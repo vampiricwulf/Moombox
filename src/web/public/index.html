@@ -311,7 +311,7 @@
                                 type="number"
                                 label="Feed Check Interval (minutes)"
                                 placeholder="10"
-                                help-text="How often to check RSS feeds for new streams (default: 10). Requires restart."
+                                help-text="How often to check RSS feeds for new streams (default: 10)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-hide-finished-days"
@@ -396,14 +396,14 @@
                                 type="number"
                                 label="Retry Delay Cap (seconds)"
                                 placeholder="60"
-                                help-text="Maximum backoff delay between segment retries during live streams (default: 60)"
+                                help-text="When a live segment isn't available yet, wait time increases by 1s each retry up to this cap (default: 60). Applies to new downloads."
                             ></sl-input>
                             <sl-input
                                 id="cfg-live-check-retries"
                                 type="number"
                                 label="Live Check Retries"
                                 placeholder="16"
-                                help-text="Number of retries before checking if stream is still live via API (default: 16)"
+                                help-text="After this many consecutive segment failures, query the YouTube API to check if the stream ended (default: 16). Lower values detect ended/privated streams faster. Applies to new downloads."
                             ></sl-input>
 
                             <sl-divider></sl-divider>
@@ -852,14 +852,14 @@
                             type="number"
                             label="Retry Delay Cap (seconds)"
                             placeholder="60"
-                            help-text="Max backoff delay between segment retries (default: 60)"
+                            help-text="Wait time increases by 1s per retry up to this cap when a segment isn't ready (default: 60)"
                         ></sl-input>
                         <sl-input
                             id="setup-live-check-retries"
                             type="number"
                             label="Live Check Retries"
                             placeholder="16"
-                            help-text="Retries before checking if stream is still live via API (default: 16)"
+                            help-text="After this many failures, check YouTube API for stream status (default: 16). Lower = faster detection of ended streams."
                         ></sl-input>
                     </sl-details>
 

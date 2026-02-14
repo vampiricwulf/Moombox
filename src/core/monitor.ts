@@ -24,17 +24,25 @@ export class FeedMonitor {
   start() {
     if (this.running) return;
     this.running = true;
-    const config = ConfigManager.getInstance().get();
-    const intervalMinutes = config.feed_check_interval ?? 10;
-    this.logger.info(`Feed Monitor started (interval: ${intervalMinutes}m).`);
+    this.logger.info("Feed Monitor started.");
     this.checkFeeds();
-    this.interval = setInterval(() => this.checkFeeds(), intervalMinutes * 60 * 1000);
+    this.scheduleNext();
   }
 
   stop() {
-    if (this.interval) clearInterval(this.interval);
+    if (this.interval) clearTimeout(this.interval);
     this.running = false;
     this.logger.info("Feed Monitor stopped.");
+  }
+
+  private scheduleNext() {
+    if (!this.running) return;
+    const config = ConfigManager.getInstance().get();
+    const intervalMs = (config.feed_check_interval ?? 10) * 60 * 1000;
+    this.interval = setTimeout(() => {
+      this.checkFeeds();
+      this.scheduleNext();
+    }, intervalMs);
   }
 
   private async checkFeeds() {
