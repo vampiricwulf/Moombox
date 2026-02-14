@@ -4,6 +4,8 @@
 
 YouTube live stream archiver with a terminal UI and web dashboard. Monitors channels via RSS, detects live streams, and downloads video + live chat automatically.
 
+I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a different name related to a certain orca in time, but for now, it's just Moombox.
+
 ## Features
 
 - **Channel monitoring** — RSS-based feed polling with regex filtering on titles/descriptions
