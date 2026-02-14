@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+sea-build/
+assets/
+*.exe
+
+# Runtime data
+moombox.json
+*.log
+output/
+staging/
+cookies.txt
+.cookies.txt
+browser-profile/
+
+# Config (use config.example.toml as reference)
+*.toml
+!config.example.toml
+
+# IDE
+.vscode/
+.idea/
+
+# OS artifacts
+Thumbs.db
+.DS_Store
+
+# Claude Code
+/.claude
+
+# Misc
+/tmp
+nul

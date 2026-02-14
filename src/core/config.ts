@@ -1,0 +1,381 @@
+import fs from "fs-extra";
+import path from "path";
+import toml from "toml";
+import os from "os";
+import type {
+  ChannelConfig,
+  MoomboxConfig,
+} from "../types/config.js";
+
+export type { ChannelConfig, MoomboxConfig, AutoCookiesConfig } from "../types/config.js";
+
+export class ConfigManager {
+  private static instance: ConfigManager;
+  private config: MoomboxConfig | null = null;
+  private configPath: string = "";
+  private configLoaded: boolean = false;
+  private saveQueue: Promise<void> = Promise.resolve();
+
+  // Default configuration values
+  private static readonly DEFAULTS: MoomboxConfig = {
+    port: 774,
+    network_access: "localhost",
+    log_level: "INFO",
+    log_file_path: "./moombox.log",
+    log_max_file_size: 10485760, // 10MB
+    log_max_files: 5,
+    database_path: "./moombox.json",
+    max_feed_items: 15,
+    downloader: {
+      output_directory: "./output",
+      output_template: "${channel}/${start_date} ${title} [${id}]",
+      staging_directory: "./staging",
+      num_parallel_downloads: 2,
+      max_video_resolution: 1080, // Based on max(width, height)
+      cookie_file: "./cookies.txt",
+      download_chat: true, // Download live chat alongside streams
+      prefer_60fps: true, // Prefer 60fps when same resolution available
+    },
+    tasklist: {
+      hide_finished_age_days: 30,
+    },
+    auto_cookies: {
+      enabled: false,
+      browser_profile_dir: "./browser-profile",
+    },
+  };
+
+  private constructor() {}
+
+  static getInstance(): ConfigManager {
+    if (!ConfigManager.instance) {
+      ConfigManager.instance = new ConfigManager();
+    }
+    return ConfigManager.instance;
+  }
+
+  /**
+   * Get the default configuration values
+   */
+  static getDefaults(): MoomboxConfig {
+    return JSON.parse(JSON.stringify(ConfigManager.DEFAULTS));
+  }
+
+  /**
+   * Merge loaded config with defaults, using defaults for any missing values
+   */
+  private applyDefaults(config: Partial<MoomboxConfig>): MoomboxConfig {
+    const defaults = ConfigManager.getDefaults();
+
+    // Migrate old allow_lan / allow_external booleans → network_access string
+    let networkAccess = config.network_access;
+    if (!networkAccess) {
+      const raw = config as any;
+      if (raw.allow_lan !== undefined || raw.allow_external !== undefined) {
+        const lan = raw.allow_lan === true;
+        const ext = lan && raw.allow_external === true;
+        networkAccess = ext ? "external" : lan ? "lan" : "localhost";
+      }
+    }
+
+    return {
+      port: config.port ?? defaults.port,
+      network_access: networkAccess ?? defaults.network_access,
+      log_level: config.log_level ?? defaults.log_level,
+      log_file_path: config.log_file_path ?? defaults.log_file_path,
+      log_max_file_size: config.log_max_file_size ?? defaults.log_max_file_size,
+      log_max_files: config.log_max_files ?? defaults.log_max_files,
+      database_path: config.database_path ?? defaults.database_path,
+      max_feed_items: config.max_feed_items ?? defaults.max_feed_items,
+      downloader: {
+        output_directory:
+          config.downloader?.output_directory ??
+          defaults.downloader.output_directory,
+        output_template:
+          config.downloader?.output_template ??
+          defaults.downloader.output_template,
+        staging_directory:
+          config.downloader?.staging_directory ??
+          defaults.downloader.staging_directory,
+        num_parallel_downloads:
+          config.downloader?.num_parallel_downloads ??
+          defaults.downloader.num_parallel_downloads,
+        max_video_resolution:
+          config.downloader?.max_video_resolution ??
+          defaults.downloader.max_video_resolution,
+        cookie_file:
+          config.downloader?.cookie_file ?? defaults.downloader.cookie_file,
+        download_chat:
+          config.downloader?.download_chat ?? defaults.downloader.download_chat,
+        prefer_60fps:
+          config.downloader?.prefer_60fps ?? defaults.downloader.prefer_60fps,
+        // These have no defaults - only use if explicitly set
+        ffmpeg_path: config.downloader?.ffmpeg_path,
+        po_token: config.downloader?.po_token,
+        visitor_data: config.downloader?.visitor_data,
+        pot_provider_url: config.downloader?.pot_provider_url,
+      },
+      tasklist: {
+        hide_finished_age_days:
+          config.tasklist?.hide_finished_age_days ??
+          defaults.tasklist?.hide_finished_age_days,
+      },
+      auto_cookies: {
+        enabled: config.auto_cookies?.enabled ?? defaults.auto_cookies?.enabled,
+        browser_profile_dir:
+          config.auto_cookies?.browser_profile_dir ??
+          defaults.auto_cookies?.browser_profile_dir,
+      },
+      notifications: config.notifications,
+      channels: config.channels,
+    };
+  }
+
+  async load(customPath?: string): Promise<MoomboxConfig> {
+    // Search paths: custom -> ./config.toml -> ./config/config.toml -> ~/.config/moombox/config.toml
+    const paths = [
+      customPath,
+      path.join(process.cwd(), "config.toml"),
+      path.join(process.cwd(), "config", "config.toml"),
+      path.join(os.homedir(), ".config", "moombox", "config.toml"),
+    ].filter((p): p is string => !!p);
+
+    for (const p of paths) {
+      if (await fs.pathExists(p)) {
+        console.log(`Loading config from ${p}`);
+        const content = await fs.readFile(p, "utf-8");
+        const loadedConfig = toml.parse(content) as Partial<MoomboxConfig>;
+        this.config = this.applyDefaults(loadedConfig);
+        this.configPath = p;
+        this.configLoaded = true;
+
+        // Write back to persist any missing config entries added by defaults
+        const updatedToml = this.configToToml(this.config);
+        if (updatedToml.trim() !== content.trim()) {
+          await fs.writeFile(p, updatedToml, "utf-8");
+        }
+
+        return this.config;
+      }
+    }
+
+    console.warn("No config file found. Using defaults.");
+    this.configPath = path.join(process.cwd(), "config.toml");
+    this.config = ConfigManager.getDefaults();
+    return this.config;
+  }
+
+  get(): MoomboxConfig {
+    if (!this.config) {
+      throw new Error("Config not loaded");
+    }
+    return this.config;
+  }
+
+  hasConfig(): boolean {
+    return this.configLoaded;
+  }
+
+  getConfigPath(): string {
+    return this.configPath;
+  }
+
+  async save(config: MoomboxConfig): Promise<void> {
+    const result = this.saveQueue.then(async () => {
+      // Apply defaults to ensure all settings are written to TOML
+      this.config = this.applyDefaults(config);
+
+      // Ensure we have a config path
+      if (!this.configPath) {
+        this.configPath = path.join(process.cwd(), "config.toml");
+      }
+
+      // Convert config to TOML format
+      const tomlContent = this.configToToml(this.config);
+
+      // Ensure directory exists
+      const dir = path.dirname(this.configPath);
+      await fs.ensureDir(dir);
+
+      // Write to file
+      await fs.writeFile(this.configPath, tomlContent, "utf-8");
+      this.configLoaded = true;
+      console.log(`[Config] Saved configuration to ${this.configPath}`);
+    });
+    this.saveQueue = result.then(() => {}, (e) => {
+      console.error(`[Config] Save failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    return result;
+  }
+
+  private configToToml(config: MoomboxConfig): string {
+    const lines: string[] = [];
+
+    // Helper to check if a value should be written (not undefined/null)
+    const isDefined = (val: unknown): boolean =>
+      val !== undefined && val !== null;
+
+    // Escape a string for TOML double-quoted values
+    const esc = (s: string): string =>
+      s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+    // Top-level settings
+    if (isDefined(config.port))
+      lines.push(`port = ${config.port}`);
+    if (isDefined(config.network_access))
+      lines.push(`network_access = "${esc(config.network_access!)}"`);
+    if (isDefined(config.log_level))
+      lines.push(`log_level = "${esc(config.log_level!)}"`);
+    if (isDefined(config.log_file_path))
+      lines.push(`log_file_path = "${esc(config.log_file_path!)}"`);
+    if (isDefined(config.log_max_file_size))
+      lines.push(`log_max_file_size = ${config.log_max_file_size}`);
+    if (isDefined(config.log_max_files))
+      lines.push(`log_max_files = ${config.log_max_files}`);
+    if (isDefined(config.database_path))
+      lines.push(`database_path = "${esc(config.database_path!)}"`);
+    if (isDefined(config.max_feed_items))
+      lines.push(`max_feed_items = ${config.max_feed_items}`);
+
+    // Downloader section
+    if (config.downloader) {
+      lines.push("");
+      lines.push("[downloader]");
+      const d = config.downloader;
+      if (isDefined(d.max_video_resolution))
+        lines.push(`max_video_resolution = ${d.max_video_resolution}`);
+      if (isDefined(d.ffmpeg_path))
+        lines.push(`ffmpeg_path = "${esc(d.ffmpeg_path!)}"`);
+      if (isDefined(d.staging_directory))
+        lines.push(`staging_directory = "${esc(d.staging_directory!)}"`);
+      if (isDefined(d.output_directory))
+        lines.push(`output_directory = "${esc(d.output_directory!)}"`);
+      if (isDefined(d.output_template))
+        lines.push(`output_template = "${esc(d.output_template!)}"`);
+      if (isDefined(d.num_parallel_downloads))
+        lines.push(`num_parallel_downloads = ${d.num_parallel_downloads}`);
+      if (isDefined(d.cookie_file))
+        lines.push(`cookie_file = "${esc(d.cookie_file!)}"`);
+      if (isDefined(d.po_token)) lines.push(`po_token = "${esc(d.po_token!)}"`);
+      if (isDefined(d.visitor_data))
+        lines.push(`visitor_data = "${esc(d.visitor_data!)}"`);
+      if (isDefined(d.pot_provider_url))
+        lines.push(`pot_provider_url = "${esc(d.pot_provider_url!)}"`);
+      if (isDefined(d.download_chat))
+        lines.push(`download_chat = ${d.download_chat}`);
+      if (isDefined(d.prefer_60fps))
+        lines.push(`prefer_60fps = ${d.prefer_60fps}`);
+    }
+
+    // Tasklist section
+    if (config.tasklist && isDefined(config.tasklist.hide_finished_age_days)) {
+      lines.push("");
+      lines.push("[tasklist]");
+      lines.push(
+        `hide_finished_age_days = ${config.tasklist.hide_finished_age_days}`,
+      );
+    }
+
+    // Auto cookies section
+    if (config.auto_cookies) {
+      const ac = config.auto_cookies;
+      if (isDefined(ac.enabled) || isDefined(ac.browser_profile_dir)) {
+        lines.push("");
+        lines.push("[auto_cookies]");
+        if (isDefined(ac.enabled))
+          lines.push(`enabled = ${ac.enabled}`);
+        if (isDefined(ac.browser_profile_dir))
+          lines.push(`browser_profile_dir = "${esc(ac.browser_profile_dir!)}"`);
+      }
+    }
+
+    // Notifications section
+    if (config.notifications && config.notifications.length > 0) {
+      for (const notif of config.notifications) {
+        lines.push("");
+        lines.push("[[notifications]]");
+        if (notif.url) lines.push(`url = "${esc(notif.url)}"`);
+        if (notif.tags && notif.tags.length > 0) {
+          lines.push(`tags = [${notif.tags.map((t) => `"${esc(t)}"`).join(", ")}]`);
+        }
+        if (notif.events && notif.events.length > 0) {
+          lines.push(`events = [${notif.events.map((e) => `"${esc(e)}"`).join(", ")}]`);
+        }
+      }
+    }
+
+    // Channels section
+    if (config.channels && config.channels.length > 0) {
+      for (const ch of config.channels) {
+        lines.push("");
+        lines.push("[[channels]]");
+        lines.push(`id = "${esc(ch.id)}"`);
+        if (ch.name) lines.push(`name = "${esc(ch.name)}"`);
+        if (ch.output_directory)
+          lines.push(`output_directory = "${esc(ch.output_directory)}"`);
+        if (ch.include_non_live_content !== undefined) {
+          lines.push(
+            `include_non_live_content = ${ch.include_non_live_content}`,
+          );
+        }
+        if (ch.num_desc_lookbehind !== undefined) {
+          lines.push(`num_desc_lookbehind = ${ch.num_desc_lookbehind}`);
+        }
+        if (ch.max_feed_items !== undefined) {
+          lines.push(`max_feed_items = ${ch.max_feed_items}`);
+        }
+        if (ch.terms) {
+          if (typeof ch.terms === "string") {
+            // New simple format - store as direct string
+            lines.push(`terms = "${esc(ch.terms)}"`);
+          } else if (Object.keys(ch.terms).length > 0) {
+            // Legacy object format — use inline table (valid inside [[channels]])
+            const entries = Object.entries(ch.terms)
+              .map(([key, value]) => `${key} = "${esc(value)}"`)
+              .join(", ");
+            lines.push(`terms = { ${entries} }`);
+          }
+        }
+      }
+    }
+
+    return lines.join("\n") + "\n";
+  }
+
+  static resolveTemplate(
+    template: string,
+    data: { title: string; id: string; channel: string; date?: Date },
+  ): string {
+    const safeTitle = data.title
+      .replace(
+        /[^\w\s\-\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uFF00-\uFFEF\u4E00-\u9FAF]/g,
+        "",
+      )
+      .trim();
+    const safeChannel = data.channel
+      .replace(
+        /[^\w\s\-\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uFF00-\uFFEF\u4E00-\u9FAF]/g,
+        "",
+      )
+      .trim();
+
+    let result = template;
+
+    // Simple Replace
+    result = result.replace(/\$\{title\}/g, safeTitle);
+    result = result.replace(/\$\{id\}/g, data.id);
+    result = result.replace(/\$\{channel\}/g, safeChannel);
+
+    const d = data.date || new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const HH = String(d.getHours()).padStart(2, "0");
+    const MM = String(d.getMinutes()).padStart(2, "0");
+
+    result = result.replace(/\$\{start_date\}/g, `${yyyy}${mm}${dd}`);
+    result = result.replace(/\$\{start_time\}/g, `${HH}${MM}`);
+
+    return result;
+  }
+}

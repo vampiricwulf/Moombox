@@ -1,0 +1,1023 @@
+<!doctype html>
+<html class="sl-theme-dark">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="robots" content="noindex,nofollow" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="referrer" content="no-referrer" />
+        <meta name="theme-color" content="#1C1B22" />
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+        <title>Moombox</title>
+
+        <!-- Shoelace UI Components -->
+        <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/themes/dark.css"
+            crossorigin="anonymous"
+        />
+        <script
+            type="module"
+            src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/shoelace-autoloader.js"
+            crossorigin="anonymous"
+        ></script>
+
+        <link rel="stylesheet" href="/moombox.css" />
+    </head>
+    <body>
+        <sl-tab-group>
+            <sl-tab slot="nav" panel="tasks">Tasks</sl-tab>
+            <sl-tab slot="nav" panel="archived">Archived</sl-tab>
+            <sl-tab slot="nav" panel="player">Player</sl-tab>
+            <sl-tab slot="nav" panel="imports">Imports</sl-tab>
+            <sl-tab slot="nav" panel="logs">Logs</sl-tab>
+            <sl-tab slot="nav" panel="settings">Settings</sl-tab>
+
+            <!-- Tasks Panel -->
+            <sl-tab-panel name="tasks">
+                <div class="panel-header">
+                    <sl-button variant="primary" id="add-video-btn">
+                        <sl-icon slot="prefix" name="plus"></sl-icon>
+                        Add video
+                    </sl-button>
+                </div>
+
+                <!-- Add Video Dialog -->
+                <sl-dialog label="Add a video" id="add-dialog">
+                    <sl-input
+                        id="video-url-input"
+                        label="Video URL or ID"
+                        placeholder="https://youtu.be/... or video ID"
+                        inputmode="url"
+                        required
+                        autofocus
+                        autocomplete="off"
+                    ></sl-input>
+                    <div slot="footer">
+                        <sl-button
+                            variant="primary"
+                            id="add-submit-btn"
+                            style="width: 100%"
+                            >Add</sl-button
+                        >
+                    </div>
+                </sl-dialog>
+
+                <!-- Jobs Table -->
+                <div id="video-table">
+                    <div id="video-table-header">
+                        <div>Thumbnail</div>
+                        <div>Video</div>
+                        <div>Status</div>
+                        <div>Progress</div>
+                    </div>
+                    <div id="jobs-container">
+                        <!-- Jobs will be rendered here -->
+                    </div>
+                </div>
+
+                <div id="empty-state" style="display: none">
+                    <sl-icon
+                        name="inbox"
+                        style="
+                            font-size: 3rem;
+                            color: var(--sl-color-neutral-400);
+                        "
+                    ></sl-icon>
+                    <p>No jobs yet. Click "Add video" to get started.</p>
+                </div>
+            </sl-tab-panel>
+
+            <!-- Archived Panel -->
+            <sl-tab-panel name="archived">
+                <div id="archived-table" class="archived-table">
+                    <div id="archived-table-header">
+                        <div>Thumbnail</div>
+                        <div>Video</div>
+                        <div>Status</div>
+                        <div>Progress</div>
+                    </div>
+                    <div id="archived-container">
+                        <!-- Archived jobs will be rendered here -->
+                    </div>
+                </div>
+
+                <div id="archived-empty-state" style="display: none">
+                    <sl-icon
+                        name="archive"
+                        style="
+                            font-size: 3rem;
+                            color: var(--sl-color-neutral-400);
+                        "
+                    ></sl-icon>
+                    <p>No archived jobs. Finished jobs older than the configured age will appear here.</p>
+                </div>
+            </sl-tab-panel>
+
+            <!-- Player Panel -->
+            <sl-tab-panel name="player">
+                <div id="player-container">
+                    <div id="player-header">
+                        <sl-select id="player-job-select" placeholder="Select a video..." clearable size="small">
+                        </sl-select>
+                        <sl-checkbox id="player-nico-toggle" checked>Overlay chat</sl-checkbox>
+                        <sl-checkbox id="player-sidebar-toggle">Sidebar chat</sl-checkbox>
+                    </div>
+                    <div id="player-viewport" style="display: none">
+                        <div id="player-video-wrapper">
+                            <video id="player-video" controls preload="metadata"></video>
+                            <div id="player-nico-overlay"></div>
+                        </div>
+                        <div id="player-sidebar" style="display: none">
+                            <div id="player-sidebar-header">0 messages</div>
+                            <div id="player-sidebar-messages"></div>
+                            <div id="player-sidebar-footer">
+                                <sl-button size="small" id="player-sync-btn">
+                                    <sl-icon slot="prefix" name="skip-end"></sl-icon>
+                                    Sync to current time
+                                </sl-button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="player-empty-state">
+                        <sl-icon name="play-circle" style="font-size: 3rem; color: var(--sl-color-neutral-400)"></sl-icon>
+                        <p>Select a finished video to play.</p>
+                    </div>
+                </div>
+            </sl-tab-panel>
+
+            <!-- Imports Panel -->
+            <sl-tab-panel name="imports">
+                <div id="imports-container">
+                    <h3>Import Archive</h3>
+                    <p class="settings-help">Upload a .zip file containing a video (.mp4, .mkv, .webm, .ts) and optionally a chat JSON file.</p>
+
+                    <div id="import-dropzone">
+                        <sl-icon name="cloud-arrow-up" style="font-size: 3rem; color: var(--sl-color-neutral-400)"></sl-icon>
+                        <p>Drag & drop a .zip file here, or click to browse</p>
+                        <input type="file" id="import-file-input" accept=".zip" hidden>
+                    </div>
+
+                    <div id="import-file-info" style="display: none">
+                        <sl-icon name="file-earmark-zip"></sl-icon>
+                        <span id="import-file-name"></span>
+                        <sl-icon-button name="x-lg" id="import-clear-btn" label="Clear"></sl-icon-button>
+                    </div>
+
+                    <div id="import-options" style="display: none">
+                        <sl-input id="import-title" label="Title (optional)" placeholder="Auto-detected from filename"></sl-input>
+                        <sl-input id="import-channel" label="Channel (optional)" placeholder="Import"></sl-input>
+                    </div>
+
+                    <div id="import-progress" style="display: none">
+                        <sl-progress-bar id="import-progress-bar" value="0"></sl-progress-bar>
+                        <p id="import-status-text">Uploading...</p>
+                    </div>
+
+                    <sl-button variant="primary" id="import-submit-btn" style="display: none">
+                        <sl-icon slot="prefix" name="cloud-arrow-up"></sl-icon>
+                        Import
+                    </sl-button>
+                </div>
+            </sl-tab-panel>
+
+            <!-- Logs Panel -->
+            <sl-tab-panel name="logs">
+                <div class="logs-header">
+                    <span id="log-count">0 log entries</span>
+                    <sl-button size="small" id="clear-logs-btn"
+                        >Clear</sl-button
+                    >
+                </div>
+                <div id="logs-container">
+                    <textarea id="logs-textarea" readonly wrap="off"></textarea>
+                </div>
+            </sl-tab-panel>
+
+            <!-- Settings Panel -->
+            <sl-tab-panel name="settings">
+                <div class="settings-container">
+                    <div class="settings-menu">
+                        <sl-menu id="settings-nav">
+                            <sl-menu-item value="general" aria-current="page">
+                                <sl-icon slot="prefix" name="gear"></sl-icon>
+                                General
+                            </sl-menu-item>
+                            <sl-menu-item value="downloader">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="download"
+                                ></sl-icon>
+                                Downloader
+                            </sl-menu-item>
+                            <sl-menu-item value="channels">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="broadcast"
+                                ></sl-icon>
+                                Channels
+                            </sl-menu-item>
+                            <sl-menu-item value="notifications">
+                                <sl-icon slot="prefix" name="bell"></sl-icon>
+                                Notifications
+                            </sl-menu-item>
+                            <sl-menu-item value="integrations">
+                                <sl-icon slot="prefix" name="plug"></sl-icon>
+                                Integrations
+                            </sl-menu-item>
+                        </sl-menu>
+                    </div>
+
+                    <div class="settings-content">
+                        <!-- General Settings -->
+                        <div id="settings-general" class="settings-section">
+                            <h3>General Settings</h3>
+                            <sl-input
+                                id="cfg-port"
+                                type="number"
+                                label="Dashboard Port"
+                                placeholder="774"
+                                help-text="Web dashboard & API port. If in use, nearby ports are tried automatically. Requires restart."
+                            ></sl-input>
+                            <sl-select
+                                id="cfg-network-access"
+                                label="Network Access"
+                                help-text="Controls who can access the dashboard. Requires restart."
+                            >
+                                <sl-option value="localhost">Localhost Only — This machine only</sl-option>
+                                <sl-option value="lan">LAN — Local network devices</sl-option>
+                                <sl-option value="external">External — All networks (dangerous)</sl-option>
+                            </sl-select>
+                            <sl-alert id="cfg-external-warning" variant="warning" open style="display: none; margin-bottom: 1em;">
+                                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                                <strong>Use at your own risk.</strong> Exposing to external networks allows anyone on the internet to access this dashboard. Security measures were community-built and have not been audited by a security specialist. There is no authentication — anyone who can reach this port has full access.
+                            </sl-alert>
+                            <sl-select
+                                id="cfg-log-level"
+                                label="Log Level"
+                                help-text="Logging verbosity level"
+                            >
+                                <sl-option value="DEBUG"
+                                    >DEBUG - All messages</sl-option
+                                >
+                                <sl-option value="INFO"
+                                    >INFO - General information</sl-option
+                                >
+                                <sl-option value="WARN"
+                                    >WARN - Warnings only</sl-option
+                                >
+                                <sl-option value="ERROR"
+                                    >ERROR - Errors only</sl-option
+                                >
+                            </sl-select>
+                            <sl-input
+                                id="cfg-log-file"
+                                label="Log File Path"
+                                placeholder="./moombox.log"
+                                help-text="Path to log file"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-log-max-size"
+                                type="number"
+                                label="Max Log File Size (bytes)"
+                                placeholder="10485760"
+                                help-text="Maximum log file size before rotation (default: 10MB)"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-log-max-files"
+                                type="number"
+                                label="Max Log Files"
+                                placeholder="5"
+                                help-text="Number of rotated log files to keep"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-database"
+                                label="Database Path"
+                                placeholder="./moombox.json"
+                                help-text="Path to jobs database"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-max-feed-items"
+                                type="number"
+                                label="Max Feed Items"
+                                placeholder="15"
+                                help-text="Maximum number of feed items to check per channel"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-hide-finished-days"
+                                type="number"
+                                label="Hide Finished Jobs After (days)"
+                                placeholder="30"
+                                help-text="Hide completed jobs older than this many days"
+                            ></sl-input>
+                        </div>
+
+                        <!-- Downloader Settings -->
+                        <div
+                            id="settings-downloader"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Downloader Settings</h3>
+                            <sl-input
+                                id="cfg-output-dir"
+                                label="Output Directory"
+                                placeholder="./output"
+                                help-text="Where to save downloaded videos"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-output-template"
+                                label="Output Template"
+                                placeholder="${channel}/${start_date} ${title} [${id}]"
+                                help-text="Filename template. Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-staging-dir"
+                                label="Staging Directory"
+                                placeholder="./staging"
+                                help-text="Temporary directory for downloads in progress"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-ffmpeg-path"
+                                label="FFmpeg Path"
+                                placeholder="ffmpeg"
+                                help-text="Path to ffmpeg executable (leave empty for system default)"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-cookie-file"
+                                label="Cookie File"
+                                placeholder="./cookies.txt"
+                                help-text="Path to Netscape format cookies file for authentication"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-max-resolution"
+                                type="number"
+                                label="Max Video Resolution"
+                                placeholder="1080"
+                                help-text="Maximum video resolution in pixels (e.g., 1080, 720, 480)"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-parallel-downloads"
+                                type="number"
+                                label="Parallel Downloads"
+                                placeholder="2"
+                                help-text="Number of concurrent downloads"
+                            ></sl-input>
+                            <sl-switch id="cfg-download-chat" checked>
+                                Download Live Chat
+                                <span slot="help-text"
+                                    >Download chat messages alongside
+                                    livestreams as JSON</span
+                                >
+                            </sl-switch>
+                            <sl-switch id="cfg-prefer-60fps" checked>
+                                Prefer 60fps
+                                <span slot="help-text"
+                                    >When multiple formats share the same
+                                    resolution, prefer 60fps over 30fps.
+                                    Resolution always takes priority.</span
+                                >
+                            </sl-switch>
+
+                            <sl-divider></sl-divider>
+                            <h4>Automatic Cookie Login</h4>
+                            <sl-switch id="cfg-auto-cookies-enabled">
+                                Enable automatic cookie acquisition
+                                <span slot="help-text"
+                                    >Detects Firefox/Edge on your system, creates
+                                    an isolated browser profile for Moombox login.
+                                    Cookies refresh automatically on auth failure.</span
+                                >
+                            </sl-switch>
+                            <sl-input
+                                id="cfg-auto-cookies-profile-dir"
+                                label="Browser Profile Directory"
+                                placeholder="./browser-profile"
+                                help-text="Directory for the isolated browser profile"
+                            ></sl-input>
+                            <div id="auto-cookie-actions" style="display: none">
+                                <sl-button
+                                    id="btn-auto-cookie-setup"
+                                    variant="primary"
+                                    size="small"
+                                >
+                                    Setup / Re-login
+                                </sl-button>
+                                <span
+                                    id="auto-cookie-browser-info"
+                                    style="margin-left: 0.5em; color: var(--sl-color-neutral-500)"
+                                ></span>
+                            </div>
+                            <div
+                                id="auto-cookie-setup-dialog"
+                                style="display: none"
+                            >
+                                <sl-alert variant="primary" open>
+                                    A browser window has opened. Sign in to
+                                    Google/YouTube, then click the button below.
+                                    The browser will be closed automatically.
+                                </sl-alert>
+                                <div
+                                    style="
+                                        margin-top: 0.5em;
+                                        display: flex;
+                                        gap: 0.5em;
+                                        align-items: center;
+                                    "
+                                >
+                                    <sl-button
+                                        id="btn-auto-cookie-done"
+                                        variant="success"
+                                        size="small"
+                                        >I'm Logged In</sl-button
+                                    >
+                                    <sl-button
+                                        id="btn-auto-cookie-cancel"
+                                        variant="neutral"
+                                        size="small"
+                                        >Cancel</sl-button
+                                    >
+                                    <span id="auto-cookie-setup-result"></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Channels Settings -->
+                        <div
+                            id="settings-channels"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Monitored Channels</h3>
+                            <p class="settings-help">
+                                Add YouTube channels to automatically monitor
+                                for new streams.
+                            </p>
+                            <div id="channels-list"></div>
+                            <sl-button variant="primary" id="add-channel-btn">
+                                <sl-icon slot="prefix" name="plus"></sl-icon>
+                                Add Channel
+                            </sl-button>
+                        </div>
+
+                        <!-- Notifications Settings -->
+                        <div
+                            id="settings-notifications"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Notifications</h3>
+                            <p class="settings-help">
+                                Configure webhook notifications for stream
+                                events.
+                            </p>
+                            <div id="notifications-list"></div>
+                            <sl-button
+                                variant="primary"
+                                id="add-notification-btn"
+                            >
+                                <sl-icon slot="prefix" name="plus"></sl-icon>
+                                Add Notification
+                            </sl-button>
+                        </div>
+
+                        <!-- Integrations Settings -->
+                        <div
+                            id="settings-integrations"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Integrations</h3>
+
+                            <div class="integration-card" id="ytdlp-plugin-card">
+                                <div class="integration-header">
+                                    <div>
+                                        <strong>yt-dlp PO Token Plugin</strong>
+                                        <p class="settings-help" style="margin: 0.25em 0 0">
+                                            Lets yt-dlp use Moombox for PO token generation.
+                                        </p>
+                                    </div>
+                                    <sl-badge id="ytdlp-plugin-status-badge" variant="neutral">Checking...</sl-badge>
+                                </div>
+
+                                <div id="ytdlp-plugin-details" style="margin-top: 0.75em">
+                                    <div class="details-row" id="ytdlp-plugin-dir-row" style="display: none">
+                                        <span class="details-label">Plugin directory:</span>
+                                        <span class="details-value" id="ytdlp-plugin-dir"></span>
+                                    </div>
+                                    <div class="details-row" id="ytdlp-plugin-port-row" style="display: none">
+                                        <span class="details-label">Installed port:</span>
+                                        <span class="details-value" id="ytdlp-plugin-port"></span>
+                                    </div>
+                                    <sl-alert id="ytdlp-port-mismatch-warning" variant="warning" open style="display: none; margin: 0.5em 0;">
+                                        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                                        The installed plugin points to a different port. Click Update to fix.
+                                    </sl-alert>
+                                </div>
+
+                                <div style="margin-top: 0.75em; display: flex; gap: 0.5em; align-items: center;">
+                                    <sl-button variant="primary" id="ytdlp-install-btn" size="small">
+                                        <sl-icon slot="prefix" name="download"></sl-icon>
+                                        Install
+                                    </sl-button>
+                                    <sl-button variant="default" id="ytdlp-refresh-btn" size="small">
+                                        <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                                        Refresh
+                                    </sl-button>
+                                </div>
+
+                                <sl-details summary="Manual usage" style="margin-top: 0.75em;">
+                                    <p class="settings-help">
+                                        You can also point yt-dlp at the extracted plugin directly:
+                                    </p>
+                                    <pre style="margin: 0.5em 0; padding: 0.5em; background: var(--sl-color-neutral-100); border-radius: var(--sl-border-radius-medium); font-size: 0.85em; overflow-x: auto;"><code id="ytdlp-manual-cmd">yt-dlp --plugin-dirs "./assets/yt-dlp-plugin" &lt;URL&gt;</code></pre>
+                                    <p class="settings-help">
+                                        Or use extractor args without a plugin:
+                                    </p>
+                                    <pre style="margin: 0.5em 0; padding: 0.5em; background: var(--sl-color-neutral-100); border-radius: var(--sl-border-radius-medium); font-size: 0.85em; overflow-x: auto;"><code id="ytdlp-extractor-cmd">yt-dlp --extractor-args "youtube:player-client=web;po_token=web.gvs+http://127.0.0.1:774/get_pot" &lt;URL&gt;</code></pre>
+                                </sl-details>
+                            </div>
+                        </div>
+
+                        <div class="settings-actions">
+                            <sl-button variant="primary" id="save-config-btn">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="check-lg"
+                                ></sl-icon>
+                                Save Settings
+                            </sl-button>
+                            <sl-button variant="default" id="reload-config-btn">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="arrow-clockwise"
+                                ></sl-icon>
+                                Reload
+                            </sl-button>
+                        </div>
+                    </div>
+                </div>
+            </sl-tab-panel>
+        </sl-tab-group>
+
+        <!-- Job Details Dialog (outside tab group so it works from any tab) -->
+        <sl-dialog
+            label="Job Details"
+            id="details-dialog"
+            style="--width: 50rem"
+        >
+            <div id="job-details-content"></div>
+            <div slot="footer" class="details-footer">
+                <sl-button variant="default" id="details-open-url-btn">
+                    <sl-icon
+                        slot="prefix"
+                        name="box-arrow-up-right"
+                    ></sl-icon>
+                    Open URL
+                </sl-button>
+                <sl-button
+                    variant="default"
+                    id="details-open-folder-btn"
+                    style="display: none"
+                >
+                    <sl-icon
+                        slot="prefix"
+                        name="folder2-open"
+                    ></sl-icon>
+                    Open Folder
+                </sl-button>
+                <sl-button
+                    variant="primary"
+                    id="details-play-btn"
+                    style="display: none"
+                    outline
+                >
+                    <sl-icon
+                        slot="prefix"
+                        name="play-circle"
+                    ></sl-icon>
+                    Play
+                </sl-button>
+                <sl-button
+                    variant="danger"
+                    id="details-cancel-btn"
+                    style="display: none"
+                    outline
+                >
+                    <sl-icon slot="prefix" name="x-octagon"></sl-icon>
+                    Cancel
+                </sl-button>
+                <sl-button
+                    variant="warning"
+                    id="details-retry-btn"
+                    style="display: none"
+                    outline
+                >
+                    <sl-icon
+                        slot="prefix"
+                        name="arrow-clockwise"
+                    ></sl-icon>
+                    Retry
+                </sl-button>
+                <sl-button
+                    variant="danger"
+                    id="details-delete-btn"
+                    style="display: none"
+                    outline
+                >
+                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                    Delete
+                </sl-button>
+            </div>
+        </sl-dialog>
+
+        <!-- Add Channel Dialog -->
+        <sl-dialog label="Add Channel" id="add-channel-dialog">
+            <sl-input
+                id="channel-id-input"
+                label="Channel ID"
+                placeholder="UCxxxxxxxx"
+                help-text="YouTube channel ID (starts with UC)"
+                required
+            ></sl-input>
+            <sl-input
+                id="channel-name-input"
+                label="Display Name"
+                placeholder="Channel Name"
+                help-text="Friendly name for this channel"
+            ></sl-input>
+            <sl-input
+                id="channel-terms-input"
+                label="Filter Pattern (regex)"
+                placeholder="(?i)(karaoke|singing|歌枠)"
+                help-text="Only download streams matching this regex pattern in title or description. Leave empty to download all streams."
+            ></sl-input>
+            <sl-details summary="Pattern examples">
+                <div class="pattern-examples">
+                    <code>(?i)karaoke</code> - Match "karaoke"
+                    (case-insensitive)<br />
+                    <code>(?i)(live|stream)</code> - Match "live" or "stream"<br />
+                    <code>(?i)(歌枠|singing|karaoke)</code> - Match Japanese or
+                    English singing streams<br />
+                    <code>(?i)minecraft.*hardcore</code> - Match "Minecraft"
+                    followed by "hardcore"<br />
+                    <code>^(?!.*\b(shorts|clip)\b)</code> - Exclude titles
+                    containing "shorts" or "clip"
+                </div>
+            </sl-details>
+            <sl-checkbox id="channel-include-vods"
+                >Include non-live content (VODs, premieres)</sl-checkbox
+            >
+            <div slot="footer">
+                <sl-button variant="default" id="channel-cancel-btn"
+                    >Cancel</sl-button
+                >
+                <sl-button variant="primary" id="channel-save-btn"
+                    >Add Channel</sl-button
+                >
+            </div>
+        </sl-dialog>
+
+        <!-- Setup Wizard (shown on first run) -->
+        <div id="setup-overlay" style="display: none">
+            <div class="setup-container">
+                <div class="setup-header">
+                    <sl-icon
+                        name="box-seam"
+                        style="
+                            font-size: 3rem;
+                            color: var(--sl-color-primary-600);
+                        "
+                    ></sl-icon>
+                    <h1>Welcome to Moombox</h1>
+                    <p>Let's configure your YouTube live stream archiver</p>
+                </div>
+
+                <div class="setup-steps">
+                    <div class="setup-step active" data-step="1">
+                        <div class="step-number">1</div>
+                        <div class="step-label">Paths</div>
+                    </div>
+                    <div class="setup-step" data-step="2">
+                        <div class="step-number">2</div>
+                        <div class="step-label">Downloads</div>
+                    </div>
+                    <div class="setup-step" data-step="3">
+                        <div class="step-number">3</div>
+                        <div class="step-label">Logging</div>
+                    </div>
+                    <div class="setup-step" data-step="4">
+                        <div class="step-number">4</div>
+                        <div class="step-label">Display</div>
+                    </div>
+                    <div class="setup-step" data-step="5">
+                        <div class="step-number">5</div>
+                        <div class="step-label">Channel</div>
+                    </div>
+                </div>
+
+                <!-- Step 1: Output & Paths -->
+                <div class="setup-page" id="setup-step-1">
+                    <h2>Output &amp; Paths</h2>
+                    <p class="setup-help">
+                        Leave fields empty to use defaults.
+                    </p>
+
+                    <sl-input
+                        id="setup-output-dir"
+                        label="Output Directory"
+                        placeholder="./output"
+                        help-text="Where finished downloads are saved (default: ./output)"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-output-template"
+                        label="Filename Template"
+                        placeholder="${channel}/${start_date} ${title} [${id}]"
+                        help-text="Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-staging-dir"
+                        label="Staging Directory"
+                        placeholder="./staging"
+                        help-text="Temporary directory for segments during download (default: ./staging)"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-database-path"
+                        label="Database Path"
+                        placeholder="./moombox.json"
+                        help-text="Job database file location (default: ./moombox.json)"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-ffmpeg-path"
+                        label="FFmpeg Path"
+                        placeholder="(system PATH)"
+                        help-text="Leave empty to use system ffmpeg"
+                    ></sl-input>
+
+                    <div class="setup-nav">
+                        <div></div>
+                        <sl-button variant="primary" id="setup-next-1">
+                            Next
+                            <sl-icon slot="suffix" name="arrow-right"></sl-icon>
+                        </sl-button>
+                    </div>
+                </div>
+
+                <!-- Step 2: Download Preferences -->
+                <div class="setup-page" id="setup-step-2" style="display: none">
+                    <h2>Download Preferences</h2>
+                    <p class="setup-help">
+                        Leave fields empty to use defaults.
+                    </p>
+
+                    <sl-input
+                        id="setup-max-resolution"
+                        type="number"
+                        label="Max Resolution"
+                        placeholder="1080"
+                        help-text="Maximum video dimension in pixels (default: 1080)"
+                    ></sl-input>
+
+                    <sl-switch id="setup-prefer-60fps" checked>
+                        Prefer 60fps
+                        <span slot="help-text"
+                            >When multiple formats share the same resolution,
+                            prefer 60fps. Resolution always takes priority.</span
+                        >
+                    </sl-switch>
+
+                    <sl-input
+                        id="setup-parallel-downloads"
+                        type="number"
+                        label="Parallel Downloads"
+                        placeholder="2"
+                        help-text="How many streams to download simultaneously (default: 2)"
+                    ></sl-input>
+
+                    <sl-switch id="setup-download-chat" checked>
+                        Download Live Chat
+                        <span slot="help-text"
+                            >Save live chat as JSON alongside video</span
+                        >
+                    </sl-switch>
+
+                    <sl-switch id="setup-auto-cookies">
+                        Enable automatic cookie login
+                        <span slot="help-text"
+                            >Opens a browser for Google login, grabs cookies
+                            automatically. Refreshes on auth failure.</span
+                        >
+                    </sl-switch>
+                    <sl-input
+                        id="setup-cookie-file"
+                        label="Cookie File (manual)"
+                        placeholder="(empty = none)"
+                        help-text="Netscape-format cookie file for member-only content. Not needed if auto-login is enabled."
+                    ></sl-input>
+
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-back-2">
+                            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+                            Back
+                        </sl-button>
+                        <sl-button variant="primary" id="setup-next-2">
+                            Next
+                            <sl-icon slot="suffix" name="arrow-right"></sl-icon>
+                        </sl-button>
+                    </div>
+                </div>
+
+                <!-- Step 3: Logging -->
+                <div class="setup-page" id="setup-step-3" style="display: none">
+                    <h2>Logging</h2>
+                    <p class="setup-help">
+                        Leave fields empty to use defaults.
+                    </p>
+
+                    <sl-select
+                        id="setup-log-level"
+                        label="Log Level"
+                        value="INFO"
+                        help-text="Verbosity of log output (default: INFO)"
+                    >
+                        <sl-option value="DEBUG">DEBUG</sl-option>
+                        <sl-option value="INFO">INFO</sl-option>
+                        <sl-option value="WARN">WARN</sl-option>
+                        <sl-option value="ERROR">ERROR</sl-option>
+                    </sl-select>
+
+                    <sl-input
+                        id="setup-log-file"
+                        label="Log File Path"
+                        placeholder="./moombox.log"
+                        help-text="Where log file is written (default: ./moombox.log)"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-log-max-size"
+                        type="number"
+                        label="Max Log File Size (bytes)"
+                        placeholder="10485760"
+                        help-text="Maximum bytes before log rotation (default: 10MB)"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-log-max-files"
+                        type="number"
+                        label="Max Log Files"
+                        placeholder="5"
+                        help-text="Number of rotated log files to keep (default: 5)"
+                    ></sl-input>
+
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-back-3">
+                            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+                            Back
+                        </sl-button>
+                        <sl-button variant="primary" id="setup-next-3">
+                            Next
+                            <sl-icon slot="suffix" name="arrow-right"></sl-icon>
+                        </sl-button>
+                    </div>
+                </div>
+
+                <!-- Step 4: Display & Monitoring -->
+                <div class="setup-page" id="setup-step-4" style="display: none">
+                    <h2>Display &amp; Monitoring</h2>
+                    <p class="setup-help">
+                        Leave fields empty to use defaults.
+                    </p>
+
+                    <sl-input
+                        id="setup-hide-age"
+                        type="number"
+                        label="Hide Finished After (days)"
+                        placeholder="30"
+                        help-text="Finished jobs older than this move to Archived (default: 30)"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-max-feed-items"
+                        type="number"
+                        label="Max Feed Items"
+                        placeholder="15"
+                        help-text="RSS feed items to check per channel (default: 15)"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-port"
+                        type="number"
+                        label="Dashboard Port"
+                        placeholder="774"
+                        help-text="Web dashboard & API port. If busy, nearby ports are tried (default: 774)"
+                    ></sl-input>
+                    <sl-select
+                        id="setup-network-access"
+                        label="Network Access"
+                        value="localhost"
+                        help-text="Controls who can access the dashboard (default: Localhost Only)"
+                    >
+                        <sl-option value="localhost">Localhost Only — This machine only</sl-option>
+                        <sl-option value="lan">LAN — Local network devices</sl-option>
+                        <sl-option value="external">External — All networks (dangerous)</sl-option>
+                    </sl-select>
+                    <sl-alert id="setup-external-warning" variant="warning" open style="display: none; margin-bottom: 1em;">
+                        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                        <strong>Use at your own risk.</strong> Exposing to external networks allows anyone on the internet to access this dashboard. Security measures were community-built and have not been audited by a security specialist. There is no authentication — anyone who can reach this port has full access.
+                    </sl-alert>
+
+                    <sl-switch id="setup-install-ytdlp-plugin">
+                        Install yt-dlp Plugin
+                        <span slot="help-text">Install a yt-dlp plugin so it can use Moombox for PO token generation</span>
+                    </sl-switch>
+
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-back-4">
+                            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+                            Back
+                        </sl-button>
+                        <sl-button variant="primary" id="setup-next-4">
+                            Next
+                            <sl-icon slot="suffix" name="arrow-right"></sl-icon>
+                        </sl-button>
+                    </div>
+                </div>
+
+                <!-- Step 5: Monitor a Channel (Optional) -->
+                <div class="setup-page" id="setup-step-5" style="display: none">
+                    <h2>Monitor a Channel (Optional)</h2>
+                    <p class="setup-help">
+                        Automatically download new streams from a YouTube
+                        channel. You can add more channels later in Settings.
+                    </p>
+
+                    <sl-input
+                        id="setup-channel-id"
+                        label="Channel ID"
+                        placeholder="UCxxxxxxxx"
+                        help-text="YouTube channel ID (starts with UC). Leave empty to skip."
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-channel-name"
+                        label="Display Name"
+                        placeholder="My Favorite Channel"
+                        help-text="Friendly name shown in task list"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-channel-terms"
+                        label="Filter Regex"
+                        placeholder="(?i)(karaoke|singing|歌枠)"
+                        help-text="Only archive streams matching this pattern. Leave empty to download all."
+                    ></sl-input>
+
+                    <sl-details summary="Pattern examples">
+                        <div class="pattern-examples">
+                            <code>(?i)karaoke</code> - Match "karaoke"
+                            (case-insensitive)<br />
+                            <code>(?i)(singing|歌枠)</code> - Match singing
+                            streams<br />
+                            <code>(?i)unarchived</code> - Match unarchived
+                            streams
+                        </div>
+                    </sl-details>
+
+                    <sl-checkbox id="setup-include-non-live"
+                        >Include non-live content (VODs, premieres)</sl-checkbox
+                    >
+
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-back-5">
+                            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+                            Back
+                        </sl-button>
+                        <sl-button variant="primary" id="setup-finish">
+                            <sl-icon slot="prefix" name="check-lg"></sl-icon>
+                            Finish Setup
+                        </sl-button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <div id="status-bar">
+            <span id="connection-status">
+                <sl-icon name="wifi-off"></sl-icon>
+                Connecting...
+            </span>
+            <span id="cookie-status"></span>
+            <span id="server-status"></span>
+        </div>
+
+        <script src="/app.js"></script>
+    </body>
+</html>

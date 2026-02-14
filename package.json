@@ -1,0 +1,49 @@
+{
+  "name": "moombox",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "bin": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "npx tsx src/index.ts",
+    "package": "node scripts/build-sfx.cjs"
+  },
+  "keywords": ["youtube", "livestream", "archiver", "tui", "downloader"],
+  "author": "Wulf",
+  "license": "MIT",
+  "description": "YouTube Live Stream Archiver",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "astring": "^1.9.0",
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.3.3",
+    "fs-extra": "^11.3.3",
+    "ink": "^6.6.0",
+    "jsdom": "^24.1.3",
+    "lowdb": "^7.0.1",
+    "lru-cache": "^11.2.4",
+    "meriyah": "^7.0.0",
+    "react": "^19.2.4",
+    "rss-parser": "^3.13.0",
+    "sql.js": "^1.14.0",
+    "toml": "^3.0.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
+    "@types/express": "^5.0.6",
+    "@types/fs-extra": "^11.0.4",
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.13",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.27.2",
+    "postject": "^1.0.0-alpha.6",
+    "typescript": "^5.9.3"
+  }
+}

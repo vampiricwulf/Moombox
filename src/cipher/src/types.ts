@@ -1,0 +1,53 @@
+import type {
+  Input as MainInput,
+  Output as MainOutput,
+} from "../../ejs/yt/solver/main.js";
+
+export interface Solvers {
+  n: ((val: string) => string) | null;
+  sig: ((val: string) => string) | null;
+}
+
+export interface SignatureRequest {
+  encrypted_signature?: string;
+  n_param?: string;
+  player_url: string;
+}
+
+export interface SignatureResponse {
+  decrypted_signature: string;
+  decrypted_n_sig: string;
+}
+
+export interface StsRequest {
+  player_url: string;
+}
+
+export interface StsResponse {
+  sts: string;
+}
+
+export interface ResolveUrlRequest {
+  stream_url: string;
+  player_url: string;
+  encrypted_signature: string;
+  signature_key?: string;
+  n_param?: string;
+}
+
+export interface ResolveUrlResponse {
+  resolved_url: string;
+}
+
+export interface WorkerWithStatus {
+  worker: any; // Using any to avoid strict Worker type dependency issues for now, or use Worker from worker_threads
+  isIdle?: boolean;
+}
+
+export interface Task {
+  data: string;
+  resolve: (output: string) => void;
+  reject: (error: any) => void;
+}
+
+export type ApiRequest = SignatureRequest | StsRequest | ResolveUrlRequest;

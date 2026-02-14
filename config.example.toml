@@ -1,0 +1,86 @@
+# Moombox Configuration
+# Copy this file to config.toml and edit to your needs.
+# All settings shown here are the defaults — uncomment and change as needed.
+
+# ─── Server ───────────────────────────────────────────────────────────────────
+# Web dashboard port
+# port = 774
+
+# Network access level: "localhost" (default), "lan", or "external"
+# network_access = "localhost"
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+# Log level: "DEBUG", "INFO" (default), "WARN", "ERROR"
+# log_level = "INFO"
+# log_file_path = "./moombox.log"
+# log_max_file_size = 10485760   # 10 MB
+# log_max_files = 5
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+# database_path = "./moombox.json"
+
+# ─── Feed Monitor ─────────────────────────────────────────────────────────────
+# Maximum RSS feed items to check per channel (default 15)
+# max_feed_items = 15
+
+# ─── Downloader ───────────────────────────────────────────────────────────────
+[downloader]
+# Maximum video resolution (based on max of width/height). Handles portrait videos.
+# max_video_resolution = 1080
+
+# Prefer 60fps streams when available at the same resolution
+# prefer_60fps = true
+
+# Download live chat alongside streams
+# download_chat = true
+
+# Output paths
+# output_directory = "./output"
+# output_template = "${channel}/${start_date} ${title} [${id}]"
+# staging_directory = "./staging"
+
+# Number of parallel segment downloads (for catching up on live streams)
+# num_parallel_downloads = 2
+
+# Netscape-format cookie file for member-only content
+# cookie_file = "./cookies.txt"
+
+# Path to ffmpeg binary (auto-detected if not set)
+# ffmpeg_path = "/usr/bin/ffmpeg"
+
+# ─── Task List ────────────────────────────────────────────────────────────────
+[tasklist]
+# Jobs older than this are moved to the Archived section
+# hide_finished_age_days = 30
+
+# ─── Auto Cookies ────────────────────────────────────────────────────────────
+# Automatic cookie acquisition via browser. When enabled, Moombox can
+# refresh YouTube cookies automatically using a local browser profile.
+# Firefox is recommended (reads cookies directly from SQLite).
+# Edge and Chrome are supported as fallback (uses Chrome DevTools Protocol).
+[auto_cookies]
+# enabled = false
+# browser_profile_dir = "./browser-profile"
+
+# ─── Discord Notifications ───────────────────────────────────────────────────
+# Send Discord webhook notifications for stream events.
+# You can add multiple [[notifications]] blocks for different webhooks.
+#
+# Available events for filtering:
+#   found, added, scheduled, live, downloading, muxing, finished, error, auth, cancelled
+#
+# [[notifications]]
+# url = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+# events = ["live", "finished", "error"]   # Optional: only send these events (default: all)
+
+# ─── Channels ─────────────────────────────────────────────────────────────────
+# Add channels to monitor. Each [[channels]] block defines one channel.
+#
+# [[channels]]
+# id = "UCxxxxxxxxxx"                        # YouTube channel ID (required)
+# name = "Channel Name"                      # Display name (optional)
+# terms = "(?i)karaoke|singing"              # Regex filter for title + description (optional)
+# include_non_live_content = false            # Also download regular uploads (default: false)
+# num_desc_lookbehind = 3                    # Compare descriptions with N older items (optional)
+# max_feed_items = 15                        # Override global max_feed_items (optional)
+# output_directory = "./output/special"      # Override output directory (optional)
