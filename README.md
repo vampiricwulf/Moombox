@@ -35,10 +35,9 @@ YouTube live stream archiver with a terminal UI and web dashboard. Monitors chan
 
 1. Download `Moombox.exe` from the [latest release](https://github.com/Wulf/Moombox/releases/latest)
 2. Place it in a directory of your choice
-3. Create a `config.toml` next to it (see [Configuration](#configuration))
-4. Run `Moombox.exe`
+3. Run `Moombox.exe`
 
-The TUI launches by default. The web dashboard is always available at `http://localhost:774`.
+A built-in setup wizard walks you through first-time configuration on launch. The TUI opens by default — press **W** to open the web dashboard in your browser.
 
 To add a video manually:
 ```bash
@@ -52,7 +51,9 @@ Moombox.exe --no-tui
 
 ## Configuration
 
-Copy [`config.example.toml`](config.example.toml) to `config.toml` in the same directory as the executable (or in `./config/` or `~/.config/moombox/`).
+Moombox includes a built-in first-time setup wizard — no manual configuration is necessary. All settings can be changed at any time from the **Settings** page in the web dashboard.
+
+For advanced users, a [`config.example.toml`](config.example.toml) reference is included. Moombox looks for `config.toml` in the current directory, `./config/`, or `~/.config/moombox/`.
 
 ### Key Settings
 
