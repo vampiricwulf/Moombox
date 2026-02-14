@@ -143,6 +143,23 @@ export class Logger {
     }
   }
 
+  /**
+   * Re-read log level from config. Called after config save so changes apply immediately.
+   */
+  refreshLogLevel() {
+    try {
+      const config = ConfigManager.getInstance().get();
+      const levelStr = config.log_level?.toUpperCase() || "INFO";
+      const newLevel = LogLevel[levelStr as keyof typeof LogLevel] ?? LogLevel.INFO;
+      if (newLevel !== this.logLevel) {
+        this.logLevel = newLevel;
+        this.info(`Log level changed to ${LogLevel[this.logLevel]}`);
+      }
+    } catch {
+      // Config may not be loaded yet
+    }
+  }
+
   debug(msg: string) {
     this.log(LogLevel.DEBUG, msg);
   }

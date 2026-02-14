@@ -881,6 +881,8 @@ export class WebServer {
         }
 
         await configManager.save(newConfig);
+        // Apply runtime-reloadable settings immediately
+        this.logger.refreshLogLevel();
         res.json({ success: true });
       } catch (error: any) {
         this.logger.error(`[WebServer] PUT /api/config failed: ${error.stack || error.message}`);
