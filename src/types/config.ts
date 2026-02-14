@@ -32,6 +32,8 @@ export interface DownloaderConfig {
   pot_provider_url?: string;
   download_chat?: boolean;
   prefer_60fps?: boolean;
+  segment_retry_delay_cap?: number;
+  segment_live_check_retries?: number;
 }
 
 /**
@@ -70,6 +72,7 @@ export interface MoomboxConfig {
   log_max_files?: number;
   database_path?: string;
   max_feed_items?: number;
+  feed_check_interval?: number;
   downloader: DownloaderConfig;
   tasklist?: TasklistConfig;
   auto_cookies?: AutoCookiesConfig;

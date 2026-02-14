@@ -169,6 +169,8 @@ class MoomboxApp {
     const downloadChat = document.getElementById("setup-download-chat")?.checked ?? true;
     const cookieFile = val("setup-cookie-file") || undefined;
     const autoCookiesEnabled = document.getElementById("setup-auto-cookies")?.checked || false;
+    const retryDelayCap = num("setup-retry-delay-cap");
+    const liveCheckRetries = num("setup-live-check-retries");
 
     // Step 3: Logging
     const logLevelSelect = document.getElementById("setup-log-level");
@@ -180,6 +182,7 @@ class MoomboxApp {
     // Step 4: Display & Monitoring
     const hideAge = num("setup-hide-age");
     const maxFeedItems = num("setup-max-feed-items");
+    const feedCheckInterval = num("setup-feed-check-interval");
     const port = num("setup-port");
     const setupNetworkAccess = document.getElementById("setup-network-access")?.value || "localhost";
 
@@ -199,6 +202,7 @@ class MoomboxApp {
       log_max_files: logMaxFiles,
       database_path: databasePath,
       max_feed_items: maxFeedItems,
+      feed_check_interval: feedCheckInterval,
       downloader: {
         output_directory: outputDir,
         output_template: outputTemplate,
@@ -209,6 +213,8 @@ class MoomboxApp {
         download_chat: downloadChat,
         ffmpeg_path: ffmpegPath,
         cookie_file: cookieFile,
+        segment_retry_delay_cap: retryDelayCap,
+        segment_live_check_retries: liveCheckRetries,
       },
       tasklist: {
         hide_finished_age_days: hideAge,
@@ -560,6 +566,7 @@ class MoomboxApp {
     this.setInputValue("cfg-log-max-files", this.config.log_max_files);
     this.setInputValue("cfg-database", this.config.database_path);
     this.setInputValue("cfg-max-feed-items", this.config.max_feed_items);
+    this.setInputValue("cfg-feed-check-interval", this.config.feed_check_interval);
     this.setInputValue(
       "cfg-hide-finished-days",
       this.config.tasklist?.hide_finished_age_days,
@@ -601,6 +608,14 @@ class MoomboxApp {
         prefer60fpsSwitch.checked =
           this.config.downloader.prefer_60fps !== false;
       }
+      this.setInputValue(
+        "cfg-retry-delay-cap",
+        this.config.downloader.segment_retry_delay_cap,
+      );
+      this.setInputValue(
+        "cfg-live-check-retries",
+        this.config.downloader.segment_live_check_retries,
+      );
     }
 
     // Auto cookies settings
@@ -659,6 +674,7 @@ class MoomboxApp {
     const logMaxFiles = this.getInputNumber("cfg-log-max-files");
     const database = this.getInputValue("cfg-database");
     const maxFeedItems = this.getInputNumber("cfg-max-feed-items");
+    const feedCheckInterval = this.getInputNumber("cfg-feed-check-interval");
     const hideFinishedDays = this.getInputNumber("cfg-hide-finished-days");
 
     const outputDir = this.getInputValue("cfg-output-dir");
@@ -668,6 +684,8 @@ class MoomboxApp {
     const cookieFile = this.getInputValue("cfg-cookie-file");
     const maxResolution = this.getInputNumber("cfg-max-resolution");
     const parallelDownloads = this.getInputNumber("cfg-parallel-downloads");
+    const retryDelayCap = this.getInputNumber("cfg-retry-delay-cap");
+    const liveCheckRetries = this.getInputNumber("cfg-live-check-retries");
 
     // Network access
     const netAccessSelect = document.getElementById("cfg-network-access");
@@ -682,6 +700,7 @@ class MoomboxApp {
     this.config.log_max_files = logMaxFiles;
     this.config.database_path = database || undefined;
     this.config.max_feed_items = maxFeedItems;
+    this.config.feed_check_interval = feedCheckInterval;
 
     if (!this.config.tasklist) this.config.tasklist = {};
     this.config.tasklist.hide_finished_age_days = hideFinishedDays;
@@ -694,6 +713,8 @@ class MoomboxApp {
     this.config.downloader.cookie_file = cookieFile || undefined;
     this.config.downloader.max_video_resolution = maxResolution;
     this.config.downloader.num_parallel_downloads = parallelDownloads;
+    this.config.downloader.segment_retry_delay_cap = retryDelayCap;
+    this.config.downloader.segment_live_check_retries = liveCheckRetries;
     // Download chat switch
     const downloadChatSwitch = document.getElementById("cfg-download-chat");
     this.config.downloader.download_chat = downloadChatSwitch

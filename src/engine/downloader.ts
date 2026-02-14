@@ -15,6 +15,8 @@ export interface DownloaderOptions {
   initUrl?: string;
   resumeFile?: string;
   onCheckStreamStatus?: () => Promise<boolean>; // Returns true if stream has ended
+  retryDelayCap?: number; // Max backoff delay in seconds (default: 60)
+  liveCheckRetries?: number; // Retries before first live status check (default: 16)
 }
 
 interface ResumeState {
@@ -357,10 +359,12 @@ export class SegmentDownloader extends EventEmitter {
               sameHeadRetryDelay = 0;
             }
 
-            sameHeadRetryDelay = Math.min(sameHeadRetryDelay + 1, 60);
+            const delayCap = this.options.retryDelayCap ?? 60;
+            const liveCheckThreshold = this.options.liveCheckRetries ?? 16;
+            sameHeadRetryDelay = Math.min(sameHeadRetryDelay + 1, delayCap);
 
-            // At threshold delays, check stream status via API
-            if ((sameHeadRetryDelay === 16 || sameHeadRetryDelay === 40)
+            // At threshold, check stream status via API
+            if (sameHeadRetryDelay === liveCheckThreshold
                 && this.options.onCheckStreamStatus) {
               this.logger.info(
                 `[Downloader] Checking stream status at ${sameHeadRetryDelay}s backoff...`,
@@ -372,14 +376,14 @@ export class SegmentDownloader extends EventEmitter {
               }
             }
 
-            // At 60s cap, check status on every probe
-            if (sameHeadRetryDelay >= 60 && this.options.onCheckStreamStatus) {
+            // At cap, check status on every probe
+            if (sameHeadRetryDelay >= delayCap && this.options.onCheckStreamStatus) {
               this.logger.info(
-                `[Downloader] Checking stream status during 60s polling...`,
+                `[Downloader] Checking stream status during ${delayCap}s polling...`,
               );
               const ended = await this.options.onCheckStreamStatus();
               if (ended) {
-                this.logger.info(`[Downloader] Stream confirmed ended during 60s polling`);
+                this.logger.info(`[Downloader] Stream confirmed ended during ${delayCap}s polling`);
                 break;
               }
             }

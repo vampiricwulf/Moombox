@@ -26,6 +26,7 @@ export class ConfigManager {
     log_max_files: 5,
     database_path: "./moombox.json",
     max_feed_items: 15,
+    feed_check_interval: 10,
     downloader: {
       output_directory: "./output",
       output_template: "${channel}/${start_date} ${title} [${id}]",
@@ -35,6 +36,8 @@ export class ConfigManager {
       cookie_file: "./cookies.txt",
       download_chat: true, // Download live chat alongside streams
       prefer_60fps: true, // Prefer 60fps when same resolution available
+      segment_retry_delay_cap: 60, // Max backoff delay in seconds
+      segment_live_check_retries: 16, // Retries before first live status check
     },
     tasklist: {
       hide_finished_age_days: 30,
@@ -87,6 +90,7 @@ export class ConfigManager {
       log_max_files: config.log_max_files ?? defaults.log_max_files,
       database_path: config.database_path ?? defaults.database_path,
       max_feed_items: config.max_feed_items ?? defaults.max_feed_items,
+      feed_check_interval: config.feed_check_interval ?? defaults.feed_check_interval,
       downloader: {
         output_directory:
           config.downloader?.output_directory ??
@@ -109,6 +113,10 @@ export class ConfigManager {
           config.downloader?.download_chat ?? defaults.downloader.download_chat,
         prefer_60fps:
           config.downloader?.prefer_60fps ?? defaults.downloader.prefer_60fps,
+        segment_retry_delay_cap:
+          config.downloader?.segment_retry_delay_cap ?? defaults.downloader.segment_retry_delay_cap,
+        segment_live_check_retries:
+          config.downloader?.segment_live_check_retries ?? defaults.downloader.segment_live_check_retries,
         // These have no defaults - only use if explicitly set
         ffmpeg_path: config.downloader?.ffmpeg_path,
         po_token: config.downloader?.po_token,
@@ -236,6 +244,8 @@ export class ConfigManager {
       lines.push(`database_path = "${esc(config.database_path!)}"`);
     if (isDefined(config.max_feed_items))
       lines.push(`max_feed_items = ${config.max_feed_items}`);
+    if (isDefined(config.feed_check_interval))
+      lines.push(`feed_check_interval = ${config.feed_check_interval}`);
 
     // Downloader section
     if (config.downloader) {
@@ -265,6 +275,10 @@ export class ConfigManager {
         lines.push(`download_chat = ${d.download_chat}`);
       if (isDefined(d.prefer_60fps))
         lines.push(`prefer_60fps = ${d.prefer_60fps}`);
+      if (isDefined(d.segment_retry_delay_cap))
+        lines.push(`segment_retry_delay_cap = ${d.segment_retry_delay_cap}`);
+      if (isDefined(d.segment_live_check_retries))
+        lines.push(`segment_live_check_retries = ${d.segment_live_check_retries}`);
     }
 
     // Tasklist section

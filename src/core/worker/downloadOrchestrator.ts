@@ -682,7 +682,8 @@ export class DownloadOrchestrator {
     let bestVideo: any = null;
     let bestAudio: any = null;
 
-    const maxRes = ConfigManager.getInstance().get().downloader?.max_video_resolution || 9999;
+    const config = ConfigManager.getInstance().get();
+    const maxRes = config.downloader?.max_video_resolution || 9999;
 
     for (const stream of dashStreams) {
       this.logger.debug(
@@ -760,6 +761,8 @@ export class DownloadOrchestrator {
       startSeq: startFromBeginning,
       initUrl: bestVideo.initialization,
       onCheckStreamStatus: checkStreamStatus,
+      retryDelayCap: config.downloader.segment_retry_delay_cap,
+      liveCheckRetries: config.downloader.segment_live_check_retries,
     });
 
     const audioDl = new SegmentDownloader({
@@ -768,6 +771,8 @@ export class DownloadOrchestrator {
       startSeq: startFromBeginning,
       initUrl: bestAudio.initialization,
       onCheckStreamStatus: checkStreamStatus,
+      retryDelayCap: config.downloader.segment_retry_delay_cap,
+      liveCheckRetries: config.downloader.segment_live_check_retries,
     });
 
     this.activeSegmentDownloaders.add(videoDl);
@@ -809,7 +814,8 @@ export class DownloadOrchestrator {
     }
 
     // Select best variant (respecting max_video_resolution)
-    const maxRes = ConfigManager.getInstance().get().downloader?.max_video_resolution || 9999;
+    const config = ConfigManager.getInstance().get();
+    const maxRes = config.downloader?.max_video_resolution || 9999;
     let bestVariant: any = null;
     for (const variant of masterPlaylist.variants) {
       const varMaxDim = Math.max(variant.width || 0, variant.height || 0);
@@ -859,6 +865,8 @@ export class DownloadOrchestrator {
       startSeq: -1,
       isHls: true,
       onCheckStreamStatus: checkStreamStatus,
+      retryDelayCap: config.downloader.segment_retry_delay_cap,
+      liveCheckRetries: config.downloader.segment_live_check_retries,
     });
 
     this.activeSegmentDownloaders.add(videoDl);

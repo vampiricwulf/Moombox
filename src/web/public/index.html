@@ -307,6 +307,13 @@
                                 help-text="Maximum number of feed items to check per channel"
                             ></sl-input>
                             <sl-input
+                                id="cfg-feed-check-interval"
+                                type="number"
+                                label="Feed Check Interval (minutes)"
+                                placeholder="10"
+                                help-text="How often to check RSS feeds for new streams (default: 10). Requires restart."
+                            ></sl-input>
+                            <sl-input
                                 id="cfg-hide-finished-days"
                                 type="number"
                                 label="Hide Finished Jobs After (days)"
@@ -381,6 +388,23 @@
                                     Resolution always takes priority.</span
                                 >
                             </sl-switch>
+
+                            <sl-divider></sl-divider>
+                            <h4>Live Stream Retry Behavior</h4>
+                            <sl-input
+                                id="cfg-retry-delay-cap"
+                                type="number"
+                                label="Retry Delay Cap (seconds)"
+                                placeholder="60"
+                                help-text="Maximum backoff delay between segment retries during live streams (default: 60)"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-live-check-retries"
+                                type="number"
+                                label="Live Check Retries"
+                                placeholder="16"
+                                help-text="Number of retries before checking if stream is still live via API (default: 16)"
+                            ></sl-input>
 
                             <sl-divider></sl-divider>
                             <h4>Automatic Cookie Login</h4>
@@ -822,6 +846,23 @@
                         help-text="Netscape-format cookie file for member-only content. Not needed if auto-login is enabled."
                     ></sl-input>
 
+                    <sl-details summary="Advanced retry settings">
+                        <sl-input
+                            id="setup-retry-delay-cap"
+                            type="number"
+                            label="Retry Delay Cap (seconds)"
+                            placeholder="60"
+                            help-text="Max backoff delay between segment retries (default: 60)"
+                        ></sl-input>
+                        <sl-input
+                            id="setup-live-check-retries"
+                            type="number"
+                            label="Live Check Retries"
+                            placeholder="16"
+                            help-text="Retries before checking if stream is still live via API (default: 16)"
+                        ></sl-input>
+                    </sl-details>
+
                     <div class="setup-nav">
                         <sl-button variant="default" id="setup-back-2">
                             <sl-icon slot="prefix" name="arrow-left"></sl-icon>
@@ -909,6 +950,14 @@
                         label="Max Feed Items"
                         placeholder="15"
                         help-text="RSS feed items to check per channel (default: 15)"
+                    ></sl-input>
+
+                    <sl-input
+                        id="setup-feed-check-interval"
+                        type="number"
+                        label="Feed Check Interval (minutes)"
+                        placeholder="10"
+                        help-text="How often to check feeds for new streams (default: 10)"
                     ></sl-input>
 
                     <sl-input

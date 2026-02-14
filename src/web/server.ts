@@ -870,7 +870,8 @@ export class WebServer {
         const allowedKeys = new Set([
           "port", "network_access",
           "log_level", "log_file_path", "log_max_file_size", "log_max_files",
-          "database_path", "max_feed_items", "downloader", "tasklist",
+          "database_path", "max_feed_items", "feed_check_interval",
+          "downloader", "tasklist",
           "auto_cookies", "notifications", "channels",
         ]);
         for (const key of Object.keys(newConfig)) {

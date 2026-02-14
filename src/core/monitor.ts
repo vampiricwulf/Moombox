@@ -24,9 +24,11 @@ export class FeedMonitor {
   start() {
     if (this.running) return;
     this.running = true;
-    this.logger.info("Feed Monitor started.");
+    const config = ConfigManager.getInstance().get();
+    const intervalMinutes = config.feed_check_interval ?? 10;
+    this.logger.info(`Feed Monitor started (interval: ${intervalMinutes}m).`);
     this.checkFeeds();
-    this.interval = setInterval(() => this.checkFeeds(), 10 * 60 * 1000); // 10 mins
+    this.interval = setInterval(() => this.checkFeeds(), intervalMinutes * 60 * 1000);
   }
 
   stop() {
