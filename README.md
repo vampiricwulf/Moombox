@@ -1,5 +1,7 @@
 # Moombox
 
+> **Note:** This project was 99% written by [Claude Opus](https://claude.ai) (Anthropic's AI model) using [Claude Code](https://claude.ai/code). From architecture decisions to implementation details, the vast majority of the codebase — including the YouTube engine, download pipeline, TUI, web dashboard, BotGuard solver, and this README — was generated through AI-assisted development.
+
 YouTube live stream archiver with a terminal UI and web dashboard. Monitors channels via RSS, detects live streams, and downloads video + live chat automatically.
 
 ## Features
