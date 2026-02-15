@@ -177,8 +177,14 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
         .sort((a, b) => {
           const aMaxDim = Math.max(a.width || 0, a.height || 0);
           const bMaxDim = Math.max(b.width || 0, b.height || 0);
+          // Sort by resolution (higher first)
           if (aMaxDim !== bMaxDim) return bMaxDim - aMaxDim;
-          return b.bitrate - a.bitrate;
+          // Same resolution: sort by FPS (60fps first for modern videos)
+          const aFps = a.fps || 30;
+          const bFps = b.fps || 30;
+          if (aFps !== bFps) return bFps - aFps;
+          // Same resolution and FPS: prefer LOWER bitrate (better compression)
+          return a.bitrate - b.bitrate;
         });
 
       const audioFormats = (videoInfo.formats || [])
