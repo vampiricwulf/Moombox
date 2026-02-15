@@ -169,7 +169,7 @@ export class WebServer {
       // Content Security Policy (prevents XSS attacks)
       res.setHeader("Content-Security-Policy",
         "default-src 'self'; " +
-        "script-src 'self'; " +
+        "script-src 'self' 'unsafe-hashes'; " + // unsafe-hashes allows inline event handlers (onclick, etc.)
         "style-src 'self' 'unsafe-inline'; " + // Shoelace requires inline styles
         "img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com; " +
         "connect-src 'self'; " +
