@@ -330,30 +330,11 @@ export async function downloadDash(
   const videoPath = path.join(stagingDir, "video_stream");
   const audioPath = path.join(stagingDir, "audio_stream");
 
-  // Calculate segment range for timestamp selection
-  let segmentRange: SegmentRange | null = null;
-  if (job.startTime != null || job.endTime != null) {
-    // Use the video stream for timeline calculation (video and audio share the same timeline in YouTube DASH)
-    segmentRange = ManifestParser.calculateSegmentRange(
-      bestVideo,
-      job.startTime,
-      job.endTime,
-    );
-    if (segmentRange) {
-      logger.info(
-        `[DownloadOrchestrator] Timestamp selection: segments ${segmentRange.startSegment}-${segmentRange.endSegment === -1 ? "end" : segmentRange.endSegment}, ` +
-          `trimStart=${segmentRange.trimStartOffset.toFixed(2)}s, duration=${segmentRange.trimDuration > 0 ? segmentRange.trimDuration.toFixed(2) + "s" : "full"}`,
-      );
-    }
-  }
-
   // For live-from-start, always start from segment 0 to capture the entire stream
   // The manifest's startNumber reflects the current live position, not the beginning
-  const startFromBeginning = segmentRange?.startSegment ?? 0;
-  const endSeq = segmentRange?.endSegment !== -1 ? segmentRange?.endSegment : undefined;
+  const startFromBeginning = 0;
   logger.info(
-    `[DownloadOrchestrator] Starting from segment ${startFromBeginning} (manifest startNumber: ${bestVideo.startNumber})` +
-      (endSeq != null ? `, ending at segment ${endSeq}` : ""),
+    `[DownloadOrchestrator] Starting from segment ${startFromBeginning} (manifest startNumber: ${bestVideo.startNumber})`
   );
 
   // Callback to check if stream has ended via YouTube API
@@ -378,7 +359,6 @@ export async function downloadDash(
     onCheckStreamStatus: checkStreamStatus,
     retryDelayCap: config.downloader.segment_retry_delay_cap,
     liveCheckRetries: config.downloader.segment_live_check_retries,
-    endSeq,
   });
 
   const audioDl = new SegmentDownloader({
@@ -389,7 +369,6 @@ export async function downloadDash(
     onCheckStreamStatus: checkStreamStatus,
     retryDelayCap: config.downloader.segment_retry_delay_cap,
     liveCheckRetries: config.downloader.segment_live_check_retries,
-    endSeq,
   });
 
   activeSegmentDownloaders.add(videoDl);
@@ -404,7 +383,7 @@ export async function downloadDash(
     audioDl,
     videoPath,
     audioPath,
-    segmentRange,
+    segmentRange: null, // No longer used - full file is always downloaded
     selectedVideoFormat: bestVideo,
     selectedAudioFormat: bestAudio,
   };

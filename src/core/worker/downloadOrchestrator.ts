@@ -128,7 +128,7 @@ export class DownloadOrchestrator {
       startFields.push({ name: "Audio", value: formatLabel, inline: true });
     }
 
-    // Add time range if specified
+    // Add time range if specified (post-download trim)
     if (job.startTime != null || job.endTime != null) {
       const startMin = Math.floor((job.startTime || 0) / 60);
       const startSec = (job.startTime || 0) % 60;
@@ -136,7 +136,7 @@ export class DownloadOrchestrator {
       const endStr = job.endTime != null
         ? `${Math.floor(job.endTime / 60)}:${String(job.endTime % 60).padStart(2, "0")}`
         : "end";
-      startFields.push({ name: "Trim Range", value: `${startStr} - ${endStr}`, inline: false });
+      startFields.push({ name: "Post-Download Trim", value: `${startStr} - ${endStr}`, inline: false });
     }
 
     NotificationManager.getInstance().send(
@@ -207,38 +207,9 @@ export class DownloadOrchestrator {
     // use DASH segment download. The player API format URLs for post-live content may
     // only serve individual segments, so direct range-based download would fail.
     // Regular uploads ("not_a_stream") use efficient direct format download.
-    // EXCEPTION: VODs with timestamp selection should use DASH segments for efficiency
-    // (only download needed segments instead of entire file, like yt-dlp)
-    const hasTimestampSelection = job.startTime != null || job.endTime != null;
     const useDirectVodDownload = isVodDownload && (
-      !hasTimestampSelection &&
-      (videoInfo.streamStatus === "not_a_stream" || !videoInfo.dashManifestUrl)
+      videoInfo.streamStatus === "not_a_stream" || !videoInfo.dashManifestUrl
     );
-
-    // Log which download method is chosen for VODs with timestamps
-    if (hasTimestampSelection && isVodDownload) {
-      if (videoInfo.dashManifestUrl) {
-        this.logger.info(
-          `[DownloadOrchestrator] VOD with timestamp selection: using DASH segments ` +
-          `(${job.startTime || 0}s - ${job.endTime ? job.endTime + "s" : "end"})`
-        );
-      } else {
-        this.logger.warn(
-          `[DownloadOrchestrator] VOD with timestamp selection but no DASH manifest available. ` +
-          `streamStatus=${videoInfo.streamStatus}, manifestUrl=${videoInfo.dashManifestUrl ? "present" : "null"}, ` +
-          `falling back to direct download with FFmpeg trim`
-        );
-      }
-    }
-
-    // Debug: Log DASH manifest availability for all VODs
-    if (isVodDownload) {
-      this.logger.debug(
-        `[DownloadOrchestrator] VOD info: streamStatus=${videoInfo.streamStatus}, ` +
-        `hasTimestamps=${hasTimestampSelection}, dashManifest=${videoInfo.dashManifestUrl ? "YES" : "NO"}, ` +
-        `useDirectDownload=${useDirectVodDownload}`
-      );
-    }
 
     if (useDirectVodDownload) {
       // VOD: Use direct format URLs
@@ -315,13 +286,6 @@ export class DownloadOrchestrator {
       videoPath = result.videoPath;
     } else if (videoInfo.formats && videoInfo.formats.length > 0) {
       // Fallback: Direct format download
-      // Log warning if timestamp selection is enabled (less efficient)
-      if (job.startTime != null || job.endTime != null) {
-        this.logger.warn(
-          `[DownloadOrchestrator] Timestamp selection enabled but no DASH manifest available. ` +
-          `Downloading entire file and trimming with FFmpeg (slower than segment download).`
-        );
-      }
 
       // Start chat downloader in background
       let chatFinished2 = false;
@@ -430,33 +394,7 @@ export class DownloadOrchestrator {
       Object.assign(job, { streamEndTime: endTime });
     }
 
-    // Build trim options for timestamp selection
-    let trimOptions: MuxTrimOptions | undefined;
-    if (segmentRange) {
-      // DASH segment-level download: trim boundaries of first/last segments
-      trimOptions = {
-        trimStartOffset: segmentRange.trimStartOffset || undefined,
-        trimDuration: segmentRange.trimDuration || undefined,
-        // Extract bitrate from selected formats for precise trim (convert bps to kbps)
-        videoBitrate: selectedVideoFormat?.bitrate ? Math.round(selectedVideoFormat.bitrate / 1000) : undefined,
-        audioBitrate: selectedAudioFormat?.bitrate ? Math.round(selectedAudioFormat.bitrate / 1000) : undefined,
-        usePreciseTrim: true, // Enable by default for trim accuracy
-      };
-    } else if (job.startTime != null || job.endTime != null) {
-      // VOD direct download: use muxer to trim the full file
-      trimOptions = {
-        trimStartOffset: job.startTime || undefined,
-        trimDuration: (job.endTime != null && job.endTime > 0)
-          ? job.endTime - (job.startTime || 0)
-          : undefined,
-        // Extract bitrate from selected formats for precise trim (convert bps to kbps)
-        videoBitrate: selectedVideoFormat?.bitrate ? Math.round(selectedVideoFormat.bitrate / 1000) : undefined,
-        audioBitrate: selectedAudioFormat?.bitrate ? Math.round(selectedAudioFormat.bitrate / 1000) : undefined,
-        usePreciseTrim: true, // Enable by default for trim accuracy
-      };
-    }
-
-    // Mux the streams
+    // Mux the streams (always download full file, no trimming during download)
     await muxAndFinalize(
       job,
       videoPath,
@@ -466,8 +404,56 @@ export class DownloadOrchestrator {
       finalExtension,
       db,
       signal,
-      trimOptions,
+      undefined, // No trim options - download full file
     );
+
+    // Post-download trim: If timestamps were specified, create a trimmed version
+    if ((job.startTime != null || job.endTime != null) && !signal?.aborted) {
+      this.logger.info(
+        `[DownloadOrchestrator] Creating post-download trim: ${job.startTime || 0}s - ${job.endTime ? job.endTime + "s" : "end"}`
+      );
+
+      try {
+        // Import TrimService (dynamic to avoid circular dependency)
+        const { TrimService } = await import("./trimService.js");
+
+        // Get the finished job with updated metadata
+        const finishedJob = (await db.getJobs()).find((j) => j.id === job.id);
+        if (!finishedJob || finishedJob.status !== "Finished") {
+          this.logger.warn(
+            `[DownloadOrchestrator] Cannot create trim: job not in Finished state (${finishedJob?.status})`
+          );
+        } else {
+          // Create trim with the specified time range
+          const trimRecord = await TrimService.createTrim(
+            finishedJob,
+            job.startTime || 0,
+            job.endTime || finishedJob.lengthSeconds || 0,
+            signal,
+          );
+
+          this.logger.info(
+            `[DownloadOrchestrator] Post-download trim created: ${trimRecord.filename}`
+          );
+        }
+      } catch (e: any) {
+        // Don't fail the entire job if trim fails - the full file is still available
+        this.logger.error(
+          `[DownloadOrchestrator] Failed to create post-download trim: ${e.message}`
+        );
+        // Optionally send a notification about trim failure
+        NotificationManager.getInstance().send(
+          "Trim Failed",
+          `Failed to create trim for "${job.title}": ${e.message}`,
+          NotificationType.ERROR,
+          [],
+          {
+            url: `https://www.youtube.com/watch?v=${job.videoId}`,
+            event: "trim_error",
+          },
+        );
+      }
+    }
     } finally {
       unsubscribe();
       this.activeAbortControllers.delete(job.id);
