@@ -11,9 +11,11 @@ import { StatusBar } from "./components/StatusBar.js";
 import { JobDetails } from "./components/JobDetails.js";
 import { HelpOverlay } from "./components/HelpOverlay.js";
 import { SetupWizard } from "./components/SetupWizard.js";
+import { AddVideoDialog } from "./components/AddVideoDialog.js";
 import { useMouse, MouseEvent } from "./hooks/useMouse.js";
 import { NotificationManager, NotificationType } from "../core/notifications.js";
 import { readClipboard } from "./clipboard.js";
+import { extractVideoId } from "../utils/youtube.js";
 
 type FocusPanel = "tasks" | "details" | "logs";
 const FOCUS_ORDER: FocusPanel[] = ["tasks", "details", "logs"];
@@ -41,8 +43,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const [taskScrollOffset, setTaskScrollOffset] = useState(0);
   const [detailScrollOffset, setDetailScrollOffset] = useState(0);
   const [logScrollOffset, setLogScrollOffset] = useState(0);
-  const [addMode, setAddMode] = useState(false);
-  const [addInput, setAddInput] = useState("");
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addMessage, setAddMessage] = useState<{ text: string; color: string } | null>(null);
   const [deleteConfirmJobId, setDeleteConfirmJobId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -70,7 +71,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const taskWidth = Math.floor(cols / 2);
   const detailWidth = cols - taskWidth;
 
-  const addBarHeight = addMode || addMessage ? 1 : 0;
+  const addBarHeight = addMessage ? 1 : 0;
   const taskHeight = topHeight - addBarHeight;
 
   // Memoize sorted jobs (unfiltered + filtered)
@@ -164,29 +165,15 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const selectedJobIndexRef = useRef(selectedJobIndex);
   selectedJobIndexRef.current = selectedJobIndex;
 
-  // Ref for addMode so mouse handler can read it without stale closure
-  const addModeRef = useRef(addMode);
-  addModeRef.current = addMode;
+  // Ref for addDialogOpen so mouse handler can read it without stale closure
+  const addDialogOpenRef = useRef(addDialogOpen);
+  addDialogOpenRef.current = addDialogOpen;
 
   // Handle mouse events
   const handleMouseEvent = useCallback(
     (event: MouseEvent) => {
-      // Right-click: paste clipboard text when in add mode
-      if (event.type === "click" && event.button === "right") {
-        if (addModeRef.current) {
-          readClipboard().then((text) => {
-            if (text) {
-              // Take first line only (URLs are single-line)
-              const firstLine = text.split(/[\r\n]/)[0].trim();
-              if (firstLine) setAddInput((prev) => prev + firstLine);
-            }
-          });
-        }
-        return;
-      }
-
-      // Left-click: ignore clicks in add mode (don't let them affect panels)
-      if (event.type === "click" && event.button === "left" && addModeRef.current) {
+      // Ignore mouse events when dialog is open
+      if (addDialogOpenRef.current) {
         return;
       }
 
@@ -358,72 +345,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
 
   // Keyboard input
   useInput((input, key) => {
-    if (setupMode) return;
-
-    // Add mode
-    if (addMode) {
-      if (key.escape) {
-        setAddMode(false);
-        setAddInput("");
-        return;
-      }
-      if (key.return) {
-        const videoId = extractVideoId(addInput.trim());
-        if (!videoId) {
-          setAddMessage({ text: `Invalid video ID or URL: ${addInput}`, color: "red" });
-        } else {
-          db.addJob({
-            videoId,
-            url: `https://www.youtube.com/watch?v=${videoId}`,
-            title: "Manual Add",
-            channelName: "Manual",
-            thumbnailUrl: "",
-            manuallyAdded: true,
-          }).then((job) => {
-            if (job) {
-              setAddMessage({ text: `Added ${videoId} to queue`, color: "green" });
-              NotificationManager.getInstance().send(
-                "Video Added",
-                `Manually added: ${videoId}`,
-                NotificationType.INFO,
-                [{ name: "Video ID", value: videoId, inline: true }],
-                { url: `https://www.youtube.com/watch?v=${videoId}`, event: "added" },
-              );
-            } else {
-              setAddMessage({ text: `${videoId} already exists`, color: "yellow" });
-            }
-          }).catch((e: any) => {
-            logger.error(`[TUI] Failed to add job: ${e.stack || e.message}`);
-            setAddMessage({ text: `Error adding ${videoId}`, color: "red" });
-          });
-        }
-        setAddMode(false);
-        setAddInput("");
-        return;
-      }
-      if (key.backspace || key.delete) {
-        setAddInput((prev) => prev.slice(0, -1));
-        return;
-      }
-      // Ctrl+V: paste from clipboard
-      if (key.ctrl && input === "v") {
-        readClipboard().then((text) => {
-          if (text) {
-            const firstLine = text.split(/[\r\n]/)[0].trim();
-            if (firstLine) setAddInput((prev) => prev + firstLine);
-          }
-        });
-        return;
-      }
-      if (input && !key.ctrl && !key.meta) {
-        // Guard: reject mouse escape sequence fragments that leaked through stdin filter
-        // Full sequence: \x1b[<N;N;NM — or CSI fragment [<N;N;NM without ESC
-        if (input.charCodeAt(0) === 0x1b || input.charCodeAt(0) === 0x9b) return;
-        if (input.length > 1 && input[0] === "[") return;
-        setAddInput((prev) => prev + input);
-      }
-      return;
-    }
+    if (setupMode || addDialogOpen) return;
 
     // Toggle help
     if (input === "?") {
@@ -497,8 +419,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
 
     // Add video (only from tasks panel)
     if ((input === "a" || input === "A") && focusedPanel === "tasks") {
-      setAddMode(true);
-      setAddInput("");
+      setAddDialogOpen(true);
       setAddMessage(null);
       return;
     }
@@ -635,6 +556,23 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     return <SetupWizard width={cols} height={rows} onComplete={() => setSetupMode(false)} />;
   }
 
+  if (addDialogOpen) {
+    return (
+      <AddVideoDialog
+        width={cols}
+        height={rows}
+        onComplete={(message) => {
+          setAddDialogOpen(false);
+          setAddMessage(message);
+        }}
+        onCancel={() => {
+          setAddDialogOpen(false);
+          setAddMessage(null);
+        }}
+      />
+    );
+  }
+
   if (helpMode) {
     return (
       <Box flexDirection="column" height={rows} width={cols}>
@@ -671,14 +609,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
             archiveExpanded={archiveExpanded}
             onToggleArchive={() => setArchiveExpanded((prev) => !prev)}
           />
-          {addMode && (
-            <Box width={taskWidth} paddingX={1}>
-              <Text color="cyan" bold>Add: </Text>
-              <Text>{addInput}</Text>
-              <Text color="gray">_</Text>
-            </Box>
-          )}
-          {!addMode && addMessage && (
+          {addMessage && (
             <Box width={taskWidth} paddingX={1}>
               <Text color={addMessage.color}>{addMessage.text}</Text>
             </Box>
@@ -708,24 +639,6 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       />
     </Box>
   );
-}
-
-function extractVideoId(input: string): string | null {
-  const trimmed = input.trim();
-  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
-    return trimmed;
-  }
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/live\/([a-zA-Z0-9_-]{11})/,
-  ];
-  for (const pattern of patterns) {
-    const match = trimmed.match(pattern);
-    if (match) {
-      return match[1];
-    }
-  }
-  return null;
 }
 
 function getSortedJobs(jobs: Job[]): Job[] {
