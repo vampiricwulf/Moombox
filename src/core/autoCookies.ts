@@ -25,7 +25,7 @@ import {
   firefoxCookiesToNetscape,
   type CdpCookie,
   type FirefoxCookieRow,
-} from "./cookieConverter.js";
+} from "./cookies.js";
 
 export interface AutoCookieStatus {
   configured: boolean;

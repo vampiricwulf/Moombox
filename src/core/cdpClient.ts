@@ -7,7 +7,7 @@
 
 import WebSocket from "ws";
 import { fetchWithTimeout } from "./http.js";
-import type { CdpCookie } from "./cookieConverter.js";
+import type { CdpCookie } from "./cookies.js";
 
 interface PendingCommand {
   resolve: (value: any) => void;
