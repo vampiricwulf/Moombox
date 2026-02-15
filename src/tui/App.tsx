@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Box, Text, useInput, useStdout, useApp } from "ink";
 import path from "path";
-import { execFile } from "child_process";
+import { execa } from "execa";
 import { ConfigManager } from "../core/config.js";
 import { Database, Job } from "../core/database.js";
 import { Logger } from "../core/logger.js";
@@ -404,7 +404,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         : process.platform === "darwin"
           ? "open"
           : "xdg-open";
-      execFile(program, [url], () => {});
+      execa(program, [url], { detached: true, cleanup: false }).catch(() => {});
       setAddMessage({ text: `Opening: ${url}`, color: "green" });
       return;
     }
@@ -505,7 +505,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
             : process.platform === "darwin"
               ? "open"
               : "xdg-open";
-          execFile(program, [folderPath], () => {});
+          execa(program, [folderPath], { detached: true, cleanup: false }).catch(() => {});
           setAddMessage({ text: `Opening: ${folderPath}`, color: "green" });
         } else {
           setAddMessage({ text: "Can only open folder for finished jobs", color: "yellow" });

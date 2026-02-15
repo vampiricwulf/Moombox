@@ -8,8 +8,9 @@
  * Supports Firefox (primary, SQLite cookies) and Edge/Chrome (fallback, CDP).
  */
 
-import { spawn, exec } from "child_process";
+import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
+import { execa } from "execa";
 import net from "net";
 import fs from "fs-extra";
 import path from "path";
@@ -611,9 +612,15 @@ export class AutoCookieService {
 
     // Step 1: Send graceful close (WM_CLOSE) — no /F flag
     this.logger.debug("[AutoCookies] Sending graceful close to Firefox...");
-    await new Promise<void>((resolve) => {
-      exec(`taskkill /T /PID ${pid}`, () => resolve());
-    });
+    try {
+      if (process.platform === 'win32') {
+        await execa('taskkill', ['/T', '/PID', String(pid)]);
+      } else {
+        await execa('kill', ['-TERM', String(pid)]);
+      }
+    } catch (error) {
+      // Ignore errors during graceful kill (process may already be gone)
+    }
 
     // Step 2: Wait for clean exit (up to 8 seconds)
     const exitedCleanly = await this.waitForProcessExit(8000);
@@ -629,9 +636,15 @@ export class AutoCookieService {
       "[AutoCookies] Firefox did not exit gracefully within 8s, force killing. " +
       "Some cookies in the WAL may not be readable.",
     );
-    await new Promise<void>((resolve) => {
-      exec(`taskkill /F /T /PID ${pid}`, () => resolve());
-    });
+    try {
+      if (process.platform === 'win32') {
+        await execa('taskkill', ['/F', '/T', '/PID', String(pid)]);
+      } else {
+        await execa('kill', ['-KILL', String(pid)]);
+      }
+    } catch (error: any) {
+      this.logger.error(`[AutoCookies] Failed to force kill process: ${error.message}`);
+    }
     await sleep(500);
   }
 
@@ -699,9 +712,15 @@ async function killProcess(proc: ChildProcess | null): Promise<void> {
   if (!proc) return;
   const pid = proc.pid;
   if (pid) {
-    await new Promise<void>((resolve) => {
-      exec(`taskkill /F /T /PID ${pid}`, () => resolve());
-    });
+    try {
+      if (process.platform === 'win32') {
+        await execa('taskkill', ['/F', '/T', '/PID', String(pid)]);
+      } else {
+        await execa('kill', ['-KILL', String(pid)]);
+      }
+    } catch (error) {
+      // Ignore errors (process may already be gone)
+    }
   }
   await sleep(300);
 }

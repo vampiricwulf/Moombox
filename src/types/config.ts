@@ -40,7 +40,8 @@ export interface DownloaderConfig {
  * Task list display settings
  */
 export interface TasklistConfig {
-  hide_finished_age_days?: number;
+  /** Age in days (or ms format like "30d") after which finished jobs are archived */
+  hide_finished_age_days?: number | string;
 }
 
 /**
@@ -72,7 +73,8 @@ export interface MoomboxConfig {
   log_max_files?: number;
   database_path?: string;
   max_feed_items?: number;
-  feed_check_interval?: number;
+  /** Feed check interval in minutes (or ms format like "10m") */
+  feed_check_interval?: number | string;
   downloader: DownloaderConfig;
   tasklist?: TasklistConfig;
   auto_cookies?: AutoCookiesConfig;

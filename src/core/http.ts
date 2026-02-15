@@ -1,351 +1,76 @@
 /**
- * HTTP Client Abstraction
+ * HTTP Client Utilities
  *
- * Provides centralized HTTP request handling with:
- * - Retry logic with exponential backoff
- * - Consistent headers
- * - Request/response logging
- * - Error handling
+ * Provides HTTP request helpers with:
+ * - Automatic retry logic with exponential backoff (via p-retry)
+ * - Timeout support
+ * - Modern ky HTTP client for advanced use cases
  */
 
-import { Logger } from "./logger.js";
-import {
-  NetworkError,
-  DownloadError,
-  getErrorMessage,
-} from "../types/errors.js";
-import {
-  USER_AGENTS,
-  MAX_DOWNLOAD_RETRIES,
-  RETRY_DELAY_MS,
-} from "../constants.js";
-import { RetryManager } from "../utils/RetryManager.js";
+import pRetry, { AbortError } from "p-retry";
+import ky from "ky";
 
 /**
- * HTTP request options
+ * Modern HTTP client with built-in retry and timeout
+ * Use this for advanced HTTP requests with automatic retries
  */
-export interface HttpRequestOptions {
-  method?: "GET" | "POST" | "HEAD";
-  headers?: Record<string, string>;
-  body?: BodyInit;
-  timeout?: number;
-  retries?: number;
-  retryDelay?: number;
-  throwOnError?: boolean;
-}
+export const httpClient = ky.create({
+  timeout: 30000,
+  retry: {
+    limit: 3,
+    statusCodes: [408, 413, 429, 500, 502, 503, 504],
+    backoffLimit: 30000,
+  },
+  hooks: {
+    beforeRetry: [
+      ({ request, options, error, retryCount }) => {
+        console.log(`Retrying ${request.url} (attempt ${retryCount + 1})`);
+      },
+    ],
+  },
+});
 
 /**
- * HTTP response wrapper
- */
-export interface HttpResponse<T = unknown> {
-  ok: boolean;
-  status: number;
-  statusText: string;
-  headers: Headers;
-  data: T;
-}
-
-/**
- * Default request options
- */
-const DEFAULT_OPTIONS: Required<
-  Pick<HttpRequestOptions, "method" | "retries" | "retryDelay" | "throwOnError">
-> = {
-  method: "GET",
-  retries: MAX_DOWNLOAD_RETRIES,
-  retryDelay: RETRY_DELAY_MS,
-  throwOnError: true,
-};
-
-/**
- * HTTP Client class
- */
-export class HttpClient {
-  private logger: Logger;
-  private defaultHeaders: Record<string, string>;
-
-  constructor(defaultHeaders?: Record<string, string>) {
-    this.logger = Logger.getInstance();
-    this.defaultHeaders = {
-      "User-Agent": USER_AGENTS.WEB,
-      ...defaultHeaders,
-    };
-  }
-
-  /**
-   * Set default headers for all requests
-   */
-  setDefaultHeaders(headers: Record<string, string>): void {
-    this.defaultHeaders = { ...this.defaultHeaders, ...headers };
-  }
-
-  /**
-   * Make an HTTP request with retry logic
-   */
-  async request<T = unknown>(
-    url: string,
-    options: HttpRequestOptions = {},
-  ): Promise<HttpResponse<T>> {
-    const opts = { ...DEFAULT_OPTIONS, ...options };
-    const headers = { ...this.defaultHeaders, ...options.headers };
-
-    let lastError: Error | null = null;
-
-    for (let attempt = 1; attempt <= opts.retries; attempt++) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = opts.timeout
-          ? setTimeout(() => controller.abort(), opts.timeout)
-          : undefined;
-
-        const response = await fetch(url, {
-          method: opts.method,
-          headers,
-          body: opts.body,
-          signal: controller.signal,
-        });
-
-        if (timeoutId) clearTimeout(timeoutId);
-
-        // Handle response based on content type
-        let data: T;
-        const contentType = response.headers.get("content-type") || "";
-
-        if (contentType.includes("application/json")) {
-          data = (await response.json()) as T;
-        } else if (
-          contentType.includes("text/") ||
-          contentType.includes("application/xml")
-        ) {
-          data = (await response.text()) as T;
-        } else {
-          data = (await response.arrayBuffer()) as T;
-        }
-
-        if (!response.ok && opts.throwOnError) {
-          throw new NetworkError(
-            `HTTP ${response.status}: ${response.statusText}`,
-            response.status,
-            url,
-          );
-        }
-
-        return {
-          ok: response.ok,
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
-          data,
-        };
-      } catch (error) {
-        lastError =
-          error instanceof Error ? error : new Error(getErrorMessage(error));
-
-        // Don't retry on certain errors
-        if (error instanceof NetworkError) {
-          const status = error.httpStatus;
-          // Don't retry on client errors (except 429 rate limit)
-          if (status && status >= 400 && status < 500 && status !== 429) {
-            throw error;
-          }
-        }
-
-        // Log retry attempt
-        if (attempt < opts.retries) {
-          this.logger.debug(
-            `[HTTP] Request failed (attempt ${attempt}/${opts.retries}): ${lastError.message}`,
-          );
-          await this.delay(opts.retryDelay * attempt); // Exponential backoff
-        }
-      }
-    }
-
-    throw new NetworkError(
-      `Request failed after ${opts.retries} attempts: ${lastError?.message}`,
-      undefined,
-      url,
-      lastError || undefined,
-    );
-  }
-
-  /**
-   * Convenience method for GET requests
-   */
-  async get<T = unknown>(
-    url: string,
-    options?: Omit<HttpRequestOptions, "method" | "body">,
-  ): Promise<HttpResponse<T>> {
-    return this.request<T>(url, { ...options, method: "GET" });
-  }
-
-  /**
-   * Convenience method for POST requests
-   */
-  async post<T = unknown>(
-    url: string,
-    body?: unknown,
-    options?: Omit<HttpRequestOptions, "method">,
-  ): Promise<HttpResponse<T>> {
-    const bodyStr =
-      typeof body === "string" ? body : body ? JSON.stringify(body) : undefined;
-    const headers = {
-      ...options?.headers,
-      ...(body && typeof body !== "string"
-        ? { "Content-Type": "application/json" }
-        : {}),
-    };
-    return this.request<T>(url, { ...options, method: "POST", body: bodyStr, headers });
-  }
-
-  /**
-   * Convenience method for HEAD requests
-   */
-  async head(
-    url: string,
-    options?: Omit<HttpRequestOptions, "method" | "body">,
-  ): Promise<HttpResponse<null>> {
-    return this.request<null>(url, { ...options, method: "HEAD" });
-  }
-
-  /**
-   * Download a file with progress tracking
-   */
-  async downloadFile(
-    url: string,
-    options?: {
-      headers?: Record<string, string>;
-      onProgress?: (downloaded: number, total: number | null) => void;
-      chunkSize?: number;
-    },
-  ): Promise<Buffer> {
-    const chunkSize = options?.chunkSize || 5 * 1024 * 1024; // 5MB default
-    const headers = {
-      ...this.defaultHeaders,
-      "User-Agent": USER_AGENTS.ANDROID, // Use Android UA for downloads
-      ...options?.headers,
-    };
-
-    // First, try to get file size with Range request
-    let totalBytes: number | null = null;
-    try {
-      const probeResponse = await fetch(url, {
-        method: "GET",
-        headers: { ...headers, Range: "bytes=0-0" },
-      });
-
-      if (probeResponse.status === 206) {
-        const contentRange = probeResponse.headers.get("content-range");
-        if (contentRange) {
-          const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
-          if (match) {
-            totalBytes = parseInt(match[1], 10);
-          }
-        }
-      }
-      // Drain probe response
-      await probeResponse.arrayBuffer();
-    } catch {
-      // Ignore probe errors
-    }
-
-    // Download in chunks
-    const chunks: Buffer[] = [];
-    let downloadedBytes = 0;
-
-    while (true) {
-      const start = downloadedBytes;
-      const end =
-        totalBytes !== null
-          ? Math.min(start + chunkSize - 1, totalBytes - 1)
-          : start + chunkSize - 1;
-
-      const response = await fetch(url, {
-        headers: { ...headers, Range: `bytes=${start}-${end}` },
-      });
-
-      if (response.status === 416) {
-        // Range not satisfiable - done
-        break;
-      }
-
-      if (!response.ok && response.status !== 206) {
-        throw new DownloadError(
-          `Download failed: HTTP ${response.status}`,
-          "DOWNLOAD_HTTP_ERROR",
-          response.status,
-        );
-      }
-
-      const data = await response.arrayBuffer();
-      const buffer = Buffer.from(data);
-
-      if (buffer.length === 0) break;
-
-      chunks.push(buffer);
-      downloadedBytes += buffer.length;
-
-      if (options?.onProgress) {
-        options.onProgress(downloadedBytes, totalBytes);
-      }
-
-      // If server returned 200 instead of 206, we got everything
-      if (response.status === 200) break;
-
-      // If we've downloaded everything
-      if (totalBytes !== null && downloadedBytes >= totalBytes) break;
-    }
-
-    return Buffer.concat(chunks);
-  }
-
-  /**
-   * Helper to delay execution
-   */
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-}
-
-/**
- * Singleton HTTP client instance
- */
-let httpClientInstance: HttpClient | null = null;
-
-/**
- * Get the singleton HTTP client
- */
-export function getHttpClient(): HttpClient {
-  if (!httpClientInstance) {
-    httpClientInstance = new HttpClient();
-  }
-  return httpClientInstance;
-}
-
-/**
- * Create a new HTTP client with custom headers
- */
-export function createHttpClient(
-  defaultHeaders?: Record<string, string>,
-): HttpClient {
-  return new HttpClient(defaultHeaders);
-}
-
-/**
- * Simple fetch with timeout. Returns raw Response.
- * If the caller provides a signal in init, it is combined with the timeout
- * signal using AbortSignal.any() so that either can cancel the request.
+ * Fetch with timeout and automatic retry on transient failures.
+ * Automatically retries on 5xx errors and 429 rate limits with exponential backoff.
+ *
+ * @param url - URL to fetch
+ * @param init - Fetch options
+ * @param timeout - Timeout in milliseconds (default: 30000)
+ * @param retryOptions - Optional retry configuration
+ * @returns Response object
  */
 export async function fetchWithTimeout(
   url: string | URL | Request,
   init?: RequestInit,
   timeout = 30000,
+  retryOptions?: { retries?: number },
 ): Promise<Response> {
-  const timeoutSignal = AbortSignal.timeout(timeout);
-  if (init?.signal) {
-    const combined = AbortSignal.any([init.signal, timeoutSignal]);
-    return fetch(url, { ...init, signal: combined });
-  }
-  return fetch(url, { ...init, signal: timeoutSignal });
+  return pRetry(
+    async () => {
+      const timeoutSignal = AbortSignal.timeout(timeout);
+      const combined = init?.signal
+        ? AbortSignal.any([init.signal, timeoutSignal])
+        : timeoutSignal;
+
+      const response = await fetch(url, { ...init, signal: combined });
+
+      // Retry on 5xx errors and 429 rate limit
+      if (!response.ok && (response.status >= 500 || response.status === 429)) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      return response;
+    },
+    {
+      retries: retryOptions?.retries ?? 3,
+      onFailedAttempt: (error) => {
+        console.log(
+          `[HTTP] Attempt ${error.attemptNumber} failed. Retries left: ${error.retriesLeft}`,
+        );
+      },
+    },
+  );
 }
 
 /**
@@ -389,30 +114,24 @@ export function createRetryFetch(options?: {
 
 /**
  * Generic retry with exponential backoff for any async operation.
- * Uses RetryManager for standardized retry logic.
+ * Uses p-retry for standardized retry logic.
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   options?: {
     maxRetries?: number;
-    baseDelay?: number;
-    maxDelay?: number;
     signal?: AbortSignal;
   },
 ): Promise<T> {
-  const maxRetries = options?.maxRetries ?? 3;
-  const baseDelay = options?.baseDelay ?? 2000;
-  const maxDelay = options?.maxDelay ?? 30000;
-
-  const retryManager = new RetryManager({
-    maxRetries,
-    sleepFunc: RetryManager.exponentialBackoff(baseDelay, maxDelay),
-  });
-
-  return retryManager.execute(async () => {
-    if (options?.signal?.aborted) {
-      throw new Error("Aborted");
-    }
-    return await fn();
-  });
+  return pRetry(
+    async () => {
+      if (options?.signal?.aborted) {
+        throw new AbortError("Aborted");
+      }
+      return await fn();
+    },
+    {
+      retries: options?.maxRetries ?? 3,
+    },
+  );
 }

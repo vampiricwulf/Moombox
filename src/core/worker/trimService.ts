@@ -4,7 +4,7 @@
 
 import path from "path";
 import fs from "fs-extra";
-import { spawn } from "child_process";
+import { execa } from "execa";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
@@ -301,64 +301,37 @@ export class TrimService {
   private static async extractVideoMetadata(
     filePath: string,
   ): Promise<{ duration: number; size: number } | null> {
-    return new Promise((resolve) => {
-      const ffprobe = spawn("ffprobe", [
+    try {
+      const { stdout } = await execa("ffprobe", [
         "-v",
         "quiet",
         "-print_format",
         "json",
         "-show_format",
         filePath,
-      ]);
+      ], { timeout: 30000 });
 
-      let stdout = "";
-      let stderr = "";
+      if (!stdout) {
+        return null;
+      }
 
-      ffprobe.stdout.on("data", (data) => {
-        stdout += data.toString();
-      });
+      const data = JSON.parse(stdout);
+      const format = data.format;
 
-      ffprobe.stderr.on("data", (data) => {
-        stderr += data.toString();
-      });
+      if (!format) {
+        return null;
+      }
 
-      ffprobe.on("close", (code) => {
-        if (code !== 0 || !stdout) {
-          Logger.getInstance().warn(
-            `[TrimService] ffprobe failed (code ${code}): ${stderr}`,
-          );
-          resolve(null);
-          return;
-        }
-
-        try {
-          const data = JSON.parse(stdout);
-          const format = data.format;
-
-          if (!format) {
-            resolve(null);
-            return;
-          }
-
-          resolve({
-            duration: Math.floor(parseFloat(format.duration) || 0),
-            size: parseInt(format.size) || 0,
-          });
-        } catch (e) {
-          Logger.getInstance().warn(
-            `[TrimService] Failed to parse ffprobe output: ${e}`,
-          );
-          resolve(null);
-        }
-      });
-
-      ffprobe.on("error", (err) => {
-        Logger.getInstance().warn(
-          `[TrimService] ffprobe error: ${err.message}`,
-        );
-        resolve(null);
-      });
-    });
+      return {
+        duration: Math.floor(parseFloat(format.duration) || 0),
+        size: parseInt(format.size) || 0,
+      };
+    } catch (error: any) {
+      Logger.getInstance().warn(
+        `[TrimService] ffprobe failed: ${error.message}`,
+      );
+      return null;
+    }
   }
 
   /**

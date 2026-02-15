@@ -5,7 +5,7 @@
 import type { Router } from "express";
 import path from "path";
 import fs from "fs-extra";
-import { spawn } from "child_process";
+import { execa } from "execa";
 import { Logger } from "../../core/logger.js";
 import { Database } from "../../core/database.js";
 import { ConfigManager } from "../../core/config.js";
@@ -529,10 +529,14 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
           ? "open"
           : "xdg-open";
 
-    const child = spawn(program, [folderPath], {
+    // Fire and forget - don't wait for the file explorer to open
+    execa(program, [folderPath], {
       stdio: "ignore",
+      detached: true,
+      cleanup: false,
+    }).catch(() => {
+      // Ignore errors (file explorer may not be available)
     });
-    child.unref();
     res.json({ success: true });
   }));
 }

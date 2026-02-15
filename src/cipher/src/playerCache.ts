@@ -5,8 +5,9 @@ import os from 'os';
 import { extractPlayerId } from "./utils.js";
 import { Logger } from "../../core/logger.js";
 import { fetchWithTimeout } from "../../core/http.js";
+import { env } from "../../core/env.js";
 
-const ignorePlayerScriptRegion = process.env.IGNORE_SCRIPT_REGION === "true";
+const ignorePlayerScriptRegion = env.IGNORE_SCRIPT_REGION;
 
 export const CACHE_HOME = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
 export const CACHE_DIR = path.join(CACHE_HOME, 'yt-cipher', 'player_cache');

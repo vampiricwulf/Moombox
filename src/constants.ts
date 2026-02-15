@@ -4,6 +4,7 @@
  * Centralizes all hardcoded values to make them easier to maintain.
  */
 
+import ms from "ms";
 import type { YouTubeClientConfig } from "./types/youtube.js";
 
 // =============================================================================
@@ -191,13 +192,13 @@ export const MAX_CONSECUTIVE_PROBE_ERRORS = 10;
  * Stream segment timeout - if no new segment received for this duration,
  * consider the stream potentially ended (10 minutes)
  */
-export const STREAM_SEGMENT_TIMEOUT_MS = 10 * 60 * 1000;
+export const STREAM_SEGMENT_TIMEOUT_MS = ms("10m");
 
 /**
  * Stream end verification interval - how often to check YouTube API
  * to confirm stream status when no segments are being received (5 minutes)
  */
-export const STREAM_END_VERIFY_INTERVAL_MS = 5 * 60 * 1000;
+export const STREAM_END_VERIFY_INTERVAL_MS = ms("5m");
 
 // =============================================================================
 // COOKIE REFRESH CONSTANTS
@@ -206,7 +207,7 @@ export const STREAM_END_VERIFY_INTERVAL_MS = 5 * 60 * 1000;
 /**
  * Cookie refresh interval (30 minutes)
  */
-export const COOKIE_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+export const COOKIE_REFRESH_INTERVAL_MS = ms("30m");
 
 // =============================================================================
 // LOGGING CONSTANTS
@@ -257,7 +258,7 @@ export const DEFAULT_HIDE_FINISHED_DAYS = 7;
 /**
  * Default feed check interval (5 minutes)
  */
-export const FEED_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+export const FEED_CHECK_INTERVAL_MS = ms("5m");
 
 /**
  * Default max feed items to process

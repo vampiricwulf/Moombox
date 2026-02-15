@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { execa } from "execa";
 import path from "path";
 import fs from "fs-extra";
 import { Logger } from "../core/logger.js";
@@ -50,122 +50,97 @@ export class Muxer {
     // Ensure output directory exists
     await fs.ensureDir(path.dirname(normalizedOutputPath));
 
-    return new Promise((resolve, reject) => {
-      // Don't use shell mode - pass args directly to avoid quoting issues
-      const ffmpegArgs = ["-y"];
+    // Build FFmpeg arguments
+    const ffmpegArgs = ["-y"];
 
-      // Apply trim offset before input (input-level seeking for codec copy)
+    // Apply trim offset before input (input-level seeking for codec copy)
+    if (trimOptions?.trimStartOffset && trimOptions.trimStartOffset > 0) {
+      ffmpegArgs.push("-ss", String(trimOptions.trimStartOffset));
+    }
+
+    ffmpegArgs.push("-i", normalizedVideoPath);
+
+    if (normalizedAudioPath) {
+      // Apply same seek to audio input for sync
       if (trimOptions?.trimStartOffset && trimOptions.trimStartOffset > 0) {
         ffmpegArgs.push("-ss", String(trimOptions.trimStartOffset));
       }
+      ffmpegArgs.push("-i", normalizedAudioPath);
+    }
 
-      ffmpegArgs.push("-i", normalizedVideoPath);
+    // Apply duration limit after inputs
+    if (trimOptions?.trimDuration && trimOptions.trimDuration > 0) {
+      ffmpegArgs.push("-t", String(trimOptions.trimDuration));
+    }
 
-      if (normalizedAudioPath) {
-        // Apply same seek to audio input for sync
-        if (trimOptions?.trimStartOffset && trimOptions.trimStartOffset > 0) {
-          ffmpegArgs.push("-ss", String(trimOptions.trimStartOffset));
-        }
-        ffmpegArgs.push("-i", normalizedAudioPath);
-      }
+    // Decide: codec copy (fast but imprecise) vs re-encode (precise)
+    const usePrecise =
+      trimOptions?.usePreciseTrim !== false && // Default true
+      (trimOptions?.trimStartOffset || trimOptions?.trimDuration) && // Has trim
+      (trimOptions?.videoBitrate || trimOptions?.audioBitrate); // Has bitrate info
 
-      // Apply duration limit after inputs
-      if (trimOptions?.trimDuration && trimOptions.trimDuration > 0) {
-        ffmpegArgs.push("-t", String(trimOptions.trimDuration));
-      }
+    if (usePrecise) {
+      // Re-encode with matching bitrate for exact duration
+      logger.info("[Muxer] Using precise trim (re-encode for exact duration)");
 
-      // Decide: codec copy (fast but imprecise) vs re-encode (precise)
-      const usePrecise =
-        trimOptions?.usePreciseTrim !== false && // Default true
-        (trimOptions?.trimStartOffset || trimOptions?.trimDuration) && // Has trim
-        (trimOptions?.videoBitrate || trimOptions?.audioBitrate); // Has bitrate info
-
-      if (usePrecise) {
-        // Re-encode with matching bitrate for exact duration
-        logger.info("[Muxer] Using precise trim (re-encode for exact duration)");
-
-        if (trimOptions.videoBitrate) {
-          ffmpegArgs.push(
-            "-c:v",
-            "libx264",
-            "-b:v",
-            `${trimOptions.videoBitrate}k`,
-            "-preset",
-            "fast", // Balance speed vs compression
-          );
-        } else {
-          // No video or copy
-          ffmpegArgs.push("-c:v", "copy");
-        }
-
-        if (normalizedAudioPath && trimOptions.audioBitrate) {
-          ffmpegArgs.push(
-            "-c:a",
-            "aac",
-            "-b:a",
-            `${trimOptions.audioBitrate}k`,
-          );
-        } else if (normalizedAudioPath) {
-          ffmpegArgs.push("-c:a", "copy");
-        }
-
-        ffmpegArgs.push("-movflags", "faststart", normalizedOutputPath);
-      } else {
-        // Standard codec copy (fast)
+      if (trimOptions.videoBitrate) {
         ffmpegArgs.push(
-          "-c",
-          "copy",
-          "-movflags",
-          "faststart",
-          normalizedOutputPath,
+          "-c:v",
+          "libx264",
+          "-b:v",
+          `${trimOptions.videoBitrate}k`,
+          "-preset",
+          "fast", // Balance speed vs compression
         );
+      } else {
+        // No video or copy
+        ffmpegArgs.push("-c:v", "copy");
       }
 
-      logger.debug(
-        `[Muxer] Running: ffmpeg ${ffmpegArgs.map((a) => `"${a}"`).join(" ")}`,
+      if (normalizedAudioPath && trimOptions.audioBitrate) {
+        ffmpegArgs.push(
+          "-c:a",
+          "aac",
+          "-b:a",
+          `${trimOptions.audioBitrate}k`,
+        );
+      } else if (normalizedAudioPath) {
+        ffmpegArgs.push("-c:a", "copy");
+      }
+
+      ffmpegArgs.push("-movflags", "faststart", normalizedOutputPath);
+    } else {
+      // Standard codec copy (fast)
+      ffmpegArgs.push(
+        "-c",
+        "copy",
+        "-movflags",
+        "faststart",
+        normalizedOutputPath,
       );
+    }
 
-      // Don't use shell mode - spawn handles arguments with spaces correctly when shell=false
-      // Note: Do NOT use windowsVerbatimArguments as it bypasses proper quoting
-      const ffmpeg = spawn("ffmpeg", ffmpegArgs, {
-        stdio: ["ignore", "pipe", "pipe"],
+    logger.debug(
+      `[Muxer] Running: ffmpeg ${ffmpegArgs.map((a) => `"${a}"`).join(" ")}`,
+    );
+
+    try {
+      await execa("ffmpeg", ffmpegArgs, {
+        stdin: "ignore",
+        cancelSignal: signal, // execa v9+ uses cancelSignal instead of signal
+        timeout: 600000, // 10 minutes max for muxing
+        cleanup: true,
       });
 
-      let stderrOutput = "";
-      let aborted = false;
-      const MAX_STDERR = 10000;
+      logger.debug(`[Muxer] FFmpeg completed successfully`);
+    } catch (error: any) {
+      if (error.isCanceled || error.name === 'AbortError') {
+        throw new DOMException("Aborted", "AbortError");
+      }
 
-      const onAbort = () => {
-        aborted = true;
-        ffmpeg.kill();
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      ffmpeg.stderr?.on("data", (data) => {
-        stderrOutput += data.toString();
-        if (stderrOutput.length > MAX_STDERR) {
-          stderrOutput = stderrOutput.slice(-MAX_STDERR / 2);
-        }
-      });
-
-      ffmpeg.on("close", (code) => {
-        signal?.removeEventListener("abort", onAbort);
-        if (aborted) {
-          reject(new DOMException("Aborted", "AbortError"));
-        } else if (code === 0) {
-          logger.debug(`[Muxer] FFmpeg completed successfully`);
-          resolve();
-        } else {
-          logger.error(`[Muxer] FFmpeg stderr: ${stderrOutput.slice(-500)}`);
-          reject(new Error(`FFmpeg exited with code ${code}`));
-        }
-      });
-
-      ffmpeg.on("error", (err) => {
-        signal?.removeEventListener("abort", onAbort);
-        logger.error(`[Muxer] Failed to start FFmpeg: ${err.message}`);
-        reject(new Error(`Failed to start FFmpeg: ${err.message}`));
-      });
-    });
+      const stderr = error.stderr || error.message;
+      logger.error(`[Muxer] FFmpeg failed: ${stderr.slice(-500)}`);
+      throw new Error(`FFmpeg exited with code ${error.exitCode || 'unknown'}: ${stderr.slice(-200)}`);
+    }
   }
 }

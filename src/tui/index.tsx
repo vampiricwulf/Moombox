@@ -1,5 +1,5 @@
 import React from "react";
-import { spawnSync } from "child_process";
+import { execaSync } from "execa";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -48,14 +48,14 @@ function enableVTInput(): void {
         '[DllImport("kernel32")]static extern bool GetConsoleMode(IntPtr h,out uint m);',
         "static void Main(){var h=GetStdHandle(-10);uint m;GetConsoleMode(h,out m);SetConsoleMode(h,m|0x200);}}",
       ].join(""));
-      spawnSync(cscExe, ["/nologo", "/optimize", `/out:${helperExe}`, csFile], {
+      execaSync(cscExe, ["/nologo", "/optimize", `/out:${helperExe}`, csFile], {
         stdio: "ignore", timeout: 10000,
       });
       try { fs.unlinkSync(csFile); } catch {}
     }
 
     if (fs.existsSync(helperExe)) {
-      spawnSync(helperExe, { stdio: ["inherit", "ignore", "ignore"], timeout: 5000 });
+      execaSync(helperExe, [], { stdio: ["inherit", "ignore", "ignore"], timeout: 5000 });
     }
   } catch {
     // Non-fatal — mouse won't work but keyboard and TUI still function

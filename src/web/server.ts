@@ -11,7 +11,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import path from "path";
 import fs from "fs-extra";
 import { fileURLToPath } from "url";
-import { spawn } from "child_process";
+import { execa } from "execa";
 import compression from "compression";
 import { Logger } from "../core/logger.js";
 import { Database } from "../core/database.js";
@@ -672,10 +672,14 @@ export class WebServer {
           ? "open"
           : "xdg-open";
 
-    const child = spawn(program, [url], {
+    // Fire and forget - don't wait for the browser to open
+    execa(program, [url], {
       stdio: "ignore",
+      detached: true,
+      cleanup: false,
+    }).catch(() => {
+      // Ignore errors (browser may not be available)
     });
-    child.unref();
   }
 
   stop(): void {

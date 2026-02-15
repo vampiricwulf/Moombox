@@ -7,6 +7,7 @@
 
 import path from "path";
 import fs from "fs-extra";
+import { env } from "./env.js";
 
 export interface YtdlpPluginStatus {
   installed: boolean;
@@ -27,9 +28,9 @@ export interface YtdlpPluginInstallResult {
 /** Determine yt-dlp's default plugin directory for the current platform. */
 function getPluginDir(): string {
   if (process.platform === "win32") {
-    return path.join(process.env.APPDATA || "", "yt-dlp", "plugins");
+    return path.join(env.APPDATA || "", "yt-dlp", "plugins");
   }
-  return path.join(process.env.HOME || "~", ".config", "yt-dlp", "plugins");
+  return path.join(env.HOME || "~", ".config", "yt-dlp", "plugins");
 }
 
 /** Path where the installed plugin file lives inside the yt-dlp plugin dir. */
@@ -46,7 +47,7 @@ function getInstalledPluginPath(pluginDir: string): string {
 /** Determine where the plugin source file can be read from. */
 function getPluginSourcePath(): string | null {
   // SEA mode: extracted assets
-  const assetsDir = process.env.MOOMBOX_ASSETS_DIR;
+  const assetsDir = env.MOOMBOX_ASSETS_DIR;
   if (assetsDir) {
     const p = path.join(
       assetsDir,
@@ -83,7 +84,7 @@ function parseInstalledPort(content: string): number | null {
 
 /** Get the extracted plugin path for display / --plugin-dirs usage. */
 function getExtractedPath(): string {
-  const assetsDir = process.env.MOOMBOX_ASSETS_DIR;
+  const assetsDir = env.MOOMBOX_ASSETS_DIR;
   return assetsDir
     ? path.join(assetsDir, "yt-dlp-plugin")
     : path.join(process.cwd(), "src", "pot-plugin");

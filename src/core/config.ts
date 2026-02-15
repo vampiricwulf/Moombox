@@ -2,6 +2,7 @@ import fs from "fs-extra";
 import path from "path";
 import toml from "toml";
 import os from "os";
+import ms from "ms";
 import type {
   ChannelConfig,
   MoomboxConfig,
@@ -10,15 +11,26 @@ import { Logger } from "./logger.js";
 
 export type { ChannelConfig, MoomboxConfig, AutoCookiesConfig } from "../types/config.js";
 
+/**
+ * Normalized config type where time values are always numbers (not strings).
+ * Used internally after applyDefaults() normalizes the values.
+ */
+export type NormalizedConfig = Omit<MoomboxConfig, 'feed_check_interval' | 'tasklist'> & {
+  feed_check_interval: number;
+  tasklist?: {
+    hide_finished_age_days: number;
+  };
+};
+
 export class ConfigManager {
   private static instance: ConfigManager;
-  private config: MoomboxConfig | null = null;
+  private config: NormalizedConfig | null = null;
   private configPath: string = "";
   private configLoaded: boolean = false;
   private saveQueue: Promise<void> = Promise.resolve();
 
-  // Default configuration values
-  private static readonly DEFAULTS: MoomboxConfig = {
+  // Default configuration values (normalized with numeric time values)
+  private static readonly DEFAULTS: NormalizedConfig = {
     port: 774,
     network_access: "localhost",
     log_level: "INFO",
@@ -27,7 +39,7 @@ export class ConfigManager {
     log_max_files: 5,
     database_path: "./moombox.json",
     max_feed_items: 15,
-    feed_check_interval: 10,
+    feed_check_interval: 10, // minutes
     downloader: {
       output_directory: "./output",
       output_template: "${channel}/${start_date} ${title} [${id}]",
@@ -41,7 +53,7 @@ export class ConfigManager {
       segment_live_check_retries: 16, // Retries before first live status check
     },
     tasklist: {
-      hide_finished_age_days: 30,
+      hide_finished_age_days: 30, // days
     },
     auto_cookies: {
       enabled: false,
@@ -61,6 +73,59 @@ export class ConfigManager {
     }
   }
 
+  /**
+   * Parse a time value that can be a number (original unit), a string (ms format like "10m"),
+   * or undefined (use default).
+   *
+   * For backward compatibility:
+   * - If value is a number, it's returned as-is (in the original unit: minutes or days)
+   * - If value is a string, it's parsed using ms() and converted back to the original unit
+   * - If value is undefined, the default is returned
+   *
+   * @param value - The value from config (can be string, number, or undefined)
+   * @param defaultValue - The default value in original unit
+   * @param unit - The unit for the return value ('minutes' | 'days')
+   * @returns Value in the original unit (minutes or days)
+   */
+  private static parseTimeValue(
+    value: string | number | undefined,
+    defaultValue: number,
+    unit: 'minutes' | 'days'
+  ): number {
+    if (value === undefined) {
+      return defaultValue;
+    }
+
+    if (typeof value === 'number') {
+      // Numeric value is already in the correct unit
+      return value;
+    }
+
+    // String value - parse with ms() and convert to target unit
+    let parsed: number;
+    try {
+      // Cast to ms.StringValue to satisfy TypeScript overload resolution
+      const result = ms(value as any as ms.StringValue);
+      if (typeof result !== 'number') {
+        ConfigManager.log('warn', `Invalid time value: ${value}, using default`);
+        return defaultValue;
+      }
+      parsed = result;
+    } catch (e) {
+      ConfigManager.log('warn', `Invalid time value: ${value}, using default`);
+      return defaultValue;
+    }
+
+    // Convert milliseconds to target unit
+    if (unit === 'minutes') {
+      return parsed / (60 * 1000);
+    } else if (unit === 'days') {
+      return parsed / (24 * 60 * 60 * 1000);
+    }
+
+    return defaultValue;
+  }
+
   static getInstance(): ConfigManager {
     if (!ConfigManager.instance) {
       ConfigManager.instance = new ConfigManager();
@@ -71,14 +136,14 @@ export class ConfigManager {
   /**
    * Get the default configuration values
    */
-  static getDefaults(): MoomboxConfig {
+  static getDefaults(): NormalizedConfig {
     return JSON.parse(JSON.stringify(ConfigManager.DEFAULTS));
   }
 
   /**
    * Merge loaded config with defaults, using defaults for any missing values
    */
-  private applyDefaults(config: Partial<MoomboxConfig>): MoomboxConfig {
+  private applyDefaults(config: Partial<MoomboxConfig>): NormalizedConfig {
     const defaults = ConfigManager.getDefaults();
 
     // Migrate old allow_lan / allow_external booleans → network_access string
@@ -101,7 +166,11 @@ export class ConfigManager {
       log_max_files: config.log_max_files ?? defaults.log_max_files,
       database_path: config.database_path ?? defaults.database_path,
       max_feed_items: config.max_feed_items ?? defaults.max_feed_items,
-      feed_check_interval: config.feed_check_interval ?? defaults.feed_check_interval,
+      feed_check_interval: ConfigManager.parseTimeValue(
+        config.feed_check_interval,
+        defaults.feed_check_interval as number,
+        'minutes'
+      ),
       downloader: {
         output_directory:
           config.downloader?.output_directory ??
@@ -139,9 +208,11 @@ export class ConfigManager {
         pot_provider_url: config.downloader?.pot_provider_url,
       },
       tasklist: {
-        hide_finished_age_days:
-          config.tasklist?.hide_finished_age_days ??
-          defaults.tasklist?.hide_finished_age_days,
+        hide_finished_age_days: ConfigManager.parseTimeValue(
+          config.tasklist?.hide_finished_age_days,
+          defaults.tasklist?.hide_finished_age_days as number,
+          'days'
+        ),
       },
       auto_cookies: {
         enabled:
@@ -160,7 +231,7 @@ export class ConfigManager {
   /**
    * Validate config values and replace invalid ones with defaults.
    */
-  private validate(config: MoomboxConfig): MoomboxConfig {
+  private validate(config: NormalizedConfig): NormalizedConfig {
     const defaults = ConfigManager.DEFAULTS;
     const warn = (field: string, val: unknown) =>
       ConfigManager.log("warn", `[Config] Invalid ${field} (${val}), using default`);
@@ -229,7 +300,7 @@ export class ConfigManager {
     return this.config;
   }
 
-  get(): MoomboxConfig {
+  get(): NormalizedConfig {
     if (!this.config) {
       throw new Error("Config not loaded");
     }

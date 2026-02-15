@@ -3,7 +3,7 @@
  * Consolidates 2 duplicate implementations.
  */
 
-import { spawn } from "child_process";
+import { execa } from "execa";
 
 export interface VideoMetadata {
   duration: number;
@@ -20,8 +20,8 @@ export interface VideoMetadata {
 export async function extractVideoMetadata(
   filePath: string,
 ): Promise<VideoMetadata | null> {
-  return new Promise((resolve) => {
-    const args = [
+  try {
+    const { stdout } = await execa("ffprobe", [
       "-v",
       "quiet",
       "-print_format",
@@ -29,49 +29,27 @@ export async function extractVideoMetadata(
       "-show_format",
       "-show_streams",
       filePath,
-    ];
+    ], { timeout: 30000 });
 
-    const ffprobe = spawn("ffprobe", args);
+    if (!stdout) {
+      return null;
+    }
 
-    let stdout = "";
-    let stderr = "";
+    const data = JSON.parse(stdout);
+    const format = data.format || {};
+    const videoStream = (data.streams || []).find(
+      (s: any) => s.codec_type === "video",
+    );
 
-    ffprobe.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
+    const metadata: VideoMetadata = {
+      duration: parseFloat(format.duration) || 0,
+      width: videoStream?.width,
+      height: videoStream?.height,
+      size: parseInt(format.size, 10) || 0,
+    };
 
-    ffprobe.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    ffprobe.on("close", (code) => {
-      if (code !== 0 || !stdout) {
-        resolve(null);
-        return;
-      }
-
-      try {
-        const data = JSON.parse(stdout);
-        const format = data.format || {};
-        const videoStream = (data.streams || []).find(
-          (s: any) => s.codec_type === "video",
-        );
-
-        const metadata: VideoMetadata = {
-          duration: parseFloat(format.duration) || 0,
-          width: videoStream?.width,
-          height: videoStream?.height,
-          size: parseInt(format.size, 10) || 0,
-        };
-
-        resolve(metadata);
-      } catch (e) {
-        resolve(null);
-      }
-    });
-
-    ffprobe.on("error", () => {
-      resolve(null);
-    });
-  });
+    return metadata;
+  } catch (error) {
+    return null;
+  }
 }

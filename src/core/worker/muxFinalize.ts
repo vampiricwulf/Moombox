@@ -5,7 +5,7 @@
 import path from "path";
 import fs from "fs-extra";
 import { open as fsOpen } from "node:fs/promises";
-import { spawn } from "child_process";
+import { execa } from "execa";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
@@ -26,8 +26,8 @@ import { formatElapsed, formatBytes } from "../../utils/timeFormat.js";
 async function extractVideoMetadata(
   filePath: string,
 ): Promise<{ duration: number; width: number; height: number; size: number } | null> {
-  return new Promise((resolve) => {
-    const ffprobe = spawn("ffprobe", [
+  try {
+    const { stdout } = await execa("ffprobe", [
       "-v",
       "quiet",
       "-print_format",
@@ -35,57 +35,30 @@ async function extractVideoMetadata(
       "-show_format",
       "-show_streams",
       filePath,
-    ]);
+    ], { timeout: 30000 });
 
-    let stdout = "";
-    let stderr = "";
+    if (!stdout) {
+      return null;
+    }
 
-    ffprobe.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
+    const data = JSON.parse(stdout);
+    const videoStream = data.streams?.find((s: any) => s.codec_type === "video");
+    const format = data.format;
 
-    ffprobe.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
+    if (!videoStream || !format) {
+      return null;
+    }
 
-    ffprobe.on("close", (code) => {
-      if (code !== 0 || !stdout) {
-        Logger.getInstance().warn(
-          `[Metadata] ffprobe failed (code ${code}): ${stderr}`,
-        );
-        resolve(null);
-        return;
-      }
-
-      try {
-        const data = JSON.parse(stdout);
-        const videoStream = data.streams?.find((s: any) => s.codec_type === "video");
-        const format = data.format;
-
-        if (!videoStream || !format) {
-          resolve(null);
-          return;
-        }
-
-        resolve({
-          duration: Math.floor(parseFloat(format.duration) || 0),
-          width: parseInt(videoStream.width) || 0,
-          height: parseInt(videoStream.height) || 0,
-          size: parseInt(format.size) || 0,
-        });
-      } catch (e) {
-        Logger.getInstance().warn(
-          `[Metadata] Failed to parse ffprobe output: ${e}`,
-        );
-        resolve(null);
-      }
-    });
-
-    ffprobe.on("error", (err) => {
-      Logger.getInstance().warn(`[Metadata] ffprobe error: ${err.message}`);
-      resolve(null);
-    });
-  });
+    return {
+      duration: Math.floor(parseFloat(format.duration) || 0),
+      width: parseInt(videoStream.width) || 0,
+      height: parseInt(videoStream.height) || 0,
+      size: parseInt(format.size) || 0,
+    };
+  } catch (error: any) {
+    Logger.getInstance().warn(`[Metadata] ffprobe failed: ${error.message}`);
+    return null;
+  }
 }
 
 /**

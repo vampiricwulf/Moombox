@@ -3,29 +3,35 @@
  * Uses platform-native commands to read clipboard text.
  */
 
-import { execFile } from "child_process";
+import { execa } from "execa";
 
-export function readClipboard(): Promise<string> {
-  return new Promise((resolve) => {
-    const opts = { encoding: "utf-8" as const, timeout: 3000 };
-
-    const cb = (err: Error | null, stdout: string) => {
-      resolve(err ? "" : (stdout || "").trim());
-    };
+export async function readClipboard(): Promise<string> {
+  try {
+    let result: { stdout: string };
 
     if (process.platform === "win32") {
-      execFile("powershell", ["-NoProfile", "-Command", "Get-Clipboard"], opts, cb);
+      result = await execa("powershell", ["-NoProfile", "-Command", "Get-Clipboard"], {
+        timeout: 3000,
+      });
     } else if (process.platform === "darwin") {
-      execFile("pbpaste", [], opts, cb);
+      result = await execa("pbpaste", [], {
+        timeout: 3000,
+      });
     } else {
       // Linux: try xclip, then xsel
-      execFile("xclip", ["-selection", "clipboard", "-o"], opts, (err, stdout) => {
-        if (err) {
-          execFile("xsel", ["--clipboard", "--output"], opts, cb);
-        } else {
-          resolve((stdout || "").trim());
-        }
-      });
+      try {
+        result = await execa("xclip", ["-selection", "clipboard", "-o"], {
+          timeout: 3000,
+        });
+      } catch (err) {
+        result = await execa("xsel", ["--clipboard", "--output"], {
+          timeout: 3000,
+        });
+      }
     }
-  });
+
+    return (result.stdout || "").trim();
+  } catch (error) {
+    return "";
+  }
 }

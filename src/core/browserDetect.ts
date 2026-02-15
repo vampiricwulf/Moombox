@@ -7,6 +7,7 @@
 
 import fs from "fs-extra";
 import path from "path";
+import { env } from "./env.js";
 
 export interface DetectedBrowser {
   type: "firefox" | "edge" | "chrome";
@@ -26,9 +27,9 @@ const CANDIDATES: BrowserCandidate[] = [
 
 function getSearchRoots(): string[] {
   const roots: string[] = [];
-  const pf = process.env.PROGRAMFILES;
-  const pf86 = process.env["PROGRAMFILES(X86)"];
-  const localApp = process.env.LOCALAPPDATA;
+  const pf = env.PROGRAMFILES;
+  const pf86 = process.env["PROGRAMFILES(X86)"];  // Not in env.ts yet, keep as-is
+  const localApp = env.LOCALAPPDATA;
 
   if (pf) roots.push(pf);
   if (pf86) roots.push(pf86);
