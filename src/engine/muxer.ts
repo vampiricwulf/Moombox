@@ -12,6 +12,12 @@ export interface MuxTrimOptions {
   trimStartOffset?: number;
   /** Duration of the output from the trim start (seconds) */
   trimDuration?: number;
+  /** Video bitrate for precise re-encode (kbps) */
+  videoBitrate?: number;
+  /** Audio bitrate for precise re-encode (kbps) */
+  audioBitrate?: number;
+  /** Use precise trim (re-encode for exact duration) - default true */
+  usePreciseTrim?: boolean;
 }
 
 export class Muxer {
@@ -68,13 +74,52 @@ export class Muxer {
         ffmpegArgs.push("-t", String(trimOptions.trimDuration));
       }
 
-      ffmpegArgs.push(
-        "-c",
-        "copy",
-        "-movflags",
-        "faststart",
-        normalizedOutputPath,
-      );
+      // Decide: codec copy (fast but imprecise) vs re-encode (precise)
+      const usePrecise =
+        trimOptions?.usePreciseTrim !== false && // Default true
+        (trimOptions?.trimStartOffset || trimOptions?.trimDuration) && // Has trim
+        (trimOptions?.videoBitrate || trimOptions?.audioBitrate); // Has bitrate info
+
+      if (usePrecise) {
+        // Re-encode with matching bitrate for exact duration
+        logger.info("[Muxer] Using precise trim (re-encode for exact duration)");
+
+        if (trimOptions.videoBitrate) {
+          ffmpegArgs.push(
+            "-c:v",
+            "libx264",
+            "-b:v",
+            `${trimOptions.videoBitrate}k`,
+            "-preset",
+            "fast", // Balance speed vs compression
+          );
+        } else {
+          // No video or copy
+          ffmpegArgs.push("-c:v", "copy");
+        }
+
+        if (normalizedAudioPath && trimOptions.audioBitrate) {
+          ffmpegArgs.push(
+            "-c:a",
+            "aac",
+            "-b:a",
+            `${trimOptions.audioBitrate}k`,
+          );
+        } else if (normalizedAudioPath) {
+          ffmpegArgs.push("-c:a", "copy");
+        }
+
+        ffmpegArgs.push("-movflags", "faststart", normalizedOutputPath);
+      } else {
+        // Standard codec copy (fast)
+        ffmpegArgs.push(
+          "-c",
+          "copy",
+          "-movflags",
+          "faststart",
+          normalizedOutputPath,
+        );
+      }
 
       logger.debug(
         `[Muxer] Running: ffmpeg ${ffmpegArgs.map((a) => `"${a}"`).join(" ")}`,

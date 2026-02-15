@@ -388,6 +388,10 @@ export class DownloadOrchestrator {
       trimOptions = {
         trimStartOffset: segmentRange.trimStartOffset || undefined,
         trimDuration: segmentRange.trimDuration || undefined,
+        // TODO: Extract bitrate from selected formats for precise trim
+        // videoBitrate: selectedVideoFormat?.bitrate / 1000,
+        // audioBitrate: selectedAudioFormat?.bitrate / 1000,
+        usePreciseTrim: true, // Enable by default for trim accuracy
       };
     } else if (job.startTime != null || job.endTime != null) {
       // VOD direct download: use FFmpeg -ss/-t to trim the full file
@@ -396,6 +400,7 @@ export class DownloadOrchestrator {
         trimDuration: (job.endTime != null && job.endTime > 0)
           ? job.endTime - (job.startTime || 0)
           : undefined,
+        usePreciseTrim: true, // Enable by default for trim accuracy
       };
     }
 
