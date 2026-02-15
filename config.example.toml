@@ -1,31 +1,56 @@
 # Moombox Configuration
 # Copy this file to config.toml and edit to your needs.
 # All settings shown here are the defaults — uncomment and change as needed.
+#
+# Moombox also includes a first-time setup wizard (TUI and web dashboard)
+# that generates this file for you.
 
 # ─── Server ───────────────────────────────────────────────────────────────────
-# Web dashboard port
+
+# Web dashboard and API port
 # port = 774
 
-# Network access level: "localhost" (default), "lan", or "external"
+# Network access level: who can reach the dashboard and API
+#   "localhost" — only this machine (default, most secure)
+#   "lan"      — any device on your local network
+#   "external" — any device (use with caution)
 # network_access = "localhost"
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
+
 # Log level: "DEBUG", "INFO" (default), "WARN", "ERROR"
 # log_level = "INFO"
+
+# Text log file path (rotated automatically)
 # log_file_path = "./moombox.log"
-# log_max_file_size = 10485760   # 10 MB
+
+# Max size per log file before rotation (bytes). Default: 10 MB.
+# log_max_file_size = 10485760
+
+# Number of rotated log files to keep
 # log_max_files = 5
 
+# Note: Structured JSON logs are also written to structured.jsonl in the same
+# directory as the text log, via pino. These are not configurable separately.
+
 # ─── Database ─────────────────────────────────────────────────────────────────
+
+# Path to the JSON database file
 # database_path = "./moombox.json"
 
 # ─── Feed Monitor ─────────────────────────────────────────────────────────────
-# Maximum RSS feed items to check per channel (default 15)
+
+# Maximum RSS feed items to check per channel
 # max_feed_items = 15
+
+# How often to check RSS feeds (in minutes, or ms-format string like "10m")
+# feed_check_interval = 10
 
 # ─── Downloader ───────────────────────────────────────────────────────────────
 [downloader]
-# Maximum video resolution (based on max of width/height). Handles portrait videos.
+
+# Maximum video resolution. Based on max(width, height), so portrait videos
+# are handled correctly (e.g., 1080 allows both 1920x1080 and 1080x1920).
 # max_video_resolution = 1080
 
 # Prefer 60fps streams when available at the same resolution
@@ -34,47 +59,93 @@
 # Download live chat alongside streams
 # download_chat = true
 
-# Output paths
+# Output directory for finished downloads
 # output_directory = "./output"
+
+# Filename template. Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}
 # output_template = "${channel}/${start_date} ${title} [${id}]"
+
+# Temporary directory for in-progress downloads (segments, chat, resume state)
 # staging_directory = "./staging"
 
-# Number of parallel segment downloads (for catching up on live streams)
+# Number of simultaneous download jobs
 # num_parallel_downloads = 2
 
 # Netscape-format cookie file for member-only content
 # cookie_file = "./cookies.txt"
 
-# Path to ffmpeg binary (auto-detected if not set)
+# Path to FFmpeg binary (auto-detected from PATH if not set)
 # ffmpeg_path = "/usr/bin/ffmpeg"
+
+# Advanced: segment retry backoff cap in seconds (for live streams hitting 404s)
+# segment_retry_delay_cap = 60
+
+# Advanced: number of 404 retries before checking if stream ended
+# segment_live_check_retries = 16
+
+# Advanced: manual PO token override (bypasses built-in BotGuard generation)
+# po_token = ""
+
+# Advanced: manual visitor data override
+# visitor_data = ""
+
+# Advanced: external POT provider URL (instead of built-in BotGuard)
+# pot_provider_url = ""
 
 # ─── Task List ────────────────────────────────────────────────────────────────
 [tasklist]
-# Jobs older than this are moved to the Archived section
+
+# Finished jobs older than this are moved to the Archived section in the
+# TUI and web dashboard. Accepts a number (days) or ms-format string like "30d".
 # hide_finished_age_days = 30
 
 # ─── Auto Cookies ────────────────────────────────────────────────────────────
 # Automatic cookie acquisition via browser. When enabled, Moombox can
-# refresh YouTube cookies automatically using a local browser profile.
+# launch a browser for you to log into YouTube, then extract and refresh
+# cookies automatically.
+#
 # Firefox is recommended (reads cookies directly from SQLite).
 # Edge and Chrome are supported as fallback (uses Chrome DevTools Protocol).
+#
+# Setup: enable below, then use the web dashboard Settings page or TUI
+# setup wizard to launch the browser and complete login.
 [auto_cookies]
 # enabled = false
 # browser_profile_dir = "./browser-profile"
 
-# ─── Discord Notifications ───────────────────────────────────────────────────
-# Send Discord webhook notifications for stream events.
-# You can add multiple [[notifications]] blocks for different webhooks.
+# ─── Webhook Notifications ──────────────────────────────────────────────────
+# Send webhook notifications for stream events.
+# Works with Discord, Slack, ntfy, or any service that accepts POST webhooks.
+# You can add multiple [[notifications]] blocks for different endpoints.
 #
 # Available events for filtering:
-#   found, added, scheduled, live, downloading, muxing, finished, error, auth, cancelled
+#   found       — New video detected in RSS feed
+#   added       — Video manually added by user
+#   scheduled   — Upcoming stream scheduled
+#   live        — Stream went live
+#   downloading — Download started
+#   muxing      — FFmpeg muxing started
+#   finished    — Download completed successfully
+#   error       — Download failed
+#   auth        — Authentication issue (COOKIES? status)
+#   cancelled   — Job cancelled by user
 #
 # [[notifications]]
 # url = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
 # events = ["live", "finished", "error"]   # Optional: only send these events (default: all)
+# tags = ["important"]                     # Optional: tags for routing/filtering
 
 # ─── Channels ─────────────────────────────────────────────────────────────────
 # Add channels to monitor. Each [[channels]] block defines one channel.
+# Channels can also be managed from the web dashboard Settings page.
+#
+# The "terms" field is a regex pattern matched against both the video title
+# and description. Use (?i) for case-insensitive matching.
+#
+# Examples:
+#   terms = "(?i)karaoke|singing"          — Match "karaoke" or "singing"
+#   terms = "(?i)live"                     — Match anything with "live"
+#   terms = "(?i)^(?!.*shorts).*$"         — Match everything except "shorts"
 #
 # [[channels]]
 # id = "UCxxxxxxxxxx"                        # YouTube channel ID (required)

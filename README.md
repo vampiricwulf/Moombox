@@ -8,20 +8,36 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 
 ## Features
 
-- **Channel monitoring** — RSS-based feed polling with regex filtering on titles/descriptions
-- **Live stream archiving** — Downloads video segments in real-time with automatic catch-up when falling behind
+### Core
+- **Channel monitoring** — RSS-based feed polling with regex filtering on titles and descriptions
+- **Live stream archiving** — Downloads DASH/HLS video segments in real-time with automatic parallel catch-up when falling behind
 - **Live chat capture** — Archives chat alongside video, including pre-stream messages from the waiting room
-- **Member-only support** — Cookie-based authentication for members-only streams, with automatic cookie refresh
-- **Parallel downloads** — Process multiple streams simultaneously
-- **Resume on crash** — Periodic state saves allow resuming interrupted downloads
-- **Terminal UI** — Full-screen TUI built with Ink (React for CLI) with mouse support, job management, and live logs
-- **Web dashboard** — Real-time job monitoring, video player with synchronized chat replay (Niconico-style flying overlay), zip import for external archives
-- **Native PO Token generation** — Built-in BotGuard solver (no external server or browser needed)
-- **yt-dlp integration** — Built-in PO Token HTTP endpoint compatible with yt-dlp, plus a bundled yt-dlp plugin
-- **YouTube cipher decryption** — Native JavaScript implementation of signature decryption
-- **Discord notifications** — Webhook notifications for stream events (found, live, finished, errors, etc.)
-- **Single executable** — Builds into a self-contained `Moombox.exe` (~72MB) with no external dependencies
+- **VOD downloads** — Download regular videos and post-live DVR recordings, not just live streams
+- **Resume on crash** — Periodic state saves allow resuming interrupted downloads without data loss
+- **Parallel downloads** — Process multiple streams simultaneously with configurable concurrency
+
+### Advanced Download Options
+- **Manual format selection** — Choose specific video and audio formats (itag) per download, or select "None" for video-only/audio-only
+- **Timestamp selection** — Download a specific time range of a stream (start/end time), with frame-accurate trimming via FFmpeg re-encode
+- **Post-download trimming** — Create trimmed clips from finished downloads without re-downloading
 - **60fps support** — Prefers 60fps streams when available at the same resolution
+
+### Authentication
+- **Member-only support** — Cookie-based authentication for members-only streams
+- **Automatic cookie refresh** — Keeps sessions alive with periodic background refresh
+- **Auto cookie setup** — Launch a browser from the dashboard, log in, and cookies are extracted automatically (Firefox recommended, Chromium supported)
+
+### Interfaces
+- **Terminal UI** — Full-screen TUI built with Ink (React for CLI) with mouse support, keyboard navigation, job management, and live logs
+- **Web dashboard** — Real-time job monitoring at `localhost:774` with video player, synchronized chat replay (Niconico-style flying overlay + sidebar), settings management, and zip import
+- **First-run wizard** — Built-in setup wizard in both TUI and web dashboard for initial configuration
+
+### Integration
+- **Native PO Token generation** — Built-in BotGuard solver using JSDOM (no external server or browser needed)
+- **yt-dlp compatibility** — Built-in PO Token HTTP endpoint and bundled yt-dlp plugin
+- **YouTube cipher decryption** — Native JavaScript implementation of signature and n-parameter decryption
+- **Webhook notifications** — Notifications for stream events (found, live, finished, errors, etc.) via any webhook-compatible service
+- **Single executable** — Builds into a self-contained `Moombox.exe` (~72MB) with no external runtime dependencies
 
 ## Requirements
 
@@ -64,10 +80,11 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `port` | `774` | Web dashboard port |
 | `network_access` | `"localhost"` | `"localhost"`, `"lan"`, or `"external"` |
 | `log_level` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"` |
-| `downloader.max_video_resolution` | `1080` | Max resolution (based on max of width/height) |
+| `downloader.max_video_resolution` | `1080` | Max resolution (based on max of width/height, handles portrait) |
 | `downloader.cookie_file` | `"./cookies.txt"` | Netscape-format cookie file |
 | `downloader.download_chat` | `true` | Download live chat alongside streams |
 | `downloader.prefer_60fps` | `true` | Prefer 60fps when same resolution available |
+| `downloader.num_parallel_downloads` | `2` | Simultaneous download jobs |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | Output path template |
 | `tasklist.hide_finished_age_days` | `30` | Days before finished jobs move to Archived |
 
@@ -93,43 +110,95 @@ npm run build    # Compile TypeScript
 npm run start    # Start with TUI + web dashboard
 ```
 
-For development (runs directly from TypeScript):
+For development (runs directly from TypeScript, no compile step):
 ```bash
 npm run dev
 ```
 
-To build the standalone executable:
+To build the standalone executable (Windows):
 ```bash
 npm run package  # Creates Moombox.exe (~72MB)
 ```
 
-## TUI Keyboard Controls
+To run tests:
+```bash
+npm run test             # Run all tests once
+npm run test:watch       # Watch mode
+npm run test:coverage    # With V8 coverage report
+```
+
+## Terminal UI
+
+The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to 75% height.
+
+### Keyboard Controls
 
 | Key | Action |
 |-----|--------|
 | Tab | Switch focus between Tasks/Details/Logs |
-| Up/Down | Navigate tasks or scroll logs |
+| Up/Down | Navigate tasks or scroll panels |
 | Enter | Expand/collapse archived jobs |
-| A | Add video by URL or ID |
+| A | Add video (Tab toggles advanced mode with format/timestamp selection) |
 | C | Cancel selected job |
 | R | Retry failed job |
 | D | Delete job (press twice to confirm) |
 | F | Cycle status filter (All/Active/Errors/Finished) |
+| T | Trim a finished video |
 | O | Open output folder (finished jobs) |
 | W | Open web dashboard in browser |
 | ? | Toggle help overlay |
 | Q | Quit |
 
+Mouse support: click to select tasks, scroll wheel to navigate. On Windows, a small C# helper is compiled at runtime to enable VT input for mouse tracking.
+
+### Add Video Dialog
+
+Press **A** to open the Add Video dialog. By default it's in quick-add mode — paste a URL and press Enter. Press **Tab** to toggle advanced mode (indicated by a magenta border), which opens a 5-step wizard:
+
+1. **URL/ID** — Paste YouTube URL or video ID
+2. **Video Format** — Select from available formats (number keys for quick select, `a` for auto, `n` for none)
+3. **Audio Format** — Select audio quality
+4. **Timestamps** — Set start/end time (HH:MM:SS, MM:SS, or seconds)
+5. **Confirmation** — Review and submit
+
 ## Web Dashboard
 
 Available at `http://localhost:774` with:
-- Real-time job list with progress updates (via WebSocket)
-- Add/cancel/retry/delete jobs
-- Job details with embedded video player
-- **Player tab** — Replay archived videos with synchronized chat (Niconico-style flying overlay + sidebar, independently togglable)
-- **Imports tab** — Upload `.zip` archives containing video + optional chat JSON for playback
+
+- **Tasks tab** — Real-time job list with progress bars, add/cancel/retry/delete actions, and job details with embedded YouTube player
+- **Advanced Options** — Format selection (video/audio dropdowns with codec badges) and timestamp range when adding videos
 - **Archived tab** — Browse finished jobs older than `hide_finished_age_days`
-- Live log viewer
+- **Player tab** — Replay archived videos with synchronized chat:
+  - Niconico-style flying chat overlay (togglable)
+  - Sidebar chat panel with auto-scroll (togglable)
+  - Superchat highlighting and emoji support
+- **Imports tab** — Upload `.zip` archives containing video + optional chat JSON for playback in the Player tab
+- **Logs tab** — Live log viewer
+- **Settings** — General config, downloader settings, channel management, webhook notifications, yt-dlp plugin installation, and auto-cookie setup
+
+### API
+
+All endpoints are available under both `/api/v1` and `/api`. Real-time updates are delivered via WebSocket.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/jobs` | List active jobs (supports pagination) |
+| GET | `/api/jobs/archived` | List archived jobs |
+| GET | `/api/jobs/:id` | Get job details |
+| GET | `/api/jobs/:id/video` | Stream video file (Range requests supported) |
+| GET | `/api/jobs/:id/chat` | Get chat data |
+| GET | `/api/formats/:videoId` | Get available formats for a video |
+| POST | `/api/jobs` | Add new job |
+| POST | `/api/jobs/:id/cancel` | Cancel job |
+| POST | `/api/jobs/:id/retry` | Retry failed job |
+| DELETE | `/api/jobs/:id` | Delete job |
+| POST | `/api/jobs/:id/trims` | Create trimmed clip |
+| POST | `/api/import` | Import zip archive |
+| GET | `/api/config` | Get configuration |
+| PUT | `/api/config` | Update configuration |
+| GET | `/api/status` | Server status |
+
+WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `log`, `pong`
 
 ## yt-dlp Integration
 
@@ -143,7 +212,7 @@ yt-dlp --extractor-args "youtube:player-client=web;po_token=web.gvs+http://127.0
 
 ### Using the bundled plugin
 
-The yt-dlp plugin is included at `src/pot-plugin/`. Copy the `yt_dlp_plugins` folder to your yt-dlp plugin directory, or point yt-dlp at it:
+The yt-dlp plugin can be installed from the web dashboard's Settings > Integrations page, or manually:
 
 ```bash
 yt-dlp --plugin-dirs path/to/src/pot-plugin <URL>
@@ -154,6 +223,15 @@ The plugin auto-discovers the Moombox server at `127.0.0.1:774`. To use a differ
 ```bash
 yt-dlp --extractor-args "youtube:getpot_moombox_base_url=http://HOST:PORT" <URL>
 ```
+
+### POT Provider Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/get_pot` | Generate PO token (loopback only) |
+| POST | `/invalidate_caches` | Clear all caches (loopback only) |
+| POST | `/invalidate_it` | Invalidate integrity tokens (loopback only) |
+| GET | `/ping` | Health check |
 
 ## Cookie Setup
 
@@ -180,7 +258,7 @@ Export cookies in Netscape format from your browser and save as `cookies.txt`:
 cookie_file = "./cookies.txt"
 ```
 
-## Discord Notifications
+## Webhook Notifications
 
 Send webhook notifications for stream events:
 
@@ -202,7 +280,23 @@ Special states: `Error`, `Cancelled`, `COOKIES?` (member content needs cookie re
 
 ## Architecture
 
-See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation, API endpoints, and development notes.
+Moombox is a Node.js application (ESM, TypeScript) with three presentation layers (TUI, web dashboard, REST API) backed by a shared service layer of singleton services.
+
+```
+RSS Feed Monitor → Job Database (lowdb) → Download Worker → YouTube Innertube API
+                                                 ↓
+                       Web Dashboard ← FFmpeg Muxer ← Segment Downloads (DASH/HLS/VOD)
+                      (localhost:774)      ↑
+                                     Chat Downloader (live chat polling)
+```
+
+Key components:
+- **YouTube engine** — Multi-client Innertube API strategy with native signature decryption (AST-based cipher solver via meriyah/astring) and BotGuard PO Token generation (JSDOM-based)
+- **Download pipeline** — SegmentDownloader with parallel catch-up mode (6 concurrent segments), head sequence tracking, resume state, and gap detection
+- **Chat system** — Live chat polling with memory bounding (50k flush threshold), stale continuation recovery, and replay support
+- **Web server** — Express 5 with WebSocket real-time updates (trailing-edge throttle at 100ms), CORS, CSP, rate limiting, and IP-based access control
+
+See [CLAUDE.md](CLAUDE.md) for comprehensive architecture documentation including initialization order, full API reference, dependency inventory, type system details, code patterns, and known issues.
 
 ## License
 
