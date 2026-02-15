@@ -169,8 +169,9 @@ export class WebServer {
       // Content Security Policy (prevents XSS attacks)
       res.setHeader("Content-Security-Policy",
         "default-src 'self'; " +
-        "script-src 'self' 'unsafe-hashes'; " + // unsafe-hashes allows inline event handlers (onclick, etc.)
-        "style-src 'self' 'unsafe-inline'; " + // Shoelace requires inline styles
+        "script-src 'self' 'unsafe-hashes' https://cdn.jsdelivr.net; " + // Shoelace from CDN + inline event handlers
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " + // Shoelace CSS from CDN + inline styles
+        "font-src 'self' https://cdn.jsdelivr.net; " + // Shoelace fonts from CDN
         "img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com; " +
         "connect-src 'self'; " +
         "frame-src https://www.youtube-nocookie.com; " +
