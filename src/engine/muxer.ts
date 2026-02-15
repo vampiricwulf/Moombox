@@ -1,3 +1,4 @@
+import os from "node:os";
 import ms from "ms";
 import { execa } from "execa";
 import path from "path";
@@ -13,12 +14,16 @@ export interface MuxTrimOptions {
   trimStartOffset?: number;
   /** Duration of the output from the trim start (seconds) */
   trimDuration?: number;
-  /** Video bitrate for precise re-encode (kbps) */
+  /** Video bitrate for precise re-encode (kbps) — used for ABR modes */
   videoBitrate?: number;
   /** Audio bitrate for precise re-encode (kbps) */
   audioBitrate?: number;
+  /** CRF value for quality-based encoding (0-51, lower = better, 18 = perceptually lossless) */
+  crf?: number;
   /** Use precise trim (re-encode for exact duration) - default true */
   usePreciseTrim?: boolean;
+  /** Use 2-pass encoding (only for ABR mode, not CRF) */
+  twoPass?: boolean;
 }
 
 export class Muxer {
@@ -51,84 +56,215 @@ export class Muxer {
     // Ensure output directory exists
     await fs.ensureDir(path.dirname(normalizedOutputPath));
 
-    // Build FFmpeg arguments
-    const ffmpegArgs = ["-y"];
-
-    // Apply trim offset before input (input-level seeking for codec copy)
-    if (trimOptions?.trimStartOffset && trimOptions.trimStartOffset > 0) {
-      ffmpegArgs.push("-ss", String(trimOptions.trimStartOffset));
-    }
-
-    ffmpegArgs.push("-i", normalizedVideoPath);
-
-    if (normalizedAudioPath) {
-      // Apply same seek to audio input for sync
-      if (trimOptions?.trimStartOffset && trimOptions.trimStartOffset > 0) {
-        ffmpegArgs.push("-ss", String(trimOptions.trimStartOffset));
-      }
-      ffmpegArgs.push("-i", normalizedAudioPath);
-    }
-
-    // Apply duration limit after inputs
-    if (trimOptions?.trimDuration && trimOptions.trimDuration > 0) {
-      ffmpegArgs.push("-t", String(trimOptions.trimDuration));
-    }
-
     // Decide: codec copy (fast but imprecise) vs re-encode (precise)
+    const hasTrim = trimOptions?.trimStartOffset || trimOptions?.trimDuration;
     const usePrecise =
-      trimOptions?.usePreciseTrim !== false && // Default true
-      (trimOptions?.trimStartOffset || trimOptions?.trimDuration) && // Has trim
-      (trimOptions?.videoBitrate || trimOptions?.audioBitrate); // Has bitrate info
+      trimOptions?.usePreciseTrim !== false && hasTrim &&
+      (trimOptions?.crf != null || trimOptions?.videoBitrate || trimOptions?.audioBitrate);
 
-    if (usePrecise) {
-      // Re-encode with matching bitrate for exact duration
-      logger.info("[Muxer] Using precise trim (re-encode for exact duration)");
-
-      if (trimOptions.videoBitrate) {
-        ffmpegArgs.push(
-          "-c:v",
-          "libx264",
-          "-b:v",
-          `${trimOptions.videoBitrate}k`,
-          "-preset",
-          "fast", // Balance speed vs compression
-        );
-      } else {
-        // No video or copy
-        ffmpegArgs.push("-c:v", "copy");
-      }
-
-      if (normalizedAudioPath && trimOptions.audioBitrate) {
-        ffmpegArgs.push(
-          "-c:a",
-          "aac",
-          "-b:a",
-          `${trimOptions.audioBitrate}k`,
-        );
-      } else if (normalizedAudioPath) {
-        ffmpegArgs.push("-c:a", "copy");
-      }
-
-      ffmpegArgs.push("-movflags", "faststart", normalizedOutputPath);
-    } else {
-      // Standard codec copy (fast)
-      ffmpegArgs.push(
-        "-c",
-        "copy",
-        "-movflags",
-        "faststart",
+    if (usePrecise && trimOptions?.twoPass && trimOptions.videoBitrate) {
+      // 2-pass ABR re-encode (for target bitrate with optimal distribution)
+      await this.runTwoPassEncode(
+        normalizedVideoPath,
+        normalizedAudioPath,
         normalizedOutputPath,
+        trimOptions,
+        signal,
       );
-    }
+    } else {
+      // Build FFmpeg arguments for single-pass paths
+      const ffmpegArgs = this.buildInputArgs(
+        normalizedVideoPath,
+        normalizedAudioPath,
+        trimOptions ?? {},
+      );
 
-    logger.debug(
-      `[Muxer] Running: ffmpeg ${ffmpegArgs.map((a) => `"${a}"`).join(" ")}`,
+      if (usePrecise) {
+        // Single-pass re-encode for exact duration
+        this.appendEncodeArgs(ffmpegArgs, normalizedAudioPath, trimOptions!);
+        ffmpegArgs.push("-movflags", "faststart", normalizedOutputPath);
+      } else {
+        // Standard codec copy (fast)
+        ffmpegArgs.push(
+          "-c",
+          "copy",
+          "-movflags",
+          "faststart",
+          normalizedOutputPath,
+        );
+      }
+
+      await this.runFFmpeg(ffmpegArgs, signal);
+    }
+  }
+
+  /**
+   * Run a 2-pass x264 encode for better bitrate distribution
+   */
+  private static async runTwoPassEncode(
+    videoPath: string,
+    audioPath: string | null,
+    outputPath: string,
+    trimOptions: MuxTrimOptions,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const logger = Logger.getInstance();
+    const passlogPrefix = path.join(
+      os.tmpdir(),
+      `moombox-2pass-${Date.now()}`,
     );
 
     try {
-      await execa("ffmpeg", ffmpegArgs, {
+      // === Pass 1: Analysis (no audio, output to null) ===
+      logger.info("[Muxer] 2-pass encode: starting pass 1 (analysis)");
+
+      const pass1Args = this.buildInputArgs(videoPath, audioPath, trimOptions);
+      pass1Args.push(
+        "-c:v", "libx264",
+        "-b:v", `${trimOptions.videoBitrate}k`,
+        "-preset", "fast",
+        "-pass", "1",
+        "-passlogfile", passlogPrefix,
+        "-an",
+        "-f", "null",
+        os.devNull,
+      );
+
+      await this.runFFmpeg(pass1Args, signal);
+
+      // Check abort between passes
+      if (signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+
+      // === Pass 2: Encode with optimized bitrate distribution ===
+      logger.info("[Muxer] 2-pass encode: starting pass 2 (encode)");
+
+      const pass2Args = this.buildInputArgs(videoPath, audioPath, trimOptions);
+      pass2Args.push(
+        "-c:v", "libx264",
+        "-b:v", `${trimOptions.videoBitrate}k`,
+        "-preset", "fast",
+        "-pass", "2",
+        "-passlogfile", passlogPrefix,
+      );
+
+      // Audio encoding (same logic as single-pass)
+      if (audioPath && trimOptions.audioBitrate) {
+        pass2Args.push("-c:a", "aac", "-b:a", `${trimOptions.audioBitrate}k`);
+      } else if (audioPath) {
+        pass2Args.push("-c:a", "copy");
+      }
+
+      pass2Args.push("-movflags", "faststart", outputPath);
+
+      await this.runFFmpeg(pass2Args, signal);
+
+      logger.info("[Muxer] 2-pass encode: complete");
+    } finally {
+      // Clean up passlog files
+      for (const suffix of ["-0.log", "-0.log.mbtree"]) {
+        try {
+          await fs.remove(passlogPrefix + suffix);
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+    }
+  }
+
+  /**
+   * Build common input arguments (seek, inputs, duration)
+   */
+  private static buildInputArgs(
+    videoPath: string,
+    audioPath: string | null,
+    trimOptions: MuxTrimOptions,
+  ): string[] {
+    const args = ["-y"];
+
+    if (trimOptions.trimStartOffset && trimOptions.trimStartOffset > 0) {
+      args.push("-ss", String(trimOptions.trimStartOffset));
+    }
+
+    args.push("-i", videoPath);
+
+    if (audioPath) {
+      if (trimOptions.trimStartOffset && trimOptions.trimStartOffset > 0) {
+        args.push("-ss", String(trimOptions.trimStartOffset));
+      }
+      args.push("-i", audioPath);
+    }
+
+    if (trimOptions.trimDuration && trimOptions.trimDuration > 0) {
+      args.push("-t", String(trimOptions.trimDuration));
+    }
+
+    return args;
+  }
+
+  /**
+   * Append single-pass video/audio encode arguments
+   */
+  private static appendEncodeArgs(
+    args: string[],
+    audioPath: string | null,
+    trimOptions: MuxTrimOptions,
+  ): void {
+    const logger = Logger.getInstance();
+
+    if (trimOptions.crf != null) {
+      // CRF mode: quality-based encoding — x264 decides bitrate per-frame
+      logger.info(`[Muxer] Using CRF ${trimOptions.crf} encode (quality-based, slow preset)`);
+      args.push(
+        "-c:v", "libx264",
+        "-crf", String(trimOptions.crf),
+        "-preset", "slow",
+      );
+      // Re-encode audio at source bitrate to keep sync with re-encoded video
+      if (trimOptions.audioBitrate) {
+        args.push("-c:a", "aac", "-b:a", `${trimOptions.audioBitrate}k`);
+      } else {
+        args.push("-c:a", "aac");
+      }
+    } else {
+      // ABR mode: target bitrate encoding
+      logger.info("[Muxer] Using precise trim (re-encode for exact duration)");
+
+      if (trimOptions.videoBitrate) {
+        args.push(
+          "-c:v", "libx264",
+          "-b:v", `${trimOptions.videoBitrate}k`,
+          "-preset", "fast",
+        );
+      } else {
+        args.push("-c:v", "copy");
+      }
+
+      if (audioPath && trimOptions.audioBitrate) {
+        args.push("-c:a", "aac", "-b:a", `${trimOptions.audioBitrate}k`);
+      } else if (audioPath) {
+        args.push("-c:a", "copy");
+      }
+    }
+  }
+
+  /**
+   * Execute FFmpeg with standard error handling
+   */
+  private static async runFFmpeg(
+    args: string[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const logger = Logger.getInstance();
+    logger.debug(
+      `[Muxer] Running: ffmpeg ${args.map((a) => `"${a}"`).join(" ")}`,
+    );
+
+    try {
+      await execa("ffmpeg", args, {
         stdin: "ignore",
-        cancelSignal: signal, // execa v9+ uses cancelSignal instead of signal
+        cancelSignal: signal,
         timeout: ms("10m"),
         cleanup: true,
       });

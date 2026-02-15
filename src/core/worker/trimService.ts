@@ -101,7 +101,10 @@ export class TrimService {
         `[TrimService] Creating trim: ${startTime}s - ${endTime}s (${duration}s) -> ${trimFilename}`,
       );
 
-      // 8. Execute FFmpeg trim with re-encode (Muxer.mux)
+      // 8. Probe source audio bitrate to re-encode at matching quality
+      const sourceAudioBitrate = await this.probeAudioBitrate(sourceFilePath);
+
+      // 9. Execute FFmpeg trim with re-encode (Muxer.mux)
       await Muxer.mux(
         sourceFilePath, // Already-muxed video file
         null, // No separate audio (single file)
@@ -110,13 +113,13 @@ export class TrimService {
         {
           trimStartOffset: startTime,
           trimDuration: duration,
-          videoBitrate: sourceJob.videoWidth ? 5000 : undefined, // kbps (estimate)
-          audioBitrate: 128, // kbps (standard)
-          usePreciseTrim: true, // Force re-encode for accuracy
+          crf: 18, // Perceptually lossless — x264 minimizes bitrate automatically
+          audioBitrate: sourceAudioBitrate,
+          usePreciseTrim: true,
         },
       );
 
-      // 9. Extract metadata (duration, size) via ffprobe
+      // 10. Extract metadata (duration, size) via ffprobe
       const metadata = await this.extractVideoMetadata(trimOutputPath);
 
       if (!metadata) {
@@ -125,7 +128,7 @@ export class TrimService {
         );
       }
 
-      // 10. Create TrimRecord and update parent job
+      // 11. Create TrimRecord and update parent job
       const trimRecord: TrimRecord = {
         id: `trim_${Date.now()}`,
         startTime,
@@ -176,7 +179,7 @@ export class TrimService {
         },
       );
 
-      // 11. Return TrimRecord
+      // 12. Return TrimRecord
       return trimRecord;
     } finally {
       this.activeTrimOps.delete(lockKey);
@@ -293,6 +296,43 @@ export class TrimService {
     }
     if (end - start < 1) {
       throw new Error("Trim must be at least 1 second");
+    }
+  }
+
+  /**
+   * Probe the audio bitrate of a source file (kbps).
+   * Falls back to 128 kbps if the stream has no bitrate metadata.
+   */
+  private static async probeAudioBitrate(filePath: string): Promise<number> {
+    const DEFAULT_AUDIO_BITRATE = 128;
+    try {
+      const { stdout } = await execa("ffprobe", [
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        "-select_streams", "a:0",
+        filePath,
+      ], { timeout: ms("30s") });
+
+      if (!stdout) return DEFAULT_AUDIO_BITRATE;
+
+      const data = JSON.parse(stdout);
+      const stream = data.streams?.[0];
+      if (!stream) return DEFAULT_AUDIO_BITRATE;
+
+      // bit_rate is in bps, convert to kbps
+      const bps = parseInt(stream.bit_rate);
+      if (bps > 0) {
+        const kbps = Math.round(bps / 1000);
+        Logger.getInstance().debug(
+          `[TrimService] Source audio: ${kbps} kbps (${stream.codec_name || "unknown"} codec)`,
+        );
+        return kbps;
+      }
+
+      return DEFAULT_AUDIO_BITRATE;
+    } catch {
+      return DEFAULT_AUDIO_BITRATE;
     }
   }
 
