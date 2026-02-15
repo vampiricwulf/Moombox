@@ -500,12 +500,10 @@ export function App({ db, logger }: AppProps): React.ReactElement {
           const outputDir = job.outputDirectory || config.downloader?.output_directory || "./output";
           const filePath = path.resolve(path.join(outputDir, job.filename));
           const folderPath = path.dirname(filePath);
-          const program = process.platform === "win32"
-            ? "explorer"
-            : process.platform === "darwin"
-              ? "open"
-              : "xdg-open";
-          execa(program, [folderPath], { stdio: "ignore", detached: true, cleanup: false }).catch(() => {});
+          const openArgs = process.platform === "win32"
+            ? ["cmd", ["/c", "start", '""', folderPath]]
+            : [process.platform === "darwin" ? "open" : "xdg-open", [folderPath]];
+          execa(openArgs[0] as string, openArgs[1] as string[], { stdio: "ignore", detached: true, cleanup: false }).catch(() => {});
           setAddMessage({ text: `Opening: ${folderPath}`, color: "green" });
         } else {
           setAddMessage({ text: "Can only open folder for finished jobs", color: "yellow" });

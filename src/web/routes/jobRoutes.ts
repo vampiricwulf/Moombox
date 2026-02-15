@@ -522,15 +522,12 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     }
     const folderPath = path.dirname(filePath);
 
-    const program =
-      process.platform === "win32"
-        ? "explorer"
-        : process.platform === "darwin"
-          ? "open"
-          : "xdg-open";
-
     // Fire and forget - don't wait for the file explorer to open
-    execa(program, [folderPath], {
+    // Windows: "cmd /c start "" path" is reliable; explorer.exe mishandles folder paths
+    const [program, args] = process.platform === "win32"
+      ? ["cmd", ["/c", "start", '""', folderPath]]
+      : [process.platform === "darwin" ? "open" : "xdg-open", [folderPath]];
+    execa(program, args, {
       stdio: "ignore",
       detached: true,
       cleanup: false,
