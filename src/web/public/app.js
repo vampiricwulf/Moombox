@@ -1182,10 +1182,22 @@ class MoomboxApp {
       // Show success notification
       this.showToast('Trim created successfully', 'success');
 
-      // Refresh job details to show new trim
-      const job = this.jobs.find(j => j.id === jobId);
-      if (job && this.selectedJobId === jobId) {
-        this.renderJobDetails(job);
+      // Fetch fresh job data from server (includes updated trims)
+      if (this.selectedJobId === jobId) {
+        const jobResponse = await fetch(`/api/jobs/${jobId}`);
+        if (jobResponse.ok) {
+          const updatedJob = await jobResponse.json();
+
+          // Update job in the jobs array
+          const jobIndex = this.jobs.findIndex(j => j.id === jobId);
+          if (jobIndex !== -1) {
+            this.jobs[jobIndex] = updatedJob;
+          }
+
+          // Refresh job details and logs with fresh data
+          this.renderJobDetails(updatedJob);
+          this.loadJobLogs(jobId);
+        }
       }
 
       return trim;
@@ -1211,10 +1223,22 @@ class MoomboxApp {
 
       this.showToast('Trim deleted', 'success');
 
-      // Refresh job details
-      const job = this.jobs.find(j => j.id === jobId);
-      if (job && this.selectedJobId === jobId) {
-        this.renderJobDetails(job);
+      // Fetch fresh job data from server (includes updated trims)
+      if (this.selectedJobId === jobId) {
+        const jobResponse = await fetch(`/api/jobs/${jobId}`);
+        if (jobResponse.ok) {
+          const updatedJob = await jobResponse.json();
+
+          // Update job in the jobs array
+          const jobIndex = this.jobs.findIndex(j => j.id === jobId);
+          if (jobIndex !== -1) {
+            this.jobs[jobIndex] = updatedJob;
+          }
+
+          // Refresh job details and logs with fresh data
+          this.renderJobDetails(updatedJob);
+          this.loadJobLogs(jobId);
+        }
       }
     } catch (error) {
       this.showToast(error.message, 'danger');
