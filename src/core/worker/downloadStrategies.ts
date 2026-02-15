@@ -18,7 +18,7 @@ import {
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
 import { formatBytes } from "./formatUtils.js";
-import { downloadFile } from "./muxFinalize.js";
+import { downloadFile, downloadFileWithFFmpegTrim } from "./muxFinalize.js";
 
 /**
  * Download VOD using direct format URLs
@@ -37,6 +37,7 @@ export async function downloadVod(
   hasVideo: boolean;
   selectedVideoFormat?: import("../../types/youtube.js").Format | null;
   selectedAudioFormat?: import("../../types/youtube.js").Format | null;
+  usedFFmpegTrim?: boolean; // True if FFmpeg trim download was used (already trimmed)
 }> {
   const logger = Logger.getInstance();
 
@@ -97,6 +98,17 @@ export async function downloadVod(
     ? path.join(stagingDir, "audio_stream")
     : null;
 
+  // Check if FFmpeg trim download should be used (timestamp selection enabled)
+  const hasTimestampSelection = job.startTime != null || job.endTime != null;
+  const useFFmpegTrim = hasTimestampSelection;
+
+  if (useFFmpegTrim) {
+    logger.info(
+      `[DownloadOrchestrator] Using FFmpeg trim download (like yt-dlp) for timestamp selection: ` +
+      `${job.startTime || 0}s - ${job.endTime !== undefined ? job.endTime + "s" : "end"}`,
+    );
+  }
+
   // Track progress
   let videoProgress = videoPath ? "0%" : "N/A";
   let audioProgress = "0%";
@@ -129,27 +141,67 @@ export async function downloadVod(
   const downloadPromises: Promise<void>[] = [];
 
   if (bestVideo?.url && videoPath) {
-    downloadPromises.push(
-      downloadFile(bestVideo.url, videoPath, activeSegmentDownloaders, signal, (progress, percent) => {
-        videoProgress =
-          percent !== undefined ? `${percent.toFixed(1)}%` : progress;
-        videoPercent = percent || 0;
-        updateCombinedProgress();
-      }),
-    );
+    if (useFFmpegTrim) {
+      // FFmpeg trim download (HTTP range requests, like yt-dlp)
+      downloadPromises.push(
+        downloadFileWithFFmpegTrim(
+          bestVideo.url,
+          videoPath,
+          job.startTime,
+          job.endTime,
+          videoInfo.lengthSeconds,
+          signal,
+          (progress, percent) => {
+            videoProgress = percent !== undefined ? `${percent.toFixed(1)}%` : progress;
+            videoPercent = percent || 0;
+            updateCombinedProgress();
+          },
+        ),
+      );
+    } else {
+      // Regular full file download
+      downloadPromises.push(
+        downloadFile(bestVideo.url, videoPath, activeSegmentDownloaders, signal, (progress, percent) => {
+          videoProgress =
+            percent !== undefined ? `${percent.toFixed(1)}%` : progress;
+          videoPercent = percent || 0;
+          updateCombinedProgress();
+        }),
+      );
+    }
   } else {
     videoProgress = "N/A";
   }
 
   if (bestAudio?.url && audioPath) {
-    downloadPromises.push(
-      downloadFile(bestAudio.url, audioPath, activeSegmentDownloaders, signal, (progress, percent) => {
-        audioProgress =
-          percent !== undefined ? `${percent.toFixed(1)}%` : progress;
-        audioPercent = percent || 0;
-        updateCombinedProgress();
-      }),
-    );
+    if (useFFmpegTrim) {
+      // FFmpeg trim download (HTTP range requests, like yt-dlp)
+      downloadPromises.push(
+        downloadFileWithFFmpegTrim(
+          bestAudio.url,
+          audioPath,
+          job.startTime,
+          job.endTime,
+          videoInfo.lengthSeconds,
+          signal,
+          (progress, percent) => {
+            audioProgress = percent !== undefined ? `${percent.toFixed(1)}%` : progress;
+            audioPercent = percent || 0;
+            updateCombinedProgress();
+          },
+        ),
+      );
+    } else {
+      // Regular full file download
+      downloadPromises.push(
+        downloadFile(bestAudio.url, audioPath, activeSegmentDownloaders, signal, (progress, percent) => {
+          audioProgress =
+            percent !== undefined ? `${percent.toFixed(1)}%` : progress;
+          audioPercent = percent || 0;
+          updateCombinedProgress();
+        }),
+      );
+    }
   } else {
     audioProgress = "N/A";
   }
@@ -162,6 +214,7 @@ export async function downloadVod(
     hasVideo: !!videoPath,
     selectedVideoFormat: bestVideo,
     selectedAudioFormat: bestAudio,
+    usedFFmpegTrim: useFFmpegTrim, // Indicate if FFmpeg trim was used
   };
 }
 

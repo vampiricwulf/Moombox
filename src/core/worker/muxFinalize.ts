@@ -433,3 +433,129 @@ export async function downloadFile(
     `[DownloadOrchestrator] Downloaded ${formatBytes(downloadedBytes)} to ${outputPath}`,
   );
 }
+
+/**
+ * Download file with FFmpeg trimming (uses HTTP range requests like yt-dlp)
+ * Much more efficient than downloading entire file then trimming
+ */
+export async function downloadFileWithFFmpegTrim(
+  url: string,
+  outputPath: string,
+  startTime: number | undefined,
+  endTime: number | undefined,
+  videoDuration: number | undefined,
+  signal?: AbortSignal,
+  onProgress?: (progress: string, percent?: number) => void,
+): Promise<void> {
+  const logger = Logger.getInstance();
+
+  // Calculate duration for -t flag
+  const start = startTime || 0;
+  const end = endTime ?? videoDuration ?? undefined;
+  const duration = end !== undefined ? end - start : undefined;
+
+  logger.info(
+    `[DownloadOrchestrator] FFmpeg trim download: ` +
+    `start=${start}s${duration !== undefined ? `, duration=${duration}s` : ", duration=unlimited"}`,
+  );
+
+  // Build FFmpeg args (like yt-dlp does)
+  const ffmpegArgs: string[] = [
+    "-y", // Overwrite output
+    "-loglevel", "warning", // Reduce noise
+    "-headers", `User-Agent: ${USER_AGENTS.ANDROID}\r\n`, // Set UA for YouTube
+  ];
+
+  // Seek before input (faster, uses HTTP range requests)
+  if (start > 0) {
+    ffmpegArgs.push("-ss", start.toString());
+  }
+
+  // Duration limit
+  if (duration !== undefined) {
+    ffmpegArgs.push("-t", duration.toString());
+  }
+
+  // Input URL
+  ffmpegArgs.push("-i", url);
+
+  // Copy codec (no re-encode, much faster)
+  ffmpegArgs.push("-c", "copy");
+
+  // Output file
+  ffmpegArgs.push(outputPath);
+
+  return new Promise((resolve, reject) => {
+    const ffmpeg = spawn("ffmpeg", ffmpegArgs);
+
+    let stderrData = "";
+    let lastProgressUpdate = 0;
+    let aborted = false;
+
+    // Handle abort signal
+    const abortHandler = () => {
+      aborted = true;
+      ffmpeg.kill("SIGTERM");
+    };
+    if (signal) {
+      signal.addEventListener("abort", abortHandler);
+    }
+
+    // Parse FFmpeg stderr for progress
+    ffmpeg.stderr.on("data", (chunk: Buffer) => {
+      stderrData += chunk.toString();
+
+      // Look for time= progress updates
+      const timeMatch = stderrData.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+      if (timeMatch && onProgress && duration !== undefined) {
+        const h = parseInt(timeMatch[1], 10);
+        const m = parseInt(timeMatch[2], 10);
+        const s = parseFloat(timeMatch[3]);
+        const currentTime = h * 3600 + m * 60 + s;
+
+        const now = Date.now();
+        if (now - lastProgressUpdate > 500) {
+          lastProgressUpdate = now;
+          const percent = Math.min((currentTime / duration) * 100, 100);
+          onProgress(
+            `${percent.toFixed(1)}% (${currentTime.toFixed(1)}s / ${duration.toFixed(1)}s)`,
+            percent,
+          );
+        }
+      }
+
+      // Keep only last 1000 chars to avoid memory bloat
+      if (stderrData.length > 1000) {
+        stderrData = stderrData.slice(-1000);
+      }
+    });
+
+    ffmpeg.on("close", (code) => {
+      if (signal) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+
+      if (aborted) {
+        logger.debug(`[DownloadOrchestrator] FFmpeg download aborted for ${outputPath}`);
+        resolve();
+        return;
+      }
+
+      if (code === 0) {
+        logger.debug(`[DownloadOrchestrator] FFmpeg downloaded to ${outputPath}`);
+        resolve();
+      } else {
+        const errorMsg = stderrData.trim() || `FFmpeg exited with code ${code}`;
+        logger.error(`[DownloadOrchestrator] FFmpeg download failed: ${errorMsg}`);
+        reject(new Error(`FFmpeg download failed: ${errorMsg}`));
+      }
+    });
+
+    ffmpeg.on("error", (err) => {
+      if (signal) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+      reject(err);
+    });
+  });
+}
