@@ -102,6 +102,14 @@ export class FormatSelector {
     let bestVideo: Format | null = null;
     let bestAudio: Format | null = null;
 
+    // Debug: log all available video formats with URLs
+    const videoFormatsWithUrls = formats.filter(f => f.mimeType?.includes("video") && f.url);
+    if (videoFormatsWithUrls.length > 0) {
+      this.logger.debug(
+        `[FormatSelector] Available video formats with URLs: ${videoFormatsWithUrls.map(f => `itag ${f.itag} (${f.width}x${f.height}@${f.fps || "?"}fps, ${f.bitrate}bps)`).join(", ")}`
+      );
+    }
+
     for (const f of formats) {
       const mimeType = f.mimeType || "";
 

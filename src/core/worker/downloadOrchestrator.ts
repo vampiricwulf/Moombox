@@ -224,10 +224,20 @@ export class DownloadOrchestrator {
         );
       } else {
         this.logger.warn(
-          `[DownloadOrchestrator] VOD with timestamp selection but no DASH manifest, ` +
+          `[DownloadOrchestrator] VOD with timestamp selection but no DASH manifest available. ` +
+          `streamStatus=${videoInfo.streamStatus}, manifestUrl=${videoInfo.dashManifestUrl ? "present" : "null"}, ` +
           `falling back to direct download with FFmpeg trim`
         );
       }
+    }
+
+    // Debug: Log DASH manifest availability for all VODs
+    if (isVodDownload) {
+      this.logger.debug(
+        `[DownloadOrchestrator] VOD info: streamStatus=${videoInfo.streamStatus}, ` +
+        `hasTimestamps=${hasTimestampSelection}, dashManifest=${videoInfo.dashManifestUrl ? "YES" : "NO"}, ` +
+        `useDirectDownload=${useDirectVodDownload}`
+      );
     }
 
     if (useDirectVodDownload) {
