@@ -448,7 +448,12 @@ export function AddVideoDialog({
       if (key.return) {
         // Validate: can't have both video and audio set to "none"
         if (selectedVideoItag === -1 && selectedAudioItag === -1) {
-          setError("Cannot download video-only and audio-only at the same time");
+          setError("❌ Cannot select both video-only and audio-only");
+          return;
+        }
+        // Validate: end time must be after start time
+        if (startTime != null && endTime != null && endTime <= startTime) {
+          setError("❌ End time must be after start time");
           return;
         }
         submitJob();
