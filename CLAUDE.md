@@ -200,20 +200,19 @@ When running in an interactive terminal, Moombox displays a full-screen TUI buil
 
 Press **A** to open the Add Video dialog:
 - Press **Tab** to toggle advanced mode (UI turns lilac/magenta when enabled)
-- **[✓] Advanced** - Shows 6-step wizard (format + timestamp selection)
+- **[✓] Advanced** - Shows 5-step wizard (format + timestamp selection)
 - **[ ] Quick add** - Immediate submission with auto settings (best quality)
 
-**Advanced Options Wizard (6 steps):**
+**Advanced Options Wizard (5 steps):**
   1. **Enter URL/ID** - Paste YouTube URL or video ID
   2. **Select Video Format** - Numbered list with best-format badges (`[a]` auto, `[n]` none for audio-only)
   3. **Select Audio Format** - Choose audio quality (`[a]` auto, `[n]` none for video-only)
-  4. **Start Time** - Optional timestamp in `HH:MM:SS`, `MM:SS`, or seconds (blank = beginning)
-  5. **End Time** - Optional timestamp (blank = end of video)
-  6. **Confirmation** - Review selections before submitting
+  4. **Timestamps** - Start and End time combined (Tab to switch between fields, HH:MM:SS / MM:SS / seconds, blank = default)
+  5. **Confirmation** - Review selections before submitting
 
 **Navigation:**
 - **Esc** - Go back one step or cancel
-- **Tab** - Toggle advanced mode (step 0 only)
+- **Tab** - Toggle advanced mode (step 1) OR switch between start/end time fields (step 4)
 - **↑/↓** - Scroll format lists (when >10 formats)
 - **Ctrl+V / Right-click** - Paste from clipboard
 - **Numbers (1-9)** - Quick select format by number

@@ -6,9 +6,8 @@
  *    - UI turns lilac/magenta when advanced mode is enabled
  * 2. (Advanced) Select video format (numbered list, 'a' = auto, 'n' = none)
  * 3. (Advanced) Select audio format
- * 4. (Advanced) Start time (HH:MM:SS, MM:SS, or seconds)
- * 5. (Advanced) End time
- * 6. (Advanced) Confirmation
+ * 4. (Advanced) Timestamps - Start and End time combined (Tab = switch field)
+ * 5. (Advanced) Confirmation
  */
 
 import React, { useState, useCallback, useEffect } from "react";
@@ -68,7 +67,7 @@ export function AddVideoDialog({
   onComplete,
   onCancel,
 }: AddVideoDialogProps): React.ReactElement {
-  const [step, setStep] = useState(0); // 0-5
+  const [step, setStep] = useState(0); // 0-4 (now 5 steps instead of 6)
   const [input, setInput] = useState("");
   const [videoId, setVideoId] = useState<string | null>(null);
   const [url, setUrl] = useState("");
@@ -82,6 +81,9 @@ export function AddVideoDialog({
   const [startTime, setStartTime] = useState<number | undefined>(undefined);
   const [endTime, setEndTime] = useState<number | undefined>(undefined);
   const [scrollOffset, setScrollOffset] = useState(0);
+  const [timeInputFocus, setTimeInputFocus] = useState<"start" | "end">("start"); // For combined time step
+  const [startTimeInput, setStartTimeInput] = useState("");
+  const [endTimeInput, setEndTimeInput] = useState("");
 
   const logger = Logger.getInstance();
 
@@ -363,89 +365,89 @@ export function AddVideoDialog({
       return;
     }
 
-    // Step 3: Start time
+    // Step 3: Start and End time (combined)
     if (step === 3) {
-      if (key.return || key.tab) {
-        if (!input.trim()) {
-          setStartTime(undefined);
-        } else {
-          const seconds = parseTimeToSeconds(input);
-          if (seconds === null) {
-            setError("Invalid time format (use HH:MM:SS, MM:SS, or seconds)");
+      // Tab: switch between start and end input fields
+      if (key.tab) {
+        setTimeInputFocus((prev) => prev === "start" ? "end" : "start");
+        return;
+      }
+
+      // Enter: validate and proceed to confirmation
+      if (key.return) {
+        // Validate start time
+        if (startTimeInput.trim()) {
+          const startSeconds = parseTimeToSeconds(startTimeInput);
+          if (startSeconds === null) {
+            setError("Invalid start time format (use HH:MM:SS, MM:SS, or seconds)");
             return;
           }
-          setStartTime(seconds);
-        }
-        setStep(4);
-        setInput("");
-        return;
-      }
-      if (key.backspace || key.delete) {
-        setInput((prev) => prev.slice(0, -1));
-        return;
-      }
-      if (key.ctrl && char === "v") {
-        readClipboard().then((text) => {
-          if (text) {
-            const firstLine = text.split(/[\r\n]/)[0].trim();
-            if (firstLine) setInput((prev) => prev + firstLine);
-          }
-        });
-        return;
-      }
-      if (char && !key.ctrl && !key.meta) {
-        if (char.charCodeAt(0) === 0x1b || char.charCodeAt(0) === 0x9b) return;
-        if (char.length > 1 && char[0] === "[") return;
-        setInput((prev) => prev + char);
-      }
-      return;
-    }
-
-    // Step 4: End time
-    if (step === 4) {
-      if (key.return || key.tab) {
-        if (!input.trim()) {
-          setEndTime(undefined);
+          setStartTime(startSeconds);
         } else {
-          const seconds = parseTimeToSeconds(input);
-          if (seconds === null) {
-            setError("Invalid time format (use HH:MM:SS, MM:SS, or seconds)");
+          setStartTime(undefined);
+        }
+
+        // Validate end time
+        if (endTimeInput.trim()) {
+          const endSeconds = parseTimeToSeconds(endTimeInput);
+          if (endSeconds === null) {
+            setError("Invalid end time format (use HH:MM:SS, MM:SS, or seconds)");
             return;
           }
           // Validate start < end
-          if (startTime !== undefined && seconds <= startTime) {
+          const finalStartTime = startTimeInput.trim() ? parseTimeToSeconds(startTimeInput) : 0;
+          if (finalStartTime !== null && endSeconds <= finalStartTime) {
             setError("End time must be after start time");
             return;
           }
-          setEndTime(seconds);
+          setEndTime(endSeconds);
+        } else {
+          setEndTime(undefined);
         }
-        setStep(5);
-        setInput("");
+
+        setStep(4); // Go to confirmation (now step 4 instead of 5)
         return;
       }
+
       if (key.backspace || key.delete) {
-        setInput((prev) => prev.slice(0, -1));
+        if (timeInputFocus === "start") {
+          setStartTimeInput((prev) => prev.slice(0, -1));
+        } else {
+          setEndTimeInput((prev) => prev.slice(0, -1));
+        }
         return;
       }
+
       if (key.ctrl && char === "v") {
         readClipboard().then((text) => {
           if (text) {
             const firstLine = text.split(/[\r\n]/)[0].trim();
-            if (firstLine) setInput((prev) => prev + firstLine);
+            if (firstLine) {
+              if (timeInputFocus === "start") {
+                setStartTimeInput((prev) => prev + firstLine);
+              } else {
+                setEndTimeInput((prev) => prev + firstLine);
+              }
+            }
           }
         });
         return;
       }
+
       if (char && !key.ctrl && !key.meta) {
         if (char.charCodeAt(0) === 0x1b || char.charCodeAt(0) === 0x9b) return;
         if (char.length > 1 && char[0] === "[") return;
-        setInput((prev) => prev + char);
+        if (timeInputFocus === "start") {
+          setStartTimeInput((prev) => prev + char);
+        } else {
+          setEndTimeInput((prev) => prev + char);
+        }
       }
       return;
     }
 
-    // Step 5: Confirmation
-    if (step === 5) {
+    // Step 4: Confirmation (was step 5)
+    if (step === 4) {
       if (key.return) {
         // Validate: can't have both video and audio set to "none"
         if (selectedVideoItag === -1 && selectedAudioItag === -1) {
@@ -492,7 +494,7 @@ export function AddVideoDialog({
             </Text>
             {advancedMode && step > 0 && (
               <Text color="gray">
-                Step {step}/{5}
+                Step {step}/{4}
               </Text>
             )}
           </Box>
@@ -516,9 +518,15 @@ export function AddVideoDialog({
               boxHeight={boxHeight}
             />
           )}
-          {step === 3 && <StepStartTime input={input} error={error} />}
-          {step === 4 && <StepEndTime input={input} error={error} />}
-          {step === 5 && (
+          {step === 3 && (
+            <StepTimestamps
+              startTimeInput={startTimeInput}
+              endTimeInput={endTimeInput}
+              timeInputFocus={timeInputFocus}
+              error={error}
+            />
+          )}
+          {step === 4 && (
             <StepConfirmation
               videoId={videoId}
               url={url}
@@ -537,8 +545,11 @@ export function AddVideoDialog({
             {step === 0 && (
               <Text color="gray">Tab: Toggle Advanced | Enter: Continue</Text>
             )}
-            {step > 0 && step < 5 && <Text color="gray">Enter: Skip (auto)</Text>}
-            {step === 5 && <Text color="cyan" bold>Enter: Submit</Text>}
+            {step === 3 && (
+              <Text color="gray">Tab: Switch Field | Enter: Continue</Text>
+            )}
+            {step > 0 && step < 3 && <Text color="gray">Enter: Skip (auto)</Text>}
+            {step === 4 && <Text color="cyan" bold>Enter: Submit</Text>}
           </Box>
         </Box>
       </Box>
@@ -791,22 +802,26 @@ function FormatList({
   );
 }
 
-// Step 3: Start time
-function StepStartTime({
-  input,
+// Step 3: Start and End time (combined)
+function StepTimestamps({
+  startTimeInput,
+  endTimeInput,
+  timeInputFocus,
   error,
 }: {
-  input: string;
+  startTimeInput: string;
+  endTimeInput: string;
+  timeInputFocus: "start" | "end";
   error: string | null;
 }): React.ReactElement {
   return (
     <>
       <Box paddingX={1} flexDirection="column">
         <Text color="white" bold>
-          Start Time (Optional)
+          Timestamps (Optional)
         </Text>
         <Text color="gray" dimColor>
-          Step 4/6
+          Step 4/5
         </Text>
       </Box>
       <Box paddingX={1} height={1}>
@@ -814,13 +829,24 @@ function StepStartTime({
       </Box>
       <Box flexDirection="column" paddingX={1} flexGrow={1}>
         <Box marginBottom={1}>
-          <Text color="cyan">&gt; Time: </Text>
-          <Text>{input}</Text>
-          <Text color="cyan">_</Text>
+          <Text color={timeInputFocus === "start" ? "cyan" : "gray"}>
+            {timeInputFocus === "start" ? ">" : " "} Start:
+          </Text>
+          <Text>{startTimeInput}</Text>
+          {timeInputFocus === "start" && <Text color="cyan">_</Text>}
         </Box>
-        <Text color="gray" dimColor>
-          Format: HH:MM:SS, MM:SS, or seconds (blank = beginning)
-        </Text>
+        <Box marginBottom={1}>
+          <Text color={timeInputFocus === "end" ? "cyan" : "gray"}>
+            {timeInputFocus === "end" ? ">" : " "} End:
+          </Text>
+          <Text>{endTimeInput}</Text>
+          {timeInputFocus === "end" && <Text color="cyan">_</Text>}
+        </Box>
+        <Box marginTop={1}>
+          <Text color="gray" dimColor>
+            Format: HH:MM:SS, MM:SS, or seconds (blank = default)
+          </Text>
+        </Box>
         {error && (
           <Box marginTop={1}>
             <Text color="red">{error}</Text>
@@ -831,47 +857,7 @@ function StepStartTime({
   );
 }
 
-// Step 4: End time
-function StepEndTime({
-  input,
-  error,
-}: {
-  input: string;
-  error: string | null;
-}): React.ReactElement {
-  return (
-    <>
-      <Box paddingX={1} flexDirection="column">
-        <Text color="white" bold>
-          End Time (Optional)
-        </Text>
-        <Text color="gray" dimColor>
-          Step 5/6
-        </Text>
-      </Box>
-      <Box paddingX={1} height={1}>
-        <Text color="gray">{"\u2500".repeat(74)}</Text>
-      </Box>
-      <Box flexDirection="column" paddingX={1} flexGrow={1}>
-        <Box marginBottom={1}>
-          <Text color="cyan">&gt; Time: </Text>
-          <Text>{input}</Text>
-          <Text color="cyan">_</Text>
-        </Box>
-        <Text color="gray" dimColor>
-          Format: HH:MM:SS, MM:SS, or seconds (blank = end of video)
-        </Text>
-        {error && (
-          <Box marginTop={1}>
-            <Text color="red">{error}</Text>
-          </Box>
-        )}
-      </Box>
-    </>
-  );
-}
-
-// Step 5: Confirmation
+// Step 4: Confirmation (was step 5)
 function StepConfirmation({
   videoId,
   url,
@@ -922,7 +908,7 @@ function StepConfirmation({
           Confirmation
         </Text>
         <Text color="gray" dimColor>
-          Step 6/6
+          Step 5/5
         </Text>
       </Box>
       <Box paddingX={1} height={1}>
