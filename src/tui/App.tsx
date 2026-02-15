@@ -404,7 +404,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         : process.platform === "darwin"
           ? "open"
           : "xdg-open";
-      execa(program, [url], { detached: true, cleanup: false }).catch(() => {});
+      execa(program, [url], { stdio: "ignore", detached: true, cleanup: false }).catch(() => {});
       setAddMessage({ text: `Opening: ${url}`, color: "green" });
       return;
     }
@@ -497,7 +497,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         const job = getJobAtVirtualIndex(selectedJobIndexRef.current);
         if (job && job.status === "Finished" && job.filename) {
           const config = ConfigManager.getInstance().get();
-          const outputDir = config.downloader?.output_directory || "./output";
+          const outputDir = job.outputDirectory || config.downloader?.output_directory || "./output";
           const filePath = path.resolve(path.join(outputDir, job.filename));
           const folderPath = path.dirname(filePath);
           const program = process.platform === "win32"
@@ -505,7 +505,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
             : process.platform === "darwin"
               ? "open"
               : "xdg-open";
-          execa(program, [folderPath], { detached: true, cleanup: false }).catch(() => {});
+          execa(program, [folderPath], { stdio: "ignore", detached: true, cleanup: false }).catch(() => {});
           setAddMessage({ text: `Opening: ${folderPath}`, color: "green" });
         } else {
           setAddMessage({ text: "Can only open folder for finished jobs", color: "yellow" });
