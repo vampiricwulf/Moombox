@@ -11,7 +11,7 @@ import { ChatDownloader, ChatApi } from "../../engine/chat/index.js";
 import type { VideoInfo } from "../../types/youtube.js";
 import type { ChatProgress } from "../../types/chat.js";
 import { PROGRESS_UPDATE_INTERVAL_MS } from "../../constants.js";
-import { formatSpeed } from "./formatUtils.js";
+import { formatSpeed } from "../../utils/timeFormat.js";
 import { SmoothValue } from "../../utils/SmoothValue.js";
 
 /**

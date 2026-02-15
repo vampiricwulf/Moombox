@@ -17,7 +17,7 @@ import {
   USER_AGENTS,
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
-import { formatBytes } from "./formatUtils.js";
+import { formatBytes } from "../../utils/timeFormat.js";
 import { downloadFile } from "./muxFinalize.js";
 
 /**

@@ -18,7 +18,7 @@ import {
   USER_AGENTS,
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
-import { formatElapsed, formatBytes } from "./formatUtils.js";
+import { formatElapsed, formatBytes } from "../../utils/timeFormat.js";
 
 /**
  * Extract video metadata using ffprobe

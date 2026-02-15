@@ -9,6 +9,40 @@ import { ConfigManager } from "../../core/config.js";
 import type { Format } from "../../types/youtube.js";
 
 /**
+ * Codec priority (higher = better)
+ */
+const CODEC_PRIORITY = {
+  video: [
+    /^vp9\.2/,      // VP9 Profile 2 (HDR)
+    /^vp9/,         // VP9
+    /^av01/,        // AV1
+    /^avc1/,        // H.264/AVC
+    /^h264/,        // H.264 (alternate)
+  ],
+  audio: [
+    /^opus/,        // Opus (best quality/compression)
+    /^mp4a\.40\.5/, // AAC-HE
+    /^mp4a\.40\.2/, // AAC-LC
+    /^mp4a/,        // AAC (generic)
+  ],
+} as const;
+
+/**
+ * Score a codec based on priority list (higher = better)
+ */
+function scoreCodec(codec: string | undefined, type: "video" | "audio"): number {
+  if (!codec) return 0;
+
+  const priorities = CODEC_PRIORITY[type];
+  for (let i = 0; i < priorities.length; i++) {
+    if (priorities[i].test(codec)) {
+      return priorities.length - i;
+    }
+  }
+  return 0;
+}
+
+/**
  * Selected formats for download
  */
 export interface SelectedFormats {
@@ -148,8 +182,16 @@ export class FormatSelector {
             continue;
           }
 
-          // Same fps — prefer LOWER bitrate (better compression for same quality)
-          // Lower bitrate at same resolution/fps indicates better encoding (VP9, AV1, etc.)
+          // Same fps — prefer better codec
+          const fCodecScore = scoreCodec(f.mimeType, "video");
+          const bestCodecScore = scoreCodec(bestVideo.mimeType, "video");
+
+          if (fCodecScore !== bestCodecScore) {
+            if (fCodecScore > bestCodecScore) bestVideo = f;
+            continue;
+          }
+
+          // Same codec — prefer LOWER bitrate (better compression)
           if (f.bitrate < bestVideo.bitrate) {
             bestVideo = f;
           } else if (f.bitrate === bestVideo.bitrate) {
@@ -163,11 +205,28 @@ export class FormatSelector {
         // Only consider formats with URLs
         if (!f.url) continue;
 
-        // Prefer higher bitrate audio, with authLevel as tiebreaker
-        if (!bestAudio || f.bitrate > bestAudio.bitrate) {
+        // Prefer better codec first
+        if (!bestAudio) {
           bestAudio = f;
-        } else if (f.bitrate === bestAudio.bitrate && (f.authLevel ?? 999) < (bestAudio.authLevel ?? 999)) {
+          continue;
+        }
+
+        const fCodecScore = scoreCodec(f.mimeType, "audio");
+        const bestCodecScore = scoreCodec(bestAudio.mimeType, "audio");
+
+        if (fCodecScore !== bestCodecScore) {
+          if (fCodecScore > bestCodecScore) bestAudio = f;
+          continue;
+        }
+
+        // Same codec — prefer higher bitrate
+        if (f.bitrate > bestAudio.bitrate) {
           bestAudio = f;
+        } else if (f.bitrate === bestAudio.bitrate) {
+          // Same bitrate — prefer lower auth level
+          if ((f.authLevel ?? 999) < (bestAudio.authLevel ?? 999)) {
+            bestAudio = f;
+          }
         }
       }
     }

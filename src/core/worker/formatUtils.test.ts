@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatBytes, formatElapsed, formatSpeed } from "./formatUtils.js";
+import { formatBytes, formatElapsed, formatSpeed } from "../../utils/timeFormat.js";
 
 describe("formatBytes", () => {
   it("should format bytes", () => {
