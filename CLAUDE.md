@@ -186,7 +186,7 @@ When running in an interactive terminal, Moombox displays a full-screen TUI buil
 | Tab | Switch focus between Tasks/Details/Logs |
 | ↑/↓ | Navigate tasks or scroll logs |
 | Enter | Expand/collapse archived jobs (on divider row) |
-| A | Open Add Video dialog (Enter = quick add, Shift+Enter = advanced options) |
+| A | Open Add Video dialog (Tab to navigate, ←/→ to toggle advanced) |
 | C | Cancel selected job |
 | R | Retry failed job |
 | D | Delete job (press twice to confirm) |
@@ -199,7 +199,8 @@ When running in an interactive terminal, Moombox displays a full-screen TUI buil
 ### TUI Add Video Dialog
 
 Press **A** to open the Add Video dialog:
-- Press **'A' key** to toggle advanced options checkbox
+- Press **Tab** to navigate between URL input and advanced options checkbox
+- Press **←/→ arrows** or **Space** to toggle advanced options when focused on checkbox
 - **[✓] Advanced** - Shows 6-step wizard (format + timestamp selection)
 - **[ ] Quick add** - Immediate submission with auto settings (best quality)
 
@@ -213,7 +214,8 @@ Press **A** to open the Add Video dialog:
 
 **Navigation:**
 - **Esc** - Go back one step or cancel
-- **A** - Toggle advanced options checkbox (step 0 only)
+- **Tab** - Switch focus between URL input and checkbox (step 0 only)
+- **←/→ / Space** - Toggle checkbox when focused on it
 - **↑/↓** - Scroll format lists (when >10 formats)
 - **Ctrl+V / Right-click** - Paste from clipboard
 - **Numbers (1-9)** - Quick select format by number

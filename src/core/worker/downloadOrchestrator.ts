@@ -167,6 +167,8 @@ export class DownloadOrchestrator {
     let videoDl: SegmentDownloader | null = null;
     let audioDl: SegmentDownloader | null = null;
     let segmentRange: SegmentRange | null = null;
+    let selectedVideoFormat: any = null;
+    let selectedAudioFormat: any = null;
 
     // Use pre-started chat downloader from upcoming phase, or create a new one
     if (config.downloader.download_chat !== false) {
@@ -225,6 +227,10 @@ export class DownloadOrchestrator {
       // Check abort immediately after download — avoid false 100% and chat timeout wait
       if (signal?.aborted) return;
 
+      // Capture selected formats for trim bitrate info
+      selectedVideoFormat = vodResult.selectedVideoFormat;
+      selectedAudioFormat = vodResult.selectedAudioFormat;
+
       if (vodResult.hasVideo) {
         videoPath = path.join(stagingDir, "video_stream");
         audioPath = vodResult.hasAudio ? path.join(stagingDir, "audio_stream") : null;
@@ -271,6 +277,8 @@ export class DownloadOrchestrator {
       videoPath = result.videoPath;
       audioPath = result.audioPath;
       segmentRange = result.segmentRange;
+      selectedVideoFormat = result.selectedVideoFormat;
+      selectedAudioFormat = result.selectedAudioFormat;
     } else if (videoInfo.hlsManifestUrl) {
       // HLS: Fallback for some streams
       const result = await downloadHls(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders);
@@ -291,6 +299,10 @@ export class DownloadOrchestrator {
 
       // Check abort immediately after download
       if (signal?.aborted) return;
+
+      // Capture selected formats for trim bitrate info
+      selectedVideoFormat = vodResult2.selectedVideoFormat;
+      selectedAudioFormat = vodResult2.selectedAudioFormat;
 
       videoPath = path.join(stagingDir, "video_stream");
       audioPath = vodResult2.hasAudio ? path.join(stagingDir, "audio_stream") : null;
@@ -388,9 +400,9 @@ export class DownloadOrchestrator {
       trimOptions = {
         trimStartOffset: segmentRange.trimStartOffset || undefined,
         trimDuration: segmentRange.trimDuration || undefined,
-        // TODO: Extract bitrate from selected formats for precise trim
-        // videoBitrate: selectedVideoFormat?.bitrate / 1000,
-        // audioBitrate: selectedAudioFormat?.bitrate / 1000,
+        // Extract bitrate from selected formats for precise trim (convert bps to kbps)
+        videoBitrate: selectedVideoFormat?.bitrate ? Math.round(selectedVideoFormat.bitrate / 1000) : undefined,
+        audioBitrate: selectedAudioFormat?.bitrate ? Math.round(selectedAudioFormat.bitrate / 1000) : undefined,
         usePreciseTrim: true, // Enable by default for trim accuracy
       };
     } else if (job.startTime != null || job.endTime != null) {
@@ -400,6 +412,9 @@ export class DownloadOrchestrator {
         trimDuration: (job.endTime != null && job.endTime > 0)
           ? job.endTime - (job.startTime || 0)
           : undefined,
+        // Extract bitrate from selected formats for precise trim (convert bps to kbps)
+        videoBitrate: selectedVideoFormat?.bitrate ? Math.round(selectedVideoFormat.bitrate / 1000) : undefined,
+        audioBitrate: selectedAudioFormat?.bitrate ? Math.round(selectedAudioFormat.bitrate / 1000) : undefined,
         usePreciseTrim: true, // Enable by default for trim accuracy
       };
     }

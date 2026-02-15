@@ -2,7 +2,7 @@
  * Multi-step wizard dialog for adding videos with advanced options.
  *
  * Flow:
- * 1. Enter URL/ID (Enter = quick add, Shift+Enter = advanced options)
+ * 1. Enter URL/ID (Tab to toggle advanced checkbox, Enter = proceed)
  * 2. (Advanced) Select video format (numbered list, 'a' = auto, 'n' = none)
  * 3. (Advanced) Select audio format
  * 4. (Advanced) Start time (HH:MM:SS, MM:SS, or seconds)
@@ -73,6 +73,7 @@ export function AddVideoDialog({
   const [url, setUrl] = useState("");
   const [advancedMode, setAdvancedMode] = useState(false);
   const [advancedEnabled, setAdvancedEnabled] = useState(false); // Checkbox state in step 0
+  const [checkboxFocused, setCheckboxFocused] = useState(false); // Focus state for checkbox navigation
   const [formats, setFormats] = useState<FormatsData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -226,10 +227,26 @@ export function AddVideoDialog({
 
     // Step 0: Enter URL/ID
     if (step === 0) {
-      // Toggle advanced options with 'A' key
-      if (char === "a" || char === "A") {
-        setAdvancedEnabled((prev) => !prev);
+      // Tab: toggle focus between URL input and checkbox
+      if (key.tab) {
+        setCheckboxFocused((prev) => !prev);
         return;
+      }
+
+      // When checkbox is focused: left/right arrow to toggle
+      if (checkboxFocused) {
+        if (key.leftArrow || key.rightArrow) {
+          setAdvancedEnabled((prev) => !prev);
+          return;
+        }
+        // Space also toggles when focused
+        if (char === " ") {
+          setAdvancedEnabled((prev) => !prev);
+          return;
+        }
+        // Any other key: switch back to URL input
+        setCheckboxFocused(false);
+        // Fall through to handle the key as URL input
       }
 
       if (key.return) {
@@ -496,7 +513,7 @@ export function AddVideoDialog({
             )}
           </Box>
 
-          {step === 0 && <StepUrl input={input} error={error} advancedEnabled={advancedEnabled} />}
+          {step === 0 && <StepUrl input={input} error={error} advancedEnabled={advancedEnabled} checkboxFocused={checkboxFocused} />}
           {step === 1 && (
             <StepVideoFormat
               formats={formats}
@@ -534,7 +551,7 @@ export function AddVideoDialog({
           <Box paddingX={1} height={1} justifyContent="space-between">
             <Text color="gray">{step > 0 ? "Esc: Back" : "Esc: Cancel"}</Text>
             {step === 0 && (
-              <Text color="gray">A: Toggle Advanced | Enter: Continue</Text>
+              <Text color="gray">Tab: Navigate | ←/→: Toggle | Enter: Continue</Text>
             )}
             {step > 0 && step < 5 && <Text color="gray">Enter: Skip (auto)</Text>}
             {step === 5 && <Text color="cyan" bold>Enter: Submit</Text>}
@@ -549,11 +566,13 @@ export function AddVideoDialog({
 function StepUrl({
   input,
   error,
-  advancedEnabled
+  advancedEnabled,
+  checkboxFocused
 }: {
   input: string;
   error: string | null;
   advancedEnabled: boolean;
+  checkboxFocused: boolean;
 }): React.ReactElement {
   return (
     <>
@@ -567,15 +586,15 @@ function StepUrl({
       </Box>
       <Box flexDirection="column" paddingX={1} flexGrow={1}>
         <Box marginBottom={1}>
-          <Text color="cyan">&gt; URL/ID: </Text>
+          <Text color={checkboxFocused ? "gray" : "cyan"}>&gt; URL/ID: </Text>
           <Text>{input}</Text>
-          <Text color="cyan">_</Text>
+          {!checkboxFocused && <Text color="cyan">_</Text>}
         </Box>
         <Box marginBottom={1} marginTop={1}>
-          <Text color={advancedEnabled ? "cyan" : "gray"}>
-            [{advancedEnabled ? "✓" : " "}] Advanced Options
+          <Text color={checkboxFocused ? "cyan" : "gray"}>
+            {checkboxFocused ? ">" : " "} [{advancedEnabled ? "✓" : " "}] Advanced Options
           </Text>
-          <Text color="gray" dimColor> (press 'A' to toggle)</Text>
+          {checkboxFocused && <Text color="cyan">_</Text>}
         </Box>
         <Box marginBottom={1}>
           {advancedEnabled ? (

@@ -32,7 +32,12 @@ export async function downloadVod(
   activeSegmentDownloaders: Set<SegmentDownloader>,
   chatDl?: ChatDownloader | null,
   signal?: AbortSignal,
-): Promise<{ hasAudio: boolean; hasVideo: boolean }> {
+): Promise<{
+  hasAudio: boolean;
+  hasVideo: boolean;
+  selectedVideoFormat?: import("../../types/youtube.js").Format | null;
+  selectedAudioFormat?: import("../../types/youtube.js").Format | null;
+}> {
   const logger = Logger.getInstance();
 
   logger.info(
@@ -152,7 +157,12 @@ export async function downloadVod(
   await Promise.all(downloadPromises);
   if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
   logger.info("[DownloadOrchestrator] Parallel download complete");
-  return { hasAudio: !isProgressive && !!audioPath, hasVideo: !!videoPath };
+  return {
+    hasAudio: !isProgressive && !!audioPath,
+    hasVideo: !!videoPath,
+    selectedVideoFormat: bestVideo,
+    selectedAudioFormat: bestAudio,
+  };
 }
 
 /**
@@ -171,6 +181,8 @@ export async function downloadDash(
   videoPath: string;
   audioPath: string;
   segmentRange: SegmentRange | null;
+  selectedVideoFormat?: any;
+  selectedAudioFormat?: any;
 }> {
   const logger = Logger.getInstance();
   logger.info("[DownloadOrchestrator] Fetching DASH Manifest...");
@@ -387,7 +399,15 @@ export async function downloadDash(
     "[DownloadOrchestrator] Starting Parallel DASH Download...",
   );
 
-  return { videoDl, audioDl, videoPath, audioPath, segmentRange };
+  return {
+    videoDl,
+    audioDl,
+    videoPath,
+    audioPath,
+    segmentRange,
+    selectedVideoFormat: bestVideo,
+    selectedAudioFormat: bestAudio,
+  };
 }
 
 /**
