@@ -400,7 +400,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       const port = process.env.MOOMBOX_PORT || String(ConfigManager.getInstance().get().port || 774);
       const url = `http://localhost:${port}`;
       const [prog, args] = process.platform === "win32"
-        ? ["cmd", ["/c", "start", '""', url]]
+        ? ["explorer.exe", [url]]
         : [process.platform === "darwin" ? "open" : "xdg-open", [url]];
       spawn(prog, args, { stdio: "ignore", detached: true }).unref();
       setAddMessage({ text: `Opening: ${url}`, color: "green" });
@@ -499,7 +499,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
           const filePath = path.resolve(path.join(outputDir, job.filename));
           const folderPath = path.dirname(filePath);
           const [prog, args] = process.platform === "win32"
-            ? ["cmd", ["/c", "start", '""', folderPath] as string[]]
+            ? ["explorer.exe", [folderPath]]
             : [process.platform === "darwin" ? "open" : "xdg-open", [folderPath]];
           spawn(prog, args, { stdio: "ignore", detached: true }).unref();
           setAddMessage({ text: `Opening: ${folderPath}`, color: "green" });

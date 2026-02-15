@@ -522,9 +522,9 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     }
     const folderPath = path.dirname(filePath);
 
-    // Fire and forget — use spawn directly (execa's arg escaping breaks Windows shell builtins)
+    // Fire and forget — spawn passes path as direct arg (no shell metachar issues)
     const [program, args] = process.platform === "win32"
-      ? ["cmd", ["/c", "start", '""', folderPath]]
+      ? ["explorer.exe", [folderPath]]
       : [process.platform === "darwin" ? "open" : "xdg-open", [folderPath]];
     spawn(program, args, { stdio: "ignore", detached: true }).unref();
     res.json({ success: true });

@@ -666,9 +666,9 @@ export class WebServer {
   }
 
   private openBrowser(url: string) {
-    // Use spawn directly — execa's arg escaping breaks Windows shell builtins
+    // spawn passes args directly to the OS — no shell metachar issues
     const [prog, args] = process.platform === "win32"
-      ? ["cmd", ["/c", "start", '""', url]]
+      ? ["explorer.exe", [url]]
       : [process.platform === "darwin" ? "open" : "xdg-open", [url]];
     spawn(prog, args, { stdio: "ignore", detached: true }).unref();
   }
