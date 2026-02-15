@@ -222,40 +222,41 @@ export class SegmentDownloader extends EventEmitter {
   }
 
   private async runDashLoop() {
-    let saveCounter = 0;
-    let progressCounter = 0;
-    let consecutiveGoneErrors = 0;
-    let hasStartedDownloading = false;
-    let headSeq: number | null = null;
-    let lastHeadProbeTime = 0;
-    let sameHeadRetryDelay = 0; // seconds, increments by 1 each retry at stale head
-    let lastConfirmedHead: number | null = null;
-    let sameSegRetries = 0; // consecutive failures on the exact same segment
-    let lastRetrySeq = -1;
-    const HEAD_PROBE_INTERVAL_MS = 5000; // Re-probe head every 5 seconds
-    const CATCHUP_PROGRESS_INTERVAL = 10; // Emit progress every N segments when catching up
+    const HEAD_PROBE_INTERVAL_MS = 5000;
+    const CATCHUP_PROGRESS_INTERVAL = 10;
 
-    // For live streams, probe for the head sequence to know how far we need to catch up
-    headSeq = await this.probeHeadSequence();
-    lastHeadProbeTime = Date.now();
-    if (headSeq !== null) {
-      const segmentsBehind = headSeq - this.currentSeq;
+    const state = {
+      saveCounter: 0,
+      progressCounter: 0,
+      consecutiveGoneErrors: 0,
+      hasStartedDownloading: false,
+      headSeq: null as number | null,
+      lastHeadProbeTime: 0,
+      sameHeadRetryDelay: 0,
+      lastConfirmedHead: null as number | null,
+      sameSegRetries: 0,
+      lastRetrySeq: -1,
+    };
+
+    // Initial head probe and catch-up
+    state.headSeq = await this.probeHeadSequence();
+    state.lastHeadProbeTime = Date.now();
+    if (state.headSeq !== null) {
+      const segmentsBehind = state.headSeq - this.currentSeq;
       this.logger.debug(
-        `[Downloader] Head sequence: ${headSeq}, starting from: ${this.currentSeq} (${segmentsBehind} segments to catch up)`,
+        `[Downloader] Head sequence: ${state.headSeq}, starting from: ${this.currentSeq} (${segmentsBehind} segments to catch up)`,
       );
 
-      // If significantly behind, use parallel catch-up
       if (segmentsBehind >= SegmentDownloader.CATCHUP_THRESHOLD) {
-        this.currentSeq = await this.runParallelCatchUp(headSeq);
-        hasStartedDownloading = true;
-        // Re-probe head after catch-up
-        headSeq = await this.probeHeadSequence();
-        lastHeadProbeTime = Date.now();
+        this.currentSeq = await this.runParallelCatchUp(state.headSeq);
+        state.hasStartedDownloading = true;
+        state.headSeq = await this.probeHeadSequence();
+        state.lastHeadProbeTime = Date.now();
       }
     }
 
     while (this.running && !this.cancelFlag && !this.streamEnded) {
-      // Check if we've reached the end sequence (timestamp selection)
+      // Check if reached end sequence
       if (this.options.endSeq != null && this.currentSeq > this.options.endSeq) {
         this.logger.info(
           `[Downloader] Reached end sequence ${this.options.endSeq}, stopping`,
@@ -263,182 +264,34 @@ export class SegmentDownloader extends EventEmitter {
         break;
       }
 
-      // Check if we've fallen behind and need parallel catch-up
-      if (headSeq !== null) {
-        const segmentsBehind = headSeq - this.currentSeq;
-        if (segmentsBehind >= SegmentDownloader.CATCHUP_THRESHOLD) {
-          this.currentSeq = await this.runParallelCatchUp(headSeq);
-          headSeq = await this.probeHeadSequence();
-          lastHeadProbeTime = Date.now();
-          // Only re-enter parallel immediately if catch-up fully completed.
-          // If it stopped short (gap from a stuck segment), fall through to
-          // sequential retry which has much better retry logic (infinite retries,
-          // escalating backoff, stream status checks).
-          const stillFarBehind = headSeq !== null
-            && (headSeq - this.currentSeq >= SegmentDownloader.CATCHUP_THRESHOLD);
-          if (!stillFarBehind) continue;
-          // Fall through to sequential download of the stuck segment
-        }
-      }
+      // Check and handle fall-behind
+      const shouldContinue = await this.checkAndHandleFallBehind(state);
+      if (shouldContinue) continue;
 
       try {
         const success = await this.downloadSegment(this.currentSeq);
         if (success) {
-          hasStartedDownloading = true;
-          consecutiveGoneErrors = 0;
-          sameHeadRetryDelay = 0;
-          sameSegRetries = 0;
-          this.currentSeq++;
-
-          // Check if we're catching up (behind the head)
-          const isCatchingUp = headSeq !== null && this.currentSeq < headSeq;
-
-          // Only probe head when NOT catching up (to avoid network overhead during catch-up)
-          // When catching up, we already know we're behind - just download as fast as possible
-          const now = Date.now();
-          if (!isCatchingUp && now - lastHeadProbeTime >= HEAD_PROBE_INTERVAL_MS) {
-            const newHead = await this.probeHeadSequence();
-            lastHeadProbeTime = now;
-            if (newHead !== null) {
-              headSeq = newHead;
-            }
-          }
-
-          // Recalculate after potential probe
-          const stillCatchingUp = headSeq !== null && this.currentSeq < headSeq;
-
-          // Emit progress - less frequently when catching up to minimize overhead
-          progressCounter++;
-          if (!stillCatchingUp || progressCounter >= CATCHUP_PROGRESS_INTERVAL) {
-            const reportedHead = headSeq !== null ? Math.max(headSeq, this.currentSeq) : null;
-            this.emit("progress", {
-              seq: this.currentSeq,
-              bytes: this.bytesWritten,
-              headSeq: reportedHead,
-              total: reportedHead,
-              catchingUp: stillCatchingUp,
-            });
-            progressCounter = 0;
-          }
-
-          // Save resume state less frequently when catching up
-          saveCounter++;
-          const saveInterval = stillCatchingUp ? 50 : 10;
-          if (saveCounter >= saveInterval) {
-            await this.saveResumeState();
-            saveCounter = 0;
-          }
-
-          // When catching up, download as fast as possible (no delay)
-          // When live, the 404 handler will add appropriate delay
+          await this.handleSuccessfulSegmentDownload(
+            state,
+            HEAD_PROBE_INTERVAL_MS,
+            CATCHUP_PROGRESS_INTERVAL,
+          );
         } else {
-          // Segment download failed (404, 500, 503, 204, etc.)
-          // Track consecutive failures on the same segment
-          if (this.currentSeq === lastRetrySeq) {
-            sameSegRetries++;
-          } else {
-            sameSegRetries = 1;
-            lastRetrySeq = this.currentSeq;
-          }
-
-          // Re-probe head sequence to check if we're actually behind
-          const newHead = await this.probeHeadSequence();
-          lastHeadProbeTime = Date.now();
-          if (newHead !== null) {
-            headSeq = newHead;
-          }
-
-          const behindHead = headSeq !== null && this.currentSeq < headSeq;
-          const stuckOnSegment = sameSegRetries >= 10;
-
-          if (behindHead && !stuckOnSegment) {
-            // Behind head and not stuck — transient failure, retry with small delay
-            await this.cancellableDelay(1000);
-          } else {
-            // At/past live edge, or stuck on same segment — backoff with status checks
-            if (stuckOnSegment && behindHead) {
-              this.logger.info(
-                `[Downloader] Segment ${this.currentSeq} failed ${sameSegRetries} times while behind head ${headSeq} — entering backoff`,
-              );
-            }
-
-            // Check if head changed since last retry cycle
-            if (headSeq !== null && headSeq !== lastConfirmedHead) {
-              // Head moved — reset backoff
-              lastConfirmedHead = headSeq;
-              sameHeadRetryDelay = 0;
-            }
-
-            const delayCap = this.options.retryDelayCap ?? 60;
-            const liveCheckThreshold = this.options.liveCheckRetries ?? 16;
-            sameHeadRetryDelay = Math.min(sameHeadRetryDelay + 1, delayCap);
-
-            // At threshold, check stream status via API
-            if (sameHeadRetryDelay === liveCheckThreshold
-                && this.options.onCheckStreamStatus) {
-              this.logger.info(
-                `[Downloader] Checking stream status at ${sameHeadRetryDelay}s backoff...`,
-              );
-              const ended = await this.options.onCheckStreamStatus();
-              if (ended) {
-                this.logger.info(`[Downloader] Stream confirmed ended at ${sameHeadRetryDelay}s backoff`);
-                break;
-              }
-            }
-
-            // At cap, check status on every probe
-            if (sameHeadRetryDelay >= delayCap && this.options.onCheckStreamStatus) {
-              this.logger.info(
-                `[Downloader] Checking stream status during ${delayCap}s polling...`,
-              );
-              const ended = await this.options.onCheckStreamStatus();
-              if (ended) {
-                this.logger.info(`[Downloader] Stream confirmed ended during ${delayCap}s polling`);
-                break;
-              }
-            }
-
-            await this.cancellableDelay(sameHeadRetryDelay * 1000);
-          }
+          const ended = await this.handleFailedSegmentDownload(state);
+          if (ended) break;
         }
       } catch (e: any) {
         if (e.message === "CANCELLED") break;
         if (e.message === "GONE") {
-          consecutiveGoneErrors++;
-
-          // If we were downloading and now get consecutive gone errors, stream ended
-          if (hasStartedDownloading && consecutiveGoneErrors > 10) {
-            this.logger.debug(
-              `[Downloader] Stream ended after ${consecutiveGoneErrors} consecutive 403/410 errors`,
-            );
-            await this.saveResumeState();
-            this.streamEnded = true;
-            break;
+          const ended = await this.handleGoneErrors(state);
+          if (ended) break;
+          if (state.consecutiveGoneErrors <= 20 && !state.hasStartedDownloading) {
+            continue; // Skip to next segment
           }
-
-          // For 403/410 before we've started, could be expired segments at the start
-          // Try next segment but don't skip too many
-          if (!hasStartedDownloading && consecutiveGoneErrors <= 20) {
-            this.logger.debug(
-              `[Downloader] Segment ${this.currentSeq} unavailable (403/410), trying next...`,
-            );
-            this.currentSeq++;
-            await this.cancellableDelay(100);
-            continue;
+          if (state.consecutiveGoneErrors > 20 && !state.hasStartedDownloading) {
+            break; // Failed to find valid starting segment
           }
-
-          // Too many errors without success
-          if (!hasStartedDownloading && consecutiveGoneErrors > 20) {
-            this.logger.error(
-              `[Downloader] Failed to find valid starting segment after ${consecutiveGoneErrors} attempts`,
-            );
-            this.streamEnded = true;
-            break;
-          }
-
-          // Single error while downloading - retry same segment
-          await this.cancellableDelay(500);
-          continue;
+          continue; // Retry same segment
         }
         this.logger.error(
           `[Downloader] Error downloading seq ${this.currentSeq}: ${e.message}`,
@@ -447,8 +300,215 @@ export class SegmentDownloader extends EventEmitter {
       }
     }
 
-    // Save final state
     await this.saveResumeState();
+  }
+
+  /**
+   * Check if we've fallen behind and trigger parallel catch-up if needed.
+   * Returns true if the caller should continue (skip rest of loop iteration).
+   */
+  private async checkAndHandleFallBehind(state: {
+    headSeq: number | null;
+    lastHeadProbeTime: number;
+  }): Promise<boolean> {
+    if (state.headSeq !== null) {
+      const segmentsBehind = state.headSeq - this.currentSeq;
+      if (segmentsBehind >= SegmentDownloader.CATCHUP_THRESHOLD) {
+        this.currentSeq = await this.runParallelCatchUp(state.headSeq);
+        state.headSeq = await this.probeHeadSequence();
+        state.lastHeadProbeTime = Date.now();
+
+        // Only re-enter parallel if catch-up fully completed
+        const stillFarBehind = state.headSeq !== null
+          && (state.headSeq - this.currentSeq >= SegmentDownloader.CATCHUP_THRESHOLD);
+        if (!stillFarBehind) return true; // Continue loop
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Handle successful segment download: update state, probe head, emit progress, save resume state.
+   */
+  private async handleSuccessfulSegmentDownload(
+    state: {
+      hasStartedDownloading: boolean;
+      consecutiveGoneErrors: number;
+      sameHeadRetryDelay: number;
+      sameSegRetries: number;
+      headSeq: number | null;
+      lastHeadProbeTime: number;
+      progressCounter: number;
+      saveCounter: number;
+    },
+    HEAD_PROBE_INTERVAL_MS: number,
+    CATCHUP_PROGRESS_INTERVAL: number,
+  ): Promise<void> {
+    state.hasStartedDownloading = true;
+    state.consecutiveGoneErrors = 0;
+    state.sameHeadRetryDelay = 0;
+    state.sameSegRetries = 0;
+    this.currentSeq++;
+
+    const isCatchingUp = state.headSeq !== null && this.currentSeq < state.headSeq;
+
+    // Probe head when not catching up
+    const now = Date.now();
+    if (!isCatchingUp && now - state.lastHeadProbeTime >= HEAD_PROBE_INTERVAL_MS) {
+      const newHead = await this.probeHeadSequence();
+      state.lastHeadProbeTime = now;
+      if (newHead !== null) {
+        state.headSeq = newHead;
+      }
+    }
+
+    const stillCatchingUp = state.headSeq !== null && this.currentSeq < state.headSeq;
+
+    // Emit progress (less frequently when catching up)
+    state.progressCounter++;
+    if (!stillCatchingUp || state.progressCounter >= CATCHUP_PROGRESS_INTERVAL) {
+      const reportedHead = state.headSeq !== null ? Math.max(state.headSeq, this.currentSeq) : null;
+      this.emit("progress", {
+        seq: this.currentSeq,
+        bytes: this.bytesWritten,
+        headSeq: reportedHead,
+        total: reportedHead,
+        catchingUp: stillCatchingUp,
+      });
+      state.progressCounter = 0;
+    }
+
+    // Save resume state (less frequently when catching up)
+    state.saveCounter++;
+    const saveInterval = stillCatchingUp ? 50 : 10;
+    if (state.saveCounter >= saveInterval) {
+      await this.saveResumeState();
+      state.saveCounter = 0;
+    }
+  }
+
+  /**
+   * Handle failed segment download with backoff and stream status checks.
+   * Returns true if stream has ended.
+   */
+  private async handleFailedSegmentDownload(state: {
+    sameSegRetries: number;
+    lastRetrySeq: number;
+    headSeq: number | null;
+    lastHeadProbeTime: number;
+    lastConfirmedHead: number | null;
+    sameHeadRetryDelay: number;
+  }): Promise<boolean> {
+    // Track consecutive failures on same segment
+    if (this.currentSeq === state.lastRetrySeq) {
+      state.sameSegRetries++;
+    } else {
+      state.sameSegRetries = 1;
+      state.lastRetrySeq = this.currentSeq;
+    }
+
+    // Re-probe head
+    const newHead = await this.probeHeadSequence();
+    state.lastHeadProbeTime = Date.now();
+    if (newHead !== null) {
+      state.headSeq = newHead;
+    }
+
+    const behindHead = state.headSeq !== null && this.currentSeq < state.headSeq;
+    const stuckOnSegment = state.sameSegRetries >= 10;
+
+    if (behindHead && !stuckOnSegment) {
+      // Transient failure - retry with small delay
+      await this.cancellableDelay(1000);
+      return false;
+    }
+
+    // At/past live edge or stuck - backoff with status checks
+    if (stuckOnSegment && behindHead) {
+      this.logger.info(
+        `[Downloader] Segment ${this.currentSeq} failed ${state.sameSegRetries} times while behind head ${state.headSeq} — entering backoff`,
+      );
+    }
+
+    // Reset backoff if head moved
+    if (state.headSeq !== null && state.headSeq !== state.lastConfirmedHead) {
+      state.lastConfirmedHead = state.headSeq;
+      state.sameHeadRetryDelay = 0;
+    }
+
+    const delayCap = this.options.retryDelayCap ?? 60;
+    const liveCheckThreshold = this.options.liveCheckRetries ?? 16;
+    state.sameHeadRetryDelay = Math.min(state.sameHeadRetryDelay + 1, delayCap);
+
+    // Check stream status at threshold
+    if (state.sameHeadRetryDelay === liveCheckThreshold && this.options.onCheckStreamStatus) {
+      this.logger.info(
+        `[Downloader] Checking stream status at ${state.sameHeadRetryDelay}s backoff...`,
+      );
+      const ended = await this.options.onCheckStreamStatus();
+      if (ended) {
+        this.logger.info(`[Downloader] Stream confirmed ended at ${state.sameHeadRetryDelay}s backoff`);
+        return true;
+      }
+    }
+
+    // Check status on every probe at cap
+    if (state.sameHeadRetryDelay >= delayCap && this.options.onCheckStreamStatus) {
+      this.logger.info(
+        `[Downloader] Checking stream status during ${delayCap}s polling...`,
+      );
+      const ended = await this.options.onCheckStreamStatus();
+      if (ended) {
+        this.logger.info(`[Downloader] Stream confirmed ended during ${delayCap}s polling`);
+        return true;
+      }
+    }
+
+    await this.cancellableDelay(state.sameHeadRetryDelay * 1000);
+    return false;
+  }
+
+  /**
+   * Handle 403/410 GONE errors. Returns true if stream has ended.
+   */
+  private async handleGoneErrors(state: {
+    consecutiveGoneErrors: number;
+    hasStartedDownloading: boolean;
+  }): Promise<boolean> {
+    state.consecutiveGoneErrors++;
+
+    // Stream ended after consecutive errors
+    if (state.hasStartedDownloading && state.consecutiveGoneErrors > 10) {
+      this.logger.debug(
+        `[Downloader] Stream ended after ${state.consecutiveGoneErrors} consecutive 403/410 errors`,
+      );
+      await this.saveResumeState();
+      this.streamEnded = true;
+      return true;
+    }
+
+    // Before started - try next segment (expired segments at start)
+    if (!state.hasStartedDownloading && state.consecutiveGoneErrors <= 20) {
+      this.logger.debug(
+        `[Downloader] Segment ${this.currentSeq} unavailable (403/410), trying next...`,
+      );
+      this.currentSeq++;
+      await this.cancellableDelay(100);
+      return false;
+    }
+
+    // Too many errors without success
+    if (!state.hasStartedDownloading && state.consecutiveGoneErrors > 20) {
+      this.logger.error(
+        `[Downloader] Failed to find valid starting segment after ${state.consecutiveGoneErrors} attempts`,
+      );
+      this.streamEnded = true;
+      return true;
+    }
+
+    // Single error while downloading - retry same segment
+    await this.cancellableDelay(500);
+    return false;
   }
 
   /**
