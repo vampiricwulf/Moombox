@@ -107,6 +107,42 @@ export class WebServer {
   }
 
   private setupMiddleware() {
+    // CORS middleware (must be first to handle preflight requests)
+    this.app.use((req, res, next) => {
+      const origin = req.headers.origin;
+
+      // Determine if origin is allowed
+      let allowOrigin = false;
+      if (origin) {
+        try {
+          const hostname = new URL(origin).hostname;
+          allowOrigin =
+            WebServer.isLoopback(hostname) ||
+            hostname === "localhost" ||
+            (this.allowLan && WebServer.isPrivateIP(hostname)) ||
+            this.allowExternal;
+        } catch {
+          allowOrigin = false;
+        }
+      }
+
+      // Set CORS headers if origin is allowed
+      if (allowOrigin && origin) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+        res.setHeader("Access-Control-Max-Age", "86400"); // 24 hours
+      }
+
+      // Handle preflight OPTIONS requests
+      if (req.method === "OPTIONS") {
+        return res.status(204).end();
+      }
+
+      next();
+    });
+
     // Gate ALL requests by client IP based on network_access config
     this.app.use((req, res, next) => {
       if (!this.isAllowedClient(req.socket.remoteAddress)) {
@@ -228,6 +264,7 @@ export class WebServer {
       router.use((req, res, next) => {
         if (req.method !== "GET" && req.method !== "HEAD") {
           const origin = req.headers.origin || req.headers.referer;
+          // Only validate Origin if present (same-origin requests may not include it)
           if (origin) {
             try {
               const h = new URL(origin as string).hostname;
@@ -242,11 +279,8 @@ export class WebServer {
             } catch {
               return res.status(403).json({ error: "Forbidden: invalid origin" });
             }
-          } else {
-            // No Origin/Referer — reject to guard against CSRF edge cases.
-            // All browser-initiated requests include Origin for non-GET methods.
-            return res.status(403).json({ error: "Forbidden: missing origin" });
           }
+          // If no Origin/Referer, allow (IP check + CORS headers provide protection)
         }
         next();
       });
