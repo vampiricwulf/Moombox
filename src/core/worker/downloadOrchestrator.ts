@@ -207,9 +207,28 @@ export class DownloadOrchestrator {
     // use DASH segment download. The player API format URLs for post-live content may
     // only serve individual segments, so direct range-based download would fail.
     // Regular uploads ("not_a_stream") use efficient direct format download.
+    // EXCEPTION: VODs with timestamp selection should use DASH segments for efficiency
+    // (only download needed segments instead of entire file, like yt-dlp)
+    const hasTimestampSelection = job.startTime != null || job.endTime != null;
     const useDirectVodDownload = isVodDownload && (
-      videoInfo.streamStatus === "not_a_stream" || !videoInfo.dashManifestUrl
+      !hasTimestampSelection &&
+      (videoInfo.streamStatus === "not_a_stream" || !videoInfo.dashManifestUrl)
     );
+
+    // Log which download method is chosen for VODs with timestamps
+    if (hasTimestampSelection && isVodDownload) {
+      if (videoInfo.dashManifestUrl) {
+        this.logger.info(
+          `[DownloadOrchestrator] VOD with timestamp selection: using DASH segments ` +
+          `(${job.startTime || 0}s - ${job.endTime ? job.endTime + "s" : "end"})`
+        );
+      } else {
+        this.logger.warn(
+          `[DownloadOrchestrator] VOD with timestamp selection but no DASH manifest, ` +
+          `falling back to direct download with FFmpeg trim`
+        );
+      }
+    }
 
     if (useDirectVodDownload) {
       // VOD: Use direct format URLs
@@ -286,6 +305,14 @@ export class DownloadOrchestrator {
       videoPath = result.videoPath;
     } else if (videoInfo.formats && videoInfo.formats.length > 0) {
       // Fallback: Direct format download
+      // Log warning if timestamp selection is enabled (less efficient)
+      if (job.startTime != null || job.endTime != null) {
+        this.logger.warn(
+          `[DownloadOrchestrator] Timestamp selection enabled but no DASH manifest available. ` +
+          `Downloading entire file and trimming with FFmpeg (slower than segment download).`
+        );
+      }
+
       // Start chat downloader in background
       let chatFinished2 = false;
       const chatPromise = chatDl

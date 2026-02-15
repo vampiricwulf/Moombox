@@ -99,6 +99,32 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
   rows.push({ type: "field", label: "Video ID", value: job.videoId || job.id });
   rows.push({ type: "field", label: "Status", value: job.status, color: getStatusColor(job.status) });
 
+  // Advanced Options section
+  if (job.selectedVideoItag != null || job.selectedAudioItag != null || job.startTime != null || job.endTime != null) {
+    rows.push({ type: "separator" });
+    rows.push({ type: "header", text: "Advanced Options" });
+
+    if (job.selectedVideoItag != null) {
+      const formatLabel = job.selectedVideoItag === -1 ? "None (audio only)" : `itag ${job.selectedVideoItag}`;
+      rows.push({ type: "field", label: "Video Format", value: formatLabel, color: "magenta" });
+    }
+
+    if (job.selectedAudioItag != null) {
+      const formatLabel = job.selectedAudioItag === -1 ? "None (video only)" : `itag ${job.selectedAudioItag}`;
+      rows.push({ type: "field", label: "Audio Format", value: formatLabel, color: "magenta" });
+    }
+
+    if (job.startTime != null || job.endTime != null) {
+      const startMin = Math.floor((job.startTime || 0) / 60);
+      const startSec = (job.startTime || 0) % 60;
+      const startStr = `${startMin}:${String(startSec).padStart(2, "0")}`;
+      const endStr = job.endTime != null
+        ? `${Math.floor(job.endTime / 60)}:${String(job.endTime % 60).padStart(2, "0")}`
+        : "end";
+      rows.push({ type: "field", label: "Time Range", value: `${startStr} - ${endStr}`, color: "magenta" });
+    }
+  }
+
   rows.push({ type: "separator" });
 
   // Progress section

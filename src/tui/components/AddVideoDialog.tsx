@@ -485,15 +485,15 @@ export function AddVideoDialog({
           width={boxWidth}
           height={boxHeight}
           borderStyle="round"
-          borderColor={advancedEnabled && step === 0 ? "magenta" : "cyan"}
+          borderColor={advancedMode || advancedEnabled ? "magenta" : "cyan"}
         >
           {/* Title */}
           <Box paddingX={1} justifyContent="space-between">
-            <Text color={advancedEnabled && step === 0 ? "magenta" : "cyan"} bold>
-              Add Video {advancedEnabled && step === 0 ? "(Advanced Mode)" : ""}
+            <Text color={advancedMode || advancedEnabled ? "magenta" : "cyan"} bold>
+              Add Video {(advancedMode || advancedEnabled) ? "(Advanced Mode)" : ""}
             </Text>
             {advancedMode && step > 0 && (
-              <Text color="gray">
+              <Text color="magenta">
                 Step {step}/{4}
               </Text>
             )}
@@ -630,11 +630,11 @@ function StepVideoFormat({
   return (
     <>
       <Box paddingX={1} flexDirection="column">
-        <Text color="white" bold>
+        <Text color="magenta" bold>
           Select Video Format
         </Text>
-        <Text color="gray" dimColor>
-          Step 2/6
+        <Text color="magenta" dimColor>
+          Step 2/5
         </Text>
       </Box>
       <Box paddingX={1} height={1}>
@@ -677,11 +677,11 @@ function StepAudioFormat({
   return (
     <>
       <Box paddingX={1} flexDirection="column">
-        <Text color="white" bold>
+        <Text color="magenta" bold>
           Select Audio Format
         </Text>
-        <Text color="gray" dimColor>
-          Step 3/6
+        <Text color="magenta" dimColor>
+          Step 3/5
         </Text>
       </Box>
       <Box paddingX={1} height={1}>
@@ -729,12 +729,12 @@ function FormatList({
   return (
     <>
       <Box marginBottom={1}>
-        <Text color="cyan" bold>
+        <Text color="magenta" bold>
           [a] Auto (best quality)
         </Text>
       </Box>
       <Box marginBottom={1}>
-        <Text color="gray">
+        <Text color="magenta">
           [n] None ({type === "video" ? "audio only" : "video only"})
         </Text>
       </Box>
@@ -759,7 +759,7 @@ function FormatList({
 
           return (
             <Box key={vfmt.itag} marginBottom={1}>
-              <Text color="cyan">[{displayNum}] </Text>
+              <Text color="magenta">[{displayNum}] </Text>
               <Text>
                 {vfmt.width}x{vfmt.height}
                 {fpsStr} {container} {Math.round(vfmt.bitrate / 1000)}kbps
@@ -777,7 +777,7 @@ function FormatList({
 
           return (
             <Box key={afmt.itag} marginBottom={1}>
-              <Text color="cyan">[{displayNum}] </Text>
+              <Text color="magenta">[{displayNum}] </Text>
               <Text>
                 {Math.round(afmt.bitrate / 1000)}kbps{sampleRate} {container}
                 {badge && <Text color="green">{badge}</Text>}
@@ -817,10 +817,10 @@ function StepTimestamps({
   return (
     <>
       <Box paddingX={1} flexDirection="column">
-        <Text color="white" bold>
+        <Text color="magenta" bold>
           Timestamps (Optional)
         </Text>
-        <Text color="gray" dimColor>
+        <Text color="magenta" dimColor>
           Step 4/5
         </Text>
       </Box>
@@ -829,18 +829,18 @@ function StepTimestamps({
       </Box>
       <Box flexDirection="column" paddingX={1} flexGrow={1}>
         <Box marginBottom={1}>
-          <Text color={timeInputFocus === "start" ? "cyan" : "gray"}>
+          <Text color={timeInputFocus === "start" ? "magenta" : "gray"}>
             {timeInputFocus === "start" ? ">" : " "} Start:
           </Text>
           <Text>{startTimeInput}</Text>
-          {timeInputFocus === "start" && <Text color="cyan">_</Text>}
+          {timeInputFocus === "start" && <Text color="magenta">_</Text>}
         </Box>
         <Box marginBottom={1}>
-          <Text color={timeInputFocus === "end" ? "cyan" : "gray"}>
+          <Text color={timeInputFocus === "end" ? "magenta" : "gray"}>
             {timeInputFocus === "end" ? ">" : " "} End:
           </Text>
           <Text>{endTimeInput}</Text>
-          {timeInputFocus === "end" && <Text color="cyan">_</Text>}
+          {timeInputFocus === "end" && <Text color="magenta">_</Text>}
         </Box>
         <Box marginTop={1}>
           <Text color="gray" dimColor>
@@ -904,10 +904,10 @@ function StepConfirmation({
   return (
     <>
       <Box paddingX={1} flexDirection="column">
-        <Text color="white" bold>
+        <Text color="magenta" bold>
           Confirmation
         </Text>
-        <Text color="gray" dimColor>
+        <Text color="magenta" dimColor>
           Step 5/5
         </Text>
       </Box>
