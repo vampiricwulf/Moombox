@@ -42,7 +42,7 @@ describe("Error Classes", () => {
 
     it("should accept optional cause", () => {
       const cause = new Error("Original");
-      const error = new YouTubeError("Failed", "FAIL", cause);
+      const error = new YouTubeError("Failed", "FAIL", {}, cause);
       expect(error.cause).toBe(cause);
     });
   });
