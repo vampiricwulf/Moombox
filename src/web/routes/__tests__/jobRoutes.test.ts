@@ -18,9 +18,9 @@ describe("Job Routes", () => {
   let app: express.Application;
   const mockJobs: Job[] = [
     {
-      id: "test123",
-      videoId: "test123",
-      url: "https://www.youtube.com/watch?v=test123",
+      id: "testVideo01",
+      videoId: "testVideo01",
+      url: "https://www.youtube.com/watch?v=testVideo01",
       title: "Test Video",
       channelName: "Test Channel",
       status: "Downloading",
@@ -30,13 +30,13 @@ describe("Job Routes", () => {
       speed: "5 MB/s",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      thumbnailUrl: "https://i.ytimg.com/vi/test123/maxresdefault.jpg",
+      thumbnailUrl: "https://i.ytimg.com/vi/testVideo01/maxresdefault.jpg",
       manuallyAdded: true,
     },
     {
-      id: "finished456",
-      videoId: "finished456",
-      url: "https://www.youtube.com/watch?v=finished456",
+      id: "finishVid01",
+      videoId: "finishVid01",
+      url: "https://www.youtube.com/watch?v=finishVid01",
       title: "Finished Video",
       channelName: "Test Channel",
       status: "Finished",
@@ -46,7 +46,7 @@ describe("Job Routes", () => {
       speed: "",
       createdAt: new Date(Date.now() - 86400000).toISOString(), // 1 day ago
       updatedAt: new Date().toISOString(),
-      thumbnailUrl: "https://i.ytimg.com/vi/finished456/maxresdefault.jpg",
+      thumbnailUrl: "https://i.ytimg.com/vi/finishVid01/maxresdefault.jpg",
       manuallyAdded: false,
       outputFile: "/path/to/output.mp4",
       filename: "output.mp4",
@@ -216,9 +216,9 @@ describe("Job Routes", () => {
 
   describe("GET /api/jobs/:id", () => {
     it("should return a single job by ID", async () => {
-      const res = await request(app).get("/api/jobs/test123").expect(200);
+      const res = await request(app).get("/api/jobs/testVideo01").expect(200);
 
-      expect(res.body).toHaveProperty("id", "test123");
+      expect(res.body).toHaveProperty("id", "testVideo01");
       expect(res.body).toHaveProperty("title", "Test Video");
     });
 
@@ -229,13 +229,13 @@ describe("Job Routes", () => {
     });
 
     it("should set Cache-Control for finished jobs", async () => {
-      const res = await request(app).get("/api/jobs/finished456").expect(200);
+      const res = await request(app).get("/api/jobs/finishVid01").expect(200);
 
       expect(res.headers["cache-control"]).toMatch(/immutable/);
     });
 
     it("should set no-cache for active jobs", async () => {
-      const res = await request(app).get("/api/jobs/test123").expect(200);
+      const res = await request(app).get("/api/jobs/testVideo01").expect(200);
 
       expect(res.headers["cache-control"]).toMatch(/no-cache/);
     });
@@ -271,7 +271,7 @@ describe("Job Routes", () => {
     it("should reject duplicate videoId with 409", async () => {
       const res = await request(app)
         .post("/api/jobs")
-        .send({ videoId: "test123" })
+        .send({ videoId: "testVideo01" })
         .expect(409);
 
       expect(res.body).toHaveProperty("error", "Job already exists");
@@ -346,7 +346,7 @@ describe("Job Routes", () => {
   describe("POST /api/jobs/:id/cancel", () => {
     it("should cancel a downloading job", async () => {
       const res = await request(app)
-        .post("/api/jobs/test123/cancel")
+        .post("/api/jobs/testVideo01/cancel")
         .expect(200);
 
       expect(res.body).toHaveProperty("success", true);
@@ -363,7 +363,7 @@ describe("Job Routes", () => {
 
   describe("DELETE /api/jobs/:id", () => {
     it("should delete a job", async () => {
-      const res = await request(app).delete("/api/jobs/test123").expect(200);
+      const res = await request(app).delete("/api/jobs/finishVid01").expect(200);
 
       expect(res.body).toHaveProperty("success", true);
     });
