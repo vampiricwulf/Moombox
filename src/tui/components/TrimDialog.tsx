@@ -3,9 +3,9 @@
  *
  * Modes:
  * - CREATE (cyan): Enter start time → end time → confirmation
- * - DELETE (magenta): Select trim by number → confirm deletion
+ * - DELETE (magenta): Arrow keys to navigate → Enter to delete → confirm
  *
- * Tab toggles between modes, Esc goes back/cancels
+ * M toggles between modes, Esc goes back/cancels
  */
 
 import React, { useState, useCallback } from "react";
@@ -66,6 +66,7 @@ export function TrimDialog({
           setStep(0);
           setError(null);
           setDeleteConfirmId(null);
+          setSelectedTrimIndex(0);
           setStartInput("");
           setEndInput("");
           setTimeInputFocus("start");
@@ -197,50 +198,62 @@ export function TrimDialog({
         return;
       }
 
-      // Number keys (1-9) to select trim
-      if (/^[1-9]$/.test(input)) {
-        const idx = parseInt(input, 10) - 1;
-        if (idx >= 0 && idx < trims.length) {
-          const trim = trims[idx];
+      // Arrow key navigation
+      if (key.upArrow) {
+        setSelectedTrimIndex((prev) => (prev > 0 ? prev - 1 : trims.length - 1));
+        setDeleteConfirmId(null); // Clear confirmation when navigating
+        setError(null);
+        return;
+      }
 
-          if (deleteConfirmId === trim.id) {
-            // Second press: confirm deletion
-            setLoading(true);
+      if (key.downArrow) {
+        setSelectedTrimIndex((prev) => (prev < trims.length - 1 ? prev + 1 : 0));
+        setDeleteConfirmId(null); // Clear confirmation when navigating
+        setError(null);
+        return;
+      }
 
-            const port = process.env.MOOMBOX_PORT || "774";
-            fetch(
-              `http://127.0.0.1:${port}/api/jobs/${jobId}/trims/${trim.id}`,
-              {
-                method: "DELETE",
-                headers: {
-                  "Origin": `http://127.0.0.1:${port}`,
-                },
+      // Enter key to delete (with confirmation)
+      if (key.return) {
+        const trim = trims[selectedTrimIndex];
+        if (!trim) return;
+
+        if (deleteConfirmId === trim.id) {
+          // Second press: confirm deletion
+          setLoading(true);
+
+          const port = process.env.MOOMBOX_PORT || "774";
+          fetch(
+            `http://127.0.0.1:${port}/api/jobs/${jobId}/trims/${trim.id}`,
+            {
+              method: "DELETE",
+              headers: {
+                "Origin": `http://127.0.0.1:${port}`,
               },
-            )
-              .then((res) => {
-                if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-                return res.json();
-              })
-              .then(() => {
-                onComplete({
-                  text: `Trim deleted: ${trim.filename}`,
-                  color: "yellow",
-                });
-              })
-              .catch((err) => {
-                setError(err.message || "Failed to delete trim");
-                setLoading(false);
+            },
+          )
+            .then((res) => {
+              if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+              return res.json();
+            })
+            .then(() => {
+              onComplete({
+                text: `Trim deleted: ${trim.filename}`,
+                color: "yellow",
               });
-          } else {
-            // First press: show confirmation
-            setDeleteConfirmId(trim.id);
-            setSelectedTrimIndex(idx);
-            setError(null);
-          }
+            })
+            .catch((err) => {
+              setError(err.message || "Failed to delete trim");
+              setLoading(false);
+            });
+        } else {
+          // First press: show confirmation
+          setDeleteConfirmId(trim.id);
+          setError(null);
         }
       }
     },
-    [trims, deleteConfirmId, jobId, onComplete],
+    [trims, deleteConfirmId, selectedTrimIndex, jobId, onComplete],
   );
 
   const renderCreateMode = () => {
@@ -366,23 +379,21 @@ export function TrimDialog({
     return (
       <Box flexDirection="column" paddingX={1}>
         <Box marginTop={1}>
-          <Text>Select a trim to delete (press number twice to confirm):</Text>
+          <Text>Navigate with arrow keys, press Enter to delete:</Text>
         </Box>
 
         <Box flexDirection="column" marginTop={1}>
           {trims.map((trim, idx) => {
-            const isSelected = deleteConfirmId === trim.id;
+            const isCurrent = idx === selectedTrimIndex;
+            const isConfirmed = deleteConfirmId === trim.id;
             const range = `${formatTime(trim.startTime)} - ${formatTime(trim.endTime)}`;
             const duration = formatDuration(trim.duration);
             const size = trim.fileSize ? formatBytes(trim.fileSize) : "?";
 
             return (
               <Box key={trim.id}>
-                <Text color={isSelected ? "yellow" : "white"}>
-                  {isSelected ? "▸ " : "  "}
-                  <Text color="magenta" bold>
-                    [{idx + 1}]
-                  </Text>{" "}
+                <Text color={isConfirmed ? "yellow" : isCurrent ? "magenta" : "white"}>
+                  {isCurrent ? "▸ " : "  "}
                   {range} ({duration}, {size})
                 </Text>
               </Box>
@@ -393,14 +404,14 @@ export function TrimDialog({
         {deleteConfirmId && (
           <Box marginTop={1}>
             <Text color="yellow">
-              ⚠ Press [{selectedTrimIndex + 1}] again to confirm deletion
+              ⚠ Press Enter again to confirm deletion
             </Text>
           </Box>
         )}
 
         <Box marginTop={1}>
           <Text color="gray" dimColor>
-            Press number key to select, Esc to cancel
+            ↑/↓ to navigate, Enter to delete, Esc to cancel
           </Text>
         </Box>
       </Box>
