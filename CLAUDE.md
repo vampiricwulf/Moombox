@@ -65,6 +65,7 @@ RSS Feed Monitor (10min) → Job Database (lowdb) → Download Worker → YouTub
 - `src/tui/components/` - TUI React components (TaskList, LogViewer, JobDetails)
 - `src/tui/hooks/` - Custom hooks (useMouse for mouse support)
 - `src/types/` - Centralized TypeScript interfaces
+- `src/utils/` - Shared utilities (extractVideoId for URL parsing)
 - `src/bgutils/` - BotGuard/PO Token generation (native JS port)
 - `src/cipher/` - YouTube signature decryption (yt-cipher port)
 - `src/ejs/` - JavaScript-in-JavaScript solver for signature functions
@@ -120,7 +121,7 @@ When running in an interactive terminal, Moombox displays a full-screen TUI buil
 | Tab | Switch focus between Tasks/Details/Logs |
 | ↑/↓ | Navigate tasks or scroll logs |
 | Enter | Expand/collapse archived jobs (on divider row) |
-| A | Add video by URL or ID |
+| A | Open Add Video dialog (Enter = quick add, Shift+Enter = advanced options) |
 | C | Cancel selected job |
 | R | Retry failed job |
 | D | Delete job (press twice to confirm) |
@@ -130,11 +131,32 @@ When running in an interactive terminal, Moombox displays a full-screen TUI buil
 | ? | Toggle help overlay |
 | Q | Quit |
 
+### TUI Add Video Dialog
+
+Press **A** to open the Add Video dialog:
+- **Enter** - Quick add with auto format selection (best quality)
+- **Shift+Enter** - Advanced options wizard (6 steps):
+  1. **Enter URL/ID** - Paste YouTube URL or video ID
+  2. **Select Video Format** - Numbered list with best-format badges (`[a]` auto, `[n]` none for audio-only)
+  3. **Select Audio Format** - Choose audio quality (`[a]` auto, `[n]` none for video-only)
+  4. **Start Time** - Optional timestamp in `HH:MM:SS`, `MM:SS`, or seconds (blank = beginning)
+  5. **End Time** - Optional timestamp (blank = end of video)
+  6. **Confirmation** - Review selections before submitting
+
+**Navigation:**
+- **Esc** - Go back one step or cancel
+- **↑/↓** - Scroll format lists (when >10 formats)
+- **Ctrl+V / Right-click** - Paste from clipboard
+- **Numbers (1-9)** - Quick select format by number
+
 ## Web Dashboard
 
 The dashboard runs at `http://localhost:774` and provides:
 - Real-time job list with status updates (via WebSocket)
-- Add videos by URL or ID
+- **Add videos** by URL or ID with optional **Advanced Options**:
+  - Manual format selection (video/audio dropdowns with best-format badges)
+  - Timestamp selection (start/end time for partial downloads)
+  - Validation prevents invalid combinations (e.g., video-only + audio-only)
 - Cancel, retry, delete jobs
 - View job details with embedded video player
 - **Archived tab** for viewing finished jobs older than `hide_finished_age_days` (fetched on demand via REST)
