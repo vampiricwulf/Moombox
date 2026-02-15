@@ -269,6 +269,16 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       advancedOpts.endTime = Number(endTime);
     }
 
+    // Validate advanced options consistency
+    if (advancedOpts.selectedVideoItag === -1 && advancedOpts.selectedAudioItag === -1) {
+      return res.status(400).json({ error: "Cannot select both video-only and audio-only" });
+    }
+    if (advancedOpts.startTime != null && advancedOpts.endTime != null) {
+      if (advancedOpts.endTime <= advancedOpts.startTime) {
+        return res.status(400).json({ error: "End time must be after start time" });
+      }
+    }
+
     const job = await db.addJob({
       videoId,
       url: `https://www.youtube.com/watch?v=${videoId}`,
