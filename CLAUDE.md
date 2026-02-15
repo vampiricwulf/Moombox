@@ -53,16 +53,80 @@ RSS Feed Monitor (10min) → Job Database (lowdb) → Download Worker → YouTub
                             (localhost:774)
 ```
 
+### Major Refactor (v1.0.0 → v1.1.0)
+
+**Commit:** `a01f6da` - February 2026
+**Impact:** 25 files changed, 4,033 insertions, 3,729 deletions
+
+The codebase underwent a comprehensive modularization refactor to improve maintainability and separation of concerns:
+
+**Backend Modularization:**
+- **`src/core/worker/downloadOrchestrator.ts`** (1,061 lines removed)
+  - Extracted into focused modules:
+    - `downloadStrategies.ts` (423 lines) - Live, VOD, and parallel download strategies
+    - `muxFinalize.ts` (330 lines) - FFmpeg muxing and finalization logic
+    - `progressTracking.ts` (320 lines) - Download progress calculation
+    - `formatUtils.ts` (29 lines) - Format selection utilities
+
+**Web Routes Modularization:**
+- **`src/web/server.ts`** (989 lines removed)
+  - Extracted into RESTful route modules:
+    - `routes/jobRoutes.ts` (340 lines) - Job CRUD, formats API, video streaming
+    - `routes/configRoutes.ts` (243 lines) - Configuration management
+    - `routes/importRoutes.ts` (255 lines) - Video import/upload handling
+    - `routes/potRoutes.ts` (130 lines) - POT provider endpoints
+    - `routes/errorHandler.ts` (39 lines) - Async error handling wrapper
+    - `routes/index.ts` (5 lines) - Route registration
+
+**Frontend Modularization:**
+- **`src/web/public/app.js`** (1,757 lines removed)
+  - Extracted into ES6 modules:
+    - `modules/player.js` (533 lines) - Video player with synced chat
+    - `modules/settings.js` (758 lines) - Settings UI and auto-cookie setup
+    - `modules/imports.js` (166 lines) - Import tab for .zip uploads
+    - `modules/setup.js` (205 lines) - First-time setup wizard
+
+**Benefits:**
+- ✅ Improved code organization and readability
+- ✅ Better separation of concerns (SRP compliance)
+- ✅ Easier testing and debugging (isolated modules)
+- ✅ Reduced cognitive load (smaller files)
+- ✅ Modular route registration pattern (`register*Routes()`)
+- ✅ Frontend ES6 modules with clean exports
+
+**Pattern Established:**
+- Backend routes: `register*Routes(router, ctx)` pattern
+- Frontend modules: Controller classes that take `app` reference
+- Error handling: `asyncHandler()` wrapper for Express 5 compatibility
+
 ### Key Directories
 
 - `src/core/` - Application services (config, database, logging, worker, cookies)
+- `src/core/worker/` - Download orchestration modules:
+  - `downloadOrchestrator.ts` - Main orchestrator (coordinates strategies)
+  - `downloadStrategies.ts` - Live, VOD, parallel download implementations
+  - `muxFinalize.ts` - FFmpeg muxing and file finalization
+  - `progressTracking.ts` - Download progress calculation
+  - `formatUtils.ts` - Format selection utilities
+  - `timeUtils.ts` - Time parsing for timestamp selection
 - `src/engine/` - Download engine (YouTube API, manifest parsing, muxing)
 - `src/engine/youtube/` - Modularized YouTube service (auth, player API, format selection)
 - `src/engine/chat/` - Live chat downloader (ChatDownloader, ChatApi)
 - `src/web/` - Express server and web dashboard
+- `src/web/routes/` - Modular Express routes (RESTful API endpoints):
+  - `jobRoutes.ts` - Job CRUD, formats API, video streaming
+  - `configRoutes.ts` - Configuration management
+  - `importRoutes.ts` - Video import/upload handling
+  - `potRoutes.ts` - POT provider endpoints (yt-dlp compatible)
+  - `errorHandler.ts` - Async error handling wrapper
 - `src/web/public/` - Static HTML/CSS/JS for dashboard UI
+- `src/web/public/modules/` - Frontend ES6 modules:
+  - `player.js` - Video player with synchronized chat
+  - `settings.js` - Settings UI and auto-cookie setup
+  - `imports.js` - Import tab for .zip uploads
+  - `setup.js` - First-time setup wizard
 - `src/tui/` - Terminal UI built with Ink (React for CLI)
-- `src/tui/components/` - TUI React components (TaskList, LogViewer, JobDetails)
+- `src/tui/components/` - TUI React components (TaskList, LogViewer, JobDetails, AddVideoDialog)
 - `src/tui/hooks/` - Custom hooks (useMouse for mouse support)
 - `src/types/` - Centralized TypeScript interfaces
 - `src/utils/` - Shared utilities (extractVideoId for URL parsing)
@@ -205,6 +269,48 @@ yt-dlp --extractor-args "youtube:player-client=web;po_token=web.gvs+http://127.0
 - `log` - New log entry
 
 ## Key Patterns
+
+### Code Organization (Post-Refactor)
+
+**Route Registration Pattern:**
+```typescript
+// src/web/routes/index.ts
+export function registerRoutes(router: Router, ctx: RouteContext) {
+  registerJobRoutes(router, ctx);
+  registerConfigRoutes(router, ctx);
+  registerImportRoutes(router, ctx);
+  registerPotRoutes(router, ctx);
+}
+```
+
+Each route module exports a `register*Routes(router, ctx)` function that:
+- Takes an Express router and shared context
+- Registers related endpoints
+- Uses `asyncHandler()` wrapper for Express 5 async compatibility
+
+**Frontend Module Pattern:**
+```javascript
+// src/web/public/modules/*.js
+export class ModuleController {
+  constructor(app) {
+    this.app = app;  // Reference to main app for shared state
+    this.init();
+  }
+
+  init() { /* Setup event listeners, render UI */ }
+}
+```
+
+Frontend modules are ES6 classes that:
+- Take `app` reference in constructor
+- Initialize in `init()` method
+- Export a single default class
+- Imported dynamically by main `app.js`
+
+**Error Handling:**
+- Routes use `asyncHandler()` wrapper from `src/web/routes/errorHandler.ts`
+- No try-catch needed in route handlers (wrapper handles it)
+- Express 5 params lose type narrowing → use `as string` cast for `req.params.id`
 
 ### Output Template Variables
 Used in `output_template` config:
