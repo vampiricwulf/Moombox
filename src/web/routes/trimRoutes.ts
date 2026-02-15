@@ -2,10 +2,14 @@
  * Trim routes - Create and delete trimmed versions of videos
  */
 
-import type { Router } from "express";
+import type { Router} from "express";
 import { Database } from "../../core/database.js";
 import { TrimService } from "../../core/worker/trimService.js";
 import { asyncHandler } from "./errorHandler.js";
+import { createTrimSchema, formatValidationErrors } from "../../types/schemas.js";
+import { Logger } from "../../core/logger.js";
+
+const logger = Logger.getInstance();
 
 export function registerTrimRoutes(router: Router): void {
   // POST /api/jobs/:id/trims - Create trim
@@ -13,19 +17,18 @@ export function registerTrimRoutes(router: Router): void {
     "/jobs/:id/trims",
     asyncHandler(async (req, res) => {
       const jobId = req.params.id as string;
-      const { startTime, endTime } = req.body;
 
-      // Validate inputs (comprehensive checks)
-      if (
-        typeof startTime !== "number" ||
-        typeof endTime !== "number" ||
-        !Number.isFinite(startTime) ||
-        !Number.isFinite(endTime) ||
-        startTime < 0 ||
-        endTime <= startTime
-      ) {
-        return res.status(400).json({ error: "Invalid time range" });
+      // Validate request body with Zod schema
+      const validation = createTrimSchema.safeParse(req.body);
+      if (!validation.success) {
+        const errors = formatValidationErrors(validation.error);
+        return res.status(400).json({
+          error: "Validation failed",
+          details: errors
+        });
       }
+
+      const { startTime, endTime } = validation.data;
 
       // Load job
       const db = await Database.getInstance();
@@ -50,7 +53,9 @@ export function registerTrimRoutes(router: Router): void {
         );
         res.json({ trim });
       } catch (error: any) {
-        res.status(400).json({ error: error.message });
+        // Sanitize error message (don't expose internal stack traces)
+        logger.error(`[TrimRoutes] Failed to create trim: ${error.message}`);
+        res.status(400).json({ error: "Failed to create trim" });
       }
     }),
   );

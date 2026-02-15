@@ -10,6 +10,17 @@ interface RateLimitEntry {
 }
 
 const rateLimitMap = new Map<string, RateLimitEntry>();
+const MAX_ENTRIES = 10000; // Prevent unbounded growth
+
+// Deterministic cleanup: runs every 60 seconds
+const cleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitMap.entries()) {
+    if (now > entry.resetTime) {
+      rateLimitMap.delete(key);
+    }
+  }
+}, 60000).unref(); // unref() allows process to exit even if timer is pending
 
 /**
  * Creates a rate limiter middleware that limits requests per IP address
@@ -22,12 +33,12 @@ export function createRateLimiter(maxRequests: number, windowMs: number) {
     const ip = req.socket.remoteAddress || "unknown";
     const now = Date.now();
 
-    // Clean up expired entries periodically
-    if (Math.random() < 0.01) { // 1% chance
-      for (const [key, entry] of rateLimitMap.entries()) {
-        if (now > entry.resetTime) {
-          rateLimitMap.delete(key);
-        }
+    // Prevent unbounded map growth (evict oldest if limit exceeded)
+    if (rateLimitMap.size > MAX_ENTRIES) {
+      const oldest = Array.from(rateLimitMap.entries())
+        .sort((a, b) => a[1].resetTime - b[1].resetTime)[0];
+      if (oldest) {
+        rateLimitMap.delete(oldest[0]);
       }
     }
 

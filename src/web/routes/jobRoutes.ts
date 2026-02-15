@@ -14,6 +14,7 @@ import { NotificationManager, NotificationType } from "../../core/notifications.
 import type { Job } from "../../types/jobs.js";
 import { asyncHandler } from "./errorHandler.js";
 import { createRateLimiter } from "./rateLimiter.js";
+import { addJobSchema, formatValidationErrors } from "../../types/schemas.js";
 
 export interface JobRoutesContext {
   jobLogs: Map<string, string[]>;
@@ -48,6 +49,14 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     if (!job) {
       return res.status(404).json({ error: "Job not found" });
     }
+
+    // Cache finished jobs (immutable), but not active ones
+    if (job.status === "Finished") {
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+      res.setHeader("Cache-Control", "no-cache, must-revalidate");
+    }
+
     res.json(job);
   }));
 
@@ -233,13 +242,17 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
   // Add new job (rate limited to 20 requests per minute)
   const addJobRateLimiter = createRateLimiter(20, 60 * 1000);
   router.post("/jobs", addJobRateLimiter, asyncHandler(async (req, res) => {
-    const { videoId, selectedVideoItag, selectedAudioItag, startTime, endTime } = req.body;
-    if (!videoId) {
-      return res.status(400).json({ error: "videoId is required" });
+    // Validate request body with Zod schema
+    const validation = addJobSchema.safeParse(req.body);
+    if (!validation.success) {
+      const errors = formatValidationErrors(validation.error);
+      return res.status(400).json({
+        error: "Validation failed",
+        details: errors
+      });
     }
-    if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-      return res.status(400).json({ error: "Invalid videoId format" });
-    }
+
+    const { videoId, selectedVideoItag, selectedAudioItag, startTime, endTime } = validation.data;
 
     const db = await Database.getInstance();
 
@@ -262,30 +275,13 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       logger.warn(`Could not fetch metadata for ${videoId}`);
     }
 
-    // Build advanced options (validate itags are numbers, times are valid)
-    const advancedOpts: Record<string, number | undefined> = {};
-    if (selectedVideoItag != null && Number.isFinite(Number(selectedVideoItag))) {
-      advancedOpts.selectedVideoItag = Number(selectedVideoItag);
-    }
-    if (selectedAudioItag != null && Number.isFinite(Number(selectedAudioItag))) {
-      advancedOpts.selectedAudioItag = Number(selectedAudioItag);
-    }
-    if (startTime != null && Number.isFinite(Number(startTime)) && Number(startTime) >= 0) {
-      advancedOpts.startTime = Number(startTime);
-    }
-    if (endTime != null && Number.isFinite(Number(endTime)) && Number(endTime) > 0) {
-      advancedOpts.endTime = Number(endTime);
-    }
-
-    // Validate advanced options consistency
-    if (advancedOpts.selectedVideoItag === -1 && advancedOpts.selectedAudioItag === -1) {
-      return res.status(400).json({ error: "Cannot select both video-only and audio-only" });
-    }
-    if (advancedOpts.startTime != null && advancedOpts.endTime != null) {
-      if (advancedOpts.endTime <= advancedOpts.startTime) {
-        return res.status(400).json({ error: "End time must be after start time" });
-      }
-    }
+    // Build advanced options (already validated by schema)
+    const advancedOpts: Record<string, number | undefined> = {
+      selectedVideoItag,
+      selectedAudioItag,
+      startTime,
+      endTime,
+    };
 
     const job = await db.addJob({
       videoId,

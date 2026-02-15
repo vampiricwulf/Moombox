@@ -28,6 +28,11 @@ export class Database {
   private jobsChangeListeners: JobsChangeListener[] = [];
   private writeQueue: Promise<void> = Promise.resolve();
 
+  // Batch update mechanism (100ms window for progress updates)
+  private updateBatch: Map<string, Partial<Job>> = new Map();
+  private batchTimer: NodeJS.Timeout | null = null;
+  private static readonly BATCH_WINDOW_MS = 100;
+
   private constructor() {
     let file = path.join(process.cwd(), "moombox.json");
     try {
@@ -177,16 +182,61 @@ export class Database {
   }
 
   async updateJob(id: string, updates: Partial<Job>) {
+    // Sanitize updates to prevent prototype pollution
+    const sanitized = { ...updates };
+    delete (sanitized as any).__proto__;
+    delete (sanitized as any).constructor;
+    delete (sanitized as any).prototype;
+
+    // Merge updates into pending batch
+    const existing = this.updateBatch.get(id) || {};
+    this.updateBatch.set(id, { ...existing, ...sanitized });
+
+    // Schedule batch flush after quiescence window
+    if (this.batchTimer) clearTimeout(this.batchTimer);
+    this.batchTimer = setTimeout(() => this.flushBatch(), Database.BATCH_WINDOW_MS);
+  }
+
+  /**
+   * Flush batched updates to disk (single write for multiple job updates)
+   */
+  private async flushBatch() {
+    if (this.updateBatch.size === 0) return;
+
+    // Take snapshot of current batch and clear for next window
+    const batch = new Map(this.updateBatch);
+    this.updateBatch.clear();
+    this.batchTimer = null;
+
     return this.enqueueMutation(async () => {
-      const job = this.jobsMap.get(id); // O(1) lookup
-      if (job) {
-        Object.assign(job, { ...updates, updatedAt: new Date().toISOString() });
-        // Map points to the same object reference, so it's automatically updated
-        await this.writeWithPermissions();
-        // Notify listeners of the update
+      const updatedJobs: Job[] = [];
+
+      for (const [id, updates] of batch) {
+        const job = this.jobsMap.get(id); // O(1) lookup
+        if (job) {
+          Object.assign(job, { ...updates, updatedAt: new Date().toISOString() });
+          updatedJobs.push(job);
+        }
+      }
+
+      // Single write for all batched updates
+      await this.writeWithPermissions();
+
+      // Notify listeners of all updated jobs
+      for (const job of updatedJobs) {
         this.notifyJobUpdate(job);
       }
     });
+  }
+
+  /**
+   * Flush any pending batch updates immediately (for shutdown)
+   */
+  async flush(): Promise<void> {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      await this.flushBatch();
+    }
   }
 
   /**

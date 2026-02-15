@@ -12,6 +12,7 @@ import path from "path";
 import fs from "fs-extra";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
+import compression from "compression";
 import { Logger } from "../core/logger.js";
 import { Database } from "../core/database.js";
 import { ConfigManager } from "../core/config.js";
@@ -113,6 +114,12 @@ export class WebServer {
       next();
     });
 
+    // Compression middleware (gzip/deflate) - 90% bandwidth savings
+    this.app.use(compression({
+      level: 6, // Balance between speed and compression ratio
+      threshold: 1024, // Only compress responses > 1KB
+    }));
+
     this.app.use(express.json());
 
     // Security headers
@@ -121,6 +128,20 @@ export class WebServer {
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Referrer-Policy", "no-referrer");
       res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+
+      // Content Security Policy (prevents XSS attacks)
+      res.setHeader("Content-Security-Policy",
+        "default-src 'self'; " +
+        "script-src 'self'; " +
+        "style-src 'self' 'unsafe-inline'; " + // Shoelace requires inline styles
+        "img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com; " +
+        "connect-src 'self'; " +
+        "frame-src https://www.youtube-nocookie.com; " +
+        "object-src 'none'; " +
+        "base-uri 'self'; " +
+        "form-action 'self'"
+      );
+
       next();
     });
 
@@ -160,6 +181,14 @@ export class WebServer {
             "Content-Type",
             contentTypes[ext] || "application/octet-stream",
           );
+
+          // Cache static assets for 1 year (immutable in production)
+          if ([".css", ".js", ".png", ".jpg", ".svg", ".ico"].includes(ext)) {
+            res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          } else {
+            res.setHeader("Cache-Control", "no-cache");
+          }
+
           return res.send(content);
         }
 
@@ -177,7 +206,10 @@ export class WebServer {
 
       for (const publicPath of possiblePaths) {
         if (fs.existsSync(publicPath)) {
-          this.app.use(express.static(publicPath));
+          this.app.use(express.static(publicPath, {
+            maxAge: "1y", // Cache static assets for 1 year
+            immutable: true,
+          }));
           break;
         }
       }
@@ -271,6 +303,11 @@ export class WebServer {
   }
 
   private setupWebSocket() {
+    // Error handler for WebSocketServer instance
+    this.wss.on("error", (error) => {
+      this.logger.error(`[WebServer] WebSocketServer error: ${error.message}`);
+    });
+
     this.wss.on("connection", (ws) => {
       this.clients.add(ws);
       this.logger.debug("[WebServer] Client connected");
@@ -278,12 +315,35 @@ export class WebServer {
       // Send current state
       this.sendInitialState(ws);
 
+      // Error handler for individual connection
+      ws.on("error", (error) => {
+        this.logger.debug(`[WebServer] WebSocket connection error: ${error.message}`);
+      });
+
       ws.on("message", (data) => {
+        // Convert RawData to Buffer for length check
+        const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+
+        // Validate message size (prevent DoS)
+        if (buffer.length > 100000) {
+          this.logger.warn("[WebServer] Oversized WebSocket message rejected");
+          ws.close(1009, "Message too large");
+          return;
+        }
+
         try {
-          const message: WSMessage = JSON.parse(data.toString());
+          const message: WSMessage = JSON.parse(buffer.toString());
+
+          // Validate message structure
+          if (typeof message.type !== "string" || message.type.length > 50) {
+            ws.close(1008, "Invalid message format");
+            return;
+          }
+
           this.handleWSMessage(ws, message);
         } catch (e) {
           this.logger.debug("[WebServer] Invalid WebSocket message");
+          ws.close(1008, "Invalid JSON");
         }
       });
 
@@ -308,15 +368,18 @@ export class WebServer {
       const db = await Database.getInstance();
       const jobs = await db.getJobs();
 
-      ws.send(
-        JSON.stringify({
-          type: "initial_state",
-          payload: {
-            jobs: this.filterJobsByAge(jobs, false),
-            logs: this.logBuffer,
-          },
-        }),
-      );
+      const payload = JSON.stringify({
+        type: "initial_state",
+        payload: {
+          jobs: this.filterJobsByAge(jobs, false),
+          logs: this.logBuffer,
+        },
+      });
+
+      // Only send if socket is still open
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(payload);
+      }
     } catch (e) {
       this.logger.error(`[WebServer] Failed to send initial state: ${e}`);
     }
@@ -428,10 +491,23 @@ export class WebServer {
   }
 
   private broadcast(message: WSMessage) {
-    const data = JSON.stringify(message);
+    let data: string;
+    try {
+      data = JSON.stringify(message);
+    } catch (e) {
+      this.logger.error(`[WebServer] Failed to stringify broadcast message: ${e}`);
+      return;
+    }
+
     for (const client of this.clients) {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(data);
+        try {
+          client.send(data);
+        } catch (e) {
+          this.logger.debug(`[WebServer] Failed to send to client: ${e}`);
+          // Remove dead client from set
+          this.clients.delete(client);
+        }
       }
     }
   }

@@ -34,3 +34,4 @@ Thumbs.db
 # Misc
 /tmp
 nul
+/coverage

@@ -46,23 +46,42 @@ export function registerImportRoutes(router: Router): void {
 
         const entries = zip.getEntries();
 
-        // Zip bomb check: limit total uncompressed size to 50GB
-        const MAX_UNCOMPRESSED = 50 * 1024 * 1024 * 1024;
+        // Zip bomb protection
+        const MAX_UNCOMPRESSED = 2 * 1024 * 1024 * 1024; // 2GB (reduced from 50GB)
+        const MAX_FILES = 1000; // Limit file count
+        const MAX_COMPRESSION_RATIO = 100; // Alert on >100x compression
+
+        // Check file count
+        if (entries.length > MAX_FILES) {
+          return res.status(400).json({ error: "Too many files in zip" });
+        }
+
+        // Check total uncompressed size and compression ratio
         let totalUncompressed = 0;
         for (const entry of entries) {
           totalUncompressed += entry.header.size;
           if (totalUncompressed > MAX_UNCOMPRESSED) {
             return res
               .status(400)
-              .json({ error: "Zip file too large (uncompressed)" });
+              .json({ error: "Zip file too large (uncompressed, max 2GB)" });
           }
+        }
+
+        // Check compression ratio (get compressed size from file)
+        const stat = await fsExtra.stat(tempPath);
+        const compressedSize = stat.size;
+        if (compressedSize > 0 && totalUncompressed / compressedSize > MAX_COMPRESSION_RATIO) {
+          return res.status(400).json({ error: "Suspicious compression ratio (possible zip bomb)" });
         }
 
         // Validate zip entries for path traversal
         for (const entry of entries) {
+          const normalized = path.normalize(entry.entryName);
           if (
-            entry.entryName.includes("..") ||
-            path.isAbsolute(entry.entryName)
+            normalized.includes("..") ||
+            path.isAbsolute(normalized) ||
+            normalized.startsWith("/") ||
+            normalized.startsWith("\\")
           ) {
             return res
               .status(400)

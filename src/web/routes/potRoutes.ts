@@ -54,8 +54,8 @@ const potRateLimiter = createRateLimiter(10, 60 * 1000); // 10 req/min
 export function registerPotRoutes(app: Application): void {
   const logger = Logger.getInstance();
 
-  // Generate PO Token - main endpoint for yt-dlp (rate limited)
-  app.post("/get_pot", potRateLimiter, asyncHandler(async (req, res) => {
+  // Generate PO Token - main endpoint for yt-dlp (loopback only, rate limited)
+  app.post("/get_pot", requireLoopback, potRateLimiter, asyncHandler(async (req, res) => {
     const body = req.body || {};
 
     // Handle deprecated parameters
