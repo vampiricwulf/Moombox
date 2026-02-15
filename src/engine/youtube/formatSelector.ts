@@ -148,8 +148,9 @@ export class FormatSelector {
             continue;
           }
 
-          // Same fps — fall through to bitrate
-          if (f.bitrate > bestVideo.bitrate) {
+          // Same fps — prefer LOWER bitrate (better compression for same quality)
+          // Lower bitrate at same resolution/fps indicates better encoding (VP9, AV1, etc.)
+          if (f.bitrate < bestVideo.bitrate) {
             bestVideo = f;
           } else if (f.bitrate === bestVideo.bitrate) {
             // Same bitrate — prefer lower auth level
