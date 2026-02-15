@@ -730,6 +730,41 @@ class MoomboxApp {
         </div>
       </div>
 
+      ${job.selectedVideoItag != null || job.selectedAudioItag != null || job.startTime != null || job.endTime != null ? `
+      <div class="details-section">
+        <strong>Advanced Options:</strong>
+        ${job.selectedVideoItag != null ? `
+        <div class="details-row">
+          <span class="details-label">Video Format:</span>
+          <span class="details-value">${
+            job.selectedVideoItag === -1
+              ? "None (audio only)"
+              : `itag ${job.selectedVideoItag}`
+          }</span>
+        </div>
+        ` : ""}
+        ${job.selectedAudioItag != null ? `
+        <div class="details-row">
+          <span class="details-label">Audio Format:</span>
+          <span class="details-value">${
+            job.selectedAudioItag === -1
+              ? "None (video only)"
+              : `itag ${job.selectedAudioItag}`
+          }</span>
+        </div>
+        ` : ""}
+        ${job.startTime != null || job.endTime != null ? `
+        <div class="details-row">
+          <span class="details-label">Time Range:</span>
+          <span class="details-value">
+            ${this.formatDurationSeconds(job.startTime || 0)} - ${job.endTime != null ? this.formatDurationSeconds(job.endTime) : "end"}
+            ${job.endTime != null && job.startTime != null ? ` (${this.formatDurationSeconds(job.endTime - job.startTime)})` : ""}
+          </span>
+        </div>
+        ` : ""}
+      </div>
+      ` : ""}
+
       ${
         job.error
           ? `
