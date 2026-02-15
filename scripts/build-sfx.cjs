@@ -188,6 +188,25 @@ async function bundleApp() {
     },
   };
 
+  // Plugin to inline jsdom's default-stylesheet.css (top-level readFileSync fails in SEA)
+  const jsdomStyleSheetPlugin = {
+    name: "jsdom-stylesheet-inline",
+    setup(build) {
+      build.onLoad({ filter: /style-rules\.js$/ }, async (args) => {
+        let contents = fs.readFileSync(args.path, "utf8");
+        const cssPath = path.resolve(path.dirname(args.path), "../../browser/default-stylesheet.css");
+        if (fs.existsSync(cssPath)) {
+          const cssContent = fs.readFileSync(cssPath, "utf8");
+          contents = contents.replace(
+            /const defaultStyleSheet = fs\.readFileSync\(\s*path\.resolve\(__dirname,\s*["']\.\.\/\.\.\/browser\/default-stylesheet\.css["']\),\s*\{\s*encoding:\s*["']utf-8["']\s*\}\s*\);/,
+            `const defaultStyleSheet = ${JSON.stringify(cssContent)};`,
+          );
+        }
+        return { contents, loader: "js" };
+      });
+    },
+  };
+
   // Bundle directly from TypeScript source
   await esbuild.build({
     entryPoints: [path.join(rootDir, "src", "index.ts")],
@@ -208,7 +227,7 @@ async function bundleApp() {
     define: {
       "import.meta.url": "importMetaUrl",
     },
-    plugins: [xhrWorkerPlugin, yogaShimPlugin, inkReconcilerPlugin],
+    plugins: [xhrWorkerPlugin, yogaShimPlugin, inkReconcilerPlugin, jsdomStyleSheetPlugin],
     logLevel: "warning",
   });
 

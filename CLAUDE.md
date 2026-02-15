@@ -37,6 +37,7 @@ npm run package          # Build self-extracting Moombox.exe (Windows only)
 - `yoga-shim` — Proxy shim (`scripts/yoga-shim.js`) defers yoga-layout Wasm init until `startTUI()` calls `loadYoga()`, avoiding top-level `await` in CJS
 - `ink-reconciler-fix` — Strips `await import('./devtools.js')` (dead code in production)
 - `xhr-worker-plugin` — Disables jsdom's sync XHR worker (not needed)
+- `jsdom-stylesheet-inline` — Inlines jsdom v28's `default-stylesheet.css` (top-level `readFileSync` fails in SEA)
 - `import-meta-shim.js` — Shims `import.meta.url` → `__filename` for CJS context
 
 ## Ports
