@@ -169,11 +169,11 @@ export class WebServer {
       // Content Security Policy (prevents XSS attacks)
       res.setHeader("Content-Security-Policy",
         "default-src 'self'; " +
-        "script-src 'self' 'unsafe-hashes' https://cdn.jsdelivr.net; " + // Shoelace from CDN + inline event handlers
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " + // Shoelace from CDN + inline event handlers (unsafe-inline covers unsafe-hashes)
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " + // Shoelace CSS from CDN + inline styles
         "font-src 'self' https://cdn.jsdelivr.net; " + // Shoelace fonts from CDN
-        "img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com; " +
-        "connect-src 'self'; " +
+        "img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://cdn.jsdelivr.net; " + // YouTube thumbnails + Shoelace icons
+        "connect-src 'self' https://cdn.jsdelivr.net data:; " + // WebSocket + Shoelace icon fetches + data URIs
         "frame-src https://www.youtube-nocookie.com; " +
         "object-src 'none'; " +
         "base-uri 'self'; " +
