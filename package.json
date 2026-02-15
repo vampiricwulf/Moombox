@@ -7,9 +7,19 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "npx tsx src/index.ts",
-    "package": "node scripts/build-sfx.cjs"
+    "package": "node scripts/build-sfx.cjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage"
   },
-  "keywords": ["youtube", "livestream", "archiver", "tui", "downloader"],
+  "keywords": [
+    "youtube",
+    "livestream",
+    "archiver",
+    "tui",
+    "downloader"
+  ],
   "author": "Wulf",
   "license": "MIT",
   "description": "YouTube Live Stream Archiver",
@@ -42,8 +52,11 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.13",
     "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/ui": "^4.0.18",
     "esbuild": "^0.27.2",
     "postject": "^1.0.0-alpha.6",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   }
 }

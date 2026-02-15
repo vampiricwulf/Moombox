@@ -156,6 +156,32 @@ class MoomboxApp {
       cookieStatus.title = "Click to recheck cookies";
       cookieStatus.addEventListener("click", () => this.recheckCookies());
     }
+
+    // Event delegation for job items (prevents memory leaks from per-item listeners)
+    const jobsContainer = document.getElementById("jobs-container");
+    if (jobsContainer) {
+      jobsContainer.addEventListener("click", (e) => {
+        const videoItem = e.target.closest(".video-item");
+        if (videoItem) {
+          const jobId = videoItem.dataset.jobId;
+          const job = this.jobs.find((j) => j.id === jobId);
+          if (job) this.showJobDetails(job);
+        }
+      });
+    }
+
+    // Event delegation for archived jobs
+    const archivedContainer = document.getElementById("archived-container");
+    if (archivedContainer) {
+      archivedContainer.addEventListener("click", (e) => {
+        const videoItem = e.target.closest(".video-item");
+        if (videoItem) {
+          const jobId = videoItem.dataset.jobId;
+          const job = this.archivedJobs.find((j) => j.id === jobId);
+          if (job) this.showJobDetails(job);
+        }
+      });
+    }
   }
 
   async loadConfig() {
@@ -375,14 +401,7 @@ class MoomboxApp {
       .map((job) => this.renderJobItem(job))
       .join("");
 
-    // Add click handlers
-    container.querySelectorAll(".video-item").forEach((item) => {
-      item.addEventListener("click", () => {
-        const jobId = item.dataset.jobId;
-        const job = this.jobs.find((j) => j.id === jobId);
-        if (job) this.showJobDetails(job);
-      });
-    });
+    // Event delegation is set up in setupEventDelegation() - no per-item listeners needed
   }
 
   async fetchArchivedJobs() {
@@ -416,14 +435,7 @@ class MoomboxApp {
       .map((job) => this.renderJobItem(job))
       .join("");
 
-    // Add click handlers
-    container.querySelectorAll(".video-item").forEach((item) => {
-      item.addEventListener("click", () => {
-        const jobId = item.dataset.jobId;
-        const job = this.archivedJobs.find((j) => j.id === jobId);
-        if (job) this.showJobDetails(job);
-      });
-    });
+    // Event delegation is set up in setupEventListeners() - no per-item listeners needed
   }
 
   renderJobItem(job) {

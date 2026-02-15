@@ -260,6 +260,8 @@ export class CookieRefreshService {
 
       // Write updated cookie file
       await fs.writeFile(cookieFilePath, updatedLines.join("\n"), "utf-8");
+      // Set restrictive permissions (owner read/write only)
+      await fs.chmod(cookieFilePath, 0o600);
       this.logger.debug(
         `[CookieRefresh] Updated ${newCookies.size} cookies in file`,
       );

@@ -13,6 +13,7 @@ import { YouTubeService } from "../../engine/youtube/index.js";
 import { NotificationManager, NotificationType } from "../../core/notifications.js";
 import type { Job } from "../../types/jobs.js";
 import { asyncHandler } from "./errorHandler.js";
+import { createRateLimiter } from "./rateLimiter.js";
 
 export interface JobRoutesContext {
   jobLogs: Map<string, string[]>;
@@ -229,8 +230,9 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     }
   }));
 
-  // Add new job
-  router.post("/jobs", asyncHandler(async (req, res) => {
+  // Add new job (rate limited to 20 requests per minute)
+  const addJobRateLimiter = createRateLimiter(20, 60 * 1000);
+  router.post("/jobs", addJobRateLimiter, asyncHandler(async (req, res) => {
     const { videoId, selectedVideoItag, selectedAudioItag, startTime, endTime } = req.body;
     if (!videoId) {
       return res.status(400).json({ error: "videoId is required" });

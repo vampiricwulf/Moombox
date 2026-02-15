@@ -178,6 +178,8 @@ export class AutoCookieService {
       const cookiePath = this.getCookiePath();
       await fs.ensureDir(path.dirname(cookiePath));
       await fs.writeFile(cookiePath, netscapeCookies, "utf-8");
+      // Set restrictive permissions (owner read/write only)
+      await fs.chmod(cookiePath, 0o600);
 
       // Validate
       CookieJar.reset();
@@ -261,6 +263,8 @@ export class AutoCookieService {
       const cookiePath = this.getCookiePath();
       await fs.ensureDir(path.dirname(cookiePath));
       await fs.writeFile(cookiePath, netscapeCookies, "utf-8");
+      // Set restrictive permissions (owner read/write only)
+      await fs.chmod(cookiePath, 0o600);
 
       // Validate
       CookieJar.reset();

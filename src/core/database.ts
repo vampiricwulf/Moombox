@@ -23,6 +23,7 @@ export class Database {
   private static initPromise: Promise<Database> | null = null;
   private db: Low<Data>;
   private historySet: Set<string> = new Set();
+  private jobsMap: Map<string, Job> = new Map(); // O(1) lookup index
   private jobUpdateListeners: JobUpdateListener[] = [];
   private jobsChangeListeners: JobsChangeListener[] = [];
   private writeQueue: Promise<void> = Promise.resolve();
@@ -78,7 +79,7 @@ export class Database {
     // Initialize with defaults if data was missing or corrupt
     if (!this.db.data) {
       this.db.data = { jobs: [], history: [] };
-      await this.db.write();
+      await this.writeWithPermissions();
     }
     // Validate data structure
     if (!Array.isArray(this.db.data.jobs)) {
@@ -91,6 +92,23 @@ export class Database {
     }
     // Build history Set for O(1) lookups
     this.historySet = new Set(this.db.data.history);
+    // Build jobs Map for O(1) lookups
+    this.jobsMap.clear();
+    for (const job of this.db.data.jobs) {
+      this.jobsMap.set(job.id, job);
+    }
+  }
+
+  /**
+   * Write database to disk and set restrictive permissions
+   */
+  private async writeWithPermissions(): Promise<void> {
+    await this.writeWithPermissions();
+    // Set owner-only permissions (0o600) for security
+    const filename = (this.db.adapter as any).filename;
+    if (filename) {
+      await fs.chmod(filename, 0o600);
+    }
   }
 
   /**
@@ -124,9 +142,8 @@ export class Database {
       // Use videoId as the job ID to prevent duplicate downloads
       const jobId = job.videoId;
 
-      // Check if job already exists
-      const existingJob = this.db.data.jobs.find((j) => j.id === jobId);
-      if (existingJob) {
+      // Check if job already exists (O(1) lookup)
+      if (this.jobsMap.has(jobId)) {
         // Job already exists, don't add duplicate
         return null;
       }
@@ -143,14 +160,15 @@ export class Database {
         updatedAt: new Date().toISOString(),
       };
       this.db.data.jobs.push(newJob);
-      await this.db.write();
+      this.jobsMap.set(newJob.id, newJob); // Update index
+      await this.writeWithPermissions();
       this.notifyJobsChange();
       return newJob;
     });
   }
 
   async getJob(id: string): Promise<Job | undefined> {
-    const job = this.db.data.jobs.find((j) => j.id === id);
+    const job = this.jobsMap.get(id);
     return job ? { ...job } : undefined;
   }
 
@@ -160,10 +178,11 @@ export class Database {
 
   async updateJob(id: string, updates: Partial<Job>) {
     return this.enqueueMutation(async () => {
-      const job = this.db.data.jobs.find((j) => j.id === id);
+      const job = this.jobsMap.get(id); // O(1) lookup
       if (job) {
         Object.assign(job, { ...updates, updatedAt: new Date().toISOString() });
-        await this.db.write();
+        // Map points to the same object reference, so it's automatically updated
+        await this.writeWithPermissions();
         // Notify listeners of the update
         this.notifyJobUpdate(job);
       }
@@ -230,7 +249,7 @@ export class Database {
           this.db.data.history = pruned;
           this.historySet = new Set(pruned);
         }
-        await this.db.write();
+        await this.writeWithPermissions();
       }
     });
   }
@@ -244,7 +263,8 @@ export class Database {
       const idx = this.db.data.jobs.findIndex((j) => j.id === id);
       if (idx !== -1) {
         this.db.data.jobs.splice(idx, 1);
-        await this.db.write();
+        this.jobsMap.delete(id); // Remove from index
+        await this.writeWithPermissions();
         this.notifyJobsChange();
         return true;
       }
@@ -262,7 +282,7 @@ export class Database {
         this.db.data.lastVideos = {};
       }
       this.db.data.lastVideos[channelId] = videoId;
-      await this.db.write();
+      await this.writeWithPermissions();
     });
   }
 

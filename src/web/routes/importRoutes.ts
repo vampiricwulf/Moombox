@@ -12,14 +12,17 @@ import { Logger } from "../../core/logger.js";
 import { Database } from "../../core/database.js";
 import { ConfigManager } from "../../core/config.js";
 import { asyncHandler } from "./errorHandler.js";
+import { createRateLimiter } from "./rateLimiter.js";
 
 export function registerImportRoutes(router: Router): void {
   const logger = Logger.getInstance();
 
-  // Import zip archive
+  // Import zip archive (rate limited to 5 per minute)
+  const importRateLimiter = createRateLimiter(5, 60 * 1000);
   router.post(
     "/import",
     express.raw({ type: "application/octet-stream", limit: "500mb" }),
+    importRateLimiter,
     asyncHandler(async (req, res) => {
       const tempFiles: string[] = [];
       try {

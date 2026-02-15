@@ -1,9 +1,11 @@
+import React from "react";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { Database } from "../core/database.js";
 import { Logger } from "../core/logger.js";
+import { ErrorBoundary } from "./components/ErrorBoundary.js";
 
 let cleanup: (() => void) | null = null;
 
@@ -92,7 +94,11 @@ export async function startTUI(): Promise<void> {
   installStdinMouseFilter();
 
   const { unmount, waitUntilExit } = render(
-    React.createElement(App, { db, logger }),
+    React.createElement(
+      ErrorBoundary,
+      null,
+      React.createElement(App, { db, logger }),
+    ),
   );
 
   // Enable VT input AFTER render() — Ink's render calls setRawMode(true) which

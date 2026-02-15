@@ -121,9 +121,13 @@ export class ConfigManager {
         cookie_file:
           config.downloader?.cookie_file ?? defaults.downloader.cookie_file,
         download_chat:
-          config.downloader?.download_chat ?? defaults.downloader.download_chat,
+          config.downloader?.download_chat !== undefined
+            ? config.downloader.download_chat
+            : defaults.downloader.download_chat,
         prefer_60fps:
-          config.downloader?.prefer_60fps ?? defaults.downloader.prefer_60fps,
+          config.downloader?.prefer_60fps !== undefined
+            ? config.downloader.prefer_60fps
+            : defaults.downloader.prefer_60fps,
         segment_retry_delay_cap:
           config.downloader?.segment_retry_delay_cap ?? defaults.downloader.segment_retry_delay_cap,
         segment_live_check_retries:
@@ -140,7 +144,10 @@ export class ConfigManager {
           defaults.tasklist?.hide_finished_age_days,
       },
       auto_cookies: {
-        enabled: config.auto_cookies?.enabled ?? defaults.auto_cookies?.enabled,
+        enabled:
+          config.auto_cookies?.enabled !== undefined
+            ? config.auto_cookies.enabled
+            : defaults.auto_cookies?.enabled,
         browser_profile_dir:
           config.auto_cookies?.browser_profile_dir ??
           defaults.auto_cookies?.browser_profile_dir,
@@ -256,6 +263,8 @@ export class ConfigManager {
 
       // Write to file
       await fs.writeFile(this.configPath, tomlContent, "utf-8");
+      // Set restrictive permissions (owner read/write only)
+      await fs.chmod(this.configPath, 0o600);
       this.configLoaded = true;
       ConfigManager.log("info", `[Config] Saved configuration to ${this.configPath}`);
     });

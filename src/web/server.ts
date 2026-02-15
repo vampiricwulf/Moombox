@@ -115,6 +115,15 @@ export class WebServer {
 
     this.app.use(express.json());
 
+    // Security headers
+    this.app.use((req, res, next) => {
+      res.setHeader("X-Frame-Options", "DENY");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+      next();
+    });
+
     // Check for embedded assets (SEA mode)
     const embeddedAssets = (globalThis as any).__MOOMBOX_ASSETS__;
     if (embeddedAssets) {
@@ -281,6 +290,15 @@ export class WebServer {
       ws.on("close", () => {
         this.clients.delete(ws);
         this.logger.debug("[WebServer] Client disconnected");
+
+        // If no clients remain, clear all pending throttle timers
+        if (this.clients.size === 0) {
+          for (const timer of this.jobTrailingTimers.values()) {
+            clearTimeout(timer);
+          }
+          this.jobTrailingTimers.clear();
+          this.logger.debug("[WebServer] Cleared all pending job update timers (no clients)");
+        }
       });
     });
   }

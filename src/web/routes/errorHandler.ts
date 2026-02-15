@@ -10,10 +10,11 @@ import { Logger } from "../../core/logger.js";
 
 /**
  * Wraps an async route handler to forward errors to Express error middleware.
+ * Generic parameter P preserves route parameter types.
  */
-export function asyncHandler(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<any>,
-): (req: any, res: any, next: any) => void {
+export function asyncHandler<P = Record<string, string>>(
+  fn: (req: Request<P>, res: Response, next: NextFunction) => Promise<any>,
+): (req: Request<P>, res: Response, next: NextFunction) => void {
   return (req, res, next) => {
     fn(req, res, next).catch(next);
   };
