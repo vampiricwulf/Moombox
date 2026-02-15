@@ -12,6 +12,7 @@ import type { VideoInfo } from "../../types/youtube.js";
 import type { ChatProgress } from "../../types/chat.js";
 import { PROGRESS_UPDATE_INTERVAL_MS } from "../../constants.js";
 import { formatSpeed } from "./formatUtils.js";
+import { SmoothValue } from "../../utils/SmoothValue.js";
 
 /**
  * Setup chat downloader if chat is available
@@ -109,6 +110,7 @@ export async function runSegmentDownloaders(
   let lastUpdate = 0;
   let lastBytes = 0;
   let lastBytesTime = Date.now();
+  const speedSmoother = new SmoothValue(0.7); // Quick response to changes
 
   const updateProgress = () => {
     const now = Date.now();
@@ -118,7 +120,8 @@ export async function runSegmentDownloaders(
       const totalBytes = vBytes + aBytes;
       const timeDelta = (now - lastBytesTime) / 1000;
       const bytesDelta = totalBytes - lastBytes;
-      const speed = timeDelta > 0 ? bytesDelta / timeDelta : 0;
+      const instantSpeed = timeDelta > 0 ? bytesDelta / timeDelta : 0;
+      const speed = speedSmoother.update(instantSpeed);
 
       lastBytes = totalBytes;
       lastBytesTime = now;
@@ -225,6 +228,7 @@ export async function runSegmentDownloadersWithoutChat(
   let lastUpdate = 0;
   let lastBytes = 0;
   let lastBytesTime = Date.now();
+  const speedSmoother = new SmoothValue(0.7); // Quick response to changes
 
   const updateProgress = () => {
     const now = Date.now();
@@ -234,7 +238,8 @@ export async function runSegmentDownloadersWithoutChat(
       const totalBytes = vBytes + aBytes;
       const timeDelta = (now - lastBytesTime) / 1000;
       const bytesDelta = totalBytes - lastBytes;
-      const speed = timeDelta > 0 ? bytesDelta / timeDelta : 0;
+      const instantSpeed = timeDelta > 0 ? bytesDelta / timeDelta : 0;
+      const speed = speedSmoother.update(instantSpeed);
 
       lastBytes = totalBytes;
       lastBytesTime = now;

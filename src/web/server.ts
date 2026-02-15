@@ -18,6 +18,7 @@ import { Database } from "../core/database.js";
 import { ConfigManager } from "../core/config.js";
 import type { Job } from "../types/jobs.js";
 import { registerPotRoutes, registerConfigRoutes, registerImportRoutes, registerJobRoutes, registerTrimRoutes, errorMiddleware } from "./routes/index.js";
+import { isPrivateIP, isLoopback } from "../utils/ipValidation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -78,21 +79,8 @@ export class WebServer {
   /**
    * Check whether an IP address is a private/LAN address.
    */
-  private static isPrivateIP(ip: string): boolean {
-    return (
-      ip === "127.0.0.1" ||
-      ip === "::1" ||
-      ip === "::ffff:127.0.0.1" ||
-      ip.startsWith("192.168.") ||
-      ip.startsWith("::ffff:192.168.") ||
-      ip.startsWith("10.") ||
-      ip.startsWith("::ffff:10.") ||
-      /^(::ffff:)?172\.(1[6-9]|2\d|3[01])\./.test(ip)
-    );
-  }
-
   static isLoopback(ip: string): boolean {
-    return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+    return isLoopback(ip);
   }
 
   /**
@@ -102,7 +90,7 @@ export class WebServer {
     if (!ip) return false;
     if (WebServer.isLoopback(ip)) return true;
     if (this.allowExternal) return true;
-    if (this.allowLan) return WebServer.isPrivateIP(ip);
+    if (this.allowLan) return isPrivateIP(ip);
     return false;
   }
 
@@ -119,7 +107,7 @@ export class WebServer {
           allowOrigin =
             WebServer.isLoopback(hostname) ||
             hostname === "localhost" ||
-            (this.allowLan && WebServer.isPrivateIP(hostname)) ||
+            (this.allowLan && isPrivateIP(hostname)) ||
             this.allowExternal;
         } catch {
           allowOrigin = false;
@@ -284,7 +272,7 @@ export class WebServer {
               const trusted =
                 WebServer.isLoopback(h) ||
                 h === "localhost" ||
-                (this.allowLan && WebServer.isPrivateIP(h)) ||
+                (this.allowLan && isPrivateIP(h)) ||
                 this.allowExternal;
               if (!trusted) {
                 return res.status(403).json({ error: "Forbidden: invalid origin" });
