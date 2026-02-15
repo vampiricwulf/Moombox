@@ -5,10 +5,12 @@
  */
 
 import path from "path";
+import ms from "ms";
 import fs from "fs-extra";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
+import { createJobLogger } from "../structuredLogger.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
 import { ChatDownloader, ChatApi } from "../../engine/chat/index.js";
 import { createEmptyVideoInfo, type VideoInfo, type StreamStatus } from "../../types/youtube.js";
@@ -311,6 +313,16 @@ export class StreamProcessor {
       );
       await db.updateJob(job.id, { status: "Live", isVod: false });
       this.sendLiveNotification(job);
+
+      createJobLogger(job.id).info({
+        event: "stream_live_detected",
+        videoId: job.videoId,
+        title: job.title,
+        channel: job.channelName,
+        scheduledStartTime: videoInfo.scheduledStartTime,
+        detectedAt: new Date().toISOString(),
+      });
+
       return { videoInfo, shouldDownload: true, isVod: false };
     }
 
@@ -572,10 +584,10 @@ export class StreamProcessor {
    * - 1 minute if within 5 minutes
    */
   private calculateRecheckInterval(scheduledStartTime?: string): number {
-    const TEN_MINUTES = 10 * 60 * 1000;
-    const FIVE_MINUTES = 5 * 60 * 1000;
-    const ONE_MINUTE = 60 * 1000;
-    const ONE_HOUR = 60 * 60 * 1000;
+    const TEN_MINUTES = ms("10m");
+    const FIVE_MINUTES = ms("5m");
+    const ONE_MINUTE = ms("1m");
+    const ONE_HOUR = ms("1h");
 
     if (!scheduledStartTime) {
       return TEN_MINUTES;

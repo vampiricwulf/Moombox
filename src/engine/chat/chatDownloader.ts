@@ -7,6 +7,7 @@
 
 import fs from "fs-extra";
 import path from "path";
+import ms from "ms";
 import { EventEmitter } from "events";
 import { ChatApi } from "./chatApi.js";
 import { Logger } from "../../core/logger.js";
@@ -361,7 +362,7 @@ export class ChatDownloader extends EventEmitter {
                 break;
               }
               // Exponential backoff: 10s, 20s, 40s, 80s, cap at 5min
-              contRetryDelay = Math.min(contRetryDelay * 2, 5 * 60 * 1000);
+              contRetryDelay = Math.min(contRetryDelay * 2, ms("5m"));
             }
             if (contRetries >= MAX_CONT_RETRIES) {
               this.logger.warn("[ChatDownloader] Max continuation retries reached, stopping chat download");

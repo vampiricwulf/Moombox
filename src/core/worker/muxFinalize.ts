@@ -83,6 +83,22 @@ export async function muxAndFinalize(
   logger.info("[DownloadOrchestrator] Muxing...");
   await db.updateJob(job.id, { status: "Muxing" });
 
+  // Structured event: mux start with segment counts
+  {
+    const freshJobForLog = (await db.getJobs()).find(j => j.id === job.id);
+    createJobLogger(job.id).info({
+      event: "mux_start",
+      videoId: job.videoId,
+      title: job.title,
+      videoSegments: freshJobForLog?.lastVideoSeq,
+      audioSegments: freshJobForLog?.lastAudioSeq,
+      chatMessages: freshJobForLog?.totalChatMessages,
+      downloadElapsedMs: freshJobForLog?.downloadStartedAt
+        ? Date.now() - new Date(freshJobForLog.downloadStartedAt).getTime()
+        : undefined,
+    });
+  }
+
   // "Muxing Starting" notification
   {
     const freshJob = (await db.getJobs()).find(j => j.id === job.id);

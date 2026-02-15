@@ -6,6 +6,7 @@
  */
 
 import path from "path";
+import ms from "ms";
 import fs from "fs-extra";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
@@ -262,7 +263,7 @@ export class DownloadOrchestrator {
 
       // Wait for chat to finish (with timeout so we don't block muxing forever)
       // Give chat 2 minutes after video/audio complete to finish
-      const CHAT_TIMEOUT_MS = 2 * 60 * 1000;
+      const CHAT_TIMEOUT_MS = ms("2m");
       let chatTimeoutTimer: ReturnType<typeof setTimeout>;
       const chatTimeout = new Promise<void>((resolve) => {
         chatTimeoutTimer = setTimeout(() => {
@@ -329,7 +330,7 @@ export class DownloadOrchestrator {
       await db.updateJob(job.id, { progress: `V:100% A:100%${chatSuffix2}`, percent: 100 });
 
       // Wait for chat with timeout
-      const CHAT_TIMEOUT_MS = 2 * 60 * 1000;
+      const CHAT_TIMEOUT_MS = ms("2m");
       let chatTimeoutTimer2: ReturnType<typeof setTimeout>;
       const chatTimeout = new Promise<void>((resolve) => {
         chatTimeoutTimer2 = setTimeout(() => {

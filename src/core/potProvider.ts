@@ -7,6 +7,7 @@
  * Uses JSDOM directly for BotGuard VM execution.
  */
 
+import ms from "ms";
 import { BG, buildURL, getHeaders } from "../bgutils/index.js";
 import { Logger } from "./logger.js";
 import { setupGlobalDom } from "./globalDom.js";
@@ -259,7 +260,7 @@ export class PotProvider {
     const sessionData = {
       poToken,
       contentBinding,
-      expiresAt: new Date(Date.now() + this.tokenTtlHours * 60 * 60 * 1000),
+      expiresAt: new Date(Date.now() + this.tokenTtlHours * ms("1h")),
     };
 
     this.sessionCache[contentBinding] = sessionData;

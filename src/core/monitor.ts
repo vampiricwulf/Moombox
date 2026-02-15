@@ -1,8 +1,10 @@
 import Parser from "rss-parser";
+import ms from "ms";
 import { ConfigManager, ChannelConfig } from "./config.js";
 import { Database } from "./database.js";
 import { YouTubeService } from "../engine/youtube/index.js";
 import { Logger } from "./logger.js";
+import { createComponentLogger } from "./structuredLogger.js";
 import { NotificationManager, NotificationType } from "./notifications.js";
 import { MoomboxConfig } from "../types/config.js";
 import { fetchWithTimeout } from "./http.js";
@@ -39,7 +41,7 @@ export class FeedMonitor {
   private scheduleNext() {
     if (!this.running) return;
     const config = ConfigManager.getInstance().get();
-    const intervalMs = (config.feed_check_interval ?? 10) * 60 * 1000;
+    const intervalMs = (config.feed_check_interval ?? 10) * ms("1m");
     this.interval = setTimeout(() => {
       this.checkFeeds();
       this.scheduleNext();
@@ -328,6 +330,17 @@ export class FeedMonitor {
     this.logger.info(
       `[Monitor] Queuing job: ${title} (${videoId})`,
     );
+
+    // Structured event: stream discovered with searchable metadata
+    createComponentLogger("FeedMonitor").info({
+      event: "stream_discovered",
+      videoId,
+      title,
+      channelId: channel.id,
+      channelName: channel.name || "Unknown",
+      includeNonLive,
+    });
+
     // Queue Job
     const newJob = await db.addJob({
       videoId: videoId,

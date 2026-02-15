@@ -4,31 +4,11 @@
  * Provides HTTP request helpers with:
  * - Automatic retry logic with exponential backoff (via p-retry)
  * - Timeout support
- * - Modern ky HTTP client for advanced use cases
+ * - fetch-compatible retry wrapper for BotGuard integration
  */
 
-import pRetry, { AbortError } from "p-retry";
-import ky from "ky";
-
-/**
- * Modern HTTP client with built-in retry and timeout
- * Use this for advanced HTTP requests with automatic retries
- */
-export const httpClient = ky.create({
-  timeout: 30000,
-  retry: {
-    limit: 3,
-    statusCodes: [408, 413, 429, 500, 502, 503, 504],
-    backoffLimit: 30000,
-  },
-  hooks: {
-    beforeRetry: [
-      ({ request, options, error, retryCount }) => {
-        console.log(`Retrying ${request.url} (attempt ${retryCount + 1})`);
-      },
-    ],
-  },
-});
+import pRetry from "p-retry";
+import { Logger } from "./logger.js";
 
 /**
  * Fetch with timeout and automatic retry on transient failures.
@@ -65,9 +45,13 @@ export async function fetchWithTimeout(
     {
       retries: retryOptions?.retries ?? 3,
       onFailedAttempt: (error) => {
-        console.log(
-          `[HTTP] Attempt ${error.attemptNumber} failed. Retries left: ${error.retriesLeft}`,
-        );
+        try {
+          Logger.getInstance().debug(
+            `[HTTP] Attempt ${error.attemptNumber} failed. Retries left: ${error.retriesLeft}`,
+          );
+        } catch {
+          // Logger may not be initialized yet
+        }
       },
     },
   );
@@ -76,15 +60,14 @@ export async function fetchWithTimeout(
 /**
  * Create a fetch-compatible function with retry logic and timeout.
  * Compatible with BotGuard's fetch parameter signature (typeof fetch).
+ * Uses p-retry for standardized exponential backoff.
  */
 export function createRetryFetch(options?: {
   maxRetries?: number;
-  retryDelay?: number;
   timeout?: number;
   headers?: Record<string, string>;
 }): typeof fetch {
   const maxRetries = options?.maxRetries ?? 3;
-  const retryDelay = options?.retryDelay ?? 2000;
   const timeout = options?.timeout ?? 30000;
   const defaultHeaders = options?.headers ?? {};
 
@@ -96,42 +79,26 @@ export function createRetryFetch(options?: {
           ? input.toString()
           : input.url;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
+    return pRetry(
+      async () => {
         return await fetch(url, {
           ...init,
           signal: init?.signal || AbortSignal.timeout(timeout),
           headers: { ...defaultHeaders, ...init?.headers },
         });
-      } catch (e) {
-        if (attempt === maxRetries) throw e;
-        await new Promise((r) => setTimeout(r, retryDelay));
-      }
-    }
-    throw new Error("All fetch attempts failed");
+      },
+      {
+        retries: maxRetries,
+        onFailedAttempt: (error) => {
+          try {
+            Logger.getInstance().debug(
+              `[HTTP] Retry fetch attempt ${error.attemptNumber} failed for ${url}. Retries left: ${error.retriesLeft}`,
+            );
+          } catch {
+            // Logger may not be initialized yet
+          }
+        },
+      },
+    );
   };
-}
-
-/**
- * Generic retry with exponential backoff for any async operation.
- * Uses p-retry for standardized retry logic.
- */
-export async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  options?: {
-    maxRetries?: number;
-    signal?: AbortSignal;
-  },
-): Promise<T> {
-  return pRetry(
-    async () => {
-      if (options?.signal?.aborted) {
-        throw new AbortError("Aborted");
-      }
-      return await fn();
-    },
-    {
-      retries: options?.maxRetries ?? 3,
-    },
-  );
 }

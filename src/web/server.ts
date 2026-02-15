@@ -5,6 +5,7 @@
  */
 
 import express from "express";
+import ms from "ms";
 import { createServer } from "http";
 import net from "net";
 import { WebSocketServer, WebSocket } from "ws";
@@ -550,7 +551,7 @@ export class WebServer {
   private filterJobsByAge(jobs: Job[], archived: boolean): Job[] {
     const config = ConfigManager.getInstance().get();
     const now = Date.now();
-    const hideAgeMs = (config.tasklist?.hide_finished_age_days || 30) * 86400000;
+    const hideAgeMs = (config.tasklist?.hide_finished_age_days || 30) * ms("1d");
 
     return jobs.filter((job) => {
       if (job.status !== "Finished") return !archived;

@@ -7,6 +7,7 @@
 
 import { Database, type Job } from "../database.js";
 import { Logger } from "../logger.js";
+import { createJobLogger } from "../structuredLogger.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import { AutoCookieService } from "../autoCookies.js";
 import { getErrorMessage } from "../../types/errors.js";
@@ -90,6 +91,17 @@ export class DownloadWorker {
       const msg = getErrorMessage(e);
       this.logger.error(`[Worker] Job ${job.id} failed: ${msg}`);
 
+      // Structured event: job failure with typed error fields
+      createJobLogger(job.id).error({
+        event: "job_error",
+        videoId: job.videoId,
+        title: job.title,
+        channel: job.channelName,
+        error: msg,
+        errorType: "unhandled",
+        stack: e instanceof Error ? e.stack : undefined,
+      });
+
       try {
         const db = await Database.getInstance();
         await db.updateJob(job.id, { status: "Error", error: msg });
@@ -132,6 +144,16 @@ export class DownloadWorker {
     if (result.error) {
       result.chatDownloader?.stop();
       const error = result.videoInfo.playabilityError;
+
+      // Structured event: job error with playability context
+      createJobLogger(job.id).warn({
+        event: "job_error",
+        videoId: job.videoId,
+        title: job.title,
+        channel: job.channelName,
+        error: result.error,
+        errorType: error || "unknown",
+      });
 
       if (error === "members_only" || error === "login_required") {
         this.logger.warn(

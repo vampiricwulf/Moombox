@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import path from "path";
 import { ConfigManager } from "./config.js";
+import { initStructuredLogger, forwardToStructuredLog } from "./structuredLogger.js";
 
 export enum LogLevel {
   DEBUG = 0,
@@ -58,6 +59,11 @@ export class Logger {
       } catch {
         this.currentSize = 0;
       }
+
+      // Initialize structured JSON logger (pino) alongside the text logger.
+      // Uses pino.destination() for SEA-compatible synchronous writes.
+      const logDir = path.dirname(this.logFile);
+      initStructuredLogger(logDir, config.log_level || "INFO");
 
       this.info(`Logger initialized. Level: ${LogLevel[this.logLevel]}`);
     } catch (e) {
@@ -126,6 +132,9 @@ export class Logger {
     for (const l of [...this.listeners]) {
       try { l(formattedMsg); } catch (e: any) { process.stderr.write(`Logger listener error: ${e?.message}\n`); }
     }
+
+    // Forward to pino for structured JSON output (structured.jsonl)
+    forwardToStructuredLog(levelName, message);
 
     // Write to file (serialized via promise chain to prevent race with rotation)
     if (this.logFile) {
