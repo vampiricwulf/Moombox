@@ -164,12 +164,24 @@ export class WebServer {
       res.setHeader("X-Frame-Options", "DENY");
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Referrer-Policy", "no-referrer");
-      res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+
+      // Permissions-Policy: deny all potentially dangerous features
+      res.setHeader("Permissions-Policy",
+        "accelerometer=(), " +
+        "autoplay=(self), " + // Allow autoplay for embedded videos
+        "camera=(), " +
+        "clipboard-write=(self), " + // Allow clipboard for copy/paste
+        "encrypted-media=(self), " + // Allow encrypted media for video playback
+        "geolocation=(), " +
+        "gyroscope=(), " +
+        "microphone=(), " +
+        "picture-in-picture=(self)" // Allow PiP for video player
+      );
 
       // Content Security Policy (prevents XSS attacks)
       res.setHeader("Content-Security-Policy",
         "default-src 'self'; " +
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " + // Shoelace from CDN + inline event handlers (unsafe-inline covers unsafe-hashes)
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " + // Shoelace from CDN + inline event handlers
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " + // Shoelace CSS from CDN + inline styles
         "font-src 'self' https://cdn.jsdelivr.net; " + // Shoelace fonts from CDN
         "img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://cdn.jsdelivr.net; " + // YouTube thumbnails + Shoelace icons
