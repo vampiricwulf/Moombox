@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import path from "path";
 import { EventEmitter } from "events";
+import pLimit from "p-limit";
 import { ManifestParser } from "./manifest.js";
 import { Logger } from "../core/logger.js";
 import { DOWNLOAD_TIMEOUT_MS } from "../constants.js";
@@ -796,7 +797,6 @@ export class SegmentDownloader extends EventEmitter {
     if (this.options.endSeq != null && targetSeq > this.options.endSeq + 1) {
       targetSeq = this.options.endSeq + 1;
     }
-    let activeDownloads = 0;
     let totalFetched = 0;
 
     this.logger.info(
@@ -805,18 +805,20 @@ export class SegmentDownloader extends EventEmitter {
 
     const startTime = Date.now();
 
+    // Create concurrency limiter - handles up to PARALLEL_DOWNLOADS concurrent requests
+    const limit = pLimit(SegmentDownloader.PARALLEL_DOWNLOADS);
+    const inFlightDownloads = new Set<Promise<void>>();
+
     // Process downloads and writes
     while (
       this.running &&
       !this.cancelFlag &&
       !this.streamEnded &&
-      (nextToWrite < targetSeq || activeDownloads > 0)
+      (nextToWrite < targetSeq || inFlightDownloads.size > 0)
     ) {
-      // Start new downloads up to parallel limit
-      const downloadPromises: Promise<void>[] = [];
-
+      // Start new downloads up to buffer size cap
       while (
-        activeDownloads < SegmentDownloader.PARALLEL_DOWNLOADS &&
+        inFlightDownloads.size < BUFFER_SIZE_CAP &&
         segmentBuffer.size < BUFFER_SIZE_CAP
       ) {
         // Prefer retry queue over new fetches
@@ -829,10 +831,10 @@ export class SegmentDownloader extends EventEmitter {
           break;
         }
 
-        activeDownloads++;
-
-        const promise = this.fetchSegmentData(seq)
-          .then((result) => {
+        // Use p-limit to manage concurrency automatically
+        const downloadPromise = limit(async () => {
+          try {
+            const result = await this.fetchSegmentData(seq);
             if (result) {
               segmentBuffer.set(result.seq, result.data);
               totalFetched++;
@@ -844,8 +846,7 @@ export class SegmentDownloader extends EventEmitter {
                 retryQueue.push(seq);
               }
             }
-          })
-          .catch((e) => {
+          } catch (e: any) {
             // Track retries for failed segments
             const retries = (retryCounts.get(seq) || 0) + 1;
             retryCounts.set(seq, retries);
@@ -859,18 +860,17 @@ export class SegmentDownloader extends EventEmitter {
                 `[Downloader] Parallel fetch failed for seq ${seq} after ${MAX_SEGMENT_RETRIES} retries: ${e.message}`,
               );
             }
-          })
-          .finally(() => {
-            activeDownloads--;
-          });
+          }
+        });
 
-        downloadPromises.push(promise);
+        inFlightDownloads.add(downloadPromise);
+        downloadPromise.finally(() => inFlightDownloads.delete(downloadPromise));
       }
 
       // Wait a bit for downloads to complete
-      if (downloadPromises.length > 0) {
+      if (inFlightDownloads.size > 0) {
         await Promise.race([
-          Promise.all(downloadPromises),
+          Promise.race([...inFlightDownloads]),
           new Promise((r) => setTimeout(r, 50)),
         ]);
       }
@@ -898,7 +898,7 @@ export class SegmentDownloader extends EventEmitter {
 
       // Check if we're stuck: all downloads done, nothing more to fetch,
       // no retries pending, and the next segment to write is missing (gap from failed fetch)
-      if (activeDownloads === 0 && nextToFetch >= targetSeq && retryQueue.length === 0 && !segmentBuffer.has(nextToWrite)) {
+      if (inFlightDownloads.size === 0 && nextToFetch >= targetSeq && retryQueue.length === 0 && !segmentBuffer.has(nextToWrite)) {
         if (nextToWrite < targetSeq) {
           // Find the next available segment in the buffer to skip past the gap
           let gapEnd = nextToWrite + 1;
@@ -920,7 +920,7 @@ export class SegmentDownloader extends EventEmitter {
       }
 
       // Yield while waiting for in-flight downloads to complete
-      if (downloadPromises.length === 0 && !segmentBuffer.has(nextToWrite)) {
+      if (inFlightDownloads.size === 0 && !segmentBuffer.has(nextToWrite)) {
         await this.cancellableDelay(100);
       }
     }

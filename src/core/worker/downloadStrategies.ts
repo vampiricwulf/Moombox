@@ -3,6 +3,7 @@
  */
 
 import path from "path";
+import pLimit from "p-limit";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
@@ -126,35 +127,43 @@ export async function downloadVod(
     "[DownloadOrchestrator] Downloading video and audio streams in parallel...",
   );
 
-  const downloadPromises: Promise<void>[] = [];
+  // Use p-limit to ensure max 2 concurrent downloads (video + audio)
+  const limit = pLimit(2);
+  const downloadPromises: (Promise<void> | false)[] = [];
 
   if (bestVideo?.url && videoPath) {
     downloadPromises.push(
-      downloadFile(bestVideo.url, videoPath, activeSegmentDownloaders, signal, (progress, percent) => {
-        videoProgress =
-          percent !== undefined ? `${percent.toFixed(1)}%` : progress;
-        videoPercent = percent || 0;
-        updateCombinedProgress();
-      }),
+      limit(() =>
+        downloadFile(bestVideo.url!, videoPath!, activeSegmentDownloaders, signal, (progress, percent) => {
+          videoProgress =
+            percent !== undefined ? `${percent.toFixed(1)}%` : progress;
+          videoPercent = percent || 0;
+          updateCombinedProgress();
+        }),
+      ),
     );
   } else {
     videoProgress = "N/A";
+    downloadPromises.push(false);
   }
 
   if (bestAudio?.url && audioPath) {
     downloadPromises.push(
-      downloadFile(bestAudio.url, audioPath, activeSegmentDownloaders, signal, (progress, percent) => {
-        audioProgress =
-          percent !== undefined ? `${percent.toFixed(1)}%` : progress;
-        audioPercent = percent || 0;
-        updateCombinedProgress();
-      }),
+      limit(() =>
+        downloadFile(bestAudio.url!, audioPath!, activeSegmentDownloaders, signal, (progress, percent) => {
+          audioProgress =
+            percent !== undefined ? `${percent.toFixed(1)}%` : progress;
+          audioPercent = percent || 0;
+          updateCombinedProgress();
+        }),
+      ),
     );
   } else {
     audioProgress = "N/A";
+    downloadPromises.push(false);
   }
 
-  await Promise.all(downloadPromises);
+  await Promise.all(downloadPromises.filter(Boolean));
   if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
   logger.info("[DownloadOrchestrator] Parallel download complete");
   return {
@@ -229,7 +238,9 @@ export async function downloadDash(
     logger.debug(
       `[DownloadOrchestrator] Decrypting n parameter in segment BaseURLs...`,
     );
-    await Promise.all(dashStreams.map(async (stream) => {
+    // Limit concurrent n-parameter decryption to avoid overwhelming the cipher
+    const decryptLimit = pLimit(10);
+    await Promise.all(dashStreams.map(stream => decryptLimit(async () => {
       if (stream.baseUrl) {
         const originalUrl = stream.baseUrl;
         stream.baseUrl = await yt.decryptNParamInUrl(
@@ -242,7 +253,7 @@ export async function downloadDash(
           );
         }
       }
-    }));
+    })));
   } else {
     logger.warn(
       `[DownloadOrchestrator] No player URL available - cannot decrypt n params`,
