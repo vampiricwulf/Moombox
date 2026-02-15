@@ -103,7 +103,7 @@ export class Database {
    * Write database to disk and set restrictive permissions
    */
   private async writeWithPermissions(): Promise<void> {
-    await this.writeWithPermissions();
+    await this.db.write();
     // Set owner-only permissions (0o600) for security
     const filename = (this.db.adapter as any).filename;
     if (filename) {
