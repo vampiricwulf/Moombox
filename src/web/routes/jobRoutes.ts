@@ -293,14 +293,48 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       logger.info(`Added job: ${title} (${videoId})`);
       ctx.broadcast({ type: "job_added", payload: job });
 
+      // Build notification fields with advanced options
+      const fields: Array<{ name: string; value: string; inline?: boolean }> = [
+        { name: "Channel", value: channelName, inline: true },
+        { name: "Video ID", value: videoId, inline: true },
+      ];
+
+      // Add format selection fields if specified
+      if (advancedOpts.selectedVideoItag != null) {
+        const formatLabel = advancedOpts.selectedVideoItag === -1
+          ? "None (audio only)"
+          : `itag ${advancedOpts.selectedVideoItag}`;
+        fields.push({ name: "Video Format", value: formatLabel, inline: true });
+      }
+      if (advancedOpts.selectedAudioItag != null) {
+        const formatLabel = advancedOpts.selectedAudioItag === -1
+          ? "None (video only)"
+          : `itag ${advancedOpts.selectedAudioItag}`;
+        fields.push({ name: "Audio Format", value: formatLabel, inline: true });
+      }
+
+      // Add time range if specified
+      if (advancedOpts.startTime != null || advancedOpts.endTime != null) {
+        const startMin = Math.floor((advancedOpts.startTime || 0) / 60);
+        const startSec = (advancedOpts.startTime || 0) % 60;
+        const startStr = `${startMin}:${String(startSec).padStart(2, "0")}`;
+        const endStr = advancedOpts.endTime != null
+          ? `${Math.floor(advancedOpts.endTime / 60)}:${String(advancedOpts.endTime % 60).padStart(2, "0")}`
+          : "end";
+        const duration = advancedOpts.endTime != null
+          ? advancedOpts.endTime - (advancedOpts.startTime || 0)
+          : null;
+        const rangeValue = duration != null
+          ? `${startStr} - ${endStr} (${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")})`
+          : `${startStr} - ${endStr}`;
+        fields.push({ name: "Time Range", value: rangeValue, inline: false });
+      }
+
       NotificationManager.getInstance().send(
         "Video Added",
         `Manually added: ${title}`,
         NotificationType.INFO,
-        [
-          { name: "Channel", value: channelName, inline: true },
-          { name: "Video ID", value: videoId, inline: true },
-        ],
+        fields,
         { url: `https://www.youtube.com/watch?v=${videoId}`, thumbnail: job.thumbnailUrl, event: "added" },
       );
 

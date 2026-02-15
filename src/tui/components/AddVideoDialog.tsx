@@ -161,11 +161,45 @@ export function AddVideoDialog({
 
       if (job) {
         onComplete({ text: `Added ${videoId} to queue`, color: "green" });
+
+        // Build notification fields with advanced options
+        const fields: Array<{ name: string; value: string; inline?: boolean }> = [
+          { name: "Video ID", value: videoId, inline: true },
+        ];
+        if (formats?.channelName) {
+          fields.push({ name: "Channel", value: formats.channelName, inline: true });
+        }
+
+        // Add format selection fields if specified
+        if (selectedVideoItag != null) {
+          const formatLabel = selectedVideoItag === -1
+            ? "None (audio only)"
+            : `itag ${selectedVideoItag}`;
+          fields.push({ name: "Video Format", value: formatLabel, inline: true });
+        }
+        if (selectedAudioItag != null) {
+          const formatLabel = selectedAudioItag === -1
+            ? "None (video only)"
+            : `itag ${selectedAudioItag}`;
+          fields.push({ name: "Audio Format", value: formatLabel, inline: true });
+        }
+
+        // Add time range if specified
+        if (startTime != null || endTime != null) {
+          const startStr = formatSecondsToTimestamp(startTime || 0);
+          const endStr = endTime != null ? formatSecondsToTimestamp(endTime) : "end";
+          const duration = endTime != null ? endTime - (startTime || 0) : null;
+          const rangeValue = duration != null
+            ? `${startStr} - ${endStr} (${formatSecondsToTimestamp(duration)})`
+            : `${startStr} - ${endStr}`;
+          fields.push({ name: "Time Range", value: rangeValue, inline: false });
+        }
+
         NotificationManager.getInstance().send(
           "Video Added",
           `Manually added: ${formats?.title || videoId}`,
           NotificationType.INFO,
-          [{ name: "Video ID", value: videoId, inline: true }],
+          fields,
           { url, event: "added" },
         );
       } else {

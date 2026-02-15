@@ -112,14 +112,38 @@ export class DownloadOrchestrator {
     await db.updateJob(job.id, { status: "Downloading", downloadStartedAt });
     Object.assign(job, { downloadStartedAt });
 
+    // Build notification fields with advanced options
+    const startFields: Array<{ name: string; value: string; inline?: boolean }> = [
+      { name: "Channel", value: job.channelName, inline: true },
+      { name: "Type", value: isVodDownload ? "VOD" : "Live Stream", inline: true },
+    ];
+
+    // Add format selection fields if specified
+    if (job.selectedVideoItag != null) {
+      const formatLabel = job.selectedVideoItag === -1 ? "None" : `itag ${job.selectedVideoItag}`;
+      startFields.push({ name: "Video", value: formatLabel, inline: true });
+    }
+    if (job.selectedAudioItag != null) {
+      const formatLabel = job.selectedAudioItag === -1 ? "None" : `itag ${job.selectedAudioItag}`;
+      startFields.push({ name: "Audio", value: formatLabel, inline: true });
+    }
+
+    // Add time range if specified
+    if (job.startTime != null || job.endTime != null) {
+      const startMin = Math.floor((job.startTime || 0) / 60);
+      const startSec = (job.startTime || 0) % 60;
+      const startStr = `${startMin}:${String(startSec).padStart(2, "0")}`;
+      const endStr = job.endTime != null
+        ? `${Math.floor(job.endTime / 60)}:${String(job.endTime % 60).padStart(2, "0")}`
+        : "end";
+      startFields.push({ name: "Trim Range", value: `${startStr} - ${endStr}`, inline: false });
+    }
+
     NotificationManager.getInstance().send(
       "Download Starting",
       `Beginning download: ${job.title}`,
       NotificationType.DOWNLOAD,
-      [
-        { name: "Channel", value: job.channelName, inline: true },
-        { name: "Type", value: isVodDownload ? "VOD" : "Live Stream", inline: true },
-      ],
+      startFields,
       {
         url: `https://www.youtube.com/watch?v=${job.videoId}`,
         thumbnail: job.thumbnailUrl,

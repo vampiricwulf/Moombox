@@ -248,6 +248,29 @@ export async function muxAndFinalize(
       finFields.push({ name: "Chat Messages", value: String(finishedJob.totalChatMessages), inline: true });
     }
 
+    // Add advanced options info if used
+    if (job.selectedVideoItag != null || job.selectedAudioItag != null) {
+      let formatInfo = "";
+      if (job.selectedVideoItag != null) {
+        formatInfo += job.selectedVideoItag === -1 ? "Video: None" : `Video: itag ${job.selectedVideoItag}`;
+      }
+      if (job.selectedAudioItag != null) {
+        if (formatInfo) formatInfo += ", ";
+        formatInfo += job.selectedAudioItag === -1 ? "Audio: None" : `Audio: itag ${job.selectedAudioItag}`;
+      }
+      finFields.push({ name: "Format Selection", value: formatInfo, inline: false });
+    }
+
+    if (job.startTime != null || job.endTime != null) {
+      const startMin = Math.floor((job.startTime || 0) / 60);
+      const startSec = (job.startTime || 0) % 60;
+      const startStr = `${startMin}:${String(startSec).padStart(2, "0")}`;
+      const endStr = job.endTime != null
+        ? `${Math.floor(job.endTime / 60)}:${String(job.endTime % 60).padStart(2, "0")}`
+        : "end";
+      finFields.push({ name: "Trimmed Range", value: `${startStr} - ${endStr}`, inline: true });
+    }
+
     if (job.description) {
       const desc = job.description.length > 300 ? job.description.substring(0, 297) + "..." : job.description;
       finFields.push({ name: "Description", value: desc, inline: false });
