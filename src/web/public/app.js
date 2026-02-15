@@ -110,6 +110,12 @@ class MoomboxApp {
       .getElementById("details-play-btn")
       .addEventListener("click", () => this.openInPlayer());
     document
+      .getElementById("details-trim-btn")
+      .addEventListener("click", () => {
+        const job = this.jobs.find(j => j.id === this.selectedJobId);
+        if (job) this.openTrimDialog(job);
+      });
+    document
       .getElementById("details-cancel-btn")
       .addEventListener("click", () => this.cancelJob());
     document
@@ -605,6 +611,9 @@ class MoomboxApp {
     document.getElementById("details-delete-btn").style.display = canDelete
       ? ""
       : "none";
+    document.getElementById("details-trim-btn").style.display = hasFile
+      ? ""
+      : "none";
     const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(
       window.location.hostname,
     );
@@ -765,6 +774,28 @@ class MoomboxApp {
       </div>
       ` : ""}
 
+      ${job.trims && job.trims.length > 0 ? `
+      <sl-details summary="Trims (${job.trims.length})" open class="details-section">
+        <div class="trim-list">
+          ${job.trims.map(trim => {
+            const range = `${this.formatDurationSeconds(trim.startTime)} - ${this.formatDurationSeconds(trim.endTime)}`;
+            const duration = `${Math.floor(trim.duration)}s`;
+            const size = trim.fileSize ? this.formatBytes(trim.fileSize) : '?';
+            return `
+              <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #eee;">
+                <span>
+                  <strong>${range}</strong> (${duration}, ${size})
+                </span>
+                <sl-button size="small" variant="danger" onclick="app.deleteTrim('${this.escapeHtml(job.id)}', '${this.escapeHtml(trim.id)}')">
+                  Delete
+                </sl-button>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </sl-details>
+      ` : ""}
+
       ${
         job.error
           ? `
@@ -803,6 +834,7 @@ class MoomboxApp {
 
   async addVideo() {
     const input = document.getElementById("video-url-input");
+    const submitBtn = document.getElementById("add-submit-btn");
     const value = input.value.trim();
 
     if (!value) return;
@@ -813,34 +845,37 @@ class MoomboxApp {
       return;
     }
 
-    // Build request body with optional advanced options
-    const body = { videoId };
-    const advancedToggle = document.getElementById("advanced-options-toggle");
-
-    if (advancedToggle.checked) {
-      const videoSelect = document.getElementById("video-format-select");
-      const audioSelect = document.getElementById("audio-format-select");
-      const startInput = document.getElementById("start-time-input");
-      const endInput = document.getElementById("end-time-input");
-
-      if (videoSelect.value) {
-        body.selectedVideoItag = parseInt(videoSelect.value, 10);
-      }
-      if (audioSelect.value) {
-        body.selectedAudioItag = parseInt(audioSelect.value, 10);
-      }
-
-      const startTime = this.parseTimeInput(startInput.value);
-      if (startTime !== null && startTime > 0) {
-        body.startTime = startTime;
-      }
-      const endTime = this.parseTimeInput(endInput.value);
-      if (endTime !== null && endTime > 0) {
-        body.endTime = endTime;
-      }
-    }
+    // Show loading state immediately
+    submitBtn.loading = true;
 
     try {
+      // Build request body with optional advanced options
+      const body = { videoId };
+      const advancedToggle = document.getElementById("advanced-options-toggle");
+
+      if (advancedToggle.checked) {
+        const videoSelect = document.getElementById("video-format-select");
+        const audioSelect = document.getElementById("audio-format-select");
+        const startInput = document.getElementById("start-time-input");
+        const endInput = document.getElementById("end-time-input");
+
+        if (videoSelect.value) {
+          body.selectedVideoItag = parseInt(videoSelect.value, 10);
+        }
+        if (audioSelect.value) {
+          body.selectedAudioItag = parseInt(audioSelect.value, 10);
+        }
+
+        const startTime = this.parseTimeInput(startInput.value);
+        if (startTime !== null && startTime > 0) {
+          body.startTime = startTime;
+        }
+        const endTime = this.parseTimeInput(endInput.value);
+        if (endTime !== null && endTime > 0) {
+          body.endTime = endTime;
+        }
+      }
+
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -856,6 +891,8 @@ class MoomboxApp {
       }
     } catch (e) {
       this.showToast("Failed to add video: " + e.message, "danger");
+    } finally {
+      submitBtn.loading = false;
     }
   }
 
@@ -1111,6 +1148,131 @@ class MoomboxApp {
     } catch (e) {
       this.showToast("Failed to delete job: " + e.message, "danger");
     }
+  }
+
+  // ===== Trim Management =====
+
+  async createTrim(jobId, startTime, endTime) {
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/trims`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startTime, endTime }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to create trim');
+      }
+
+      const { trim } = await response.json();
+
+      // Show success notification
+      this.showToast('Trim created successfully', 'success');
+
+      // Refresh job details to show new trim
+      const job = this.jobs.find(j => j.id === jobId);
+      if (job && this.selectedJobId === jobId) {
+        this.renderJobDetails(job);
+      }
+
+      return trim;
+    } catch (error) {
+      this.showToast(error.message, 'danger');
+      throw error;
+    }
+  }
+
+  async deleteTrim(jobId, trimId) {
+    if (!confirm('Delete this trim? This cannot be undone.')) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/trims/${trimId}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to delete trim');
+      }
+
+      this.showToast('Trim deleted', 'success');
+
+      // Refresh job details
+      const job = this.jobs.find(j => j.id === jobId);
+      if (job && this.selectedJobId === jobId) {
+        this.renderJobDetails(job);
+      }
+    } catch (error) {
+      this.showToast(error.message, 'danger');
+    }
+  }
+
+  openTrimDialog(job) {
+    const trimDialog = document.getElementById('trim-dialog');
+    const detailsDialog = document.getElementById('details-dialog');
+    const startInput = document.getElementById('trim-start-input');
+    const endInput = document.getElementById('trim-end-input');
+    const submitBtn = document.getElementById('trim-submit-btn');
+
+    // Reset inputs
+    startInput.value = '';
+    endInput.value = '';
+
+    // Update dialog title with job info
+    trimDialog.label = `Create Trim - ${job.title}`;
+
+    // Set up submit handler
+    submitBtn.onclick = async () => {
+      // Show loading state immediately
+      submitBtn.loading = true;
+
+      try {
+        const startTime = this.parseTimeInput(startInput.value);
+        const endTime = this.parseTimeInput(endInput.value);
+
+        if (startTime === null || endTime === null) {
+          this.showToast('Invalid time format', 'warning');
+          return;
+        }
+
+        if (endTime <= startTime) {
+          this.showToast('End time must be after start time', 'warning');
+          return;
+        }
+
+        await this.createTrim(job.id, startTime, endTime);
+        trimDialog.hide();
+        // Reopen details dialog to show updated trims
+        setTimeout(() => detailsDialog.show(), 100);
+      } catch (error) {
+        // Error already shown by createTrim()
+      } finally {
+        // Clear loading state
+        submitBtn.loading = false;
+      }
+    };
+
+    // Close details dialog first to avoid layering issues
+    detailsDialog.hide();
+    // Small delay to ensure smooth transition
+    setTimeout(() => trimDialog.show(), 100);
+  }
+
+  formatDurationSeconds(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  formatBytes(bytes) {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
   }
 
   // ===== Log Management =====

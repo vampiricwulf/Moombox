@@ -169,7 +169,6 @@ export class DownloadOrchestrator {
     let segmentRange: SegmentRange | null = null;
     let selectedVideoFormat: any = null;
     let selectedAudioFormat: any = null;
-    let usedFFmpegTrim = false; // Track if FFmpeg trim download was used
 
     // Use pre-started chat downloader from upcoming phase, or create a new one
     if (config.downloader.download_chat !== false) {
@@ -260,15 +259,13 @@ export class DownloadOrchestrator {
       // Capture selected formats for trim bitrate info
       selectedVideoFormat = vodResult.selectedVideoFormat;
       selectedAudioFormat = vodResult.selectedAudioFormat;
-      usedFFmpegTrim = vodResult.usedFFmpegTrim || false;
 
-      // Use paths from downloadVod (may have extensions for FFmpeg compatibility)
       if (vodResult.hasVideo) {
-        videoPath = vodResult.videoPath || path.join(stagingDir, "video_stream");
-        audioPath = vodResult.audioPath || (vodResult.hasAudio ? path.join(stagingDir, "audio_stream") : null);
+        videoPath = path.join(stagingDir, "video_stream");
+        audioPath = vodResult.hasAudio ? path.join(stagingDir, "audio_stream") : null;
       } else if (vodResult.hasAudio) {
         // Audio-only download: use audio as primary input for muxer
-        videoPath = vodResult.audioPath || path.join(stagingDir, "audio_stream");
+        videoPath = path.join(stagingDir, "audio_stream");
         audioPath = null;
       }
 
@@ -343,11 +340,9 @@ export class DownloadOrchestrator {
       // Capture selected formats for trim bitrate info
       selectedVideoFormat = vodResult2.selectedVideoFormat;
       selectedAudioFormat = vodResult2.selectedAudioFormat;
-      usedFFmpegTrim = vodResult2.usedFFmpegTrim || false;
 
-      // Use paths from downloadVod (may have extensions for FFmpeg compatibility)
-      videoPath = vodResult2.videoPath || path.join(stagingDir, "video_stream");
-      audioPath = vodResult2.audioPath || (vodResult2.hasAudio ? path.join(stagingDir, "audio_stream") : null);
+      videoPath = path.join(stagingDir, "video_stream");
+      audioPath = vodResult2.hasAudio ? path.join(stagingDir, "audio_stream") : null;
 
       // Set progress to 100% now that download is complete
       const chatCount2 = chatDl ? chatDl.getMessageCount() : 0;
@@ -447,9 +442,8 @@ export class DownloadOrchestrator {
         audioBitrate: selectedAudioFormat?.bitrate ? Math.round(selectedAudioFormat.bitrate / 1000) : undefined,
         usePreciseTrim: true, // Enable by default for trim accuracy
       };
-    } else if (!usedFFmpegTrim && (job.startTime != null || job.endTime != null)) {
-      // VOD direct download WITHOUT FFmpeg trim: use muxer to trim the full file
-      // (If FFmpeg trim was used, files are already trimmed - just mux with -c copy)
+    } else if (job.startTime != null || job.endTime != null) {
+      // VOD direct download: use muxer to trim the full file
       trimOptions = {
         trimStartOffset: job.startTime || undefined,
         trimDuration: (job.endTime != null && job.endTime > 0)
@@ -460,12 +454,6 @@ export class DownloadOrchestrator {
         audioBitrate: selectedAudioFormat?.bitrate ? Math.round(selectedAudioFormat.bitrate / 1000) : undefined,
         usePreciseTrim: true, // Enable by default for trim accuracy
       };
-    }
-
-    if (usedFFmpegTrim) {
-      this.logger.info(
-        "[DownloadOrchestrator] Files already trimmed by FFmpeg download, muxing with -c copy (no re-encode)",
-      );
     }
 
     // Mux the streams

@@ -27,6 +27,7 @@ const HELP_SECTIONS: HelpSection[] = [
     bindings: [
       ["\u2191/\u2193", "Select previous/next task"],
       ["A", "Add video by URL or ID"],
+      ["T", "Trim finished video"],
       ["C", "Cancel selected job"],
       ["R", "Retry failed/cancelled job"],
       ["D", "Delete job (press twice to confirm)"],

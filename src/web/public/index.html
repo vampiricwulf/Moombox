@@ -111,6 +111,23 @@
                     </div>
                 </sl-dialog>
 
+                <!-- Trim Dialog -->
+                <sl-dialog label="Create Trim" id="trim-dialog">
+                    <div style="margin-bottom: 12px;">
+                        <small>Enter start and end times as HH:MM:SS, MM:SS, or seconds</small>
+                    </div>
+                    <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+                        <sl-input id="trim-start-input" label="Start Time" placeholder="0:00 or 0" style="flex: 1;"></sl-input>
+                        <sl-input id="trim-end-input" label="End Time" placeholder="1:30 or 90" style="flex: 1;"></sl-input>
+                    </div>
+                    <sl-button slot="footer" variant="default" onclick="document.getElementById('trim-dialog').hide()">
+                        Cancel
+                    </sl-button>
+                    <sl-button slot="footer" variant="primary" id="trim-submit-btn">
+                        Create Trim
+                    </sl-button>
+                </sl-dialog>
+
                 <!-- Jobs Table -->
                 <div id="video-table">
                     <div id="video-table-header">
@@ -669,6 +686,18 @@
                         name="play-circle"
                     ></sl-icon>
                     Play
+                </sl-button>
+                <sl-button
+                    variant="primary"
+                    id="details-trim-btn"
+                    style="display: none"
+                    outline
+                >
+                    <sl-icon
+                        slot="prefix"
+                        name="scissors"
+                    ></sl-icon>
+                    Create Trim
                 </sl-button>
                 <sl-button
                     variant="danger"

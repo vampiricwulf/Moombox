@@ -12,6 +12,7 @@ import { JobDetails } from "./components/JobDetails.js";
 import { HelpOverlay } from "./components/HelpOverlay.js";
 import { SetupWizard } from "./components/SetupWizard.js";
 import { AddVideoDialog } from "./components/AddVideoDialog.js";
+import { TrimDialog } from "./components/TrimDialog.js";
 import { useMouse, MouseEvent } from "./hooks/useMouse.js";
 import { NotificationManager, NotificationType } from "../core/notifications.js";
 import { readClipboard } from "./clipboard.js";
@@ -46,6 +47,8 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addMessage, setAddMessage] = useState<{ text: string; color: string } | null>(null);
   const [deleteConfirmJobId, setDeleteConfirmJobId] = useState<string | null>(null);
+  const [trimDialogOpen, setTrimDialogOpen] = useState(false);
+  const [trimDialogJob, setTrimDialogJob] = useState<Job | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [helpMode, setHelpMode] = useState(false);
   const [helpScrollOffset, setHelpScrollOffset] = useState(0);
@@ -507,6 +510,17 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         } else {
           setAddMessage({ text: "Can only open folder for finished jobs", color: "yellow" });
         }
+      } else if (input === "t" || input === "T") {
+        const job = getJobAtVirtualIndex(selectedJobIndexRef.current);
+        if (job && job.status === "Finished" && job.filename) {
+          setTrimDialogOpen(true);
+          setTrimDialogJob(job);
+        } else {
+          setAddMessage({
+            text: "Trim only available for finished jobs with files",
+            color: "yellow",
+          });
+        }
       }
     },
     [sortedJobs, virtualListLength, hasDivider, dividerIndex, getJobAtVirtualIndex, taskScrollOffset, taskHeight, db, deleteConfirmJobId],
@@ -568,6 +582,25 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         onCancel={() => {
           setAddDialogOpen(false);
           setAddMessage(null);
+        }}
+      />
+    );
+  }
+
+  if (trimDialogOpen && trimDialogJob) {
+    return (
+      <TrimDialog
+        job={trimDialogJob}
+        width={cols}
+        height={rows}
+        onComplete={(message) => {
+          setTrimDialogOpen(false);
+          setTrimDialogJob(null);
+          setAddMessage(message);
+        }}
+        onCancel={() => {
+          setTrimDialogOpen(false);
+          setTrimDialogJob(null);
         }}
       />
     );

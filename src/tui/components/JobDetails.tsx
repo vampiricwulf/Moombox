@@ -125,6 +125,24 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
     }
   }
 
+  // Trims section (if any exist)
+  if (job.trims && job.trims.length > 0) {
+    rows.push({ type: "separator" });
+    rows.push({ type: "header", text: `Trims (${job.trims.length})` });
+
+    for (const trim of job.trims) {
+      const range = `${formatTime(trim.startTime)} - ${formatTime(trim.endTime)}`;
+      const duration = `${Math.floor(trim.duration)}s`;
+      const size = trim.fileSize ? formatBytes(trim.fileSize) : "?";
+      rows.push({
+        type: "field",
+        label: range,
+        value: `${duration}, ${size}`,
+        color: "cyan",
+      });
+    }
+  }
+
   rows.push({ type: "separator" });
 
   // Progress section
@@ -245,5 +263,18 @@ function formatDuration(ms: number): string {
     return `${minutes}m ${seconds}s`;
   }
   return `${seconds}s`;
+}
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
 }
 

@@ -16,7 +16,7 @@ import { Logger } from "../core/logger.js";
 import { Database } from "../core/database.js";
 import { ConfigManager } from "../core/config.js";
 import type { Job } from "../types/jobs.js";
-import { registerPotRoutes, registerConfigRoutes, registerImportRoutes, registerJobRoutes, errorMiddleware } from "./routes/index.js";
+import { registerPotRoutes, registerConfigRoutes, registerImportRoutes, registerJobRoutes, registerTrimRoutes, errorMiddleware } from "./routes/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -221,6 +221,8 @@ export class WebServer {
     });
 
     registerImportRoutes(api);
+
+    registerTrimRoutes(api);
 
     this.app.use("/api", api);
 

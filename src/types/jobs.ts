@@ -18,6 +18,19 @@ export type JobStatus =
   | "COOKIES?"; // Requires updated cookies (member content)
 
 /**
+ * Trimmed version record (derivative file)
+ */
+export interface TrimRecord {
+  id: string;              // Unique trim ID (timestamp-based: "trim_1708042800000")
+  startTime: number;       // Start time in seconds
+  endTime: number;         // End time in seconds
+  filename: string;        // Relative filename: "{base} [30s-60s].mp4"
+  createdAt: string;       // ISO timestamp
+  duration: number;        // Trim duration (endTime - startTime)
+  fileSize?: number;       // File size in bytes (populated after creation)
+}
+
+/**
  * Job record stored in database
  */
 export interface Job {
@@ -70,6 +83,8 @@ export interface Job {
   // Timestamp selection (segment-level download range)
   startTime?: number;           // Start time in seconds (0 = beginning)
   endTime?: number;             // End time in seconds (undefined = end of stream)
+  // Derivative Trimmed Versions
+  trims?: TrimRecord[];         // Trimmed versions of this video
 }
 
 /**
