@@ -89,6 +89,8 @@ The Database class provides event subscriptions for real-time UI updates:
 
 ### Download Features
 
+- **Manual format selection:** Per-job format selection via "Advanced Options" in the Add Video dialog. Users can select specific video/audio itags or choose "None" for video-only/audio-only downloads (itag -1). The `FormatSelector.selectWithOptions()` method handles manual selection with automatic fallback.
+- **Timestamp selection:** Segment-level download range via start/end time. For DASH streams, `ManifestParser.calculateSegmentRange()` maps timestamps to segment indices. The `SegmentDownloader` respects `endSeq` to stop at the right segment. FFmpeg `-ss`/`-t` flags trim segment boundaries during mux. Time input supports `HH:MM:SS`, `MM:SS`, or raw seconds.
 - **Parallel segment downloads:** When catching up on a live stream, downloads 6 segments in parallel
 - **Head sequence tracking:** Monitors the live stream head to detect when falling behind
 - **Automatic catch-up:** Switches to parallel mode when >10 segments behind
@@ -147,7 +149,8 @@ The dashboard runs at `http://localhost:774` and provides:
 - `GET /api/jobs/archived` - List archived jobs (finished older than `hide_finished_age_days`)
 - `GET /api/jobs/:id` - Get job details
 - `GET /api/jobs/:id/video` - Stream video file (supports Range requests for seeking)
-- `POST /api/jobs` - Add new job `{ videoId: string }`
+- `GET /api/formats/:videoId` - Get available video/audio formats for a video (for Advanced Options)
+- `POST /api/jobs` - Add new job `{ videoId: string, selectedVideoItag?: number, selectedAudioItag?: number, startTime?: number, endTime?: number }`
 - `POST /api/jobs/:id/cancel` - Cancel job
 - `POST /api/jobs/:id/retry` - Retry failed job
 - `DELETE /api/jobs/:id` - Delete job

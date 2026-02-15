@@ -8,7 +8,7 @@ import { open as fsOpen } from "node:fs/promises";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
-import { Muxer } from "../../engine/muxer.js";
+import { Muxer, type MuxTrimOptions } from "../../engine/muxer.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import { AssetDownloader } from "./assetDownloader.js";
 import { SegmentDownloader } from "../../engine/downloader.js";
@@ -31,6 +31,7 @@ export async function muxAndFinalize(
   finalExtension: string,
   db: Database,
   signal?: AbortSignal,
+  trimOptions?: MuxTrimOptions,
 ): Promise<void> {
   const logger = Logger.getInstance();
   const config = ConfigManager.getInstance().get();
@@ -79,7 +80,7 @@ export async function muxAndFinalize(
   const finalPath = path.join(outputDir, finalFilename);
 
   try {
-    await Muxer.mux(videoPath, audioPath, finalPath, signal);
+    await Muxer.mux(videoPath, audioPath, finalPath, signal, trimOptions);
     logger.info(`[DownloadOrchestrator] Muxing complete: ${finalPath}`);
 
     // Save description and thumbnail

@@ -47,15 +47,60 @@
 
                 <!-- Add Video Dialog -->
                 <sl-dialog label="Add a video" id="add-dialog">
-                    <sl-input
-                        id="video-url-input"
-                        label="Video URL or ID"
-                        placeholder="https://youtu.be/... or video ID"
-                        inputmode="url"
-                        required
-                        autofocus
-                        autocomplete="off"
-                    ></sl-input>
+                    <div style="display: flex; gap: 8px; align-items: flex-end;">
+                        <sl-input
+                            id="video-url-input"
+                            label="Video URL or ID"
+                            placeholder="https://youtu.be/... or video ID"
+                            inputmode="url"
+                            required
+                            autofocus
+                            autocomplete="off"
+                            style="flex: 1"
+                        ></sl-input>
+                        <sl-checkbox id="advanced-options-toggle" style="margin-bottom: 8px;">
+                            Advanced
+                        </sl-checkbox>
+                    </div>
+
+                    <!-- Advanced Options Panel (hidden by default) -->
+                    <div id="advanced-options-panel" style="display: none; margin-top: 12px;">
+                        <sl-spinner id="format-loading-spinner" style="display: none; font-size: 1.5rem; margin: 12px auto;"></sl-spinner>
+                        <div id="format-selection" style="display: none;">
+                            <sl-divider></sl-divider>
+                            <div style="display: flex; gap: 12px; margin-bottom: 8px;">
+                                <sl-select id="video-format-select" label="Video Format" placeholder="Auto (best quality)" clearable style="flex: 1" size="small">
+                                    <sl-option value="-1">None (audio only)</sl-option>
+                                </sl-select>
+                                <sl-select id="audio-format-select" label="Audio Format" placeholder="Auto (best quality)" clearable style="flex: 1" size="small">
+                                    <sl-option value="-1">None (video only)</sl-option>
+                                </sl-select>
+                            </div>
+                            <sl-divider></sl-divider>
+                            <div style="display: flex; gap: 12px;">
+                                <sl-input
+                                    id="start-time-input"
+                                    label="Start Time"
+                                    placeholder="0:00 or seconds"
+                                    size="small"
+                                    style="flex: 1"
+                                    autocomplete="off"
+                                ></sl-input>
+                                <sl-input
+                                    id="end-time-input"
+                                    label="End Time"
+                                    placeholder="End or seconds"
+                                    size="small"
+                                    style="flex: 1"
+                                    autocomplete="off"
+                                ></sl-input>
+                            </div>
+                            <small style="color: var(--sl-color-neutral-500); display: block; margin-top: 4px;">
+                                Time format: HH:MM:SS, MM:SS, or seconds. Invalid input downloads full video.
+                            </small>
+                        </div>
+                    </div>
+
                     <div slot="footer">
                         <sl-button
                             variant="primary"

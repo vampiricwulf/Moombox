@@ -9,7 +9,7 @@ import { Logger } from "../logger.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
 import { SegmentDownloader } from "../../engine/downloader.js";
 import { ChatDownloader } from "../../engine/chat/index.js";
-import { ManifestParser } from "../../engine/manifest.js";
+import { ManifestParser, type SegmentRange } from "../../engine/manifest.js";
 import { fetchWithTimeout } from "../http.js";
 import type { VideoInfo } from "../../types/youtube.js";
 import type { ChatProgress } from "../../types/chat.js";
@@ -32,7 +32,7 @@ export async function downloadVod(
   activeSegmentDownloaders: Set<SegmentDownloader>,
   chatDl?: ChatDownloader | null,
   signal?: AbortSignal,
-): Promise<{ hasAudio: boolean }> {
+): Promise<{ hasAudio: boolean; hasVideo: boolean }> {
   const logger = Logger.getInstance();
 
   logger.info(
@@ -41,14 +41,22 @@ export async function downloadVod(
 
   const { video: bestVideo, audio: bestAudio } = yt.getBestFormats(
     videoInfo.formats,
+    {
+      selectedVideoItag: job.selectedVideoItag,
+      selectedAudioItag: job.selectedAudioItag,
+    },
   );
 
-  if (!bestVideo || !bestVideo.url) {
-    throw new Error("No video format with URL found for VOD");
+  // Allow video-only (no audio) and audio-only (no video) downloads
+  if (!bestVideo && !bestAudio) {
+    throw new Error("No format with URL found for VOD");
+  }
+  if (!bestVideo?.url && !bestAudio?.url) {
+    throw new Error("No format with URL found for VOD");
   }
 
   // Store format metadata for notifications
-  if (bestVideo.width || bestVideo.height) {
+  if (bestVideo && (bestVideo.width || bestVideo.height)) {
     const metaUpdate: Partial<Job> = {
       videoWidth: bestVideo.width,
       videoHeight: bestVideo.height,
@@ -59,31 +67,33 @@ export async function downloadVod(
   }
 
   // Detect progressive format (video+audio pre-muxed, e.g. itag 18 at 360p)
-  const isProgressive = !!(bestVideo.audioQuality && (bestVideo.width || bestVideo.height));
+  const isProgressive = !!(bestVideo?.audioQuality && (bestVideo.width || bestVideo.height));
   if (isProgressive) {
     logger.warn(
-      `[DownloadOrchestrator] Progressive format selected (itag ${bestVideo.itag}, ` +
-      `${bestVideo.qualityLabel || (bestVideo.width + "x" + bestVideo.height)}) — ` +
+      `[DownloadOrchestrator] Progressive format selected (itag ${bestVideo!.itag}, ` +
+      `${bestVideo!.qualityLabel || (bestVideo!.width + "x" + bestVideo!.height)}) — ` +
       `video and audio are pre-muxed, no separate audio download needed`,
     );
   }
 
-  logger.info(
-    `[DownloadOrchestrator] Selected Video: ${bestVideo.width}x${bestVideo.height} @ ${bestVideo.bitrate}`,
-  );
+  if (bestVideo) {
+    logger.info(
+      `[DownloadOrchestrator] Selected Video: ${bestVideo.width}x${bestVideo.height} @ ${bestVideo.bitrate}`,
+    );
+  }
   if (bestAudio && !isProgressive) {
     logger.info(
       `[DownloadOrchestrator] Selected Audio: ${bestAudio.bitrate}`,
     );
   }
 
-  const videoPath = path.join(stagingDir, "video_stream");
+  const videoPath = bestVideo?.url ? path.join(stagingDir, "video_stream") : null;
   const audioPath = (!isProgressive && bestAudio?.url)
     ? path.join(stagingDir, "audio_stream")
     : null;
 
   // Track progress
-  let videoProgress = "0%";
+  let videoProgress = videoPath ? "0%" : "N/A";
   let audioProgress = "0%";
   let videoPercent = 0;
   let audioPercent = 0;
@@ -96,9 +106,9 @@ export async function downloadVod(
   if (chatDl && chatProgressHandler) chatDl.on("progress", chatProgressHandler);
 
   const updateCombinedProgress = () => {
-    const combinedPercent = audioPath
+    const combinedPercent = audioPath && videoPath
       ? (videoPercent + audioPercent) / 2
-      : videoPercent;
+      : videoPath ? videoPercent : audioPercent;
     const chatStr = chatMsgCount > 0 ? ` C:${chatMsgCount}` : "";
     db.updateJob(job.id, {
       progress: `V:${videoProgress} A:${audioProgress}${chatStr}`,
@@ -113,14 +123,18 @@ export async function downloadVod(
 
   const downloadPromises: Promise<void>[] = [];
 
-  downloadPromises.push(
-    downloadFile(bestVideo.url, videoPath, activeSegmentDownloaders, signal, (progress, percent) => {
-      videoProgress =
-        percent !== undefined ? `${percent.toFixed(1)}%` : progress;
-      videoPercent = percent || 0;
-      updateCombinedProgress();
-    }),
-  );
+  if (bestVideo?.url && videoPath) {
+    downloadPromises.push(
+      downloadFile(bestVideo.url, videoPath, activeSegmentDownloaders, signal, (progress, percent) => {
+        videoProgress =
+          percent !== undefined ? `${percent.toFixed(1)}%` : progress;
+        videoPercent = percent || 0;
+        updateCombinedProgress();
+      }),
+    );
+  } else {
+    videoProgress = "N/A";
+  }
 
   if (bestAudio?.url && audioPath) {
     downloadPromises.push(
@@ -138,7 +152,7 @@ export async function downloadVod(
   await Promise.all(downloadPromises);
   if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
   logger.info("[DownloadOrchestrator] Parallel download complete");
-  return { hasAudio: !isProgressive && !!audioPath };
+  return { hasAudio: !isProgressive && !!audioPath, hasVideo: !!videoPath };
 }
 
 /**
@@ -156,6 +170,7 @@ export async function downloadDash(
   audioDl: SegmentDownloader;
   videoPath: string;
   audioPath: string;
+  segmentRange: SegmentRange | null;
 }> {
   const logger = Logger.getInstance();
   logger.info("[DownloadOrchestrator] Fetching DASH Manifest...");
@@ -222,24 +237,47 @@ export async function downloadDash(
     );
   }
 
-  // Select best streams
+  // Select best streams (respecting manual itag selection from job)
   let bestVideo: any = null;
   let bestAudio: any = null;
 
   const config = ConfigManager.getInstance().get();
   const maxRes = config.downloader?.max_video_resolution || 9999;
 
+  // Try manual selection first
+  if (job.selectedVideoItag != null && job.selectedVideoItag !== -1) {
+    bestVideo = dashStreams.find(
+      (s) => s.itag === job.selectedVideoItag && s.mimeType?.includes("video"),
+    ) || null;
+    if (bestVideo) {
+      logger.info(`[DownloadOrchestrator] Manual DASH video selection: itag ${bestVideo.itag}`);
+    } else {
+      logger.warn(`[DownloadOrchestrator] Manual video itag ${job.selectedVideoItag} not in DASH manifest, falling back to auto`);
+    }
+  }
+  if (job.selectedAudioItag != null && job.selectedAudioItag !== -1) {
+    bestAudio = dashStreams.find(
+      (s) => s.itag === job.selectedAudioItag && s.mimeType?.includes("audio"),
+    ) || null;
+    if (bestAudio) {
+      logger.info(`[DownloadOrchestrator] Manual DASH audio selection: itag ${bestAudio.itag}`);
+    } else {
+      logger.warn(`[DownloadOrchestrator] Manual audio itag ${job.selectedAudioItag} not in DASH manifest, falling back to auto`);
+    }
+  }
+
+  // Auto-select remaining (skip if user explicitly chose "none" with itag -1)
   for (const stream of dashStreams) {
     logger.debug(
       `[DownloadOrchestrator] Stream: itag=${stream.itag} mime=${stream.mimeType} ${stream.width || 0}x${stream.height || 0} bw=${stream.bandwidth}`,
     );
-    if (stream.mimeType?.includes("video")) {
+    if (stream.mimeType?.includes("video") && job.selectedVideoItag !== -1) {
       const streamMaxDim = Math.max(stream.width || 0, stream.height || 0);
       if (streamMaxDim > maxRes) continue;
       if (!bestVideo || stream.bandwidth > bestVideo.bandwidth) {
         bestVideo = stream;
       }
-    } else if (stream.mimeType?.includes("audio")) {
+    } else if (stream.mimeType?.includes("audio") && job.selectedAudioItag !== -1) {
       if (!bestAudio || stream.bandwidth > bestAudio.bandwidth) {
         bestAudio = stream;
       }
@@ -247,6 +285,8 @@ export async function downloadDash(
   }
 
   if (!bestVideo || !bestAudio) {
+    // For DASH streams, both video and audio are required
+    // (audio-only / video-only not supported for live segment downloads)
     logger.error(
       `[DownloadOrchestrator] Stream selection failed: video=${!!bestVideo} audio=${!!bestAudio}`,
     );
@@ -278,11 +318,30 @@ export async function downloadDash(
   const videoPath = path.join(stagingDir, "video_stream");
   const audioPath = path.join(stagingDir, "audio_stream");
 
+  // Calculate segment range for timestamp selection
+  let segmentRange: SegmentRange | null = null;
+  if (job.startTime != null || job.endTime != null) {
+    // Use the video stream for timeline calculation (video and audio share the same timeline in YouTube DASH)
+    segmentRange = ManifestParser.calculateSegmentRange(
+      bestVideo,
+      job.startTime,
+      job.endTime,
+    );
+    if (segmentRange) {
+      logger.info(
+        `[DownloadOrchestrator] Timestamp selection: segments ${segmentRange.startSegment}-${segmentRange.endSegment === -1 ? "end" : segmentRange.endSegment}, ` +
+          `trimStart=${segmentRange.trimStartOffset.toFixed(2)}s, duration=${segmentRange.trimDuration > 0 ? segmentRange.trimDuration.toFixed(2) + "s" : "full"}`,
+      );
+    }
+  }
+
   // For live-from-start, always start from segment 0 to capture the entire stream
   // The manifest's startNumber reflects the current live position, not the beginning
-  const startFromBeginning = 0;
+  const startFromBeginning = segmentRange?.startSegment ?? 0;
+  const endSeq = segmentRange?.endSegment !== -1 ? segmentRange?.endSegment : undefined;
   logger.info(
-    `[DownloadOrchestrator] Starting from segment ${startFromBeginning} (manifest startNumber: ${bestVideo.startNumber})`,
+    `[DownloadOrchestrator] Starting from segment ${startFromBeginning} (manifest startNumber: ${bestVideo.startNumber})` +
+      (endSeq != null ? `, ending at segment ${endSeq}` : ""),
   );
 
   // Callback to check if stream has ended via YouTube API
@@ -307,6 +366,7 @@ export async function downloadDash(
     onCheckStreamStatus: checkStreamStatus,
     retryDelayCap: config.downloader.segment_retry_delay_cap,
     liveCheckRetries: config.downloader.segment_live_check_retries,
+    endSeq,
   });
 
   const audioDl = new SegmentDownloader({
@@ -317,6 +377,7 @@ export async function downloadDash(
     onCheckStreamStatus: checkStreamStatus,
     retryDelayCap: config.downloader.segment_retry_delay_cap,
     liveCheckRetries: config.downloader.segment_live_check_retries,
+    endSeq,
   });
 
   activeSegmentDownloaders.add(videoDl);
@@ -326,7 +387,7 @@ export async function downloadDash(
     "[DownloadOrchestrator] Starting Parallel DASH Download...",
   );
 
-  return { videoDl, audioDl, videoPath, audioPath };
+  return { videoDl, audioDl, videoPath, audioPath, segmentRange };
 }
 
 /**

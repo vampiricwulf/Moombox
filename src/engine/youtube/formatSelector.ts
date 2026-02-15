@@ -17,6 +17,14 @@ export interface SelectedFormats {
 }
 
 /**
+ * Options for manual format selection
+ */
+export interface FormatSelectionOptions {
+  selectedVideoItag?: number;   // User-chosen video format itag
+  selectedAudioItag?: number;   // User-chosen audio format itag
+}
+
+/**
  * Format Selector
  */
 export class FormatSelector {
@@ -24,6 +32,63 @@ export class FormatSelector {
 
   constructor() {
     this.logger = Logger.getInstance();
+  }
+
+  /**
+   * Select formats with optional manual itag selection.
+   * If a selected itag is found in the available formats, it is used.
+   * Otherwise falls back to automatic best-quality selection.
+   */
+  selectWithOptions(formats: Format[], options?: FormatSelectionOptions): SelectedFormats {
+    let video: Format | null = null;
+    let audio: Format | null = null;
+
+    // Try manual video selection
+    if (options?.selectedVideoItag != null) {
+      video = formats.find(
+        (f) => f.itag === options.selectedVideoItag && f.mimeType?.includes("video") && f.url,
+      ) || null;
+      if (video) {
+        this.logger.debug(
+          `[FormatSelector] Manual video selection: itag ${video.itag} ${video.width}x${video.height}@${video.fps || "?"}fps`,
+        );
+      } else {
+        this.logger.warn(
+          `[FormatSelector] Manual video itag ${options.selectedVideoItag} not found, falling back to auto`,
+        );
+      }
+    }
+
+    // Try manual audio selection
+    if (options?.selectedAudioItag != null) {
+      audio = formats.find(
+        (f) => f.itag === options.selectedAudioItag && f.mimeType?.includes("audio") && f.url,
+      ) || null;
+      if (audio) {
+        this.logger.debug(
+          `[FormatSelector] Manual audio selection: itag ${audio.itag} ${audio.bitrate}bps`,
+        );
+      } else {
+        this.logger.warn(
+          `[FormatSelector] Manual audio itag ${options.selectedAudioItag} not found, falling back to auto`,
+        );
+      }
+    }
+
+    // Fall back to auto for any unresolved selections
+    // A selectedItag of -1 means explicitly "none" (video-only or audio-only)
+    if (options?.selectedVideoItag === -1) {
+      video = null; // Explicitly no video
+    }
+    if (options?.selectedAudioItag === -1) {
+      audio = null; // Explicitly no audio
+    }
+
+    const auto = this.selectBest(formats);
+    if (!video && options?.selectedVideoItag !== -1) video = auto.video;
+    if (!audio && options?.selectedAudioItag !== -1) audio = auto.audio;
+
+    return { video, audio };
   }
 
   /**

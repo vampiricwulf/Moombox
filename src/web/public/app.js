@@ -60,6 +60,7 @@ class MoomboxApp {
     document.getElementById("add-video-btn").addEventListener("click", () => {
       document.getElementById("add-dialog").show();
       document.getElementById("video-url-input").value = "";
+      this.resetAdvancedOptions();
       setTimeout(() => document.getElementById("video-url-input").focus(), 100);
     });
 
@@ -73,6 +74,29 @@ class MoomboxApp {
       .getElementById("video-url-input")
       .addEventListener("keypress", (e) => {
         if (e.key === "Enter") this.addVideo();
+      });
+
+    // Advanced options toggle
+    document
+      .getElementById("advanced-options-toggle")
+      .addEventListener("sl-change", (e) => {
+        const panel = document.getElementById("advanced-options-panel");
+        const checked = e.target.checked;
+        panel.style.display = checked ? "block" : "none";
+        if (checked) {
+          this.fetchFormatsForAdvanced();
+        }
+      });
+
+    // Debounced format fetch when URL changes while advanced is checked
+    let formatFetchTimeout = null;
+    document
+      .getElementById("video-url-input")
+      .addEventListener("sl-input", () => {
+        if (document.getElementById("advanced-options-toggle").checked) {
+          clearTimeout(formatFetchTimeout);
+          formatFetchTimeout = setTimeout(() => this.fetchFormatsForAdvanced(), 500);
+        }
       });
 
     // Details dialog buttons
@@ -754,11 +778,38 @@ class MoomboxApp {
       return;
     }
 
+    // Build request body with optional advanced options
+    const body = { videoId };
+    const advancedToggle = document.getElementById("advanced-options-toggle");
+
+    if (advancedToggle.checked) {
+      const videoSelect = document.getElementById("video-format-select");
+      const audioSelect = document.getElementById("audio-format-select");
+      const startInput = document.getElementById("start-time-input");
+      const endInput = document.getElementById("end-time-input");
+
+      if (videoSelect.value) {
+        body.selectedVideoItag = parseInt(videoSelect.value, 10);
+      }
+      if (audioSelect.value) {
+        body.selectedAudioItag = parseInt(audioSelect.value, 10);
+      }
+
+      const startTime = this.parseTimeInput(startInput.value);
+      if (startTime !== null && startTime > 0) {
+        body.startTime = startTime;
+      }
+      const endTime = this.parseTimeInput(endInput.value);
+      if (endTime !== null && endTime > 0) {
+        body.endTime = endTime;
+      }
+    }
+
     try {
       const response = await fetch("/api/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoId }),
+        body: JSON.stringify(body),
       });
 
       if (response.ok) {
@@ -770,6 +821,160 @@ class MoomboxApp {
       }
     } catch (e) {
       this.showToast("Failed to add video: " + e.message, "danger");
+    }
+  }
+
+  /**
+   * Parse time input string to seconds.
+   * Supports HH:MM:SS, MM:SS, or raw seconds.
+   * Returns null for invalid/empty input.
+   */
+  parseTimeInput(input) {
+    const trimmed = (input || "").trim();
+    if (!trimmed) return null;
+
+    if (trimmed.includes(":")) {
+      const parts = trimmed.split(":");
+      if (parts.length < 2 || parts.length > 3) return null;
+      const nums = parts.map(Number);
+      if (nums.some(isNaN)) return null;
+      if (parts.length === 3) return nums[0] * 3600 + nums[1] * 60 + nums[2];
+      return nums[0] * 60 + nums[1];
+    }
+
+    const seconds = Number(trimmed);
+    return isNaN(seconds) || seconds < 0 ? null : seconds;
+  }
+
+  /**
+   * Reset advanced options panel to default state
+   */
+  resetAdvancedOptions() {
+    const toggle = document.getElementById("advanced-options-toggle");
+    toggle.checked = false;
+    document.getElementById("advanced-options-panel").style.display = "none";
+    document.getElementById("format-selection").style.display = "none";
+    document.getElementById("format-loading-spinner").style.display = "none";
+
+    // Clear selections
+    const videoSelect = document.getElementById("video-format-select");
+    const audioSelect = document.getElementById("audio-format-select");
+    videoSelect.value = "";
+    audioSelect.value = "";
+
+    // Remove dynamic options (keep the "None" option)
+    videoSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
+    audioSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
+
+    document.getElementById("start-time-input").value = "";
+    document.getElementById("end-time-input").value = "";
+
+    // Reset cached video ID
+    this._lastFormatVideoId = null;
+  }
+
+  /**
+   * Fetch available formats for the current video URL
+   */
+  async fetchFormatsForAdvanced() {
+    const input = document.getElementById("video-url-input");
+    const value = input.value.trim();
+    if (!value) return;
+
+    const videoId = this.extractVideoId(value);
+    if (!videoId) return;
+
+    // Don't re-fetch if same video
+    if (this._lastFormatVideoId === videoId) return;
+    this._lastFormatVideoId = videoId;
+
+    const spinner = document.getElementById("format-loading-spinner");
+    const formatSection = document.getElementById("format-selection");
+    spinner.style.display = "block";
+    formatSection.style.display = "none";
+
+    try {
+      const response = await fetch(`/api/formats/${videoId}`);
+      if (!response.ok) {
+        throw new Error("Failed to fetch formats");
+      }
+
+      const data = await response.json();
+      this.populateFormatSelects(data);
+
+      spinner.style.display = "none";
+      formatSection.style.display = "block";
+    } catch (e) {
+      spinner.style.display = "none";
+      formatSection.style.display = "block";
+      console.error("Failed to fetch formats:", e);
+      this.showToast("Could not load format options: " + e.message, "warning");
+    }
+  }
+
+  /**
+   * Populate video and audio format select dropdowns
+   */
+  populateFormatSelects(data) {
+    const videoSelect = document.getElementById("video-format-select");
+    const audioSelect = document.getElementById("audio-format-select");
+
+    // Clear existing dynamic options
+    videoSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
+    audioSelect.querySelectorAll("sl-option:not([value='-1'])").forEach((el) => el.remove());
+
+    const bestItags = data.bestItags || {};
+
+    // Add video formats
+    for (const fmt of data.videoFormats || []) {
+      const opt = document.createElement("sl-option");
+      opt.value = String(fmt.itag);
+
+      const codec = (fmt.mimeType || "").split(";")[0]?.split("/")[1] || "";
+      const container = codec.includes("webm") || (fmt.mimeType || "").includes("webm") ? "WEBM" : "MP4";
+      const res = fmt.height ? `${fmt.width || "?"}x${fmt.height}` : "?";
+      const fps = fmt.fps ? `@${fmt.fps}fps` : "";
+      const bitrate = fmt.bitrate ? ` ${(fmt.bitrate / 1000).toFixed(0)}kbps` : "";
+
+      let badges = "";
+      if (fmt.itag === bestItags.bestWebmVideo) badges += " [Best WEBM]";
+      if (fmt.itag === bestItags.bestMp4Video) badges += " [Best MP4]";
+
+      opt.textContent = `${res}${fps} ${container}${bitrate}${badges}`;
+      videoSelect.appendChild(opt);
+    }
+
+    // Add audio formats
+    for (const fmt of data.audioFormats || []) {
+      const opt = document.createElement("sl-option");
+      opt.value = String(fmt.itag);
+
+      const mime = fmt.mimeType || "";
+      let codec = "";
+      if (mime.includes("opus") || mime.includes("webm")) codec = "OPUS";
+      else if (mime.includes("mp4a") || mime.includes("mp4")) codec = "AAC";
+      else codec = mime.split(";")[0]?.split("/")[1] || "?";
+
+      const bitrate = fmt.bitrate ? `${(fmt.bitrate / 1000).toFixed(0)}kbps` : "?";
+      const sampleRate = fmt.audioSampleRate ? ` ${fmt.audioSampleRate}Hz` : "";
+
+      let badges = "";
+      if (fmt.itag === bestItags.bestOpusAudio) badges += " [Best OPUS]";
+      if (fmt.itag === bestItags.bestAacAudio) badges += " [Best AAC]";
+
+      opt.textContent = `${bitrate}${sampleRate} ${codec}${badges}`;
+      audioSelect.appendChild(opt);
+    }
+
+    // Update end time placeholder with video duration
+    if (data.lengthSeconds && data.lengthSeconds > 0) {
+      const h = Math.floor(data.lengthSeconds / 3600);
+      const m = Math.floor((data.lengthSeconds % 3600) / 60);
+      const s = data.lengthSeconds % 60;
+      const durationStr = h > 0
+        ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+        : `${m}:${String(s).padStart(2, "0")}`;
+      document.getElementById("end-time-input").placeholder = durationStr;
     }
   }
 

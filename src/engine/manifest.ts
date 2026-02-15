@@ -22,6 +22,20 @@ export interface DashStream {
   initialization?: string;
 }
 
+/**
+ * Result of timestamp-to-segment mapping
+ */
+export interface SegmentRange {
+  /** First segment index to download (0-based from startNumber) */
+  startSegment: number;
+  /** Last segment index to download (inclusive) */
+  endSegment: number;
+  /** Offset within the first segment where the start time falls (seconds) */
+  trimStartOffset: number;
+  /** Total duration to keep from the trimmed start (seconds), or 0 for no limit */
+  trimDuration: number;
+}
+
 export class ManifestParser {
   static parseDash(xmlContent: string, manifestUrl?: string): DashStream[] {
     const logger = Logger.getInstance();
@@ -330,5 +344,123 @@ export class ManifestParser {
         discontinuitySequence,
       };
     }
+  }
+
+  /**
+   * Calculate which segments to download for a given time range.
+   *
+   * For DASH streams with SegmentTimeline, maps start/end timestamps (in seconds)
+   * to segment indices. Returns the segment range and trim offsets for the muxer.
+   *
+   * @param stream - The DASH stream with segment timeline info
+   * @param startTimeSec - Start time in seconds (0 = beginning)
+   * @param endTimeSec - End time in seconds (undefined = end of stream)
+   * @returns Segment range and trim info, or null if timeline is unavailable
+   */
+  static calculateSegmentRange(
+    stream: DashStream,
+    startTimeSec?: number,
+    endTimeSec?: number,
+  ): SegmentRange | null {
+    const logger = Logger.getInstance();
+
+    // YouTube live streams typically use ~2s segments without SegmentTimeline
+    // For these, we estimate based on a fixed segment duration
+    const segments = stream.segments;
+    const timescale = stream.timescale || 1000;
+
+    // Calculate segment durations in seconds
+    // Expand the segment timeline (handling repeat counts)
+    const expandedDurations: number[] = [];
+    if (segments.length > 0) {
+      for (const seg of segments) {
+        const durationSec = seg.d / timescale;
+        const repeatCount = (seg.r ?? 0) + 1; // r=0 means 1 occurrence, r=2 means 3
+        for (let i = 0; i < repeatCount; i++) {
+          expandedDurations.push(durationSec);
+        }
+      }
+    }
+
+    // If no segment timeline is available, estimate with default segment duration
+    // YouTube live typically uses ~2 second segments
+    const DEFAULT_SEGMENT_DURATION = 2.0;
+    const useEstimate = expandedDurations.length === 0;
+
+    if (useEstimate) {
+      logger.debug(
+        "[ManifestParser] No SegmentTimeline available, using estimated segment duration",
+      );
+    }
+
+    const getSegmentDuration = (idx: number): number => {
+      if (useEstimate) return DEFAULT_SEGMENT_DURATION;
+      return idx < expandedDurations.length
+        ? expandedDurations[idx]
+        : expandedDurations[expandedDurations.length - 1] || DEFAULT_SEGMENT_DURATION;
+    };
+
+    // Walk through segments to find start and end indices
+    let cumulativeTime = 0;
+    let startSegment = stream.startNumber;
+    let trimStartOffset = 0;
+
+    if (startTimeSec != null && startTimeSec > 0) {
+      let segIdx = 0;
+      while (true) {
+        const segDuration = getSegmentDuration(segIdx);
+        if (cumulativeTime + segDuration > startTimeSec) {
+          // Start time falls within this segment
+          startSegment = stream.startNumber + segIdx;
+          trimStartOffset = startTimeSec - cumulativeTime;
+          break;
+        }
+        cumulativeTime += segDuration;
+        segIdx++;
+
+        // Safety: don't scan beyond a reasonable limit for estimated durations
+        if (useEstimate && segIdx > 100000) {
+          startSegment = stream.startNumber + segIdx;
+          trimStartOffset = 0;
+          break;
+        }
+      }
+    }
+
+    let endSegment = -1; // -1 = download to end
+    let totalRequestedDuration = 0;
+
+    if (endTimeSec != null && endTimeSec > 0) {
+      cumulativeTime = 0;
+      let segIdx = 0;
+      while (true) {
+        const segDuration = getSegmentDuration(segIdx);
+        cumulativeTime += segDuration;
+        if (cumulativeTime >= endTimeSec) {
+          endSegment = stream.startNumber + segIdx;
+          break;
+        }
+        segIdx++;
+
+        if (useEstimate && segIdx > 100000) {
+          endSegment = stream.startNumber + segIdx;
+          break;
+        }
+      }
+
+      totalRequestedDuration = endTimeSec - (startTimeSec || 0);
+    }
+
+    logger.debug(
+      `[ManifestParser] Segment range: ${startSegment}-${endSegment === -1 ? "end" : endSegment}, ` +
+        `trimStart=${trimStartOffset.toFixed(2)}s, duration=${totalRequestedDuration > 0 ? totalRequestedDuration.toFixed(2) + "s" : "full"}`,
+    );
+
+    return {
+      startSegment,
+      endSegment,
+      trimStartOffset,
+      trimDuration: totalRequestedDuration,
+    };
   }
 }
