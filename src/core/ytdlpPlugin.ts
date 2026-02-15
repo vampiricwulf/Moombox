@@ -6,8 +6,7 @@
  */
 
 import path from "path";
-import fs from "fs";
-import fsExtra from "fs-extra";
+import fs from "fs-extra";
 
 export interface YtdlpPluginStatus {
   installed: boolean;
@@ -171,7 +170,7 @@ export async function installYtdlpPlugin(
 
   // Write to yt-dlp plugin directory
   const destDir = path.dirname(destPath);
-  await fsExtra.ensureDir(destDir);
+  await fs.ensureDir(destDir);
   fs.writeFileSync(destPath, pluginSource, "utf-8");
 
   return { success: true, path: destPath };

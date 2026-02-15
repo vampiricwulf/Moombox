@@ -6,6 +6,7 @@ import type {
   ChannelConfig,
   MoomboxConfig,
 } from "../types/config.js";
+import { Logger } from "./logger.js";
 
 export type { ChannelConfig, MoomboxConfig, AutoCookiesConfig } from "../types/config.js";
 
@@ -49,6 +50,16 @@ export class ConfigManager {
   };
 
   private constructor() {}
+
+  /** Log helper that falls back to console if Logger isn't ready */
+  private static log(level: "info" | "warn" | "error", msg: string): void {
+    try {
+      const logger = Logger.getInstance();
+      logger[level](msg);
+    } catch {
+      console[level](msg);
+    }
+  }
 
   static getInstance(): ConfigManager {
     if (!ConfigManager.instance) {
@@ -139,6 +150,44 @@ export class ConfigManager {
     };
   }
 
+  /**
+   * Validate config values and replace invalid ones with defaults.
+   */
+  private validate(config: MoomboxConfig): MoomboxConfig {
+    const defaults = ConfigManager.DEFAULTS;
+    const warn = (field: string, val: unknown) =>
+      ConfigManager.log("warn", `[Config] Invalid ${field} (${val}), using default`);
+
+    if (!Number.isInteger(config.port) || config.port! < 1 || config.port! > 65535) {
+      warn("port", config.port); config.port = defaults.port;
+    }
+    if (!["localhost", "lan", "external"].includes(config.network_access!)) {
+      warn("network_access", config.network_access); config.network_access = defaults.network_access;
+    }
+    if (typeof config.max_feed_items !== "number" || config.max_feed_items < 1) {
+      warn("max_feed_items", config.max_feed_items); config.max_feed_items = defaults.max_feed_items;
+    }
+    if (typeof config.feed_check_interval !== "number" || config.feed_check_interval < 1) {
+      warn("feed_check_interval", config.feed_check_interval); config.feed_check_interval = defaults.feed_check_interval;
+    }
+    if (typeof config.log_max_file_size !== "number" || config.log_max_file_size! < 1) {
+      warn("log_max_file_size", config.log_max_file_size); config.log_max_file_size = defaults.log_max_file_size;
+    }
+    if (typeof config.log_max_files !== "number" || config.log_max_files! < 1) {
+      warn("log_max_files", config.log_max_files); config.log_max_files = defaults.log_max_files;
+    }
+    const d = config.downloader;
+    if (typeof d.num_parallel_downloads !== "number" || d.num_parallel_downloads < 1) {
+      warn("downloader.num_parallel_downloads", d.num_parallel_downloads);
+      d.num_parallel_downloads = defaults.downloader.num_parallel_downloads;
+    }
+    if (typeof d.max_video_resolution !== "number" || d.max_video_resolution! < 1) {
+      warn("downloader.max_video_resolution", d.max_video_resolution);
+      d.max_video_resolution = defaults.downloader.max_video_resolution;
+    }
+    return config;
+  }
+
   async load(customPath?: string): Promise<MoomboxConfig> {
     // Search paths: custom -> ./config.toml -> ./config/config.toml -> ~/.config/moombox/config.toml
     const paths = [
@@ -150,10 +199,10 @@ export class ConfigManager {
 
     for (const p of paths) {
       if (await fs.pathExists(p)) {
-        console.log(`Loading config from ${p}`);
+        ConfigManager.log("info", `[Config] Loading from ${p}`);
         const content = await fs.readFile(p, "utf-8");
         const loadedConfig = toml.parse(content) as Partial<MoomboxConfig>;
-        this.config = this.applyDefaults(loadedConfig);
+        this.config = this.validate(this.applyDefaults(loadedConfig));
         this.configPath = p;
         this.configLoaded = true;
 
@@ -167,7 +216,7 @@ export class ConfigManager {
       }
     }
 
-    console.warn("No config file found. Using defaults.");
+    ConfigManager.log("warn", "[Config] No config file found. Using defaults.");
     this.configPath = path.join(process.cwd(), "config.toml");
     this.config = ConfigManager.getDefaults();
     return this.config;
@@ -208,10 +257,10 @@ export class ConfigManager {
       // Write to file
       await fs.writeFile(this.configPath, tomlContent, "utf-8");
       this.configLoaded = true;
-      console.log(`[Config] Saved configuration to ${this.configPath}`);
+      ConfigManager.log("info", `[Config] Saved configuration to ${this.configPath}`);
     });
     this.saveQueue = result.then(() => {}, (e) => {
-      console.error(`[Config] Save failed: ${e instanceof Error ? e.message : String(e)}`);
+      ConfigManager.log("error", `[Config] Save failed: ${e instanceof Error ? e.message : String(e)}`);
     });
     return result;
   }

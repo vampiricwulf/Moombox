@@ -88,9 +88,9 @@ export class DownloadWorker {
         const msg = e instanceof Error ? e.message : String(e);
         this.logger.error(`[Worker] Job ${job.id} failed: ${msg}`);
 
-        Database.getInstance().then((db) =>
-          db.updateJob(job.id, { status: "Error", error: msg }),
-        );
+        Database.getInstance()
+          .then((db) => db.updateJob(job.id, { status: "Error", error: msg }))
+          .catch((e) => this.logger.error(`[Worker] Failed to update job error status: ${e instanceof Error ? e.message : String(e)}`));
 
         NotificationManager.getInstance().send(
           "Job Failed",

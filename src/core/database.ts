@@ -80,6 +80,15 @@ export class Database {
       this.db.data = { jobs: [], history: [] };
       await this.db.write();
     }
+    // Validate data structure
+    if (!Array.isArray(this.db.data.jobs)) {
+      Logger.getInstance().warn("[Database] jobs is not an array, resetting");
+      this.db.data.jobs = [];
+    }
+    if (!Array.isArray(this.db.data.history)) {
+      Logger.getInstance().warn("[Database] history is not an array, resetting");
+      this.db.data.history = [];
+    }
     // Build history Set for O(1) lookups
     this.historySet = new Set(this.db.data.history);
   }

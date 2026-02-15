@@ -7,76 +7,34 @@
 
 import path from "path";
 import fs from "fs-extra";
-import { open as fsOpen } from "node:fs/promises";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
 import { SegmentDownloader } from "../../engine/downloader.js";
-import { ChatDownloader, ChatApi } from "../../engine/chat/index.js";
-import { ManifestParser } from "../../engine/manifest.js";
-import { Muxer } from "../../engine/muxer.js";
+import { ChatDownloader } from "../../engine/chat/index.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
-import { AssetDownloader } from "./assetDownloader.js";
-import { fetchWithTimeout } from "../http.js";
 import type { VideoInfo } from "../../types/youtube.js";
-import type { ChatProgress } from "../../types/chat.js";
 import {
-  DOWNLOAD_CHUNK_SIZE,
-  PROGRESS_UPDATE_INTERVAL_MS,
-  USER_AGENTS,
   STREAM_SEGMENT_TIMEOUT_MS,
   STREAM_END_VERIFY_INTERVAL_MS,
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
-
-function formatElapsed(ms: number): string {
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  const remSecs = secs % 60;
-  if (mins < 60) return `${mins}m ${remSecs}s`;
-  const hrs = Math.floor(mins / 60);
-  const remMins = mins % 60;
-  return `${hrs}h ${remMins}m`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024)
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec < 1024) return `${bytesPerSec.toFixed(0)} B/s`;
-  if (bytesPerSec < 1024 * 1024)
-    return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
-  return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`;
-}
-
-/**
- * Result from running segment downloaders
- */
-interface SegmentDownloadResult {
-  finished: boolean;
-  lastSegmentTime: number;
-}
+import { downloadVod, downloadDash, downloadHls } from "./downloadStrategies.js";
+import { muxAndFinalize } from "./muxFinalize.js";
+import { setupChatDownloader, runSegmentDownloaders, runSegmentDownloadersWithoutChat } from "./progressTracking.js";
 
 /**
  * Download Orchestrator
  */
 export class DownloadOrchestrator {
   private logger: Logger;
-  private assetDownloader: AssetDownloader;
   private activeSegmentDownloaders: Set<SegmentDownloader> = new Set();
   private activeChatDownloaders: Set<ChatDownloader> = new Set();
   private activeAbortControllers: Map<string, AbortController> = new Map();
 
   constructor() {
     this.logger = Logger.getInstance();
-    this.assetDownloader = new AssetDownloader();
   }
 
   /**
@@ -202,12 +160,13 @@ export class DownloadOrchestrator {
           db.updateJob(job.id, { chatStatus: "finished" }).catch((e: any) => this.logger.debug(`[Chat] DB update failed: ${e.message}`));
         }
       } else {
-        chatDl = await this.setupChatDownloader(
+        chatDl = await setupChatDownloader(
           job,
           videoInfo,
           yt,
           stagingDir,
           db,
+          this.activeChatDownloaders,
         );
       }
     } else {
@@ -234,7 +193,7 @@ export class DownloadOrchestrator {
           })
         : Promise.resolve();
 
-      const vodResult = await this.downloadVod(job, videoInfo, yt, stagingDir, db, chatDl, signal);
+      const vodResult = await downloadVod(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders, chatDl, signal);
 
       // Check abort immediately after download — avoid false 100% and chat timeout wait
       if (signal?.aborted) return;
@@ -266,12 +225,13 @@ export class DownloadOrchestrator {
       clearTimeout(chatTimeoutTimer!);
     } else if (videoInfo.dashManifestUrl) {
       // DASH: Live streams and post-live VODs
-      const result = await this.downloadDash(
+      const result = await downloadDash(
         job,
         videoInfo,
         yt,
         stagingDir,
         db,
+        this.activeSegmentDownloaders,
       );
       videoDl = result.videoDl;
       audioDl = result.audioDl;
@@ -279,7 +239,7 @@ export class DownloadOrchestrator {
       audioPath = result.audioPath;
     } else if (videoInfo.hlsManifestUrl) {
       // HLS: Fallback for some streams
-      const result = await this.downloadHls(job, videoInfo, yt, stagingDir, db);
+      const result = await downloadHls(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders);
       videoDl = result.videoDl;
       videoPath = result.videoPath;
     } else if (videoInfo.formats && videoInfo.formats.length > 0) {
@@ -293,7 +253,7 @@ export class DownloadOrchestrator {
           })
         : Promise.resolve();
 
-      const vodResult2 = await this.downloadVod(job, videoInfo, yt, stagingDir, db, chatDl, signal);
+      const vodResult2 = await downloadVod(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders, chatDl, signal);
 
       // Check abort immediately after download
       if (signal?.aborted) return;
@@ -354,7 +314,7 @@ export class DownloadOrchestrator {
         );
       } else {
         // VOD: just run the segment downloaders
-        await this.runSegmentDownloaders(job, videoDl, audioDl, chatDl, db);
+        await runSegmentDownloaders(job, videoDl, audioDl, chatDl, db, this.activeSegmentDownloaders);
       }
     }
 
@@ -388,7 +348,7 @@ export class DownloadOrchestrator {
     }
 
     // Mux the streams
-    await this.muxAndFinalize(
+    await muxAndFinalize(
       job,
       videoPath,
       audioPath,
@@ -408,571 +368,6 @@ export class DownloadOrchestrator {
         fs.remove(stagingDir).catch((e: any) => this.logger.debug(`[DownloadOrchestrator] Staging cleanup failed: ${e.message}`));
       }
     }
-  }
-
-  /**
-   * Setup chat downloader if chat is available
-   */
-  private async setupChatDownloader(
-    job: Job,
-    videoInfo: VideoInfo,
-    yt: YouTubeService,
-    stagingDir: string,
-    db: Database,
-  ): Promise<ChatDownloader | null> {
-    try {
-      // Fetch watch page HTML to extract chat continuation
-      const html = await yt.fetchWatchPageHtml(job.videoId);
-      const chatApi = new ChatApi();
-      const { continuation, isReplay } = chatApi.extractChatContinuation(html);
-
-      if (!continuation) {
-        this.logger.debug(`[Chat] No chat available for ${job.videoId}`);
-        await db.updateJob(job.id, { chatStatus: "unavailable" });
-        return null;
-      }
-
-      const chatPath = path.join(stagingDir, "chat.json");
-      const chatDl = new ChatDownloader({
-        videoId: job.videoId,
-        videoTitle: job.title,
-        channelName: job.channelName,
-        outputFile: chatPath,
-        initialContinuation: continuation,
-        apiKey: yt.getApiKey(),
-        visitorData: yt.getVisitorData(),
-        cookieHeader: yt.getCookieHeader(),
-        isReplay,
-        isLiveOrUpcoming: videoInfo.isLive || videoInfo.isUpcoming,
-        streamStartTime: videoInfo.scheduledStartTime,
-      });
-
-      await db.updateJob(job.id, { chatStatus: "pending" });
-
-      this.activeChatDownloaders.add(chatDl);
-
-      chatDl.on("start", () => {
-        db.updateJob(job.id, { chatStatus: "downloading" }).catch((e: any) => this.logger.debug(`[Chat] DB update failed: ${e.message}`));
-        this.logger.info(`[Chat] Started downloading chat for ${job.videoId}`);
-      });
-
-      chatDl.on("progress", (data) => {
-        db.updateJob(job.id, { totalChatMessages: data.messageCount }).catch(
-          (e: any) => this.logger.debug(`[Chat] DB update failed: ${e.message}`),
-        );
-      });
-
-      chatDl.on("error", (err) => {
-        this.logger.warn(`[Chat] Error: ${err.message}`);
-        db.updateJob(job.id, { chatStatus: "error" }).catch((e: any) => this.logger.debug(`[Chat] DB update failed: ${e.message}`));
-      });
-
-      chatDl.on("finish", () => {
-        this.activeChatDownloaders.delete(chatDl);
-        this.logger.info(`[Chat] Finished downloading chat for ${job.videoId}`);
-        db.updateJob(job.id, { chatStatus: "finished" }).catch((e: any) => this.logger.debug(`[Chat] DB update failed: ${e.message}`));
-      });
-
-      return chatDl;
-    } catch (e: any) {
-      this.logger.warn(`[Chat] Failed to setup chat downloader: ${e.message}`);
-      await db.updateJob(job.id, { chatStatus: "error" });
-      return null;
-    }
-  }
-
-  /**
-   * Download VOD using direct format URLs
-   */
-  private async downloadVod(
-    job: Job,
-    videoInfo: VideoInfo,
-    yt: YouTubeService,
-    stagingDir: string,
-    db: Database,
-    chatDl?: ChatDownloader | null,
-    signal?: AbortSignal,
-  ): Promise<{ hasAudio: boolean }> {
-    this.logger.info(
-      "[DownloadOrchestrator] VOD download - using direct format URLs",
-    );
-
-    const { video: bestVideo, audio: bestAudio } = yt.getBestFormats(
-      videoInfo.formats,
-    );
-
-    if (!bestVideo || !bestVideo.url) {
-      throw new Error("No video format with URL found for VOD");
-    }
-
-    // Store format metadata for notifications
-    if (bestVideo.width || bestVideo.height) {
-      const metaUpdate: Partial<Job> = {
-        videoWidth: bestVideo.width,
-        videoHeight: bestVideo.height,
-        videoFps: bestVideo.fps,
-      };
-      await db.updateJob(job.id, metaUpdate);
-      Object.assign(job, metaUpdate);
-    }
-
-    // Detect progressive format (video+audio pre-muxed, e.g. itag 18 at 360p)
-    const isProgressive = !!(bestVideo.audioQuality && (bestVideo.width || bestVideo.height));
-    if (isProgressive) {
-      this.logger.warn(
-        `[DownloadOrchestrator] Progressive format selected (itag ${bestVideo.itag}, ` +
-        `${bestVideo.qualityLabel || (bestVideo.width + "x" + bestVideo.height)}) — ` +
-        `video and audio are pre-muxed, no separate audio download needed`,
-      );
-    }
-
-    this.logger.info(
-      `[DownloadOrchestrator] Selected Video: ${bestVideo.width}x${bestVideo.height} @ ${bestVideo.bitrate}`,
-    );
-    if (bestAudio && !isProgressive) {
-      this.logger.info(
-        `[DownloadOrchestrator] Selected Audio: ${bestAudio.bitrate}`,
-      );
-    }
-
-    const videoPath = path.join(stagingDir, "video_stream");
-    const audioPath = (!isProgressive && bestAudio?.url)
-      ? path.join(stagingDir, "audio_stream")
-      : null;
-
-    // Track progress
-    let videoProgress = "0%";
-    let audioProgress = "0%";
-    let videoPercent = 0;
-    let audioPercent = 0;
-    let chatMsgCount = 0;
-
-    // Track chat progress if available
-    const chatProgressHandler = chatDl
-      ? (data: ChatProgress) => { chatMsgCount = data.messageCount; updateCombinedProgress(); }
-      : null;
-    if (chatDl && chatProgressHandler) chatDl.on("progress", chatProgressHandler);
-
-    const updateCombinedProgress = () => {
-      const combinedPercent = audioPath
-        ? (videoPercent + audioPercent) / 2
-        : videoPercent;
-      const chatStr = chatMsgCount > 0 ? ` C:${chatMsgCount}` : "";
-      db.updateJob(job.id, {
-        progress: `V:${videoProgress} A:${audioProgress}${chatStr}`,
-        percent: combinedPercent,
-      }).catch((e: any) => this.logger.debug(`[DownloadOrchestrator] Progress update failed: ${e.message}`));
-    };
-
-    // Download in parallel
-    this.logger.info(
-      "[DownloadOrchestrator] Downloading video and audio streams in parallel...",
-    );
-
-    const downloadPromises: Promise<void>[] = [];
-
-    downloadPromises.push(
-      this.downloadFile(bestVideo.url, videoPath, signal, (progress, percent) => {
-        videoProgress =
-          percent !== undefined ? `${percent.toFixed(1)}%` : progress;
-        videoPercent = percent || 0;
-        updateCombinedProgress();
-      }),
-    );
-
-    if (bestAudio?.url && audioPath) {
-      downloadPromises.push(
-        this.downloadFile(bestAudio.url, audioPath, signal, (progress, percent) => {
-          audioProgress =
-            percent !== undefined ? `${percent.toFixed(1)}%` : progress;
-          audioPercent = percent || 0;
-          updateCombinedProgress();
-        }),
-      );
-    } else {
-      audioProgress = "N/A";
-    }
-
-    await Promise.all(downloadPromises);
-    if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
-    this.logger.info("[DownloadOrchestrator] Parallel download complete");
-    return { hasAudio: !isProgressive && !!audioPath };
-  }
-
-  /**
-   * Download DASH stream
-   */
-  private async downloadDash(
-    job: Job,
-    videoInfo: VideoInfo,
-    yt: YouTubeService,
-    stagingDir: string,
-    db: Database,
-  ): Promise<{
-    videoDl: SegmentDownloader;
-    audioDl: SegmentDownloader;
-    videoPath: string;
-    audioPath: string;
-  }> {
-    this.logger.info("[DownloadOrchestrator] Fetching DASH Manifest...");
-
-    let decryptedDashUrl = await yt.decryptDashManifestUrl(
-      videoInfo.dashManifestUrl!,
-      videoInfo.playerUrl,
-    );
-
-    // Add PO token to manifest URL (required for live streams)
-    // yt-dlp appends /pot/{token} to the manifest path
-    const poToken = yt.getPoToken();
-    if (poToken) {
-      // Remove trailing slash if present, then append /pot/{token}
-      decryptedDashUrl = decryptedDashUrl.replace(/\/?$/, `/pot/${poToken}`);
-      this.logger.debug(
-        `[DownloadOrchestrator] Added PO token to manifest URL`,
-      );
-    } else {
-      this.logger.warn(
-        "[DownloadOrchestrator] No PO token available for manifest URL - may get 403 errors",
-      );
-    }
-
-    const manifestResp = await fetchWithTimeout(decryptedDashUrl);
-    if (!manifestResp.ok) {
-      throw new Error(
-        `Failed to fetch DASH manifest: HTTP ${manifestResp.status}`,
-      );
-    }
-
-    const manifestXml = await manifestResp.text();
-    const dashStreams = ManifestParser.parseDash(
-      manifestXml,
-      videoInfo.dashManifestUrl!,
-    );
-
-    this.logger.debug(
-      `[DownloadOrchestrator] DASH manifest parsed, found ${dashStreams.length} streams`,
-    );
-
-    // Decrypt n parameter in segment BaseURLs (required to avoid throttling/403)
-    if (videoInfo.playerUrl) {
-      this.logger.debug(
-        `[DownloadOrchestrator] Decrypting n parameter in segment BaseURLs...`,
-      );
-      await Promise.all(dashStreams.map(async (stream) => {
-        if (stream.baseUrl) {
-          const originalUrl = stream.baseUrl;
-          stream.baseUrl = await yt.decryptNParamInUrl(
-            stream.baseUrl,
-            videoInfo.playerUrl!,
-          );
-          if (stream.baseUrl !== originalUrl) {
-            this.logger.debug(
-              `[DownloadOrchestrator] Decrypted n param for itag=${stream.itag}`,
-            );
-          }
-        }
-      }));
-    } else {
-      this.logger.warn(
-        `[DownloadOrchestrator] No player URL available - cannot decrypt n params`,
-      );
-    }
-
-    // Select best streams
-    let bestVideo: any = null;
-    let bestAudio: any = null;
-
-    const config = ConfigManager.getInstance().get();
-    const maxRes = config.downloader?.max_video_resolution || 9999;
-
-    for (const stream of dashStreams) {
-      this.logger.debug(
-        `[DownloadOrchestrator] Stream: itag=${stream.itag} mime=${stream.mimeType} ${stream.width || 0}x${stream.height || 0} bw=${stream.bandwidth}`,
-      );
-      if (stream.mimeType?.includes("video")) {
-        const streamMaxDim = Math.max(stream.width || 0, stream.height || 0);
-        if (streamMaxDim > maxRes) continue;
-        if (!bestVideo || stream.bandwidth > bestVideo.bandwidth) {
-          bestVideo = stream;
-        }
-      } else if (stream.mimeType?.includes("audio")) {
-        if (!bestAudio || stream.bandwidth > bestAudio.bandwidth) {
-          bestAudio = stream;
-        }
-      }
-    }
-
-    if (!bestVideo || !bestAudio) {
-      this.logger.error(
-        `[DownloadOrchestrator] Stream selection failed: video=${!!bestVideo} audio=${!!bestAudio}`,
-      );
-      this.logger.debug(
-        `[DownloadOrchestrator] Raw manifest (first 2000 chars): ${manifestXml.substring(0, 2000)}`,
-      );
-      throw new Error(
-        "Could not find suitable Video/Audio streams in DASH Manifest",
-      );
-    }
-
-    this.logger.info(
-      `[DownloadOrchestrator] Selected DASH Video: ${bestVideo.width}x${bestVideo.height} @ ${bestVideo.bandwidth}`,
-    );
-    this.logger.info(
-      `[DownloadOrchestrator] Selected DASH Audio: ${bestAudio.bandwidth}`,
-    );
-
-    // Store format metadata for notifications
-    if (bestVideo.width || bestVideo.height) {
-      const metaUpdate: Partial<Job> = {
-        videoWidth: bestVideo.width,
-        videoHeight: bestVideo.height,
-      };
-      await db.updateJob(job.id, metaUpdate);
-      Object.assign(job, metaUpdate);
-    }
-
-    const videoPath = path.join(stagingDir, "video_stream");
-    const audioPath = path.join(stagingDir, "audio_stream");
-
-    // For live-from-start, always start from segment 0 to capture the entire stream
-    // The manifest's startNumber reflects the current live position, not the beginning
-    const startFromBeginning = 0;
-    this.logger.info(
-      `[DownloadOrchestrator] Starting from segment ${startFromBeginning} (manifest startNumber: ${bestVideo.startNumber})`,
-    );
-
-    // Callback to check if stream has ended via YouTube API
-    const checkStreamStatus = async (): Promise<boolean> => {
-      try {
-        const freshInfo = await yt.getVideoInfo(job.videoId);
-        this.logger.info(`[DownloadOrchestrator] Status check: ${freshInfo.streamStatus}`);
-        return freshInfo.streamStatus === "post_live"
-            || freshInfo.streamStatus === "vod"
-            || freshInfo.streamStatus === "not_a_stream";
-      } catch (e) {
-        this.logger.warn(`[DownloadOrchestrator] Status check failed: ${getErrorMessage(e)}`);
-        return false;
-      }
-    };
-
-    const videoDl = new SegmentDownloader({
-      baseUrl: bestVideo.baseUrl,
-      outputFile: videoPath,
-      startSeq: startFromBeginning,
-      initUrl: bestVideo.initialization,
-      onCheckStreamStatus: checkStreamStatus,
-      retryDelayCap: config.downloader.segment_retry_delay_cap,
-      liveCheckRetries: config.downloader.segment_live_check_retries,
-    });
-
-    const audioDl = new SegmentDownloader({
-      baseUrl: bestAudio.baseUrl,
-      outputFile: audioPath,
-      startSeq: startFromBeginning,
-      initUrl: bestAudio.initialization,
-      onCheckStreamStatus: checkStreamStatus,
-      retryDelayCap: config.downloader.segment_retry_delay_cap,
-      liveCheckRetries: config.downloader.segment_live_check_retries,
-    });
-
-    this.activeSegmentDownloaders.add(videoDl);
-    this.activeSegmentDownloaders.add(audioDl);
-
-    this.logger.info(
-      "[DownloadOrchestrator] Starting Parallel DASH Download...",
-    );
-
-    return { videoDl, audioDl, videoPath, audioPath };
-  }
-
-  /**
-   * Download HLS stream
-   */
-  private async downloadHls(
-    job: Job,
-    videoInfo: VideoInfo,
-    yt: YouTubeService,
-    stagingDir: string,
-    db: Database,
-  ): Promise<{ videoDl: SegmentDownloader; videoPath: string }> {
-    this.logger.info("[DownloadOrchestrator] Fetching HLS Master Playlist...");
-
-    const manifestResp = await fetchWithTimeout(videoInfo.hlsManifestUrl!);
-    if (!manifestResp.ok) {
-      throw new Error(
-        `Failed to fetch HLS manifest: HTTP ${manifestResp.status}`,
-      );
-    }
-    const manifestText = await manifestResp.text();
-    const masterPlaylist = ManifestParser.parseHls(
-      manifestText,
-      videoInfo.hlsManifestUrl!,
-    );
-
-    if (masterPlaylist.type !== "master" || !masterPlaylist.variants) {
-      throw new Error("Invalid HLS Master Playlist");
-    }
-
-    // Select best variant (respecting max_video_resolution)
-    const config = ConfigManager.getInstance().get();
-    const maxRes = config.downloader?.max_video_resolution || 9999;
-    let bestVariant: any = null;
-    for (const variant of masterPlaylist.variants) {
-      const varMaxDim = Math.max(variant.width || 0, variant.height || 0);
-      if (varMaxDim > maxRes) continue;
-      if (!bestVariant || variant.bandwidth > bestVariant.bandwidth) {
-        bestVariant = variant;
-      }
-    }
-
-    if (!bestVariant) {
-      throw new Error("No variants found in HLS Playlist (within resolution limit)");
-    }
-
-    this.logger.info(
-      `[DownloadOrchestrator] Selected HLS Variant: ${bestVariant.width}x${bestVariant.height} @ ${bestVariant.bandwidth}`,
-    );
-
-    // Store format metadata for notifications
-    if (bestVariant.width || bestVariant.height) {
-      const metaUpdate: Partial<Job> = {
-        videoWidth: bestVariant.width,
-        videoHeight: bestVariant.height,
-      };
-      await db.updateJob(job.id, metaUpdate);
-      Object.assign(job, metaUpdate);
-    }
-
-    const videoPath = path.join(stagingDir, "stream.ts");
-
-    // Callback to check if stream has ended via YouTube API
-    const checkStreamStatus = async (): Promise<boolean> => {
-      try {
-        const freshInfo = await yt.getVideoInfo(job.videoId);
-        this.logger.info(`[DownloadOrchestrator] HLS status check: ${freshInfo.streamStatus}`);
-        return freshInfo.streamStatus === "post_live"
-            || freshInfo.streamStatus === "vod"
-            || freshInfo.streamStatus === "not_a_stream";
-      } catch (e) {
-        this.logger.warn(`[DownloadOrchestrator] HLS status check failed: ${getErrorMessage(e)}`);
-        return false;
-      }
-    };
-
-    const videoDl = new SegmentDownloader({
-      baseUrl: bestVariant.url,
-      outputFile: videoPath,
-      startSeq: -1,
-      isHls: true,
-      onCheckStreamStatus: checkStreamStatus,
-      retryDelayCap: config.downloader.segment_retry_delay_cap,
-      liveCheckRetries: config.downloader.segment_live_check_retries,
-    });
-
-    this.activeSegmentDownloaders.add(videoDl);
-
-    this.logger.info("[DownloadOrchestrator] Starting HLS Download...");
-
-    return { videoDl, videoPath };
-  }
-
-  /**
-   * Run segment downloaders with progress tracking
-   */
-  private async runSegmentDownloaders(
-    job: Job,
-    videoDl: SegmentDownloader | null,
-    audioDl: SegmentDownloader | null,
-    chatDl: ChatDownloader | null,
-    db: Database,
-  ): Promise<void> {
-    let vSeq = 0;
-    let aSeq = 0;
-    let vTotal = 0;
-    let aTotal = 0;
-    let vBytes = 0;
-    let aBytes = 0;
-    let chatMsgCount = 0;
-    let lastUpdate = 0;
-    let lastBytes = 0;
-    let lastBytesTime = Date.now();
-
-    const updateProgress = () => {
-      const now = Date.now();
-      if (now - lastUpdate > PROGRESS_UPDATE_INTERVAL_MS) {
-        lastUpdate = now;
-
-        const totalBytes = vBytes + aBytes;
-        const timeDelta = (now - lastBytesTime) / 1000;
-        const bytesDelta = totalBytes - lastBytes;
-        const speed = timeDelta > 0 ? bytesDelta / timeDelta : 0;
-
-        lastBytes = totalBytes;
-        lastBytesTime = now;
-
-        let progStr = "";
-        if (audioDl) {
-          const vPart = vTotal > 0 ? `${vSeq}/${vTotal}` : `${vSeq}`;
-          const aPart = aTotal > 0 ? `${aSeq}/${aTotal}` : `${aSeq}`;
-          progStr = `(A: ${aPart} V: ${vPart}`;
-          if (chatDl && chatMsgCount > 0) {
-            progStr += ` C: ${chatMsgCount}`;
-          }
-          progStr += ")";
-        } else {
-          progStr = `Seq: ${vSeq}`;
-          if (chatDl && chatMsgCount > 0) {
-            progStr += ` C: ${chatMsgCount}`;
-          }
-        }
-
-        db.updateJob(job.id, {
-          progress: progStr,
-          speed: formatSpeed(speed),
-          lastVideoSeq: vSeq,
-          lastAudioSeq: aSeq,
-          totalVideoSeq: vTotal || undefined,
-          totalAudioSeq: aTotal || undefined,
-        }).catch((e: any) => this.logger.debug(`[DownloadOrchestrator] Progress update failed: ${e.message}`));
-      }
-    };
-
-    if (videoDl) {
-      videoDl.on("progress", (d) => {
-        vSeq = d.seq;
-        vBytes = d.bytes || 0;
-        if (d.total || d.headSeq) vTotal = d.total || d.headSeq;
-        updateProgress();
-      });
-    }
-
-    if (audioDl) {
-      audioDl.on("progress", (d) => {
-        aSeq = d.seq;
-        aBytes = d.bytes || 0;
-        if (d.total || d.headSeq) aTotal = d.total || d.headSeq;
-        updateProgress();
-      });
-    }
-
-    const chatProgressHandler = chatDl
-      ? (d: ChatProgress) => { chatMsgCount = d.messageCount; updateProgress(); }
-      : null;
-    if (chatDl && chatProgressHandler) chatDl.on("progress", chatProgressHandler);
-
-    const promises: Promise<void>[] = [];
-    if (videoDl) promises.push(videoDl.start().finally(() => this.activeSegmentDownloaders.delete(videoDl!)));
-    if (audioDl) promises.push(audioDl.start().finally(() => this.activeSegmentDownloaders.delete(audioDl!)));
-    if (chatDl)
-      promises.push(
-        chatDl.start().catch((e) => {
-          this.logger.warn(`[Chat] Chat download error: ${e.message}`);
-        }),
-      );
-    await Promise.all(promises);
-
-    // Remove chat listener to prevent leak
-    if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
   }
 
   /**
@@ -1014,10 +409,13 @@ export class DownloadOrchestrator {
   ): Promise<void> {
     let lastSegmentTime = Date.now();
     let streamConfirmedEnded = false;
+    let consecutiveLiveChecks = 0; // How many times YouTube said "live" with no new segments
+    const MAX_LIVE_CHECKS = 6; // Force-end after 6 checks (~30min with 5min intervals)
 
     // Track segment activity
     const onSegmentProgress = () => {
       lastSegmentTime = Date.now();
+      consecutiveLiveChecks = 0; // Reset when new segments arrive
     };
 
     if (videoDl) videoDl.on("progress", onSegmentProgress);
@@ -1036,7 +434,7 @@ export class DownloadOrchestrator {
       if (signal?.aborted) break;
 
       // Run video/audio segment downloaders (they will stop when stream appears to end)
-      await this.runSegmentDownloadersWithoutChat(job, videoDl, audioDl, chatDl, db);
+      await runSegmentDownloadersWithoutChat(job, videoDl, audioDl, chatDl, db, this.activeSegmentDownloaders);
 
       // Check how long since last segment
       const timeSinceLastSegment = Date.now() - lastSegmentTime;
@@ -1068,9 +466,21 @@ export class DownloadOrchestrator {
             `[DownloadOrchestrator] Stream confirmed ended (${freshInfo.streamStatus}), proceeding to mux`,
           );
         } else if (freshInfo.streamStatus === "live") {
+          consecutiveLiveChecks++;
+
+          // Force-end if YouTube keeps saying "live" but no segments are arriving
+          if (consecutiveLiveChecks >= MAX_LIVE_CHECKS) {
+            this.logger.warn(
+              `[DownloadOrchestrator] YouTube reported "live" ${consecutiveLiveChecks} times ` +
+                `with no new segments. Forcing stream end.`,
+            );
+            streamConfirmedEnded = true;
+            break;
+          }
+
           // Stream is still live - wait and try again
           this.logger.info(
-            `[DownloadOrchestrator] Stream still reports as live. ` +
+            `[DownloadOrchestrator] Stream still reports as live (check ${consecutiveLiveChecks}/${MAX_LIVE_CHECKS}). ` +
               `Waiting ${STREAM_END_VERIFY_INTERVAL_MS / 60000} minutes before retrying...`,
           );
 
@@ -1090,22 +500,24 @@ export class DownloadOrchestrator {
 
           try {
             if (isHls) {
-              const refreshedResult = await this.downloadHls(
+              const refreshedResult = await downloadHls(
                 job,
                 freshInfo,
                 yt,
                 stagingDir,
                 db,
+                this.activeSegmentDownloaders,
               );
               videoDl = refreshedResult.videoDl;
               audioDl = null;
             } else {
-              const refreshedResult = await this.downloadDash(
+              const refreshedResult = await downloadDash(
                 job,
                 freshInfo,
                 yt,
                 stagingDir,
                 db,
+                this.activeSegmentDownloaders,
               );
               videoDl = refreshedResult.videoDl;
               audioDl = refreshedResult.audioDl;
@@ -1164,410 +576,5 @@ export class DownloadOrchestrator {
 
     // Wait for chat to finish
     await chatPromise;
-  }
-
-  /**
-   * Run segment downloaders for video/audio only (chat handled separately)
-   */
-  private async runSegmentDownloadersWithoutChat(
-    job: Job,
-    videoDl: SegmentDownloader | null,
-    audioDl: SegmentDownloader | null,
-    chatDl: ChatDownloader | null,
-    db: Database,
-  ): Promise<void> {
-    let vSeq = 0;
-    let aSeq = 0;
-    let vTotal = 0;
-    let aTotal = 0;
-    let vBytes = 0;
-    let aBytes = 0;
-    let chatMsgCount = 0;
-    let lastUpdate = 0;
-    let lastBytes = 0;
-    let lastBytesTime = Date.now();
-
-    const updateProgress = () => {
-      const now = Date.now();
-      if (now - lastUpdate > PROGRESS_UPDATE_INTERVAL_MS) {
-        lastUpdate = now;
-
-        const totalBytes = vBytes + aBytes;
-        const timeDelta = (now - lastBytesTime) / 1000;
-        const bytesDelta = totalBytes - lastBytes;
-        const speed = timeDelta > 0 ? bytesDelta / timeDelta : 0;
-
-        lastBytes = totalBytes;
-        lastBytesTime = now;
-
-        let progStr = "";
-        if (audioDl) {
-          const vPart = vTotal > 0 ? `${vSeq}/${vTotal}` : `${vSeq}`;
-          const aPart = aTotal > 0 ? `${aSeq}/${aTotal}` : `${aSeq}`;
-          progStr = `(A: ${aPart} V: ${vPart}`;
-          if (chatDl && chatMsgCount > 0) {
-            progStr += ` C: ${chatMsgCount}`;
-          }
-          progStr += ")";
-        } else {
-          progStr = `Seq: ${vSeq}`;
-          if (chatDl && chatMsgCount > 0) {
-            progStr += ` C: ${chatMsgCount}`;
-          }
-        }
-
-        db.updateJob(job.id, {
-          progress: progStr,
-          speed: formatSpeed(speed),
-          lastVideoSeq: vSeq,
-          lastAudioSeq: aSeq,
-          totalVideoSeq: vTotal || undefined,
-          totalAudioSeq: aTotal || undefined,
-        }).catch((e: any) => this.logger.debug(`[DownloadOrchestrator] Progress update failed: ${e.message}`));
-      }
-    };
-
-    if (videoDl) {
-      videoDl.on("progress", (d) => {
-        vSeq = d.seq;
-        vBytes = d.bytes || 0;
-        if (d.total || d.headSeq) vTotal = d.total || d.headSeq;
-        updateProgress();
-      });
-    }
-
-    if (audioDl) {
-      audioDl.on("progress", (d) => {
-        aSeq = d.seq;
-        aBytes = d.bytes || 0;
-        if (d.total || d.headSeq) aTotal = d.total || d.headSeq;
-        updateProgress();
-      });
-    }
-
-    // Chat listeners are registered once in runLiveStreamDownload to avoid
-    // leaking listeners across loop iterations. Read chatDl count directly.
-    if (chatDl) {
-      chatMsgCount = chatDl.getMessageCount();
-    }
-
-    const chatProgressHandler = chatDl
-      ? (d: ChatProgress) => { chatMsgCount = d.messageCount; updateProgress(); }
-      : null;
-    if (chatDl && chatProgressHandler) chatDl.on("progress", chatProgressHandler);
-
-    const promises: Promise<void>[] = [];
-    if (videoDl) promises.push(videoDl.start().finally(() => this.activeSegmentDownloaders.delete(videoDl!)));
-    if (audioDl) promises.push(audioDl.start().finally(() => this.activeSegmentDownloaders.delete(audioDl!)));
-    await Promise.all(promises);
-
-    // Remove chat listener to prevent leak when called in a loop
-    if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
-  }
-
-  /**
-   * Mux streams and finalize job
-   */
-  private async muxAndFinalize(
-    job: Job,
-    videoPath: string,
-    audioPath: string | null,
-    outputDir: string,
-    stagingDir: string,
-    finalExtension: string,
-    db: Database,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    const config = ConfigManager.getInstance().get();
-
-    this.logger.info("[DownloadOrchestrator] Muxing...");
-    await db.updateJob(job.id, { status: "Muxing" });
-
-    // "Muxing Starting" notification
-    {
-      const freshJob = (await db.getJobs()).find(j => j.id === job.id);
-      const muxFields: { name: string; value: string; inline?: boolean }[] = [];
-      if (freshJob?.lastVideoSeq) muxFields.push({ name: "Video Segments", value: String(freshJob.lastVideoSeq), inline: true });
-      if (freshJob?.lastAudioSeq) muxFields.push({ name: "Audio Segments", value: String(freshJob.lastAudioSeq), inline: true });
-      if (freshJob?.totalChatMessages) muxFields.push({ name: "Chat Messages", value: String(freshJob.totalChatMessages), inline: true });
-      if (freshJob?.downloadStartedAt) {
-        const elapsed = Date.now() - new Date(freshJob.downloadStartedAt).getTime();
-        muxFields.push({ name: "Download Time", value: formatElapsed(elapsed), inline: true });
-      }
-      NotificationManager.getInstance().send(
-        "Muxing Starting",
-        `Download complete, muxing: ${job.title}`,
-        NotificationType.MUXING,
-        muxFields,
-        {
-          url: `https://www.youtube.com/watch?v=${job.videoId}`,
-          thumbnail: job.thumbnailUrl,
-          event: "muxing",
-        },
-      );
-    }
-
-    const template = config.downloader.output_template || "${title} [${id}]";
-    // Use stream start time if available, otherwise fall back to job creation time
-    const streamDate = job.streamStartTime
-      ? new Date(job.streamStartTime)
-      : new Date(job.createdAt);
-    const filenameBase = ConfigManager.resolveTemplate(template, {
-      title: job.title,
-      id: job.id,
-      channel: job.channelName || "Unknown",
-      date: streamDate,
-    });
-
-    const finalFilename = `${filenameBase}${finalExtension}`;
-    const finalPath = path.join(outputDir, finalFilename);
-
-    try {
-      await Muxer.mux(videoPath, audioPath, finalPath, signal);
-      this.logger.info(`[DownloadOrchestrator] Muxing complete: ${finalPath}`);
-
-      // Save description and thumbnail
-      if (job.description) {
-        await this.assetDownloader.saveDescription(
-          job.description,
-          outputDir,
-          filenameBase,
-        );
-      }
-
-      if (job.thumbnailUrl) {
-        await this.assetDownloader.downloadThumbnail(
-          job.thumbnailUrl,
-          outputDir,
-          filenameBase,
-        );
-      }
-
-      // Copy chat file if exists
-      const chatStagingPath = path.join(stagingDir, "chat.json");
-      let chatFilename: string | undefined;
-      if (await fs.pathExists(chatStagingPath)) {
-        chatFilename = `${filenameBase}.chat.json`;
-        const chatOutputPath = path.join(outputDir, chatFilename);
-        await fs.copy(chatStagingPath, chatOutputPath);
-        this.logger.info(`[Chat] Saved chat to ${chatOutputPath}`);
-      }
-
-      // Get file size
-      let fileSize: number | undefined;
-      try {
-        const stats = await fs.stat(finalPath);
-        fileSize = stats.size;
-      } catch {}
-
-      await db.updateJob(job.id, {
-        status: "Finished",
-        filename: finalFilename,
-        progress: "",
-        percent: 100,
-        speed: "",
-        eta: "",
-        chatStatus: chatFilename ? "finished" : job.chatStatus,
-        chatFilename,
-        fileSize,
-      });
-
-      // Build rich "Download Finished" notification
-      const finishedJob = (await db.getJobs()).find(j => j.id === job.id);
-      const finFields: { name: string; value: string; inline?: boolean }[] = [];
-      finFields.push({ name: "File", value: finalFilename, inline: false });
-
-      if (job.videoWidth && job.videoHeight) {
-        const res = `${job.videoWidth}x${job.videoHeight}${job.videoFps ? ` @${job.videoFps}fps` : ""}`;
-        finFields.push({ name: "Resolution", value: res, inline: true });
-      }
-
-      if (fileSize) {
-        const sizeStr = fileSize > 1024 ** 3
-          ? `${(fileSize / 1024 ** 3).toFixed(2)} GB`
-          : `${(fileSize / 1024 ** 2).toFixed(1)} MB`;
-        finFields.push({ name: "File Size", value: sizeStr, inline: true });
-      }
-
-      if (finishedJob?.lengthSeconds && finishedJob.lengthSeconds > 0) {
-        finFields.push({ name: "Duration", value: formatElapsed(finishedJob.lengthSeconds * 1000), inline: true });
-      }
-
-      if (finishedJob?.downloadStartedAt) {
-        const elapsed = Date.now() - new Date(finishedJob.downloadStartedAt).getTime();
-        finFields.push({ name: "Total Time", value: formatElapsed(elapsed), inline: true });
-      }
-
-      if (finishedJob?.lastVideoSeq) {
-        finFields.push({
-          name: "Segments",
-          value: `V: ${finishedJob.lastVideoSeq}${finishedJob.lastAudioSeq ? ` A: ${finishedJob.lastAudioSeq}` : ""}`,
-          inline: true,
-        });
-      }
-
-      if (finishedJob?.totalChatMessages) {
-        finFields.push({ name: "Chat Messages", value: String(finishedJob.totalChatMessages), inline: true });
-      }
-
-      if (job.description) {
-        const desc = job.description.length > 300 ? job.description.substring(0, 297) + "..." : job.description;
-        finFields.push({ name: "Description", value: desc, inline: false });
-      }
-
-      NotificationManager.getInstance().send(
-        "Download Finished",
-        `Successfully archived: ${job.title}`,
-        NotificationType.SUCCESS,
-        finFields,
-        {
-          url: `https://www.youtube.com/watch?v=${job.videoId}`,
-          image: job.thumbnailUrl,
-          event: "finished",
-        },
-      );
-
-      // Cleanup staging
-      await fs.remove(stagingDir);
-    } catch (e: any) {
-      // Don't mark as error if cancelled — the main execute() handler deals with that
-      if (e?.name === "AbortError") {
-        await fs.remove(finalPath).catch((e: any) => this.logger.debug(`[DownloadOrchestrator] Cleanup failed: ${e.message}`));
-        throw e;
-      }
-      this.logger.error(
-        `[DownloadOrchestrator] Muxing failed: ${getErrorMessage(e)}`,
-      );
-      await db.updateJob(job.id, { status: "Error", error: "Muxing Failed" });
-      throw e;
-    }
-  }
-
-  /**
-   * Download a file with chunked range requests
-   */
-  private async downloadFile(
-    url: string,
-    outputPath: string,
-    signal?: AbortSignal,
-    onProgress?: (progress: string, percent?: number) => void,
-  ): Promise<void> {
-    const headers: Record<string, string> = {
-      "User-Agent": USER_AGENTS.ANDROID,
-    };
-
-    // Get file size
-    let totalBytes = 0;
-    try {
-      const probeResponse = await fetch(url, {
-        method: "GET",
-        headers: { ...headers, Range: "bytes=0-0" },
-        signal,
-      });
-
-      if (probeResponse.status === 206) {
-        const contentRange = probeResponse.headers.get("content-range");
-        if (contentRange) {
-          const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
-          if (match) {
-            totalBytes = parseInt(match[1], 10);
-          }
-        }
-      }
-      await probeResponse.arrayBuffer();
-    } catch (e: any) {
-      if (e?.name === "AbortError" || signal?.aborted) return;
-      this.logger.debug(
-        "[DownloadOrchestrator] Size probe failed, downloading without size info",
-      );
-    }
-
-    if (signal?.aborted) return;
-
-    // Download in chunks
-    let downloadedBytes = 0;
-    let lastProgressUpdate = 0;
-    const fileHandle = await fsOpen(outputPath, "w");
-
-    try {
-      while (true) {
-        if (signal?.aborted) break;
-
-        const start = downloadedBytes;
-        const end =
-          totalBytes > 0
-            ? Math.min(start + DOWNLOAD_CHUNK_SIZE - 1, totalBytes - 1)
-            : start + DOWNLOAD_CHUNK_SIZE - 1;
-
-        let response!: Response;
-        for (let chunkAttempt = 0; ; chunkAttempt++) {
-          try {
-            response = await fetch(url, {
-              headers: { ...headers, Range: `bytes=${start}-${end}` },
-              signal,
-            });
-            if (response.status >= 500) {
-              await response.arrayBuffer();
-              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-            break;
-          } catch (e: any) {
-            if (e?.name === "AbortError" || signal?.aborted) throw e;
-            if (chunkAttempt >= 2) throw e;
-            this.logger.debug(
-              `[DownloadOrchestrator] Chunk retry ${chunkAttempt + 1}/3 for bytes ${start}-${end}`,
-            );
-            await new Promise((r) => setTimeout(r, 1000 * (chunkAttempt + 1)));
-          }
-        }
-
-        if (response.status === 416) {
-          await response.arrayBuffer();
-          break;
-        }
-
-        if (!response.ok && response.status !== 206) {
-          await response.arrayBuffer();
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const data = await response.arrayBuffer();
-        const buffer = Buffer.from(data);
-
-        if (buffer.length === 0) break;
-
-        await fileHandle.write(buffer, 0, buffer.length, downloadedBytes);
-        downloadedBytes += buffer.length;
-
-        const now = Date.now();
-        if (onProgress && now - lastProgressUpdate > 500) {
-          lastProgressUpdate = now;
-          if (totalBytes > 0) {
-            const percent = (downloadedBytes / totalBytes) * 100;
-            onProgress(
-              `${percent.toFixed(1)}% (${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)})`,
-              percent,
-            );
-          } else {
-            onProgress(formatBytes(downloadedBytes));
-          }
-        }
-
-        if (response.status === 200) break;
-        if (totalBytes > 0 && downloadedBytes >= totalBytes) break;
-      }
-    } catch (e: any) {
-      if (e?.name === "AbortError" || signal?.aborted) {
-        this.logger.debug(`[DownloadOrchestrator] Download aborted for ${outputPath}`);
-        return;
-      }
-      throw e;
-    } finally {
-      await fileHandle.close();
-    }
-
-    this.logger.debug(
-      `[DownloadOrchestrator] Downloaded ${formatBytes(downloadedBytes)} to ${outputPath}`,
-    );
   }
 }

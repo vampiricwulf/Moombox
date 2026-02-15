@@ -826,9 +826,21 @@ export class SegmentDownloader extends EventEmitter {
       // no retries pending, and the next segment to write is missing (gap from failed fetch)
       if (activeDownloads === 0 && nextToFetch >= targetSeq && retryQueue.length === 0 && !segmentBuffer.has(nextToWrite)) {
         if (nextToWrite < targetSeq) {
+          // Find the next available segment in the buffer to skip past the gap
+          let gapEnd = nextToWrite + 1;
+          while (gapEnd < targetSeq && !segmentBuffer.has(gapEnd)) {
+            gapEnd++;
+          }
           this.logger.warn(
-            `[Downloader] Parallel catch-up stopped at seq ${nextToWrite} — falling back to sequential retry (target was ${targetSeq})`,
+            `[Downloader] Segment gap detected: seq ${nextToWrite}–${gapEnd - 1} lost after ${MAX_SEGMENT_RETRIES} retries`,
           );
+          this.emit("gap", { from: nextToWrite, to: gapEnd - 1 });
+          // Skip past the gap and continue writing buffered segments
+          nextToWrite = gapEnd;
+          // If there are still buffered segments, continue the loop
+          if (segmentBuffer.size > 0) {
+            continue;
+          }
         }
         break;
       }

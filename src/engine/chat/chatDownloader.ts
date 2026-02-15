@@ -36,6 +36,12 @@ export class ChatDownloader extends EventEmitter {
   private completionPromise: Promise<void> | null = null;
   private abortController: AbortController | null = null;
 
+  // Memory bounding: flush messages to disk when they exceed this threshold
+  private static readonly FLUSH_THRESHOLD = 50000;
+  private static readonly DEDUP_KEEP = 5000; // Keep last N messages in memory after flush
+  private totalMessageCount: number = 0;
+  private flushedToDisk: boolean = false;
+
   constructor(options: ChatDownloaderOptions) {
     super();
     this.options = options;
@@ -83,7 +89,7 @@ export class ChatDownloader extends EventEmitter {
     const lastMessage = this.messages[this.messages.length - 1];
     const state: ChatResumeState = {
       lastTimestampUsec: lastMessage?.timestampUsec || "0",
-      messageCount: this.messages.length,
+      messageCount: this.totalMessageCount,
       continuation: this.continuation,
       timestamp: Date.now(),
       videoId: this.options.videoId,
@@ -124,17 +130,38 @@ export class ChatDownloader extends EventEmitter {
   }
 
   /**
-   * Write chat data to output file atomically (write to temp, then rename)
+   * Write chat data to output file atomically (write to temp, then rename).
+   * If messages were previously flushed to disk, merges existing file with
+   * current in-memory messages to produce the complete output.
    */
   private async writeChatFile(): Promise<void> {
+    let allMessages = this.messages;
+
+    if (this.flushedToDisk) {
+      // Load previously flushed messages from disk and merge with in-memory tail
+      const existing = await this.loadExistingMessages();
+      if (existing.length > 0 && this.messages.length > 0) {
+        // Find overlap between existing (flushed) and in-memory (tail)
+        const firstInMemoryId = this.messages[0].id;
+        const overlapIdx = existing.findIndex((m) => m.id === firstInMemoryId);
+        if (overlapIdx >= 0) {
+          allMessages = [...existing.slice(0, overlapIdx), ...this.messages];
+        } else {
+          allMessages = [...existing, ...this.messages];
+        }
+      } else if (existing.length > 0) {
+        allMessages = existing;
+      }
+    }
+
     const chatData: ChatData = {
       videoId: this.options.videoId,
       videoTitle: this.options.videoTitle,
       channelName: this.options.channelName,
       streamStartTime: this.options.streamStartTime,
       downloadedAt: new Date().toISOString(),
-      messageCount: this.messages.length,
-      messages: this.messages,
+      messageCount: allMessages.length,
+      messages: allMessages,
     };
 
     await fs.ensureDir(path.dirname(this.options.outputFile));
@@ -173,23 +200,24 @@ export class ChatDownloader extends EventEmitter {
         // Load existing messages and continuation
         this.messages = await this.loadExistingMessages();
         this.seenIds = new Set(this.messages.map((m) => m.id));
+        this.totalMessageCount = this.messages.length;
         this.continuation = resumeState.continuation;
         isResuming = true;
         this.logger.info(
-          `[ChatDownloader] Resuming from ${this.messages.length} messages`,
+          `[ChatDownloader] Resuming from ${this.totalMessageCount} messages`,
         );
       }
 
-      this.emit("start", { messageCount: this.messages.length, resuming: isResuming });
+      this.emit("start", { messageCount: this.totalMessageCount, resuming: isResuming });
 
       // Main polling loop
       await this.runChatLoop();
 
       // Write final chat file
-      if (this.messages.length > 0) {
+      if (this.totalMessageCount > 0) {
         await this.writeChatFile();
         this.logger.info(
-          `[ChatDownloader] Saved ${this.messages.length} chat messages`,
+          `[ChatDownloader] Saved ${this.totalMessageCount} chat messages`,
         );
       }
 
@@ -252,13 +280,14 @@ export class ChatDownloader extends EventEmitter {
             if (!this.seenIds.has(msg.id)) {
               this.seenIds.add(msg.id);
               this.messages.push(msg);
+              this.totalMessageCount++;
               newInBatch++;
             }
           }
 
           // Emit progress
           const progress: ChatProgress = {
-            messageCount: this.messages.length,
+            messageCount: this.totalMessageCount,
             lastTimestamp: response.messages[response.messages.length - 1]?.timestampText,
           };
           this.emit("progress", progress);
@@ -266,7 +295,7 @@ export class ChatDownloader extends EventEmitter {
           // Save periodically — count only deduplicated new messages,
           // and scale threshold with message count to reduce I/O on long streams
           saveCounter += newInBatch;
-          const saveThreshold = Math.max(100, Math.floor(this.messages.length * 0.1));
+          const saveThreshold = Math.max(100, Math.floor(this.totalMessageCount * 0.1));
           if (saveCounter >= saveThreshold) {
             try {
               await this.writeChatFile();
@@ -275,6 +304,16 @@ export class ChatDownloader extends EventEmitter {
               this.logger.debug(`[ChatDownloader] Save error: ${ioErr?.message}`);
             }
             saveCounter = 0;
+
+            // Flush old messages from memory after persisting to disk.
+            // Keep only the last DEDUP_KEEP messages for overlap detection on next write.
+            if (this.messages.length > ChatDownloader.FLUSH_THRESHOLD) {
+              this.messages = this.messages.slice(-ChatDownloader.DEDUP_KEEP);
+              this.flushedToDisk = true;
+              this.logger.debug(
+                `[ChatDownloader] Flushed to disk, ${this.totalMessageCount} total, ${this.messages.length} in memory`,
+              );
+            }
 
             // Prune seenIds to prevent unbounded growth on long streams
             if (this.seenIds.size > 50000) {
@@ -302,11 +341,14 @@ export class ChatDownloader extends EventEmitter {
               await this.sleep(10000);
               continue;
             }
-            // No fresh continuation — keep retrying without wasting an API call
-            // with the stale continuation token
-            this.logger.debug("[ChatDownloader] No fresh continuation available — retrying in 10s");
-            while (this.running && !this.cancelFlag && !this.streamEnded) {
-              await this.sleep(10000);
+            // No fresh continuation — retry with exponential backoff
+            this.logger.debug("[ChatDownloader] No fresh continuation available — retrying with backoff");
+            let contRetryDelay = 10000; // Start at 10s
+            const MAX_CONT_RETRIES = 30; // ~30min max
+            let contRetries = 0;
+            while (this.running && !this.cancelFlag && !this.streamEnded && contRetries < MAX_CONT_RETRIES) {
+              await this.sleep(contRetryDelay);
+              contRetries++;
               const retry = await this.chatApi.fetchFreshContinuation(
                 this.options.videoId,
                 this.options.cookieHeader,
@@ -317,6 +359,12 @@ export class ChatDownloader extends EventEmitter {
                 this.continuation = retry.continuation;
                 break;
               }
+              // Exponential backoff: 10s, 20s, 40s, 80s, cap at 5min
+              contRetryDelay = Math.min(contRetryDelay * 2, 5 * 60 * 1000);
+            }
+            if (contRetries >= MAX_CONT_RETRIES) {
+              this.logger.warn("[ChatDownloader] Max continuation retries reached, stopping chat download");
+              break;
             }
             continue;
           }
@@ -397,10 +445,10 @@ export class ChatDownloader extends EventEmitter {
   }
 
   /**
-   * Get current message count
+   * Get current message count (includes messages flushed to disk)
    */
   getMessageCount(): number {
-    return this.messages.length;
+    return this.totalMessageCount;
   }
 
   /**

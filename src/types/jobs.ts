@@ -62,6 +62,8 @@ export interface Job {
   chatStatus?: ChatStatus;
   totalChatMessages?: number;
   chatFilename?: string; // Relative path to chat.json
+  // Segment gap tracking (segments lost during parallel catch-up)
+  gaps?: Array<{ from: number; to: number; stream: "video" | "audio" }>;
 }
 
 /**
