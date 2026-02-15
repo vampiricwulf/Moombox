@@ -18,6 +18,7 @@ import type {
 import {
   TV_DOWNGRADED_CLIENT,
   WEB_CREATOR_CLIENT,
+  WEB_CLIENT,
   ANDROID_VR_CLIENT,
   DEFAULT_API_KEY,
   YOUTUBE_URLS,
@@ -35,7 +36,8 @@ const AUTH_LEVELS = {
   WATCH_PAGE: 1,    // Embedded in HTML (no separate API call)
   TV_PUBLIC: 2,     // TV_DOWNGRADED without cookies
   TV_AUTH: 3,       // TV_DOWNGRADED with cookies
-  WEB_CREATOR: 4,   // WEB_CREATOR with cookies
+  WEB: 4,           // WEB client (provides DASH manifests)
+  WEB_CREATOR: 5,   // WEB_CREATOR with cookies
 } as const;
 
 /**
@@ -134,6 +136,27 @@ export class PlayerApi {
       signatureTimestamp,
     );
     this.collectFormats(formatPool, result.formats, "tv_auth", AUTH_LEVELS.TV_AUTH);
+
+    // Always try WEB client to get DASH manifest URL (like yt-dlp)
+    // WEB client often provides dashManifestUrl even when other clients don't
+    this.logger.debug(
+      `[PlayerApi] Fetching WEB client for ${videoId} to get DASH manifest`,
+    );
+    const webResult = await this.fetchWithClient(
+      videoId,
+      WEB_CLIENT,
+      ytcfg,
+      signatureTimestamp,
+    );
+    this.collectFormats(formatPool, webResult.formats, "web", AUTH_LEVELS.WEB);
+
+    // Merge DASH manifest URL from WEB client if available
+    if (webResult.dashManifestUrl && !result.dashManifestUrl) {
+      this.logger.info(
+        `[PlayerApi] Got DASH manifest URL from WEB client for ${videoId}`,
+      );
+      result.dashManifestUrl = webResult.dashManifestUrl;
+    }
 
     // If TV_DOWNGRADED fails, try WEB_CREATOR
     if (
