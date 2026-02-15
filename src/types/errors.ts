@@ -3,12 +3,21 @@
  */
 
 /**
+ * Error context - additional structured information about the error
+ */
+export interface ErrorContext {
+  [key: string]: any;
+}
+
+/**
  * Base error class for all Moombox errors
  */
 export class MoomboxError extends Error {
   constructor(
     message: string,
     public readonly code: string,
+    public readonly expected: boolean = false,  // User-facing vs developer error
+    public readonly context: ErrorContext = {},  // Contextual information
     public readonly cause?: Error,
   ) {
     super(message);
@@ -28,6 +37,21 @@ export class MoomboxError extends Error {
     }
     return this.message;
   }
+
+  /**
+   * Convert error to JSON for logging/transmission
+   */
+  toJSON(): Record<string, any> {
+    return {
+      name: this.name,
+      message: this.message,
+      code: this.code,
+      expected: this.expected,
+      context: this.context,
+      cause: this.cause?.message,
+      stack: this.stack,
+    };
+  }
 }
 
 /**
@@ -37,15 +61,17 @@ export class YouTubeError extends MoomboxError {
   constructor(
     message: string,
     code: string = "YOUTUBE_ERROR",
+    context: ErrorContext = {},
     cause?: Error,
   ) {
-    super(message, code, cause);
+    super(message, code, false, context, cause);
     this.name = "YouTubeError";
   }
 }
 
 /**
  * Video playability errors (member-only, unavailable, etc.)
+ * Marked as expected (user-facing) errors
  */
 export class VideoPlayabilityError extends MoomboxError {
   constructor(
@@ -53,7 +79,12 @@ export class VideoPlayabilityError extends MoomboxError {
     public readonly playabilityStatus: string,
     public readonly reason?: string,
   ) {
-    super(message, `PLAYABILITY_${playabilityStatus.toUpperCase()}`);
+    super(
+      message,
+      `PLAYABILITY_${playabilityStatus.toUpperCase()}`,
+      true,  // expected = true (user-facing error)
+      { playabilityStatus, reason }
+    );
     this.name = "VideoPlayabilityError";
   }
 }
@@ -68,7 +99,7 @@ export class DownloadError extends MoomboxError {
     public readonly httpStatus?: number,
     cause?: Error,
   ) {
-    super(message, code, cause);
+    super(message, code, false, { httpStatus }, cause);
     this.name = "DownloadError";
   }
 }
@@ -83,7 +114,7 @@ export class NetworkError extends MoomboxError {
     public readonly url?: string,
     cause?: Error,
   ) {
-    super(message, `HTTP_${httpStatus || "UNKNOWN"}`, cause);
+    super(message, `HTTP_${httpStatus || "UNKNOWN"}`, false, { httpStatus, url }, cause);
     this.name = "NetworkError";
   }
 }
@@ -93,7 +124,7 @@ export class NetworkError extends MoomboxError {
  */
 export class ConfigError extends MoomboxError {
   constructor(message: string, cause?: Error) {
-    super(message, "CONFIG_ERROR", cause);
+    super(message, "CONFIG_ERROR", false, {}, cause);
     this.name = "ConfigError";
   }
 }
@@ -107,7 +138,7 @@ export class MuxingError extends MoomboxError {
     public readonly exitCode?: number,
     cause?: Error,
   ) {
-    super(message, "MUXING_ERROR", cause);
+    super(message, "MUXING_ERROR", false, { exitCode }, cause);
     this.name = "MuxingError";
   }
 }
@@ -117,7 +148,7 @@ export class MuxingError extends MoomboxError {
  */
 export class AuthenticationError extends MoomboxError {
   constructor(message: string, cause?: Error) {
-    super(message, "AUTH_ERROR", cause);
+    super(message, "AUTH_ERROR", false, {}, cause);
     this.name = "AuthenticationError";
   }
 }
@@ -143,10 +174,12 @@ export function wrapError(error: unknown, defaultMessage: string): MoomboxError 
     return error;
   }
   if (error instanceof Error) {
-    return new MoomboxError(error.message, "UNKNOWN_ERROR", error);
+    return new MoomboxError(error.message, "UNKNOWN_ERROR", false, {}, error);
   }
   return new MoomboxError(
     typeof error === "string" ? error : defaultMessage,
     "UNKNOWN_ERROR",
+    false,
+    {},
   );
 }

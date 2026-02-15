@@ -6,6 +6,7 @@ import { Logger } from "./logger.js";
 import { NotificationManager, NotificationType } from "./notifications.js";
 import { MoomboxConfig } from "../types/config.js";
 import { fetchWithTimeout } from "./http.js";
+import { fuzzyMatch } from "../utils/textNormalization.js";
 
 export class FeedMonitor {
   private parser: Parser;
@@ -389,7 +390,7 @@ export class FeedMonitor {
         }
 
         const regex = new RegExp(finalPattern, flags);
-        if (regex.test(title)) return true;
+        if (fuzzyMatch(title, regex)) return true;
       } catch (e) {
         this.logger.error(`Invalid regex for ${config.name}: ${pattern}`);
       }

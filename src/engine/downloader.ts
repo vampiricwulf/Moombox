@@ -4,6 +4,7 @@ import { EventEmitter } from "events";
 import { ManifestParser } from "./manifest.js";
 import { Logger } from "../core/logger.js";
 import { DOWNLOAD_TIMEOUT_MS } from "../constants.js";
+import { LIMITS } from "../constants/limits.js";
 
 export interface DownloaderOptions {
   baseUrl: string;
@@ -38,8 +39,8 @@ export class SegmentDownloader extends EventEmitter {
   private logger: Logger;
 
   // Parallel download settings
-  private static readonly PARALLEL_DOWNLOADS = 6;
-  private static readonly CATCHUP_THRESHOLD = 10; // Use parallel mode if this many segments behind
+  private static readonly PARALLEL_DOWNLOADS = LIMITS.MAX_PARALLEL_SEGMENTS;
+  private static readonly CATCHUP_THRESHOLD = LIMITS.SEGMENT_BEHIND_THRESHOLD; // Use parallel mode if this many segments behind
 
   constructor(options: DownloaderOptions) {
     super();

@@ -9,6 +9,7 @@ import { Logger } from "../../core/logger.js";
 import { setupGlobalDom } from "../../core/globalDom.js";
 import { USER_AGENTS, BOTGUARD_REQUEST_KEY } from "../../constants.js";
 import { createRetryFetch } from "../../core/http.js";
+import { getErrorMessage } from "../../types/errors.js";
 
 /**
  * PO Token Generator
@@ -89,7 +90,7 @@ export class PoTokenGenerator {
         return this.poToken;
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.logger.debug(
         `[PoToken] Generation failed (may not be needed): ${msg}`,
       );

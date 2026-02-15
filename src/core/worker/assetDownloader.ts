@@ -9,6 +9,7 @@ import path from "path";
 import { Logger } from "../logger.js";
 import { THUMBNAIL_QUALITIES, YOUTUBE_URLS } from "../../constants.js";
 import { fetchWithTimeout } from "../http.js";
+import { getErrorMessage } from "../../types/errors.js";
 
 /**
  * Asset Downloader
@@ -37,7 +38,7 @@ export class AssetDownloader {
       this.logger.info(`[AssetDownloader] Saved description: ${descriptionPath}`);
       return true;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.logger.warn(`[AssetDownloader] Failed to save description: ${msg}`);
       return false;
     }
@@ -96,7 +97,7 @@ export class AssetDownloader {
       );
       return false;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.logger.warn(`[AssetDownloader] Failed to download thumbnail: ${msg}`);
       return false;
     }

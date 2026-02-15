@@ -6,6 +6,7 @@ import { AutoCookieService } from "../../core/autoCookies.js";
 import type { MoomboxConfig } from "../../types/config.js";
 import { useMouse, MouseEvent as TuiMouseEvent } from "../hooks/useMouse.js";
 import { readClipboard } from "../clipboard.js";
+import { getErrorMessage } from "../../types/errors.js";
 
 interface SetupWizardProps {
   width: number;
@@ -396,7 +397,7 @@ export function SetupWizard({ width, height, onComplete }: SetupWizardProps): Re
 
       onComplete();
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       setError(`Failed to save: ${msg}`);
       setSaving(false);
     }

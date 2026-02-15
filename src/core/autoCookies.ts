@@ -18,6 +18,7 @@ import { ConfigManager } from "./config.js";
 import { CookieJar } from "./cookies.js";
 import { fetchWithTimeout } from "./http.js";
 import { detectBrowser, type DetectedBrowser } from "./browserDetect.js";
+import { getErrorMessage } from "../types/errors.js";
 import { CdpClient } from "./cdpClient.js";
 import {
   cdpCookiesToNetscape,
@@ -133,7 +134,7 @@ export class AutoCookieService {
       }
       return { success: true };
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.lastError = msg;
       this.cleanup();
       return { success: false, error: msg };
@@ -200,7 +201,7 @@ export class AutoCookieService {
       this.logger.info("[AutoCookies] Setup complete — authenticated successfully");
       return { success: true, authenticated: true };
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.lastError = msg;
       this.cleanup();
       return { success: false, authenticated: false, error: msg };
@@ -282,7 +283,7 @@ export class AutoCookieService {
       this.logger.warn("[AutoCookies] Refresh completed but auth cookies not found");
       return false;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.lastError = msg;
       this.logger.warn(`[AutoCookies] Refresh failed: ${msg}`);
       return false;

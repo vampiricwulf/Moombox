@@ -26,7 +26,7 @@ describe("Error Classes", () => {
 
     it("should chain causes", () => {
       const cause = new Error("Original cause");
-      const error = new MoomboxError("Wrapped", "WRAP", cause);
+      const error = new MoomboxError("Wrapped", "WRAP", false, {}, cause);
       expect(error.cause).toBe(cause);
       expect(error.fullMessage).toContain("Original cause");
     });

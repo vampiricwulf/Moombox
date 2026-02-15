@@ -1,5 +1,6 @@
 import { parentPort } from "worker_threads";
 import { preprocessPlayer } from "../ejs/yt/solver/solvers.js";
+import { getErrorMessage } from "../types/errors.js";
 
 if (parentPort) {
   parentPort.on("message", async (data: string) => {
@@ -10,7 +11,7 @@ if (parentPort) {
       parentPort!.postMessage({
         type: "error",
         data: {
-          message: error instanceof Error ? error.message : String(error),
+          message: getErrorMessage(error),
           stack: error instanceof Error ? error.stack : undefined,
         },
       });

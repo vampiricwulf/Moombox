@@ -15,6 +15,7 @@ import type { Job } from "../../types/jobs.js";
 import { asyncHandler } from "./errorHandler.js";
 import { createRateLimiter } from "./rateLimiter.js";
 import { addJobSchema, formatValidationErrors } from "../../types/schemas.js";
+import { validateOffsetPagination } from "./validators.js";
 
 export interface JobRoutesContext {
   jobLogs: Map<string, string[]>;
@@ -32,16 +33,14 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     const jobs = await db.getJobs();
     const filtered = ctx.filterJobsByAge(jobs, false);
 
-    // Parse pagination parameters
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
-    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
-
-    // Validate pagination parameters
-    if (limit !== undefined && (isNaN(limit) || limit < 1 || limit > 1000)) {
-      return res.status(400).json({ error: "Invalid limit parameter (must be 1-1000)" });
-    }
-    if (isNaN(offset) || offset < 0) {
-      return res.status(400).json({ error: "Invalid offset parameter (must be >= 0)" });
+    // Parse and validate pagination parameters
+    try {
+      var { offset, limit } = validateOffsetPagination(
+        req.query.offset as string | undefined,
+        req.query.limit as string | undefined
+      );
+    } catch (e: any) {
+      return res.status(400).json({ error: e.message });
     }
 
     // If pagination parameters are used, return paginated response with metadata
@@ -72,16 +71,14 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     const archivedJobs = ctx.filterJobsByAge(jobs, true)
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
-    // Parse pagination parameters
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
-    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
-
-    // Validate pagination parameters
-    if (limit !== undefined && (isNaN(limit) || limit < 1 || limit > 1000)) {
-      return res.status(400).json({ error: "Invalid limit parameter (must be 1-1000)" });
-    }
-    if (isNaN(offset) || offset < 0) {
-      return res.status(400).json({ error: "Invalid offset parameter (must be >= 0)" });
+    // Parse and validate pagination parameters
+    try {
+      var { offset, limit } = validateOffsetPagination(
+        req.query.offset as string | undefined,
+        req.query.limit as string | undefined
+      );
+    } catch (e: any) {
+      return res.status(400).json({ error: e.message });
     }
 
     // If pagination parameters are used, return paginated response with metadata

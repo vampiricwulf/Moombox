@@ -8,6 +8,7 @@ import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
 import { WORKER_CHECK_INTERVAL_MS } from "../../constants.js";
+import { getErrorMessage } from "../../types/errors.js";
 
 /**
  * Job filter function type
@@ -94,7 +95,7 @@ export class JobQueue {
         }
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.logger.error(`[JobQueue] Error checking queue: ${msg}`);
     }
   }

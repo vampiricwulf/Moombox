@@ -7,6 +7,7 @@
 import { Logger } from "../../core/logger.js";
 import { getSts } from "../../cipher/src/handlers/getSts.js";
 import { decryptSignature } from "../../cipher/src/handlers/decryptSignature.js";
+import { getErrorMessage } from "../../types/errors.js";
 import type {
   Format,
   VideoInfo,
@@ -103,7 +104,7 @@ export class PlayerApi {
         }
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.logger.warn(`[PlayerApi] Could not fetch watch page: ${msg}`);
     }
 
@@ -198,7 +199,7 @@ export class PlayerApi {
               `[PlayerApi] ANDROID_VR returned ${vrResult.playabilityError || "inadequate formats"} for ${videoId}`,
             );
           } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
+            const msg = getErrorMessage(e);
             this.logger.debug(`[PlayerApi] ANDROID_VR failed: ${msg}`);
           }
         }
@@ -299,7 +300,7 @@ export class PlayerApi {
           `[PlayerApi] ANDROID_VR returned ${vrResult.playabilityError || "inadequate formats"} for ${videoId}`,
         );
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = getErrorMessage(e);
         this.logger.debug(`[PlayerApi] ANDROID_VR failed: ${msg}`);
       }
 
@@ -725,7 +726,7 @@ export class PlayerApi {
               }
             }
           } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
+            const msg = getErrorMessage(e);
             this.logger.debug(
               `[PlayerApi] Failed to decrypt n param for format ${f.itag}: ${msg}`,
             );
@@ -767,7 +768,7 @@ export class PlayerApi {
             });
           }
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = getErrorMessage(e);
           this.logger.debug(
             `[PlayerApi] Failed to decrypt signature cipher: ${msg}`,
           );

@@ -19,6 +19,7 @@ import {
   MAX_DOWNLOAD_RETRIES,
   RETRY_DELAY_MS,
 } from "../constants.js";
+import { RetryManager } from "../utils/RetryManager.js";
 
 /**
  * HTTP request options
@@ -388,6 +389,7 @@ export function createRetryFetch(options?: {
 
 /**
  * Generic retry with exponential backoff for any async operation.
+ * Uses RetryManager for standardized retry logic.
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
@@ -402,18 +404,15 @@ export async function retryWithBackoff<T>(
   const baseDelay = options?.baseDelay ?? 2000;
   const maxDelay = options?.maxDelay ?? 30000;
 
-  let lastError: Error | null = null;
+  const retryManager = new RetryManager({
+    maxRetries,
+    sleepFunc: RetryManager.exponentialBackoff(baseDelay, maxDelay),
+  });
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      if (options?.signal?.aborted) throw new Error("Aborted");
-      return await fn();
-    } catch (e) {
-      lastError = e instanceof Error ? e : new Error(String(e));
-      if (attempt === maxRetries) throw lastError;
-      const delay = Math.min(baseDelay * attempt, maxDelay);
-      await new Promise((r) => setTimeout(r, delay));
+  return retryManager.execute(async () => {
+    if (options?.signal?.aborted) {
+      throw new Error("Aborted");
     }
-  }
-  throw lastError || new Error("All retry attempts failed");
+    return await fn();
+  });
 }

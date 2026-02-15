@@ -7,6 +7,7 @@
 import { CookieJar } from "../../core/cookies.js";
 import { ConfigManager } from "../../core/config.js";
 import { Logger } from "../../core/logger.js";
+import { getErrorMessage } from "../../types/errors.js";
 import type { YouTubeClientConfig, YtcfgData } from "../../types/youtube.js";
 
 /**
@@ -31,7 +32,7 @@ export class YouTubeAuth {
         this.cookieHeader = await CookieJar.load(config.downloader.cookie_file);
         this.logger.info("[YouTubeAuth] Loaded cookies from file");
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = getErrorMessage(e);
         this.logger.warn(`[YouTubeAuth] Failed to load cookies: ${msg}`);
       }
     }
@@ -51,7 +52,7 @@ export class YouTubeAuth {
         );
         this.logger.info("[YouTubeAuth] Reloaded cookies from file");
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = getErrorMessage(e);
         this.logger.warn(`[YouTubeAuth] Failed to reload cookies: ${msg}`);
       }
     }

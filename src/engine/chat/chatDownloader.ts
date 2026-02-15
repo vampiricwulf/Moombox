@@ -10,6 +10,7 @@ import path from "path";
 import { EventEmitter } from "events";
 import { ChatApi } from "./chatApi.js";
 import { Logger } from "../../core/logger.js";
+import { LIMITS } from "../../constants/limits.js";
 import type {
   ChatDownloaderOptions,
   ChatMessage,
@@ -37,8 +38,8 @@ export class ChatDownloader extends EventEmitter {
   private abortController: AbortController | null = null;
 
   // Memory bounding: flush messages to disk when they exceed this threshold
-  private static readonly FLUSH_THRESHOLD = 50000;
-  private static readonly DEDUP_KEEP = 5000; // Keep last N messages in memory after flush
+  private static readonly FLUSH_THRESHOLD = LIMITS.CHAT_MESSAGES_FLUSH_THRESHOLD;
+  private static readonly DEDUP_KEEP = LIMITS.CHAT_MESSAGES_IN_MEMORY; // Keep last N messages in memory after flush
   private totalMessageCount: number = 0;
   private flushedToDisk: boolean = false;
 
@@ -316,8 +317,8 @@ export class ChatDownloader extends EventEmitter {
             }
 
             // Prune seenIds to prevent unbounded growth on long streams
-            if (this.seenIds.size > 50000) {
-              this.seenIds = new Set(this.messages.slice(-50000).map(m => m.id));
+            if (this.seenIds.size > LIMITS.CHAT_MESSAGES_FLUSH_THRESHOLD) {
+              this.seenIds = new Set(this.messages.slice(-LIMITS.CHAT_MESSAGES_FLUSH_THRESHOLD).map(m => m.id));
             }
           }
         }

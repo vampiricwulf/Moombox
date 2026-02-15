@@ -4,6 +4,8 @@ import path from "path";
 import fs from "fs-extra";
 import { ConfigManager } from "./config.js";
 import { Logger } from "./logger.js";
+import { getErrorMessage } from "../types/errors.js";
+import { TIMEOUTS } from "../constants/timeouts.js";
 import type { Job, JobUpdate } from "../types/jobs.js";
 
 // Re-export Job type for backwards compatibility
@@ -31,7 +33,7 @@ export class Database {
   // Batch update mechanism (100ms window for progress updates)
   private updateBatch: Map<string, Partial<Job>> = new Map();
   private batchTimer: NodeJS.Timeout | null = null;
-  private static readonly BATCH_WINDOW_MS = 100;
+  private static readonly BATCH_WINDOW_MS = TIMEOUTS.JOB_UPDATE_THROTTLE;
 
   private constructor() {
     let file = path.join(process.cwd(), "moombox.json");
@@ -66,7 +68,7 @@ export class Database {
     } catch (e) {
       // Database file is corrupted — back it up and start fresh
       const logger = Logger.getInstance();
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       logger.error(`[Database] Failed to read database: ${msg}`);
 
       let file = path.join(process.cwd(), "moombox.json");
@@ -125,7 +127,7 @@ export class Database {
     const result = this.writeQueue.then(fn);
     // Keep the chain going regardless of success/failure (log errors for visibility)
     this.writeQueue = result.then(() => {}, (e) => {
-      Logger.getInstance().error(`[Database] Write failed: ${e instanceof Error ? e.message : String(e)}`);
+      Logger.getInstance().error(`[Database] Write failed: ${getErrorMessage(e)}`);
     });
     return result;
   }

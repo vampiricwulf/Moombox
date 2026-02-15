@@ -15,6 +15,7 @@ import { PlayerApi } from "./playerApi.js";
 import { FormatSelector, type SelectedFormats, type FormatSelectionOptions } from "./formatSelector.js";
 import { PoTokenGenerator } from "./poToken.js";
 import { fetchWithTimeout } from "../../core/http.js";
+import { getErrorMessage } from "../../types/errors.js";
 
 // Re-export sub-modules for direct access if needed
 export { YouTubeAuth } from "./auth.js";
@@ -113,7 +114,7 @@ export class YouTubeService {
         this.logger.debug(`[YouTube] API key: ${this.innertubeApiKey}`);
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = getErrorMessage(e);
       this.logger.warn(`[YouTube] Failed to fetch homepage: ${msg}`);
     }
 

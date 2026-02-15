@@ -14,6 +14,7 @@ import { PotProvider } from "./core/potProvider.js";
 import { AutoCookieService } from "./core/autoCookies.js";
 import { NotificationManager, NotificationType } from "./core/notifications.js";
 import { WebServer } from "./web/server.js";
+import { getErrorMessage } from "./types/errors.js";
 
 // Dynamic import for TUI (may not be available in packaged build)
 async function loadTUI(): Promise<{ startTUI: () => Promise<void> } | null> {
@@ -230,7 +231,7 @@ async function run() {
         await fn();
         logger.debug(`[Moombox] Stopped ${name}`);
       } catch (e) {
-        logger.error(`[Moombox] Error stopping ${name}: ${e instanceof Error ? e.message : String(e)}`);
+        logger.error(`[Moombox] Error stopping ${name}: ${getErrorMessage(e)}`);
       }
     };
 

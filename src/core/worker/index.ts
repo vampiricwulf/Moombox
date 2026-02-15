@@ -9,6 +9,7 @@ import { Database, type Job } from "../database.js";
 import { Logger } from "../logger.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import { AutoCookieService } from "../autoCookies.js";
+import { getErrorMessage } from "../../types/errors.js";
 import { JobQueue } from "./jobQueue.js";
 import { StreamProcessor } from "./streamProcessor.js";
 import { DownloadOrchestrator } from "./downloadOrchestrator.js";
@@ -82,35 +83,38 @@ export class DownloadWorker {
   /**
    * Start processing a job
    */
-  private startJob(job: Job): void {
-    this.processJob(job)
-      .catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.logger.error(`[Worker] Job ${job.id} failed: ${msg}`);
+  private async startJob(job: Job): Promise<void> {
+    try {
+      await this.processJob(job);
+    } catch (e) {
+      const msg = getErrorMessage(e);
+      this.logger.error(`[Worker] Job ${job.id} failed: ${msg}`);
 
-        Database.getInstance()
-          .then((db) => db.updateJob(job.id, { status: "Error", error: msg }))
-          .catch((e) => this.logger.error(`[Worker] Failed to update job error status: ${e instanceof Error ? e.message : String(e)}`));
+      try {
+        const db = await Database.getInstance();
+        await db.updateJob(job.id, { status: "Error", error: msg });
+      } catch (dbErr) {
+        this.logger.error(`[Worker] Failed to update job error status: ${getErrorMessage(dbErr)}`);
+      }
 
-        NotificationManager.getInstance().send(
-          "Job Failed",
-          `Job failed for: ${job.title}`,
-          NotificationType.ERROR,
-          [
-            { name: "Error", value: msg },
-            { name: "Channel", value: job.channelName, inline: true },
-            { name: "Video ID", value: job.videoId, inline: true },
-          ],
-          {
-            url: `https://www.youtube.com/watch?v=${job.videoId}`,
-            thumbnail: job.thumbnailUrl,
-            event: "error",
-          },
-        );
-      })
-      .finally(() => {
-        this.jobQueue.markInactive(job.id);
-      });
+      NotificationManager.getInstance().send(
+        "Job Failed",
+        `Job failed for: ${job.title}`,
+        NotificationType.ERROR,
+        [
+          { name: "Error", value: msg },
+          { name: "Channel", value: job.channelName, inline: true },
+          { name: "Video ID", value: job.videoId, inline: true },
+        ],
+        {
+          url: `https://www.youtube.com/watch?v=${job.videoId}`,
+          thumbnail: job.thumbnailUrl,
+          event: "error",
+        },
+      );
+    } finally {
+      this.jobQueue.markInactive(job.id);
+    }
   }
 
   /**
