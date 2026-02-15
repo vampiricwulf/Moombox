@@ -86,7 +86,8 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `downloader.prefer_60fps` | `true` | Prefer 60fps when same resolution available |
 | `downloader.num_parallel_downloads` | `2` | Simultaneous download jobs |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | Output path template |
-| `tasklist.hide_finished_age_days` | `30` | Days before finished jobs move to Archived |
+| `feed_check_interval` | `10` | Minutes between RSS feed checks (also accepts `"10m"`) |
+| `tasklist.hide_finished_age_days` | `30` | Days before finished jobs move to Archived (also accepts `"30d"`) |
 
 ### Channel Monitoring
 
