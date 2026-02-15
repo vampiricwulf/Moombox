@@ -9,6 +9,7 @@ import { execa } from "execa";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
+import { createJobLogger } from "../structuredLogger.js";
 import { Muxer, type MuxTrimOptions } from "../../engine/muxer.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import { AssetDownloader } from "./assetDownloader.js";
@@ -181,6 +182,22 @@ export async function muxAndFinalize(
       lengthSeconds: metadata?.duration,
       videoWidth: metadata?.width,
       videoHeight: metadata?.height,
+    });
+
+    // Structured logging: log download completion with final metadata
+    const structuredLog = createJobLogger(job.id);
+    structuredLog.info({
+      event: "download_complete",
+      videoId: job.videoId,
+      title: job.title,
+      filename: finalFilename,
+      fileSize: metadata?.size || fileSize,
+      duration: metadata?.duration,
+      resolution: metadata?.width && metadata?.height
+        ? `${metadata.width}x${metadata.height}`
+        : undefined,
+      hasChatFile: !!chatFilename,
+      gaps: job.gaps?.length || 0,
     });
 
     // Build rich "Download Finished" notification
