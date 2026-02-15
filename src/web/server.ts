@@ -53,6 +53,7 @@ export class WebServer {
   private jobUpdateUnsubscribe: (() => void) | null = null;
   private jobsChangeUnsubscribe: (() => void) | null = null;
   private jobTrailingTimers: Map<string, NodeJS.Timeout> = new Map();
+  private clientJobs: Map<WebSocket, Set<string>> = new Map(); // Track which jobs each client receives updates for
 
   constructor(options: WebServerOptions = {}) {
     this.port = options.port || DEFAULT_PORT;
@@ -351,12 +352,37 @@ export class WebServer {
         this.clients.delete(ws);
         this.logger.debug("[WebServer] Client disconnected");
 
+        // Clear timers for jobs this client was tracking
+        const clientJobIds = this.clientJobs.get(ws);
+        if (clientJobIds) {
+          for (const jobId of clientJobIds) {
+            // Only clear timer if no other clients are tracking this job
+            let stillTracked = false;
+            for (const [otherClient, otherJobIds] of this.clientJobs.entries()) {
+              if (otherClient !== ws && otherJobIds.has(jobId)) {
+                stillTracked = true;
+                break;
+              }
+            }
+
+            if (!stillTracked) {
+              const timer = this.jobTrailingTimers.get(jobId);
+              if (timer) {
+                clearTimeout(timer);
+                this.jobTrailingTimers.delete(jobId);
+              }
+            }
+          }
+          this.clientJobs.delete(ws);
+        }
+
         // If no clients remain, clear all pending throttle timers
         if (this.clients.size === 0) {
           for (const timer of this.jobTrailingTimers.values()) {
             clearTimeout(timer);
           }
           this.jobTrailingTimers.clear();
+          this.clientJobs.clear();
           this.logger.debug("[WebServer] Cleared all pending job update timers (no clients)");
         }
       });
@@ -448,6 +474,7 @@ export class WebServer {
         const timer = this.jobTrailingTimers.get(job.id);
         if (timer) { clearTimeout(timer); this.jobTrailingTimers.delete(job.id); }
         this.broadcast({ type: "job_update", payload: job });
+        this.trackJobForClients(job.id);
       } else {
         // Schedule trailing-edge send to ensure the last update is always delivered
         const existing = this.jobTrailingTimers.get(job.id);
@@ -456,6 +483,7 @@ export class WebServer {
           this.jobTrailingTimers.delete(job.id);
           jobUpdateTimestamps.set(job.id, Date.now());
           this.broadcast({ type: "job_update", payload: job });
+          this.trackJobForClients(job.id);
         }, UPDATE_THROTTLE_MS));
       }
     });
@@ -509,6 +537,18 @@ export class WebServer {
           this.clients.delete(client);
         }
       }
+    }
+  }
+
+  /**
+   * Track that all current clients received updates for this job (for memory leak prevention)
+   */
+  private trackJobForClients(jobId: string) {
+    for (const client of this.clients) {
+      if (!this.clientJobs.has(client)) {
+        this.clientJobs.set(client, new Set());
+      }
+      this.clientJobs.get(client)!.add(jobId);
     }
   }
 

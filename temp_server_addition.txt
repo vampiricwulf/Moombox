@@ -1,0 +1,11 @@
+  /**
+   * Track that all current clients received updates for this job
+   */
+  private trackJobForClients(jobId: string) {
+    for (const client of this.clients) {
+      if (!this.clientJobs.has(client)) {
+        this.clientJobs.set(client, new Set());
+      }
+      this.clientJobs.get(client)!.add(jobId);
+    }
+  }
