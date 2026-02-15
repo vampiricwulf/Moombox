@@ -138,6 +138,9 @@ export class TrimService {
       const updatedTrims = [...(sourceJob.trims || []), trimRecord];
       await db.updateJob(sourceJob.id, { trims: updatedTrims });
 
+      // Flush batch immediately so frontend can fetch updated job data
+      await db.flush();
+
       logger.info(
         `[TrimService] Trim created successfully: ${trimFilename} (${this.formatBytes(metadata?.size || 0)})`,
       );
@@ -225,6 +228,9 @@ export class TrimService {
 
     // 5. Update job in database
     await db.updateJob(jobId, { trims: updatedTrims });
+
+    // Flush batch immediately so frontend can fetch updated job data
+    await db.flush();
 
     logger.info(`[TrimService] Trim deleted: ${trim.filename}`);
 
