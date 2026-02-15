@@ -5,6 +5,7 @@
 import path from "path";
 import fs from "fs-extra";
 import { open as fsOpen } from "node:fs/promises";
+import { spawn } from "child_process";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
@@ -18,6 +19,74 @@ import {
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
 import { formatElapsed, formatBytes } from "./formatUtils.js";
+
+/**
+ * Extract video metadata using ffprobe
+ */
+async function extractVideoMetadata(
+  filePath: string,
+): Promise<{ duration: number; width: number; height: number; size: number } | null> {
+  return new Promise((resolve) => {
+    const ffprobe = spawn("ffprobe", [
+      "-v",
+      "quiet",
+      "-print_format",
+      "json",
+      "-show_format",
+      "-show_streams",
+      filePath,
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+
+    ffprobe.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    ffprobe.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    ffprobe.on("close", (code) => {
+      if (code !== 0 || !stdout) {
+        Logger.getInstance().warn(
+          `[Metadata] ffprobe failed (code ${code}): ${stderr}`,
+        );
+        resolve(null);
+        return;
+      }
+
+      try {
+        const data = JSON.parse(stdout);
+        const videoStream = data.streams?.find((s: any) => s.codec_type === "video");
+        const format = data.format;
+
+        if (!videoStream || !format) {
+          resolve(null);
+          return;
+        }
+
+        resolve({
+          duration: Math.floor(parseFloat(format.duration) || 0),
+          width: parseInt(videoStream.width) || 0,
+          height: parseInt(videoStream.height) || 0,
+          size: parseInt(format.size) || 0,
+        });
+      } catch (e) {
+        Logger.getInstance().warn(
+          `[Metadata] Failed to parse ffprobe output: ${e}`,
+        );
+        resolve(null);
+      }
+    });
+
+    ffprobe.on("error", (err) => {
+      Logger.getInstance().warn(`[Metadata] ffprobe error: ${err.message}`);
+      resolve(null);
+    });
+  });
+}
 
 /**
  * Mux streams and finalize job
@@ -83,6 +152,14 @@ export async function muxAndFinalize(
     await Muxer.mux(videoPath, audioPath, finalPath, signal, trimOptions);
     logger.info(`[DownloadOrchestrator] Muxing complete: ${finalPath}`);
 
+    // Extract actual video metadata (duration, resolution, size)
+    const metadata = await extractVideoMetadata(finalPath);
+    if (metadata) {
+      logger.info(
+        `[Metadata] Extracted: ${metadata.duration}s, ${metadata.width}x${metadata.height}, ${(metadata.size / 1024 / 1024).toFixed(2)}MB`,
+      );
+    }
+
     // Save description and thumbnail
     if (job.description) {
       await assetDownloader.saveDescription(
@@ -126,7 +203,11 @@ export async function muxAndFinalize(
       eta: "",
       chatStatus: chatFilename ? "finished" : job.chatStatus,
       chatFilename,
-      fileSize,
+      fileSize: metadata?.size || fileSize,
+      // Update with actual metadata from muxed file
+      lengthSeconds: metadata?.duration,
+      videoWidth: metadata?.width,
+      videoHeight: metadata?.height,
     });
 
     // Build rich "Download Finished" notification
