@@ -5,6 +5,7 @@
  * from YouTube's Innertube API.
  */
 
+import ms from "ms";
 import { Logger } from "../../core/logger.js";
 import {
   YOUTUBE_URLS,
@@ -49,7 +50,7 @@ export class ChatApi {
         headers["Cookie"] = cookieHeader;
       }
 
-      const response = await fetchWithTimeout(url, { headers, signal }, 15000);
+      const response = await fetchWithTimeout(url, { headers, signal }, ms("15s"));
 
       if (!response.ok) {
         this.logger.debug(`[ChatApi] Watch page fetch failed: HTTP ${response.status}`);
@@ -228,7 +229,7 @@ export class ChatApi {
   private parseResponse(data: any): ChatApiResponse {
     const messages: ChatMessage[] = [];
     let nextContinuation: string | null = null;
-    let timeoutMs = 5000; // Default polling interval
+    let timeoutMs = ms("5s"); // Default polling interval
     let isComplete = false;
 
     const liveChatContinuation = data?.continuationContents?.liveChatContinuation;
@@ -244,12 +245,12 @@ export class ChatApi {
       for (const cont of continuations) {
         if (cont.timedContinuationData) {
           nextContinuation = cont.timedContinuationData.continuation;
-          timeoutMs = cont.timedContinuationData.timeoutMs || 5000;
+          timeoutMs = cont.timedContinuationData.timeoutMs || ms("5s");
           break;
         }
         if (cont.invalidationContinuationData) {
           nextContinuation = cont.invalidationContinuationData.continuation;
-          timeoutMs = cont.invalidationContinuationData.timeoutMs || 5000;
+          timeoutMs = cont.invalidationContinuationData.timeoutMs || ms("5s");
           break;
         }
         if (cont.liveChatReplayContinuationData) {
@@ -399,8 +400,8 @@ export class ChatApi {
    */
   private formatTimestamp(usec: string): string {
     try {
-      const ms = parseInt(usec, 10) / 1000;
-      const date = new Date(ms);
+      const timestamp = parseInt(usec, 10) / 1000;
+      const date = new Date(timestamp);
       return date.toISOString().slice(11, 19); // HH:MM:SS
     } catch {
       return "0:00:00";

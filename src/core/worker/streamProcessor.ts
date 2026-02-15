@@ -649,7 +649,7 @@ export class StreamProcessor {
   /**
    * Delay helper
    */
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  private delay(delayMs: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 }

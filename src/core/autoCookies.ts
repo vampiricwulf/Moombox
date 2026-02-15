@@ -10,6 +10,7 @@
 
 import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
+import ms from "ms";
 import { execa } from "execa";
 import net from "net";
 import fs from "fs-extra";
@@ -362,7 +363,7 @@ export class AutoCookieService {
         dbBuffer = await fs.readFile(dbPath);
         break;
       } catch {
-        if (attempt < 2) await sleep(1000);
+        if (attempt < 2) await sleep(ms("1s"));
       }
     }
 
@@ -576,7 +577,7 @@ export class AutoCookieService {
       } catch {
         // Not ready yet
       }
-      await sleep(500);
+      await sleep(ms("500ms"));
     }
     throw new Error("Timeout waiting for CDP endpoint to become available");
   }
@@ -603,7 +604,7 @@ export class AutoCookieService {
     // Already exited (user closed it) — WAL was checkpointed on clean exit
     if (this.browserExited) {
       this.logger.debug("[AutoCookies] Firefox already exited cleanly");
-      await sleep(300); // Brief FS flush delay
+      await sleep(ms("300ms")); // Brief FS flush delay
       return;
     }
 
@@ -627,7 +628,7 @@ export class AutoCookieService {
 
     if (exitedCleanly) {
       this.logger.debug("[AutoCookies] Firefox exited cleanly (WAL checkpointed)");
-      await sleep(300); // Brief FS flush delay
+      await sleep(ms("300ms")); // Brief FS flush delay
       return;
     }
 
@@ -645,7 +646,7 @@ export class AutoCookieService {
     } catch (error: any) {
       this.logger.error(`[AutoCookies] Failed to force kill process: ${error.message}`);
     }
-    await sleep(500);
+    await sleep(ms("500ms"));
   }
 
   /**
@@ -704,8 +705,8 @@ export class AutoCookieService {
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 async function killProcess(proc: ChildProcess | null): Promise<void> {
@@ -722,7 +723,7 @@ async function killProcess(proc: ChildProcess | null): Promise<void> {
       // Ignore errors (process may already be gone)
     }
   }
-  await sleep(300);
+  await sleep(ms("300ms"));
 }
 
 async function cleanChromiumLockFiles(profileDir: string): Promise<void> {

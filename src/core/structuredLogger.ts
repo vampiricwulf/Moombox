@@ -20,6 +20,14 @@ import fs from "fs-extra";
 /** The singleton pino instance, initialized lazily by Logger.init() */
 let _instance: pino.Logger | null = null;
 
+/** Shared silent logger to avoid creating new pino instances on every call */
+let _silentLogger: pino.Logger | null = null;
+
+function getSilentLogger(): pino.Logger {
+  if (!_silentLogger) _silentLogger = pino({ level: "silent" });
+  return _silentLogger;
+}
+
 /** Map Logger levels to pino method names */
 const LEVEL_MAP: Record<string, "debug" | "info" | "warn" | "error"> = {
   DEBUG: "debug",
@@ -96,7 +104,7 @@ export function getStructuredLogger(): pino.Logger | null {
  * All entries include { context: "job", jobId }.
  */
 export function createJobLogger(jobId: string): pino.Logger {
-  if (!_instance) return pino({ level: "silent" });
+  if (!_instance) return getSilentLogger();
   return _instance.child({ context: "job", jobId });
 }
 
@@ -105,7 +113,7 @@ export function createJobLogger(jobId: string): pino.Logger {
  * All entries include { context: "video", videoId }.
  */
 export function createVideoLogger(videoId: string): pino.Logger {
-  if (!_instance) return pino({ level: "silent" });
+  if (!_instance) return getSilentLogger();
   return _instance.child({ context: "video", videoId });
 }
 
@@ -114,7 +122,7 @@ export function createVideoLogger(videoId: string): pino.Logger {
  * All entries include { context: componentName }.
  */
 export function createComponentLogger(component: string): pino.Logger {
-  if (!_instance) return pino({ level: "silent" });
+  if (!_instance) return getSilentLogger();
   return _instance.child({ context: component });
 }
 

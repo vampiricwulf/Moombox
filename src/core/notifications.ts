@@ -1,3 +1,4 @@
+import ms from "ms";
 import { ConfigManager } from './config.js';
 import { Logger } from './logger.js';
 import { fetchWithTimeout } from './http.js';
@@ -94,7 +95,7 @@ export class NotificationManager {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
-            }, 15000);
+            }, ms("15s"));
 
             if (!resp.ok) {
                 this.logger.error(`[Notifications] Failed to send Discord webhook: ${resp.status} ${resp.statusText}`);

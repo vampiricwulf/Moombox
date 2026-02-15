@@ -7,6 +7,7 @@
  * - fetch-compatible retry wrapper for BotGuard integration
  */
 
+import ms from "ms";
 import pRetry from "p-retry";
 import { Logger } from "./logger.js";
 
@@ -23,7 +24,7 @@ import { Logger } from "./logger.js";
 export async function fetchWithTimeout(
   url: string | URL | Request,
   init?: RequestInit,
-  timeout = 30000,
+  timeout = ms("30s"),
   retryOptions?: { retries?: number },
 ): Promise<Response> {
   return pRetry(
@@ -68,7 +69,7 @@ export function createRetryFetch(options?: {
   headers?: Record<string, string>;
 }): typeof fetch {
   const maxRetries = options?.maxRetries ?? 3;
-  const timeout = options?.timeout ?? 30000;
+  const timeout = options?.timeout ?? ms("30s");
   const defaultHeaders = options?.headers ?? {};
 
   return async (input, init) => {
@@ -81,11 +82,18 @@ export function createRetryFetch(options?: {
 
     return pRetry(
       async () => {
-        return await fetch(url, {
+        const response = await fetch(url, {
           ...init,
           signal: init?.signal || AbortSignal.timeout(timeout),
           headers: { ...defaultHeaders, ...init?.headers },
         });
+
+        // Retry on 5xx errors and 429 rate limit (same as fetchWithTimeout)
+        if (!response.ok && (response.status >= 500 || response.status === 429)) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        return response;
       },
       {
         retries: maxRetries,

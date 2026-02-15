@@ -229,14 +229,7 @@ export class DownloadOrchestrator {
 
     if (useDirectVodDownload) {
       // VOD: Use direct format URLs
-      // Start chat downloader in background for replay
-      let chatFinished = false;
-      const chatPromise = chatDl
-        ? chatDl.start().then(() => { chatFinished = true; }).catch((e) => {
-            chatFinished = true;
-            this.logger.warn(`[Chat] VOD chat download failed: ${e.message}`);
-          })
-        : Promise.resolve();
+      const { chatPromise } = this.startChatInBackground(chatDl, "VOD");
 
       const vodResult = await downloadVod(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders, chatDl, signal);
 
@@ -256,28 +249,8 @@ export class DownloadOrchestrator {
         audioPath = null;
       }
 
-      // Set progress to 100% now that download is complete
-      const chatCount1 = chatDl ? chatDl.getMessageCount() : 0;
-      const chatSuffix1 = chatCount1 > 0 ? ` C:${chatCount1}` : "";
-      await db.updateJob(job.id, { progress: `V:100% A:100%${chatSuffix1}`, percent: 100 });
-
-      // Wait for chat to finish (with timeout so we don't block muxing forever)
-      // Give chat 2 minutes after video/audio complete to finish
-      const CHAT_TIMEOUT_MS = ms("2m");
-      let chatTimeoutTimer: ReturnType<typeof setTimeout>;
-      const chatTimeout = new Promise<void>((resolve) => {
-        chatTimeoutTimer = setTimeout(() => {
-          if (chatDl && !chatFinished) {
-            this.logger.warn(
-              `[Chat] Chat download timed out after ${CHAT_TIMEOUT_MS / 1000}s, proceeding to mux`,
-            );
-            chatDl.stop();
-          }
-          resolve();
-        }, CHAT_TIMEOUT_MS);
-      });
-      await Promise.race([chatPromise, chatTimeout]);
-      clearTimeout(chatTimeoutTimer!);
+      // Set progress to 100% and wait for chat with timeout
+      await this.finishVodWithChat(job.id, chatDl, chatPromise, db);
     } else if (videoInfo.dashManifestUrl) {
       // DASH: Live streams and post-live VODs
       const result = await downloadDash(
@@ -302,15 +275,7 @@ export class DownloadOrchestrator {
       videoPath = result.videoPath;
     } else if (videoInfo.formats && videoInfo.formats.length > 0) {
       // Fallback: Direct format download
-
-      // Start chat downloader in background
-      let chatFinished2 = false;
-      const chatPromise = chatDl
-        ? chatDl.start().then(() => { chatFinished2 = true; }).catch((e) => {
-            chatFinished2 = true;
-            this.logger.warn(`[Chat] Chat download failed: ${e.message}`);
-          })
-        : Promise.resolve();
+      const { chatPromise } = this.startChatInBackground(chatDl, "Fallback");
 
       const vodResult2 = await downloadVod(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders, chatDl, signal);
 
@@ -324,27 +289,8 @@ export class DownloadOrchestrator {
       videoPath = path.join(stagingDir, "video_stream");
       audioPath = vodResult2.hasAudio ? path.join(stagingDir, "audio_stream") : null;
 
-      // Set progress to 100% now that download is complete
-      const chatCount2 = chatDl ? chatDl.getMessageCount() : 0;
-      const chatSuffix2 = chatCount2 > 0 ? ` C:${chatCount2}` : "";
-      await db.updateJob(job.id, { progress: `V:100% A:100%${chatSuffix2}`, percent: 100 });
-
-      // Wait for chat with timeout
-      const CHAT_TIMEOUT_MS = ms("2m");
-      let chatTimeoutTimer2: ReturnType<typeof setTimeout>;
-      const chatTimeout = new Promise<void>((resolve) => {
-        chatTimeoutTimer2 = setTimeout(() => {
-          if (chatDl && !chatFinished2) {
-            this.logger.warn(
-              `[Chat] Chat download timed out after ${CHAT_TIMEOUT_MS / 1000}s, proceeding to mux`,
-            );
-            chatDl.stop();
-          }
-          resolve();
-        }, CHAT_TIMEOUT_MS);
-      });
-      await Promise.race([chatPromise, chatTimeout]);
-      clearTimeout(chatTimeoutTimer2!);
+      // Set progress to 100% and wait for chat with timeout
+      await this.finishVodWithChat(job.id, chatDl, chatPromise, db);
     } else {
       throw new Error("No DASH, HLS Manifest or direct formats found");
     }
@@ -485,10 +431,58 @@ export class DownloadOrchestrator {
     }
   }
 
+  private static readonly CHAT_TIMEOUT_MS = ms("2m");
+
   /**
-   * Cancellable delay — resolves after `ms` or rejects immediately if signal fires.
+   * Start a chat downloader in the background, returning a tracked promise.
    */
-  private cancellableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  private startChatInBackground(chatDl: ChatDownloader | null, label: string) {
+    let chatFinished = false;
+    const chatPromise = chatDl
+      ? chatDl.start().then(() => { chatFinished = true; }).catch((e) => {
+          chatFinished = true;
+          this.logger.warn(`[Chat] ${label} chat download failed: ${e.message}`);
+        })
+      : Promise.resolve();
+    return { chatPromise, isChatFinished: () => chatFinished };
+  }
+
+  /**
+   * Set 100% progress and wait for chat to finish with a timeout.
+   * Used after VOD/fallback downloads complete.
+   */
+  private async finishVodWithChat(
+    jobId: string,
+    chatDl: ChatDownloader | null,
+    chatPromise: Promise<void>,
+    db: Database,
+  ): Promise<void> {
+    const chatCount = chatDl ? chatDl.getMessageCount() : 0;
+    const chatSuffix = chatCount > 0 ? ` C:${chatCount}` : "";
+    await db.updateJob(jobId, { progress: `V:100% A:100%${chatSuffix}`, percent: 100 });
+
+    // Wait for chat to finish (with timeout so we don't block muxing forever)
+    const timeoutMs = DownloadOrchestrator.CHAT_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout>;
+    const chatTimeout = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        if (chatDl && chatDl.isRunning()) {
+          this.logger.warn(
+            `[Chat] Chat download timed out after ${timeoutMs / 1000}s, proceeding to mux`,
+          );
+          chatDl.stop();
+        }
+        resolve();
+      }, timeoutMs);
+    });
+    await Promise.race([chatPromise, chatTimeout]);
+    clearTimeout(timer!);
+  }
+
+  /**
+   * Cancellable delay — resolves after `delayMs` or rejects immediately if signal fires.
+   */
+  private cancellableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
     return new Promise((resolve, reject) => {
       const onAbort = () => {
@@ -498,7 +492,7 @@ export class DownloadOrchestrator {
       const timer = setTimeout(() => {
         signal?.removeEventListener("abort", onAbort);
         resolve();
-      }, ms);
+      }, delayMs);
       signal?.addEventListener("abort", onAbort, { once: true });
     });
   }

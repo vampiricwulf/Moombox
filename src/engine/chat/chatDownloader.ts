@@ -53,8 +53,8 @@ export class ChatDownloader extends EventEmitter {
 
     // Parse stream start time for offset calculation
     if (options.streamStartTime) {
-      const ms = new Date(options.streamStartTime).getTime();
-      this.streamStartMs = Number.isNaN(ms) ? 0 : ms;
+      const startMs = new Date(options.streamStartTime).getTime();
+      this.streamStartMs = Number.isNaN(startMs) ? 0 : startMs;
     }
   }
 
@@ -340,12 +340,12 @@ export class ChatDownloader extends EventEmitter {
             if (fresh.continuation) {
               this.logger.debug("[ChatDownloader] Got fresh continuation token");
               this.continuation = fresh.continuation;
-              await this.sleep(10000);
+              await this.sleep(ms("10s"));
               continue;
             }
             // No fresh continuation — retry with exponential backoff
             this.logger.debug("[ChatDownloader] No fresh continuation available — retrying with backoff");
-            let contRetryDelay = 10000; // Start at 10s
+            let contRetryDelay = ms("10s");
             const MAX_CONT_RETRIES = 30; // ~30min max
             let contRetries = 0;
             while (this.running && !this.cancelFlag && !this.streamEnded && contRetries < MAX_CONT_RETRIES) {
@@ -380,7 +380,7 @@ export class ChatDownloader extends EventEmitter {
         // Wait before next poll (respect API timeout)
         // For live chat, YouTube returns timeoutMs indicating when to poll next
         // For replay/VOD, timeoutMs is often 0 meaning we can fetch immediately
-        const waitMs = response.timeoutMs ?? (this.options.isReplay ? 0 : 5000);
+        const waitMs = response.timeoutMs ?? (this.options.isReplay ? 0 : ms("5s"));
         if (waitMs > 0) {
           await this.sleep(waitMs);
         }
@@ -402,8 +402,8 @@ export class ChatDownloader extends EventEmitter {
         }
 
         // Exponential backoff (cap at 30s for VOD, 60s for live)
-        const maxBackoff = this.isStreamActive ? 60000 : 30000;
-        await this.sleep(Math.min(5000 * consecutiveErrors, maxBackoff));
+        const maxBackoff = this.isStreamActive ? ms("60s") : ms("30s");
+        await this.sleep(Math.min(ms("5s") * consecutiveErrors, maxBackoff));
       }
     }
 
@@ -417,12 +417,12 @@ export class ChatDownloader extends EventEmitter {
   /**
    * Sleep helper that wakes early on cancel or stream end
    */
-  private async sleep(ms: number): Promise<void> {
+  private async sleep(delayMs: number): Promise<void> {
     const checkInterval = 500;
     let elapsed = 0;
 
-    while (elapsed < ms && this.running && !this.cancelFlag && !this.streamEnded) {
-      await new Promise((r) => setTimeout(r, Math.min(checkInterval, ms - elapsed)));
+    while (elapsed < delayMs && this.running && !this.cancelFlag && !this.streamEnded) {
+      await new Promise((r) => setTimeout(r, Math.min(checkInterval, delayMs - elapsed)));
       elapsed += checkInterval;
     }
   }

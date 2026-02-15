@@ -89,15 +89,20 @@ export async function setupChatDownloader(
 }
 
 /**
- * Run segment downloaders with progress tracking (for VOD segment downloads)
+ * Shared implementation for segment downloader progress tracking.
+ * Attaches progress/gap listeners, optionally starts chat, waits for completion.
+ *
+ * @param startChat - If true, starts chatDl in Promise.all alongside segment downloaders.
+ *   If false, only reads chatDl count and tracks progress (chat started separately).
  */
-export async function runSegmentDownloaders(
+async function runSegmentDownloadersImpl(
   job: Job,
   videoDl: SegmentDownloader | null,
   audioDl: SegmentDownloader | null,
   chatDl: ChatDownloader | null,
   db: Database,
   activeSegmentDownloaders: Set<SegmentDownloader>,
+  startChat: boolean,
 ): Promise<void> {
   const logger = Logger.getInstance();
   let vSeq = 0;
@@ -106,7 +111,7 @@ export async function runSegmentDownloaders(
   let aTotal = 0;
   let vBytes = 0;
   let aBytes = 0;
-  let chatMsgCount = 0;
+  let chatMsgCount = chatDl && !startChat ? chatDl.getMessageCount() : 0;
   let lastUpdate = 0;
   let lastBytes = 0;
   let lastBytesTime = Date.now();
@@ -194,7 +199,7 @@ export async function runSegmentDownloaders(
   const promises: Promise<void>[] = [];
   if (videoDl) promises.push(videoDl.start().finally(() => activeSegmentDownloaders.delete(videoDl!)));
   if (audioDl) promises.push(audioDl.start().finally(() => activeSegmentDownloaders.delete(audioDl!)));
-  if (chatDl)
+  if (startChat && chatDl)
     promises.push(
       chatDl.start().catch((e) => {
         logger.warn(`[Chat] Chat download error: ${e.message}`);
@@ -204,6 +209,20 @@ export async function runSegmentDownloaders(
 
   // Remove chat listener to prevent leak
   if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
+}
+
+/**
+ * Run segment downloaders with progress tracking (starts chat alongside segments)
+ */
+export async function runSegmentDownloaders(
+  job: Job,
+  videoDl: SegmentDownloader | null,
+  audioDl: SegmentDownloader | null,
+  chatDl: ChatDownloader | null,
+  db: Database,
+  activeSegmentDownloaders: Set<SegmentDownloader>,
+): Promise<void> {
+  return runSegmentDownloadersImpl(job, videoDl, audioDl, chatDl, db, activeSegmentDownloaders, true);
 }
 
 /**
@@ -217,109 +236,5 @@ export async function runSegmentDownloadersWithoutChat(
   db: Database,
   activeSegmentDownloaders: Set<SegmentDownloader>,
 ): Promise<void> {
-  const logger = Logger.getInstance();
-  let vSeq = 0;
-  let aSeq = 0;
-  let vTotal = 0;
-  let aTotal = 0;
-  let vBytes = 0;
-  let aBytes = 0;
-  let chatMsgCount = 0;
-  let lastUpdate = 0;
-  let lastBytes = 0;
-  let lastBytesTime = Date.now();
-  const speedSmoother = new SmoothValue(0.7); // Quick response to changes
-
-  const updateProgress = () => {
-    const now = Date.now();
-    if (now - lastUpdate > PROGRESS_UPDATE_INTERVAL_MS) {
-      lastUpdate = now;
-
-      const totalBytes = vBytes + aBytes;
-      const timeDelta = (now - lastBytesTime) / 1000;
-      const bytesDelta = totalBytes - lastBytes;
-      const instantSpeed = timeDelta > 0 ? bytesDelta / timeDelta : 0;
-      const speed = speedSmoother.update(instantSpeed);
-
-      lastBytes = totalBytes;
-      lastBytesTime = now;
-
-      let progStr = "";
-      if (audioDl) {
-        const vPart = vTotal > 0 ? `${vSeq}/${vTotal}` : `${vSeq}`;
-        const aPart = aTotal > 0 ? `${aSeq}/${aTotal}` : `${aSeq}`;
-        progStr = `(A: ${aPart} V: ${vPart}`;
-        if (chatDl && chatMsgCount > 0) {
-          progStr += ` C: ${chatMsgCount}`;
-        }
-        progStr += ")";
-      } else {
-        progStr = `Seq: ${vSeq}`;
-        if (chatDl && chatMsgCount > 0) {
-          progStr += ` C: ${chatMsgCount}`;
-        }
-      }
-
-      db.updateJob(job.id, {
-        progress: progStr,
-        speed: formatSpeed(speed),
-        lastVideoSeq: vSeq,
-        lastAudioSeq: aSeq,
-        totalVideoSeq: vTotal || undefined,
-        totalAudioSeq: aTotal || undefined,
-      }).catch((e: any) => logger.debug(`[DownloadOrchestrator] Progress update failed: ${e.message}`));
-    }
-  };
-
-  // Track segment gaps
-  const gapHandler = (stream: "video" | "audio") => (gap: { from: number; to: number }) => {
-    logger.warn(`[DownloadOrchestrator] ${stream} segment gap: seq ${gap.from}–${gap.to}`);
-    db.getJob(job.id).then((j) => {
-      if (!j) return;
-      const gaps = j.gaps || [];
-      gaps.push({ ...gap, stream });
-      db.updateJob(job.id, { gaps }).catch((e: any) =>
-        logger.debug(`[DownloadOrchestrator] Gap update failed: ${e.message}`),
-      );
-    }).catch(() => {});
-  };
-
-  if (videoDl) {
-    videoDl.on("progress", (d) => {
-      vSeq = d.seq;
-      vBytes = d.bytes || 0;
-      if (d.total || d.headSeq) vTotal = d.total || d.headSeq;
-      updateProgress();
-    });
-    videoDl.on("gap", gapHandler("video"));
-  }
-
-  if (audioDl) {
-    audioDl.on("progress", (d) => {
-      aSeq = d.seq;
-      aBytes = d.bytes || 0;
-      if (d.total || d.headSeq) aTotal = d.total || d.headSeq;
-      updateProgress();
-    });
-    audioDl.on("gap", gapHandler("audio"));
-  }
-
-  // Chat listeners are registered once in runLiveStreamDownload to avoid
-  // leaking listeners across loop iterations. Read chatDl count directly.
-  if (chatDl) {
-    chatMsgCount = chatDl.getMessageCount();
-  }
-
-  const chatProgressHandler = chatDl
-    ? (d: ChatProgress) => { chatMsgCount = d.messageCount; updateProgress(); }
-    : null;
-  if (chatDl && chatProgressHandler) chatDl.on("progress", chatProgressHandler);
-
-  const promises: Promise<void>[] = [];
-  if (videoDl) promises.push(videoDl.start().finally(() => activeSegmentDownloaders.delete(videoDl!)));
-  if (audioDl) promises.push(audioDl.start().finally(() => activeSegmentDownloaders.delete(audioDl!)));
-  await Promise.all(promises);
-
-  // Remove chat listener to prevent leak when called in a loop
-  if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
+  return runSegmentDownloadersImpl(job, videoDl, audioDl, chatDl, db, activeSegmentDownloaders, false);
 }

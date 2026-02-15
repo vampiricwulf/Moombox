@@ -5,6 +5,7 @@
 import path from "path";
 import fs from "fs-extra";
 import { open as fsOpen } from "node:fs/promises";
+import ms from "ms";
 import { execa } from "execa";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
@@ -36,7 +37,7 @@ async function extractVideoMetadata(
       "-show_format",
       "-show_streams",
       filePath,
-    ], { timeout: 30000 });
+    ], { timeout: ms("30s") });
 
     if (!stdout) {
       return null;

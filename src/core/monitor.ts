@@ -177,7 +177,7 @@ export class FeedMonitor {
     const url = `https://decapi.me/youtube/latest_video?id=${channel.id}`;
     this.logger.debug(`[Monitor] DECAPI fallback for ${channel.name || channel.id}: ${url}`);
 
-    const response = await fetchWithTimeout(url, { headers: { "User-Agent": "Moombox/1.0" } }, 15000);
+    const response = await fetchWithTimeout(url, { headers: { "User-Agent": "Moombox/1.0" } }, ms("15s"));
     if (!response.ok) {
       throw new Error(`DECAPI returned HTTP ${response.status}`);
     }

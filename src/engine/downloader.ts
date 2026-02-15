@@ -1,5 +1,6 @@
 import fs from "fs-extra";
 import path from "path";
+import ms from "ms";
 import { EventEmitter } from "events";
 import pLimit from "p-limit";
 import { ManifestParser } from "./manifest.js";
@@ -54,9 +55,9 @@ export class SegmentDownloader extends EventEmitter {
    * Cancellable delay that checks running/cancel/streamEnded flags every 500ms.
    * Returns early if the downloader is stopped or the stream ends.
    */
-  private async cancellableDelay(ms: number): Promise<void> {
+  private async cancellableDelay(delayMs: number): Promise<void> {
     const interval = 500;
-    let remaining = ms;
+    let remaining = delayMs;
     while (remaining > 0 && this.running && !this.cancelFlag && !this.streamEnded) {
       const sleepTime = Math.min(remaining, interval);
       await new Promise((r) => setTimeout(r, sleepTime));
@@ -223,7 +224,7 @@ export class SegmentDownloader extends EventEmitter {
   }
 
   private async runDashLoop() {
-    const HEAD_PROBE_INTERVAL_MS = 5000;
+    const HEAD_PROBE_INTERVAL_MS = ms("5s");
     const CATCHUP_PROGRESS_INTERVAL = 10;
 
     const state = {
@@ -297,7 +298,7 @@ export class SegmentDownloader extends EventEmitter {
         this.logger.error(
           `[Downloader] Error downloading seq ${this.currentSeq}: ${e.message}`,
         );
-        await this.cancellableDelay(2000);
+        await this.cancellableDelay(ms("2s"));
       }
     }
 
@@ -420,7 +421,7 @@ export class SegmentDownloader extends EventEmitter {
 
     if (behindHead && !stuckOnSegment) {
       // Transient failure - retry with small delay
-      await this.cancellableDelay(1000);
+      await this.cancellableDelay(ms("1s"));
       return false;
     }
 
@@ -508,7 +509,7 @@ export class SegmentDownloader extends EventEmitter {
     }
 
     // Single error while downloading - retry same segment
-    await this.cancellableDelay(500);
+    await this.cancellableDelay(ms("500ms"));
     return false;
   }
 
@@ -622,7 +623,7 @@ export class SegmentDownloader extends EventEmitter {
             this.logger.debug(
               `[Downloader] HLS segment at seq ${this.currentSeq} failed, will retry after playlist refresh`,
             );
-            await this.cancellableDelay(2000);
+            await this.cancellableDelay(ms("2s"));
             break;
           }
         }
@@ -659,7 +660,7 @@ export class SegmentDownloader extends EventEmitter {
           this.cancelFlag = true; // Preserve resume state for retry
           break;
         }
-        await this.cancellableDelay(5000);
+        await this.cancellableDelay(ms("5s"));
       }
     }
   }

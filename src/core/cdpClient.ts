@@ -5,6 +5,7 @@
  * with Chromium-based browsers (Edge, Chrome) via CDP WebSocket.
  */
 
+import ms from "ms";
 import WebSocket from "ws";
 import { fetchWithTimeout } from "./http.js";
 import type { CdpCookie } from "./cookies.js";
@@ -60,7 +61,7 @@ export class CdpClient {
    * Storage.getCookies works on this endpoint.
    */
   static async connect(port: number): Promise<CdpClient> {
-    const resp = await fetchWithTimeout(`http://127.0.0.1:${port}/json/version`, undefined, 5000);
+    const resp = await fetchWithTimeout(`http://127.0.0.1:${port}/json/version`, undefined, ms("5s"));
     const info = (await resp.json()) as { webSocketDebuggerUrl: string };
     const wsUrl = info.webSocketDebuggerUrl;
 
@@ -77,7 +78,7 @@ export class CdpClient {
    * Falls back to browser-level if no page targets exist.
    */
   static async connectToPage(port: number): Promise<CdpClient> {
-    const resp = await fetchWithTimeout(`http://127.0.0.1:${port}/json`, undefined, 5000);
+    const resp = await fetchWithTimeout(`http://127.0.0.1:${port}/json`, undefined, ms("5s"));
     const targets = (await resp.json()) as { webSocketDebuggerUrl?: string; type: string }[];
     const page = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
 
@@ -121,7 +122,7 @@ export class CdpClient {
   /**
    * Wait for a specific CDP event (one-shot)
    */
-  waitForEvent(method: string, timeoutMs: number = 30000): Promise<any> {
+  waitForEvent(method: string, timeoutMs: number = ms("30s")): Promise<any> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`Timeout waiting for CDP event: ${method}`));
@@ -175,7 +176,7 @@ export class CdpClient {
    */
   async navigate(url: string): Promise<void> {
     await this.send("Page.enable");
-    const loadPromise = this.waitForEvent("Page.loadEventFired", 30000);
+    const loadPromise = this.waitForEvent("Page.loadEventFired", ms("30s"));
     await this.send("Page.navigate", { url });
     await loadPromise;
   }

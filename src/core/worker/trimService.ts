@@ -3,6 +3,7 @@
  */
 
 import path from "path";
+import ms from "ms";
 import fs from "fs-extra";
 import { execa } from "execa";
 import { Database, type Job } from "../database.js";
@@ -309,7 +310,7 @@ export class TrimService {
         "json",
         "-show_format",
         filePath,
-      ], { timeout: 30000 });
+      ], { timeout: ms("30s") });
 
       if (!stdout) {
         return null;

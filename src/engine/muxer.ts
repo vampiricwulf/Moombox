@@ -1,3 +1,4 @@
+import ms from "ms";
 import { execa } from "execa";
 import path from "path";
 import fs from "fs-extra";
@@ -128,7 +129,7 @@ export class Muxer {
       await execa("ffmpeg", ffmpegArgs, {
         stdin: "ignore",
         cancelSignal: signal, // execa v9+ uses cancelSignal instead of signal
-        timeout: 600000, // 10 minutes max for muxing
+        timeout: ms("10m"),
         cleanup: true,
       });
 
