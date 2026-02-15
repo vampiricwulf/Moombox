@@ -38,6 +38,8 @@ export async function downloadVod(
   selectedVideoFormat?: import("../../types/youtube.js").Format | null;
   selectedAudioFormat?: import("../../types/youtube.js").Format | null;
   usedFFmpegTrim?: boolean; // True if FFmpeg trim download was used (already trimmed)
+  videoPath?: string | null; // Actual path used for video (may have extension)
+  audioPath?: string | null; // Actual path used for audio (may have extension)
 }> {
   const logger = Logger.getInstance();
 
@@ -93,14 +95,26 @@ export async function downloadVod(
     );
   }
 
-  const videoPath = bestVideo?.url ? path.join(stagingDir, "video_stream") : null;
-  const audioPath = (!isProgressive && bestAudio?.url)
-    ? path.join(stagingDir, "audio_stream")
-    : null;
-
   // Check if FFmpeg trim download should be used (timestamp selection enabled)
   const hasTimestampSelection = job.startTime != null || job.endTime != null;
   const useFFmpegTrim = hasTimestampSelection;
+
+  // Determine file extensions based on mimeType for FFmpeg compatibility
+  const getExtensionForFormat = (format: any): string => {
+    const mimeType = format?.mimeType || "";
+    if (mimeType.includes("webm")) return ".webm";
+    if (mimeType.includes("mp4")) return ".mp4";
+    if (mimeType.includes("audio/mp4")) return ".m4a";
+    return ""; // No extension for regular downloads (will be added by muxer)
+  };
+
+  const videoExt = (hasTimestampSelection && bestVideo) ? getExtensionForFormat(bestVideo) : "";
+  const audioExt = (hasTimestampSelection && bestAudio) ? getExtensionForFormat(bestAudio) : "";
+
+  const videoPath = bestVideo?.url ? path.join(stagingDir, `video_stream${videoExt}`) : null;
+  const audioPath = (!isProgressive && bestAudio?.url)
+    ? path.join(stagingDir, `audio_stream${audioExt}`)
+    : null;
 
   if (useFFmpegTrim) {
     logger.info(
@@ -215,6 +229,8 @@ export async function downloadVod(
     selectedVideoFormat: bestVideo,
     selectedAudioFormat: bestAudio,
     usedFFmpegTrim: useFFmpegTrim, // Indicate if FFmpeg trim was used
+    videoPath, // Return actual path (may have extension for FFmpeg compatibility)
+    audioPath, // Return actual path (may have extension for FFmpeg compatibility)
   };
 }
 
