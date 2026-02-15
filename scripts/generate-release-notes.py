@@ -2,7 +2,8 @@
 
 Called by .github/workflows/release.yml during tag-triggered builds.
 Falls back to a simple download link if ANTHROPIC_API_KEY is not set
-or if the API call fails.
+or if the API call fails. Supports both API keys (x-api-key) and
+OAuth tokens (Authorization: Bearer).
 """
 
 import argparse
@@ -64,14 +65,20 @@ def call_claude(commits: str, tag: str) -> str | None:
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
 
+    headers = {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    # OAuth tokens start with specific prefixes; API keys start with "sk-ant-"
+    if api_key.startswith("sk-ant-"):
+        headers["x-api-key"] = api_key
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
         data=body,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
+        headers=headers,
     )
 
     try:

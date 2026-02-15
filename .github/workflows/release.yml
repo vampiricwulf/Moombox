@@ -27,7 +27,7 @@ jobs:
 
       - name: Generate release notes
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         shell: bash
