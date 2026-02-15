@@ -2,7 +2,8 @@
  * Multi-step wizard dialog for adding videos with advanced options.
  *
  * Flow:
- * 1. Enter URL/ID (Tab to toggle advanced checkbox, Enter = proceed)
+ * 1. Enter URL/ID (Tab = toggle advanced mode, Enter = proceed)
+ *    - UI turns lilac/magenta when advanced mode is enabled
  * 2. (Advanced) Select video format (numbered list, 'a' = auto, 'n' = none)
  * 3. (Advanced) Select audio format
  * 4. (Advanced) Start time (HH:MM:SS, MM:SS, or seconds)
@@ -73,7 +74,6 @@ export function AddVideoDialog({
   const [url, setUrl] = useState("");
   const [advancedMode, setAdvancedMode] = useState(false);
   const [advancedEnabled, setAdvancedEnabled] = useState(false); // Checkbox state in step 0
-  const [checkboxFocused, setCheckboxFocused] = useState(false); // Focus state for checkbox navigation
   const [formats, setFormats] = useState<FormatsData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -227,26 +227,10 @@ export function AddVideoDialog({
 
     // Step 0: Enter URL/ID
     if (step === 0) {
-      // Tab: toggle focus between URL input and checkbox
+      // Tab: toggle advanced mode directly
       if (key.tab) {
-        setCheckboxFocused((prev) => !prev);
+        setAdvancedEnabled((prev) => !prev);
         return;
-      }
-
-      // When checkbox is focused: left/right arrow to toggle
-      if (checkboxFocused) {
-        if (key.leftArrow || key.rightArrow) {
-          setAdvancedEnabled((prev) => !prev);
-          return;
-        }
-        // Space also toggles when focused
-        if (char === " ") {
-          setAdvancedEnabled((prev) => !prev);
-          return;
-        }
-        // Any other key: switch back to URL input
-        setCheckboxFocused(false);
-        // Fall through to handle the key as URL input
       }
 
       if (key.return) {
@@ -499,21 +483,21 @@ export function AddVideoDialog({
           width={boxWidth}
           height={boxHeight}
           borderStyle="round"
-          borderColor="cyan"
+          borderColor={advancedEnabled && step === 0 ? "magenta" : "cyan"}
         >
           {/* Title */}
           <Box paddingX={1} justifyContent="space-between">
-            <Text color="cyan" bold>
-              Add Video
+            <Text color={advancedEnabled && step === 0 ? "magenta" : "cyan"} bold>
+              Add Video {advancedEnabled && step === 0 ? "(Advanced Mode)" : ""}
             </Text>
-            {advancedMode && (
+            {advancedMode && step > 0 && (
               <Text color="gray">
                 Step {step}/{5}
               </Text>
             )}
           </Box>
 
-          {step === 0 && <StepUrl input={input} error={error} advancedEnabled={advancedEnabled} checkboxFocused={checkboxFocused} />}
+          {step === 0 && <StepUrl input={input} error={error} advancedEnabled={advancedEnabled} />}
           {step === 1 && (
             <StepVideoFormat
               formats={formats}
@@ -551,7 +535,7 @@ export function AddVideoDialog({
           <Box paddingX={1} height={1} justifyContent="space-between">
             <Text color="gray">{step > 0 ? "Esc: Back" : "Esc: Cancel"}</Text>
             {step === 0 && (
-              <Text color="gray">Tab: Navigate | ←/→: Toggle | Enter: Continue</Text>
+              <Text color="gray">Tab: Toggle Advanced | Enter: Continue</Text>
             )}
             {step > 0 && step < 5 && <Text color="gray">Enter: Skip (auto)</Text>}
             {step === 5 && <Text color="cyan" bold>Enter: Submit</Text>}
@@ -566,14 +550,13 @@ export function AddVideoDialog({
 function StepUrl({
   input,
   error,
-  advancedEnabled,
-  checkboxFocused
+  advancedEnabled
 }: {
   input: string;
   error: string | null;
   advancedEnabled: boolean;
-  checkboxFocused: boolean;
 }): React.ReactElement {
+  const accentColor = advancedEnabled ? "magenta" : "cyan";
   return (
     <>
       <Box paddingX={1}>
@@ -586,21 +569,21 @@ function StepUrl({
       </Box>
       <Box flexDirection="column" paddingX={1} flexGrow={1}>
         <Box marginBottom={1}>
-          <Text color={checkboxFocused ? "gray" : "cyan"}>&gt; URL/ID: </Text>
+          <Text color={accentColor}>&gt; URL/ID: </Text>
           <Text>{input}</Text>
-          {!checkboxFocused && <Text color="cyan">_</Text>}
+          <Text color={accentColor}>_</Text>
         </Box>
         <Box marginBottom={1} marginTop={1}>
-          <Text color={checkboxFocused ? "cyan" : "gray"}>
-            {checkboxFocused ? ">" : " "} [{advancedEnabled ? "✓" : " "}] Advanced Options
+          <Text color={accentColor}>
+            [{advancedEnabled ? "✓" : " "}] Advanced Options
           </Text>
-          {checkboxFocused && <Text color="cyan">_</Text>}
+          <Text color="gray" dimColor> (press Tab to toggle)</Text>
         </Box>
         <Box marginBottom={1}>
           {advancedEnabled ? (
             <Box flexDirection="column">
-              <Text color="gray" dimColor>  → Format selection (video/audio)</Text>
-              <Text color="gray" dimColor>  → Timestamp selection (start/end)</Text>
+              <Text color="magenta" dimColor>  → Format selection (video/audio)</Text>
+              <Text color="magenta" dimColor>  → Timestamp selection (start/end)</Text>
             </Box>
           ) : (
             <Text color="gray" dimColor>Quick add with auto settings</Text>
