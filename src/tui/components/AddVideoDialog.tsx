@@ -72,6 +72,7 @@ export function AddVideoDialog({
   const [videoId, setVideoId] = useState<string | null>(null);
   const [url, setUrl] = useState("");
   const [advancedMode, setAdvancedMode] = useState(false);
+  const [advancedEnabled, setAdvancedEnabled] = useState(false); // Checkbox state in step 0
   const [formats, setFormats] = useState<FormatsData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -225,22 +226,13 @@ export function AddVideoDialog({
 
     // Step 0: Enter URL/ID
     if (step === 0) {
-      if (key.return && !key.shift) {
-        // Quick add (auto)
-        const vid = extractVideoId(input);
-        if (!vid) {
-          setError("Invalid video ID or URL");
-          return;
-        }
-        setVideoId(vid);
-        setUrl(input.includes("http") ? input : `https://www.youtube.com/watch?v=${vid}`);
-        setAdvancedMode(false);
-        // Submit immediately
-        setTimeout(() => submitJob(), 100);
+      // Toggle advanced options with 'A' key
+      if (char === "a" || char === "A") {
+        setAdvancedEnabled((prev) => !prev);
         return;
       }
-      if (key.return && key.shift) {
-        // Advanced options
+
+      if (key.return) {
         const vid = extractVideoId(input);
         if (!vid) {
           setError("Invalid video ID or URL");
@@ -248,9 +240,17 @@ export function AddVideoDialog({
         }
         setVideoId(vid);
         setUrl(input.includes("http") ? input : `https://www.youtube.com/watch?v=${vid}`);
-        setAdvancedMode(true);
-        setStep(1);
-        fetchFormats(vid);
+
+        if (advancedEnabled) {
+          // Advanced path: fetch formats and show wizard
+          setAdvancedMode(true);
+          setStep(1);
+          fetchFormats(vid);
+        } else {
+          // Quick add: submit immediately with auto settings
+          setAdvancedMode(false);
+          setTimeout(() => submitJob(), 100);
+        }
         return;
       }
       if (key.backspace || key.delete) {
@@ -491,7 +491,7 @@ export function AddVideoDialog({
             )}
           </Box>
 
-          {step === 0 && <StepUrl input={input} error={error} />}
+          {step === 0 && <StepUrl input={input} error={error} advancedEnabled={advancedEnabled} />}
           {step === 1 && (
             <StepVideoFormat
               formats={formats}
@@ -529,7 +529,7 @@ export function AddVideoDialog({
           <Box paddingX={1} height={1} justifyContent="space-between">
             <Text color="gray">{step > 0 ? "Esc: Back" : "Esc: Cancel"}</Text>
             {step === 0 && (
-              <Text color="gray">Enter: Quick Add | Shift+Enter: Advanced</Text>
+              <Text color="gray">A: Toggle Advanced | Enter: Continue</Text>
             )}
             {step > 0 && step < 5 && <Text color="gray">Enter: Skip (auto)</Text>}
             {step === 5 && <Text color="cyan" bold>Enter: Submit</Text>}
@@ -541,7 +541,15 @@ export function AddVideoDialog({
 }
 
 // Step 0: Enter URL/ID
-function StepUrl({ input, error }: { input: string; error: string | null }): React.ReactElement {
+function StepUrl({
+  input,
+  error,
+  advancedEnabled
+}: {
+  input: string;
+  error: string | null;
+  advancedEnabled: boolean;
+}): React.ReactElement {
   return (
     <>
       <Box paddingX={1}>
@@ -557,6 +565,22 @@ function StepUrl({ input, error }: { input: string; error: string | null }): Rea
           <Text color="cyan">&gt; URL/ID: </Text>
           <Text>{input}</Text>
           <Text color="cyan">_</Text>
+        </Box>
+        <Box marginBottom={1} marginTop={1}>
+          <Text color={advancedEnabled ? "cyan" : "gray"}>
+            [{advancedEnabled ? "✓" : " "}] Advanced Options
+          </Text>
+          <Text color="gray" dimColor> (press 'A' to toggle)</Text>
+        </Box>
+        <Box marginBottom={1}>
+          {advancedEnabled ? (
+            <Box flexDirection="column">
+              <Text color="gray" dimColor>  → Format selection (video/audio)</Text>
+              <Text color="gray" dimColor>  → Timestamp selection (start/end)</Text>
+            </Box>
+          ) : (
+            <Text color="gray" dimColor>Quick add with auto settings</Text>
+          )}
         </Box>
         <Text color="gray" dimColor>
           (Paste with Ctrl+V or right-click)
