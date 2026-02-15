@@ -12,7 +12,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import path from "path";
 import fs from "fs-extra";
 import { fileURLToPath } from "url";
-import { execa } from "execa";
+import { spawn } from "child_process";
 import compression from "compression";
 import { Logger } from "../core/logger.js";
 import { Database } from "../core/database.js";
@@ -666,21 +666,11 @@ export class WebServer {
   }
 
   private openBrowser(url: string) {
-    const program =
-      process.platform === "win32"
-        ? "explorer"
-        : process.platform === "darwin"
-          ? "open"
-          : "xdg-open";
-
-    // Fire and forget - don't wait for the browser to open
-    execa(program, [url], {
-      stdio: "ignore",
-      detached: true,
-      cleanup: false,
-    }).catch(() => {
-      // Ignore errors (browser may not be available)
-    });
+    // Use spawn directly — execa's arg escaping breaks Windows shell builtins
+    const [prog, args] = process.platform === "win32"
+      ? ["cmd", ["/c", "start", '""', url]]
+      : [process.platform === "darwin" ? "open" : "xdg-open", [url]];
+    spawn(prog, args, { stdio: "ignore", detached: true }).unref();
   }
 
   stop(): void {

@@ -5,7 +5,7 @@
 import type { Router } from "express";
 import path from "path";
 import fs from "fs-extra";
-import { execa } from "execa";
+import { spawn } from "child_process";
 import { Logger } from "../../core/logger.js";
 import { Database } from "../../core/database.js";
 import { ConfigManager } from "../../core/config.js";
@@ -522,18 +522,11 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     }
     const folderPath = path.dirname(filePath);
 
-    // Fire and forget - don't wait for the file explorer to open
-    // Windows: "cmd /c start "" path" is reliable; explorer.exe mishandles folder paths
+    // Fire and forget — use spawn directly (execa's arg escaping breaks Windows shell builtins)
     const [program, args] = process.platform === "win32"
       ? ["cmd", ["/c", "start", '""', folderPath]]
       : [process.platform === "darwin" ? "open" : "xdg-open", [folderPath]];
-    execa(program, args, {
-      stdio: "ignore",
-      detached: true,
-      cleanup: false,
-    }).catch(() => {
-      // Ignore errors (file explorer may not be available)
-    });
+    spawn(program, args, { stdio: "ignore", detached: true }).unref();
     res.json({ success: true });
   }));
 }

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Box, Text, useInput, useStdout, useApp } from "ink";
 import path from "path";
-import { execa } from "execa";
+import { spawn } from "child_process";
 import { ConfigManager } from "../core/config.js";
 import { Database, Job } from "../core/database.js";
 import { Logger } from "../core/logger.js";
@@ -399,12 +399,10 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     if (input === "w" || input === "W") {
       const port = process.env.MOOMBOX_PORT || String(ConfigManager.getInstance().get().port || 774);
       const url = `http://localhost:${port}`;
-      const program = process.platform === "win32"
-        ? "explorer"
-        : process.platform === "darwin"
-          ? "open"
-          : "xdg-open";
-      execa(program, [url], { stdio: "ignore", detached: true, cleanup: false }).catch(() => {});
+      const [prog, args] = process.platform === "win32"
+        ? ["cmd", ["/c", "start", '""', url]]
+        : [process.platform === "darwin" ? "open" : "xdg-open", [url]];
+      spawn(prog, args, { stdio: "ignore", detached: true }).unref();
       setAddMessage({ text: `Opening: ${url}`, color: "green" });
       return;
     }
@@ -500,10 +498,10 @@ export function App({ db, logger }: AppProps): React.ReactElement {
           const outputDir = job.outputDirectory || config.downloader?.output_directory || "./output";
           const filePath = path.resolve(path.join(outputDir, job.filename));
           const folderPath = path.dirname(filePath);
-          const openArgs = process.platform === "win32"
-            ? ["cmd", ["/c", "start", '""', folderPath]]
+          const [prog, args] = process.platform === "win32"
+            ? ["cmd", ["/c", "start", '""', folderPath] as string[]]
             : [process.platform === "darwin" ? "open" : "xdg-open", [folderPath]];
-          execa(openArgs[0] as string, openArgs[1] as string[], { stdio: "ignore", detached: true, cleanup: false }).catch(() => {});
+          spawn(prog, args, { stdio: "ignore", detached: true }).unref();
           setAddMessage({ text: `Opening: ${folderPath}`, color: "green" });
         } else {
           setAddMessage({ text: "Can only open folder for finished jobs", color: "yellow" });
