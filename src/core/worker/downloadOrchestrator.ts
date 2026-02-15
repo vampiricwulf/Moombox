@@ -417,6 +417,9 @@ export class DownloadOrchestrator {
         // Import TrimService (dynamic to avoid circular dependency)
         const { TrimService } = await import("./trimService.js");
 
+        // Flush database to ensure "Finished" status is written
+        await db.flush();
+
         // Get the finished job with updated metadata
         const finishedJob = (await db.getJobs()).find((j) => j.id === job.id);
         if (!finishedJob || finishedJob.status !== "Finished") {
