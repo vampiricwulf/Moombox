@@ -155,7 +155,7 @@ async function bundleApp() {
         let contents = fs.readFileSync(args.path, "utf8");
         // Replace the syncWorkerFile assignment to return null
         contents = contents.replace(
-          /const syncWorkerFile = require\.resolve\s*\?\s*require\.resolve\(["']\.\/xhr-sync-worker\.js["']\)\s*:\s*null;/,
+          /const syncWorkerFile = require\.resolve\(["']\.\/xhr-sync-worker\.js["']\);/,
           "const syncWorkerFile = null;",
         );
         return { contents, loader: "js" };
