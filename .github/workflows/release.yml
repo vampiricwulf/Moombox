@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
   build:
@@ -37,42 +36,36 @@ jobs:
     needs: build
     permissions:
       contents: write
-      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Get commit log
-        id: commits
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate release notes with Claude Code CLI
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
         run: |
+          # Get commit log since previous tag
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           if [ -z "$PREV_TAG" ]; then
             COMMITS=$(git log --pretty=format:"- %s (%h)" -20)
           else
             COMMITS=$(git log --pretty=format:"- %s (%h)" "$PREV_TAG"..HEAD)
           fi
-          # Write to file for Claude to read
-          echo "$COMMITS" > /tmp/commits.txt
 
-      - name: Generate release notes with Claude
-        id: claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: '--model claude-opus-4-6'
-          prompt: |
-            Read the file /tmp/commits.txt which contains git commits for Moombox version ${{ github.ref_name }}.
+          npm install -g @anthropic-ai/claude-code
 
-            Moombox is a YouTube live stream archiver with a web dashboard and TUI.
+          PROMPT="You are writing release notes for Moombox version ${TAG_NAME}, a YouTube live stream archiver with a web dashboard and TUI. Given the following git commits, write concise, user-friendly release notes. Group changes into sections like **Features**, **Improvements**, **Bug Fixes**, and **Internal** as appropriate. Skip any section that has no entries. Focus on what matters to users. Do not include a version heading — start directly with the sections. Use markdown formatting. Output ONLY the markdown, nothing else.
 
-            Write concise, user-friendly release notes. Group changes into sections like
-            **Features**, **Improvements**, **Bug Fixes**, and **Internal** as appropriate.
-            Skip any section that has no entries. Focus on what matters to users.
-            Do not include a version heading — start directly with the sections.
-            Use markdown formatting.
+          Commits:
+          ${COMMITS}"
 
-            Write ONLY the release notes content to a file at /tmp/release_body.md — no other output.
+          claude --model claude-opus-4-6 -p "$PROMPT" --output-format text > /tmp/release_body.md || true
 
       - name: Build final release notes
         env:
