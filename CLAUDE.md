@@ -155,7 +155,8 @@ The Database class provides event subscriptions for real-time UI updates:
 ### Download Features
 
 - **Manual format selection:** Per-job format selection via "Advanced Options" in the Add Video dialog. Users can select specific video/audio itags or choose "None" for video-only/audio-only downloads (itag -1). The `FormatSelector.selectWithOptions()` method handles manual selection with automatic fallback.
-- **Timestamp selection:** Segment-level download range via start/end time. For DASH streams, `ManifestParser.calculateSegmentRange()` maps timestamps to segment indices. The `SegmentDownloader` respects `endSeq` to stop at the right segment. FFmpeg `-ss`/`-t` flags trim segment boundaries during mux. Time input supports `HH:MM:SS`, `MM:SS`, or raw seconds.
+- **Timestamp selection:** Segment-level download range via start/end time. For DASH streams, `ManifestParser.calculateSegmentRange()` maps timestamps to segment indices. The `SegmentDownloader` respects `endSeq` to stop at the right segment. FFmpeg re-encodes trimmed segments with `libx264`/`aac` for exact duration matching (fixes keyframe overshoot). Time input supports `HH:MM:SS`, `MM:SS`, or raw seconds.
+- **Post-mux metadata extraction:** After muxing, `ffprobe` extracts actual file properties (duration, resolution, size) and updates the job metadata. This ensures `lengthSeconds` reflects the trimmed output, not YouTube's original duration.
 - **Parallel segment downloads:** When catching up on a live stream, downloads 6 segments in parallel
 - **Head sequence tracking:** Monitors the live stream head to detect when falling behind
 - **Automatic catch-up:** Switches to parallel mode when >10 segments behind
@@ -198,8 +199,11 @@ When running in an interactive terminal, Moombox displays a full-screen TUI buil
 ### TUI Add Video Dialog
 
 Press **A** to open the Add Video dialog:
-- **Enter** - Quick add with auto format selection (best quality)
-- **Shift+Enter** - Advanced options wizard (6 steps):
+- Press **'A' key** to toggle advanced options checkbox
+- **[✓] Advanced** - Shows 6-step wizard (format + timestamp selection)
+- **[ ] Quick add** - Immediate submission with auto settings (best quality)
+
+**Advanced Options Wizard (6 steps):**
   1. **Enter URL/ID** - Paste YouTube URL or video ID
   2. **Select Video Format** - Numbered list with best-format badges (`[a]` auto, `[n]` none for audio-only)
   3. **Select Audio Format** - Choose audio quality (`[a]` auto, `[n]` none for video-only)
@@ -209,9 +213,15 @@ Press **A** to open the Add Video dialog:
 
 **Navigation:**
 - **Esc** - Go back one step or cancel
+- **A** - Toggle advanced options checkbox (step 0 only)
 - **↑/↓** - Scroll format lists (when >10 formats)
 - **Ctrl+V / Right-click** - Paste from clipboard
 - **Numbers (1-9)** - Quick select format by number
+
+**Validation:**
+- ❌ Both formats cannot be "None" (would download nothing)
+- ❌ End time must be after start time
+- Inline error messages guide user to fix issues
 
 ## Web Dashboard
 
