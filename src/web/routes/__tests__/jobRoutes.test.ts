@@ -104,22 +104,28 @@ describe("Job Routes", () => {
     app = express();
     app.use(express.json());
 
-    const router = express.Router();
-    registerJobRoutes(router, {
-      jobLogs: new Map(),
-      filterJobsByAge: (jobs: Job[], archived: boolean) => {
-        const now = Date.now();
-        const hideAgeMs = 30 * 86400000;
-        return jobs.filter((job) => {
-          if (job.status !== "Finished") return !archived;
-          const age = now - new Date(job.updatedAt).getTime();
-          return archived ? age > hideAgeMs : age <= hideAgeMs;
-        });
-      },
-      broadcast: vi.fn(),
-      isLoopback: vi.fn(() => true),
-    });
-    app.use("/api", router);
+    const createRouter = () => {
+      const router = express.Router();
+      registerJobRoutes(router, {
+        jobLogs: new Map(),
+        filterJobsByAge: (jobs: Job[], archived: boolean) => {
+          const now = Date.now();
+          const hideAgeMs = 30 * 86400000;
+          return jobs.filter((job) => {
+            if (job.status !== "Finished") return !archived;
+            const age = now - new Date(job.updatedAt).getTime();
+            return archived ? age > hideAgeMs : age <= hideAgeMs;
+          });
+        },
+        broadcast: vi.fn(),
+        isLoopback: vi.fn(() => true),
+      });
+      return router;
+    };
+
+    // Mount at both /api and /api/v1 to match server behavior
+    app.use("/api/v1", createRouter());
+    app.use("/api", createRouter());
   });
 
   afterAll(() => {
@@ -151,6 +157,48 @@ describe("Job Routes", () => {
       });
 
       expect(archivedJobs.length).toBe(0);
+    });
+
+    it("should support pagination with limit parameter", async () => {
+      const res = await request(app).get("/api/jobs?limit=1").expect(200);
+
+      expect(res.body).toHaveProperty("data");
+      expect(res.body).toHaveProperty("pagination");
+      expect(res.body.data).toBeInstanceOf(Array);
+      expect(res.body.data.length).toBeLessThanOrEqual(1);
+      expect(res.body.pagination).toHaveProperty("total");
+      expect(res.body.pagination).toHaveProperty("offset", 0);
+      expect(res.body.pagination).toHaveProperty("limit", 1);
+      expect(res.body.pagination).toHaveProperty("hasMore");
+    });
+
+    it("should support pagination with offset parameter", async () => {
+      const res = await request(app).get("/api/jobs?offset=1").expect(200);
+
+      expect(res.body).toHaveProperty("data");
+      expect(res.body).toHaveProperty("pagination");
+      expect(res.body.pagination).toHaveProperty("offset", 1);
+    });
+
+    it("should reject invalid limit parameter", async () => {
+      const res = await request(app).get("/api/jobs?limit=2000").expect(400);
+
+      expect(res.body).toHaveProperty("error");
+      expect(res.body.error).toMatch(/Invalid limit parameter/);
+    });
+
+    it("should reject invalid offset parameter", async () => {
+      const res = await request(app).get("/api/jobs?offset=-1").expect(400);
+
+      expect(res.body).toHaveProperty("error");
+      expect(res.body.error).toMatch(/Invalid offset parameter/);
+    });
+
+    it("should work with /api/v1 prefix", async () => {
+      const res = await request(app).get("/api/v1/jobs").expect(200);
+
+      expect(res.body).toBeInstanceOf(Array);
+      expect(res.body.length).toBeGreaterThan(0);
     });
   });
 

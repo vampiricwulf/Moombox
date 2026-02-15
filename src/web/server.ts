@@ -218,55 +218,61 @@ export class WebServer {
   }
 
   private setupRoutes() {
-    // API Routes
-    const api = express.Router();
+    // Helper to create an API router with all routes
+    const createApiRouter = () => {
+      const router = express.Router();
 
-    // CSRF protection for mutating requests — verify Origin header matches a trusted source
-    // (The IP-level gate in setupMiddleware already blocks disallowed clients,
-    //  but Origin checks guard against cross-site requests from allowed IPs.)
-    api.use((req, res, next) => {
-      if (req.method !== "GET" && req.method !== "HEAD") {
-        const origin = req.headers.origin || req.headers.referer;
-        if (origin) {
-          try {
-            const h = new URL(origin as string).hostname;
-            const trusted =
-              WebServer.isLoopback(h) ||
-              h === "localhost" ||
-              (this.allowLan && WebServer.isPrivateIP(h)) ||
-              this.allowExternal;
-            if (!trusted) {
+      // CSRF protection for mutating requests — verify Origin header matches a trusted source
+      // (The IP-level gate in setupMiddleware already blocks disallowed clients,
+      //  but Origin checks guard against cross-site requests from allowed IPs.)
+      router.use((req, res, next) => {
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          const origin = req.headers.origin || req.headers.referer;
+          if (origin) {
+            try {
+              const h = new URL(origin as string).hostname;
+              const trusted =
+                WebServer.isLoopback(h) ||
+                h === "localhost" ||
+                (this.allowLan && WebServer.isPrivateIP(h)) ||
+                this.allowExternal;
+              if (!trusted) {
+                return res.status(403).json({ error: "Forbidden: invalid origin" });
+              }
+            } catch {
               return res.status(403).json({ error: "Forbidden: invalid origin" });
             }
-          } catch {
-            return res.status(403).json({ error: "Forbidden: invalid origin" });
+          } else {
+            // No Origin/Referer — reject to guard against CSRF edge cases.
+            // All browser-initiated requests include Origin for non-GET methods.
+            return res.status(403).json({ error: "Forbidden: missing origin" });
           }
-        } else {
-          // No Origin/Referer — reject to guard against CSRF edge cases.
-          // All browser-initiated requests include Origin for non-GET methods.
-          return res.status(403).json({ error: "Forbidden: missing origin" });
         }
-      }
-      next();
-    });
+        next();
+      });
 
-    // Register route modules
-    registerJobRoutes(api, {
-      jobLogs: this.jobLogs,
-      filterJobsByAge: (jobs, archived) => this.filterJobsByAge(jobs, archived),
-      broadcast: (msg) => this.broadcast(msg),
-      isLoopback: WebServer.isLoopback,
-    });
+      // Register route modules
+      registerJobRoutes(router, {
+        jobLogs: this.jobLogs,
+        filterJobsByAge: (jobs, archived) => this.filterJobsByAge(jobs, archived),
+        broadcast: (msg) => this.broadcast(msg),
+        isLoopback: WebServer.isLoopback,
+      });
 
-    registerConfigRoutes(api, {
-      logBuffer: this.logBuffer,
-    });
+      registerConfigRoutes(router, {
+        logBuffer: this.logBuffer,
+      });
 
-    registerImportRoutes(api);
+      registerImportRoutes(router);
 
-    registerTrimRoutes(api);
+      registerTrimRoutes(router);
 
-    this.app.use("/api", api);
+      return router;
+    };
+
+    // Mount API routes at both /api/v1 (current version) and /api (backward compatibility)
+    this.app.use("/api/v1", createApiRouter());
+    this.app.use("/api", createApiRouter());
 
     // POT Provider endpoints are mounted on the app directly (not /api router)
     registerPotRoutes(this.app);

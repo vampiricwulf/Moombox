@@ -26,19 +26,82 @@ export interface JobRoutesContext {
 export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
   const logger = Logger.getInstance();
 
-  // Get all jobs
+  // Get all jobs (with optional pagination)
   router.get("/jobs", asyncHandler(async (req, res) => {
     const db = await Database.getInstance();
     const jobs = await db.getJobs();
-    res.json(ctx.filterJobsByAge(jobs, false));
+    const filtered = ctx.filterJobsByAge(jobs, false);
+
+    // Parse pagination parameters
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+
+    // Validate pagination parameters
+    if (limit !== undefined && (isNaN(limit) || limit < 1 || limit > 1000)) {
+      return res.status(400).json({ error: "Invalid limit parameter (must be 1-1000)" });
+    }
+    if (isNaN(offset) || offset < 0) {
+      return res.status(400).json({ error: "Invalid offset parameter (must be >= 0)" });
+    }
+
+    // If pagination parameters are used, return paginated response with metadata
+    if (limit !== undefined || offset > 0) {
+      const paginated = limit !== undefined
+        ? filtered.slice(offset, offset + limit)
+        : filtered.slice(offset);
+
+      return res.json({
+        data: paginated,
+        pagination: {
+          total: filtered.length,
+          offset,
+          limit: limit || (filtered.length - offset),
+          hasMore: limit !== undefined && (offset + limit) < filtered.length,
+        },
+      });
+    }
+
+    // Backward compatibility: return plain array if no pagination params
+    res.json(filtered);
   }));
 
-  // Get archived jobs (finished jobs older than hide_finished_age_days)
+  // Get archived jobs (finished jobs older than hide_finished_age_days, with optional pagination)
   router.get("/jobs/archived", asyncHandler(async (req, res) => {
     const db = await Database.getInstance();
     const jobs = await db.getJobs();
     const archivedJobs = ctx.filterJobsByAge(jobs, true)
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+    // Parse pagination parameters
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+
+    // Validate pagination parameters
+    if (limit !== undefined && (isNaN(limit) || limit < 1 || limit > 1000)) {
+      return res.status(400).json({ error: "Invalid limit parameter (must be 1-1000)" });
+    }
+    if (isNaN(offset) || offset < 0) {
+      return res.status(400).json({ error: "Invalid offset parameter (must be >= 0)" });
+    }
+
+    // If pagination parameters are used, return paginated response with metadata
+    if (limit !== undefined || offset > 0) {
+      const paginated = limit !== undefined
+        ? archivedJobs.slice(offset, offset + limit)
+        : archivedJobs.slice(offset);
+
+      return res.json({
+        data: paginated,
+        pagination: {
+          total: archivedJobs.length,
+          offset,
+          limit: limit || (archivedJobs.length - offset),
+          hasMore: limit !== undefined && (offset + limit) < archivedJobs.length,
+        },
+      });
+    }
+
+    // Backward compatibility: return plain array if no pagination params
     res.json(archivedJobs);
   }));
 
