@@ -75,7 +75,7 @@ Services must start in this exact order due to dependencies:
 
 ```
 1. ConfigManager.load()        → TOML config (everything depends on this)
-2. Logger.init()               → reads config for log level/path, inits pino
+2. Logger.init()               → reads config for log level/path
 3. Database.getInstance()      → reads moombox.json, builds in-memory indexes
 4. FeedMonitor.start()         → RSS polling (depends on DB + config)
 5. DownloadWorker.start()      → job queue polling (depends on DB + YouTube)
@@ -103,8 +103,7 @@ FeedMonitor → DownloadWorker → CookieRefreshService → AutoCookieService �
 src/
 ├── core/                    # Application services (singletons)
 │   ├── config.ts            # ConfigManager — TOML loader, validation, defaults
-│   ├── logger.ts            # Logger — file rotation, pub/sub, pino forwarding
-│   ├── structuredLogger.ts  # Pino wrapper — structured.jsonl output
+│   ├── logger.ts            # Logger — file rotation, pub/sub
 │   ├── database.ts          # Database — lowdb, batch updates, pub/sub
 │   ├── cookies.ts           # CookieJar — Netscape parser, SAPISIDHASH generation
 │   ├── cookieRefresh.ts     # CookieRefreshService — 30-min refresh cycle
@@ -232,7 +231,7 @@ All major services use `getInstance()` pattern. Initialization order matters (se
 | Service | File | Key Responsibility |
 |---------|------|--------------------|
 | `ConfigManager` | `core/config.ts` | TOML loader, defaults, validation, `resolveTemplate()` |
-| `Logger` | `core/logger.ts` | File rotation, 200-entry pub/sub, pino forwarding |
+| `Logger` | `core/logger.ts` | File rotation, 200-entry pub/sub |
 | `Database` | `core/database.ts` | lowdb JSON, O(1) indexes (`jobsMap`, `historySet`), batch writes (100ms), pub/sub |
 | `YouTubeService` | `engine/youtube/index.ts` | Facade: auth, player API, format selection, PO token |
 | `DownloadWorker` | `core/worker/index.ts` | Composes JobQueue + StreamProcessor + DownloadOrchestrator |
@@ -570,7 +569,7 @@ All settings have defaults in `ConfigManager.DEFAULTS`. Missing fields auto-popu
 
 Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`
 
-## Dependencies (24 production, 17 dev)
+## Dependencies (23 production, 17 dev)
 
 ### Production Dependencies
 
@@ -593,7 +592,7 @@ Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start
 | `p-limit` | 7.3.0 | Parallel segment/decrypt concurrency caps |
 | `p-queue` | 9.1.0 | Priority job queue with concurrency control |
 | `p-retry` | 7.1.1 | HTTP retry with exponential backoff |
-| `pino` | 10.3.1 | Structured JSON logging (structured.jsonl) |
+
 | `react` | 19.2.4 | React runtime for Ink TUI |
 | `rss-parser` | 3.13.0 | YouTube channel RSS feed parsing |
 | `sql.js` | 1.14.0 | Firefox cookies.sqlite via WebAssembly (dynamic import) |

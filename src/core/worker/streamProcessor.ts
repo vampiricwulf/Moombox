@@ -10,7 +10,6 @@ import fs from "fs-extra";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
-import { createJobLogger } from "../structuredLogger.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
 import { ChatDownloader, ChatApi } from "../../engine/chat/index.js";
 import { createEmptyVideoInfo, type VideoInfo, type StreamStatus } from "../../types/youtube.js";
@@ -313,15 +312,6 @@ export class StreamProcessor {
       );
       await db.updateJob(job.id, { status: "Live", isVod: false });
       this.sendLiveNotification(job);
-
-      createJobLogger(job.id).info({
-        event: "stream_live_detected",
-        videoId: job.videoId,
-        title: job.title,
-        channel: job.channelName,
-        scheduledStartTime: videoInfo.scheduledStartTime,
-        detectedAt: new Date().toISOString(),
-      });
 
       return { videoInfo, shouldDownload: true, isVod: false };
     }

@@ -10,7 +10,6 @@ import { execa } from "execa";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
-import { createJobLogger } from "../structuredLogger.js";
 import { Muxer, type MuxTrimOptions } from "../../engine/muxer.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import { AssetDownloader } from "./assetDownloader.js";
@@ -83,22 +82,6 @@ export async function muxAndFinalize(
 
   logger.info("[DownloadOrchestrator] Muxing...");
   await db.updateJob(job.id, { status: "Muxing" });
-
-  // Structured event: mux start with segment counts
-  {
-    const freshJobForLog = (await db.getJobs()).find(j => j.id === job.id);
-    createJobLogger(job.id).info({
-      event: "mux_start",
-      videoId: job.videoId,
-      title: job.title,
-      videoSegments: freshJobForLog?.lastVideoSeq,
-      audioSegments: freshJobForLog?.lastAudioSeq,
-      chatMessages: freshJobForLog?.totalChatMessages,
-      downloadElapsedMs: freshJobForLog?.downloadStartedAt
-        ? Date.now() - new Date(freshJobForLog.downloadStartedAt).getTime()
-        : undefined,
-    });
-  }
 
   // "Muxing Starting" notification
   {
@@ -199,22 +182,6 @@ export async function muxAndFinalize(
       lengthSeconds: metadata?.duration,
       videoWidth: metadata?.width,
       videoHeight: metadata?.height,
-    });
-
-    // Structured logging: log download completion with final metadata
-    const structuredLog = createJobLogger(job.id);
-    structuredLog.info({
-      event: "download_complete",
-      videoId: job.videoId,
-      title: job.title,
-      filename: finalFilename,
-      fileSize: metadata?.size || fileSize,
-      duration: metadata?.duration,
-      resolution: metadata?.width && metadata?.height
-        ? `${metadata.width}x${metadata.height}`
-        : undefined,
-      hasChatFile: !!chatFilename,
-      gaps: job.gaps?.length || 0,
     });
 
     // Build rich "Download Finished" notification

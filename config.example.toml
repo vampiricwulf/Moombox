@@ -30,9 +30,6 @@
 # Number of rotated log files to keep
 # log_max_files = 5
 
-# Note: Structured JSON logs are also written to structured.jsonl in the same
-# directory as the text log, via pino. These are not configurable separately.
-
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 # Path to the JSON database file

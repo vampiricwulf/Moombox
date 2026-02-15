@@ -4,7 +4,6 @@ import { ConfigManager, ChannelConfig } from "./config.js";
 import { Database } from "./database.js";
 import { YouTubeService } from "../engine/youtube/index.js";
 import { Logger } from "./logger.js";
-import { createComponentLogger } from "./structuredLogger.js";
 import { NotificationManager, NotificationType } from "./notifications.js";
 import { MoomboxConfig } from "../types/config.js";
 import { fetchWithTimeout } from "./http.js";
@@ -330,16 +329,6 @@ export class FeedMonitor {
     this.logger.info(
       `[Monitor] Queuing job: ${title} (${videoId})`,
     );
-
-    // Structured event: stream discovered with searchable metadata
-    createComponentLogger("FeedMonitor").info({
-      event: "stream_discovered",
-      videoId,
-      title,
-      channelId: channel.id,
-      channelName: channel.name || "Unknown",
-      includeNonLive,
-    });
 
     // Queue Job
     const newJob = await db.addJob({

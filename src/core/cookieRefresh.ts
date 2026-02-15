@@ -1,6 +1,5 @@
 import ms from "ms";
 import { Logger } from "./logger.js";
-import { createComponentLogger } from "./structuredLogger.js";
 import { ConfigManager } from "./config.js";
 import { CookieJar } from "./cookies.js";
 import { AutoCookieService } from "./autoCookies.js";
@@ -131,8 +130,6 @@ export class CookieRefreshService {
         },
       );
 
-      const slog = createComponentLogger("CookieRefresh");
-
       if (response.ok) {
         // Check for Set-Cookie headers (new cookies from server)
         const setCookies = response.headers.getSetCookie?.();
@@ -146,30 +143,15 @@ export class CookieRefreshService {
         this.logger.debug(
           `[CookieRefresh] Session refreshed successfully (HTTP ${response.status})`,
         );
-        slog.info({
-          event: "cookie_refresh_success",
-          httpStatus: response.status,
-          cookiesUpdated: setCookies?.length || 0,
-        });
         return true;
       } else {
         this.logger.warn(
           `[CookieRefresh] Refresh request failed: HTTP ${response.status}`,
         );
-        slog.warn({
-          event: "cookie_refresh_failed",
-          httpStatus: response.status,
-          reason: "http_error",
-        });
         return false;
       }
     } catch (e: any) {
       this.logger.warn(`[CookieRefresh] Refresh error: ${e.stack || e.message}`);
-      createComponentLogger("CookieRefresh").error({
-        event: "cookie_refresh_failed",
-        reason: "exception",
-        error: e.message,
-      });
       return false;
     }
   }

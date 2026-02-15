@@ -11,7 +11,6 @@ import fs from "fs-extra";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
-import { createJobLogger } from "../structuredLogger.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
 import { SegmentDownloader } from "../../engine/downloader.js";
 import { ChatDownloader } from "../../engine/chat/index.js";
@@ -113,20 +112,6 @@ export class DownloadOrchestrator {
     const downloadStartedAt = new Date().toISOString();
     await db.updateJob(job.id, { status: "Downloading", downloadStartedAt });
     Object.assign(job, { downloadStartedAt });
-
-    // Structured logging: log download start event with metadata
-    const structuredLog = createJobLogger(job.id);
-    structuredLog.info({
-      event: "download_start",
-      videoId: job.videoId,
-      title: job.title,
-      channel: job.channelName,
-      isVod: isVodDownload,
-      selectedVideoItag: job.selectedVideoItag,
-      selectedAudioItag: job.selectedAudioItag,
-      startTime: job.startTime,
-      endTime: job.endTime,
-    });
 
     // Build notification fields with advanced options
     const startFields: Array<{ name: string; value: string; inline?: boolean }> = [
