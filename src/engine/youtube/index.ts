@@ -12,7 +12,7 @@ import { YOUTUBE_URLS, USER_AGENTS, DEFAULT_API_KEY } from "../../constants.js";
 import { YouTubeAuth } from "./auth.js";
 import { WatchPageParser } from "./watchPage.js";
 import { PlayerApi } from "./playerApi.js";
-import { FormatSelector, type SelectedFormats } from "./formatSelector.js";
+import { FormatSelector, type SelectedFormats, type FormatSelectionOptions } from "./formatSelector.js";
 import { PoTokenGenerator } from "./poToken.js";
 import { fetchWithTimeout } from "../../core/http.js";
 
@@ -24,7 +24,7 @@ export { FormatSelector } from "./formatSelector.js";
 export { PoTokenGenerator } from "./poToken.js";
 
 // Re-export types
-export type { SelectedFormats } from "./formatSelector.js";
+export type { SelectedFormats, FormatSelectionOptions } from "./formatSelector.js";
 
 /**
  * YouTube Service - Main facade for all YouTube operations
@@ -185,7 +185,10 @@ export class YouTubeService {
   /**
    * Select best formats from available options
    */
-  getBestFormats(formats: Format[]): SelectedFormats {
+  getBestFormats(formats: Format[], options?: FormatSelectionOptions): SelectedFormats {
+    if (options?.selectedVideoItag != null || options?.selectedAudioItag != null) {
+      return this.formatSelector.selectWithOptions(formats, options);
+    }
     return this.formatSelector.selectBest(formats);
   }
 

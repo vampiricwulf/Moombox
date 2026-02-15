@@ -149,9 +149,83 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     res.json(chatData);
   }));
 
+  // Get available formats for a video (for Advanced Options)
+  router.get("/formats/:videoId", asyncHandler(async (req, res) => {
+    const { videoId } = req.params;
+    if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId as string)) {
+      return res.status(400).json({ error: "Invalid videoId format" });
+    }
+
+    try {
+      const yt = YouTubeService.getInstance();
+      await yt.init();
+      const videoInfo = await yt.getVideoInfo(videoId as string);
+
+      const videoFormats = (videoInfo.formats || [])
+        .filter((f) => f.mimeType?.includes("video") && f.url)
+        .map((f) => ({
+          itag: f.itag,
+          mimeType: f.mimeType,
+          width: f.width,
+          height: f.height,
+          fps: f.fps,
+          bitrate: f.bitrate,
+          qualityLabel: f.qualityLabel,
+          audioQuality: f.audioQuality,
+          contentLength: f.contentLength,
+        }))
+        .sort((a, b) => {
+          const aMaxDim = Math.max(a.width || 0, a.height || 0);
+          const bMaxDim = Math.max(b.width || 0, b.height || 0);
+          if (aMaxDim !== bMaxDim) return bMaxDim - aMaxDim;
+          return b.bitrate - a.bitrate;
+        });
+
+      const audioFormats = (videoInfo.formats || [])
+        .filter((f) => f.mimeType?.includes("audio") && f.url)
+        .map((f) => ({
+          itag: f.itag,
+          mimeType: f.mimeType,
+          bitrate: f.bitrate,
+          audioQuality: f.audioQuality,
+          audioSampleRate: f.audioSampleRate,
+          contentLength: f.contentLength,
+        }))
+        .sort((a, b) => b.bitrate - a.bitrate);
+
+      // Mark best formats per container type
+      const markBest = <T extends { itag: number; mimeType?: string }>(
+        formats: T[],
+        typeFilter: string,
+      ): number | null => {
+        const match = formats.find((f) => f.mimeType?.includes(typeFilter));
+        return match ? match.itag : null;
+      };
+
+      res.json({
+        videoId,
+        title: videoInfo.title,
+        channelName: videoInfo.channelName,
+        lengthSeconds: videoInfo.lengthSeconds,
+        streamStatus: videoInfo.streamStatus,
+        videoFormats,
+        audioFormats,
+        bestItags: {
+          bestWebmVideo: markBest(videoFormats, "webm"),
+          bestMp4Video: markBest(videoFormats, "mp4"),
+          bestOpusAudio: markBest(audioFormats, "opus") ?? markBest(audioFormats, "webm"),
+          bestAacAudio: markBest(audioFormats, "mp4"),
+        },
+      });
+    } catch (e: any) {
+      logger.warn(`Failed to fetch formats for ${videoId}: ${e.message}`);
+      res.status(500).json({ error: "Failed to fetch video formats" });
+    }
+  }));
+
   // Add new job
   router.post("/jobs", asyncHandler(async (req, res) => {
-    const { videoId } = req.body;
+    const { videoId, selectedVideoItag, selectedAudioItag, startTime, endTime } = req.body;
     if (!videoId) {
       return res.status(400).json({ error: "videoId is required" });
     }
@@ -180,6 +254,21 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       logger.warn(`Could not fetch metadata for ${videoId}`);
     }
 
+    // Build advanced options (validate itags are numbers, times are valid)
+    const advancedOpts: Record<string, number | undefined> = {};
+    if (selectedVideoItag != null && Number.isFinite(Number(selectedVideoItag))) {
+      advancedOpts.selectedVideoItag = Number(selectedVideoItag);
+    }
+    if (selectedAudioItag != null && Number.isFinite(Number(selectedAudioItag))) {
+      advancedOpts.selectedAudioItag = Number(selectedAudioItag);
+    }
+    if (startTime != null && Number.isFinite(Number(startTime)) && Number(startTime) >= 0) {
+      advancedOpts.startTime = Number(startTime);
+    }
+    if (endTime != null && Number.isFinite(Number(endTime)) && Number(endTime) > 0) {
+      advancedOpts.endTime = Number(endTime);
+    }
+
     const job = await db.addJob({
       videoId,
       url: `https://www.youtube.com/watch?v=${videoId}`,
@@ -187,6 +276,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       channelName,
       thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
       manuallyAdded: true,
+      ...advancedOpts,
     });
 
     if (job) {

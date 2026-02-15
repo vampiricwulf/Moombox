@@ -3,12 +3,24 @@ import path from "path";
 import fs from "fs-extra";
 import { Logger } from "../core/logger.js";
 
+/**
+ * Trim options for timestamp-based segment selection.
+ * These apply FFmpeg -ss/-to flags during mux to trim segment boundaries.
+ */
+export interface MuxTrimOptions {
+  /** Offset into the first segment where the actual start time falls (seconds) */
+  trimStartOffset?: number;
+  /** Duration of the output from the trim start (seconds) */
+  trimDuration?: number;
+}
+
 export class Muxer {
   static async mux(
     videoPath: string,
     audioPath: string | null,
     outputPath: string,
     signal?: AbortSignal,
+    trimOptions?: MuxTrimOptions,
   ): Promise<void> {
     const logger = Logger.getInstance();
 
@@ -34,10 +46,26 @@ export class Muxer {
 
     return new Promise((resolve, reject) => {
       // Don't use shell mode - pass args directly to avoid quoting issues
-      const ffmpegArgs = ["-y", "-i", normalizedVideoPath];
+      const ffmpegArgs = ["-y"];
+
+      // Apply trim offset before input (input-level seeking for codec copy)
+      if (trimOptions?.trimStartOffset && trimOptions.trimStartOffset > 0) {
+        ffmpegArgs.push("-ss", String(trimOptions.trimStartOffset));
+      }
+
+      ffmpegArgs.push("-i", normalizedVideoPath);
 
       if (normalizedAudioPath) {
+        // Apply same seek to audio input for sync
+        if (trimOptions?.trimStartOffset && trimOptions.trimStartOffset > 0) {
+          ffmpegArgs.push("-ss", String(trimOptions.trimStartOffset));
+        }
         ffmpegArgs.push("-i", normalizedAudioPath);
+      }
+
+      // Apply duration limit after inputs
+      if (trimOptions?.trimDuration && trimOptions.trimDuration > 0) {
+        ffmpegArgs.push("-t", String(trimOptions.trimDuration));
       }
 
       ffmpegArgs.push(

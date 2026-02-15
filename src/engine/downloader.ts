@@ -17,6 +17,7 @@ export interface DownloaderOptions {
   onCheckStreamStatus?: () => Promise<boolean>; // Returns true if stream has ended
   retryDelayCap?: number; // Max backoff delay in seconds (default: 60)
   liveCheckRetries?: number; // Retries before first live status check (default: 16)
+  endSeq?: number; // Stop downloading after this sequence number (inclusive, for timestamp selection)
 }
 
 interface ResumeState {
@@ -253,6 +254,14 @@ export class SegmentDownloader extends EventEmitter {
     }
 
     while (this.running && !this.cancelFlag && !this.streamEnded) {
+      // Check if we've reached the end sequence (timestamp selection)
+      if (this.options.endSeq != null && this.currentSeq > this.options.endSeq) {
+        this.logger.info(
+          `[Downloader] Reached end sequence ${this.options.endSeq}, stopping`,
+        );
+        break;
+      }
+
       // Check if we've fallen behind and need parallel catch-up
       if (headSeq !== null) {
         const segmentsBehind = headSeq - this.currentSeq;
@@ -721,7 +730,11 @@ export class SegmentDownloader extends EventEmitter {
     const BUFFER_SIZE_CAP = SegmentDownloader.PARALLEL_DOWNLOADS * 3;
     let nextToWrite = this.currentSeq;
     let nextToFetch = this.currentSeq;
-    const targetSeq = headSeq - 30; // Stop well before head to hand off to sequential cleanly
+    let targetSeq = headSeq - 30; // Stop well before head to hand off to sequential cleanly
+    // Respect endSeq for timestamp selection
+    if (this.options.endSeq != null && targetSeq > this.options.endSeq + 1) {
+      targetSeq = this.options.endSeq + 1;
+    }
     let activeDownloads = 0;
     let totalFetched = 0;
 

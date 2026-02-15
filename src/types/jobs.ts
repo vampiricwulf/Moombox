@@ -64,6 +64,12 @@ export interface Job {
   chatFilename?: string; // Relative path to chat.json
   // Segment gap tracking (segments lost during parallel catch-up)
   gaps?: Array<{ from: number; to: number; stream: "video" | "audio" }>;
+  // Advanced download options (manual format selection)
+  selectedVideoItag?: number;   // User-chosen video format itag
+  selectedAudioItag?: number;   // User-chosen audio format itag
+  // Timestamp selection (segment-level download range)
+  startTime?: number;           // Start time in seconds (0 = beginning)
+  endTime?: number;             // End time in seconds (undefined = end of stream)
 }
 
 /**
@@ -84,6 +90,11 @@ export interface NewJobData {
   outputDirectory?: string;
   manuallyAdded?: boolean;
   allowNonStream?: boolean; // From include_non_live_content setting
+  // Advanced download options
+  selectedVideoItag?: number;
+  selectedAudioItag?: number;
+  startTime?: number;
+  endTime?: number;
 }
 
 /**

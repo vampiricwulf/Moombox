@@ -20,6 +20,8 @@ import {
   STREAM_END_VERIFY_INTERVAL_MS,
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
+import type { SegmentRange } from "../../engine/manifest.js";
+import type { MuxTrimOptions } from "../../engine/muxer.js";
 import { downloadVod, downloadDash, downloadHls } from "./downloadStrategies.js";
 import { muxAndFinalize } from "./muxFinalize.js";
 import { setupChatDownloader, runSegmentDownloaders, runSegmentDownloadersWithoutChat } from "./progressTracking.js";
@@ -140,6 +142,7 @@ export class DownloadOrchestrator {
 
     let videoDl: SegmentDownloader | null = null;
     let audioDl: SegmentDownloader | null = null;
+    let segmentRange: SegmentRange | null = null;
 
     // Use pre-started chat downloader from upcoming phase, or create a new one
     if (config.downloader.download_chat !== false) {
@@ -198,8 +201,14 @@ export class DownloadOrchestrator {
       // Check abort immediately after download — avoid false 100% and chat timeout wait
       if (signal?.aborted) return;
 
-      videoPath = path.join(stagingDir, "video_stream");
-      audioPath = vodResult.hasAudio ? path.join(stagingDir, "audio_stream") : null;
+      if (vodResult.hasVideo) {
+        videoPath = path.join(stagingDir, "video_stream");
+        audioPath = vodResult.hasAudio ? path.join(stagingDir, "audio_stream") : null;
+      } else if (vodResult.hasAudio) {
+        // Audio-only download: use audio as primary input for muxer
+        videoPath = path.join(stagingDir, "audio_stream");
+        audioPath = null;
+      }
 
       // Set progress to 100% now that download is complete
       const chatCount1 = chatDl ? chatDl.getMessageCount() : 0;
@@ -237,6 +246,7 @@ export class DownloadOrchestrator {
       audioDl = result.audioDl;
       videoPath = result.videoPath;
       audioPath = result.audioPath;
+      segmentRange = result.segmentRange;
     } else if (videoInfo.hlsManifestUrl) {
       // HLS: Fallback for some streams
       const result = await downloadHls(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders);
@@ -347,6 +357,24 @@ export class DownloadOrchestrator {
       Object.assign(job, { streamEndTime: endTime });
     }
 
+    // Build trim options for timestamp selection
+    let trimOptions: MuxTrimOptions | undefined;
+    if (segmentRange) {
+      // DASH segment-level download: trim boundaries of first/last segments
+      trimOptions = {
+        trimStartOffset: segmentRange.trimStartOffset || undefined,
+        trimDuration: segmentRange.trimDuration || undefined,
+      };
+    } else if (job.startTime != null || job.endTime != null) {
+      // VOD direct download: use FFmpeg -ss/-t to trim the full file
+      trimOptions = {
+        trimStartOffset: job.startTime || undefined,
+        trimDuration: (job.endTime != null && job.endTime > 0)
+          ? job.endTime - (job.startTime || 0)
+          : undefined,
+      };
+    }
+
     // Mux the streams
     await muxAndFinalize(
       job,
@@ -357,6 +385,7 @@ export class DownloadOrchestrator {
       finalExtension,
       db,
       signal,
+      trimOptions,
     );
     } finally {
       unsubscribe();
