@@ -1,6 +1,6 @@
 import fs from "fs-extra";
 import path from "path";
-import toml from "toml";
+import { parse as parseToml } from "smol-toml";
 import os from "os";
 import ms from "ms";
 import type {
@@ -279,7 +279,7 @@ export class ConfigManager {
       if (await fs.pathExists(p)) {
         ConfigManager.log("info", `[Config] Loading from ${p}`);
         const content = await fs.readFile(p, "utf-8");
-        const loadedConfig = toml.parse(content) as Partial<MoomboxConfig>;
+        const loadedConfig = parseToml(content) as unknown as Partial<MoomboxConfig>;
         this.config = this.validate(this.applyDefaults(loadedConfig));
         this.configPath = p;
         this.configLoaded = true;

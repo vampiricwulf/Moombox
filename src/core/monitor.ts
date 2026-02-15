@@ -1,4 +1,4 @@
-import Parser from "rss-parser";
+import { XMLParser } from "fast-xml-parser";
 import ms from "ms";
 import { ConfigManager, ChannelConfig } from "./config.js";
 import { Database } from "./database.js";
@@ -9,8 +9,16 @@ import { MoomboxConfig } from "../types/config.js";
 import { fetchWithTimeout } from "./http.js";
 import { fuzzyMatch } from "../utils/textNormalization.js";
 
+/** Parsed YouTube Atom feed entry */
+interface FeedEntry {
+  id: string;
+  title: string;
+  link: string;
+  description: string;
+}
+
 export class FeedMonitor {
-  private parser: Parser;
+  private xmlParser: XMLParser;
   private interval: NodeJS.Timeout | null = null;
   private running: boolean = false;
   private checking: boolean = false;
@@ -19,7 +27,10 @@ export class FeedMonitor {
   private static readonly MAX_METADATA_FAILURES = 3;
 
   constructor() {
-    this.parser = new Parser();
+    this.xmlParser = new XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: "@_",
+    });
     this.logger = Logger.getInstance();
   }
 
@@ -93,6 +104,32 @@ export class FeedMonitor {
     }
   }
 
+  /**
+   * Parse YouTube Atom feed XML into a flat array of entries.
+   * Handles both single-entry and multi-entry feeds (fast-xml-parser
+   * returns an object instead of an array when there's only one entry).
+   */
+  private parseFeedXml(xml: string): FeedEntry[] {
+    const parsed = this.xmlParser.parse(xml);
+    const feed = parsed.feed;
+    if (!feed || !feed.entry) return [];
+
+    const rawEntries = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
+    return rawEntries.map((entry: any) => {
+      // Link can be a single object or array (rel="self" + rel="alternate")
+      const links = Array.isArray(entry.link) ? entry.link : [entry.link];
+      const altLink = links.find((l: any) => l?.["@_rel"] === "alternate");
+      const href = altLink?.["@_href"] || "";
+
+      return {
+        id: String(entry["yt:videoId"] || entry.id || ""),
+        title: String(entry.title || ""),
+        link: href,
+        description: String(entry["media:group"]?.["media:description"] || ""),
+      };
+    });
+  }
+
   private async checkChannelFeed(
     channel: ChannelConfig,
     config: MoomboxConfig,
@@ -101,48 +138,48 @@ export class FeedMonitor {
     const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channel.id}`;
     this.logger.debug(`Fetching feed: ${feedUrl}`);
 
-    const feed = await this.parser.parseURL(feedUrl);
+    const response = await fetchWithTimeout(feedUrl, {}, ms("15s"));
+    if (!response.ok) {
+      throw new Error(`Status code ${response.status}`);
+    }
+    const xml = await response.text();
+    const allEntries = this.parseFeedXml(xml);
 
     // Sliding window / Lookbehind logic
     const lookbehind = channel.num_desc_lookbehind || 0;
 
     // Max feed items limit
     const maxItems = channel.max_feed_items || config.max_feed_items || 15;
-    const itemsToProcess = feed.items.slice(0, maxItems);
+    const itemsToProcess = allEntries.slice(0, maxItems);
 
     // Track the most recent video for DECAPI fallback baseline
     if (itemsToProcess.length > 0) {
-      const newestVideoId = itemsToProcess[0].id?.replace("yt:video:", "");
+      const newestVideoId = itemsToProcess[0].id.replace("yt:video:", "");
       if (newestVideoId) {
         await db.setLastVideo(channel.id, newestVideoId);
       }
     }
 
-    // feed.items is usually sorted newest first.
-    // We iterate through them.
+    // Entries are usually sorted newest first.
     for (let i = 0; i < itemsToProcess.length; i++) {
       const item = itemsToProcess[i];
-      const videoId = item.id?.replace("yt:video:", "");
+      const videoId = item.id.replace("yt:video:", "");
       if (!videoId) continue;
 
       if (await db.hasProcessed(videoId)) continue;
 
       // Collect older items for description comparison
-      const olderItems = feed.items.slice(i + 1, i + 1 + lookbehind);
+      const olderItems = allEntries.slice(i + 1, i + 1 + lookbehind);
 
       // Filter lines present in older items (template boilerplate)
       const olderLines = new Set<string>();
       for (const older of olderItems) {
-        (older.contentSnippet || older.summary || "")
+        older.description
           .split("\n")
           .forEach((line) => olderLines.add(line.trim()));
       }
 
-      const currentLines = (
-        item.contentSnippet ||
-        item.summary ||
-        ""
-      ).split("\n");
+      const currentLines = item.description.split("\n");
       const uniqueDescription = currentLines
         .filter((line) => !olderLines.has(line.trim()))
         .join("\n");

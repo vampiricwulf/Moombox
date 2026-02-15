@@ -569,7 +569,7 @@ All settings have defaults in `ConfigManager.DEFAULTS`. Missing fields auto-popu
 
 Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`
 
-## Dependencies (23 production, 17 dev)
+## Dependencies (22 production, 17 dev)
 
 ### Production Dependencies
 
@@ -581,10 +581,10 @@ Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start
 | `envalid` | 8.1.1 | Environment variable validation |
 | `execa` | 9.6.1 | FFmpeg, ffprobe, browser cleanup, clipboard |
 | `express` | 5.2.1 | HTTP server + REST API |
-| `fast-xml-parser` | 5.3.6 | DASH manifest XML parsing |
+| `fast-xml-parser` | 5.3.3 | DASH manifest + YouTube RSS feed XML parsing |
 | `fs-extra` | 11.3.3 | Extended fs (ensureDir, move, pathExists) |
 | `ink` | 6.6.0 | React-for-CLI TUI framework |
-| `jsdom` | 24.1.3 | DOM for BotGuard VM execution |
+| `jsdom` | 28.1.0 | DOM for BotGuard VM execution |
 | `lowdb` | 7.0.1 | JSON file database (moombox.json) |
 | `lru-cache` | 11.2.4 | Cipher solver caches (STS, preprocessed, solver) |
 | `meriyah` | 7.0.0 | Fast JS parser for cipher AST extraction |
@@ -594,9 +594,8 @@ Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start
 | `p-retry` | 7.1.1 | HTTP retry with exponential backoff |
 
 | `react` | 19.2.4 | React runtime for Ink TUI |
-| `rss-parser` | 3.13.0 | YouTube channel RSS feed parsing |
+| `smol-toml` | 1.6.0 | TOML v1.0 config file parsing |
 | `sql.js` | 1.14.0 | Firefox cookies.sqlite via WebAssembly (dynamic import) |
-| `toml` | 3.0.0 | Config file parsing |
 | `ws` | 8.19.0 | WebSocket server + CDP client |
 | `zod` | 4.3.6 | Runtime schema validation for API requests |
 
@@ -608,12 +607,9 @@ Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start
 | `esbuild` | SEA bundling (TypeScript → CJS) |
 | `postject` | SEA blob injection into Node.js binary |
 | `supertest` | HTTP assertion testing |
+| `tsx` | TypeScript execution for `npm run dev` |
 | `typescript` | 5.9.3 — compiler |
 | `vitest` | 4.0.18 — test runner + `@vitest/coverage-v8` + `@vitest/ui` |
-
-### Notable: `tsx` not in devDependencies
-
-`npm run dev` uses `npx tsx` which downloads on demand. Should be added as devDependency for reproducibility.
 
 ## Known Code Quality Issues
 

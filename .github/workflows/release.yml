@@ -13,6 +13,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -23,7 +25,28 @@ jobs:
 
       - run: npm run package
 
-      - uses: softprops/action-gh-release@v2
+      - name: Generate release notes
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TAG_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          python scripts/generate-release-notes.py \
+            --tag "$TAG_NAME" \
+            --repo "$REPO" \
+            --output release_notes.md
+
+          # If Claude notes were generated, don't also append GitHub's auto-notes
+          if grep -q "Claude Opus" release_notes.md 2>/dev/null; then
+            echo "use_github_notes=false" >> "$GITHUB_ENV"
+          else
+            echo "use_github_notes=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release_notes.md
+          generate_release_notes: ${{ env.use_github_notes == 'true' }}
           files: Moombox.exe

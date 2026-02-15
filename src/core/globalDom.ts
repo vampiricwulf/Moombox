@@ -22,7 +22,9 @@ export function setupGlobalDom(): void {
     {
       url: "https://www.youtube.com/",
       referrer: "https://www.youtube.com/",
-      userAgent: USER_AGENTS.WEB,
+      // jsdom v28 moved userAgent into resources object, but @types/jsdom
+      // v27 hasn't updated the type signature yet — cast to bypass.
+      resources: { userAgent: USER_AGENTS.WEB } as any,
     },
   );
 
