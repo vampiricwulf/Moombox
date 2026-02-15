@@ -1184,7 +1184,9 @@ class MoomboxApp {
 
       // Fetch fresh job data from server (includes updated trims)
       if (this.selectedJobId === jobId) {
-        const jobResponse = await fetch(`/api/jobs/${jobId}`);
+        const jobResponse = await fetch(`/api/jobs/${jobId}`, {
+          cache: 'no-store' // Bypass browser cache to get fresh trim data
+        });
         if (jobResponse.ok) {
           const updatedJob = await jobResponse.json();
 
@@ -1225,7 +1227,9 @@ class MoomboxApp {
 
       // Fetch fresh job data from server (includes updated trims)
       if (this.selectedJobId === jobId) {
-        const jobResponse = await fetch(`/api/jobs/${jobId}`);
+        const jobResponse = await fetch(`/api/jobs/${jobId}`, {
+          cache: 'no-store' // Bypass browser cache to get fresh trim data
+        });
         if (jobResponse.ok) {
           const updatedJob = await jobResponse.json();
 
