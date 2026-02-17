@@ -27,6 +27,7 @@ import {
   TWITCH_URLS,
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
+import { fetchWithTimeout } from "../http.js";
 import { extractTwitchLoginFromJob } from "../../utils/twitch.js";
 import type { SegmentRange } from "../../engine/manifest.js";
 import type { MuxTrimOptions } from "../../engine/muxer.js";
@@ -129,6 +130,23 @@ export class DownloadOrchestrator {
         ? path.join(config.downloader.staging_directory, job.id)
         : path.join("./staging", job.id);
       await fs.ensureDir(stagingDir);
+
+      // Pre-download thumbnail to staging while stream is still live
+      // (Twitch live preview URLs 404 after stream ends, so muxFinalize would be too late)
+      if (job.thumbnailUrl) {
+        try {
+          const resp = await fetchWithTimeout(job.thumbnailUrl, undefined, ms("15s"));
+          if (resp.ok) {
+            const data = await resp.arrayBuffer();
+            if (data.byteLength > 1000) {
+              const ext = job.thumbnailUrl.includes(".webp") ? ".webp" : ".jpg";
+              await fs.writeFile(path.join(stagingDir, `thumbnail${ext}`), Buffer.from(data));
+            }
+          }
+        } catch {
+          // Non-critical — muxFinalize will retry
+        }
+      }
 
       // Twitch HLS delivers pre-muxed MPEG-TS — single stream download
       const videoPath = path.join(stagingDir, "video_stream");

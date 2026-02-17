@@ -330,6 +330,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       let title = "Manual Add";
       let channelName = login;
       let thumbnailUrl: string | undefined;
+      let channelAvatarUrl: string | undefined;
       let streamStartTime: string | undefined;
       let twitchCategory: string | undefined;
 
@@ -357,6 +358,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
           title = `${streamInfo.channelDisplayName} — ${streamInfo.title || "Live"}`;
           channelName = streamInfo.channelDisplayName;
           thumbnailUrl = streamInfo.thumbnailUrl;
+          channelAvatarUrl = streamInfo.profileImageUrl;
           streamStartTime = streamInfo.startedAt;
           twitchCategory = streamInfo.gameCategory;
         } else {
@@ -378,6 +380,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
         channelName,
         platform: "twitch",
         thumbnailUrl,
+        channelAvatarUrl,
         manuallyAdded: true,
         isVod: isVod || undefined,
         streamStartTime,

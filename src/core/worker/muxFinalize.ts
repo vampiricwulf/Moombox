@@ -143,9 +143,28 @@ export async function muxAndFinalize(
       );
     }
 
-    if (job.thumbnailUrl) {
-      await assetDownloader.downloadThumbnail(
+    // Check for pre-downloaded thumbnail in staging (Twitch pre-downloads while live)
+    let thumbnailSaved = false;
+    for (const ext of [".jpg", ".webp", ".png"]) {
+      const stagingThumb = path.join(stagingDir, `thumbnail${ext}`);
+      if (await fs.pathExists(stagingThumb)) {
+        const thumbOutputPath = path.join(outputDir, `${filenameBase}${ext}`);
+        await fs.copy(stagingThumb, thumbOutputPath);
+        logger.debug(`[AssetDownloader] Copied pre-downloaded thumbnail: ${thumbOutputPath}`);
+        thumbnailSaved = true;
+        break;
+      }
+    }
+    if (!thumbnailSaved && job.thumbnailUrl) {
+      thumbnailSaved = await assetDownloader.downloadThumbnail(
         job.thumbnailUrl,
+        outputDir,
+        filenameBase,
+      );
+    }
+    if (!thumbnailSaved && job.channelAvatarUrl) {
+      await assetDownloader.downloadThumbnail(
+        job.channelAvatarUrl,
         outputDir,
         filenameBase,
       );

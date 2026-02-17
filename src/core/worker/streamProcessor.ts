@@ -265,6 +265,7 @@ export class StreamProcessor {
     if (streamInfo.title) updates.title = `${streamInfo.channelDisplayName} — ${streamInfo.title}`;
     if (streamInfo.channelDisplayName) updates.channelName = streamInfo.channelDisplayName;
     if (streamInfo.thumbnailUrl) updates.thumbnailUrl = streamInfo.thumbnailUrl;
+    if (streamInfo.profileImageUrl) updates.channelAvatarUrl = streamInfo.profileImageUrl;
     if (streamInfo.startedAt && !job.streamStartTime) updates.streamStartTime = streamInfo.startedAt;
     if (streamInfo.gameCategory) updates.twitchCategory = streamInfo.gameCategory;
     if (Object.keys(updates).length > 0) {

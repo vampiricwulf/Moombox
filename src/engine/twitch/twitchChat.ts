@@ -171,17 +171,16 @@ export class TwitchChatDownloader extends EventEmitter {
     this.cancelFlag = false;
     this.streamEnded = false;
 
-    // Try to resume
+    // Try to resume from state, or detect existing chat file from a previous session
     const resumeState = await this.loadResumeState();
-    if (resumeState) {
-      this.totalMessageCount = resumeState.messageCount;
-      this.flushedToDisk = true; // Ensure final write merges old + new messages
+    const existing = await this.loadExistingMessages();
+    if (existing.length > 0) {
+      this.totalMessageCount = resumeState?.messageCount ?? existing.length;
+      this.flushedToDisk = true;
+      for (const msg of existing) this.seenIds.add(msg.id);
       this.logger.info(
         `[TwitchChat] Resuming from ${this.totalMessageCount} messages`,
       );
-      // Load existing messages for dedup
-      const existing = await this.loadExistingMessages();
-      for (const msg of existing) this.seenIds.add(msg.id);
     }
 
     this.emit("start");

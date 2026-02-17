@@ -68,19 +68,24 @@ export class TwitchVodChatDownloader extends EventEmitter {
     this.running = true;
     this.cancelFlag = false;
 
-    // Try to resume
+    // Try to resume from state, or detect existing chat file from a previous session
     let offsetSeconds = 0;
     const resumeState = await this.loadResumeState();
-    if (resumeState) {
-      this.totalMessageCount = resumeState.messageCount;
+    const existing = await this.loadExistingMessages();
+    if (existing.length > 0) {
+      this.totalMessageCount = resumeState?.messageCount ?? existing.length;
       this.flushedToDisk = true;
-      offsetSeconds = resumeState.lastOffsetSeconds;
+      for (const msg of existing) this.seenIds.add(msg.id);
+      // Restore offset from resume state, or derive from last message
+      if (resumeState) {
+        offsetSeconds = resumeState.lastOffsetSeconds;
+      } else {
+        const lastMsg = existing[existing.length - 1];
+        if (lastMsg?.offsetMs) offsetSeconds = lastMsg.offsetMs / 1000;
+      }
       this.logger.info(
         `[TwitchVodChat] Resuming from ${this.totalMessageCount} messages (offset ${offsetSeconds}s)`,
       );
-      // Load existing messages for dedup
-      const existing = await this.loadExistingMessages();
-      for (const msg of existing) this.seenIds.add(msg.id);
     }
 
     this.emit("start");

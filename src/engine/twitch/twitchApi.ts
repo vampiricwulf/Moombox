@@ -147,6 +147,22 @@ export async function getStreamInfo(
     info.profileImageUrl = metadataResult.profileImageURL;
   }
 
+  // If profileImageURL wasn't in the persisted query response, fetch it directly
+  if (!info.profileImageUrl) {
+    try {
+      const safeLogin = channelLogin.replace(/[^a-zA-Z0-9_]/g, "");
+      const userResult = await gqlRequest(
+        { query: `{ user(login: "${safeLogin}") { profileImageURL(width: 300) } }` },
+        authToken,
+      );
+      if (userResult?.data?.user?.profileImageURL) {
+        info.profileImageUrl = userResult.data.user.profileImageURL;
+      }
+    } catch {
+      // Non-critical — avatar is just a fallback
+    }
+  }
+
   return info;
 }
 
@@ -259,13 +275,25 @@ export async function getVodInfo(
     duration = video.lengthSeconds;
   }
 
+  // Twitch GQL returns thumbnail URLs with either template vars (%{width}x%{height})
+  // or small hardcoded dimensions (90x60). Replace with 640x360.
+  let thumbnailUrl: string | undefined = video.previewThumbnailURL;
+  if (thumbnailUrl) {
+    thumbnailUrl = thumbnailUrl
+      .replace("%{width}", "640")
+      .replace("%{height}", "360")
+      .replace("{width}", "640")
+      .replace("{height}", "360")
+      .replace(/[-_](\d+)x(\d+)\./, "-640x360.");
+  }
+
   return {
     vodId,
     title: video.title || "",
     channelLogin: video.owner?.login || "",
     channelDisplayName: video.owner?.displayName || "",
     duration,
-    thumbnailUrl: video.previewThumbnailURL,
+    thumbnailUrl,
     createdAt: video.createdAt || new Date().toISOString(),
     viewCount: video.viewCount,
     gameCategory: video.game?.displayName,
