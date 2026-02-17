@@ -11,11 +11,15 @@ import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
+import { TwitchService } from "../../engine/twitch/index.js";
 import { ChatDownloader, ChatApi } from "../../engine/chat/index.js";
+import { TwitchChatDownloader } from "../../engine/twitch/twitchChat.js";
 import { createEmptyVideoInfo, type VideoInfo, type StreamStatus } from "../../types/youtube.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
-import { STREAM_RECHECK_INTERVAL_MS, PROBE_JITTER_MAX_MS, MAX_CONSECUTIVE_PROBE_ERRORS } from "../../constants.js";
+import { STREAM_RECHECK_INTERVAL_MS, PROBE_JITTER_MAX_MS, MAX_CONSECUTIVE_PROBE_ERRORS, TWITCH_URLS } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
+import { extractTwitchLoginFromJob } from "../../utils/twitch.js";
+import type { TwitchStreamInfo, TwitchHlsVariant } from "../../types/twitch.js";
 
 /**
  * Stream processing result
@@ -26,6 +30,10 @@ export interface StreamProcessResult {
   isVod: boolean;
   error?: string;
   chatDownloader?: ChatDownloader;
+  // Twitch-specific
+  twitchStreamInfo?: TwitchStreamInfo;
+  twitchVariant?: TwitchHlsVariant;
+  twitchChatDownloader?: TwitchChatDownloader;
 }
 
 /**
@@ -34,7 +42,7 @@ export interface StreamProcessResult {
 export class StreamProcessor {
   private logger: Logger;
   private running: boolean = true;
-  private activeChatDownloaders: Map<string, ChatDownloader> = new Map();
+  private activeChatDownloaders: Map<string, ChatDownloader | TwitchChatDownloader> = new Map();
 
   constructor() {
     this.logger = Logger.getInstance();
@@ -56,6 +64,12 @@ export class StreamProcessor {
    */
   async process(job: Job): Promise<StreamProcessResult> {
     this.running = true;
+
+    // Twitch path — completely separate from YouTube
+    if (job.platform === "twitch") {
+      return this.processTwitch(job);
+    }
+
     const db = await Database.getInstance();
     const yt = YouTubeService.getInstance();
     await yt.init();
@@ -125,6 +139,193 @@ export class StreamProcessor {
     const videoInfo = await yt.getVideoInfo(job.videoId);
     await this.updateJobMetadata(job, videoInfo, db);
     return this.handleStreamStatus(job, videoInfo, db, false);
+  }
+
+  /**
+   * Process a Twitch job.
+   * Simpler state model than YouTube: stream is either live or offline.
+   */
+  private async processTwitch(job: Job): Promise<StreamProcessResult> {
+    const db = await Database.getInstance();
+    const twitch = TwitchService.getInstance();
+    await twitch.init();
+
+    // Extract channel login from job ID (tw_{streamId}) or URL
+    const login = extractTwitchLoginFromJob(job);
+    if (!login) {
+      return {
+        videoInfo: createEmptyVideoInfo(job.videoId),
+        shouldDownload: false,
+        isVod: false,
+        error: "Could not determine Twitch channel login",
+      };
+    }
+
+    // Check if this is a VOD job (tw_v{vodId})
+    const isVodJob = job.videoId.startsWith("tw_v");
+
+    if (isVodJob) {
+      // VOD: fetch metadata and proceed directly
+      const vodId = job.videoId.replace("tw_v", "");
+      try {
+        const vodInfo = await twitch.getVodInfo(vodId);
+        await db.updateJob(job.id, {
+          status: "Downloading",
+          isVod: true,
+          title: `${vodInfo.channelDisplayName} — ${vodInfo.title}`,
+          channelName: vodInfo.channelDisplayName,
+          thumbnailUrl: vodInfo.thumbnailUrl,
+          lengthSeconds: vodInfo.duration,
+          twitchCategory: vodInfo.gameCategory,
+          chatStatus: "unavailable",  // VOD chat replay not yet implemented
+        });
+
+        const variants = await twitch.getVodHlsPlaylist(vodId);
+        const config = ConfigManager.getInstance().get();
+        const variant = twitch.selectBestVariant(
+          variants,
+          job.twitchQuality,
+          config.downloader.max_video_resolution,
+        );
+
+        if (!variant) {
+          return {
+            videoInfo: createEmptyVideoInfo(job.videoId),
+            shouldDownload: false,
+            isVod: true,
+            error: "No suitable HLS quality found for VOD",
+          };
+        }
+
+        this.logger.info(`[StreamProcessor] Twitch VOD ${vodId}: using quality ${variant.name}`);
+        return {
+          videoInfo: createEmptyVideoInfo(job.videoId),
+          shouldDownload: true,
+          isVod: true,
+          twitchVariant: variant,
+        };
+      } catch (e) {
+        return {
+          videoInfo: createEmptyVideoInfo(job.videoId),
+          shouldDownload: false,
+          isVod: true,
+          error: `Twitch VOD error: ${getErrorMessage(e)}`,
+        };
+      }
+    }
+
+    // Live stream: check if stream is still live
+    const streamInfo = await twitch.getStreamInfo(login);
+    if (!streamInfo || !streamInfo.isLive) {
+      this.logger.info(`[StreamProcessor] Twitch channel ${login} is offline`);
+      return {
+        videoInfo: createEmptyVideoInfo(job.videoId),
+        shouldDownload: false,
+        isVod: false,
+        error: "Twitch channel is offline",
+      };
+    }
+
+    // Update job metadata from stream info
+    const updates: Partial<Job> = {};
+    if (streamInfo.title) updates.title = `${streamInfo.channelDisplayName} — ${streamInfo.title}`;
+    if (streamInfo.channelDisplayName) updates.channelName = streamInfo.channelDisplayName;
+    if (streamInfo.thumbnailUrl) updates.thumbnailUrl = streamInfo.thumbnailUrl;
+    if (streamInfo.startedAt && !job.streamStartTime) updates.streamStartTime = streamInfo.startedAt;
+    if (streamInfo.gameCategory) updates.twitchCategory = streamInfo.gameCategory;
+    if (Object.keys(updates).length > 0) {
+      await db.updateJob(job.id, updates);
+      Object.assign(job, updates);
+    }
+
+    // Get HLS variants
+    const variants = await twitch.getHlsMasterPlaylist(login);
+    const config = ConfigManager.getInstance().get();
+    const variant = twitch.selectBestVariant(
+      variants,
+      job.twitchQuality,
+      config.downloader.max_video_resolution,
+    );
+
+    if (!variant) {
+      return {
+        videoInfo: createEmptyVideoInfo(job.videoId),
+        shouldDownload: false,
+        isVod: false,
+        error: "No suitable HLS quality found",
+      };
+    }
+
+    this.logger.info(
+      `[StreamProcessor] Twitch LIVE ${login}: ${variant.name} (${variant.width}x${variant.height})`,
+    );
+
+    await db.updateJob(job.id, {
+      status: "Live",
+      isVod: false,
+      twitchQuality: variant.name,
+    });
+
+    // Start Twitch chat downloader
+    let twitchChatDl: TwitchChatDownloader | undefined;
+    if (config.downloader.download_chat !== false) {
+      const stagingDir = config.downloader.staging_directory
+        ? path.join(config.downloader.staging_directory, job.id)
+        : path.join("./staging", job.id);
+      await fs.ensureDir(stagingDir);
+      const chatPath = path.join(stagingDir, "chat.json");
+
+      twitchChatDl = new TwitchChatDownloader({
+        channelLogin: login,
+        channelDisplayName: streamInfo.channelDisplayName,
+        channelId: streamInfo.channelId,
+        streamId: streamInfo.streamId,
+        outputFile: chatPath,
+        streamStartTime: streamInfo.startedAt,
+        authToken: twitch.getAuthToken(),
+      });
+
+      // Track for shutdown propagation
+      this.activeChatDownloaders.set(job.id, twitchChatDl);
+
+      await db.updateJob(job.id, { chatStatus: "downloading" });
+
+      twitchChatDl.on("progress", (data: any) => {
+        db.updateJob(job.id, { totalChatMessages: data.messageCount }).catch(() => {});
+      });
+    }
+
+    // Send live notification
+    NotificationManager.getInstance().send(
+      "Twitch Stream Live",
+      `Now live: ${job.title}`,
+      NotificationType.SUCCESS,
+      [
+        { name: "Channel", value: streamInfo.channelDisplayName, inline: true },
+        { name: "Quality", value: variant.name, inline: true },
+        ...(streamInfo.gameCategory ? [{ name: "Category", value: streamInfo.gameCategory, inline: true }] : []),
+      ],
+      {
+        url: `${TWITCH_URLS.BASE}/${login}`,
+        thumbnail: streamInfo.thumbnailUrl,
+        event: "live",
+      },
+    );
+
+    // Detach chat downloader from StreamProcessor before handing to orchestrator
+    // (same pattern as YouTube's detachChatDownloader — prevents double-stop on shutdown)
+    if (twitchChatDl) {
+      this.activeChatDownloaders.delete(job.id);
+    }
+
+    return {
+      videoInfo: createEmptyVideoInfo(job.videoId),
+      shouldDownload: true,
+      isVod: false,
+      twitchStreamInfo: streamInfo,
+      twitchVariant: variant,
+      twitchChatDownloader: twitchChatDl,
+    };
   }
 
   /**
@@ -386,14 +587,25 @@ export class StreamProcessor {
         // Probe succeeded — reset error counter
         consecutiveErrors = 0;
 
-        // Update scheduled start time if available
+        // Update scheduled start time if available (persist to DB if not yet stored)
         if (probeInfo.scheduledStartTime) {
           scheduledStartTime = probeInfo.scheduledStartTime;
+          if (!job.streamStartTime) {
+            job.streamStartTime = probeInfo.scheduledStartTime;
+            await db.updateJob(job.id, {
+              streamStartTime: probeInfo.scheduledStartTime,
+              lastRecheckAt: new Date().toISOString(),
+            });
+          } else {
+            await db.updateJob(job.id, {
+              lastRecheckAt: new Date().toISOString(),
+            });
+          }
+        } else {
+          await db.updateJob(job.id, {
+            lastRecheckAt: new Date().toISOString(),
+          });
         }
-
-        await db.updateJob(job.id, {
-          lastRecheckAt: new Date().toISOString(),
-        });
 
         this.logger.debug(
           `[StreamProcessor] ${job.videoId} probe${membersOnly ? " (auth)" : ""}: ${probeInfo.streamStatus}` +
@@ -629,7 +841,7 @@ export class StreamProcessor {
         { name: "Video ID", value: job.videoId, inline: true },
       ],
       {
-        url: `https://www.youtube.com/watch?v=${job.videoId}`,
+        url: job.url || `https://www.youtube.com/watch?v=${job.videoId}`,
         thumbnail: job.thumbnailUrl,
         event: "live",
       },

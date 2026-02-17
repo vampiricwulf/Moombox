@@ -39,6 +39,7 @@ export interface Job {
   url: string;
   title: string;
   channelName: string;
+  platform?: "youtube" | "twitch"; // defaults to "youtube" for backwards compat
   status: JobStatus;
   progress: string; // e.g. "(A: 10/100 V: 10/100)" for live, "45.3%" for VOD
   percent: number; // 0-100 for progress bar
@@ -77,6 +78,9 @@ export interface Job {
   chatFilename?: string; // Relative path to chat.json
   // Segment gap tracking (segments lost during parallel catch-up)
   gaps?: Array<{ from: number; to: number; stream: "video" | "audio" }>;
+  // Twitch-specific fields
+  twitchQuality?: string;       // Selected HLS quality name (e.g., "chunked", "720p60")
+  twitchCategory?: string;      // Current game/category
   // Advanced download options (manual format selection)
   selectedVideoItag?: number;   // User-chosen video format itag
   selectedAudioItag?: number;   // User-chosen audio format itag
@@ -100,16 +104,21 @@ export interface NewJobData {
   url: string;
   title: string;
   channelName: string;
+  platform?: "youtube" | "twitch";
   thumbnailUrl?: string;
   description?: string;
   outputDirectory?: string;
   manuallyAdded?: boolean;
   allowNonStream?: boolean; // From include_non_live_content setting
+  streamStartTime?: string; // ISO timestamp (Twitch provides this immediately)
   // Advanced download options
   selectedVideoItag?: number;
   selectedAudioItag?: number;
   startTime?: number;
   endTime?: number;
+  // Twitch-specific
+  twitchQuality?: string;   // Quality preference (e.g., "best", "720p")
+  twitchCategory?: string;  // Game/category
 }
 
 /**

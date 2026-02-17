@@ -642,32 +642,39 @@ sl-progress-bar {
     align-items: flex-start;
 }
 
-/* Cookie Status */
-#cookie-status {
+/* Status Bar Right */
+#status-bar-right {
     display: flex;
     align-items: center;
-    gap: var(--sl-spacing-x-small);
+    gap: var(--sl-spacing-small);
 }
 
-#cookie-status.authenticated {
-    color: var(--sl-color-success-600);
+#status-warnings {
+    display: flex;
+    align-items: center;
+    gap: var(--sl-spacing-small);
 }
 
-#cookie-status.no-cookies {
-    color: var(--sl-color-warning-600);
-}
-
-#cookie-status.not-authenticated {
+.status-warning {
+    cursor: pointer;
+    font-size: var(--sl-font-size-small);
     color: var(--sl-color-danger-600);
 }
+.status-warning:hover { text-decoration: underline; }
 
-#cookie-status.checking {
-    color: var(--sl-color-neutral-500);
+#yt-indicator, #tw-indicator {
+    font-weight: 600;
+    font-size: var(--sl-font-size-small);
 }
 
-#cookie-status.checking sl-icon {
-    animation: spin 1s linear infinite;
-}
+.indicator-ok    { color: var(--sl-color-success-600); }
+.indicator-warn  { color: var(--sl-color-warning-600); }
+.indicator-error { color: var(--sl-color-danger-600); }
+.indicator-off   { color: var(--sl-color-neutral-500); }
+
+#btn-refresh-cookies { font-size: var(--sl-font-size-medium); color: var(--sl-color-neutral-600); }
+#btn-refresh-cookies:hover { color: var(--sl-color-neutral-900); }
+#btn-refresh-cookies.checking { animation: spin 1s linear infinite; }
 
 @keyframes spin {
     from {

@@ -283,10 +283,13 @@ export class PlayerController {
       // Author
       const authorSpan = document.createElement("span");
       authorSpan.className = "chat-msg-author";
-      if (msg.authorBadges) {
-        if (msg.authorBadges.includes("owner")) authorSpan.classList.add("owner");
-        else if (msg.authorBadges.includes("moderator")) authorSpan.classList.add("moderator");
-        else if (msg.authorBadges.includes("member")) authorSpan.classList.add("member");
+      if (msg.authorBadges && Array.isArray(msg.authorBadges)) {
+        // Twitch badges use "type/tier" format (e.g. "subscriber/12"), so check prefix
+        const hasBadge = (name) => msg.authorBadges.some((b) => b === name || b.startsWith(name + "/"));
+        if (hasBadge("owner") || hasBadge("broadcaster")) authorSpan.classList.add("owner");
+        else if (hasBadge("moderator")) authorSpan.classList.add("moderator");
+        else if (hasBadge("member") || hasBadge("subscriber")) authorSpan.classList.add("member");
+        else if (hasBadge("vip")) authorSpan.classList.add("member");
       }
       authorSpan.textContent = msg.authorName + ": ";
       div.appendChild(authorSpan);
@@ -431,8 +434,7 @@ export class PlayerController {
       if (spawned >= maxPerFrame) break;
 
       const msg = messages[i];
-      const parts = msg.message || [];
-      const html = this.renderChatMessageParts(parts);
+      const html = this.renderChatMessageParts(msg.message || []);
       if (!html) continue;
 
       // Create element off-screen to measure its actual height
@@ -505,6 +507,11 @@ export class PlayerController {
   }
 
   renderChatMessageParts(parts) {
+    // Twitch chat stores message as a plain string; YouTube uses MessagePart[]
+    if (typeof parts === "string") {
+      return this.app.escapeHtml(parts);
+    }
+    if (!Array.isArray(parts)) return "";
     return parts
       .map((part) => {
         if (part.type === "emoji" && part.emojiUrl) {

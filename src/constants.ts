@@ -57,12 +57,12 @@ export const DEFAULT_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
  */
 export const TV_DOWNGRADED_CLIENT: YouTubeClientConfig = {
   clientName: "TVHTML5",
-  clientVersion: "4",
+  clientVersion: "5.20260114",
   clientId: "7",
   userAgent: USER_AGENTS.TV,
   context: {
     clientName: "TVHTML5",
-    clientVersion: "4",
+    clientVersion: "5.20260114",
     hl: "en",
   },
 };
@@ -133,6 +133,64 @@ export const ANDROID_SDKLESS_CLIENT: YouTubeClientConfig = {
     deviceModel: "Pixel 8 Pro",
   },
 };
+
+// =============================================================================
+// TWITCH CONSTANTS
+// =============================================================================
+
+/**
+ * Twitch API URLs
+ */
+export const TWITCH_URLS = {
+  BASE: "https://www.twitch.tv",
+  GQL: "https://gql.twitch.tv/gql",
+  USHER_LIVE: "https://usher.ttvnw.net/api/channel/hls",
+  USHER_VOD: "https://usher.ttvnw.net/vod",
+  EMOTE_CDN: "https://static-cdn.jtvnw.net/emoticons/v2",
+  PREVIEW_CDN: "https://static-cdn.jtvnw.net/previews-ttv",
+  IRC_WS: "wss://irc-ws.chat.twitch.tv:443",
+  DECAPI_UPTIME: "https://decapi.me/twitch/uptime",
+  OAUTH_VALIDATE: "https://id.twitch.tv/oauth2/validate",
+} as const;
+
+/**
+ * Public GQL Client-ID (same as yt-dlp / streamlink)
+ */
+export const TWITCH_GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+
+/**
+ * GQL persisted query hashes (from yt-dlp twitch.py, battle-tested)
+ */
+export const TWITCH_GQL_HASHES = {
+  StreamMetadata: "b57f9b910f8cd1a4659d894fe7550ccc81ec9052c01e438b290fd66a040b9b93",
+  ComscoreStreamingQuery: "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
+  PlaybackAccessToken: "ed230aa1e33e07eebb8928504583da78a5173989fadfb11c9e8d60b96e87e3e8",
+  VideoMetadata: "45111672eea2e507f8ba44d101a61862f9c56b11dee09a15634cb75cb9b9084d",
+} as const;
+
+/**
+ * Twitch third-party emote API endpoints
+ */
+export const TWITCH_EMOTE_APIS = {
+  BTTV_GLOBAL: "https://api.betterttv.net/3/cached/emotes/global",
+  BTTV_CHANNEL: "https://api.betterttv.net/3/cached/users/twitch",
+  FFZ_GLOBAL: "https://api.frankerfacez.com/v1/set/global",
+  FFZ_CHANNEL: "https://api.frankerfacez.com/v1/room/id",
+  SEVENTV_USER: "https://7tv.io/v3/users/twitch",
+  SEVENTV_GLOBAL: "https://7tv.io/v3/emote-sets/global",
+} as const;
+
+/**
+ * Twitch IRC constants
+ */
+export const TWITCH_IRC = {
+  /** Maximum messages before flushing to disk */
+  FLUSH_THRESHOLD: 50_000,
+  /** Messages to keep in memory after flush */
+  KEEP_IN_MEMORY: 5_000,
+  /** Consecutive errors before giving up */
+  MAX_CONSECUTIVE_ERRORS: 20,
+} as const;
 
 // =============================================================================
 // DOWNLOAD CONSTANTS

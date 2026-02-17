@@ -173,7 +173,7 @@ export class TrimService {
           },
         ],
         {
-          url: `https://www.youtube.com/watch?v=${sourceJob.videoId}`,
+          url: sourceJob.url || `https://www.youtube.com/watch?v=${sourceJob.videoId}`,
           thumbnail: sourceJob.thumbnailUrl,
           event: "trim_created",
         },

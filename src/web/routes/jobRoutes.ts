@@ -10,12 +10,14 @@ import { Logger } from "../../core/logger.js";
 import { Database } from "../../core/database.js";
 import { ConfigManager } from "../../core/config.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
+import { TwitchService } from "../../engine/twitch/index.js";
 import { NotificationManager, NotificationType } from "../../core/notifications.js";
 import type { Job } from "../../types/jobs.js";
 import { asyncHandler } from "./errorHandler.js";
 import { createRateLimiter } from "./rateLimiter.js";
 import { addJobSchema, formatValidationErrors } from "../../types/schemas.js";
 import { validateOffsetPagination } from "./validators.js";
+import { TWITCH_URLS } from "../../constants.js";
 
 export interface JobRoutesContext {
   jobLogs: Map<string, string[]>;
@@ -312,99 +314,189 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       });
     }
 
-    const { videoId, selectedVideoItag, selectedAudioItag, startTime, endTime } = validation.data;
-
+    const data = validation.data;
     const db = await Database.getInstance();
 
-    const exists = await db.jobExists(videoId);
-    if (exists) {
-      return res.status(409).json({ error: "Job already exists" });
-    }
+    // Branch on platform
+    if ("platform" in data && data.platform === "twitch") {
+      // --- Twitch job ---
+      const twitchData = data as { platform: "twitch"; videoId: string; twitchType?: string; qualityPreference?: string };
+      const login = twitchData.videoId.toLowerCase();
+      const isVod = twitchData.twitchType === "vod";
 
-    // Fetch metadata
-    let title = "Manual Add";
-    let channelName = "Manual";
+      // Build job ID
+      let jobId: string;
+      let url: string;
+      let title = "Manual Add";
+      let channelName = login;
+      let thumbnailUrl: string | undefined;
+      let streamStartTime: string | undefined;
+      let twitchCategory: string | undefined;
 
-    try {
-      const yt = YouTubeService.getInstance();
-      await yt.init();
-      const metadata = await yt.getMetadata(videoId);
-      title = metadata.title || title;
-      channelName = metadata.channelName || channelName;
-    } catch (e) {
-      logger.warn(`Could not fetch metadata for ${videoId}`);
-    }
+      const twitch = TwitchService.getInstance();
+      await twitch.init();
 
-    // Build advanced options (already validated by schema)
-    const advancedOpts: Record<string, number | undefined> = {
-      selectedVideoItag,
-      selectedAudioItag,
-      startTime,
-      endTime,
-    };
-
-    const job = await db.addJob({
-      videoId,
-      url: `https://www.youtube.com/watch?v=${videoId}`,
-      title,
-      channelName,
-      thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-      manuallyAdded: true,
-      ...advancedOpts,
-    });
-
-    if (job) {
-      logger.info(`Added job: ${title} (${videoId})`);
-      ctx.broadcast({ type: "job_added", payload: job });
-
-      // Build notification fields with advanced options
-      const fields: Array<{ name: string; value: string; inline?: boolean }> = [
-        { name: "Channel", value: channelName, inline: true },
-        { name: "Video ID", value: videoId, inline: true },
-      ];
-
-      // Add format selection fields if specified
-      if (advancedOpts.selectedVideoItag != null) {
-        const formatLabel = advancedOpts.selectedVideoItag === -1
-          ? "None (audio only)"
-          : `itag ${advancedOpts.selectedVideoItag}`;
-        fields.push({ name: "Video Format", value: formatLabel, inline: true });
-      }
-      if (advancedOpts.selectedAudioItag != null) {
-        const formatLabel = advancedOpts.selectedAudioItag === -1
-          ? "None (video only)"
-          : `itag ${advancedOpts.selectedAudioItag}`;
-        fields.push({ name: "Audio Format", value: formatLabel, inline: true });
+      if (isVod) {
+        jobId = `tw_v${login}`;
+        url = `${TWITCH_URLS.BASE}/videos/${login}`;
+        try {
+          const vodInfo = await twitch.getVodInfo(login);
+          title = `${vodInfo.channelDisplayName} — ${vodInfo.title}`;
+          channelName = vodInfo.channelDisplayName;
+          thumbnailUrl = vodInfo.thumbnailUrl;
+          streamStartTime = vodInfo.createdAt;
+          twitchCategory = vodInfo.gameCategory;
+        } catch {
+          logger.warn(`Could not fetch Twitch VOD metadata for ${login}`);
+        }
+      } else {
+        // Live channel: check if live and get stream ID
+        const streamInfo = await twitch.getStreamInfo(login);
+        if (streamInfo && streamInfo.isLive) {
+          jobId = `tw_${streamInfo.streamId}`;
+          title = `${streamInfo.channelDisplayName} — ${streamInfo.title || "Live"}`;
+          channelName = streamInfo.channelDisplayName;
+          thumbnailUrl = streamInfo.thumbnailUrl;
+          streamStartTime = streamInfo.startedAt;
+          twitchCategory = streamInfo.gameCategory;
+        } else {
+          jobId = `tw_manual_${login}_${Date.now()}`;
+          title = `${login} — Manual Add`;
+        }
+        url = `${TWITCH_URLS.BASE}/${login}`;
       }
 
-      // Add time range if specified
-      if (advancedOpts.startTime != null || advancedOpts.endTime != null) {
-        const startMin = Math.floor((advancedOpts.startTime || 0) / 60);
-        const startSec = (advancedOpts.startTime || 0) % 60;
-        const startStr = `${startMin}:${String(startSec).padStart(2, "0")}`;
-        const endStr = advancedOpts.endTime != null
-          ? `${Math.floor(advancedOpts.endTime / 60)}:${String(advancedOpts.endTime % 60).padStart(2, "0")}`
-          : "end";
-        const duration = advancedOpts.endTime != null
-          ? advancedOpts.endTime - (advancedOpts.startTime || 0)
-          : null;
-        const rangeValue = duration != null
-          ? `${startStr} - ${endStr} (${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")})`
-          : `${startStr} - ${endStr}`;
-        fields.push({ name: "Time Range", value: rangeValue, inline: false });
+      const exists = await db.jobExists(jobId);
+      if (exists) {
+        return res.status(409).json({ error: "Job already exists" });
       }
 
-      NotificationManager.getInstance().send(
-        "Video Added",
-        `Manually added: ${title}`,
-        NotificationType.INFO,
-        fields,
-        { url: `https://www.youtube.com/watch?v=${videoId}`, thumbnail: job.thumbnailUrl, event: "added" },
-      );
+      const job = await db.addJob({
+        videoId: jobId,
+        url,
+        title,
+        channelName,
+        platform: "twitch",
+        thumbnailUrl,
+        manuallyAdded: true,
+        isVod: isVod || undefined,
+        streamStartTime,
+        twitchCategory,
+        twitchQuality: twitchData.qualityPreference,
+      });
 
-      res.status(201).json(job);
+      if (job) {
+        logger.info(`Added Twitch job: ${title} (${jobId})`);
+        ctx.broadcast({ type: "job_added", payload: job });
+        NotificationManager.getInstance().send(
+          "Twitch Video Added",
+          `Manually added: ${title}`,
+          NotificationType.INFO,
+          [
+            { name: "Channel", value: channelName, inline: true },
+            { name: "Stream ID", value: jobId, inline: true },
+          ],
+          { url, thumbnail: thumbnailUrl, event: "added" },
+        );
+        res.status(201).json(job);
+      } else {
+        res.status(500).json({ error: "Failed to create job" });
+      }
     } else {
-      res.status(500).json({ error: "Failed to create job" });
+      // --- YouTube job ---
+      const ytData = data as { videoId: string; selectedVideoItag?: number; selectedAudioItag?: number; startTime?: number; endTime?: number };
+      const { videoId, selectedVideoItag, selectedAudioItag, startTime, endTime } = ytData;
+
+      const exists = await db.jobExists(videoId);
+      if (exists) {
+        return res.status(409).json({ error: "Job already exists" });
+      }
+
+      // Fetch metadata
+      let title = "Manual Add";
+      let channelName = "Manual";
+
+      try {
+        const yt = YouTubeService.getInstance();
+        await yt.init();
+        const metadata = await yt.getMetadata(videoId);
+        title = metadata.title || title;
+        channelName = metadata.channelName || channelName;
+      } catch (e) {
+        logger.warn(`Could not fetch metadata for ${videoId}`);
+      }
+
+      // Build advanced options (already validated by schema)
+      const advancedOpts: Record<string, number | undefined> = {
+        selectedVideoItag,
+        selectedAudioItag,
+        startTime,
+        endTime,
+      };
+
+      const job = await db.addJob({
+        videoId,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        title,
+        channelName,
+        thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+        manuallyAdded: true,
+        ...advancedOpts,
+      });
+
+      if (job) {
+        logger.info(`Added job: ${title} (${videoId})`);
+        ctx.broadcast({ type: "job_added", payload: job });
+
+        // Build notification fields with advanced options
+        const fields: Array<{ name: string; value: string; inline?: boolean }> = [
+          { name: "Channel", value: channelName, inline: true },
+          { name: "Video ID", value: videoId, inline: true },
+        ];
+
+        // Add format selection fields if specified
+        if (advancedOpts.selectedVideoItag != null) {
+          const formatLabel = advancedOpts.selectedVideoItag === -1
+            ? "None (audio only)"
+            : `itag ${advancedOpts.selectedVideoItag}`;
+          fields.push({ name: "Video Format", value: formatLabel, inline: true });
+        }
+        if (advancedOpts.selectedAudioItag != null) {
+          const formatLabel = advancedOpts.selectedAudioItag === -1
+            ? "None (video only)"
+            : `itag ${advancedOpts.selectedAudioItag}`;
+          fields.push({ name: "Audio Format", value: formatLabel, inline: true });
+        }
+
+        // Add time range if specified
+        if (advancedOpts.startTime != null || advancedOpts.endTime != null) {
+          const startMin = Math.floor((advancedOpts.startTime || 0) / 60);
+          const startSec = (advancedOpts.startTime || 0) % 60;
+          const startStr = `${startMin}:${String(startSec).padStart(2, "0")}`;
+          const endStr = advancedOpts.endTime != null
+            ? `${Math.floor(advancedOpts.endTime / 60)}:${String(advancedOpts.endTime % 60).padStart(2, "0")}`
+            : "end";
+          const duration = advancedOpts.endTime != null
+            ? advancedOpts.endTime - (advancedOpts.startTime || 0)
+            : null;
+          const rangeValue = duration != null
+            ? `${startStr} - ${endStr} (${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")})`
+            : `${startStr} - ${endStr}`;
+          fields.push({ name: "Time Range", value: rangeValue, inline: false });
+        }
+
+        NotificationManager.getInstance().send(
+          "Video Added",
+          `Manually added: ${title}`,
+          NotificationType.INFO,
+          fields,
+          { url: `https://www.youtube.com/watch?v=${videoId}`, thumbnail: job.thumbnailUrl, event: "added" },
+        );
+
+        res.status(201).json(job);
+      } else {
+        res.status(500).json({ error: "Failed to create job" });
+      }
     }
   }));
 
@@ -436,10 +528,10 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       NotificationType.CANCELLED,
       [
         { name: "Channel", value: job.channelName, inline: true },
-        { name: "Video ID", value: job.videoId, inline: true },
+        { name: job.platform === "twitch" ? "Stream ID" : "Video ID", value: job.videoId, inline: true },
       ],
       {
-        url: `https://www.youtube.com/watch?v=${job.videoId}`,
+        url: job.url || `https://www.youtube.com/watch?v=${job.videoId}`,
         thumbnail: job.thumbnailUrl,
         event: "cancelled",
       },

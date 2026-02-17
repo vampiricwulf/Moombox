@@ -224,7 +224,14 @@ export class ConfigManager {
           defaults.auto_cookies?.browser_profile_dir,
       },
       notifications: config.notifications,
-      channels: config.channels,
+      // Normalize channel configs (TOML snake_case → camelCase)
+      channels: config.channels?.map((ch: any) => {
+        const { quality_preference, ...rest } = ch;
+        return {
+          ...rest,
+          qualityPreference: ch.qualityPreference || quality_preference,
+        };
+      }),
     };
   }
 
@@ -452,6 +459,10 @@ export class ConfigManager {
       for (const ch of config.channels) {
         lines.push("");
         lines.push("[[channels]]");
+        // Emit platform only when non-default (twitch)
+        if (ch.platform && ch.platform !== "youtube") {
+          lines.push(`platform = "${esc(ch.platform)}"`);
+        }
         lines.push(`id = "${esc(ch.id)}"`);
         if (ch.name) lines.push(`name = "${esc(ch.name)}"`);
         if (ch.output_directory)
@@ -466,6 +477,10 @@ export class ConfigManager {
         }
         if (ch.max_feed_items !== undefined) {
           lines.push(`max_feed_items = ${ch.max_feed_items}`);
+        }
+        // Twitch-specific: quality preference
+        if (ch.qualityPreference) {
+          lines.push(`quality_preference = "${esc(ch.qualityPreference)}"`);
         }
         if (ch.terms) {
           if (typeof ch.terms === "string") {

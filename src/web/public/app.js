@@ -17,6 +17,7 @@ class MoomboxApp {
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 10;
     this.reconnectDelay = 1000;
+    this.autoCookieReloginRequired = null;
 
     // Module controllers
     this.setup = new SetupController(this);
@@ -149,12 +150,22 @@ class MoomboxApp {
       });
     }
 
-    // Cookie status click to recheck
-    const cookieStatus = document.getElementById("cookie-status");
-    if (cookieStatus) {
-      cookieStatus.style.cursor = "pointer";
-      cookieStatus.title = "Click to recheck cookies";
-      cookieStatus.addEventListener("click", () => this.recheckCookies());
+    // Refresh cookies button
+    const refreshBtn = document.getElementById("btn-refresh-cookies");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", () => this.recheckCookies());
+    }
+
+    // Status warnings — delegated click
+    const warningsEl = document.getElementById("status-warnings");
+    if (warningsEl) {
+      warningsEl.addEventListener("click", (e) => {
+        const warning = e.target.closest(".status-warning");
+        if (!warning) return;
+        const action = warning.dataset.action;
+        if (action === "yt-relogin") this.settings.startAutoCookieSetup("youtube");
+        else if (action === "tw-relogin") this.settings.startAutoCookieSetup("twitch");
+      });
     }
 
     // Event delegation for job items (prevents memory leaks from per-item listeners)
@@ -192,6 +203,7 @@ class MoomboxApp {
         this.settings.populateConfigForm();
         this.settings.renderChannelsList();
         this.settings.renderNotificationsList();
+        this.updateStatusBar();
       }
     } catch (e) {
       console.error("Failed to load config:", e);
@@ -203,7 +215,10 @@ class MoomboxApp {
       const response = await fetch("/api/status");
       if (response.ok) {
         const status = await response.json();
-        this.updateCookieStatus(status.cookieStatus);
+        this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
+        this.cookieStatus = status.cookieStatus;
+        this.twitchAuthStatus = status.twitchAuthStatus;
+        this.updateStatusBar();
       }
     } catch (e) {
       console.error("Failed to load status:", e);
@@ -211,19 +226,17 @@ class MoomboxApp {
   }
 
   async recheckCookies() {
-    const el = document.getElementById("cookie-status");
-    if (!el) return;
-
-    // Show checking state
-    const originalHtml = el.innerHTML;
-    el.innerHTML = '<sl-icon name="arrow-repeat"></sl-icon> Checking...';
-    el.className = "checking";
+    const btn = document.getElementById("btn-refresh-cookies");
+    if (btn) btn.classList.add("checking");
 
     try {
       const response = await fetch("/api/cookies/recheck", { method: "POST" });
       if (response.ok) {
         const data = await response.json();
-        this.updateCookieStatus(data.cookieStatus);
+        this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
+        this.cookieStatus = data.cookieStatus;
+        this.twitchAuthStatus = data.twitchAuthStatus;
+        this.updateStatusBar();
         this.showToast(
           data.success
             ? "Cookies refreshed successfully"
@@ -231,29 +244,53 @@ class MoomboxApp {
           data.success ? "success" : "primary",
         );
       } else {
-        el.innerHTML = originalHtml;
         this.showToast("Failed to recheck cookies", "danger");
       }
     } catch (e) {
-      el.innerHTML = originalHtml;
       this.showToast("Failed to recheck cookies: " + e.message, "danger");
+    } finally {
+      if (btn) btn.classList.remove("checking");
     }
   }
 
-  updateCookieStatus(cookieStatus) {
-    const el = document.getElementById("cookie-status");
-    if (!el) return;
+  updateStatusBar() {
+    const autoCookiesEnabled = this.config?.auto_cookies?.enabled === true;
 
-    if (!cookieStatus || !cookieStatus.found) {
-      el.className = "no-cookies";
-      el.innerHTML = '<sl-icon name="cookie"></sl-icon> No cookies';
-    } else if (cookieStatus.authenticated) {
-      el.className = "authenticated";
-      el.innerHTML = '<sl-icon name="shield-check"></sl-icon> Authenticated';
-    } else {
-      el.className = "not-authenticated";
-      el.innerHTML =
-        '<sl-icon name="shield-exclamation"></sl-icon> Cookies found (not verified)';
+    // 1. Warnings (clickable, to the left)
+    const warningsEl = document.getElementById("status-warnings");
+    if (warningsEl) {
+      const warnings = [];
+      if (autoCookiesEnabled && this.autoCookieReloginRequired?.youtube)
+        warnings.push('<span class="status-warning" data-action="yt-relogin" title="Click to re-login">YT: Re-login</span>');
+      if (autoCookiesEnabled && this.autoCookieReloginRequired?.twitch)
+        warnings.push('<span class="status-warning" data-action="tw-relogin" title="Click to re-login">TW: Re-login</span>');
+      warningsEl.innerHTML = warnings.join("");
+    }
+
+    // 2. YT indicator (color only)
+    const ytEl = document.getElementById("yt-indicator");
+    if (ytEl) {
+      if (this.autoCookieReloginRequired?.youtube && autoCookiesEnabled) {
+        ytEl.className = "indicator-error"; ytEl.title = "YouTube: Re-login required";
+      } else if (!this.cookieStatus?.found) {
+        ytEl.className = "indicator-warn"; ytEl.title = "YouTube: No cookies";
+      } else if (this.cookieStatus?.authenticated) {
+        ytEl.className = "indicator-ok"; ytEl.title = "YouTube: Authenticated";
+      } else {
+        ytEl.className = "indicator-error"; ytEl.title = "YouTube: Not verified";
+      }
+    }
+
+    // 3. TW indicator (color only)
+    const twEl = document.getElementById("tw-indicator");
+    if (twEl) {
+      if (this.autoCookieReloginRequired?.twitch && autoCookiesEnabled) {
+        twEl.className = "indicator-error"; twEl.title = "Twitch: Re-login required";
+      } else if (this.twitchAuthStatus?.authenticated) {
+        twEl.className = "indicator-ok"; twEl.title = "Twitch: Authenticated";
+      } else {
+        twEl.className = "indicator-off"; twEl.title = "Twitch: Anonymous";
+      }
     }
   }
 
@@ -275,6 +312,8 @@ class MoomboxApp {
       console.log("WebSocket connected");
       this.reconnectAttempts = 0;
       this.updateConnectionStatus(true);
+      // Refresh status (cookie + Twitch auth) on reconnect
+      this.loadStatus();
     };
 
     this.ws.onmessage = (event) => {
@@ -440,20 +479,25 @@ class MoomboxApp {
 
   renderJobItem(job) {
     const statusClass = job.status.toLowerCase().replace("?", "");
+    const isTwitch = job.platform === "twitch";
     const safeVideoId = this.escapeHtml(job.videoId || job.id);
-    const thumbnailUrl =
-      job.thumbnailUrl || `https://i.ytimg.com/vi/${safeVideoId}/mqdefault.jpg`;
+    const ytThumb = `https://i.ytimg.com/vi/${safeVideoId}/mqdefault.jpg`;
+    const thumbnailUrl = job.thumbnailUrl || (isTwitch ? "" : ytThumb);
+    const fallbackThumb = isTwitch ? "" : ytThumb;
     const progress = this.formatProgress(job);
     const percent = job.percent || 0;
+    const platformBadge = isTwitch
+      ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
+      : '';
 
     return `
       <div class="video-item" data-job-id="${this.escapeHtml(job.id)}">
         <div class="thumb">
-          <img src="${this.escapeHtml(thumbnailUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer"
-               onerror="this.src='https://i.ytimg.com/vi/${safeVideoId}/mqdefault.jpg'">
+          <img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+               onerror="this.onerror=null;${fallbackThumb ? `this.src='${this.escapeHtml(fallbackThumb)}'` : "this.style.display='none'"}">
         </div>
         <div class="stream-info">
-          <div class="stream-title" title="${this.escapeHtml(job.title)}">${this.escapeHtml(job.title)}</div>
+          <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>
           <div class="stream-author">${this.escapeHtml(job.channelName)}</div>
         </div>
         <div>
@@ -655,29 +699,40 @@ class MoomboxApp {
       const vDisplay = vTotal ? `${vCurrent}/${vTotal}` : vCurrent;
       const aDisplay = aTotal ? `${aCurrent}/${aTotal}` : aCurrent;
 
+      // Twitch has single muxed HLS stream (no separate audio)
+      const isTwitchSegments = job.platform === "twitch";
       segmentInfo = `<div class="details-row" id="segments-row">
           <span class="details-label">Segments:</span>
-          <span class="details-value" data-field="segments">V: ${vDisplay} | A: ${aDisplay}</span>
+          <span class="details-value" data-field="segments">${isTwitchSegments ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`}</span>
         </div>`;
+    }
+
+    const isTwitch = job.platform === "twitch";
+    // Extract Twitch login from URL or channelName for embed
+    const twitchLogin = isTwitch
+      ? (job.url ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0] : job.channelName || "").toLowerCase()
+      : "";
+    const twitchVodId = isTwitch && job.videoId.startsWith("tw_v") ? job.videoId.slice(4) : "";
+
+    // Build embed HTML
+    let embedHtml;
+    if (isTwitch && twitchVodId) {
+      embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?video=${this.escapeHtml(twitchVodId)}&parent=${location.hostname}" allowfullscreen></iframe>`;
+    } else if (isTwitch && twitchLogin) {
+      embedHtml = `<iframe class="details-embed" src="https://player.twitch.tv/?channel=${this.escapeHtml(twitchLogin)}&parent=${location.hostname}" allowfullscreen></iframe>`;
+    } else {
+      embedHtml = `<iframe class="details-embed" src="https://www.youtube-nocookie.com/embed/${this.escapeHtml(job.videoId)}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
     }
 
     content.innerHTML = `
       <div class="details-top">
         <div class="details-section">
-          <iframe
-            class="details-embed"
-            src="https://www.youtube-nocookie.com/embed/${this.escapeHtml(job.videoId)}"
-            title="YouTube video player"
-            frameborder="0"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-            referrerpolicy="strict-origin-when-cross-origin"
-            allowfullscreen>
-          </iframe>
+          ${embedHtml}
         </div>
 
         <div class="details-section">
           <div class="details-row">
-            <span class="details-label">Video ID:</span>
+            <span class="details-label">${isTwitch ? "Stream ID:" : "Video ID:"}</span>
             <span class="details-value"><code>${this.escapeHtml(job.videoId)}</code></span>
           </div>
           <div class="details-row">
@@ -736,6 +791,33 @@ class MoomboxApp {
             <span class="details-label">Updated:</span>
             <span class="details-value" data-field="updated">${this.formatRelativeTime(job.updatedAt)}</span>
           </div>
+          ${isTwitch && job.twitchCategory ? `
+          <div class="details-row">
+            <span class="details-label">Category:</span>
+            <span class="details-value">${this.escapeHtml(job.twitchCategory)}</span>
+          </div>
+          ` : ""}
+          ${isTwitch && job.twitchQuality ? `
+          <div class="details-row">
+            <span class="details-label">Quality:</span>
+            <span class="details-value">${this.escapeHtml(job.twitchQuality)}</span>
+          </div>
+          ` : ""}
+          ${job.streamStartTime ? (() => {
+            const isScheduled = job.status === "Upcoming" && new Date(job.streamStartTime).getTime() > Date.now();
+            const label = isScheduled ? "Scheduled" : "Stream Start";
+            const value = isScheduled ? new Date(job.streamStartTime).toLocaleString() : this.formatRelativeTime(job.streamStartTime);
+            return `
+          <div class="details-row">
+            <span class="details-label">${label}:</span>
+            <span class="details-value">${this.escapeHtml(value)}</span>
+          </div>
+          ${isScheduled ? `
+          <div class="details-row">
+            <span class="details-label">Starts In:</span>
+            <span class="details-value">${this.formatDurationSeconds(Math.floor((new Date(job.streamStartTime).getTime() - Date.now()) / 1000))}</span>
+          </div>` : ""}`;
+          })() : ""}
           ${job.streamEndTime ? `
           <div class="details-row">
             <span class="details-label">Stream End:</span>
@@ -751,7 +833,7 @@ class MoomboxApp {
         </div>
       </div>
 
-      ${job.selectedVideoItag != null || job.selectedAudioItag != null || job.startTime != null || job.endTime != null ? `
+      ${!isTwitch && (job.selectedVideoItag != null || job.selectedAudioItag != null || job.startTime != null || job.endTime != null) ? `
       <div class="details-section">
         <strong>Advanced Options:</strong>
         ${job.selectedVideoItag != null ? `
@@ -851,9 +933,10 @@ class MoomboxApp {
 
     if (!value) return;
 
-    const videoId = this.extractVideoId(value);
-    if (!videoId) {
-      this.showToast("Invalid YouTube URL or video ID", "warning");
+    // Try unified media target extraction
+    const target = this.extractMediaTarget(value);
+    if (!target) {
+      this.showToast("Invalid YouTube/Twitch URL or ID", "warning");
       return;
     }
 
@@ -861,30 +944,47 @@ class MoomboxApp {
     submitBtn.loading = true;
 
     try {
-      // Build request body with optional advanced options
-      const body = { videoId };
-      const advancedToggle = document.getElementById("advanced-options-toggle");
+      let body;
 
-      if (advancedToggle.checked) {
-        const videoSelect = document.getElementById("video-format-select");
-        const audioSelect = document.getElementById("audio-format-select");
-        const startInput = document.getElementById("start-time-input");
-        const endInput = document.getElementById("end-time-input");
+      if (target.platform === "twitch") {
+        // Reject clips client-side (not supported)
+        if (target.type === "clip") {
+          this.showToast("Twitch clips are not supported. Use a channel or VOD URL.", "warning");
+          submitBtn.loading = false;
+          return;
+        }
+        // Twitch job
+        body = {
+          platform: "twitch",
+          videoId: target.id,
+          twitchType: target.type,
+        };
+      } else {
+        // YouTube job
+        body = { videoId: target.videoId };
+        const advancedToggle = document.getElementById("advanced-options-toggle");
 
-        if (videoSelect.value) {
-          body.selectedVideoItag = parseInt(videoSelect.value, 10);
-        }
-        if (audioSelect.value) {
-          body.selectedAudioItag = parseInt(audioSelect.value, 10);
-        }
+        if (advancedToggle.checked) {
+          const videoSelect = document.getElementById("video-format-select");
+          const audioSelect = document.getElementById("audio-format-select");
+          const startInput = document.getElementById("start-time-input");
+          const endInput = document.getElementById("end-time-input");
 
-        const startTime = this.parseTimeInput(startInput.value);
-        if (startTime !== null && startTime > 0) {
-          body.startTime = startTime;
-        }
-        const endTime = this.parseTimeInput(endInput.value);
-        if (endTime !== null && endTime > 0) {
-          body.endTime = endTime;
+          if (videoSelect.value) {
+            body.selectedVideoItag = parseInt(videoSelect.value, 10);
+          }
+          if (audioSelect.value) {
+            body.selectedAudioItag = parseInt(audioSelect.value, 10);
+          }
+
+          const startTime = this.parseTimeInput(startInput.value);
+          if (startTime !== null && startTime > 0) {
+            body.startTime = startTime;
+          }
+          const endTime = this.parseTimeInput(endInput.value);
+          if (endTime !== null && endTime > 0) {
+            body.endTime = endTime;
+          }
         }
       }
 
@@ -1345,6 +1445,32 @@ class MoomboxApp {
 
   // ===== Utilities =====
 
+  /**
+   * Extract a media target from input. Returns:
+   * - { platform: "youtube", videoId } for YouTube
+   * - { platform: "twitch", type: "channel"|"vod", id } for Twitch
+   * - null if unrecognized
+   */
+  extractMediaTarget(input) {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+
+    // Check for Twitch URLs first
+    if (trimmed.includes("twitch.tv")) {
+      return this.extractTwitchTarget(trimmed);
+    }
+
+    // Try YouTube
+    const videoId = this.extractVideoId(trimmed);
+    if (videoId) return { platform: "youtube", videoId };
+
+    // Try Twitch raw username/VOD
+    const twitchTarget = this.extractTwitchTarget(trimmed);
+    if (twitchTarget) return twitchTarget;
+
+    return null;
+  }
+
   extractVideoId(input) {
     const trimmed = input.trim();
 
@@ -1366,6 +1492,58 @@ class MoomboxApp {
       }
     }
 
+    return null;
+  }
+
+  extractTwitchTarget(input) {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+
+    const reserved = new Set(["directory", "downloads", "jobs", "settings", "videos", "search", "p"]);
+
+    try {
+      let urlStr = trimmed;
+      if (!urlStr.startsWith("http")) {
+        if (urlStr.includes("twitch.tv")) urlStr = "https://" + urlStr;
+      }
+      if (urlStr.startsWith("http")) {
+        const url = new URL(urlStr);
+        const host = url.hostname.replace("www.", "");
+        // clips.twitch.tv/{slug}
+        if (host === "clips.twitch.tv") {
+          const slug = url.pathname.split("/").filter(Boolean)[0];
+          if (slug) return { platform: "twitch", type: "clip", id: slug };
+        }
+        if (host === "twitch.tv") {
+          const parts = url.pathname.split("/").filter(Boolean);
+          if (parts[0] === "videos" && parts[1] && /^\d+$/.test(parts[1])) {
+            return { platform: "twitch", type: "vod", id: parts[1] };
+          }
+          if (parts.length >= 3 && parts[1] === "video" && /^\d+$/.test(parts[2])) {
+            return { platform: "twitch", type: "vod", id: parts[2] };
+          }
+          if (parts.length >= 3 && parts[1] === "clip" && parts[2]) {
+            return { platform: "twitch", type: "clip", id: parts[2] };
+          }
+          if (parts[0] && !reserved.has(parts[0].toLowerCase()) && /^[a-zA-Z0-9_]{1,25}$/.test(parts[0])) {
+            return { platform: "twitch", type: "channel", id: parts[0].toLowerCase() };
+          }
+        }
+      }
+    } catch {}
+
+    // Raw VOD ID with v prefix
+    if (/^v\d{7,12}$/.test(trimmed)) {
+      return { platform: "twitch", type: "vod", id: trimmed.slice(1) };
+    }
+    // Raw numeric VOD ID
+    if (/^\d{7,12}$/.test(trimmed)) {
+      return { platform: "twitch", type: "vod", id: trimmed };
+    }
+    // Raw username
+    if (/^[a-zA-Z][a-zA-Z0-9_]{0,24}$/.test(trimmed)) {
+      return { platform: "twitch", type: "channel", id: trimmed.toLowerCase() };
+    }
     return null;
   }
 

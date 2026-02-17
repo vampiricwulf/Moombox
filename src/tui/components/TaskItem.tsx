@@ -14,12 +14,16 @@ export const TaskItem = React.memo(function TaskItem({ job, selected, width, dim
   const statusColor = getStatusColor(job.status);
   const statusIcon = getStatusIcon(job.status);
 
+  const isTwitch = job.platform === "twitch";
+  const platformTag = isTwitch ? "[TW] " : "";
+  const platformTagWidth = isTwitch ? 5 : 0;
+
   // Fixed widths
   const selectorWidth = 2;   // "> " or "  "
   const iconWidth = 2;       // icon + space
 
   // Calculate remaining width for title
-  const titleWidth = Math.max(5, width - selectorWidth - iconWidth);
+  const titleWidth = Math.max(5, width - selectorWidth - iconWidth - platformTagWidth);
 
   // Truncate title if needed (display-width aware for CJK characters)
   const title = displayWidth(job.title) > titleWidth
@@ -36,6 +40,9 @@ export const TaskItem = React.memo(function TaskItem({ job, selected, width, dim
         {selected ? "> " : "  "}
       </Text>
       <Text color={statusColor} dimColor={dimmed && !selected}>{statusIcon} </Text>
+      {isTwitch && (
+        <Text color="magenta" dimColor={dimmed && !selected}>{platformTag}</Text>
+      )}
       <Text
         backgroundColor={selected ? "blue" : undefined}
         color={selected ? "white" : statusColor}

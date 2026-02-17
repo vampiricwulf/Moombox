@@ -8,12 +8,15 @@
 export interface ChannelConfig {
   id: string;
   name?: string;
+  platform?: "youtube" | "twitch"; // defaults to "youtube"
   /** Filter pattern - can be a simple string (regex) or object with named patterns for backwards compatibility */
   terms?: string | Record<string, string>;
   num_desc_lookbehind?: number;
   output_directory?: string;
   include_non_live_content?: boolean;
   max_feed_items?: number;
+  /** Twitch-specific: quality preference for HLS recording */
+  qualityPreference?: "best" | "720p" | "480p" | "audio_only";
 }
 
 /**

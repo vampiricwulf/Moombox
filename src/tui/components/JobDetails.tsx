@@ -93,14 +93,25 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
 
   const rows: DetailRow[] = [];
 
+  const isTwitch = job.platform === "twitch";
+
   // Basic info
   rows.push({ type: "field", label: "Title", value: truncate(job.title) });
   rows.push({ type: "field", label: "Channel", value: job.channelName || "Unknown" });
-  rows.push({ type: "field", label: "Video ID", value: job.videoId || job.id });
+  rows.push({ type: "field", label: isTwitch ? "Stream ID" : "Video ID", value: job.videoId || job.id });
   rows.push({ type: "field", label: "Status", value: job.status, color: getStatusColor(job.status) });
+  if (isTwitch) {
+    rows.push({ type: "field", label: "Platform", value: "Twitch", color: "magenta" });
+  }
+  if (isTwitch && job.twitchCategory) {
+    rows.push({ type: "field", label: "Category", value: truncate(job.twitchCategory) });
+  }
+  if (isTwitch && job.twitchQuality) {
+    rows.push({ type: "field", label: "Quality", value: job.twitchQuality });
+  }
 
-  // Advanced Options section
-  if (job.selectedVideoItag != null || job.selectedAudioItag != null || job.startTime != null || job.endTime != null) {
+  // Advanced Options section (YouTube only — Twitch doesn't have itag selection)
+  if (!isTwitch && (job.selectedVideoItag != null || job.selectedAudioItag != null || job.startTime != null || job.endTime != null)) {
     rows.push({ type: "separator" });
     rows.push({ type: "header", text: "Advanced Options" });
 
@@ -158,10 +169,10 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
 
   if (job.lastVideoSeq !== undefined) {
     const vTotal = job.totalVideoSeq ? `/${job.totalVideoSeq}` : "";
-    rows.push({ type: "field", label: "Video Segs", value: `${job.lastVideoSeq}${vTotal}` });
+    rows.push({ type: "field", label: isTwitch ? "Segments" : "Video Segs", value: `${job.lastVideoSeq}${vTotal}` });
   }
 
-  if (job.lastAudioSeq !== undefined) {
+  if (!isTwitch && job.lastAudioSeq !== undefined) {
     const aTotal = job.totalAudioSeq ? `/${job.totalAudioSeq}` : "";
     rows.push({ type: "field", label: "Audio Segs", value: `${job.lastAudioSeq}${aTotal}` });
   }
@@ -178,7 +189,8 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
   rows.push({ type: "field", label: "Updated", value: formatDate(job.updatedAt) });
 
   if (job.streamStartTime) {
-    rows.push({ type: "field", label: "Stream Start", value: formatDate(job.streamStartTime) });
+    const isScheduled = job.status === "Upcoming" && new Date(job.streamStartTime).getTime() > Date.now();
+    rows.push({ type: "field", label: isScheduled ? "Scheduled" : "Stream Start", value: formatDate(job.streamStartTime) });
   }
 
   if (job.streamEndTime) {

@@ -42,11 +42,19 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
       // Ignore errors
     }
 
+    // Twitch auth status
+    const twitchAuthStatus = { authenticated: CookieJar.hasTwitchAuthCookies() };
+
+    // Auto-cookie re-login state
+    const autoCookieReloginRequired = AutoCookieService.getInstance().needsManualRelogin;
+
     res.json({
       status: "running",
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
       cookieStatus,
+      twitchAuthStatus,
+      autoCookieReloginRequired,
     });
   }));
 
@@ -179,9 +187,14 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
       cookieStatus.authenticated = CookieJar.hasAuthCookies();
     }
 
+    const twitchAuthStatus = { authenticated: CookieJar.hasTwitchAuthCookies() };
+    const autoCookieReloginRequired = AutoCookieService.getInstance().needsManualRelogin;
+
     res.json({
       success,
       cookieStatus,
+      twitchAuthStatus,
+      autoCookieReloginRequired,
     });
   }));
 
@@ -194,13 +207,20 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
 
   // Start auto-cookie setup (launches browser)
   router.post("/cookies/auto-setup/start", asyncHandler(async (req, res) => {
-    const result = await AutoCookieService.getInstance().startSetup();
+    const platform = req.body?.platform as "youtube" | "twitch" | undefined;
+    const result = await AutoCookieService.getInstance().startSetup(platform);
     res.json(result);
   }));
 
   // Finish auto-cookie setup (extract cookies)
   router.post("/cookies/auto-setup/finish", asyncHandler(async (req, res) => {
     const result = await AutoCookieService.getInstance().finishSetup();
+    res.json(result);
+  }));
+
+  // Navigate browser to Twitch login during setup
+  router.post("/cookies/auto-setup/navigate-twitch", asyncHandler(async (req, res) => {
+    const result = await AutoCookieService.getInstance().navigateToTwitch();
     res.json(result);
   }));
 

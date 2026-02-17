@@ -25,6 +25,31 @@ export const channelIdSchema = z
   .regex(/^UC[a-zA-Z0-9_-]{22}$/, "Invalid channel ID format");
 
 /**
+ * Twitch channel login: 1-25 alphanumeric + underscore
+ */
+export const twitchLoginSchema = z
+  .string()
+  .min(1).max(25)
+  .regex(/^[a-zA-Z0-9_]+$/, "Invalid Twitch username");
+
+/**
+ * Twitch VOD ID: numeric, variable length
+ */
+export const twitchVodIdSchema = z
+  .string()
+  .regex(/^\d{1,12}$/, "Invalid Twitch VOD ID");
+
+/**
+ * Twitch quality preference
+ */
+export const twitchQualitySchema = z.enum(["best", "720p", "480p", "audio_only"]);
+
+/**
+ * Platform identifier
+ */
+export const platformSchema = z.enum(["youtube", "twitch"]).default("youtube");
+
+/**
  * YouTube format itag: -1 (none) or 1-999
  */
 export const itagSchema = z
@@ -57,10 +82,11 @@ export const safePathSchema = z
 // ============================================================================
 
 /**
- * POST /api/jobs - Add new job
+ * POST /api/jobs - Add new YouTube job
  */
-export const addJobSchema = z
+export const addYouTubeJobSchema = z
   .object({
+    platform: z.literal("youtube").default("youtube"),
     videoId: videoIdSchema,
     selectedVideoItag: itagSchema.optional(),
     selectedAudioItag: itagSchema.optional(),
@@ -88,7 +114,27 @@ export const addJobSchema = z
     { message: "End time must be after start time", path: ["endTime"] }
   );
 
+/**
+ * POST /api/jobs - Add new Twitch job
+ */
+export const addTwitchJobSchema = z.object({
+  platform: z.literal("twitch"),
+  videoId: z.string().min(1),  // channel login or VOD ID
+  twitchType: z.enum(["channel", "vod"]).default("channel"),
+  qualityPreference: twitchQualitySchema.optional(),
+});
+
+/**
+ * POST /api/jobs - Add new job (YouTube or Twitch)
+ *
+ * Tries Twitch schema first (requires explicit platform: "twitch"),
+ * falls back to YouTube schema (platform defaults to "youtube").
+ */
+export const addJobSchema = z.union([addTwitchJobSchema, addYouTubeJobSchema]);
+
 export type AddJobRequest = z.infer<typeof addJobSchema>;
+export type AddYouTubeJobRequest = z.infer<typeof addYouTubeJobSchema>;
+export type AddTwitchJobRequest = z.infer<typeof addTwitchJobSchema>;
 
 /**
  * GET /api/jobs - List jobs with pagination
@@ -175,14 +221,35 @@ export const updateConfigSchema = z.object({
 export type UpdateConfigRequest = z.infer<typeof updateConfigSchema>;
 
 /**
- * POST /api/config/channels - Add or update channel
+ * POST /api/config/channels - Add or update YouTube channel
  */
-export const addChannelSchema = z.object({
+export const addYouTubeChannelSchema = z.object({
+  platform: z.literal("youtube").default("youtube"),
   id: channelIdSchema,
-  terms: z.record(z.string(), z.string()).optional(), // Record<string, regex pattern>
+  name: z.string().optional(),
+  terms: z.union([z.string(), z.record(z.string(), z.string())]).optional(),
   include_non_live_content: z.boolean().optional(),
   num_desc_lookbehind: z.number().int().min(0).max(100).optional(),
+  output_directory: z.string().optional(),
+  max_feed_items: z.number().int().min(1).max(100).optional(),
 });
+
+/**
+ * POST /api/config/channels - Add or update Twitch channel
+ */
+export const addTwitchChannelSchema = z.object({
+  platform: z.literal("twitch"),
+  id: twitchLoginSchema,         // Twitch login name (e.g., "shroud")
+  name: z.string().optional(),    // Display name override
+  terms: z.union([z.string(), z.record(z.string(), z.string())]).optional(),
+  output_directory: z.string().optional(),
+  qualityPreference: twitchQualitySchema.optional(),
+});
+
+/**
+ * POST /api/config/channels - Add or update channel (YouTube or Twitch)
+ */
+export const addChannelSchema = z.union([addTwitchChannelSchema, addYouTubeChannelSchema]);
 
 export type AddChannelRequest = z.infer<typeof addChannelSchema>;
 

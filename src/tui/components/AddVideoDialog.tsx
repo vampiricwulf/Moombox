@@ -16,6 +16,7 @@ import { Database } from "../../core/database.js";
 import { Logger } from "../../core/logger.js";
 import { NotificationManager, NotificationType } from "../../core/notifications.js";
 import { extractVideoId } from "../../utils/youtube.js";
+import { extractMediaId } from "../../utils/mediaId.js";
 import { parseTimeToSeconds, formatSecondsToTimestamp } from "../../core/worker/timeUtils.js";
 import { useMouse, MouseEvent as TuiMouseEvent } from "../hooks/useMouse.js";
 import { readClipboard } from "../clipboard.js";
@@ -71,6 +72,7 @@ export function AddVideoDialog({
   const [input, setInput] = useState("");
   const [videoId, setVideoId] = useState<string | null>(null);
   const [url, setUrl] = useState("");
+  const [platform, setPlatform] = useState<"youtube" | "twitch">("youtube");
   const [advancedMode, setAdvancedMode] = useState(false);
   const [advancedEnabled, setAdvancedEnabled] = useState(false); // Checkbox state in step 0
   const [formats, setFormats] = useState<FormatsData | null>(null);
@@ -139,7 +141,7 @@ export function AddVideoDialog({
       setLoading(false);
       // Auto-advance after showing error
       setTimeout(() => {
-        setStep(5); // Skip to confirmation
+        setStep(4); // Skip to confirmation
         setAdvancedMode(false);
       }, 2000);
     }
@@ -149,18 +151,40 @@ export function AddVideoDialog({
     if (!videoId) return;
 
     try {
+      const isTwitch = platform === "twitch";
+
+      if (isTwitch) {
+        // Route Twitch jobs through the REST API for proper metadata resolution
+        const port = process.env.MOOMBOX_PORT || "774";
+        const twitchType = videoId.startsWith("tw_v") ? "vod" : "channel";
+        const twitchId = twitchType === "vod" ? videoId.replace("tw_v", "") : videoId;
+        const res = await fetch(`http://localhost:${port}/api/jobs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ platform: "twitch", videoId: twitchId, twitchType }),
+        });
+        if (res.ok) {
+          onComplete({ text: `Added Twitch ${twitchType} to queue`, color: "green" });
+        } else if (res.status === 409) {
+          onComplete({ text: `Job already exists`, color: "yellow" });
+        } else {
+          const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+          onComplete({ text: data.error || `Failed to add job`, color: "red" });
+        }
+        return;
+      }
+
+      // YouTube path: direct DB access (already has metadata from format fetch)
       const db = await Database.getInstance();
+      const thumbnailUrl = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
       const job = await db.addJob({
         videoId,
         url,
         title: formats?.title || "Manual Add",
         channelName: formats?.channelName || "Manual",
-        thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+        thumbnailUrl,
         manuallyAdded: true,
-        selectedVideoItag,
-        selectedAudioItag,
-        startTime,
-        endTime,
+        selectedVideoItag, selectedAudioItag, startTime, endTime,
       });
 
       if (job) {
@@ -213,7 +237,7 @@ export function AddVideoDialog({
       logger.error(`[AddVideoDialog] Failed to add job: ${e.stack || e.message}`);
       onComplete({ text: `Error adding ${videoId}`, color: "red" });
     }
-  }, [videoId, url, formats, selectedVideoItag, selectedAudioItag, startTime, endTime, onComplete, logger]);
+  }, [videoId, url, platform, formats, selectedVideoItag, selectedAudioItag, startTime, endTime, onComplete, logger]);
 
   useInput((char, key) => {
     // Esc: go back or cancel
@@ -236,12 +260,39 @@ export function AddVideoDialog({
       }
 
       if (key.return) {
-        const vid = extractVideoId(input);
-        if (!vid) {
+        const target = extractMediaId(input);
+        if (!target) {
           setError("Invalid video ID or URL");
           return;
         }
+
+        if (target.platform === "twitch") {
+          // Twitch: no advanced options
+          const twitchTarget = target.target;
+          let twitchVideoId: string;
+          let twitchUrl: string;
+          if (twitchTarget.type === "vod") {
+            twitchVideoId = `tw_v${twitchTarget.vodId}`;
+            twitchUrl = `https://www.twitch.tv/videos/${twitchTarget.vodId}`;
+          } else if (twitchTarget.type === "channel") {
+            twitchVideoId = twitchTarget.login; // will be resolved by the API
+            twitchUrl = `https://www.twitch.tv/${twitchTarget.login}`;
+          } else {
+            setError("Twitch clips are not supported");
+            return;
+          }
+          setVideoId(twitchVideoId);
+          setUrl(twitchUrl);
+          setPlatform("twitch");
+          setAdvancedMode(false);
+          setAdvancedEnabled(false);
+          return; // submitJob will fire via the useEffect
+        }
+
+        // YouTube path
+        const vid = target.videoId;
         setVideoId(vid);
+        setPlatform("youtube");
         setUrl(input.includes("http") ? input : `https://www.youtube.com/watch?v=${vid}`);
 
         if (advancedEnabled) {
@@ -572,7 +623,7 @@ function StepUrl({
     <>
       <Box paddingX={1}>
         <Text color="white" bold>
-          Enter URL or Video ID
+          Enter YouTube/Twitch URL or Video ID
         </Text>
       </Box>
       <Box paddingX={1} height={1}>
@@ -634,7 +685,7 @@ function StepVideoFormat({
           Select Video Format
         </Text>
         <Text color="magenta" dimColor>
-          Step 2/5
+          Step 1/4
         </Text>
       </Box>
       <Box paddingX={1} height={1}>
@@ -681,7 +732,7 @@ function StepAudioFormat({
           Select Audio Format
         </Text>
         <Text color="magenta" dimColor>
-          Step 3/5
+          Step 2/4
         </Text>
       </Box>
       <Box paddingX={1} height={1}>
@@ -821,7 +872,7 @@ function StepTimestamps({
           Timestamps (Optional)
         </Text>
         <Text color="magenta" dimColor>
-          Step 4/5
+          Step 3/4
         </Text>
       </Box>
       <Box paddingX={1} height={1}>
@@ -908,7 +959,7 @@ function StepConfirmation({
           Confirmation
         </Text>
         <Text color="magenta" dimColor>
-          Step 5/5
+          Step 4/4
         </Text>
       </Box>
       <Box paddingX={1} height={1}>

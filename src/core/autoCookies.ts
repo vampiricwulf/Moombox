@@ -1,9 +1,9 @@
 /**
  * Automatic Cookie Acquisition Service
  *
- * Automates the cookie lifecycle for YouTube authentication:
- * - Initial setup: launches a browser for user to log in to Google
- * - Silent refresh: headless browser visit to refresh cookies on auth failure
+ * Automates the cookie lifecycle for YouTube and Twitch authentication:
+ * - Initial setup: launches a browser for user to log in to Google and/or Twitch
+ * - Silent refresh: headless browser visits to both sites to refresh cookies on auth failure
  *
  * Supports Firefox (primary, SQLite cookies) and Edge/Chrome (fallback, CDP).
  */
@@ -21,6 +21,7 @@ import { CookieJar } from "./cookies.js";
 import { fetchWithTimeout } from "./http.js";
 import { detectBrowser, type DetectedBrowser } from "./browserDetect.js";
 import { getErrorMessage } from "../types/errors.js";
+import { USER_AGENTS, YOUTUBE_URLS, TWITCH_URLS, WEB_CLIENT } from "../constants.js";
 import { CdpClient } from "./cdpClient.js";
 import {
   cdpCookiesToNetscape,
@@ -29,12 +30,18 @@ import {
   type FirefoxCookieRow,
 } from "./cookies.js";
 
+export interface AutoCookieReloginRequired {
+  youtube: boolean;
+  twitch: boolean;
+}
+
 export interface AutoCookieStatus {
   configured: boolean;
   setupInProgress: boolean;
   browser: DetectedBrowser | null;
   lastRefresh: string | null;
   lastError: string | null;
+  needsManualRelogin: AutoCookieReloginRequired;
 }
 
 // Firefox user.js preferences to suppress first-run dialogs
@@ -48,6 +55,8 @@ user_pref("browser.rights.3.shown", true);
 
 const LOGIN_URL = "https://accounts.google.com/ServiceLogin?service=youtube";
 const REFRESH_URL = "https://www.youtube.com";
+const TWITCH_LOGIN_URL = "https://www.twitch.tv/login";
+const TWITCH_REFRESH_URL = "https://www.twitch.tv";
 const PROCESS_TIMEOUT = 30000;
 
 // Chromium lock files that prevent headless launch when a headed session was killed
@@ -64,6 +73,8 @@ export class AutoCookieService {
   private cancelled: boolean = false;
   private lastRefresh: Date | null = null;
   private lastError: string | null = null;
+  private _needsManualRelogin: AutoCookieReloginRequired = { youtube: false, twitch: false };
+  private targetPlatform: "youtube" | "twitch" | null = null;
 
   private constructor() {
     this.logger = Logger.getInstance();
@@ -99,7 +110,16 @@ export class AutoCookieService {
       browser: detectBrowser(),
       lastRefresh: this.lastRefresh?.toISOString() ?? null,
       lastError: this.lastError,
+      needsManualRelogin: this.needsManualRelogin,
     };
+  }
+
+  get needsManualRelogin(): AutoCookieReloginRequired {
+    return { ...this._needsManualRelogin };
+  }
+
+  getTargetPlatform(): "youtube" | "twitch" | null {
+    return this.targetPlatform;
   }
 
   // ─── Headed Setup ────────────────────────────────────────────────
@@ -108,7 +128,7 @@ export class AutoCookieService {
    * Step 1: Launch a browser for the user to log in to Google.
    * Returns immediately — the user logs in at their own pace.
    */
-  async startSetup(): Promise<{ success: boolean; error?: string }> {
+  async startSetup(platform?: "youtube" | "twitch"): Promise<{ success: boolean; error?: string }> {
     if (this.setupProcess) {
       return { success: false, error: "Setup already in progress" };
     }
@@ -127,12 +147,16 @@ export class AutoCookieService {
     this.setupBrowser = browser;
     this.lastError = null;
     this.cancelled = false;
+    this.targetPlatform = platform ?? null;
+
+    // Select login URL based on platform
+    const loginUrl = platform === "twitch" ? TWITCH_LOGIN_URL : LOGIN_URL;
 
     try {
       if (browser.type === "firefox") {
-        await this.startFirefoxSetup(browser, profileDir);
+        await this.startFirefoxSetup(browser, profileDir, loginUrl);
       } else {
-        await this.startChromiumSetup(browser, profileDir);
+        await this.startChromiumSetup(browser, profileDir, loginUrl);
       }
       return { success: true };
     } catch (e) {
@@ -150,14 +174,15 @@ export class AutoCookieService {
   async finishSetup(): Promise<{
     success: boolean;
     authenticated: boolean;
+    twitchAuthenticated: boolean;
     error?: string;
   }> {
     if (!this.setupProcess || !this.setupBrowser) {
-      return { success: false, authenticated: false, error: "No setup in progress" };
+      return { success: false, authenticated: false, twitchAuthenticated: false, error: "No setup in progress" };
     }
 
     if (this.cancelled) {
-      return { success: false, authenticated: false, error: "Setup was cancelled" };
+      return { success: false, authenticated: false, twitchAuthenticated: false, error: "Setup was cancelled" };
     }
 
     const browser = this.setupBrowser;
@@ -184,29 +209,48 @@ export class AutoCookieService {
       // Set restrictive permissions (owner read/write only)
       await fs.chmod(cookiePath, 0o600);
 
-      // Validate
+      // Validate by making real API calls (not just cookie presence checks)
       CookieJar.reset();
       await CookieJar.parse(cookiePath, true);
-      const authenticated = CookieJar.hasAuthCookies();
+
+      // Run both verifications in parallel for speed
+      const [authenticated, twitchAuthenticated] = await Promise.all([
+        CookieJar.hasAuthCookies() ? this.verifyYouTubeAuth() : Promise.resolve(false),
+        CookieJar.hasTwitchAuthCookies() ? this.verifyTwitchAuth() : Promise.resolve(false),
+      ]);
 
       this.lastRefresh = new Date();
       this.cleanup();
 
-      if (!authenticated) {
+      if (!authenticated && !twitchAuthenticated) {
+        // Cookies are present but auth failed — still report as setup complete
+        // so the user knows cookies were extracted, but flag that auth didn't pass
+        const hasCookies = CookieJar.hasAuthCookies() || CookieJar.hasTwitchAuthCookies();
         return {
           success: true,
           authenticated: false,
-          error: "Login not detected. Please try again and make sure you complete the Google login.",
+          twitchAuthenticated: false,
+          error: hasCookies
+            ? "Cookies were extracted but authentication verification failed. The login session may not have completed."
+            : "No login detected for YouTube or Twitch. Make sure you signed in to at least one service.",
         };
       }
 
-      this.logger.info("[AutoCookies] Setup complete — authenticated successfully");
-      return { success: true, authenticated: true };
+      // Clear re-login flags for verified platforms
+      if (authenticated) this._needsManualRelogin.youtube = false;
+      if (twitchAuthenticated) this._needsManualRelogin.twitch = false;
+
+      const platforms = [
+        authenticated ? "YouTube" : null,
+        twitchAuthenticated ? "Twitch" : null,
+      ].filter(Boolean).join(" + ");
+      this.logger.info(`[AutoCookies] Setup complete — verified: ${platforms}`);
+      return { success: true, authenticated, twitchAuthenticated };
     } catch (e) {
       const msg = getErrorMessage(e);
       this.lastError = msg;
       this.cleanup();
-      return { success: false, authenticated: false, error: msg };
+      return { success: false, authenticated: false, twitchAuthenticated: false, error: msg };
     }
   }
 
@@ -232,6 +276,118 @@ export class AutoCookieService {
     this.cleanup();
   }
 
+  // ─── Twitch Navigation ──────────────────────────────────────────
+
+  /**
+   * Navigate the setup browser to Twitch login page.
+   * For Chromium: uses CDP to navigate the active tab.
+   * For Firefox: no-op (user must navigate manually).
+   */
+  async navigateToTwitch(): Promise<{ success: boolean; manual?: boolean; error?: string }> {
+    if (!this.setupProcess || !this.setupBrowser) {
+      return { success: false, error: "No setup in progress" };
+    }
+
+    if (this.setupBrowser.type === "firefox") {
+      // Firefox doesn't support CDP navigation — user navigates manually
+      return { success: true, manual: true };
+    }
+
+    // Chromium: navigate via CDP
+    if (!this.cdpPort) {
+      return { success: false, error: "CDP port not available" };
+    }
+
+    let pageClient: CdpClient | null = null;
+    try {
+      pageClient = await CdpClient.connectToPage(this.cdpPort);
+      await pageClient.navigate(TWITCH_LOGIN_URL);
+      pageClient.disconnect();
+      return { success: true };
+    } catch (e) {
+      pageClient?.disconnect();
+      return { success: false, error: getErrorMessage(e) };
+    }
+  }
+
+  // ─── Auth Verification ─────────────────────────────────────────
+
+  /**
+   * Verify YouTube authentication by making a real API call.
+   * Uses the guide endpoint (same as CookieRefreshService) which is
+   * lightweight and requires valid auth cookies + SAPISIDHASH.
+   * Returns true if cookies are valid, false if expired/invalid.
+   */
+  private async verifyYouTubeAuth(): Promise<boolean> {
+    try {
+      if (!CookieJar.hasAuthCookies()) return false;
+
+      const cookieHeader = await CookieJar.load(this.getCookiePath());
+      if (!cookieHeader) return false;
+
+      const authHeader = CookieJar.generateAuthorizationHeader();
+      if (!authHeader) return false;
+
+      const response = await fetchWithTimeout(
+        `${YOUTUBE_URLS.API}/guide?prettyPrint=false`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENTS.WEB,
+            Cookie: cookieHeader,
+            Origin: YOUTUBE_URLS.BASE,
+            Referer: `${YOUTUBE_URLS.BASE}/`,
+            Authorization: authHeader,
+            "X-Origin": YOUTUBE_URLS.BASE,
+          },
+          body: JSON.stringify({
+            context: {
+              client: {
+                clientName: WEB_CLIENT.context.clientName,
+                clientVersion: WEB_CLIENT.context.clientVersion,
+                hl: "en",
+              },
+            },
+          }),
+        },
+        10000, // 10s timeout — we just need a quick yes/no
+      );
+
+      return response.ok;
+    } catch (e) {
+      this.logger.debug(`[AutoCookies] YouTube auth verification failed: ${getErrorMessage(e)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Verify Twitch authentication by validating the OAuth token.
+   * Uses Twitch's OAuth2 validation endpoint — returns 200 if the
+   * auth-token is still valid, 401 if expired/revoked.
+   */
+  private async verifyTwitchAuth(): Promise<boolean> {
+    try {
+      const token = CookieJar.getTwitchAuthToken();
+      if (!token) return false;
+
+      const response = await fetchWithTimeout(
+        TWITCH_URLS.OAUTH_VALIDATE,
+        {
+          headers: {
+            Authorization: `OAuth ${token}`,
+          },
+        },
+        10000,
+      );
+
+      return response.ok;
+    } catch (e) {
+      this.logger.debug(`[AutoCookies] Twitch auth verification failed: ${getErrorMessage(e)}`);
+      return false;
+    }
+  }
+
   // ─── Headless Refresh ────────────────────────────────────────────
 
   /**
@@ -239,6 +395,12 @@ export class AutoCookieService {
    * Called automatically when a job hits COOKIES? status.
    */
   async refreshCookies(): Promise<boolean> {
+    // If manual re-login is already required, skip the headless refresh entirely
+    if (this._needsManualRelogin.youtube) {
+      this.logger.debug("[AutoCookies] Skipping headless refresh — manual re-login required");
+      return false;
+    }
+
     const browser = detectBrowser();
     if (!browser) {
       this.lastError = "No browser found for refresh";
@@ -249,6 +411,18 @@ export class AutoCookieService {
     if (!await fs.pathExists(profileDir)) {
       this.lastError = "Browser profile not found — run setup first";
       return false;
+    }
+
+    // Check if cookie file had Twitch cookies before refresh (to detect Twitch auth loss)
+    const cookiePath = this.getCookiePath();
+    let hadTwitchCookiesBefore = false;
+    try {
+      if (await fs.pathExists(cookiePath)) {
+        await CookieJar.load(cookiePath, true);
+        hadTwitchCookiesBefore = CookieJar.hasTwitchAuthCookies();
+      }
+    } catch {
+      // Ignore errors checking pre-refresh state
     }
 
     this.logger.info(`[AutoCookies] Refreshing cookies via ${browser.type}...`);
@@ -263,26 +437,42 @@ export class AutoCookieService {
       }
 
       // Write cookies
-      const cookiePath = this.getCookiePath();
       await fs.ensureDir(path.dirname(cookiePath));
       await fs.writeFile(cookiePath, netscapeCookies, "utf-8");
       // Set restrictive permissions (owner read/write only)
       await fs.chmod(cookiePath, 0o600);
 
-      // Validate
+      // Validate by making real API calls (not just cookie presence checks)
       CookieJar.reset();
       await CookieJar.parse(cookiePath, true);
-      const authenticated = CookieJar.hasAuthCookies();
+
+      // Run both verifications in parallel
+      const [authenticated, twitchAuthenticated] = await Promise.all([
+        CookieJar.hasAuthCookies() ? this.verifyYouTubeAuth() : Promise.resolve(false),
+        hadTwitchCookiesBefore && CookieJar.hasTwitchAuthCookies()
+          ? this.verifyTwitchAuth()
+          : Promise.resolve(false),
+      ]);
+
+      // Set re-login flags for platforms that lost authentication
+      if (!authenticated) {
+        this._needsManualRelogin.youtube = true;
+        this.logger.warn("[AutoCookies] YouTube auth verification failed — manual re-login required");
+      }
+      if (hadTwitchCookiesBefore && !twitchAuthenticated) {
+        this._needsManualRelogin.twitch = true;
+        this.logger.warn("[AutoCookies] Twitch auth verification failed — manual re-login required");
+      }
 
       if (authenticated) {
         this.lastRefresh = new Date();
         this.lastError = null;
-        this.logger.info("[AutoCookies] Cookie refresh succeeded");
+        this.logger.info("[AutoCookies] Cookie refresh succeeded (auth verified)");
         return true;
       }
 
-      this.lastError = "Refresh completed but auth cookies not found";
-      this.logger.warn("[AutoCookies] Refresh completed but auth cookies not found");
+      this.lastError = "Refresh completed but auth verification failed — manual re-login required";
+      this.logger.warn("[AutoCookies] Refresh completed but auth verification failed");
       return false;
     } catch (e) {
       const msg = getErrorMessage(e);
@@ -297,6 +487,7 @@ export class AutoCookieService {
   private async startFirefoxSetup(
     browser: DetectedBrowser,
     profileDir: string,
+    url: string = LOGIN_URL,
   ): Promise<void> {
     // Write user.js to suppress first-run dialogs
     await fs.writeFile(
@@ -309,7 +500,7 @@ export class AutoCookieService {
 
     this.setupProcess = spawn(
       browser.path,
-      ["-profile", profileDir, "-no-remote", LOGIN_URL],
+      ["-profile", profileDir, "-no-remote", url],
       { stdio: "ignore", detached: false },
     );
 
@@ -327,16 +518,25 @@ export class AutoCookieService {
     browser: DetectedBrowser,
     profileDir: string,
   ): Promise<string> {
-    // Use --screenshot to make headless Firefox load a page and exit
+    // Use --screenshot to make headless Firefox load a page and exit.
+    // Visit both YouTube and Twitch to refresh session cookies for each.
     const tempScreenshot = path.join(profileDir, "refresh-screenshot.png");
 
-    const proc = spawn(
+    // Visit YouTube
+    const proc1 = spawn(
       browser.path,
       ["--screenshot", tempScreenshot, "-no-remote", "-profile", profileDir, REFRESH_URL],
       { stdio: "ignore", detached: false },
     );
+    await waitForExit(proc1, PROCESS_TIMEOUT);
 
-    await waitForExit(proc, PROCESS_TIMEOUT);
+    // Visit Twitch
+    const proc2 = spawn(
+      browser.path,
+      ["--screenshot", tempScreenshot, "-no-remote", "-profile", profileDir, TWITCH_REFRESH_URL],
+      { stdio: "ignore", detached: false },
+    );
+    await waitForExit(proc2, PROCESS_TIMEOUT);
 
     // Clean up screenshot
     await fs.remove(tempScreenshot).catch(() => {});
@@ -419,6 +619,7 @@ export class AutoCookieService {
   private async startChromiumSetup(
     browser: DetectedBrowser,
     profileDir: string,
+    url: string = LOGIN_URL,
   ): Promise<void> {
     // Launch with --remote-debugging-port so we can extract cookies via CDP.
     // --disable-blink-features=AutomationControlled removes navigator.webdriver
@@ -441,7 +642,7 @@ export class AutoCookieService {
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
         `--remote-debugging-port=${this.cdpPort}`,
-        LOGIN_URL,
+        url,
       ],
       { stdio: "ignore", detached: false },
     );
@@ -498,11 +699,12 @@ export class AutoCookieService {
     try {
       await this.waitForCdp(port, 15000);
 
-      // Navigate to YouTube to refresh cookies
+      // Navigate to YouTube and Twitch to refresh cookies for both
       let pageClient: CdpClient | null = null;
       try {
         pageClient = await CdpClient.connectToPage(port);
         await pageClient.navigate(REFRESH_URL);
+        await pageClient.navigate(TWITCH_REFRESH_URL);
         pageClient.disconnect();
       } catch {
         pageClient?.disconnect();
@@ -679,6 +881,7 @@ export class AutoCookieService {
     this.browserExited = false;
     this.cdpPort = null;
     this.cancelled = false;
+    this.targetPlatform = null;
   }
 
   private getProfileDir(): string {

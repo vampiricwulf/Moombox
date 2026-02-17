@@ -107,7 +107,7 @@ export class DownloadWorker {
           { name: "Video ID", value: job.videoId, inline: true },
         ],
         {
-          url: `https://www.youtube.com/watch?v=${job.videoId}`,
+          url: job.url || `https://www.youtube.com/watch?v=${job.videoId}`,
           thumbnail: job.thumbnailUrl,
           event: "error",
         },
@@ -128,9 +128,18 @@ export class DownloadWorker {
     // Step 1: Process stream status and get video info
     const result = await this.streamProcessor.process(job);
 
+    // Helper: stop Twitch chat and reset chatStatus if it was started
+    const stopTwitchChat = async () => {
+      if (result.twitchChatDownloader) {
+        result.twitchChatDownloader.stop();
+        await db.updateJob(job.id, { chatStatus: "unavailable" }).catch(() => {});
+      }
+    };
+
     // Check for errors
     if (result.error) {
       result.chatDownloader?.stop();
+      await stopTwitchChat();
       const error = result.videoInfo.playabilityError;
 
       if (error === "members_only" || error === "login_required") {
@@ -152,7 +161,7 @@ export class DownloadWorker {
             { name: "Video ID", value: job.videoId, inline: true },
           ],
           {
-            url: `https://www.youtube.com/watch?v=${job.videoId}`,
+            url: job.url || `https://www.youtube.com/watch?v=${job.videoId}`,
             thumbnail: job.thumbnailUrl,
             event: "auth",
           },
@@ -182,7 +191,7 @@ export class DownloadWorker {
         return;
       }
 
-      // Other errors
+      // Other errors (including Twitch errors)
       await db.updateJob(job.id, {
         status: "Error",
         error: result.error,
@@ -193,11 +202,13 @@ export class DownloadWorker {
     // Check if we should proceed with download
     if (!result.shouldDownload) {
       result.chatDownloader?.stop();
+      await stopTwitchChat();
       return;
     }
 
     if (!this.running) {
       result.chatDownloader?.stop();
+      await stopTwitchChat();
       return;
     }
 
@@ -205,12 +216,23 @@ export class DownloadWorker {
     const currentJob = (await db.getJobs()).find((j) => j.id === job.id);
     if (!currentJob || currentJob.status === "Cancelled") {
       result.chatDownloader?.stop();
+      await stopTwitchChat();
       this.logger.info(`[Worker] Job ${job.id} was cancelled, skipping download`);
       return;
     }
 
     // Step 2: Execute the download
-    await this.downloadOrchestrator.execute(job, result.videoInfo, result.isVod, result.chatDownloader);
+    if (job.platform === "twitch" && result.twitchVariant) {
+      await this.downloadOrchestrator.executeTwitch(
+        job,
+        result.twitchVariant,
+        result.isVod,
+        result.twitchChatDownloader,
+        result.twitchStreamInfo,
+      );
+    } else {
+      await this.downloadOrchestrator.execute(job, result.videoInfo, result.isVod, result.chatDownloader);
+    }
   }
 }
 

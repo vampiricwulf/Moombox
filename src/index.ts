@@ -12,9 +12,11 @@ import { DownloadWorker } from "./core/worker/index.js";
 import { CookieRefreshService } from "./core/cookieRefresh.js";
 import { PotProvider } from "./core/potProvider.js";
 import { AutoCookieService } from "./core/autoCookies.js";
+import { TwitchService } from "./engine/twitch/index.js";
 import { NotificationManager, NotificationType } from "./core/notifications.js";
 import { WebServer } from "./web/server.js";
 import { getErrorMessage } from "./types/errors.js";
+import { extractMediaId } from "./utils/mediaId.js";
 
 // Dynamic import for TUI (may not be available in packaged build)
 async function loadTUI(): Promise<{ startTUI: () => Promise<void> } | null> {
@@ -55,8 +57,8 @@ const args = process.argv.slice(2);
 const command = args[0] || "run";
 
 async function addVideo(input: string) {
-  const videoId = extractVideoId(input);
-  if (!videoId) {
+  const target = extractMediaId(input);
+  if (!target) {
     console.error(`Invalid video ID or URL: ${input}`);
     process.exit(1);
   }
@@ -64,57 +66,82 @@ async function addVideo(input: string) {
   await ConfigManager.getInstance().load();
   const db = await Database.getInstance();
 
-  const exists = await db.jobExists(videoId);
-  if (exists) {
-    console.log(`Job already exists for video: ${videoId}`);
-    process.exit(0);
-  }
+  if (target.platform === "twitch") {
+    const twitchTarget = target.target;
+    if (twitchTarget.type === "clip") {
+      console.error("Twitch clips are not supported.");
+      process.exit(1);
+    }
 
-  const job = await db.addJob({
-    videoId: videoId,
-    url: `https://www.youtube.com/watch?v=${videoId}`,
-    title: "Manual Add",
-    channelName: "Manual",
-    thumbnailUrl: "",
-    manuallyAdded: true,
-  });
+    let videoId: string;
+    let url: string;
+    if (twitchTarget.type === "vod") {
+      videoId = `tw_v${twitchTarget.vodId}`;
+      url = `https://www.twitch.tv/videos/${twitchTarget.vodId}`;
+    } else {
+      videoId = twitchTarget.login; // Will be resolved by the worker
+      url = `https://www.twitch.tv/${twitchTarget.login}`;
+    }
 
-  if (job) {
-    console.log(`Added ${videoId} to queue.`);
-    await NotificationManager.getInstance().send(
-      "Video Added",
-      `Manually added: ${videoId}`,
-      NotificationType.INFO,
-      [{ name: "Video ID", value: videoId, inline: true }],
-      { url: `https://www.youtube.com/watch?v=${videoId}`, event: "added" },
-    );
+    const exists = await db.jobExists(videoId);
+    if (exists) {
+      console.log(`Job already exists: ${videoId}`);
+      process.exit(0);
+    }
+
+    const job = await db.addJob({
+      videoId,
+      url,
+      title: "Manual Add",
+      channelName: twitchTarget.type === "channel" ? twitchTarget.login : "Manual",
+      manuallyAdded: true,
+      platform: "twitch",
+    });
+
+    if (job) {
+      console.log(`Added Twitch ${twitchTarget.type} ${videoId} to queue.`);
+      await NotificationManager.getInstance().send(
+        "Video Added",
+        `Manually added Twitch ${twitchTarget.type}: ${videoId}`,
+        NotificationType.INFO,
+        [{ name: "ID", value: videoId, inline: true }],
+        { url, event: "added" },
+      );
+    } else {
+      console.log(`Failed to add ${videoId} (may already exist).`);
+    }
   } else {
-    console.log(`Failed to add ${videoId} (may already exist).`);
-  }
-}
+    // YouTube path
+    const videoId = target.videoId;
 
-function extractVideoId(input: string): string | null {
-  const trimmed = input.trim();
+    const exists = await db.jobExists(videoId);
+    if (exists) {
+      console.log(`Job already exists for video: ${videoId}`);
+      process.exit(0);
+    }
 
-  // Direct video ID (11 chars)
-  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
-    return trimmed;
-  }
+    const job = await db.addJob({
+      videoId,
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+      title: "Manual Add",
+      channelName: "Manual",
+      thumbnailUrl: "",
+      manuallyAdded: true,
+    });
 
-  // YouTube URL patterns
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/live\/([a-zA-Z0-9_-]{11})/,
-  ];
-
-  for (const pattern of patterns) {
-    const match = trimmed.match(pattern);
-    if (match) {
-      return match[1];
+    if (job) {
+      console.log(`Added ${videoId} to queue.`);
+      await NotificationManager.getInstance().send(
+        "Video Added",
+        `Manually added: ${videoId}`,
+        NotificationType.INFO,
+        [{ name: "Video ID", value: videoId, inline: true }],
+        { url: `https://www.youtube.com/watch?v=${videoId}`, event: "added" },
+      );
+    } else {
+      console.log(`Failed to add ${videoId} (may already exist).`);
     }
   }
-
-  return null;
 }
 
 async function run() {
@@ -170,6 +197,9 @@ async function run() {
   if (!useTUI) {
     console.log("Starting services...");
   }
+
+  // Initialize Twitch service (loads auth token from cookies if available)
+  await TwitchService.getInstance().init();
 
   const monitor = new FeedMonitor();
   monitor.start();

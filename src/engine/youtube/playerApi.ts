@@ -654,10 +654,13 @@ export class PlayerApi {
     }
 
     // Extract scheduled start time for upcoming streams, or upload date for VODs
-    // For streams: use liveBroadcastDetails.startTimestamp
-    // For regular videos: use microformat uploadDate or publishDate
+    // Priority: liveBroadcastDetails (ISO string, web only) > liveStreamability (unix epoch, all clients) > uploadDate
+    const liveStreamabilityEpoch = playabilityStatus.liveStreamability
+      ?.liveStreamabilityRenderer?.offlineSlate
+      ?.liveStreamOfflineSlateRenderer?.scheduledStartTime;
     const scheduledStartTime =
       liveBroadcastDetails?.startTimestamp ||
+      (liveStreamabilityEpoch ? new Date(Number(liveStreamabilityEpoch) * 1000).toISOString() : undefined) ||
       microformat?.uploadDate ||
       microformat?.publishDate ||
       undefined;

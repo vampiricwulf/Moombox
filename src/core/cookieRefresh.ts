@@ -5,6 +5,7 @@ import { CookieJar } from "./cookies.js";
 import { AutoCookieService } from "./autoCookies.js";
 import fs from "fs-extra";
 import { fetchWithTimeout } from "./http.js";
+import { USER_AGENTS, YOUTUBE_URLS, WEB_CLIENT } from "../constants.js";
 
 /**
  * Cookie Refresh Service
@@ -104,26 +105,24 @@ export class CookieRefreshService {
       // Make an authenticated request to YouTube
       // Using the /youtubei/v1/guide endpoint which is lightweight and requires auth
       const response = await fetchWithTimeout(
-        "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false",
+        `${YOUTUBE_URLS.API}/guide?prettyPrint=false`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "User-Agent": USER_AGENTS.WEB,
             Cookie: cookieHeader,
-            Origin: "https://www.youtube.com",
-            Referer: "https://www.youtube.com/",
+            Origin: YOUTUBE_URLS.BASE,
+            Referer: `${YOUTUBE_URLS.BASE}/`,
             ...(authHeader ? { Authorization: authHeader } : {}),
-            "X-Origin": "https://www.youtube.com",
+            "X-Origin": YOUTUBE_URLS.BASE,
           },
           body: JSON.stringify({
             context: {
               client: {
-                clientName: "WEB",
-                clientVersion: "2.20241212.01.00",
+                clientName: WEB_CLIENT.context.clientName,
+                clientVersion: WEB_CLIENT.context.clientVersion,
                 hl: "en",
-                gl: "US",
               },
             },
           }),
@@ -148,6 +147,11 @@ export class CookieRefreshService {
         this.logger.warn(
           `[CookieRefresh] Refresh request failed: HTTP ${response.status}`,
         );
+        // Auth cookies are present but the server rejected them (expired/invalid session).
+        // Trigger headless auto-cookie refresh to attempt recovery.
+        if (response.status === 401 || response.status === 403) {
+          return this.tryAutoCookieRefresh();
+        }
         return false;
       }
     } catch (e: any) {

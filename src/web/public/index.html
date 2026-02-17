@@ -51,7 +51,7 @@
                         <sl-input
                             id="video-url-input"
                             label="Video URL or ID"
-                            placeholder="https://youtu.be/... or video ID"
+                            placeholder="YouTube URL, Twitch URL, or ID"
                             inputmode="url"
                             required
                             autofocus
@@ -497,38 +497,6 @@
                                     style="margin-left: 0.5em; color: var(--sl-color-neutral-500)"
                                 ></span>
                             </div>
-                            <div
-                                id="auto-cookie-setup-dialog"
-                                style="display: none"
-                            >
-                                <sl-alert variant="primary" open>
-                                    A browser window has opened. Sign in to
-                                    Google/YouTube, then click the button below.
-                                    The browser will be closed automatically.
-                                </sl-alert>
-                                <div
-                                    style="
-                                        margin-top: 0.5em;
-                                        display: flex;
-                                        gap: 0.5em;
-                                        align-items: center;
-                                    "
-                                >
-                                    <sl-button
-                                        id="btn-auto-cookie-done"
-                                        variant="success"
-                                        size="small"
-                                        >I'm Logged In</sl-button
-                                    >
-                                    <sl-button
-                                        id="btn-auto-cookie-cancel"
-                                        variant="neutral"
-                                        size="small"
-                                        >Cancel</sl-button
-                                    >
-                                    <span id="auto-cookie-setup-result"></span>
-                                </div>
-                            </div>
                         </div>
 
                         <!-- Channels Settings -->
@@ -539,8 +507,8 @@
                         >
                             <h3>Monitored Channels</h3>
                             <p class="settings-help">
-                                Add YouTube channels to automatically monitor
-                                for new streams.
+                                Add YouTube or Twitch channels to automatically
+                                monitor for new streams.
                             </p>
                             <div id="channels-list"></div>
                             <sl-button variant="primary" id="add-channel-btn">
@@ -734,6 +702,15 @@
 
         <!-- Add Channel Dialog -->
         <sl-dialog label="Add Channel" id="add-channel-dialog">
+            <sl-select
+                id="channel-platform-select"
+                label="Platform"
+                value="youtube"
+                style="margin-bottom: 1rem"
+            >
+                <sl-option value="youtube">YouTube</sl-option>
+                <sl-option value="twitch">Twitch</sl-option>
+            </sl-select>
             <sl-input
                 id="channel-id-input"
                 label="Channel ID"
@@ -766,9 +743,23 @@
                     containing "shorts" or "clip"
                 </div>
             </sl-details>
-            <sl-checkbox id="channel-include-vods"
-                >Include non-live content (VODs, premieres)</sl-checkbox
-            >
+            <div id="channel-include-vods-row">
+                <sl-checkbox id="channel-include-vods"
+                    >Include non-live content (VODs, premieres)</sl-checkbox
+                >
+            </div>
+            <div id="channel-quality-row" style="display: none">
+                <sl-select
+                    id="channel-quality-select"
+                    label="Quality Preference"
+                    value="best"
+                >
+                    <sl-option value="best">Best (Source)</sl-option>
+                    <sl-option value="720p">720p</sl-option>
+                    <sl-option value="480p">480p</sl-option>
+                    <sl-option value="audio_only">Audio Only</sl-option>
+                </sl-select>
+            </div>
             <div slot="footer">
                 <sl-button variant="default" id="channel-cancel-btn"
                     >Cancel</sl-button
@@ -777,6 +768,43 @@
                     >Add Channel</sl-button
                 >
             </div>
+        </sl-dialog>
+
+        <!-- Auto Cookie Setup Dialog (global, accessible from any tab) -->
+        <sl-dialog label="Cookie Login" id="auto-cookie-setup-dialog" style="--width: 28rem">
+            <!-- Full mode: Step 1 — YouTube login -->
+            <div id="auto-cookie-step-1">
+                <sl-alert variant="primary" open>
+                    A browser window has opened. Sign in to
+                    Google/YouTube, then choose an option below.
+                </sl-alert>
+                <div style="margin-top: 0.5em; display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap;">
+                    <sl-button id="btn-auto-cookie-twitch" variant="primary" size="small">Next: Twitch Login</sl-button>
+                    <sl-button id="btn-auto-cookie-done" variant="success" size="small">Skip Twitch, Finish</sl-button>
+                    <sl-button id="btn-auto-cookie-cancel" variant="neutral" size="small">Cancel</sl-button>
+                </div>
+            </div>
+            <!-- Full mode: Step 2 — Twitch login -->
+            <div id="auto-cookie-step-2" style="display: none">
+                <sl-alert variant="primary" open>
+                    <span id="auto-cookie-twitch-instructions">Now sign in to Twitch in the browser window, then click Done.</span>
+                </sl-alert>
+                <div style="margin-top: 0.5em; display: flex; gap: 0.5em; align-items: center;">
+                    <sl-button id="btn-auto-cookie-finish" variant="success" size="small">I'm Done</sl-button>
+                    <sl-button id="btn-auto-cookie-cancel-2" variant="neutral" size="small">Cancel</sl-button>
+                </div>
+            </div>
+            <!-- Single-platform mode — re-login for one platform -->
+            <div id="auto-cookie-single-platform" style="display: none">
+                <sl-alert variant="warning" open>
+                    <span id="auto-cookie-single-instructions">A browser window has opened. Please sign in, then click "I'm Logged In".</span>
+                </sl-alert>
+                <div style="margin-top: 0.5em; display: flex; gap: 0.5em; align-items: center;">
+                    <sl-button id="btn-auto-cookie-single-done" variant="success" size="small">I'm Logged In</sl-button>
+                    <sl-button id="btn-auto-cookie-single-cancel" variant="neutral" size="small">Cancel</sl-button>
+                </div>
+            </div>
+            <span id="auto-cookie-setup-result" style="display: block; margin-top: 0.5em;"></span>
         </sl-dialog>
 
         <!-- Setup Wizard (shown on first run) -->
@@ -1137,8 +1165,12 @@
                 <sl-icon name="wifi-off"></sl-icon>
                 Connecting...
             </span>
-            <span id="cookie-status"></span>
-            <span id="server-status"></span>
+            <div id="status-bar-right">
+                <span id="status-warnings"></span>
+                <span id="yt-indicator" title="YouTube">YT</span>
+                <span id="tw-indicator" title="Twitch">TW</span>
+                <sl-icon-button id="btn-refresh-cookies" name="arrow-clockwise" label="Refresh cookies"></sl-icon-button>
+            </div>
         </div>
 
         <script type="module" src="/app.js"></script>

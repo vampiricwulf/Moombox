@@ -12,15 +12,20 @@ import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
+import { TwitchService } from "../../engine/twitch/index.js";
 import { SegmentDownloader } from "../../engine/downloader.js";
 import { ChatDownloader } from "../../engine/chat/index.js";
+import { TwitchChatDownloader } from "../../engine/twitch/twitchChat.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import type { VideoInfo } from "../../types/youtube.js";
+import type { TwitchStreamInfo, TwitchHlsVariant } from "../../types/twitch.js";
 import {
   STREAM_SEGMENT_TIMEOUT_MS,
   STREAM_END_VERIFY_INTERVAL_MS,
+  TWITCH_URLS,
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
+import { extractTwitchLoginFromJob } from "../../utils/twitch.js";
 import type { SegmentRange } from "../../engine/manifest.js";
 import type { MuxTrimOptions } from "../../engine/muxer.js";
 import { downloadVod, downloadDash, downloadHls } from "./downloadStrategies.js";
@@ -33,7 +38,7 @@ import { setupChatDownloader, runSegmentDownloaders, runSegmentDownloadersWithou
 export class DownloadOrchestrator {
   private logger: Logger;
   private activeSegmentDownloaders: Set<SegmentDownloader> = new Set();
-  private activeChatDownloaders: Set<ChatDownloader> = new Set();
+  private activeChatDownloaders: Set<{ stop(): void }> = new Set();
   private activeAbortControllers: Map<string, AbortController> = new Map();
 
   constructor() {
@@ -56,6 +61,173 @@ export class DownloadOrchestrator {
       ac.abort();
     }
     this.activeAbortControllers.clear();
+  }
+
+  /**
+   * Execute a Twitch stream/VOD download.
+   * Uses existing SegmentDownloader in HLS mode (standard M3U8).
+   * Twitch HLS delivers pre-muxed MPEG-TS, so only one downloader is needed.
+   */
+  async executeTwitch(
+    job: Job,
+    variant: TwitchHlsVariant,
+    isVod: boolean,
+    twitchChatDl?: TwitchChatDownloader,
+    twitchStreamInfo?: TwitchStreamInfo,
+  ): Promise<void> {
+    const db = await Database.getInstance();
+    const config = ConfigManager.getInstance().get();
+
+    // Create abort controller for this job
+    const abortController = new AbortController();
+    this.activeAbortControllers.set(job.id, abortController);
+
+    const unsubscribe = db.onJobUpdate((updatedJob) => {
+      if (updatedJob.id === job.id && updatedJob.status === "Cancelled") {
+        this.logger.info(`[DownloadOrchestrator] Twitch cancel detected for ${job.id}`);
+        abortController.abort();
+      }
+    });
+
+    const signal = abortController.signal;
+
+    signal.addEventListener("abort", () => {
+      for (const dl of this.activeSegmentDownloaders) dl.stop();
+      twitchChatDl?.stop();
+    }, { once: true });
+
+    let stagingDir: string | null = null;
+
+    try {
+      const downloadStartedAt = new Date().toISOString();
+      await db.updateJob(job.id, { status: "Downloading", downloadStartedAt });
+
+      const qualityLabel = variant.name + (variant.height ? ` (${variant.height}p${variant.fps || ""})` : "");
+
+      NotificationManager.getInstance().send(
+        "Twitch Download Starting",
+        `Beginning download: ${job.title}`,
+        NotificationType.DOWNLOAD,
+        [
+          { name: "Channel", value: job.channelName, inline: true },
+          { name: "Quality", value: qualityLabel, inline: true },
+          { name: "Type", value: isVod ? "VOD" : "Live Stream", inline: true },
+        ],
+        {
+          url: job.url,
+          thumbnail: job.thumbnailUrl,
+          event: "downloading",
+        },
+      );
+
+      // Setup staging directory
+      const outputDir = job.outputDirectory || config.downloader.output_directory || "./output";
+      stagingDir = config.downloader.staging_directory
+        ? path.join(config.downloader.staging_directory, job.id)
+        : path.join("./staging", job.id);
+      await fs.ensureDir(stagingDir);
+
+      // Twitch HLS delivers pre-muxed MPEG-TS — single stream download
+      const videoPath = path.join(stagingDir, "video_stream");
+
+      // Create SegmentDownloader for the HLS variant
+      const videoDl = new SegmentDownloader({
+        baseUrl: variant.url,
+        outputFile: videoPath,
+        startSeq: -1,
+        isHls: true,
+        onCheckStreamStatus: async () => {
+          // Check if Twitch stream is still live
+          if (isVod) return false;
+          const login = extractTwitchLoginFromJob(job);
+          if (!login) return true;
+          const twitch = TwitchService.getInstance();
+          const info = await twitch.getStreamInfo(login);
+          return info === null || !info.isLive;
+        },
+      });
+      this.activeSegmentDownloaders.add(videoDl);
+
+      // Track Twitch chat downloader for shutdown propagation
+      if (twitchChatDl) {
+        this.activeChatDownloaders.add(twitchChatDl);
+      }
+
+      // Start chat in background
+      const chatPromise = twitchChatDl
+        ? twitchChatDl.start().catch(e => {
+            this.logger.warn(`[TwitchChat] Chat download error: ${e.message}`);
+          })
+        : Promise.resolve();
+
+      // Progress tracking for Twitch
+      videoDl.on("progress", (data) => {
+        const seq = data.seq || 0;
+        db.updateJob(job.id, {
+          lastVideoSeq: seq,
+          progress: `Seg: ${seq}`,
+        }).catch(() => {});
+      });
+
+      videoDl.on("finish", () => {
+        this.activeSegmentDownloaders.delete(videoDl);
+      });
+
+      // Start download
+      await videoDl.start();
+
+      if (signal.aborted) {
+        twitchChatDl?.stop();
+        return;
+      }
+
+      // Mark stream ended for chat downloader
+      if (twitchChatDl) twitchChatDl.markStreamEnded();
+
+      // Wait for chat with timeout
+      const chatTimeout = new Promise<void>(resolve => setTimeout(resolve, ms("2m")));
+      await Promise.race([chatPromise, chatTimeout]);
+      if (twitchChatDl && twitchChatDl.isRunning()) twitchChatDl.stop();
+
+      // Update chat status
+      if (twitchChatDl) {
+        const chatMsgCount = twitchChatDl.getMessageCount();
+        await db.updateJob(job.id, {
+          chatStatus: chatMsgCount > 0 ? "finished" : "unavailable",
+          totalChatMessages: chatMsgCount,
+        });
+      }
+
+      if (signal.aborted) return;
+
+      // Set stream end time
+      if (!job.streamEndTime) {
+        const endTime = new Date().toISOString();
+        await db.updateJob(job.id, { streamEndTime: endTime });
+      }
+
+      // Mux: Twitch .ts → .mp4 (simple remux, single input)
+      await muxAndFinalize(
+        job,
+        videoPath,
+        null,          // No separate audio — Twitch HLS is pre-muxed
+        outputDir,
+        stagingDir,
+        ".mp4",
+        db,
+        signal,
+      );
+    } finally {
+      unsubscribe();
+      this.activeAbortControllers.delete(job.id);
+      if (twitchChatDl) {
+        twitchChatDl.stop();
+        this.activeChatDownloaders.delete(twitchChatDl);
+      }
+      if (signal.aborted && stagingDir) {
+        fs.remove(stagingDir).catch(() => {});
+      }
+    }
   }
 
   /**
@@ -146,7 +318,7 @@ export class DownloadOrchestrator {
       NotificationType.DOWNLOAD,
       startFields,
       {
-        url: `https://www.youtube.com/watch?v=${job.videoId}`,
+        url: job.url || `https://www.youtube.com/watch?v=${job.videoId}`,
         thumbnail: job.thumbnailUrl,
         event: "downloading",
       },
@@ -398,7 +570,7 @@ export class DownloadOrchestrator {
           NotificationType.ERROR,
           [],
           {
-            url: `https://www.youtube.com/watch?v=${job.videoId}`,
+            url: job.url || `https://www.youtube.com/watch?v=${job.videoId}`,
             event: "trim_error",
           },
         );

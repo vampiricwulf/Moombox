@@ -100,7 +100,7 @@ export async function muxAndFinalize(
       NotificationType.MUXING,
       muxFields,
       {
-        url: `https://www.youtube.com/watch?v=${job.videoId}`,
+        url: job.url || `https://www.youtube.com/watch?v=${job.videoId}`,
         thumbnail: job.thumbnailUrl,
         event: "muxing",
       },
@@ -256,7 +256,7 @@ export async function muxAndFinalize(
       NotificationType.SUCCESS,
       finFields,
       {
-        url: `https://www.youtube.com/watch?v=${job.videoId}`,
+        url: job.url || `https://www.youtube.com/watch?v=${job.videoId}`,
         image: job.thumbnailUrl,
         event: "finished",
       },

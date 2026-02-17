@@ -23,7 +23,7 @@ export async function setupChatDownloader(
   yt: YouTubeService,
   stagingDir: string,
   db: Database,
-  activeChatDownloaders: Set<ChatDownloader>,
+  activeChatDownloaders: Set<{ stop(): void }>,
 ): Promise<ChatDownloader | null> {
   const logger = Logger.getInstance();
 

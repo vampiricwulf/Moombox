@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { Job } from "../../core/database.js";
 import { CookieJar } from "../../core/cookies.js";
+import { AutoCookieService } from "../../core/autoCookies.js";
 
 interface StatusBarProps {
   focusedPanel: "tasks" | "details" | "logs";
@@ -29,23 +30,26 @@ export function StatusBar({
 
   const hasCookies = CookieJar.hasAuthCookies();
   const cookiesRejected = jobs.some((j) => j.status === "COOKIES?");
+  const hasTwitchAuth = CookieJar.hasTwitchAuthCookies();
+  const reloginRequired = AutoCookieService.getInstance().needsManualRelogin;
 
-  let cookieIcon: string;
-  let cookieColor: string;
-  let cookieLabel: string;
-  if (!hasCookies) {
-    cookieIcon = "\u25CB";
-    cookieColor = "red";
-    cookieLabel = "No Cookies";
-  } else if (cookiesRejected) {
-    cookieIcon = "\u2717";
-    cookieColor = "red";
-    cookieLabel = "Cookies";
-  } else {
-    cookieIcon = "\u25CF";
-    cookieColor = "green";
-    cookieLabel = "Cookies";
-  }
+  // Warnings
+  const warnings: string[] = [];
+  if (reloginRequired.youtube) warnings.push("YT: Re-login");
+  if (reloginRequired.twitch) warnings.push("TW: Re-login");
+
+  // YT indicator color
+  let ytColor: string;
+  if (reloginRequired.youtube) ytColor = "red";
+  else if (!hasCookies) ytColor = "yellow";
+  else if (cookiesRejected) ytColor = "red";
+  else ytColor = "green";
+
+  // TW indicator color
+  let twColor: string;
+  if (reloginRequired.twitch) twColor = "red";
+  else if (hasTwitchAuth) twColor = "green";
+  else twColor = "gray";
 
   return (
     <Box width={width} justifyContent="space-between">
@@ -53,8 +57,19 @@ export function StatusBar({
         {controls}
       </Text>
       <Box>
-        <Text color={cookieColor} dimColor>
-          {cookieIcon} {cookieLabel}
+        {warnings.length > 0 && (
+          <Text color="red" dimColor>
+            {warnings.join("  ")}{"  "}
+          </Text>
+        )}
+        <Text color={ytColor} dimColor>
+          YT
+        </Text>
+        <Text color="gray" dimColor>
+          {" "}
+        </Text>
+        <Text color={twColor} dimColor>
+          TW
         </Text>
       </Box>
     </Box>

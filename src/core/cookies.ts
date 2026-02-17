@@ -31,6 +31,14 @@ export interface FirefoxCookieRow {
   isSecure: number; // 0 or 1;
 }
 
+// Essential Twitch cookies
+export const TWITCH_ESSENTIAL_COOKIES = new Set([
+  "auth-token",           // OAuth bearer token (the main one)
+  "twilight-user",        // User preference data
+  "login",               // Username
+  "name",                // Display name
+]);
+
 // Essential YouTube cookies needed for authentication
 // Based on yt-dlp's cookie handling
 export const ESSENTIAL_COOKIES = new Set([
@@ -109,14 +117,15 @@ export class CookieJar {
         const name = parts[5].trim();
         const value = parts[6].trim();
 
-        // Only include YouTube and Google domain cookies
-        // Google cookies (SID, HSID, etc.) are needed for YouTube auth
-        if (
-          !domain.includes("youtube.com") &&
-          !domain.includes(".youtube.com") &&
-          !domain.includes("google.com") &&
-          !domain.includes(".google.com")
-        ) {
+        // Only include YouTube, Google, and Twitch domain cookies
+        const isYouTubeGoogle =
+          domain.includes("youtube.com") ||
+          domain.includes(".youtube.com") ||
+          domain.includes("google.com") ||
+          domain.includes(".google.com");
+        const isTwitch = domain.includes("twitch.tv") || domain.includes(".twitch.tv");
+
+        if (!isYouTubeGoogle && !isTwitch) {
           continue;
         }
 
@@ -132,7 +141,9 @@ export class CookieJar {
             name.startsWith("__Secure-1P") ||
             name.startsWith("__Secure-3P"));
 
-        if (!ESSENTIAL_COOKIES.has(name) && !isGoogleAuthCookie) {
+        const isTwitchEssential = isTwitch && TWITCH_ESSENTIAL_COOKIES.has(name);
+
+        if (!ESSENTIAL_COOKIES.has(name) && !isGoogleAuthCookie && !isTwitchEssential) {
           continue;
         }
 
@@ -271,6 +282,22 @@ export class CookieJar {
   }
 
   /**
+   * Get Twitch auth-token from parsed cookies.
+   * The auth-token is the OAuth bearer token for Twitch API access.
+   */
+  static getTwitchAuthToken(): string | null {
+    if (!this.parsedCookies) return null;
+    return this.parsedCookies.cookies.get("auth-token") || null;
+  }
+
+  /**
+   * Check if we have Twitch authentication cookies.
+   */
+  static hasTwitchAuthCookies(): boolean {
+    return !!this.getTwitchAuthToken();
+  }
+
+  /**
    * Reset parsed cookies (for testing)
    */
   static reset(): void {
@@ -282,7 +309,7 @@ export class CookieJar {
 // Cookie Format Conversion Utilities
 // ============================================================================
 
-const RELEVANT_DOMAINS = [".youtube.com", ".google.com", "youtube.com", "google.com"];
+const RELEVANT_DOMAINS = [".youtube.com", ".google.com", "youtube.com", "google.com", ".twitch.tv", "twitch.tv"];
 
 function isRelevantDomain(domain: string): boolean {
   return RELEVANT_DOMAINS.some(
@@ -351,7 +378,10 @@ export function cdpCookiesToNetscape(
 
   for (const cookie of cookies) {
     if (!isRelevantDomain(cookie.domain)) continue;
-    if (essentialOnly && !ESSENTIAL_COOKIES.has(cookie.name)) continue;
+    if (essentialOnly) {
+      const isTwitchDomain = cookie.domain.includes("twitch.tv");
+      if (isTwitchDomain ? !TWITCH_ESSENTIAL_COOKIES.has(cookie.name) : !ESSENTIAL_COOKIES.has(cookie.name)) continue;
+    }
 
     collected.push({
       domain: cookie.domain,
@@ -382,7 +412,10 @@ export function firefoxCookiesToNetscape(
 
   for (const row of rows) {
     if (!isRelevantDomain(row.host)) continue;
-    if (essentialOnly && !ESSENTIAL_COOKIES.has(row.name)) continue;
+    if (essentialOnly) {
+      const isTwitchDomain = row.host.includes("twitch.tv");
+      if (isTwitchDomain ? !TWITCH_ESSENTIAL_COOKIES.has(row.name) : !ESSENTIAL_COOKIES.has(row.name)) continue;
+    }
 
     // Firefox stores expiry in milliseconds; Netscape format uses seconds
     const expiry = row.expiry > 1e12 ? Math.floor(row.expiry / 1000) : row.expiry;

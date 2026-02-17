@@ -166,6 +166,8 @@ export class CdpClient {
         "https://accounts.google.com",
         "https://www.google.com",
         "https://google.com",
+        "https://www.twitch.tv",
+        "https://twitch.tv",
       ],
     });
     return result.cookies as CdpCookie[];

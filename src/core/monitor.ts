@@ -3,11 +3,14 @@ import ms from "ms";
 import { ConfigManager, ChannelConfig } from "./config.js";
 import { Database } from "./database.js";
 import { YouTubeService } from "../engine/youtube/index.js";
+import { TwitchService } from "../engine/twitch/index.js";
 import { Logger } from "./logger.js";
 import { NotificationManager, NotificationType } from "./notifications.js";
 import { MoomboxConfig } from "../types/config.js";
 import { fetchWithTimeout } from "./http.js";
 import { fuzzyMatch } from "../utils/textNormalization.js";
+import { getErrorMessage } from "../types/errors.js";
+import { TWITCH_URLS } from "../constants.js";
 
 /** Parsed YouTube Atom feed entry */
 interface FeedEntry {
@@ -78,12 +81,16 @@ export class FeedMonitor {
 
     for (const channel of config.channels) {
       try {
-        await this.checkChannelFeed(channel, config, db);
+        if (channel.platform === "twitch") {
+          await this.checkTwitchChannel(channel, config, db);
+        } else {
+          await this.checkChannelFeed(channel, config, db);
+        }
       } catch (e: any) {
         const errorMsg = e.message || String(e);
         const isHttpError = errorMsg.includes("Status code");
 
-        if (isHttpError) {
+        if (isHttpError && channel.platform !== "twitch") {
           this.logger.warn(
             `[Monitor] RSS feed blocked for ${channel.name || channel.id}: ${errorMsg}`,
           );
@@ -402,6 +409,125 @@ export class FeedMonitor {
       ],
       { url: videoUrl, thumbnail: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`, event: "found" },
     );
+  }
+
+  /**
+   * Check a Twitch channel for live status.
+   * Uses DECAPI uptime check first (lightweight), then GQL for full metadata.
+   */
+  private async checkTwitchChannel(
+    channel: ChannelConfig,
+    config: MoomboxConfig,
+    db: Database,
+  ) {
+    const login = channel.id.toLowerCase();
+    const displayName = channel.name || login;
+
+    // Quick uptime check via DECAPI
+    const isLive = await this.checkTwitchUptime(login);
+    if (!isLive) {
+      this.logger.debug(`[Monitor] Twitch channel ${displayName} is offline`);
+      return;
+    }
+
+    // Channel is live — fetch full metadata via GQL
+    const twitch = TwitchService.getInstance();
+    await twitch.init();
+
+    const streamInfo = await twitch.getStreamInfo(login);
+    if (!streamInfo || !streamInfo.isLive) {
+      this.logger.debug(`[Monitor] Twitch GQL says ${displayName} is not live (stale DECAPI?)`);
+      return;
+    }
+
+    // Check deduplication — stream ID is unique per broadcast session
+    const jobId = `tw_${streamInfo.streamId}`;
+    if (await db.hasProcessed(jobId)) {
+      this.logger.debug(`[Monitor] Twitch stream ${jobId} already processed`);
+      return;
+    }
+
+    // Apply term matching on stream title and game category
+    const titleMatch = this.matches(streamInfo.title || "", channel);
+    const categoryMatch = streamInfo.gameCategory
+      ? this.matches(streamInfo.gameCategory, channel)
+      : false;
+
+    if (!titleMatch && !categoryMatch) {
+      this.logger.debug(
+        `[Monitor] Twitch stream "${streamInfo.title}" (${streamInfo.gameCategory || "no category"}) ` +
+        `did not match terms for ${displayName}`,
+      );
+      return;
+    }
+
+    this.logger.info(
+      `[Monitor] Twitch LIVE: ${displayName} — ${streamInfo.title} (${jobId})`,
+    );
+
+    // Create job
+    const title = `${streamInfo.channelDisplayName} — ${streamInfo.title || new Date().toISOString()}`;
+    const newJob = await db.addJob({
+      videoId: jobId,
+      url: `${TWITCH_URLS.BASE}/${login}`,
+      title,
+      channelName: streamInfo.channelDisplayName,
+      platform: "twitch",
+      thumbnailUrl: streamInfo.thumbnailUrl,
+      outputDirectory: channel.output_directory || config.downloader?.output_directory,
+      streamStartTime: streamInfo.startedAt,
+      twitchCategory: streamInfo.gameCategory,
+      twitchQuality: channel.qualityPreference,
+    });
+
+    if (!newJob) {
+      this.logger.debug(`[Monitor] Twitch job already exists for ${jobId}`);
+      return;
+    }
+
+    await db.addToHistory(jobId);
+
+    await NotificationManager.getInstance().send(
+      "Twitch Stream Found",
+      `Live: ${title}`,
+      NotificationType.INFO,
+      [
+        { name: "Channel", value: displayName, inline: true },
+        { name: "Stream ID", value: streamInfo.streamId, inline: true },
+        ...(streamInfo.gameCategory ? [{ name: "Category", value: streamInfo.gameCategory, inline: true }] : []),
+      ],
+      {
+        url: `${TWITCH_URLS.BASE}/${login}`,
+        thumbnail: streamInfo.thumbnailUrl,
+        event: "found",
+      },
+    );
+  }
+
+  /**
+   * Lightweight Twitch uptime check via DECAPI.
+   * Returns true if the channel is live.
+   */
+  private async checkTwitchUptime(login: string): Promise<boolean> {
+    try {
+      const response = await fetchWithTimeout(
+        `${TWITCH_URLS.DECAPI_UPTIME}/${login}`,
+        { headers: { "User-Agent": "Moombox/1.0" } },
+        ms("15s"),
+      );
+      if (!response.ok) return false;
+      const text = await response.text();
+      const lower = text.toLowerCase().trim();
+      // DECAPI returns "X is offline" when not live, or error strings
+      if (lower.includes("is offline")) return false;
+      if (lower.includes("not found") || lower.includes("error")) return false;
+      // Valid uptime response contains a digit and a time-unit word
+      return /\d/.test(text) && /(second|minute|hour|day|week)/i.test(text);
+    } catch (e) {
+      this.logger.debug(`[Monitor] DECAPI Twitch uptime check failed for ${login}: ${getErrorMessage(e)}`);
+      // Assume possibly live — the caller's GQL call will verify
+      return true;
+    }
   }
 
   private matches(title: string, config: ChannelConfig): boolean {
