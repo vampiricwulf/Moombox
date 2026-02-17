@@ -64,6 +64,8 @@ export interface NotificationConfig {
 export interface AutoCookiesConfig {
   enabled?: boolean;
   browser_profile_dir?: string;
+  /** Platforms that have been configured for auto-cookie acquisition */
+  platforms?: ("youtube" | "twitch")[];
 }
 
 /**

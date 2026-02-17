@@ -3,11 +3,9 @@
  */
 
 import type { Router } from "express";
-import fs from "fs-extra";
 import { Logger } from "../../core/logger.js";
 import { ConfigManager } from "../../core/config.js";
 import { CookieRefreshService } from "../../core/cookieRefresh.js";
-import { CookieJar } from "../../core/cookies.js";
 import { AutoCookieService } from "../../core/autoCookies.js";
 import { getYtdlpPluginStatus, installYtdlpPlugin } from "../../core/ytdlpPlugin.js";
 import { asyncHandler } from "./errorHandler.js";
@@ -26,34 +24,20 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
 
   // Get status
   router.get("/status", asyncHandler(async (req, res) => {
-    const config = ConfigManager.getInstance().get();
-
-    // Check cookie status by directly loading and parsing the cookie file
-    let cookieStatus = { found: false, authenticated: false };
-    try {
-      const cookieFile = config.downloader?.cookie_file;
-      if (cookieFile && fs.existsSync(cookieFile)) {
-        cookieStatus.found = true;
-        // Load cookies fresh to check authentication
-        await CookieJar.load(cookieFile, true);
-        cookieStatus.authenticated = CookieJar.hasAuthCookies();
-      }
-    } catch (e) {
-      // Ignore errors
-    }
-
-    // Twitch auth status
-    const twitchAuthStatus = { authenticated: CookieJar.hasTwitchAuthCookies() };
-
-    // Auto-cookie re-login state
+    const validation = CookieRefreshService.getInstance().validationState;
     const autoCookieReloginRequired = AutoCookieService.getInstance().needsManualRelogin;
 
     res.json({
       status: "running",
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
-      cookieStatus,
-      twitchAuthStatus,
+      cookieStatus: {
+        found: validation.youtube.hasCookies,
+        authenticated: validation.youtube.authenticated,
+      },
+      twitchAuthStatus: {
+        authenticated: validation.twitch.authenticated,
+      },
       autoCookieReloginRequired,
     });
   }));
@@ -170,30 +154,21 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
     res.json({ success: true });
   }));
 
-  // Recheck cookies
+  // Recheck cookies (triggers real validation via API calls)
   router.post("/cookies/recheck", asyncHandler(async (req, res) => {
     const cookieService = CookieRefreshService.getInstance();
-    const success = await cookieService.refresh();
-
-    // Get updated status by directly loading and parsing the cookie file
-    const config = ConfigManager.getInstance().get();
-    let cookieStatus = { found: false, authenticated: false };
-
-    const cookieFile = config.downloader?.cookie_file;
-    if (cookieFile && fs.existsSync(cookieFile)) {
-      cookieStatus.found = true;
-      // Load cookies fresh to check authentication
-      await CookieJar.load(cookieFile, true);
-      cookieStatus.authenticated = CookieJar.hasAuthCookies();
-    }
-
-    const twitchAuthStatus = { authenticated: CookieJar.hasTwitchAuthCookies() };
+    const validation = await cookieService.recheck();
     const autoCookieReloginRequired = AutoCookieService.getInstance().needsManualRelogin;
 
     res.json({
-      success,
-      cookieStatus,
-      twitchAuthStatus,
+      success: validation.youtube.authenticated || validation.twitch.authenticated,
+      cookieStatus: {
+        found: validation.youtube.hasCookies,
+        authenticated: validation.youtube.authenticated,
+      },
+      twitchAuthStatus: {
+        authenticated: validation.twitch.authenticated,
+      },
       autoCookieReloginRequired,
     });
   }));

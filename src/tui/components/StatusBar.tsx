@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { Job } from "../../core/database.js";
-import { CookieJar } from "../../core/cookies.js";
+import { CookieRefreshService } from "../../core/cookieRefresh.js";
 import { AutoCookieService } from "../../core/autoCookies.js";
 
 interface StatusBarProps {
@@ -28,9 +28,8 @@ export function StatusBar({
       break;
   }
 
-  const hasCookies = CookieJar.hasAuthCookies();
+  const validation = CookieRefreshService.getInstance().validationState;
   const cookiesRejected = jobs.some((j) => j.status === "COOKIES?");
-  const hasTwitchAuth = CookieJar.hasTwitchAuthCookies();
   const reloginRequired = AutoCookieService.getInstance().needsManualRelogin;
 
   // Warnings
@@ -38,17 +37,18 @@ export function StatusBar({
   if (reloginRequired.youtube) warnings.push("YT: Re-login");
   if (reloginRequired.twitch) warnings.push("TW: Re-login");
 
-  // YT indicator color
+  // YT indicator color — uses real auth validation, not just cookie presence
   let ytColor: string;
   if (reloginRequired.youtube) ytColor = "red";
-  else if (!hasCookies) ytColor = "yellow";
-  else if (cookiesRejected) ytColor = "red";
+  else if (!validation.youtube.hasCookies) ytColor = "yellow";
+  else if (cookiesRejected || !validation.youtube.authenticated) ytColor = "red";
   else ytColor = "green";
 
-  // TW indicator color
+  // TW indicator color — uses real auth validation
   let twColor: string;
   if (reloginRequired.twitch) twColor = "red";
-  else if (hasTwitchAuth) twColor = "green";
+  else if (validation.twitch.authenticated) twColor = "green";
+  else if (validation.twitch.hasCookies) twColor = "red";
   else twColor = "gray";
 
   return (

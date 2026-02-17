@@ -1,5 +1,7 @@
 import fs from "fs-extra";
 import crypto from "crypto";
+import { fetchWithTimeout } from "./http.js";
+import { USER_AGENTS, YOUTUBE_URLS, TWITCH_URLS, WEB_CLIENT } from "../constants.js";
 
 export interface ParsedCookies {
   cookieHeader: string;
@@ -173,6 +175,13 @@ export class CookieJar {
   }
 
   /**
+   * Get the current cookie header string without reloading from file.
+   */
+  static getCookieHeader(): string {
+    return this.parsedCookies?.cookieHeader ?? "";
+  }
+
+  /**
    * Get all SAPISID cookie variants for YouTube authentication.
    * Returns { sapisid, sapisid1p, sapisid3p }
    */
@@ -302,6 +311,109 @@ export class CookieJar {
    */
   static reset(): void {
     this.parsedCookies = null;
+  }
+}
+
+// ============================================================================
+// Auth Verification (real API calls, not format-only checks)
+// ============================================================================
+
+/**
+ * Verify YouTube authentication by making a real API call.
+ * Uses the guide endpoint which is lightweight and requires valid auth cookies + SAPISIDHASH.
+ * CookieJar must already be loaded before calling this.
+ */
+export async function verifyYouTubeAuth(): Promise<boolean> {
+  try {
+    if (!CookieJar.hasAuthCookies()) return false;
+
+    const cookieHeader = CookieJar.getCookieHeader();
+    if (!cookieHeader) return false;
+
+    const authHeader = CookieJar.generateAuthorizationHeader();
+    if (!authHeader) return false;
+
+    const response = await fetchWithTimeout(
+      `${YOUTUBE_URLS.API}/guide?prettyPrint=false`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": USER_AGENTS.WEB,
+          Cookie: cookieHeader,
+          Origin: YOUTUBE_URLS.BASE,
+          Referer: `${YOUTUBE_URLS.BASE}/`,
+          Authorization: authHeader,
+          "X-Origin": YOUTUBE_URLS.BASE,
+        },
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: WEB_CLIENT.context.clientName,
+              clientVersion: WEB_CLIENT.context.clientVersion,
+              hl: "en",
+            },
+          },
+        }),
+      },
+      10000, // 10s timeout — quick yes/no
+    );
+
+    if (!response.ok) return false;
+
+    // YouTube always returns 200 OK even with invalid/garbage cookies —
+    // it just serves an unauthenticated guide response. Parse the body
+    // and check for authentication indicators.
+    const data = await response.json();
+
+    // Primary: serviceTrackingParams contains logged_in across all Innertube responses
+    const trackingParams = data?.responseContext?.serviceTrackingParams;
+    if (Array.isArray(trackingParams)) {
+      for (const service of trackingParams) {
+        if (Array.isArray(service?.params)) {
+          for (const param of service.params) {
+            if (param?.key === "logged_in" && param?.value === "1") {
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    // Fallback: mainAppWebResponseContext.loggedIn (may not always be present)
+    if (data?.responseContext?.mainAppWebResponseContext?.loggedIn === true) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify Twitch authentication by validating the OAuth token.
+ * Uses Twitch's OAuth2 validation endpoint — returns 200 if valid, 401 if expired.
+ * CookieJar must already be loaded before calling this.
+ */
+export async function verifyTwitchAuth(): Promise<boolean> {
+  try {
+    const token = CookieJar.getTwitchAuthToken();
+    if (!token) return false;
+
+    const response = await fetchWithTimeout(
+      TWITCH_URLS.OAUTH_VALIDATE,
+      {
+        headers: {
+          Authorization: `OAuth ${token}`,
+        },
+      },
+      10000,
+    );
+
+    return response.ok;
+  } catch {
+    return false;
   }
 }
 

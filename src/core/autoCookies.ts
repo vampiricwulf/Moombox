@@ -17,11 +17,11 @@ import fs from "fs-extra";
 import path from "path";
 import { Logger } from "./logger.js";
 import { ConfigManager } from "./config.js";
-import { CookieJar } from "./cookies.js";
+import { CookieJar, verifyYouTubeAuth, verifyTwitchAuth } from "./cookies.js";
 import { fetchWithTimeout } from "./http.js";
 import { detectBrowser, type DetectedBrowser } from "./browserDetect.js";
 import { getErrorMessage } from "../types/errors.js";
-import { USER_AGENTS, YOUTUBE_URLS, TWITCH_URLS, WEB_CLIENT } from "../constants.js";
+import { TWITCH_URLS } from "../constants.js";
 import { CdpClient } from "./cdpClient.js";
 import {
   cdpCookiesToNetscape,
@@ -116,6 +116,15 @@ export class AutoCookieService {
 
   get needsManualRelogin(): AutoCookieReloginRequired {
     return { ...this._needsManualRelogin };
+  }
+
+  /**
+   * Flag a platform as needing manual re-login.
+   * Called by CookieRefreshService when a configured platform fails validation
+   * and auto-refresh either isn't possible or didn't fix it.
+   */
+  flagManualRelogin(platform: "youtube" | "twitch"): void {
+    this._needsManualRelogin[platform] = true;
   }
 
   getTargetPlatform(): "youtube" | "twitch" | null {
@@ -215,8 +224,8 @@ export class AutoCookieService {
 
       // Run both verifications in parallel for speed
       const [authenticated, twitchAuthenticated] = await Promise.all([
-        CookieJar.hasAuthCookies() ? this.verifyYouTubeAuth() : Promise.resolve(false),
-        CookieJar.hasTwitchAuthCookies() ? this.verifyTwitchAuth() : Promise.resolve(false),
+        CookieJar.hasAuthCookies() ? verifyYouTubeAuth() : Promise.resolve(false),
+        CookieJar.hasTwitchAuthCookies() ? verifyTwitchAuth() : Promise.resolve(false),
       ]);
 
       this.lastRefresh = new Date();
@@ -239,6 +248,9 @@ export class AutoCookieService {
       // Clear re-login flags for verified platforms
       if (authenticated) this._needsManualRelogin.youtube = false;
       if (twitchAuthenticated) this._needsManualRelogin.twitch = false;
+
+      // Persist verified platforms to config so we can detect auth loss after restart
+      await this.persistPlatforms(authenticated, twitchAuthenticated);
 
       const platforms = [
         authenticated ? "YouTube" : null,
@@ -310,81 +322,30 @@ export class AutoCookieService {
     }
   }
 
-  // ─── Auth Verification ─────────────────────────────────────────
+  // ─── Platform Persistence ───────────────────────────────────────
 
   /**
-   * Verify YouTube authentication by making a real API call.
-   * Uses the guide endpoint (same as CookieRefreshService) which is
-   * lightweight and requires valid auth cookies + SAPISIDHASH.
-   * Returns true if cookies are valid, false if expired/invalid.
+   * Persist verified platforms to config so we can detect auth loss after restart.
    */
-  private async verifyYouTubeAuth(): Promise<boolean> {
+  private async persistPlatforms(youtubeVerified: boolean, twitchVerified: boolean): Promise<void> {
     try {
-      if (!CookieJar.hasAuthCookies()) return false;
+      const configManager = ConfigManager.getInstance();
+      const config = configManager.get();
+      const existing = new Set(config.auto_cookies?.platforms ?? []);
 
-      const cookieHeader = await CookieJar.load(this.getCookiePath());
-      if (!cookieHeader) return false;
+      if (youtubeVerified) existing.add("youtube");
+      if (twitchVerified) existing.add("twitch");
 
-      const authHeader = CookieJar.generateAuthorizationHeader();
-      if (!authHeader) return false;
+      const platforms = Array.from(existing) as ("youtube" | "twitch")[];
+      if (!config.auto_cookies) {
+        (config as any).auto_cookies = {};
+      }
+      config.auto_cookies!.platforms = platforms;
 
-      const response = await fetchWithTimeout(
-        `${YOUTUBE_URLS.API}/guide?prettyPrint=false`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENTS.WEB,
-            Cookie: cookieHeader,
-            Origin: YOUTUBE_URLS.BASE,
-            Referer: `${YOUTUBE_URLS.BASE}/`,
-            Authorization: authHeader,
-            "X-Origin": YOUTUBE_URLS.BASE,
-          },
-          body: JSON.stringify({
-            context: {
-              client: {
-                clientName: WEB_CLIENT.context.clientName,
-                clientVersion: WEB_CLIENT.context.clientVersion,
-                hl: "en",
-              },
-            },
-          }),
-        },
-        10000, // 10s timeout — we just need a quick yes/no
-      );
-
-      return response.ok;
+      await configManager.save(config);
+      this.logger.debug(`[AutoCookies] Persisted configured platforms: ${platforms.join(", ")}`);
     } catch (e) {
-      this.logger.debug(`[AutoCookies] YouTube auth verification failed: ${getErrorMessage(e)}`);
-      return false;
-    }
-  }
-
-  /**
-   * Verify Twitch authentication by validating the OAuth token.
-   * Uses Twitch's OAuth2 validation endpoint — returns 200 if the
-   * auth-token is still valid, 401 if expired/revoked.
-   */
-  private async verifyTwitchAuth(): Promise<boolean> {
-    try {
-      const token = CookieJar.getTwitchAuthToken();
-      if (!token) return false;
-
-      const response = await fetchWithTimeout(
-        TWITCH_URLS.OAUTH_VALIDATE,
-        {
-          headers: {
-            Authorization: `OAuth ${token}`,
-          },
-        },
-        10000,
-      );
-
-      return response.ok;
-    } catch (e) {
-      this.logger.debug(`[AutoCookies] Twitch auth verification failed: ${getErrorMessage(e)}`);
-      return false;
+      this.logger.warn(`[AutoCookies] Failed to persist platforms: ${getErrorMessage(e)}`);
     }
   }
 
@@ -395,9 +356,9 @@ export class AutoCookieService {
    * Called automatically when a job hits COOKIES? status.
    */
   async refreshCookies(): Promise<boolean> {
-    // If manual re-login is already required, skip the headless refresh entirely
-    if (this._needsManualRelogin.youtube) {
-      this.logger.debug("[AutoCookies] Skipping headless refresh — manual re-login required");
+    // If both platforms need manual re-login, skip the headless refresh entirely
+    if (this._needsManualRelogin.youtube && this._needsManualRelogin.twitch) {
+      this.logger.debug("[AutoCookies] Skipping headless refresh — manual re-login required for all platforms");
       return false;
     }
 
@@ -413,13 +374,16 @@ export class AutoCookieService {
       return false;
     }
 
-    // Check if cookie file had Twitch cookies before refresh (to detect Twitch auth loss)
     const cookiePath = this.getCookiePath();
-    let hadTwitchCookiesBefore = false;
+
+    // Determine which platforms we expect — configured platforms, or infer from existing cookies
+    const config = ConfigManager.getInstance().get();
+    const configuredPlatforms = new Set(config.auto_cookies?.platforms ?? []);
     try {
       if (await fs.pathExists(cookiePath)) {
         await CookieJar.load(cookiePath, true);
-        hadTwitchCookiesBefore = CookieJar.hasTwitchAuthCookies();
+        if (CookieJar.hasTwitchAuthCookies()) configuredPlatforms.add("twitch");
+        if (CookieJar.hasAuthCookies()) configuredPlatforms.add("youtube");
       }
     } catch {
       // Ignore errors checking pre-refresh state
@@ -446,28 +410,31 @@ export class AutoCookieService {
       CookieJar.reset();
       await CookieJar.parse(cookiePath, true);
 
-      // Run both verifications in parallel
+      // Run both verifications in parallel — verify any platform that has cookies
       const [authenticated, twitchAuthenticated] = await Promise.all([
-        CookieJar.hasAuthCookies() ? this.verifyYouTubeAuth() : Promise.resolve(false),
-        hadTwitchCookiesBefore && CookieJar.hasTwitchAuthCookies()
-          ? this.verifyTwitchAuth()
-          : Promise.resolve(false),
+        CookieJar.hasAuthCookies() ? verifyYouTubeAuth() : Promise.resolve(false),
+        CookieJar.hasTwitchAuthCookies() ? verifyTwitchAuth() : Promise.resolve(false),
       ]);
 
-      // Set re-login flags for platforms that lost authentication
-      if (!authenticated) {
+      // Set re-login flags for configured platforms that lost authentication
+      if (!authenticated && configuredPlatforms.has("youtube")) {
         this._needsManualRelogin.youtube = true;
         this.logger.warn("[AutoCookies] YouTube auth verification failed — manual re-login required");
       }
-      if (hadTwitchCookiesBefore && !twitchAuthenticated) {
+      if (!twitchAuthenticated && configuredPlatforms.has("twitch")) {
         this._needsManualRelogin.twitch = true;
         this.logger.warn("[AutoCookies] Twitch auth verification failed — manual re-login required");
       }
 
-      if (authenticated) {
+      // Consider refresh successful if any platform verified
+      if (authenticated || twitchAuthenticated) {
         this.lastRefresh = new Date();
         this.lastError = null;
-        this.logger.info("[AutoCookies] Cookie refresh succeeded (auth verified)");
+        const verified = [
+          authenticated ? "YouTube" : null,
+          twitchAuthenticated ? "Twitch" : null,
+        ].filter(Boolean).join(" + ");
+        this.logger.info(`[AutoCookies] Cookie refresh succeeded (verified: ${verified})`);
         return true;
       }
 

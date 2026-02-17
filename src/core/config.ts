@@ -58,6 +58,7 @@ export class ConfigManager {
     auto_cookies: {
       enabled: false,
       browser_profile_dir: "./browser-profile",
+      platforms: [],
     },
   };
 
@@ -222,6 +223,9 @@ export class ConfigManager {
         browser_profile_dir:
           config.auto_cookies?.browser_profile_dir ??
           defaults.auto_cookies?.browser_profile_dir,
+        platforms:
+          config.auto_cookies?.platforms ??
+          defaults.auto_cookies?.platforms,
       },
       notifications: config.notifications,
       // Normalize channel configs (TOML snake_case → camelCase)
@@ -429,13 +433,15 @@ export class ConfigManager {
     // Auto cookies section
     if (config.auto_cookies) {
       const ac = config.auto_cookies;
-      if (isDefined(ac.enabled) || isDefined(ac.browser_profile_dir)) {
+      if (isDefined(ac.enabled) || isDefined(ac.browser_profile_dir) || (ac.platforms && ac.platforms.length > 0)) {
         lines.push("");
         lines.push("[auto_cookies]");
         if (isDefined(ac.enabled))
           lines.push(`enabled = ${ac.enabled}`);
         if (isDefined(ac.browser_profile_dir))
           lines.push(`browser_profile_dir = "${esc(ac.browser_profile_dir!)}"`);
+        if (ac.platforms && ac.platforms.length > 0)
+          lines.push(`platforms = [${ac.platforms.map((p) => `"${esc(p)}"`).join(", ")}]`);
       }
     }
 

@@ -1,20 +1,29 @@
 import ms from "ms";
 import { Logger } from "./logger.js";
 import { ConfigManager } from "./config.js";
-import { CookieJar } from "./cookies.js";
+import { CookieJar, verifyYouTubeAuth, verifyTwitchAuth } from "./cookies.js";
 import { AutoCookieService } from "./autoCookies.js";
 import fs from "fs-extra";
 import { fetchWithTimeout } from "./http.js";
 import { USER_AGENTS, YOUTUBE_URLS, WEB_CLIENT } from "../constants.js";
 
+export interface PlatformValidation {
+  hasCookies: boolean;
+  authenticated: boolean;
+  lastValidated: Date | null;
+}
+
+export interface ValidationState {
+  youtube: PlatformValidation;
+  twitch: PlatformValidation;
+}
+
 /**
  * Cookie Refresh Service
  *
- * Keeps YouTube session cookies alive by periodically making authenticated requests.
- * This prevents cookies from expiring due to inactivity.
- *
- * YouTube session cookies typically expire after extended periods of inactivity.
- * By making periodic requests with the cookies, we refresh the session.
+ * Keeps YouTube and Twitch session cookies alive by periodically making authenticated requests.
+ * Validates authentication with real API calls (not just cookie presence checks).
+ * Triggers auto-reacquisition when a configured platform loses auth.
  */
 export class CookieRefreshService {
   private static instance: CookieRefreshService;
@@ -25,6 +34,11 @@ export class CookieRefreshService {
   // Refresh every 30 minutes (YouTube sessions typically last longer, but this is safe)
   private readonly REFRESH_INTERVAL_MS = ms("30m");
 
+  private _validationState: ValidationState = {
+    youtube: { hasCookies: false, authenticated: false, lastValidated: null },
+    twitch: { hasCookies: false, authenticated: false, lastValidated: null },
+  };
+
   private constructor() {
     this.logger = Logger.getInstance();
   }
@@ -34,6 +48,16 @@ export class CookieRefreshService {
       CookieRefreshService.instance = new CookieRefreshService();
     }
     return CookieRefreshService.instance;
+  }
+
+  /**
+   * Get a copy of the current validation state
+   */
+  get validationState(): ValidationState {
+    return {
+      youtube: { ...this._validationState.youtube },
+      twitch: { ...this._validationState.twitch },
+    };
   }
 
   /**
@@ -79,7 +103,12 @@ export class CookieRefreshService {
   }
 
   /**
-   * Perform a cookie refresh by making an authenticated request to YouTube
+   * Perform a cookie refresh cycle:
+   * 1. Reload cookies from file
+   * 2. Validate YouTube auth with real API call
+   * 3. Validate Twitch auth with real API call
+   * 4. Refresh YouTube session cookies via Set-Cookie
+   * 5. Trigger auto-reacquisition for configured platforms that lost auth
    */
   async refresh(): Promise<boolean> {
     const config = ConfigManager.getInstance().get();
@@ -94,16 +123,119 @@ export class CookieRefreshService {
         true,
       );
 
-      if (!cookieHeader || !CookieJar.hasAuthCookies()) {
-        this.logger.debug("[CookieRefresh] No auth cookies present");
-        return this.tryAutoCookieRefresh();
+      const now = new Date();
+
+      // Update hasCookies flags from format checks
+      this._validationState.youtube.hasCookies = CookieJar.hasAuthCookies();
+      this._validationState.twitch.hasCookies = CookieJar.hasTwitchAuthCookies();
+
+      // Validate both platforms with real API calls (in parallel)
+      const [ytAuth, twAuth] = await Promise.all([
+        this._validationState.youtube.hasCookies ? verifyYouTubeAuth() : Promise.resolve(false),
+        this._validationState.twitch.hasCookies ? verifyTwitchAuth() : Promise.resolve(false),
+      ]);
+
+      this._validationState.youtube.authenticated = ytAuth;
+      this._validationState.youtube.lastValidated = now;
+      this._validationState.twitch.authenticated = twAuth;
+      this._validationState.twitch.lastValidated = now;
+
+      // Refresh YouTube session cookies via Set-Cookie if auth is valid
+      if (ytAuth && cookieHeader) {
+        await this.refreshYouTubeSession(config.downloader.cookie_file, cookieHeader);
       }
 
-      // Generate authorization header
+      // Determine which configured platforms need recovery.
+      // A platform needs recovery when it's in the platforms list (meaning
+      // it was set up at some point) and it now lacks cookies or failed auth.
+      const autoCookiesEnabled = config.auto_cookies?.enabled === true;
+      const configuredPlatforms = config.auto_cookies?.platforms ?? [];
+      const platformsNeedingRecovery: ("youtube" | "twitch")[] = [];
+
+      if (autoCookiesEnabled) {
+        for (const platform of configuredPlatforms) {
+          const state = this._validationState[platform];
+          if (!state.hasCookies || !state.authenticated) {
+            platformsNeedingRecovery.push(platform);
+          }
+        }
+
+        // Also trigger if no cookies at all (file deleted) and auto_cookies is enabled,
+        // even if platforms list is empty (handles pre-migration setups)
+        if (platformsNeedingRecovery.length === 0
+          && !this._validationState.youtube.hasCookies
+          && !this._validationState.twitch.hasCookies) {
+          platformsNeedingRecovery.push("youtube"); // YouTube is always the primary platform
+        }
+      }
+
+      if (platformsNeedingRecovery.length > 0) {
+        const reasons = platformsNeedingRecovery.map((p) => {
+          const state = this._validationState[p];
+          return !state.hasCookies ? `${p} missing` : `${p} auth failed`;
+        });
+        this.logger.info(
+          `[CookieRefresh] Auto-cookie refresh needed (${reasons.join(", ")})`,
+        );
+        const refreshed = await this.tryAutoCookieRefresh();
+
+        if (refreshed) {
+          // Re-validate after auto-refresh
+          await CookieJar.load(config.downloader.cookie_file, true);
+          this._validationState.youtube.hasCookies = CookieJar.hasAuthCookies();
+          this._validationState.twitch.hasCookies = CookieJar.hasTwitchAuthCookies();
+
+          const [ytAuth2, twAuth2] = await Promise.all([
+            this._validationState.youtube.hasCookies ? verifyYouTubeAuth() : Promise.resolve(false),
+            this._validationState.twitch.hasCookies ? verifyTwitchAuth() : Promise.resolve(false),
+          ]);
+
+          const revalidateTime = new Date();
+          this._validationState.youtube.authenticated = ytAuth2;
+          this._validationState.youtube.lastValidated = revalidateTime;
+          this._validationState.twitch.authenticated = twAuth2;
+          this._validationState.twitch.lastValidated = revalidateTime;
+        }
+
+        // Flag re-login for configured platforms that still lack auth after refresh attempt
+        const autoCookies = AutoCookieService.getInstance();
+        for (const platform of platformsNeedingRecovery) {
+          if (!this._validationState[platform].authenticated) {
+            autoCookies.flagManualRelogin(platform);
+          }
+        }
+      }
+
+      const ytStatus = this._validationState.youtube;
+      const twStatus = this._validationState.twitch;
+      this.logger.debug(
+        `[CookieRefresh] Validation: YT(cookies=${ytStatus.hasCookies}, auth=${ytStatus.authenticated}) ` +
+        `TW(cookies=${twStatus.hasCookies}, auth=${twStatus.authenticated})`,
+      );
+
+      return ytAuth || twAuth;
+    } catch (e: any) {
+      this.logger.warn(`[CookieRefresh] Refresh error: ${e.stack || e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Convenience method: run a refresh cycle and return the validation state.
+   */
+  async recheck(): Promise<ValidationState> {
+    await this.refresh();
+    return this.validationState;
+  }
+
+  /**
+   * Refresh YouTube session cookies by making an authenticated request
+   * and updating the cookie file with any Set-Cookie headers.
+   */
+  private async refreshYouTubeSession(cookieFilePath: string, cookieHeader: string): Promise<void> {
+    try {
       const authHeader = CookieJar.generateAuthorizationHeader();
 
-      // Make an authenticated request to YouTube
-      // Using the /youtubei/v1/guide endpoint which is lightweight and requires auth
       const response = await fetchWithTimeout(
         `${YOUTUBE_URLS.API}/guide?prettyPrint=false`,
         {
@@ -130,33 +262,16 @@ export class CookieRefreshService {
       );
 
       if (response.ok) {
-        // Check for Set-Cookie headers (new cookies from server)
         const setCookies = response.headers.getSetCookie?.();
         if (setCookies && setCookies.length > 0) {
-          await this.updateCookieFile(
-            config.downloader.cookie_file,
-            setCookies,
-          );
+          await this.updateCookieFile(cookieFilePath, setCookies);
         }
-
         this.logger.debug(
-          `[CookieRefresh] Session refreshed successfully (HTTP ${response.status})`,
+          `[CookieRefresh] YouTube session refreshed (HTTP ${response.status})`,
         );
-        return true;
-      } else {
-        this.logger.warn(
-          `[CookieRefresh] Refresh request failed: HTTP ${response.status}`,
-        );
-        // Auth cookies are present but the server rejected them (expired/invalid session).
-        // Trigger headless auto-cookie refresh to attempt recovery.
-        if (response.status === 401 || response.status === 403) {
-          return this.tryAutoCookieRefresh();
-        }
-        return false;
       }
     } catch (e: any) {
-      this.logger.warn(`[CookieRefresh] Refresh error: ${e.stack || e.message}`);
-      return false;
+      this.logger.debug(`[CookieRefresh] YouTube session refresh error: ${e.message}`);
     }
   }
 
