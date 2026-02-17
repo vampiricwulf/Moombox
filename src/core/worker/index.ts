@@ -160,6 +160,16 @@ export class DownloadWorker {
   private async processJob(job: Job): Promise<void> {
     const db = await Database.getInstance();
 
+    // Guard: re-read job from DB to ensure it's still in a processable state.
+    // The job object may be stale if checkQueue's snapshot was taken long ago.
+    const freshJob = (await db.getJobs()).find(j => j.id === job.id);
+    if (!freshJob) return;
+    const terminal = ["Finished", "Error", "Cancelled", "Muxing"];
+    if (terminal.includes(freshJob.status)) {
+      this.logger.debug(`[Worker] Skipping job ${job.id} — already ${freshJob.status}`);
+      return;
+    }
+
     this.logger.info(`[Worker] Processing job ${job.title} (${job.videoId})`);
 
     // Step 1: Process stream status and get video info
