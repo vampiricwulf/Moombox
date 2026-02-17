@@ -605,6 +605,17 @@ export class SegmentDownloader extends EventEmitter {
           (_, idx) => mediaSequence + idx >= this.currentSeq,
         );
 
+        // VOD optimization: if playlist has EXT-X-ENDLIST and there are segments
+        // to download, use parallel download for much faster throughput
+        if (playlist.endList && newSegments.length > 0) {
+          this.logger.info(
+            `[Downloader] HLS VOD detected (${newSegments.length} segments), using parallel download`,
+          );
+          await this.runHlsVodParallel(newSegments);
+          this.streamEnded = true;
+          break;
+        }
+
         for (const seg of newSegments) {
           if (!this.running || this.cancelFlag) break;
 
@@ -686,6 +697,198 @@ export class SegmentDownloader extends EventEmitter {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Fetch an HLS segment and return its data without writing to file.
+   * Returns buffer on success, null on failure.
+   */
+  private async fetchHlsSegmentData(
+    url: string,
+    idx: number,
+  ): Promise<{ idx: number; data: Buffer } | null> {
+    try {
+      const resp = await fetch(url, {
+        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+      });
+
+      if (resp.status === 200) {
+        const buffer = await resp.arrayBuffer();
+        return { idx, data: Buffer.from(buffer) };
+      }
+      await resp.arrayBuffer(); // Consume body to free socket
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Parallel HLS VOD download: fetch all segments concurrently and write in order.
+   * Modeled on runParallelCatchUp() but uses HLS segment URLs instead of DASH seq numbers.
+   */
+  private async runHlsVodParallel(
+    segments: Array<{ url: string; duration: number }>,
+  ): Promise<void> {
+    const segmentBuffer: Map<number, Buffer> = new Map();
+    const retryQueue: Array<{ idx: number; url: string }> = [];
+    const retryCounts: Map<number, number> = new Map();
+    const MAX_SEGMENT_RETRIES = 10;
+    const BUFFER_SIZE_CAP = SegmentDownloader.PARALLEL_DOWNLOADS * 3;
+    let nextToWrite = 0;
+    let nextToFetch = 0;
+    const totalSegments = segments.length;
+
+    const concurrency = Math.min(SegmentDownloader.PARALLEL_DOWNLOADS, totalSegments);
+    const limit = pLimit(concurrency);
+    const inFlightDownloads = new Set<Promise<void>>();
+
+    this.logger.info(
+      `[Downloader] Parallel HLS VOD: ${totalSegments} segments, ${concurrency} parallel`,
+    );
+
+    const startTime = Date.now();
+
+    while (
+      this.running &&
+      !this.cancelFlag &&
+      (nextToWrite < totalSegments || inFlightDownloads.size > 0)
+    ) {
+      // Start new downloads up to buffer size cap
+      while (
+        inFlightDownloads.size < BUFFER_SIZE_CAP &&
+        segmentBuffer.size < BUFFER_SIZE_CAP
+      ) {
+        let idx: number;
+        let url: string;
+
+        if (retryQueue.length > 0) {
+          const item = retryQueue.shift()!;
+          idx = item.idx;
+          url = item.url;
+        } else if (nextToFetch < totalSegments) {
+          idx = nextToFetch;
+          url = segments[nextToFetch].url;
+          nextToFetch++;
+        } else {
+          break;
+        }
+
+        const capturedIdx = idx;
+        const capturedUrl = url;
+
+        const downloadPromise = limit(async () => {
+          const result = await this.fetchHlsSegmentData(capturedUrl, capturedIdx);
+          if (result) {
+            segmentBuffer.set(result.idx, result.data);
+          } else {
+            const retries = (retryCounts.get(capturedIdx) || 0) + 1;
+            retryCounts.set(capturedIdx, retries);
+            if (retries < MAX_SEGMENT_RETRIES) {
+              retryQueue.push({ idx: capturedIdx, url: capturedUrl });
+            } else {
+              this.logger.warn(
+                `[Downloader] HLS VOD segment ${capturedIdx} failed after ${MAX_SEGMENT_RETRIES} retries`,
+              );
+            }
+          }
+        });
+
+        inFlightDownloads.add(downloadPromise);
+        downloadPromise.finally(() => inFlightDownloads.delete(downloadPromise));
+      }
+
+      // Wait for downloads to complete
+      if (inFlightDownloads.size > 0) {
+        await Promise.race([
+          Promise.race([...inFlightDownloads]),
+          new Promise((r) => setTimeout(r, 50)),
+        ]);
+      }
+
+      // Write available segments in order
+      while (segmentBuffer.has(nextToWrite)) {
+        const data = segmentBuffer.get(nextToWrite)!;
+        await fs.write(this.fileHandle, data);
+        this.bytesWritten += data.byteLength;
+        segmentBuffer.delete(nextToWrite);
+        this.currentSeq++;
+        nextToWrite++;
+
+        // Emit progress periodically
+        if (nextToWrite % 20 === 0 || nextToWrite === totalSegments) {
+          this.emit("progress", {
+            seq: this.currentSeq,
+            bytes: this.bytesWritten,
+            total: totalSegments,
+            percent: Math.round((nextToWrite / totalSegments) * 100),
+          });
+        }
+      }
+
+      // Save resume state periodically
+      if (nextToWrite % 50 === 0 && nextToWrite > 0) {
+        await this.saveResumeState();
+      }
+
+      // Check if stuck: all done fetching, nothing in-flight, nothing to retry, gap
+      if (
+        inFlightDownloads.size === 0 &&
+        nextToFetch >= totalSegments &&
+        retryQueue.length === 0 &&
+        !segmentBuffer.has(nextToWrite)
+      ) {
+        if (nextToWrite < totalSegments) {
+          let gapEnd = nextToWrite + 1;
+          while (gapEnd < totalSegments && !segmentBuffer.has(gapEnd)) {
+            gapEnd++;
+          }
+          this.logger.warn(
+            `[Downloader] HLS VOD gap: segments ${nextToWrite}-${gapEnd - 1} lost after retries`,
+          );
+          this.emit("gap", { from: nextToWrite, to: gapEnd - 1 });
+          nextToWrite = gapEnd;
+          this.currentSeq = nextToWrite;
+          if (segmentBuffer.size > 0) continue;
+        }
+        break;
+      }
+
+      // Yield while waiting
+      if (inFlightDownloads.size === 0 && !segmentBuffer.has(nextToWrite)) {
+        await this.cancellableDelay(100);
+      }
+    }
+
+    // Write remaining buffered segments
+    while (segmentBuffer.has(nextToWrite)) {
+      const data = segmentBuffer.get(nextToWrite)!;
+      await fs.write(this.fileHandle, data);
+      this.bytesWritten += data.byteLength;
+      segmentBuffer.delete(nextToWrite);
+      this.currentSeq++;
+      nextToWrite++;
+    }
+
+    const elapsed = (Date.now() - startTime) / 1000;
+    const speed = nextToWrite / elapsed;
+    this.logger.info(
+      `[Downloader] Parallel HLS VOD complete: ${nextToWrite}/${totalSegments} segments in ${elapsed.toFixed(1)}s (${speed.toFixed(1)} seg/s)`,
+    );
+
+    // Final progress
+    this.emit("progress", {
+      seq: this.currentSeq,
+      bytes: this.bytesWritten,
+      total: totalSegments,
+      percent: 100,
+    });
+
+    await this.saveResumeState();
   }
 
   stop() {

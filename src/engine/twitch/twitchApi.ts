@@ -397,6 +397,68 @@ export async function getVodHlsPlaylist(
 }
 
 /**
+ * VOD comment edge from GQL response.
+ */
+export interface VodCommentEdge {
+  node: {
+    id: string;
+    contentOffsetSeconds: number;
+    commenter: {
+      displayName: string;
+      id: string;
+      login: string;
+    } | null;
+    message: {
+      fragments: Array<{
+        text: string;
+        emote: { emoteID: string } | null;
+      }>;
+      userBadges: Array<{ setID: string; version: string }>;
+      userColor: string | null;
+    };
+  };
+}
+
+/**
+ * Fetch VOD chat comments (replay) via GQL persisted query.
+ * Always uses contentOffsetSeconds for pagination (not cursor) because
+ * cursor-based pagination triggers Twitch's integrity check.
+ * This matches TwitchDownloader's approach.
+ */
+export async function getVodComments(
+  vodId: string,
+  contentOffsetSeconds: number,
+  authToken?: string | null,
+): Promise<{ edges: VodCommentEdge[]; hasNextPage: boolean }> {
+  const result = await gqlRequest(
+    {
+      operationName: "VideoCommentsByOffsetOrCursor",
+      variables: {
+        videoID: vodId,
+        contentOffsetSeconds,
+      },
+      extensions: {
+        persistedQuery: {
+          version: 1,
+          sha256Hash: TWITCH_GQL_HASHES.VideoCommentsByOffsetOrCursor,
+        },
+      },
+    },
+    authToken,
+  );
+
+  const comments = result?.data?.video?.comments;
+  if (!comments) {
+    return { edges: [], hasNextPage: false };
+  }
+
+  return {
+    edges: comments.edges || [],
+    hasNextPage: comments.pageInfo?.hasNextPage ?? false,
+  };
+}
+
+/**
  * Lightweight channel-live check using DECAPI.
  * Returns true if the channel is currently live.
  */

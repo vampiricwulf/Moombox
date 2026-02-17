@@ -19,6 +19,7 @@ import * as twitchApi from "./twitchApi.js";
 // Re-export sub-modules
 export { twitchApi };
 export { generateTwitchHeaders, readTwitchAuthToken } from "./twitchAuth.js";
+export { TwitchVodChatDownloader } from "./twitchVodChat.js";
 
 /**
  * Twitch Service — singleton facade
@@ -107,6 +108,14 @@ export class TwitchService {
   async getVodHlsPlaylist(vodId: string): Promise<TwitchHlsVariant[]> {
     if (!this.initialized) await this.init();
     return twitchApi.getVodHlsPlaylist(vodId, this.authToken);
+  }
+
+  /**
+   * Fetch VOD chat comments (replay).
+   */
+  async getVodComments(vodId: string, contentOffsetSeconds: number) {
+    if (!this.initialized) await this.init();
+    return twitchApi.getVodComments(vodId, contentOffsetSeconds, this.authToken);
   }
 
   /**

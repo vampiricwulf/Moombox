@@ -14,6 +14,7 @@ import { YouTubeService } from "../../engine/youtube/index.js";
 import { TwitchService } from "../../engine/twitch/index.js";
 import { ChatDownloader, ChatApi } from "../../engine/chat/index.js";
 import { TwitchChatDownloader } from "../../engine/twitch/twitchChat.js";
+import { TwitchVodChatDownloader } from "../../engine/twitch/twitchVodChat.js";
 import { createEmptyVideoInfo, type VideoInfo, type StreamStatus } from "../../types/youtube.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import { STREAM_RECHECK_INTERVAL_MS, PROBE_JITTER_MAX_MS, MAX_CONSECUTIVE_PROBE_ERRORS, TWITCH_URLS } from "../../constants.js";
@@ -33,7 +34,7 @@ export interface StreamProcessResult {
   // Twitch-specific
   twitchStreamInfo?: TwitchStreamInfo;
   twitchVariant?: TwitchHlsVariant;
-  twitchChatDownloader?: TwitchChatDownloader;
+  twitchChatDownloader?: TwitchChatDownloader | TwitchVodChatDownloader;
 }
 
 /**
@@ -42,7 +43,7 @@ export interface StreamProcessResult {
 export class StreamProcessor {
   private logger: Logger;
   private running: boolean = true;
-  private activeChatDownloaders: Map<string, ChatDownloader | TwitchChatDownloader> = new Map();
+  private activeChatDownloaders: Map<string, ChatDownloader | TwitchChatDownloader | TwitchVodChatDownloader> = new Map();
 
   constructor() {
     this.logger = Logger.getInstance();
@@ -169,6 +170,8 @@ export class StreamProcessor {
       const vodId = job.videoId.replace("tw_v", "");
       try {
         const vodInfo = await twitch.getVodInfo(vodId);
+        const config = ConfigManager.getInstance().get();
+
         await db.updateJob(job.id, {
           status: "Downloading",
           isVod: true,
@@ -177,11 +180,9 @@ export class StreamProcessor {
           thumbnailUrl: vodInfo.thumbnailUrl,
           lengthSeconds: vodInfo.duration,
           twitchCategory: vodInfo.gameCategory,
-          chatStatus: "unavailable",  // VOD chat replay not yet implemented
         });
 
         const variants = await twitch.getVodHlsPlaylist(vodId);
-        const config = ConfigManager.getInstance().get();
         const variant = twitch.selectBestVariant(
           variants,
           job.twitchQuality,
@@ -197,12 +198,45 @@ export class StreamProcessor {
           };
         }
 
+        // Start VOD chat replay downloader
+        let twitchChatDl: TwitchVodChatDownloader | undefined;
+        if (config.downloader.download_chat !== false) {
+          const stagingDir = config.downloader.staging_directory
+            ? path.join(config.downloader.staging_directory, job.id)
+            : path.join("./staging", job.id);
+          await fs.ensureDir(stagingDir);
+          const chatPath = path.join(stagingDir, "chat.json");
+
+          twitchChatDl = new TwitchVodChatDownloader({
+            vodId,
+            channelLogin: vodInfo.channelLogin,
+            channelDisplayName: vodInfo.channelDisplayName,
+            outputFile: chatPath,
+            vodDuration: vodInfo.duration,
+            vodCreatedAt: vodInfo.createdAt,
+            authToken: twitch.getAuthToken(),
+          });
+
+          this.activeChatDownloaders.set(job.id, twitchChatDl);
+          await db.updateJob(job.id, { chatStatus: "downloading" });
+
+          twitchChatDl.on("progress", (data: any) => {
+            db.updateJob(job.id, { totalChatMessages: data.messageCount }).catch(() => {});
+          });
+
+          // Detach before handing to orchestrator
+          this.activeChatDownloaders.delete(job.id);
+        } else {
+          await db.updateJob(job.id, { chatStatus: "unavailable" });
+        }
+
         this.logger.info(`[StreamProcessor] Twitch VOD ${vodId}: using quality ${variant.name}`);
         return {
           videoInfo: createEmptyVideoInfo(job.videoId),
           shouldDownload: true,
           isVod: true,
           twitchVariant: variant,
+          twitchChatDownloader: twitchChatDl,
         };
       } catch (e) {
         return {

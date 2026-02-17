@@ -16,12 +16,14 @@ import { TwitchService } from "../../engine/twitch/index.js";
 import { SegmentDownloader } from "../../engine/downloader.js";
 import { ChatDownloader } from "../../engine/chat/index.js";
 import { TwitchChatDownloader } from "../../engine/twitch/twitchChat.js";
+import { TwitchVodChatDownloader } from "../../engine/twitch/twitchVodChat.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import type { VideoInfo } from "../../types/youtube.js";
 import type { TwitchStreamInfo, TwitchHlsVariant } from "../../types/twitch.js";
 import {
   STREAM_SEGMENT_TIMEOUT_MS,
   STREAM_END_VERIFY_INTERVAL_MS,
+  PROGRESS_UPDATE_INTERVAL_MS,
   TWITCH_URLS,
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
@@ -72,7 +74,7 @@ export class DownloadOrchestrator {
     job: Job,
     variant: TwitchHlsVariant,
     isVod: boolean,
-    twitchChatDl?: TwitchChatDownloader,
+    twitchChatDl?: TwitchChatDownloader | TwitchVodChatDownloader,
     twitchStreamInfo?: TwitchStreamInfo,
     onDownloadComplete?: () => void,
   ): Promise<void> {
@@ -161,12 +163,32 @@ export class DownloadOrchestrator {
           })
         : Promise.resolve();
 
-      // Progress tracking for Twitch
+      // Progress tracking for Twitch (includes chat count like YouTube path)
+      let chatMsgCount = 0;
+      let lastProgressUpdate = 0;
+
+      if (twitchChatDl) {
+        twitchChatDl.on("progress", (data: any) => {
+          chatMsgCount = data.messageCount || 0;
+          db.updateJob(job.id, { totalChatMessages: chatMsgCount }).catch(() => {});
+        });
+      }
+
       videoDl.on("progress", (data) => {
+        const now = Date.now();
+        if (now - lastProgressUpdate < PROGRESS_UPDATE_INTERVAL_MS) return;
+        lastProgressUpdate = now;
+
         const seq = data.seq || 0;
+        // Read latest chat count directly from downloader for accuracy
+        if (twitchChatDl) chatMsgCount = twitchChatDl.getMessageCount();
+        let progStr = `Seg: ${seq}`;
+        if (chatMsgCount > 0) progStr += ` C: ${chatMsgCount}`;
+
         db.updateJob(job.id, {
           lastVideoSeq: seq,
-          progress: `Seg: ${seq}`,
+          progress: progStr,
+          totalChatMessages: chatMsgCount || undefined,
         }).catch(() => {});
       });
 

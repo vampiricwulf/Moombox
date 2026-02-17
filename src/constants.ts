@@ -165,6 +165,7 @@ export const TWITCH_GQL_HASHES = {
   StreamMetadata: "b57f9b910f8cd1a4659d894fe7550ccc81ec9052c01e438b290fd66a040b9b93",
   ComscoreStreamingQuery: "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
   VideoMetadata: "45111672eea2e507f8ba44d101a61862f9c56b11dee09a15634cb75cb9b9084d",
+  VideoCommentsByOffsetOrCursor: "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a",
 } as const;
 
 /**

@@ -148,6 +148,8 @@ export class TwitchChatDownloader extends EventEmitter {
   private totalMessageCount = 0;
   private flushedToDisk = false;
   private streamStartMs = 0;
+  private lastSaveMs = 0;
+  private saving = false;
 
   constructor(options: TwitchChatDownloaderOptions) {
     super();
@@ -173,6 +175,7 @@ export class TwitchChatDownloader extends EventEmitter {
     const resumeState = await this.loadResumeState();
     if (resumeState) {
       this.totalMessageCount = resumeState.messageCount;
+      this.flushedToDisk = true; // Ensure final write merges old + new messages
       this.logger.info(
         `[TwitchChat] Resuming from ${this.totalMessageCount} messages`,
       );
@@ -431,7 +434,7 @@ export class TwitchChatDownloader extends EventEmitter {
   }
 
   /**
-   * Add a message, handle dedup and flushing.
+   * Add a message, handle dedup and periodic saving.
    */
   private addMessage(msg: TwitchChatMessage): void {
     this.seenIds.add(msg.id);
@@ -443,32 +446,40 @@ export class TwitchChatDownloader extends EventEmitter {
       this.emit("progress", { messageCount: this.totalMessageCount });
     }
 
-    // Flush to disk if threshold exceeded
-    if (this.messages.length >= TWITCH_IRC.FLUSH_THRESHOLD) {
-      this.flushToDisk().catch(e => {
-        this.logger.warn(`[TwitchChat] Flush failed: ${getErrorMessage(e)}`);
-      });
+    // Save to disk at most once per second (skip if a save is already in flight)
+    const now = Date.now();
+    if (!this.saving && now - this.lastSaveMs >= 1000) {
+      this.lastSaveMs = now;
+      this.saving = true;
+      this.periodicSave()
+        .catch(e => this.logger.debug(`[TwitchChat] Save error: ${getErrorMessage(e)}`))
+        .finally(() => { this.saving = false; });
     }
   }
 
   /**
-   * Flush messages to disk, keeping last N in memory.
+   * Save chat to disk and manage memory.
+   * Called periodically via addMessage() and on clean exit.
    */
-  private async flushToDisk(): Promise<void> {
-    this.logger.info(
-      `[TwitchChat] Flushing ${this.messages.length} messages to disk (keeping last ${TWITCH_IRC.KEEP_IN_MEMORY})`,
-    );
-
+  private async periodicSave(): Promise<void> {
     await this.writeChatFile();
-    this.flushedToDisk = true;
-
-    // Keep only recent messages in memory, trim seenIds to match
-    const keep = this.messages.slice(-TWITCH_IRC.KEEP_IN_MEMORY);
-    const keepIds = new Set(keep.map(m => m.id));
-    this.seenIds = keepIds;
-    this.messages = keep;
-
     await this.saveResumeState();
+
+    // Flush old messages from memory after persisting to disk
+    if (this.messages.length > TWITCH_IRC.FLUSH_THRESHOLD) {
+      this.flushedToDisk = true;
+      const keep = this.messages.slice(-TWITCH_IRC.KEEP_IN_MEMORY);
+      this.seenIds = new Set(keep.map(m => m.id));
+      this.messages = keep;
+      this.logger.debug(
+        `[TwitchChat] Flushed to disk, ${this.totalMessageCount} total, ${this.messages.length} in memory`,
+      );
+    }
+
+    // Prune seenIds to prevent unbounded growth
+    if (this.seenIds.size > TWITCH_IRC.FLUSH_THRESHOLD) {
+      this.seenIds = new Set(this.messages.slice(-TWITCH_IRC.FLUSH_THRESHOLD).map(m => m.id));
+    }
   }
 
   // =========================================================================
