@@ -6,6 +6,7 @@
  */
 
 import { Database, type Job } from "../database.js";
+import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
 import { AutoCookieService } from "../autoCookies.js";
@@ -32,11 +33,20 @@ export class DownloadWorker {
   private downloadOrchestrator: DownloadOrchestrator;
   private running: boolean = false;
 
+  // Download slot semaphore — limits concurrent active downloads
+  // (separate from job processing concurrency in p-queue)
+  private maxDownloadSlots: number;
+  private activeDownloads: number = 0;
+  private downloadWaiters: Array<() => void> = [];
+
   private constructor() {
     this.logger = Logger.getInstance();
     this.jobQueue = new JobQueue();
     this.streamProcessor = new StreamProcessor();
     this.downloadOrchestrator = new DownloadOrchestrator();
+
+    const config = ConfigManager.getInstance().get();
+    this.maxDownloadSlots = config.downloader?.num_parallel_downloads ?? 2;
 
     // Setup job ready callback
     this.jobQueue.setJobReadyCallback((job) => this.startJob(job));
@@ -78,6 +88,33 @@ export class DownloadWorker {
    */
   isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Acquire a download slot. Resolves immediately if a slot is free,
+   * otherwise waits until one is released.
+   */
+  private acquireDownloadSlot(): Promise<void> {
+    if (this.activeDownloads < this.maxDownloadSlots) {
+      this.activeDownloads++;
+      return Promise.resolve();
+    }
+    return new Promise(resolve => {
+      this.downloadWaiters.push(() => {
+        this.activeDownloads++;
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Release a download slot, unblocking the next waiter if any.
+   */
+  private releaseDownloadSlot(): void {
+    this.activeDownloads--;
+    if (this.downloadWaiters.length > 0) {
+      this.downloadWaiters.shift()!();
+    }
   }
 
   /**
@@ -221,17 +258,33 @@ export class DownloadWorker {
       return;
     }
 
-    // Step 2: Execute the download
-    if (job.platform === "twitch" && result.twitchVariant) {
-      await this.downloadOrchestrator.executeTwitch(
-        job,
-        result.twitchVariant,
-        result.isVod,
-        result.twitchChatDownloader,
-        result.twitchStreamInfo,
-      );
-    } else {
-      await this.downloadOrchestrator.execute(job, result.videoInfo, result.isVod, result.chatDownloader);
+    // Step 2: Acquire a download slot (num_parallel_downloads concurrency gate)
+    // Stream processing above runs freely; only active downloads are limited.
+    await this.acquireDownloadSlot();
+    let slotReleased = false;
+    const releaseSlot = () => {
+      if (!slotReleased) {
+        slotReleased = true;
+        this.releaseDownloadSlot();
+      }
+    };
+
+    try {
+      // Step 3: Execute the download (slot released via callback before muxing)
+      if (job.platform === "twitch" && result.twitchVariant) {
+        await this.downloadOrchestrator.executeTwitch(
+          job,
+          result.twitchVariant,
+          result.isVod,
+          result.twitchChatDownloader,
+          result.twitchStreamInfo,
+          releaseSlot,
+        );
+      } else {
+        await this.downloadOrchestrator.execute(job, result.videoInfo, result.isVod, result.chatDownloader, releaseSlot);
+      }
+    } finally {
+      releaseSlot(); // Ensure slot is released on any exit path
     }
   }
 }

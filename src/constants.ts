@@ -164,7 +164,6 @@ export const TWITCH_GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko";
 export const TWITCH_GQL_HASHES = {
   StreamMetadata: "b57f9b910f8cd1a4659d894fe7550ccc81ec9052c01e438b290fd66a040b9b93",
   ComscoreStreamingQuery: "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
-  PlaybackAccessToken: "ed230aa1e33e07eebb8928504583da78a5173989fadfb11c9e8d60b96e87e3e8",
   VideoMetadata: "45111672eea2e507f8ba44d101a61862f9c56b11dee09a15634cb75cb9b9084d",
 } as const;
 

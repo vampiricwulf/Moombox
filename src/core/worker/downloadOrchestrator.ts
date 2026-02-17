@@ -74,6 +74,7 @@ export class DownloadOrchestrator {
     isVod: boolean,
     twitchChatDl?: TwitchChatDownloader,
     twitchStreamInfo?: TwitchStreamInfo,
+    onDownloadComplete?: () => void,
   ): Promise<void> {
     const db = await Database.getInstance();
     const config = ConfigManager.getInstance().get();
@@ -206,6 +207,9 @@ export class DownloadOrchestrator {
         await db.updateJob(job.id, { streamEndTime: endTime });
       }
 
+      // Release download slot before muxing — mux is CPU-bound, not a download
+      onDownloadComplete?.();
+
       // Mux: Twitch .ts → .mp4 (simple remux, single input)
       await muxAndFinalize(
         job,
@@ -233,7 +237,7 @@ export class DownloadOrchestrator {
   /**
    * Execute the download for a job
    */
-  async execute(job: Job, videoInfo: VideoInfo, isVod: boolean, existingChatDl?: ChatDownloader): Promise<void> {
+  async execute(job: Job, videoInfo: VideoInfo, isVod: boolean, existingChatDl?: ChatDownloader, onDownloadComplete?: () => void): Promise<void> {
     const db = await Database.getInstance();
     const config = ConfigManager.getInstance().get();
     const yt = YouTubeService.getInstance();
@@ -512,6 +516,9 @@ export class DownloadOrchestrator {
       await db.updateJob(job.id, { streamEndTime: endTime });
       Object.assign(job, { streamEndTime: endTime });
     }
+
+    // Release download slot before muxing — mux is CPU-bound, not a download
+    onDownloadComplete?.();
 
     // Mux the streams (always download full file, no trimming during download)
     await muxAndFinalize(

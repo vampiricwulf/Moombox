@@ -8,7 +8,6 @@
 import ms from "ms";
 import PQueue from "p-queue";
 import { Database, type Job } from "../database.js";
-import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
 import { WORKER_CHECK_INTERVAL_MS } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
@@ -33,12 +32,11 @@ export class JobQueue {
   constructor() {
     this.logger = Logger.getInstance();
 
-    const config = ConfigManager.getInstance().get();
-    const concurrency = config.downloader?.num_parallel_downloads ?? 2;
-
-    // Create p-queue with concurrency limit and rate limiting
+    // Create p-queue for job lifecycle management.
+    // Concurrency is generous — actual download throughput is controlled
+    // by DownloadWorker's download slot semaphore (num_parallel_downloads).
     this.queue = new PQueue({
-      concurrency,
+      concurrency: 100,
       autoStart: true,
       interval: ms("1s"), // Rate limit: max N job starts per second
       intervalCap: 10, // Max 10 job starts per second
@@ -126,13 +124,10 @@ export class JobQueue {
           !this.queuedJobs.has(j.id),
       );
 
-      const config = ConfigManager.getInstance().get();
-      const maxParallel = config.downloader?.num_parallel_downloads ?? 2;
-
       // Add jobs to p-queue with priority
       for (const job of pendingJobs) {
         // Limit queue backlog to prevent memory issues
-        if (this.queue.size >= maxParallel * 2) {
+        if (this.queue.size >= 100) {
           this.logger.debug(
             `[JobQueue] Queue backlog limit reached (${this.queue.size} jobs), skipping new additions`,
           );

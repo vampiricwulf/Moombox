@@ -793,21 +793,30 @@ export class SegmentDownloader extends EventEmitter {
     const BUFFER_SIZE_CAP = SegmentDownloader.PARALLEL_DOWNLOADS * 3;
     let nextToWrite = this.currentSeq;
     let nextToFetch = this.currentSeq;
-    let targetSeq = headSeq - 30; // Stop well before head to hand off to sequential cleanly
+    let targetSeq = Math.max(this.currentSeq + 1, headSeq - 30); // Stop well before head, but never behind currentSeq
     // Respect endSeq for timestamp selection
     if (this.options.endSeq != null && targetSeq > this.options.endSeq + 1) {
       targetSeq = this.options.endSeq + 1;
     }
+
+    // Guard: if target is at or behind current position, nothing to catch up
+    if (targetSeq <= this.currentSeq) {
+      this.logger.debug(`[Downloader] Parallel catch-up skipped: targetSeq ${targetSeq} <= currentSeq ${this.currentSeq}`);
+      return this.currentSeq;
+    }
+
     let totalFetched = 0;
+    const segmentsToFetch = targetSeq - this.currentSeq;
+    const concurrency = Math.min(SegmentDownloader.PARALLEL_DOWNLOADS, segmentsToFetch);
 
     this.logger.info(
-      `[Downloader] Starting parallel catch-up: ${this.currentSeq} -> ${targetSeq} (${targetSeq - this.currentSeq} segments, ${SegmentDownloader.PARALLEL_DOWNLOADS} parallel)`,
+      `[Downloader] Starting parallel catch-up: ${this.currentSeq} -> ${targetSeq} (${segmentsToFetch} segments, ${concurrency} parallel)`,
     );
 
     const startTime = Date.now();
 
-    // Create concurrency limiter - handles up to PARALLEL_DOWNLOADS concurrent requests
-    const limit = pLimit(SegmentDownloader.PARALLEL_DOWNLOADS);
+    // Create concurrency limiter - capped to actual segment count
+    const limit = pLimit(concurrency);
     const inFlightDownloads = new Set<Promise<void>>();
 
     // Process downloads and writes

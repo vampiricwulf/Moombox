@@ -485,6 +485,10 @@ export class FeedMonitor {
       return;
     }
 
+    // Twitch monitor already confirmed stream is live — set status immediately
+    // so the job doesn't sit as "Upcoming" while waiting for a queue slot
+    await db.updateJob(jobId, { status: "Live" });
+
     await db.addToHistory(jobId);
 
     await NotificationManager.getInstance().send(

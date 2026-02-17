@@ -94,7 +94,7 @@ export async function getStreamInfo(
   const results = await gqlBatchRequest([
     {
       operationName: "StreamMetadata",
-      variables: { channelLogin },
+      variables: { channelLogin, includeIsDJ: true },
       extensions: {
         persistedQuery: {
           version: 1,
@@ -148,28 +148,30 @@ export async function getStreamInfo(
 /**
  * Get a playback access token for a live stream.
  * Required to access HLS playlists.
+ * Uses raw GQL query (not persisted query) — Twitch removed the persisted hash.
  */
 export async function getStreamAccessToken(
   channelLogin: string,
   authToken?: string | null,
 ): Promise<TwitchAccessToken> {
+  // Sanitize input — Twitch logins are alphanumeric + underscores
+  const safeLogin = channelLogin.replace(/[^a-zA-Z0-9_]/g, "");
   const result = await gqlRequest(
     {
-      operationName: "PlaybackAccessToken",
-      variables: {
-        isLive: true,
-        login: channelLogin,
-        isVod: false,
-        vodID: "",
-        playerType: "embed",
-        platform: "web",
-      },
-      extensions: {
-        persistedQuery: {
-          version: 1,
-          sha256Hash: TWITCH_GQL_HASHES.PlaybackAccessToken,
-        },
-      },
+      query: `{
+        streamPlaybackAccessToken(
+          channelName: "${safeLogin}",
+          params: {
+            platform: "web",
+            playerBackend: "mediaplayer",
+            playerType: "site"
+          }
+        )
+        {
+          value
+          signature
+        }
+      }`,
     },
     authToken,
   );
@@ -184,28 +186,30 @@ export async function getStreamAccessToken(
 
 /**
  * Get a playback access token for a VOD.
+ * Uses raw GQL query (not persisted query) — Twitch removed the persisted hash.
  */
 export async function getVodAccessToken(
   vodId: string,
   authToken?: string | null,
 ): Promise<TwitchAccessToken> {
+  // Sanitize input — VOD IDs are numeric
+  const safeVodId = vodId.replace(/[^0-9]/g, "");
   const result = await gqlRequest(
     {
-      operationName: "PlaybackAccessToken",
-      variables: {
-        isLive: false,
-        login: "",
-        isVod: true,
-        vodID: vodId,
-        playerType: "embed",
-        platform: "web",
-      },
-      extensions: {
-        persistedQuery: {
-          version: 1,
-          sha256Hash: TWITCH_GQL_HASHES.PlaybackAccessToken,
-        },
-      },
+      query: `{
+        videoPlaybackAccessToken(
+          id: "${safeVodId}",
+          params: {
+            platform: "web",
+            playerBackend: "mediaplayer",
+            playerType: "site"
+          }
+        )
+        {
+          value
+          signature
+        }
+      }`,
     },
     authToken,
   );
