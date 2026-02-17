@@ -9,6 +9,8 @@ export interface ChannelConfig {
   id: string;
   name?: string;
   platform?: "youtube" | "twitch"; // defaults to "youtube"
+  /** Whether this channel is actively monitored (defaults to true when undefined) */
+  enabled?: boolean;
   /** Filter pattern - can be a simple string (regex) or object with named patterns for backwards compatibility */
   terms?: string | Record<string, string>;
   num_desc_lookbehind?: number;

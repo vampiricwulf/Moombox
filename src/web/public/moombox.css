@@ -153,6 +153,11 @@ sl-tab::part(base) {
     display: block;
 }
 
+.thumb img.thumb-avatar {
+    object-fit: contain;
+    background-color: var(--sl-color-neutral-200);
+}
+
 @media only screen and (max-width: 992px) {
     .thumb img {
         max-height: initial;
@@ -582,6 +587,11 @@ sl-progress-bar {
 .channel-card-actions {
     display: flex;
     gap: var(--sl-spacing-x-small);
+    align-items: center;
+}
+
+.channel-card--disabled {
+    opacity: 0.5;
 }
 
 /* Notification Card */

@@ -118,7 +118,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         );
         return diffDays > hideAgeDays;
       })
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      .sort((a, b) => (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" }));
   }, [jobs]);
 
   // Virtual list: [sortedJobs..., divider?, archivedJobs...]
@@ -670,8 +670,12 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   );
 }
 
+const STATUS_PRIORITY: Record<string, number> = {
+  "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
+  "Live": 4, "Upcoming": 5, "Cancelled": 6, "Finished": 7,
+};
+
 function getSortedJobs(jobs: Job[]): Job[] {
-  const activeStatuses = ["Live", "Downloading", "Muxing", "Upcoming"];
   const config = ConfigManager.getInstance().get();
   const hideAgeDays = config.tasklist?.hide_finished_age_days || 30;
   const now = Date.now();
@@ -685,12 +689,9 @@ function getSortedJobs(jobs: Job[]): Job[] {
       return diffDays <= hideAgeDays;
     })
     .sort((a, b) => {
-      const aActive = activeStatuses.includes(a.status);
-      const bActive = activeStatuses.includes(b.status);
-
-      if (aActive && !bActive) return -1;
-      if (!aActive && bActive) return 1;
-
-      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      const pa = STATUS_PRIORITY[a.status] ?? 99;
+      const pb = STATUS_PRIORITY[b.status] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
     });
 }

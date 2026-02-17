@@ -424,16 +424,16 @@ class MoomboxApp {
 
     emptyState.style.display = "none";
 
-    // Sort jobs: active first, then by updatedAt
+    // Sort jobs: by state priority, then alphabetically by title
+    const STATUS_PRIORITY = {
+      "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
+      "Live": 4, "Upcoming": 5, "Cancelled": 6, "Finished": 7,
+    };
     const sortedJobs = [...this.jobs].sort((a, b) => {
-      const activeStatuses = ["Live", "Downloading", "Muxing", "Upcoming"];
-      const aActive = activeStatuses.includes(a.status);
-      const bActive = activeStatuses.includes(b.status);
-
-      if (aActive && !bActive) return -1;
-      if (!aActive && bActive) return 1;
-
-      return new Date(b.updatedAt) - new Date(a.updatedAt);
+      const pa = STATUS_PRIORITY[a.status] ?? 99;
+      const pb = STATUS_PRIORITY[b.status] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
     });
 
     container.innerHTML = sortedJobs
@@ -482,8 +482,10 @@ class MoomboxApp {
     const isTwitch = job.platform === "twitch";
     const safeVideoId = this.escapeHtml(job.videoId || job.id);
     const ytThumb = `https://i.ytimg.com/vi/${safeVideoId}/mqdefault.jpg`;
-    const thumbnailUrl = job.thumbnailUrl || (isTwitch ? "" : ytThumb);
-    const fallbackThumb = isTwitch ? "" : ytThumb;
+    const twitchAvatarFallback = isTwitch && job.channelAvatarUrl ? job.channelAvatarUrl : "";
+    const thumbnailUrl = job.thumbnailUrl || (isTwitch ? twitchAvatarFallback : ytThumb);
+    const fallbackThumb = isTwitch ? twitchAvatarFallback : ytThumb;
+    const isAvatarThumb = isTwitch && (!job.thumbnailUrl || thumbnailUrl === twitchAvatarFallback);
     const progress = this.formatProgress(job);
     const percent = job.percent || 0;
     const platformBadge = isTwitch
@@ -494,7 +496,8 @@ class MoomboxApp {
       <div class="video-item" data-job-id="${this.escapeHtml(job.id)}">
         <div class="thumb">
           <img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
-               onerror="this.onerror=null;${fallbackThumb ? `this.src='${this.escapeHtml(fallbackThumb)}'` : "this.style.display='none'"}">
+               class="${isAvatarThumb ? "thumb-avatar" : ""}"
+               onerror="this.onerror=null;${fallbackThumb ? `this.src='${this.escapeHtml(fallbackThumb)}';this.classList.add('thumb-avatar')` : "this.style.display='none'"}">
         </div>
         <div class="stream-info">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>

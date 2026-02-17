@@ -81,6 +81,7 @@ export interface Job {
   // Twitch-specific fields
   twitchQuality?: string;       // Selected HLS quality name (e.g., "chunked", "720p60")
   twitchCategory?: string;      // Current game/category
+  channelAvatarUrl?: string;    // Channel profile image (Twitch avatar fallback)
   // Advanced download options (manual format selection)
   selectedVideoItag?: number;   // User-chosen video format itag
   selectedAudioItag?: number;   // User-chosen audio format itag
@@ -119,6 +120,7 @@ export interface NewJobData {
   // Twitch-specific
   twitchQuality?: string;   // Quality preference (e.g., "best", "720p")
   twitchCategory?: string;  // Game/category
+  channelAvatarUrl?: string; // Channel profile image URL
 }
 
 /**

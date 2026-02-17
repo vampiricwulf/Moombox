@@ -80,6 +80,10 @@ export class FeedMonitor {
     this.logger.debug(`Checking ${config.channels.length} channels...`);
 
     for (const channel of config.channels) {
+      if (channel.enabled === false) {
+        this.logger.debug(`[Monitor] Skipping disabled channel: ${channel.name || channel.id}`);
+        continue;
+      }
       try {
         if (channel.platform === "twitch") {
           await this.checkTwitchChannel(channel, config, db);
@@ -474,6 +478,7 @@ export class FeedMonitor {
       channelName: streamInfo.channelDisplayName,
       platform: "twitch",
       thumbnailUrl: streamInfo.thumbnailUrl,
+      channelAvatarUrl: streamInfo.profileImageUrl,
       outputDirectory: channel.output_directory || config.downloader?.output_directory,
       streamStartTime: streamInfo.startedAt,
       twitchCategory: streamInfo.gameCategory,

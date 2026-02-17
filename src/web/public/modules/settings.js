@@ -356,17 +356,19 @@ export class SettingsController {
       .map(
         (ch) => {
           const isTwitch = ch.platform === "twitch";
+          const isEnabled = ch.enabled !== false;
           const platformTag = isTwitch
             ? '<sl-tag size="small" variant="primary">Twitch</sl-tag> '
             : '<sl-tag size="small" variant="danger">YouTube</sl-tag> ';
           return `
-      <div class="channel-card" data-channel-id="${this.app.escapeHtml(ch.id)}">
+      <div class="channel-card${isEnabled ? "" : " channel-card--disabled"}" data-channel-id="${this.app.escapeHtml(ch.id)}">
         <div class="channel-card-header">
           <div>
             <div class="channel-card-title">${platformTag}${this.app.escapeHtml(ch.name || ch.id)}</div>
             <div class="channel-card-id">${this.app.escapeHtml(ch.id)}</div>
           </div>
           <div class="channel-card-actions">
+            <sl-switch size="small" ${isEnabled ? "checked" : ""} title="${isEnabled ? "Monitoring enabled" : "Monitoring disabled"}" onclick="app.settings.toggleChannel('${this.app.escapeHtml(ch.id)}', this.checked); event.stopPropagation();"></sl-switch>
             <sl-icon-button name="pencil" label="Edit" onclick="app.settings.editChannel('${this.app.escapeHtml(ch.id)}')"></sl-icon-button>
             <sl-icon-button name="trash" label="Delete" onclick="app.settings.deleteChannel('${this.app.escapeHtml(ch.id)}')"></sl-icon-button>
           </div>
@@ -404,6 +406,12 @@ export class SettingsController {
     if (platformSelect) {
       platformSelect.value = channel?.platform || "youtube";
       this.updateChannelDialogForPlatform(platformSelect.value);
+    }
+
+    // Enabled switch (defaults to true for new channels)
+    const enabledSwitch = document.getElementById("channel-enabled-switch");
+    if (enabledSwitch) {
+      enabledSwitch.checked = channel ? channel.enabled !== false : true;
     }
 
     // Twitch quality preference
@@ -470,10 +478,14 @@ export class SettingsController {
     const platform = platformSelect ? platformSelect.value : "youtube";
     const isTwitch = platform === "twitch";
 
+    const enabledSwitch = document.getElementById("channel-enabled-switch");
+    const enabled = enabledSwitch ? enabledSwitch.checked : true;
+
     const channel = {
       id,
       name: name || undefined,
       terms: termsValue || undefined,
+      enabled,
       ...(isTwitch ? { platform: "twitch" } : {}),
       ...(!isTwitch ? { include_non_live_content: includeVods || undefined } : {}),
     };
@@ -530,6 +542,28 @@ export class SettingsController {
       }
     } catch (e) {
       this.app.showToast("Failed to remove channel: " + e.message, "danger");
+    }
+  }
+
+  async toggleChannel(channelId, enabled) {
+    const channel = this.app.config?.channels?.find((c) => c.id === channelId);
+    if (!channel) return;
+
+    try {
+      const response = await fetch("/api/config/channels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...channel, enabled }),
+      });
+
+      if (response.ok) {
+        this.app.loadConfig();
+      } else {
+        const data = await response.json();
+        this.app.showToast(data.error || "Failed to update channel", "danger");
+      }
+    } catch (e) {
+      this.app.showToast("Failed to update channel: " + e.message, "danger");
     }
   }
 

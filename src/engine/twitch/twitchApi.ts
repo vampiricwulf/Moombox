@@ -142,6 +142,11 @@ export async function getStreamInfo(
     info.thumbnailUrl = `${TWITCH_URLS.PREVIEW_CDN}/live_user_${metadataResult.login}-640x360.jpg`;
   }
 
+  // Extract channel profile image (stable fallback when live preview 404s)
+  if (metadataResult.profileImageURL) {
+    info.profileImageUrl = metadataResult.profileImageURL;
+  }
+
   return info;
 }
 

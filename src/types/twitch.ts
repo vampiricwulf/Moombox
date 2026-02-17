@@ -15,6 +15,7 @@ export interface TwitchStreamInfo {
   thumbnailUrl?: string;      // Preview image URL
   viewerCount?: number;
   startedAt?: string;         // ISO timestamp
+  profileImageUrl?: string;   // Channel avatar URL
   isLive: boolean;
   streamType?: "live" | "rerun";
   // HLS access
