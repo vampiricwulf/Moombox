@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { Logger } from "../../core/logger.js";
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -29,8 +30,11 @@ export class ErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    // Log error details for debugging
-    console.error("TUI Error Boundary caught an error:", error, errorInfo);
+    try {
+      Logger.getInstance().error(`[ErrorBoundary] TUI error: ${error.message}\n${errorInfo.componentStack || ""}`);
+    } catch {
+      // Logger may not be initialized yet
+    }
   }
 
   render(): React.ReactNode {

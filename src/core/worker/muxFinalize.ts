@@ -20,47 +20,7 @@ import {
 } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
 import { formatElapsed, formatBytes } from "../../utils/timeFormat.js";
-
-/**
- * Extract video metadata using ffprobe
- */
-async function extractVideoMetadata(
-  filePath: string,
-): Promise<{ duration: number; width: number; height: number; size: number } | null> {
-  try {
-    const { stdout } = await execa("ffprobe", [
-      "-v",
-      "quiet",
-      "-print_format",
-      "json",
-      "-show_format",
-      "-show_streams",
-      filePath,
-    ], { timeout: ms("30s") });
-
-    if (!stdout) {
-      return null;
-    }
-
-    const data = JSON.parse(stdout);
-    const videoStream = data.streams?.find((s: any) => s.codec_type === "video");
-    const format = data.format;
-
-    if (!videoStream || !format) {
-      return null;
-    }
-
-    return {
-      duration: Math.floor(parseFloat(format.duration) || 0),
-      width: parseInt(videoStream.width) || 0,
-      height: parseInt(videoStream.height) || 0,
-      size: parseInt(format.size) || 0,
-    };
-  } catch (error: any) {
-    Logger.getInstance().warn(`[Metadata] ffprobe failed: ${error.message}`);
-    return null;
-  }
-}
+import { extractVideoMetadata } from "../../utils/ffprobe.js";
 
 /**
  * Mux streams and finalize job
@@ -283,10 +243,10 @@ export async function muxAndFinalize(
 
     // Cleanup staging
     await fs.remove(stagingDir);
-  } catch (e: any) {
+  } catch (e: unknown) {
     // Don't mark as error if cancelled — the main execute() handler deals with that
-    if (e?.name === "AbortError") {
-      await fs.remove(finalPath).catch((e: any) => logger.debug(`[DownloadOrchestrator] Cleanup failed: ${e.message}`));
+    if (e instanceof Error && e.name === "AbortError") {
+      await fs.remove(finalPath).catch((cleanupErr: unknown) => logger.debug(`[DownloadOrchestrator] Cleanup failed: ${getErrorMessage(cleanupErr)}`));
       throw e;
     }
     logger.error(
@@ -331,8 +291,8 @@ export async function downloadFile(
       }
     }
     await probeResponse.arrayBuffer();
-  } catch (e: any) {
-    if (e?.name === "AbortError" || signal?.aborted) return;
+  } catch (e: unknown) {
+    if ((e instanceof Error && e.name === "AbortError") || signal?.aborted) return;
     logger.debug(
       "[DownloadOrchestrator] Size probe failed, downloading without size info",
     );
@@ -367,8 +327,8 @@ export async function downloadFile(
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
           }
           break;
-        } catch (e: any) {
-          if (e?.name === "AbortError" || signal?.aborted) throw e;
+        } catch (e: unknown) {
+          if ((e instanceof Error && e.name === "AbortError") || signal?.aborted) throw e;
           if (chunkAttempt >= 2) throw e;
           logger.debug(
             `[DownloadOrchestrator] Chunk retry ${chunkAttempt + 1}/3 for bytes ${start}-${end}`,
@@ -412,14 +372,19 @@ export async function downloadFile(
       if (response.status === 200) break;
       if (totalBytes > 0 && downloadedBytes >= totalBytes) break;
     }
-  } catch (e: any) {
-    if (e?.name === "AbortError" || signal?.aborted) {
+  } catch (e: unknown) {
+    if ((e instanceof Error && e.name === "AbortError") || signal?.aborted) {
       logger.debug(`[DownloadOrchestrator] Download aborted for ${outputPath}`);
       return;
     }
     throw e;
   } finally {
     await fileHandle.close();
+  }
+
+  // Final progress callback so callers see 100% when download completes
+  if (onProgress) {
+    onProgress(`100.0% (${formatBytes(downloadedBytes)})`, 100);
   }
 
   logger.debug(

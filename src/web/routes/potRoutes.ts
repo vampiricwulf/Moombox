@@ -7,6 +7,8 @@ import type { Application, Request, Response, NextFunction } from "express";
 import { Logger } from "../../core/logger.js";
 import { PotProvider } from "../../core/potProvider.js";
 import { asyncHandler } from "./errorHandler.js";
+import { createRateLimiter } from "./rateLimiter.js";
+import { isLoopback } from "../../utils/ipValidation.js";
 
 // POT Provider version for compatibility
 const POT_PROVIDER_VERSION = "1.0.0";
@@ -14,39 +16,11 @@ const POT_PROVIDER_VERSION = "1.0.0";
 /** Restrict access to loopback IPs only */
 function requireLoopback(req: Request, res: Response, next: NextFunction): void {
   const ip = req.ip || req.socket.remoteAddress || "";
-  if (ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1") {
+  if (isLoopback(ip)) {
     next();
   } else {
     res.status(403).json({ error: "Forbidden: loopback only" });
   }
-}
-
-/** Simple per-IP rate limiter */
-function createRateLimiter(maxRequests: number, windowMs: number) {
-  const hits = new Map<string, { count: number; resetAt: number }>();
-  // Clean up stale entries periodically
-  setInterval(() => {
-    const now = Date.now();
-    for (const [ip, entry] of hits) {
-      if (now > entry.resetAt) hits.delete(ip);
-    }
-  }, windowMs).unref();
-
-  return (req: Request, res: Response, next: NextFunction): void => {
-    const ip = req.ip || req.socket.remoteAddress || "unknown";
-    const now = Date.now();
-    let entry = hits.get(ip);
-    if (!entry || now > entry.resetAt) {
-      entry = { count: 0, resetAt: now + windowMs };
-      hits.set(ip, entry);
-    }
-    entry.count++;
-    if (entry.count > maxRequests) {
-      res.status(429).json({ error: "Too many requests" });
-      return;
-    }
-    next();
-  };
 }
 
 const potRateLimiter = createRateLimiter(10, 60 * 1000); // 10 req/min
@@ -58,7 +32,7 @@ export function registerPotRoutes(app: Application): void {
   app.post("/get_pot", requireLoopback, potRateLimiter, asyncHandler(async (req, res) => {
     const body = req.body || {};
 
-    // Handle deprecated parameters
+    // Handle deprecated parameters (must reject before schema validation for clear error messages)
     if (body.data_sync_id) {
       logger.warn(
         "[PotProvider] Rejected request using deprecated data_sync_id",
@@ -77,7 +51,7 @@ export function registerPotRoutes(app: Application): void {
     }
 
     const contentBinding: string | undefined = body.content_binding;
-    const bypassCache: boolean = body.bypass_cache || false;
+    const bypassCache: boolean = body.bypass_cache === true;
 
     logger.info(
       `[PotProvider] POT requested${contentBinding ? ` for ${contentBinding.substring(0, 20)}...` : " (no binding)"}${bypassCache ? " (bypass cache)" : ""}`,

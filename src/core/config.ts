@@ -1,6 +1,6 @@
 import fs from "fs-extra";
 import path from "path";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import os from "os";
 import ms from "ms";
 import type {
@@ -17,6 +17,7 @@ export type { ChannelConfig, MoomboxConfig, AutoCookiesConfig } from "../types/c
  */
 export type NormalizedConfig = Omit<MoomboxConfig, 'feed_check_interval' | 'tasklist'> & {
   feed_check_interval: number;
+  password_hash?: string;
   tasklist?: {
     hide_finished_age_days: number;
   };
@@ -161,6 +162,7 @@ export class ConfigManager {
     return {
       port: config.port ?? defaults.port,
       network_access: networkAccess ?? defaults.network_access,
+      password_hash: config.password_hash,
       log_level: config.log_level ?? defaults.log_level,
       log_file_path: config.log_file_path ?? defaults.log_file_path,
       log_max_file_size: config.log_max_file_size ?? defaults.log_max_file_size,
@@ -357,153 +359,20 @@ export class ConfigManager {
   }
 
   private configToToml(config: MoomboxConfig): string {
-    const lines: string[] = [];
+    // Strip undefined values (TOML has no null/undefined)
+    const clean = JSON.parse(JSON.stringify(config));
 
-    // Helper to check if a value should be written (not undefined/null)
-    const isDefined = (val: unknown): boolean =>
-      val !== undefined && val !== null;
-
-    // Escape a string for TOML double-quoted values
-    const esc = (s: string): string =>
-      s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-
-    // Top-level settings
-    if (isDefined(config.port))
-      lines.push(`port = ${config.port}`);
-    if (isDefined(config.network_access))
-      lines.push(`network_access = "${esc(config.network_access!)}"`);
-    if (isDefined(config.log_level))
-      lines.push(`log_level = "${esc(config.log_level!)}"`);
-    if (isDefined(config.log_file_path))
-      lines.push(`log_file_path = "${esc(config.log_file_path!)}"`);
-    if (isDefined(config.log_max_file_size))
-      lines.push(`log_max_file_size = ${config.log_max_file_size}`);
-    if (isDefined(config.log_max_files))
-      lines.push(`log_max_files = ${config.log_max_files}`);
-    if (isDefined(config.database_path))
-      lines.push(`database_path = "${esc(config.database_path!)}"`);
-    if (isDefined(config.max_feed_items))
-      lines.push(`max_feed_items = ${config.max_feed_items}`);
-    if (isDefined(config.feed_check_interval))
-      lines.push(`feed_check_interval = ${config.feed_check_interval}`);
-
-    // Downloader section
-    if (config.downloader) {
-      lines.push("");
-      lines.push("[downloader]");
-      const d = config.downloader;
-      if (isDefined(d.max_video_resolution))
-        lines.push(`max_video_resolution = ${d.max_video_resolution}`);
-      if (isDefined(d.ffmpeg_path))
-        lines.push(`ffmpeg_path = "${esc(d.ffmpeg_path!)}"`);
-      if (isDefined(d.staging_directory))
-        lines.push(`staging_directory = "${esc(d.staging_directory!)}"`);
-      if (isDefined(d.output_directory))
-        lines.push(`output_directory = "${esc(d.output_directory!)}"`);
-      if (isDefined(d.output_template))
-        lines.push(`output_template = "${esc(d.output_template!)}"`);
-      if (isDefined(d.num_parallel_downloads))
-        lines.push(`num_parallel_downloads = ${d.num_parallel_downloads}`);
-      if (isDefined(d.cookie_file))
-        lines.push(`cookie_file = "${esc(d.cookie_file!)}"`);
-      if (isDefined(d.po_token)) lines.push(`po_token = "${esc(d.po_token!)}"`);
-      if (isDefined(d.visitor_data))
-        lines.push(`visitor_data = "${esc(d.visitor_data!)}"`);
-      if (isDefined(d.pot_provider_url))
-        lines.push(`pot_provider_url = "${esc(d.pot_provider_url!)}"`);
-      if (isDefined(d.download_chat))
-        lines.push(`download_chat = ${d.download_chat}`);
-      if (isDefined(d.prefer_60fps))
-        lines.push(`prefer_60fps = ${d.prefer_60fps}`);
-      if (isDefined(d.segment_retry_delay_cap))
-        lines.push(`segment_retry_delay_cap = ${d.segment_retry_delay_cap}`);
-      if (isDefined(d.segment_live_check_retries))
-        lines.push(`segment_live_check_retries = ${d.segment_live_check_retries}`);
-    }
-
-    // Tasklist section
-    if (config.tasklist && isDefined(config.tasklist.hide_finished_age_days)) {
-      lines.push("");
-      lines.push("[tasklist]");
-      lines.push(
-        `hide_finished_age_days = ${config.tasklist.hide_finished_age_days}`,
-      );
-    }
-
-    // Auto cookies section
-    if (config.auto_cookies) {
-      const ac = config.auto_cookies;
-      if (isDefined(ac.enabled) || isDefined(ac.browser_profile_dir) || (ac.platforms && ac.platforms.length > 0)) {
-        lines.push("");
-        lines.push("[auto_cookies]");
-        if (isDefined(ac.enabled))
-          lines.push(`enabled = ${ac.enabled}`);
-        if (isDefined(ac.browser_profile_dir))
-          lines.push(`browser_profile_dir = "${esc(ac.browser_profile_dir!)}"`);
-        if (ac.platforms && ac.platforms.length > 0)
-          lines.push(`platforms = [${ac.platforms.map((p) => `"${esc(p)}"`).join(", ")}]`);
-      }
-    }
-
-    // Notifications section
-    if (config.notifications && config.notifications.length > 0) {
-      for (const notif of config.notifications) {
-        lines.push("");
-        lines.push("[[notifications]]");
-        if (notif.url) lines.push(`url = "${esc(notif.url)}"`);
-        if (notif.tags && notif.tags.length > 0) {
-          lines.push(`tags = [${notif.tags.map((t) => `"${esc(t)}"`).join(", ")}]`);
-        }
-        if (notif.events && notif.events.length > 0) {
-          lines.push(`events = [${notif.events.map((e) => `"${esc(e)}"`).join(", ")}]`);
-        }
-      }
-    }
-
-    // Channels section
-    if (config.channels && config.channels.length > 0) {
-      for (const ch of config.channels) {
-        lines.push("");
-        lines.push("[[channels]]");
-        // Emit platform only when non-default (twitch)
-        if (ch.platform && ch.platform !== "youtube") {
-          lines.push(`platform = "${esc(ch.platform)}"`);
-        }
-        lines.push(`id = "${esc(ch.id)}"`);
-        if (ch.name) lines.push(`name = "${esc(ch.name)}"`);
-        if (ch.output_directory)
-          lines.push(`output_directory = "${esc(ch.output_directory)}"`);
-        if (ch.include_non_live_content !== undefined) {
-          lines.push(
-            `include_non_live_content = ${ch.include_non_live_content}`,
-          );
-        }
-        if (ch.num_desc_lookbehind !== undefined) {
-          lines.push(`num_desc_lookbehind = ${ch.num_desc_lookbehind}`);
-        }
-        if (ch.max_feed_items !== undefined) {
-          lines.push(`max_feed_items = ${ch.max_feed_items}`);
-        }
-        // Twitch-specific: quality preference
+    // Transform camelCase → snake_case for TOML serialization
+    if (clean.channels) {
+      for (const ch of clean.channels) {
         if (ch.qualityPreference) {
-          lines.push(`quality_preference = "${esc(ch.qualityPreference)}"`);
-        }
-        if (ch.terms) {
-          if (typeof ch.terms === "string") {
-            // New simple format - store as direct string
-            lines.push(`terms = "${esc(ch.terms)}"`);
-          } else if (Object.keys(ch.terms).length > 0) {
-            // Legacy object format — use inline table (valid inside [[channels]])
-            const entries = Object.entries(ch.terms)
-              .map(([key, value]) => `${key} = "${esc(value)}"`)
-              .join(", ");
-            lines.push(`terms = { ${entries} }`);
-          }
+          ch.quality_preference = ch.qualityPreference;
+          delete ch.qualityPreference;
         }
       }
     }
 
-    return lines.join("\n") + "\n";
+    return stringifyToml(clean) + "\n";
   }
 
   static resolveTemplate(

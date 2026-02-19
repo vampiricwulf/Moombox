@@ -182,40 +182,67 @@ export type CreateTrimRequest = z.infer<typeof createTrimSchema>;
  * PUT /api/config - Update configuration
  */
 export const updateConfigSchema = z.object({
+  port: z.number().int().min(1).max(65535).optional(),
+  network_access: z.enum(["localhost", "lan", "external"]).optional(),
   log_level: z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).optional(),
   log_file_path: safePathSchema.optional(),
   log_max_file_size: z.number().int().min(1024).max(1073741824).optional(), // 1KB to 1GB
   log_max_files: z.number().int().min(1).max(100).optional(),
   database_path: safePathSchema.optional(),
   max_feed_items: z.number().int().min(1).max(100).optional(),
+  feed_check_interval: z.union([z.number().min(1), z.string()]).optional(),
 
   downloader: z
     .object({
-      output_directory: safePathSchema,
-      output_template: z.string().min(1).max(500),
+      output_directory: safePathSchema.optional(),
+      output_template: z.string().min(1).max(500).optional(),
       staging_directory: safePathSchema.optional(),
       num_parallel_downloads: z.number().int().min(1).max(10).optional(),
-      max_video_resolution: z.number().int().min(144).max(8192).optional(),
+      max_video_resolution: z.number().int().min(1).optional(),
       prefer_60fps: z.boolean().optional(),
       download_chat: z.boolean().optional(),
       cookie_file: safePathSchema.optional(),
-    })
-    .strict(),
-
-  tasklist: z
-    .object({
-      hide_finished_age_days: z.number().int().min(0).max(3650).optional(), // 0 to 10 years
+      ffmpeg_path: z.string().optional(),
+      po_token: z.string().optional(),
+      visitor_data: z.string().optional(),
+      pot_provider_url: z.string().optional(),
+      segment_retry_delay_cap: z.number().min(0).optional(),
+      segment_live_check_retries: z.number().int().min(0).optional(),
     })
     .optional(),
 
-  network_access: z.enum(["loopback", "lan", "external"]).optional(),
+  tasklist: z
+    .object({
+      hide_finished_age_days: z.union([z.number().int().min(0).max(3650), z.string()]).optional(),
+    })
+    .optional(),
 
   auto_cookies: z
     .object({
       enabled: z.boolean().optional(),
       browser_profile_dir: safePathSchema.optional(),
+      platforms: z.array(z.enum(["youtube", "twitch"])).optional(),
     })
     .optional(),
+
+  notifications: z.array(z.object({
+    url: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    events: z.array(z.string()).optional(),
+  })).optional(),
+
+  channels: z.array(z.object({
+    id: z.string().min(1),
+    name: z.string().optional(),
+    platform: z.enum(["youtube", "twitch"]).optional(),
+    enabled: z.boolean().optional(),
+    terms: z.union([z.string(), z.record(z.string(), z.string())]).optional(),
+    num_desc_lookbehind: z.number().int().min(0).max(100).optional(),
+    output_directory: z.string().optional(),
+    include_non_live_content: z.boolean().optional(),
+    max_feed_items: z.number().int().min(1).max(100).optional(),
+    qualityPreference: twitchQualitySchema.optional(),
+  })).optional(),
 });
 
 export type UpdateConfigRequest = z.infer<typeof updateConfigSchema>;
@@ -282,6 +309,38 @@ export const getPotSchema = z.object({
 });
 
 export type GetPotRequest = z.infer<typeof getPotSchema>;
+
+// ============================================================================
+// Auth Routes Schemas
+// ============================================================================
+
+/**
+ * POST /api/auth/login - Login request
+ */
+export const loginSchema = z.object({
+  password: z.string().min(1).max(128),
+});
+
+export type LoginRequest = z.infer<typeof loginSchema>;
+
+/**
+ * POST /api/auth/set-password - Set or change password
+ */
+export const setPasswordSchema = z.object({
+  currentPassword: z.string().max(128).optional(),
+  newPassword: z.string().min(8).max(128),
+});
+
+export type SetPasswordRequest = z.infer<typeof setPasswordSchema>;
+
+/**
+ * POST /api/auth/remove-password - Remove password
+ */
+export const removePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+});
+
+export type RemovePasswordRequest = z.infer<typeof removePasswordSchema>;
 
 // ============================================================================
 // Validation Helper Functions

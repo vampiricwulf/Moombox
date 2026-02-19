@@ -286,6 +286,10 @@
                                 <sl-icon slot="prefix" name="bell"></sl-icon>
                                 Notifications
                             </sl-menu-item>
+                            <sl-menu-item value="security">
+                                <sl-icon slot="prefix" name="shield-lock"></sl-icon>
+                                Security
+                            </sl-menu-item>
                             <sl-menu-item value="integrations">
                                 <sl-icon slot="prefix" name="plug"></sl-icon>
                                 Integrations
@@ -315,7 +319,7 @@
                             </sl-select>
                             <sl-alert id="cfg-external-warning" variant="warning" open style="display: none; margin-bottom: 1em;">
                                 <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                                <strong>Use at your own risk.</strong> Exposing to external networks allows anyone on the internet to access this dashboard. Security measures were community-built and have not been audited by a security specialist. There is no authentication — anyone who can reach this port has full access.
+                                <strong>Use at your own risk.</strong> External access requires a password (set one in Settings &rarr; Security). All external connections must authenticate. LAN and loopback connections are always allowed without a password.
                             </sl-alert>
                             <sl-select
                                 id="cfg-log-level"
@@ -536,6 +540,63 @@
                                 <sl-icon slot="prefix" name="plus"></sl-icon>
                                 Add Notification
                             </sl-button>
+                        </div>
+
+                        <!-- Security Settings -->
+                        <div
+                            id="settings-security"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Security</h3>
+                            <p class="settings-help">
+                                A password is required to enable external network access. Loopback and LAN connections are never challenged.
+                            </p>
+
+                            <div id="security-status" style="margin-bottom: 1em;">
+                                <sl-badge id="security-password-badge" variant="neutral">Checking...</sl-badge>
+                            </div>
+
+                            <div id="security-set-password-form">
+                                <sl-input
+                                    id="security-current-password"
+                                    type="password"
+                                    label="Current Password"
+                                    toggle-password
+                                    style="display: none; margin-bottom: 0.75em;"
+                                ></sl-input>
+                                <sl-input
+                                    id="security-new-password"
+                                    type="password"
+                                    label="New Password"
+                                    help-text="Minimum 8 characters"
+                                    toggle-password
+                                    style="margin-bottom: 0.75em;"
+                                ></sl-input>
+                                <sl-input
+                                    id="security-confirm-password"
+                                    type="password"
+                                    label="Confirm Password"
+                                    toggle-password
+                                    style="margin-bottom: 0.75em;"
+                                ></sl-input>
+                                <sl-button id="security-set-password-btn" variant="primary" size="small">
+                                    <sl-icon slot="prefix" name="key"></sl-icon>
+                                    Set Password
+                                </sl-button>
+                            </div>
+
+                            <sl-divider></sl-divider>
+
+                            <div id="security-remove-section" style="display: none;">
+                                <sl-button id="security-remove-password-btn" variant="danger" size="small" outline>
+                                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                                    Remove Password
+                                </sl-button>
+                                <p class="settings-help" style="margin-top: 0.5em;">
+                                    Removing the password will also set network access back to Localhost Only.
+                                </p>
+                            </div>
                         </div>
 
                         <!-- Integrations Settings -->
@@ -1082,8 +1143,17 @@
                     </sl-select>
                     <sl-alert id="setup-external-warning" variant="warning" open style="display: none; margin-bottom: 1em;">
                         <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                        <strong>Use at your own risk.</strong> Exposing to external networks allows anyone on the internet to access this dashboard. Security measures were community-built and have not been audited by a security specialist. There is no authentication — anyone who can reach this port has full access.
+                        <strong>Password required.</strong> External access requires a password. All external connections must authenticate. LAN and loopback connections are always allowed without a password.
                     </sl-alert>
+                    <sl-input
+                        id="setup-external-password"
+                        type="password"
+                        label="External Access Password"
+                        placeholder="Minimum 8 characters"
+                        help-text="Required when enabling external access"
+                        toggle-password
+                        style="display: none; margin-bottom: 1em;"
+                    ></sl-input>
 
                     <sl-switch id="setup-install-ytdlp-plugin">
                         Install yt-dlp Plugin

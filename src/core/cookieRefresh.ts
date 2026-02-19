@@ -6,6 +6,7 @@ import { AutoCookieService } from "./autoCookies.js";
 import fs from "fs-extra";
 import { fetchWithTimeout } from "./http.js";
 import { USER_AGENTS, YOUTUBE_URLS, WEB_CLIENT } from "../constants.js";
+import { getErrorMessage } from "../types/errors.js";
 
 export interface PlatformValidation {
   hasCookies: boolean;
@@ -214,8 +215,8 @@ export class CookieRefreshService {
       );
 
       return ytAuth || twAuth;
-    } catch (e: any) {
-      this.logger.warn(`[CookieRefresh] Refresh error: ${e.stack || e.message}`);
+    } catch (e: unknown) {
+      this.logger.warn(`[CookieRefresh] Refresh error: ${e instanceof Error ? (e.stack || e.message) : String(e)}`);
       return false;
     }
   }
@@ -270,8 +271,8 @@ export class CookieRefreshService {
           `[CookieRefresh] YouTube session refreshed (HTTP ${response.status})`,
         );
       }
-    } catch (e: any) {
-      this.logger.debug(`[CookieRefresh] YouTube session refresh error: ${e.message}`);
+    } catch (e: unknown) {
+      this.logger.debug(`[CookieRefresh] YouTube session refresh error: ${getErrorMessage(e)}`);
     }
   }
 
@@ -385,8 +386,8 @@ export class CookieRefreshService {
       this.logger.debug(
         `[CookieRefresh] Updated ${newCookies.size} cookies in file`,
       );
-    } catch (e: any) {
-      this.logger.warn(`[CookieRefresh] Failed to update cookie file: ${e.stack || e.message}`);
+    } catch (e: unknown) {
+      this.logger.warn(`[CookieRefresh] Failed to update cookie file: ${e instanceof Error ? (e.stack || e.message) : String(e)}`);
     }
   }
 

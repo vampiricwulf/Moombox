@@ -616,34 +616,16 @@ Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start
 
 Reference these during code reviews and improvements:
 
-### High Priority
-
-| Issue | Location | Details |
-|-------|----------|---------|
-| Duplicate `DOWNLOAD_CHUNK_SIZE` | `constants.ts` (5MB) vs `constants/limits.ts` (1MB) | `LIMITS.DOWNLOAD_CHUNK_SIZE` is dead — only `constants.ts` value is imported |
-| Duplicate `createRateLimiter` | `potRoutes.ts` vs `rateLimiter.ts` | potRoutes has its own inline copy instead of importing from `rateLimiter.ts` |
-| Duplicate loopback check | `potRoutes.ts` | Hardcodes IP strings instead of importing `isLoopback()` from `ipValidation.ts` |
-| Dead code: `PromiseQueue` | `src/utils/PromiseQueue.ts` | Fully implemented utility that is never imported. ConfigManager/Database/Logger use inline `.then()` chains instead |
-
-### Medium Priority
-
-| Issue | Location | Details |
-|-------|----------|---------|
-| `var` scoping workaround | `jobRoutes.ts:38,76` | `var` used to escape try-catch scope — should be `let` before the try block |
-| Inline filename sanitizer | `importRoutes.ts:200-201` | Duplicates `sanitizeForFilename()` from `src/utils/sanitize.ts` |
-| Missing Zod validation | `configRoutes.ts:62,149` | `req.body` accepted without schema validation before passing to ConfigManager |
-| `console.log` in server | `server.ts:655` | Dashboard URL logged via `console.log` instead of `Logger` |
-| `catch (e: any)` pattern | downloader.ts, chatApi.ts, muxFinalize.ts | Should use `catch (e: unknown)` with type narrowing |
-
-### Low Priority
-
-| Issue | Location | Details |
-|-------|----------|---------|
-| `any` typed formats | downloadOrchestrator.ts, downloadStrategies.ts | `selectedVideoFormat: any` should use `Format` interface |
-| Duplicated `sleep()` | 5+ files | Same `new Promise(r => setTimeout(r, N))` pattern; should extract to `src/utils/` |
-| Event listener cleanup | progressTracking.ts | `start`/`finish`/`error`/`gap` handlers not removed (only `progress` is) |
-| Commented debug lines | cipher/playerCache.ts | 4 commented-out `console.log` lines |
-| `(globalThis as any)` | server.ts, autoCookies.ts | SEA assets access — could use `declare global` augmentation |
+All previously tracked issues have been resolved:
+- ~~Duplicate `DOWNLOAD_CHUNK_SIZE`~~ — dead constant removed
+- ~~Duplicate `createRateLimiter` / loopback check in potRoutes.ts~~ — imports shared modules
+- ~~Dead `PromiseQueue` / `Singleton` utilities~~ — deleted
+- ~~`var` scoping in jobRoutes.ts~~ — refactored to `let`
+- ~~Missing Zod validation in configRoutes.ts~~ — schemas wired up
+- ~~`catch (e: any)` pattern~~ — all converted to `catch (e: unknown)` with `getErrorMessage()`
+- ~~Duplicated `sleep()` pattern~~ — consolidated to `src/utils/async.ts`
+- ~~`any` typed format variables~~ — dead variables removed
+- ~~`(globalThis as any).__MOOMBOX_ASSETS__`~~ — uses `declare global` augmentation in `types/index.ts`
 
 ## Constants Reference (src/constants.ts)
 

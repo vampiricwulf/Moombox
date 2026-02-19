@@ -16,6 +16,7 @@ import WebSocket from "ws";
 import { Logger } from "../../core/logger.js";
 import { TWITCH_URLS, TWITCH_IRC } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
+import { sleep } from "../../utils/async.js";
 import type { TwitchChatMessage, TwitchChatData, TwitchMessageType } from "../../types/twitch.js";
 import { resolveChannelEmotes } from "./twitchEmotes.js";
 
@@ -328,7 +329,7 @@ export class TwitchChatDownloader extends EventEmitter {
       this.logger.info(
         `[TwitchChat] Reconnecting in ${delay / 1000}s (attempt ${attempts}/${MAX_RECONNECTS})`,
       );
-      await new Promise(r => setTimeout(r, delay));
+      await sleep(delay);
 
       if (this.cancelFlag || this.streamEnded) break;
 

@@ -90,8 +90,8 @@ export class FeedMonitor {
         } else {
           await this.checkChannelFeed(channel, config, db);
         }
-      } catch (e: any) {
-        const errorMsg = e.message || String(e);
+      } catch (e: unknown) {
+        const errorMsg = getErrorMessage(e);
         const isHttpError = errorMsg.includes("Status code");
 
         if (isHttpError && channel.platform !== "twitch") {
@@ -101,9 +101,9 @@ export class FeedMonitor {
           // Fall back to DECAPI
           try {
             await this.checkChannelDecapi(channel, config, db);
-          } catch (fallbackErr: any) {
+          } catch (fallbackErr: unknown) {
             this.logger.error(
-              `[Monitor] DECAPI fallback also failed for ${channel.name || channel.id}: ${fallbackErr.message}`,
+              `[Monitor] DECAPI fallback also failed for ${channel.name || channel.id}: ${getErrorMessage(fallbackErr)}`,
             );
           }
         } else {
@@ -356,19 +356,19 @@ export class FeedMonitor {
       this.logger.debug(
         `[Monitor] Video ${videoId} classified as: ${meta.streamStatus}`,
       );
-    } catch (err: any) {
+    } catch (err: unknown) {
       const failures = (this.metadataFailures.get(videoId) || 0) + 1;
       this.metadataFailures.set(videoId, failures);
 
       if (failures >= FeedMonitor.MAX_METADATA_FAILURES) {
         this.logger.warn(
-          `[Monitor] Failed to check metadata for ${videoId} ${failures} times, adding to history to stop retrying: ${err.message}`,
+          `[Monitor] Failed to check metadata for ${videoId} ${failures} times, adding to history to stop retrying: ${getErrorMessage(err)}`,
         );
         this.metadataFailures.delete(videoId);
         await db.addToHistory(videoId);
       } else {
         this.logger.warn(
-          `[Monitor] Failed to check metadata for ${videoId} (attempt ${failures}/${FeedMonitor.MAX_METADATA_FAILURES}): ${err.message}`,
+          `[Monitor] Failed to check metadata for ${videoId} (attempt ${failures}/${FeedMonitor.MAX_METADATA_FAILURES}): ${getErrorMessage(err)}`,
         );
       }
       return;

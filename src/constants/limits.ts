@@ -25,13 +25,4 @@ export const LIMITS = {
 
   /** Default items per page for API pagination */
   DEFAULT_ITEMS_PER_PAGE: 50,
-
-  /** Maximum log file size in bytes (10 MB) */
-  LOG_MAX_FILE_SIZE: 10 * 1024 * 1024,
-
-  /** Download chunk size in bytes (1 MB) */
-  DOWNLOAD_CHUNK_SIZE: 1024 * 1024,
-
-  /** Maximum number of log files to keep */
-  LOG_MAX_FILES: 5,
 } as const;

@@ -262,9 +262,9 @@ function formatDate(dateStr?: string): string {
 }
 
 
-function formatDuration(ms: number): string {
-  ms = Math.max(0, ms);
-  const totalSeconds = Math.floor(ms / 1000);
+function formatDuration(millis: number): string {
+  millis = Math.max(0, millis);
+  const totalSeconds = Math.floor(millis / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;

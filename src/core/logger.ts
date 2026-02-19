@@ -124,7 +124,7 @@ export class Logger {
 
     // Emit to listeners (e.g. TUI) — copy to avoid concurrent modification
     for (const l of [...this.listeners]) {
-      try { l(formattedMsg); } catch (e: any) { process.stderr.write(`Logger listener error: ${e?.message}\n`); }
+      try { l(formattedMsg); } catch (e: unknown) { process.stderr.write(`Logger listener error: ${e instanceof Error ? e.message : String(e)}\n`); }
     }
 
     // Write to file (serialized via promise chain to prevent race with rotation)
@@ -193,7 +193,7 @@ export class Logger {
   subscribe(listener: (msg: string) => void) {
     // Replay buffered history so late subscribers see early messages
     for (const msg of this.history) {
-      try { listener(msg); } catch (e: any) { process.stderr.write(`Logger listener error: ${e?.message}\n`); }
+      try { listener(msg); } catch (e: unknown) { process.stderr.write(`Logger listener error: ${e instanceof Error ? e.message : String(e)}\n`); }
     }
     this.listeners.push(listener);
     return () => {

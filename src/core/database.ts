@@ -5,7 +5,6 @@ import fs from "fs-extra";
 import { ConfigManager } from "./config.js";
 import { Logger } from "./logger.js";
 import { getErrorMessage } from "../types/errors.js";
-import { TIMEOUTS } from "../constants/timeouts.js";
 import type { Job, JobUpdate } from "../types/jobs.js";
 
 // Re-export Job type for backwards compatibility
@@ -33,7 +32,7 @@ export class Database {
   // Batch update mechanism (100ms window for progress updates)
   private updateBatch: Map<string, Partial<Job>> = new Map();
   private batchTimer: NodeJS.Timeout | null = null;
-  private static readonly BATCH_WINDOW_MS = TIMEOUTS.JOB_UPDATE_THROTTLE;
+  private static readonly BATCH_WINDOW_MS = 100; // 100ms throttle for job update broadcasts
 
   private constructor() {
     let file = path.join(process.cwd(), "moombox.json");

@@ -9,6 +9,9 @@ import { CookieRefreshService } from "../../core/cookieRefresh.js";
 import { AutoCookieService } from "../../core/autoCookies.js";
 import { getYtdlpPluginStatus, installYtdlpPlugin } from "../../core/ytdlpPlugin.js";
 import { asyncHandler } from "./errorHandler.js";
+import { updateConfigSchema, addChannelSchema, validateRequest, formatValidationErrors } from "../../types/schemas.js";
+import { AuthService } from "../../core/auth.js";
+import { isLoopback } from "../../utils/ipValidation.js";
 
 export interface ConfigRoutesContext {
   logBuffer: string[];
@@ -42,39 +45,48 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
     });
   }));
 
-  // Get config
+  // Get config (strip password_hash, add hasPassword boolean)
   router.get("/config", (req, res) => {
-    const config = ConfigManager.getInstance().get();
-    res.json(config);
+    const { password_hash, ...safeConfig } = ConfigManager.getInstance().get();
+    res.json({ ...safeConfig, hasPassword: !!password_hash });
   });
 
   // Update config
   router.put("/config", asyncHandler(async (req, res) => {
     const configManager = ConfigManager.getInstance();
-    const newConfig = req.body;
 
-    // Validate required fields
-    if (!newConfig.downloader || typeof newConfig.downloader !== "object") {
-      return res
-        .status(400)
-        .json({ error: "downloader configuration is required" });
+    // Validate with Zod schema
+    const validation = updateConfigSchema.safeParse(req.body);
+    if (!validation.success) {
+      const details = formatValidationErrors(validation.error);
+      logger.warn(`[Config] PUT /config validation failed: ${JSON.stringify(details)}`);
+      return res.status(400).json({
+        error: "Validation failed",
+        details,
+      });
     }
 
-    // Validate known top-level keys only
-    const allowedKeys = new Set([
-      "port", "network_access",
-      "log_level", "log_file_path", "log_max_file_size", "log_max_files",
-      "database_path", "max_feed_items", "feed_check_interval",
-      "downloader", "tasklist",
-      "auto_cookies", "notifications", "channels",
-    ]);
-    for (const key of Object.keys(newConfig)) {
-      if (!allowedKeys.has(key)) {
-        return res.status(400).json({ error: `Unknown config key: ${key}` });
+    // Prevent enabling external access without a password
+    if (validation.data.network_access === "external") {
+      const existing = configManager.get();
+      if (!existing.password_hash) {
+        return res.status(400).json({
+          error: "A password must be set before enabling external access. Go to Settings \u2192 Security.",
+        });
       }
     }
 
-    await configManager.save(newConfig);
+    // Never allow password_hash via config update (use /auth/set-password)
+    delete (validation.data as Record<string, unknown>).password_hash;
+
+    // Preserve existing password_hash (managed via /auth endpoints, not config UI)
+    const existing = configManager.get();
+    const configToSave = { ...validation.data } as Record<string, unknown>;
+    if (existing.password_hash) {
+      configToSave.password_hash = existing.password_hash;
+    }
+
+    await configManager.save(configToSave as any);
     // Apply runtime-reloadable settings immediately
     logger.refreshLogLevel();
     res.json({ success: true });
@@ -83,27 +95,29 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
   // Add channel
   router.post("/config/channels", asyncHandler(async (req, res) => {
     const configManager = ConfigManager.getInstance();
-    const config = configManager.get();
-    const channel = req.body;
 
-    if (!channel.id) {
-      return res.status(400).json({ error: "Channel ID is required" });
+    // Validate with Zod schema
+    const validation = addChannelSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: formatValidationErrors(validation.error),
+      });
     }
 
-    if (!config.channels) {
-      config.channels = [];
-    }
+    const channel = validation.data;
+    const config = { ...configManager.get() };
+    const channels = [...(config.channels || [])];
 
     // Check if channel already exists
-    const existingIndex = config.channels.findIndex(
-      (c) => c.id === channel.id,
-    );
+    const existingIndex = channels.findIndex((c) => c.id === channel.id);
     if (existingIndex >= 0) {
-      config.channels[existingIndex] = channel;
+      channels[existingIndex] = channel;
     } else {
-      config.channels.push(channel);
+      channels.push(channel);
     }
 
+    config.channels = channels;
     await configManager.save(config);
     res.json({ success: true, channel });
   }));
@@ -138,17 +152,40 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
   // Complete first-run setup
   router.post("/setup/complete", asyncHandler(async (req, res) => {
     const configManager = ConfigManager.getInstance();
-    const config = req.body;
 
-    // Validate required fields
-    if (!config.downloader) {
-      return res
-        .status(400)
-        .json({ error: "downloader configuration is required" });
+    // Extract password before Zod validation (not part of config schema)
+    const password = typeof req.body?.password === "string" ? req.body.password : undefined;
+
+    // Validate with Zod schema (same rules as config update)
+    const validation = updateConfigSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: formatValidationErrors(validation.error),
+      });
     }
 
+    // If external access is selected, require a password
+    if (validation.data.network_access === "external") {
+      if (!password || password.length < 8) {
+        return res.status(400).json({
+          error: "A password (min 8 characters) is required for external access.",
+        });
+      }
+    }
+
+    // Hash password if provided and include in config
+    const configData: Record<string, unknown> = { ...validation.data };
+    if (password && password.length >= 8) {
+      const auth = AuthService.getInstance();
+      configData.password_hash = auth.hashPassword(password);
+    }
+
+    // Never pass raw password to config save
+    delete configData.password;
+
     // Save the configuration
-    await configManager.save(config);
+    await configManager.save(configData as any);
 
     logger.info("[Setup] First-run setup completed");
     res.json({ success: true });

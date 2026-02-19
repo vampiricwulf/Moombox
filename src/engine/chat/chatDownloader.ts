@@ -12,6 +12,7 @@ import { EventEmitter } from "events";
 import { ChatApi } from "./chatApi.js";
 import { Logger } from "../../core/logger.js";
 import { LIMITS } from "../../constants/limits.js";
+import { getErrorMessage } from "../../types/errors.js";
 import type {
   ChatDownloaderOptions,
   ChatMessage,
@@ -302,8 +303,8 @@ export class ChatDownloader extends EventEmitter {
             try {
               await this.writeChatFile();
               await this.saveResumeState();
-            } catch (ioErr: any) {
-              this.logger.debug(`[ChatDownloader] Save error: ${ioErr?.message}`);
+            } catch (ioErr: unknown) {
+              this.logger.debug(`[ChatDownloader] Save error: ${getErrorMessage(ioErr)}`);
             }
             saveCounter = 0;
 
@@ -384,14 +385,14 @@ export class ChatDownloader extends EventEmitter {
         if (waitMs > 0) {
           await this.sleep(waitMs);
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         // If aborted (stop/markStreamEnded), exit the loop without counting as error
-        if (e?.name === "AbortError") {
+        if (e instanceof Error && e.name === "AbortError") {
           break;
         }
 
         consecutiveErrors++;
-        this.logger.debug(`[ChatDownloader] Error: ${e.message}`);
+        this.logger.debug(`[ChatDownloader] Error: ${getErrorMessage(e)}`);
 
         // Higher tolerance for live/upcoming streams (transient issues are normal)
         const maxErrors = this.isStreamActive ? 20 : 5;

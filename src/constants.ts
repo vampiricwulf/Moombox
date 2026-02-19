@@ -116,24 +116,6 @@ export const ANDROID_VR_CLIENT: YouTubeClientConfig = {
   },
 };
 
-/**
- * Android SDK-less client - for public content without signature cipher
- */
-export const ANDROID_SDKLESS_CLIENT: YouTubeClientConfig = {
-  clientName: "ANDROID",
-  clientVersion: "19.09.37",
-  clientId: "3",
-  userAgent: USER_AGENTS.ANDROID,
-  context: {
-    clientName: "ANDROID",
-    clientVersion: "19.09.37",
-    androidSdkVersion: 34,
-    osVersion: "14",
-    deviceMake: "Google",
-    deviceModel: "Pixel 8 Pro",
-  },
-};
-
 // =============================================================================
 // TWITCH CONSTANTS
 // =============================================================================

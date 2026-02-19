@@ -223,11 +223,11 @@ async function run() {
     serverStarted = true;
     // Expose the actual port for TUI and other components
     process.env.MOOMBOX_PORT = String(actualPort);
-    logger.info(`[Moombox] Web dashboard available at http://localhost:${actualPort}`);
-  } catch (error: any) {
-    const detail = error.code === "EADDRINUSE"
+    logger.info(`[Moombox] Web dashboard available at https://localhost:${actualPort}`);
+  } catch (error: unknown) {
+    const detail = (error as NodeJS.ErrnoException).code === "EADDRINUSE"
       ? `Port ${port} (and nearby ports) already in use. Is another instance running?`
-      : `Web server failed: ${error.message}`;
+      : `Web server failed: ${getErrorMessage(error)}`;
 
     if (useTUI) {
       // TUI will start below and show the error — downloads still work
@@ -319,9 +319,9 @@ Commands:
   add <id>  Manually add a video ID to the queue
 `);
     }
-  } catch (error: any) {
-    console.error("Startup error:", error.message);
-    console.error(error.stack);
+  } catch (error: unknown) {
+    console.error("Startup error:", getErrorMessage(error));
+    if (error instanceof Error) console.error(error.stack);
     if (process.stdin.isTTY) {
       await waitForKeypress();
     }

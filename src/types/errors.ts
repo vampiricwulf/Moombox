@@ -6,7 +6,7 @@
  * Error context - additional structured information about the error
  */
 export interface ErrorContext {
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 /**
@@ -41,7 +41,7 @@ export class MoomboxError extends Error {
   /**
    * Convert error to JSON for logging/transmission
    */
-  toJSON(): Record<string, any> {
+  toJSON(): Record<string, unknown> {
     return {
       name: this.name,
       message: this.message,

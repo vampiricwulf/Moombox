@@ -384,8 +384,6 @@ export class DownloadOrchestrator {
     let videoDl: SegmentDownloader | null = null;
     let audioDl: SegmentDownloader | null = null;
     let segmentRange: SegmentRange | null = null;
-    let selectedVideoFormat: any = null;
-    let selectedAudioFormat: any = null;
 
     // Use pre-started chat downloader from upcoming phase, or create a new one
     if (config.downloader.download_chat !== false) {
@@ -394,16 +392,16 @@ export class DownloadOrchestrator {
         this.activeChatDownloaders.add(chatDl);
         chatDl.on("finish", () => {
           this.activeChatDownloaders.delete(chatDl!);
-          db.updateJob(job.id, { chatStatus: "finished" }).catch((e: any) => this.logger.debug(`[Chat] DB update failed: ${e.message}`));
+          db.updateJob(job.id, { chatStatus: "finished" }).catch((e: unknown) => this.logger.debug(`[Chat] DB update failed: ${getErrorMessage(e)}`));
         });
         chatDl.on("error", (err) => {
           this.logger.warn(`[Chat] Error (pre-started): ${err.message}`);
-          db.updateJob(job.id, { chatStatus: "error" }).catch((e: any) => this.logger.debug(`[Chat] DB update failed: ${e.message}`));
+          db.updateJob(job.id, { chatStatus: "error" }).catch((e: unknown) => this.logger.debug(`[Chat] DB update failed: ${getErrorMessage(e)}`));
         });
         // If chatDl already finished before we attached listeners, clean up
         if (!chatDl.isRunning()) {
           this.activeChatDownloaders.delete(chatDl);
-          db.updateJob(job.id, { chatStatus: "finished" }).catch((e: any) => this.logger.debug(`[Chat] DB update failed: ${e.message}`));
+          db.updateJob(job.id, { chatStatus: "finished" }).catch((e: unknown) => this.logger.debug(`[Chat] DB update failed: ${getErrorMessage(e)}`));
         }
       } else {
         chatDl = await setupChatDownloader(
@@ -438,8 +436,7 @@ export class DownloadOrchestrator {
       if (signal?.aborted) return;
 
       // Capture selected formats for trim bitrate info
-      selectedVideoFormat = vodResult.selectedVideoFormat;
-      selectedAudioFormat = vodResult.selectedAudioFormat;
+
 
       if (vodResult.hasVideo) {
         videoPath = path.join(stagingDir, "video_stream");
@@ -467,8 +464,6 @@ export class DownloadOrchestrator {
       videoPath = result.videoPath;
       audioPath = result.audioPath;
       segmentRange = result.segmentRange;
-      selectedVideoFormat = result.selectedVideoFormat;
-      selectedAudioFormat = result.selectedAudioFormat;
     } else if (videoInfo.hlsManifestUrl) {
       // HLS: Fallback for some streams
       const result = await downloadHls(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders);
@@ -482,10 +477,6 @@ export class DownloadOrchestrator {
 
       // Check abort immediately after download
       if (signal?.aborted) return;
-
-      // Capture selected formats for trim bitrate info
-      selectedVideoFormat = vodResult2.selectedVideoFormat;
-      selectedAudioFormat = vodResult2.selectedAudioFormat;
 
       videoPath = path.join(stagingDir, "video_stream");
       audioPath = vodResult2.hasAudio ? path.join(stagingDir, "audio_stream") : null;
@@ -605,15 +596,15 @@ export class DownloadOrchestrator {
             `[DownloadOrchestrator] Post-download trim created: ${trimRecord.filename}`
           );
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         // Don't fail the entire job if trim fails - the full file is still available
         this.logger.error(
-          `[DownloadOrchestrator] Failed to create post-download trim: ${e.message}`
+          `[DownloadOrchestrator] Failed to create post-download trim: ${getErrorMessage(e)}`
         );
         // Optionally send a notification about trim failure
         NotificationManager.getInstance().send(
           "Trim Failed",
-          `Failed to create trim for "${job.title}": ${e.message}`,
+          `Failed to create trim for "${job.title}": ${getErrorMessage(e)}`,
           NotificationType.ERROR,
           [],
           {
@@ -630,7 +621,7 @@ export class DownloadOrchestrator {
       chatDl?.stop();
       // O13: Clean up staging for cancelled jobs (errored jobs may be retried)
       if (signal.aborted && stagingDir) {
-        fs.remove(stagingDir).catch((e: any) => this.logger.debug(`[DownloadOrchestrator] Staging cleanup failed: ${e.message}`));
+        fs.remove(stagingDir).catch((e: unknown) => this.logger.debug(`[DownloadOrchestrator] Staging cleanup failed: ${getErrorMessage(e)}`));
       }
     }
   }

@@ -1,0 +1,153 @@
+<!doctype html>
+<html class="sl-theme-dark">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="robots" content="noindex,nofollow" />
+        <meta name="referrer" content="no-referrer" />
+        <meta name="theme-color" content="#1C1B22" />
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+        <title>Moombox - Login</title>
+
+        <!-- Shoelace UI Components -->
+        <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/themes/dark.css"
+            crossorigin="anonymous"
+        />
+        <script
+            type="module"
+            src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/shoelace-autoloader.js"
+            crossorigin="anonymous"
+        ></script>
+
+        <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+                font-family: var(--sl-font-sans);
+                background: #1C1B22;
+                color: var(--sl-color-neutral-900);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 100vh;
+                padding: 1rem;
+            }
+            .login-container {
+                background: var(--sl-color-neutral-50);
+                border-radius: var(--sl-border-radius-large);
+                padding: 2rem;
+                width: 100%;
+                max-width: 380px;
+                box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+            }
+            .login-header {
+                text-align: center;
+                margin-bottom: 1.5rem;
+            }
+            .login-header sl-icon {
+                font-size: 3rem;
+                color: var(--sl-color-primary-600);
+            }
+            .login-header h1 {
+                font-size: 1.5rem;
+                margin-top: 0.5rem;
+            }
+            .login-header p {
+                color: var(--sl-color-neutral-500);
+                font-size: 0.9rem;
+                margin-top: 0.25rem;
+            }
+            .login-form {
+                display: flex;
+                flex-direction: column;
+                gap: 1rem;
+            }
+            .login-form sl-button {
+                width: 100%;
+            }
+            #login-error {
+                display: none;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="login-container">
+            <div class="login-header">
+                <sl-icon name="box-seam"></sl-icon>
+                <h1>Moombox</h1>
+                <p>Enter your password to continue</p>
+            </div>
+
+            <sl-alert id="login-error" variant="danger" open>
+                <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
+                <span id="login-error-text">Invalid password</span>
+            </sl-alert>
+
+            <div class="login-form">
+                <sl-input
+                    id="login-password"
+                    type="password"
+                    label="Password"
+                    placeholder="Enter password"
+                    required
+                    autofocus
+                    toggle-password
+                ></sl-input>
+                <sl-button id="login-submit" variant="primary">
+                    <sl-icon slot="prefix" name="box-arrow-in-right"></sl-icon>
+                    Login
+                </sl-button>
+            </div>
+        </div>
+
+        <script>
+            document.addEventListener("DOMContentLoaded", () => {
+                const passwordInput = document.getElementById("login-password");
+                const submitBtn = document.getElementById("login-submit");
+                const errorAlert = document.getElementById("login-error");
+                const errorText = document.getElementById("login-error-text");
+
+                async function doLogin() {
+                    const password = passwordInput.value;
+                    if (!password) {
+                        passwordInput.focus();
+                        return;
+                    }
+
+                    submitBtn.loading = true;
+                    errorAlert.style.display = "none";
+
+                    try {
+                        const response = await fetch("/api/auth/login", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ password }),
+                        });
+
+                        if (response.ok) {
+                            // Redirect to dashboard
+                            window.location.href = "/";
+                        } else {
+                            const data = await response.json();
+                            errorText.textContent = data.error || "Login failed";
+                            errorAlert.style.display = "";
+                            passwordInput.value = "";
+                            passwordInput.focus();
+                        }
+                    } catch (e) {
+                        errorText.textContent = "Connection error: " + e.message;
+                        errorAlert.style.display = "";
+                    } finally {
+                        submitBtn.loading = false;
+                    }
+                }
+
+                submitBtn.addEventListener("click", doLogin);
+                passwordInput.addEventListener("keypress", (e) => {
+                    if (e.key === "Enter") doLogin();
+                });
+            });
+        </script>
+    </body>
+</html>

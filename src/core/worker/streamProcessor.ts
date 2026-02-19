@@ -19,6 +19,7 @@ import { createEmptyVideoInfo, type VideoInfo, type StreamStatus } from "../../t
 import { NotificationManager, NotificationType } from "../notifications.js";
 import { STREAM_RECHECK_INTERVAL_MS, PROBE_JITTER_MAX_MS, MAX_CONSECUTIVE_PROBE_ERRORS, TWITCH_URLS } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
+import { sleep } from "../../utils/async.js";
 import { extractTwitchLoginFromJob } from "../../utils/twitch.js";
 import type { TwitchStreamInfo, TwitchHlsVariant } from "../../types/twitch.js";
 
@@ -596,7 +597,7 @@ export class StreamProcessor {
       // Calculate dynamic recheck interval with jitter to stagger concurrent probes
       const recheckInterval = this.calculateRecheckInterval(scheduledStartTime);
       const jitter = Math.floor(Math.random() * PROBE_JITTER_MAX_MS);
-      await this.delay(recheckInterval + jitter);
+      await sleep(recheckInterval + jitter);
 
       // Check if job was cancelled
       const freshJob = (await db.getJobs()).find((j) => j.id === job.id);
@@ -808,8 +809,8 @@ export class StreamProcessor {
 
       this.logger.info(`[Chat] Started early chat download for upcoming ${job.videoId}`);
       return chatDl;
-    } catch (e: any) {
-      this.logger.warn(`[Chat] Failed to start early chat: ${e.message}`);
+    } catch (e: unknown) {
+      this.logger.warn(`[Chat] Failed to start early chat: ${getErrorMessage(e)}`);
       return null;
     }
   }
@@ -883,10 +884,4 @@ export class StreamProcessor {
     );
   }
 
-  /**
-   * Delay helper
-   */
-  private delay(delayMs: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
 }

@@ -5,6 +5,7 @@
 import type { Router} from "express";
 import { Database } from "../../core/database.js";
 import { TrimService } from "../../core/worker/trimService.js";
+import { MuxingError } from "../../types/errors.js";
 import { asyncHandler } from "./errorHandler.js";
 import { createTrimSchema, formatValidationErrors } from "../../types/schemas.js";
 import { Logger } from "../../core/logger.js";
@@ -52,10 +53,11 @@ export function registerTrimRoutes(router: Router): void {
           abortController.signal,
         );
         res.json({ trim });
-      } catch (error: any) {
-        // Sanitize error message (don't expose internal stack traces)
-        logger.error(`[TrimRoutes] Failed to create trim: ${error.message}`);
-        res.status(400).json({ error: "Failed to create trim" });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`[TrimRoutes] Failed to create trim: ${message}`);
+        const status = error instanceof MuxingError ? 500 : 400;
+        res.status(status).json({ error: "Failed to create trim" });
       }
     }),
   );

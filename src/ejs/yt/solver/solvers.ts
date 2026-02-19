@@ -68,7 +68,7 @@ export function modifyPlayer(program: ESTree.Program) {
         break;
       }
     }
-    throw "unexpected structure";
+    throw new Error("unexpected structure");
   })();
 
   block.body = block.body.filter((node: ESTree.Statement) => {

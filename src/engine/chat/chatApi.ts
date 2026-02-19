@@ -13,6 +13,7 @@ import {
   WEB_CLIENT,
   DEFAULT_API_KEY,
 } from "../../constants.js";
+import { getErrorMessage } from "../../types/errors.js";
 import { fetchWithTimeout } from "../../core/http.js";
 import type {
   ChatMessage,
@@ -59,9 +60,9 @@ export class ChatApi {
 
       const html = await response.text();
       return this.extractChatContinuation(html);
-    } catch (e: any) {
-      if (e?.name === "AbortError") throw e;
-      this.logger.debug(`[ChatApi] Error fetching fresh continuation: ${e.message}`);
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name === "AbortError") throw e;
+      this.logger.debug(`[ChatApi] Error fetching fresh continuation: ${getErrorMessage(e)}`);
       return { continuation: null, isReplay: false };
     }
   }
@@ -217,8 +218,8 @@ export class ChatApi {
 
       const data = await response.json();
       return this.parseResponse(data);
-    } catch (e: any) {
-      this.logger.debug(`[ChatApi] Fetch error: ${e.message}`);
+    } catch (e: unknown) {
+      this.logger.debug(`[ChatApi] Fetch error: ${getErrorMessage(e)}`);
       throw e;
     }
   }

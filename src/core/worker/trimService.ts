@@ -11,6 +11,8 @@ import { ConfigManager } from "../config.js";
 import { Logger } from "../logger.js";
 import { Muxer } from "../../engine/muxer.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
+import { extractVideoMetadata } from "../../utils/ffprobe.js";
+import { getErrorMessage } from "../../types/errors.js";
 import type { TrimRecord } from "../../types/jobs.js";
 
 export class TrimService {
@@ -120,7 +122,7 @@ export class TrimService {
       );
 
       // 10. Extract metadata (duration, size) via ffprobe
-      const metadata = await this.extractVideoMetadata(trimOutputPath);
+      const metadata = await extractVideoMetadata(trimOutputPath);
 
       if (!metadata) {
         logger.warn(
@@ -220,9 +222,9 @@ export class TrimService {
           `[TrimService] Trim file not found (already deleted?): ${trim.filename}`,
         );
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       logger.error(
-        `[TrimService] Failed to delete trim file: ${e.message}`,
+        `[TrimService] Failed to delete trim file: ${getErrorMessage(e)}`,
       );
       // Continue anyway to clean up database record
     }
@@ -333,45 +335,6 @@ export class TrimService {
       return DEFAULT_AUDIO_BITRATE;
     } catch {
       return DEFAULT_AUDIO_BITRATE;
-    }
-  }
-
-  /**
-   * Extract video metadata using ffprobe
-   */
-  private static async extractVideoMetadata(
-    filePath: string,
-  ): Promise<{ duration: number; size: number } | null> {
-    try {
-      const { stdout } = await execa("ffprobe", [
-        "-v",
-        "quiet",
-        "-print_format",
-        "json",
-        "-show_format",
-        filePath,
-      ], { timeout: ms("30s") });
-
-      if (!stdout) {
-        return null;
-      }
-
-      const data = JSON.parse(stdout);
-      const format = data.format;
-
-      if (!format) {
-        return null;
-      }
-
-      return {
-        duration: Math.floor(parseFloat(format.duration) || 0),
-        size: parseInt(format.size) || 0,
-      };
-    } catch (error: any) {
-      Logger.getInstance().warn(
-        `[TrimService] ffprobe failed: ${error.message}`,
-      );
-      return null;
     }
   }
 

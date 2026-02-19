@@ -2,6 +2,7 @@ import ms from "ms";
 import { ConfigManager } from './config.js';
 import { Logger } from './logger.js';
 import { fetchWithTimeout } from './http.js';
+import { getErrorMessage } from "../types/errors.js";
 
 export enum NotificationType {
     INFO = 0x3498db,       // Blue — found, added, scheduled
@@ -100,8 +101,8 @@ export class NotificationManager {
             if (!resp.ok) {
                 this.logger.error(`[Notifications] Failed to send Discord webhook: ${resp.status} ${resp.statusText}`);
             }
-        } catch (e: any) {
-            this.logger.error(`[Notifications] Error sending Discord webhook: ${e.message}`);
+        } catch (e: unknown) {
+            this.logger.error(`[Notifications] Error sending Discord webhook: ${getErrorMessage(e)}`);
         }
     }
 }

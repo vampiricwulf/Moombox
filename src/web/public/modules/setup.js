@@ -34,12 +34,15 @@ export class SetupController {
     document.getElementById("setup-back-4").addEventListener("click", () => this.goToStep(3));
     document.getElementById("setup-back-5").addEventListener("click", () => this.goToStep(4));
 
-    // Setup: Network access select — show warning when External is chosen
+    // Setup: Network access select — show warning + password when External is chosen
     const setupNetAccess = document.getElementById("setup-network-access");
     const setupExtWarning = document.getElementById("setup-external-warning");
-    if (setupNetAccess && setupExtWarning) {
+    const setupExtPassword = document.getElementById("setup-external-password");
+    if (setupNetAccess) {
       setupNetAccess.addEventListener("sl-change", () => {
-        setupExtWarning.style.display = setupNetAccess.value === "external" ? "" : "none";
+        const isExternal = setupNetAccess.value === "external";
+        if (setupExtWarning) setupExtWarning.style.display = isExternal ? "" : "none";
+        if (setupExtPassword) setupExtPassword.style.display = isExternal ? "" : "none";
       });
     }
 
@@ -112,6 +115,7 @@ export class SetupController {
     const feedCheckInterval = num("setup-feed-check-interval");
     const port = num("setup-port");
     const setupNetworkAccess = document.getElementById("setup-network-access")?.value || "localhost";
+    const externalPassword = val("setup-external-password");
 
     // Step 5: Channel
     const channelId = val("setup-channel-id");
@@ -119,10 +123,22 @@ export class SetupController {
     const channelTerms = val("setup-channel-terms");
     const includeNonLive = document.getElementById("setup-include-non-live")?.checked || false;
 
+    // Validate password for external access
+    if (setupNetworkAccess === "external") {
+      if (!externalPassword || externalPassword.length < 8) {
+        this.app.showToast("Password (min 8 characters) is required for external access", "warning");
+        finishBtn.loading = false;
+        finishBtn.disabled = false;
+        return;
+      }
+    }
+
     // Build config
     const config = {
       port: port,
       network_access: setupNetworkAccess,
+      // Include password for server to hash (only for external access)
+      ...(setupNetworkAccess === "external" && externalPassword ? { password: externalPassword } : {}),
       log_level: logLevel,
       log_file_path: logFilePath,
       log_max_file_size: logMaxSize,

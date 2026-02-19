@@ -73,7 +73,8 @@ export interface AutoCookiesConfig {
  */
 export interface MoomboxConfig {
   port?: number;
-  network_access?: string; // "localhost" | "lan" | "external"
+  network_access?: "localhost" | "lan" | "external";
+  password_hash?: string;
   log_level?: string;
   log_file_path?: string;
   log_max_file_size?: number;

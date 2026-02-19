@@ -28,9 +28,8 @@ export async function getPlayerFilePath(playerUrl: string): Promise<string> {
         // updated time on file mark it as recently used.
         await fs.utimes(filePath, new Date(), stat.mtime ?? new Date());
         return filePath;
-    } catch (error: any) {
-        if (error.code === 'ENOENT') {
-            // console.log(`Cache miss for player: ${playerUrl}. Fetching...`);
+    } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
             const response = await fetchWithTimeout(playerUrl);
             if (!response.ok) {
                 throw new Error(`Failed to fetch player from ${playerUrl}: ${response.statusText}`);
@@ -38,8 +37,6 @@ export async function getPlayerFilePath(playerUrl: string): Promise<string> {
             const playerContent = await response.text();
             await fs.ensureDir(CACHE_DIR);
             await fs.writeFile(filePath, playerContent);
-            
-            // console.log(`Saved player to cache: ${filePath}`);
             return filePath;
         }
         throw error;
@@ -50,7 +47,6 @@ export async function initializeCache() {
     await fs.ensureDir(CACHE_DIR);
 
     const fourteenDays = ms("14d");
-    // console.log(`Cleaning up player cache directory: ${CACHE_DIR}`);
     try {
         const files = await fs.readdir(CACHE_DIR);
         for (const file of files) {
@@ -59,7 +55,6 @@ export async function initializeCache() {
             if (stat.isFile()) {
                 const lastAccessed = stat.atimeMs || stat.mtimeMs || stat.birthtimeMs;
                 if (Date.now() - lastAccessed > fourteenDays) {
-                    // console.log(`Deleting stale player cache file: ${filePath}`);
                     await fs.remove(filePath);
                 }
             }

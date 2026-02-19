@@ -5,8 +5,9 @@ import { EventEmitter } from "events";
 import pLimit from "p-limit";
 import { ManifestParser } from "./manifest.js";
 import { Logger } from "../core/logger.js";
-import { DOWNLOAD_TIMEOUT_MS } from "../constants.js";
+import { DOWNLOAD_TIMEOUT_MS, USER_AGENTS } from "../constants.js";
 import { LIMITS } from "../constants/limits.js";
+import { getErrorMessage } from "../types/errors.js";
 
 export interface DownloaderOptions {
   baseUrl: string;
@@ -177,8 +178,7 @@ export class SegmentDownloader extends EventEmitter {
           const resp = await fetch(this.options.initUrl, {
             signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
             headers: {
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "User-Agent": USER_AGENTS.WEB,
             },
           });
 
@@ -192,9 +192,9 @@ export class SegmentDownloader extends EventEmitter {
               `[Downloader] Failed to download init segment: ${resp.status}`,
             );
           }
-        } catch (e: any) {
+        } catch (e: unknown) {
           this.logger.warn(
-            `[Downloader] Error downloading init segment: ${e.message}`,
+            `[Downloader] Error downloading init segment: ${getErrorMessage(e)}`,
           );
         }
       }
@@ -282,9 +282,10 @@ export class SegmentDownloader extends EventEmitter {
           const ended = await this.handleFailedSegmentDownload(state);
           if (ended) break;
         }
-      } catch (e: any) {
-        if (e.message === "CANCELLED") break;
-        if (e.message === "GONE") {
+      } catch (e: unknown) {
+        const msg = getErrorMessage(e);
+        if (msg === "CANCELLED") break;
+        if (msg === "GONE") {
           const ended = await this.handleGoneErrors(state);
           if (ended) break;
           if (state.consecutiveGoneErrors <= 20 && !state.hasStartedDownloading) {
@@ -296,7 +297,7 @@ export class SegmentDownloader extends EventEmitter {
           continue; // Retry same segment
         }
         this.logger.error(
-          `[Downloader] Error downloading seq ${this.currentSeq}: ${e.message}`,
+          `[Downloader] Error downloading seq ${this.currentSeq}: ${msg}`,
         );
         await this.cancellableDelay(ms("2s"));
       }
@@ -533,8 +534,7 @@ export class SegmentDownloader extends EventEmitter {
         method: "GET",
         signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
         headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "User-Agent": USER_AGENTS.WEB,
         },
       });
 
@@ -563,8 +563,7 @@ export class SegmentDownloader extends EventEmitter {
         const resp = await fetch(this.options.baseUrl, {
           signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
           headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": USER_AGENTS.WEB,
           },
         });
         if (!resp.ok) {
@@ -664,9 +663,9 @@ export class SegmentDownloader extends EventEmitter {
         // Wait Target Duration before refreshing playlist
         const sleepTime = (playlist.targetDuration || 2) * 1000;
         await this.cancellableDelay(sleepTime);
-      } catch (e: any) {
+      } catch (e: unknown) {
         consecutiveErrors++;
-        this.logger.error(`[Downloader] HLS Loop Error: ${e.message}`);
+        this.logger.error(`[Downloader] HLS Loop Error: ${getErrorMessage(e)}`);
         if (consecutiveErrors > 5) {
           this.cancelFlag = true; // Preserve resume state for retry
           break;
@@ -681,8 +680,7 @@ export class SegmentDownloader extends EventEmitter {
       const resp = await fetch(url, {
         signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
         headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "User-Agent": USER_AGENTS.WEB,
         },
       });
 
@@ -711,8 +709,7 @@ export class SegmentDownloader extends EventEmitter {
       const resp = await fetch(url, {
         signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
         headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "User-Agent": USER_AGENTS.WEB,
         },
       });
 
@@ -918,8 +915,7 @@ export class SegmentDownloader extends EventEmitter {
     const resp = await fetch(url, {
       signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": USER_AGENTS.WEB,
       },
     });
 
@@ -964,8 +960,7 @@ export class SegmentDownloader extends EventEmitter {
     const resp = await fetch(url, {
       signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": USER_AGENTS.WEB,
       },
     });
 
@@ -1059,18 +1054,18 @@ export class SegmentDownloader extends EventEmitter {
                 retryQueue.push(seq);
               }
             }
-          } catch (e: any) {
+          } catch (e: unknown) {
             // Track retries for failed segments
             const retries = (retryCounts.get(seq) || 0) + 1;
             retryCounts.set(seq, retries);
             if (retries < MAX_SEGMENT_RETRIES) {
               retryQueue.push(seq);
               this.logger.debug(
-                `[Downloader] Parallel fetch error for seq ${seq} (retry ${retries}/${MAX_SEGMENT_RETRIES}): ${e.message}`,
+                `[Downloader] Parallel fetch error for seq ${seq} (retry ${retries}/${MAX_SEGMENT_RETRIES}): ${getErrorMessage(e)}`,
               );
             } else {
               this.logger.warn(
-                `[Downloader] Parallel fetch failed for seq ${seq} after ${MAX_SEGMENT_RETRIES} retries: ${e.message}`,
+                `[Downloader] Parallel fetch failed for seq ${seq} after ${MAX_SEGMENT_RETRIES} retries: ${getErrorMessage(e)}`,
               );
             }
           }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { mouseDataBus } from "../stdinFilter.js";
 
 export interface MouseEvent {
@@ -15,9 +15,7 @@ interface UseMouseOptions {
   onMouseEvent?: (event: MouseEvent) => void;
 }
 
-export function useMouse(options: UseMouseOptions = {}): MouseEvent | null {
-  const [lastEvent, setLastEvent] = useState<MouseEvent | null>(null);
-
+export function useMouse(options: UseMouseOptions = {}): void {
   // Store callback in a ref so the effect doesn't re-run when it changes.
   const onMouseEventRef = useRef(options.onMouseEvent);
   onMouseEventRef.current = options.onMouseEvent;
@@ -71,7 +69,6 @@ export function useMouse(options: UseMouseOptions = {}): MouseEvent | null {
         // Only emit events we care about (not releases or moves without button)
         if (type === "click" || type === "scroll") {
           const event: MouseEvent = { type, button, x, y, shift, meta, ctrl };
-          setLastEvent(event);
           onMouseEventRef.current?.(event);
         }
       }
@@ -83,6 +80,4 @@ export function useMouse(options: UseMouseOptions = {}): MouseEvent | null {
       mouseDataBus.off("data", handleData);
     };
   }, []);
-
-  return lastEvent;
 }

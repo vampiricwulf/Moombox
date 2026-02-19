@@ -119,7 +119,7 @@ export async function downloadVod(
     db.updateJob(job.id, {
       progress: `V:${videoProgress} A:${audioProgress}${chatStr}`,
       percent: combinedPercent,
-    }).catch((e: any) => logger.debug(`[DownloadOrchestrator] Progress update failed: ${e.message}`));
+    }).catch((e: unknown) => logger.debug(`[DownloadOrchestrator] Progress update failed: ${getErrorMessage(e)}`));
   };
 
   // Download in parallel

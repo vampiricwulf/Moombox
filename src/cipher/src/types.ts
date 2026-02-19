@@ -39,15 +39,4 @@ export interface ResolveUrlResponse {
   resolved_url: string;
 }
 
-export interface WorkerWithStatus {
-  worker: any; // Using any to avoid strict Worker type dependency issues for now, or use Worker from worker_threads
-  isIdle?: boolean;
-}
-
-export interface Task {
-  data: string;
-  resolve: (output: string) => void;
-  reject: (error: any) => void;
-}
-
 export type ApiRequest = SignatureRequest | StsRequest | ResolveUrlRequest;

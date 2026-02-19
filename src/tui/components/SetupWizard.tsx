@@ -323,7 +323,7 @@ export function SetupWizard({ width, height, onComplete }: SetupWizardProps): Re
     };
 
     // Map TUI display values to config values
-    const netAccessMap: Record<string, string> = {
+    const netAccessMap: Record<string, "localhost" | "lan" | "external"> = {
       "Localhost": "localhost",
       "LAN": "lan",
       "External": "external",

@@ -168,24 +168,24 @@ export class PlayerApi {
       this.logger.debug(
         `[PlayerApi] TV_DOWNGRADED client failed (${result.playabilityError || "no formats"}), trying WEB_CREATOR for ${videoId}`,
       );
-      const webResult = await this.fetchWithClient(
+      const webCreatorResult = await this.fetchWithClient(
         videoId,
         WEB_CREATOR_CLIENT,
         ytcfg,
         signatureTimestamp,
       );
-      this.collectFormats(formatPool, webResult.formats, "web_creator", AUTH_LEVELS.WEB_CREATOR);
+      this.collectFormats(formatPool, webCreatorResult.formats, "web_creator", AUTH_LEVELS.WEB_CREATOR);
 
       // If WEB_CREATOR also fails, try ANDROID_VR (unless members_only — auth is required)
       if (
-        webResult.playabilityError === "login_required" ||
-        webResult.streamStatus === "not_a_stream" ||
-        webResult.formats.length === 0 ||
-        !this.hasAdequateFormats(webResult)
+        webCreatorResult.playabilityError === "login_required" ||
+        webCreatorResult.streamStatus === "not_a_stream" ||
+        webCreatorResult.formats.length === 0 ||
+        !this.hasAdequateFormats(webCreatorResult)
       ) {
-        if (webResult.playabilityError !== "members_only") {
+        if (webCreatorResult.playabilityError !== "members_only") {
           this.logger.debug(
-            `[PlayerApi] WEB_CREATOR failed (${webResult.playabilityError || "inadequate formats"}), trying ANDROID_VR for ${videoId}`,
+            `[PlayerApi] WEB_CREATOR failed (${webCreatorResult.playabilityError || "inadequate formats"}), trying ANDROID_VR for ${videoId}`,
           );
           try {
             const vrResult = await this.fetchWithAndroidVR(videoId, ytcfg.visitorData || undefined);
@@ -214,9 +214,9 @@ export class PlayerApi {
         }
       }
 
-      if (wpParsed) this.mergeWatchPageMetadata(webResult, wpParsed);
-      webResult.formats = this.deduplicateFormats(formatPool);
-      return webResult;
+      if (wpParsed) this.mergeWatchPageMetadata(webCreatorResult, wpParsed);
+      webCreatorResult.formats = this.deduplicateFormats(formatPool);
+      return webCreatorResult;
     }
 
     // If TV result looks like not_a_stream but watch page says otherwise,

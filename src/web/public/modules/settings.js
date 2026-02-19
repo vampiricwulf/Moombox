@@ -24,6 +24,18 @@ export class SettingsController {
   }
 
   setupListeners() {
+    // Security: set password button
+    const setPasswordBtn = document.getElementById("security-set-password-btn");
+    if (setPasswordBtn) {
+      setPasswordBtn.addEventListener("click", () => this.setPassword());
+    }
+
+    // Security: remove password button
+    const removePasswordBtn = document.getElementById("security-remove-password-btn");
+    if (removePasswordBtn) {
+      removePasswordBtn.addEventListener("click", () => this.removePassword());
+    }
+
     // Settings navigation
     const settingsNav = document.getElementById("settings-nav");
     if (settingsNav) {
@@ -176,6 +188,11 @@ export class SettingsController {
     // Load integrations data when that section is shown
     if (section === "integrations") {
       this.loadYtdlpPluginStatus();
+    }
+
+    // Load security status when that section is shown
+    if (section === "security") {
+      this.loadSecurityStatus();
     }
   }
 
@@ -333,7 +350,12 @@ export class SettingsController {
         this.app.showToast("Settings saved successfully", "success");
       } else {
         const data = await response.json();
-        this.app.showToast(data.error || "Failed to save settings", "danger");
+        let msg = data.error || "Failed to save settings";
+        if (data.details) {
+          const fields = Object.entries(data.details).map(([k, v]) => `${k}: ${v}`).join(", ");
+          msg += ` (${fields})`;
+        }
+        this.app.showToast(msg, "danger");
       }
     } catch (e) {
       this.app.showToast("Failed to save settings: " + e.message, "danger");
@@ -780,6 +802,140 @@ export class SettingsController {
     } finally {
       installBtn.loading = false;
       installBtn.disabled = false;
+    }
+  }
+
+  // ─── Security / Password Methods ─────────────────────────────
+
+  async loadSecurityStatus() {
+    const badge = document.getElementById("security-password-badge");
+    const currentPasswordInput = document.getElementById("security-current-password");
+    const setPasswordBtn = document.getElementById("security-set-password-btn");
+    const removeSection = document.getElementById("security-remove-section");
+
+    try {
+      const response = await fetch("/api/auth/status");
+      if (!response.ok) return;
+      const status = await response.json();
+
+      if (status.hasPassword) {
+        badge.variant = "success";
+        badge.textContent = "Password set";
+        if (currentPasswordInput) currentPasswordInput.style.display = "";
+        if (setPasswordBtn) {
+          setPasswordBtn.textContent = "";
+          const icon = document.createElement("sl-icon");
+          icon.setAttribute("slot", "prefix");
+          icon.setAttribute("name", "key");
+          setPasswordBtn.appendChild(icon);
+          setPasswordBtn.appendChild(document.createTextNode(" Change Password"));
+        }
+        if (removeSection) removeSection.style.display = "";
+      } else {
+        badge.variant = "neutral";
+        badge.textContent = "No password set";
+        if (currentPasswordInput) currentPasswordInput.style.display = "none";
+        if (setPasswordBtn) {
+          setPasswordBtn.textContent = "";
+          const icon = document.createElement("sl-icon");
+          icon.setAttribute("slot", "prefix");
+          icon.setAttribute("name", "key");
+          setPasswordBtn.appendChild(icon);
+          setPasswordBtn.appendChild(document.createTextNode(" Set Password"));
+        }
+        if (removeSection) removeSection.style.display = "none";
+      }
+    } catch (e) {
+      console.error("Failed to load security status:", e);
+    }
+
+    // Clear form fields
+    if (currentPasswordInput) currentPasswordInput.value = "";
+    document.getElementById("security-new-password").value = "";
+    document.getElementById("security-confirm-password").value = "";
+  }
+
+  async setPassword() {
+    const currentPasswordInput = document.getElementById("security-current-password");
+    const newPasswordInput = document.getElementById("security-new-password");
+    const confirmPasswordInput = document.getElementById("security-confirm-password");
+    const btn = document.getElementById("security-set-password-btn");
+
+    const newPassword = newPasswordInput.value;
+    const confirmPassword = confirmPasswordInput.value;
+
+    if (!newPassword || newPassword.length < 8) {
+      this.app.showToast("Password must be at least 8 characters", "warning");
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      this.app.showToast("Passwords do not match", "warning");
+      return;
+    }
+
+    const body = { newPassword };
+    // Include current password if the field is visible (password already set)
+    if (currentPasswordInput && currentPasswordInput.style.display !== "none") {
+      body.currentPassword = currentPasswordInput.value;
+      if (!body.currentPassword) {
+        this.app.showToast("Current password is required", "warning");
+        return;
+      }
+    }
+
+    btn.loading = true;
+    try {
+      const response = await fetch("/api/auth/set-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (response.ok) {
+        this.app.showToast("Password updated successfully", "success");
+        this.loadSecurityStatus();
+        // Refresh config to pick up hasPassword change
+        this.app.loadConfig();
+      } else {
+        const data = await response.json();
+        this.app.showToast(data.error || "Failed to set password", "danger");
+      }
+    } catch (e) {
+      this.app.showToast("Failed to set password: " + e.message, "danger");
+    } finally {
+      btn.loading = false;
+    }
+  }
+
+  async removePassword() {
+    const currentPassword = prompt("Enter your current password to confirm removal:");
+    if (!currentPassword) return;
+
+    const btn = document.getElementById("security-remove-password-btn");
+    btn.loading = true;
+
+    try {
+      const response = await fetch("/api/auth/remove-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        this.app.showToast("Password removed. Network access set to Localhost Only.", "success");
+        this.loadSecurityStatus();
+        // Refresh config to pick up changes
+        this.app.loadConfig();
+      } else {
+        const data = await response.json();
+        this.app.showToast(data.error || "Failed to remove password", "danger");
+      }
+    } catch (e) {
+      this.app.showToast("Failed to remove password: " + e.message, "danger");
+    } finally {
+      btn.loading = false;
     }
   }
 

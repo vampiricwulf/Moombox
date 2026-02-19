@@ -4,6 +4,7 @@ import { execa } from "execa";
 import path from "path";
 import fs from "fs-extra";
 import { Logger } from "../core/logger.js";
+import { getErrorMessage } from "../types/errors.js";
 
 /**
  * Trim options for timestamp-based segment selection.
@@ -270,14 +271,15 @@ export class Muxer {
       });
 
       logger.debug(`[Muxer] FFmpeg completed successfully`);
-    } catch (error: any) {
-      if (error.isCanceled || error.name === 'AbortError') {
+    } catch (error: unknown) {
+      const execaErr = error as { isCanceled?: boolean; name?: string; stderr?: string; exitCode?: number; message?: string };
+      if (execaErr.isCanceled || execaErr.name === 'AbortError') {
         throw new DOMException("Aborted", "AbortError");
       }
 
-      const stderr = error.stderr || error.message;
+      const stderr = execaErr.stderr || getErrorMessage(error);
       logger.error(`[Muxer] FFmpeg failed: ${stderr.slice(-500)}`);
-      throw new Error(`FFmpeg exited with code ${error.exitCode || 'unknown'}: ${stderr.slice(-200)}`);
+      throw new Error(`FFmpeg exited with code ${execaErr.exitCode || 'unknown'}: ${stderr.slice(-200)}`);
     }
   }
 }

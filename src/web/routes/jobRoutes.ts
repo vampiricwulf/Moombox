@@ -12,6 +12,7 @@ import { ConfigManager } from "../../core/config.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
 import { TwitchService } from "../../engine/twitch/index.js";
 import { NotificationManager, NotificationType } from "../../core/notifications.js";
+import { getErrorMessage } from "../../types/errors.js";
 import type { Job } from "../../types/jobs.js";
 import { asyncHandler } from "./errorHandler.js";
 import { createRateLimiter } from "./rateLimiter.js";
@@ -26,6 +27,45 @@ export interface JobRoutesContext {
   isLoopback: (ip: string) => boolean;
 }
 
+/** Apply optional offset/limit pagination to an array and send response */
+function sendPaginated<T>(
+  items: T[],
+  req: { query: Record<string, unknown> },
+  res: { status: (code: number) => { json: (body: unknown) => void }; json: (body: unknown) => void },
+): void {
+  let offset: number;
+  let limit: number | undefined;
+  try {
+    ({ offset, limit } = validateOffsetPagination(
+      req.query.offset as string | undefined,
+      req.query.limit as string | undefined,
+    ));
+  } catch (e: unknown) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+    return;
+  }
+
+  if (limit !== undefined || offset > 0) {
+    const paginated = limit !== undefined
+      ? items.slice(offset, offset + limit)
+      : items.slice(offset);
+
+    res.json({
+      data: paginated,
+      pagination: {
+        total: items.length,
+        offset,
+        limit: limit || (items.length - offset),
+        hasMore: limit !== undefined && (offset + limit) < items.length,
+      },
+    });
+    return;
+  }
+
+  // Backward compatibility: return plain array if no pagination params
+  res.json(items);
+}
+
 export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
   const logger = Logger.getInstance();
 
@@ -34,36 +74,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     const db = await Database.getInstance();
     const jobs = await db.getJobs();
     const filtered = ctx.filterJobsByAge(jobs, false);
-
-    // Parse and validate pagination parameters
-    try {
-      var { offset, limit } = validateOffsetPagination(
-        req.query.offset as string | undefined,
-        req.query.limit as string | undefined
-      );
-    } catch (e: any) {
-      return res.status(400).json({ error: e.message });
-    }
-
-    // If pagination parameters are used, return paginated response with metadata
-    if (limit !== undefined || offset > 0) {
-      const paginated = limit !== undefined
-        ? filtered.slice(offset, offset + limit)
-        : filtered.slice(offset);
-
-      return res.json({
-        data: paginated,
-        pagination: {
-          total: filtered.length,
-          offset,
-          limit: limit || (filtered.length - offset),
-          hasMore: limit !== undefined && (offset + limit) < filtered.length,
-        },
-      });
-    }
-
-    // Backward compatibility: return plain array if no pagination params
-    res.json(filtered);
+    sendPaginated(filtered, req, res);
   }));
 
   // Get archived jobs (finished jobs older than hide_finished_age_days, with optional pagination)
@@ -72,36 +83,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     const jobs = await db.getJobs();
     const archivedJobs = ctx.filterJobsByAge(jobs, true)
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-
-    // Parse and validate pagination parameters
-    try {
-      var { offset, limit } = validateOffsetPagination(
-        req.query.offset as string | undefined,
-        req.query.limit as string | undefined
-      );
-    } catch (e: any) {
-      return res.status(400).json({ error: e.message });
-    }
-
-    // If pagination parameters are used, return paginated response with metadata
-    if (limit !== undefined || offset > 0) {
-      const paginated = limit !== undefined
-        ? archivedJobs.slice(offset, offset + limit)
-        : archivedJobs.slice(offset);
-
-      return res.json({
-        data: paginated,
-        pagination: {
-          total: archivedJobs.length,
-          offset,
-          limit: limit || (archivedJobs.length - offset),
-          hasMore: limit !== undefined && (offset + limit) < archivedJobs.length,
-        },
-      });
-    }
-
-    // Backward compatibility: return plain array if no pagination params
-    res.json(archivedJobs);
+    sendPaginated(archivedJobs, req, res);
   }));
 
   // Get single job
@@ -154,12 +136,18 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       return res.status(403).json({ error: "Access denied" });
     }
 
-    if (!fs.existsSync(filePath)) {
+    if (!(await fs.pathExists(filePath))) {
       return res.status(404).json({ error: "Video file not found" });
     }
 
-    const stat = fs.statSync(filePath);
+    const stat = await fs.stat(filePath);
     const fileSize = stat.size;
+
+    // Derive Content-Type from file extension
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = ext === ".webm" ? "video/webm"
+      : ext === ".mkv" ? "video/x-matroska"
+      : "video/mp4";
 
     const range = req.headers.range;
     if (range) {
@@ -176,11 +164,11 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
       res.setHeader("Accept-Ranges", "bytes");
       res.setHeader("Content-Length", end - start + 1);
-      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Type", contentType);
       fs.createReadStream(filePath, { start, end }).pipe(res);
     } else {
       res.setHeader("Content-Length", fileSize);
-      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Type", contentType);
       res.setHeader("Accept-Ranges", "bytes");
       fs.createReadStream(filePath).pipe(res);
     }
@@ -212,7 +200,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       return res.status(403).json({ error: "Access denied" });
     }
 
-    if (!fs.existsSync(chatPath)) {
+    if (!(await fs.pathExists(chatPath))) {
       return res.status(404).json({ error: "Chat file not found" });
     }
 
@@ -295,8 +283,8 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
           bestAacAudio: markBest(audioFormats, "mp4"),
         },
       });
-    } catch (e: any) {
-      logger.warn(`Failed to fetch formats for ${videoId}: ${e.message}`);
+    } catch (e: unknown) {
+      logger.warn(`Failed to fetch formats for ${videoId}: ${getErrorMessage(e)}`);
       res.status(500).json({ error: "Failed to fetch video formats" });
     }
   }));

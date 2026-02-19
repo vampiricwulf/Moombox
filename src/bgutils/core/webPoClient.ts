@@ -1,6 +1,6 @@
 import BotGuardClient from './botGuardClient.js';
 import WebPoMinter from './webPoMinter.js';
-import { base64ToU8, buildURL, u8ToBase64, getHeaders, BGError } from '../utils/index.js';
+import { buildURL, u8ToBase64, getHeaders, BGError } from '../utils/index.js';
 import type { PoTokenArgs, PoTokenResult, WebPoSignalOutput } from '../utils/index.js';
 
 /**
@@ -23,6 +23,10 @@ export async function generate(args: PoTokenArgs): Promise<PoTokenResult> {
     headers: getHeaders(),
     body: JSON.stringify(payload)
   });
+
+  if (!integrityTokenResponse.ok) {
+    throw new Error(`GenerateIT request failed: HTTP ${integrityTokenResponse.status}`);
+  }
 
   const integrityTokenJson = await integrityTokenResponse.json() as [string, number, number, string];
 
@@ -89,54 +93,3 @@ export function generateColdStartToken(identifier: string, clientState?: number)
   return u8ToBase64(packet, true);
 }
 
-/**
- * @deprecated Use `generateColdStartToken` instead.
- */
-export function generatePlaceholder(identifier: string, clientState?: number): string {
-  return generateColdStartToken(identifier, clientState);
-}
-
-/**
- * Decodes a cold start webpo token.
- * @throws Error if the packet length is invalid.
- */
-export function decodeColdStartToken(token: string) {
-  const packet = base64ToU8(token);
-
-  const payloadLength = packet[1];
-  const totalPacketLength = 2 + payloadLength;
-
-  if (packet.length !== totalPacketLength)
-    throw new BGError('BAD_INPUT', 'Invalid packet length.', { packetLength: packet.length, expectedLength: totalPacketLength });
-
-  const payload = packet.subarray(2);
-
-  // Decrypt the payload by reversing the XOR operation
-  const keyLength = 2;
-  for (let i = keyLength; i < payload.length; ++i) {
-    payload[i] ^= payload[i % keyLength];
-  }
-
-  const keys = [ payload[0], payload[1] ];
-
-  const unknownVal = payload[2]; // The masked property I mentioned in the function above
-  const clientState = payload[3];
-
-  const timestamp =
-    (payload[4] << 24) |
-    (payload[5] << 16) |
-    (payload[6] << 8) |
-    payload[7];
-
-  const date = new Date(timestamp * 1000);
-  const identifier = new TextDecoder().decode(payload.subarray(8));
-
-  return {
-    identifier,
-    timestamp,
-    unknownVal,
-    clientState,
-    keys,
-    date
-  };
-}

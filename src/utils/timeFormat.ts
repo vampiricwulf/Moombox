@@ -7,8 +7,8 @@
  * Format duration in milliseconds to human-readable string with h/m/s labels.
  * Examples: "2h 15m 30s", "5m 12s", "45s"
  */
-export function formatDuration(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
+export function formatDuration(millis: number): string {
+  const totalSeconds = Math.floor(millis / 1000);
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
   const s = totalSeconds % 60;
@@ -43,9 +43,9 @@ export function formatTime(seconds: number, includeHours = true): string {
  * Format milliseconds to HH:MM:SS or MM:SS, handling negative values.
  * Used for video player timestamps.
  */
-export function formatMsToTime(ms: number): string {
-  const isNegative = ms < 0;
-  const absMs = Math.abs(ms);
+export function formatMsToTime(millis: number): string {
+  const isNegative = millis < 0;
+  const absMs = Math.abs(millis);
   const totalSeconds = Math.floor(absMs / 1000);
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
@@ -89,8 +89,8 @@ export function formatTimestampFromUsec(usec: string): string {
  * Format elapsed time in milliseconds to compact human-readable string.
  * Examples: "45s", "5m 12s", "2h 15m"
  */
-export function formatElapsed(ms: number): string {
-  const secs = Math.floor(ms / 1000);
+export function formatElapsed(millis: number): string {
+  const secs = Math.floor(millis / 1000);
   if (secs < 60) return `${secs}s`;
   const mins = Math.floor(secs / 60);
   const remSecs = secs % 60;

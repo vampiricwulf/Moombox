@@ -13,6 +13,7 @@ import type { ChatProgress } from "../../types/chat.js";
 import { PROGRESS_UPDATE_INTERVAL_MS } from "../../constants.js";
 import { formatSpeed } from "../../utils/timeFormat.js";
 import { SmoothValue } from "../../utils/SmoothValue.js";
+import { getErrorMessage } from "../../types/errors.js";
 
 /**
  * Setup chat downloader if chat is available
@@ -59,30 +60,30 @@ export async function setupChatDownloader(
     activeChatDownloaders.add(chatDl);
 
     chatDl.on("start", () => {
-      db.updateJob(job.id, { chatStatus: "downloading" }).catch((e: any) => logger.debug(`[Chat] DB update failed: ${e.message}`));
+      db.updateJob(job.id, { chatStatus: "downloading" }).catch((e: unknown) => logger.debug(`[Chat] DB update failed: ${getErrorMessage(e)}`));
       logger.info(`[Chat] Started downloading chat for ${job.videoId}`);
     });
 
     chatDl.on("progress", (data) => {
       db.updateJob(job.id, { totalChatMessages: data.messageCount }).catch(
-        (e: any) => logger.debug(`[Chat] DB update failed: ${e.message}`),
+        (e: unknown) => logger.debug(`[Chat] DB update failed: ${getErrorMessage(e)}`),
       );
     });
 
     chatDl.on("error", (err) => {
       logger.warn(`[Chat] Error: ${err.message}`);
-      db.updateJob(job.id, { chatStatus: "error" }).catch((e: any) => logger.debug(`[Chat] DB update failed: ${e.message}`));
+      db.updateJob(job.id, { chatStatus: "error" }).catch((e: unknown) => logger.debug(`[Chat] DB update failed: ${getErrorMessage(e)}`));
     });
 
     chatDl.on("finish", () => {
       activeChatDownloaders.delete(chatDl);
       logger.info(`[Chat] Finished downloading chat for ${job.videoId}`);
-      db.updateJob(job.id, { chatStatus: "finished" }).catch((e: any) => logger.debug(`[Chat] DB update failed: ${e.message}`));
+      db.updateJob(job.id, { chatStatus: "finished" }).catch((e: unknown) => logger.debug(`[Chat] DB update failed: ${getErrorMessage(e)}`));
     });
 
     return chatDl;
-  } catch (e: any) {
-    logger.warn(`[Chat] Failed to setup chat downloader: ${e.message}`);
+  } catch (e: unknown) {
+    logger.warn(`[Chat] Failed to setup chat downloader: ${getErrorMessage(e)}`);
     await db.updateJob(job.id, { chatStatus: "error" });
     return null;
   }
@@ -154,7 +155,7 @@ async function runSegmentDownloadersImpl(
         lastAudioSeq: aSeq,
         totalVideoSeq: vTotal || undefined,
         totalAudioSeq: aTotal || undefined,
-      }).catch((e: any) => logger.debug(`[DownloadOrchestrator] Progress update failed: ${e.message}`));
+      }).catch((e: unknown) => logger.debug(`[DownloadOrchestrator] Progress update failed: ${getErrorMessage(e)}`));
     }
   };
 
@@ -165,8 +166,8 @@ async function runSegmentDownloadersImpl(
       if (!j) return;
       const gaps = j.gaps || [];
       gaps.push({ ...gap, stream });
-      db.updateJob(job.id, { gaps }).catch((e: any) =>
-        logger.debug(`[DownloadOrchestrator] Gap update failed: ${e.message}`),
+      db.updateJob(job.id, { gaps }).catch((e: unknown) =>
+        logger.debug(`[DownloadOrchestrator] Gap update failed: ${getErrorMessage(e)}`),
       );
     }).catch(() => {});
   };

@@ -17,6 +17,7 @@ import { useMouse, MouseEvent } from "./hooks/useMouse.js";
 import { NotificationManager, NotificationType } from "../core/notifications.js";
 import { readClipboard } from "./clipboard.js";
 import { extractVideoId } from "../utils/youtube.js";
+import { getErrorMessage } from "../types/errors.js";
 
 type FocusPanel = "tasks" | "details" | "logs";
 const FOCUS_ORDER: FocusPanel[] = ["tasks", "details", "logs"];
@@ -398,7 +399,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     // Open web dashboard in browser
     if (input === "w" || input === "W") {
       const port = process.env.MOOMBOX_PORT || String(ConfigManager.getInstance().get().port || 774);
-      const url = `http://localhost:${port}`;
+      const url = `https://localhost:${port}`;
       const [prog, args] = process.platform === "win32"
         ? ["explorer.exe", [url]]
         : [process.platform === "darwin" ? "open" : "xdg-open", [url]];
@@ -457,7 +458,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       } else if (input === "c" || input === "C") {
         const job = getJobAtVirtualIndex(selectedJobIndexRef.current);
         if (job && job.status !== "Finished" && job.status !== "Cancelled" && job.status !== "Error") {
-          db.updateJob(job.id, { status: "Cancelled" }).catch((e: any) => logger.error(`[TUI] Failed to cancel job: ${e.message}`));
+          db.updateJob(job.id, { status: "Cancelled" }).catch((e: unknown) => logger.error(`[TUI] Failed to cancel job: ${getErrorMessage(e)}`));
           NotificationManager.getInstance().send(
             "Job Cancelled",
             `Cancelled: ${job.title}`,
@@ -476,13 +477,13 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       } else if (input === "r" || input === "R") {
         const job = getJobAtVirtualIndex(selectedJobIndexRef.current);
         if (job && (job.status === "Error" || job.status === "Cancelled")) {
-          db.updateJob(job.id, { status: "Upcoming", error: undefined }).catch((e: any) => logger.error(`[TUI] Failed to retry job: ${e.message}`));
+          db.updateJob(job.id, { status: "Upcoming", error: undefined }).catch((e: unknown) => logger.error(`[TUI] Failed to retry job: ${getErrorMessage(e)}`));
         }
       } else if (input === "d" || input === "D") {
         const job = getJobAtVirtualIndex(selectedJobIndexRef.current);
         if (job) {
           if (deleteConfirmJobId === job.id) {
-            db.deleteJob(job.id).catch((e: any) => logger.error(`[TUI] Failed to delete job: ${e.message}`));
+            db.deleteJob(job.id).catch((e: unknown) => logger.error(`[TUI] Failed to delete job: ${getErrorMessage(e)}`));
             setSelectedJobIndex((prev: number) => Math.max(0, prev - 1));
             setDeleteConfirmJobId(null);
             setAddMessage({ text: `Deleted: ${job.title}`, color: "gray" });

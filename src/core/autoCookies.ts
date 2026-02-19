@@ -21,6 +21,7 @@ import { CookieJar, verifyYouTubeAuth, verifyTwitchAuth } from "./cookies.js";
 import { fetchWithTimeout } from "./http.js";
 import { detectBrowser, type DetectedBrowser } from "./browserDetect.js";
 import { getErrorMessage } from "../types/errors.js";
+import { sleep } from "../utils/async.js";
 import { TWITCH_URLS } from "../constants.js";
 import { CdpClient } from "./cdpClient.js";
 import {
@@ -566,9 +567,9 @@ export class AutoCookieService {
 
   private async loadSqlWasm(): Promise<Buffer | null> {
     // Try embedded assets first (SEA build)
-    const assets = (globalThis as any).__MOOMBOX_ASSETS__;
+    const assets = globalThis.__MOOMBOX_ASSETS__;
     if (assets?.["sql-wasm.wasm"]) {
-      return assets["sql-wasm.wasm"];
+      return assets["sql-wasm.wasm"] as Buffer;
     }
 
     // Development: load from node_modules
@@ -812,8 +813,8 @@ export class AutoCookieService {
       } else {
         await execa('kill', ['-KILL', String(pid)]);
       }
-    } catch (error: any) {
-      this.logger.error(`[AutoCookies] Failed to force kill process: ${error.message}`);
+    } catch (error: unknown) {
+      this.logger.error(`[AutoCookies] Failed to force kill process: ${getErrorMessage(error)}`);
     }
     await sleep(ms("500ms"));
   }
@@ -874,10 +875,6 @@ export class AutoCookieService {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
-
-function sleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
 
 async function killProcess(proc: ChildProcess | null): Promise<void> {
   if (!proc) return;

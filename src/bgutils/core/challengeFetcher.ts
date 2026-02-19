@@ -42,11 +42,11 @@ export async function create(
     const rawData = (await response.json()) as unknown[];
 
     return parseChallengeData(rawData);
-  } catch (e: any) {
+  } catch (e: unknown) {
     if (e instanceof BGError) throw e;
     throw new BGError(
       "REQUEST_FAILED",
-      `Failed to fetch challenge: ${e.message}`,
+      `Failed to fetch challenge: ${e instanceof Error ? e.message : String(e)}`,
       { originalError: e },
     );
   }

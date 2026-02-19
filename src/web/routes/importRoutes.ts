@@ -13,6 +13,7 @@ import { Database } from "../../core/database.js";
 import { ConfigManager } from "../../core/config.js";
 import { asyncHandler } from "./errorHandler.js";
 import { createRateLimiter } from "./rateLimiter.js";
+import { sanitizeForFilename } from "../../utils/sanitize.js";
 
 export function registerImportRoutes(router: Router): void {
   const logger = Logger.getInstance();
@@ -197,9 +198,7 @@ export function registerImportRoutes(router: Router): void {
 
         // Compute output paths
         // Sanitize for filesystem
-        const sanitize = (s: string) =>
-          s.replace(/[<>:"/\\|?*]/g, "_").replace(/\s+/g, " ").trim();
-        const safeName = sanitize(title);
+        const safeName = sanitizeForFilename(title);
         const relativeDir = "imports";
         const baseFilename = `${safeName} [${videoId}]`;
         const filename = path.join(

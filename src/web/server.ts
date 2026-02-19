@@ -1,12 +1,15 @@
 /**
  * Web Server for Moombox Dashboard
  *
- * Provides HTTP server with WebSocket support for real-time updates.
+ * Provides dual-protocol HTTP/HTTPS server with WebSocket support for real-time updates.
+ * A net.Server peeks the first byte of each connection: TLS ClientHello (0x16) routes
+ * to the HTTPS server, plain text routes to the HTTP server. Both share the same Express app.
  */
 
 import express from "express";
 import ms from "ms";
-import { createServer } from "http";
+import http from "http";
+import https from "https";
 import net from "net";
 import { WebSocketServer, WebSocket } from "ws";
 import path from "path";
@@ -18,8 +21,10 @@ import { Logger } from "../core/logger.js";
 import { Database } from "../core/database.js";
 import { ConfigManager } from "../core/config.js";
 import type { Job } from "../types/jobs.js";
-import { registerPotRoutes, registerConfigRoutes, registerImportRoutes, registerJobRoutes, registerTrimRoutes, errorMiddleware } from "./routes/index.js";
+import { registerPotRoutes, registerConfigRoutes, registerImportRoutes, registerJobRoutes, registerTrimRoutes, registerAuthRoutes, errorMiddleware } from "./routes/index.js";
 import { isPrivateIP, isLoopback } from "../utils/ipValidation.js";
+import { AuthService } from "../core/auth.js";
+import { ensureCertificate } from "../utils/selfSignedCert.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,9 +44,14 @@ interface WSMessage {
   payload?: any;
 }
 
+/** POT provider paths that must work over plain HTTP (for yt-dlp compatibility). */
+const POT_PATHS = new Set(["/get_pot", "/ping", "/minter_cache", "/invalidate_caches", "/invalidate_it"]);
+
 export class WebServer {
   private app: express.Application;
-  private server: ReturnType<typeof createServer>;
+  private httpServer: http.Server;
+  private httpsServer: https.Server | null = null;
+  private netServer: net.Server | null = null;
   private wss: WebSocketServer;
   private port: number;
   private allowLan: boolean;
@@ -63,18 +73,52 @@ export class WebServer {
     this.allowExternal = this.allowLan && (options.allowExternal ?? false);
     this.logger = Logger.getInstance();
     this.app = express();
-    this.server = createServer(this.app);
+    this.httpServer = http.createServer(this.app);
+
+    // WSS in noServer mode — upgrade handler attached to both HTTP and HTTPS servers
     this.wss = new WebSocketServer({
-      server: this.server,
+      noServer: true,
       maxPayload: 1024 * 1024, // 1MB max WebSocket message size
-      verifyClient: (info: { req: { socket: { remoteAddress?: string } } }) =>
-        this.isAllowedClient(info.req.socket.remoteAddress),
     });
 
     this.setupMiddleware();
     this.setupRoutes();
     this.setupWebSocket();
     this.setupLogSubscription();
+  }
+
+  /**
+   * Verify whether a WebSocket upgrade request should be accepted.
+   */
+  private verifyWsClient(req: http.IncomingMessage): boolean {
+    const ip = req.socket.remoteAddress;
+    if (!this.isAllowedClient(ip)) return false;
+
+    // External clients need valid session when auth is required
+    if (ip && !isLoopback(ip) && !isPrivateIP(ip)) {
+      const auth = AuthService.getInstance();
+      if (auth.isAuthRequired()) {
+        const cookieHeader = req.headers.cookie;
+        const token = auth.parseCookies(
+          typeof cookieHeader === "string" ? cookieHeader : ""
+        )["moombox_session"];
+        return !!token && auth.validateSession(token);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Handle an HTTP upgrade request by verifying the client and upgrading to WebSocket.
+   */
+  private handleUpgrade(req: http.IncomingMessage, socket: net.Socket, head: Buffer): void {
+    if (!this.verifyWsClient(req)) {
+      socket.destroy();
+      return;
+    }
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.wss.emit("connection", ws, req);
+    });
   }
 
   /**
@@ -96,6 +140,22 @@ export class WebServer {
   }
 
   private setupMiddleware() {
+    // HTTP → HTTPS redirect for browser requests (only when HTTPS is available)
+    // API endpoints, POT provider paths, and non-browser clients are not redirected.
+    this.app.use((req, res, next) => {
+      if (
+        !req.secure &&
+        this.httpsServer &&
+        req.accepts("html") &&
+        !req.path.startsWith("/api/") &&
+        !POT_PATHS.has(req.path)
+      ) {
+        const host = req.hostname || "localhost";
+        return res.redirect(301, `https://${host}:${this.port}${req.url}`);
+      }
+      next();
+    });
+
     // CORS middleware (must be first to handle preflight requests)
     this.app.use((req, res, next) => {
       const origin = req.headers.origin;
@@ -138,6 +198,36 @@ export class WebServer {
         return res.status(403).send("Forbidden");
       }
       next();
+    });
+
+    // Authentication middleware for external connections
+    this.app.use((req, res, next) => {
+      const ip = req.socket.remoteAddress || "";
+
+      // Loopback and LAN clients skip auth entirely
+      if (isLoopback(ip) || isPrivateIP(ip)) return next();
+
+      // No auth required if not configured
+      const auth = AuthService.getInstance();
+      if (!auth.isAuthRequired()) return next();
+
+      // Unauthenticated paths (login page, auth endpoints, POT read-only, favicon)
+      if (req.path === "/api/auth/login" || req.path === "/api/v1/auth/login" ||
+          req.path === "/api/auth/status" || req.path === "/api/v1/auth/status" ||
+          req.path === "/ping" || req.path === "/minter_cache" ||
+          req.path === "/favicon.svg" || req.path === "/login.html") {
+        return next();
+      }
+
+      // Check session cookie
+      const token = auth.parseCookies(req.headers.cookie || "")["moombox_session"];
+      if (token && auth.validateSession(token)) return next();
+
+      // Unauthenticated — serve login page for browser, 401 for API
+      if (req.accepts("html") && !req.path.startsWith("/api/")) {
+        return this.serveLoginPage(req, res);
+      }
+      res.status(401).json({ error: "Authentication required" });
     });
 
     // Compression middleware (gzip/deflate) - 90% bandwidth savings
@@ -185,7 +275,7 @@ export class WebServer {
     });
 
     // Check for embedded assets (SEA mode)
-    const embeddedAssets = (globalThis as any).__MOOMBOX_ASSETS__;
+    const embeddedAssets = globalThis.__MOOMBOX_ASSETS__;
     if (embeddedAssets) {
       this.logger.debug("[WebServer] Using embedded assets (SEA mode)");
 
@@ -288,6 +378,8 @@ export class WebServer {
       });
 
       // Register route modules
+      registerAuthRoutes(router);
+
       registerJobRoutes(router, {
         jobLogs: this.jobLogs,
         filterJobsByAge: (jobs, archived) => this.filterJobsByAge(jobs, archived),
@@ -307,8 +399,9 @@ export class WebServer {
     };
 
     // Mount API routes at both /api/v1 (current version) and /api (backward compatibility)
-    this.app.use("/api/v1", createApiRouter());
-    this.app.use("/api", createApiRouter());
+    const apiRouter = createApiRouter();
+    this.app.use("/api/v1", apiRouter);
+    this.app.use("/api", apiRouter);
 
     // POT Provider endpoints are mounted on the app directly (not /api router)
     registerPotRoutes(this.app);
@@ -316,7 +409,7 @@ export class WebServer {
     // Serve index.html for all other routes (SPA)
     this.app.get("/{*splat}", (req, res) => {
       // Check for embedded assets (SEA mode)
-      const embeddedAssets = (globalThis as any).__MOOMBOX_ASSETS__;
+      const embeddedAssets = globalThis.__MOOMBOX_ASSETS__;
       if (embeddedAssets && embeddedAssets["index.html"]) {
         res.setHeader("Content-Type", "text/html");
         return res.send(embeddedAssets["index.html"]);
@@ -637,22 +730,63 @@ export class WebServer {
       }
     }
 
-    // Now bind the actual server on the confirmed-free port
-    await new Promise<void>((resolve, reject) => {
-      this.server.once("error", reject);
-      this.server.listen(targetPort, host, () => {
-        this.server.removeListener("error", reject);
-        resolve();
+    // Generate / load self-signed TLS certificate
+    const certDir = path.dirname(ConfigManager.getInstance().getConfigPath());
+    let hasHttps = false;
+    try {
+      const { key, cert } = ensureCertificate(certDir);
+      this.httpsServer = https.createServer({ key, cert }, this.app);
+      hasHttps = true;
+      this.logger.info("[WebServer] TLS certificate loaded");
+    } catch (e) {
+      this.logger.warn(`[WebServer] Failed to set up HTTPS (falling back to HTTP only): ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // Attach WebSocket upgrade handler to both HTTP and HTTPS servers
+    this.httpServer.on("upgrade", (req, socket, head) => this.handleUpgrade(req, socket as net.Socket, head));
+    if (this.httpsServer) {
+      this.httpsServer.on("upgrade", (req, socket, head) => this.handleUpgrade(req, socket as net.Socket, head));
+    }
+
+    if (hasHttps && this.httpsServer) {
+      // Dual-protocol: net.Server peeks first byte to route TLS vs plain
+      this.netServer = net.createServer({ pauseOnConnect: true }, (socket) => {
+        socket.once("readable", () => {
+          const buf: Buffer | null = socket.read(1);
+          if (!buf) { socket.destroy(); return; }
+          socket.unshift(buf);
+          const target = buf[0] === 0x16 ? this.httpsServer! : this.httpServer;
+          target.emit("connection", socket);
+          if (socket.isPaused()) socket.resume();
+        });
       });
-    });
+
+      await new Promise<void>((resolve, reject) => {
+        this.netServer!.once("error", reject);
+        this.netServer!.listen(targetPort, host, () => {
+          this.netServer!.removeListener("error", reject);
+          resolve();
+        });
+      });
+    } else {
+      // HTTP-only fallback
+      await new Promise<void>((resolve, reject) => {
+        this.httpServer.once("error", reject);
+        this.httpServer.listen(targetPort, host, () => {
+          this.httpServer.removeListener("error", reject);
+          resolve();
+        });
+      });
+    }
     this.port = targetPort;
 
-    const url = `http://localhost:${this.port}`;
+    const protocol = hasHttps ? "https" : "http";
+    const url = `${protocol}://localhost:${this.port}`;
     this.logger.info(`[WebServer] Dashboard available at ${url}`);
     if (this.allowLan) {
       this.logger.info(`[WebServer] LAN access enabled (listening on ${host})`);
     }
-    console.log(`\nMoombox Dashboard: ${url}\n`);
+    this.logger.info(`Moombox Dashboard: ${url}`);
 
     if (openBrowser) {
       this.openBrowser(url);
@@ -663,6 +797,38 @@ export class WebServer {
 
   getPort(): number {
     return this.port;
+  }
+
+  /**
+   * Serve the login page for unauthenticated external requests.
+   */
+  private serveLoginPage(_req: express.Request, res: express.Response): void {
+    // Check for embedded assets (SEA mode)
+    const embeddedAssets = globalThis.__MOOMBOX_ASSETS__;
+    if (embeddedAssets && embeddedAssets["login.html"]) {
+      res.setHeader("Content-Type", "text/html");
+      res.setHeader("Cache-Control", "no-cache");
+      return void res.send(embeddedAssets["login.html"]);
+    }
+
+    // Try filesystem paths
+    const possiblePaths = [
+      path.join(__dirname, "public", "login.html"),
+      path.join(__dirname, "..", "..", "src", "web", "public", "login.html"),
+      path.join(process.cwd(), "src", "web", "public", "login.html"),
+    ];
+
+    for (const loginPath of possiblePaths) {
+      try {
+        if (fs.existsSync(loginPath)) {
+          return void res.sendFile(loginPath);
+        }
+      } catch {}
+    }
+
+    // Fallback: inline minimal login form
+    res.setHeader("Content-Type", "text/html");
+    res.send("<html><body><h1>Login Required</h1><p>login.html not found</p></body></html>");
   }
 
   private openBrowser(url: string) {
@@ -685,7 +851,9 @@ export class WebServer {
     }
     this.jobTrailingTimers.clear();
 
-    this.server.close();
+    this.netServer?.close();
+    this.httpServer.close();
+    this.httpsServer?.close();
     this.wss.close();
   }
 }

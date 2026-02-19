@@ -101,8 +101,11 @@ export class YouTubeAuth {
       "X-YouTube-Client-Name": client.clientId,
       "X-YouTube-Client-Version": client.context.clientVersion,
       Origin: origin,
-      Cookie: this.cookieHeader,
     };
+
+    if (this.cookieHeader) {
+      headers.Cookie = this.cookieHeader;
+    }
 
     // Add visitor ID if available
     if (ytcfg.visitorData) {

@@ -5,11 +5,3 @@ import { preprocessPlayer } from "../../ejs/yt/solver/solvers.js";
 export async function execInPool(data: string): Promise<string> {
   return preprocessPlayer(data);
 }
-
-export function initializeWorkers() {
-  // No-op: we run preprocessing inline now
-}
-
-export function shutdownWorkers() {
-  // No-op: nothing to clean up
-}

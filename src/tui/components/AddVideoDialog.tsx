@@ -17,6 +17,7 @@ import { Logger } from "../../core/logger.js";
 import { NotificationManager, NotificationType } from "../../core/notifications.js";
 import { extractVideoId } from "../../utils/youtube.js";
 import { extractMediaId } from "../../utils/mediaId.js";
+import { getErrorMessage } from "../../types/errors.js";
 import { parseTimeToSeconds, formatSecondsToTimestamp } from "../../core/worker/timeUtils.js";
 import { useMouse, MouseEvent as TuiMouseEvent } from "../hooks/useMouse.js";
 import { readClipboard } from "../clipboard.js";
@@ -134,8 +135,8 @@ export function AddVideoDialog({
       const data: FormatsData = await res.json();
       setFormats(data);
       setLoading(false);
-    } catch (e: any) {
-      logger.warn(`[AddVideoDialog] Failed to fetch formats: ${e.message}`);
+    } catch (e: unknown) {
+      logger.warn(`[AddVideoDialog] Failed to fetch formats: ${getErrorMessage(e)}`);
       setError("Failed to fetch formats. Proceeding with auto selection.");
       setFormats(null);
       setLoading(false);
@@ -233,8 +234,8 @@ export function AddVideoDialog({
       } else {
         onComplete({ text: `${videoId} already exists`, color: "yellow" });
       }
-    } catch (e: any) {
-      logger.error(`[AddVideoDialog] Failed to add job: ${e.stack || e.message}`);
+    } catch (e: unknown) {
+      logger.error(`[AddVideoDialog] Failed to add job: ${e instanceof Error ? (e.stack || e.message) : String(e)}`);
       onComplete({ text: `Error adding ${videoId}`, color: "red" });
     }
   }, [videoId, url, platform, formats, selectedVideoItag, selectedAudioItag, startTime, endTime, onComplete, logger]);
