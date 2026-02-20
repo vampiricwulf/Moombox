@@ -10,7 +10,7 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 
 ### Core
 - **YouTube + Twitch** — Monitors and downloads live streams from both platforms
-- **Channel monitoring** — RSS-based feed polling (YouTube) and GQL polling (Twitch) with regex filtering on titles and descriptions
+- **Channel monitoring** — Independent RSS feed polling (YouTube), DECAPI polling (YouTube), and GQL polling (Twitch) with regex filtering on titles and descriptions
 - **Live stream archiving** — Downloads DASH/HLS video segments in real-time with automatic parallel catch-up when falling behind
 - **Live chat capture** — Archives chat alongside video (YouTube live chat + Twitch IRC), including pre-stream messages from the waiting room
 - **VOD downloads** — Download regular videos and post-live DVR recordings with parallel segment fetching
@@ -94,6 +94,7 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `downloader.num_parallel_downloads` | `2` | Simultaneous download jobs |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | Output path template |
 | `feed_check_interval` | `10` | Minutes between RSS feed checks (also accepts `"10m"`) |
+| `twitch_check_interval` | `15` | Seconds between Twitch GQL live-status checks (±5s jitter) |
 | `tasklist.hide_finished_age_days` | `30` | Days before finished jobs move to Archived (also accepts `"30d"`) |
 
 ### Channel Monitoring
@@ -218,7 +219,7 @@ All endpoints are available under both `/api/v1` and `/api`. Real-time updates a
 | POST | `/auth/set-password` | Set or change password |
 | GET | `/auth/status` | Check auth status |
 
-WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `log`, `pong`
+WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `pong`
 
 ## yt-dlp Integration
 
@@ -305,11 +306,11 @@ Special states: `Error`, `Cancelled`, `COOKIES?` (member content needs cookie re
 Moombox is a Node.js application (ESM, TypeScript) with three presentation layers (TUI, web dashboard, REST API) backed by a shared service layer of singleton services.
 
 ```
-RSS/GQL Feed Monitor → Job Database (lowdb) → Download Worker → YouTube/Twitch API
-                                                      ↓
-                          Web Dashboard ← FFmpeg Muxer ← Segment Downloads (DASH/HLS/VOD)
-                         (localhost:774)      ↑
-                                        Chat Downloader (YouTube live chat / Twitch IRC)
+RSS Feed Monitor ───→ Job Database (lowdb) → Download Worker → YouTube/Twitch API
+DECAPI Monitor ─────↗                               ↓
+Twitch Monitor ────↗  Web Dashboard ← FFmpeg Muxer ← Segment Downloads (DASH/HLS/VOD)
+                      (localhost:774)      ↑
+                                     Chat Downloader (YouTube live chat / Twitch IRC)
 ```
 
 Key components:
