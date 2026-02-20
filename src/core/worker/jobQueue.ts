@@ -5,7 +5,6 @@
  * Uses p-queue for priority-based job scheduling and concurrency control.
  */
 
-import ms from "ms";
 import PQueue from "p-queue";
 import { Database, type Job } from "../database.js";
 import { Logger } from "../logger.js";
@@ -38,7 +37,7 @@ export class JobQueue {
     this.queue = new PQueue({
       concurrency: 100,
       autoStart: true,
-      interval: ms("1s"), // Rate limit: max N job starts per second
+      interval: 1_000, // Rate limit: max N job starts per second
       intervalCap: 10, // Max 10 job starts per second
     });
   }

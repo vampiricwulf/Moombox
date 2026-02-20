@@ -5,7 +5,6 @@
  * from YouTube's Innertube API.
  */
 
-import ms from "ms";
 import { Logger } from "../../core/logger.js";
 import {
   YOUTUBE_URLS,
@@ -51,7 +50,7 @@ export class ChatApi {
         headers["Cookie"] = cookieHeader;
       }
 
-      const response = await fetchWithTimeout(url, { headers, signal }, ms("15s"));
+      const response = await fetchWithTimeout(url, { headers, signal }, 15_000);
 
       if (!response.ok) {
         this.logger.debug(`[ChatApi] Watch page fetch failed: HTTP ${response.status}`);
@@ -230,7 +229,7 @@ export class ChatApi {
   private parseResponse(data: any): ChatApiResponse {
     const messages: ChatMessage[] = [];
     let nextContinuation: string | null = null;
-    let timeoutMs = ms("5s"); // Default polling interval
+    let timeoutMs = 5_000; // Default polling interval
     let isComplete = false;
 
     const liveChatContinuation = data?.continuationContents?.liveChatContinuation;
@@ -246,12 +245,12 @@ export class ChatApi {
       for (const cont of continuations) {
         if (cont.timedContinuationData) {
           nextContinuation = cont.timedContinuationData.continuation;
-          timeoutMs = cont.timedContinuationData.timeoutMs || ms("5s");
+          timeoutMs = cont.timedContinuationData.timeoutMs || 5_000;
           break;
         }
         if (cont.invalidationContinuationData) {
           nextContinuation = cont.invalidationContinuationData.continuation;
-          timeoutMs = cont.invalidationContinuationData.timeoutMs || ms("5s");
+          timeoutMs = cont.invalidationContinuationData.timeoutMs || 5_000;
           break;
         }
         if (cont.liveChatReplayContinuationData) {

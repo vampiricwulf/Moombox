@@ -5,7 +5,6 @@
  */
 
 import path from "path";
-import ms from "ms";
 import fs from "fs-extra";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
@@ -822,10 +821,10 @@ export class StreamProcessor {
    * - 1 minute if within 5 minutes
    */
   private calculateRecheckInterval(scheduledStartTime?: string): number {
-    const TEN_MINUTES = ms("10m");
-    const FIVE_MINUTES = ms("5m");
-    const ONE_MINUTE = ms("1m");
-    const ONE_HOUR = ms("1h");
+    const TEN_MINUTES = 10 * 60_000;
+    const FIVE_MINUTES = 5 * 60_000;
+    const ONE_MINUTE = 60_000;
+    const ONE_HOUR = 60 * 60_000;
 
     if (!scheduledStartTime) {
       return TEN_MINUTES;

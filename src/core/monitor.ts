@@ -6,7 +6,6 @@
  */
 
 import { XMLParser } from "fast-xml-parser";
-import ms from "ms";
 import { ConfigManager, ChannelConfig } from "./config.js";
 import { Database } from "./database.js";
 import { Logger } from "./logger.js";
@@ -78,7 +77,7 @@ export class FeedMonitor {
   private scheduleNext(): void {
     if (!this.running) return;
     const config = ConfigManager.getInstance().get();
-    const intervalMs = (config.feed_check_interval ?? 10) * ms("1m");
+    const intervalMs = (config.feed_check_interval ?? 10) * 60_000;
     this.nextCheckAt = Date.now() + intervalMs;
     this.interval = setTimeout(() => {
       this.checkFeeds();
@@ -158,7 +157,7 @@ export class FeedMonitor {
     const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channel.id}`;
     this.logger.debug(`Fetching feed: ${feedUrl}`);
 
-    const response = await fetchWithTimeout(feedUrl, {}, ms("15s"));
+    const response = await fetchWithTimeout(feedUrl, {}, 15_000);
     if (!response.ok) {
       throw new Error(`Status code ${response.status}`);
     }

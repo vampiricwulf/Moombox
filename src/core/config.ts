@@ -2,7 +2,6 @@ import fs from "fs-extra";
 import path from "path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import os from "os";
-import ms from "ms";
 import type {
   ChannelConfig,
   MoomboxConfig,
@@ -82,7 +81,7 @@ export class ConfigManager {
    *
    * For backward compatibility:
    * - If value is a number, it's returned as-is (in the original unit: minutes or days)
-   * - If value is a string, it's parsed using ms() and converted back to the original unit
+   * - If value is a string, it's parsed as a duration (e.g. "10m") and converted back to the original unit
    * - If value is undefined, the default is returned
    *
    * @param value - The value from config (can be string, number, or undefined)
@@ -104,20 +103,15 @@ export class ConfigManager {
       return value;
     }
 
-    // String value - parse with ms() and convert to target unit
-    let parsed: number;
-    try {
-      // Cast to ms.StringValue to satisfy TypeScript overload resolution
-      const result = ms(value as any as ms.StringValue);
-      if (typeof result !== 'number') {
-        ConfigManager.log('warn', `Invalid time value: ${value}, using default`);
-        return defaultValue;
-      }
-      parsed = result;
-    } catch (e) {
+    // String value - parse duration string (e.g. "10m", "7d") and convert to target unit
+    const match = value.trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d|w)$/i);
+    if (!match) {
       ConfigManager.log('warn', `Invalid time value: ${value}, using default`);
       return defaultValue;
     }
+    const num = parseFloat(match[1]);
+    const multipliers: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+    const parsed = num * (multipliers[match[2].toLowerCase()] ?? 1);
 
     // Convert milliseconds to target unit
     if (unit === 'minutes') {

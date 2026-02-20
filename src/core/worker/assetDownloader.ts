@@ -6,7 +6,6 @@
 
 import fs from "fs-extra";
 import path from "path";
-import ms from "ms";
 import { Logger } from "../logger.js";
 import { THUMBNAIL_QUALITIES, YOUTUBE_URLS } from "../../constants.js";
 import { fetchWithTimeout } from "../http.js";
@@ -75,7 +74,7 @@ export class AssetDownloader {
         const url = `${YOUTUBE_URLS.THUMBNAIL}/${videoId}/${quality}.jpg`;
 
         try {
-          const response = await fetchWithTimeout(url, undefined, ms("15s"));
+          const response = await fetchWithTimeout(url, undefined, 15_000);
           if (response.ok) {
             const data = await response.arrayBuffer();
             // Check if we got a valid image (YouTube returns a tiny placeholder for missing thumbnails)
@@ -112,7 +111,7 @@ export class AssetDownloader {
     outputDir: string,
     filenameBase: string,
   ): Promise<boolean> {
-    const response = await fetchWithTimeout(url, undefined, ms("15s"));
+    const response = await fetchWithTimeout(url, undefined, 15_000);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }

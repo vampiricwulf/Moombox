@@ -4,7 +4,6 @@
  * Centralizes all hardcoded values to make them easier to maintain.
  */
 
-import ms from "ms";
 import type { YouTubeClientConfig } from "./types/youtube.js";
 
 // =============================================================================
@@ -236,13 +235,13 @@ export const MAX_CONSECUTIVE_PROBE_ERRORS = 10;
  * Stream segment timeout - if no new segment received for this duration,
  * consider the stream potentially ended (10 minutes)
  */
-export const STREAM_SEGMENT_TIMEOUT_MS = ms("10m");
+export const STREAM_SEGMENT_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * Stream end verification interval - how often to check YouTube API
  * to confirm stream status when no segments are being received (5 minutes)
  */
-export const STREAM_END_VERIFY_INTERVAL_MS = ms("5m");
+export const STREAM_END_VERIFY_INTERVAL_MS = 5 * 60_000;
 
 // =============================================================================
 // COOKIE REFRESH CONSTANTS
@@ -251,7 +250,7 @@ export const STREAM_END_VERIFY_INTERVAL_MS = ms("5m");
 /**
  * Cookie refresh interval (30 minutes)
  */
-export const COOKIE_REFRESH_INTERVAL_MS = ms("30m");
+export const COOKIE_REFRESH_INTERVAL_MS = 30 * 60_000;
 
 // =============================================================================
 // LOGGING CONSTANTS
@@ -302,7 +301,7 @@ export const DEFAULT_HIDE_FINISHED_DAYS = 7;
 /**
  * Default feed check interval (5 minutes)
  */
-export const FEED_CHECK_INTERVAL_MS = ms("5m");
+export const FEED_CHECK_INTERVAL_MS = 5 * 60_000;
 
 /**
  * Default max feed items to process
@@ -339,7 +338,7 @@ export const DECAPI_DEFAULT_RATE_LIMIT = 60;
 /**
  * Per-request timeout for DECAPI calls (15 seconds)
  */
-export const DECAPI_REQUEST_TIMEOUT_MS = ms("15s");
+export const DECAPI_REQUEST_TIMEOUT_MS = 15_000;
 
 // =============================================================================
 // BOTGUARD CONSTANTS

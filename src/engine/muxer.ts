@@ -1,5 +1,4 @@
 import os from "node:os";
-import ms from "ms";
 import { execa } from "execa";
 import path from "path";
 import fs from "fs-extra";
@@ -266,7 +265,7 @@ export class Muxer {
       await execa("ffmpeg", args, {
         stdin: "ignore",
         cancelSignal: signal,
-        timeout: ms("10m"),
+        timeout: 10 * 60_000, // 10 minutes
         cleanup: true,
       });
 

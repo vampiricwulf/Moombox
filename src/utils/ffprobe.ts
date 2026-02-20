@@ -3,7 +3,6 @@
  * Consolidates 2 duplicate implementations.
  */
 
-import ms from "ms";
 import { execa } from "execa";
 
 export interface VideoMetadata {
@@ -30,7 +29,7 @@ export async function extractVideoMetadata(
       "-show_format",
       "-show_streams",
       filePath,
-    ], { timeout: ms("30s") });
+    ], { timeout: 30_000 });
 
     if (!stdout) {
       return null;

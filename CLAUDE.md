@@ -585,7 +585,7 @@ All settings have defaults in `ConfigManager.DEFAULTS`. Missing fields auto-popu
 
 Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`
 
-## Dependencies (22 production, 17 dev)
+## Dependencies (21 production, 16 dev)
 
 ### Production Dependencies
 
@@ -604,7 +604,6 @@ Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start
 | `lowdb` | 7.0.1 | JSON file database (moombox.json) |
 | `lru-cache` | 11.2.4 | Cipher solver caches (STS, preprocessed, solver) |
 | `meriyah` | 7.0.0 | Fast JS parser for cipher AST extraction |
-| `ms` | 2.1.3 | Human-readable time strings (replaces all hardcoded math) |
 | `p-limit` | 7.3.0 | Parallel segment/decrypt concurrency caps |
 | `p-queue` | 9.1.0 | Priority job queue with concurrency control |
 | `p-retry` | 7.1.1 | HTTP retry with exponential backoff |
@@ -619,7 +618,7 @@ Template variables: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start
 
 | Package | Purpose |
 |---------|---------|
-| `@types/*` | TypeScript type definitions (adm-zip, compression, express, fs-extra, jsdom, ms, node, react, supertest, ws) |
+| `@types/*` | TypeScript type definitions (adm-zip, compression, express, fs-extra, jsdom, node, react, supertest, ws) |
 | `esbuild` | SEA bundling (TypeScript → CJS) |
 | `postject` | SEA blob injection into Node.js binary |
 | `supertest` | HTTP assertion testing |

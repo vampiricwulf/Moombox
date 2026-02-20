@@ -1,4 +1,3 @@
-import ms from "ms";
 import { Logger } from "./logger.js";
 import { ConfigManager } from "./config.js";
 import { CookieJar, verifyYouTubeAuth, verifyTwitchAuth } from "./cookies.js";
@@ -33,7 +32,7 @@ export class CookieRefreshService {
   private running: boolean = false;
 
   // Refresh every 30 minutes (YouTube sessions typically last longer, but this is safe)
-  private readonly REFRESH_INTERVAL_MS = ms("30m");
+  private readonly REFRESH_INTERVAL_MS = 30 * 60_000; // 30 minutes
 
   private _validationState: ValidationState = {
     youtube: { hasCookies: false, authenticated: false, lastValidated: null },
@@ -304,7 +303,7 @@ export class CookieRefreshService {
         const value = nameValue.substring(eqIndex + 1).trim();
 
         // Check for expiry
-        let expiry = Math.floor(Date.now() / 1000) + ms("365d") / 1000; // Default 1 year
+        let expiry = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60; // Default 1 year
         for (const part of parts.slice(1)) {
           const trimmed = part.trim().toLowerCase();
           if (trimmed.startsWith("expires=")) {

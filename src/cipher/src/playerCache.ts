@@ -2,7 +2,6 @@ import fs from 'fs-extra';
 import path from 'path';
 import crypto from 'crypto';
 import os from 'os';
-import ms from 'ms';
 import { extractPlayerId } from "./utils.js";
 import { Logger } from "../../core/logger.js";
 import { fetchWithTimeout } from "../../core/http.js";
@@ -46,7 +45,7 @@ export async function getPlayerFilePath(playerUrl: string): Promise<string> {
 export async function initializeCache() {
     await fs.ensureDir(CACHE_DIR);
 
-    const fourteenDays = ms("14d");
+    const fourteenDays = 14 * 24 * 60 * 60_000;
     try {
         const files = await fs.readdir(CACHE_DIR);
         for (const file of files) {

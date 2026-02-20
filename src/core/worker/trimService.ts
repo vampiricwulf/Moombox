@@ -3,7 +3,6 @@
  */
 
 import path from "path";
-import ms from "ms";
 import fs from "fs-extra";
 import { execa } from "execa";
 import { Database, type Job } from "../database.js";
@@ -314,7 +313,7 @@ export class TrimService {
         "-show_streams",
         "-select_streams", "a:0",
         filePath,
-      ], { timeout: ms("30s") });
+      ], { timeout: 30_000 });
 
       if (!stdout) return DEFAULT_AUDIO_BITRATE;
 

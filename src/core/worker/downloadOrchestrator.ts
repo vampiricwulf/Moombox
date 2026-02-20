@@ -6,7 +6,6 @@
  */
 
 import path from "path";
-import ms from "ms";
 import fs from "fs-extra";
 import { Database, type Job } from "../database.js";
 import { ConfigManager } from "../config.js";
@@ -135,7 +134,7 @@ export class DownloadOrchestrator {
       // (Twitch live preview URLs 404 after stream ends, so muxFinalize would be too late)
       if (job.thumbnailUrl) {
         try {
-          const resp = await fetchWithTimeout(job.thumbnailUrl, undefined, ms("15s"));
+          const resp = await fetchWithTimeout(job.thumbnailUrl, undefined, 15_000);
           if (resp.ok) {
             const data = await resp.arrayBuffer();
             if (data.byteLength > 1000) {
@@ -226,7 +225,7 @@ export class DownloadOrchestrator {
       if (twitchChatDl) twitchChatDl.markStreamEnded();
 
       // Wait for chat with timeout
-      const chatTimeout = new Promise<void>(resolve => setTimeout(resolve, ms("2m")));
+      const chatTimeout = new Promise<void>(resolve => setTimeout(resolve, 2 * 60_000));
       await Promise.race([chatPromise, chatTimeout]);
       if (twitchChatDl && twitchChatDl.isRunning()) twitchChatDl.stop();
 
@@ -626,7 +625,7 @@ export class DownloadOrchestrator {
     }
   }
 
-  private static readonly CHAT_TIMEOUT_MS = ms("2m");
+  private static readonly CHAT_TIMEOUT_MS = 2 * 60_000; // 2 minutes
 
   /**
    * Start a chat downloader in the background, returning a tracked promise.

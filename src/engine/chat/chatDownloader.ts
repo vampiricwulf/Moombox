@@ -7,7 +7,6 @@
 
 import fs from "fs-extra";
 import path from "path";
-import ms from "ms";
 import { EventEmitter } from "events";
 import { ChatApi } from "./chatApi.js";
 import { Logger } from "../../core/logger.js";
@@ -341,12 +340,12 @@ export class ChatDownloader extends EventEmitter {
             if (fresh.continuation) {
               this.logger.debug("[ChatDownloader] Got fresh continuation token");
               this.continuation = fresh.continuation;
-              await this.sleep(ms("10s"));
+              await this.sleep(10_000);
               continue;
             }
             // No fresh continuation — retry with exponential backoff
             this.logger.debug("[ChatDownloader] No fresh continuation available — retrying with backoff");
-            let contRetryDelay = ms("10s");
+            let contRetryDelay = 10_000;
             const MAX_CONT_RETRIES = 30; // ~30min max
             let contRetries = 0;
             while (this.running && !this.cancelFlag && !this.streamEnded && contRetries < MAX_CONT_RETRIES) {
@@ -363,7 +362,7 @@ export class ChatDownloader extends EventEmitter {
                 break;
               }
               // Exponential backoff: 10s, 20s, 40s, 80s, cap at 5min
-              contRetryDelay = Math.min(contRetryDelay * 2, ms("5m"));
+              contRetryDelay = Math.min(contRetryDelay * 2, 5 * 60_000);
             }
             if (contRetries >= MAX_CONT_RETRIES) {
               this.logger.warn("[ChatDownloader] Max continuation retries reached, stopping chat download");
@@ -381,7 +380,7 @@ export class ChatDownloader extends EventEmitter {
         // Wait before next poll (respect API timeout)
         // For live chat, YouTube returns timeoutMs indicating when to poll next
         // For replay/VOD, timeoutMs is often 0 meaning we can fetch immediately
-        const waitMs = response.timeoutMs ?? (this.options.isReplay ? 0 : ms("5s"));
+        const waitMs = response.timeoutMs ?? (this.options.isReplay ? 0 : 5_000);
         if (waitMs > 0) {
           await this.sleep(waitMs);
         }
@@ -403,8 +402,8 @@ export class ChatDownloader extends EventEmitter {
         }
 
         // Exponential backoff (cap at 30s for VOD, 60s for live)
-        const maxBackoff = this.isStreamActive ? ms("60s") : ms("30s");
-        await this.sleep(Math.min(ms("5s") * consecutiveErrors, maxBackoff));
+        const maxBackoff = this.isStreamActive ? 60_000 : 30_000;
+        await this.sleep(Math.min(5_000 * consecutiveErrors, maxBackoff));
       }
     }
 

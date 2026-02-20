@@ -10,7 +10,6 @@
 
 import { spawn } from "child_process";
 import type { ChildProcess } from "child_process";
-import ms from "ms";
 import { execa } from "execa";
 import net from "net";
 import fs from "fs-extra";
@@ -531,7 +530,7 @@ export class AutoCookieService {
         dbBuffer = await fs.readFile(dbPath);
         break;
       } catch {
-        if (attempt < 2) await sleep(ms("1s"));
+        if (attempt < 2) await sleep(1_000);
       }
     }
 
@@ -747,7 +746,7 @@ export class AutoCookieService {
       } catch {
         // Not ready yet
       }
-      await sleep(ms("500ms"));
+      await sleep(500);
     }
     throw new Error("Timeout waiting for CDP endpoint to become available");
   }
@@ -774,7 +773,7 @@ export class AutoCookieService {
     // Already exited (user closed it) — WAL was checkpointed on clean exit
     if (this.browserExited) {
       this.logger.debug("[AutoCookies] Firefox already exited cleanly");
-      await sleep(ms("300ms")); // Brief FS flush delay
+      await sleep(300); // Brief FS flush delay
       return;
     }
 
@@ -798,7 +797,7 @@ export class AutoCookieService {
 
     if (exitedCleanly) {
       this.logger.debug("[AutoCookies] Firefox exited cleanly (WAL checkpointed)");
-      await sleep(ms("300ms")); // Brief FS flush delay
+      await sleep(300); // Brief FS flush delay
       return;
     }
 
@@ -816,7 +815,7 @@ export class AutoCookieService {
     } catch (error: unknown) {
       this.logger.error(`[AutoCookies] Failed to force kill process: ${getErrorMessage(error)}`);
     }
-    await sleep(ms("500ms"));
+    await sleep(500);
   }
 
   /**
@@ -890,7 +889,7 @@ async function killProcess(proc: ChildProcess | null): Promise<void> {
       // Ignore errors (process may already be gone)
     }
   }
-  await sleep(ms("300ms"));
+  await sleep(300);
 }
 
 async function cleanChromiumLockFiles(profileDir: string): Promise<void> {

@@ -7,7 +7,6 @@
  */
 
 import express from "express";
-import ms from "ms";
 import http from "http";
 import https from "https";
 import net from "net";
@@ -648,7 +647,7 @@ export class WebServer {
   private filterJobsByAge(jobs: Job[], archived: boolean): Job[] {
     const config = ConfigManager.getInstance().get();
     const now = Date.now();
-    const hideAgeMs = (config.tasklist?.hide_finished_age_days || 30) * ms("1d");
+    const hideAgeMs = (config.tasklist?.hide_finished_age_days || 30) * 86_400_000; // days → ms
 
     return jobs.filter((job) => {
       if (job.status !== "Finished") return !archived;

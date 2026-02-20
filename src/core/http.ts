@@ -7,7 +7,6 @@
  * - fetch-compatible retry wrapper for BotGuard integration
  */
 
-import ms from "ms";
 import pRetry from "p-retry";
 import { Logger } from "./logger.js";
 
@@ -24,7 +23,7 @@ import { Logger } from "./logger.js";
 export async function fetchWithTimeout(
   url: string | URL | Request,
   init?: RequestInit,
-  timeout = ms("30s"),
+  timeout = 30_000,
   retryOptions?: { retries?: number },
 ): Promise<Response> {
   return pRetry(
@@ -69,7 +68,7 @@ export function createRetryFetch(options?: {
   headers?: Record<string, string>;
 }): typeof fetch {
   const maxRetries = options?.maxRetries ?? 3;
-  const timeout = options?.timeout ?? ms("30s");
+  const timeout = options?.timeout ?? 30_000;
   const defaultHeaders = options?.headers ?? {};
 
   return async (input, init) => {
