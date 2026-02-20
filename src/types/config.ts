@@ -85,6 +85,8 @@ export interface MoomboxConfig {
   feed_check_interval?: number | string;
   /** DECAPI check interval in seconds (undefined = dynamic based on channel count) */
   decapi_check_interval?: number;
+  /** Twitch GQL check interval in seconds (default 15, min 5) */
+  twitch_check_interval?: number;
   downloader: DownloaderConfig;
   tasklist?: TasklistConfig;
   auto_cookies?: AutoCookiesConfig;

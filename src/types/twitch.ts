@@ -57,7 +57,7 @@ export interface TwitchVodInfo {
 export interface TwitchChatMessage {
   id: string;                    // IRC message UUID
   timestampMs: number;           // tmi-sent-ts
-  offsetMs: number;              // relative to stream start
+  offsetMs: number;              // relative to recording start (when Moombox began downloading)
   authorName: string;            // display-name
   authorId: string;              // user-id (numeric)
   authorBadges: string[];        // ["subscriber/12", "moderator/1"]
@@ -86,8 +86,9 @@ export interface TwitchChatData {
   channelLogin: string;
   channelDisplayName: string;
   streamId: string;
-  streamStartTime?: string;     // ISO timestamp
-  downloadedAt: string;         // ISO timestamp
+  streamStartTime?: string;      // ISO timestamp — when the Twitch broadcast began
+  recordingStartTime?: string;   // ISO timestamp — when Moombox began downloading (video start)
+  downloadedAt: string;          // ISO timestamp
   messageCount: number;
   messages: TwitchChatMessage[];
   emotes?: TwitchEmoteData;

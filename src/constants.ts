@@ -234,7 +234,6 @@ export const STREAM_END_VERIFY_INTERVAL_MS = 5 * 60_000;
  */
 export const DECAPI_URLS = {
   YOUTUBE_LATEST: "https://decapi.me/youtube/latest_video",
-  TWITCH_UPTIME: "https://decapi.me/twitch/uptime",
 } as const;
 
 /**
@@ -256,6 +255,30 @@ export const DECAPI_DEFAULT_RATE_LIMIT = 60;
  * Per-request timeout for DECAPI calls (15 seconds)
  */
 export const DECAPI_REQUEST_TIMEOUT_MS = 15_000;
+
+// =============================================================================
+// TWITCH MONITOR CONSTANTS
+// =============================================================================
+
+/**
+ * Default interval between Twitch GQL live-status checks (15 seconds)
+ */
+export const TWITCH_CHECK_INTERVAL_DEFAULT_MS = 15_000;
+
+/**
+ * Maximum random jitter applied to Twitch check interval (±5 seconds)
+ */
+export const TWITCH_CHECK_JITTER_MS = 5_000;
+
+/**
+ * Stagger between individual Twitch channel checks within a cycle (500ms)
+ */
+export const TWITCH_REQUEST_STAGGER_MS = 500;
+
+/**
+ * Minimum Twitch check interval after jitter is applied (5 seconds)
+ */
+export const TWITCH_CHECK_MIN_INTERVAL_MS = 5_000;
 
 // =============================================================================
 // BOTGUARD CONSTANTS

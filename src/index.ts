@@ -9,6 +9,7 @@ import { Database } from "./core/database.js";
 import { Logger } from "./core/logger.js";
 import { FeedMonitor } from "./core/monitor.js";
 import { DecapiMonitor } from "./core/decapiMonitor.js";
+import { TwitchMonitor } from "./core/twitchMonitor.js";
 import { DownloadWorker } from "./core/worker/index.js";
 import { CookieRefreshService } from "./core/cookieRefresh.js";
 import { PotProvider } from "./core/potProvider.js";
@@ -230,6 +231,9 @@ async function run() {
   const decapiMonitor = DecapiMonitor.getInstance();
   decapiMonitor.start();
 
+  const twitchMonitor = TwitchMonitor.getInstance();
+  twitchMonitor.start();
+
   const worker = DownloadWorker.getInstance();
   worker.start();
 
@@ -254,6 +258,7 @@ async function run() {
     // Wire up countdown timer broadcasts
     monitor.onSchedule = () => server.broadcastCheckTimers?.();
     decapiMonitor.onSchedule = () => server.broadcastCheckTimers?.();
+    twitchMonitor.onSchedule = () => server.broadcastCheckTimers?.();
   } catch (error: unknown) {
     const detail = (error as NodeJS.ErrnoException).code === "EADDRINUSE"
       ? `Port ${port} (and nearby ports) already in use. Is another instance running?`
@@ -296,6 +301,7 @@ async function run() {
       }
     };
 
+    await stopService("TwitchMonitor", () => twitchMonitor.stop());
     await stopService("DecapiMonitor", () => decapiMonitor.stop());
     await stopService("FeedMonitor", () => monitor.stop());
     await stopService("DownloadWorker", () => worker.stop());

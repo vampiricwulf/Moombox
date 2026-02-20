@@ -173,6 +173,11 @@ export class DownloadOrchestrator {
         this.activeChatDownloaders.add(twitchChatDl);
       }
 
+      // Set recording start time so chat offsetMs syncs with video start
+      if (twitchChatDl && twitchChatDl instanceof TwitchChatDownloader) {
+        twitchChatDl.setRecordingStartTime(downloadStartedAt);
+      }
+
       // Start chat in background
       const chatPromise = twitchChatDl
         ? twitchChatDl.start().catch(e => {

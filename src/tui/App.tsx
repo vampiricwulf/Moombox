@@ -17,6 +17,7 @@ import { SettingsPanel } from "./components/SettingsPanel.js";
 import { useMouse, MouseEvent } from "./hooks/useMouse.js";
 import { FeedMonitor } from "../core/monitor.js";
 import { DecapiMonitor } from "../core/decapiMonitor.js";
+import { TwitchMonitor } from "../core/twitchMonitor.js";
 import { NotificationManager, NotificationType } from "../core/notifications.js";
 import { readClipboard } from "./clipboard.js";
 import { getErrorMessage } from "../types/errors.js";
@@ -678,6 +679,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
             onToggleArchive={() => setArchiveExpanded((prev) => !prev)}
             nextFeedCheck={FeedMonitor.getInstance().nextCheckAt}
             nextDecapiCheck={DecapiMonitor.getInstance().nextCheckAt}
+            nextTwitchCheck={TwitchMonitor.getInstance().nextCheckAt}
           />
           {addMessage && (
             <Box width={taskWidth} paddingX={1}>

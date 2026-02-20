@@ -21,6 +21,7 @@ import { Database } from "../core/database.js";
 import { ConfigManager } from "../core/config.js";
 import { FeedMonitor } from "../core/monitor.js";
 import { DecapiMonitor } from "../core/decapiMonitor.js";
+import { TwitchMonitor } from "../core/twitchMonitor.js";
 import type { Job } from "../types/jobs.js";
 import { registerPotRoutes, registerConfigRoutes, registerImportRoutes, registerJobRoutes, registerTrimRoutes, registerAuthRoutes, errorMiddleware } from "./routes/index.js";
 import { isPrivateIP, isLoopback } from "../utils/ipValidation.js";
@@ -537,6 +538,7 @@ export class WebServer {
           logs: this.logBuffer,
           nextFeedCheck: FeedMonitor.getInstance().nextCheckAt,
           nextDecapiCheck: DecapiMonitor.getInstance().nextCheckAt,
+          nextTwitchCheck: TwitchMonitor.getInstance().nextCheckAt,
         },
       });
 
@@ -689,6 +691,7 @@ export class WebServer {
       payload: {
         nextFeedCheck: FeedMonitor.getInstance().nextCheckAt,
         nextDecapiCheck: DecapiMonitor.getInstance().nextCheckAt,
+        nextTwitchCheck: TwitchMonitor.getInstance().nextCheckAt,
       },
     });
   }

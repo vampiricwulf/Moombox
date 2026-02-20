@@ -1,5 +1,5 @@
 /**
- * Shared monitoring utilities used by both FeedMonitor and DecapiMonitor.
+ * Shared monitoring utilities used by FeedMonitor, DecapiMonitor, and TwitchMonitor.
  */
 
 import { ChannelConfig } from "./config.js";

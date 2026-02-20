@@ -18,6 +18,7 @@ class MoomboxApp {
     this.autoCookieReloginRequired = null;
     this.nextFeedCheck = 0;
     this.nextDecapiCheck = 0;
+    this.nextTwitchCheck = 0;
     this._countdownInterval = null;
 
     // Module controllers
@@ -368,6 +369,7 @@ class MoomboxApp {
         this.logs = message.payload.logs || [];
         this.nextFeedCheck = message.payload.nextFeedCheck || 0;
         this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
+        this.nextTwitchCheck = message.payload.nextTwitchCheck || 0;
         this.renderJobs();
         this.renderLogs();
         this.updateCheckCountdown();
@@ -409,6 +411,7 @@ class MoomboxApp {
       case "check_timers":
         this.nextFeedCheck = message.payload.nextFeedCheck || 0;
         this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
+        this.nextTwitchCheck = message.payload.nextTwitchCheck || 0;
         this.updateCheckCountdown();
         break;
 
@@ -433,7 +436,8 @@ class MoomboxApp {
     if (!el) return;
     const feed = this.formatCountdown(this.nextFeedCheck);
     const decapi = this.formatCountdown(this.nextDecapiCheck);
-    el.textContent = `Feed: ${feed} | DECAPI: ${decapi}`;
+    const twitch = this.formatCountdown(this.nextTwitchCheck);
+    el.textContent = `Feed: ${feed} | DECAPI: ${decapi} | Twitch: ${twitch}`;
   }
 
   // ===== Job Rendering =====

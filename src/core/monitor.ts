@@ -1,8 +1,9 @@
 /**
  * Feed Monitor — RSS-based channel monitoring.
  *
- * Polls YouTube RSS feeds and Twitch GQL for live streams.
+ * Polls YouTube RSS feeds for live streams.
  * DECAPI checks are handled independently by DecapiMonitor.
+ * Twitch channels are handled by TwitchMonitor.
  */
 
 import { XMLParser } from "fast-xml-parser";
@@ -12,7 +13,7 @@ import { Logger } from "./logger.js";
 import { MoomboxConfig } from "../types/config.js";
 import { fetchWithTimeout } from "./http.js";
 import { getErrorMessage } from "../types/errors.js";
-import { matchesTerms, processYouTubeVideo, processTwitchStream } from "./monitorUtils.js";
+import { matchesTerms, processYouTubeVideo } from "./monitorUtils.js";
 
 /** Parsed YouTube Atom feed entry */
 interface FeedEntry {
@@ -109,12 +110,11 @@ export class FeedMonitor {
         this.logger.debug(`[Monitor] Skipping disabled channel: ${channel.name || channel.id}`);
         continue;
       }
+      // Twitch channels are handled by TwitchMonitor
+      if (channel.platform === "twitch") continue;
+
       try {
-        if (channel.platform === "twitch") {
-          await this.checkTwitchChannel(channel, config, db);
-        } else {
-          await this.checkChannelFeed(channel, config, db);
-        }
+        await this.checkChannelFeed(channel, config, db);
       } catch (e: unknown) {
         this.logger.error(
           `[Monitor] Error checking ${channel.name || channel.id}: ${getErrorMessage(e)}`,
@@ -222,14 +222,4 @@ export class FeedMonitor {
     }
   }
 
-  /**
-   * Check a Twitch channel for live status via direct GQL call.
-   */
-  private async checkTwitchChannel(
-    channel: ChannelConfig,
-    config: MoomboxConfig,
-    db: Database,
-  ): Promise<void> {
-    await processTwitchStream(channel, config, db);
-  }
 }

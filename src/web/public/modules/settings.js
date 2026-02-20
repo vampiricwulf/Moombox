@@ -238,6 +238,7 @@ export class SettingsController {
     this.app.setInputValue("cfg-max-feed-items", config.max_feed_items);
     this.app.setInputValue("cfg-feed-check-interval", config.feed_check_interval);
     this.app.setInputValue("cfg-decapi-check-interval", config.decapi_check_interval ?? "");
+    this.app.setInputValue("cfg-twitch-check-interval", config.twitch_check_interval ?? "");
     this.app.setInputValue(
       "cfg-hide-finished-days",
       config.tasklist?.hide_finished_age_days,
@@ -305,6 +306,7 @@ export class SettingsController {
     const maxFeedItems = this.app.getInputNumber("cfg-max-feed-items");
     const feedCheckInterval = this.app.getInputNumber("cfg-feed-check-interval");
     const decapiCheckInterval = this.app.getInputNumber("cfg-decapi-check-interval");
+    const twitchCheckInterval = this.app.getInputNumber("cfg-twitch-check-interval");
     const hideFinishedDays = this.app.getInputNumber("cfg-hide-finished-days");
 
     const outputDir = this.app.getInputValue("cfg-output-dir");
@@ -335,6 +337,11 @@ export class SettingsController {
       config.decapi_check_interval = decapiCheckInterval;
     } else {
       delete config.decapi_check_interval;
+    }
+    if (twitchCheckInterval) {
+      config.twitch_check_interval = twitchCheckInterval;
+    } else {
+      delete config.twitch_check_interval;
     }
 
     if (!config.tasklist) config.tasklist = {};

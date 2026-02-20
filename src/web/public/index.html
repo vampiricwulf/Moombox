@@ -387,6 +387,13 @@
                                 help-text="Seconds between DECAPI live-status checks. Leave empty for automatic rate-based timing (default: dynamic)"
                             ></sl-input>
                             <sl-input
+                                id="cfg-twitch-check-interval"
+                                type="number"
+                                label="Twitch Check Interval (seconds)"
+                                placeholder="15"
+                                help-text="Seconds between Twitch GQL live-status checks (default: 15, min: 5). Jitter is always applied."
+                            ></sl-input>
+                            <sl-input
                                 id="cfg-hide-finished-days"
                                 type="number"
                                 label="Hide Finished Jobs After (days)"

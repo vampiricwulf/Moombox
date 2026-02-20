@@ -18,6 +18,7 @@ interface TaskListProps {
   onToggleArchive?: () => void;
   nextFeedCheck?: number;
   nextDecapiCheck?: number;
+  nextTwitchCheck?: number;
 }
 
 // Order in which status icons appear in the summary
@@ -52,6 +53,7 @@ export function TaskList({
   onToggleArchive,
   nextFeedCheck = 0,
   nextDecapiCheck = 0,
+  nextTwitchCheck = 0,
 }: TaskListProps): React.ReactElement {
   const contentHeight = height - 3; // borders (2) + title row (1)
   const borderColor = focused ? "cyan" : "gray";
@@ -103,8 +105,8 @@ export function TaskList({
         {filterLabel && (
           <Text color="yellow"> [{filterLabel}]</Text>
         )}
-        {(nextFeedCheck > 0 || nextDecapiCheck > 0) && (
-          <Text color="gray"> F:{formatCountdown(nextFeedCheck)} D:{formatCountdown(nextDecapiCheck)}</Text>
+        {(nextFeedCheck > 0 || nextDecapiCheck > 0 || nextTwitchCheck > 0) && (
+          <Text color="gray"> F:{formatCountdown(nextFeedCheck)} D:{formatCountdown(nextDecapiCheck)} T:{formatCountdown(nextTwitchCheck)}</Text>
         )}
         {totalItems > contentHeight && (
           <Text color="gray">

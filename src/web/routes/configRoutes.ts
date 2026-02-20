@@ -7,6 +7,7 @@ import { Logger } from "../../core/logger.js";
 import { ConfigManager } from "../../core/config.js";
 import { FeedMonitor } from "../../core/monitor.js";
 import { DecapiMonitor } from "../../core/decapiMonitor.js";
+import { TwitchMonitor } from "../../core/twitchMonitor.js";
 import { CookieRefreshService } from "../../core/cookieRefresh.js";
 import { AutoCookieService } from "../../core/autoCookies.js";
 import { getYtdlpPluginStatus, installYtdlpPlugin } from "../../core/ytdlpPlugin.js";
@@ -49,6 +50,7 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
       autoCookieReloginRequired,
       nextFeedCheck: FeedMonitor.getInstance().nextCheckAt,
       nextDecapiCheck: DecapiMonitor.getInstance().nextCheckAt,
+      nextTwitchCheck: TwitchMonitor.getInstance().nextCheckAt,
     });
   }));
 

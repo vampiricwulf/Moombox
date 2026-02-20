@@ -149,6 +149,7 @@ export class TwitchChatDownloader extends EventEmitter {
   private totalMessageCount = 0;
   private flushedToDisk = false;
   private streamStartMs = 0;
+  private recordingStartMs = 0;
   private lastSaveMs = 0;
   private saving = false;
 
@@ -161,6 +162,16 @@ export class TwitchChatDownloader extends EventEmitter {
       const startMs = new Date(options.streamStartTime).getTime();
       this.streamStartMs = Number.isNaN(startMs) ? 0 : startMs;
     }
+  }
+
+  /**
+   * Set the recording start time (when Moombox began downloading video).
+   * Chat offsetMs will be computed relative to this instead of stream start.
+   * Must be called before start().
+   */
+  setRecordingStartTime(isoString: string): void {
+    const ms = new Date(isoString).getTime();
+    this.recordingStartMs = Number.isNaN(ms) ? 0 : ms;
   }
 
   /**
@@ -379,11 +390,12 @@ export class TwitchChatDownloader extends EventEmitter {
 
     const timestampMs = parseInt(tags.get("tmi-sent-ts") || "0", 10) || Date.now();
     const bits = parseInt(tags.get("bits") || "0", 10);
+    const baseMs = this.recordingStartMs || this.streamStartMs;
 
     const chatMsg: TwitchChatMessage = {
       id: msgId,
       timestampMs,
-      offsetMs: this.streamStartMs > 0 ? timestampMs - this.streamStartMs : 0,
+      offsetMs: baseMs > 0 ? Math.max(0, timestampMs - baseMs) : 0,
       authorName: tags.get("display-name") || tags.get("login") || "Anonymous",
       authorId: tags.get("user-id") || "",
       authorBadges: (tags.get("badges") || "").split(",").filter(Boolean),
@@ -416,11 +428,12 @@ export class TwitchChatDownloader extends EventEmitter {
     else if (msgType === "raid") messageType = "raid";
 
     const systemMsg = tags.get("system-msg")?.replace(/\\s/g, " ") || "";
+    const baseMs = this.recordingStartMs || this.streamStartMs;
 
     const chatMsg: TwitchChatMessage = {
       id: msgId,
       timestampMs,
-      offsetMs: this.streamStartMs > 0 ? timestampMs - this.streamStartMs : 0,
+      offsetMs: baseMs > 0 ? Math.max(0, timestampMs - baseMs) : 0,
       authorName: tags.get("display-name") || tags.get("login") || "System",
       authorId: tags.get("user-id") || "",
       authorBadges: (tags.get("badges") || "").split(",").filter(Boolean),
@@ -510,6 +523,9 @@ export class TwitchChatDownloader extends EventEmitter {
       channelDisplayName: this.options.channelDisplayName,
       streamId: this.options.streamId,
       streamStartTime: this.options.streamStartTime,
+      recordingStartTime: this.recordingStartMs > 0
+        ? new Date(this.recordingStartMs).toISOString()
+        : undefined,
       downloadedAt: new Date().toISOString(),
       messageCount: allMessages.length,
       messages: allMessages,

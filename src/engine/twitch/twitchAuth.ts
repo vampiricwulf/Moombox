@@ -6,7 +6,7 @@
  */
 
 import fs from "fs-extra";
-import { TWITCH_GQL_CLIENT_ID } from "../../constants.js";
+import { TWITCH_GQL_CLIENT_ID, USER_AGENTS } from "../../constants.js";
 
 /**
  * Extract Twitch auth-token from a Netscape cookie file.
@@ -52,6 +52,7 @@ export function generateTwitchHeaders(authToken?: string | null): Record<string,
   const headers: Record<string, string> = {
     "Client-ID": TWITCH_GQL_CLIENT_ID,
     "Content-Type": "application/json",
+    "User-Agent": USER_AGENTS.WEB,
   };
 
   if (authToken) {

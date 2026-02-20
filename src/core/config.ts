@@ -169,6 +169,8 @@ export class ConfigManager {
         defaults.feed_check_interval as number,
         'minutes'
       ),
+      decapi_check_interval: config.decapi_check_interval,
+      twitch_check_interval: config.twitch_check_interval,
       downloader: {
         output_directory:
           config.downloader?.output_directory ??
@@ -248,6 +250,12 @@ export class ConfigManager {
     }
     if (typeof config.feed_check_interval !== "number" || config.feed_check_interval < 1) {
       warn("feed_check_interval", config.feed_check_interval); config.feed_check_interval = defaults.feed_check_interval;
+    }
+    if (config.decapi_check_interval !== undefined && (typeof config.decapi_check_interval !== "number" || config.decapi_check_interval < 15 || config.decapi_check_interval > 3600)) {
+      warn("decapi_check_interval", config.decapi_check_interval); config.decapi_check_interval = undefined;
+    }
+    if (config.twitch_check_interval !== undefined && (typeof config.twitch_check_interval !== "number" || config.twitch_check_interval < 5 || config.twitch_check_interval > 3600)) {
+      warn("twitch_check_interval", config.twitch_check_interval); config.twitch_check_interval = undefined;
     }
     if (typeof config.log_max_file_size !== "number" || config.log_max_file_size! < 1) {
       warn("log_max_file_size", config.log_max_file_size); config.log_max_file_size = defaults.log_max_file_size;

@@ -39,6 +39,7 @@ const GENERAL_FIELDS: FieldDef[] = [
   { key: "max_feed_items", label: "Max feed items", type: "number", configPath: ["max_feed_items"] },
   { key: "feed_check_interval", label: "Feed check interval", type: "number", configPath: ["feed_check_interval"], help: "minutes" },
   { key: "decapi_check_interval", label: "DECAPI check interval", type: "number", configPath: ["decapi_check_interval"], help: "seconds (0=dynamic)" },
+  { key: "twitch_check_interval", label: "Twitch check interval", type: "number", configPath: ["twitch_check_interval"], help: "seconds (default: 15)" },
   { key: "hide_finished_age_days", label: "Hide finished after", type: "number", configPath: ["tasklist", "hide_finished_age_days"], help: "days" },
 ];
 
@@ -193,6 +194,7 @@ export function SettingsPanel({ width, height, onClose }: SettingsPanelProps): R
       max_feed_items: parseInt(values.max_feed_items, 10) || config.max_feed_items,
       feed_check_interval: parseInt(values.feed_check_interval, 10) || config.feed_check_interval,
       decapi_check_interval: parseInt(values.decapi_check_interval, 10) || undefined,
+      twitch_check_interval: parseInt(values.twitch_check_interval, 10) || undefined,
       downloader: {
         output_directory: values.output_directory || config.downloader.output_directory,
         output_template: values.output_template || config.downloader.output_template,

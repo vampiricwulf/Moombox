@@ -63,18 +63,19 @@ Moombox is a YouTube live stream archiver with a web dashboard + TUI. It monitor
 ### Data Flow
 
 ```
-RSS Feed Monitor ──→ Job Database (lowdb) → Download Worker → YouTube Innertube API
-DECAPI Monitor ────↗                               ↓
-                       Web Dashboard ← FFmpeg Muxer ← Segment Downloads (DASH/HLS/VOD)
+RSS Feed Monitor ───→ Job Database (lowdb) → Download Worker → YouTube Innertube API
+DECAPI Monitor ─────↗                               ↓
+Twitch Monitor ────↗  Web Dashboard ← FFmpeg Muxer ← Segment Downloads (DASH/HLS/VOD)
                       (localhost:774)      ↑
                                      Chat Downloader (live chat polling)
 ```
 
-Two independent monitoring cycles detect streams:
-- **Feed cycle** (`FeedMonitor`): RSS feeds (YouTube) + direct GQL (Twitch), interval = `feed_check_interval`
-- **DECAPI cycle** (`DecapiMonitor`): `decapi.me` latest video/uptime, dynamic rate-limited interval
+Three independent monitoring cycles detect streams:
+- **Feed cycle** (`FeedMonitor`): RSS feeds (YouTube only), interval = `feed_check_interval`
+- **DECAPI cycle** (`DecapiMonitor`): `decapi.me` latest video (YouTube only), dynamic rate-limited interval
+- **Twitch cycle** (`TwitchMonitor`): GQL live-status polling (Twitch only), interval = `twitch_check_interval` (default 15s with ±5s jitter)
 
-Both cycles independently create jobs. Deduplication via `db.hasProcessed()` prevents double-processing.
+All cycles independently create jobs. Deduplication via `db.hasProcessed()` prevents double-processing.
 
 ### Initialization Order (src/index.ts)
 
@@ -86,11 +87,12 @@ Services must start in this exact order due to dependencies:
 3. Database.getInstance()       → reads moombox.json, builds in-memory indexes
 4. FeedMonitor.start()          → RSS polling (depends on DB + config)
 5. DecapiMonitor.start()        → independent DECAPI polling (depends on DB + config)
-6. DownloadWorker.start()       → job queue polling (depends on DB + YouTube)
-7. CookieRefreshService.start() → 30-min cookie refresh cycle
-8. AutoCookieService            → singleton created, no auto-start
-9. WebServer.start()            → HTTP + WebSocket (subscribes to Logger + DB pub/sub)
-10. TUI (if interactive)        → Ink render tree
+6. TwitchMonitor.start()        → independent Twitch GQL polling (depends on DB + config)
+7. DownloadWorker.start()       → job queue polling (depends on DB + YouTube)
+8. CookieRefreshService.start() → 30-min cookie refresh cycle
+9. AutoCookieService            → singleton created, no auto-start
+10. WebServer.start()           → HTTP + WebSocket (subscribes to Logger + DB pub/sub)
+11. TUI (if interactive)        → Ink render tree
 ```
 
 **Circular dependency:** `ConfigManager.log()` uses try-catch fallback — tries Logger, falls back to console if Logger not yet initialized.
@@ -100,7 +102,7 @@ Services must start in this exact order due to dependencies:
 Consumers stop first, infrastructure last. 10-second force-exit timer as safety net.
 
 ```
-DecapiMonitor → FeedMonitor → DownloadWorker → CookieRefreshService → AutoCookieService → PotProvider → WebServer → Logger.flush()
+TwitchMonitor → DecapiMonitor → FeedMonitor → DownloadWorker → CookieRefreshService → AutoCookieService → PotProvider → WebServer → Logger.flush()
 ```
 
 `DownloadOrchestrator.stop()` propagates to all active `SegmentDownloader` and `ChatDownloader` instances via `AbortController.abort()`.
@@ -122,7 +124,8 @@ src/
 │   ├── http.ts              # fetchWithTimeout + createRetryFetch (p-retry wrapper)
 │   ├── monitor.ts           # FeedMonitor — RSS polling, regex matching (singleton)
 │   ├── monitorUtils.ts      # Shared monitoring: matchesTerms, processYouTubeVideo, processTwitchStream
-│   ├── decapiMonitor.ts     # DecapiMonitor — independent DECAPI polling with dynamic rate limits
+│   ├── decapiMonitor.ts     # DecapiMonitor — independent DECAPI polling with dynamic rate limits (YouTube only)
+│   ├── twitchMonitor.ts     # TwitchMonitor — independent Twitch GQL polling with jitter
 │   ├── potProvider.ts       # PotProvider — BotGuard/PO Token with minter cache
 │   ├── notifications.ts     # NotificationManager — webhook dispatch
 │   └── worker/              # Download orchestration
@@ -244,8 +247,9 @@ All major services use `getInstance()` pattern. Initialization order matters (se
 | `Logger` | `core/logger.ts` | File rotation, 200-entry pub/sub |
 | `Database` | `core/database.ts` | lowdb JSON, O(1) indexes (`jobsMap`, `historySet`), batch writes (100ms), pub/sub |
 | `YouTubeService` | `engine/youtube/index.ts` | Facade: auth, player API, format selection, PO token |
-| `FeedMonitor` | `core/monitor.ts` | RSS feed polling, term matching, YouTube/Twitch detection |
-| `DecapiMonitor` | `core/decapiMonitor.ts` | Independent DECAPI polling, dynamic rate limits, `nextCheckAt` timer |
+| `FeedMonitor` | `core/monitor.ts` | RSS feed polling, term matching (YouTube only, skips Twitch) |
+| `DecapiMonitor` | `core/decapiMonitor.ts` | Independent DECAPI polling, dynamic rate limits (YouTube only) |
+| `TwitchMonitor` | `core/twitchMonitor.ts` | Independent Twitch GQL polling, configurable interval with jitter |
 | `DownloadWorker` | `core/worker/index.ts` | Composes JobQueue + StreamProcessor + DownloadOrchestrator |
 | `WebServer` | `web/server.ts` | Express 5 + WebSocket, CORS, CSP, IP gate, static serving |
 | `PotProvider` | `core/potProvider.ts` | BotGuard minter cache (TTL from API), session cache (6hr), inflight dedup |
@@ -386,10 +390,10 @@ PotProvider.generatePoToken(contentBinding)
 
 | Message | Direction | Trigger | Payload |
 |---------|-----------|---------|---------|
-| `initial_state` | → client | On connect | `{ jobs: Job[], logs: string[], nextFeedCheck, nextDecapiCheck }` |
+| `initial_state` | → client | On connect | `{ jobs: Job[], logs: string[], nextFeedCheck, nextDecapiCheck, nextTwitchCheck }` |
 | `jobs_update` | → client | Job added/deleted | Full `Job[]` array |
 | `job_update` | → client | Progress change | Single `Job` (throttled: 10/sec per job) |
-| `check_timers` | → client | Monitor reschedule | `{ nextFeedCheck, nextDecapiCheck }` (epoch ms) |
+| `check_timers` | → client | Monitor reschedule | `{ nextFeedCheck, nextDecapiCheck, nextTwitchCheck }` (epoch ms) |
 | `log` | → client | New log line | Log string |
 | `ping` | client → | Heartbeat | - |
 | `pong` | → client | Response | - |
@@ -565,6 +569,7 @@ All settings have defaults in `ConfigManager.DEFAULTS`. Missing fields auto-popu
 | `max_feed_items` | `15` | ≥ 1 |
 | `feed_check_interval` | `10` (minutes) | ≥ 1 (number or ms-string) |
 | `decapi_check_interval` | undefined (dynamic) | 15–3600 seconds, optional |
+| `twitch_check_interval` | `15` (seconds) | 5–3600 seconds, optional |
 | `downloader.output_directory` | `"./output"` | - |
 | `downloader.output_template` | `"${channel}/${start_date} ${title} [${id}]"` | - |
 | `downloader.staging_directory` | `"./staging"` | - |
@@ -679,11 +684,16 @@ All previously tracked issues have been resolved:
 
 ### DECAPI Constants
 - `DECAPI_URLS.YOUTUBE_LATEST`: `"https://decapi.me/youtube/latest_video"`
-- `DECAPI_URLS.TWITCH_UPTIME`: `"https://decapi.me/twitch/uptime"`
 - `DECAPI_MIN_INTERVAL_MS`: 15s (minimum cycle interval)
 - `DECAPI_REQUEST_STAGGER_MS`: 1s (between requests within a cycle)
 - `DECAPI_DEFAULT_RATE_LIMIT`: 60 (assumed requests/min until learned from headers)
 - `DECAPI_REQUEST_TIMEOUT_MS`: 15s (per-request timeout)
+
+### Twitch Monitor Constants
+- `TWITCH_CHECK_INTERVAL_DEFAULT_MS`: 15s (default polling interval)
+- `TWITCH_CHECK_JITTER_MS`: ±5s (applied to each cycle)
+- `TWITCH_REQUEST_STAGGER_MS`: 500ms (between channel checks within a cycle)
+- `TWITCH_CHECK_MIN_INTERVAL_MS`: 5s (floor after jitter)
 
 ## Database
 
