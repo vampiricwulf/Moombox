@@ -198,9 +198,14 @@ export const RETRY_DELAY_MS = 2000;
 export const DOWNLOAD_TIMEOUT_MS = 30000;
 
 /**
- * Progress update interval (ms)
+ * Progress display update interval — in-memory only, no disk I/O (ms)
  */
-export const PROGRESS_UPDATE_INTERVAL_MS = 3000;
+export const PROGRESS_UPDATE_INTERVAL_MS = 100;
+
+/**
+ * Progress persistence interval — writes to disk for crash recovery (ms)
+ */
+export const PROGRESS_PERSIST_INTERVAL_MS = 1_000;
 
 // =============================================================================
 // WORKER CONSTANTS

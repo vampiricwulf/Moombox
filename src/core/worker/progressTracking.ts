@@ -10,7 +10,7 @@ import { SegmentDownloader } from "../../engine/downloader.js";
 import { ChatDownloader, ChatApi } from "../../engine/chat/index.js";
 import type { VideoInfo } from "../../types/youtube.js";
 import type { ChatProgress } from "../../types/chat.js";
-import { PROGRESS_UPDATE_INTERVAL_MS } from "../../constants.js";
+import { PROGRESS_UPDATE_INTERVAL_MS, PROGRESS_PERSIST_INTERVAL_MS } from "../../constants.js";
 import { formatSpeed } from "../../utils/timeFormat.js";
 import { SmoothValue } from "../../utils/SmoothValue.js";
 import { getErrorMessage } from "../../types/errors.js";
@@ -65,9 +65,7 @@ export async function setupChatDownloader(
     });
 
     chatDl.on("progress", (data) => {
-      db.updateJob(job.id, { totalChatMessages: data.messageCount }).catch(
-        (e: unknown) => logger.debug(`[Chat] DB update failed: ${getErrorMessage(e)}`),
-      );
+      db.updateJobLive(job.id, { totalChatMessages: data.messageCount });
     });
 
     chatDl.on("error", (err) => {
@@ -148,16 +146,24 @@ async function runSegmentDownloadersImpl(
         }
       }
 
-      db.updateJob(job.id, {
+      // In-memory update — notifies TUI/WebSocket instantly, no disk I/O
+      db.updateJobLive(job.id, {
         progress: progStr,
         speed: formatSpeed(speed),
         lastVideoSeq: vSeq,
         lastAudioSeq: aSeq,
         totalVideoSeq: vTotal || undefined,
         totalAudioSeq: aTotal || undefined,
-      }).catch((e: unknown) => logger.debug(`[DownloadOrchestrator] Progress update failed: ${getErrorMessage(e)}`));
+      });
     }
   };
+
+  // Periodic disk persistence for crash recovery (much less frequent than display updates)
+  const persistTimer = setInterval(() => {
+    db.persistToDisk().catch((e: unknown) =>
+      logger.debug(`[DownloadOrchestrator] Persist failed: ${getErrorMessage(e)}`),
+    );
+  }, PROGRESS_PERSIST_INTERVAL_MS);
 
   // Track segment gaps
   const gapHandler = (stream: "video" | "audio") => (gap: { from: number; to: number }) => {
@@ -207,6 +213,12 @@ async function runSegmentDownloadersImpl(
       }),
     );
   await Promise.all(promises);
+
+  // Clean up persist timer and flush final state to disk
+  clearInterval(persistTimer);
+  await db.persistToDisk().catch((e: unknown) =>
+    logger.debug(`[DownloadOrchestrator] Final persist failed: ${getErrorMessage(e)}`),
+  );
 
   // Remove chat listener to prevent leak
   if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);

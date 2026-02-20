@@ -182,6 +182,32 @@ export class Database {
     return this.db.data.jobs.some((j) => j.id === videoId);
   }
 
+  /**
+   * Update a job in memory and notify listeners without writing to disk.
+   * For high-frequency progress updates where persistence can be deferred.
+   */
+  updateJobLive(id: string, updates: Partial<Job>): void {
+    const sanitized = { ...updates };
+    delete (sanitized as any).__proto__;
+    delete (sanitized as any).constructor;
+    delete (sanitized as any).prototype;
+
+    const job = this.jobsMap.get(id);
+    if (!job) return;
+    Object.assign(job, { ...sanitized, updatedAt: new Date().toISOString() });
+    this.notifyJobUpdate(job);
+  }
+
+  /**
+   * Persist current in-memory state to disk for crash recovery.
+   * Does not go through the batch mechanism — writes whatever is in memory now.
+   */
+  async persistToDisk(): Promise<void> {
+    return this.enqueueMutation(async () => {
+      await this.writeWithPermissions();
+    });
+  }
+
   async updateJob(id: string, updates: Partial<Job>) {
     // Sanitize updates to prevent prototype pollution
     const sanitized = { ...updates };

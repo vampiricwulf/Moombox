@@ -648,7 +648,8 @@ All previously tracked issues have been resolved:
 - `DOWNLOAD_CHUNK_SIZE`: 5MB per HTTP chunk
 - `MAX_DOWNLOAD_RETRIES`: 3
 - `DOWNLOAD_TIMEOUT_MS`: 30s
-- `PROGRESS_UPDATE_INTERVAL_MS`: 3s
+- `PROGRESS_UPDATE_INTERVAL_MS`: 100ms (in-memory display, no disk I/O)
+- `PROGRESS_PERSIST_INTERVAL_MS`: 1s (disk write for crash recovery)
 
 ### Worker Constants
 - `WORKER_CHECK_INTERVAL_MS`: 5s (job queue poll)
