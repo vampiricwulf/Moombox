@@ -64,7 +64,14 @@ export class StreamProcessor {
    * Process a job to determine stream status and extract metadata
    */
   async process(job: Job): Promise<StreamProcessResult> {
-    this.running = true;
+    // Don't override stop() — only set running if not explicitly stopped
+    if (this.running === false) {
+      return {
+        videoInfo: createEmptyVideoInfo(),
+        shouldDownload: false,
+        isVod: false,
+      };
+    }
 
     // Twitch path — completely separate from YouTube
     if (job.platform === "twitch") {
@@ -155,7 +162,7 @@ export class StreamProcessor {
     const login = extractTwitchLoginFromJob(job);
     if (!login) {
       return {
-        videoInfo: createEmptyVideoInfo(job.videoId),
+        videoInfo: createEmptyVideoInfo(),
         shouldDownload: false,
         isVod: false,
         error: "Could not determine Twitch channel login",
@@ -191,7 +198,7 @@ export class StreamProcessor {
 
         if (!variant) {
           return {
-            videoInfo: createEmptyVideoInfo(job.videoId),
+            videoInfo: createEmptyVideoInfo(),
             shouldDownload: false,
             isVod: true,
             error: "No suitable HLS quality found for VOD",
@@ -232,7 +239,7 @@ export class StreamProcessor {
 
         this.logger.info(`[StreamProcessor] Twitch VOD ${vodId}: using quality ${variant.name}`);
         return {
-          videoInfo: createEmptyVideoInfo(job.videoId),
+          videoInfo: createEmptyVideoInfo(),
           shouldDownload: true,
           isVod: true,
           twitchVariant: variant,
@@ -240,7 +247,7 @@ export class StreamProcessor {
         };
       } catch (e) {
         return {
-          videoInfo: createEmptyVideoInfo(job.videoId),
+          videoInfo: createEmptyVideoInfo(),
           shouldDownload: false,
           isVod: true,
           error: `Twitch VOD error: ${getErrorMessage(e)}`,
@@ -253,7 +260,7 @@ export class StreamProcessor {
     if (!streamInfo || !streamInfo.isLive) {
       this.logger.info(`[StreamProcessor] Twitch channel ${login} is offline`);
       return {
-        videoInfo: createEmptyVideoInfo(job.videoId),
+        videoInfo: createEmptyVideoInfo(),
         shouldDownload: false,
         isVod: false,
         error: "Twitch channel is offline",
@@ -284,7 +291,7 @@ export class StreamProcessor {
 
     if (!variant) {
       return {
-        videoInfo: createEmptyVideoInfo(job.videoId),
+        videoInfo: createEmptyVideoInfo(),
         shouldDownload: false,
         isVod: false,
         error: "No suitable HLS quality found",
@@ -354,7 +361,7 @@ export class StreamProcessor {
     }
 
     return {
-      videoInfo: createEmptyVideoInfo(job.videoId),
+      videoInfo: createEmptyVideoInfo(),
       shouldDownload: true,
       isVod: false,
       twitchStreamInfo: streamInfo,
@@ -599,7 +606,7 @@ export class StreamProcessor {
       await sleep(recheckInterval + jitter);
 
       // Check if job was cancelled
-      const freshJob = (await db.getJobs()).find((j) => j.id === job.id);
+      const freshJob = await db.getJob(job.id);
       if (!freshJob || freshJob.status === "Cancelled") {
         // Job was cancelled - stop chat downloader
         if (chatDl) {
@@ -607,7 +614,7 @@ export class StreamProcessor {
           this.activeChatDownloaders.delete(job.id);
         }
         return {
-          videoInfo: createEmptyVideoInfo(job.videoId),
+          videoInfo: createEmptyVideoInfo(),
           shouldDownload: false,
           isVod: false,
         };
@@ -728,7 +735,7 @@ export class StreamProcessor {
             this.activeChatDownloaders.delete(job.id);
           }
           return {
-            videoInfo: createEmptyVideoInfo(job.videoId),
+            videoInfo: createEmptyVideoInfo(),
             shouldDownload: false,
             isVod: false,
             error: `Probe failed ${MAX_CONSECUTIVE_PROBE_ERRORS} times consecutively`,
@@ -743,7 +750,7 @@ export class StreamProcessor {
       this.activeChatDownloaders.delete(job.id);
     }
     return {
-      videoInfo: createEmptyVideoInfo(job.videoId),
+      videoInfo: createEmptyVideoInfo(),
       shouldDownload: false,
       isVod: false,
     };
@@ -802,8 +809,8 @@ export class StreamProcessor {
       });
 
       // Start in the background
-      chatDl.start().catch((e) => {
-        this.logger.warn(`[Chat] Early chat download error: ${e.message}`);
+      chatDl.start().catch((e: unknown) => {
+        this.logger.warn(`[Chat] Early chat download error: ${getErrorMessage(e)}`);
       });
 
       this.logger.info(`[Chat] Started early chat download for upcoming ${job.videoId}`);

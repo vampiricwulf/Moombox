@@ -517,7 +517,11 @@ export class PlayerController {
         if (part.type === "emoji" && part.emojiUrl) {
           const alt = part.text || part.emojiId || "";
           const url = part.emojiUrl.replace(/=[^/]*$/, "");
-          return `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(alt)}" loading="lazy" referrerpolicy="no-referrer">`;
+          // Only allow http/https URLs to prevent javascript: injection
+          if (/^https?:\/\//i.test(url)) {
+            return `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(alt)}" loading="lazy" referrerpolicy="no-referrer">`;
+          }
+          return this.app.escapeHtml(alt);
         }
         return this.app.escapeHtml(part.text || "");
       })

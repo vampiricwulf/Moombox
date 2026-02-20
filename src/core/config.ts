@@ -146,7 +146,7 @@ export class ConfigManager {
     // Migrate old allow_lan / allow_external booleans → network_access string
     let networkAccess = config.network_access;
     if (!networkAccess) {
-      const raw = config as any;
+      const raw = config as Record<string, unknown>;
       if (raw.allow_lan !== undefined || raw.allow_external !== undefined) {
         const lan = raw.allow_lan === true;
         const ext = lan && raw.allow_external === true;

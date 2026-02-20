@@ -75,7 +75,7 @@ export interface MoomboxConfig {
   port?: number;
   network_access?: "localhost" | "lan" | "external";
   password_hash?: string;
-  log_level?: string;
+  log_level?: "DEBUG" | "INFO" | "WARN" | "ERROR";
   log_file_path?: string;
   log_max_file_size?: number;
   log_max_files?: number;

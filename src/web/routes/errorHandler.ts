@@ -13,7 +13,7 @@ import { Logger } from "../../core/logger.js";
  * Generic parameter P preserves route parameter types.
  */
 export function asyncHandler<P = Record<string, string>>(
-  fn: (req: Request<P>, res: Response, next: NextFunction) => Promise<any>,
+  fn: (req: Request<P>, res: Response, next: NextFunction) => Promise<unknown>,
 ): (req: Request<P>, res: Response, next: NextFunction) => void {
   return (req, res, next) => {
     fn(req, res, next).catch(next);
@@ -25,15 +25,14 @@ export function asyncHandler<P = Record<string, string>>(
  * Logs the full error server-side and returns a generic message to the client.
  */
 export function errorMiddleware(
-  err: any,
+  err: unknown,
   req: Request,
   res: Response,
   _next: NextFunction,
 ): void {
   const logger = Logger.getInstance();
-  logger.error(
-    `[WebServer] ${req.method} ${req.path} failed: ${err.stack || err.message || err}`,
-  );
+  const msg = err instanceof Error ? (err.stack || err.message) : String(err);
+  logger.error(`[WebServer] ${req.method} ${req.path} failed: ${msg}`);
   if (!res.headersSent) {
     res.status(500).json({ error: "Internal server error" });
   }

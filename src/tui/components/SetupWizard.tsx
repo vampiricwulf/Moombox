@@ -333,7 +333,7 @@ export function SetupWizard({ width, height, onComplete }: SetupWizardProps): Re
     const config: MoomboxConfig = {
       port: vNum("port"),
       network_access: networkAccess,
-      log_level: values.logLevel || undefined,
+      log_level: (values.logLevel as MoomboxConfig["log_level"]) || undefined,
       log_file_path: v("logFilePath") || undefined,
       log_max_file_size: vNum("logMaxSize"),
       log_max_files: vNum("logMaxFiles"),

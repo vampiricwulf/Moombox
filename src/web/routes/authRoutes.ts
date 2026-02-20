@@ -53,8 +53,9 @@ export function registerAuthRoutes(router: Router): void {
     }
 
     const token = auth.createSession();
+    const secure = req.secure ? "; Secure" : "";
     res.setHeader("Set-Cookie",
-      `moombox_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400`
+      `moombox_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400${secure}`
     );
 
     logger.info("[Auth] Successful login from " + req.socket.remoteAddress);
@@ -66,9 +67,7 @@ export function registerAuthRoutes(router: Router): void {
     const auth = AuthService.getInstance();
     const token = auth.parseCookies(req.headers.cookie || "")["moombox_session"];
     if (token) {
-      // Invalidate just this session by clearing and re-adding others
-      // Simpler: just clear the cookie; the session will expire naturally
-      auth.invalidateAllSessions();
+      auth.invalidateSession(token);
     }
 
     // Clear cookie

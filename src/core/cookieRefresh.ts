@@ -78,14 +78,14 @@ export class CookieRefreshService {
     this.logger.info("[CookieRefresh] Starting cookie refresh service");
 
     // Do an initial refresh
-    this.refresh().catch((e) => {
-      this.logger.warn(`[CookieRefresh] Initial refresh failed: ${e.stack || e.message}`);
+    this.refresh().catch((e: unknown) => {
+      this.logger.warn(`[CookieRefresh] Initial refresh failed: ${getErrorMessage(e)}`);
     });
 
     // Schedule periodic refreshes
     this.interval = setInterval(() => {
-      this.refresh().catch((e) => {
-        this.logger.warn(`[CookieRefresh] Refresh failed: ${e.stack || e.message}`);
+      this.refresh().catch((e: unknown) => {
+        this.logger.warn(`[CookieRefresh] Refresh failed: ${getErrorMessage(e)}`);
       });
     }, this.REFRESH_INTERVAL_MS);
   }

@@ -10,9 +10,10 @@ import { Logger } from "../logger.js";
 import { YouTubeService } from "../../engine/youtube/index.js";
 import { SegmentDownloader } from "../../engine/downloader.js";
 import { ChatDownloader } from "../../engine/chat/index.js";
-import { ManifestParser, type SegmentRange } from "../../engine/manifest.js";
+import { ManifestParser } from "../../engine/manifest.js";
 import { fetchWithTimeout } from "../http.js";
-import type { VideoInfo } from "../../types/youtube.js";
+import type { VideoInfo, HlsVariant } from "../../types/youtube.js";
+import type { DashStream } from "../../engine/manifest.js";
 import type { ChatProgress } from "../../types/chat.js";
 import {
   USER_AGENTS,
@@ -189,9 +190,8 @@ export async function downloadDash(
   audioDl: SegmentDownloader;
   videoPath: string;
   audioPath: string;
-  segmentRange: SegmentRange | null;
-  selectedVideoFormat?: any;
-  selectedAudioFormat?: any;
+  selectedVideoFormat?: DashStream;
+  selectedAudioFormat?: DashStream;
 }> {
   const logger = Logger.getInstance();
   logger.info("[DownloadOrchestrator] Fetching DASH Manifest...");
@@ -261,8 +261,8 @@ export async function downloadDash(
   }
 
   // Select best streams (respecting manual itag selection from job)
-  let bestVideo: any = null;
-  let bestAudio: any = null;
+  let bestVideo: DashStream | null = null;
+  let bestAudio: DashStream | null = null;
 
   const config = ConfigManager.getInstance().get();
   const maxRes = config.downloader?.max_video_resolution || 9999;
@@ -341,11 +341,10 @@ export async function downloadDash(
   const videoPath = path.join(stagingDir, "video_stream");
   const audioPath = path.join(stagingDir, "audio_stream");
 
-  // For live-from-start, always start from segment 0 to capture the entire stream
-  // The manifest's startNumber reflects the current live position, not the beginning
-  const startFromBeginning = 0;
+  // Always start from segment 0 to capture the entire stream
+  // (the manifest's startNumber reflects the current live position, not the beginning)
   logger.info(
-    `[DownloadOrchestrator] Starting from segment ${startFromBeginning} (manifest startNumber: ${bestVideo.startNumber})`
+    `[DownloadOrchestrator] Starting from segment 0 (manifest startNumber: ${bestVideo.startNumber})`
   );
 
   // Callback to check if stream has ended via YouTube API
@@ -365,7 +364,7 @@ export async function downloadDash(
   const videoDl = new SegmentDownloader({
     baseUrl: bestVideo.baseUrl,
     outputFile: videoPath,
-    startSeq: startFromBeginning,
+    startSeq: 0,
     initUrl: bestVideo.initialization,
     onCheckStreamStatus: checkStreamStatus,
     retryDelayCap: config.downloader.segment_retry_delay_cap,
@@ -375,7 +374,7 @@ export async function downloadDash(
   const audioDl = new SegmentDownloader({
     baseUrl: bestAudio.baseUrl,
     outputFile: audioPath,
-    startSeq: startFromBeginning,
+    startSeq: 0,
     initUrl: bestAudio.initialization,
     onCheckStreamStatus: checkStreamStatus,
     retryDelayCap: config.downloader.segment_retry_delay_cap,
@@ -394,8 +393,7 @@ export async function downloadDash(
     audioDl,
     videoPath,
     audioPath,
-    segmentRange: null, // No longer used - full file is always downloaded
-    selectedVideoFormat: bestVideo,
+    selectedVideoFormat: bestVideo ?? undefined,
     selectedAudioFormat: bestAudio,
   };
 }
@@ -433,7 +431,7 @@ export async function downloadHls(
   // Select best variant (respecting max_video_resolution)
   const config = ConfigManager.getInstance().get();
   const maxRes = config.downloader?.max_video_resolution || 9999;
-  let bestVariant: any = null;
+  let bestVariant: HlsVariant | null = null;
   for (const variant of masterPlaylist.variants) {
     const varMaxDim = Math.max(variant.width || 0, variant.height || 0);
     if (varMaxDim > maxRes) continue;

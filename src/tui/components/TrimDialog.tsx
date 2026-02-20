@@ -9,7 +9,7 @@
  */
 
 import React, { useState, useCallback } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, type Key } from "ink";
 import { parseTimeToSeconds } from "../../core/worker/timeUtils.js";
 import type { Job } from "../../types/jobs.js";
 
@@ -104,7 +104,7 @@ export function TrimDialog({
   );
 
   const handleCreateInput = useCallback(
-    (input: string, key: any) => {
+    (input: string, key: Key) => {
       if (step === 0) {
         // Step 0: Both start and end time inputs (Tab to switch focus)
         if (key.return) {
@@ -192,7 +192,7 @@ export function TrimDialog({
   );
 
   const handleDeleteInput = useCallback(
-    (input: string, key: any) => {
+    (input: string, key: Key) => {
       // If no trims available, renderDeleteMode already shows appropriate message
       if (trims.length === 0) {
         return;

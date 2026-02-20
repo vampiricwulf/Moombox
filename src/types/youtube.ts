@@ -165,7 +165,7 @@ export interface HlsSegment {
  * Create a minimal valid VideoInfo for error/cancellation paths.
  * Prevents NPEs when callers access fields on error-path returns.
  */
-export function createEmptyVideoInfo(videoId?: string): VideoInfo {
+export function createEmptyVideoInfo(): VideoInfo {
   return {
     title: "Unknown",
     channelName: "Unknown",

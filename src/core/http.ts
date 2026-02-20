@@ -81,9 +81,14 @@ export function createRetryFetch(options?: {
 
     return pRetry(
       async () => {
+        const timeoutSignal = AbortSignal.timeout(timeout);
+        const combined = init?.signal
+          ? AbortSignal.any([init.signal, timeoutSignal])
+          : timeoutSignal;
+
         const response = await fetch(url, {
           ...init,
-          signal: init?.signal || AbortSignal.timeout(timeout),
+          signal: combined,
           headers: { ...defaultHeaders, ...init?.headers },
         });
 

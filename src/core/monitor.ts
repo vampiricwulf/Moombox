@@ -134,10 +134,11 @@ export class FeedMonitor {
     if (!feed || !feed.entry) return [];
 
     const rawEntries = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
-    return rawEntries.map((entry: any) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- XML parser output is untyped
+    return rawEntries.map((entry: Record<string, any>) => {
       // Link can be a single object or array (rel="self" + rel="alternate")
       const links = Array.isArray(entry.link) ? entry.link : [entry.link];
-      const altLink = links.find((l: any) => l?.["@_rel"] === "alternate");
+      const altLink = links.find((l: Record<string, unknown>) => l?.["@_rel"] === "alternate");
       const href = altLink?.["@_href"] || "";
 
       return {

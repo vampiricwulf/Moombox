@@ -16,6 +16,7 @@ import { getErrorMessage } from "../../types/errors.js";
 import { AuthService } from "../../core/auth.js";
 import { DownloadWorker } from "../../core/worker/index.js";
 import { isLoopback } from "../../utils/ipValidation.js";
+import type { MoomboxConfig } from "../../types/config.js";
 
 export interface ConfigRoutesContext {
   logBuffer: string[];
@@ -87,12 +88,12 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
 
     // Preserve existing password_hash (managed via /auth endpoints, not config UI)
     const existing = configManager.get();
-    const configToSave = { ...validation.data } as Record<string, unknown>;
-    if (existing.password_hash) {
-      configToSave.password_hash = existing.password_hash;
-    }
+    const configToSave: MoomboxConfig = {
+      ...validation.data,
+      ...(existing.password_hash ? { password_hash: existing.password_hash } : {}),
+    } as MoomboxConfig;
 
-    await configManager.save(configToSave as any);
+    await configManager.save(configToSave);
     // Apply runtime-reloadable settings immediately
     logger.refreshLogLevel();
     // Hot-reload num_parallel_downloads
@@ -166,8 +167,9 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
       return res.status(404).json({ error: "Channel not found" });
     }
 
-    config.channels.splice(index, 1);
-    await configManager.save(config);
+    const channels = [...config.channels];
+    channels.splice(index, 1);
+    await configManager.save({ ...config, channels });
     res.json({ success: true });
   }));
 
@@ -204,17 +206,15 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
     }
 
     // Hash password if provided and include in config
-    const configData: Record<string, unknown> = { ...validation.data };
+    const { password: _pw, ...configWithoutPassword } = validation.data as Record<string, unknown>;
+    const configData = { ...configWithoutPassword } as unknown as MoomboxConfig;
     if (password && password.length >= 8) {
       const auth = AuthService.getInstance();
       configData.password_hash = auth.hashPassword(password);
     }
 
-    // Never pass raw password to config save
-    delete configData.password;
-
     // Save the configuration
-    await configManager.save(configData as any);
+    await configManager.save(configData);
 
     logger.info("[Setup] First-run setup completed");
     res.json({ success: true });

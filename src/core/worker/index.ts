@@ -80,6 +80,9 @@ export class DownloadWorker {
     this.jobQueue.stop();
     this.streamProcessor.stop();
     this.downloadOrchestrator.stop();
+    // Resolve all pending download slot waiters so they can exit
+    const waiters = this.downloadWaiters.splice(0);
+    for (const resolve of waiters) resolve();
     this.logger.info("Download Worker stopped.");
   }
 
@@ -177,7 +180,7 @@ export class DownloadWorker {
 
     // Guard: re-read job from DB to ensure it's still in a processable state.
     // The job object may be stale if checkQueue's snapshot was taken long ago.
-    const freshJob = (await db.getJobs()).find(j => j.id === job.id);
+    const freshJob = await db.getJob(job.id);
     if (!freshJob) return;
     const terminal = ["Finished", "Error", "Cancelled", "Muxing"];
     if (terminal.includes(freshJob.status)) {
@@ -275,7 +278,7 @@ export class DownloadWorker {
     }
 
     // Check if job was cancelled during stream processing
-    const currentJob = (await db.getJobs()).find((j) => j.id === job.id);
+    const currentJob = await db.getJob(job.id);
     if (!currentJob || currentJob.status === "Cancelled") {
       result.chatDownloader?.stop();
       await stopTwitchChat();

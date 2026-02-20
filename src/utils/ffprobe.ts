@@ -38,7 +38,7 @@ export async function extractVideoMetadata(
     const data = JSON.parse(stdout);
     const format = data.format || {};
     const videoStream = (data.streams || []).find(
-      (s: any) => s.codec_type === "video",
+      (s: Record<string, unknown>) => s.codec_type === "video",
     );
 
     const metadata: VideoMetadata = {

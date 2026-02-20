@@ -13,6 +13,8 @@ vi.mock("../../../core/database.js");
 vi.mock("../../../core/logger.js");
 vi.mock("../../../core/config.js");
 vi.mock("../../../engine/youtube/index.js");
+vi.mock("../../../engine/twitch/index.js");
+vi.mock("../../../core/notifications.js");
 
 describe("Job Routes", () => {
   let app: express.Application;
@@ -98,6 +100,11 @@ describe("Job Routes", () => {
         tasklist: { hide_finished_age_days: 30 },
         downloader: { output_directory: "/output" },
       }),
+    } as any);
+
+    const { NotificationManager } = await import("../../../core/notifications.js");
+    vi.mocked(NotificationManager.getInstance).mockReturnValue({
+      send: vi.fn(),
     } as any);
 
     // Create Express app

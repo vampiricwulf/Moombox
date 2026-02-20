@@ -28,7 +28,7 @@ import {
 import { getErrorMessage } from "../../types/errors.js";
 import { fetchWithTimeout } from "../http.js";
 import { extractTwitchLoginFromJob } from "../../utils/twitch.js";
-import type { SegmentRange } from "../../engine/manifest.js";
+
 import type { MuxTrimOptions } from "../../engine/muxer.js";
 import { downloadVod, downloadDash, downloadHls } from "./downloadStrategies.js";
 import { muxAndFinalize } from "./muxFinalize.js";
@@ -282,7 +282,7 @@ export class DownloadOrchestrator {
     const yt = YouTubeService.getInstance();
 
     // Check if already cancelled before starting
-    const freshJob = (await db.getJobs()).find((j) => j.id === job.id);
+    const freshJob = await db.getJob(job.id);
     if (freshJob?.status === "Cancelled") {
       existingChatDl?.stop();
       return;
@@ -382,8 +382,6 @@ export class DownloadOrchestrator {
 
     let videoDl: SegmentDownloader | null = null;
     let audioDl: SegmentDownloader | null = null;
-    let segmentRange: SegmentRange | null = null;
-
     // Use pre-started chat downloader from upcoming phase, or create a new one
     if (config.downloader.download_chat !== false) {
       if (existingChatDl) {
@@ -462,7 +460,6 @@ export class DownloadOrchestrator {
       audioDl = result.audioDl;
       videoPath = result.videoPath;
       audioPath = result.audioPath;
-      segmentRange = result.segmentRange;
     } else if (videoInfo.hlsManifestUrl) {
       // HLS: Fallback for some streams
       const result = await downloadHls(job, videoInfo, yt, stagingDir, db, this.activeSegmentDownloaders);
@@ -528,7 +525,7 @@ export class DownloadOrchestrator {
     // After live stream download completes, sync totals to last downloaded seq
     // so progress shows matching values (e.g. "A: 150/150 V: 150/150") before muxing
     if (videoDl || audioDl) {
-      const finalJob = (await db.getJobs()).find(j => j.id === job.id);
+      const finalJob = await db.getJob(job.id);
       if (finalJob) {
         const finalUpdate: Partial<Job> = {};
         if (finalJob.lastVideoSeq) finalUpdate.totalVideoSeq = finalJob.lastVideoSeq;
@@ -577,7 +574,7 @@ export class DownloadOrchestrator {
         await db.flush();
 
         // Get the finished job with updated metadata
-        const finishedJob = (await db.getJobs()).find((j) => j.id === job.id);
+        const finishedJob = await db.getJob(job.id);
         if (!finishedJob || finishedJob.status !== "Finished") {
           this.logger.warn(
             `[DownloadOrchestrator] Cannot create trim: job not in Finished state (${finishedJob?.status})`
@@ -633,9 +630,9 @@ export class DownloadOrchestrator {
   private startChatInBackground(chatDl: ChatDownloader | null, label: string) {
     let chatFinished = false;
     const chatPromise = chatDl
-      ? chatDl.start().then(() => { chatFinished = true; }).catch((e) => {
+      ? chatDl.start().then(() => { chatFinished = true; }).catch((e: unknown) => {
           chatFinished = true;
-          this.logger.warn(`[Chat] ${label} chat download failed: ${e.message}`);
+          this.logger.warn(`[Chat] ${label} chat download failed: ${getErrorMessage(e)}`);
         })
       : Promise.resolve();
     return { chatPromise, isChatFinished: () => chatFinished };
@@ -726,8 +723,8 @@ export class DownloadOrchestrator {
 
     // Start chat downloader in background (it runs independently)
     const chatPromise = chatDl
-      ? chatDl.start().catch((e) => {
-          this.logger.warn(`[Chat] Live chat download error: ${e.message}`);
+      ? chatDl.start().catch((e: unknown) => {
+          this.logger.warn(`[Chat] Live chat download error: ${getErrorMessage(e)}`);
         })
       : Promise.resolve();
 

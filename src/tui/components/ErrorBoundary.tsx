@@ -51,7 +51,7 @@ export class ErrorBoundary extends React.Component<
           <Text dimColor>Stack trace:</Text>
           <Text dimColor>{this.state.error?.stack || "No stack trace available"}</Text>
           <Text> </Text>
-          <Text color="cyan">Press Q to quit and restart the application.</Text>
+          <Text color="cyan">Press Ctrl+C to quit and restart the application.</Text>
         </Box>
       );
     }

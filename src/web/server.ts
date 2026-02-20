@@ -42,7 +42,7 @@ const DEFAULT_PORT = 774;
 
 interface WSMessage {
   type: string;
-  payload?: any;
+  payload?: unknown;
 }
 
 /** POT provider paths that must work over plain HTTP (for yt-dlp compatibility). */
@@ -647,7 +647,9 @@ export class WebServer {
   private filterJobsByAge(jobs: Job[], archived: boolean): Job[] {
     const config = ConfigManager.getInstance().get();
     const now = Date.now();
-    const hideAgeMs = (config.tasklist?.hide_finished_age_days || 30) * 86_400_000; // days → ms
+    const raw = config.tasklist?.hide_finished_age_days ?? 30;
+    const hideAgeDays = typeof raw === "number" ? raw : parseInt(String(raw), 10) || 30;
+    const hideAgeMs = hideAgeDays * 86_400_000; // days → ms
 
     return jobs.filter((job) => {
       if (job.status !== "Finished") return !archived;

@@ -338,7 +338,7 @@ export class AutoCookieService {
 
       const platforms = Array.from(existing) as ("youtube" | "twitch")[];
       if (!config.auto_cookies) {
-        (config as any).auto_cookies = {};
+        (config as Record<string, unknown>).auto_cookies = {};
       }
       config.auto_cookies!.platforms = platforms;
 

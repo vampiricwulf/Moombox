@@ -15,8 +15,6 @@ class MoomboxApp {
     this.config = null;
     this.selectedJobId = null;
     this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 10;
-    this.reconnectDelay = 1000;
     this.autoCookieReloginRequired = null;
     this.nextFeedCheck = 0;
     this.nextDecapiCheck = 0;
@@ -343,7 +341,7 @@ class MoomboxApp {
   scheduleReconnect() {
     this.reconnectAttempts++;
     const delay = Math.min(
-      this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts - 1),
+      1000 * Math.pow(1.5, this.reconnectAttempts - 1),
       30000,
     );
     console.log(
@@ -385,7 +383,7 @@ class MoomboxApp {
         }
         break;
 
-      case "job_update":
+      case "job_update": {
         // Single job update - update in place without full re-render
         const updatedJob = message.payload;
         const jobIndex = this.jobs.findIndex((j) => j.id === updatedJob.id);
@@ -402,10 +400,7 @@ class MoomboxApp {
           this.renderJobs();
         }
         break;
-
-      case "job_added":
-        // Will be included in next jobs_update
-        break;
+      }
 
       case "log":
         this.addLog(message.payload);
@@ -896,8 +891,8 @@ class MoomboxApp {
         <div class="details-row">
           <span class="details-label">Time Range:</span>
           <span class="details-value">
-            ${this.formatDurationSeconds(job.startTime || 0)} - ${job.endTime != null ? this.formatDurationSeconds(job.endTime) : "end"}
-            ${job.endTime != null && job.startTime != null ? ` (${this.formatDurationSeconds(job.endTime - job.startTime)})` : ""}
+            ${this.formatTimestamp(job.startTime || 0)} - ${job.endTime != null ? this.formatTimestamp(job.endTime) : "end"}
+            ${job.endTime != null && job.startTime != null ? ` (${this.formatTimestamp(job.endTime - job.startTime)})` : ""}
           </span>
         </div>
         ` : ""}
@@ -908,7 +903,7 @@ class MoomboxApp {
       <sl-details summary="Trims (${job.trims.length})" open class="details-section">
         <div class="trim-list">
           ${job.trims.map(trim => {
-            const range = `${this.formatDurationSeconds(trim.startTime)} - ${this.formatDurationSeconds(trim.endTime)}`;
+            const range = `${this.formatTimestamp(trim.startTime)} - ${this.formatTimestamp(trim.endTime)}`;
             const duration = `${Math.floor(trim.duration)}s`;
             const size = trim.fileSize ? this.formatBytes(trim.fileSize) : '?';
             return `
@@ -1204,7 +1199,14 @@ class MoomboxApp {
       || this.archivedJobs.find((j) => j.id === this.selectedJobId);
     if (!job) return;
     const url = job.url || `https://www.youtube.com/watch?v=${job.videoId}`;
-    window.open(url, "_blank");
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+        window.open(url, "_blank");
+      }
+    } catch {
+      // Invalid URL — ignore
+    }
   }
 
   async openJobFolder() {
@@ -1436,7 +1438,7 @@ class MoomboxApp {
     setTimeout(() => trimDialog.show(), 100);
   }
 
-  formatDurationSeconds(seconds) {
+  formatTimestamp(seconds) {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = Math.floor(seconds % 60);

@@ -57,7 +57,7 @@ export class Muxer {
     await fs.ensureDir(path.dirname(normalizedOutputPath));
 
     // Decide: codec copy (fast but imprecise) vs re-encode (precise)
-    const hasTrim = trimOptions?.trimStartOffset || trimOptions?.trimDuration;
+    const hasTrim = (trimOptions?.trimStartOffset != null && trimOptions.trimStartOffset > 0) || (trimOptions?.trimDuration != null && trimOptions.trimDuration > 0);
     const usePrecise =
       trimOptions?.usePreciseTrim !== false && hasTrim &&
       (trimOptions?.crf != null || trimOptions?.videoBitrate || trimOptions?.audioBitrate);
@@ -183,20 +183,20 @@ export class Muxer {
   ): string[] {
     const args = ["-y"];
 
-    if (trimOptions.trimStartOffset && trimOptions.trimStartOffset > 0) {
+    if (trimOptions.trimStartOffset != null && trimOptions.trimStartOffset > 0) {
       args.push("-ss", String(trimOptions.trimStartOffset));
     }
 
     args.push("-i", videoPath);
 
     if (audioPath) {
-      if (trimOptions.trimStartOffset && trimOptions.trimStartOffset > 0) {
+      if (trimOptions.trimStartOffset != null && trimOptions.trimStartOffset > 0) {
         args.push("-ss", String(trimOptions.trimStartOffset));
       }
       args.push("-i", audioPath);
     }
 
-    if (trimOptions.trimDuration && trimOptions.trimDuration > 0) {
+    if (trimOptions.trimDuration != null && trimOptions.trimDuration > 0) {
       args.push("-t", String(trimOptions.trimDuration));
     }
 

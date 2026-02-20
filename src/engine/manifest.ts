@@ -1,6 +1,5 @@
 import { XMLParser } from "fast-xml-parser";
 import { Logger } from "../core/logger.js";
-// import { Parser } from 'm3u8-parser'; // Types issues usually, better to just regex or use a simpler parser for HLS
 
 export interface DashSegment {
   t?: number;
@@ -34,6 +33,20 @@ export interface SegmentRange {
   trimStartOffset: number;
   /** Total duration to keep from the trimmed start (seconds), or 0 for no limit */
   trimDuration: number;
+}
+
+export interface ParsedHlsVariant {
+  bandwidth: number;
+  width: number;
+  height: number;
+  codecs: string;
+  url: string;
+}
+
+export interface ParsedHlsSegment {
+  duration: number;
+  url: string;
+  discontinuity: number;
 }
 
 export class ManifestParser {
@@ -96,8 +109,8 @@ export class ManifestParser {
     const periodSegments: DashSegment[] = [];
 
     if (periodSegmentList) {
-      periodStartNumber = parseInt(periodSegmentList["@_startNumber"] || "0");
-      periodTimescale = parseInt(periodSegmentList["@_timescale"] || "1000");
+      periodStartNumber = parseInt(periodSegmentList["@_startNumber"] || "0", 10);
+      periodTimescale = parseInt(periodSegmentList["@_timescale"] || "1000", 10);
 
       // Parse SegmentTimeline from Period-level SegmentList
       const timeline = periodSegmentList.SegmentTimeline;
@@ -105,9 +118,9 @@ export class ManifestParser {
         const sList = Array.isArray(timeline.S) ? timeline.S : [timeline.S];
         for (const s of sList) {
           periodSegments.push({
-            t: s["@_t"] ? parseInt(s["@_t"]) : undefined,
-            d: parseInt(s["@_d"]),
-            r: s["@_r"] ? parseInt(s["@_r"]) : undefined,
+            t: s["@_t"] ? parseInt(s["@_t"], 10) : undefined,
+            d: parseInt(s["@_d"], 10),
+            r: s["@_r"] ? parseInt(s["@_r"], 10) : undefined,
           });
         }
       }
@@ -155,8 +168,8 @@ export class ManifestParser {
         const codecs = rep["@_codecs"] || adaptSet["@_codecs"];
         const width = rep["@_width"];
         const height = rep["@_height"];
-        const bandwidth = parseInt(rep["@_bandwidth"]);
-        const itag = parseInt(rep["@_id"]);
+        const bandwidth = parseInt(rep["@_bandwidth"], 10);
+        const itag = parseInt(rep["@_id"], 10);
 
         // SegmentTemplate might be in Representation or AdaptationSet
         const segTemplate = rep.SegmentTemplate || adaptSet.SegmentTemplate;
@@ -209,8 +222,8 @@ export class ManifestParser {
           continue;
         }
 
-        const startNumber = parseInt(segTemplate["@_startNumber"] || "0");
-        const timescale = parseInt(segTemplate["@_timescale"] || "1000");
+        const startNumber = parseInt(segTemplate["@_startNumber"] || "0", 10);
+        const timescale = parseInt(segTemplate["@_timescale"] || "1000", 10);
         let initialization = segTemplate["@_initialization"];
         let mediaTemplate = segTemplate["@_media"]; // "sq/$Number$" or similar
 
@@ -231,9 +244,9 @@ export class ManifestParser {
           const sList = Array.isArray(timeline.S) ? timeline.S : [timeline.S];
           for (const s of sList) {
             segments.push({
-              t: s["@_t"] ? parseInt(s["@_t"]) : undefined,
-              d: parseInt(s["@_d"]),
-              r: s["@_r"] ? parseInt(s["@_r"]) : undefined,
+              t: s["@_t"] ? parseInt(s["@_t"], 10) : undefined,
+              d: parseInt(s["@_d"], 10),
+              r: s["@_r"] ? parseInt(s["@_r"], 10) : undefined,
             });
           }
         }
@@ -262,8 +275,8 @@ export class ManifestParser {
     baseUrl: string,
   ): {
     type: "master" | "media";
-    variants?: any[];
-    segments?: any[];
+    variants?: ParsedHlsVariant[];
+    segments?: ParsedHlsSegment[];
     targetDuration?: number;
     mediaSequence?: number;
     endList?: boolean;
@@ -272,8 +285,8 @@ export class ManifestParser {
     const lines = m3u8Content.split("\n");
 
     let isMaster = false;
-    const variants: any[] = [];
-    const segments: any[] = [];
+    const variants: ParsedHlsVariant[] = [];
+    const segments: ParsedHlsSegment[] = [];
     let targetDuration = 0;
     let mediaSequence = 0;
     let endList = false;
@@ -297,9 +310,9 @@ export class ManifestParser {
           }
 
           variants.push({
-            bandwidth: bandwidthMatch ? parseInt(bandwidthMatch[1]) : 0,
-            width: resMatch ? parseInt(resMatch[1]) : 0,
-            height: resMatch ? parseInt(resMatch[2]) : 0,
+            bandwidth: bandwidthMatch ? parseInt(bandwidthMatch[1], 10) : 0,
+            width: resMatch ? parseInt(resMatch[1], 10) : 0,
+            height: resMatch ? parseInt(resMatch[2], 10) : 0,
             codecs: codecsMatch ? codecsMatch[1] : "",
             url: url,
           });
@@ -308,9 +321,9 @@ export class ManifestParser {
       } else if (line.startsWith("#EXT-X-TARGETDURATION:")) {
         targetDuration = parseFloat(line.split(":")[1]);
       } else if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
-        mediaSequence = parseInt(line.split(":")[1]);
+        mediaSequence = parseInt(line.split(":")[1], 10);
       } else if (line.startsWith("#EXT-X-DISCONTINUITY-SEQUENCE:")) {
-        discontinuitySequence = parseInt(line.split(":")[1]);
+        discontinuitySequence = parseInt(line.split(":")[1], 10);
       } else if (line === "#EXT-X-DISCONTINUITY") {
         currentDiscontinuity++;
       } else if (line === "#EXT-X-ENDLIST") {
@@ -418,8 +431,8 @@ export class ManifestParser {
         cumulativeTime += segDuration;
         segIdx++;
 
-        // Safety: don't scan beyond a reasonable limit for estimated durations
-        if (useEstimate && segIdx > 100_000) {
+        // Safety: don't scan beyond a reasonable limit
+        if (segIdx > 100_000) {
           startSegment = stream.startNumber + segIdx;
           trimStartOffset = 0;
           break;
@@ -442,7 +455,8 @@ export class ManifestParser {
         }
         segIdx++;
 
-        if (useEstimate && segIdx > 100_000) {
+        // Safety: don't scan beyond a reasonable limit
+        if (segIdx > 100_000) {
           endSegment = stream.startNumber + segIdx;
           break;
         }

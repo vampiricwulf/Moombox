@@ -165,17 +165,14 @@ async function runSegmentDownloadersImpl(
     );
   }, PROGRESS_PERSIST_INTERVAL_MS);
 
-  // Track segment gaps
+  // Track segment gaps — accumulate locally to avoid read-modify-write races
+  const localGaps: Array<{ from: number; to: number; stream: "video" | "audio" }> = [];
   const gapHandler = (stream: "video" | "audio") => (gap: { from: number; to: number }) => {
     logger.warn(`[DownloadOrchestrator] ${stream} segment gap: seq ${gap.from}–${gap.to}`);
-    db.getJob(job.id).then((j) => {
-      if (!j) return;
-      const gaps = j.gaps || [];
-      gaps.push({ ...gap, stream });
-      db.updateJob(job.id, { gaps }).catch((e: unknown) =>
-        logger.debug(`[DownloadOrchestrator] Gap update failed: ${getErrorMessage(e)}`),
-      );
-    }).catch(() => {});
+    localGaps.push({ ...gap, stream });
+    db.updateJob(job.id, { gaps: [...localGaps] }).catch((e: unknown) =>
+      logger.debug(`[DownloadOrchestrator] Gap update failed: ${getErrorMessage(e)}`),
+    );
   };
 
   if (videoDl) {
@@ -208,8 +205,8 @@ async function runSegmentDownloadersImpl(
   if (audioDl) promises.push(audioDl.start().finally(() => activeSegmentDownloaders.delete(audioDl!)));
   if (startChat && chatDl)
     promises.push(
-      chatDl.start().catch((e) => {
-        logger.warn(`[Chat] Chat download error: ${e.message}`);
+      chatDl.start().catch((e: unknown) => {
+        logger.warn(`[Chat] Chat download error: ${getErrorMessage(e)}`);
       }),
     );
   await Promise.all(promises);

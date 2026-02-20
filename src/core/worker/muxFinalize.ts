@@ -44,7 +44,7 @@ export async function muxAndFinalize(
 
   // "Muxing Starting" notification
   {
-    const freshJob = (await db.getJobs()).find(j => j.id === job.id);
+    const freshJob = await db.getJob(job.id);
     const muxFields: { name: string; value: string; inline?: boolean }[] = [];
     if (freshJob?.lastVideoSeq) muxFields.push({ name: "Video Segments", value: String(freshJob.lastVideoSeq), inline: true });
     if (freshJob?.lastAudioSeq) muxFields.push({ name: "Audio Segments", value: String(freshJob.lastAudioSeq), inline: true });
@@ -163,7 +163,7 @@ export async function muxAndFinalize(
     });
 
     // Build rich "Download Finished" notification
-    const finishedJob = (await db.getJobs()).find(j => j.id === job.id);
+    const finishedJob = await db.getJob(job.id);
     const finFields: { name: string; value: string; inline?: boolean }[] = [];
     finFields.push({ name: "File", value: finalFilename, inline: false });
 
@@ -244,7 +244,7 @@ export async function muxAndFinalize(
     await fs.remove(stagingDir);
   } catch (e: unknown) {
     // Don't mark as error if cancelled — the main execute() handler deals with that
-    if (e instanceof Error && e.name === "AbortError") {
+    if ((e instanceof Error && e.name === "AbortError") || signal?.aborted) {
       await fs.remove(finalPath).catch((cleanupErr: unknown) => logger.debug(`[DownloadOrchestrator] Cleanup failed: ${getErrorMessage(cleanupErr)}`));
       throw e;
     }

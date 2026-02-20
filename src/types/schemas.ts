@@ -73,7 +73,7 @@ export const safePathSchema = z
   .string()
   .min(1)
   .refine(
-    (path) => !path.includes("..") && !path.startsWith("/") && !path.startsWith("\\"),
+    (path) => !path.includes("..") && !path.startsWith("/") && !path.startsWith("\\") && !/^[A-Za-z]:/.test(path),
     "Path cannot contain .. or be absolute"
   );
 
@@ -139,14 +139,6 @@ export type AddTwitchJobRequest = z.infer<typeof addTwitchJobSchema>;
 /**
  * GET /api/jobs - List jobs with pagination
  */
-export const listJobsQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(1000).default(100),
-  offset: z.coerce.number().int().min(0).default(0),
-  status: z.string().optional(), // Comma-separated status filters
-});
-
-export type ListJobsQuery = z.infer<typeof listJobsQuerySchema>;
-
 // ============================================================================
 // Trim Routes Schemas
 // ============================================================================
@@ -282,36 +274,6 @@ export const addChannelSchema = z.union([addTwitchChannelSchema, addYouTubeChann
 export type AddChannelRequest = z.infer<typeof addChannelSchema>;
 
 // ============================================================================
-// Import Routes Schemas
-// ============================================================================
-
-/**
- * POST /api/import - Import archive headers
- */
-export const importHeadersSchema = z.object({
-  "X-Import-Title": z.string().max(500).optional(),
-  "X-Import-Channel": z.string().max(500).optional(),
-});
-
-export type ImportHeaders = z.infer<typeof importHeadersSchema>;
-
-// ============================================================================
-// POT Routes Schemas
-// ============================================================================
-
-/**
- * POST /get_pot - Generate PO token
- */
-export const getPotSchema = z.object({
-  content_binding: z.string().optional(),
-  // Deprecated parameters that should be rejected
-  data_sync_id: z.never().optional(),
-  visitor_data: z.never().optional(),
-});
-
-export type GetPotRequest = z.infer<typeof getPotSchema>;
-
-// ============================================================================
 // Auth Routes Schemas
 // ============================================================================
 
@@ -346,23 +308,6 @@ export type RemovePasswordRequest = z.infer<typeof removePasswordSchema>;
 // ============================================================================
 // Validation Helper Functions
 // ============================================================================
-
-/**
- * Validates request body against schema and returns result
- * @param schema Zod schema to validate against
- * @param data Data to validate
- * @returns Success with parsed data or error with validation errors
- */
-export function validateRequest<T>(
-  schema: z.ZodSchema<T>,
-  data: unknown
-): { success: true; data: T } | { success: false; errors: z.ZodIssue[] } {
-  const result = schema.safeParse(data);
-  if (result.success) {
-    return { success: true, data: result.data };
-  }
-  return { success: false, errors: result.error.issues };
-}
 
 /**
  * Formats Zod validation errors into user-friendly messages

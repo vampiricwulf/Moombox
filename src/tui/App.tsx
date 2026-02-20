@@ -19,7 +19,6 @@ import { FeedMonitor } from "../core/monitor.js";
 import { DecapiMonitor } from "../core/decapiMonitor.js";
 import { NotificationManager, NotificationType } from "../core/notifications.js";
 import { readClipboard } from "./clipboard.js";
-import { extractVideoId } from "../utils/youtube.js";
 import { getErrorMessage } from "../types/errors.js";
 
 type FocusPanel = "tasks" | "details" | "logs";
@@ -418,7 +417,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     // Open web dashboard in browser
     if (input === "w" || input === "W") {
       const port = process.env.MOOMBOX_PORT || String(ConfigManager.getInstance().get().port || 774);
-      const url = `https://localhost:${port}`;
+      const url = `http://localhost:${port}`;
       const [prog, args] = process.platform === "win32"
         ? ["explorer.exe", [url]]
         : [process.platform === "darwin" ? "open" : "xdg-open", [url]];

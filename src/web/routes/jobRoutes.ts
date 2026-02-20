@@ -23,7 +23,7 @@ import { TWITCH_URLS } from "../../constants.js";
 export interface JobRoutesContext {
   jobLogs: Map<string, string[]>;
   filterJobsByAge: (jobs: Job[], archived: boolean) => Job[];
-  broadcast: (message: { type: string; payload?: any }) => void;
+  broadcast: (message: { type: string; payload?: unknown }) => void;
   isLoopback: (ip: string) => boolean;
 }
 
@@ -165,12 +165,16 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       res.setHeader("Accept-Ranges", "bytes");
       res.setHeader("Content-Length", end - start + 1);
       res.setHeader("Content-Type", contentType);
-      fs.createReadStream(filePath, { start, end }).pipe(res);
+      const stream = fs.createReadStream(filePath, { start, end });
+      stream.on("error", () => { if (!res.headersSent) res.status(500).end(); });
+      stream.pipe(res);
     } else {
       res.setHeader("Content-Length", fileSize);
       res.setHeader("Content-Type", contentType);
       res.setHeader("Accept-Ranges", "bytes");
-      fs.createReadStream(filePath).pipe(res);
+      const stream = fs.createReadStream(filePath);
+      stream.on("error", () => { if (!res.headersSent) res.status(500).end(); });
+      stream.pipe(res);
     }
   }));
 
@@ -205,7 +209,12 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     }
 
     const chatRaw = await fs.readFile(chatPath, "utf-8");
-    const chatData = JSON.parse(chatRaw);
+    let chatData: unknown;
+    try {
+      chatData = JSON.parse(chatRaw);
+    } catch {
+      return res.status(422).json({ error: "Chat file is corrupt or unreadable" });
+    }
     res.json(chatData);
   }));
 
@@ -378,7 +387,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
 
       if (job) {
         logger.info(`Added Twitch job: ${title} (${jobId})`);
-        ctx.broadcast({ type: "job_added", payload: job });
+        // job_added not needed — the DB's notifyJobsChange triggers a jobs_update broadcast
         NotificationManager.getInstance().send(
           "Twitch Video Added",
           `Manually added: ${title}`,
@@ -437,7 +446,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
 
       if (job) {
         logger.info(`Added job: ${title} (${videoId})`);
-        ctx.broadcast({ type: "job_added", payload: job });
+        // job_added not needed — the DB's notifyJobsChange triggers a jobs_update broadcast
 
         // Build notification fields with advanced options
         const fields: Array<{ name: string; value: string; inline?: boolean }> = [

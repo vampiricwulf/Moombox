@@ -28,6 +28,15 @@ const CODEC_PRIORITY = {
 } as const;
 
 /**
+ * Extract the codec string from a mimeType like "video/mp4; codecs=\"vp9\""
+ */
+function extractCodec(mimeType: string | undefined): string | undefined {
+  if (!mimeType) return undefined;
+  const match = mimeType.match(/codecs="?([^",]+)/);
+  return match?.[1];
+}
+
+/**
  * Score a codec based on priority list (higher = better)
  */
 function scoreCodec(codec: string | undefined, type: "video" | "audio"): number {
@@ -183,8 +192,8 @@ export class FormatSelector {
           }
 
           // Same fps — prefer better codec
-          const fCodecScore = scoreCodec(f.mimeType, "video");
-          const bestCodecScore = scoreCodec(bestVideo.mimeType, "video");
+          const fCodecScore = scoreCodec(extractCodec(f.mimeType), "video");
+          const bestCodecScore = scoreCodec(extractCodec(bestVideo.mimeType), "video");
 
           if (fCodecScore !== bestCodecScore) {
             if (fCodecScore > bestCodecScore) bestVideo = f;
@@ -211,8 +220,8 @@ export class FormatSelector {
           continue;
         }
 
-        const fCodecScore = scoreCodec(f.mimeType, "audio");
-        const bestCodecScore = scoreCodec(bestAudio.mimeType, "audio");
+        const fCodecScore = scoreCodec(extractCodec(f.mimeType), "audio");
+        const bestCodecScore = scoreCodec(extractCodec(bestAudio.mimeType), "audio");
 
         if (fCodecScore !== bestCodecScore) {
           if (fCodecScore > bestCodecScore) bestAudio = f;
@@ -245,38 +254,4 @@ export class FormatSelector {
     return { video: bestVideo, audio: bestAudio };
   }
 
-  /**
-   * Filter formats to only those with direct URLs
-   */
-  filterWithUrls(formats: Format[]): Format[] {
-    return formats.filter((f) => !!f.url);
-  }
-
-  /**
-   * Get video formats only
-   */
-  getVideoFormats(formats: Format[]): Format[] {
-    return formats.filter((f) => f.mimeType?.includes("video") && f.url);
-  }
-
-  /**
-   * Get audio formats only
-   */
-  getAudioFormats(formats: Format[]): Format[] {
-    return formats.filter((f) => f.mimeType?.includes("audio") && f.url);
-  }
-
-  /**
-   * Sort formats by quality (best first)
-   */
-  sortByQuality(formats: Format[]): Format[] {
-    return [...formats].sort((a, b) => {
-      // Video: sort by resolution then bitrate
-      if (a.height && b.height) {
-        if (a.height !== b.height) return b.height - a.height;
-      }
-      // Audio or same resolution: sort by bitrate
-      return b.bitrate - a.bitrate;
-    });
-  }
 }

@@ -24,14 +24,6 @@ export const USER_AGENTS = {
 } as const;
 
 /**
- * Default HTTP headers
- */
-export const DEFAULT_HEADERS = {
-  "Accept-Language": "en-US,en;q=0.9",
-  Accept: "*/*",
-} as const;
-
-/**
  * YouTube API base URLs
  */
 export const YOUTUBE_URLS = {
@@ -182,16 +174,6 @@ export const TWITCH_IRC = {
 export const DOWNLOAD_CHUNK_SIZE = 5 * 1024 * 1024;
 
 /**
- * Maximum retry attempts for downloads
- */
-export const MAX_DOWNLOAD_RETRIES = 3;
-
-/**
- * Delay between retries (ms)
- */
-export const RETRY_DELAY_MS = 2_000;
-
-/**
  * Download timeout (ms)
  */
 export const DOWNLOAD_TIMEOUT_MS = 30_000;
@@ -242,71 +224,6 @@ export const STREAM_SEGMENT_TIMEOUT_MS = 10 * 60_000;
  * to confirm stream status when no segments are being received (5 minutes)
  */
 export const STREAM_END_VERIFY_INTERVAL_MS = 5 * 60_000;
-
-// =============================================================================
-// COOKIE REFRESH CONSTANTS
-// =============================================================================
-
-/**
- * Cookie refresh interval (30 minutes)
- */
-export const COOKIE_REFRESH_INTERVAL_MS = 30 * 60_000;
-
-// =============================================================================
-// LOGGING CONSTANTS
-// =============================================================================
-
-/**
- * Default log file size limit (10 MB)
- */
-export const DEFAULT_LOG_MAX_SIZE = 10 * 1024 * 1024;
-
-/**
- * Default number of log files to keep
- */
-export const DEFAULT_LOG_MAX_FILES = 5;
-
-// =============================================================================
-// TUI CONSTANTS
-// =============================================================================
-
-/**
- * Maximum visible jobs in the TUI
- */
-export const MAX_VISIBLE_JOBS = 10;
-
-/**
- * Maximum visible log lines in the TUI
- */
-export const MAX_VISIBLE_LOGS = 6;
-
-/**
- * Job details log limit
- */
-export const MAX_JOB_LOGS = 100;
-
-// =============================================================================
-// DATABASE CONSTANTS
-// =============================================================================
-
-/**
- * Default days to show finished jobs
- */
-export const DEFAULT_HIDE_FINISHED_DAYS = 7;
-
-// =============================================================================
-// FEED MONITOR CONSTANTS
-// =============================================================================
-
-/**
- * Default feed check interval (5 minutes)
- */
-export const FEED_CHECK_INTERVAL_MS = 5 * 60_000;
-
-/**
- * Default max feed items to process
- */
-export const DEFAULT_MAX_FEED_ITEMS = 15;
 
 // =============================================================================
 // DECAPI CONSTANTS

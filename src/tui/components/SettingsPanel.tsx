@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from "react";
 import { Box, Text, useInput } from "ink";
 import { ConfigManager, type NormalizedConfig } from "../../core/config.js";
-import type { ChannelConfig, NotificationConfig } from "../../types/config.js";
+import type { ChannelConfig, NotificationConfig, MoomboxConfig } from "../../types/config.js";
 import { Logger } from "../../core/logger.js";
 import { DownloadWorker } from "../../core/worker/index.js";
 import { ChannelEditor } from "./ChannelEditor.js";
@@ -218,7 +218,7 @@ export function SettingsPanel({ width, height, onClose }: SettingsPanelProps): R
     };
 
     try {
-      await ConfigManager.getInstance().save(newConfig as any);
+      await ConfigManager.getInstance().save(newConfig as unknown as MoomboxConfig);
 
       // Hot-reload runtime settings
       Logger.getInstance().refreshLogLevel();

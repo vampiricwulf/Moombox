@@ -317,10 +317,6 @@ export class ChatDownloader extends EventEmitter {
               );
             }
 
-            // Prune seenIds to prevent unbounded growth on long streams
-            if (this.seenIds.size > LIMITS.CHAT_MESSAGES_FLUSH_THRESHOLD) {
-              this.seenIds = new Set(this.messages.slice(-LIMITS.CHAT_MESSAGES_FLUSH_THRESHOLD).map(m => m.id));
-            }
           }
         }
 

@@ -322,7 +322,7 @@ export class TrimService {
       if (!stream) return DEFAULT_AUDIO_BITRATE;
 
       // bit_rate is in bps, convert to kbps
-      const bps = parseInt(stream.bit_rate);
+      const bps = parseInt(stream.bit_rate, 10);
       if (bps > 0) {
         const kbps = Math.round(bps / 1000);
         Logger.getInstance().debug(

@@ -96,6 +96,13 @@ export class AuthService {
   }
 
   /**
+   * Invalidate a single session by token.
+   */
+  invalidateSession(token: string): void {
+    this.sessions.delete(token);
+  }
+
+  /**
    * Invalidate all sessions (called on password change/removal).
    */
   invalidateAllSessions(): void {

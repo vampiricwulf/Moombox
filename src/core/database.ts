@@ -34,6 +34,8 @@ export class Database {
   private batchTimer: NodeJS.Timeout | null = null;
   private static readonly BATCH_WINDOW_MS = 100; // 100ms throttle for job update broadcasts
 
+  private dbFilePath: string;
+
   private constructor() {
     let file = path.join(process.cwd(), "moombox.json");
     try {
@@ -45,6 +47,7 @@ export class Database {
       // Config might not be loaded yet if testing separately, fallback to default
     }
 
+    this.dbFilePath = file;
     const adapter = new JSONFile<Data>(file);
     this.db = new Low(adapter, { jobs: [], history: [] });
   }
@@ -111,9 +114,8 @@ export class Database {
   private async writeWithPermissions(): Promise<void> {
     await this.db.write();
     // Set owner-only permissions (0o600) for security
-    const filename = (this.db.adapter as any).filename;
-    if (filename) {
-      await fs.chmod(filename, 0o600);
+    if (this.dbFilePath) {
+      await fs.chmod(this.dbFilePath, 0o600);
     }
   }
 
@@ -179,7 +181,7 @@ export class Database {
   }
 
   async jobExists(videoId: string): Promise<boolean> {
-    return this.db.data.jobs.some((j) => j.id === videoId);
+    return this.jobsMap.has(videoId);
   }
 
   /**
@@ -187,14 +189,9 @@ export class Database {
    * For high-frequency progress updates where persistence can be deferred.
    */
   updateJobLive(id: string, updates: Partial<Job>): void {
-    const sanitized = { ...updates };
-    delete (sanitized as any).__proto__;
-    delete (sanitized as any).constructor;
-    delete (sanitized as any).prototype;
-
     const job = this.jobsMap.get(id);
     if (!job) return;
-    Object.assign(job, { ...sanitized, updatedAt: new Date().toISOString() });
+    Object.assign(job, { ...updates, updatedAt: new Date().toISOString() });
     this.notifyJobUpdate(job);
   }
 
@@ -209,15 +206,9 @@ export class Database {
   }
 
   async updateJob(id: string, updates: Partial<Job>) {
-    // Sanitize updates to prevent prototype pollution
-    const sanitized = { ...updates };
-    delete (sanitized as any).__proto__;
-    delete (sanitized as any).constructor;
-    delete (sanitized as any).prototype;
-
     // Merge updates into pending batch
     const existing = this.updateBatch.get(id) || {};
-    this.updateBatch.set(id, { ...existing, ...sanitized });
+    this.updateBatch.set(id, { ...existing, ...updates });
 
     // Schedule batch flush after quiescence window
     if (this.batchTimer) clearTimeout(this.batchTimer);
@@ -299,7 +290,7 @@ export class Database {
   }
 
   private notifyJobsChange() {
-    const jobs = this.db.data.jobs;
+    const jobs = [...this.db.data.jobs];
     for (const listener of this.jobsChangeListeners) {
       try {
         listener(jobs);

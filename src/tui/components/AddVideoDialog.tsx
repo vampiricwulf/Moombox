@@ -15,7 +15,7 @@
  * 3. Uploading (reads file, POSTs to /api/import)
  */
 
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import fs from "fs-extra";
 import path from "path";
@@ -106,6 +106,14 @@ export function AddVideoDialog({
   const [importMetaFocus, setImportMetaFocus] = useState<"title" | "channel">("title");
 
   const logger = Logger.getInstance();
+  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup error auto-advance timer on unmount
+  useEffect(() => {
+    return () => {
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    };
+  }, []);
 
   // Reset error on input change
   useEffect(() => {
@@ -188,7 +196,7 @@ export function AddVideoDialog({
       setFormats(null);
       setLoading(false);
       // Auto-advance after showing error
-      setTimeout(() => {
+      errorTimerRef.current = setTimeout(() => {
         setStep(4); // Skip to confirmation
         setAdvancedMode(false);
       }, 2_000);
