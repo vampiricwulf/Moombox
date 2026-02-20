@@ -27,6 +27,8 @@ interface RateLimitState {
   resetAt: number;
 }
 
+type DecapiEndpoint = "youtube" | "twitch";
+
 export class DecapiMonitor {
   private static instance: DecapiMonitor | null = null;
 
@@ -36,11 +38,8 @@ export class DecapiMonitor {
   private abortController: AbortController | null = null;
   private logger: Logger;
   private metadataFailures: Map<string, number> = new Map();
-  private rateLimit: RateLimitState = {
-    limit: DECAPI_DEFAULT_RATE_LIMIT,
-    remaining: DECAPI_DEFAULT_RATE_LIMIT,
-    resetAt: 0,
-  };
+  /** Per-endpoint rate limit state (YouTube and Twitch may have separate buckets). */
+  private rateLimits: Map<DecapiEndpoint, RateLimitState> = new Map();
 
   /** Epoch ms of the next scheduled check. 0 = not scheduled. */
   public nextCheckAt = 0;
@@ -50,6 +49,20 @@ export class DecapiMonitor {
 
   private constructor() {
     this.logger = Logger.getInstance();
+  }
+
+  /** Get or create rate limit state for an endpoint. */
+  private getRateLimit(endpoint: DecapiEndpoint): RateLimitState {
+    let rl = this.rateLimits.get(endpoint);
+    if (!rl) {
+      rl = {
+        limit: DECAPI_DEFAULT_RATE_LIMIT,
+        remaining: DECAPI_DEFAULT_RATE_LIMIT,
+        resetAt: 0,
+      };
+      this.rateLimits.set(endpoint, rl);
+    }
+    return rl;
   }
 
   static getInstance(): DecapiMonitor {
@@ -112,8 +125,10 @@ export class DecapiMonitor {
     for (const channel of channels) {
       if (!this.running) break;
 
+      const endpoint: DecapiEndpoint = channel.platform === "twitch" ? "twitch" : "youtube";
+
       // Check rate limit — pause if exhausted
-      await this.waitForRateLimit();
+      await this.waitForRateLimit(endpoint);
       if (!this.running) break;
 
       try {
@@ -145,7 +160,7 @@ export class DecapiMonitor {
     db: Database,
   ): Promise<void> {
     const url = `${DECAPI_URLS.YOUTUBE_LATEST}?id=${channel.id}`;
-    const response = await this.fetchDecapi(url);
+    const response = await this.fetchDecapi(url, "youtube");
     if (!response) return;
 
     const text = (await response.text()).trim();
@@ -206,7 +221,7 @@ export class DecapiMonitor {
   ): Promise<void> {
     const login = channel.id.toLowerCase();
     const url = `${DECAPI_URLS.TWITCH_UPTIME}/${login}`;
-    const response = await this.fetchDecapi(url);
+    const response = await this.fetchDecapi(url, "twitch");
     if (!response) return;
 
     const text = await response.text();
@@ -229,21 +244,31 @@ export class DecapiMonitor {
    * Uses raw fetch() (not fetchWithTimeout) so we can read headers on non-OK responses
    * and avoid auto-retrying 429s.
    */
-  private async fetchDecapi(url: string): Promise<Response | null> {
+  private async fetchDecapi(url: string, endpoint: DecapiEndpoint): Promise<Response | null> {
+    const rl = this.getRateLimit(endpoint);
+
     try {
       const response = await fetch(url, {
         headers: { "User-Agent": "Moombox/1.0" },
         signal: AbortSignal.timeout(DECAPI_REQUEST_TIMEOUT_MS),
       });
 
-      // Update rate limit state from headers
-      this.updateRateLimit(response.headers);
+      // Start a 1-minute rate limit window if none is active
+      if (rl.resetAt === 0) {
+        rl.resetAt = Date.now() + 60_000;
+      }
+
+      // Decrement locally first (covers the case where server omits headers)
+      rl.remaining = Math.max(0, rl.remaining - 1);
+
+      // Server headers override with authoritative count
+      this.updateRateLimit(response.headers, endpoint);
 
       if (response.status === 429) {
         const retryAfter = parseInt(response.headers.get("Retry-After") || "60", 10);
-        this.logger.warn(`[DECAPI] Rate limited (429). Retry after ${retryAfter}s`);
-        this.rateLimit.remaining = 0;
-        this.rateLimit.resetAt = Date.now() + retryAfter * 1000;
+        this.logger.warn(`[DECAPI] Rate limited (429) on ${endpoint}. Retry after ${retryAfter}s`);
+        rl.remaining = 0;
+        rl.resetAt = Date.now() + retryAfter * 1000;
         return null;
       }
 
@@ -261,47 +286,58 @@ export class DecapiMonitor {
     }
   }
 
-  /** Update internal rate limit state from response headers. */
-  private updateRateLimit(headers: Headers): void {
+  /** Update rate limit state from response headers (authoritative, overrides local tracking). */
+  private updateRateLimit(headers: Headers, endpoint: DecapiEndpoint): void {
+    const rl = this.getRateLimit(endpoint);
     const limit = headers.get("X-RateLimit-Limit");
     const remaining = headers.get("X-RateLimit-Remaining");
     const reset = headers.get("X-RateLimit-Reset");
 
     if (limit) {
       const parsed = parseInt(limit, 10);
-      if (!isNaN(parsed) && parsed > 0) this.rateLimit.limit = parsed;
+      if (!isNaN(parsed) && parsed > 0) rl.limit = parsed;
     }
     if (remaining) {
       const parsed = parseInt(remaining, 10);
-      if (!isNaN(parsed)) this.rateLimit.remaining = parsed;
+      if (!isNaN(parsed)) rl.remaining = parsed;
     }
     if (reset) {
       const parsed = parseInt(reset, 10);
       if (!isNaN(parsed)) {
         // Reset header can be epoch seconds or relative seconds
-        this.rateLimit.resetAt = parsed > 1e9 ? parsed * 1000 : Date.now() + parsed * 1000;
+        rl.resetAt = parsed > 1e9 ? parsed * 1000 : Date.now() + parsed * 1000;
       }
     }
   }
 
-  /** Wait if rate limit is exhausted. */
-  private async waitForRateLimit(): Promise<void> {
-    if (this.rateLimit.remaining > 0) return;
+  /** Wait if rate limit is exhausted for the given endpoint. */
+  private async waitForRateLimit(endpoint: DecapiEndpoint): Promise<void> {
+    const rl = this.getRateLimit(endpoint);
 
-    const waitMs = Math.max(0, this.rateLimit.resetAt - Date.now());
+    // Proactively reset if the rate limit window has expired
+    if (rl.resetAt > 0 && Date.now() >= rl.resetAt) {
+      rl.remaining = rl.limit;
+      rl.resetAt = 0;
+    }
+
+    if (rl.remaining > 0) return;
+
+    const waitMs = Math.max(0, rl.resetAt - Date.now());
     if (waitMs <= 0) {
-      // Reset window has passed, refresh
-      this.rateLimit.remaining = this.rateLimit.limit;
+      // Reset window has passed (or was never set), refresh
+      rl.remaining = rl.limit;
+      rl.resetAt = 0;
       return;
     }
 
-    this.logger.debug(`[DECAPI] Rate limit exhausted, waiting ${Math.ceil(waitMs / 1000)}s...`);
+    this.logger.debug(`[DECAPI] Rate limit exhausted for ${endpoint}, waiting ${Math.ceil(waitMs / 1000)}s...`);
     await this.sleep(waitMs);
-    this.rateLimit.remaining = this.rateLimit.limit;
+    rl.remaining = rl.limit;
+    rl.resetAt = 0;
   }
 
-  /** Calculate interval for next cycle. */
-  private calculateInterval(channelCount: number): number {
+  /** Calculate interval for next cycle based on per-endpoint rate limits. */
+  private calculateInterval(channels: ChannelConfig[]): number {
     const config = ConfigManager.getInstance().get();
 
     // Manual override from config (in seconds)
@@ -309,10 +345,18 @@ export class DecapiMonitor {
       return config.decapi_check_interval * 1000;
     }
 
-    // Dynamic: ensure we can check all channels within the rate limit window
-    // interval = max(15, ceil(channelCount / ratePerMinute * 60)) seconds
-    const ratePerMinute = this.rateLimit.limit;
-    const dynamicSeconds = Math.ceil((channelCount / ratePerMinute) * 60);
+    // Count calls per endpoint
+    const ytCount = channels.filter((c) => c.platform !== "twitch").length;
+    const twCount = channels.filter((c) => c.platform === "twitch").length;
+
+    // Each endpoint's interval: ceil(calls / ratePerMinute * 60) seconds
+    const ytRl = this.getRateLimit("youtube");
+    const twRl = this.getRateLimit("twitch");
+    const ytSeconds = ytCount > 0 ? Math.ceil((ytCount / ytRl.limit) * 60) : 0;
+    const twSeconds = twCount > 0 ? Math.ceil((twCount / twRl.limit) * 60) : 0;
+
+    // Use the most constrained endpoint
+    const dynamicSeconds = Math.max(ytSeconds, twSeconds);
     return Math.max(DECAPI_MIN_INTERVAL_MS, dynamicSeconds * 1000);
   }
 
@@ -321,13 +365,16 @@ export class DecapiMonitor {
 
     const config = ConfigManager.getInstance().get();
     const channels = (config.channels || []).filter((c) => c.enabled !== false);
-    const intervalMs = this.calculateInterval(channels.length);
+    const intervalMs = this.calculateInterval(channels);
 
     this.nextCheckAt = Date.now() + intervalMs;
     this.timer = setTimeout(() => this.runCycle(), intervalMs);
 
+    const ytRl = this.getRateLimit("youtube");
+    const twRl = this.getRateLimit("twitch");
     this.logger.debug(
-      `[DECAPI] Next cycle in ${Math.round(intervalMs / 1000)}s (${channels.length} channels, rate limit: ${this.rateLimit.remaining}/${this.rateLimit.limit})`,
+      `[DECAPI] Next cycle in ${Math.round(intervalMs / 1000)}s (${channels.length} channels, ` +
+      `YT: ${ytRl.remaining}/${ytRl.limit}, TW: ${twRl.remaining}/${twRl.limit})`,
     );
 
     this.onSchedule?.();
