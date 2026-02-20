@@ -121,7 +121,7 @@ export const addTwitchJobSchema = z.object({
   platform: z.literal("twitch"),
   videoId: z.string().min(1),  // channel login or VOD ID
   twitchType: z.enum(["channel", "vod"]).default("channel"),
-  qualityPreference: twitchQualitySchema.optional(),
+  quality_preference: twitchQualitySchema.optional(),
 });
 
 /**
@@ -241,7 +241,7 @@ export const updateConfigSchema = z.object({
     output_directory: z.string().optional(),
     include_non_live_content: z.boolean().optional(),
     max_feed_items: z.number().int().min(1).max(100).optional(),
-    qualityPreference: twitchQualitySchema.optional(),
+    quality_preference: twitchQualitySchema.optional(),
   })).optional(),
 });
 
@@ -270,7 +270,7 @@ export const addTwitchChannelSchema = z.object({
   name: z.string().optional(),    // Display name override
   terms: z.union([z.string(), z.record(z.string(), z.string())]).optional(),
   output_directory: z.string().optional(),
-  qualityPreference: twitchQualitySchema.optional(),
+  quality_preference: twitchQualitySchema.optional(),
 });
 
 /**

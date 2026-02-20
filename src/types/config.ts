@@ -18,7 +18,7 @@ export interface ChannelConfig {
   include_non_live_content?: boolean;
   max_feed_items?: number;
   /** Twitch-specific: quality preference for HLS recording */
-  qualityPreference?: "best" | "720p" | "480p" | "audio_only";
+  quality_preference?: "best" | "720p" | "480p" | "audio_only";
 }
 
 /**

@@ -454,7 +454,7 @@ export class SettingsController {
             : ""
         }
         ${ch.include_non_live_content ? '<sl-badge variant="neutral">Include VODs</sl-badge>' : ""}
-        ${isTwitch && ch.qualityPreference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.qualityPreference)}</sl-badge>` : ""}
+        ${isTwitch && ch.quality_preference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.quality_preference)}</sl-badge>` : ""}
       </div>
     `;
         },
@@ -492,7 +492,7 @@ export class SettingsController {
     // Twitch quality preference
     const qualitySelect = document.getElementById("channel-quality-select");
     if (qualitySelect) {
-      qualitySelect.value = channel?.qualityPreference || "best";
+      qualitySelect.value = channel?.quality_preference || "best";
     }
 
     const dialog = document.getElementById("add-channel-dialog");
@@ -570,7 +570,7 @@ export class SettingsController {
       const qualitySelect = document.getElementById("channel-quality-select");
       const quality = qualitySelect ? qualitySelect.value : "best";
       if (quality !== "best") {
-        channel.qualityPreference = quality;
+        channel.quality_preference = quality;
       }
     }
 

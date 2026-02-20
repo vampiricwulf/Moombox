@@ -308,7 +308,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
     // Branch on platform
     if ("platform" in data && data.platform === "twitch") {
       // --- Twitch job ---
-      const twitchData = data as { platform: "twitch"; videoId: string; twitchType?: string; qualityPreference?: string };
+      const twitchData = data as { platform: "twitch"; videoId: string; twitchType?: string; quality_preference?: string };
       const login = twitchData.videoId.toLowerCase();
       const isVod = twitchData.twitchType === "vod";
 
@@ -373,7 +373,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
         isVod: isVod || undefined,
         streamStartTime,
         twitchCategory,
-        twitchQuality: twitchData.qualityPreference,
+        twitchQuality: twitchData.quality_preference,
       });
 
       if (job) {

@@ -231,14 +231,7 @@ export class ConfigManager {
           defaults.auto_cookies?.platforms,
       },
       notifications: config.notifications,
-      // Normalize channel configs (TOML snake_case → camelCase)
-      channels: config.channels?.map((ch: any) => {
-        const { quality_preference, ...rest } = ch;
-        return {
-          ...rest,
-          qualityPreference: ch.qualityPreference || quality_preference,
-        };
-      }),
+      channels: config.channels,
     };
   }
 
@@ -368,16 +361,6 @@ export class ConfigManager {
   private configToToml(config: MoomboxConfig): string {
     // Strip undefined values (TOML has no null/undefined)
     const clean = JSON.parse(JSON.stringify(config));
-
-    // Transform camelCase → snake_case for TOML serialization
-    if (clean.channels) {
-      for (const ch of clean.channels) {
-        if (ch.qualityPreference) {
-          ch.quality_preference = ch.qualityPreference;
-          delete ch.qualityPreference;
-        }
-      }
-    }
 
     return stringifyToml(clean) + "\n";
   }

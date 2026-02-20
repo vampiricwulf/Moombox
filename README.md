@@ -112,7 +112,7 @@ enabled = true                        # Toggle monitoring on/off (default: true)
 id = "channelname"                    # Twitch login name
 name = "Channel Name"
 platform = "twitch"                   # Required for Twitch channels
-qualityPreference = "best"            # "best", "720p", "480p", or "audio_only"
+quality_preference = "best"            # "best", "720p", "480p", or "audio_only"
 ```
 
 Template variables for `output_template`: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`

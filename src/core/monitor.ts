@@ -482,7 +482,7 @@ export class FeedMonitor {
       outputDirectory: channel.output_directory || config.downloader?.output_directory,
       streamStartTime: streamInfo.startedAt,
       twitchCategory: streamInfo.gameCategory,
-      twitchQuality: channel.qualityPreference,
+      twitchQuality: channel.quality_preference,
     });
 
     if (!newJob) {

@@ -3,7 +3,7 @@ import { Box, Text, useInput } from "ink";
 import type { ChannelConfig } from "../../types/config.js";
 import { readClipboard } from "../clipboard.js";
 
-type ChannelFieldKey = "id" | "name" | "platform" | "enabled" | "terms" | "include_non_live_content" | "qualityPreference";
+type ChannelFieldKey = "id" | "name" | "platform" | "enabled" | "terms" | "include_non_live_content" | "quality_preference";
 
 interface ChannelFieldDef {
   key: ChannelFieldKey;
@@ -22,7 +22,7 @@ const CHANNEL_FIELDS: ChannelFieldDef[] = [
   { key: "enabled", label: "Enabled", type: "toggle", options: ["Yes", "No"] },
   { key: "terms", label: "Filter regex", type: "text", help: "e.g. (?i)karaoke" },
   { key: "include_non_live_content", label: "Include non-live", type: "toggle", options: ["No", "Yes"], platformFilter: "youtube" },
-  { key: "qualityPreference", label: "Quality preference", type: "cycle", options: ["best", "720p", "480p", "audio_only"], platformFilter: "twitch" },
+  { key: "quality_preference", label: "Quality preference", type: "cycle", options: ["best", "720p", "480p", "audio_only"], platformFilter: "twitch" },
 ];
 
 function channelToValues(ch: ChannelConfig): Record<string, string> {
@@ -34,7 +34,7 @@ function channelToValues(ch: ChannelConfig): Record<string, string> {
     enabled: ch.enabled !== false ? "Yes" : "No",
     terms,
     include_non_live_content: ch.include_non_live_content ? "Yes" : "No",
-    qualityPreference: ch.qualityPreference || "best",
+    quality_preference: ch.quality_preference || "best",
   };
 }
 
@@ -50,7 +50,7 @@ function valuesToChannel(vals: Record<string, string>): ChannelConfig {
     ch.include_non_live_content = vals.include_non_live_content === "Yes" ? true : undefined;
   }
   if (vals.platform === "twitch") {
-    ch.qualityPreference = (vals.qualityPreference as ChannelConfig["qualityPreference"]) || undefined;
+    ch.quality_preference = (vals.quality_preference as ChannelConfig["quality_preference"]) || undefined;
   }
   return ch;
 }
@@ -103,7 +103,7 @@ export function ChannelEditor({ channels, onChange, focused, onModeChange }: Cha
       id: "", name: "", platform: "youtube",
       enabled: "Yes", terms: "",
       include_non_live_content: "No",
-      qualityPreference: "best",
+      quality_preference: "best",
     });
     setEditField(0);
     setSelectedIndex(channels.length); // Will be the new index
