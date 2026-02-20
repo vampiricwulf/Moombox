@@ -1,23 +1,30 @@
 /**
  * Multi-step wizard dialog for adding videos with advanced options.
  *
- * Flow:
- * 1. Enter URL/ID (Tab = toggle advanced mode, Enter = proceed)
+ * Flow (URL mode):
+ * 1. Enter URL/ID (Tab = cycle mode: URL → Import → URL, Enter = proceed)
  *    - UI turns lilac/magenta when advanced mode is enabled
  * 2. (Advanced) Select video format (numbered list, 'a' = auto, 'n' = none)
  * 3. (Advanced) Select audio format
  * 4. (Advanced) Timestamps - Start and End time combined (Tab = switch field)
  * 5. (Advanced) Confirmation
+ *
+ * Flow (Import mode):
+ * 1. Enter file path to .zip (Tab = cycle mode, Enter = validate + proceed)
+ * 2. Optional metadata (title + channel name)
+ * 3. Uploading (reads file, POSTs to /api/import)
  */
 
 import React, { useState, useCallback, useEffect } from "react";
 import { Box, Text, useInput } from "ink";
+import fs from "fs-extra";
+import path from "path";
 import { Database } from "../../core/database.js";
 import { Logger } from "../../core/logger.js";
 import { NotificationManager, NotificationType } from "../../core/notifications.js";
-import { extractVideoId } from "../../utils/youtube.js";
 import { extractMediaId } from "../../utils/mediaId.js";
 import { getErrorMessage } from "../../types/errors.js";
+
 import { parseTimeToSeconds, formatSecondsToTimestamp } from "../../core/worker/timeUtils.js";
 import { useMouse, MouseEvent as TuiMouseEvent } from "../hooks/useMouse.js";
 import { readClipboard } from "../clipboard.js";
@@ -63,6 +70,8 @@ interface FormatsData {
   };
 }
 
+type InputMode = "url" | "import";
+
 export function AddVideoDialog({
   width,
   height,
@@ -88,23 +97,61 @@ export function AddVideoDialog({
   const [startTimeInput, setStartTimeInput] = useState("");
   const [endTimeInput, setEndTimeInput] = useState("");
 
+  // Import mode state
+  const [inputMode, setInputMode] = useState<InputMode>("url");
+  const [importPath, setImportPath] = useState("");
+  const [importTitle, setImportTitle] = useState("");
+  const [importChannel, setImportChannel] = useState("");
+  const [importStep, setImportStep] = useState(0); // 0=path, 1=metadata, 2=uploading
+  const [importMetaFocus, setImportMetaFocus] = useState<"title" | "channel">("title");
+
   const logger = Logger.getInstance();
 
   // Reset error on input change
   useEffect(() => {
     if (error) setError(null);
-  }, [input, error]);
+  }, [input, importPath, error]);
 
   // Right-click paste
   useMouse({
     onMouseEvent: useCallback(
       (event: TuiMouseEvent) => {
         if (event.type === "click" && event.button === "right") {
-          if (step === 0 || step === 3 || step === 4) {
+          if (inputMode === "import") {
+            readClipboard().then((text) => {
+              if (text) {
+                const firstLine = text.split(/[\r\n]/)[0].trim();
+                if (firstLine) {
+                  if (importStep === 0) {
+                    setImportPath((prev) => prev + firstLine);
+                  } else if (importStep === 1) {
+                    if (importMetaFocus === "title") {
+                      setImportTitle((prev) => prev + firstLine);
+                    } else {
+                      setImportChannel((prev) => prev + firstLine);
+                    }
+                  }
+                }
+              }
+            });
+          } else if (step === 0) {
             readClipboard().then((text) => {
               if (text) {
                 const firstLine = text.split(/[\r\n]/)[0].trim();
                 if (firstLine) setInput((prev) => prev + firstLine);
+              }
+            });
+          } else if (step === 3) {
+            readClipboard().then((text) => {
+              if (text) {
+                const firstLine = text.split(/[\r\n]/)[0].trim();
+                if (firstLine) {
+                  if (timeInputFocus === "start") {
+                    setStartTimeInput((prev) => prev + firstLine);
+                  } else {
+                    setEndTimeInput((prev) => prev + firstLine);
+                  }
+                }
               }
             });
           }
@@ -119,7 +166,7 @@ export function AddVideoDialog({
           }
         }
       },
-      [step],
+      [step, inputMode, importStep, importMetaFocus, timeInputFocus],
     ),
   });
 
@@ -240,9 +287,63 @@ export function AddVideoDialog({
     }
   }, [videoId, url, platform, formats, selectedVideoItag, selectedAudioItag, startTime, endTime, onComplete, logger]);
 
+  const submitImport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const fileData = await fs.readFile(importPath);
+      const port = process.env.MOOMBOX_PORT || "774";
+      const headers: Record<string, string> = {
+        "Content-Type": "application/octet-stream",
+        "Origin": `http://127.0.0.1:${port}`,
+      };
+      if (importTitle.trim()) {
+        headers["X-Import-Title"] = importTitle.trim();
+      }
+      if (importChannel.trim()) {
+        headers["X-Import-Channel"] = importChannel.trim();
+      }
+
+      const res = await fetch(`http://127.0.0.1:${port}/api/import`, {
+        method: "POST",
+        headers,
+        body: fileData,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const title = data?.title || importTitle.trim() || path.basename(importPath, ".zip");
+        onComplete({ text: `Imported: ${title}`, color: "green" });
+      } else {
+        const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        setError(data.error || `Import failed (HTTP ${res.status})`);
+        setLoading(false);
+        setImportStep(1); // Go back to metadata step
+      }
+    } catch (e: unknown) {
+      const msg = getErrorMessage(e);
+      logger.error(`[AddVideoDialog] Import failed: ${msg}`);
+      setError(`Import failed: ${msg}`);
+      setLoading(false);
+      setImportStep(1); // Go back to metadata step
+    }
+  }, [importPath, importTitle, importChannel, onComplete, logger]);
+
   useInput((char, key) => {
     // Esc: go back or cancel
     if (key.escape) {
+      if (inputMode === "import") {
+        if (importStep > 0 && !loading) {
+          setImportStep((s) => s - 1);
+          setError(null);
+        } else if (importStep === 0) {
+          // Switch back to URL mode
+          setInputMode("url");
+          setError(null);
+        }
+        return;
+      }
       if (step === 0) {
         onCancel();
       } else {
@@ -252,11 +353,131 @@ export function AddVideoDialog({
       return;
     }
 
-    // Step 0: Enter URL/ID
+    // Import mode input handling
+    if (inputMode === "import") {
+      if (loading) return;
+
+      // Import step 0: File path input
+      if (importStep === 0) {
+        // Tab: switch back to URL mode
+        if (key.tab) {
+          setInputMode("url");
+          setError(null);
+          return;
+        }
+
+        if (key.return) {
+          const trimmedPath = importPath.trim();
+          if (!trimmedPath) {
+            setError("Please enter a file path");
+            return;
+          }
+          // Validate file exists and is .zip
+          const resolved = path.resolve(trimmedPath);
+          if (!resolved.toLowerCase().endsWith(".zip")) {
+            setError("File must be a .zip archive");
+            return;
+          }
+          fs.pathExists(resolved).then((exists) => {
+            if (!exists) {
+              setError("File not found");
+            } else {
+              setImportPath(resolved);
+              setImportStep(1);
+              setError(null);
+            }
+          });
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setImportPath((prev) => prev.slice(0, -1));
+          return;
+        }
+        if (key.ctrl && char === "v") {
+          readClipboard().then((text) => {
+            if (text) {
+              const firstLine = text.split(/[\r\n]/)[0].trim();
+              if (firstLine) setImportPath((prev) => prev + firstLine);
+            }
+          });
+          return;
+        }
+        if (char && !key.ctrl && !key.meta) {
+          if (char.charCodeAt(0) === 0x1b || char.charCodeAt(0) === 0x9b) return;
+          if (char.length > 1 && char[0] === "[") return;
+          setImportPath((prev) => prev + char);
+        }
+        return;
+      }
+
+      // Import step 1: Metadata
+      if (importStep === 1) {
+        if (key.tab) {
+          setImportMetaFocus((prev) => prev === "title" ? "channel" : "title");
+          return;
+        }
+        if (key.return) {
+          setImportStep(2);
+          // Trigger upload
+          submitImport();
+          return;
+        }
+        if (key.backspace || key.delete) {
+          if (importMetaFocus === "title") {
+            setImportTitle((prev) => prev.slice(0, -1));
+          } else {
+            setImportChannel((prev) => prev.slice(0, -1));
+          }
+          return;
+        }
+        if (key.ctrl && char === "v") {
+          readClipboard().then((text) => {
+            if (text) {
+              const firstLine = text.split(/[\r\n]/)[0].trim();
+              if (firstLine) {
+                if (importMetaFocus === "title") {
+                  setImportTitle((prev) => prev + firstLine);
+                } else {
+                  setImportChannel((prev) => prev + firstLine);
+                }
+              }
+            }
+          });
+          return;
+        }
+        if (char && !key.ctrl && !key.meta) {
+          if (char.charCodeAt(0) === 0x1b || char.charCodeAt(0) === 0x9b) return;
+          if (char.length > 1 && char[0] === "[") return;
+          if (importMetaFocus === "title") {
+            setImportTitle((prev) => prev + char);
+          } else {
+            setImportChannel((prev) => prev + char);
+          }
+        }
+        return;
+      }
+
+      // Import step 2: Uploading — no input accepted
+      return;
+    }
+
+    // URL mode: Step 0: Enter URL/ID
     if (step === 0) {
-      // Tab: toggle advanced mode directly
+      // Tab: cycle mode (URL → Advanced URL → Import → URL)
       if (key.tab) {
-        setAdvancedEnabled((prev) => !prev);
+        if (!advancedEnabled) {
+          setAdvancedEnabled(true);
+        } else {
+          setAdvancedEnabled(false);
+          setInputMode("import");
+          setError(null);
+        }
+        return;
+      }
+
+      // Ctrl+I: Toggle advanced options (may not fire in all terminals — same as Tab)
+      if (key.ctrl && char === "i") {
+        setAdvancedEnabled(prev => !prev);
         return;
       }
 
@@ -301,11 +522,8 @@ export function AddVideoDialog({
           setAdvancedMode(true);
           setStep(1);
           fetchFormats(vid);
-        } else {
-          // Quick add: submit immediately with auto settings
-          setAdvancedMode(false);
-          setTimeout(() => submitJob(), 100);
         }
+        // Non-advanced: useEffect fires submitJob() when videoId is set
         return;
       }
       if (key.backspace || key.delete) {
@@ -321,6 +539,7 @@ export function AddVideoDialog({
         });
         return;
       }
+      // 'a' key toggles advanced when not typing a URL
       if (char && !key.ctrl && !key.meta) {
         // Guard: reject mouse escape sequences
         if (char.charCodeAt(0) === 0x1b || char.charCodeAt(0) === 0x9b) return;
@@ -503,12 +722,12 @@ export function AddVideoDialog({
       if (key.return) {
         // Validate: can't have both video and audio set to "none"
         if (selectedVideoItag === -1 && selectedAudioItag === -1) {
-          setError("❌ Cannot select both video-only and audio-only");
+          setError("Cannot select both video-only and audio-only");
           return;
         }
         // Validate: end time must be after start time
         if (startTime != null && endTime != null && endTime <= startTime) {
-          setError("❌ End time must be after start time");
+          setError("End time must be after start time");
           return;
         }
         submitJob();
@@ -528,6 +747,21 @@ export function AddVideoDialog({
   const boxHeight = Math.min(height - 4, 30);
   const leftPad = Math.max(0, Math.floor((width - boxWidth) / 2));
 
+  // Border color: green for import, magenta for advanced, cyan for normal
+  const isImport = inputMode === "import";
+  const borderColor = isImport ? "green" : (advancedMode || advancedEnabled ? "magenta" : "cyan");
+
+  // Title
+  let titleText: string;
+  let stepText: string | null = null;
+  if (isImport) {
+    titleText = "Import Archive";
+    if (importStep > 0) stepText = `Step ${importStep + 1}/3`;
+  } else {
+    titleText = `Add Video${advancedMode || advancedEnabled ? " (Advanced Mode)" : ""}`;
+    if (advancedMode && step > 0) stepText = `Step ${step}/${4}`;
+  }
+
   return (
     <Box flexDirection="column" width={width} height={height}>
       <Box height={Math.max(0, Math.floor((height - boxHeight) / 2))} />
@@ -537,22 +771,40 @@ export function AddVideoDialog({
           width={boxWidth}
           height={boxHeight}
           borderStyle="round"
-          borderColor={advancedMode || advancedEnabled ? "magenta" : "cyan"}
+          borderColor={borderColor}
         >
           {/* Title */}
           <Box paddingX={1} justifyContent="space-between">
-            <Text color={advancedMode || advancedEnabled ? "magenta" : "cyan"} bold>
-              Add Video {(advancedMode || advancedEnabled) ? "(Advanced Mode)" : ""}
+            <Text color={borderColor} bold>
+              {titleText}
             </Text>
-            {advancedMode && step > 0 && (
-              <Text color="magenta">
-                Step {step}/{4}
+            {stepText && (
+              <Text color={borderColor}>
+                {stepText}
               </Text>
             )}
           </Box>
 
-          {step === 0 && <StepUrl input={input} error={error} advancedEnabled={advancedEnabled} />}
-          {step === 1 && (
+          {/* Import mode steps */}
+          {isImport && importStep === 0 && (
+            <StepImportPath importPath={importPath} error={error} />
+          )}
+          {isImport && importStep === 1 && (
+            <StepImportMeta
+              importPath={importPath}
+              importTitle={importTitle}
+              importChannel={importChannel}
+              importMetaFocus={importMetaFocus}
+              error={error}
+            />
+          )}
+          {isImport && importStep === 2 && (
+            <StepImportUploading error={error} />
+          )}
+
+          {/* URL mode steps */}
+          {!isImport && step === 0 && <StepUrl input={input} error={error} advancedEnabled={advancedEnabled} />}
+          {!isImport && step === 1 && (
             <StepVideoFormat
               formats={formats}
               loading={loading}
@@ -561,7 +813,7 @@ export function AddVideoDialog({
               boxHeight={boxHeight}
             />
           )}
-          {step === 2 && (
+          {!isImport && step === 2 && (
             <StepAudioFormat
               formats={formats}
               loading={loading}
@@ -570,7 +822,7 @@ export function AddVideoDialog({
               boxHeight={boxHeight}
             />
           )}
-          {step === 3 && (
+          {!isImport && step === 3 && (
             <StepTimestamps
               startTimeInput={startTimeInput}
               endTimeInput={endTimeInput}
@@ -578,7 +830,7 @@ export function AddVideoDialog({
               error={error}
             />
           )}
-          {step === 4 && (
+          {!isImport && step === 4 && (
             <StepConfirmation
               videoId={videoId}
               url={url}
@@ -593,19 +845,175 @@ export function AddVideoDialog({
 
           {/* Footer */}
           <Box paddingX={1} height={1} justifyContent="space-between">
-            <Text color="gray">{step > 0 ? "Esc: Back" : "Esc: Cancel"}</Text>
-            {step === 0 && (
-              <Text color="gray">Tab: Toggle Advanced | Enter: Continue</Text>
+            {isImport ? (
+              <>
+                <Text color="gray">{importStep > 0 ? "Esc: Back" : "Esc: URL mode"}</Text>
+                {importStep === 0 && (
+                  <Text color="gray">Tab: URL mode | Enter: Continue</Text>
+                )}
+                {importStep === 1 && (
+                  <Text color="gray">Tab: Switch Field | Enter: Import</Text>
+                )}
+                {importStep === 2 && (
+                  <Text color="green">Uploading...</Text>
+                )}
+              </>
+            ) : (
+              <>
+                <Text color="gray">{step > 0 ? "Esc: Back" : "Esc: Cancel"}</Text>
+                {step === 0 && (
+                  <Text color="gray">Tab: Cycle mode | Enter: Continue</Text>
+                )}
+                {step === 3 && (
+                  <Text color="gray">Tab: Switch Field | Enter: Continue</Text>
+                )}
+                {step > 0 && step < 3 && <Text color="gray">Enter: Skip (auto)</Text>}
+                {step === 4 && <Text color="cyan" bold>Enter: Submit</Text>}
+              </>
             )}
-            {step === 3 && (
-              <Text color="gray">Tab: Switch Field | Enter: Continue</Text>
-            )}
-            {step > 0 && step < 3 && <Text color="gray">Enter: Skip (auto)</Text>}
-            {step === 4 && <Text color="cyan" bold>Enter: Submit</Text>}
           </Box>
         </Box>
       </Box>
     </Box>
+  );
+}
+
+// Import Step 0: File path input
+function StepImportPath({
+  importPath,
+  error,
+}: {
+  importPath: string;
+  error: string | null;
+}): React.ReactElement {
+  return (
+    <>
+      <Box paddingX={1}>
+        <Text color="white" bold>
+          Import ZIP Archive
+        </Text>
+      </Box>
+      <Box paddingX={1} height={1}>
+        <Text color="gray">{"\u2500".repeat(74)}</Text>
+      </Box>
+      <Box flexDirection="column" paddingX={1} flexGrow={1}>
+        <Box marginBottom={1}>
+          <Text color="green">&gt; File path: </Text>
+          <Text>{importPath}</Text>
+          <Text color="green">_</Text>
+        </Box>
+        <Box marginBottom={1} marginTop={1}>
+          <Text color="gray" dimColor>
+            Enter path to a .zip file containing video (+ optional chat JSON)
+          </Text>
+        </Box>
+        <Text color="gray" dimColor>
+          (Paste with Ctrl+V or right-click)
+        </Text>
+        {error && (
+          <Box marginTop={1}>
+            <Text color="red">{error}</Text>
+          </Box>
+        )}
+      </Box>
+    </>
+  );
+}
+
+// Import Step 1: Optional metadata
+function StepImportMeta({
+  importPath,
+  importTitle,
+  importChannel,
+  importMetaFocus,
+  error,
+}: {
+  importPath: string;
+  importTitle: string;
+  importChannel: string;
+  importMetaFocus: "title" | "channel";
+  error: string | null;
+}): React.ReactElement {
+  const basename = path.basename(importPath);
+  return (
+    <>
+      <Box paddingX={1} flexDirection="column">
+        <Text color="green" bold>
+          Metadata (Optional)
+        </Text>
+        <Text color="green" dimColor>
+          Step 2/3
+        </Text>
+      </Box>
+      <Box paddingX={1} height={1}>
+        <Text color="gray">{"\u2500".repeat(74)}</Text>
+      </Box>
+      <Box flexDirection="column" paddingX={1} flexGrow={1}>
+        <Box marginBottom={1}>
+          <Text color="gray">File: </Text>
+          <Text>{basename.length > 60 ? basename.slice(0, 57) + "..." : basename}</Text>
+        </Box>
+        <Box marginBottom={1}>
+          <Text color={importMetaFocus === "title" ? "green" : "gray"}>
+            {importMetaFocus === "title" ? "> " : "  "}Title:
+          </Text>
+          <Text>{importTitle}</Text>
+          {importMetaFocus === "title" && <Text color="green">_</Text>}
+        </Box>
+        <Box marginBottom={1}>
+          <Text color={importMetaFocus === "channel" ? "green" : "gray"}>
+            {importMetaFocus === "channel" ? "> " : "  "}Channel:
+          </Text>
+          <Text>{importChannel}</Text>
+          {importMetaFocus === "channel" && <Text color="green">_</Text>}
+        </Box>
+        <Box marginTop={1}>
+          <Text color="gray" dimColor>
+            Leave blank to auto-detect from archive contents
+          </Text>
+        </Box>
+        {error && (
+          <Box marginTop={1}>
+            <Text color="red">{error}</Text>
+          </Box>
+        )}
+      </Box>
+    </>
+  );
+}
+
+// Import Step 2: Uploading
+function StepImportUploading({
+  error,
+}: {
+  error: string | null;
+}): React.ReactElement {
+  return (
+    <>
+      <Box paddingX={1} flexDirection="column">
+        <Text color="green" bold>
+          Importing
+        </Text>
+        <Text color="green" dimColor>
+          Step 3/3
+        </Text>
+      </Box>
+      <Box paddingX={1} height={1}>
+        <Text color="gray">{"\u2500".repeat(74)}</Text>
+      </Box>
+      <Box flexDirection="column" paddingX={1} flexGrow={1}>
+        {!error && (
+          <Box marginTop={1}>
+            <Text color="green">Reading file and importing...</Text>
+          </Box>
+        )}
+        {error && (
+          <Box marginTop={1}>
+            <Text color="red">{error}</Text>
+          </Box>
+        )}
+      </Box>
+    </>
   );
 }
 
@@ -638,9 +1046,9 @@ function StepUrl({
         </Box>
         <Box marginBottom={1} marginTop={1}>
           <Text color={accentColor}>
-            [{advancedEnabled ? "✓" : " "}] Advanced Options
+            [{advancedEnabled ? "\u2713" : " "}] Advanced Options
           </Text>
-          <Text color="gray" dimColor> (press Tab to toggle)</Text>
+          <Text color="gray" dimColor> (Tab to cycle)</Text>
         </Box>
         <Box marginBottom={1}>
           {advancedEnabled ? (
@@ -793,7 +1201,7 @@ function FormatList({
       {hasPrev && (
         <Box marginBottom={1}>
           <Text color="gray" dimColor>
-            [\u2191 more above]
+            [{"\u2191"} more above]
           </Text>
         </Box>
       )}
@@ -841,7 +1249,7 @@ function FormatList({
       {hasMore && (
         <Box marginTop={1}>
           <Text color="gray" dimColor>
-            [\u2193 more below]
+            [{"\u2193"} more below]
           </Text>
         </Box>
       )}

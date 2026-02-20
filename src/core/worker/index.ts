@@ -91,6 +91,21 @@ export class DownloadWorker {
   }
 
   /**
+   * Update the maximum number of concurrent download slots at runtime.
+   * Existing downloads continue; the new limit applies to future slot acquisitions.
+   */
+  setMaxDownloadSlots(n: number): void {
+    if (n >= 1) {
+      this.maxDownloadSlots = n;
+      this.logger.info(`[Worker] Download slots updated to ${n}`);
+      // Wake up waiters if we now have spare capacity
+      while (this.activeDownloads < this.maxDownloadSlots && this.downloadWaiters.length > 0) {
+        this.downloadWaiters.shift()!();
+      }
+    }
+  }
+
+  /**
    * Acquire a download slot. Resolves immediately if a slot is free,
    * otherwise waits until one is released.
    */

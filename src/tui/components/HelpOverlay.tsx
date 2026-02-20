@@ -17,6 +17,7 @@ const HELP_SECTIONS: HelpSection[] = [
     title: "Global",
     bindings: [
       ["Tab", "Cycle focus: Tasks > Details > Logs"],
+      ["`", "Open settings panel"],
       ["W", "Open web dashboard in browser"],
       ["?", "Toggle this help overlay"],
       ["Q / Ctrl+C", "Quit"],
@@ -26,7 +27,7 @@ const HELP_SECTIONS: HelpSection[] = [
     title: "Tasks Panel",
     bindings: [
       ["\u2191/\u2193", "Select previous/next task"],
-      ["A", "Add video by URL or ID"],
+      ["A", "Add video by URL or ID (Tab: cycle mode)"],
       ["T", "Trim finished video"],
       ["C", "Cancel selected job"],
       ["R", "Retry failed/cancelled job"],

@@ -16,11 +16,19 @@ const ALL_NOTIFICATION_EVENTS = [
 ];
 const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 
+// Settings that require a process restart to take effect
+const RESTART_REQUIRED_KEYS = [
+  "port", "network_access", "database_path",
+  "log_file_path", "log_max_file_size", "log_max_files",
+];
+
 export class SettingsController {
   constructor(app) {
     this.app = app;
     this.editingChannelId = null;
     this._netAccessListenerAdded = false;
+    /** Snapshot of restart-required values taken when config is loaded */
+    this._originalRestartValues = {};
   }
 
   setupListeners() {
@@ -267,6 +275,16 @@ export class SettingsController {
       config.auto_cookies?.browser_profile_dir,
     );
     this.updateAutoCookieUI();
+
+    // Snapshot restart-required values for change detection
+    this._originalRestartValues = {
+      port: config.port,
+      network_access: config.network_access,
+      database_path: config.database_path,
+      log_file_path: config.log_file_path,
+      log_max_file_size: config.log_max_file_size,
+      log_max_files: config.log_max_files,
+    };
   }
 
   async saveConfig() {
@@ -348,6 +366,8 @@ export class SettingsController {
 
       if (response.ok) {
         this.app.showToast("Settings saved successfully", "success");
+        // Check if any restart-required settings changed
+        this._checkRestartRequired(config);
       } else {
         const data = await response.json();
         let msg = data.error || "Failed to save settings";
@@ -360,6 +380,39 @@ export class SettingsController {
     } catch (e) {
       this.app.showToast("Failed to save settings: " + e.message, "danger");
     }
+  }
+
+  /**
+   * After a successful save, check if restart-requiring settings changed.
+   * If so, prompt the user and call POST /api/restart.
+   */
+  _checkRestartRequired(config) {
+    const current = {
+      port: config.port,
+      network_access: config.network_access,
+      database_path: config.database_path,
+      log_file_path: config.log_file_path,
+      log_max_file_size: config.log_max_file_size,
+      log_max_files: config.log_max_files,
+    };
+
+    const changed = RESTART_REQUIRED_KEYS.some(
+      (k) => String(current[k] ?? "") !== String(this._originalRestartValues[k] ?? ""),
+    );
+    if (!changed) return;
+
+    // Update snapshot so we don't prompt again
+    this._originalRestartValues = { ...current };
+
+    if (!confirm("Some settings require a restart to take effect (port, network access, database path, log settings).\n\nRestart Moombox now?")) {
+      return;
+    }
+
+    this.app.showToast("Restarting Moombox...", "primary");
+
+    fetch("/api/restart", { method: "POST" }).catch(() => {
+      // Connection will drop during restart — expected
+    });
   }
 
   renderChannelsList() {

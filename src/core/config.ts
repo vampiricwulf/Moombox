@@ -8,6 +8,7 @@ import type {
   MoomboxConfig,
 } from "../types/config.js";
 import { Logger } from "./logger.js";
+import { isScryptHash, hashPassword } from "./auth.js";
 
 export type { ChannelConfig, MoomboxConfig, AutoCookiesConfig } from "../types/config.js";
 
@@ -296,6 +297,12 @@ export class ConfigManager {
         this.config = this.validate(this.applyDefaults(loadedConfig));
         this.configPath = p;
         this.configLoaded = true;
+
+        // Auto-convert plaintext password to scrypt hash
+        if (this.config.password_hash && !isScryptHash(this.config.password_hash)) {
+          ConfigManager.log("info", "[Config] Plaintext password detected, converting to secure hash");
+          this.config.password_hash = hashPassword(this.config.password_hash);
+        }
 
         // Write back to persist any missing config entries added by defaults
         const updatedToml = this.configToToml(this.config);

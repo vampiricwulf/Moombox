@@ -9,8 +9,10 @@ import { CookieRefreshService } from "../../core/cookieRefresh.js";
 import { AutoCookieService } from "../../core/autoCookies.js";
 import { getYtdlpPluginStatus, installYtdlpPlugin } from "../../core/ytdlpPlugin.js";
 import { asyncHandler } from "./errorHandler.js";
-import { updateConfigSchema, addChannelSchema, validateRequest, formatValidationErrors } from "../../types/schemas.js";
+import { updateConfigSchema, addChannelSchema, formatValidationErrors } from "../../types/schemas.js";
+import { getErrorMessage } from "../../types/errors.js";
 import { AuthService } from "../../core/auth.js";
+import { DownloadWorker } from "../../core/worker/index.js";
 import { isLoopback } from "../../utils/ipValidation.js";
 
 export interface ConfigRoutesContext {
@@ -89,7 +91,30 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
     await configManager.save(configToSave as any);
     // Apply runtime-reloadable settings immediately
     logger.refreshLogLevel();
+    // Hot-reload num_parallel_downloads
+    const newParallel = configManager.get().downloader?.num_parallel_downloads;
+    if (newParallel != null) {
+      DownloadWorker.getInstance().setMaxDownloadSlots(newParallel);
+    }
     res.json({ success: true });
+  }));
+
+  // Restart process (loopback-only)
+  router.post("/restart", asyncHandler(async (req, res) => {
+    const ip = (req.ip || req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+    if (!isLoopback(ip)) {
+      return res.status(403).json({ error: "Restart is only available from localhost" });
+    }
+    res.json({ success: true, message: "Restarting..." });
+    // Delay slightly so the response gets sent before we exit
+    setTimeout(async () => {
+      try {
+        const { restart } = await import("../../index.js");
+        await restart();
+      } catch (e: unknown) {
+        logger.error(`[Config] Restart failed: ${getErrorMessage(e)}`);
+      }
+    }, 500);
   }));
 
   // Add channel

@@ -14,6 +14,19 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const SALT_BYTES = 16;
 const TOKEN_BYTES = 32;
 
+/** Check if a value is already an scrypt hash (scrypt:<salt>:<hash>) */
+export function isScryptHash(value: string): boolean {
+  const parts = value.split(":");
+  return parts.length === 3 && parts[0] === "scrypt";
+}
+
+/** Hash a plaintext password using scrypt. Returns "scrypt:<salt_hex>:<hash_hex>" */
+export function hashPassword(plain: string): string {
+  const salt = crypto.randomBytes(SALT_BYTES);
+  const hash = crypto.scryptSync(plain, salt, SCRYPT_KEYLEN, SCRYPT_OPTIONS);
+  return `scrypt:${salt.toString("hex")}:${hash.toString("hex")}`;
+}
+
 interface Session {
   createdAt: number;
 }
@@ -36,9 +49,7 @@ export class AuthService {
    * Returns "scrypt:<salt_hex>:<hash_hex>"
    */
   hashPassword(plain: string): string {
-    const salt = crypto.randomBytes(SALT_BYTES);
-    const hash = crypto.scryptSync(plain, salt, SCRYPT_KEYLEN, SCRYPT_OPTIONS);
-    return `scrypt:${salt.toString("hex")}:${hash.toString("hex")}`;
+    return hashPassword(plain);
   }
 
   /**

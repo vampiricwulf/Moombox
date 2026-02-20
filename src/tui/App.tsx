@@ -13,6 +13,7 @@ import { HelpOverlay } from "./components/HelpOverlay.js";
 import { SetupWizard } from "./components/SetupWizard.js";
 import { AddVideoDialog } from "./components/AddVideoDialog.js";
 import { TrimDialog } from "./components/TrimDialog.js";
+import { SettingsPanel } from "./components/SettingsPanel.js";
 import { useMouse, MouseEvent } from "./hooks/useMouse.js";
 import { NotificationManager, NotificationType } from "../core/notifications.js";
 import { readClipboard } from "./clipboard.js";
@@ -55,6 +56,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const [helpScrollOffset, setHelpScrollOffset] = useState(0);
   const [logAutoScroll, setLogAutoScroll] = useState(true);
   const [archiveExpanded, setArchiveExpanded] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [setupMode, setSetupMode] = useState(() => !ConfigManager.getInstance().hasConfig());
 
   // Get terminal dimensions
@@ -169,15 +171,17 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const selectedJobIndexRef = useRef(selectedJobIndex);
   selectedJobIndexRef.current = selectedJobIndex;
 
-  // Ref for addDialogOpen so mouse handler can read it without stale closure
+  // Refs so mouse handler can read these without stale closures
   const addDialogOpenRef = useRef(addDialogOpen);
   addDialogOpenRef.current = addDialogOpen;
+  const settingsOpenRef = useRef(settingsOpen);
+  settingsOpenRef.current = settingsOpen;
 
   // Handle mouse events
   const handleMouseEvent = useCallback(
     (event: MouseEvent) => {
-      // Ignore mouse events when dialog is open
-      if (addDialogOpenRef.current) {
+      // Ignore mouse events when dialog/settings is open
+      if (addDialogOpenRef.current || settingsOpenRef.current) {
         return;
       }
 
@@ -349,13 +353,19 @@ export function App({ db, logger }: AppProps): React.ReactElement {
 
   // Keyboard input
   useInput((input, key) => {
-    if (setupMode || addDialogOpen) return;
+    if (setupMode || addDialogOpen || settingsOpen) return;
 
     // Toggle help
     if (input === "?") {
       setHelpMode((prev) => !prev);
       setHelpScrollOffset(0);
       setDeleteConfirmJobId(null);
+      return;
+    }
+
+    // Open settings
+    if (input === "`") {
+      setSettingsOpen(true);
       return;
     }
 
@@ -598,6 +608,26 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         onCancel={() => {
           setTrimDialogOpen(false);
           setTrimDialogJob(null);
+        }}
+      />
+    );
+  }
+
+  if (settingsOpen) {
+    return (
+      <SettingsPanel
+        width={cols}
+        height={rows}
+        onClose={async (needsRestart) => {
+          setSettingsOpen(false);
+          if (needsRestart) {
+            try {
+              const { restart } = await import("../index.js");
+              await restart();
+            } catch (e: unknown) {
+              setAddMessage({ text: `Restart failed: ${getErrorMessage(e)}`, color: "red" });
+            }
+          }
         }}
       />
     );

@@ -17,6 +17,7 @@ import { NotificationManager, NotificationType } from "./core/notifications.js";
 import { WebServer } from "./web/server.js";
 import { getErrorMessage } from "./types/errors.js";
 import { extractMediaId } from "./utils/mediaId.js";
+import { spawn as nodeSpawn } from "child_process";
 
 // Dynamic import for TUI (may not be available in packaged build)
 async function loadTUI(): Promise<{ startTUI: () => Promise<void> } | null> {
@@ -50,6 +51,27 @@ function waitForKeypress(): Promise<void> {
       resolve();
     });
   });
+}
+
+// Module-level shutdown reference (set during run())
+let shutdownFn: (() => Promise<void>) | null = null;
+
+/**
+ * Restart the process: runs shutdown, then re-spawns the same process.
+ * Works for both SEA executable and `npm run dev`.
+ */
+export async function restart(): Promise<never> {
+  if (shutdownFn) {
+    await shutdownFn();
+  }
+  // Re-spawn identical process
+  const child = nodeSpawn(process.argv[0], process.argv.slice(1), {
+    stdio: "inherit",
+    detached: true,
+    cwd: process.cwd(),
+  });
+  child.unref();
+  process.exit(0);
 }
 
 // Parse command line arguments
@@ -246,6 +268,7 @@ async function run() {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    shutdownFn = null; // Prevent restart from calling us again
     logger.info("[Moombox] Shutting down...");
 
     // Force exit after 10 seconds to prevent hanging
@@ -277,6 +300,9 @@ async function run() {
     await new Promise((r) => setTimeout(r, 1000));
     process.exit(0);
   };
+
+  // Expose shutdown for restart()
+  shutdownFn = shutdown;
 
   process.on("SIGTERM", () => { shutdown(); });
 

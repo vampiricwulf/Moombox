@@ -18,7 +18,7 @@ export function StatusBar({
   let controls: string;
   switch (focusedPanel) {
     case "tasks":
-      controls = "[\u2191\u2193] Select | [Tab] Switch | [A]dd [C]ancel [R]etry [D]el [F]ilter [O]pen [?] [Q]uit";
+      controls = "[\u2191\u2193] Select | [Tab] Switch | [A]dd [C]ancel [R]etry [D]el [F]ilter [O]pen [`]Settings [?] [Q]uit";
       break;
     case "details":
       controls = "[\u2191\u2193] Scroll | [Tab] Switch | [?] [Q]uit";
