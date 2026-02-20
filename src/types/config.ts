@@ -83,6 +83,8 @@ export interface MoomboxConfig {
   max_feed_items?: number;
   /** Feed check interval in minutes (or ms format like "10m") */
   feed_check_interval?: number | string;
+  /** DECAPI check interval in seconds (undefined = dynamic based on channel count) */
+  decapi_check_interval?: number;
   downloader: DownloaderConfig;
   tasklist?: TasklistConfig;
   auto_cookies?: AutoCookiesConfig;

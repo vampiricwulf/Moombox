@@ -191,6 +191,7 @@ export const updateConfigSchema = z.object({
   database_path: safePathSchema.optional(),
   max_feed_items: z.number().int().min(1).max(100).optional(),
   feed_check_interval: z.union([z.number().min(1), z.string()]).optional(),
+  decapi_check_interval: z.number().int().min(15).max(3600).optional(),
 
   downloader: z
     .object({

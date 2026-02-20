@@ -15,6 +15,8 @@ import { AddVideoDialog } from "./components/AddVideoDialog.js";
 import { TrimDialog } from "./components/TrimDialog.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
 import { useMouse, MouseEvent } from "./hooks/useMouse.js";
+import { FeedMonitor } from "../core/monitor.js";
+import { DecapiMonitor } from "../core/decapiMonitor.js";
 import { NotificationManager, NotificationType } from "../core/notifications.js";
 import { readClipboard } from "./clipboard.js";
 import { extractVideoId } from "../utils/youtube.js";
@@ -58,6 +60,13 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const [archiveExpanded, setArchiveExpanded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [setupMode, setSetupMode] = useState(() => !ConfigManager.getInstance().hasConfig());
+  const [, setTick] = useState(0);
+
+  // 1-second timer for countdown display updates
+  useEffect(() => {
+    const timer = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Get terminal dimensions
   const rows = stdout?.rows || 24;
@@ -668,6 +677,8 @@ export function App({ db, logger }: AppProps): React.ReactElement {
             archivedJobs={showArchive ? archivedJobs : []}
             archiveExpanded={archiveExpanded}
             onToggleArchive={() => setArchiveExpanded((prev) => !prev)}
+            nextFeedCheck={FeedMonitor.getInstance().nextCheckAt}
+            nextDecapiCheck={DecapiMonitor.getInstance().nextCheckAt}
           />
           {addMessage && (
             <Box width={taskWidth} paddingX={1}>

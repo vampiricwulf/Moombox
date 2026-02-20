@@ -20,6 +20,8 @@ import compression from "compression";
 import { Logger } from "../core/logger.js";
 import { Database } from "../core/database.js";
 import { ConfigManager } from "../core/config.js";
+import { FeedMonitor } from "../core/monitor.js";
+import { DecapiMonitor } from "../core/decapiMonitor.js";
 import type { Job } from "../types/jobs.js";
 import { registerPotRoutes, registerConfigRoutes, registerImportRoutes, registerJobRoutes, registerTrimRoutes, registerAuthRoutes, errorMiddleware } from "./routes/index.js";
 import { isPrivateIP, isLoopback } from "../utils/ipValidation.js";
@@ -534,6 +536,8 @@ export class WebServer {
         payload: {
           jobs: this.filterJobsByAge(jobs, false),
           logs: this.logBuffer,
+          nextFeedCheck: FeedMonitor.getInstance().nextCheckAt,
+          nextDecapiCheck: DecapiMonitor.getInstance().nextCheckAt,
         },
       });
 
@@ -673,6 +677,19 @@ export class WebServer {
         }
       }
     }
+  }
+
+  /**
+   * Broadcast updated check timer timestamps to all clients.
+   */
+  broadcastCheckTimers(): void {
+    this.broadcast({
+      type: "check_timers",
+      payload: {
+        nextFeedCheck: FeedMonitor.getInstance().nextCheckAt,
+        nextDecapiCheck: DecapiMonitor.getInstance().nextCheckAt,
+      },
+    });
   }
 
   /**

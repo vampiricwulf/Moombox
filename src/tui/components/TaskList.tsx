@@ -16,10 +16,22 @@ interface TaskListProps {
   archivedJobs?: Job[];
   archiveExpanded?: boolean;
   onToggleArchive?: () => void;
+  nextFeedCheck?: number;
+  nextDecapiCheck?: number;
 }
 
 // Order in which status icons appear in the summary
 const STATUS_DISPLAY_ORDER = ["Live", "Downloading", "Muxing", "Upcoming", "Error", "COOKIES?", "Cancelled", "Finished"];
+
+function formatCountdown(epochMs: number): string {
+  if (!epochMs) return "--";
+  const remaining = Math.max(0, Math.floor((epochMs - Date.now()) / 1000));
+  if (remaining <= 0) return "now";
+  const minutes = Math.floor(remaining / 60);
+  const seconds = remaining % 60;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
 
 type VirtualItem =
   | { type: "job"; job: Job; dimmed?: boolean }
@@ -38,6 +50,8 @@ export function TaskList({
   archivedJobs = [],
   archiveExpanded = false,
   onToggleArchive,
+  nextFeedCheck = 0,
+  nextDecapiCheck = 0,
 }: TaskListProps): React.ReactElement {
   const contentHeight = height - 3; // borders (2) + title row (1)
   const borderColor = focused ? "cyan" : "gray";
@@ -88,6 +102,9 @@ export function TaskList({
         )}
         {filterLabel && (
           <Text color="yellow"> [{filterLabel}]</Text>
+        )}
+        {(nextFeedCheck > 0 || nextDecapiCheck > 0) && (
+          <Text color="gray"> F:{formatCountdown(nextFeedCheck)} D:{formatCountdown(nextDecapiCheck)}</Text>
         )}
         {totalItems > contentHeight && (
           <Text color="gray">

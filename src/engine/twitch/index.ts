@@ -119,13 +119,6 @@ export class TwitchService {
   }
 
   /**
-   * Lightweight live check via DECAPI.
-   */
-  async isChannelLive(channelLogin: string): Promise<boolean> {
-    return twitchApi.isChannelLive(channelLogin);
-  }
-
-  /**
    * Check if we have a Twitch auth token.
    */
   hasAuthToken(): boolean {

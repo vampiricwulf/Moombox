@@ -485,28 +485,3 @@ export async function getVodComments(
     hasNextPage: comments.pageInfo?.hasNextPage ?? false,
   };
 }
-
-/**
- * Lightweight channel-live check using DECAPI.
- * Returns true if the channel is currently live.
- */
-export async function isChannelLive(channelLogin: string): Promise<boolean> {
-  try {
-    const response = await fetchWithTimeout(
-      `${TWITCH_URLS.DECAPI_UPTIME}/${channelLogin}`,
-      { headers: { "User-Agent": "Moombox/1.0" } },
-    );
-    if (!response.ok) return false;
-    const text = await response.text();
-    const lower = text.toLowerCase().trim();
-    // DECAPI returns the channel name followed by " is offline" when not live,
-    // or error messages like "user not found" / "could not be found"
-    if (lower.includes("is offline")) return false;
-    if (lower.includes("not found") || lower.includes("error")) return false;
-    // A valid uptime response is a duration string like "2 hours, 15 minutes"
-    // containing at least one time unit word
-    return /\d/.test(text) && /(second|minute|hour|day|week)/i.test(text);
-  } catch {
-    return false;
-  }
-}

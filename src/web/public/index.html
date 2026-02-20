@@ -380,6 +380,13 @@
                                 help-text="How often to check RSS feeds for new streams (default: 10)"
                             ></sl-input>
                             <sl-input
+                                id="cfg-decapi-check-interval"
+                                type="number"
+                                label="DECAPI Check Interval (seconds)"
+                                placeholder="dynamic"
+                                help-text="Seconds between DECAPI live-status checks. Leave empty for automatic rate-based timing (default: dynamic)"
+                            ></sl-input>
+                            <sl-input
                                 id="cfg-hide-finished-days"
                                 type="number"
                                 label="Hide Finished Jobs After (days)"
@@ -1236,6 +1243,7 @@
                 <sl-icon name="wifi-off"></sl-icon>
                 Connecting...
             </span>
+            <span id="check-countdown"></span>
             <div id="status-bar-right">
                 <span id="status-warnings"></span>
                 <span id="yt-indicator" title="YouTube">YT</span>

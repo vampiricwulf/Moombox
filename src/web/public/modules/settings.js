@@ -237,6 +237,7 @@ export class SettingsController {
     this.app.setInputValue("cfg-database", config.database_path);
     this.app.setInputValue("cfg-max-feed-items", config.max_feed_items);
     this.app.setInputValue("cfg-feed-check-interval", config.feed_check_interval);
+    this.app.setInputValue("cfg-decapi-check-interval", config.decapi_check_interval ?? "");
     this.app.setInputValue(
       "cfg-hide-finished-days",
       config.tasklist?.hide_finished_age_days,
@@ -303,6 +304,7 @@ export class SettingsController {
     const database = this.app.getInputValue("cfg-database");
     const maxFeedItems = this.app.getInputNumber("cfg-max-feed-items");
     const feedCheckInterval = this.app.getInputNumber("cfg-feed-check-interval");
+    const decapiCheckInterval = this.app.getInputNumber("cfg-decapi-check-interval");
     const hideFinishedDays = this.app.getInputNumber("cfg-hide-finished-days");
 
     const outputDir = this.app.getInputValue("cfg-output-dir");
@@ -329,6 +331,11 @@ export class SettingsController {
     config.database_path = database || undefined;
     config.max_feed_items = maxFeedItems;
     config.feed_check_interval = feedCheckInterval;
+    if (decapiCheckInterval) {
+      config.decapi_check_interval = decapiCheckInterval;
+    } else {
+      delete config.decapi_check_interval;
+    }
 
     if (!config.tasklist) config.tasklist = {};
     config.tasklist.hide_finished_age_days = hideFinishedDays;

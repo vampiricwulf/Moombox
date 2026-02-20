@@ -476,6 +476,12 @@ body {
     color: var(--sl-color-danger-600);
 }
 
+#check-countdown {
+    color: var(--sl-color-neutral-500);
+    font-size: var(--sl-font-size-small);
+    white-space: nowrap;
+}
+
 /* Dialog adjustments */
 sl-dialog::part(body) {
     padding: var(--sl-spacing-medium);

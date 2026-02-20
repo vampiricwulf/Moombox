@@ -18,6 +18,9 @@ class MoomboxApp {
     this.maxReconnectAttempts = 10;
     this.reconnectDelay = 1000;
     this.autoCookieReloginRequired = null;
+    this.nextFeedCheck = 0;
+    this.nextDecapiCheck = 0;
+    this._countdownInterval = null;
 
     // Module controllers
     this.setup = new SetupController(this);
@@ -40,6 +43,7 @@ class MoomboxApp {
       this.connectWebSocket();
       this.loadConfig();
       this.loadStatus();
+      this._countdownInterval = setInterval(() => this.updateCheckCountdown(), 1000);
     }
   }
 
@@ -364,8 +368,11 @@ class MoomboxApp {
       case "initial_state":
         this.jobs = message.payload.jobs || [];
         this.logs = message.payload.logs || [];
+        this.nextFeedCheck = message.payload.nextFeedCheck || 0;
+        this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
         this.renderJobs();
         this.renderLogs();
+        this.updateCheckCountdown();
         break;
 
       case "jobs_update":
@@ -404,10 +411,34 @@ class MoomboxApp {
         this.addLog(message.payload);
         break;
 
+      case "check_timers":
+        this.nextFeedCheck = message.payload.nextFeedCheck || 0;
+        this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
+        this.updateCheckCountdown();
+        break;
+
       case "pong":
         // Heartbeat response
         break;
     }
+  }
+
+  formatCountdown(epochMs) {
+    if (!epochMs) return "--";
+    const remaining = Math.max(0, Math.floor((epochMs - Date.now()) / 1000));
+    if (remaining <= 0) return "now";
+    const minutes = Math.floor(remaining / 60);
+    const seconds = remaining % 60;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }
+
+  updateCheckCountdown() {
+    const el = document.getElementById("check-countdown");
+    if (!el) return;
+    const feed = this.formatCountdown(this.nextFeedCheck);
+    const decapi = this.formatCountdown(this.nextDecapiCheck);
+    el.textContent = `Feed: ${feed} | DECAPI: ${decapi}`;
   }
 
   // ===== Job Rendering =====

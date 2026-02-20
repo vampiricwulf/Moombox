@@ -8,6 +8,7 @@ import { ConfigManager } from "./core/config.js";
 import { Database } from "./core/database.js";
 import { Logger } from "./core/logger.js";
 import { FeedMonitor } from "./core/monitor.js";
+import { DecapiMonitor } from "./core/decapiMonitor.js";
 import { DownloadWorker } from "./core/worker/index.js";
 import { CookieRefreshService } from "./core/cookieRefresh.js";
 import { PotProvider } from "./core/potProvider.js";
@@ -223,8 +224,11 @@ async function run() {
   // Initialize Twitch service (loads auth token from cookies if available)
   await TwitchService.getInstance().init();
 
-  const monitor = new FeedMonitor();
+  const monitor = FeedMonitor.getInstance();
   monitor.start();
+
+  const decapiMonitor = DecapiMonitor.getInstance();
+  decapiMonitor.start();
 
   const worker = DownloadWorker.getInstance();
   worker.start();
@@ -246,6 +250,10 @@ async function run() {
     // Expose the actual port for TUI and other components
     process.env.MOOMBOX_PORT = String(actualPort);
     logger.info(`[Moombox] Web dashboard available at https://localhost:${actualPort}`);
+
+    // Wire up countdown timer broadcasts
+    monitor.onSchedule = () => server.broadcastCheckTimers?.();
+    decapiMonitor.onSchedule = () => server.broadcastCheckTimers?.();
   } catch (error: unknown) {
     const detail = (error as NodeJS.ErrnoException).code === "EADDRINUSE"
       ? `Port ${port} (and nearby ports) already in use. Is another instance running?`
@@ -288,6 +296,7 @@ async function run() {
       }
     };
 
+    await stopService("DecapiMonitor", () => decapiMonitor.stop());
     await stopService("FeedMonitor", () => monitor.stop());
     await stopService("DownloadWorker", () => worker.stop());
     await stopService("CookieRefresh", () => CookieRefreshService.getInstance().stop());

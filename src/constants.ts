@@ -131,7 +131,6 @@ export const TWITCH_URLS = {
   EMOTE_CDN: "https://static-cdn.jtvnw.net/emoticons/v2",
   PREVIEW_CDN: "https://static-cdn.jtvnw.net/previews-ttv",
   IRC_WS: "wss://irc-ws.chat.twitch.tv:443",
-  DECAPI_UPTIME: "https://decapi.me/twitch/uptime",
   OAUTH_VALIDATE: "https://id.twitch.tv/oauth2/validate",
 } as const;
 
@@ -304,6 +303,38 @@ export const FEED_CHECK_INTERVAL_MS = ms("5m");
  * Default max feed items to process
  */
 export const DEFAULT_MAX_FEED_ITEMS = 15;
+
+// =============================================================================
+// DECAPI CONSTANTS
+// =============================================================================
+
+/**
+ * DECAPI API URLs
+ */
+export const DECAPI_URLS = {
+  YOUTUBE_LATEST: "https://decapi.me/youtube/latest_video",
+  TWITCH_UPTIME: "https://decapi.me/twitch/uptime",
+} as const;
+
+/**
+ * Minimum interval between DECAPI cycles (15 seconds)
+ */
+export const DECAPI_MIN_INTERVAL_MS = 15_000;
+
+/**
+ * Stagger between individual DECAPI requests within a cycle (1 second)
+ */
+export const DECAPI_REQUEST_STAGGER_MS = 1_000;
+
+/**
+ * Default assumed DECAPI rate limit (requests per minute) until learned from headers
+ */
+export const DECAPI_DEFAULT_RATE_LIMIT = 60;
+
+/**
+ * Per-request timeout for DECAPI calls (15 seconds)
+ */
+export const DECAPI_REQUEST_TIMEOUT_MS = ms("15s");
 
 // =============================================================================
 // BOTGUARD CONSTANTS
