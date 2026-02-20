@@ -529,8 +529,8 @@ export function firefoxCookiesToNetscape(
       if (isTwitchDomain ? !TWITCH_ESSENTIAL_COOKIES.has(row.name) : !ESSENTIAL_COOKIES.has(row.name)) continue;
     }
 
-    // Firefox stores expiry in milliseconds; Netscape format uses seconds
-    const expiry = row.expiry > 1e12 ? Math.floor(row.expiry / 1000) : row.expiry;
+    // Firefox moz_cookies.expiry is already in seconds (unix epoch)
+    const expiry = row.expiry;
 
     collected.push({
       domain: row.host,
