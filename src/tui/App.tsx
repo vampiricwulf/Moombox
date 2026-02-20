@@ -121,7 +121,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         );
         return diffDays > hideAgeDays;
       })
-      .sort((a, b) => (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" }));
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   }, [jobs]);
 
   // Virtual list: [sortedJobs..., divider?, archivedJobs...]
@@ -723,6 +723,8 @@ function getSortedJobs(jobs: Job[]): Job[] {
       const pa = STATUS_PRIORITY[a.status] ?? 99;
       const pb = STATUS_PRIORITY[b.status] ?? 99;
       if (pa !== pb) return pa - pb;
+      // Finished/Cancelled/Error: most recently updated first
+      if (pa >= 6) return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
       return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
     });
 }

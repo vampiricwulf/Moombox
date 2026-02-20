@@ -433,6 +433,8 @@ class MoomboxApp {
       const pa = STATUS_PRIORITY[a.status] ?? 99;
       const pb = STATUS_PRIORITY[b.status] ?? 99;
       if (pa !== pb) return pa - pb;
+      // Finished/Cancelled/Error: most recently updated first
+      if (pa >= 6) return new Date(b.updatedAt) - new Date(a.updatedAt);
       return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
     });
 
