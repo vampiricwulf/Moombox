@@ -115,9 +115,9 @@ export class ConfigManager {
 
     // Convert milliseconds to target unit
     if (unit === 'minutes') {
-      return parsed / (60 * 1000);
+      return parsed / 60_000;
     } else if (unit === 'days') {
-      return parsed / (24 * 60 * 60 * 1000);
+      return parsed / 86_400_000;
     }
 
     return defaultValue;

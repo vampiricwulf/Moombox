@@ -290,7 +290,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
   }));
 
   // Add new job (rate limited to 20 requests per minute)
-  const addJobRateLimiter = createRateLimiter(20, 60 * 1000);
+  const addJobRateLimiter = createRateLimiter(20, 60_000);
   router.post("/jobs", addJobRateLimiter, asyncHandler(async (req, res) => {
     // Validate request body with Zod schema
     const validation = addJobSchema.safeParse(req.body);

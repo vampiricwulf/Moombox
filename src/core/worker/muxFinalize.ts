@@ -332,7 +332,7 @@ export async function downloadFile(
           logger.debug(
             `[DownloadOrchestrator] Chunk retry ${chunkAttempt + 1}/3 for bytes ${start}-${end}`,
           );
-          await new Promise((r) => setTimeout(r, 1000 * (chunkAttempt + 1)));
+          await new Promise((r) => setTimeout(r, 1_000 * (chunkAttempt + 1)));
         }
       }
 

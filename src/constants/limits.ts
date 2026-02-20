@@ -15,10 +15,10 @@ export const LIMITS = {
   SEGMENT_BEHIND_THRESHOLD: 10,
 
   /** Maximum chat messages kept in memory before flushing to disk */
-  CHAT_MESSAGES_IN_MEMORY: 5000,
+  CHAT_MESSAGES_IN_MEMORY: 5_000,
 
   /** Chat message count threshold that triggers flush to disk */
-  CHAT_MESSAGES_FLUSH_THRESHOLD: 50000,
+  CHAT_MESSAGES_FLUSH_THRESHOLD: 50_000,
 
   /** Maximum items per page for API pagination */
   MAX_ITEMS_PER_PAGE: 100,

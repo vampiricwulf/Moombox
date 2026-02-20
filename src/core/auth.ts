@@ -10,7 +10,7 @@ import { ConfigManager } from "./config.js";
 
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_OPTIONS: crypto.ScryptOptions = { N: 16384, r: 8, p: 1 };
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const SESSION_TTL_MS = 24 * 60 * 60_000; // 24 hours
 const SALT_BYTES = 16;
 const TOKEN_BYTES = 32;
 

@@ -313,7 +313,7 @@ export class Database {
     return this.db.data.jobs.map((j) => ({ ...j }));
   }
 
-  private static readonly MAX_HISTORY_SIZE = 10000;
+  private static readonly MAX_HISTORY_SIZE = 10_000;
 
   async addToHistory(videoId: string) {
     return this.enqueueMutation(async () => {

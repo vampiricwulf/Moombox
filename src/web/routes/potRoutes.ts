@@ -23,7 +23,7 @@ function requireLoopback(req: Request, res: Response, next: NextFunction): void 
   }
 }
 
-const potRateLimiter = createRateLimiter(10, 60 * 1000); // 10 req/min
+const potRateLimiter = createRateLimiter(10, 60_000); // 10 req/min
 
 export function registerPotRoutes(app: Application): void {
   const logger = Logger.getInstance();

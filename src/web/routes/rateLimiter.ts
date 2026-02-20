@@ -10,7 +10,7 @@ interface RateLimitEntry {
 }
 
 const rateLimitMap = new Map<string, RateLimitEntry>();
-const MAX_ENTRIES = 10000; // Prevent unbounded growth
+const MAX_ENTRIES = 10_000; // Prevent unbounded growth
 
 // Deterministic cleanup: runs every 60 seconds
 const cleanupInterval = setInterval(() => {
@@ -20,7 +20,7 @@ const cleanupInterval = setInterval(() => {
       rateLimitMap.delete(key);
     }
   }
-}, 60000).unref(); // unref() allows process to exit even if timer is pending
+}, 60_000).unref(); // unref() allows process to exit even if timer is pending
 
 /**
  * Creates a rate limiter middleware that limits requests per IP address

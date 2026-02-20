@@ -7,7 +7,7 @@ export default class BotGuardClient {
   public userInteractionElement?: any;
   public syncSnapshotFunction?: (args: any[]) => Promise<string>;
   public deferredVmFunctions = new DeferredPromise<VMFunctions>();
-  public defaultTimeout = 3000;
+  public defaultTimeout = 3_000;
 
   constructor(options: BotGuardClientOptions) {
     this.userInteractionElement = options.userInteractionElement;
@@ -53,7 +53,7 @@ export default class BotGuardClient {
 
     // Wait for VM callback with a timeout to prevent hanging
     const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new BGError('TIMEOUT', 'VM load callback timed out')), 10000)
+      setTimeout(() => reject(new BGError('TIMEOUT', 'VM load callback timed out')), 10_000)
     );
     await Promise.race([this.deferredVmFunctions.promise, timeout]);
 
@@ -76,7 +76,7 @@ export default class BotGuardClient {
    * console.log(result);
    * ```
    */
-  public async snapshot(args: SnapshotArgs, timeout = 3000): Promise<string> {
+  public async snapshot(args: SnapshotArgs, timeout = 3_000): Promise<string> {
     const vmFunctions = await this.deferredVmFunctions.promise;
     if (!vmFunctions.asyncSnapshotFunction)
       throw new BGError('ASYNC_SNAPSHOT', 'Asynchronous snapshot function not found');

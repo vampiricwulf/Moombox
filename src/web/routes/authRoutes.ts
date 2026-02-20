@@ -32,7 +32,7 @@ export function registerAuthRoutes(router: Router): void {
   });
 
   // POST /auth/login — rate-limited
-  router.post("/auth/login", createRateLimiter(5, 60000), asyncHandler(async (req, res) => {
+  router.post("/auth/login", createRateLimiter(5, 60_000), asyncHandler(async (req, res) => {
     const validation = loginSchema.safeParse(req.body);
     if (!validation.success) {
       return res.status(400).json({
@@ -79,7 +79,7 @@ export function registerAuthRoutes(router: Router): void {
   }));
 
   // POST /auth/set-password — rate-limited, requires session OR loopback
-  router.post("/auth/set-password", createRateLimiter(3, 60000), asyncHandler(async (req, res) => {
+  router.post("/auth/set-password", createRateLimiter(3, 60_000), asyncHandler(async (req, res) => {
     const ip = req.socket.remoteAddress || "";
     const auth = AuthService.getInstance();
     const configManager = ConfigManager.getInstance();
@@ -127,7 +127,7 @@ export function registerAuthRoutes(router: Router): void {
   }));
 
   // POST /auth/remove-password — requires session or loopback
-  router.post("/auth/remove-password", createRateLimiter(3, 60000), asyncHandler(async (req, res) => {
+  router.post("/auth/remove-password", createRateLimiter(3, 60_000), asyncHandler(async (req, res) => {
     const ip = req.socket.remoteAddress || "";
     const auth = AuthService.getInstance();
     const configManager = ConfigManager.getInstance();

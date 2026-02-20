@@ -19,7 +19,7 @@ export function registerImportRoutes(router: Router): void {
   const logger = Logger.getInstance();
 
   // Import zip archive (rate limited to 5 per minute)
-  const importRateLimiter = createRateLimiter(5, 60 * 1000);
+  const importRateLimiter = createRateLimiter(5, 60_000);
   router.post(
     "/import",
     express.raw({ type: "application/octet-stream", limit: "500mb" }),

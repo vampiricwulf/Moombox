@@ -325,7 +325,7 @@ export class TwitchChatDownloader extends EventEmitter {
 
     while (!this.cancelFlag && !this.streamEnded && attempts < MAX_RECONNECTS) {
       attempts++;
-      const delay = Math.min(1000 * Math.pow(2, attempts), 30000);
+      const delay = Math.min(1_000 * Math.pow(2, attempts), 30_000);
       this.logger.info(
         `[TwitchChat] Reconnecting in ${delay / 1000}s (attempt ${attempts}/${MAX_RECONNECTS})`,
       );
@@ -448,7 +448,7 @@ export class TwitchChatDownloader extends EventEmitter {
 
     // Save to disk at most once per second (skip if a save is already in flight)
     const now = Date.now();
-    if (!this.saving && now - this.lastSaveMs >= 1000) {
+    if (!this.saving && now - this.lastSaveMs >= 1_000) {
       this.lastSaveMs = now;
       this.saving = true;
       this.periodicSave()

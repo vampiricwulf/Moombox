@@ -189,12 +189,12 @@ export const MAX_DOWNLOAD_RETRIES = 3;
 /**
  * Delay between retries (ms)
  */
-export const RETRY_DELAY_MS = 2000;
+export const RETRY_DELAY_MS = 2_000;
 
 /**
  * Download timeout (ms)
  */
-export const DOWNLOAD_TIMEOUT_MS = 30000;
+export const DOWNLOAD_TIMEOUT_MS = 30_000;
 
 /**
  * Progress display update interval — in-memory only, no disk I/O (ms)
@@ -213,12 +213,12 @@ export const PROGRESS_PERSIST_INTERVAL_MS = 1_000;
 /**
  * Worker queue check interval (ms)
  */
-export const WORKER_CHECK_INTERVAL_MS = 5000;
+export const WORKER_CHECK_INTERVAL_MS = 5_000;
 
 /**
  * Stream status recheck interval (ms)
  */
-export const STREAM_RECHECK_INTERVAL_MS = 30000;
+export const STREAM_RECHECK_INTERVAL_MS = 30_000;
 
 /**
  * Maximum random jitter added to probe intervals (ms)

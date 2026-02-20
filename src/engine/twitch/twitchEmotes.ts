@@ -68,7 +68,7 @@ async function fetchBttvEmotes(
     const res = await fetchWithTimeout(
       `${TWITCH_EMOTE_APIS.BTTV_CHANNEL}/${channelId}`,
       undefined,
-      8000,
+      8_000,
     );
     if (!res.ok) return [];
 
@@ -118,7 +118,7 @@ async function fetchFfzEmotes(
     const res = await fetchWithTimeout(
       `${TWITCH_EMOTE_APIS.FFZ_CHANNEL}/${channelId}`,
       undefined,
-      8000,
+      8_000,
     );
     if (!res.ok) return [];
 
@@ -168,7 +168,7 @@ async function fetchSevenTvEmotes(
     const res = await fetchWithTimeout(
       `${TWITCH_EMOTE_APIS.SEVENTV_USER}/${channelId}`,
       undefined,
-      8000,
+      8_000,
     );
     if (!res.ok) return [];
 

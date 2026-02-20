@@ -57,7 +57,7 @@ const LOGIN_URL = "https://accounts.google.com/ServiceLogin?service=youtube";
 const REFRESH_URL = "https://www.youtube.com";
 const TWITCH_LOGIN_URL = "https://www.twitch.tv/login";
 const TWITCH_REFRESH_URL = "https://www.twitch.tv";
-const PROCESS_TIMEOUT = 30000;
+const PROCESS_TIMEOUT = 30_000;
 
 // Chromium lock files that prevent headless launch when a headed session was killed
 const CHROMIUM_LOCK_FILES = ["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"];
@@ -625,7 +625,7 @@ export class AutoCookieService {
 
     // Poll until CDP endpoint is available (the actual browser process
     // may take a moment to start listening after the launcher exits)
-    await this.waitForCdp(this.cdpPort, 15000);
+    await this.waitForCdp(this.cdpPort, 15_000);
   }
 
   /**
@@ -664,7 +664,7 @@ export class AutoCookieService {
     );
 
     try {
-      await this.waitForCdp(port, 15000);
+      await this.waitForCdp(port, 15_000);
 
       // Navigate to YouTube and Twitch to refresh cookies for both
       let pageClient: CdpClient | null = null;
@@ -685,7 +685,7 @@ export class AutoCookieService {
         await browserClient.closeBrowser();
         browserClient.disconnect();
       }
-      await waitForExit(proc, 5000).catch(() => {});
+      await waitForExit(proc, 5_000).catch(() => {});
 
       return cdpCookiesToNetscape(cookies);
     } catch (e) {
@@ -740,7 +740,7 @@ export class AutoCookieService {
         const resp = await fetchWithTimeout(
           `http://127.0.0.1:${port}/json/version`,
           undefined,
-          2000,
+          2_000,
         );
         if (resp.ok) return; // CDP is ready
       } catch {
@@ -793,7 +793,7 @@ export class AutoCookieService {
     }
 
     // Step 2: Wait for clean exit (up to 8 seconds)
-    const exitedCleanly = await this.waitForProcessExit(8000);
+    const exitedCleanly = await this.waitForProcessExit(8_000);
 
     if (exitedCleanly) {
       this.logger.debug("[AutoCookies] Firefox exited cleanly (WAL checkpointed)");

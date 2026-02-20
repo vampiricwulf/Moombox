@@ -64,7 +64,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
 
   // 1-second timer for countdown display updates
   useEffect(() => {
-    const timer = setInterval(() => setTick((t) => t + 1), 1000);
+    const timer = setInterval(() => setTick((t) => t + 1), 1_000);
     return () => clearInterval(timer);
   }, []);
 
@@ -126,7 +126,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       .filter((job) => {
         if (job.status !== "Finished") return false;
         const diffDays = Math.ceil(
-          (now - new Date(job.updatedAt).getTime()) / (1000 * 60 * 60 * 24),
+          (now - new Date(job.updatedAt).getTime()) / 86_400_000,
         );
         return diffDays > hideAgeDays;
       })
@@ -346,7 +346,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   // Clear add message after timeout
   useEffect(() => {
     if (!addMessage) return;
-    const timer = setTimeout(() => setAddMessage(null), 3000);
+    const timer = setTimeout(() => setAddMessage(null), 3_000);
     return () => clearTimeout(timer);
   }, [addMessage]);
 
@@ -356,7 +356,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     const timer = setTimeout(() => {
       setDeleteConfirmJobId(null);
       setAddMessage({ text: "Delete cancelled", color: "gray" });
-    }, 3000);
+    }, 3_000);
     return () => clearTimeout(timer);
   }, [deleteConfirmJobId]);
 
@@ -726,7 +726,7 @@ function getSortedJobs(jobs: Job[]): Job[] {
     .filter((job) => {
       if (job.status !== "Finished") return true;
       const diffDays = Math.ceil(
-        (now - new Date(job.updatedAt).getTime()) / (1000 * 60 * 60 * 24),
+        (now - new Date(job.updatedAt).getTime()) / 86_400_000,
       );
       return diffDays <= hideAgeDays;
     })

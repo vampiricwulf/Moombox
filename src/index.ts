@@ -283,7 +283,7 @@ async function run() {
     const forceExitTimer = setTimeout(() => {
       logger.warn("[Moombox] Force exit after timeout");
       process.exit(1);
-    }, 10000);
+    }, 10_000);
     forceExitTimer.unref();
 
     // Stop services in dependency order (consumers first, infrastructure last)
@@ -306,7 +306,7 @@ async function run() {
 
     // Flush pending log writes and give DB writes a moment to complete
     await logger.flush();
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1_000));
     process.exit(0);
   };
 

@@ -356,7 +356,7 @@ export async function verifyYouTubeAuth(): Promise<boolean> {
           },
         }),
       },
-      10000, // 10s timeout — quick yes/no
+      10_000, // 10s timeout — quick yes/no
     );
 
     if (!response.ok) return false;
@@ -408,7 +408,7 @@ export async function verifyTwitchAuth(): Promise<boolean> {
           Authorization: `OAuth ${token}`,
         },
       },
-      10000,
+      10_000,
     );
 
     return response.ok;

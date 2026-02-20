@@ -49,13 +49,13 @@ function enableVTInput(): void {
         "static void Main(){var h=GetStdHandle(-10);uint m;GetConsoleMode(h,out m);SetConsoleMode(h,m|0x200);}}",
       ].join(""));
       execaSync(cscExe, ["/nologo", "/optimize", `/out:${helperExe}`, csFile], {
-        stdio: "ignore", timeout: 10000,
+        stdio: "ignore", timeout: 10_000,
       });
       try { fs.unlinkSync(csFile); } catch {}
     }
 
     if (fs.existsSync(helperExe)) {
-      execaSync(helperExe, [], { stdio: ["inherit", "ignore", "ignore"], timeout: 5000 });
+      execaSync(helperExe, [], { stdio: ["inherit", "ignore", "ignore"], timeout: 5_000 });
     }
   } catch {
     // Non-fatal — mouse won't work but keyboard and TUI still function

@@ -419,7 +419,7 @@ export class ManifestParser {
         segIdx++;
 
         // Safety: don't scan beyond a reasonable limit for estimated durations
-        if (useEstimate && segIdx > 100000) {
+        if (useEstimate && segIdx > 100_000) {
           startSegment = stream.startNumber + segIdx;
           trimStartOffset = 0;
           break;
@@ -442,7 +442,7 @@ export class ManifestParser {
         }
         segIdx++;
 
-        if (useEstimate && segIdx > 100000) {
+        if (useEstimate && segIdx > 100_000) {
           endSegment = stream.startNumber + segIdx;
           break;
         }

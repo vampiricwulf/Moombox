@@ -167,7 +167,7 @@ export class PotProvider {
     this.logger.debug("[PotProvider] Generating BotGuard snapshot...");
     const botguardResponse = await bgClient.snapshot(
       { webPoSignalOutput },
-      30000,
+      30_000,
     );
     this.logger.debug(
       `[PotProvider] BotGuard response length: ${botguardResponse?.length || 0}`,

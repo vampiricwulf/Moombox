@@ -137,13 +137,13 @@ export class TwitchService {
    */
   selectBestVariant(
     variants: TwitchHlsVariant[],
-    qualityPreference?: string,
+    quality_preference?: string,
     maxResolution?: number,
   ): TwitchHlsVariant | null {
     if (variants.length === 0) return null;
 
     // Handle explicit quality preferences
-    if (qualityPreference === "audio_only") {
+    if (quality_preference === "audio_only") {
       return variants.find(v => v.name === "audio_only") || variants[variants.length - 1];
     }
 
@@ -160,11 +160,11 @@ export class TwitchService {
     }
 
     // Handle specific quality targets
-    if (qualityPreference === "720p") {
+    if (quality_preference === "720p") {
       const match = filtered.find(v => v.height === 720);
       if (match) return match;
     }
-    if (qualityPreference === "480p") {
+    if (quality_preference === "480p") {
       const match = filtered.find(v => v.height === 480);
       if (match) return match;
     }

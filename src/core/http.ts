@@ -16,7 +16,7 @@ import { Logger } from "./logger.js";
  *
  * @param url - URL to fetch
  * @param init - Fetch options
- * @param timeout - Timeout in milliseconds (default: 30000)
+ * @param timeout - Timeout in milliseconds (default: 30s)
  * @param retryOptions - Optional retry configuration
  * @returns Response object
  */

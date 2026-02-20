@@ -462,7 +462,7 @@ export class WebServer {
         const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
 
         // Validate message size (prevent DoS)
-        if (buffer.length > 100000) {
+        if (buffer.length > 100_000) {
           this.logger.warn("[WebServer] Oversized WebSocket message rejected");
           ws.close(1009, "Message too large");
           return;

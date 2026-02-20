@@ -181,7 +181,7 @@ export class TwitchVodChatDownloader extends EventEmitter {
           );
         }
         // Brief backoff before retry
-        await new Promise(r => setTimeout(r, 2000 * consecutiveErrors));
+        await new Promise(r => setTimeout(r, 2_000 * consecutiveErrors));
       }
     }
   }
@@ -251,7 +251,7 @@ export class TwitchVodChatDownloader extends EventEmitter {
 
     // Save to disk at most once per second (skip if a save is already in flight)
     const now = Date.now();
-    if (!this.saving && now - this.lastSaveMs >= 1000) {
+    if (!this.saving && now - this.lastSaveMs >= 1_000) {
       this.lastSaveMs = now;
       this.saving = true;
       this.periodicSave()

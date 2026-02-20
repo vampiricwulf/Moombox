@@ -191,7 +191,7 @@ export function AddVideoDialog({
       setTimeout(() => {
         setStep(4); // Skip to confirmation
         setAdvancedMode(false);
-      }, 2000);
+      }, 2_000);
     }
   }, [logger]);
 
