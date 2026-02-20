@@ -2,35 +2,42 @@
 
 > **Note:** This project was 99% written by [Claude Opus](https://claude.ai) (Anthropic's AI model) using [Claude Code](https://claude.ai/code). From architecture decisions to implementation details, the vast majority of the codebase — including the YouTube engine, download pipeline, TUI, web dashboard, BotGuard solver, and this README — was generated through AI-assisted development.
 
-YouTube live stream archiver with a terminal UI and web dashboard. Monitors channels via RSS, detects live streams, and downloads video + live chat automatically.
+YouTube and Twitch live stream archiver with a terminal UI and web dashboard. Monitors channels, detects live streams, and downloads video + live chat automatically.
 
 I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a different name related to a certain orca in time, but for now, it's just Moombox.
 
 ## Features
 
 ### Core
-- **Channel monitoring** — RSS-based feed polling with regex filtering on titles and descriptions
+- **YouTube + Twitch** — Monitors and downloads live streams from both platforms
+- **Channel monitoring** — RSS-based feed polling (YouTube) and GQL polling (Twitch) with regex filtering on titles and descriptions
 - **Live stream archiving** — Downloads DASH/HLS video segments in real-time with automatic parallel catch-up when falling behind
-- **Live chat capture** — Archives chat alongside video, including pre-stream messages from the waiting room
-- **VOD downloads** — Download regular videos and post-live DVR recordings, not just live streams
+- **Live chat capture** — Archives chat alongside video (YouTube live chat + Twitch IRC), including pre-stream messages from the waiting room
+- **VOD downloads** — Download regular videos and post-live DVR recordings with parallel segment fetching
 - **Resume on crash** — Periodic state saves allow resuming interrupted downloads without data loss
 - **Parallel downloads** — Process multiple streams simultaneously with configurable concurrency
 
 ### Advanced Download Options
 - **Manual format selection** — Choose specific video and audio formats (itag) per download, or select "None" for video-only/audio-only
 - **Timestamp selection** — Download a specific time range of a stream (start/end time), with frame-accurate trimming via FFmpeg re-encode
-- **Post-download trimming** — Create trimmed clips from finished downloads without re-downloading
+- **Post-download trimming** — Create trimmed clips from finished downloads with CRF-based encoding for optimal quality/size
 - **60fps support** — Prefers 60fps streams when available at the same resolution
 
+### Security
+- **HTTPS support** — Auto-generated self-signed certificates with dual-protocol (TLS + plain HTTP) on a single port
+- **Password authentication** — Optional password protection for external access (scrypt-hashed, session-based)
+
 ### Authentication
-- **Member-only support** — Cookie-based authentication for members-only streams
-- **Automatic cookie refresh** — Keeps sessions alive with periodic background refresh
-- **Auto cookie setup** — Launch a browser from the dashboard, log in, and cookies are extracted automatically (Firefox recommended, Chromium supported)
+- **Member-only support** — Cookie-based authentication for members-only streams (YouTube + Twitch)
+- **Automatic cookie refresh** — Keeps sessions alive with periodic background refresh with real API-based validation
+- **Auto cookie setup** — Launch a browser from the dashboard or TUI, log in, and cookies are extracted automatically (Firefox recommended, Chromium supported)
+- **Auto-reacquisition** — When cookies expire or are deleted, Moombox automatically re-launches the browser to reacquire them
 
 ### Interfaces
-- **Terminal UI** — Full-screen TUI built with Ink (React for CLI) with mouse support, keyboard navigation, job management, and live logs
-- **Web dashboard** — Real-time job monitoring at `localhost:774` with video player, synchronized chat replay (Niconico-style flying overlay + sidebar), settings management, and zip import
+- **Terminal UI** — Full-screen TUI built with Ink (React for CLI) with mouse support, keyboard navigation, job management, settings editor, import wizard, and live logs
+- **Web dashboard** — Real-time job monitoring at `localhost:774` (HTTPS when external) with video player, synchronized chat replay (Niconico-style flying overlay + sidebar), settings management, and zip import
 - **First-run wizard** — Built-in setup wizard in both TUI and web dashboard for initial configuration
+- **Process restart** — Restart Moombox from the TUI or web dashboard when settings require it
 
 ### Integration
 - **Native PO Token generation** — Built-in BotGuard solver using JSDOM (no external server or browser needed)
@@ -92,11 +99,20 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 ### Channel Monitoring
 
 ```toml
+# YouTube channel
 [[channels]]
 id = "UCxxxxxxxxxx"                   # YouTube channel ID
 name = "Channel Name"                 # Display name (optional)
 terms = "(?i)karaoke|singing"         # Regex filter on title + description (optional)
 include_non_live_content = false       # Also download regular uploads (default: false)
+enabled = true                        # Toggle monitoring on/off (default: true)
+
+# Twitch channel
+[[channels]]
+id = "channelname"                    # Twitch login name
+name = "Channel Name"
+platform = "twitch"                   # Required for Twitch channels
+qualityPreference = "best"            # "best", "720p", "480p", or "audio_only"
 ```
 
 Template variables for `output_template`: `${title}`, `${id}`, `${channel}`, `${start_date}`, `${start_time}`
@@ -139,7 +155,7 @@ The TUI displays a three-panel layout: task list + job details (top) and live lo
 | Tab | Switch focus between Tasks/Details/Logs |
 | Up/Down | Navigate tasks or scroll panels |
 | Enter | Expand/collapse archived jobs |
-| A | Add video (Tab toggles advanced mode with format/timestamp selection) |
+| A | Add video (Tab cycles: URL → Advanced → Import) |
 | C | Cancel selected job |
 | R | Retry failed job |
 | D | Delete job (press twice to confirm) |
@@ -147,6 +163,7 @@ The TUI displays a three-panel layout: task list + job details (top) and live lo
 | T | Trim a finished video |
 | O | Open output folder (finished jobs) |
 | W | Open web dashboard in browser |
+| ` | Open settings panel |
 | ? | Toggle help overlay |
 | Q | Quit |
 
@@ -154,17 +171,15 @@ Mouse support: click to select tasks, scroll wheel to navigate. On Windows, a sm
 
 ### Add Video Dialog
 
-Press **A** to open the Add Video dialog. By default it's in quick-add mode — paste a URL and press Enter. Press **Tab** to toggle advanced mode (indicated by a magenta border), which opens a 5-step wizard:
+Press **A** to open the Add Video dialog. By default it's in quick-add mode — paste a URL and press Enter. Press **Tab** to cycle through modes:
 
-1. **URL/ID** — Paste YouTube URL or video ID
-2. **Video Format** — Select from available formats (number keys for quick select, `a` for auto, `n` for none)
-3. **Audio Format** — Select audio quality
-4. **Timestamps** — Set start/end time (HH:MM:SS, MM:SS, or seconds)
-5. **Confirmation** — Review and submit
+- **Quick Add** — Paste a YouTube or Twitch URL and press Enter
+- **Advanced** (magenta border) — 5-step wizard: URL → Video Format → Audio Format → Timestamps → Confirm
+- **Import** (green border) — Upload a `.zip` archive with video + optional chat JSON
 
 ## Web Dashboard
 
-Available at `http://localhost:774` with:
+Available at `http://localhost:774` (auto-upgrades to HTTPS for external access) with:
 
 - **Tasks tab** — Real-time job list with progress bars, add/cancel/retry/delete actions, and job details with embedded YouTube player
 - **Advanced Options** — Format selection (video/audio dropdowns with codec badges) and timestamp range when adding videos
@@ -175,7 +190,7 @@ Available at `http://localhost:774` with:
   - Superchat highlighting and emoji support
 - **Imports tab** — Upload `.zip` archives containing video + optional chat JSON for playback in the Player tab
 - **Logs tab** — Live log viewer
-- **Settings** — General config, downloader settings, channel management, webhook notifications, yt-dlp plugin installation, and auto-cookie setup
+- **Settings** — General config, downloader settings, channel management (YouTube + Twitch), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
 
 ### API
 
@@ -198,6 +213,10 @@ All endpoints are available under both `/api/v1` and `/api`. Real-time updates a
 | GET | `/api/config` | Get configuration |
 | PUT | `/api/config` | Update configuration |
 | GET | `/api/status` | Server status |
+| POST | `/api/restart` | Restart server (loopback only) |
+| POST | `/auth/login` | Authenticate with password |
+| POST | `/auth/set-password` | Set or change password |
+| GET | `/auth/status` | Check auth status |
 
 WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `log`, `pong`
 
@@ -236,7 +255,7 @@ yt-dlp --extractor-args "youtube:getpot_moombox_base_url=http://HOST:PORT" <URL>
 
 ## Cookie Setup
 
-Cookies are needed for member-only content. Two options:
+Cookies are needed for member-only content (YouTube) and authenticated access (Twitch). Two options:
 
 ### Automatic (recommended)
 
@@ -248,7 +267,9 @@ enabled = true
 browser_profile_dir = "./browser-profile"
 ```
 
-Then use the web dashboard Settings page to launch a browser, log into YouTube, and Moombox will manage cookie refresh automatically. Firefox is recommended (cookies are read directly from SQLite). Edge and Chrome are supported as fallback via Chrome DevTools Protocol.
+Then use the web dashboard Settings page or TUI settings panel to launch a browser, log into YouTube and/or Twitch, and Moombox will manage cookie refresh automatically. Firefox is recommended (cookies are read directly from SQLite). Edge and Chrome are supported as fallback via Chrome DevTools Protocol.
+
+Cookies are validated via real API calls (not just format checks), and if they expire or are deleted, Moombox will automatically re-launch the browser to reacquire them.
 
 ### Manual
 
@@ -284,18 +305,19 @@ Special states: `Error`, `Cancelled`, `COOKIES?` (member content needs cookie re
 Moombox is a Node.js application (ESM, TypeScript) with three presentation layers (TUI, web dashboard, REST API) backed by a shared service layer of singleton services.
 
 ```
-RSS Feed Monitor → Job Database (lowdb) → Download Worker → YouTube Innertube API
-                                                 ↓
-                       Web Dashboard ← FFmpeg Muxer ← Segment Downloads (DASH/HLS/VOD)
-                      (localhost:774)      ↑
-                                     Chat Downloader (live chat polling)
+RSS/GQL Feed Monitor → Job Database (lowdb) → Download Worker → YouTube/Twitch API
+                                                      ↓
+                          Web Dashboard ← FFmpeg Muxer ← Segment Downloads (DASH/HLS/VOD)
+                         (localhost:774)      ↑
+                                        Chat Downloader (YouTube live chat / Twitch IRC)
 ```
 
 Key components:
 - **YouTube engine** — Multi-client Innertube API strategy with native signature decryption (AST-based cipher solver via meriyah/astring) and BotGuard PO Token generation (JSDOM-based)
+- **Twitch engine** — GQL-based stream metadata, HLS segment downloading, IRC live chat, and VOD chat replay
 - **Download pipeline** — SegmentDownloader with parallel catch-up mode (6 concurrent segments), head sequence tracking, resume state, and gap detection
-- **Chat system** — Live chat polling with memory bounding (50k flush threshold), stale continuation recovery, and replay support
-- **Web server** — Express 5 with WebSocket real-time updates (trailing-edge throttle at 100ms), CORS, CSP, rate limiting, and IP-based access control
+- **Chat system** — YouTube live chat polling + Twitch IRC with memory bounding (50k flush threshold), stale continuation recovery, and replay support
+- **Web server** — Express 5 with HTTPS + WebSocket real-time updates (trailing-edge throttle at 100ms), CORS, CSP, rate limiting, password auth, and IP-based access control
 
 See [CLAUDE.md](CLAUDE.md) for comprehensive architecture documentation including initialization order, full API reference, dependency inventory, type system details, code patterns, and known issues.
 
