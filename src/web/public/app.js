@@ -5,6 +5,7 @@ import { SetupController } from "./modules/setup.js";
 import { ImportController } from "./modules/imports.js";
 import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
+import { formatTimestamp as _formatTimestamp, formatBytes as _formatBytes, formatDurationSeconds as _formatDurationSeconds, formatRelativeTime as _formatRelativeTime } from "./modules/utils.js";
 
 class MoomboxApp {
   constructor() {
@@ -20,6 +21,7 @@ class MoomboxApp {
     this.nextDecapiCheck = 0;
     this.nextTwitchCheck = 0;
     this._countdownInterval = null;
+    this.logFilter = "all";
 
     // Module controllers
     this.setup = new SetupController(this);
@@ -129,10 +131,28 @@ class MoomboxApp {
       .getElementById("details-delete-btn")
       .addEventListener("click", () => this.deleteJob());
 
+    // Copy buttons in details dialog (event delegation via data-copy attribute)
+    document.getElementById("details-dialog").addEventListener("click", (e) => {
+      const copyBtn = e.target.closest("[data-copy]");
+      if (copyBtn) {
+        navigator.clipboard.writeText(copyBtn.dataset.copy);
+      }
+    });
+
     // Clear logs
     document
       .getElementById("clear-logs-btn")
       .addEventListener("click", () => this.clearLogs());
+
+    // Log level filter buttons
+    document.querySelectorAll(".log-filter").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        this.logFilter = btn.dataset.level;
+        document.querySelectorAll(".log-filter").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        this.renderLogs();
+      });
+    });
 
     // Tab activation handlers
     const tabGroup = document.querySelector("sl-tab-group");
@@ -437,7 +457,7 @@ class MoomboxApp {
     const feed = this.formatCountdown(this.nextFeedCheck);
     const decapi = this.formatCountdown(this.nextDecapiCheck);
     const twitch = this.formatCountdown(this.nextTwitchCheck);
-    el.textContent = `Feed: ${feed} | DECAPI: ${decapi} | Twitch: ${twitch}`;
+    el.textContent = `Next: Feed ${feed} \u00b7 DECAPI ${decapi} \u00b7 Twitch ${twitch}`;
   }
 
   // ===== Job Rendering =====
@@ -472,7 +492,7 @@ class MoomboxApp {
       .map((job) => this.renderJobItem(job))
       .join("");
 
-    // Event delegation is set up in setupEventDelegation() - no per-item listeners needed
+    // Event delegation is set up in setupEventListeners() - no per-item listeners needed
   }
 
   async fetchArchivedJobs() {
@@ -539,7 +559,7 @@ class MoomboxApp {
           <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(job.status)}</sl-badge>
         </div>
         <div class="job-progress">
-          <div class="job-progress-text">${this.escapeHtml(progress)}</div>
+          <div class="job-progress-text" title="${this.escapeHtml(progress)}">${this.escapeHtml(progress)}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${percent}"></sl-progress-bar>` : ""}
         </div>
       </div>
@@ -563,7 +583,9 @@ class MoomboxApp {
     // Update progress text
     const progressText = card.querySelector(".job-progress-text");
     if (progressText) {
-      progressText.textContent = this.formatProgress(job);
+      const progress = this.formatProgress(job);
+      progressText.textContent = progress;
+      progressText.title = progress;
     }
 
     // Update progress bar
@@ -768,7 +790,7 @@ class MoomboxApp {
         <div class="details-section">
           <div class="details-row">
             <span class="details-label">${isTwitch ? "Stream ID:" : "Video ID:"}</span>
-            <span class="details-value"><code>${this.escapeHtml(job.videoId)}</code></span>
+            <span class="details-value"><code>${this.escapeHtml(job.videoId)}</code><sl-icon-button class="details-copy-btn" name="clipboard" label="Copy" data-copy="${this.escapeHtml(job.videoId)}"></sl-icon-button></span>
           </div>
           <div class="details-row">
             <span class="details-label">Title:</span>
@@ -784,6 +806,18 @@ class MoomboxApp {
               <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(job.status)}</sl-badge>
             </span>
           </div>
+          ${job.chatStatus ? (() => {
+            const chatVariantMap = { downloading: "primary", finished: "success", error: "danger", unavailable: "neutral", pending: "neutral" };
+            const chatVariant = chatVariantMap[job.chatStatus] || "neutral";
+            return `
+          <div class="details-row">
+            <span class="details-label">Chat:</span>
+            <span class="details-value">
+              <sl-badge variant="${chatVariant}">${this.escapeHtml(job.chatStatus)}</sl-badge>
+              ${job.totalChatMessages ? ` (${job.totalChatMessages.toLocaleString()} messages)` : ""}
+            </span>
+          </div>`;
+          })() : ""}
           ${
             job.isVod
               ? `
@@ -813,7 +847,7 @@ class MoomboxApp {
               ? `
           <div class="details-row">
             <span class="details-label">Filename:</span>
-            <span class="details-value">${this.escapeHtml(job.filename)}</span>
+            <span class="details-value">${this.escapeHtml(job.filename)}<sl-icon-button class="details-copy-btn" name="clipboard" label="Copy" data-copy="${this.escapeHtml(job.filename)}"></sl-icon-button></span>
           </div>
           `
               : ""
@@ -1185,6 +1219,13 @@ class MoomboxApp {
       audioSelect.appendChild(opt);
     }
 
+    // Auto-select best formats
+    if (bestItags.bestWebmVideo) videoSelect.value = String(bestItags.bestWebmVideo);
+    else if (bestItags.bestMp4Video) videoSelect.value = String(bestItags.bestMp4Video);
+
+    if (bestItags.bestOpusAudio) audioSelect.value = String(bestItags.bestOpusAudio);
+    else if (bestItags.bestAacAudio) audioSelect.value = String(bestItags.bestAacAudio);
+
     // Update end time placeholder with video duration
     if (data.lengthSeconds && data.lengthSeconds > 0) {
       const h = Math.floor(data.lengthSeconds / 3600);
@@ -1194,6 +1235,17 @@ class MoomboxApp {
         ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
         : `${m}:${String(s).padStart(2, "0")}`;
       document.getElementById("end-time-input").placeholder = durationStr;
+    }
+
+    // Show duration display
+    const durationEl = document.getElementById("video-duration-display");
+    if (durationEl) {
+      if (data.lengthSeconds && data.lengthSeconds > 0) {
+        durationEl.textContent = `Duration: ${this.formatDurationSeconds(data.lengthSeconds)}`;
+        durationEl.style.display = "block";
+      } else {
+        durationEl.style.display = "none";
+      }
     }
   }
 
@@ -1405,6 +1457,50 @@ class MoomboxApp {
     // Update dialog title with job info
     trimDialog.label = `Create Trim - ${job.title}`;
 
+    // Add/update trim timeline preview
+    let previewContainer = trimDialog.querySelector('.trim-preview-container');
+    if (!previewContainer) {
+      previewContainer = document.createElement('div');
+      previewContainer.className = 'trim-preview-container';
+      previewContainer.innerHTML = `
+        <div class="trim-preview-label"></div>
+        <div class="trim-preview"><div class="trim-preview-range"></div></div>
+      `;
+      // Insert before the footer
+      trimDialog.querySelector('[slot="footer"]')?.before(previewContainer);
+      // Fallback: just append
+      if (!previewContainer.parentNode) {
+        const body = trimDialog.querySelector('div') || trimDialog;
+        body.appendChild(previewContainer);
+      }
+    }
+    previewContainer.style.display = 'none';
+
+    const totalDuration = job.lengthSeconds || 0;
+    const updatePreview = () => {
+      const start = this.parseTimeInput(startInput.value);
+      const end = this.parseTimeInput(endInput.value);
+      if (start !== null && end !== null && end > start && totalDuration > 0) {
+        const startPct = Math.min(100, (start / totalDuration) * 100);
+        const endPct = Math.min(100, (end / totalDuration) * 100);
+        const rangeEl = previewContainer.querySelector('.trim-preview-range');
+        rangeEl.style.left = `${startPct}%`;
+        rangeEl.style.width = `${endPct - startPct}%`;
+        previewContainer.querySelector('.trim-preview-label').textContent =
+          `${this.formatTimestamp(start)} - ${this.formatTimestamp(end)} of ${this.formatTimestamp(totalDuration)}`;
+        previewContainer.style.display = '';
+      } else {
+        previewContainer.style.display = 'none';
+      }
+    };
+
+    // Abort previous trim listeners to prevent stacking on repeated opens
+    if (this._trimListenerAbort) this._trimListenerAbort.abort();
+    this._trimListenerAbort = new AbortController();
+    const trimSignal = this._trimListenerAbort.signal;
+    startInput.addEventListener('sl-input', updatePreview, { signal: trimSignal });
+    endInput.addEventListener('sl-input', updatePreview, { signal: trimSignal });
+
     // Set up submit handler
     submitBtn.onclick = async () => {
       // Show loading state immediately
@@ -1443,18 +1539,11 @@ class MoomboxApp {
   }
 
   formatTimestamp(seconds) {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-    return `${m}:${String(s).padStart(2, '0')}`;
+    return _formatTimestamp(seconds);
   }
 
   formatBytes(bytes) {
-    if (bytes < 1024) return `${bytes}B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+    return _formatBytes(bytes);
   }
 
   // ===== Log Management =====
@@ -1469,12 +1558,30 @@ class MoomboxApp {
     this._logRenderTimer = setTimeout(() => this.renderLogs(), 100);
   }
 
+  getFilteredLogs() {
+    if (this.logFilter === "all") return this.logs;
+
+    // Filter hierarchy: ERROR < WARN < INFO < DEBUG
+    const levelPriority = { ERROR: 0, WARN: 1, WARNING: 1, INFO: 2, DEBUG: 3 };
+    const threshold = levelPriority[this.logFilter] ?? 3;
+
+    return this.logs.filter((log) => {
+      const match = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
+      if (!match) return true; // Show untagged lines always
+      const level = match[1].toUpperCase();
+      return (levelPriority[level] ?? 2) <= threshold;
+    });
+  }
+
   renderLogs() {
     const textarea = document.getElementById("logs-textarea");
     const countEl = document.getElementById("log-count");
 
-    textarea.value = this.logs.join("\n");
-    countEl.textContent = `${this.logs.length} log entries`;
+    const filtered = this.getFilteredLogs();
+    textarea.value = filtered.join("\n");
+
+    const suffix = this.logFilter !== "all" ? ` (${this.logFilter}+)` : "";
+    countEl.textContent = `${filtered.length} log entries${suffix}`;
 
     // Auto-scroll to bottom
     textarea.scrollTop = textarea.scrollHeight;
@@ -1590,35 +1697,11 @@ class MoomboxApp {
   }
 
   formatRelativeTime(isoDate) {
-    const date = new Date(isoDate);
-    const now = new Date();
-    const diffMs = now - date;
-    const diffSecs = Math.floor(diffMs / 1000);
-
-    if (diffSecs < 60) return `${diffSecs}s ago`;
-    const diffMins = Math.floor(diffSecs / 60);
-    if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    const diffDays = Math.floor(diffHours / 24);
-    return `${diffDays}d ago`;
+    return _formatRelativeTime(isoDate);
   }
 
   formatDurationSeconds(totalSeconds) {
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-    if (minutes > 0) return `${minutes}m ${seconds}s`;
-    return `${seconds}s`;
-  }
-
-  formatFileSize(bytes) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024)
-      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    return _formatDurationSeconds(totalSeconds);
   }
 
   setInputValue(id, value) {

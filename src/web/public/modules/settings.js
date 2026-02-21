@@ -29,6 +29,8 @@ export class SettingsController {
     this._netAccessListenerAdded = false;
     /** Snapshot of restart-required values taken when config is loaded */
     this._originalRestartValues = {};
+    this._dirty = false;
+    this._dirtyListenersAdded = false;
   }
 
   setupListeners() {
@@ -171,6 +173,14 @@ export class SettingsController {
       singleCancelBtn.addEventListener("click", () => this.cancelAutoCookieSetup());
     }
 
+    // Unsaved changes warning
+    window.addEventListener("beforeunload", (e) => {
+      if (this._dirty) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    });
+
     // Handle sl-dialog close (Escape/overlay click)
     const autoCookieDialog = document.getElementById("auto-cookie-setup-dialog");
     if (autoCookieDialog) {
@@ -278,6 +288,21 @@ export class SettingsController {
     );
     this.updateAutoCookieUI();
 
+    // Track dirty state
+    this._dirty = false;
+    this._updateUnsavedIndicator();
+    if (!this._dirtyListenersAdded) {
+      this._dirtyListenersAdded = true;
+      const settingsContent = document.querySelector(".settings-content");
+      if (settingsContent) {
+        settingsContent.addEventListener("sl-change", () => this._markDirty());
+        settingsContent.addEventListener("sl-input", () => this._markDirty());
+      }
+    }
+
+    // Add restart-required badges to relevant fields
+    this._addRestartBadges();
+
     // Snapshot restart-required values for change detection
     this._originalRestartValues = {
       port: config.port,
@@ -379,6 +404,8 @@ export class SettingsController {
       });
 
       if (response.ok) {
+        this._dirty = false;
+        this._updateUnsavedIndicator();
         this.app.showToast("Settings saved successfully", "success");
         // Check if any restart-required settings changed
         this._checkRestartRequired(config);
@@ -427,6 +454,53 @@ export class SettingsController {
     fetch("/api/restart", { method: "POST" }).catch(() => {
       // Connection will drop during restart — expected
     });
+  }
+
+  _markDirty() {
+    this._dirty = true;
+    this._updateUnsavedIndicator();
+  }
+
+  _updateUnsavedIndicator() {
+    let indicator = document.getElementById("unsaved-indicator");
+    const saveBtn = document.getElementById("save-config-btn");
+    if (this._dirty) {
+      if (!indicator && saveBtn) {
+        indicator = document.createElement("span");
+        indicator.id = "unsaved-indicator";
+        indicator.className = "unsaved-warning";
+        indicator.textContent = "Unsaved changes";
+        saveBtn.parentElement.insertBefore(indicator, saveBtn);
+      }
+    } else if (indicator) {
+      indicator.remove();
+    }
+  }
+
+  _addRestartBadges() {
+    const fieldMap = {
+      port: "cfg-port",
+      network_access: "cfg-network-access",
+      database_path: "cfg-database",
+      log_file_path: "cfg-log-file",
+      log_max_file_size: "cfg-log-max-size",
+      log_max_files: "cfg-log-max-files",
+    };
+    for (const [, elId] of Object.entries(fieldMap)) {
+      const el = document.getElementById(elId);
+      if (!el) continue;
+      // Avoid duplicate badges
+      const parent = el.parentElement;
+      if (parent && !parent.querySelector(".restart-badge")) {
+        const badge = document.createElement("sl-tag");
+        badge.size = "small";
+        badge.variant = "warning";
+        badge.className = "restart-badge";
+        badge.textContent = "Restart";
+        // Insert after the element's label (next sibling or append to parent)
+        el.insertAdjacentElement("afterend", badge);
+      }
+    }
   }
 
   renderChannelsList() {
@@ -706,17 +780,32 @@ export class SettingsController {
       .join("");
   }
 
-  async addNotification() {
-    const url = prompt("Enter webhook URL:");
-    if (!url) return;
+  addNotification() {
+    const dialog = document.getElementById("webhook-dialog");
+    const input = document.getElementById("webhook-url-input");
+    const confirmBtn = document.getElementById("webhook-confirm-btn");
+    input.value = "";
 
-    if (!this.app.config.notifications) {
-      this.app.config.notifications = [];
-    }
+    // Wire confirm handler (replace to avoid stacking listeners)
+    confirmBtn.onclick = async () => {
+      const url = input.value.trim();
+      if (!url) {
+        this.app.showToast("Please enter a URL", "warning");
+        return;
+      }
 
-    this.app.config.notifications.push({ url });
-    await this.saveConfig();
-    this.renderNotificationsList();
+      if (!this.app.config.notifications) {
+        this.app.config.notifications = [];
+      }
+
+      this.app.config.notifications.push({ url });
+      dialog.hide();
+      await this.saveConfig();
+      this.renderNotificationsList();
+    };
+
+    dialog.show();
+    setTimeout(() => input.focus(), 100);
   }
 
   async deleteNotification(index) {

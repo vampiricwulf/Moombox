@@ -9,6 +9,20 @@ interface LogViewerProps {
   width: number;
   focused: boolean;
   autoScroll?: boolean;
+  levelFilter?: string;
+}
+
+const LEVEL_PRIORITY: Record<string, number> = { ERROR: 0, WARN: 1, WARNING: 1, INFO: 2, DEBUG: 3 };
+
+function filterLogsByLevel(logs: string[], filter: string): string[] {
+  if (!filter || filter === "all") return logs;
+  const threshold = LEVEL_PRIORITY[filter] ?? 3;
+  return logs.filter((log) => {
+    const match = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
+    if (!match) return true;
+    const level = match[1].toUpperCase();
+    return (LEVEL_PRIORITY[level] ?? 2) <= threshold;
+  });
 }
 
 export const LogViewer = React.memo(function LogViewer({
@@ -18,19 +32,23 @@ export const LogViewer = React.memo(function LogViewer({
   width,
   focused,
   autoScroll = true,
+  levelFilter = "all",
 }: LogViewerProps): React.ReactElement {
+  const filteredLogs = React.useMemo(() => filterLogsByLevel(logs, levelFilter), [logs, levelFilter]);
   const contentHeight = height - 3; // borders (2) + title row (1)
-  const maxScroll = Math.max(0, logs.length - contentHeight);
+  const maxScroll = Math.max(0, filteredLogs.length - contentHeight);
   const actualOffset = Math.min(scrollOffset, maxScroll);
-  const visibleLogs = logs.slice(actualOffset, actualOffset + contentHeight);
+  const visibleLogs = filteredLogs.slice(actualOffset, actualOffset + contentHeight);
 
   const borderColor = focused ? "cyan" : "gray";
   const titleColor = focused ? "cyan" : "white";
 
   // Calculate scroll indicator
-  const scrollPercent = logs.length > contentHeight
+  const scrollPercent = filteredLogs.length > contentHeight
     ? Math.round((actualOffset / maxScroll) * 100)
     : 100;
+
+  const filterSuffix = levelFilter !== "all" ? ` [${levelFilter}+]` : "";
 
   return (
     <Box
@@ -42,9 +60,10 @@ export const LogViewer = React.memo(function LogViewer({
     >
       <Box paddingX={1}>
         <Text color={titleColor} bold>
-          Logs ({logs.length})
+          Logs ({filteredLogs.length})
         </Text>
-        {logs.length > contentHeight && (
+        {filterSuffix && <Text color="yellow">{filterSuffix}</Text>}
+        {filteredLogs.length > contentHeight && (
           <Text color="gray">
             {" "}
             [{scrollPercent}%]

@@ -1,6 +1,8 @@
 /**
  * Player Controller — Video player + chat replay
  */
+import { formatMsToTime } from "./utils.js";
+
 export class PlayerController {
   constructor(app) {
     this.app = app;
@@ -120,6 +122,56 @@ export class PlayerController {
       this.playerScrollLock = false;
       this.syncSidebarToTime();
     });
+
+    // Chat search
+    const chatSearch = document.getElementById("chat-search");
+    if (chatSearch) {
+      let searchTimeout = null;
+      chatSearch.addEventListener("input", () => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => this.filterChat(chatSearch.value), 200);
+      });
+    }
+  }
+
+  filterChat(query) {
+    const container = document.getElementById("player-sidebar-messages");
+    if (!container) return;
+    const children = container.children;
+    const needle = query.trim().toLowerCase();
+
+    if (!needle) {
+      // Clear search — restore all messages
+      for (let i = 0; i < children.length; i++) {
+        children[i].classList.remove("search-hidden");
+      }
+      this.playerAutoScroll = true;
+      this.playerScrollLock = false;
+      return;
+    }
+
+    // Filter messages
+    for (let i = 0; i < this.playerChatMessages.length; i++) {
+      const msg = this.playerChatMessages[i];
+      const authorMatch = (msg.authorName || "").toLowerCase().includes(needle);
+      const textParts = msg.message || [];
+      let textMatch = false;
+      if (typeof textParts === "string") {
+        textMatch = textParts.toLowerCase().includes(needle);
+      } else if (Array.isArray(textParts)) {
+        textMatch = textParts.some((p) => (p.text || "").toLowerCase().includes(needle));
+      }
+      const child = children[i];
+      if (child) {
+        if (authorMatch || textMatch) {
+          child.classList.remove("search-hidden");
+        } else {
+          child.classList.add("search-hidden");
+        }
+      }
+    }
+    // Disable auto-scroll during search
+    this.playerAutoScroll = false;
   }
 
   clearPlayer() {
@@ -529,16 +581,6 @@ export class PlayerController {
   }
 
   formatMsToTime(ms) {
-    const negative = ms < 0;
-    const absTotalSec = Math.floor(Math.abs(ms) / 1000);
-    const h = Math.floor(absTotalSec / 3600);
-    const m = Math.floor((absTotalSec % 3600) / 60);
-    const s = absTotalSec % 60;
-
-    const prefix = negative ? "-" : "";
-    if (h > 0) {
-      return `${prefix}${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-    }
-    return `${prefix}${m}:${String(s).padStart(2, "0")}`;
+    return formatMsToTime(ms);
   }
 }

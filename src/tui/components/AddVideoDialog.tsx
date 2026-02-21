@@ -562,6 +562,7 @@ export function AddVideoDialog({
 
     // Step 1: Select video format
     if (step === 1) {
+      const pageSize = Math.max(5, Math.min(height - 4, 30) - 10) - 1;
       if (key.return) {
         // Skip (auto)
         setSelectedVideoItag(undefined);
@@ -575,6 +576,14 @@ export function AddVideoDialog({
       }
       if (key.downArrow) {
         setScrollOffset((prev) => prev + 1);
+        return;
+      }
+      if (key.pageUp) {
+        setScrollOffset((prev) => Math.max(0, prev - pageSize));
+        return;
+      }
+      if (key.pageDown) {
+        setScrollOffset((prev) => prev + pageSize);
         return;
       }
       if (char === "a" || char === "A") {
@@ -603,6 +612,7 @@ export function AddVideoDialog({
 
     // Step 2: Select audio format
     if (step === 2) {
+      const pageSize = Math.max(5, Math.min(height - 4, 30) - 10) - 1;
       if (key.return) {
         setSelectedAudioItag(undefined);
         setStep(3);
@@ -615,6 +625,14 @@ export function AddVideoDialog({
       }
       if (key.downArrow) {
         setScrollOffset((prev) => prev + 1);
+        return;
+      }
+      if (key.pageUp) {
+        setScrollOffset((prev) => Math.max(0, prev - pageSize));
+        return;
+      }
+      if (key.pageDown) {
+        setScrollOffset((prev) => prev + pageSize);
         return;
       }
       if (char === "a" || char === "A") {

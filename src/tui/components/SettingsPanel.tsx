@@ -30,13 +30,13 @@ interface FieldDef {
 
 const GENERAL_FIELDS: FieldDef[] = [
   { key: "port", label: "Port", type: "number", configPath: ["port"], help: "1-65535" },
-  { key: "network_access", label: "Network access", type: "cycle", options: ["localhost", "lan", "external"], configPath: ["network_access"] },
-  { key: "log_level", label: "Log level", type: "cycle", options: ["DEBUG", "INFO", "WARN", "ERROR"], configPath: ["log_level"] },
+  { key: "network_access", label: "Network access", type: "cycle", options: ["localhost", "lan", "external"], configPath: ["network_access"], help: "localhost, lan, or external" },
+  { key: "log_level", label: "Log level", type: "cycle", options: ["DEBUG", "INFO", "WARN", "ERROR"], configPath: ["log_level"], help: "DEBUG, INFO, WARN, ERROR" },
   { key: "log_file_path", label: "Log file path", type: "text", configPath: ["log_file_path"] },
   { key: "log_max_file_size", label: "Max log file size", type: "number", configPath: ["log_max_file_size"], help: "bytes" },
   { key: "log_max_files", label: "Max log files", type: "number", configPath: ["log_max_files"] },
-  { key: "database_path", label: "Database path", type: "text", configPath: ["database_path"] },
-  { key: "max_feed_items", label: "Max feed items", type: "number", configPath: ["max_feed_items"] },
+  { key: "database_path", label: "Database path", type: "text", configPath: ["database_path"], help: "path to moombox.json" },
+  { key: "max_feed_items", label: "Max feed items", type: "number", configPath: ["max_feed_items"], help: "RSS items per feed" },
   { key: "feed_check_interval", label: "Feed check interval", type: "number", configPath: ["feed_check_interval"], help: "minutes" },
   { key: "decapi_check_interval", label: "DECAPI check interval", type: "number", configPath: ["decapi_check_interval"], help: "seconds (0=dynamic)" },
   { key: "twitch_check_interval", label: "Twitch check interval", type: "number", configPath: ["twitch_check_interval"], help: "seconds (default: 15)" },
@@ -44,17 +44,17 @@ const GENERAL_FIELDS: FieldDef[] = [
 ];
 
 const DOWNLOADER_FIELDS: FieldDef[] = [
-  { key: "output_directory", label: "Output directory", type: "text", configPath: ["downloader", "output_directory"] },
+  { key: "output_directory", label: "Output directory", type: "text", configPath: ["downloader", "output_directory"], help: "where finished files go" },
   { key: "output_template", label: "Output template", type: "text", configPath: ["downloader", "output_template"], help: "${title} ${id} ${channel} ${start_date} ${start_time}" },
-  { key: "staging_directory", label: "Staging directory", type: "text", configPath: ["downloader", "staging_directory"] },
+  { key: "staging_directory", label: "Staging directory", type: "text", configPath: ["downloader", "staging_directory"], help: "temp files during download" },
   { key: "ffmpeg_path", label: "FFmpeg path", type: "text", configPath: ["downloader", "ffmpeg_path"], help: "empty = system PATH" },
-  { key: "cookie_file", label: "Cookie file", type: "text", configPath: ["downloader", "cookie_file"] },
+  { key: "cookie_file", label: "Cookie file", type: "text", configPath: ["downloader", "cookie_file"], help: "Netscape format cookies.txt" },
   { key: "max_video_resolution", label: "Max resolution", type: "number", configPath: ["downloader", "max_video_resolution"], help: "pixels" },
-  { key: "num_parallel_downloads", label: "Parallel downloads", type: "number", configPath: ["downloader", "num_parallel_downloads"] },
+  { key: "num_parallel_downloads", label: "Parallel downloads", type: "number", configPath: ["downloader", "num_parallel_downloads"], help: "concurrent jobs" },
   { key: "download_chat", label: "Download chat", type: "toggle", options: ["Yes", "No"], configPath: ["downloader", "download_chat"] },
   { key: "prefer_60fps", label: "Prefer 60fps", type: "toggle", options: ["Yes", "No"], configPath: ["downloader", "prefer_60fps"] },
   { key: "segment_retry_delay_cap", label: "Segment retry cap", type: "number", configPath: ["downloader", "segment_retry_delay_cap"], help: "seconds" },
-  { key: "segment_live_check_retries", label: "Live check retries", type: "number", configPath: ["downloader", "segment_live_check_retries"] },
+  { key: "segment_live_check_retries", label: "Live check retries", type: "number", configPath: ["downloader", "segment_live_check_retries"], help: "before marking stream ended" },
 ];
 
 const FIELD_SECTIONS = [GENERAL_FIELDS, DOWNLOADER_FIELDS];

@@ -106,7 +106,15 @@ export function TaskList({
           <Text color="yellow"> [{filterLabel}]</Text>
         )}
         {(nextFeedCheck > 0 || nextDecapiCheck > 0 || nextTwitchCheck > 0) && (
-          <Text color="gray"> F:{formatCountdown(nextFeedCheck)} D:{formatCountdown(nextDecapiCheck)} T:{formatCountdown(nextTwitchCheck)}</Text>
+          <Text color="gray">
+            {" "}
+            <Text color={nextFeedCheck > Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+            <Text color="gray">F:{formatCountdown(nextFeedCheck)} </Text>
+            <Text color={nextDecapiCheck > Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+            <Text color="gray">D:{formatCountdown(nextDecapiCheck)} </Text>
+            <Text color={nextTwitchCheck > Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+            <Text color="gray">T:{formatCountdown(nextTwitchCheck)}</Text>
+          </Text>
         )}
         {totalItems > contentHeight && (
           <Text color="gray">
@@ -118,7 +126,7 @@ export function TaskList({
 
       {jobs.length === 0 && archivedJobs.length === 0 ? (
         <Box paddingX={1} paddingY={1}>
-          <Text color="gray">No tasks. Add videos via Web UI or CLI.</Text>
+          <Text color="gray">No tasks. Press A to add, or use Web UI.</Text>
         </Box>
       ) : (
         <Box flexDirection="column" paddingX={1}>
@@ -127,14 +135,17 @@ export function TaskList({
             if (item.type === "divider") {
               const icon = item.expanded ? "\u25BE" : "\u25B8";
               const isSelected = globalIdx === selectedIndex;
+              const dividerLabel = `${icon} Archived (${item.count})`;
+              const padLen = Math.max(0, (width - 4) - dividerLabel.length - 6);
+              const rule = "\u2500".repeat(Math.floor(padLen / 2));
               return (
                 <Box key="archive-divider" height={1} width={width - 4}>
                   <Text
                     backgroundColor={isSelected ? "blue" : undefined}
-                    color={isSelected ? "white" : "gray"}
-                    dimColor={!isSelected}
+                    color={isSelected ? "white" : "yellow"}
+                    bold
                   >
-                    {isSelected ? "> " : "  "}{icon} Archived ({item.count})
+                    {isSelected ? "> " : "  "}{rule} {dividerLabel} {rule}
                   </Text>
                 </Box>
               );

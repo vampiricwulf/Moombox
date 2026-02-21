@@ -1,12 +1,15 @@
 /**
  * Import Controller — ZIP archive import UI
  */
+import { formatBytes } from "./utils.js";
+
 export class ImportController {
   constructor(app) {
     this.app = app;
     this.importFile = null;
     this.importUploading = false;
     this.importInitialized = false;
+    this._activeXhr = null;
   }
 
   initImports() {
@@ -55,6 +58,41 @@ export class ImportController {
     submitBtn.addEventListener("click", () => this.uploadImport());
   }
 
+  cancelUpload() {
+    if (this._activeXhr) {
+      this._activeXhr.abort();
+      this._activeXhr = null;
+      this.importUploading = false;
+      const submitBtn = document.getElementById("import-submit-btn");
+      submitBtn.disabled = false;
+      submitBtn.loading = false;
+      document.getElementById("import-status-text").textContent = "Upload cancelled";
+      this._hideCancelButton();
+      this.app.showToast("Upload cancelled", "primary");
+    }
+  }
+
+  _showCancelButton() {
+    let cancelBtn = document.getElementById("import-cancel-btn");
+    if (!cancelBtn) {
+      cancelBtn = document.createElement("sl-button");
+      cancelBtn.id = "import-cancel-btn";
+      cancelBtn.variant = "danger";
+      cancelBtn.size = "small";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.style.marginTop = "var(--sl-spacing-x-small)";
+      cancelBtn.addEventListener("click", () => this.cancelUpload());
+      const progress = document.getElementById("import-progress");
+      if (progress) progress.appendChild(cancelBtn);
+    }
+    cancelBtn.style.display = "";
+  }
+
+  _hideCancelButton() {
+    const cancelBtn = document.getElementById("import-cancel-btn");
+    if (cancelBtn) cancelBtn.style.display = "none";
+  }
+
   setImportFile(file) {
     this.importFile = file;
 
@@ -66,7 +104,7 @@ export class ImportController {
 
     dropzone.classList.add("has-file");
     fileInfo.style.display = "";
-    fileName.textContent = `${file.name} (${this.app.formatFileSize(file.size)})`;
+    fileName.textContent = `${file.name} (${formatBytes(file.size)})`;
     options.style.display = "";
     submitBtn.style.display = "";
   }
@@ -107,6 +145,7 @@ export class ImportController {
     progress.style.display = "";
     progressBar.value = 0;
     statusText.textContent = "Uploading...";
+    this._showCancelButton();
 
     const title = document.getElementById("import-title").value.trim();
     const channel = document.getElementById("import-channel").value.trim();
@@ -121,14 +160,18 @@ export class ImportController {
       if (e.lengthComputable) {
         const pct = Math.round((e.loaded / e.total) * 100);
         progressBar.value = pct;
-        statusText.textContent = `Uploading... ${pct}% (${this.app.formatFileSize(e.loaded)} / ${this.app.formatFileSize(e.total)})`;
+        statusText.textContent = `Uploading... ${pct}% (${formatBytes(e.loaded)} / ${formatBytes(e.total)})`;
       }
     });
 
+    this._activeXhr = xhr;
+
     xhr.addEventListener("load", () => {
+      this._activeXhr = null;
       this.importUploading = false;
       submitBtn.disabled = false;
       submitBtn.loading = false;
+      this._hideCancelButton();
 
       if (xhr.status === 201) {
         statusText.textContent = "Import complete!";
@@ -154,9 +197,11 @@ export class ImportController {
     });
 
     xhr.addEventListener("error", () => {
+      this._activeXhr = null;
       this.importUploading = false;
       submitBtn.disabled = false;
       submitBtn.loading = false;
+      this._hideCancelButton();
       statusText.textContent = "Upload failed (network error)";
       this.app.showToast("Upload failed: network error", "danger");
     });

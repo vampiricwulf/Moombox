@@ -98,6 +98,7 @@
                             <small style="color: var(--sl-color-neutral-500); display: block; margin-top: 4px;">
                                 Time format: HH:MM:SS, MM:SS, or seconds. Invalid input downloads full video.
                             </small>
+                            <div id="video-duration-display" style="display: none;"></div>
                         </div>
                     </div>
 
@@ -195,6 +196,9 @@
                         </div>
                         <div id="player-sidebar" style="display: none">
                             <div id="player-sidebar-header">0 messages</div>
+                            <div id="chat-search-container">
+                                <input type="text" id="chat-search" placeholder="Search chat...">
+                            </div>
                             <div id="player-sidebar-messages"></div>
                             <div id="player-sidebar-footer">
                                 <sl-button size="small" id="player-sync-btn">
@@ -250,6 +254,13 @@
             <sl-tab-panel name="logs">
                 <div class="logs-header">
                     <span id="log-count">0 log entries</span>
+                    <div class="log-filters">
+                        <sl-button size="small" class="log-filter active" data-level="all">All</sl-button>
+                        <sl-button size="small" class="log-filter" data-level="ERROR">Error</sl-button>
+                        <sl-button size="small" class="log-filter" data-level="WARN">Warn</sl-button>
+                        <sl-button size="small" class="log-filter" data-level="INFO">Info</sl-button>
+                        <sl-button size="small" class="log-filter" data-level="DEBUG">Debug</sl-button>
+                    </div>
                     <sl-button size="small" id="clear-logs-btn"
                         >Clear</sl-button
                     >
@@ -696,7 +707,6 @@
         <sl-dialog
             label="Job Details"
             id="details-dialog"
-            style="--width: 50rem"
         >
             <div id="job-details-content"></div>
             <div slot="footer" class="details-footer">
@@ -881,6 +891,13 @@
                 </div>
             </div>
             <span id="auto-cookie-setup-result" style="display: block; margin-top: 0.5em;"></span>
+        </sl-dialog>
+
+        <!-- Add Webhook Dialog -->
+        <sl-dialog id="webhook-dialog" label="Add Webhook">
+            <sl-input id="webhook-url-input" label="Webhook URL" placeholder="https://..." type="url"></sl-input>
+            <sl-button slot="footer" variant="default" onclick="document.getElementById('webhook-dialog').hide()">Cancel</sl-button>
+            <sl-button slot="footer" variant="primary" id="webhook-confirm-btn">Add</sl-button>
         </sl-dialog>
 
         <!-- Setup Wizard (shown on first run) -->

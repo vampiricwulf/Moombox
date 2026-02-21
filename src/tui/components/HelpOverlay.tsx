@@ -5,6 +5,7 @@ interface HelpOverlayProps {
   width: number;
   height: number;
   scrollOffset: number;
+  activePanel?: "tasks" | "details" | "logs";
 }
 
 interface HelpSection {
@@ -48,6 +49,7 @@ const HELP_SECTIONS: HelpSection[] = [
     bindings: [
       ["\u2191/\u2193", "Scroll logs up/down"],
       ["PgUp/PgDn", "Page up/down"],
+      ["L", "Cycle log level filter"],
       ["", "Auto-scroll pauses when you scroll up"],
       ["", "Resume by scrolling to bottom"],
     ],
@@ -61,16 +63,36 @@ const HELP_SECTIONS: HelpSection[] = [
   },
 ];
 
-export function HelpOverlay({ width, height, scrollOffset }: HelpOverlayProps): React.ReactElement {
+const PANEL_SECTION_TITLES: Record<string, string> = {
+  tasks: "Tasks Panel",
+  details: "Details Panel",
+  logs: "Logs Panel",
+};
+
+export function HelpOverlay({ width, height, scrollOffset, activePanel }: HelpOverlayProps): React.ReactElement {
   const contentHeight = height - 3; // borders (2) + title row (1)
 
+  // Reorder sections: active panel's section first, then rest
+  const orderedSections = React.useMemo(() => {
+    if (!activePanel) return HELP_SECTIONS;
+    const activeTitle = PANEL_SECTION_TITLES[activePanel];
+    const activeIdx = HELP_SECTIONS.findIndex((s) => s.title === activeTitle);
+    if (activeIdx <= 0) return HELP_SECTIONS; // already first or not found
+    const reordered = [...HELP_SECTIONS];
+    const [moved] = reordered.splice(activeIdx, 1);
+    reordered.unshift(moved);
+    return reordered;
+  }, [activePanel]);
+
   // Build all lines
+  const activeTitle = activePanel ? PANEL_SECTION_TITLES[activePanel] : null;
   const lines: { type: "title" | "binding" | "blank"; text?: string; key?: string; desc?: string }[] = [];
 
-  for (let i = 0; i < HELP_SECTIONS.length; i++) {
-    const section = HELP_SECTIONS[i];
+  for (let i = 0; i < orderedSections.length; i++) {
+    const section = orderedSections[i];
     if (i > 0) lines.push({ type: "blank" });
-    lines.push({ type: "title", text: section.title });
+    const marker = section.title === activeTitle ? " [active]" : "";
+    lines.push({ type: "title", text: section.title + marker });
     for (const [key, desc] of section.bindings) {
       lines.push({ type: "binding", key, desc });
     }

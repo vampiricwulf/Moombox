@@ -34,6 +34,8 @@ const FILTER_LABELS: Record<StatusFilter, string> = {
   finished: "Finished",
 };
 
+const LOG_LEVEL_PRIORITY: Record<string, number> = { ERROR: 0, WARN: 1, WARNING: 1, INFO: 2, DEBUG: 3 };
+
 interface AppProps {
   db: Database;
   logger: Logger;
@@ -58,6 +60,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const [helpMode, setHelpMode] = useState(false);
   const [helpScrollOffset, setHelpScrollOffset] = useState(0);
   const [logAutoScroll, setLogAutoScroll] = useState(true);
+  const [logLevelFilter, setLogLevelFilter] = useState("all");
   const [archiveExpanded, setArchiveExpanded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [setupMode, setSetupMode] = useState(() => !ConfigManager.getInstance().hasConfig());
@@ -118,6 +121,18 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       }
     });
   }, [allSortedJobs, statusFilter]);
+
+  // Compute filtered log count for scroll calculations (mirrors LogViewer's internal filtering)
+  const filteredLogCount = useMemo(() => {
+    if (!logLevelFilter || logLevelFilter === "all") return logs.length;
+    const threshold = LOG_LEVEL_PRIORITY[logLevelFilter] ?? 3;
+    return logs.filter((log) => {
+      const match = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
+      if (!match) return true;
+      const level = match[1].toUpperCase();
+      return (LOG_LEVEL_PRIORITY[level] ?? 2) <= threshold;
+    }).length;
+  }, [logs, logLevelFilter]);
 
   // Compute archived jobs (finished jobs older than hideAgeDays)
   const archivedJobs = useMemo(() => {
@@ -241,7 +256,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
             setDetailScrollOffset((prev) => Math.min(detailMaxScrollRef.current, prev + 3));
           }
         } else {
-          const maxScroll = Math.max(0, logs.length - (logHeight - 3));
+          const maxScroll = Math.max(0, filteredLogCount - (logHeight - 3));
           if (event.button === "scrollUp") {
             setLogScrollOffset((prev) => Math.max(0, Math.min(prev, maxScroll) - 3));
             setLogAutoScroll(false);
@@ -255,7 +270,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         }
       }
     },
-    [sortedJobs, virtualListLength, logs.length, topHeight, taskWidth, taskHeight, logHeight, taskScrollOffset, focusedPanel],
+    [sortedJobs, virtualListLength, filteredLogCount, topHeight, taskWidth, taskHeight, logHeight, taskScrollOffset, focusedPanel, hasDivider, dividerIndex],
   );
 
   useMouse({ onMouseEvent: handleMouseEvent });
@@ -454,7 +469,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     } else if (focusedPanel === "details") {
       handleDetailInput(key);
     } else {
-      handleLogInput(key);
+      handleLogInput(input, key);
     }
   });
 
@@ -498,7 +513,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         }
       } else if (input === "r" || input === "R") {
         const job = getJobAtVirtualIndex(selectedJobIndexRef.current);
-        if (job && (job.status === "Error" || job.status === "Cancelled")) {
+        if (job && (job.status === "Error" || job.status === "Cancelled" || job.status === "COOKIES?")) {
           db.updateJob(job.id, { status: "Upcoming", error: undefined }).catch((e: unknown) => logger.error(`[TUI] Failed to retry job: ${getErrorMessage(e)}`));
         }
       } else if (input === "d" || input === "D") {
@@ -557,8 +572,17 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   );
 
   const handleLogInput = useCallback(
-    (key: { upArrow?: boolean; downArrow?: boolean; pageUp?: boolean; pageDown?: boolean }) => {
-      const maxScroll = Math.max(0, logs.length - (logHeight - 3));
+    (input: string, key: { upArrow?: boolean; downArrow?: boolean; pageUp?: boolean; pageDown?: boolean }) => {
+      const maxScroll = Math.max(0, filteredLogCount - (logHeight - 3));
+
+      if (input === "l" || input === "L") {
+        const order = ["all", "ERROR", "WARN", "INFO", "DEBUG"];
+        setLogLevelFilter((prev) => order[(order.indexOf(prev) + 1) % order.length]);
+        // Reset scroll position and re-enable auto-scroll on filter change
+        setLogScrollOffset(Number.MAX_SAFE_INTEGER);
+        setLogAutoScroll(true);
+        return;
+      }
 
       if (key.upArrow) {
         setLogScrollOffset((prev: number) => Math.max(0, Math.min(prev, maxScroll) - 1));
@@ -580,7 +604,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         });
       }
     },
-    [logs.length, logHeight],
+    [filteredLogCount, logHeight],
   );
 
   const selectedJob = getJobAtVirtualIndex(selectedJobIndex) ?? undefined;
@@ -652,6 +676,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
           width={cols}
           height={rows - statusBarHeight}
           scrollOffset={helpScrollOffset}
+          activePanel={focusedPanel}
         />
         <StatusBar
           focusedPanel={focusedPanel}
@@ -707,6 +732,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         width={cols}
         focused={focusedPanel === "logs"}
         autoScroll={logAutoScroll}
+        levelFilter={logLevelFilter}
       />
       <StatusBar
         focusedPanel={focusedPanel}

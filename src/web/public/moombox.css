@@ -421,6 +421,18 @@ sl-badge.status.cookies::part(base) {
     justify-content: space-between;
     align-items: center;
     margin-bottom: var(--sl-spacing-small);
+    gap: var(--sl-spacing-small);
+}
+
+.log-filters {
+    display: flex;
+    gap: 4px;
+}
+
+.log-filter.active::part(base) {
+    background-color: var(--sl-color-primary-600);
+    border-color: var(--sl-color-primary-600);
+    color: var(--sl-color-neutral-0);
 }
 
 #logs-container {
@@ -511,6 +523,9 @@ sl-progress-bar {
 .settings-menu {
     min-width: 200px;
     flex-shrink: 0;
+    position: sticky;
+    top: var(--sl-spacing-medium);
+    align-self: flex-start;
 }
 
 .settings-menu sl-menu {
@@ -1144,4 +1159,96 @@ sl-progress-bar {
     .step-label {
         font-size: var(--sl-font-size-x-small);
     }
+}
+
+/* Copy button in job details */
+.details-copy-btn {
+    font-size: 0.85rem;
+    vertical-align: middle;
+    margin-left: var(--sl-spacing-2x-small);
+}
+
+.details-copy-btn::part(base) {
+    padding: 0;
+}
+
+/* Responsive job details dialog */
+#details-dialog::part(panel) {
+    width: min(50rem, 90vw);
+}
+
+@media (max-width: 576px) {
+    .details-footer {
+        flex-direction: column;
+        gap: var(--sl-spacing-x-small);
+    }
+}
+
+/* Trim timeline preview */
+.trim-preview {
+    height: 1.5rem;
+    border-radius: var(--sl-border-radius-medium);
+    margin-bottom: var(--sl-spacing-small);
+    position: relative;
+    overflow: hidden;
+    background-color: var(--sl-color-neutral-300);
+}
+
+.trim-preview-range {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background-color: var(--sl-color-primary-600);
+}
+
+.trim-preview-label {
+    font-size: var(--sl-font-size-x-small);
+    color: var(--sl-color-neutral-500);
+    margin-bottom: var(--sl-spacing-2x-small);
+}
+
+/* Restart-required badge */
+.restart-badge {
+    margin-left: var(--sl-spacing-x-small);
+    vertical-align: middle;
+}
+
+/* Unsaved settings warning */
+.unsaved-warning {
+    color: var(--sl-color-warning-600);
+    font-size: var(--sl-font-size-small);
+    font-weight: var(--sl-font-weight-semibold);
+}
+
+/* Video duration display in add dialog */
+#video-duration-display {
+    font-size: var(--sl-font-size-small);
+    color: var(--sl-color-neutral-500);
+    margin-top: var(--sl-spacing-x-small);
+}
+
+/* Chat search input in player sidebar */
+#chat-search-container {
+    padding: var(--sl-spacing-2x-small) var(--sl-spacing-small);
+    border-bottom: 1px solid var(--sl-color-neutral-200);
+    flex-shrink: 0;
+}
+
+#chat-search {
+    width: 100%;
+    font-size: var(--sl-font-size-small);
+    padding: var(--sl-spacing-2x-small) var(--sl-spacing-x-small);
+    border: 1px solid var(--sl-color-neutral-300);
+    border-radius: var(--sl-border-radius-small);
+    background: var(--sl-color-neutral-0);
+    color: var(--sl-color-neutral-900);
+    outline: none;
+}
+
+#chat-search:focus {
+    border-color: var(--sl-color-primary-600);
+}
+
+.chat-msg.search-hidden {
+    display: none;
 }
