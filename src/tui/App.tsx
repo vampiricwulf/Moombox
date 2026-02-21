@@ -47,6 +47,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const [selectedJobIndex, setSelectedJobIndex] = useState(0);
   const [taskScrollOffset, setTaskScrollOffset] = useState(0);
   const [detailScrollOffset, setDetailScrollOffset] = useState(0);
+  const detailMaxScrollRef = useRef(0);
   const [logScrollOffset, setLogScrollOffset] = useState(0);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addMessage, setAddMessage] = useState<{ text: string; color: string } | null>(null);
@@ -82,8 +83,10 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     : Math.floor(availableHeight * 0.7);
   const logHeight = availableHeight - topHeight;
 
-  // Split width for task list and details panel
-  const taskWidth = Math.floor(cols / 2);
+  // Split width for task list and details panel (favor focused panel)
+  const taskWidthPercent = focusedPanel === "tasks" ? 0.45
+    : focusedPanel === "details" ? 0.35 : 0.5;
+  const taskWidth = Math.floor(cols * taskWidthPercent);
   const detailWidth = cols - taskWidth;
 
   const addBarHeight = addMessage ? 1 : 0;
@@ -233,9 +236,9 @@ export function App({ db, logger }: AppProps): React.ReactElement {
           }
         } else if (focusedPanel === "details") {
           if (event.button === "scrollUp") {
-            setDetailScrollOffset((prev) => Math.max(0, prev - 3));
+            setDetailScrollOffset((prev) => Math.max(0, Math.min(prev, detailMaxScrollRef.current) - 3));
           } else if (event.button === "scrollDown") {
-            setDetailScrollOffset((prev) => prev + 3);
+            setDetailScrollOffset((prev) => Math.min(detailMaxScrollRef.current, prev + 3));
           }
         } else {
           const maxScroll = Math.max(0, logs.length - (logHeight - 3));
@@ -285,7 +288,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         const idx = prev.findIndex((j: Job) => j.id === job.id);
         if (idx !== -1) {
           const newJobs = [...prev];
-          newJobs[idx] = job;
+          newJobs[idx] = { ...job }; // Shallow copy — DB mutates in place, memo needs new reference
           return newJobs;
         }
         return prev;
@@ -545,9 +548,9 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const handleDetailInput = useCallback(
     (key: { upArrow?: boolean; downArrow?: boolean }) => {
       if (key.upArrow) {
-        setDetailScrollOffset((prev: number) => Math.max(0, prev - 1));
+        setDetailScrollOffset((prev: number) => Math.max(0, Math.min(prev, detailMaxScrollRef.current) - 1));
       } else if (key.downArrow) {
-        setDetailScrollOffset((prev: number) => prev + 1);
+        setDetailScrollOffset((prev: number) => Math.min(detailMaxScrollRef.current, prev + 1));
       }
     },
     [],
@@ -693,6 +696,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
           height={topHeight}
           focused={focusedPanel === "details"}
           scrollOffset={detailScrollOffset}
+          onMaxScroll={useCallback((max: number) => { detailMaxScrollRef.current = max; }, [])}
         />
       </Box>
       {/* Bottom: LogViewer */}

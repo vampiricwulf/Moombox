@@ -75,7 +75,7 @@ interface LogLineProps {
 
 function LogLine({ log, width }: LogLineProps): React.ReactElement {
   // Parse log level from format: [LEVEL] message or timestamp [LEVEL] message
-  const levelMatch = log.match(/\[(DEBUG|INFO|WARNING|ERROR)\]/i);
+  const levelMatch = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
   const level = levelMatch ? levelMatch[1].toUpperCase() : "INFO";
 
   const color = getLogColor(level);
@@ -96,6 +96,7 @@ function getLogColor(level: string): string {
       return "gray";
     case "INFO":
       return "white";
+    case "WARN":
     case "WARNING":
       return "yellow";
     case "ERROR":

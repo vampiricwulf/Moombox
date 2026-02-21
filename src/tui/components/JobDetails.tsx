@@ -10,14 +10,19 @@ interface JobDetailsProps {
   height: number;
   focused: boolean;
   scrollOffset: number;
+  onMaxScroll?: (max: number) => void;
 }
 
-export function JobDetails({ job, width, height, focused, scrollOffset }: JobDetailsProps): React.ReactElement {
+export function JobDetails({ job, width, height, focused, scrollOffset, onMaxScroll }: JobDetailsProps): React.ReactElement {
   const contentWidth = width - 4; // borders + padding
   const contentHeight = height - 3; // borders (2) + title row (1)
 
   const borderColor = focused ? "cyan" : "gray";
   const titleColor = focused ? "cyan" : "white";
+
+  // Status-colored border when a job is selected
+  const statusBorderColor = job && focused ? getStatusColor(job.status) : borderColor;
+  const statusTitleColor = job && focused ? getStatusColor(job.status) : titleColor;
 
   if (!job) {
     return (
@@ -43,6 +48,9 @@ export function JobDetails({ job, width, height, focused, scrollOffset }: JobDet
   const actualOffset = Math.min(scrollOffset, maxScroll);
   const visibleRows = rows.slice(actualOffset, actualOffset + contentHeight);
 
+  // Report maxScroll so parent can clamp offset in scroll handlers
+  React.useEffect(() => { onMaxScroll?.(maxScroll); }, [maxScroll, onMaxScroll]);
+
   const scrollPercent = rows.length > contentHeight
     ? Math.round((actualOffset / maxScroll) * 100)
     : 100;
@@ -53,10 +61,10 @@ export function JobDetails({ job, width, height, focused, scrollOffset }: JobDet
       width={width}
       height={height}
       borderStyle="round"
-      borderColor={borderColor}
+      borderColor={statusBorderColor}
     >
       <Box paddingX={1}>
-        <Text color={titleColor} bold>Details</Text>
+        <Text color={statusTitleColor} bold>Details</Text>
         {rows.length > contentHeight && (
           <Text color="gray"> [{scrollPercent}%]</Text>
         )}
@@ -69,6 +77,8 @@ export function JobDetails({ job, width, height, focused, scrollOffset }: JobDet
               <Text color="cyan" bold>{row.text}</Text>
             ) : row.type === "separator" ? (
               <Text color="gray">{"\u2500".repeat(Math.min(contentWidth, 40))}</Text>
+            ) : row.type === "progress_bar" ? (
+              <>{renderProgressBar(row, contentWidth)}</>
             ) : (
               <>
                 <Text color="gray">{row.label!.padEnd(14)}</Text>
@@ -85,7 +95,8 @@ export function JobDetails({ job, width, height, focused, scrollOffset }: JobDet
 type DetailRow =
   | { type: "field"; label: string; value: string; color?: string }
   | { type: "header"; text: string }
-  | { type: "separator" };
+  | { type: "separator" }
+  | { type: "progress_bar"; percent: number; color: string };
 
 function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
   const valueWidth = Math.max(10, maxWidth - 14);
@@ -99,6 +110,9 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
   rows.push({ type: "field", label: "Title", value: truncate(job.title) });
   rows.push({ type: "field", label: "Channel", value: job.channelName || "Unknown" });
   rows.push({ type: "field", label: isTwitch ? "Stream ID" : "Video ID", value: job.videoId || job.id });
+  if (job.url) {
+    rows.push({ type: "field", label: "URL", value: truncate(job.url) });
+  }
   rows.push({ type: "field", label: "Status", value: job.status, color: getStatusColor(job.status) });
   if (isTwitch) {
     rows.push({ type: "field", label: "Platform", value: "Twitch", color: "magenta" });
@@ -154,38 +168,98 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
     }
   }
 
-  rows.push({ type: "separator" });
+  const isFinished = job.status === "Finished";
 
-  // Progress section
-  rows.push({ type: "header", text: "Progress" });
+  // Helper: segment/chat/gap rows (shared between Progress and Media sections)
+  const addSegmentRows = () => {
+    if (job.lastVideoSeq !== undefined) {
+      const vTotal = job.totalVideoSeq ? `/${job.totalVideoSeq}` : "";
+      rows.push({ type: "field", label: isTwitch ? "Segments" : "Video Segs", value: `${job.lastVideoSeq}${vTotal}` });
+    }
 
-  if (job.progress) {
-    rows.push({ type: "field", label: "Progress", value: job.progress });
+    if (!isTwitch && job.lastAudioSeq !== undefined) {
+      const aTotal = job.totalAudioSeq ? `/${job.totalAudioSeq}` : "";
+      rows.push({ type: "field", label: "Audio Segs", value: `${job.lastAudioSeq}${aTotal}` });
+    }
+
+    if (job.totalChatMessages && job.totalChatMessages > 0) {
+      rows.push({ type: "field", label: "Chat Msgs", value: job.totalChatMessages.toString() });
+    }
+
+    if (job.gaps && job.gaps.length > 0) {
+      const videoGaps = job.gaps.filter(g => g.stream === "video").length;
+      const audioGaps = job.gaps.filter(g => g.stream === "audio").length;
+      const parts: string[] = [];
+      if (videoGaps > 0) parts.push(`video: ${videoGaps}`);
+      if (audioGaps > 0) parts.push(`audio: ${audioGaps}`);
+      const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+      rows.push({ type: "field", label: "Gaps", value: `${job.gaps.length} segments${detail}`, color: "yellow" });
+    }
+  };
+
+  // Progress section (hidden when Finished — contents merge into Media)
+  if (!isFinished) {
+    rows.push({ type: "separator" });
+    rows.push({ type: "header", text: "Progress" });
+
+    if (job.progress) {
+      rows.push({ type: "field", label: "Progress", value: job.progress });
+    }
+
+    if (job.percent > 0) {
+      rows.push({ type: "progress_bar", percent: job.percent, color: getStatusColor(job.status) });
+    }
+
+    if (job.speed) {
+      rows.push({ type: "field", label: "Speed", value: job.speed });
+    }
+
+    if (job.eta) {
+      rows.push({ type: "field", label: "ETA", value: job.eta });
+    }
+
+    addSegmentRows();
+
+    if (job.chatStatus) {
+      const chatColor = job.chatStatus === "downloading" ? "green"
+        : job.chatStatus === "finished" ? "cyan"
+        : job.chatStatus === "error" ? "red"
+        : "gray";
+      rows.push({ type: "field", label: "Chat", value: job.chatStatus, color: chatColor });
+    }
   }
 
-  if (job.speed) {
-    rows.push({ type: "field", label: "Speed", value: job.speed });
-  }
+  // Media section
+  const hasMedia = (job.videoWidth && job.videoHeight) || job.videoFps || job.fileSize;
+  const hasFinishedStats = isFinished && (job.lastVideoSeq !== undefined || (job.totalChatMessages && job.totalChatMessages > 0) || (job.gaps && job.gaps.length > 0));
+  if (hasMedia || hasFinishedStats) {
+    rows.push({ type: "separator" });
+    rows.push({ type: "header", text: "Media" });
 
-  if (job.lastVideoSeq !== undefined) {
-    const vTotal = job.totalVideoSeq ? `/${job.totalVideoSeq}` : "";
-    rows.push({ type: "field", label: isTwitch ? "Segments" : "Video Segs", value: `${job.lastVideoSeq}${vTotal}` });
-  }
+    if (job.videoWidth && job.videoHeight) {
+      rows.push({ type: "field", label: "Resolution", value: `${job.videoWidth}x${job.videoHeight}` });
+    }
 
-  if (!isTwitch && job.lastAudioSeq !== undefined) {
-    const aTotal = job.totalAudioSeq ? `/${job.totalAudioSeq}` : "";
-    rows.push({ type: "field", label: "Audio Segs", value: `${job.lastAudioSeq}${aTotal}` });
-  }
+    if (job.videoFps) {
+      rows.push({ type: "field", label: "FPS", value: String(job.videoFps) });
+    }
 
-  if (job.totalChatMessages && job.totalChatMessages > 0) {
-    rows.push({ type: "field", label: "Chat Msgs", value: job.totalChatMessages.toString() });
-  }
+    if (job.fileSize) {
+      rows.push({ type: "field", label: "File Size", value: formatBytes(job.fileSize) });
+    }
 
-  rows.push({ type: "separator" });
+    // When Finished, segment/chat/gap stats appear here instead of Progress
+    if (isFinished) {
+      addSegmentRows();
+    }
+  }
 
   // Timestamps
   rows.push({ type: "header", text: "Timestamps" });
   rows.push({ type: "field", label: "Created", value: formatDate(job.createdAt) });
+  if (job.downloadStartedAt) {
+    rows.push({ type: "field", label: "DL Started", value: formatDate(job.downloadStartedAt) });
+  }
   rows.push({ type: "field", label: "Updated", value: formatDate(job.updatedAt) });
 
   if (job.streamStartTime) {
@@ -288,5 +362,24 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+}
+
+function renderProgressBar(row: { percent: number; color: string }, contentWidth: number): React.ReactElement {
+  const label = "              "; // 14-char label padding (matches field layout)
+  const percentLabel = ` ${row.percent.toFixed(1)}%`;
+  const barMaxWidth = Math.min(30, contentWidth - 14 - percentLabel.length - 2); // 2 for brackets
+  if (barMaxWidth < 5) {
+    return <Text color={row.color}>{label}{row.percent.toFixed(1)}%</Text>;
+  }
+  const filled = Math.round((row.percent / 100) * barMaxWidth);
+  const empty = barMaxWidth - filled;
+  return (
+    <>
+      <Text color="gray">{label}</Text>
+      <Text color={row.color}>{"\u2588".repeat(filled)}</Text>
+      <Text color="gray">{"\u2591".repeat(empty)}</Text>
+      <Text color={row.color}>{percentLabel}</Text>
+    </>
+  );
 }
 

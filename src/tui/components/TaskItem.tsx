@@ -18,12 +18,17 @@ export const TaskItem = React.memo(function TaskItem({ job, selected, width, dim
   const platformTag = isTwitch ? "[TW] " : "";
   const platformTagWidth = isTwitch ? 5 : 0;
 
+  // Inline progress for active downloads (e.g. "45%")
+  const showProgress = (job.status === "Downloading" || job.status === "Muxing") && job.percent > 0;
+  const progressText = showProgress ? `${Math.round(job.percent)}% ` : "";
+  const progressTextWidth = progressText.length;
+
   // Fixed widths
   const selectorWidth = 2;   // "> " or "  "
   const iconWidth = 2;       // icon + space
 
   // Calculate remaining width for title
-  const titleWidth = Math.max(5, width - selectorWidth - iconWidth - platformTagWidth);
+  const titleWidth = Math.max(5, width - selectorWidth - iconWidth - platformTagWidth - progressTextWidth);
 
   // Truncate title if needed (display-width aware for CJK characters)
   const title = displayWidth(job.title) > titleWidth
@@ -40,6 +45,9 @@ export const TaskItem = React.memo(function TaskItem({ job, selected, width, dim
         {selected ? "> " : "  "}
       </Text>
       <Text color={statusColor} dimColor={dimmed && !selected}>{statusIcon} </Text>
+      {progressText && (
+        <Text color={statusColor} dimColor={dimmed && !selected}>{progressText}</Text>
+      )}
       {isTwitch && (
         <Text color="magenta" dimColor={dimmed && !selected}>{platformTag}</Text>
       )}
