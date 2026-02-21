@@ -457,6 +457,17 @@ export function SettingsPanel({ width, height, onClose }: SettingsPanelProps): R
     const maxLabel = Math.max(...fields.map(f => f.label.length));
     const dotPadWidth = maxLabel + 2;
 
+    // Build info line for focused field
+    const focusedFieldDef = fields[focusedField];
+    const focusedVal = focusedFieldDef ? getFieldValue(focusedFieldDef) : "";
+    const focusedChanged = focusedFieldDef ? focusedVal !== originalValues[focusedFieldDef.key] : false;
+    const focusedRestart = focusedChanged && focusedFieldDef && RESTART_REQUIRED_KEYS.has(focusedFieldDef.key);
+
+    const infoParts: string[] = [];
+    if (focusedFieldDef?.help) infoParts.push(focusedFieldDef.help);
+    if (focusedRestart) infoParts.push("[restart required]");
+    else if (focusedChanged) infoParts.push("[modified]");
+
     sectionContent = (
       <Box flexDirection="column">
         {fields.map((field, idx) => {
@@ -482,11 +493,8 @@ export function SettingsPanel({ width, height, onClose }: SettingsPanelProps): R
                   {isFocused && <Text color="cyan">_</Text>}
                 </>
               )}
-              {field.help && isFocused && (
-                <Text color="gray" dimColor> ({field.help})</Text>
-              )}
               {needsRestart && (
-                <Text color="yellow" dimColor> [restart]</Text>
+                <Text color="yellow" dimColor> *</Text>
               )}
               {isChanged && !needsRestart && (
                 <Text color="green" dimColor> *</Text>
@@ -494,6 +502,17 @@ export function SettingsPanel({ width, height, onClose }: SettingsPanelProps): R
             </Box>
           );
         })}
+        {/* Info area for focused field */}
+        <Box paddingX={2} height={1} marginTop={1}>
+          <Text color="gray">{"\u2500".repeat(innerWidth - 4)}</Text>
+        </Box>
+        <Box paddingX={2} height={1}>
+          {infoParts.length > 0 ? (
+            <Text color={focusedRestart ? "yellow" : "gray"} dimColor>{infoParts.join("  ")}</Text>
+          ) : (
+            <Text> </Text>
+          )}
+        </Box>
       </Box>
     );
   }

@@ -108,11 +108,11 @@ export function TaskList({
         {(nextFeedCheck > 0 || nextDecapiCheck > 0 || nextTwitchCheck > 0) && (
           <Text color="gray">
             {" "}
-            <Text color={nextFeedCheck > Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+            <Text color={nextFeedCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
             <Text color="gray">F:{formatCountdown(nextFeedCheck)} </Text>
-            <Text color={nextDecapiCheck > Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+            <Text color={nextDecapiCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
             <Text color="gray">D:{formatCountdown(nextDecapiCheck)} </Text>
-            <Text color={nextTwitchCheck > Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+            <Text color={nextTwitchCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
             <Text color="gray">T:{formatCountdown(nextTwitchCheck)}</Text>
           </Text>
         )}
