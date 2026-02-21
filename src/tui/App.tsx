@@ -571,6 +571,8 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     [],
   );
 
+  const handleDetailMaxScroll = useCallback((max: number) => { detailMaxScrollRef.current = max; }, []);
+
   const handleLogInput = useCallback(
     (input: string, key: { upArrow?: boolean; downArrow?: boolean; pageUp?: boolean; pageDown?: boolean }) => {
       const maxScroll = Math.max(0, filteredLogCount - (logHeight - 3));
@@ -721,7 +723,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
           height={topHeight}
           focused={focusedPanel === "details"}
           scrollOffset={detailScrollOffset}
-          onMaxScroll={useCallback((max: number) => { detailMaxScrollRef.current = max; }, [])}
+          onMaxScroll={handleDetailMaxScroll}
         />
       </Box>
       {/* Bottom: LogViewer */}
