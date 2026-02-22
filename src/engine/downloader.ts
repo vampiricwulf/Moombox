@@ -65,6 +65,25 @@ export class SegmentDownloader extends EventEmitter {
     }
   }
 
+  /**
+   * Fetch with a manual timeout that is immediately cleared when the request
+   * completes. Unlike `AbortSignal.timeout()`, this avoids 30-second ghost
+   * timers that hold the signal (and associated closures) alive in memory —
+   * critical for segment downloads that can issue thousands of requests.
+   */
+  private async timedFetch(url: string, init?: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")),
+      DOWNLOAD_TIMEOUT_MS,
+    );
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private getResumeFilePath(): string {
     return this.options.resumeFile || `${this.options.outputFile}.resume.json`;
   }
@@ -174,8 +193,7 @@ export class SegmentDownloader extends EventEmitter {
       // Only download init segment if not resuming
       if (!isResuming && this.options.initUrl) {
         try {
-          const resp = await fetch(this.options.initUrl, {
-            signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+          const resp = await this.timedFetch(this.options.initUrl, {
             headers: {
               "User-Agent": USER_AGENTS.WEB,
             },
@@ -529,9 +547,8 @@ export class SegmentDownloader extends EventEmitter {
         url += `sq/${probeSeq}`;
       }
 
-      const resp = await fetch(url, {
+      const resp = await this.timedFetch(url, {
         method: "GET",
-        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
         headers: {
           "User-Agent": USER_AGENTS.WEB,
         },
@@ -559,8 +576,7 @@ export class SegmentDownloader extends EventEmitter {
     while (this.running && !this.cancelFlag && !this.streamEnded) {
       try {
         // 1. Fetch Playlist
-        const resp = await fetch(this.options.baseUrl, {
-          signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+        const resp = await this.timedFetch(this.options.baseUrl, {
           headers: {
             "User-Agent": USER_AGENTS.WEB,
           },
@@ -676,8 +692,7 @@ export class SegmentDownloader extends EventEmitter {
 
   private async downloadHlsSegment(url: string): Promise<boolean> {
     try {
-      const resp = await fetch(url, {
-        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+      const resp = await this.timedFetch(url, {
         headers: {
           "User-Agent": USER_AGENTS.WEB,
         },
@@ -705,8 +720,7 @@ export class SegmentDownloader extends EventEmitter {
     idx: number,
   ): Promise<{ idx: number; data: Buffer } | null> {
     try {
-      const resp = await fetch(url, {
-        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+      const resp = await this.timedFetch(url, {
         headers: {
           "User-Agent": USER_AGENTS.WEB,
         },
@@ -911,8 +925,7 @@ export class SegmentDownloader extends EventEmitter {
       );
     }
 
-    const resp = await fetch(url, {
-      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    const resp = await this.timedFetch(url, {
       headers: {
         "User-Agent": USER_AGENTS.WEB,
       },
@@ -956,8 +969,7 @@ export class SegmentDownloader extends EventEmitter {
       url += `sq/${seq}`;
     }
 
-    const resp = await fetch(url, {
-      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    const resp = await this.timedFetch(url, {
       headers: {
         "User-Agent": USER_AGENTS.WEB,
       },
