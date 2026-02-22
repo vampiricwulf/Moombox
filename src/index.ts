@@ -335,7 +335,7 @@ async function run() {
     const heapMB = mem.heapUsed / 1048576;
     const delta = prevHeapUsed > 0 ? ` (${heapMB > prevHeapUsed ? "+" : ""}${(heapMB - prevHeapUsed).toFixed(1)})` : "";
     prevHeapUsed = heapMB;
-    logger.info(
+    logger.debug(
       `[Memory] RSS: ${(mem.rss / 1048576).toFixed(1)}MB, ` +
       `Heap: ${heapMB.toFixed(1)}${delta}/${(mem.heapTotal / 1048576).toFixed(1)}MB, ` +
       `External: ${(mem.external / 1048576).toFixed(1)}MB, ` +
@@ -348,7 +348,7 @@ async function run() {
     const spaces = v8.getHeapSpaceStatistics();
     const oldSpace = spaces.find((s) => s.space_name === "old_space");
     const loSpace = spaces.find((s) => s.space_name === "large_object_space");
-    logger.info(
+    logger.debug(
       `[Memory] V8: contexts=${heapStats.number_of_native_contexts}, ` +
       `detached=${heapStats.number_of_detached_contexts}, ` +
       `handles=${(heapStats.used_global_handles_size / 1024).toFixed(0)}KB, ` +
