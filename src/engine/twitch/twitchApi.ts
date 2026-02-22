@@ -292,6 +292,7 @@ export async function getVodInfo(
     title: video.title || "",
     channelLogin: video.owner?.login || "",
     channelDisplayName: video.owner?.displayName || "",
+    channelId: video.owner?.id || undefined,
     duration,
     thumbnailUrl,
     createdAt: video.createdAt || new Date().toISOString(),

@@ -44,6 +44,7 @@ export interface TwitchVodInfo {
   title: string;
   channelLogin: string;
   channelDisplayName: string;
+  channelId?: string;         // Numeric Twitch user ID (for emote resolution)
   duration: number;           // seconds
   thumbnailUrl?: string;
   createdAt: string;          // ISO timestamp

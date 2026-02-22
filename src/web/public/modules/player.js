@@ -697,7 +697,7 @@ export class PlayerController {
         result += this.renderTwitchWords(message.substring(cursor, emote.start));
       }
       // Native Twitch emote
-      const url = `https://static-cdn.jtvnps.com/emoticons/v2/${encodeURIComponent(emote.id)}/default/dark/2.0`;
+      const url = `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(emote.id)}/default/dark/2.0`;
       result += `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(emote.name)}" loading="lazy" referrerpolicy="no-referrer">`;
       cursor = emote.end + 1;
     }

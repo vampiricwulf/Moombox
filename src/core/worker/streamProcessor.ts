@@ -219,6 +219,7 @@ export class StreamProcessor {
             vodId,
             channelLogin: vodInfo.channelLogin,
             channelDisplayName: vodInfo.channelDisplayName,
+            channelId: vodInfo.channelId,
             outputFile: chatPath,
             vodDuration: vodInfo.duration,
             vodCreatedAt: vodInfo.createdAt,
