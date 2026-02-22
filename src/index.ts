@@ -20,6 +20,7 @@ import { WebServer } from "./web/server.js";
 import { getErrorMessage } from "./types/errors.js";
 import { extractMediaId } from "./utils/mediaId.js";
 import { spawn as nodeSpawn } from "child_process";
+import * as v8 from "v8";
 
 // Dynamic import for TUI (may not be available in packaged build)
 async function loadTUI(): Promise<{ startTUI: () => Promise<void> } | null> {
@@ -340,6 +341,19 @@ async function run() {
       `External: ${(mem.external / 1048576).toFixed(1)}MB, ` +
       `ArrayBuffers: ${(mem.arrayBuffers / 1048576).toFixed(1)}MB` +
       (typeof globalThis.gc === "function" ? " [post-GC]" : ""),
+    );
+
+    // V8 heap space breakdown — identifies which heap region is growing
+    const heapStats = v8.getHeapStatistics();
+    const spaces = v8.getHeapSpaceStatistics();
+    const oldSpace = spaces.find((s) => s.space_name === "old_space");
+    const loSpace = spaces.find((s) => s.space_name === "large_object_space");
+    logger.info(
+      `[Memory] V8: contexts=${heapStats.number_of_native_contexts}, ` +
+      `detached=${heapStats.number_of_detached_contexts}, ` +
+      `handles=${(heapStats.used_global_handles_size / 1024).toFixed(0)}KB, ` +
+      `old_space=${oldSpace ? (oldSpace.space_used_size / 1048576).toFixed(1) : "?"}MB, ` +
+      `large_obj=${loSpace ? (loSpace.space_used_size / 1048576).toFixed(1) : "?"}MB`,
     );
   }, 120_000);
   memoryLogInterval.unref();

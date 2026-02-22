@@ -215,10 +215,19 @@ export class DecapiMonitor {
   private async fetchDecapi(url: string): Promise<Response | null> {
     const rl = this.getRateLimit();
 
+    // Use manual AbortController + setTimeout instead of AbortSignal.timeout()
+    // to ensure the timer is cleared immediately when the fetch completes,
+    // avoiding ghost timers that keep the signal alive for the full timeout period.
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")),
+      DECAPI_REQUEST_TIMEOUT_MS,
+    );
+
     try {
       const response = await fetch(url, {
         headers: { "User-Agent": "Moombox/1.0" },
-        signal: AbortSignal.timeout(DECAPI_REQUEST_TIMEOUT_MS),
+        signal: controller.signal,
       });
 
       // Start a 1-minute rate limit window if none is active
@@ -253,6 +262,8 @@ export class DecapiMonitor {
         this.logger.debug(`[DECAPI] Fetch failed: ${getErrorMessage(e)}`);
       }
       return null;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
