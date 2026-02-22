@@ -321,16 +321,27 @@ async function run() {
 
   process.on("SIGTERM", () => { shutdown(); });
 
-  // Periodic memory usage logging (every 5 minutes) for diagnostics
-  const memoryLogInterval = setInterval(() => {
+  // Periodic memory usage logging (every 2 minutes) for diagnostics.
+  // If node is started with --expose-gc, forces a full GC before measuring
+  // to distinguish true leaks from lazy GC.
+  let prevHeapUsed = 0;
+  const memoryLogInterval = setInterval(async () => {
+    // Force GC if available (node --expose-gc) for accurate measurement
+    if (typeof globalThis.gc === "function") {
+      globalThis.gc();
+    }
     const mem = process.memoryUsage();
+    const heapMB = mem.heapUsed / 1048576;
+    const delta = prevHeapUsed > 0 ? ` (${heapMB > prevHeapUsed ? "+" : ""}${(heapMB - prevHeapUsed).toFixed(1)})` : "";
+    prevHeapUsed = heapMB;
     logger.info(
       `[Memory] RSS: ${(mem.rss / 1048576).toFixed(1)}MB, ` +
-      `Heap: ${(mem.heapUsed / 1048576).toFixed(1)}/${(mem.heapTotal / 1048576).toFixed(1)}MB, ` +
+      `Heap: ${heapMB.toFixed(1)}${delta}/${(mem.heapTotal / 1048576).toFixed(1)}MB, ` +
       `External: ${(mem.external / 1048576).toFixed(1)}MB, ` +
-      `ArrayBuffers: ${(mem.arrayBuffers / 1048576).toFixed(1)}MB`,
+      `ArrayBuffers: ${(mem.arrayBuffers / 1048576).toFixed(1)}MB` +
+      (typeof globalThis.gc === "function" ? " [post-GC]" : ""),
     );
-  }, 300_000);
+  }, 120_000);
   memoryLogInterval.unref();
 
   // Start TUI if in interactive terminal
