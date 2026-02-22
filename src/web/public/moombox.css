@@ -63,8 +63,8 @@ sl-tab::part(base) {
 #video-table {
     display: grid;
     grid-template-columns:
-        fit-content(12.5%) auto fit-content(12.5%)
-        fit-content(20%);
+        8rem 1fr fit-content(12.5%)
+        fit-content(20%) auto;
     padding: var(--sl-spacing-medium) 0;
     gap: var(--sl-spacing-x-small) 0;
 }
@@ -92,7 +92,7 @@ sl-tab::part(base) {
 .video-item {
     display: grid;
     grid-template-columns: subgrid;
-    grid-column: 1 / 5;
+    grid-column: 1 / 6;
 }
 
 @media only screen and (max-width: 992px) {
@@ -117,11 +117,9 @@ sl-tab::part(base) {
 
 .video-item {
     gap: var(--sl-spacing-x-small);
-    padding: var(--sl-spacing-x-small) 0;
     cursor: pointer;
     transition: background-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
     border-radius: var(--sl-border-radius-medium);
-    position: relative;
 }
 
 .video-item:hover {
@@ -150,7 +148,7 @@ sl-tab::part(base) {
 
 .thumb img {
     object-fit: cover;
-    max-height: 4.5rem;
+    height: 4.5rem;
     aspect-ratio: 16 / 9;
     border-radius: var(--sl-border-radius-medium);
     width: 100%;
@@ -158,13 +156,16 @@ sl-tab::part(base) {
 }
 
 .thumb img.thumb-avatar {
-    object-fit: contain;
+    object-fit: cover;
     background-color: var(--sl-color-neutral-200);
+    aspect-ratio: 1;
+    width: auto;
+    margin: 0 auto;
 }
 
 @media only screen and (max-width: 992px) {
     .thumb img {
-        max-height: initial;
+        height: auto;
         margin-bottom: var(--sl-spacing-x-small);
     }
 }
@@ -272,8 +273,8 @@ sl-badge.status.cookies::part(base) {
 .archived-table {
     display: grid;
     grid-template-columns:
-        fit-content(12.5%) auto fit-content(12.5%)
-        fit-content(20%);
+        8rem 1fr fit-content(12.5%)
+        fit-content(20%) auto;
     padding: var(--sl-spacing-medium) 0;
     gap: var(--sl-spacing-x-small) 0;
 }
@@ -301,7 +302,7 @@ sl-badge.status.cookies::part(base) {
 .archived-table .video-item {
     display: grid;
     grid-template-columns: subgrid;
-    grid-column: 1 / 5;
+    grid-column: 1 / 6;
 }
 
 @media only screen and (max-width: 992px) {
@@ -567,7 +568,7 @@ sl-dialog::part(footer) {
 .skeleton-row {
     display: grid;
     grid-template-columns: subgrid;
-    grid-column: 1 / 5;
+    grid-column: 1 / 6;
     gap: var(--sl-spacing-x-small);
     padding: var(--sl-spacing-x-small) 0;
     align-items: center;
@@ -1418,19 +1419,9 @@ sl-progress-bar {
 
 /* Job card quick actions */
 .job-quick-actions {
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    opacity: 0;
-    transition: opacity 0.15s;
     display: flex;
+    align-items: center;
     gap: 2px;
-    z-index: 1;
-}
-
-.video-item:hover .job-quick-actions {
-    opacity: 1;
 }
 
 /* Keyboard focus indicator */
@@ -1546,11 +1537,6 @@ html.sl-theme-light {
     #logs-viewer {
         font-size: var(--sl-font-size-medium);
         line-height: 1.8;
-    }
-
-    /* Quick actions always visible on touch */
-    .job-quick-actions {
-        opacity: 1;
     }
 
     /* Stack filter bar vertically */

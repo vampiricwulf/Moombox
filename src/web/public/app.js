@@ -266,6 +266,14 @@ class MoomboxApp {
     const archivedContainer = document.getElementById("archived-container");
     if (archivedContainer) {
       archivedContainer.addEventListener("click", (e) => {
+        const quickBtn = e.target.closest("[data-quick-action]");
+        if (quickBtn) {
+          e.stopPropagation();
+          const action = quickBtn.dataset.quickAction;
+          const jobId = quickBtn.dataset.jobId;
+          this.quickAction(action, jobId);
+          return;
+        }
         const videoItem = e.target.closest(".video-item");
         if (videoItem) {
           const jobId = videoItem.dataset.jobId;
@@ -639,14 +647,10 @@ class MoomboxApp {
     const canRetry = ["Error", "Cancelled", "COOKIES?"].includes(job.status);
     const canDelete = ["Finished", "Error", "Cancelled", "COOKIES?"].includes(job.status);
 
-    let quickActions = "";
-    if (canCancel || canRetry || canDelete) {
-      quickActions = '<div class="job-quick-actions">';
-      if (canCancel) quickActions += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
-      if (canRetry) quickActions += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
-      if (canDelete) quickActions += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
-      quickActions += "</div>";
-    }
+    let actionsHtml = "";
+    if (canCancel) actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
+    if (canRetry) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
+    if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
 
     return `
       <div class="video-item" data-job-id="${this.escapeHtml(job.id)}" data-status="${statusClass}">
@@ -666,7 +670,7 @@ class MoomboxApp {
           <div class="job-progress-text" title="${this.escapeHtml(progress)}">${this.escapeHtml(progress)}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${percent}"></sl-progress-bar>` : ""}
         </div>
-        ${quickActions}
+        <div class="job-quick-actions">${actionsHtml}</div>
       </div>
     `;
   }
@@ -710,6 +714,20 @@ class MoomboxApp {
       }
     } else if (progressBar) {
       progressBar.remove();
+    }
+
+    // Update quick actions
+    const actionsContainer = card.querySelector(".job-quick-actions");
+    if (actionsContainer) {
+      const canCancel = ["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"].includes(job.status);
+      const canRetry = ["Error", "Cancelled", "COOKIES?"].includes(job.status);
+      const canDelete = ["Finished", "Error", "Cancelled", "COOKIES?"].includes(job.status);
+
+      let actionsHtml = "";
+      if (canCancel) actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${job.id}"></sl-icon-button>`;
+      if (canRetry) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${job.id}"></sl-icon-button>`;
+      if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${job.id}"></sl-icon-button>`;
+      actionsContainer.innerHTML = actionsHtml;
     }
   }
 
