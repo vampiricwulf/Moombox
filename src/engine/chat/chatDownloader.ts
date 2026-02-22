@@ -12,6 +12,7 @@ import { ChatApi } from "./chatApi.js";
 import { Logger } from "../../core/logger.js";
 import { LIMITS } from "../../constants/limits.js";
 import { getErrorMessage } from "../../types/errors.js";
+import { cancellableSleep } from "../../utils/async.js";
 import type {
   ChatDownloaderOptions,
   ChatMessage,
@@ -481,16 +482,12 @@ export class ChatDownloader extends EventEmitter {
   }
 
   /**
-   * Sleep helper that wakes early on cancel or stream end
+   * Sleep helper that wakes early on cancel or stream end.
+   * Uses the abort signal (fired by stop() and markStreamEnded()) instead of a
+   * polling loop, reducing promise/timer creation from ~10 per 5s wait to just 1.
    */
-  private async sleep(delayMs: number): Promise<void> {
-    const checkInterval = 500;
-    let elapsed = 0;
-
-    while (elapsed < delayMs && this.running && !this.cancelFlag && !this.streamEnded) {
-      await new Promise((r) => setTimeout(r, Math.min(checkInterval, delayMs - elapsed)));
-      elapsed += checkInterval;
-    }
+  private sleep(delayMs: number): Promise<void> {
+    return cancellableSleep(delayMs, this.abortController?.signal);
   }
 
   /**

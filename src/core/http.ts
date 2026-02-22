@@ -11,6 +11,51 @@ import pRetry from "p-retry";
 import { Logger } from "./logger.js";
 
 /**
+ * Create a managed AbortController with timeout and optional caller signal propagation.
+ *
+ * Unlike `AbortSignal.any()` + `AbortSignal.timeout()`, the timer is immediately
+ * cleared when `cleanup()` is called. This prevents 30-second ghost timers from
+ * accumulating in memory during high-frequency polling (e.g., chat downloader
+ * every ~5s creates ~6 overlapping timeout signals at any given time). It also
+ * avoids dead `WeakRef` accumulation on long-lived abort signals.
+ */
+function createTimeoutController(
+  timeout: number,
+  callerSignal?: AbortSignal | null,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")),
+    timeout,
+  );
+
+  let onAbort: (() => void) | null = null;
+
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      clearTimeout(timer);
+      controller.abort(callerSignal.reason);
+    } else {
+      onAbort = () => {
+        clearTimeout(timer);
+        controller.abort(callerSignal.reason);
+      };
+      callerSignal.addEventListener("abort", onAbort, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timer);
+      if (onAbort && callerSignal) {
+        callerSignal.removeEventListener("abort", onAbort);
+      }
+    },
+  };
+}
+
+/**
  * Fetch with timeout and automatic retry on transient failures.
  * Automatically retries on 5xx errors and 429 rate limits with exponential backoff.
  *
@@ -28,21 +73,21 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   return pRetry(
     async () => {
-      const timeoutSignal = AbortSignal.timeout(timeout);
-      const combined = init?.signal
-        ? AbortSignal.any([init.signal, timeoutSignal])
-        : timeoutSignal;
+      const { signal, cleanup } = createTimeoutController(timeout, init?.signal);
+      try {
+        const response = await fetch(url, { ...init, signal });
 
-      const response = await fetch(url, { ...init, signal: combined });
+        // Retry on 5xx errors and 429 rate limit
+        if (!response.ok && (response.status >= 500 || response.status === 429)) {
+          // Drain body to prevent memory/socket leak from unconsumed responses
+          await response.body?.cancel();
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
 
-      // Retry on 5xx errors and 429 rate limit
-      if (!response.ok && (response.status >= 500 || response.status === 429)) {
-        // Drain body to prevent memory/socket leak from unconsumed responses
-        await response.body?.cancel();
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        return response;
+      } finally {
+        cleanup();
       }
-
-      return response;
     },
     {
       retries: retryOptions?.retries ?? 3,
@@ -83,25 +128,25 @@ export function createRetryFetch(options?: {
 
     return pRetry(
       async () => {
-        const timeoutSignal = AbortSignal.timeout(timeout);
-        const combined = init?.signal
-          ? AbortSignal.any([init.signal, timeoutSignal])
-          : timeoutSignal;
+        const { signal, cleanup } = createTimeoutController(timeout, init?.signal);
+        try {
+          const response = await fetch(url, {
+            ...init,
+            signal,
+            headers: { ...defaultHeaders, ...init?.headers },
+          });
 
-        const response = await fetch(url, {
-          ...init,
-          signal: combined,
-          headers: { ...defaultHeaders, ...init?.headers },
-        });
+          // Retry on 5xx errors and 429 rate limit (same as fetchWithTimeout)
+          if (!response.ok && (response.status >= 500 || response.status === 429)) {
+            // Drain body to prevent memory/socket leak from unconsumed responses
+            await response.body?.cancel();
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
 
-        // Retry on 5xx errors and 429 rate limit (same as fetchWithTimeout)
-        if (!response.ok && (response.status >= 500 || response.status === 429)) {
-          // Drain body to prevent memory/socket leak from unconsumed responses
-          await response.body?.cancel();
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          return response;
+        } finally {
+          cleanup();
         }
-
-        return response;
       },
       {
         retries: maxRetries,
