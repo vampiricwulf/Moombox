@@ -154,6 +154,7 @@ export class TwitchChatDownloader extends EventEmitter {
   private lastSaveMs = 0;
   private saving = false;
   private lastTimestampMs = 0;
+  private streamEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: TwitchChatDownloaderOptions) {
     super();
@@ -238,6 +239,10 @@ export class TwitchChatDownloader extends EventEmitter {
    */
   stop(): void {
     this.cancelFlag = true;
+    if (this.streamEndTimer) {
+      clearTimeout(this.streamEndTimer);
+      this.streamEndTimer = null;
+    }
     if (this.ws) {
       try {
         this.ws.close();
@@ -254,7 +259,8 @@ export class TwitchChatDownloader extends EventEmitter {
   markStreamEnded(): void {
     this.streamEnded = true;
     // Give the loop a moment to finish, then force close
-    setTimeout(() => {
+    this.streamEndTimer = setTimeout(() => {
+      this.streamEndTimer = null;
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.close();
       }

@@ -142,6 +142,8 @@ export class DownloadOrchestrator {
               const ext = job.thumbnailUrl.includes(".webp") ? ".webp" : ".jpg";
               await fs.writeFile(path.join(stagingDir, `thumbnail${ext}`), Buffer.from(data));
             }
+          } else {
+            await resp.body?.cancel();
           }
         } catch {
           // Non-critical — muxFinalize will retry
@@ -231,9 +233,11 @@ export class DownloadOrchestrator {
       // Mark stream ended for chat downloader
       if (twitchChatDl) twitchChatDl.markStreamEnded();
 
-      // Wait for chat with timeout
-      const chatTimeout = new Promise<void>(resolve => setTimeout(resolve, 2 * 60_000));
+      // Wait for chat with timeout (clear timer to prevent 2-min retention)
+      let chatTimeoutTimer: ReturnType<typeof setTimeout>;
+      const chatTimeout = new Promise<void>(resolve => { chatTimeoutTimer = setTimeout(resolve, 2 * 60_000); });
       await Promise.race([chatPromise, chatTimeout]);
+      clearTimeout(chatTimeoutTimer!);
       if (twitchChatDl && twitchChatDl.isRunning()) twitchChatDl.stop();
 
       // Update chat status

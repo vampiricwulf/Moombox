@@ -218,6 +218,7 @@ export async function downloadDash(
 
   const manifestResp = await fetchWithTimeout(decryptedDashUrl);
   if (!manifestResp.ok) {
+    await manifestResp.body?.cancel();
     throw new Error(
       `Failed to fetch DASH manifest: HTTP ${manifestResp.status}`,
     );
@@ -414,6 +415,7 @@ export async function downloadHls(
 
   const manifestResp = await fetchWithTimeout(videoInfo.hlsManifestUrl!);
   if (!manifestResp.ok) {
+    await manifestResp.body?.cancel();
     throw new Error(
       `Failed to fetch HLS manifest: HTTP ${manifestResp.status}`,
     );
