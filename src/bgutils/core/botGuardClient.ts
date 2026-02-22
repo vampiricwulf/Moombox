@@ -52,10 +52,15 @@ export default class BotGuardClient {
     }
 
     // Wait for VM callback with a timeout to prevent hanging
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new BGError('TIMEOUT', 'VM load callback timed out')), 10_000)
-    );
-    await Promise.race([this.deferredVmFunctions.promise, timeout]);
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new BGError('TIMEOUT', 'VM load callback timed out')), 10_000);
+    });
+    try {
+      await Promise.race([this.deferredVmFunctions.promise, timeout]);
+    } finally {
+      clearTimeout(timer!);
+    }
 
     return this;
   }

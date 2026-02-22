@@ -16,6 +16,9 @@ export async function generate(args: PoTokenArgs): Promise<PoTokenResult> {
   const webPoSignalOutput: WebPoSignalOutput = [];
   const botguardResponse = await botguard.snapshot({ webPoSignalOutput });
 
+  // BotGuard VM is no longer needed — shut it down to release its closures.
+  try { await botguard.shutdown(); } catch { /* may not have shutdown fn */ }
+
   const payload = [ bgConfig.requestKey, botguardResponse ];
 
   const integrityTokenResponse = await bgConfig.fetch(buildURL('GenerateIT', bgConfig.useYouTubeAPI), {

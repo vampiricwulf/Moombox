@@ -9,7 +9,7 @@
 
 import { BG, buildURL, getHeaders } from "../bgutils/index.js";
 import { Logger } from "./logger.js";
-import { setupGlobalDom, teardownGlobalDom } from "./globalDom.js";
+import { setupGlobalDom, teardownGlobalDom, interceptTimers } from "./globalDom.js";
 import { USER_AGENTS, BOTGUARD_REQUEST_KEY } from "../constants.js";
 import { createRetryFetch } from "./http.js";
 import type {
@@ -144,43 +144,56 @@ export class PotProvider {
       `[PotProvider] Challenge received, globalName: ${bgChallenge.globalName}`,
     );
 
-    // Load interpreter — clean previous globalName to avoid stale closure retention
-    if (
-      bgChallenge.interpreterJavascript
-        ?.privateDoNotAccessOrElseSafeScriptWrappedValue
-    ) {
-      if (bgChallenge.globalName && bgChallenge.globalName in globalThis) {
-        delete (globalThis as Record<string, unknown>)[bgChallenge.globalName];
-      }
-      this.logger.debug("[PotProvider] Loading BotGuard interpreter...");
-      new Function(
-        bgChallenge.interpreterJavascript
-          .privateDoNotAccessOrElseSafeScriptWrappedValue,
-      )();
-      this.logger.debug("[PotProvider] Interpreter loaded");
-    } else {
-      throw new Error("Could not load BotGuard VM");
-    }
-
-    // Create BotGuard client
-    this.logger.debug("[PotProvider] Creating BotGuard client...");
-    const bgClient = await BG.BotGuardClient.create({
-      program: bgChallenge.program,
-      globalName: bgChallenge.globalName,
-      globalObj: globalThis,
-    });
-    this.logger.debug("[PotProvider] BotGuard client created");
-
-    // Generate integrity token
+    // Intercept setInterval calls from BotGuard's interpreter — it creates
+    // persistent telemetry timers that leak ~1MB/30s in long-running Node.js.
+    const cleanupTimers = interceptTimers();
     const webPoSignalOutput: WebPoSignalOutput = [];
-    this.logger.debug("[PotProvider] Generating BotGuard snapshot...");
-    const botguardResponse = await bgClient.snapshot(
-      { webPoSignalOutput },
-      30_000,
-    );
-    this.logger.debug(
-      `[PotProvider] BotGuard response length: ${botguardResponse?.length || 0}`,
-    );
+    let botguardResponse: string;
+
+    try {
+      // Load interpreter — clean previous globalName to avoid stale closure retention
+      if (
+        bgChallenge.interpreterJavascript
+          ?.privateDoNotAccessOrElseSafeScriptWrappedValue
+      ) {
+        if (bgChallenge.globalName && bgChallenge.globalName in globalThis) {
+          delete (globalThis as Record<string, unknown>)[bgChallenge.globalName];
+        }
+        this.logger.debug("[PotProvider] Loading BotGuard interpreter...");
+        new Function(
+          bgChallenge.interpreterJavascript
+            .privateDoNotAccessOrElseSafeScriptWrappedValue,
+        )();
+        this.logger.debug("[PotProvider] Interpreter loaded");
+      } else {
+        throw new Error("Could not load BotGuard VM");
+      }
+
+      // Create BotGuard client
+      this.logger.debug("[PotProvider] Creating BotGuard client...");
+      const bgClient = await BG.BotGuardClient.create({
+        program: bgChallenge.program,
+        globalName: bgChallenge.globalName,
+        globalObj: globalThis,
+      });
+      this.logger.debug("[PotProvider] BotGuard client created");
+
+      // Generate integrity token
+      this.logger.debug("[PotProvider] Generating BotGuard snapshot...");
+      botguardResponse = await bgClient.snapshot(
+        { webPoSignalOutput },
+        30_000,
+      );
+      this.logger.debug(
+        `[PotProvider] BotGuard response length: ${botguardResponse?.length || 0}`,
+      );
+
+      // BotGuard VM is no longer needed — shut it down to release its closures.
+      try { await bgClient.shutdown(); } catch { /* may not have shutdown fn */ }
+    } finally {
+      // Always clear BotGuard's persistent timers, even if an error occurred.
+      cleanupTimers();
+    }
 
     const generateItUrl = buildURL("GenerateIT");
     this.logger.debug(`[PotProvider] Calling ${generateItUrl}`);

@@ -6,7 +6,7 @@
 
 import { BG } from "../../bgutils/index.js";
 import { Logger } from "../../core/logger.js";
-import { setupGlobalDom } from "../../core/globalDom.js";
+import { setupGlobalDom, interceptTimers } from "../../core/globalDom.js";
 import { USER_AGENTS, BOTGUARD_REQUEST_KEY } from "../../constants.js";
 import { createRetryFetch } from "../../core/http.js";
 import { getErrorMessage } from "../../types/errors.js";
@@ -59,6 +59,10 @@ export class PoTokenGenerator {
       requestKey: BOTGUARD_REQUEST_KEY,
     };
 
+    // Intercept setInterval calls from BotGuard's interpreter — it creates
+    // persistent telemetry timers that leak ~1MB/30s in long-running Node.js.
+    const cleanupTimers = interceptTimers();
+
     try {
       const bgChallenge = await BG.Challenge.create(bgConfig);
       if (!bgChallenge) {
@@ -94,6 +98,8 @@ export class PoTokenGenerator {
       this.logger.debug(
         `[PoToken] Generation failed (may not be needed): ${msg}`,
       );
+    } finally {
+      cleanupTimers();
     }
 
     return "";
