@@ -6,7 +6,7 @@
 
 import { BG } from "../../bgutils/index.js";
 import { Logger } from "../../core/logger.js";
-import { setupGlobalDom, interceptTimers } from "../../core/globalDom.js";
+import { setupGlobalDom, teardownGlobalDom, interceptTimers, cleanupBotGuardState } from "../../core/globalDom.js";
 import { USER_AGENTS, BOTGUARD_REQUEST_KEY } from "../../constants.js";
 import { createRetryFetch } from "../../core/http.js";
 import { getErrorMessage } from "../../types/errors.js";
@@ -86,6 +86,11 @@ export class PoTokenGenerator {
         bgConfig,
       });
 
+      // Clean up BotGuard state — no minter is cached in this path,
+      // so we can fully tear down JSDOM to free ~30-50MB of DOM state.
+      cleanupBotGuardState(bgChallenge.globalName);
+      teardownGlobalDom();
+
       if (poTokenResult?.poToken) {
         this.poToken = poTokenResult.poToken;
         this.logger.debug(
@@ -100,6 +105,8 @@ export class PoTokenGenerator {
       );
     } finally {
       cleanupTimers();
+      // Ensure JSDOM is torn down even on error
+      teardownGlobalDom();
     }
 
     return "";

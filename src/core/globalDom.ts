@@ -60,45 +60,102 @@ export function teardownGlobalDom(): void {
 }
 
 /**
- * Intercept `setInterval` calls to track persistent timers created by BotGuard.
+ * Intercept `setInterval` and `setTimeout` calls to track timers created by BotGuard.
  *
  * BotGuard's interpreter (`new Function(js)()`) creates persistent `setInterval`
- * timers inside the JSDOM/Node.js environment for monitoring and telemetry.
- * In a browser these are harmless (page eventually closes), but in a long-running
- * Node.js server they leak ~1MB/30s by continuously allocating DOM state.
+ * timers and one-shot `setTimeout` callbacks inside the JSDOM/Node.js environment
+ * for monitoring and telemetry. In a browser these are harmless (page eventually
+ * closes), but in a long-running Node.js server they leak memory by continuously
+ * allocating DOM state.
  *
  * Call this BEFORE loading the BotGuard interpreter. Call the returned cleanup
- * function AFTER the minter/token is fully created to clear all tracked intervals.
+ * function AFTER the minter/token is fully created to clear all tracked timers.
  */
 export function interceptTimers(): () => void {
   const origGlobalSetInterval = globalThis.setInterval;
-  const tracked: ReturnType<typeof setInterval>[] = [];
+  const origGlobalSetTimeout = globalThis.setTimeout;
+  const trackedIntervals: ReturnType<typeof setInterval>[] = [];
+  const trackedTimeouts: ReturnType<typeof setTimeout>[] = [];
 
   // Intercept globalThis.setInterval (what `new Function(js)()` resolves to)
   globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
     const id = origGlobalSetInterval(...args);
-    tracked.push(id);
+    trackedIntervals.push(id);
     return id;
   }) as typeof setInterval;
 
-  // Also intercept window.setInterval (JSDOM's implementation) in case
-  // BotGuard code explicitly calls window.setInterval(...)
+  // Intercept globalThis.setTimeout
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    const id = origGlobalSetTimeout(...args);
+    trackedTimeouts.push(id);
+    return id;
+  }) as typeof setTimeout;
+
+  // Also intercept window.setInterval/setTimeout (JSDOM's implementation) in case
+  // BotGuard code explicitly calls window.setInterval(...) / window.setTimeout(...)
   let origWindowSetInterval: (typeof setInterval) | null = null;
+  let origWindowSetTimeout: (typeof setTimeout) | null = null;
   if (domInstance) {
     const win = domInstance.window as Record<string, any>;
+
     origWindowSetInterval = win.setInterval as typeof setInterval;
     win.setInterval = (...args: any[]) => {
       const id = (origWindowSetInterval as Function).apply(win, args);
-      tracked.push(id);
+      trackedIntervals.push(id);
+      return id;
+    };
+
+    origWindowSetTimeout = win.setTimeout as typeof setTimeout;
+    win.setTimeout = (...args: any[]) => {
+      const id = (origWindowSetTimeout as Function).apply(win, args);
+      trackedTimeouts.push(id);
       return id;
     };
   }
 
   return () => {
     globalThis.setInterval = origGlobalSetInterval;
+    globalThis.setTimeout = origGlobalSetTimeout;
     if (domInstance && origWindowSetInterval) {
       (domInstance.window as Record<string, any>).setInterval = origWindowSetInterval;
     }
-    for (const id of tracked) clearInterval(id);
+    if (domInstance && origWindowSetTimeout) {
+      (domInstance.window as Record<string, any>).setTimeout = origWindowSetTimeout;
+    }
+    for (const id of trackedIntervals) clearInterval(id);
+    for (const id of trackedTimeouts) clearTimeout(id);
   };
+}
+
+/**
+ * Clean up DOM state left by BotGuard's interpreter.
+ *
+ * BotGuard's `new Function(js)()` may inject script tags, add event listeners,
+ * and create globals on the JSDOM window. This function removes that accumulated
+ * state without tearing down the entire JSDOM instance (which would break any
+ * cached minter callbacks that reference the window).
+ *
+ * @param globalName - The BotGuard VM global name to remove from globalThis
+ */
+export function cleanupBotGuardState(globalName?: string): void {
+  // Remove BotGuard's VM global variable (large closure tree)
+  if (globalName && globalName in globalThis) {
+    delete (globalThis as Record<string, unknown>)[globalName];
+  }
+
+  // Clean JSDOM document — BotGuard may have injected script tags or other elements
+  if (domInstance) {
+    try {
+      const doc = domInstance.window.document;
+      // Clear body and head to remove any injected elements
+      while (doc.body.firstChild) doc.body.removeChild(doc.body.firstChild);
+      while (doc.head.childNodes.length > 1) {
+        // Keep the <title> element (first child)
+        const last = doc.head.lastChild;
+        if (last) doc.head.removeChild(last);
+      }
+    } catch {
+      // JSDOM may already be closed
+    }
+  }
 }

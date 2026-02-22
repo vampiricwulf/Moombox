@@ -9,7 +9,7 @@
 
 import { BG, buildURL, getHeaders } from "../bgutils/index.js";
 import { Logger } from "./logger.js";
-import { setupGlobalDom, teardownGlobalDom, interceptTimers } from "./globalDom.js";
+import { setupGlobalDom, teardownGlobalDom, interceptTimers, cleanupBotGuardState } from "./globalDom.js";
 import { USER_AGENTS, BOTGUARD_REQUEST_KEY } from "../constants.js";
 import { createRetryFetch } from "./http.js";
 import type {
@@ -253,6 +253,12 @@ export class PotProvider {
         webPoSignalOutput,
       ),
     };
+
+    // Minter is now created — remove BotGuard's VM globals and injected DOM
+    // nodes, then tear down JSDOM entirely to free ~30-50MB of DOM state.
+    // The minter's callback is pure byte manipulation and does not need JSDOM.
+    cleanupBotGuardState(bgChallenge.globalName);
+    teardownGlobalDom();
 
     this.minterCache.set(cacheKey, tokenMinter);
     return tokenMinter;
