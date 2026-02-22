@@ -17,6 +17,8 @@ export class PlayerController {
     this.nicoLaneAvail = [];
     this.nicoLastSpawnMs = -1;
     this.playerInitialized = false;
+    /** @type {Map<string, string>} code → URL for 3rd-party Twitch emotes */
+    this.twitchEmoteMap = new Map();
   }
 
   initPlayer() {
@@ -178,6 +180,7 @@ export class PlayerController {
     this.playerJob = null;
     this.playerChatData = null;
     this.playerChatMessages = [];
+    this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
     this.nicoLastSpawnMs = -1;
 
@@ -262,6 +265,7 @@ export class PlayerController {
     // Load chat if available
     this.playerChatMessages = [];
     this.playerChatData = null;
+    this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
     this.nicoLastSpawnMs = -1;
 
@@ -276,6 +280,15 @@ export class PlayerController {
               offsetMs: m.offsetMs || 0,
             }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
+
+          // Build 3rd-party emote lookup map for Twitch chat
+          // Priority (Chatterino order): FFZ > BTTV > 7TV — add lowest first so higher overwrites
+          if (this.playerChatData.emotes) {
+            const { bttv, ffz, seventv } = this.playerChatData.emotes;
+            for (const e of seventv || []) this.twitchEmoteMap.set(e.code, e.url);
+            for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
+            for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
+          }
         }
       } catch (e) {
         console.error("Failed to load chat:", e);
@@ -348,7 +361,7 @@ export class PlayerController {
 
       // Message content
       const contentSpan = document.createElement("span");
-      contentSpan.innerHTML = this.renderChatMessageParts(msg.message || []);
+      contentSpan.innerHTML = this.renderChatMessageParts(msg.message || [], msg.emotes);
       div.appendChild(contentSpan);
 
       frag.appendChild(div);
@@ -486,7 +499,7 @@ export class PlayerController {
       if (spawned >= maxPerFrame) break;
 
       const msg = messages[i];
-      const html = this.renderChatMessageParts(msg.message || []);
+      const html = this.renderChatMessageParts(msg.message || [], msg.emotes);
       if (!html) continue;
 
       // Create element off-screen to measure its actual height
@@ -558,10 +571,10 @@ export class PlayerController {
     this.nicoLastSpawnMs = currentMs;
   }
 
-  renderChatMessageParts(parts) {
+  renderChatMessageParts(parts, twitchNativeEmotes) {
     // Twitch chat stores message as a plain string; YouTube uses MessagePart[]
     if (typeof parts === "string") {
-      return this.app.escapeHtml(parts);
+      return this.renderTwitchMessage(parts, twitchNativeEmotes);
     }
     if (!Array.isArray(parts)) return "";
     return parts
@@ -576,6 +589,73 @@ export class PlayerController {
           return this.app.escapeHtml(alt);
         }
         return this.app.escapeHtml(part.text || "");
+      })
+      .join("");
+  }
+
+  /**
+   * Render a Twitch message string with native + 3rd-party emote replacement.
+   * Uses native Twitch emote positions (from IRC tags) first, then does
+   * word-by-word lookup against BTTV/FFZ/7TV maps (Chatterino-style).
+   */
+  renderTwitchMessage(message, nativeEmotes) {
+    if (!message) return "";
+
+    // No emote data at all — fast path
+    if ((!nativeEmotes || nativeEmotes.length === 0) && this.twitchEmoteMap.size === 0) {
+      return this.app.escapeHtml(message);
+    }
+
+    // If no native emotes, just do word-by-word 3rd-party lookup
+    if (!nativeEmotes || nativeEmotes.length === 0) {
+      return this.renderTwitchWords(message);
+    }
+
+    // Sort native emotes by start position
+    const sorted = [...nativeEmotes].sort((a, b) => a.start - b.start);
+
+    let result = "";
+    let cursor = 0;
+
+    for (const emote of sorted) {
+      // Text before this emote — check for 3rd-party emotes
+      if (emote.start > cursor) {
+        result += this.renderTwitchWords(message.substring(cursor, emote.start));
+      }
+      // Native Twitch emote
+      const url = `https://static-cdn.jtvnps.com/emoticons/v2/${encodeURIComponent(emote.id)}/default/dark/2.0`;
+      result += `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(emote.name)}" loading="lazy" referrerpolicy="no-referrer">`;
+      cursor = emote.end + 1;
+    }
+
+    // Remaining text after last native emote
+    if (cursor < message.length) {
+      result += this.renderTwitchWords(message.substring(cursor));
+    }
+
+    return result;
+  }
+
+  /**
+   * Render a text segment with word-by-word 3rd-party emote lookup.
+   * Splits on whitespace, checks each word against twitchEmoteMap.
+   */
+  renderTwitchWords(text) {
+    if (!text) return "";
+    if (this.twitchEmoteMap.size === 0) {
+      return this.app.escapeHtml(text);
+    }
+
+    // Split preserving whitespace tokens
+    return text
+      .split(/(\s+)/)
+      .map((part) => {
+        if (/^\s+$/.test(part)) return part; // preserve whitespace
+        const url = this.twitchEmoteMap.get(part);
+        if (url && /^https?:\/\//i.test(url)) {
+          return `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(part)}" loading="lazy" referrerpolicy="no-referrer">`;
+        }
+        return this.app.escapeHtml(part);
       })
       .join("");
   }

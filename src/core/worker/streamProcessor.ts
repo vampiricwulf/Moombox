@@ -16,8 +16,9 @@ import { TwitchChatDownloader } from "../../engine/twitch/twitchChat.js";
 import { TwitchVodChatDownloader } from "../../engine/twitch/twitchVodChat.js";
 import { createEmptyVideoInfo, type VideoInfo, type StreamStatus } from "../../types/youtube.js";
 import { NotificationManager, NotificationType } from "../notifications.js";
-import { STREAM_RECHECK_INTERVAL_MS, PROBE_JITTER_MAX_MS, MAX_CONSECUTIVE_PROBE_ERRORS, TWITCH_URLS } from "../../constants.js";
+import { STREAM_RECHECK_INTERVAL_MS, PROBE_JITTER_MAX_MS, MAX_CONSECUTIVE_PROBE_ERRORS, TWITCH_URLS, CHAT_SURGE_THRESHOLD, CHAT_SURGE_WINDOW_MS } from "../../constants.js";
 import { getErrorMessage } from "../../types/errors.js";
+import type { ChatProgress } from "../../types/chat.js";
 import { sleep } from "../../utils/async.js";
 import { extractTwitchLoginFromJob } from "../../utils/twitch.js";
 import type { TwitchStreamInfo, TwitchHlsVariant } from "../../types/twitch.js";
@@ -599,11 +600,49 @@ export class StreamProcessor {
       chatDl = await this.startEarlyChat(job, initialVideoInfo, yt, db);
     }
 
+    // Chat surge detection — a burst of messages signals the stream just went live
+    let surgeWindowStart = Date.now();
+    let surgeWindowCount = 0;
+    let surgeResolve: (() => void) | null = null;
+
+    const registerSurgeHandler = (dl: ChatDownloader): void => {
+      dl.on("progress", (data: ChatProgress) => {
+        const now = Date.now();
+        const elapsed = now - surgeWindowStart;
+
+        if (elapsed >= CHAT_SURGE_WINDOW_MS) {
+          // Reset sliding window
+          surgeWindowStart = now;
+          surgeWindowCount = data.messageCount;
+          return;
+        }
+
+        const delta = data.messageCount - surgeWindowCount;
+        if (delta >= CHAT_SURGE_THRESHOLD && surgeResolve) {
+          this.logger.info(
+            `[StreamProcessor] Chat surge detected for ${job.videoId}: ` +
+            `${delta} messages in ${elapsed}ms — triggering early probe`,
+          );
+          surgeResolve();
+          surgeResolve = null;
+          // Reset window to avoid repeated triggers
+          surgeWindowStart = now;
+          surgeWindowCount = data.messageCount;
+        }
+      });
+    };
+
+    if (chatDl) registerSurgeHandler(chatDl);
+
     while (this.running) {
       // Calculate dynamic recheck interval with jitter to stagger concurrent probes
       const recheckInterval = this.calculateRecheckInterval(scheduledStartTime);
       const jitter = Math.floor(Math.random() * PROBE_JITTER_MAX_MS);
-      await sleep(recheckInterval + jitter);
+
+      // Race sleep against chat surge — surge resolves immediately to trigger early probe
+      const surgePromise = new Promise<void>((resolve) => { surgeResolve = resolve; });
+      await Promise.race([sleep(recheckInterval + jitter), surgePromise]);
+      surgeResolve = null;
 
       // Check if job was cancelled
       const freshJob = await db.getJob(job.id);
@@ -657,6 +696,7 @@ export class StreamProcessor {
         // Retry starting chat if it wasn't available earlier (chat may have opened)
         if (!chatDl && config.downloader.download_chat !== false) {
           chatDl = await this.startEarlyChat(job, probeInfo, yt, db);
+          if (chatDl) registerSurgeHandler(chatDl);
         }
 
         // Stream transitioned — full fetch for format selection

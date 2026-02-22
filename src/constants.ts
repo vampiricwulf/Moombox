@@ -225,6 +225,17 @@ export const STREAM_SEGMENT_TIMEOUT_MS = 10 * 60_000;
  */
 export const STREAM_END_VERIFY_INTERVAL_MS = 5 * 60_000;
 
+/**
+ * Chat surge detection — number of new messages within the window
+ * that triggers an immediate status probe during the upcoming phase
+ */
+export const CHAT_SURGE_THRESHOLD = 30;
+
+/**
+ * Chat surge detection — sliding window duration (15 seconds)
+ */
+export const CHAT_SURGE_WINDOW_MS = 15_000;
+
 // =============================================================================
 // DECAPI CONSTANTS
 // =============================================================================
