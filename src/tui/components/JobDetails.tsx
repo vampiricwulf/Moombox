@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Box, Text } from "ink";
 import type { Job } from "../../core/database.js";
 import { displayWidth, truncateToWidth, wordWrapWidth } from "../textWidth.js";
@@ -14,8 +14,30 @@ interface JobDetailsProps {
 }
 
 export function JobDetails({ job, width, height, focused, scrollOffset, onMaxScroll }: JobDetailsProps): React.ReactElement {
+  // Tick only for jobs with time-dependent fields (Duration, Starts In).
+  // Scoped here so only JobDetails re-renders, not the full App tree.
+  const needsTick = !!job && (
+    ["Live", "Downloading", "Muxing"].includes(job.status) ||
+    (job.status === "Upcoming" && !!job.streamStartTime)
+  );
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!needsTick) return;
+    const timer = setInterval(() => setTick((t) => t + 1), 5_000);
+    return () => clearInterval(timer);
+  }, [needsTick]);
+
   const contentWidth = width - 4; // borders + padding
   const contentHeight = height - 3; // borders (2) + title row (1)
+
+  // Compute rows/scroll BEFORE early return so all hooks run unconditionally
+  const rows = job ? buildDetailRows(job, contentWidth) : [];
+  const maxScroll = Math.max(0, rows.length - contentHeight);
+  const actualOffset = Math.min(scrollOffset, maxScroll);
+  const visibleRows = rows.slice(actualOffset, actualOffset + contentHeight);
+
+  // Report maxScroll so parent can clamp offset in scroll handlers
+  useEffect(() => { onMaxScroll?.(maxScroll); }, [maxScroll, onMaxScroll]);
 
   const borderColor = focused ? "cyan" : "gray";
   const titleColor = focused ? "cyan" : "white";
@@ -42,14 +64,6 @@ export function JobDetails({ job, width, height, focused, scrollOffset, onMaxScr
       </Box>
     );
   }
-
-  const rows = buildDetailRows(job, contentWidth);
-  const maxScroll = Math.max(0, rows.length - contentHeight);
-  const actualOffset = Math.min(scrollOffset, maxScroll);
-  const visibleRows = rows.slice(actualOffset, actualOffset + contentHeight);
-
-  // Report maxScroll so parent can clamp offset in scroll handlers
-  React.useEffect(() => { onMaxScroll?.(maxScroll); }, [maxScroll, onMaxScroll]);
 
   const scrollPercent = rows.length > contentHeight
     ? Math.round((actualOffset / maxScroll) * 100)

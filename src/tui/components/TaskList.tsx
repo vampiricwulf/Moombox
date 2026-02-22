@@ -1,7 +1,10 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Box, Text } from "ink";
 import type { Job } from "../../core/database.js";
 import { TaskItem, getStatusColor, getStatusIcon } from "./TaskItem.js";
+import { FeedMonitor } from "../../core/monitor.js";
+import { DecapiMonitor } from "../../core/decapiMonitor.js";
+import { TwitchMonitor } from "../../core/twitchMonitor.js";
 
 interface TaskListProps {
   jobs: Job[];
@@ -16,9 +19,6 @@ interface TaskListProps {
   archivedJobs?: Job[];
   archiveExpanded?: boolean;
   onToggleArchive?: () => void;
-  nextFeedCheck?: number;
-  nextDecapiCheck?: number;
-  nextTwitchCheck?: number;
 }
 
 // Order in which status icons appear in the summary
@@ -32,6 +32,37 @@ function formatCountdown(epochMs: number): string {
   const seconds = remaining % 60;
   if (minutes > 0) return `${minutes}m ${seconds}s`;
   return `${seconds}s`;
+}
+
+/**
+ * Self-contained countdown display with its own 5-second tick.
+ * Reads monitor singletons directly so the parent tree does NOT re-render.
+ * This isolates the timer-driven re-renders to just this tiny component.
+ */
+function CountdownDisplay(): React.ReactElement | null {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTick((t) => t + 1), 5_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const nextFeedCheck = FeedMonitor.getInstance().nextCheckAt;
+  const nextDecapiCheck = DecapiMonitor.getInstance().nextCheckAt;
+  const nextTwitchCheck = TwitchMonitor.getInstance().nextCheckAt;
+
+  if (nextFeedCheck <= 0 && nextDecapiCheck <= 0 && nextTwitchCheck <= 0) return null;
+
+  return (
+    <Text color="gray">
+      {" "}
+      <Text color={nextFeedCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+      <Text color="gray">F:{formatCountdown(nextFeedCheck)} </Text>
+      <Text color={nextDecapiCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+      <Text color="gray">D:{formatCountdown(nextDecapiCheck)} </Text>
+      <Text color={nextTwitchCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
+      <Text color="gray">T:{formatCountdown(nextTwitchCheck)}</Text>
+    </Text>
+  );
 }
 
 type VirtualItem =
@@ -51,9 +82,6 @@ export function TaskList({
   archivedJobs = [],
   archiveExpanded = false,
   onToggleArchive,
-  nextFeedCheck = 0,
-  nextDecapiCheck = 0,
-  nextTwitchCheck = 0,
 }: TaskListProps): React.ReactElement {
   const contentHeight = height - 3; // borders (2) + title row (1)
   const borderColor = focused ? "cyan" : "gray";
@@ -105,17 +133,7 @@ export function TaskList({
         {filterLabel && (
           <Text color="yellow"> [{filterLabel}]</Text>
         )}
-        {(nextFeedCheck > 0 || nextDecapiCheck > 0 || nextTwitchCheck > 0) && (
-          <Text color="gray">
-            {" "}
-            <Text color={nextFeedCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
-            <Text color="gray">F:{formatCountdown(nextFeedCheck)} </Text>
-            <Text color={nextDecapiCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
-            <Text color="gray">D:{formatCountdown(nextDecapiCheck)} </Text>
-            <Text color={nextTwitchCheck <= Date.now() ? "green" : "gray"}>{"\u25CF"}</Text>
-            <Text color="gray">T:{formatCountdown(nextTwitchCheck)}</Text>
-          </Text>
-        )}
+        <CountdownDisplay />
         {totalItems > contentHeight && (
           <Text color="gray">
             {" "}

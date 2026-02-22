@@ -172,7 +172,7 @@ async function addVideo(input: string) {
 async function run() {
   // Check if running in a TTY (interactive terminal)
   const isTTY = process.stdout.isTTY && process.stdin.isTTY;
-  const noTUI = process.argv.includes("--no-tui") || !!(process.env.MOOMBOX_NO_TUI?.trim());
+  const noTUI = process.argv.includes("--no-tui") || /^(1|true|yes)$/i.test(process.env.MOOMBOX_NO_TUI?.trim() || "");
   const useTUI = isTTY && !noTUI;
 
   if (!useTUI) {
