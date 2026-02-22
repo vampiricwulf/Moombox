@@ -10,12 +10,13 @@ import { Logger } from "../../core/logger.js";
 import { TWITCH_EMOTE_APIS } from "../../constants.js";
 import type { TwitchEmoteData } from "../../types/twitch.js";
 
-/** Per-channel emote cache (login → resolved emotes). */
+/** Per-channel emote cache (login → resolved emotes). Bounded to prevent unbounded growth. */
+const MAX_EMOTE_CACHE_SIZE = 200;
 const emoteCache = new Map<string, TwitchEmoteData>();
 
 /**
  * Resolve all third-party emotes for a Twitch channel.
- * Results are cached in memory for the lifetime of the process.
+ * Results are cached in memory, bounded to MAX_EMOTE_CACHE_SIZE entries (LRU eviction).
  */
 export async function resolveChannelEmotes(
   channelId: string,
@@ -23,7 +24,12 @@ export async function resolveChannelEmotes(
 ): Promise<TwitchEmoteData> {
   const cacheKey = channelLogin.toLowerCase();
   const cached = emoteCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    // Move to end for LRU behavior (Map preserves insertion order)
+    emoteCache.delete(cacheKey);
+    emoteCache.set(cacheKey, cached);
+    return cached;
+  }
 
   const [bttv, ffz, seventv] = await Promise.allSettled([
     fetchBttvEmotes(channelId),
@@ -37,6 +43,11 @@ export async function resolveChannelEmotes(
     seventv: seventv.status === "fulfilled" ? seventv.value : [],
   };
 
+  // Evict oldest entry if at capacity
+  if (emoteCache.size >= MAX_EMOTE_CACHE_SIZE) {
+    const oldest = emoteCache.keys().next().value;
+    if (oldest !== undefined) emoteCache.delete(oldest);
+  }
   emoteCache.set(cacheKey, emotes);
   const total = (emotes.bttv?.length || 0) + (emotes.ffz?.length || 0) + (emotes.seventv?.length || 0);
   if (total > 0) {

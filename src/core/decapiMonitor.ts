@@ -90,6 +90,7 @@ export class DecapiMonitor {
     this.nextCheckAt = 0;
     this.abortController?.abort();
     this.abortController = null;
+    this.metadataFailures.clear();
     this.logger.info("[DECAPI] Monitor stopped.");
   }
 

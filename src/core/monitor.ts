@@ -72,6 +72,7 @@ export class FeedMonitor {
     this.interval = null;
     this.running = false;
     this.nextCheckAt = 0;
+    this.metadataFailures.clear();
     this.logger.info("Feed Monitor stopped.");
   }
 

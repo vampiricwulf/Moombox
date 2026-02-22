@@ -119,18 +119,32 @@ export class CdpClient {
   }
 
   /**
+   * Remove a CDP event handler
+   */
+  off(method: string, handler: (params: any) => void): void {
+    const handlers = this.eventHandlers.get(method);
+    if (!handlers) return;
+    const idx = handlers.indexOf(handler);
+    if (idx !== -1) handlers.splice(idx, 1);
+    if (handlers.length === 0) this.eventHandlers.delete(method);
+  }
+
+  /**
    * Wait for a specific CDP event (one-shot)
    */
   waitForEvent(method: string, timeoutMs: number = 30_000): Promise<any> {
     return new Promise((resolve, reject) => {
+      const handler = (params: any) => {
+        clearTimeout(timer);
+        this.off(method, handler);
+        resolve(params);
+      };
       const timer = setTimeout(() => {
+        this.off(method, handler);
         reject(new Error(`Timeout waiting for CDP event: ${method}`));
       }, timeoutMs);
 
-      this.on(method, (params) => {
-        clearTimeout(timer);
-        resolve(params);
-      });
+      this.on(method, handler);
     });
   }
 
