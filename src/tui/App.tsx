@@ -54,6 +54,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addMessage, setAddMessage] = useState<{ text: string; color: string } | null>(null);
   const [deleteConfirmJobId, setDeleteConfirmJobId] = useState<string | null>(null);
+  const [cancelConfirmJobId, setCancelConfirmJobId] = useState<string | null>(null);
   const [trimDialogOpen, setTrimDialogOpen] = useState(false);
   const [trimDialogJob, setTrimDialogJob] = useState<Job | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -378,6 +379,16 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     return () => clearTimeout(timer);
   }, [deleteConfirmJobId]);
 
+  // Clear cancel confirmation after timeout
+  useEffect(() => {
+    if (!cancelConfirmJobId) return;
+    const timer = setTimeout(() => {
+      setCancelConfirmJobId(null);
+      setAddMessage({ text: "Cancel dismissed", color: "gray" });
+    }, 3_000);
+    return () => clearTimeout(timer);
+  }, [cancelConfirmJobId]);
+
   // Keyboard input
   useInput((input, key) => {
     if (setupMode || addDialogOpen || settingsOpen) return;
@@ -411,6 +422,10 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     // Clear delete confirmation on any non-D key
     if (deleteConfirmJobId && input !== "d" && input !== "D") {
       setDeleteConfirmJobId(null);
+    }
+    // Clear cancel confirmation on any non-C key
+    if (cancelConfirmJobId && input !== "c" && input !== "C") {
+      setCancelConfirmJobId(null);
     }
 
     // Quit
@@ -495,21 +510,28 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       } else if (input === "c" || input === "C") {
         const job = getJobAtVirtualIndex(selectedJobIndexRef.current);
         if (job && job.status !== "Finished" && job.status !== "Cancelled" && job.status !== "Error") {
-          db.updateJob(job.id, { status: "Cancelled" }).catch((e: unknown) => logger.error(`[TUI] Failed to cancel job: ${getErrorMessage(e)}`));
-          NotificationManager.getInstance().send(
-            "Job Cancelled",
-            `Cancelled: ${job.title}`,
-            NotificationType.CANCELLED,
-            [
-              { name: "Channel", value: job.channelName, inline: true },
-              { name: "Video ID", value: job.videoId, inline: true },
-            ],
-            {
-              url: `https://www.youtube.com/watch?v=${job.videoId}`,
-              thumbnail: job.thumbnailUrl,
-              event: "cancelled",
-            },
-          );
+          if (cancelConfirmJobId === job.id) {
+            db.updateJob(job.id, { status: "Cancelled" }).catch((e: unknown) => logger.error(`[TUI] Failed to cancel job: ${getErrorMessage(e)}`));
+            setCancelConfirmJobId(null);
+            setAddMessage({ text: `Cancelled: ${job.title}`, color: "red" });
+            NotificationManager.getInstance().send(
+              "Job Cancelled",
+              `Cancelled: ${job.title}`,
+              NotificationType.CANCELLED,
+              [
+                { name: "Channel", value: job.channelName, inline: true },
+                { name: "Video ID", value: job.videoId, inline: true },
+              ],
+              {
+                url: `https://www.youtube.com/watch?v=${job.videoId}`,
+                thumbnail: job.thumbnailUrl,
+                event: "cancelled",
+              },
+            );
+          } else {
+            setCancelConfirmJobId(job.id);
+            setAddMessage({ text: `Press C again to cancel "${job.title}"`, color: "yellow" });
+          }
         }
       } else if (input === "r" || input === "R") {
         const job = getJobAtVirtualIndex(selectedJobIndexRef.current);
@@ -557,7 +579,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         }
       }
     },
-    [sortedJobs, virtualListLength, hasDivider, dividerIndex, getJobAtVirtualIndex, taskScrollOffset, taskHeight, db, deleteConfirmJobId],
+    [sortedJobs, virtualListLength, hasDivider, dividerIndex, getJobAtVirtualIndex, taskScrollOffset, taskHeight, db, deleteConfirmJobId, cancelConfirmJobId],
   );
 
   const handleDetailInput = useCallback(

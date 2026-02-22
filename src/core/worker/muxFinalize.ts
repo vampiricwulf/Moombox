@@ -85,6 +85,12 @@ export async function muxAndFinalize(
     await Muxer.mux(videoPath, audioPath, finalPath, signal, trimOptions);
     logger.info(`[DownloadOrchestrator] Muxing complete: ${finalPath}`);
 
+    // If cancelled after mux completed, respect cancellation intent.
+    // The catch block below will clean up the output file.
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+
     // Extract actual video metadata (duration, resolution, size)
     const metadata = await extractVideoMetadata(finalPath);
     if (metadata) {
