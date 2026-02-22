@@ -134,6 +134,80 @@ export class PlayerController {
         searchTimeout = setTimeout(() => this.filterChat(chatSearch.value), 200);
       });
     }
+
+    // Keyboard controls for player
+    this.setupKeyboardControls();
+  }
+
+  setupKeyboardControls() {
+    document.addEventListener("keydown", (e) => {
+      // Only active when player tab is shown
+      const playerPanel = document.querySelector('sl-tab-panel[name="player"]');
+      if (!playerPanel || !playerPanel.hasAttribute("active")) return;
+
+      // Skip when typing in inputs
+      const tag = e.target.tagName;
+      if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
+      if (e.target.id === "chat-search") return;
+
+      const video = document.getElementById("player-video");
+      if (!video || !video.src) return;
+
+      switch (e.key) {
+        case " ":
+          if (video.paused) video.play(); else video.pause();
+          e.preventDefault();
+          break;
+        case "ArrowLeft":
+          video.currentTime -= e.shiftKey ? 30 : 5;
+          e.preventDefault();
+          break;
+        case "ArrowRight":
+          video.currentTime += e.shiftKey ? 30 : 5;
+          e.preventDefault();
+          break;
+        case "ArrowUp":
+          video.volume = Math.min(1, video.volume + 0.1);
+          e.preventDefault();
+          break;
+        case "ArrowDown":
+          video.volume = Math.max(0, video.volume - 0.1);
+          e.preventDefault();
+          break;
+        case "f": {
+          const wrapper = document.getElementById("player-video-wrapper");
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          } else if (wrapper) {
+            wrapper.requestFullscreen();
+          }
+          e.preventDefault();
+          break;
+        }
+        case "m":
+          video.muted = !video.muted;
+          e.preventDefault();
+          break;
+        case "c": {
+          const nicoToggle = document.getElementById("player-nico-toggle");
+          if (nicoToggle) {
+            nicoToggle.checked = !nicoToggle.checked;
+            nicoToggle.dispatchEvent(new Event("sl-change"));
+          }
+          e.preventDefault();
+          break;
+        }
+        case "s": {
+          const sidebarToggle = document.getElementById("player-sidebar-toggle");
+          if (sidebarToggle) {
+            sidebarToggle.checked = !sidebarToggle.checked;
+            sidebarToggle.dispatchEvent(new Event("sl-change"));
+          }
+          e.preventDefault();
+          break;
+        }
+      }
+    });
   }
 
   filterChat(query) {

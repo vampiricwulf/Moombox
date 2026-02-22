@@ -517,18 +517,21 @@ export class SettingsController {
 
     container.innerHTML = channels
       .map(
-        (ch) => {
+        (ch, index) => {
           const isTwitch = ch.platform === "twitch";
           const isEnabled = ch.enabled !== false;
           const platformTag = isTwitch
             ? '<sl-tag size="small" variant="primary">Twitch</sl-tag> '
             : '<sl-tag size="small" variant="danger">YouTube</sl-tag> ';
           return `
-      <div class="channel-card${isEnabled ? "" : " channel-card--disabled"}" data-channel-id="${this.app.escapeHtml(ch.id)}">
+      <div class="channel-card${isEnabled ? "" : " channel-card--disabled"}" data-channel-id="${this.app.escapeHtml(ch.id)}" data-index="${index}" draggable="true">
         <div class="channel-card-header">
-          <div>
-            <div class="channel-card-title">${platformTag}${this.app.escapeHtml(ch.name || ch.id)}</div>
-            <div class="channel-card-id">${this.app.escapeHtml(ch.id)}</div>
+          <div style="display:flex;align-items:center">
+            <sl-icon name="grip-vertical" class="channel-drag-handle"></sl-icon>
+            <div>
+              <div class="channel-card-title">${platformTag}${this.app.escapeHtml(ch.name || ch.id)}</div>
+              <div class="channel-card-id">${this.app.escapeHtml(ch.id)}</div>
+            </div>
           </div>
           <div class="channel-card-actions">
             <sl-switch size="small" ${isEnabled ? "checked" : ""} title="${isEnabled ? "Monitoring enabled" : "Monitoring disabled"}" onclick="app.settings.toggleChannel('${this.app.escapeHtml(ch.id)}', this.checked); event.stopPropagation();"></sl-switch>
@@ -548,6 +551,60 @@ export class SettingsController {
         },
       )
       .join("");
+
+    this.setupChannelDragDrop();
+  }
+
+  setupChannelDragDrop() {
+    const container = document.getElementById("channels-list");
+    if (!container) return;
+
+    let draggedIndex = null;
+
+    container.querySelectorAll(".channel-card[draggable]").forEach((card) => {
+      card.addEventListener("dragstart", (e) => {
+        draggedIndex = parseInt(card.dataset.index);
+        card.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+      });
+
+      card.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        // Remove previous drag-over indicators
+        container.querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
+        card.classList.add("drag-over");
+      });
+
+      card.addEventListener("dragleave", () => {
+        card.classList.remove("drag-over");
+      });
+
+      card.addEventListener("drop", (e) => {
+        e.preventDefault();
+        const targetIndex = parseInt(card.dataset.index);
+        card.classList.remove("drag-over");
+
+        if (draggedIndex !== null && draggedIndex !== targetIndex && this.app.config?.channels) {
+          const channels = this.app.config.channels;
+          const [moved] = channels.splice(draggedIndex, 1);
+          channels.splice(targetIndex, 0, moved);
+
+          // Save reordered channels
+          this.saveConfig().then(() => {
+            this.renderChannelsList();
+            this.app.showToast("Channel order updated", "success");
+          });
+        }
+      });
+
+      card.addEventListener("dragend", () => {
+        draggedIndex = null;
+        container.querySelectorAll(".dragging, .drag-over").forEach((el) => {
+          el.classList.remove("dragging", "drag-over");
+        });
+      });
+    });
   }
 
   showAddChannelDialog(channel = null) {

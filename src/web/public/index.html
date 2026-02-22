@@ -16,8 +16,16 @@
         <!-- Shoelace UI Components -->
         <link
             rel="stylesheet"
+            id="sl-theme-dark"
             href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/themes/dark.css"
             crossorigin="anonymous"
+        />
+        <link
+            rel="stylesheet"
+            id="sl-theme-light"
+            href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/themes/light.css"
+            crossorigin="anonymous"
+            media="not all"
         />
         <script
             type="module"
@@ -38,7 +46,16 @@
 
             <!-- Tasks Panel -->
             <sl-tab-panel name="tasks">
-                <div class="panel-header">
+                <div class="panel-header tasks-filter-bar">
+                    <sl-input id="tasks-search" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
+                        <sl-icon slot="prefix" name="search"></sl-icon>
+                    </sl-input>
+                    <sl-select id="tasks-status-filter" placeholder="All statuses" clearable size="small" style="min-width:140px">
+                        <sl-option value="active">Active</sl-option>
+                        <sl-option value="errors">Errors</sl-option>
+                        <sl-option value="finished">Finished</sl-option>
+                    </sl-select>
+                    <span id="tasks-filter-count" style="display:none"></span>
                     <sl-button variant="primary" id="add-video-btn">
                         <sl-icon slot="prefix" name="plus"></sl-icon>
                         Add video
@@ -65,7 +82,10 @@
 
                     <!-- Advanced Options Panel (hidden by default) -->
                     <div id="advanced-options-panel" style="display: none; margin-top: 12px;">
-                        <sl-spinner id="format-loading-spinner" style="display: none; font-size: 1.5rem; margin: 12px auto;"></sl-spinner>
+                        <div id="format-skeleton" style="display:none;margin-top:12px">
+                            <sl-skeleton effect="sheen" style="width:100%;height:40px;margin-bottom:8px"></sl-skeleton>
+                            <sl-skeleton effect="sheen" style="width:100%;height:40px"></sl-skeleton>
+                        </div>
                         <div id="format-selection" style="display: none;">
                             <sl-divider></sl-divider>
                             <div style="display: flex; gap: 12px; margin-bottom: 8px;">
@@ -140,17 +160,35 @@
                     <div id="jobs-container">
                         <!-- Jobs will be rendered here -->
                     </div>
+                    <div id="jobs-skeleton">
+                        <div class="skeleton-row">
+                            <div><sl-skeleton effect="sheen" style="width:100%;height:4.5rem;border-radius:var(--sl-border-radius-medium)"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:80%;height:1rem;margin-bottom:6px"></sl-skeleton><sl-skeleton effect="sheen" style="width:50%;height:0.8rem"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:5rem;height:1.4rem;border-radius:9999px"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:100%;height:0.8rem"></sl-skeleton></div>
+                        </div>
+                        <div class="skeleton-row">
+                            <div><sl-skeleton effect="sheen" style="width:100%;height:4.5rem;border-radius:var(--sl-border-radius-medium)"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:70%;height:1rem;margin-bottom:6px"></sl-skeleton><sl-skeleton effect="sheen" style="width:40%;height:0.8rem"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:5rem;height:1.4rem;border-radius:9999px"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:100%;height:0.8rem"></sl-skeleton></div>
+                        </div>
+                        <div class="skeleton-row">
+                            <div><sl-skeleton effect="sheen" style="width:100%;height:4.5rem;border-radius:var(--sl-border-radius-medium)"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:60%;height:1rem;margin-bottom:6px"></sl-skeleton><sl-skeleton effect="sheen" style="width:45%;height:0.8rem"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:5rem;height:1.4rem;border-radius:9999px"></sl-skeleton></div>
+                            <div><sl-skeleton effect="sheen" style="width:100%;height:0.8rem"></sl-skeleton></div>
+                        </div>
+                    </div>
                 </div>
 
                 <div id="empty-state" style="display: none">
-                    <sl-icon
-                        name="inbox"
-                        style="
-                            font-size: 3rem;
-                            color: var(--sl-color-neutral-400);
-                        "
-                    ></sl-icon>
-                    <p>No jobs yet. Click "Add video" to get started.</p>
+                    <sl-icon name="inbox"></sl-icon>
+                    <p>No jobs yet</p>
+                    <p class="empty-state-subtext">Add a YouTube or Twitch URL to start archiving</p>
+                    <sl-button class="empty-state-cta" variant="primary" size="small" onclick="document.getElementById('add-video-btn').click()">
+                        <sl-icon slot="prefix" name="plus"></sl-icon> Add your first video
+                    </sl-button>
                 </div>
             </sl-tab-panel>
 
@@ -169,14 +207,9 @@
                 </div>
 
                 <div id="archived-empty-state" style="display: none">
-                    <sl-icon
-                        name="archive"
-                        style="
-                            font-size: 3rem;
-                            color: var(--sl-color-neutral-400);
-                        "
-                    ></sl-icon>
-                    <p>No archived jobs. Finished jobs older than the configured age will appear here.</p>
+                    <sl-icon name="archive"></sl-icon>
+                    <p>No archived jobs</p>
+                    <p class="empty-state-subtext">Finished jobs older than the configured age will appear here automatically</p>
                 </div>
             </sl-tab-panel>
 
@@ -193,6 +226,7 @@
                         <div id="player-video-wrapper">
                             <video id="player-video" controls preload="metadata"></video>
                             <div id="player-nico-overlay"></div>
+                            <div class="player-controls-hint">Space: Play · ←→: Seek · ↑↓: Vol · F: Full · M: Mute</div>
                         </div>
                         <div id="player-sidebar" style="display: none">
                             <div id="player-sidebar-header">0 messages</div>
@@ -209,8 +243,9 @@
                         </div>
                     </div>
                     <div id="player-empty-state">
-                        <sl-icon name="play-circle" style="font-size: 3rem; color: var(--sl-color-neutral-400)"></sl-icon>
-                        <p>Select a finished video to play.</p>
+                        <sl-icon name="play-circle"></sl-icon>
+                        <p>Select a finished video to play</p>
+                        <p class="empty-state-subtext">Choose from the dropdown above to watch with synced chat overlay</p>
                     </div>
                 </div>
             </sl-tab-panel>
@@ -261,12 +296,15 @@
                         <sl-button size="small" class="log-filter" data-level="INFO">Info</sl-button>
                         <sl-button size="small" class="log-filter" data-level="DEBUG">Debug</sl-button>
                     </div>
+                    <sl-input id="log-search" placeholder="Search logs..." clearable size="small" style="max-width:200px">
+                        <sl-icon slot="prefix" name="search"></sl-icon>
+                    </sl-input>
                     <sl-button size="small" id="clear-logs-btn"
                         >Clear</sl-button
                     >
                 </div>
                 <div id="logs-container">
-                    <textarea id="logs-textarea" readonly wrap="off"></textarea>
+                    <div id="logs-viewer"></div>
                 </div>
             </sl-tab-panel>
 
@@ -1261,6 +1299,31 @@
             </div>
         </div>
 
+        <!-- Keyboard Help Dialog -->
+        <sl-dialog label="Keyboard Shortcuts" id="keyboard-help-dialog">
+            <h4 style="margin:0 0 var(--sl-spacing-small)">Global</h4>
+            <div class="keyboard-shortcut-grid">
+                <kbd>A</kbd> <span>Add video</span>
+                <kbd>?</kbd> <span>Show this help</span>
+                <kbd>Esc</kbd> <span>Close dialog</span>
+                <kbd>1</kbd>-<kbd>6</kbd> <span>Switch tabs</span>
+                <kbd>F</kbd> <span>Focus search</span>
+                <kbd>↑</kbd> <kbd>↓</kbd> <span>Navigate job list</span>
+                <kbd>Enter</kbd> <span>Open selected job details</span>
+            </div>
+            <sl-divider></sl-divider>
+            <h4 style="margin:0 0 var(--sl-spacing-small)">Player Tab</h4>
+            <div class="keyboard-shortcut-grid">
+                <kbd>Space</kbd> <span>Play / Pause</span>
+                <kbd>←</kbd> <kbd>→</kbd> <span>Seek 5s (Shift: 30s)</span>
+                <kbd>↑</kbd> <kbd>↓</kbd> <span>Volume up / down</span>
+                <kbd>F</kbd> <span>Toggle fullscreen</span>
+                <kbd>M</kbd> <span>Toggle mute</span>
+                <kbd>C</kbd> <span>Toggle chat overlay</span>
+                <kbd>S</kbd> <span>Toggle chat sidebar</span>
+            </div>
+        </sl-dialog>
+
         <!-- Status Bar -->
         <div id="status-bar">
             <span id="connection-status">
@@ -1269,6 +1332,7 @@
             </span>
             <span id="check-countdown"></span>
             <div id="status-bar-right">
+                <sl-icon-button id="theme-toggle" name="moon" label="Toggle theme"></sl-icon-button>
                 <span id="status-warnings"></span>
                 <span id="yt-indicator" title="YouTube">YT</span>
                 <span id="tw-indicator" title="Twitch">TW</span>

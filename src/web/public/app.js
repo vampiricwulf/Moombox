@@ -22,6 +22,11 @@ class MoomboxApp {
     this.nextTwitchCheck = 0;
     this._countdownInterval = null;
     this.logFilter = "all";
+    this._logSearchQuery = "";
+    this.tasksSearchQuery = "";
+    this.tasksStatusFilter = "";
+    this.focusedJobIndex = -1;
+    this.theme = localStorage.getItem("moombox-theme") || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
     // Module controllers
     this.setup = new SetupController(this);
@@ -39,7 +44,9 @@ class MoomboxApp {
     if (isFirstRun) {
       this.setup.show();
     } else {
+      this.setTheme(this.theme);
       this.setupEventListeners();
+      this.setupKeyboardShortcuts();
       this.settings.setupListeners();
       this.connectWebSocket();
       this.loadConfig();
@@ -154,6 +161,19 @@ class MoomboxApp {
       });
     });
 
+    // Log search
+    let logSearchTimeout = null;
+    const logSearchInput = document.getElementById("log-search");
+    if (logSearchInput) {
+      logSearchInput.addEventListener("sl-input", () => {
+        clearTimeout(logSearchTimeout);
+        logSearchTimeout = setTimeout(() => {
+          this._logSearchQuery = logSearchInput.value.trim();
+          this.renderLogs();
+        }, 200);
+      });
+    }
+
     // Tab activation handlers
     const tabGroup = document.querySelector("sl-tab-group");
     if (tabGroup) {
@@ -191,10 +211,48 @@ class MoomboxApp {
       });
     }
 
+    // Tasks search/filter
+    let tasksSearchTimeout = null;
+    const tasksSearch = document.getElementById("tasks-search");
+    if (tasksSearch) {
+      tasksSearch.addEventListener("sl-input", () => {
+        clearTimeout(tasksSearchTimeout);
+        tasksSearchTimeout = setTimeout(() => {
+          this.tasksSearchQuery = tasksSearch.value.trim();
+          this.renderJobs();
+        }, 200);
+      });
+    }
+
+    const tasksStatusFilter = document.getElementById("tasks-status-filter");
+    if (tasksStatusFilter) {
+      tasksStatusFilter.addEventListener("sl-change", () => {
+        this.tasksStatusFilter = tasksStatusFilter.value || "";
+        this.renderJobs();
+      });
+    }
+
+    // Theme toggle
+    const themeToggle = document.getElementById("theme-toggle");
+    if (themeToggle) {
+      themeToggle.addEventListener("click", () => {
+        this.setTheme(this.theme === "dark" ? "light" : "dark");
+      });
+    }
+
     // Event delegation for job items (prevents memory leaks from per-item listeners)
     const jobsContainer = document.getElementById("jobs-container");
     if (jobsContainer) {
       jobsContainer.addEventListener("click", (e) => {
+        // Quick action buttons
+        const quickBtn = e.target.closest("[data-quick-action]");
+        if (quickBtn) {
+          e.stopPropagation();
+          const action = quickBtn.dataset.quickAction;
+          const jobId = quickBtn.dataset.jobId;
+          this.quickAction(action, jobId);
+          return;
+        }
         const videoItem = e.target.closest(".video-item");
         if (videoItem) {
           const jobId = videoItem.dataset.jobId;
@@ -390,6 +448,9 @@ class MoomboxApp {
         this.nextFeedCheck = message.payload.nextFeedCheck || 0;
         this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
         this.nextTwitchCheck = message.payload.nextTwitchCheck || 0;
+        // Hide loading skeletons
+        const skeleton = document.getElementById("jobs-skeleton");
+        if (skeleton) skeleton.style.display = "none";
         this.renderJobs();
         this.renderLogs();
         this.updateCheckCountdown();
@@ -465,34 +526,63 @@ class MoomboxApp {
   renderJobs() {
     const container = document.getElementById("jobs-container");
     const emptyState = document.getElementById("empty-state");
+    const filterCount = document.getElementById("tasks-filter-count");
 
     if (this.jobs.length === 0) {
       container.innerHTML = "";
       emptyState.style.display = "flex";
+      if (filterCount) { filterCount.style.display = "none"; }
+      return;
+    }
+
+    const filtered = this.getFilteredJobs();
+    const isFiltered = this.tasksSearchQuery || this.tasksStatusFilter;
+
+    // Update filter count
+    if (filterCount) {
+      if (isFiltered) {
+        filterCount.textContent = `${filtered.length} of ${this.jobs.length}`;
+        filterCount.style.display = "";
+      } else {
+        filterCount.style.display = "none";
+      }
+    }
+
+    if (filtered.length === 0 && isFiltered) {
+      container.innerHTML = "";
+      emptyState.style.display = "flex";
+      emptyState.querySelector("sl-icon").name = "search";
+      emptyState.querySelector("p").textContent = "No matching jobs";
+      const subtext = emptyState.querySelector(".empty-state-subtext");
+      if (subtext) subtext.textContent = "Try adjusting your search or filter";
+      const cta = emptyState.querySelector(".empty-state-cta");
+      if (cta) cta.style.display = "none";
+      return;
+    }
+
+    if (filtered.length === 0) {
+      container.innerHTML = "";
+      emptyState.style.display = "flex";
+      // Reset empty state to default
+      emptyState.querySelector("sl-icon").name = "inbox";
+      emptyState.querySelector("p").textContent = "No jobs yet";
+      const subtext = emptyState.querySelector(".empty-state-subtext");
+      if (subtext) subtext.textContent = "Add a YouTube or Twitch URL to start archiving";
+      const cta = emptyState.querySelector(".empty-state-cta");
+      if (cta) cta.style.display = "";
       return;
     }
 
     emptyState.style.display = "none";
 
-    // Sort jobs: by state priority, then alphabetically by title
-    const STATUS_PRIORITY = {
-      "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
-      "Live": 4, "Upcoming": 5, "Cancelled": 6, "Finished": 7,
-    };
-    const sortedJobs = [...this.jobs].sort((a, b) => {
-      const pa = STATUS_PRIORITY[a.status] ?? 99;
-      const pb = STATUS_PRIORITY[b.status] ?? 99;
-      if (pa !== pb) return pa - pb;
-      // Finished/Cancelled/Error: most recently updated first
-      if (pa >= 6) return new Date(b.updatedAt) - new Date(a.updatedAt);
-      return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
-    });
+    const sortedJobs = this._sortJobs(filtered);
 
     container.innerHTML = sortedJobs
       .map((job) => this.renderJobItem(job))
       .join("");
 
-    // Event delegation is set up in setupEventListeners() - no per-item listeners needed
+    // Reset focused index
+    this.focusedJobIndex = -1;
   }
 
   async fetchArchivedJobs() {
@@ -544,8 +634,22 @@ class MoomboxApp {
       ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
       : '';
 
+    // Quick action button based on status
+    const canCancel = ["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"].includes(job.status);
+    const canRetry = ["Error", "Cancelled", "COOKIES?"].includes(job.status);
+    const canDelete = ["Finished", "Error", "Cancelled", "COOKIES?"].includes(job.status);
+
+    let quickActions = "";
+    if (canCancel || canRetry || canDelete) {
+      quickActions = '<div class="job-quick-actions">';
+      if (canCancel) quickActions += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
+      if (canRetry) quickActions += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
+      if (canDelete) quickActions += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
+      quickActions += "</div>";
+    }
+
     return `
-      <div class="video-item" data-job-id="${this.escapeHtml(job.id)}">
+      <div class="video-item" data-job-id="${this.escapeHtml(job.id)}" data-status="${statusClass}">
         <div class="thumb">
           <img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
@@ -562,6 +666,7 @@ class MoomboxApp {
           <div class="job-progress-text" title="${this.escapeHtml(progress)}">${this.escapeHtml(progress)}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${percent}"></sl-progress-bar>` : ""}
         </div>
+        ${quickActions}
       </div>
     `;
   }
@@ -571,10 +676,11 @@ class MoomboxApp {
     const card = document.querySelector(`.video-item[data-job-id="${job.id}"]`);
     if (!card) return;
 
-    // Update status badge
+    // Update status badge and data-status
+    const statusClass = job.status.toLowerCase().replace("?", "");
+    card.dataset.status = statusClass;
     const statusBadge = card.querySelector(".status");
     if (statusBadge) {
-      const statusClass = job.status.toLowerCase().replace("?", "");
       statusBadge.className = `status ${statusClass}`;
       statusBadge.setAttribute("variant", "primary");
       statusBadge.textContent = job.status;
@@ -1107,7 +1213,7 @@ class MoomboxApp {
     toggle.checked = false;
     document.getElementById("advanced-options-panel").style.display = "none";
     document.getElementById("format-selection").style.display = "none";
-    document.getElementById("format-loading-spinner").style.display = "none";
+    document.getElementById("format-skeleton").style.display = "none";
 
     // Clear selections
     const videoSelect = document.getElementById("video-format-select");
@@ -1141,9 +1247,9 @@ class MoomboxApp {
     if (this._lastFormatVideoId === videoId) return;
     this._lastFormatVideoId = videoId;
 
-    const spinner = document.getElementById("format-loading-spinner");
+    const formatSkeleton = document.getElementById("format-skeleton");
     const formatSection = document.getElementById("format-selection");
-    spinner.style.display = "block";
+    formatSkeleton.style.display = "block";
     formatSection.style.display = "none";
 
     try {
@@ -1155,10 +1261,10 @@ class MoomboxApp {
       const data = await response.json();
       this.populateFormatSelects(data);
 
-      spinner.style.display = "none";
+      formatSkeleton.style.display = "none";
       formatSection.style.display = "block";
     } catch (e) {
-      spinner.style.display = "none";
+      formatSkeleton.style.display = "none";
       formatSection.style.display = "block";
       console.error("Failed to fetch formats:", e);
       this.showToast("Could not load format options: " + e.message, "warning");
@@ -1574,22 +1680,223 @@ class MoomboxApp {
   }
 
   renderLogs() {
-    const textarea = document.getElementById("logs-textarea");
+    const viewer = document.getElementById("logs-viewer");
     const countEl = document.getElementById("log-count");
 
-    const filtered = this.getFilteredLogs();
-    textarea.value = filtered.join("\n");
+    let filtered = this.getFilteredLogs();
+    const searchQuery = this._logSearchQuery || "";
+
+    // Filter by search query
+    if (searchQuery) {
+      const needle = searchQuery.toLowerCase();
+      filtered = filtered.filter((log) => log.toLowerCase().includes(needle));
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const log of filtered) {
+      const div = document.createElement("div");
+      // Determine log level class
+      const levelMatch = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
+      const level = levelMatch ? levelMatch[1].toUpperCase() : "INFO";
+      let levelClass = "log-info";
+      if (level === "ERROR") levelClass = "log-error";
+      else if (level === "WARN" || level === "WARNING") levelClass = "log-warn";
+      else if (level === "DEBUG") levelClass = "log-debug";
+      div.className = `log-line ${levelClass}`;
+
+      if (searchQuery) {
+        // Highlight search matches
+        const escaped = this.escapeHtml(log);
+        const escapedQuery = this.escapeHtml(searchQuery);
+        const regex = new RegExp(escapedQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+        div.innerHTML = escaped.replace(regex, (match) => `<mark>${match}</mark>`);
+      } else {
+        div.textContent = log;
+      }
+
+      frag.appendChild(div);
+    }
+
+    viewer.innerHTML = "";
+    viewer.appendChild(frag);
 
     const suffix = this.logFilter !== "all" ? ` (${this.logFilter}+)` : "";
-    countEl.textContent = `${filtered.length} log entries${suffix}`;
+    const searchSuffix = searchQuery ? `, matching "${searchQuery}"` : "";
+    countEl.textContent = `${filtered.length} log entries${suffix}${searchSuffix}`;
 
     // Auto-scroll to bottom
-    textarea.scrollTop = textarea.scrollHeight;
+    viewer.scrollTop = viewer.scrollHeight;
   }
 
   clearLogs() {
     this.logs = [];
     this.renderLogs();
+  }
+
+  // ===== Keyboard Shortcuts =====
+
+  setupKeyboardShortcuts() {
+    document.addEventListener("keydown", (e) => {
+      // Skip when typing in input fields
+      const tag = e.target.tagName;
+      if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
+      if (e.target.contentEditable === "true") return;
+
+      // If a dialog is open, only handle Escape
+      const openDialog = document.querySelector("sl-dialog[open]");
+      if (openDialog) {
+        if (e.key === "Escape") openDialog.hide();
+        return;
+      }
+
+      const tabGroup = document.querySelector("sl-tab-group");
+      const panels = ["tasks", "archived", "player", "imports", "logs", "settings"];
+      const activePanel = document.querySelector("sl-tab-panel[active]");
+      const isPlayerActive = activePanel?.getAttribute("name") === "player";
+
+      switch (e.key) {
+        case "a":
+          if (!isPlayerActive) {
+            document.getElementById("add-video-btn").click();
+            e.preventDefault();
+          }
+          break;
+        case "?":
+          document.getElementById("keyboard-help-dialog").show();
+          e.preventDefault();
+          break;
+        case "1": case "2": case "3": case "4": case "5": case "6":
+          if (tabGroup) tabGroup.show(panels[parseInt(e.key) - 1]);
+          e.preventDefault();
+          break;
+        case "ArrowUp":
+        case "ArrowDown":
+          if (!isPlayerActive) {
+            this.navigateJobList(e.key === "ArrowUp" ? -1 : 1);
+            e.preventDefault();
+          }
+          break;
+        case "Enter":
+          if (!isPlayerActive && this.focusedJobIndex >= 0) {
+            const filtered = this.getFilteredJobs();
+            const sorted = this._sortJobs(filtered);
+            const job = sorted[this.focusedJobIndex];
+            if (job) this.showJobDetails(job);
+          }
+          break;
+        case "f": {
+          if (!isPlayerActive) {
+            const searchInput = document.getElementById("tasks-search");
+            if (searchInput) { searchInput.focus(); e.preventDefault(); }
+          }
+          break;
+        }
+      }
+    });
+  }
+
+  navigateJobList(direction) {
+    const filtered = this.getFilteredJobs();
+    const sorted = this._sortJobs(filtered);
+    if (sorted.length === 0) return;
+
+    // Remove previous focus
+    document.querySelectorAll(".video-item[data-focused]").forEach((el) => el.removeAttribute("data-focused"));
+
+    this.focusedJobIndex += direction;
+    if (this.focusedJobIndex < 0) this.focusedJobIndex = sorted.length - 1;
+    if (this.focusedJobIndex >= sorted.length) this.focusedJobIndex = 0;
+
+    const job = sorted[this.focusedJobIndex];
+    if (job) {
+      const card = document.querySelector(`.video-item[data-job-id="${job.id}"]`);
+      if (card) {
+        card.setAttribute("data-focused", "");
+        card.scrollIntoView({ block: "nearest" });
+      }
+    }
+  }
+
+  // ===== Search/Filter =====
+
+  getFilteredJobs() {
+    let jobs = this.jobs;
+
+    // Text filter
+    if (this.tasksSearchQuery) {
+      const query = this.tasksSearchQuery.toLowerCase();
+      jobs = jobs.filter((j) =>
+        (j.title || "").toLowerCase().includes(query) ||
+        (j.channelName || "").toLowerCase().includes(query)
+      );
+    }
+
+    // Status filter
+    if (this.tasksStatusFilter) {
+      const statusMap = {
+        active: ["Downloading", "Live", "Upcoming", "Muxing"],
+        errors: ["Error", "COOKIES?"],
+        finished: ["Finished", "Cancelled"],
+      };
+      const allowed = statusMap[this.tasksStatusFilter];
+      if (allowed) {
+        jobs = jobs.filter((j) => allowed.includes(j.status));
+      }
+    }
+
+    return jobs;
+  }
+
+  _sortJobs(jobs) {
+    const STATUS_PRIORITY = {
+      "Error": 0, "COOKIES?": 1, "Downloading": 2, "Muxing": 3,
+      "Live": 4, "Upcoming": 5, "Cancelled": 6, "Finished": 7,
+    };
+    return [...jobs].sort((a, b) => {
+      const pa = STATUS_PRIORITY[a.status] ?? 99;
+      const pb = STATUS_PRIORITY[b.status] ?? 99;
+      if (pa !== pb) return pa - pb;
+      if (pa >= 6) return new Date(b.updatedAt) - new Date(a.updatedAt);
+      return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
+    });
+  }
+
+  // ===== Quick Actions =====
+
+  quickAction(action, jobId) {
+    this.selectedJobId = jobId;
+    switch (action) {
+      case "cancel": this.cancelJob(); break;
+      case "retry": this.retryJob(); break;
+      case "delete": this.deleteJob(); break;
+    }
+  }
+
+  // ===== Theme =====
+
+  setTheme(theme) {
+    this.theme = theme;
+    const html = document.documentElement;
+    const darkSheet = document.getElementById("sl-theme-dark");
+    const lightSheet = document.getElementById("sl-theme-light");
+    const toggleBtn = document.getElementById("theme-toggle");
+
+    if (theme === "light") {
+      html.className = "sl-theme-light";
+      if (darkSheet) darkSheet.media = "not all";
+      if (lightSheet) lightSheet.media = "";
+      if (toggleBtn) toggleBtn.name = "sun";
+    } else {
+      html.className = "sl-theme-dark";
+      if (darkSheet) darkSheet.media = "";
+      if (lightSheet) lightSheet.media = "not all";
+      if (toggleBtn) toggleBtn.name = "moon";
+    }
+
+    localStorage.setItem("moombox-theme", theme);
+    // Update theme-color meta tag
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) metaTheme.content = theme === "light" ? "#ffffff" : "#1C1B22";
   }
 
   // ===== Utilities =====
@@ -1749,7 +2056,8 @@ class MoomboxApp {
       variant,
       closable: true,
       duration: 3000,
-      innerHTML: `<sl-icon slot="icon" name="${this.getIconForVariant(variant)}"></sl-icon>${this.escapeHtml(message)}`,
+      className: "toast-alert",
+      innerHTML: `<sl-icon slot="icon" name="${this.getIconForVariant(variant)}"></sl-icon>${this.escapeHtml(message)}<div class="toast-countdown"></div>`,
     });
 
     document.body.append(alert);
