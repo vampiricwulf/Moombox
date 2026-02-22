@@ -563,10 +563,10 @@ export class WebServer {
   private setupLogSubscription() {
     const logger = Logger.getInstance();
     this.loggerUnsubscribe = logger.subscribe((msg) => {
-      // Add to general log buffer
+      // Add to general log buffer (batch-trim instead of shift() to avoid O(n) per message)
       this.logBuffer.push(msg);
-      if (this.logBuffer.length > 200) {
-        this.logBuffer.shift();
+      if (this.logBuffer.length > 400) {
+        this.logBuffer = this.logBuffer.slice(-200);
       }
 
       // Store in job-specific logs (match only known job IDs, not arbitrary 11-char words)
@@ -577,8 +577,8 @@ export class WebServer {
           }
           const logs = this.jobLogs.get(jobId)!;
           logs.push(msg);
-          if (logs.length > 100) {
-            logs.shift();
+          if (logs.length > 200) {
+            this.jobLogs.set(jobId, logs.slice(-100));
           }
           break; // Each log line belongs to at most one job
         }
@@ -674,7 +674,12 @@ export class WebServer {
     });
   }
 
+  /** Max bytes buffered per client before we skip sending (backpressure). */
+  private static readonly WS_BACKPRESSURE_BYTES = 256 * 1024; // 256 KB
+
   private broadcast(message: WSMessage) {
+    if (this.clients.size === 0) return;
+
     let data: string;
     try {
       data = JSON.stringify(message);
@@ -684,14 +689,17 @@ export class WebServer {
     }
 
     for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        try {
-          client.send(data);
-        } catch (e) {
-          this.logger.debug(`[WebServer] Failed to send to client: ${e}`);
-          // Remove dead client from set
-          this.clients.delete(client);
-        }
+      if (client.readyState !== WebSocket.OPEN) continue;
+
+      // Skip stalled clients to prevent unbounded send buffer growth
+      if (client.bufferedAmount > WebServer.WS_BACKPRESSURE_BYTES) continue;
+
+      try {
+        client.send(data);
+      } catch (e) {
+        this.logger.debug(`[WebServer] Failed to send to client: ${e}`);
+        // Remove dead client from set
+        this.clients.delete(client);
       }
     }
   }

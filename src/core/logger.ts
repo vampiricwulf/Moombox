@@ -116,14 +116,16 @@ export class Logger {
     const levelName = LogLevel[level];
     const formattedMsg = `[${timestamp}] [${levelName}] ${message}`;
 
-    // Buffer for late subscribers (e.g. TUI starts after early log messages)
+    // Buffer for late subscribers (e.g. TUI starts after early log messages).
+    // Batch-trim instead of shift() to avoid O(n) per message at capacity.
     this.history.push(formattedMsg);
-    if (this.history.length > Logger.MAX_HISTORY) {
-      this.history.shift();
+    if (this.history.length > Logger.MAX_HISTORY * 2) {
+      this.history = this.history.slice(-Logger.MAX_HISTORY);
     }
 
-    // Emit to listeners (e.g. TUI) — copy to avoid concurrent modification
-    for (const l of [...this.listeners]) {
+    // Emit to listeners (e.g. TUI).
+    // Unsubscribe replaces the array, so for-of on the current reference is safe.
+    for (const l of this.listeners) {
       try { l(formattedMsg); } catch (e: unknown) { process.stderr.write(`Logger listener error: ${e instanceof Error ? e.message : String(e)}\n`); }
     }
 
