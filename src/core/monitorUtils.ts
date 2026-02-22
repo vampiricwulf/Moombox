@@ -70,6 +70,9 @@ export async function processYouTubeVideo(
     const yt = YouTubeService.getInstance();
     const meta = await yt.getMetadata(videoId);
 
+    // Clear failure counter on success (prevents unbounded Map growth)
+    metadataFailures.delete(videoId);
+
     if (meta.streamStatus === "not_a_stream") {
       if (!includeNonLive) {
         logger.info(`[Monitor] Skipping non-stream content: ${title} (${videoId})`);

@@ -671,7 +671,8 @@ All previously tracked issues have been resolved:
 - Resume state saved every 10 (catch-up) or 50 (sequential) segments
 
 ### Chat Downloader (engine/chat/chatDownloader.ts)
-- `FLUSH_THRESHOLD`: 50,000 messages → flush to disk, keep last 5,000 in memory
+- Writes to disk within 1-second batching window, clears messages from memory after each write
+- `DEDUP_KEEP`: 5,000 recent IDs for deduplication (bounded Set)
 - Consecutive error tolerance: 20 (live), 5 (VOD)
 - Stale continuation: up to 30 retries with exponential backoff (10s → 5min cap)
 

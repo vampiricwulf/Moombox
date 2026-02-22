@@ -61,6 +61,7 @@ export interface ChatResumeState {
   continuation: string;
   timestamp: number; // When state was saved
   videoId: string; // For validation
+  recentIds?: string[]; // Bounded dedup IDs — avoids reloading chat file on resume
 }
 
 /**

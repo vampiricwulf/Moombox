@@ -4,7 +4,7 @@
  * Downloads live chat messages via IRC WebSocket connection.
  * Follows the same event interface as YouTube's ChatDownloader:
  * - Emits: start, progress, finish, error
- * - Same flush threshold (50k messages, keep last 5k)
+ * - Writes to disk within 1-second batching window, clears memory after each write
  * - Same atomic write pattern (.tmp + rename)
  * - Resume state sidecar (.resume.json)
  */
@@ -36,6 +36,7 @@ interface TwitchChatResumeState {
   lastTimestampMs: number;
   timestamp: number;
   streamId: string;
+  recentIds?: string[];
 }
 
 /**
@@ -152,6 +153,7 @@ export class TwitchChatDownloader extends EventEmitter {
   private recordingStartMs = 0;
   private lastSaveMs = 0;
   private saving = false;
+  private lastTimestampMs = 0;
 
   constructor(options: TwitchChatDownloaderOptions) {
     super();
@@ -185,14 +187,27 @@ export class TwitchChatDownloader extends EventEmitter {
 
     // Try to resume from state, or detect existing chat file from a previous session
     const resumeState = await this.loadResumeState();
-    const existing = await this.loadExistingMessages();
-    if (existing.length > 0) {
-      this.totalMessageCount = resumeState?.messageCount ?? existing.length;
+    if (resumeState?.recentIds) {
+      // Restore dedup set directly from resume state — no file I/O needed
+      this.totalMessageCount = resumeState.messageCount;
       this.flushedToDisk = true;
-      for (const msg of existing) this.seenIds.add(msg.id);
+      this.seenIds = new Set(resumeState.recentIds);
+      this.lastTimestampMs = resumeState.lastTimestampMs;
       this.logger.info(
         `[TwitchChat] Resuming from ${this.totalMessageCount} messages`,
       );
+    } else {
+      // Legacy resume state without recentIds — load file for dedup IDs
+      const existing = await this.loadExistingMessages();
+      if (existing.length > 0) {
+        this.totalMessageCount = resumeState?.messageCount ?? existing.length;
+        this.flushedToDisk = true;
+        const tail = existing.slice(-TWITCH_IRC.DEDUP_IDS);
+        this.seenIds = new Set(tail.map(m => m.id));
+        this.logger.info(
+          `[TwitchChat] Resuming from ${this.totalMessageCount} messages`,
+        );
+      }
     }
 
     this.emit("start");
@@ -202,8 +217,16 @@ export class TwitchChatDownloader extends EventEmitter {
     } catch (e) {
       this.emit("error", e);
     } finally {
-      // Write final chat file with emote data
-      await this.writeChatFile(true);
+      // Write any remaining unwritten messages
+      if (this.messages.length > 0) {
+        await this.writeChatFile();
+        this.messages = [];
+        this.flushedToDisk = true;
+      }
+      // Resolve and inject emotes on final write
+      if (this.totalMessageCount > 0 && this.options.channelId) {
+        await this.injectEmotes();
+      }
       await this.clearResumeState();
       this.running = false;
       this.emit("finish");
@@ -453,6 +476,7 @@ export class TwitchChatDownloader extends EventEmitter {
     this.seenIds.add(msg.id);
     this.messages.push(msg);
     this.totalMessageCount++;
+    this.lastTimestampMs = msg.timestampMs;
 
     // Emit progress periodically
     if (this.totalMessageCount % 100 === 0) {
@@ -476,77 +500,152 @@ export class TwitchChatDownloader extends EventEmitter {
    */
   private async periodicSave(): Promise<void> {
     await this.writeChatFile();
+
+    // All messages now on disk — clear from memory
+    this.messages = [];
+    this.flushedToDisk = true;
+
+    // Bound seenIds to prevent unbounded growth
+    if (this.seenIds.size > TWITCH_IRC.DEDUP_IDS) {
+      const arr = [...this.seenIds];
+      this.seenIds = new Set(arr.slice(-TWITCH_IRC.DEDUP_IDS));
+    }
+
     await this.saveResumeState();
-
-    // Flush old messages from memory after persisting to disk
-    if (this.messages.length > TWITCH_IRC.FLUSH_THRESHOLD) {
-      this.flushedToDisk = true;
-      const keep = this.messages.slice(-TWITCH_IRC.KEEP_IN_MEMORY);
-      this.seenIds = new Set(keep.map(m => m.id));
-      this.messages = keep;
-      this.logger.debug(
-        `[TwitchChat] Flushed to disk, ${this.totalMessageCount} total, ${this.messages.length} in memory`,
-      );
-    }
-
-    // Prune seenIds to prevent unbounded growth
-    if (this.seenIds.size > TWITCH_IRC.FLUSH_THRESHOLD) {
-      this.seenIds = new Set(this.messages.slice(-TWITCH_IRC.FLUSH_THRESHOLD).map(m => m.id));
-    }
   }
 
   // =========================================================================
   // File I/O
   // =========================================================================
 
-  private async writeChatFile(isFinal = false): Promise<void> {
-    let allMessages = this.messages;
-
-    if (this.flushedToDisk) {
-      const existing = await this.loadExistingMessages();
-      if (existing.length > 0 && this.messages.length > 0) {
-        const firstInMemoryId = this.messages[0].id;
-        const overlapIdx = existing.findIndex(m => m.id === firstInMemoryId);
-        if (overlapIdx >= 0) {
-          allMessages = [...existing.slice(0, overlapIdx), ...this.messages];
-        } else {
-          allMessages = [...existing, ...this.messages];
-        }
-      } else if (existing.length > 0) {
-        allMessages = existing;
-      }
-    }
-
-    const chatData: TwitchChatData = {
-      platform: "twitch",
-      channelLogin: this.options.channelLogin,
-      channelDisplayName: this.options.channelDisplayName,
-      streamId: this.options.streamId,
-      streamStartTime: this.options.streamStartTime,
-      recordingStartTime: this.recordingStartMs > 0
-        ? new Date(this.recordingStartMs).toISOString()
-        : undefined,
-      downloadedAt: new Date().toISOString(),
-      messageCount: allMessages.length,
-      messages: allMessages,
-    };
-
-    // Resolve third-party emotes on final write
-    if (isFinal && this.options.channelId) {
-      try {
-        chatData.emotes = await resolveChannelEmotes(
-          this.options.channelId,
-          this.options.channelLogin,
-        );
-      } catch (e: unknown) {
-        this.logger.warn(`[TwitchChat] Failed to resolve emotes: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-
+  /**
+   * Write chat data to output file. Two paths:
+   * - Not flushed: all messages in memory, write complete JSON.
+   * - Flushed: append only new messages via raw string manipulation
+   *   (avoids JSON.parse + merge memory overhead).
+   */
+  private async writeChatFile(): Promise<void> {
     await fs.ensureDir(path.dirname(this.options.outputFile));
     const tmpPath = this.options.outputFile + ".tmp";
-    await fs.writeJson(tmpPath, chatData, { spaces: 2 });
+
+    if (!this.flushedToDisk) {
+      // All messages in memory — write complete file
+      const chatData: TwitchChatData = {
+        platform: "twitch",
+        channelLogin: this.options.channelLogin,
+        channelDisplayName: this.options.channelDisplayName,
+        streamId: this.options.streamId,
+        streamStartTime: this.options.streamStartTime,
+        recordingStartTime: this.recordingStartMs > 0
+          ? new Date(this.recordingStartMs).toISOString()
+          : undefined,
+        downloadedAt: new Date().toISOString(),
+        messageCount: this.totalMessageCount,
+        messages: this.messages,
+      };
+      await fs.writeJson(tmpPath, chatData, { spaces: 2 });
+      await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
+      return;
+    }
+
+    // Flushed path: append only new messages via raw string manipulation
+    const newMessages = this.messages;
+
+    if (!(await fs.pathExists(this.options.outputFile))) {
+      // Disk file missing — write what we have
+      const chatData: TwitchChatData = {
+        platform: "twitch",
+        channelLogin: this.options.channelLogin,
+        channelDisplayName: this.options.channelDisplayName,
+        streamId: this.options.streamId,
+        streamStartTime: this.options.streamStartTime,
+        recordingStartTime: this.recordingStartMs > 0
+          ? new Date(this.recordingStartMs).toISOString()
+          : undefined,
+        downloadedAt: new Date().toISOString(),
+        messageCount: this.totalMessageCount,
+        messages: this.messages,
+      };
+      await fs.writeJson(tmpPath, chatData, { spaces: 2 });
+      await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
+      return;
+    }
+
+    // Read existing file as raw text (NOT JSON.parse)
+    const raw = await fs.readFile(this.options.outputFile, "utf8");
+    const closingIdx = raw.lastIndexOf("]");
+    if (closingIdx === -1) {
+      this.logger.warn("[TwitchChat] Corrupt chat file, rewriting with in-memory messages");
+      const chatData: TwitchChatData = {
+        platform: "twitch",
+        channelLogin: this.options.channelLogin,
+        channelDisplayName: this.options.channelDisplayName,
+        streamId: this.options.streamId,
+        streamStartTime: this.options.streamStartTime,
+        recordingStartTime: this.recordingStartMs > 0
+          ? new Date(this.recordingStartMs).toISOString()
+          : undefined,
+        downloadedAt: new Date().toISOString(),
+        messageCount: this.totalMessageCount,
+        messages: this.messages,
+      };
+      await fs.writeJson(tmpPath, chatData, { spaces: 2 });
+      await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
+      return;
+    }
+
+    // Build output: everything before ']' + new messages + closing
+    const beforeBracket = raw.substring(0, closingIdx);
+    const hasExisting = beforeBracket.trimEnd().endsWith("}");
+
+    let content = beforeBracket;
+    if (newMessages.length > 0) {
+      content += hasExisting ? ",\n" : "";
+      content += newMessages.map(m => "    " + JSON.stringify(m)).join(",\n");
+      content += "\n";
+    }
+    content += "  ]\n}";
+
+    // Update metadata in the header
+    const messagesKeyIdx = content.indexOf('"messages"');
+    if (messagesKeyIdx > 0) {
+      let header = content.substring(0, messagesKeyIdx);
+      header = header.replace(/"messageCount": \d+/, `"messageCount": ${this.totalMessageCount}`);
+      header = header.replace(/"downloadedAt": "[^"]*"/, `"downloadedAt": "${new Date().toISOString()}"`);
+      content = header + content.substring(messagesKeyIdx);
+    }
+
+    await fs.writeFile(tmpPath, content);
     await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
+  }
+
+  /**
+   * Resolve third-party emotes and inject into the final chat file.
+   * Called once after the download loop exits.
+   */
+  private async injectEmotes(): Promise<void> {
+    try {
+      const emotes = await resolveChannelEmotes(
+        this.options.channelId!,
+        this.options.channelLogin,
+      );
+      if (!emotes) return;
+
+      if (!(await fs.pathExists(this.options.outputFile))) return;
+      const raw = await fs.readFile(this.options.outputFile, "utf8");
+      const lastBrace = raw.lastIndexOf("}");
+      if (lastBrace === -1) return;
+
+      // Insert emotes field before closing brace
+      const before = raw.substring(0, lastBrace).trimEnd();
+      const content = `${before},\n  "emotes": ${JSON.stringify(emotes)}\n}`;
+
+      const tmpPath = this.options.outputFile + ".tmp";
+      await fs.writeFile(tmpPath, content);
+      await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
+    } catch (e: unknown) {
+      this.logger.warn(`[TwitchChat] Failed to resolve emotes: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   private async loadExistingMessages(): Promise<TwitchChatMessage[]> {
@@ -583,12 +682,12 @@ export class TwitchChatDownloader extends EventEmitter {
   }
 
   private async saveResumeState(): Promise<void> {
-    const lastMsg = this.messages[this.messages.length - 1];
     const state: TwitchChatResumeState = {
       messageCount: this.totalMessageCount,
-      lastTimestampMs: lastMsg?.timestampMs || 0,
+      lastTimestampMs: this.lastTimestampMs,
       timestamp: Date.now(),
       streamId: this.options.streamId,
+      recentIds: [...this.seenIds],
     };
     try {
       const resumePath = this.getResumeFilePath();

@@ -156,10 +156,8 @@ export const TWITCH_EMOTE_APIS = {
  * Twitch IRC constants
  */
 export const TWITCH_IRC = {
-  /** Maximum messages before flushing to disk */
-  FLUSH_THRESHOLD: 50_000,
-  /** Messages to keep in memory after flush */
-  KEEP_IN_MEMORY: 5_000,
+  /** Maximum recent message IDs kept for deduplication */
+  DEDUP_IDS: 5_000,
   /** Consecutive errors before giving up */
   MAX_CONSECUTIVE_ERRORS: 20,
 } as const;

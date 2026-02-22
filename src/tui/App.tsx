@@ -336,8 +336,11 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       const batch = logBufferRef.current;
       logBufferRef.current = [];
       setLogs((prev: string[]) => {
-        const combined = [...prev, ...batch];
-        return combined.length > 1000 ? combined.slice(-1000) : combined;
+        const total = prev.length + batch.length;
+        if (total <= 1000) return prev.concat(batch);
+        // Slice first to avoid creating oversized intermediate array
+        const skip = total - 1000;
+        return (skip >= prev.length ? [] : prev.slice(skip)).concat(batch);
       });
       if (logAutoScrollRef.current) {
         setLogScrollOffset(Number.MAX_SAFE_INTEGER);

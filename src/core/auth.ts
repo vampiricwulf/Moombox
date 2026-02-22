@@ -34,8 +34,24 @@ interface Session {
 export class AuthService {
   private static instance: AuthService;
   private sessions = new Map<string, Session>();
+  private cleanupTimer: NodeJS.Timeout | null = null;
 
-  private constructor() {}
+  private constructor() {
+    // Periodically evict expired sessions (every hour) so stale tokens
+    // don't accumulate when validateSession() is never called for them.
+    this.cleanupTimer = setInterval(() => this.evictExpired(), 60 * 60_000);
+    this.cleanupTimer.unref(); // Don't prevent process exit
+  }
+
+  /** Remove all expired sessions. */
+  private evictExpired(): void {
+    const now = Date.now();
+    for (const [token, session] of this.sessions) {
+      if (now - session.createdAt > SESSION_TTL_MS) {
+        this.sessions.delete(token);
+      }
+    }
+  }
 
   static getInstance(): AuthService {
     if (!AuthService.instance) {

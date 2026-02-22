@@ -638,6 +638,20 @@ export class WebServer {
           this.jobLogs.delete(logId);
         }
       }
+      // Prune throttle timestamps for deleted jobs
+      for (const tsId of jobUpdateTimestamps.keys()) {
+        if (!this.knownJobIds.has(tsId)) {
+          jobUpdateTimestamps.delete(tsId);
+        }
+      }
+      // Prune per-client job tracking sets for deleted jobs
+      for (const jobSet of this.clientJobs.values()) {
+        for (const jobId of jobSet) {
+          if (!this.knownJobIds.has(jobId)) {
+            jobSet.delete(jobId);
+          }
+        }
+      }
       this.broadcast({ type: "jobs_update", payload: this.filterJobsByAge(jobs, false) });
     });
   }

@@ -38,11 +38,13 @@ export class ChatDownloader extends EventEmitter {
   private completionPromise: Promise<void> | null = null;
   private abortController: AbortController | null = null;
 
-  // Memory bounding: flush messages to disk when they exceed this threshold
-  private static readonly FLUSH_THRESHOLD = LIMITS.CHAT_MESSAGES_FLUSH_THRESHOLD;
-  private static readonly DEDUP_KEEP = LIMITS.CHAT_MESSAGES_IN_MEMORY; // Keep last N messages in memory after flush
+  // Write to disk within 1 second of receiving new messages
+  private static readonly WRITE_INTERVAL_MS = 1_000;
+  private static readonly DEDUP_KEEP = LIMITS.CHAT_DEDUP_IDS;
   private totalMessageCount: number = 0;
   private flushedToDisk: boolean = false;
+  private lastWriteMs: number = 0;
+  private lastTimestampUsec: string = "0";
 
   constructor(options: ChatDownloaderOptions) {
     super();
@@ -88,13 +90,13 @@ export class ChatDownloader extends EventEmitter {
 
   private async saveResumeState(): Promise<void> {
     const resumePath = this.getResumeFilePath();
-    const lastMessage = this.messages[this.messages.length - 1];
     const state: ChatResumeState = {
-      lastTimestampUsec: lastMessage?.timestampUsec || "0",
+      lastTimestampUsec: this.lastTimestampUsec,
       messageCount: this.totalMessageCount,
       continuation: this.continuation,
       timestamp: Date.now(),
       videoId: this.options.videoId,
+      recentIds: [...this.seenIds], // Bounded to DEDUP_KEEP entries (~5k IDs, ~100KB)
     };
     try {
       const tmpPath = resumePath + ".tmp";
@@ -133,42 +135,99 @@ export class ChatDownloader extends EventEmitter {
 
   /**
    * Write chat data to output file atomically (write to temp, then rename).
-   * If messages were previously flushed to disk, merges existing file with
-   * current in-memory messages to produce the complete output.
+   *
+   * Two paths:
+   * - Not flushed: all messages are in memory, write complete JSON directly.
+   * - Flushed: the on-disk file already has old messages. Instead of re-reading
+   *   and re-parsing the entire file (which causes 5-10x memory overhead from
+   *   JSON.parse + array merge + JSON.stringify), read the raw text, locate the
+   *   closing ']', and append only the NEW messages that arrived after the flush.
+   *   Memory cost: ~1x file size (raw string) instead of ~6-10x.
    */
   private async writeChatFile(): Promise<void> {
-    let allMessages = this.messages;
-
-    if (this.flushedToDisk) {
-      // Load previously flushed messages from disk and merge with in-memory tail
-      const existing = await this.loadExistingMessages();
-      if (existing.length > 0 && this.messages.length > 0) {
-        // Find overlap between existing (flushed) and in-memory (tail)
-        const firstInMemoryId = this.messages[0].id;
-        const overlapIdx = existing.findIndex((m) => m.id === firstInMemoryId);
-        if (overlapIdx >= 0) {
-          allMessages = [...existing.slice(0, overlapIdx), ...this.messages];
-        } else {
-          allMessages = [...existing, ...this.messages];
-        }
-      } else if (existing.length > 0) {
-        allMessages = existing;
-      }
-    }
-
-    const chatData: ChatData = {
-      videoId: this.options.videoId,
-      videoTitle: this.options.videoTitle,
-      channelName: this.options.channelName,
-      streamStartTime: this.options.streamStartTime,
-      downloadedAt: new Date().toISOString(),
-      messageCount: allMessages.length,
-      messages: allMessages,
-    };
-
     await fs.ensureDir(path.dirname(this.options.outputFile));
     const tmpPath = this.options.outputFile + ".tmp";
-    await fs.writeJson(tmpPath, chatData, { spaces: 2 });
+
+    if (!this.flushedToDisk) {
+      // All messages in memory — write complete file directly
+      const chatData: ChatData = {
+        videoId: this.options.videoId,
+        videoTitle: this.options.videoTitle,
+        channelName: this.options.channelName,
+        streamStartTime: this.options.streamStartTime,
+        downloadedAt: new Date().toISOString(),
+        messageCount: this.totalMessageCount,
+        messages: this.messages,
+      };
+      await fs.writeJson(tmpPath, chatData, { spaces: 2 });
+      await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
+      return;
+    }
+
+    // Flushed path: this.messages only contains unwritten messages (cleared on flush)
+    const newMessages = this.messages;
+
+    if (!(await fs.pathExists(this.options.outputFile))) {
+      // Disk file missing — write what we have in memory
+      const chatData: ChatData = {
+        videoId: this.options.videoId,
+        videoTitle: this.options.videoTitle,
+        channelName: this.options.channelName,
+        streamStartTime: this.options.streamStartTime,
+        downloadedAt: new Date().toISOString(),
+        messageCount: this.totalMessageCount,
+        messages: this.messages,
+      };
+      await fs.writeJson(tmpPath, chatData, { spaces: 2 });
+      await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
+      return;
+    }
+
+    // Read existing file as raw text (NOT JSON.parse — avoids massive object allocation)
+    const raw = await fs.readFile(this.options.outputFile, "utf8");
+
+    // Locate the end of the messages array
+    const closingIdx = raw.lastIndexOf("]");
+    if (closingIdx === -1) {
+      // Corrupt file — fall back to writing what we have in memory
+      this.logger.warn("[ChatDownloader] Corrupt chat file, rewriting with in-memory messages");
+      const chatData: ChatData = {
+        videoId: this.options.videoId,
+        videoTitle: this.options.videoTitle,
+        channelName: this.options.channelName,
+        streamStartTime: this.options.streamStartTime,
+        downloadedAt: new Date().toISOString(),
+        messageCount: this.totalMessageCount,
+        messages: this.messages,
+      };
+      await fs.writeJson(tmpPath, chatData, { spaces: 2 });
+      await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
+      return;
+    }
+
+    // Build output: everything before ']' + new messages + closing structure
+    const beforeBracket = raw.substring(0, closingIdx);
+    const hasExisting = beforeBracket.trimEnd().endsWith("}");
+
+    let content = beforeBracket;
+    if (newMessages.length > 0) {
+      content += hasExisting ? ",\n" : "";
+      content += newMessages.map((m) => "    " + JSON.stringify(m)).join(",\n");
+      content += "\n";
+    }
+    content += "  ]\n}";
+
+    // Update metadata in the header (search only before "messages" key to avoid
+    // matching message content that coincidentally contains these field names)
+    const messagesKeyIdx = content.indexOf('"messages"');
+    if (messagesKeyIdx > 0) {
+      let header = content.substring(0, messagesKeyIdx);
+      header = header.replace(/"messageCount": \d+/, `"messageCount": ${this.totalMessageCount}`);
+      header = header.replace(/"downloadedAt": "[^"]*"/, `"downloadedAt": "${new Date().toISOString()}"`);
+      content = header + content.substring(messagesKeyIdx);
+    }
+
+    await fs.writeFile(tmpPath, content);
     await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
   }
 
@@ -199,11 +258,22 @@ export class ChatDownloader extends EventEmitter {
       let isResuming = false;
 
       if (resumeState) {
-        // Load existing messages and continuation
-        this.messages = await this.loadExistingMessages();
-        this.seenIds = new Set(this.messages.map((m) => m.id));
-        this.totalMessageCount = this.messages.length;
         this.continuation = resumeState.continuation;
+        this.messages = [];
+
+        if (resumeState.recentIds) {
+          // Restore dedup set directly from resume state — no file I/O needed
+          this.totalMessageCount = resumeState.messageCount;
+          this.seenIds = new Set(resumeState.recentIds);
+        } else {
+          // Legacy resume state without recentIds — load file for dedup IDs
+          const existing = await this.loadExistingMessages();
+          this.totalMessageCount = existing.length;
+          const tail = existing.slice(-ChatDownloader.DEDUP_KEEP);
+          this.seenIds = new Set(tail.map((m) => m.id));
+        }
+
+        this.flushedToDisk = this.totalMessageCount > 0;
         isResuming = true;
         this.logger.info(
           `[ChatDownloader] Resuming from ${this.totalMessageCount} messages`,
@@ -215,9 +285,11 @@ export class ChatDownloader extends EventEmitter {
       // Main polling loop
       await this.runChatLoop();
 
-      // Write final chat file
-      if (this.totalMessageCount > 0) {
+      // Write any remaining unwritten messages
+      if (this.messages.length > 0) {
         await this.writeChatFile();
+      }
+      if (this.totalMessageCount > 0) {
         this.logger.info(
           `[ChatDownloader] Saved ${this.totalMessageCount} chat messages`,
         );
@@ -240,7 +312,6 @@ export class ChatDownloader extends EventEmitter {
    * Main chat polling loop
    */
   private async runChatLoop(): Promise<void> {
-    let saveCounter = 0;
     let consecutiveErrors = 0;
 
     while (this.running && !this.cancelFlag && !this.streamEnded) {
@@ -283,6 +354,7 @@ export class ChatDownloader extends EventEmitter {
               this.seenIds.add(msg.id);
               this.messages.push(msg);
               this.totalMessageCount++;
+              this.lastTimestampUsec = msg.timestampUsec;
               newInBatch++;
             }
           }
@@ -294,29 +366,27 @@ export class ChatDownloader extends EventEmitter {
           };
           this.emit("progress", progress);
 
-          // Save periodically — count only deduplicated new messages,
-          // and scale threshold with message count to reduce I/O on long streams
-          saveCounter += newInBatch;
-          const saveThreshold = Math.max(100, Math.floor(this.totalMessageCount * 0.1));
-          if (saveCounter >= saveThreshold) {
+          // Write to disk within 1-second batching window
+          const now = Date.now();
+          if (now - this.lastWriteMs >= ChatDownloader.WRITE_INTERVAL_MS) {
             try {
               await this.writeChatFile();
+              this.lastWriteMs = now;
+
+              // All messages now on disk — clear from memory
+              this.messages = [];
+              this.flushedToDisk = true;
+
+              // Bound seenIds to prevent unbounded growth
+              if (this.seenIds.size > ChatDownloader.DEDUP_KEEP) {
+                const arr = [...this.seenIds];
+                this.seenIds = new Set(arr.slice(-ChatDownloader.DEDUP_KEEP));
+              }
+
               await this.saveResumeState();
             } catch (ioErr: unknown) {
               this.logger.debug(`[ChatDownloader] Save error: ${getErrorMessage(ioErr)}`);
             }
-            saveCounter = 0;
-
-            // Flush old messages from memory after persisting to disk.
-            // Keep only the last DEDUP_KEEP messages for overlap detection on next write.
-            if (this.messages.length > ChatDownloader.FLUSH_THRESHOLD) {
-              this.messages = this.messages.slice(-ChatDownloader.DEDUP_KEEP);
-              this.flushedToDisk = true;
-              this.logger.debug(
-                `[ChatDownloader] Flushed to disk, ${this.totalMessageCount} total, ${this.messages.length} in memory`,
-              );
-            }
-
           }
         }
 
