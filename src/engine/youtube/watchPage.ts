@@ -43,6 +43,7 @@ export class WatchPageParser {
     });
 
     if (!response.ok) {
+      await response.body?.cancel();
       throw new Error(`Failed to fetch watch page: HTTP ${response.status}`);
     }
 

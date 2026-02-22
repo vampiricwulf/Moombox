@@ -53,6 +53,7 @@ export class ChatApi {
       const response = await fetchWithTimeout(url, { headers, signal }, 15_000);
 
       if (!response.ok) {
+        await response.body?.cancel();
         this.logger.debug(`[ChatApi] Watch page fetch failed: HTTP ${response.status}`);
         return { continuation: null, isReplay: false };
       }
@@ -212,6 +213,7 @@ export class ChatApi {
       });
 
       if (!response.ok) {
+        await response.body?.cancel();
         throw new Error(`Chat API error: HTTP ${response.status}`);
       }
 

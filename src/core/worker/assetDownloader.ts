@@ -113,6 +113,7 @@ export class AssetDownloader {
   ): Promise<boolean> {
     const response = await fetchWithTimeout(url, undefined, 15_000);
     if (!response.ok) {
+      await response.body?.cancel();
       throw new Error(`HTTP ${response.status}`);
     }
 

@@ -410,6 +410,7 @@ export class PlayerApi {
     });
 
     if (!response.ok) {
+      await response.body?.cancel();
       throw new Error(`Innertube API error: HTTP ${response.status}`);
     }
 
@@ -540,6 +541,7 @@ export class PlayerApi {
     });
 
     if (!response.ok) {
+      await response.body?.cancel();
       throw new Error(`ANDROID_VR API error: HTTP ${response.status}`);
     }
 

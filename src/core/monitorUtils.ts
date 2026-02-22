@@ -50,6 +50,9 @@ export function matchesTerms(text: string, channel: ChannelConfig): boolean {
 /** Maximum metadata fetch failures before adding to history. */
 const MAX_METADATA_FAILURES = 3;
 
+/** Maximum entries in the metadataFailures map to prevent unbounded growth. */
+const MAX_METADATA_FAILURES_MAP_SIZE = 500;
+
 /**
  * Process a YouTube video: check metadata, classify stream status, create job.
  * Returns true if a job was created.
@@ -109,6 +112,18 @@ export async function processYouTubeVideo(
         `[Monitor] Failed to check metadata for ${videoId} (attempt ${failures}/${MAX_METADATA_FAILURES}): ${getErrorMessage(err)}`,
       );
     }
+
+    // Evict oldest entries if the map exceeds the cap (prevents unbounded growth
+    // from orphaned entries for videos that dropped out of the feed)
+    if (metadataFailures.size > MAX_METADATA_FAILURES_MAP_SIZE) {
+      const excess = metadataFailures.size - MAX_METADATA_FAILURES_MAP_SIZE;
+      const iter = metadataFailures.keys();
+      for (let i = 0; i < excess; i++) {
+        const key = iter.next().value;
+        if (key !== undefined) metadataFailures.delete(key);
+      }
+    }
+
     return false;
   }
 
