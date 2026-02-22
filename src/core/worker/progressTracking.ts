@@ -154,6 +154,7 @@ async function runSegmentDownloadersImpl(
         lastAudioSeq: aSeq,
         totalVideoSeq: vTotal || undefined,
         totalAudioSeq: aTotal || undefined,
+        totalChatMessages: chatMsgCount || undefined,
       });
     }
   };
