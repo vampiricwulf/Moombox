@@ -37,6 +37,8 @@ export async function fetchWithTimeout(
 
       // Retry on 5xx errors and 429 rate limit
       if (!response.ok && (response.status >= 500 || response.status === 429)) {
+        // Drain body to prevent memory/socket leak from unconsumed responses
+        await response.body?.cancel();
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
@@ -94,6 +96,8 @@ export function createRetryFetch(options?: {
 
         // Retry on 5xx errors and 429 rate limit (same as fetchWithTimeout)
         if (!response.ok && (response.status >= 500 || response.status === 429)) {
+          // Drain body to prevent memory/socket leak from unconsumed responses
+          await response.body?.cancel();
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 

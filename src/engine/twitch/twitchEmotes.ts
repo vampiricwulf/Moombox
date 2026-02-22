@@ -81,7 +81,7 @@ async function fetchBttvEmotes(
       undefined,
       8_000,
     );
-    if (!res.ok) return [];
+    if (!res.ok) { await res.body?.cancel(); return []; }
 
     const data = (await res.json()) as BttvChannelResponse;
     const emotes: Array<{ id: string; code: string; url: string }> = [];
@@ -131,7 +131,7 @@ async function fetchFfzEmotes(
       undefined,
       8_000,
     );
-    if (!res.ok) return [];
+    if (!res.ok) { await res.body?.cancel(); return []; }
 
     const data = (await res.json()) as FfzResponse;
     const emotes: Array<{ id: number; code: string; url: string }> = [];
@@ -181,7 +181,7 @@ async function fetchSevenTvEmotes(
       undefined,
       8_000,
     );
-    if (!res.ok) return [];
+    if (!res.ok) { await res.body?.cancel(); return []; }
 
     const data = (await res.json()) as SevenTvResponse;
     const emotes: Array<{ id: string; code: string; url: string }> = [];

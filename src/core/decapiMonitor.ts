@@ -233,6 +233,7 @@ export class DecapiMonitor {
       this.updateRateLimit(response.headers);
 
       if (response.status === 429) {
+        await response.body?.cancel();
         const retryAfter = parseInt(response.headers.get("Retry-After") || "60", 10);
         this.logger.warn(`[DECAPI] Rate limited (429). Retry after ${retryAfter}s`);
         rl.remaining = 0;
@@ -241,6 +242,7 @@ export class DecapiMonitor {
       }
 
       if (!response.ok) {
+        await response.body?.cancel();
         this.logger.debug(`[DECAPI] HTTP ${response.status} for ${url}`);
         return null;
       }

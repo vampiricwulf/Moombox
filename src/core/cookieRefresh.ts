@@ -261,8 +261,11 @@ export class CookieRefreshService {
         },
       );
 
+      // Drain body — we only need the Set-Cookie headers
+      const setCookies = response.ok ? response.headers.getSetCookie?.() : undefined;
+      await response.body?.cancel();
+
       if (response.ok) {
-        const setCookies = response.headers.getSetCookie?.();
         if (setCookies && setCookies.length > 0) {
           await this.updateCookieFile(cookieFilePath, setCookies);
         }

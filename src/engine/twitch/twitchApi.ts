@@ -33,6 +33,7 @@ async function gqlRequest(
   );
 
   if (!response.ok) {
+    await response.body?.cancel();
     throw new Error(`Twitch GQL error: HTTP ${response.status}`);
   }
 
@@ -64,6 +65,7 @@ async function gqlBatchRequest(
   );
 
   if (!response.ok) {
+    await response.body?.cancel();
     throw new Error(`Twitch GQL batch error: HTTP ${response.status}`);
   }
 
@@ -396,6 +398,7 @@ export async function getHlsMasterPlaylist(
   });
 
   if (!response.ok) {
+    await response.body?.cancel();
     throw new Error(`Usher returned HTTP ${response.status}`);
   }
 
@@ -418,6 +421,7 @@ export async function getVodHlsPlaylist(
   });
 
   if (!response.ok) {
+    await response.body?.cancel();
     throw new Error(`Usher VOD returned HTTP ${response.status}`);
   }
 

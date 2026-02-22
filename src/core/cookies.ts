@@ -359,7 +359,10 @@ export async function verifyYouTubeAuth(): Promise<boolean> {
       10_000, // 10s timeout — quick yes/no
     );
 
-    if (!response.ok) return false;
+    if (!response.ok) {
+      await response.body?.cancel();
+      return false;
+    }
 
     // YouTube always returns 200 OK even with invalid/garbage cookies —
     // it just serves an unauthenticated guide response. Parse the body
@@ -411,7 +414,10 @@ export async function verifyTwitchAuth(): Promise<boolean> {
       10_000,
     );
 
-    return response.ok;
+    const ok = response.ok;
+    // Drain body — we only need the HTTP status
+    await response.body?.cancel();
+    return ok;
   } catch {
     return false;
   }

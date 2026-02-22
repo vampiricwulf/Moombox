@@ -97,6 +97,8 @@ export class NotificationManager {
                 body: JSON.stringify(payload)
             }, 15_000);
 
+            // Drain body to prevent memory leak from unconsumed response
+            await resp.body?.cancel();
             if (!resp.ok) {
                 this.logger.error(`[Notifications] Failed to send Discord webhook: ${resp.status} ${resp.statusText}`);
             }

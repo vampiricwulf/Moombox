@@ -161,6 +161,7 @@ export class FeedMonitor {
 
     const response = await fetchWithTimeout(feedUrl, {}, 15_000);
     if (!response.ok) {
+      await response.body?.cancel();
       throw new Error(`Status code ${response.status}`);
     }
     const xml = await response.text();
