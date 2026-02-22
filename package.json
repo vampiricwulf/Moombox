@@ -1,6 +1,6 @@
 {
   "name": "moombox",
-  "version": "1.5.10",
+  "version": "1.5.11",
   "main": "dist/index.js",
   "bin": "dist/index.js",
   "scripts": {
