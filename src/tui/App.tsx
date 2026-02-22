@@ -315,13 +315,14 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   const logAutoScrollRef = useRef(logAutoScroll);
   logAutoScrollRef.current = logAutoScroll;
 
-  // Subscribe to logs (batched — flush every 100ms to avoid excessive re-renders)
+  // Subscribe to logs (batched — flush every 250ms to avoid excessive re-renders).
+  // Uses setInterval instead of per-message setTimeout because interceptTimers()
+  // (BotGuard cleanup) can clear tracked setTimeout IDs, permanently killing the
+  // flush cycle. A mount-time setInterval is created before any BotGuard interception.
   const logBufferRef = useRef<string[]>([]);
-  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const flush = () => {
-      flushTimerRef.current = null;
       if (logBufferRef.current.length === 0) return;
       const batch = logBufferRef.current;
       logBufferRef.current = [];
@@ -339,17 +340,13 @@ export function App({ db, logger }: AppProps): React.ReactElement {
 
     const unsubscribe = logger.subscribe((msg: string) => {
       logBufferRef.current.push(msg);
-      if (!flushTimerRef.current) {
-        flushTimerRef.current = setTimeout(flush, 100);
-      }
     });
+
+    const intervalId = setInterval(flush, 250);
 
     return () => {
       unsubscribe();
-      if (flushTimerRef.current) {
-        clearTimeout(flushTimerRef.current);
-        flushTimerRef.current = null;
-      }
+      clearInterval(intervalId);
     };
   }, [logger]);
 
