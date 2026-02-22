@@ -9,7 +9,7 @@
 
 import { BG, buildURL, getHeaders } from "../bgutils/index.js";
 import { Logger } from "./logger.js";
-import { setupGlobalDom } from "./globalDom.js";
+import { setupGlobalDom, teardownGlobalDom } from "./globalDom.js";
 import { USER_AGENTS, BOTGUARD_REQUEST_KEY } from "../constants.js";
 import { createRetryFetch } from "./http.js";
 import type {
@@ -102,6 +102,12 @@ export class PotProvider {
         delete this.sessionCache[contentBinding];
       }
     }
+    // Evict expired minters to free BotGuard VM closures
+    for (const [key, minter] of this.minterCache) {
+      if (now >= minter.expiry) {
+        this.minterCache.delete(key);
+      }
+    }
   }
 
   /**
@@ -138,11 +144,14 @@ export class PotProvider {
       `[PotProvider] Challenge received, globalName: ${bgChallenge.globalName}`,
     );
 
-    // Load interpreter
+    // Load interpreter — clean previous globalName to avoid stale closure retention
     if (
       bgChallenge.interpreterJavascript
         ?.privateDoNotAccessOrElseSafeScriptWrappedValue
     ) {
+      if (bgChallenge.globalName && bgChallenge.globalName in globalThis) {
+        delete (globalThis as Record<string, unknown>)[bgChallenge.globalName];
+      }
       this.logger.debug("[PotProvider] Loading BotGuard interpreter...");
       new Function(
         bgChallenge.interpreterJavascript
@@ -340,6 +349,9 @@ export class PotProvider {
    * Shutdown the POT provider
    */
   shutdown(): void {
-    // No-op - no subprocess to stop
+    this.minterCache.clear();
+    this.sessionCache = {};
+    this.inflight.clear();
+    teardownGlobalDom();
   }
 }

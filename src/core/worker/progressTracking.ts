@@ -218,7 +218,9 @@ async function runSegmentDownloadersImpl(
     logger.debug(`[DownloadOrchestrator] Final persist failed: ${getErrorMessage(e)}`),
   );
 
-  // Remove chat listener to prevent leak
+  // Remove all progress/gap listeners to prevent leaks
+  if (videoDl) videoDl.removeAllListeners();
+  if (audioDl) audioDl.removeAllListeners();
   if (chatDl && chatProgressHandler) chatDl.removeListener("progress", chatProgressHandler);
 }
 

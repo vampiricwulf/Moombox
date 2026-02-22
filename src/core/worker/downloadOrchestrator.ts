@@ -100,6 +100,7 @@ export class DownloadOrchestrator {
     }, { once: true });
 
     let stagingDir: string | null = null;
+    let twitchVideoDl: SegmentDownloader | null = null;
 
     try {
       const downloadStartedAt = new Date().toISOString();
@@ -166,6 +167,7 @@ export class DownloadOrchestrator {
           return info === null || !info.isLive;
         },
       });
+      twitchVideoDl = videoDl;
       this.activeSegmentDownloaders.add(videoDl);
 
       // Track Twitch chat downloader for shutdown propagation
@@ -268,7 +270,10 @@ export class DownloadOrchestrator {
     } finally {
       unsubscribe();
       this.activeAbortControllers.delete(job.id);
+      // Remove listeners to prevent leak if downloader is retained elsewhere
+      twitchVideoDl?.removeAllListeners();
       if (twitchChatDl) {
+        twitchChatDl.removeAllListeners();
         twitchChatDl.stop();
         this.activeChatDownloaders.delete(twitchChatDl);
       }
@@ -619,6 +624,7 @@ export class DownloadOrchestrator {
       unsubscribe();
       this.activeAbortControllers.delete(job.id);
       // O9: Stop chat downloader if still running (e.g. on exception)
+      chatDl?.removeAllListeners();
       chatDl?.stop();
       // O13: Clean up staging for cancelled jobs (errored jobs may be retried)
       if (signal.aborted && stagingDir) {
@@ -804,6 +810,11 @@ export class DownloadOrchestrator {
           );
 
           try {
+            // Remove listeners from OLD downloaders before replacing them,
+            // preventing listener accumulation across manifest refresh cycles.
+            if (videoDl) videoDl.removeAllListeners("progress");
+            if (audioDl) audioDl.removeAllListeners("progress");
+
             if (isHls) {
               const refreshedResult = await downloadHls(
                 job,
@@ -828,8 +839,9 @@ export class DownloadOrchestrator {
               audioDl = refreshedResult.audioDl;
             }
 
-            // Re-attach progress handlers — onSegmentProgress will update
-            // lastSegmentTime naturally when segments actually download.
+            // Re-attach progress handlers to NEW downloaders —
+            // onSegmentProgress will update lastSegmentTime naturally
+            // when segments actually download.
             // Do NOT reset lastSegmentTime here, otherwise the
             // STREAM_SEGMENT_TIMEOUT_MS fallback can never trigger (O6).
             if (videoDl) videoDl.on("progress", onSegmentProgress);

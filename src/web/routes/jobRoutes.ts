@@ -167,6 +167,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       res.setHeader("Content-Type", contentType);
       const stream = fs.createReadStream(filePath, { start, end });
       stream.on("error", () => { if (!res.headersSent) res.status(500).end(); });
+      res.on("close", () => { stream.destroy(); });
       stream.pipe(res);
     } else {
       res.setHeader("Content-Length", fileSize);
@@ -174,6 +175,7 @@ export function registerJobRoutes(router: Router, ctx: JobRoutesContext): void {
       res.setHeader("Accept-Ranges", "bytes");
       const stream = fs.createReadStream(filePath);
       stream.on("error", () => { if (!res.headersSent) res.status(500).end(); });
+      res.on("close", () => { stream.destroy(); });
       stream.pipe(res);
     }
   }));

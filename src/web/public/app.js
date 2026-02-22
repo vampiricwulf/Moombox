@@ -386,6 +386,12 @@ class MoomboxApp {
   // ===== WebSocket Management =====
 
   connectWebSocket() {
+    // Clear countdown interval to prevent duplicates on reconnect
+    if (this._countdownInterval) {
+      clearInterval(this._countdownInterval);
+      this._countdownInterval = null;
+    }
+
     // Close any existing connection to prevent zombie sockets
     if (this.ws) {
       this.ws.onclose = null; // Prevent triggering another reconnect
@@ -403,6 +409,10 @@ class MoomboxApp {
       this.updateConnectionStatus(true);
       // Refresh status (cookie + Twitch auth) on reconnect
       this.loadStatus();
+      // Restart countdown interval (cleared above to prevent duplicates)
+      if (!this._countdownInterval) {
+        this._countdownInterval = setInterval(() => this.updateCheckCountdown(), 1000);
+      }
     };
 
     this.ws.onmessage = (event) => {

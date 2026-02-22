@@ -9,6 +9,7 @@ import { JSDOM } from "jsdom";
 import { USER_AGENTS } from "../constants.js";
 
 let domInitialized = false;
+let domInstance: JSDOM | null = null;
 
 /**
  * Setup global DOM for BotGuard using JSDOM.
@@ -28,6 +29,8 @@ export function setupGlobalDom(): void {
     },
   );
 
+  domInstance = dom;
+
   Object.assign(globalThis, {
     window: dom.window,
     document: dom.window.document,
@@ -42,4 +45,16 @@ export function setupGlobalDom(): void {
   }
 
   domInitialized = true;
+}
+
+/**
+ * Tear down the global DOM, releasing JSDOM resources.
+ * Called during shutdown to free internal timers and DOM tree.
+ */
+export function teardownGlobalDom(): void {
+  if (!domInitialized || !domInstance) return;
+
+  domInstance.window.close();
+  domInstance = null;
+  domInitialized = false;
 }
