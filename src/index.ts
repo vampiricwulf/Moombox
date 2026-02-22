@@ -321,6 +321,18 @@ async function run() {
 
   process.on("SIGTERM", () => { shutdown(); });
 
+  // Periodic memory usage logging (every 5 minutes) for diagnostics
+  const memoryLogInterval = setInterval(() => {
+    const mem = process.memoryUsage();
+    logger.info(
+      `[Memory] RSS: ${(mem.rss / 1048576).toFixed(1)}MB, ` +
+      `Heap: ${(mem.heapUsed / 1048576).toFixed(1)}/${(mem.heapTotal / 1048576).toFixed(1)}MB, ` +
+      `External: ${(mem.external / 1048576).toFixed(1)}MB, ` +
+      `ArrayBuffers: ${(mem.arrayBuffers / 1048576).toFixed(1)}MB`,
+    );
+  }, 300_000);
+  memoryLogInterval.unref();
+
   // Start TUI if in interactive terminal
   if (useTUI) {
     const tui = await loadTUI();

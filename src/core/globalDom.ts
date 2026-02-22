@@ -41,6 +41,13 @@ export function setupGlobalDom(): void {
   if (!Reflect.has(globalThis, "navigator")) {
     Object.defineProperty(globalThis, "navigator", {
       value: dom.window.navigator,
+      configurable: true,
+    });
+  } else {
+    // Update navigator to point to the new JSDOM instance
+    Object.defineProperty(globalThis, "navigator", {
+      value: dom.window.navigator,
+      configurable: true,
     });
   }
 
@@ -50,6 +57,9 @@ export function setupGlobalDom(): void {
 /**
  * Tear down the global DOM, releasing JSDOM resources.
  * Called during shutdown to free internal timers and DOM tree.
+ *
+ * Also removes globalThis references (window, document, location, origin)
+ * that would otherwise keep the closed JSDOM instance alive in memory.
  */
 export function teardownGlobalDom(): void {
   if (!domInitialized || !domInstance) return;
@@ -57,6 +67,13 @@ export function teardownGlobalDom(): void {
   domInstance.window.close();
   domInstance = null;
   domInitialized = false;
+
+  // Remove globalThis references to the closed JSDOM — without this,
+  // the entire DOM tree (~30-50MB) stays alive via these references.
+  delete (globalThis as Record<string, unknown>).window;
+  delete (globalThis as Record<string, unknown>).document;
+  delete (globalThis as Record<string, unknown>).location;
+  delete (globalThis as Record<string, unknown>).origin;
 }
 
 /**

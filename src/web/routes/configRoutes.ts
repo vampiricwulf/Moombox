@@ -36,10 +36,18 @@ export function registerConfigRoutes(router: Router, ctx: ConfigRoutesContext): 
     const validation = CookieRefreshService.getInstance().validationState;
     const autoCookieReloginRequired = AutoCookieService.getInstance().needsManualRelogin;
 
+    const mem = process.memoryUsage();
     res.json({
       status: "running",
       uptime: process.uptime(),
       timestamp: new Date().toISOString(),
+      memory: {
+        rss: Math.round(mem.rss / 1048576),
+        heapUsed: Math.round(mem.heapUsed / 1048576),
+        heapTotal: Math.round(mem.heapTotal / 1048576),
+        external: Math.round(mem.external / 1048576),
+        arrayBuffers: Math.round(mem.arrayBuffers / 1048576),
+      },
       cookieStatus: {
         found: validation.youtube.hasCookies,
         authenticated: validation.youtube.authenticated,
