@@ -42,7 +42,7 @@ function formatCountdown(epochMs: number): string {
 function CountdownDisplay(): React.ReactElement | null {
   const [, setTick] = useState(0);
   useEffect(() => {
-    const timer = setInterval(() => setTick((t) => t + 1), 5_000);
+    const timer = setInterval(() => setTick((t) => t + 1), 1_000);
     return () => clearInterval(timer);
   }, []);
 
