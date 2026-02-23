@@ -2,6 +2,8 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { Job } from "../../core/database.js";
 import { displayWidth, truncateToWidth, padEndToWidth } from "../textWidth.js";
+import { getProgress } from "../progressStore.js";
+import { useProgressTick } from "../hooks/useProgressTick.js";
 
 interface TaskItemProps {
   job: Job;
@@ -11,6 +13,9 @@ interface TaskItemProps {
 }
 
 export const TaskItem = React.memo(function TaskItem({ job, selected, width, dimmed }: TaskItemProps): React.ReactElement {
+  const isActive = job.status === "Downloading" || job.status === "Muxing";
+  useProgressTick(isActive); // 1s tick only for active items
+
   const statusColor = getStatusColor(job.status);
   const statusIcon = getStatusIcon(job.status);
 
@@ -19,8 +24,10 @@ export const TaskItem = React.memo(function TaskItem({ job, selected, width, dim
   const platformTagWidth = isTwitch ? 5 : 0;
 
   // Inline progress for active downloads (e.g. "45%")
-  const showProgress = (job.status === "Downloading" || job.status === "Muxing") && job.percent > 0;
-  const progressText = showProgress ? `${Math.round(job.percent)}% ` : "";
+  const progressData = isActive ? getProgress(job.id) : undefined;
+  const percent = progressData?.percent ?? job.percent;
+  const showProgress = isActive && percent > 0;
+  const progressText = showProgress ? `${Math.round(percent)}% ` : "";
   const progressTextWidth = progressText.length;
 
   // Fixed widths

@@ -18,6 +18,7 @@ import { useMouse, MouseEvent } from "./hooks/useMouse.js";
 import { NotificationManager, NotificationType } from "../core/notifications.js";
 import { readClipboard } from "./clipboard.js";
 import { getErrorMessage } from "../types/errors.js";
+import { setProgress, clearProgress } from "./progressStore.js";
 
 type FocusPanel = "tasks" | "details" | "logs";
 const FOCUS_ORDER: FocusPanel[] = ["tasks", "details", "logs"];
@@ -114,15 +115,18 @@ export function App({ db, logger }: AppProps): React.ReactElement {
   }, [allSortedJobs, statusFilter]);
 
   // Compute filtered log count for scroll calculations (mirrors LogViewer's internal filtering)
+  // Uses counting loop instead of .filter().length to avoid allocating intermediate array
   const filteredLogCount = useMemo(() => {
     if (!logLevelFilter || logLevelFilter === "all") return logs.length;
     const threshold = LOG_LEVEL_PRIORITY[logLevelFilter] ?? 3;
-    return logs.filter((log) => {
+    let count = 0;
+    for (const log of logs) {
       const match = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
-      if (!match) return true;
+      if (!match) { count++; continue; }
       const level = match[1].toUpperCase();
-      return (LOG_LEVEL_PRIORITY[level] ?? 2) <= threshold;
-    }).length;
+      if ((LOG_LEVEL_PRIORITY[level] ?? 2) <= threshold) count++;
+    }
+    return count;
   }, [logs, logLevelFilter]);
 
   // Compute archived jobs (finished jobs older than hideAgeDays)
@@ -135,11 +139,11 @@ export function App({ db, logger }: AppProps): React.ReactElement {
       .filter((job) => {
         if (job.status !== "Finished") return false;
         const diffDays = Math.ceil(
-          (now - new Date(job.updatedAt).getTime()) / 86_400_000,
+          (now - Date.parse(job.updatedAt)) / 86_400_000,
         );
         return diffDays > hideAgeDays;
       })
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   }, [jobs]);
 
   // Virtual list: [sortedJobs..., divider?, archivedJobs...]
@@ -261,7 +265,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         }
       }
     },
-    [sortedJobs, virtualListLength, filteredLogCount, topHeight, taskWidth, taskHeight, logHeight, taskScrollOffset, focusedPanel, hasDivider, dividerIndex],
+    [virtualListLength, filteredLogCount, topHeight, taskWidth, taskHeight, logHeight, taskScrollOffset, focusedPanel, hasDivider, dividerIndex],
   );
 
   useMouse({ onMouseEvent: handleMouseEvent });
@@ -282,19 +286,48 @@ export function App({ db, logger }: AppProps): React.ReactElement {
 
   // Load jobs
   useEffect(() => {
+    // Closure-local status tracker — NOT React state.
+    // Tracks last-known status per job so onJobUpdate can distinguish
+    // progress-only updates (write to progressStore silently) from
+    // status changes (trigger setJobs for re-sort/re-filter).
+    const statusMap = new Map<string, string>();
+
+    const extractProgress = (j: Job) => ({
+      progress: j.progress, percent: j.percent,
+      speed: j.speed, eta: j.eta,
+      lastVideoSeq: j.lastVideoSeq, lastAudioSeq: j.lastAudioSeq,
+      totalVideoSeq: j.totalVideoSeq, totalAudioSeq: j.totalAudioSeq,
+      totalChatMessages: j.totalChatMessages, chatStatus: j.chatStatus,
+    });
+
     const loadJobs = async () => {
       const allJobs = await db.getJobs();
+      for (const j of allJobs) {
+        statusMap.set(j.id, j.status);
+        setProgress(j.id, extractProgress(j));
+      }
       setJobs(allJobs);
     };
 
     loadJobs();
 
     const unsubUpdate = db.onJobUpdate((job: Job) => {
+      // Always update progress store (zero React cost)
+      setProgress(job.id, extractProgress(job));
+
+      const prevStatus = statusMap.get(job.id);
+      if (prevStatus === job.status) {
+        // Progress-only update — no React state change
+        return;
+      }
+
+      // Status changed — update tracker and trigger React re-render
+      statusMap.set(job.id, job.status);
       setJobs((prev: Job[]) => {
         const idx = prev.findIndex((j: Job) => j.id === job.id);
         if (idx !== -1) {
           const newJobs = [...prev];
-          newJobs[idx] = { ...job }; // Shallow copy — DB mutates in place, memo needs new reference
+          newJobs[idx] = { ...job };
           return newJobs;
         }
         return prev;
@@ -302,6 +335,13 @@ export function App({ db, logger }: AppProps): React.ReactElement {
     });
 
     const unsubChange = db.onJobsChange((newJobs: Job[]) => {
+      // Structural change (add/delete) — rebuild statusMap + progress store
+      statusMap.clear();
+      clearProgress();
+      for (const j of newJobs) {
+        statusMap.set(j.id, j.status);
+        setProgress(j.id, extractProgress(j));
+      }
       setJobs(newJobs);
     });
 
@@ -569,7 +609,7 @@ export function App({ db, logger }: AppProps): React.ReactElement {
         }
       }
     },
-    [sortedJobs, virtualListLength, hasDivider, dividerIndex, getJobAtVirtualIndex, taskScrollOffset, taskHeight, db, deleteConfirmJobId, cancelConfirmJobId],
+    [virtualListLength, hasDivider, dividerIndex, getJobAtVirtualIndex, taskScrollOffset, taskHeight, db, deleteConfirmJobId, cancelConfirmJobId],
   );
 
   const handleDetailInput = useCallback(
@@ -768,7 +808,7 @@ function getSortedJobs(jobs: Job[]): Job[] {
     .filter((job) => {
       if (job.status !== "Finished") return true;
       const diffDays = Math.ceil(
-        (now - new Date(job.updatedAt).getTime()) / 86_400_000,
+        (now - Date.parse(job.updatedAt)) / 86_400_000,
       );
       return diffDays <= hideAgeDays;
     })
@@ -777,7 +817,7 @@ function getSortedJobs(jobs: Job[]): Job[] {
       const pb = STATUS_PRIORITY[b.status] ?? 99;
       if (pa !== pb) return pa - pb;
       // Finished/Cancelled/Error: most recently updated first
-      if (pa >= 6) return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      if (pa >= 6) return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
       return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
     });
 }

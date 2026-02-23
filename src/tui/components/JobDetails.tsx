@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import type { Job } from "../../core/database.js";
 import { displayWidth, truncateToWidth, wordWrapWidth } from "../textWidth.js";
 import { getStatusColor } from "./TaskItem.js";
+import { getProgress, type ProgressData } from "../progressStore.js";
 
 interface JobDetailsProps {
   job: Job | undefined;
@@ -14,24 +15,29 @@ interface JobDetailsProps {
 }
 
 export function JobDetails({ job, width, height, focused, scrollOffset, onMaxScroll }: JobDetailsProps): React.ReactElement {
-  // Tick only for jobs with time-dependent fields (Duration, Starts In).
+  // Tick for jobs with time-dependent or progress fields.
   // Scoped here so only JobDetails re-renders, not the full App tree.
-  const needsTick = !!job && (
-    ["Live", "Downloading", "Muxing"].includes(job.status) ||
-    (job.status === "Upcoming" && !!job.streamStartTime)
-  );
+  // Active downloads (Live/Downloading/Muxing): 100ms for real-time progress from progressStore.
+  // Upcoming with scheduled time: 1s for "Starts In" countdown.
+  const isActive = !!job && ["Live", "Downloading", "Muxing"].includes(job.status);
+  const isUpcoming = !!job && job.status === "Upcoming" && !!job.streamStartTime;
+  const needsTick = isActive || isUpcoming;
+  const tickInterval = isActive ? 100 : 1_000;
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!needsTick) return;
-    const timer = setInterval(() => setTick((t) => t + 1), 5_000);
+    const timer = setInterval(() => setTick((t) => t + 1), tickInterval);
     return () => clearInterval(timer);
-  }, [needsTick]);
+  }, [needsTick, tickInterval]);
 
   const contentWidth = width - 4; // borders + padding
   const contentHeight = height - 3; // borders (2) + title row (1)
 
+  // Read progress data from store (updated outside React state at 10Hz)
+  const progressData = job ? getProgress(job.id) : undefined;
+
   // Compute rows/scroll BEFORE early return so all hooks run unconditionally
-  const rows = job ? buildDetailRows(job, contentWidth) : [];
+  const rows = job ? buildDetailRows(job, contentWidth, progressData) : [];
   const maxScroll = Math.max(0, rows.length - contentHeight);
   const actualOffset = Math.min(scrollOffset, maxScroll);
   const visibleRows = rows.slice(actualOffset, actualOffset + contentHeight);
@@ -112,7 +118,7 @@ type DetailRow =
   | { type: "separator" }
   | { type: "progress_bar"; percent: number; color: string };
 
-function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
+function buildDetailRows(job: Job, maxWidth: number, pd?: ProgressData): DetailRow[] {
   const valueWidth = Math.max(10, maxWidth - 14);
   const truncate = (s: string) => displayWidth(s) > valueWidth ? truncateToWidth(s, valueWidth) : s;
 
@@ -184,20 +190,32 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
 
   const isFinished = job.status === "Finished";
 
+  // Read progress fields from store (real-time) with fallback to job (for finished/initial)
+  const lastVideoSeq = pd?.lastVideoSeq ?? job.lastVideoSeq;
+  const lastAudioSeq = pd?.lastAudioSeq ?? job.lastAudioSeq;
+  const totalVideoSeq = pd?.totalVideoSeq ?? job.totalVideoSeq;
+  const totalAudioSeq = pd?.totalAudioSeq ?? job.totalAudioSeq;
+  const totalChatMessages = pd?.totalChatMessages ?? job.totalChatMessages;
+  const chatStatus = pd?.chatStatus ?? job.chatStatus;
+  const progress = pd?.progress ?? job.progress;
+  const percent = pd?.percent ?? job.percent;
+  const speed = pd?.speed ?? job.speed;
+  const eta = pd?.eta ?? job.eta;
+
   // Helper: segment/chat/gap rows (shared between Progress and Media sections)
   const addSegmentRows = () => {
-    if (job.lastVideoSeq !== undefined) {
-      const vTotal = job.totalVideoSeq ? `/${job.totalVideoSeq}` : "";
-      rows.push({ type: "field", label: isTwitch ? "Segments" : "Video Segs", value: `${job.lastVideoSeq}${vTotal}` });
+    if (lastVideoSeq !== undefined) {
+      const vTotal = totalVideoSeq ? `/${totalVideoSeq}` : "";
+      rows.push({ type: "field", label: isTwitch ? "Segments" : "Video Segs", value: `${lastVideoSeq}${vTotal}` });
     }
 
-    if (!isTwitch && job.lastAudioSeq !== undefined) {
-      const aTotal = job.totalAudioSeq ? `/${job.totalAudioSeq}` : "";
-      rows.push({ type: "field", label: "Audio Segs", value: `${job.lastAudioSeq}${aTotal}` });
+    if (!isTwitch && lastAudioSeq !== undefined) {
+      const aTotal = totalAudioSeq ? `/${totalAudioSeq}` : "";
+      rows.push({ type: "field", label: "Audio Segs", value: `${lastAudioSeq}${aTotal}` });
     }
 
-    if (job.totalChatMessages && job.totalChatMessages > 0) {
-      rows.push({ type: "field", label: "Chat Msgs", value: job.totalChatMessages.toString() });
+    if (totalChatMessages && totalChatMessages > 0) {
+      rows.push({ type: "field", label: "Chat Msgs", value: totalChatMessages.toString() });
     }
 
     if (job.gaps && job.gaps.length > 0) {
@@ -216,30 +234,30 @@ function buildDetailRows(job: Job, maxWidth: number): DetailRow[] {
     rows.push({ type: "separator" });
     rows.push({ type: "header", text: "Progress" });
 
-    if (job.progress) {
-      rows.push({ type: "field", label: "Progress", value: job.progress });
+    if (progress) {
+      rows.push({ type: "field", label: "Progress", value: progress });
     }
 
-    if (job.percent > 0) {
-      rows.push({ type: "progress_bar", percent: job.percent, color: getStatusColor(job.status) });
+    if (percent > 0) {
+      rows.push({ type: "progress_bar", percent, color: getStatusColor(job.status) });
     }
 
-    if (job.speed) {
-      rows.push({ type: "field", label: "Speed", value: job.speed });
+    if (speed) {
+      rows.push({ type: "field", label: "Speed", value: speed });
     }
 
-    if (job.eta) {
-      rows.push({ type: "field", label: "ETA", value: job.eta });
+    if (eta) {
+      rows.push({ type: "field", label: "ETA", value: eta });
     }
 
     addSegmentRows();
 
-    if (job.chatStatus) {
-      const chatColor = job.chatStatus === "downloading" ? "green"
-        : job.chatStatus === "finished" ? "cyan"
-        : job.chatStatus === "error" ? "red"
+    if (chatStatus) {
+      const chatColor = chatStatus === "downloading" ? "green"
+        : chatStatus === "finished" ? "cyan"
+        : chatStatus === "error" ? "red"
         : "gray";
-      rows.push({ type: "field", label: "Chat", value: job.chatStatus, color: chatColor });
+      rows.push({ type: "field", label: "Chat", value: chatStatus, color: chatColor });
     }
   }
 

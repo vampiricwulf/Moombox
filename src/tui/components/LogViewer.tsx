@@ -92,7 +92,7 @@ interface LogLineProps {
   width: number;
 }
 
-function LogLine({ log, width }: LogLineProps): React.ReactElement {
+const LogLine = React.memo(function LogLine({ log, width }: LogLineProps): React.ReactElement {
   // Parse log level from format: [LEVEL] message or timestamp [LEVEL] message
   const levelMatch = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
   const level = levelMatch ? levelMatch[1].toUpperCase() : "INFO";
@@ -107,7 +107,7 @@ function LogLine({ log, width }: LogLineProps): React.ReactElement {
       <Text color={color} wrap="truncate">{displayLog}</Text>
     </Box>
   );
-}
+});
 
 function getLogColor(level: string): string {
   switch (level) {
