@@ -46,7 +46,10 @@ process.on("unhandledRejection", (reason) => {
 function waitForKeypress(): Promise<void> {
   return new Promise((resolve) => {
     console.error("\nPress any key to exit...");
-    if (!process.stdin.isTTY) { resolve(); return; }
+    if (!process.stdin.isTTY) {
+      resolve();
+      return;
+    }
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.once("data", () => {
@@ -118,7 +121,8 @@ async function addVideo(input: string) {
       videoId,
       url,
       title: "Manual Add",
-      channelName: twitchTarget.type === "channel" ? twitchTarget.login : "Manual",
+      channelName:
+        twitchTarget.type === "channel" ? twitchTarget.login : "Manual",
       manuallyAdded: true,
       platform: "twitch",
     });
@@ -172,8 +176,10 @@ async function addVideo(input: string) {
 async function run() {
   // Check if running in a TTY (interactive terminal)
   const isTTY = process.stdout.isTTY && process.stdin.isTTY;
-  const noTUI = process.argv.includes("--no-tui") || /^(1|true|yes)$/i.test(process.env.MOOMBOX_NO_TUI?.trim() || "");
-  const useTUI = isTTY && !noTUI;
+  const noTUI =
+    process.argv.includes("--no-tui") ||
+    /^(1|true|yes)$/i.test(process.env.MOOMBOX_NO_TUI?.trim() || "");
+  const useTUI = false; //isTTY && !noTUI;
 
   if (!useTUI) {
     console.log("Moombox - YouTube Live Stream Archiver");
@@ -254,21 +260,26 @@ async function run() {
     serverStarted = true;
     // Expose the actual port for TUI and other components
     process.env.MOOMBOX_PORT = String(actualPort);
-    logger.info(`[Moombox] Web dashboard available at https://localhost:${actualPort}`);
+    logger.info(
+      `[Moombox] Web dashboard available at https://localhost:${actualPort}`,
+    );
 
     // Wire up countdown timer broadcasts
     monitor.onSchedule = () => server.broadcastCheckTimers?.();
     decapiMonitor.onSchedule = () => server.broadcastCheckTimers?.();
     twitchMonitor.onSchedule = () => server.broadcastCheckTimers?.();
   } catch (error: unknown) {
-    const detail = (error as NodeJS.ErrnoException).code === "EADDRINUSE"
-      ? `Port ${port} (and nearby ports) already in use. Is another instance running?`
-      : `Web server failed: ${getErrorMessage(error)}`;
+    const detail =
+      (error as NodeJS.ErrnoException).code === "EADDRINUSE"
+        ? `Port ${port} (and nearby ports) already in use. Is another instance running?`
+        : `Web server failed: ${getErrorMessage(error)}`;
 
     if (useTUI) {
       // TUI will start below and show the error — downloads still work
       logger.error(`[Moombox] ${detail}`);
-      logger.error("[Moombox] Web dashboard is unavailable. Downloads will still work.");
+      logger.error(
+        "[Moombox] Web dashboard is unavailable. Downloads will still work.",
+      );
     } else {
       console.error(`\nError: ${detail}`);
       console.error("Web dashboard is unavailable.");
@@ -293,7 +304,10 @@ async function run() {
     forceExitTimer.unref();
 
     // Stop services in dependency order (consumers first, infrastructure last)
-    const stopService = async (name: string, fn: () => void | Promise<void>) => {
+    const stopService = async (
+      name: string,
+      fn: () => void | Promise<void>,
+    ) => {
       try {
         await fn();
         logger.debug(`[Moombox] Stopped ${name}`);
@@ -306,9 +320,15 @@ async function run() {
     await stopService("DecapiMonitor", () => decapiMonitor.stop());
     await stopService("FeedMonitor", () => monitor.stop());
     await stopService("DownloadWorker", () => worker.stop());
-    await stopService("CookieRefresh", () => CookieRefreshService.getInstance().stop());
-    await stopService("AutoCookies", () => AutoCookieService.getInstance().stop());
-    await stopService("PotProvider", () => PotProvider.getInstance().shutdown());
+    await stopService("CookieRefresh", () =>
+      CookieRefreshService.getInstance().stop(),
+    );
+    await stopService("AutoCookies", () =>
+      AutoCookieService.getInstance().stop(),
+    );
+    await stopService("PotProvider", () =>
+      PotProvider.getInstance().shutdown(),
+    );
     if (serverStarted) await stopService("WebServer", () => server.stop());
 
     // Flush pending log writes and give DB writes a moment to complete
@@ -320,7 +340,9 @@ async function run() {
   // Expose shutdown for restart()
   shutdownFn = shutdown;
 
-  process.on("SIGTERM", () => { shutdown(); });
+  process.on("SIGTERM", () => {
+    shutdown();
+  });
 
   // Periodic memory usage logging (every 2 minutes) for diagnostics.
   // If node is started with --expose-gc, forces a full GC before measuring
@@ -333,14 +355,17 @@ async function run() {
     }
     const mem = process.memoryUsage();
     const heapMB = mem.heapUsed / 1048576;
-    const delta = prevHeapUsed > 0 ? ` (${heapMB > prevHeapUsed ? "+" : ""}${(heapMB - prevHeapUsed).toFixed(1)})` : "";
+    const delta =
+      prevHeapUsed > 0
+        ? ` (${heapMB > prevHeapUsed ? "+" : ""}${(heapMB - prevHeapUsed).toFixed(1)})`
+        : "";
     prevHeapUsed = heapMB;
     logger.debug(
       `[Memory] RSS: ${(mem.rss / 1048576).toFixed(1)}MB, ` +
-      `Heap: ${heapMB.toFixed(1)}${delta}/${(mem.heapTotal / 1048576).toFixed(1)}MB, ` +
-      `External: ${(mem.external / 1048576).toFixed(1)}MB, ` +
-      `ArrayBuffers: ${(mem.arrayBuffers / 1048576).toFixed(1)}MB` +
-      (typeof globalThis.gc === "function" ? " [post-GC]" : ""),
+        `Heap: ${heapMB.toFixed(1)}${delta}/${(mem.heapTotal / 1048576).toFixed(1)}MB, ` +
+        `External: ${(mem.external / 1048576).toFixed(1)}MB, ` +
+        `ArrayBuffers: ${(mem.arrayBuffers / 1048576).toFixed(1)}MB` +
+        (typeof globalThis.gc === "function" ? " [post-GC]" : ""),
     );
 
     // V8 heap space breakdown — identifies which heap region is growing
@@ -350,10 +375,10 @@ async function run() {
     const loSpace = spaces.find((s) => s.space_name === "large_object_space");
     logger.debug(
       `[Memory] V8: contexts=${heapStats.number_of_native_contexts}, ` +
-      `detached=${heapStats.number_of_detached_contexts}, ` +
-      `handles=${(heapStats.used_global_handles_size / 1024).toFixed(0)}KB, ` +
-      `old_space=${oldSpace ? (oldSpace.space_used_size / 1048576).toFixed(1) : "?"}MB, ` +
-      `large_obj=${loSpace ? (loSpace.space_used_size / 1048576).toFixed(1) : "?"}MB`,
+        `detached=${heapStats.number_of_detached_contexts}, ` +
+        `handles=${(heapStats.used_global_handles_size / 1024).toFixed(0)}KB, ` +
+        `old_space=${oldSpace ? (oldSpace.space_used_size / 1048576).toFixed(1) : "?"}MB, ` +
+        `large_obj=${loSpace ? (loSpace.space_used_size / 1048576).toFixed(1) : "?"}MB`,
     );
   }, 120_000);
   memoryLogInterval.unref();
@@ -368,10 +393,14 @@ async function run() {
     } else {
       // TUI import failed, fall back to console
       logger.info("[Moombox] TUI not available, using web dashboard only");
-      process.on("SIGINT", () => { shutdown(); });
+      process.on("SIGINT", () => {
+        shutdown();
+      });
     }
   } else {
-    process.on("SIGINT", () => { shutdown(); });
+    process.on("SIGINT", () => {
+      shutdown();
+    });
   }
 }
 

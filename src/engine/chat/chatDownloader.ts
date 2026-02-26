@@ -6,6 +6,7 @@
  */
 
 import fs from "fs-extra";
+import { open as fsOpen } from "node:fs/promises";
 import path from "path";
 import { EventEmitter } from "events";
 import { ChatApi } from "./chatApi.js";
@@ -135,15 +136,15 @@ export class ChatDownloader extends EventEmitter {
   }
 
   /**
-   * Write chat data to output file atomically (write to temp, then rename).
+   * Write chat data to output file.
    *
    * Two paths:
-   * - Not flushed: all messages are in memory, write complete JSON directly.
-   * - Flushed: the on-disk file already has old messages. Instead of re-reading
-   *   and re-parsing the entire file (which causes 5-10x memory overhead from
-   *   JSON.parse + array merge + JSON.stringify), read the raw text, locate the
-   *   closing ']', and append only the NEW messages that arrived after the flush.
-   *   Memory cost: ~1x file size (raw string) instead of ~6-10x.
+   * - Not flushed: all messages are in memory, write complete JSON atomically.
+   * - Flushed: the on-disk file already has old messages. Use file-handle-based
+   *   in-place append — read only the last 10 bytes to locate ']', truncate
+   *   there, then append new messages + closing structure. Memory cost: O(new
+   *   messages) instead of O(file size). For a 400MB chat file with non-Latin1
+   *   characters, the old approach read it as a ~800MB V8 UTF-16 string.
    */
   private async writeChatFile(): Promise<void> {
     await fs.ensureDir(path.dirname(this.options.outputFile));
@@ -184,51 +185,106 @@ export class ChatDownloader extends EventEmitter {
       return;
     }
 
-    // Read existing file as raw text (NOT JSON.parse — avoids massive object allocation)
-    const raw = await fs.readFile(this.options.outputFile, "utf8");
+    // In-place append: read only the tail to find ']', truncate, and write new messages
+    const handle = await fsOpen(this.options.outputFile, "r+");
+    try {
+      const stat = await handle.stat();
 
-    // Locate the end of the messages array
-    const closingIdx = raw.lastIndexOf("]");
-    if (closingIdx === -1) {
-      // Corrupt file — fall back to writing what we have in memory
-      this.logger.warn("[ChatDownloader] Corrupt chat file, rewriting with in-memory messages");
-      const chatData: ChatData = {
-        videoId: this.options.videoId,
-        videoTitle: this.options.videoTitle,
-        channelName: this.options.channelName,
-        streamStartTime: this.options.streamStartTime,
-        downloadedAt: new Date().toISOString(),
-        messageCount: this.totalMessageCount,
-        messages: this.messages,
-      };
-      await fs.writeJson(tmpPath, chatData, { spaces: 2 });
-      await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
-      return;
+      // Read last 10 bytes to locate ']'
+      const tailSize = Math.min(10, stat.size);
+      if (tailSize < 3) {
+        // File too small — fall back to full rewrite
+        await handle.close();
+        return this.rewriteChatFileFallback(newMessages, tmpPath);
+      }
+      const tailBuf = Buffer.alloc(tailSize);
+      await handle.read(tailBuf, 0, tailSize, stat.size - tailSize);
+      const tail = tailBuf.toString("utf8");
+      const bracketOffset = tail.lastIndexOf("]");
+
+      if (bracketOffset === -1) {
+        // Corrupt file (no ']' found) — fall back to full rewrite
+        this.logger.warn("[ChatDownloader] Corrupt chat file, rewriting with in-memory messages");
+        await handle.close();
+        return this.rewriteChatFileFallback(newMessages, tmpPath);
+      }
+
+      const bracketBytePos = stat.size - tailSize + bracketOffset;
+
+      // Read a few bytes before ']' to check for existing messages
+      let hasExisting = false;
+      if (bracketBytePos > 5) {
+        const checkSize = Math.min(5, bracketBytePos);
+        const checkBuf = Buffer.alloc(checkSize);
+        await handle.read(checkBuf, 0, checkSize, bracketBytePos - checkSize);
+        hasExisting = checkBuf.toString("utf8").trimEnd().endsWith("}");
+      }
+
+      // Build only the new content to append
+      let appendStr = "";
+      if (newMessages.length > 0) {
+        appendStr += hasExisting ? ",\n" : "";
+        appendStr += newMessages.map((m) => "    " + JSON.stringify(m)).join(",\n");
+        appendStr += "\n";
+      }
+      appendStr += "  ]\n}";
+
+      // Truncate at ']' position, then write new content
+      await handle.truncate(bracketBytePos);
+      const appendBuf = Buffer.from(appendStr, "utf8");
+      await handle.write(appendBuf, 0, appendBuf.length, bracketBytePos);
+    } finally {
+      await handle.close();
     }
+  }
 
-    // Build output: everything before ']' + new messages + closing structure
-    const beforeBracket = raw.substring(0, closingIdx);
-    const hasExisting = beforeBracket.trimEnd().endsWith("}");
+  /**
+   * Update the chat file header metadata (messageCount, downloadedAt) in-place.
+   * Reads only the first 1KB — avoids loading the entire file into memory.
+   * Called once after the chat loop ends.
+   */
+  private async updateChatFileHeader(): Promise<void> {
+    if (!(await fs.pathExists(this.options.outputFile))) return;
 
-    let content = beforeBracket;
-    if (newMessages.length > 0) {
-      content += hasExisting ? ",\n" : "";
-      content += newMessages.map((m) => "    " + JSON.stringify(m)).join(",\n");
-      content += "\n";
+    const handle = await fsOpen(this.options.outputFile, "r+");
+    try {
+      const stat = await handle.stat();
+      const headerSize = Math.min(1024, stat.size);
+      if (headerSize < 50) return; // Too small to have a valid header
+
+      const headerBuf = Buffer.alloc(headerSize);
+      await handle.read(headerBuf, 0, headerSize, 0);
+      const header = headerBuf.toString("utf8");
+
+      const updated = header
+        .replace(/"messageCount": \d+/, `"messageCount": ${this.totalMessageCount}`)
+        .replace(/"downloadedAt": "[^"]*"/, `"downloadedAt": "${new Date().toISOString()}"`);
+
+      // Only write if byte length is unchanged (safe in-place update).
+      // Length changes when messageCount gains a digit (e.g. 999→1000) — rare, skip.
+      const updatedBuf = Buffer.from(updated, "utf8");
+      if (updatedBuf.length === headerBuf.length) {
+        await handle.write(updatedBuf, 0, updatedBuf.length, 0);
+      }
+    } finally {
+      await handle.close();
     }
-    content += "  ]\n}";
+  }
 
-    // Update metadata in the header (search only before "messages" key to avoid
-    // matching message content that coincidentally contains these field names)
-    const messagesKeyIdx = content.indexOf('"messages"');
-    if (messagesKeyIdx > 0) {
-      let header = content.substring(0, messagesKeyIdx);
-      header = header.replace(/"messageCount": \d+/, `"messageCount": ${this.totalMessageCount}`);
-      header = header.replace(/"downloadedAt": "[^"]*"/, `"downloadedAt": "${new Date().toISOString()}"`);
-      content = header + content.substring(messagesKeyIdx);
-    }
-
-    await fs.writeFile(tmpPath, content);
+  /**
+   * Full file rewrite fallback for corrupt/missing cases.
+   */
+  private async rewriteChatFileFallback(newMessages: ChatMessage[], tmpPath: string): Promise<void> {
+    const chatData: ChatData = {
+      videoId: this.options.videoId,
+      videoTitle: this.options.videoTitle,
+      channelName: this.options.channelName,
+      streamStartTime: this.options.streamStartTime,
+      downloadedAt: new Date().toISOString(),
+      messageCount: this.totalMessageCount,
+      messages: newMessages,
+    };
+    await fs.writeJson(tmpPath, chatData, { spaces: 2 });
     await fs.move(tmpPath, this.options.outputFile, { overwrite: true });
   }
 
@@ -289,6 +345,10 @@ export class ChatDownloader extends EventEmitter {
       // Write any remaining unwritten messages
       if (this.messages.length > 0) {
         await this.writeChatFile();
+      }
+      // Update header metadata (messageCount, downloadedAt) once at the end
+      if (this.flushedToDisk && this.totalMessageCount > 0) {
+        await this.updateChatFileHeader();
       }
       if (this.totalMessageCount > 0) {
         this.logger.info(

@@ -264,6 +264,7 @@ export class Muxer {
     try {
       await execa("ffmpeg", args, {
         stdin: "ignore",
+        stdout: "ignore", // FFmpeg writes nothing to stdout
         cancelSignal: signal,
         timeout: 10 * 60_000, // 10 minutes
         cleanup: true,
