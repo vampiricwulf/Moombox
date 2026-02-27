@@ -21,6 +21,7 @@ import {
 import { getErrorMessage } from "../../types/errors.js";
 import { formatBytes } from "../../utils/timeFormat.js";
 import { downloadFile } from "./muxFinalize.js";
+import { applyGvsToken } from "../../engine/youtube/poToken.js";
 
 /**
  * Download VOD using direct format URLs
@@ -92,6 +93,18 @@ export async function downloadVod(
     logger.info(
       `[DownloadOrchestrator] Selected Audio: ${bestAudio.bitrate}`,
     );
+  }
+
+  // Apply GVS PO token to VOD format URLs
+  const poToken = yt.getPoToken();
+  if (poToken) {
+    if (bestVideo?.url) {
+      bestVideo.url = applyGvsToken(bestVideo.url, poToken, "query");
+    }
+    if (bestAudio?.url) {
+      bestAudio.url = applyGvsToken(bestAudio.url, poToken, "query");
+    }
+    logger.debug(`[DownloadOrchestrator] Applied GVS PO token to VOD format URLs`);
   }
 
   const videoPath = bestVideo?.url ? path.join(stagingDir, "video_stream") : null;
@@ -201,14 +214,12 @@ export async function downloadDash(
     videoInfo.playerUrl,
   );
 
-  // Add PO token to manifest URL (required for live streams)
-  // yt-dlp appends /pot/{token} to the manifest path
+  // Add GVS PO token to manifest URL (required for DASH streams)
   const poToken = yt.getPoToken();
   if (poToken) {
-    // Remove trailing slash if present, then append /pot/{token}
-    decryptedDashUrl = decryptedDashUrl.replace(/\/?$/, `/pot/${poToken}`);
+    decryptedDashUrl = applyGvsToken(decryptedDashUrl, poToken, "path");
     logger.debug(
-      `[DownloadOrchestrator] Added PO token to manifest URL`,
+      `[DownloadOrchestrator] Applied GVS PO token to DASH manifest URL`,
     );
   } else {
     logger.warn(
@@ -258,6 +269,22 @@ export async function downloadDash(
   } else {
     logger.warn(
       `[DownloadOrchestrator] No player URL available - cannot decrypt n params`,
+    );
+  }
+
+  // Apply GVS PO token to all segment BaseURLs (query mode, since BaseURLs
+  // use $Number$ template substitution and sq/ path appending)
+  if (poToken) {
+    for (const stream of dashStreams) {
+      if (stream.baseUrl) {
+        stream.baseUrl = applyGvsToken(stream.baseUrl, poToken, "query");
+      }
+      if (stream.initialization) {
+        stream.initialization = applyGvsToken(stream.initialization, poToken, "query");
+      }
+    }
+    logger.debug(
+      `[DownloadOrchestrator] Applied GVS PO token to ${dashStreams.length} DASH stream BaseURLs`,
     );
   }
 
@@ -413,7 +440,15 @@ export async function downloadHls(
   const logger = Logger.getInstance();
   logger.info("[DownloadOrchestrator] Fetching HLS Master Playlist...");
 
-  const manifestResp = await fetchWithTimeout(videoInfo.hlsManifestUrl!);
+  // Apply GVS PO token to HLS manifest URL
+  const poToken = yt.getPoToken();
+  let hlsUrl = videoInfo.hlsManifestUrl!;
+  if (poToken) {
+    hlsUrl = applyGvsToken(hlsUrl, poToken, "path");
+    logger.debug(`[DownloadOrchestrator] Applied GVS PO token to HLS manifest URL`);
+  }
+
+  const manifestResp = await fetchWithTimeout(hlsUrl);
   if (!manifestResp.ok) {
     await manifestResp.body?.cancel();
     throw new Error(
@@ -476,11 +511,19 @@ export async function downloadHls(
     }
   };
 
+  // Apply GVS PO token to HLS variant URL
+  let variantUrl = bestVariant.url;
+  if (poToken) {
+    variantUrl = applyGvsToken(variantUrl, poToken, "path");
+    logger.debug(`[DownloadOrchestrator] Applied GVS PO token to HLS variant URL`);
+  }
+
   const videoDl = new SegmentDownloader({
-    baseUrl: bestVariant.url,
+    baseUrl: variantUrl,
     outputFile: videoPath,
     startSeq: -1,
     isHls: true,
+    poToken: poToken || undefined,
     onCheckStreamStatus: checkStreamStatus,
     retryDelayCap: config.downloader.segment_retry_delay_cap,
     liveCheckRetries: config.downloader.segment_live_check_retries,

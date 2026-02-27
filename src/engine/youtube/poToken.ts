@@ -12,6 +12,27 @@ import { createRetryFetch } from "../../core/http.js";
 import { getErrorMessage } from "../../types/errors.js";
 
 /**
+ * Apply a GVS PO token to a URL.
+ *
+ * @param url - The URL to modify
+ * @param token - The PO token value
+ * @param mode - "path" appends `/pot/{token}` (for manifests); "query" sets `?pot={token}` (for format/segment URLs)
+ */
+export function applyGvsToken(url: string, token: string, mode: "query" | "path"): string {
+  if (!token) return url;
+
+  if (mode === "path") {
+    // Remove trailing slash if present, then append /pot/{token}
+    return url.replace(/\/?$/, `/pot/${token}`);
+  }
+
+  // Query mode: set pot= query parameter
+  const parsed = new URL(url);
+  parsed.searchParams.set("pot", token);
+  return parsed.toString();
+}
+
+/**
  * PO Token Generator
  */
 export class PoTokenGenerator {

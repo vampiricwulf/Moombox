@@ -23,6 +23,7 @@ interface TokenMinter {
   expiry: Date;
   integrityToken: string;
   minter: InstanceType<typeof BG.WebPoMinter>;
+  globalName: string; // BotGuard VM global to clean up on eviction
 }
 
 interface SessionData {
@@ -77,7 +78,11 @@ export class PotProvider {
    */
   invalidateCaches(): void {
     this.sessionCache = {};
+    for (const minter of this.minterCache.values()) {
+      cleanupBotGuardState(minter.globalName);
+    }
     this.minterCache.clear();
+    teardownGlobalDom();
     this.logger.debug("[PotProvider] All caches invalidated");
   }
 
@@ -102,11 +107,16 @@ export class PotProvider {
         delete this.sessionCache[contentBinding];
       }
     }
-    // Evict expired minters to free BotGuard VM closures
+    // Evict expired minters and clean up their BotGuard VM state
     for (const [key, minter] of this.minterCache) {
       if (now >= minter.expiry) {
+        cleanupBotGuardState(minter.globalName);
         this.minterCache.delete(key);
       }
+    }
+    // If no minters remain, tear down JSDOM to free ~30-50MB
+    if (this.minterCache.size === 0) {
+      teardownGlobalDom();
     }
   }
 
@@ -148,7 +158,6 @@ export class PotProvider {
     // persistent telemetry timers that leak ~1MB/30s in long-running Node.js.
     const cleanupTimers = interceptTimers();
     const webPoSignalOutput: WebPoSignalOutput = [];
-    let botguardResponse: string;
 
     try {
       // Load interpreter — clean previous globalName to avoid stale closure retention
@@ -178,9 +187,9 @@ export class PotProvider {
       });
       this.logger.debug("[PotProvider] BotGuard client created");
 
-      // Generate integrity token
+      // Generate snapshot — populates webPoSignalOutput[0] with getMinter callback
       this.logger.debug("[PotProvider] Generating BotGuard snapshot...");
-      botguardResponse = await bgClient.snapshot(
+      const botguardResponse = await bgClient.snapshot(
         { webPoSignalOutput },
         30_000,
       );
@@ -188,62 +197,56 @@ export class PotProvider {
         `[PotProvider] BotGuard response length: ${botguardResponse?.length || 0}`,
       );
 
-      // BotGuard VM is no longer needed — shut it down to release its closures.
-      try { await bgClient.shutdown(); } catch { /* may not have shutdown fn */ }
-    } finally {
-      // Always clear BotGuard's persistent timers, even if an error occurred.
-      cleanupTimers();
-    }
+      // Fetch integrity token from Google
+      const generateItUrl = buildURL("GenerateIT");
+      this.logger.debug(`[PotProvider] Calling ${generateItUrl}`);
 
-    const generateItUrl = buildURL("GenerateIT");
-    this.logger.debug(`[PotProvider] Calling ${generateItUrl}`);
+      const integrityTokenResp = await fetchWithRetry(generateItUrl, {
+        method: "POST",
+        headers: getHeaders(),
+        body: JSON.stringify([BOTGUARD_REQUEST_KEY, botguardResponse]),
+      });
 
-    const integrityTokenResp = await fetchWithRetry(generateItUrl, {
-      method: "POST",
-      headers: getHeaders(),
-      body: JSON.stringify([BOTGUARD_REQUEST_KEY, botguardResponse]),
-    });
-
-    this.logger.debug(
-      `[PotProvider] GenerateIT response status: ${integrityTokenResp.status}`,
-    );
-
-    if (!integrityTokenResp.ok) {
-      const errorText = await integrityTokenResp
-        .text()
-        .catch(() => "Unknown error");
-      throw new Error(
-        `GenerateIT failed: ${integrityTokenResp.status} - ${errorText}`,
+      this.logger.debug(
+        `[PotProvider] GenerateIT response status: ${integrityTokenResp.status}`,
       );
-    }
 
-    const integrityTokenData = (await integrityTokenResp.json()) as [
-      string,
-      number,
-      number,
-      string,
-    ];
+      if (!integrityTokenResp.ok) {
+        const errorText = await integrityTokenResp
+          .text()
+          .catch(() => "Unknown error");
+        throw new Error(
+          `GenerateIT failed: ${integrityTokenResp.status} - ${errorText}`,
+        );
+      }
 
-    this.logger.debug(
-      `[PotProvider] IntegrityTokenData received: ${JSON.stringify(integrityTokenData).substring(0, 100)}...`,
-    );
+      const integrityTokenData = (await integrityTokenResp.json()) as [
+        string,
+        number,
+        number,
+        string,
+      ];
 
-    const [integrityToken, estimatedTtlSecs] = integrityTokenData;
-
-    if (!integrityToken) {
-      throw new Error(
-        `Failed to generate integrity token: ${JSON.stringify(integrityTokenData)}`,
+      this.logger.debug(
+        `[PotProvider] IntegrityTokenData received: ${JSON.stringify(integrityTokenData).substring(0, 100)}...`,
       );
-    }
 
-    this.logger.debug(
-      `[PotProvider] Generated integrity token (TTL: ${estimatedTtlSecs}s)`,
-    );
+      const [integrityToken, estimatedTtlSecs] = integrityTokenData;
 
-    const tokenMinter: TokenMinter = {
-      expiry: new Date(Date.now() + estimatedTtlSecs * 1000),
-      integrityToken,
-      minter: await BG.WebPoMinter.create(
+      if (!integrityToken) {
+        throw new Error(
+          `Failed to generate integrity token: ${JSON.stringify(integrityTokenData)}`,
+        );
+      }
+
+      this.logger.debug(
+        `[PotProvider] Generated integrity token (TTL: ${estimatedTtlSecs}s)`,
+      );
+
+      // Create minter BEFORE any cleanup — both the getMinter callback
+      // (webPoSignalOutput[0]) and the resulting mintCallback closure depend
+      // on BotGuard VM state and JSDOM globals being alive.
+      const minter = await BG.WebPoMinter.create(
         {
           integrityToken,
           estimatedTtlSecs,
@@ -251,17 +254,39 @@ export class PotProvider {
           websafeFallbackToken: integrityTokenData[3],
         } as IntegrityTokenData,
         webPoSignalOutput,
-      ),
-    };
+      );
 
-    // Minter is now created — remove BotGuard's VM globals and injected DOM
-    // nodes, then tear down JSDOM entirely to free ~30-50MB of DOM state.
-    // The minter's callback is pure byte manipulation and does not need JSDOM.
-    cleanupBotGuardState(bgChallenge.globalName);
-    teardownGlobalDom();
+      this.logger.debug("[PotProvider] WebPoMinter created successfully");
 
-    this.minterCache.set(cacheKey, tokenMinter);
-    return tokenMinter;
+      // Clean up the previous minter's BotGuard VM global (if any)
+      const prevMinter = this.minterCache.get(cacheKey);
+      if (prevMinter) {
+        cleanupBotGuardState(prevMinter.globalName);
+      }
+
+      const tokenMinter: TokenMinter = {
+        expiry: new Date(Date.now() + estimatedTtlSecs * 1000),
+        integrityToken,
+        minter,
+        globalName: bgChallenge.globalName,
+      };
+
+      this.minterCache.set(cacheKey, tokenMinter);
+      return tokenMinter;
+    } catch (err) {
+      // On error, no minter was cached — safe to fully clean up VM and JSDOM
+      cleanupBotGuardState(bgChallenge.globalName);
+      if (this.minterCache.size === 0) {
+        teardownGlobalDom();
+      }
+      throw err;
+    } finally {
+      // Clear BotGuard's persistent telemetry timers to prevent memory leaks.
+      // Do NOT tear down JSDOM or clean up BotGuard VM state here — the minter's
+      // mintCallback closure depends on VM/DOM globals for subsequent mint() calls.
+      // Full cleanup happens on minter eviction, cache invalidation, or shutdown.
+      cleanupTimers();
+    }
   }
 
   /**
@@ -368,6 +393,9 @@ export class PotProvider {
    * Shutdown the POT provider
    */
   shutdown(): void {
+    for (const minter of this.minterCache.values()) {
+      cleanupBotGuardState(minter.globalName);
+    }
     this.minterCache.clear();
     this.sessionCache = {};
     this.inflight.clear();

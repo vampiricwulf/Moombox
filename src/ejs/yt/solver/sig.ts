@@ -2,32 +2,33 @@ import { type ESTree } from "meriyah";
 import { matchesStructure } from "../../utils.js";
 import { type DeepPartial } from "../../types.js";
 
-const nsigExpression: DeepPartial<ESTree.Statement> = {
-  type: "VariableDeclaration",
-  kind: "var",
-  declarations: [
+const nsig: DeepPartial<ESTree.CallExpression> = {
+  type: "CallExpression",
+  callee: {
+    or: [{ type: "Identifier" }, { type: "SequenceExpression" }],
+  },
+  arguments: [
+    {},
     {
-      type: "VariableDeclarator",
-      init: {
-        type: "CallExpression",
-        callee: {
-          type: "Identifier",
-        },
-        arguments: [
-          {
-            type: "Literal",
-          },
-          {
-            type: "CallExpression",
-            callee: {
-              type: "Identifier",
-              name: "decodeURIComponent",
-            },
-          },
-        ],
+      type: "CallExpression",
+      callee: {
+        type: "Identifier",
+        name: "decodeURIComponent",
       },
+      arguments: [{}],
     },
   ],
+};
+const nsigAssignment: DeepPartial<ESTree.AssignmentExpression> = {
+  type: "AssignmentExpression",
+  left: { type: "Identifier" },
+  operator: "=",
+  right: nsig,
+};
+const nsigDeclarator: DeepPartial<ESTree.VariableDeclarator> = {
+  type: "VariableDeclarator",
+  id: { type: "Identifier" },
+  init: nsig,
 };
 
 const logicalExpression: DeepPartial<ESTree.ExpressionStatement> = {
@@ -54,6 +55,17 @@ const logicalExpression: DeepPartial<ESTree.ExpressionStatement> = {
             arguments: {
               or: [
                 [
+                  {
+                    type: "CallExpression",
+                    callee: {
+                      type: "Identifier",
+                      name: "decodeURIComponent",
+                    },
+                    arguments: [{ type: "Identifier" }],
+                    optional: false,
+                  },
+                ],
+                [
                   { type: "Literal" },
                   {
                     type: "CallExpression",
@@ -66,6 +78,8 @@ const logicalExpression: DeepPartial<ESTree.ExpressionStatement> = {
                   },
                 ],
                 [
+                  { type: "Literal" },
+                  { type: "Literal" },
                   {
                     type: "CallExpression",
                     callee: {
@@ -98,17 +112,15 @@ const identifier: DeepPartial<ESTree.Node> = {
         type: "AssignmentExpression",
         operator: "=",
         left: {
-          type: "Identifier",
+          or: [{ type: "Identifier" }, { type: "MemberExpression" }],
         },
         right: {
           type: "FunctionExpression",
-          params: [{}, {}, {}],
         },
       },
     },
     {
       type: "FunctionDeclaration",
-      params: [{}, {}, {}],
     },
     {
       type: "VariableDeclaration",
@@ -118,7 +130,6 @@ const identifier: DeepPartial<ESTree.Node> = {
             type: "VariableDeclarator",
             init: {
               type: "FunctionExpression",
-              params: [{}, {}, {}],
             },
           },
         ],
@@ -130,101 +141,149 @@ const identifier: DeepPartial<ESTree.Node> = {
 export function extract(
   node: ESTree.Node,
 ): ESTree.ArrowFunctionExpression | null {
-  if (!matchesStructure(node, identifier)) {
-    return null;
-  }
-  let block: ESTree.BlockStatement | undefined | null;
-  if (node.type === "ExpressionStatement" &&
-    node.expression.type === "AssignmentExpression" &&
-    node.expression.right.type === "FunctionExpression") {
-    block = node.expression.right.body;
-  } else if (node.type === "VariableDeclaration") {
-    for (const decl of node.declarations) {
+  const blocks: ESTree.BlockStatement[] = [];
+
+  if (matchesStructure(node, identifier)) {
+    if (
+      node.type === "ExpressionStatement" &&
+      node.expression.type === "AssignmentExpression" &&
+      node.expression.right.type === "FunctionExpression" &&
+      node.expression.right.params.length >= 3
+    ) {
+      blocks.push(node.expression.right.body!);
+    } else if (node.type === "VariableDeclaration") {
+      for (const decl of node.declarations) {
+        if (
+          decl.init?.type === "FunctionExpression" &&
+          decl.init.params.length >= 3
+        ) {
+          blocks.push(decl.init.body!);
+        }
+      }
+    } else if (node.type === "FunctionDeclaration" && node.params.length >= 3) {
+      blocks.push(node.body!);
+    } else {
+      return null;
+    }
+  } else if (
+    node.type === "ExpressionStatement" &&
+    node.expression.type === "SequenceExpression"
+  ) {
+    for (const expr of node.expression.expressions) {
       if (
-        decl.type === "VariableDeclarator" &&
-        decl.init?.type === "FunctionExpression" &&
-        decl.init?.params.length === 3
+        expr.type === "AssignmentExpression" &&
+        expr.right.type === "FunctionExpression" &&
+        expr.right.params.length === 3
       ) {
-        block = decl.init.body;
-        break;
+        blocks.push(expr.right.body as ESTree.BlockStatement);
       }
     }
-  } else if (node.type === "FunctionDeclaration") {
-    block = node.body;
   } else {
     return null;
   }
-  const relevantExpression = block?.body.at(-2);
 
-  let call: ESTree.CallExpression | null = null;
-  if (matchesStructure(relevantExpression!, logicalExpression)) {
-    if (
-      relevantExpression?.type !== "ExpressionStatement" ||
-      relevantExpression.expression.type !== "LogicalExpression" ||
-      relevantExpression.expression.right.type !== "SequenceExpression" ||
-      relevantExpression.expression.right.expressions[0].type !==
-        "AssignmentExpression" ||
-      relevantExpression.expression.right.expressions[0].right.type !==
-        "CallExpression"
-    ) {
-      return null;
-    }
-    call = relevantExpression.expression.right.expressions[0].right;
-  } else if (
-    relevantExpression?.type === "IfStatement" &&
-    relevantExpression.consequent.type === "BlockStatement"
-  ) {
-    for (const n of relevantExpression.consequent.body) {
-      if (!matchesStructure(n, nsigExpression)) {
-        continue;
+  for (const block of blocks) {
+    let call: ESTree.CallExpression | null = null;
+
+    for (const stmt of block.body) {
+      if (matchesStructure(stmt, logicalExpression)) {
+        // legacy matching
+        if (
+          stmt.type === "ExpressionStatement" &&
+          stmt.expression.type === "LogicalExpression" &&
+          stmt.expression.right.type === "SequenceExpression" &&
+          stmt.expression.right.expressions[0].type ===
+            "AssignmentExpression" &&
+          stmt.expression.right.expressions[0].right.type === "CallExpression"
+        ) {
+          call = stmt.expression.right.expressions[0].right;
+        }
+      } else if (stmt.type === "IfStatement") {
+        // if (...) { var a, b = (0, c)(1, decodeURIComponent(...))}
+        let consequent = stmt.consequent;
+        while (consequent.type === "LabeledStatement") {
+          consequent = consequent.body;
+        }
+        if (consequent.type !== "BlockStatement") {
+          continue;
+        }
+
+        for (const n of consequent.body) {
+          if (n.type !== "VariableDeclaration") {
+            continue;
+          }
+          for (const decl of n.declarations) {
+            if (
+              matchesStructure(decl, nsigDeclarator) &&
+              decl.init?.type === "CallExpression"
+            ) {
+              call = decl.init;
+              break;
+            }
+          }
+          if (call) {
+            break;
+          }
+        }
+      } else if (stmt.type === "ExpressionStatement") {
+        // (...) && ((...), (c = (...)(decodeURIComponent(...))))
+        if (
+          stmt.expression.type !== "LogicalExpression" ||
+          stmt.expression.operator !== "&&" ||
+          stmt.expression.right.type !== "SequenceExpression"
+        ) {
+          continue;
+        }
+        for (const expr of stmt.expression.right.expressions) {
+          if (matchesStructure(expr, nsigAssignment) && expr.type) {
+            if (
+              expr.type === "AssignmentExpression" &&
+              expr.right.type === "CallExpression"
+            ) {
+              call = expr.right;
+              break;
+            }
+          }
+        }
       }
-      if (
-        n.type !== "VariableDeclaration" ||
-        n.declarations[0].init?.type !== "CallExpression"
-      ) {
-        continue;
+      if (call) {
+        break;
       }
-      call = n.declarations[0].init;
-      break;
     }
-  }
-  if (call === null) {
-    return null;
-  }
-  // TODO: verify identifiers here
-  return {
-    type: "ArrowFunctionExpression",
-    params: [
-      {
-        type: "Identifier",
-        name: "sig",
+
+    if (!call) {
+      continue;
+    }
+
+    // TODO: verify identifiers here
+    return {
+      type: "ArrowFunctionExpression",
+      params: [
+        {
+          type: "Identifier",
+          name: "sig",
+        },
+      ],
+      body: {
+        type: "CallExpression",
+        callee: call.callee,
+        arguments: call.arguments.map((arg): ESTree.Expression => {
+          if (
+            arg.type === "CallExpression" &&
+            arg.callee.type === "Identifier" &&
+            arg.callee.name === "decodeURIComponent"
+          ) {
+            return { type: "Identifier", name: "sig" };
+          }
+          return arg as unknown as ESTree.Expression;
+        }),
+        optional: false,
       },
-    ],
-    body: {
-      type: "CallExpression",
-      callee: {
-        type: "Identifier",
-        name: call.callee.name,
-      },
-      arguments:
-        call.arguments.length === 1
-          ? [
-              {
-                type: "Identifier",
-                name: "sig",
-              },
-            ]
-          : [
-              call.arguments[0],
-              {
-                type: "Identifier",
-                name: "sig",
-              },
-            ],
-      optional: false,
-    },
-    async: false,
-    expression: false,
-    generator: false,
-  };
+      async: false,
+      expression: false,
+      generator: false,
+    };
+  }
+
+  return null;
 }

@@ -16,9 +16,6 @@ export async function generate(args: PoTokenArgs): Promise<PoTokenResult> {
   const webPoSignalOutput: WebPoSignalOutput = [];
   const botguardResponse = await botguard.snapshot({ webPoSignalOutput });
 
-  // BotGuard VM is no longer needed — shut it down to release its closures.
-  try { await botguard.shutdown(); } catch { /* may not have shutdown fn */ }
-
   const payload = [ bgConfig.requestKey, botguardResponse ];
 
   const integrityTokenResponse = await bgConfig.fetch(buildURL('GenerateIT', bgConfig.useYouTubeAPI), {
@@ -42,9 +39,14 @@ export async function generate(args: PoTokenArgs): Promise<PoTokenResult> {
     websafeFallbackToken
   };
 
+  // Create minter BEFORE shutting down VM — the getMinter callback in
+  // webPoSignalOutput[0] depends on BotGuard VM state being alive.
   const webPoMinter = await WebPoMinter.create(integrityTokenData, webPoSignalOutput);
 
   const poToken = await webPoMinter.mintAsWebsafeString(identifier);
+
+  // Shut down VM after minter callback is captured
+  try { await botguard.shutdown(); } catch { /* may not have shutdown fn */ }
 
   return { poToken, integrityTokenData };
 }

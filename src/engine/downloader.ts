@@ -7,6 +7,7 @@ import { Logger } from "../core/logger.js";
 import { DOWNLOAD_TIMEOUT_MS, USER_AGENTS } from "../constants.js";
 import { LIMITS } from "../constants/limits.js";
 import { getErrorMessage } from "../types/errors.js";
+import { applyGvsToken } from "./youtube/poToken.js";
 
 export interface DownloaderOptions {
   baseUrl: string;
@@ -692,6 +693,11 @@ export class SegmentDownloader extends EventEmitter {
 
   private async downloadHlsSegment(url: string): Promise<boolean> {
     try {
+      // Apply GVS PO token — HLS segment URLs are absolute and don't inherit
+      // the /pot/ path from the playlist URL
+      if (this.options.poToken) {
+        url = applyGvsToken(url, this.options.poToken, "query");
+      }
       const resp = await this.timedFetch(url, {
         headers: {
           "User-Agent": USER_AGENTS.WEB,
@@ -720,6 +726,11 @@ export class SegmentDownloader extends EventEmitter {
     idx: number,
   ): Promise<{ idx: number; data: Buffer } | null> {
     try {
+      // Apply GVS PO token — HLS segment URLs are absolute and don't inherit
+      // the /pot/ path from the playlist URL
+      if (this.options.poToken) {
+        url = applyGvsToken(url, this.options.poToken, "query");
+      }
       const resp = await this.timedFetch(url, {
         headers: {
           "User-Agent": USER_AGENTS.WEB,
