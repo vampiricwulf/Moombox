@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -106,7 +107,10 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	if err != nil {
 		return fmt.Errorf("discord webhook request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("discord webhook returned %d", resp.StatusCode)

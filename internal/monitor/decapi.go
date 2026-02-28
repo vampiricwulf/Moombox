@@ -77,8 +77,12 @@ func NewDecapiMonitor(cfg *config.MoomboxConfig, db *database.Database, logger i
 
 // Start begins the DECAPI monitoring loop.
 func (dm *DecapiMonitor) Start(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
 	dm.mu.Lock()
+	if dm.cancel != nil {
+		dm.mu.Unlock()
+		return // Already running
+	}
+	ctx, cancel := context.WithCancel(ctx)
 	dm.cancel = cancel
 	dm.mu.Unlock()
 

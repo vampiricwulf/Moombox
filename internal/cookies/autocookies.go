@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -333,13 +334,6 @@ func (s *AutoCookieService) NavigateToTwitch() error {
 
 // RefreshCookies performs a headless browser visit to refresh cookies.
 func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
-	s.mu.Lock()
-	if s.needsRelogin.YouTube && s.needsRelogin.Twitch {
-		s.mu.Unlock()
-		return false, fmt.Errorf("manual re-login required for all platforms")
-	}
-	s.mu.Unlock()
-
 	browser := DetectBrowser()
 	if browser == nil {
 		s.setError("no browser found for refresh")
@@ -367,9 +361,12 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	// Write cookies
+	// Merge with existing cookies (new cookies take priority)
 	if err := os.MkdirAll(filepath.Dir(s.cookiePath), 0o755); err != nil {
 		return false, err
+	}
+	if existingData, readErr := os.ReadFile(s.cookiePath); readErr == nil && len(existingData) > 0 {
+		netscapeCookies = mergeCookieFiles(string(existingData), netscapeCookies)
 	}
 	if err := os.WriteFile(s.cookiePath, []byte(netscapeCookies), 0o600); err != nil {
 		return false, err
@@ -456,6 +453,33 @@ func (s *AutoCookieService) Stop() {
 	s.mu.Unlock()
 	s.killSetupProcess()
 	s.cleanup()
+}
+
+// StartPeriodicRefresh starts a background goroutine that periodically
+// refreshes cookies via headless browser visit.
+func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval time.Duration) {
+	s.logger.Info("auto-cookie periodic refresh enabled", "interval", interval.String())
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.logger.Debug("periodic auto-cookie refresh triggered")
+				refreshCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				ok, err := s.RefreshCookies(refreshCtx)
+				cancel()
+				if err != nil {
+					s.logger.Warn("periodic auto-cookie refresh failed", "err", err)
+				} else if ok {
+					s.logger.Info("periodic auto-cookie refresh succeeded")
+				}
+			}
+		}
+	}()
 }
 
 // --- Firefox flows ---
@@ -978,7 +1002,10 @@ func cdpNavigate(ctx context.Context, port int, url string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var targets []struct {
 		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
@@ -1062,7 +1089,10 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	var version struct {
 		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
@@ -1084,7 +1114,10 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 		if err2 != nil {
 			return "", fmt.Errorf("CDP Storage.getCookies failed: %v, fallback failed: %v", err, err2)
 		}
-		defer pagesResp.Body.Close()
+		defer func() {
+			io.Copy(io.Discard, pagesResp.Body)
+			pagesResp.Body.Close()
+		}()
 
 		var targets []struct {
 			WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`

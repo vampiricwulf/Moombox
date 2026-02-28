@@ -133,6 +133,19 @@ func (rs *RefreshService) CheckNow(ctx context.Context) {
 	rs.doRefresh(ctx)
 }
 
+// CheckYouTubeAuth checks whether the current YouTube cookies are authenticated
+// by making a guide API request. This is the public entry point for external
+// callers (e.g. AutoCookieService verification).
+func (rs *RefreshService) CheckYouTubeAuth(ctx context.Context) (bool, error) {
+	return rs.checkYouTubeAuth(ctx)
+}
+
+// CheckTwitchAuth checks whether the current Twitch auth token is valid
+// by calling the Twitch validation endpoint.
+func (rs *RefreshService) CheckTwitchAuth(ctx context.Context) (bool, error) {
+	return rs.checkTwitchAuth(ctx)
+}
+
 func (rs *RefreshService) doRefresh(ctx context.Context) {
 	rs.logger.Debug("refreshing cookies")
 
@@ -141,20 +154,15 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 		rs.logger.Warn("cookie reload failed", "err", err)
 	}
 
-	// Check YouTube auth
+	// Check YouTube auth and refresh session cookies in a single request
 	// Returns: (authenticated bool, err error)
 	//   err != nil       => network/request error (not auth loss)
 	//   false, nil       => genuine auth failure or no cookies
-	ytAuth, ytErr := rs.checkYouTubeAuth(ctx)
+	ytAuth, ytErr := rs.checkAndRefreshYouTube(ctx)
 	ytErrStr := ""
 	if ytErr != nil {
 		ytErrStr = ytErr.Error()
 		rs.logger.Debug("youtube auth check failed", "err", ytErr)
-	}
-
-	// If YouTube auth succeeded, refresh the session cookies
-	if ytAuth && ytErr == nil {
-		rs.refreshYouTubeSession(ctx)
 	}
 
 	// Check Twitch auth
@@ -305,58 +313,113 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// refreshYouTubeSession makes an authenticated request to YouTube's guide API
-// to collect any Set-Cookie headers, then merges them back into the cookie file.
-// This keeps the YouTube session alive by refreshing expiring cookies.
-func (rs *RefreshService) refreshYouTubeSession(ctx context.Context) {
+// checkAndRefreshYouTube makes a single guide API request to both check
+// YouTube auth status and refresh session cookies from Set-Cookie headers.
+// This avoids the redundancy of separate check + refresh requests.
+func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
+	if !rs.jar.HasAuthCookies() {
+		return false, nil
+	}
+
+	cookieHeader := rs.jar.GetCookieHeader()
+	if cookieHeader == "" {
+		return false, nil
+	}
+
+	origin := "https://www.youtube.com"
+	authHeader := rs.jar.GenerateAuthorizationHeader(origin)
+	if authHeader == "" {
+		return false, nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()
 
-	origin := "https://www.youtube.com"
 	body := `{"context":{"client":{"clientName":"WEB","clientVersion":"2.20260101.00.00","hl":"en"}}}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideRefreshURL, strings.NewReader(body))
 	if err != nil {
-		rs.logger.Debug("youtube session refresh: request creation failed", "err", err)
-		return
+		return false, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Cookie", cookieHeader)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("Cookie", rs.jar.GetCookieHeader())
-
-	if authHeader := rs.jar.GenerateAuthorizationHeader(origin); authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
-		req.Header.Set("X-Origin", origin)
-	}
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Origin", origin)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		rs.logger.Debug("youtube session refresh: request failed", "err", err)
-		return
+		return false, fmt.Errorf("youtube auth check: %w", err)
 	}
 	defer resp.Body.Close()
-	// Drain body to allow connection reuse
-	_, _ = io.Copy(io.Discard, resp.Body)
 
-	// Parse Set-Cookie headers from response
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return false, nil
+	}
+
+	// Read body for auth check
+	respBody, _ := io.ReadAll(resp.Body)
+
+	// Check auth status from response
+	authenticated := false
+	var data struct {
+		ResponseContext struct {
+			ServiceTrackingParams []struct {
+				Params []struct {
+					Key   string `json:"key"`
+					Value string `json:"value"`
+				} `json:"params"`
+			} `json:"serviceTrackingParams"`
+			MainAppWebResponseContext struct {
+				LoggedIn bool `json:"loggedIn"`
+			} `json:"mainAppWebResponseContext"`
+		} `json:"responseContext"`
+	}
+
+	if err := json.Unmarshal(respBody, &data); err != nil {
+		respStr := string(respBody)
+		authenticated = strings.Contains(respStr, `"logged_in":"1"`) ||
+			strings.Contains(respStr, `"loggedIn":true`)
+	} else {
+		for _, service := range data.ResponseContext.ServiceTrackingParams {
+			for _, param := range service.Params {
+				if param.Key == "logged_in" && param.Value == "1" {
+					authenticated = true
+				}
+			}
+		}
+		if !authenticated {
+			authenticated = data.ResponseContext.MainAppWebResponseContext.LoggedIn
+		}
+	}
+
+	// If authenticated, process Set-Cookie headers to refresh session cookies
+	if authenticated {
+		rs.processYouTubeSetCookies(resp)
+	}
+
+	return authenticated, nil
+}
+
+// processYouTubeSetCookies parses Set-Cookie headers from a YouTube API response
+// and merges updated cookies into the cookie file.
+func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 	setCookies := resp.Header.Values("Set-Cookie")
 	if len(setCookies) == 0 {
 		rs.logger.Debug("youtube session refresh: no Set-Cookie headers")
 		return
 	}
 
-	// Parse Set-Cookie headers: extract name, value, and expiry
 	updates := make(map[string]cookieUpdate)
 	for _, sc := range setCookies {
-		// Only process YouTube/Google cookies (check full header string)
 		scLower := strings.ToLower(sc)
 		if !strings.Contains(scLower, "youtube.com") && !strings.Contains(scLower, "google.com") {
 			continue
 		}
 
-		// Set-Cookie format: "name=value; Path=/; Expires=...; Max-Age=..."
 		parts := strings.Split(sc, ";")
 		if len(parts) == 0 {
 			continue
@@ -369,7 +432,6 @@ func (rs *RefreshService) refreshYouTubeSession(ctx context.Context) {
 		name := nameValue[:eqIdx]
 		value := nameValue[eqIdx+1:]
 
-		// Parse expiry from remaining parts; default to 1 year
 		expiry := time.Now().Unix() + 365*24*60*60
 		for _, part := range parts[1:] {
 			trimmed := strings.TrimSpace(strings.ToLower(part))
@@ -397,13 +459,11 @@ func (rs *RefreshService) refreshYouTubeSession(ctx context.Context) {
 
 	rs.logger.Debug("youtube session refresh: updating cookies", "count", len(updates))
 
-	// Update the cookie file on disk
 	if err := rs.updateCookieFile(updates); err != nil {
 		rs.logger.Warn("youtube session refresh: failed to update cookie file", "err", err)
 		return
 	}
 
-	// Reload the jar so in-memory cookies reflect the updates
 	if err := rs.jar.Reload(); err != nil {
 		rs.logger.Warn("youtube session refresh: failed to reload jar", "err", err)
 	}
@@ -506,7 +566,10 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("twitch auth check: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	return resp.StatusCode == http.StatusOK, nil
 }

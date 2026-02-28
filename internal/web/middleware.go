@@ -27,7 +27,11 @@ func CORSMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
 			}
 
 			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusNoContent)
+				if origin != "" && isAllowedOrigin(origin, cfg.NetworkAccess) {
+					w.WriteHeader(http.StatusNoContent)
+				} else {
+					w.WriteHeader(http.StatusForbidden)
+				}
 				return
 			}
 
@@ -187,6 +191,14 @@ func isLoopback(ipStr string) bool {
 	return ip.IsLoopback()
 }
 
+// privateCIDRs is parsed once at package init to avoid re-parsing on every HTTP request.
+var privateCIDRs = []*net.IPNet{
+	mustParseCIDR("10.0.0.0/8"),
+	mustParseCIDR("172.16.0.0/12"),
+	mustParseCIDR("192.168.0.0/16"),
+	mustParseCIDR("fc00::/7"), // IPv6 private
+}
+
 func isPrivateIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
@@ -203,18 +215,8 @@ func isPrivateIP(ipStr string) bool {
 		return true
 	}
 
-	// Check private ranges
-	privateRanges := []struct {
-		network *net.IPNet
-	}{
-		{mustParseCIDR("10.0.0.0/8")},
-		{mustParseCIDR("172.16.0.0/12")},
-		{mustParseCIDR("192.168.0.0/16")},
-		{mustParseCIDR("fc00::/7")}, // IPv6 private
-	}
-
-	for _, r := range privateRanges {
-		if r.network.Contains(ip) {
+	for _, cidr := range privateCIDRs {
+		if cidr.Contains(ip) {
 			return true
 		}
 	}

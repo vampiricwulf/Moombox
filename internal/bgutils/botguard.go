@@ -55,8 +55,23 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 		globalName: challenge.GlobalName,
 	}
 
-	// Execute the interpreter JS
-	_, err = vm.RunString(interpreterJS)
+	// Execute the interpreter JS with a timeout to prevent hangs from malicious/buggy scripts
+	vmDone := make(chan error, 1)
+	go func() {
+		_, runErr := vm.RunString(interpreterJS)
+		vmDone <- runErr
+	}()
+	timer := time.NewTimer(30 * time.Second)
+	select {
+	case err = <-vmDone:
+		timer.Stop()
+	case <-timer.C:
+		vm.Interrupt("BotGuard interpreter execution timeout (30s)")
+		err = <-vmDone // wait for RunString to return after interrupt
+	case <-ctx.Done():
+		vm.Interrupt("context cancelled")
+		err = ctx.Err()
+	}
 	if err != nil {
 		client.Shutdown()
 		return nil, &BGError{Code: ErrVMInit, Message: fmt.Sprintf("execute interpreter: %v", err)}

@@ -41,6 +41,7 @@
             <sl-tab slot="nav" panel="archived">Archived</sl-tab>
             <sl-tab slot="nav" panel="player">Player</sl-tab>
             <sl-tab slot="nav" panel="imports">Imports</sl-tab>
+            <sl-tab slot="nav" panel="files">Files</sl-tab>
             <sl-tab slot="nav" panel="logs">Logs</sl-tab>
             <sl-tab slot="nav" panel="settings">Settings</sl-tab>
 
@@ -287,6 +288,41 @@
                         <sl-icon slot="prefix" name="cloud-arrow-up"></sl-icon>
                         Import
                     </sl-button>
+                </div>
+            </sl-tab-panel>
+
+            <!-- Files Panel -->
+            <sl-tab-panel name="files">
+                <div id="files-container">
+                    <div class="files-header">
+                        <h3>Orphaned Files</h3>
+                        <div class="files-actions">
+                            <sl-button size="small" id="files-refresh-btn">
+                                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                                Refresh
+                            </sl-button>
+                            <sl-button size="small" variant="danger" id="files-delete-all-btn" disabled>
+                                <sl-icon slot="prefix" name="trash"></sl-icon>
+                                Delete All
+                            </sl-button>
+                        </div>
+                    </div>
+                    <p class="settings-help">Staging directories and output files no longer associated with active jobs. These can be safely deleted to free disk space.</p>
+                    <div id="files-empty" style="display: none">
+                        <p style="text-align: center; color: var(--sl-color-neutral-500); padding: 2rem 0;">No orphaned files found.</p>
+                    </div>
+                    <div id="files-table-wrapper" style="display: none">
+                        <div class="files-table" id="files-table">
+                            <div id="files-table-header">
+                                <span>Type</span>
+                                <span>Path</span>
+                                <span>Size</span>
+                                <span>Modified</span>
+                                <span>Job</span>
+                                <span></span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </sl-tab-panel>
 

@@ -88,9 +88,10 @@ type NotificationConfig struct {
 
 // AutoCookiesConfig holds automatic cookie acquisition settings.
 type AutoCookiesConfig struct {
-	Enabled           bool     `toml:"enabled" json:"enabled"`
-	BrowserProfileDir string   `toml:"browser_profile_dir,omitempty" json:"browser_profile_dir,omitempty"`
-	Platforms         []string `toml:"platforms,omitempty" json:"platforms,omitempty"`
+	Enabled           bool         `toml:"enabled" json:"enabled"`
+	BrowserProfileDir string       `toml:"browser_profile_dir,omitempty" json:"browser_profile_dir,omitempty"`
+	Platforms         []string     `toml:"platforms,omitempty" json:"platforms,omitempty"`
+	RefreshInterval   FlexDuration `toml:"refresh_interval" json:"refresh_interval"`
 }
 
 // TemplateVariables holds template variables for output filenames.

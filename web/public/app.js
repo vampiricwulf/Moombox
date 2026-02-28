@@ -189,6 +189,8 @@ class MoomboxApp {
           if (!this.imports.importInitialized) {
             this.imports.initImports();
           }
+        } else if (e.detail.name === "files") {
+          this.fetchOrphanedFiles();
         }
       });
     }
@@ -197,6 +199,16 @@ class MoomboxApp {
     const refreshBtn = document.getElementById("btn-refresh-cookies");
     if (refreshBtn) {
       refreshBtn.addEventListener("click", () => this.recheckCookies());
+    }
+
+    // Files tab buttons
+    const filesRefreshBtn = document.getElementById("files-refresh-btn");
+    if (filesRefreshBtn) {
+      filesRefreshBtn.addEventListener("click", () => this.fetchOrphanedFiles());
+    }
+    const filesDeleteAllBtn = document.getElementById("files-delete-all-btn");
+    if (filesDeleteAllBtn) {
+      filesDeleteAllBtn.addEventListener("click", () => this.deleteAllOrphanedFiles());
     }
 
     // Status warnings — delegated click
@@ -2110,6 +2122,120 @@ class MoomboxApp {
         return "exclamation-octagon";
       default:
         return "info-circle";
+    }
+  }
+
+  // --- Files tab ---
+
+  async fetchOrphanedFiles() {
+    try {
+      const resp = await fetch("/api/v1/files/orphaned");
+      if (!resp.ok) throw new Error("Failed to fetch");
+      const data = await resp.json();
+      this._orphanedFiles = data;
+      this.renderOrphanedFiles(data);
+    } catch (err) {
+      console.error("Failed to fetch orphaned files:", err);
+    }
+  }
+
+  renderOrphanedFiles(files) {
+    const emptyEl = document.getElementById("files-empty");
+    const tableWrapper = document.getElementById("files-table-wrapper");
+    const deleteAllBtn = document.getElementById("files-delete-all-btn");
+
+    if (!files || files.length === 0) {
+      if (emptyEl) emptyEl.style.display = "";
+      if (tableWrapper) tableWrapper.style.display = "none";
+      if (deleteAllBtn) deleteAllBtn.disabled = true;
+      return;
+    }
+
+    if (emptyEl) emptyEl.style.display = "none";
+    if (tableWrapper) tableWrapper.style.display = "";
+    if (deleteAllBtn) deleteAllBtn.disabled = false;
+
+    const table = document.getElementById("files-table");
+    // Remove existing rows (keep header)
+    table.querySelectorAll(".files-row").forEach((row) => row.remove());
+
+    // Sort: staging first, then output, then trim
+    const typeOrder = { staging: 0, output: 1, trim: 2 };
+    const sorted = [...files].sort((a, b) => (typeOrder[a.type] ?? 9) - (typeOrder[b.type] ?? 9));
+
+    for (const file of sorted) {
+      const row = document.createElement("div");
+      row.className = "files-row";
+
+      const typeBadge = `<span class="files-type-badge ${this.escapeHtml(file.type)}">${this.escapeHtml(file.type)}</span>`;
+      const pathStr = `<span class="files-path" title="${this.escapeHtml(file.path)}">${this.escapeHtml(file.relPath)}</span>`;
+      const sizeStr = `<span>${this.formatBytes(file.size)}</span>`;
+      const modStr = `<span>${this.formatRelativeTime(file.modified)}</span>`;
+
+      let jobStr = "";
+      if (file.jobTitle) {
+        jobStr = `<span class="files-job-info" title="${this.escapeHtml(file.jobId)}">${this.escapeHtml(file.jobTitle)} (${this.escapeHtml(file.jobStatus)})</span>`;
+      } else {
+        jobStr = `<span class="files-job-info">—</span>`;
+      }
+
+      const deleteBtn = `<sl-icon-button name="trash" label="Delete" class="files-delete-btn" data-path="${this.escapeHtml(file.path)}"></sl-icon-button>`;
+
+      row.innerHTML = typeBadge + pathStr + sizeStr + modStr + jobStr + deleteBtn;
+
+      row.querySelector(".files-delete-btn").addEventListener("click", () => {
+        this.deleteOrphanedFile(file.path);
+      });
+
+      table.appendChild(row);
+    }
+  }
+
+  async deleteOrphanedFile(path) {
+    if (!confirm(`Delete this file?\n\n${path}`)) return;
+
+    try {
+      const resp = await fetch("/api/v1/files/orphaned", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: [path] }),
+      });
+      if (!resp.ok) throw new Error("Failed to delete");
+      const result = await resp.json();
+      if (result.deleted && result.deleted.length > 0) {
+        this.showToast("File deleted", "success");
+      } else if (result.errors && result.errors.length > 0) {
+        this.showToast(`Failed: ${result.errors[0].error}`, "danger");
+      }
+      this.fetchOrphanedFiles();
+    } catch (err) {
+      this.showToast("Failed to delete file", "danger");
+    }
+  }
+
+  async deleteAllOrphanedFiles() {
+    if (!this._orphanedFiles || this._orphanedFiles.length === 0) return;
+    if (!confirm(`Delete all ${this._orphanedFiles.length} orphaned files?`)) return;
+
+    const paths = this._orphanedFiles.map((f) => f.path);
+    try {
+      const resp = await fetch("/api/v1/files/orphaned", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths }),
+      });
+      if (!resp.ok) throw new Error("Failed to delete");
+      const result = await resp.json();
+      const count = result.deleted ? result.deleted.length : 0;
+      const errCount = result.errors ? result.errors.length : 0;
+      if (errCount > 0) {
+        this.showToast(`Deleted ${count}, ${errCount} errors`, "warning");
+      } else {
+        this.showToast(`Deleted ${count} files`, "success");
+      }
+      this.fetchOrphanedFiles();
+    } catch (err) {
+      this.showToast("Failed to delete files", "danger");
     }
   }
 }

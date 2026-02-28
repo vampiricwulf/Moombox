@@ -580,10 +580,6 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	}
 	header := string(headerBuf[:n])
 
-	// Replace messageCount and downloadedAt in header
-	import_regexp := false
-	_ = import_regexp
-
 	// Simple string replacement approach
 	updated := header
 	// Replace messageCount value

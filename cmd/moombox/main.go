@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"syscall"
@@ -41,9 +42,25 @@ import (
 )
 
 var (
-	version = "2.0.0"
-	commit  = "unknown"
+	version = "2.0.1"
+	commit  = ""
 )
+
+func init() {
+	if commit != "" {
+		return
+	}
+	// Resolve commit from Go build info (populated by `go build` in a git repo)
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && len(s.Value) >= 7 {
+				commit = s.Value[:7]
+				return
+			}
+		}
+	}
+	commit = "unknown"
+}
 
 var noTUIEnvRe = regexp.MustCompile(`^(?i:1|true|yes)$`)
 
@@ -170,7 +187,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	if !useTUI {
 		fmt.Println("Initializing database...")
 	}
-	db, err := database.Open(cfg.DatabasePath)
+	db, err := database.Open(cfg.DatabasePath, log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Startup error: Failed to open database: %v\n", err)
 		waitForKeypress()
@@ -285,6 +302,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		jar,
 		log,
 	)
+	// Wire auth verification callbacks so AutoCookieService can verify via real API
+	autoCookieSvc.VerifyYouTubeAuth = cookieRefresh.CheckYouTubeAuth
+	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms)
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
@@ -402,6 +422,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	})
 	routes.ChannelRoutes(r, cfg, func(c *config.MoomboxConfig) error {
 		return config.Save(c, configPath)
+	})
+	routes.FileRoutes(r, &routes.FileRoutesDeps{
+		DB:     db,
+		Cfg:    cfg,
+		Logger: log,
 	})
 	routes.TrimRoutes(r, db, trimSvc)
 	routes.PotRoutes(r, &routes.PotRoutesDeps{
@@ -719,6 +744,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		log.Debug("[CookieRefresh] No cookie file configured, skipping refresh service")
 	}
 
+	// Start auto-cookie periodic refresh if enabled and profile exists
+	if cfg.AutoCookies != nil && cfg.AutoCookies.Enabled {
+		if _, err := os.Stat(browserProfileDir); err == nil {
+			interval := time.Duration(cfg.AutoCookies.RefreshInterval.Minutes()) * time.Minute
+			if interval > 0 {
+				autoCookieSvc.StartPeriodicRefresh(ctx, interval)
+			}
+		}
+	}
+
 	// Start web server — wait for initial binding result before continuing.
 	// Matches TS: exits on web server failure in non-TUI mode.
 	webErrCh := make(chan error, 1)
@@ -862,6 +897,29 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			if err := trimSvc.DeleteTrim(jobID, trimID); err != nil {
 				log.Error("Failed to delete trim", slog.String("error", err.Error()))
 			}
+		}
+		app.OnListOrphans = func() ([]tui.OrphanedFileEntry, error) {
+			entries, err := worker.ScanOrphanedFiles(db, cfg)
+			if err != nil {
+				return nil, err
+			}
+			result := make([]tui.OrphanedFileEntry, len(entries))
+			for i, e := range entries {
+				result[i] = tui.OrphanedFileEntry{
+					Path:      e.Path,
+					RelPath:   e.RelPath,
+					Type:      e.Type,
+					Size:      e.Size,
+					Modified:  e.Modified,
+					JobID:     e.JobID,
+					JobTitle:  e.JobTitle,
+					JobStatus: e.JobStatus,
+				}
+			}
+			return result, nil
+		}
+		app.OnDeleteOrphan = func(path string) error {
+			return worker.DeleteOrphanedFile(path, cfg)
 		}
 		app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) {
 			if err := config.Save(updatedCfg, configPath); err != nil {

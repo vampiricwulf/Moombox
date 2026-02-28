@@ -166,8 +166,11 @@ func (l *Logger) openFile() error {
 }
 
 func (l *Logger) rotate() {
-	if l.file != nil {
-		l.file.Close()
+	oldFile := l.file
+	l.file = nil
+
+	if oldFile != nil {
+		oldFile.Close()
 	}
 
 	// Shift existing log files
@@ -184,8 +187,10 @@ func (l *Logger) rotate() {
 	excess := fmt.Sprintf("%s.%d", l.filePath, l.maxFiles+1)
 	os.Remove(excess)
 
-	// Open fresh file
-	l.openFile()
+	// Open fresh file — if this fails, log to stderr so we don't silently lose all logging
+	if err := l.openFile(); err != nil {
+		fmt.Fprintf(os.Stderr, "logger: rotation failed to open new log file: %v\n", err)
+	}
 }
 
 func (l *Logger) log(level slog.Level, msg string, args ...any) {
@@ -347,6 +352,9 @@ func (l *Logger) Subscribe() chan string {
 }
 
 // Unsubscribe removes a subscription channel.
+// The channel is not closed here to avoid a race with broadcast() which may
+// be concurrently sending to it. Instead, the channel is simply removed from
+// the list and left for GC.
 func (l *Logger) Unsubscribe(ch chan string) {
 	l.subMu.Lock()
 	defer l.subMu.Unlock()
@@ -354,7 +362,6 @@ func (l *Logger) Unsubscribe(ch chan string) {
 	for i, sub := range l.subscribers {
 		if sub == ch {
 			l.subscribers = append(l.subscribers[:i], l.subscribers[i+1:]...)
-			close(ch)
 			return
 		}
 	}

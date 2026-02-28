@@ -157,7 +157,9 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 	mpdBaseURL := mpd.BaseURL
 	if mpdBaseURL == "" && manifestURL != "" {
 		if u, err := url.Parse(manifestURL); err == nil {
-			u.Path = u.Path[:strings.LastIndex(u.Path, "/")+1]
+			if idx := strings.LastIndex(u.Path, "/"); idx >= 0 {
+				u.Path = u.Path[:idx+1]
+			}
 			// Preserve query string — YouTube uses it for token auth
 			mpdBaseURL = u.String()
 		}
@@ -197,7 +199,12 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 
 	// Parse itag from ID
 	if rep.ID != "" {
-		stream.Itag, _ = strconv.Atoi(rep.ID)
+		var err error
+		stream.Itag, err = strconv.Atoi(rep.ID)
+		if err != nil {
+			// Non-numeric representation ID — itag stays 0
+			stream.Itag = 0
+		}
 	}
 
 	// MimeType: representation > adaptation set

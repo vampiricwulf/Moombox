@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
@@ -66,6 +66,7 @@ type DownloadWorker struct {
 	streamProc   *StreamProcessor
 	notifier     *notifications.Manager
 	logger       Logger
+	wg           sync.WaitGroup // tracks in-flight processJob goroutines
 
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should be attempted.
 	// Returns true if cookies were refreshed successfully.
@@ -136,7 +137,11 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 			return // Context cancelled
 		}
 
-		go w.processJob(jobCtx, jobID)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.processJob(jobCtx, jobID)
+		}()
 	}
 }
 
@@ -298,20 +303,16 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 }
 
 // handleCancellation handles a cancelled/shutdown job.
-// User-initiated cancels update status to Cancelled and clean staging.
+// User-initiated cancels update status to Cancelled.
 // Shutdown cancels preserve original status so jobs resume on restart (matches TS).
 func (w *DownloadWorker) handleCancellation(job *database.Job, stagingDir string) {
 	if w.queue.WasCancelled(job.ID) {
-		// User-initiated cancel: update status, clean up, notify
+		// User-initiated cancel: update status, notify
 		w.logger.Info("job cancelled by user", "jobID", job.ID)
 
 		w.db.UpdateJobFields(job.ID, map[string]any{
 			"status": database.StatusCancelled,
 		})
-
-		if stagingDir != "" {
-			os.RemoveAll(stagingDir)
-		}
 
 		if w.notifier != nil {
 			w.notifier.Send("Download Cancelled",
@@ -536,12 +537,25 @@ func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	return data, resp.StatusCode, err
 }
 
-// Stop signals the worker to stop processing new jobs.
-// Active jobs will finish via context cancellation.
+// Stop signals the worker to stop processing new jobs and waits for in-flight
+// jobs to finish (up to 10 seconds) so downloads aren't interrupted mid-write.
 func (w *DownloadWorker) Stop() {
 	w.logger.Info("download worker stopping")
 	if w.streamProc != nil {
 		w.streamProc.Stop()
+	}
+
+	// Wait for in-flight jobs with a timeout
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		w.logger.Info("download worker: all in-flight jobs finished")
+	case <-time.After(10 * time.Second):
+		w.logger.Warn("download worker: timed out waiting for in-flight jobs")
 	}
 }
 

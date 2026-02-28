@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+// DrainBody reads and discards the remaining response body, then closes it.
+// This ensures the underlying TCP connection can be reused by the HTTP client pool.
+func DrainBody(resp *http.Response) {
+	if resp != nil && resp.Body != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
 // FetchWithTimeout performs an HTTP GET with a timeout.
 // IMPORTANT: The caller receives a cancel function that MUST be called after
 // the response body has been fully read. The timeout context is kept alive

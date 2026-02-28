@@ -65,6 +65,7 @@ func (a *Auth) ValidateToken(ctx context.Context) (bool, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
+		io.Copy(io.Discard, resp.Body)
 		return false, nil
 	}
 
@@ -73,7 +74,7 @@ func (a *Auth) ValidateToken(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("validate unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse response for login info
+	// Parse response for login info (body is consumed by Decode, no drain needed)
 	var result struct {
 		Login    string `json:"login"`
 		UserID   string `json:"user_id"`

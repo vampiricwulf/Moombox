@@ -58,8 +58,12 @@ func NewTwitchMonitor(cfg *config.MoomboxConfig, db *database.Database, tw *twit
 
 // Start begins the Twitch monitoring loop.
 func (tm *TwitchMonitor) Start(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
 	tm.mu.Lock()
+	if tm.cancel != nil {
+		tm.mu.Unlock()
+		return // Already running
+	}
+	ctx, cancel := context.WithCancel(ctx)
 	tm.cancel = cancel
 	tm.mu.Unlock()
 

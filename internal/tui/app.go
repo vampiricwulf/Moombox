@@ -67,6 +67,14 @@ type (
 		Filename string
 		Err      string
 	}
+	fetchOrphansResultMsg struct {
+		Files []OrphanedFileEntry
+		Err   string
+	}
+	deleteOrphanResultMsg struct {
+		Path string
+		Err  string
+	}
 )
 
 // App is the root BubbleTea model.
@@ -79,6 +87,7 @@ type App struct {
 	help      *HelpModel
 	addVideo  *AddVideoModel
 	trimDlg   *TrimDialogModel
+	filesDlg  *FilesDialogModel
 	setupWiz  *SetupWizardModel
 	settings  *SettingsModel
 
@@ -136,8 +145,10 @@ type App struct {
 	OnRestart        func()
 	OnHashPassword   func(password string) string
 	OnVerifyPassword func(password, hash string) bool
-	OnFetchFormats   func(videoID string) (*FormatsData, error) // optional: fetch formats via service
-	OnImportFile     func(path, title, channel string) (string, error) // optional: import zip, returns title
+	OnFetchFormats   func(videoID string) (*FormatsData, error)          // optional: fetch formats via service
+	OnImportFile     func(path, title, channel string) (string, error)  // optional: import zip, returns title
+	OnListOrphans    func() ([]OrphanedFileEntry, error)                // list orphaned files
+	OnDeleteOrphan   func(path string) error                            // delete orphaned file
 }
 
 // NewApp creates a new TUI application.
@@ -154,6 +165,7 @@ func NewApp() *App {
 		help:          NewHelpModel(),
 		addVideo:      NewAddVideoModel(),
 		trimDlg:       NewTrimDialogModel(),
+		filesDlg:      NewFilesDialogModel(),
 		setupWiz:      NewSetupWizardModel(),
 		settings:      NewSettingsModel(),
 		progressStore: ps,
@@ -478,6 +490,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setFeedback(fmt.Sprintf("Trim deleted: %s", msg.Filename))
 		return a, nil
 
+	case fetchOrphansResultMsg:
+		if msg.Err != "" {
+			a.filesDlg.SetError(msg.Err)
+		} else {
+			a.filesDlg.SetFiles(msg.Files)
+		}
+		return a, nil
+
+	case deleteOrphanResultMsg:
+		if msg.Err != "" {
+			a.filesDlg.SetError(msg.Err)
+		} else {
+			a.filesDlg.RemoveFile(msg.Path)
+			a.filesDlg.feedbackMsg = "Deleted"
+		}
+		return a, nil
+
 	case tea.KeyMsg:
 		return a.handleKey(msg)
 
@@ -603,6 +632,18 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	if a.filesDlg.IsVisible() {
+		action := a.filesDlg.HandleKey(key)
+		switch action {
+		case "refresh":
+			return a, a.fetchOrphansCmd()
+		case "delete":
+			if sel := a.filesDlg.SelectedFile(); sel != nil {
+				return a, a.deleteOrphanCmd(sel.Path)
+			}
+		}
+		return a, nil
+	}
 	if a.setupWiz.IsVisible() {
 		action := a.setupWiz.HandleKey(key)
 		if action == "complete" {
@@ -657,6 +698,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.settings.Open(a.cfg)
 		}
 		return a, nil
+	case "~":
+		a.filesDlg.SetSize(a.width, a.height)
+		a.filesDlg.Open()
+		return a, a.fetchOrphansCmd()
 	}
 
 	// Panel-specific keys
@@ -820,7 +865,7 @@ func (a *App) handleCancel() {
 }
 
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if a.settings.IsVisible() || a.help.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.setupWiz.IsVisible() {
+	if a.settings.IsVisible() || a.help.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.setupWiz.IsVisible() {
 		return a, nil
 	}
 
@@ -955,6 +1000,7 @@ func (a *App) recalcLayout() {
 	a.help.SetSize(a.width, a.height)
 	a.addVideo.SetSize(a.width, a.height)
 	a.trimDlg.SetSize(a.width, a.height)
+	a.filesDlg.SetSize(a.width, a.height)
 	a.setupWiz.SetSize(a.width, a.height)
 	a.settings.SetSize(a.width, a.height)
 
@@ -985,6 +1031,9 @@ func (a *App) View() string {
 	}
 	if a.trimDlg.IsVisible() {
 		return a.trimDlg.View()
+	}
+	if a.filesDlg.IsVisible() {
+		return a.filesDlg.View()
 	}
 
 	// Top row: task list + details
@@ -1232,6 +1281,31 @@ func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
 		}
 		a.OnDeleteTrim(jobID, trimID)
 		return deleteTrimResultMsg{TrimID: trimID, Filename: filename}
+	}
+}
+
+func (a *App) fetchOrphansCmd() tea.Cmd {
+	return func() tea.Msg {
+		if a.OnListOrphans == nil {
+			return fetchOrphansResultMsg{Err: "Not available"}
+		}
+		files, err := a.OnListOrphans()
+		if err != nil {
+			return fetchOrphansResultMsg{Err: err.Error()}
+		}
+		return fetchOrphansResultMsg{Files: files}
+	}
+}
+
+func (a *App) deleteOrphanCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		if a.OnDeleteOrphan == nil {
+			return deleteOrphanResultMsg{Path: path, Err: "Not available"}
+		}
+		if err := a.OnDeleteOrphan(path); err != nil {
+			return deleteOrphanResultMsg{Path: path, Err: err.Error()}
+		}
+		return deleteOrphanResultMsg{Path: path}
 	}
 }
 

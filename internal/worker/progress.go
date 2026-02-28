@@ -66,6 +66,10 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 		if p.Total > 0 {
 			pt.videoTotal = p.Total
 		}
+		// Total must never be smaller than the last downloaded segment
+		if pt.videoTotal > 0 && pt.videoTotal < pt.videoSeq {
+			pt.videoTotal = pt.videoSeq
+		}
 		// Track VOD chunked download progress
 		if p.TotalBytes > 0 {
 			pt.vodTotalBytes = p.TotalBytes
@@ -102,6 +106,10 @@ func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 		}
 		if p.Total > 0 {
 			pt.audioTotal = p.Total
+		}
+		// Total must never be smaller than the last downloaded segment
+		if pt.audioTotal > 0 && pt.audioTotal < pt.audioSeq {
+			pt.audioTotal = pt.audioSeq
 		}
 		pt.bytesTotal += p.Bytes - pt.lastAudioBytes
 		pt.lastAudioBytes = p.Bytes

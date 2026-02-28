@@ -22,6 +22,7 @@ var globalKeys = helpSection{
 	keys: []helpKey{
 		{"Tab", "Cycle focus: Tasks → Details → Logs"},
 		{"`", "Open settings panel"},
+		{"~", "Browse orphaned files"},
 		{"W", "Open web dashboard in browser"},
 		{"?", "Toggle this help overlay"},
 		{"Q / Ctrl+C", "Quit"},

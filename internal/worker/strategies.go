@@ -329,13 +329,25 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		dashCookieHeader = job.YT.GetCookieHeader()
 	}
 
+	// Use last downloaded sequence from DB as StartSeq fallback for crash recovery.
+	// The resume file (.resume.json) takes priority if it exists; StartSeq is only
+	// used when no resume file is found (e.g., after a crash without graceful shutdown).
+	videoStartSeq := 0
+	if job.Job.LastVideoSeq != nil && *job.Job.LastVideoSeq > 0 {
+		videoStartSeq = *job.Job.LastVideoSeq
+	}
+	audioStartSeq := 0
+	if job.Job.LastAudioSeq != nil && *job.Job.LastAudioSeq > 0 {
+		audioStartSeq = *job.Job.LastAudioSeq
+	}
+
 	if videoStream != nil {
 		result.HasVideo = true
 		result.VideoPath = filepath.Join(job.StagingDir, "video_stream")
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:          videoStream.BaseURL,
 			OutputFile:       result.VideoPath,
-			StartSeq:         0,
+			StartSeq:         videoStartSeq,
 			InitURL:          videoStream.Initialization,
 			PoToken:          dashPoToken,
 			CookieHeader:     dashCookieHeader,
@@ -357,7 +369,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:          audioStream.BaseURL,
 			OutputFile:       result.AudioPath,
-			StartSeq:         0,
+			StartSeq:         audioStartSeq,
 			InitURL:          audioStream.Initialization,
 			PoToken:          dashPoToken,
 			CookieHeader:     dashCookieHeader,

@@ -207,13 +207,7 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 		return fmt.Errorf("trim not found")
 	}
 
-	// Delete file — target.Filename is a relative path (e.g. "Channel/trim/id [30s-60s].mp4")
-	// Resolve absolute path from the source video's directory
-	trimDir := filepath.Join(filepath.Dir(job.OutputFile), "trim")
-	trimPath := filepath.Join(trimDir, filepath.Base(target.Filename))
-	os.Remove(trimPath) // Graceful: ignore if already deleted
-
-	// Delete DB record
+	// Delete DB record only — file stays on disk for orphaned files cleanup
 	if err := ts.db.DeleteTrim(trimID); err != nil {
 		return fmt.Errorf("delete trim record: %w", err)
 	}

@@ -1,6 +1,12 @@
 package database
 
-const schemaVersion = 1
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const schemaVersion = 3
 
 const createSchema = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -45,6 +51,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     chat_status TEXT,
     total_chat_messages INTEGER,
     chat_filename TEXT,
+    chat_file TEXT,
+    thumbnail_file TEXT,
+    description_file TEXT,
     twitch_quality TEXT,
     twitch_category TEXT,
     channel_avatar_url TEXT,
@@ -105,11 +114,88 @@ func (db *Database) migrate() error {
 	}
 
 	// Run incremental migrations if needed
-	if version < schemaVersion {
-		// Future migrations go here
-		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", schemaVersion)
-		return err
+	if version < 2 {
+		// Add chat_file column to store absolute chat file path
+		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN chat_file TEXT`); err != nil {
+			// Column may already exist if migration was partially applied
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return err
+			}
+		}
+
+		// Backfill: derive chat_file from output_file for existing jobs
+		rows, err := db.db.QueryContext(db.getCtx(),
+			`SELECT id, output_file, chat_filename FROM jobs WHERE output_file != '' AND chat_filename != '' AND (chat_file IS NULL OR chat_file = '')`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id, outputFile, chatFilename string
+				if err := rows.Scan(&id, &outputFile, &chatFilename); err != nil {
+					continue
+				}
+				// Chat file lives alongside the output file — replace video extension with .chat.json
+				ext := filepath.Ext(outputFile)
+				chatFile := strings.TrimSuffix(outputFile, ext) + ".chat.json"
+				db.db.ExecContext(db.getCtx(), `UPDATE jobs SET chat_file = ? WHERE id = ?`, chatFile, id)
+			}
+		}
+
+		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 2)
+		if err != nil {
+			return err
+		}
+	}
+
+	if version < 3 {
+		// Add thumbnail_file and description_file columns
+		for _, col := range []string{"thumbnail_file", "description_file"} {
+			if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN `+col+` TEXT`); err != nil {
+				if !strings.Contains(err.Error(), "duplicate column") {
+					return err
+				}
+			}
+		}
+
+		// Backfill: derive thumbnail_file and description_file from output_file
+		rows, err := db.db.QueryContext(db.getCtx(),
+			`SELECT id, output_file FROM jobs WHERE output_file != '' AND (thumbnail_file IS NULL OR thumbnail_file = '')`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id, outputFile string
+				if err := rows.Scan(&id, &outputFile); err != nil {
+					continue
+				}
+				ext := filepath.Ext(outputFile)
+				base := strings.TrimSuffix(outputFile, ext)
+
+				// Check which thumbnail extension exists on disk
+				for _, thumbExt := range []string{".jpg", ".webp", ".png"} {
+					thumbPath := base + thumbExt
+					if fileExists(thumbPath) {
+						db.db.ExecContext(db.getCtx(), `UPDATE jobs SET thumbnail_file = ? WHERE id = ?`, thumbPath, id)
+						break
+					}
+				}
+
+				// Check if description file exists
+				descPath := base + ".description"
+				if fileExists(descPath) {
+					db.db.ExecContext(db.getCtx(), `UPDATE jobs SET description_file = ? WHERE id = ?`, descPath, id)
+				}
+			}
+		}
+
+		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 3)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

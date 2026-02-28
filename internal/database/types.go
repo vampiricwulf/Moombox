@@ -57,6 +57,10 @@ type Job struct {
 	ChatStatus        string     `json:"chatStatus,omitempty"`
 	TotalChatMessages *int       `json:"totalChatMessages,omitempty"`
 	ChatFilename      string     `json:"chatFilename,omitempty"`
+	ChatFile          string     `json:"chatFile,omitempty"`
+	// Saved asset files (absolute paths)
+	ThumbnailFile     string     `json:"thumbnailFile,omitempty"`
+	DescriptionFile   string     `json:"descriptionFile,omitempty"`
 	// Gaps
 	Gaps              []Gap      `json:"gaps,omitempty"`
 	// Twitch

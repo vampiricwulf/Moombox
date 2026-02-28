@@ -42,6 +42,7 @@ func Defaults() *MoomboxConfig {
 			Enabled:           false,
 			BrowserProfileDir: "./browser-profile",
 			Platforms:         []string{},
+			RefreshInterval:   FlexDuration{Value: 360}, // 6 hours in minutes
 		},
 	}
 }

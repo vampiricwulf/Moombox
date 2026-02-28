@@ -276,10 +276,20 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	}
 
 	if err != nil {
-		o.cleanup(jobCtx, chatDl, chatDone)
 		if ctx.Err() != nil {
+			// Shutdown: stop chat but preserve staging dir for resume
+			if chatDl != nil {
+				chatDl.Stop()
+				if chatDone != nil {
+					select {
+					case <-chatDone:
+					case <-time.After(2 * time.Second):
+					}
+				}
+			}
 			return ctx.Err()
 		}
+		o.cleanup(jobCtx, chatDl, chatDone)
 		return fmt.Errorf("download: %w", err)
 	}
 
@@ -323,9 +333,8 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		})
 	}
 
-	// Check cancellation between download and mux
+	// Check cancellation between download and mux — preserve staging for resume
 	if ctx.Err() != nil {
-		os.RemoveAll(jobCtx.StagingDir)
 		return ctx.Err()
 	}
 
@@ -346,9 +355,6 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// Mux and finalize (B5: includes ffprobe metadata)
 	if err := o.muxAndFinalize(ctx, jobCtx, result); err != nil {
 		if ctx.Err() != nil {
-			outputFile := filepath.Join(jobCtx.OutputDir, jobCtx.Filename+".mp4")
-			os.Remove(outputFile)
-			os.RemoveAll(jobCtx.StagingDir)
 			return ctx.Err()
 		}
 		return err
@@ -681,7 +687,6 @@ func (o *DownloadOrchestrator) cleanup(jobCtx *JobContext, chatDl *chat.ChatDown
 			}
 		}
 	}
-	os.RemoveAll(jobCtx.StagingDir)
 }
 
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
@@ -861,6 +866,8 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		descPath := filepath.Join(outputDir, filenameBase+".description")
 		if err := os.WriteFile(descPath, []byte(jobCtx.Job.Description), 0o644); err != nil {
 			o.logger.Warn("failed to save description", "err", err)
+		} else {
+			updates["description_file"] = descPath
 		}
 	}
 
@@ -873,6 +880,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 			if data, err := os.ReadFile(stagingThumb); err == nil {
 				if err := os.WriteFile(thumbDst, data, 0o644); err == nil {
 					thumbnailSaved = true
+					updates["thumbnail_file"] = thumbDst
 				}
 			}
 			break
@@ -886,6 +894,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 			thumbDst := filepath.Join(outputDir, filenameBase+".jpg")
 			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000) == nil {
 				thumbnailSaved = true
+				updates["thumbnail_file"] = thumbDst
 				break
 			}
 		}
@@ -902,7 +911,9 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 				ext = ".webp"
 			}
 			thumbDst := filepath.Join(outputDir, filenameBase+ext)
-			DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000)
+			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000) == nil {
+				updates["thumbnail_file"] = thumbDst
+			}
 		}
 	}
 
@@ -1006,9 +1017,6 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 			},
 		)
 	}
-
-	// Cleanup staging
-	os.RemoveAll(jobCtx.StagingDir)
 
 	o.logger.Info("download complete", "jobID", jobCtx.Job.ID, "output", outputFile)
 	return nil
@@ -1216,10 +1224,10 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	tracker.Finalize()
 
 	if ctx.Err() != nil {
+		// Shutdown: stop chat but preserve staging dir for resume
 		if twitchChatDl != nil {
 			twitchChatDl.Stop()
 		}
-		os.RemoveAll(jobCtx.StagingDir)
 		return ctx.Err()
 	}
 

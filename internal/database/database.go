@@ -13,12 +13,21 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// dbLogger is the interface for database error logging.
+type dbLogger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
+
 // Database provides SQLite-backed persistence for Moombox.
 type Database struct {
 	db     *sql.DB
 	ctx    context.Context // Optional context for query cancellation
 	mu     sync.RWMutex
 	closed bool
+	logger dbLogger
 
 	// Batch update coalescing
 	updateCh   chan *Job
@@ -47,7 +56,8 @@ func (db *Database) getCtx() context.Context {
 }
 
 // Open creates or opens a SQLite database at the given path.
-func Open(dbPath string) (*Database, error) {
+// The logger parameter is optional; if nil, database errors will be silently dropped.
+func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", dbPath)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -63,6 +73,9 @@ func Open(dbPath string) (*Database, error) {
 		updateCh:  make(chan *Job, 100),
 		batchDone: make(chan struct{}),
 		jobLogs:   make(map[string][]string),
+	}
+	if len(logger) > 0 && logger[0] != nil {
+		db.logger = logger[0]
 	}
 
 	// Run migrations
@@ -92,7 +105,8 @@ func (db *Database) prepareStatements() error {
 		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
 		length_seconds, download_started_at, thumbnail_url, description, output_file,
 		filename, output_directory, video_width, video_height, video_fps, file_size,
-		chat_status, total_chat_messages, chat_filename, twitch_quality, twitch_category,
+		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
+		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at
 		FROM jobs WHERE id = ?`)
@@ -137,24 +151,38 @@ func (db *Database) flushUpdates(pending map[string]*Job) {
 
 	tx, err := db.db.BeginTx(db.getCtx(), nil)
 	if err != nil {
+		if db.logger != nil {
+			db.logger.Error("database batch flush: failed to begin transaction", "err", err)
+		}
 		return
 	}
 
-	for _, job := range pending {
-		_ = updateJobInTx(db.getCtx(), tx, job)
+	// Track which jobs were successfully persisted
+	persisted := make(map[string]*Job, len(pending))
+	for id, job := range pending {
+		if err := updateJobInTx(db.getCtx(), tx, job); err != nil {
+			if db.logger != nil {
+				db.logger.Error("database batch flush: failed to update job", "jobID", id, "err", err)
+			}
+		} else {
+			persisted[id] = job
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		tx.Rollback()
+		if db.logger != nil {
+			db.logger.Error("database batch flush: commit failed", "err", err, "jobs", len(pending))
+		}
 		return
 	}
 
-	// Notify subscribers
+	// Only notify subscribers for jobs that were successfully persisted
 	db.subMu.RLock()
-	for _, job := range pending {
+	for _, job := range persisted {
 		for _, fn := range db.onJobUpdate {
 			if fn != nil {
-				fn(job)
+				db.safeCallJobUpdate(fn, job)
 			}
 		}
 	}
@@ -176,11 +204,12 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 		status, progress, percent, eta, speed, error, created_at, updated_at,
 		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
 		length_seconds, download_started_at, thumbnail_url, description, output_file,
-		filename, output_directory, chat_status, total_chat_messages, chat_filename,
+		filename, output_directory, chat_status, total_chat_messages, chat_filename, chat_file,
+		thumbnail_file, description_file,
 		twitch_quality, twitch_category, channel_avatar_url,
 		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 		job.CreatedAt, job.UpdatedAt,
@@ -188,7 +217,8 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 		job.StreamStartTime, job.StreamEndTime,
 		job.LengthSeconds, job.DownloadStartedAt, job.ThumbnailURL, job.Description,
 		job.OutputFile, job.Filename, job.OutputDirectory,
-		job.ChatStatus, job.TotalChatMessages, job.ChatFilename,
+		job.ChatStatus, job.TotalChatMessages, job.ChatFilename, job.ChatFile,
+		job.ThumbnailFile, job.DescriptionFile,
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt)
@@ -260,7 +290,8 @@ func (db *Database) GetAllJobs(includeArchived bool) ([]*Job, error) {
 		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
 		length_seconds, download_started_at, thumbnail_url, description, output_file,
 		filename, output_directory, video_width, video_height, video_fps, file_size,
-		chat_status, total_chat_messages, chat_filename, twitch_quality, twitch_category,
+		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
+		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at
 		FROM jobs ORDER BY updated_at DESC`
@@ -291,7 +322,9 @@ func (db *Database) UpdateJob(job *Job) {
 	default:
 		// Channel full, do synchronous update
 		db.mu.Lock()
-		updateJobDirect(db.getCtx(), db.db, job)
+		if err := updateJobDirect(db.getCtx(), db.db, job); err != nil && db.logger != nil {
+			db.logger.Error("database sync update fallback failed", "jobID", job.ID, "err", err)
+		}
 		db.mu.Unlock()
 	}
 }
@@ -314,7 +347,8 @@ func updateJobDirect(ctx context.Context, db *sql.DB, job *Job) error {
 		stream_end_time=?, length_seconds=?, download_started_at=?,
 		thumbnail_url=?, description=?, output_file=?, filename=?,
 		output_directory=?, video_width=?, video_height=?, video_fps=?, file_size=?,
-		chat_status=?, total_chat_messages=?, chat_filename=?,
+		chat_status=?, total_chat_messages=?, chat_filename=?, chat_file=?,
+		thumbnail_file=?, description_file=?,
 		twitch_quality=?, twitch_category=?, channel_avatar_url=?,
 		selected_video_itag=?, selected_audio_itag=?, start_time=?, end_time=?,
 		last_recheck_at=?
@@ -326,7 +360,8 @@ func updateJobDirect(ctx context.Context, db *sql.DB, job *Job) error {
 		job.StreamStartTime, job.StreamEndTime, job.LengthSeconds, job.DownloadStartedAt,
 		job.ThumbnailURL, job.Description, job.OutputFile, job.Filename,
 		job.OutputDirectory, job.VideoWidth, job.VideoHeight, job.VideoFps, job.FileSize,
-		job.ChatStatus, job.TotalChatMessages, job.ChatFilename,
+		job.ChatStatus, job.TotalChatMessages, job.ChatFilename, job.ChatFile,
+		job.ThumbnailFile, job.DescriptionFile,
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt,
@@ -343,7 +378,8 @@ func updateJobInTx(ctx context.Context, tx *sql.Tx, job *Job) error {
 		stream_end_time=?, length_seconds=?, download_started_at=?,
 		thumbnail_url=?, description=?, output_file=?, filename=?,
 		output_directory=?, video_width=?, video_height=?, video_fps=?, file_size=?,
-		chat_status=?, total_chat_messages=?, chat_filename=?,
+		chat_status=?, total_chat_messages=?, chat_filename=?, chat_file=?,
+		thumbnail_file=?, description_file=?,
 		twitch_quality=?, twitch_category=?, channel_avatar_url=?,
 		selected_video_itag=?, selected_audio_itag=?, start_time=?, end_time=?,
 		last_recheck_at=?
@@ -355,7 +391,8 @@ func updateJobInTx(ctx context.Context, tx *sql.Tx, job *Job) error {
 		job.StreamStartTime, job.StreamEndTime, job.LengthSeconds, job.DownloadStartedAt,
 		job.ThumbnailURL, job.Description, job.OutputFile, job.Filename,
 		job.OutputDirectory, job.VideoWidth, job.VideoHeight, job.VideoFps, job.FileSize,
-		job.ChatStatus, job.TotalChatMessages, job.ChatFilename,
+		job.ChatStatus, job.TotalChatMessages, job.ChatFilename, job.ChatFile,
+		job.ThumbnailFile, job.DescriptionFile,
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt,
@@ -539,18 +576,20 @@ func (db *Database) ImportFromJSON(path string) error {
 			status, progress, percent, eta, speed, error, created_at, updated_at,
 			is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
 			length_seconds, download_started_at, thumbnail_url, description, output_file,
-			filename, output_directory, chat_status, total_chat_messages, chat_filename,
+			filename, output_directory, chat_status, total_chat_messages, chat_filename, chat_file,
+			thumbnail_file, description_file,
 			twitch_quality, twitch_category, channel_avatar_url,
 			selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 			job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 			job.CreatedAt, job.UpdatedAt,
 			boolToInt(job.IsVod), boolToInt(job.ManuallyAdded), boolToInt(job.AllowNonStream),
 			job.StreamStartTime, job.StreamEndTime, job.LengthSeconds, job.DownloadStartedAt,
 			job.ThumbnailURL, job.Description, job.OutputFile, job.Filename, job.OutputDirectory,
-			job.ChatStatus, job.TotalChatMessages, job.ChatFilename,
+			job.ChatStatus, job.TotalChatMessages, job.ChatFilename, job.ChatFile,
+			job.ThumbnailFile, job.DescriptionFile,
 			job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 			job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 			job.LastRecheckAt)
@@ -627,7 +666,7 @@ func (db *Database) notifyJobsChange() {
 	jobs, _ := db.getAllJobsUnlocked()
 	for _, fn := range db.onJobsChange {
 		if fn != nil {
-			fn(jobs)
+			db.safeCallJobsChange(fn, jobs)
 		}
 	}
 }
@@ -641,7 +680,8 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
 		length_seconds, download_started_at, thumbnail_url, description, output_file,
 		filename, output_directory, video_width, video_height, video_fps, file_size,
-		chat_status, total_chat_messages, chat_filename, twitch_quality, twitch_category,
+		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
+		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at
 		FROM jobs ORDER BY updated_at DESC`
@@ -701,6 +741,9 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		"total_chat_messages": "total_chat_messages",
 		"chat_status":         "chat_status",
 		"chat_filename":       "chat_filename",
+		"chat_file":           "chat_file",
+		"thumbnail_file":      "thumbnail_file",
+		"description_file":    "description_file",
 		"is_vod":              "is_vod",
 		"video_width":         "video_width",
 		"video_height":        "video_height",
@@ -744,7 +787,8 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
 		length_seconds, download_started_at, thumbnail_url, description, output_file,
 		filename, output_directory, video_width, video_height, video_fps, file_size,
-		chat_status, total_chat_messages, chat_filename, twitch_quality, twitch_category,
+		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
+		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
 		last_recheck_at
 		FROM jobs WHERE id = ?`, id)
@@ -756,7 +800,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 	db.subMu.RLock()
 	for _, fn := range db.onJobUpdate {
 		if fn != nil {
-			fn(job)
+			db.safeCallJobUpdate(fn, job)
 		}
 	}
 	db.subMu.RUnlock()
@@ -876,6 +920,27 @@ func (db *Database) Close() error {
 	return db.db.Close()
 }
 
+// safeCallJobUpdate calls a subscriber callback, recovering from panics so
+// one misbehaving subscriber can't prevent others from being notified.
+func (db *Database) safeCallJobUpdate(fn func(*Job), job *Job) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("database subscriber panic on job update", "jobID", job.ID, "panic", r)
+		}
+	}()
+	fn(job)
+}
+
+// safeCallJobsChange calls a jobs-change subscriber callback with panic recovery.
+func (db *Database) safeCallJobsChange(fn func([]*Job), jobs []*Job) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("database subscriber panic on jobs change", "panic", r)
+		}
+	}()
+	fn(jobs)
+}
+
 // Helper functions
 
 func boolToInt(b bool) int {
@@ -897,7 +962,8 @@ func scanJob(row *sql.Row) (*Job, error) {
 		&j.LengthSeconds, &j.DownloadStartedAt, &j.ThumbnailURL, &j.Description,
 		&j.OutputFile, &j.Filename, &j.OutputDirectory,
 		&j.VideoWidth, &j.VideoHeight, &j.VideoFps, &j.FileSize,
-		&j.ChatStatus, &j.TotalChatMessages, &j.ChatFilename,
+		&j.ChatStatus, &j.TotalChatMessages, &j.ChatFilename, &j.ChatFile,
+		&j.ThumbnailFile, &j.DescriptionFile,
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt,
@@ -923,7 +989,8 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 		&j.LengthSeconds, &j.DownloadStartedAt, &j.ThumbnailURL, &j.Description,
 		&j.OutputFile, &j.Filename, &j.OutputDirectory,
 		&j.VideoWidth, &j.VideoHeight, &j.VideoFps, &j.FileSize,
-		&j.ChatStatus, &j.TotalChatMessages, &j.ChatFilename,
+		&j.ChatStatus, &j.TotalChatMessages, &j.ChatFilename, &j.ChatFile,
+		&j.ThumbnailFile, &j.DescriptionFile,
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt,

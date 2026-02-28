@@ -185,12 +185,30 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		}
 	}
 
+	// DB-level fallback: no resume file but StartSeq > 0 means the database has
+	// a last-downloaded sequence from a previous session. Use the output file's
+	// current size as the byte position. This is a best-effort recovery for cases
+	// where the resume file was lost (e.g., crash without graceful shutdown).
+	if !resuming && d.currentSeq > 0 && !d.opts.IsHls {
+		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
+			d.bytesWritten = info.Size()
+			d.currentSeq++ // StartSeq is the last downloaded; advance to the next
+			resuming = true
+			d.logger.Info("[Downloader] Resuming from database state (no resume file)",
+				"seq", d.currentSeq, "fileSize", info.Size())
+		} else {
+			// Output file missing — can't resume, start fresh from segment 0
+			d.logger.Info("[Downloader] No output file for resume, starting fresh")
+			d.currentSeq = 0
+		}
+	}
+
 	// Open output file
 	flags := os.O_CREATE | os.O_WRONLY
 	if resuming {
 		flags |= os.O_APPEND
-		// Truncate to known good size
-		if state.BytesWritten > 0 {
+		// Truncate to known good size (only when we have a precise byte position from resume file)
+		if state != nil && state.BytesWritten > 0 {
 			if info, err := os.Stat(d.opts.OutputFile); err == nil && info.Size() > state.BytesWritten {
 				d.logger.Info("[Downloader] Truncating file for resume",
 					"from", info.Size(), "to", state.BytesWritten)
@@ -387,9 +405,12 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 			return nil, status, err
 		}
 
-		// Retry on 5xx or network errors with exponential backoff
+		// Retry on 5xx or network errors with exponential backoff (capped at 60s)
 		if status >= 500 || status == 0 {
 			delay := time.Duration(1<<uint(attempt)) * time.Second
+			if delay > 60*time.Second {
+				delay = 60 * time.Second
+			}
 			sleepCtx(ctx, delay)
 			continue
 		}
@@ -503,10 +524,20 @@ func truncateURL(u string, maxLen int) string {
 
 // runDashLoop is the main DASH download loop.
 func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
-	// Save resume state on exit; only clear on clean completion
+	// Save resume state on exit; only clear on clean stream completion.
+	// On shutdown (context cancel) or user cancel, keep the resume file
+	// so the download can continue where it left off on restart.
 	defer func() {
+		// Emit final progress so the UI reflects the definitive last state
+		if d.OnProgress != nil && d.currentSeq > 0 {
+			d.OnProgress(DownloadProgress{
+				Seq:     d.currentSeq - 1,
+				Bytes:   d.bytesWritten,
+				HeadSeq: d.headSeq,
+			})
+		}
 		d.saveResume()
-		if !d.isCancelled() && !d.streamEnded {
+		if d.streamEnded {
 			d.ClearResume()
 		}
 	}()
@@ -700,6 +731,15 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 
 // runHlsLoop is the main HLS download loop.
 func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
+	// Save resume state on exit so interrupted downloads can continue on restart.
+	// Only clear the resume file when the stream ends naturally.
+	defer func() {
+		d.saveResume()
+		if d.streamEnded {
+			d.ClearResume()
+		}
+	}()
+
 	staleCount := 0
 	consecutiveErrors := 0
 
@@ -785,7 +825,10 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				segFailed = true
 				break
 			}
-			n, _ := d.outputFile.Write(segData)
+			n, writeErr := d.outputFile.Write(segData)
+			if writeErr != nil {
+				return fmt.Errorf("write HLS segment %d: %w", d.currentSeq, writeErr)
+			}
 			d.bytesWritten += int64(n)
 			d.currentSeq++
 			d.lastSegTime = time.Now()
@@ -836,53 +879,66 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 }
 
 // runHlsVodParallel downloads all VOD HLS segments in parallel with bounded concurrency.
+// Uses a worker pool pattern: ParallelDownloads workers pull from a work channel,
+// avoiding N goroutines sitting in memory for large VODs.
 func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlaylist) error {
 	totalSegs := len(pl.Segments)
 	if totalSegs == 0 {
 		return nil
 	}
 
+	type segWork struct {
+		idx    int
+		segURL string
+	}
 	type segResult struct {
 		idx  int
 		data []byte
 	}
 
-	sem := make(chan struct{}, ParallelDownloads)
+	work := make(chan segWork, ParallelDownloads)
 	results := make(chan segResult, ParallelDownloads*3)
 	var wg sync.WaitGroup
 
-	// Launch downloads
-	for i, seg := range pl.Segments {
-		if d.isCancelled() || ctx.Err() != nil {
-			break
-		}
-
+	// Spawn fixed worker pool
+	for w := 0; w < ParallelDownloads; w++ {
 		wg.Add(1)
-		i := i
-		segURL := seg.URL
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			for attempt := 0; attempt < MaxSegmentRetries; attempt++ {
+			for item := range work {
 				if d.isCancelled() || ctx.Err() != nil {
-					return
+					continue // drain channel
 				}
-				data, status, err := d.fetchSegment(ctx, segURL)
-				if err == nil && status < 400 {
-					results <- segResult{idx: i, data: data}
-					return
+				for attempt := 0; attempt < MaxSegmentRetries; attempt++ {
+					if d.isCancelled() || ctx.Err() != nil {
+						break
+					}
+					data, status, err := d.fetchSegment(ctx, item.segURL)
+					if err == nil && status < 400 {
+						results <- segResult{idx: item.idx, data: data}
+						break
+					}
+					if status == 403 || status == 410 {
+						break
+					}
+					sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
 				}
-				if status == 403 || status == 410 {
-					return
-				}
-				sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
 			}
 		}()
 	}
 
-	// Close results when all done
+	// Feed work to workers
+	go func() {
+		for i, seg := range pl.Segments {
+			if d.isCancelled() || ctx.Err() != nil {
+				break
+			}
+			work <- segWork{idx: i, segURL: seg.URL}
+		}
+		close(work)
+	}()
+
+	// Close results when all workers done
 	go func() {
 		wg.Wait()
 		close(results)
@@ -935,7 +991,10 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				d.OnGap(DownloadGap{From: gapStart, To: nextIdx})
 				gapStart = -1
 			}
-			n, _ := d.outputFile.Write(data)
+			n, writeErr := d.outputFile.Write(data)
+			if writeErr != nil {
+				d.logger.Warn("[Downloader] Write error during HLS VOD gap flush", "segment", nextIdx, "error", writeErr)
+			}
 			d.bytesWritten += int64(n)
 			d.currentSeq++
 			delete(buffer, nextIdx)
@@ -978,48 +1037,59 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		})
 	}
 
+	type segWork struct {
+		seq int
+	}
 	type segResult struct {
 		seq  int
 		data []byte
 	}
 
 	bufferCap := ParallelDownloads * 3
-	sem := make(chan struct{}, ParallelDownloads)
+	work := make(chan segWork, ParallelDownloads)
 	results := make(chan segResult, bufferCap)
 	var wg sync.WaitGroup
 
-	// Launch downloads
-	for seq := d.currentSeq; seq <= targetSeq; seq++ {
-		if d.isCancelled() || ctx.Err() != nil {
-			break
-		}
-
+	// Spawn fixed worker pool
+	for w := 0; w < ParallelDownloads; w++ {
 		wg.Add(1)
-		seq := seq
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			segURL := d.buildSegmentURL(seq)
-			for attempt := 0; attempt < MaxSegmentRetries; attempt++ {
+			for item := range work {
 				if d.isCancelled() || ctx.Err() != nil {
-					return
+					continue // drain channel
 				}
-				data, status, err := d.fetchSegment(ctx, segURL)
-				if err == nil && status < 400 {
-					results <- segResult{seq: seq, data: data}
-					return
+				segURL := d.buildSegmentURL(item.seq)
+				for attempt := 0; attempt < MaxSegmentRetries; attempt++ {
+					if d.isCancelled() || ctx.Err() != nil {
+						break
+					}
+					data, status, err := d.fetchSegment(ctx, segURL)
+					if err == nil && status < 400 {
+						results <- segResult{seq: item.seq, data: data}
+						break
+					}
+					if status == 403 || status == 410 {
+						break // Segment gone permanently
+					}
+					sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
 				}
-				if status == 403 || status == 410 {
-					return // Segment gone permanently
-				}
-				sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
 			}
 		}()
 	}
 
-	// Close results when all downloads complete
+	// Feed work to workers
+	go func() {
+		for seq := d.currentSeq; seq <= targetSeq; seq++ {
+			if d.isCancelled() || ctx.Err() != nil {
+				break
+			}
+			work <- segWork{seq: seq}
+		}
+		close(work)
+	}()
+
+	// Close results when all workers complete
 	go func() {
 		wg.Wait()
 		close(results)
@@ -1090,7 +1160,10 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				d.OnGap(DownloadGap{From: catchupGapStart, To: nextSeq})
 				catchupGapStart = -1
 			}
-			n, _ := d.outputFile.Write(buffer[nextSeq])
+			n, writeErr := d.outputFile.Write(buffer[nextSeq])
+			if writeErr != nil {
+				d.logger.Warn("[Downloader] Write error during catch-up gap flush", "segment", nextSeq, "error", writeErr)
+			}
 			d.bytesWritten += int64(n)
 			delete(buffer, nextSeq)
 		} else {
@@ -1236,9 +1309,12 @@ func (d *SegmentDownloader) saveResume() {
 	}
 	tmpFile := d.opts.ResumeFile + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
+		d.logger.Warn("[Downloader] Failed to write resume file", "file", tmpFile, "error", err)
 		return
 	}
-	os.Rename(tmpFile, d.opts.ResumeFile)
+	if err := os.Rename(tmpFile, d.opts.ResumeFile); err != nil {
+		d.logger.Warn("[Downloader] Failed to rename resume file", "from", tmpFile, "to", d.opts.ResumeFile, "error", err)
+	}
 }
 
 // ClearResume removes the resume state file.
