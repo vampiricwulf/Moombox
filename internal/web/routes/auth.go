@@ -32,9 +32,9 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		authenticated := deps.Auth.ValidateSession(sessionToken)
 
 		jsonResponse(rw, map[string]any{
-			"authRequired":  web.IsAuthRequired(deps.Cfg.NetworkAccess, deps.Cfg.PasswordHash),
+			"authRequired":  web.IsAuthRequired(deps.Cfg.Network.NetworkAccess, deps.Cfg.Network.PasswordHash),
 			"authenticated": authenticated,
-			"hasPassword":   deps.Cfg.PasswordHash != "",
+			"hasPassword":   deps.Cfg.Network.PasswordHash != "",
 		})
 	})
 
@@ -57,12 +57,12 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			return
 		}
 
-		if deps.Cfg.PasswordHash == "" {
+		if deps.Cfg.Network.PasswordHash == "" {
 			jsonError(rw, "No password is set", http.StatusBadRequest)
 			return
 		}
 
-		if !deps.Auth.VerifyPassword(body.Password, deps.Cfg.PasswordHash) {
+		if !deps.Auth.VerifyPassword(body.Password, deps.Cfg.Network.PasswordHash) {
 			if deps.Logger != nil {
 				deps.Logger.Warn("[Auth] Failed login attempt from " + extractClientIP(req))
 			}
@@ -132,8 +132,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		}
 
 		// If password exists, verify current password
-		if deps.Cfg.PasswordHash != "" {
-			if !deps.Auth.VerifyPassword(body.CurrentPassword, deps.Cfg.PasswordHash) {
+		if deps.Cfg.Network.PasswordHash != "" {
+			if !deps.Auth.VerifyPassword(body.CurrentPassword, deps.Cfg.Network.PasswordHash) {
 				jsonError(rw, "Current password is incorrect", http.StatusUnauthorized)
 				return
 			}
@@ -146,7 +146,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			return
 		}
 
-		deps.Cfg.PasswordHash = hash
+		deps.Cfg.Network.PasswordHash = hash
 
 		// Save config
 		if deps.SaveConfig != nil {
@@ -198,18 +198,18 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			return
 		}
 
-		if deps.Cfg.PasswordHash == "" {
+		if deps.Cfg.Network.PasswordHash == "" {
 			jsonError(rw, "No password is set", http.StatusBadRequest)
 			return
 		}
 
-		if !deps.Auth.VerifyPassword(body.CurrentPassword, deps.Cfg.PasswordHash) {
+		if !deps.Auth.VerifyPassword(body.CurrentPassword, deps.Cfg.Network.PasswordHash) {
 			jsonError(rw, "Current password is incorrect", http.StatusUnauthorized)
 			return
 		}
 
-		deps.Cfg.PasswordHash = ""
-		deps.Cfg.NetworkAccess = "localhost" // Reset to safe default
+		deps.Cfg.Network.PasswordHash = ""
+		deps.Cfg.Network.NetworkAccess = "localhost" // Reset to safe default
 
 		if deps.SaveConfig != nil {
 			if err := deps.SaveConfig(deps.Cfg); err != nil {
@@ -237,7 +237,7 @@ func AuthMiddleware(cfg *config.MoomboxConfig, auth *web.AuthService) func(http.
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 			// Skip auth check if not required
-			if !web.IsAuthRequired(cfg.NetworkAccess, cfg.PasswordHash) {
+			if !web.IsAuthRequired(cfg.Network.NetworkAccess, cfg.Network.PasswordHash) {
 				next.ServeHTTP(rw, req)
 				return
 			}

@@ -105,7 +105,7 @@ func (fm *FeedMonitor) CheckNow(ctx context.Context) {
 }
 
 func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
-	intervalMin := fm.cfg.FeedCheckInterval.Value
+	intervalMin := fm.cfg.Monitors.FeedCheckInterval.Value
 	if intervalMin <= 0 {
 		intervalMin = 10 // default 10 minutes
 	}
@@ -244,8 +244,8 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 	maxItems := defaultMaxFeedItems
 	if ch.MaxFeedItems != nil && *ch.MaxFeedItems > 0 {
 		maxItems = *ch.MaxFeedItems
-	} else if fm.cfg.MaxFeedItems > 0 {
-		maxItems = fm.cfg.MaxFeedItems
+	} else if fm.cfg.Monitors.MaxFeedItems > 0 {
+		maxItems = fm.cfg.Monitors.MaxFeedItems
 	}
 
 	entries := feed.Entries

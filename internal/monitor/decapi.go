@@ -166,8 +166,8 @@ func (dm *DecapiMonitor) calculateInterval(channelCount int) time.Duration {
 	interval := time.Duration(dynamicSec) * time.Second
 
 	// Config override
-	if dm.cfg.DecapiCheckInterval != nil && *dm.cfg.DecapiCheckInterval >= 15 {
-		interval = time.Duration(*dm.cfg.DecapiCheckInterval) * time.Second
+	if dm.cfg.Monitors.DecapiCheckInterval != nil && *dm.cfg.Monitors.DecapiCheckInterval >= 15 {
+		interval = time.Duration(*dm.cfg.Monitors.DecapiCheckInterval) * time.Second
 	}
 
 	// Floor

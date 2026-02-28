@@ -354,9 +354,21 @@
                 <div class="settings-container">
                     <div class="settings-menu">
                         <sl-menu id="settings-nav">
-                            <sl-menu-item value="general" aria-current="page">
-                                <sl-icon slot="prefix" name="gear"></sl-icon>
-                                General
+                            <sl-menu-item value="network" aria-current="page">
+                                <sl-icon slot="prefix" name="globe"></sl-icon>
+                                Network
+                            </sl-menu-item>
+                            <sl-menu-item value="paths">
+                                <sl-icon slot="prefix" name="folder2"></sl-icon>
+                                Paths
+                            </sl-menu-item>
+                            <sl-menu-item value="logs">
+                                <sl-icon slot="prefix" name="journal-text"></sl-icon>
+                                Logs
+                            </sl-menu-item>
+                            <sl-menu-item value="monitors">
+                                <sl-icon slot="prefix" name="eye"></sl-icon>
+                                Monitors
                             </sl-menu-item>
                             <sl-menu-item value="downloader">
                                 <sl-icon
@@ -365,20 +377,16 @@
                                 ></sl-icon>
                                 Downloader
                             </sl-menu-item>
+                            <sl-menu-item value="cookies">
+                                <sl-icon slot="prefix" name="key"></sl-icon>
+                                Cookies
+                            </sl-menu-item>
                             <sl-menu-item value="channels">
                                 <sl-icon
                                     slot="prefix"
                                     name="broadcast"
                                 ></sl-icon>
                                 Channels
-                            </sl-menu-item>
-                            <sl-menu-item value="notifications">
-                                <sl-icon slot="prefix" name="bell"></sl-icon>
-                                Notifications
-                            </sl-menu-item>
-                            <sl-menu-item value="security">
-                                <sl-icon slot="prefix" name="shield-lock"></sl-icon>
-                                Security
                             </sl-menu-item>
                             <sl-menu-item value="integrations">
                                 <sl-icon slot="prefix" name="plug"></sl-icon>
@@ -389,8 +397,9 @@
 
                     <div class="settings-content">
                         <!-- General Settings -->
-                        <div id="settings-general" class="settings-section">
-                            <h3>General Settings</h3>
+                        <!-- Network Settings -->
+                        <div id="settings-network" class="settings-section">
+                            <h3>Network</h3>
                             <sl-input
                                 id="cfg-port"
                                 type="number"
@@ -409,8 +418,121 @@
                             </sl-select>
                             <sl-alert id="cfg-external-warning" variant="warning" open style="display: none; margin-bottom: 1em;">
                                 <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                                <strong>Use at your own risk.</strong> External access requires a password (set one in Settings &rarr; Security). All external connections must authenticate. LAN and loopback connections are always allowed without a password.
+                                <strong>Use at your own risk.</strong> External access requires a password. All external connections must authenticate. LAN and loopback connections are always allowed without a password.
                             </sl-alert>
+                            <sl-switch id="cfg-https-enabled">
+                                Enable HTTPS
+                                <span slot="help-text">Serve the dashboard over HTTPS. Requires TLS certificate and key files.</span>
+                            </sl-switch>
+                            <sl-input
+                                id="cfg-tls-cert-path"
+                                label="TLS Certificate Path"
+                                placeholder="./cert.pem"
+                                help-text="Path to TLS certificate file (PEM format)"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-tls-key-path"
+                                label="TLS Key Path"
+                                placeholder="./key.pem"
+                                help-text="Path to TLS private key file (PEM format)"
+                            ></sl-input>
+
+                            <sl-divider></sl-divider>
+                            <h4>Password</h4>
+                            <p class="settings-help">
+                                A password is required to enable external network access. Loopback and LAN connections are never challenged.
+                            </p>
+
+                            <div id="security-status" style="margin-bottom: 1em;">
+                                <sl-badge id="security-password-badge" variant="neutral">Checking...</sl-badge>
+                            </div>
+
+                            <div id="security-set-password-form">
+                                <sl-input
+                                    id="security-current-password"
+                                    type="password"
+                                    label="Current Password"
+                                    toggle-password
+                                    style="display: none; margin-bottom: 0.75em;"
+                                ></sl-input>
+                                <sl-input
+                                    id="security-new-password"
+                                    type="password"
+                                    label="New Password"
+                                    help-text="Minimum 8 characters"
+                                    toggle-password
+                                    style="margin-bottom: 0.75em;"
+                                ></sl-input>
+                                <sl-input
+                                    id="security-confirm-password"
+                                    type="password"
+                                    label="Confirm Password"
+                                    toggle-password
+                                    style="margin-bottom: 0.75em;"
+                                ></sl-input>
+                                <sl-button id="security-set-password-btn" variant="primary" size="small">
+                                    <sl-icon slot="prefix" name="key"></sl-icon>
+                                    Set Password
+                                </sl-button>
+                            </div>
+
+                            <div id="security-remove-section" style="display: none; margin-top: 0.75em;">
+                                <sl-button id="security-remove-password-btn" variant="danger" size="small" outline>
+                                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                                    Remove Password
+                                </sl-button>
+                                <p class="settings-help" style="margin-top: 0.5em;">
+                                    Removing the password will also set network access back to Localhost Only.
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Paths Settings -->
+                        <div
+                            id="settings-paths"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Paths</h3>
+                            <sl-input
+                                id="cfg-database"
+                                label="Database Path"
+                                placeholder="./moombox.db"
+                                help-text="Path to SQLite database. Requires restart."
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-log-file"
+                                label="Log File Path"
+                                placeholder="./moombox.log"
+                                help-text="Path to log file. Requires restart."
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-output-dir"
+                                label="Output Directory"
+                                placeholder="./output"
+                                help-text="Where to save downloaded videos"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-staging-dir"
+                                label="Staging Directory"
+                                placeholder="./staging"
+                                help-text="Temporary directory for downloads in progress"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-ffmpeg-path"
+                                label="FFmpeg Path"
+                                placeholder="ffmpeg"
+                                help-text="Path to ffmpeg executable (leave empty for system default)"
+                            ></sl-input>
+                        </div>
+
+                        <!-- Logs Settings -->
+                        <div
+                            id="settings-logs"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Logs</h3>
                             <sl-select
                                 id="cfg-log-level"
                                 label="Log Level"
@@ -430,31 +552,28 @@
                                 >
                             </sl-select>
                             <sl-input
-                                id="cfg-log-file"
-                                label="Log File Path"
-                                placeholder="./moombox.log"
-                                help-text="Path to log file"
-                            ></sl-input>
-                            <sl-input
                                 id="cfg-log-max-size"
                                 type="number"
                                 label="Max Log File Size (bytes)"
                                 placeholder="10485760"
-                                help-text="Maximum log file size before rotation (default: 10MB)"
+                                help-text="Maximum log file size before rotation (default: 10MB). Requires restart."
                             ></sl-input>
                             <sl-input
                                 id="cfg-log-max-files"
                                 type="number"
                                 label="Max Log Files"
                                 placeholder="5"
-                                help-text="Number of rotated log files to keep"
+                                help-text="Number of rotated log files to keep. Requires restart."
                             ></sl-input>
-                            <sl-input
-                                id="cfg-database"
-                                label="Database Path"
-                                placeholder="./moombox.json"
-                                help-text="Path to jobs database"
-                            ></sl-input>
+                        </div>
+
+                        <!-- Monitors Settings -->
+                        <div
+                            id="settings-monitors"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Monitors</h3>
                             <sl-input
                                 id="cfg-max-feed-items"
                                 type="number"
@@ -498,36 +617,12 @@
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Downloader Settings</h3>
-                            <sl-input
-                                id="cfg-output-dir"
-                                label="Output Directory"
-                                placeholder="./output"
-                                help-text="Where to save downloaded videos"
-                            ></sl-input>
+                            <h3>Downloader</h3>
                             <sl-input
                                 id="cfg-output-template"
                                 label="Output Template"
                                 placeholder="${channel}/${start_date} ${title} [${id}]"
                                 help-text="Filename template. Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
-                            ></sl-input>
-                            <sl-input
-                                id="cfg-staging-dir"
-                                label="Staging Directory"
-                                placeholder="./staging"
-                                help-text="Temporary directory for downloads in progress"
-                            ></sl-input>
-                            <sl-input
-                                id="cfg-ffmpeg-path"
-                                label="FFmpeg Path"
-                                placeholder="ffmpeg"
-                                help-text="Path to ffmpeg executable (leave empty for system default)"
-                            ></sl-input>
-                            <sl-input
-                                id="cfg-cookie-file"
-                                label="Cookie File"
-                                placeholder="./cookies.txt"
-                                help-text="Path to Netscape format cookies file for authentication"
                             ></sl-input>
                             <sl-input
                                 id="cfg-max-resolution"
@@ -574,6 +669,21 @@
                                 label="Live Check Retries"
                                 placeholder="16"
                                 help-text="After this many consecutive segment failures, query the YouTube API to check if the stream ended (default: 16). Lower values detect ended/privated streams faster. Applies to new downloads."
+                            ></sl-input>
+                        </div>
+
+                        <!-- Cookies Settings -->
+                        <div
+                            id="settings-cookies"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Cookies</h3>
+                            <sl-input
+                                id="cfg-cookie-file"
+                                label="Cookie File"
+                                placeholder="./cookies.txt"
+                                help-text="Path to Netscape format cookies file for authentication"
                             ></sl-input>
 
                             <sl-divider></sl-divider>
@@ -625,13 +735,15 @@
                             </sl-button>
                         </div>
 
-                        <!-- Notifications Settings -->
+                        <!-- Integrations Settings -->
                         <div
-                            id="settings-notifications"
+                            id="settings-integrations"
                             class="settings-section"
                             style="display: none"
                         >
-                            <h3>Notifications</h3>
+                            <h3>Integrations</h3>
+
+                            <h4>Notifications</h4>
                             <p class="settings-help">
                                 Configure webhook notifications for stream
                                 events.
@@ -644,77 +756,13 @@
                                 <sl-icon slot="prefix" name="plus"></sl-icon>
                                 Add Notification
                             </sl-button>
-                        </div>
-
-                        <!-- Security Settings -->
-                        <div
-                            id="settings-security"
-                            class="settings-section"
-                            style="display: none"
-                        >
-                            <h3>Security</h3>
-                            <p class="settings-help">
-                                A password is required to enable external network access. Loopback and LAN connections are never challenged.
-                            </p>
-
-                            <div id="security-status" style="margin-bottom: 1em;">
-                                <sl-badge id="security-password-badge" variant="neutral">Checking...</sl-badge>
-                            </div>
-
-                            <div id="security-set-password-form">
-                                <sl-input
-                                    id="security-current-password"
-                                    type="password"
-                                    label="Current Password"
-                                    toggle-password
-                                    style="display: none; margin-bottom: 0.75em;"
-                                ></sl-input>
-                                <sl-input
-                                    id="security-new-password"
-                                    type="password"
-                                    label="New Password"
-                                    help-text="Minimum 8 characters"
-                                    toggle-password
-                                    style="margin-bottom: 0.75em;"
-                                ></sl-input>
-                                <sl-input
-                                    id="security-confirm-password"
-                                    type="password"
-                                    label="Confirm Password"
-                                    toggle-password
-                                    style="margin-bottom: 0.75em;"
-                                ></sl-input>
-                                <sl-button id="security-set-password-btn" variant="primary" size="small">
-                                    <sl-icon slot="prefix" name="key"></sl-icon>
-                                    Set Password
-                                </sl-button>
-                            </div>
 
                             <sl-divider></sl-divider>
 
-                            <div id="security-remove-section" style="display: none;">
-                                <sl-button id="security-remove-password-btn" variant="danger" size="small" outline>
-                                    <sl-icon slot="prefix" name="trash"></sl-icon>
-                                    Remove Password
-                                </sl-button>
-                                <p class="settings-help" style="margin-top: 0.5em;">
-                                    Removing the password will also set network access back to Localhost Only.
-                                </p>
-                            </div>
-                        </div>
-
-                        <!-- Integrations Settings -->
-                        <div
-                            id="settings-integrations"
-                            class="settings-section"
-                            style="display: none"
-                        >
-                            <h3>Integrations</h3>
-
+                            <h4>yt-dlp PO Token Plugin</h4>
                             <div class="integration-card" id="ytdlp-plugin-card">
                                 <div class="integration-header">
                                     <div>
-                                        <strong>yt-dlp PO Token Plugin</strong>
                                         <p class="settings-help" style="margin: 0.25em 0 0">
                                             Lets yt-dlp use Moombox for PO token generation.
                                         </p>

@@ -136,8 +136,8 @@ func (tm *TwitchMonitor) scheduleNext(ctx context.Context) {
 func (tm *TwitchMonitor) calculateInterval() time.Duration {
 	base := twitchDefaultInterval
 
-	if tm.cfg.TwitchCheckInterval != nil && *tm.cfg.TwitchCheckInterval > 0 {
-		base = time.Duration(*tm.cfg.TwitchCheckInterval) * time.Second
+	if tm.cfg.Monitors.TwitchCheckInterval != nil && *tm.cfg.Monitors.TwitchCheckInterval > 0 {
+		base = time.Duration(*tm.cfg.Monitors.TwitchCheckInterval) * time.Second
 	}
 
 	// Apply ±5 second jitter

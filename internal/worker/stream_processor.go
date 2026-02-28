@@ -462,7 +462,7 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	}
 
 	// Create staging dir for early chat output (matches TypeScript behavior)
-	stagingBase := sp.cfg.Downloader.StagingDirectory
+	stagingBase := sp.cfg.Paths.StagingDirectory
 	if stagingBase == "" {
 		stagingBase = "./staging"
 	}
@@ -757,8 +757,8 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 
 	// Create VOD chat downloader if chat download is enabled
 	if sp.cfg.Downloader.DownloadChat {
-		stagingDir := filepath.Join(sp.cfg.Downloader.StagingDirectory, job.ID)
-		if sp.cfg.Downloader.StagingDirectory == "" {
+		stagingDir := filepath.Join(sp.cfg.Paths.StagingDirectory, job.ID)
+		if sp.cfg.Paths.StagingDirectory == "" {
 			stagingDir = filepath.Join("staging", job.ID)
 		}
 		if err := os.MkdirAll(stagingDir, 0o755); err != nil {
@@ -887,7 +887,7 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	// Start Twitch IRC chat downloader if chat recording is enabled
 	var twitchChatDl *twitch.ChatDownloader
 	if sp.cfg.Downloader.DownloadChat && sp.tw != nil {
-		stagingBase := sp.cfg.Downloader.StagingDirectory
+		stagingBase := sp.cfg.Paths.StagingDirectory
 		if stagingBase == "" {
 			stagingBase = "./staging"
 		}

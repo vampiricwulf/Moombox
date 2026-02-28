@@ -40,6 +40,9 @@ type settingsSection struct {
 var restartRequiredKeys = map[string]bool{
 	"port":              true,
 	"network_access":    true,
+	"https_enabled":     true,
+	"tls_cert_path":     true,
+	"tls_key_path":      true,
 	"database_path":     true,
 	"log_file_path":     true,
 	"log_max_file_size": true,
@@ -48,15 +51,34 @@ var restartRequiredKeys = map[string]bool{
 
 var sections = []settingsSection{
 	{
-		name: "General",
+		name: "Network",
 		fields: []fieldDef{
 			{"port", "Port", fieldNumber, nil, "1-65535"},
-			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, "localhost, lan, or external"},
-			{"log_level", "Log level", fieldCycle, []string{"DEBUG", "INFO", "WARN", "ERROR"}, "DEBUG, INFO, WARN, ERROR"},
+			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, ""},
+			{"https_enabled", "HTTPS enabled", fieldToggle, nil, ""},
+		},
+	},
+	{
+		name: "Paths",
+		fields: []fieldDef{
+			{"database_path", "Database path", fieldText, nil, ""},
 			{"log_file_path", "Log file path", fieldText, nil, ""},
+			{"output_directory", "Output directory", fieldText, nil, "where finished files go"},
+			{"staging_directory", "Staging directory", fieldText, nil, "temp files during download"},
+			{"ffmpeg_path", "FFmpeg path", fieldText, nil, "empty = system PATH"},
+		},
+	},
+	{
+		name: "Logs",
+		fields: []fieldDef{
+			{"log_level", "Log level", fieldCycle, []string{"DEBUG", "INFO", "WARN", "ERROR"}, ""},
 			{"log_max_file_size", "Max log file size", fieldNumber, nil, "bytes"},
 			{"log_max_files", "Max log files", fieldNumber, nil, ""},
-			{"database_path", "Database path", fieldText, nil, "path to moombox.json"},
+		},
+	},
+	{
+		name: "Monitors",
+		fields: []fieldDef{
 			{"max_feed_items", "Max feed items", fieldNumber, nil, "RSS items per feed"},
 			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes"},
 			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds (0=dynamic)"},
@@ -67,11 +89,7 @@ var sections = []settingsSection{
 	{
 		name: "Downloader",
 		fields: []fieldDef{
-			{"output_directory", "Output directory", fieldText, nil, "where finished files go"},
 			{"output_template", "Output template", fieldText, nil, "${title} ${id} ${channel} ${start_date} ${start_time}"},
-			{"staging_directory", "Staging directory", fieldText, nil, "temp files during download"},
-			{"ffmpeg_path", "FFmpeg path", fieldText, nil, "empty = system PATH"},
-			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt"},
 			{"max_video_resolution", "Max resolution", fieldNumber, nil, "pixels"},
 			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "concurrent jobs"},
 			{"download_chat", "Download chat", fieldToggle, nil, ""},
@@ -81,16 +99,20 @@ var sections = []settingsSection{
 		},
 	},
 	{
+		name: "Cookies",
+		fields: []fieldDef{
+			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt"},
+			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "browser-based cookie acquisition"},
+			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data"},
+		},
+	},
+	{
 		name: "Channels",
 		fields: nil, // Sub-editor
 	},
 	{
-		name: "Notifications",
-		fields: nil, // Sub-editor
-	},
-	{
-		name: "Security",
-		fields: nil, // Sub-editor
+		name: "Integrations",
+		fields: nil, // Notifications sub-editor
 	},
 }
 
@@ -144,7 +166,7 @@ type SettingsModel struct {
 	width   int
 	height  int
 
-	// Current section (0-4)
+	// Current section (0-7)
 	sectionIndex int
 
 	// Current field within section
@@ -270,39 +292,51 @@ func (m *SettingsModel) SetSize(w, h int) {
 }
 
 func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
-	m.values["port"] = strconv.Itoa(cfg.Port)
-	m.values["network_access"] = cfg.NetworkAccess
-	m.values["log_level"] = cfg.LogLevel
-	m.values["log_file_path"] = cfg.LogFilePath
-	m.values["log_max_file_size"] = strconv.Itoa(cfg.LogMaxFileSize)
-	m.values["log_max_files"] = strconv.Itoa(cfg.LogMaxFiles)
-	m.values["database_path"] = cfg.DatabasePath
-	m.values["max_feed_items"] = strconv.Itoa(cfg.MaxFeedItems)
-	m.values["feed_check_interval"] = strconv.Itoa(int(cfg.FeedCheckInterval.Minutes()))
+	// Network
+	m.values["port"] = strconv.Itoa(cfg.Network.Port)
+	m.values["network_access"] = cfg.Network.NetworkAccess
+	m.values["https_enabled"] = boolToDisplay(cfg.Network.HTTPSEnabled)
+
+	// Paths
+	m.values["database_path"] = cfg.Paths.DatabasePath
+	m.values["log_file_path"] = cfg.Paths.LogFilePath
+	m.values["output_directory"] = cfg.Paths.OutputDirectory
+	m.values["staging_directory"] = cfg.Paths.StagingDirectory
+	m.values["ffmpeg_path"] = cfg.Paths.FfmpegPath
+
+	// Logs
+	m.values["log_level"] = cfg.Logs.LogLevel
+	m.values["log_max_file_size"] = strconv.Itoa(cfg.Logs.LogMaxFileSize)
+	m.values["log_max_files"] = strconv.Itoa(cfg.Logs.LogMaxFiles)
+
+	// Monitors
+	m.values["max_feed_items"] = strconv.Itoa(cfg.Monitors.MaxFeedItems)
+	m.values["feed_check_interval"] = strconv.Itoa(int(cfg.Monitors.FeedCheckInterval.Minutes()))
 	decapi := 0
-	if cfg.DecapiCheckInterval != nil {
-		decapi = *cfg.DecapiCheckInterval
+	if cfg.Monitors.DecapiCheckInterval != nil {
+		decapi = *cfg.Monitors.DecapiCheckInterval
 	}
 	m.values["decapi_check_interval"] = strconv.Itoa(decapi)
 	twitch := 15
-	if cfg.TwitchCheckInterval != nil {
-		twitch = *cfg.TwitchCheckInterval
+	if cfg.Monitors.TwitchCheckInterval != nil {
+		twitch = *cfg.Monitors.TwitchCheckInterval
 	}
 	m.values["twitch_check_interval"] = strconv.Itoa(twitch)
-	m.values["hide_finished_age_days"] = strconv.Itoa(int(cfg.HideFinishedAgeDays.Days()))
+	m.values["hide_finished_age_days"] = strconv.Itoa(int(cfg.Monitors.HideFinishedAgeDays.Days()))
 
 	// Downloader
-	m.values["output_directory"] = cfg.Downloader.OutputDirectory
 	m.values["output_template"] = cfg.Downloader.OutputTemplate
-	m.values["staging_directory"] = cfg.Downloader.StagingDirectory
-	m.values["ffmpeg_path"] = cfg.Downloader.FfmpegPath
-	m.values["cookie_file"] = cfg.Downloader.CookieFile
 	m.values["max_video_resolution"] = strconv.Itoa(cfg.Downloader.MaxVideoResolution)
 	m.values["num_parallel_downloads"] = strconv.Itoa(cfg.Downloader.NumParallelDownloads)
 	m.values["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
 	m.values["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
 	m.values["segment_retry_delay_cap"] = strconv.Itoa(cfg.Downloader.SegmentRetryDelayCap)
 	m.values["segment_live_check_retries"] = strconv.Itoa(cfg.Downloader.SegmentLiveCheckRetries)
+
+	// Cookies
+	m.values["cookie_file"] = cfg.Cookies.CookieFile
+	m.values["auto_enabled"] = boolToDisplay(cfg.Cookies.AutoEnabled)
+	m.values["browser_profile_dir"] = cfg.Cookies.BrowserProfileDir
 }
 
 func (m *SettingsModel) applyValues() {
@@ -319,43 +353,53 @@ func (m *SettingsModel) applyValues() {
 	}
 
 	// Validate external access requires password
-	if m.values["network_access"] == "external" && m.cfg.PasswordHash == "" {
-		m.errorMsg = "Password required for external access. Set in Security section (5)."
+	if m.values["network_access"] == "external" && m.cfg.Network.PasswordHash == "" {
+		m.errorMsg = "Password required for external access. Set password in Network section."
 		m.status = saveError
 		return
 	}
 
-	m.cfg.Port = port
-	m.cfg.NetworkAccess = m.values["network_access"]
-	m.cfg.LogLevel = m.values["log_level"]
-	m.cfg.LogFilePath = m.values["log_file_path"]
-	m.cfg.LogMaxFileSize, _ = strconv.Atoi(m.values["log_max_file_size"])
-	m.cfg.LogMaxFiles, _ = strconv.Atoi(m.values["log_max_files"])
-	m.cfg.DatabasePath = m.values["database_path"]
-	m.cfg.MaxFeedItems, _ = strconv.Atoi(m.values["max_feed_items"])
+	// Network
+	m.cfg.Network.Port = port
+	m.cfg.Network.NetworkAccess = m.values["network_access"]
+	m.cfg.Network.HTTPSEnabled = m.values["https_enabled"] == "Yes"
 
+	// Paths
+	m.cfg.Paths.DatabasePath = m.values["database_path"]
+	m.cfg.Paths.LogFilePath = m.values["log_file_path"]
+	m.cfg.Paths.OutputDirectory = m.values["output_directory"]
+	m.cfg.Paths.StagingDirectory = m.values["staging_directory"]
+	m.cfg.Paths.FfmpegPath = m.values["ffmpeg_path"]
+
+	// Logs
+	m.cfg.Logs.LogLevel = m.values["log_level"]
+	m.cfg.Logs.LogMaxFileSize, _ = strconv.Atoi(m.values["log_max_file_size"])
+	m.cfg.Logs.LogMaxFiles, _ = strconv.Atoi(m.values["log_max_files"])
+
+	// Monitors
+	m.cfg.Monitors.MaxFeedItems, _ = strconv.Atoi(m.values["max_feed_items"])
 	feedMin, _ := strconv.Atoi(m.values["feed_check_interval"])
-	m.cfg.FeedCheckInterval = config.FlexDuration{Value: float64(feedMin)}
-
+	m.cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: float64(feedMin)}
 	decapi, _ := strconv.Atoi(m.values["decapi_check_interval"])
-	m.cfg.DecapiCheckInterval = &decapi
+	m.cfg.Monitors.DecapiCheckInterval = &decapi
 	twitchInt, _ := strconv.Atoi(m.values["twitch_check_interval"])
-	m.cfg.TwitchCheckInterval = &twitchInt
-
+	m.cfg.Monitors.TwitchCheckInterval = &twitchInt
 	hideAge, _ := strconv.Atoi(m.values["hide_finished_age_days"])
-	m.cfg.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
+	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
 
-	m.cfg.Downloader.OutputDirectory = m.values["output_directory"]
+	// Downloader
 	m.cfg.Downloader.OutputTemplate = m.values["output_template"]
-	m.cfg.Downloader.StagingDirectory = m.values["staging_directory"]
-	m.cfg.Downloader.FfmpegPath = m.values["ffmpeg_path"]
-	m.cfg.Downloader.CookieFile = m.values["cookie_file"]
 	m.cfg.Downloader.MaxVideoResolution, _ = strconv.Atoi(m.values["max_video_resolution"])
 	m.cfg.Downloader.NumParallelDownloads, _ = strconv.Atoi(m.values["num_parallel_downloads"])
 	m.cfg.Downloader.DownloadChat = m.values["download_chat"] == "Yes"
 	m.cfg.Downloader.Prefer60fps = m.values["prefer_60fps"] == "Yes"
 	m.cfg.Downloader.SegmentRetryDelayCap, _ = strconv.Atoi(m.values["segment_retry_delay_cap"])
 	m.cfg.Downloader.SegmentLiveCheckRetries, _ = strconv.Atoi(m.values["segment_live_check_retries"])
+
+	// Cookies
+	m.cfg.Cookies.CookieFile = m.values["cookie_file"]
+	m.cfg.Cookies.AutoEnabled = m.values["auto_enabled"] == "Yes"
+	m.cfg.Cookies.BrowserProfileDir = m.values["browser_profile_dir"]
 
 	// Apply channels and notifications
 	m.cfg.Channels = m.channels
@@ -372,7 +416,7 @@ func (m *SettingsModel) hasRestartChanges() bool {
 }
 
 func (m *SettingsModel) isFieldSection() bool {
-	return m.sectionIndex < 2
+	return sections[m.sectionIndex].fields != nil
 }
 
 // HandleKey processes key input in the settings panel.
@@ -403,10 +447,33 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 	switch sec.name {
 	case "Channels":
 		return m.handleChannelKey(key)
-	case "Notifications":
+	case "Integrations":
 		return m.handleNotifKey(key)
-	case "Security":
-		return m.handleSecurityKey(key)
+	case "Network":
+		// Security sub-editor is embedded in Network section
+		if m.secMode != securityStatus {
+			return m.handleSecurityKey(key)
+		}
+		// Check for S/R to enter security mode (these won't conflict with
+		// Network fields since port is number-only, the rest are cycle/toggle)
+		switch key {
+		case "s", "S":
+			m.secMode = securitySet
+			m.secCurrentPw = ""
+			m.secNewPw = ""
+			m.secConfirmPw = ""
+			m.secFieldIndex = 0
+			m.secMessage = ""
+			return ""
+		case "r", "R":
+			if m.hasPassword() {
+				m.secMode = securityRemove
+				m.secRemovePw = ""
+				m.secMessage = ""
+				return ""
+			}
+		}
+		return m.handleFieldKey(key)
 	}
 
 	// Field section handling (inline editing - no separate edit mode)
@@ -506,7 +573,7 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 
 	default:
 		// Number keys 1-5: jump to section (only when NOT on text/number field)
-		if !isTextual && len(key) == 1 && key[0] >= '1' && key[0] <= '5' {
+		if !isTextual && len(key) == 1 && key[0] >= '1' && key[0] <= '8' {
 			idx := int(key[0]-'0') - 1
 			if idx >= 0 && idx < len(sections) {
 				m.switchSection(idx)
@@ -747,7 +814,7 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		}
 	default:
 		// Number keys for section jump
-		if len(key) == 1 && key[0] >= '1' && key[0] <= '5' {
+		if len(key) == 1 && key[0] >= '1' && key[0] <= '8' {
 			idx := int(key[0]-'0') - 1
 			if idx >= 0 && idx < len(sections) {
 				m.switchSection(idx)
@@ -932,7 +999,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 			m.switchSection(m.sectionIndex + 1)
 		}
 	default:
-		if len(key) == 1 && key[0] >= '1' && key[0] <= '5' {
+		if len(key) == 1 && key[0] >= '1' && key[0] <= '8' {
 			idx := int(key[0]-'0') - 1
 			if idx >= 0 && idx < len(sections) {
 				m.switchSection(idx)
@@ -1043,48 +1110,17 @@ func (m *SettingsModel) handleSecurityKey(key string) string {
 }
 
 func (m *SettingsModel) hasPassword() bool {
-	return m.cfg != nil && m.cfg.PasswordHash != ""
+	return m.cfg != nil && m.cfg.Network.PasswordHash != ""
 }
 
 func (m *SettingsModel) handleSecurityStatusKey(key string) string {
-	// Clear message on non-mode keys
-	if m.secMessage != "" && key != "s" && key != "S" && key != "r" && key != "R" {
-		m.secMessage = ""
-	}
-
+	// Security status mode is no longer used as a standalone section.
+	// S/R is handled directly in the Network section's HandleKey.
+	// This function handles Esc from security sub-modes back to field mode.
 	switch key {
 	case keyEsc:
-		return m.handleClose()
-	case "s", "S":
-		m.secMode = securitySet
-		m.secCurrentPw = ""
-		m.secNewPw = ""
-		m.secConfirmPw = ""
-		m.secFieldIndex = 0
-		m.secMessage = ""
+		m.secMode = securityStatus
 		return ""
-	case "r", "R":
-		if m.hasPassword() {
-			m.secMode = securityRemove
-			m.secRemovePw = ""
-			m.secMessage = ""
-			return ""
-		}
-	case "left":
-		if m.sectionIndex > 0 {
-			m.switchSection(m.sectionIndex - 1)
-		}
-	case "right":
-		if m.sectionIndex < len(sections)-1 {
-			m.switchSection(m.sectionIndex + 1)
-		}
-	default:
-		if len(key) == 1 && key[0] >= '1' && key[0] <= '5' {
-			idx := int(key[0]-'0') - 1
-			if idx >= 0 && idx < len(sections) {
-				m.switchSection(idx)
-			}
-		}
 	}
 	return ""
 }
@@ -1184,7 +1220,7 @@ func (m *SettingsModel) handleSetPassword() {
 			m.secMessageColor = ColorRed
 			return
 		}
-		if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secCurrentPw, m.cfg.PasswordHash) {
+		if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secCurrentPw, m.cfg.Network.PasswordHash) {
 			m.secMessage = "Current password is incorrect"
 			m.secMessageColor = ColorRed
 			return
@@ -1210,7 +1246,7 @@ func (m *SettingsModel) handleSetPassword() {
 			m.secMessageColor = ColorRed
 			return
 		}
-		m.cfg.PasswordHash = hash
+		m.cfg.Network.PasswordHash = hash
 		if m.OnSave != nil {
 			m.OnSave(m.cfg)
 		}
@@ -1264,17 +1300,17 @@ func (m *SettingsModel) handleRemovePassword() {
 		return
 	}
 
-	if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secRemovePw, m.cfg.PasswordHash) {
+	if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secRemovePw, m.cfg.Network.PasswordHash) {
 		m.secMessage = "Current password is incorrect"
 		m.secMessageColor = ColorRed
 		return
 	}
 
 	// Remove password
-	networkReset := m.cfg.NetworkAccess == "external"
-	m.cfg.PasswordHash = ""
+	networkReset := m.cfg.Network.NetworkAccess == "external"
+	m.cfg.Network.PasswordHash = ""
 	if networkReset {
-		m.cfg.NetworkAccess = "localhost"
+		m.cfg.Network.NetworkAccess = "localhost"
 		m.values["network_access"] = "localhost"
 	}
 	if m.OnSave != nil {
@@ -1326,12 +1362,19 @@ func (m *SettingsModel) View() string {
 
 	// Section content
 	switch sec.name {
+	case "Network":
+		// Network fields + embedded security sub-editor
+		if m.secMode != securityStatus {
+			content.WriteString(m.renderSecurity(innerW))
+		} else {
+			content.WriteString(m.renderFields(sec, innerW, h-12))
+			content.WriteString("\n")
+			content.WriteString(m.renderSecurityCompact(innerW))
+		}
 	case "Channels":
 		content.WriteString(m.renderChannels(innerW, h-8))
-	case "Notifications":
+	case "Integrations":
 		content.WriteString(m.renderNotifications(innerW, h-8))
-	case "Security":
-		content.WriteString(m.renderSecurity(innerW))
 	default:
 		content.WriteString(m.renderFields(sec, innerW, h-8))
 	}
@@ -1395,21 +1438,23 @@ func (m *SettingsModel) renderHeader(w int) string {
 }
 
 func (m *SettingsModel) renderHintText() string {
+	sec := sections[m.sectionIndex]
+	if sec.name == "Network" && m.secMode != securityStatus {
+		return "Esc: Back  \u2191/\u2193/Tab: Navigate  Enter: Save"
+	}
 	if m.isFieldSection() {
-		sec := sections[m.sectionIndex]
 		field := sec.fields[m.fieldIndex]
 		toggle := "Section"
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			toggle = "Toggle"
 		}
-		return fmt.Sprintf("\u2190/\u2192: %s  \u2191/\u2193: Navigate  1-5: Jump", toggle)
+		hint := fmt.Sprintf("\u2190/\u2192: %s  \u2191/\u2193: Navigate  1-8: Jump", toggle)
+		if sec.name == "Network" {
+			hint += "  S: Password"
+		}
+		return hint
 	}
-	switch sections[m.sectionIndex].name {
-	case "Security":
-		return "\u2190/\u2192: Section  S: Set password  R: Remove  1-5: Jump"
-	default:
-		return "\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete  1-5: Jump"
-	}
+	return "\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete  1-8: Jump"
 }
 
 func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
@@ -1924,6 +1969,34 @@ func (m *SettingsModel) renderSecurityStatus(w int) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderSecurityCompact renders a compact password status below Network fields.
+func (m *SettingsModel) renderSecurityCompact(w int) string {
+	var lines []string
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", w-4)))
+
+	status := DimStyle.Render("Not set")
+	if m.hasPassword() {
+		status = lipgloss.NewStyle().Foreground(ColorGreen).Render("Set")
+	}
+	lines = append(lines, "  Password: "+status)
+
+	actionLabel := "Set"
+	if m.hasPassword() {
+		actionLabel = "Change"
+	}
+	actionLine := DimStyle.Render("  S: "+actionLabel+" password")
+	if m.hasPassword() {
+		actionLine += DimStyle.Render("  R: Remove")
+	}
+	lines = append(lines, actionLine)
+
+	if m.secMessage != "" {
+		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(m.secMessageColor).Render(m.secMessage))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 func (m *SettingsModel) renderSecuritySet(w int) string {
 	var lines []string
 
@@ -1993,7 +2066,7 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 		DimStyle.Render(" (Enter: confirm, Esc: cancel)"))
 	lines = append(lines, "")
 
-	if m.cfg != nil && m.cfg.NetworkAccess == "external" {
+	if m.cfg != nil && m.cfg.Network.NetworkAccess == "external" {
 		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
 			"Warning: Network access will be reset to localhost"))
 	}

@@ -72,7 +72,7 @@ type TwitchJobMetadata struct {
 // If hideAgeDays is 0, all finished jobs are immediately archived.
 // If hideAgeDays is negative, no finished jobs are ever archived (all stay active).
 func filterJobsByAge(jobs []*database.Job, archived bool, cfg *config.MoomboxConfig) []*database.Job {
-	hideAgeDays := cfg.HideFinishedAgeDays.Value
+	hideAgeDays := cfg.Monitors.HideFinishedAgeDays.Value
 
 	// Negative means never hide finished jobs — they all stay in active view
 	if hideAgeDays < 0 {
@@ -245,7 +245,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		// Build file path from output directory + relative filename
 		outputDir := job.OutputDirectory
 		if outputDir == "" {
-			outputDir = cfg.Downloader.OutputDirectory
+			outputDir = cfg.Paths.OutputDirectory
 		}
 		if outputDir == "" {
 			outputDir = "./output"
@@ -331,7 +331,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		// Resolve chat file path relative to output directory
 		outputDir := job.OutputDirectory
 		if outputDir == "" {
-			outputDir = cfg.Downloader.OutputDirectory
+			outputDir = cfg.Paths.OutputDirectory
 		}
 		if outputDir == "" {
 			outputDir = "./output"
@@ -805,7 +805,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		// Resolve path: join output directory + filename, then get parent dir (match TS)
 		outputDir := job.OutputDirectory
 		if outputDir == "" {
-			outputDir = cfg.Downloader.OutputDirectory
+			outputDir = cfg.Paths.OutputDirectory
 		}
 		filePath, err := filepath.Abs(filepath.Join(outputDir, job.Filename))
 		if err != nil {
@@ -1025,76 +1025,101 @@ func isSafePath(p string) bool {
 func validateConfigUpdates(updates map[string]any) map[string]string {
 	errs := make(map[string]string)
 
-	if v, ok := updates["port"].(float64); ok {
-		if v < 1 || v > 65535 {
-			errs["port"] = "port must be between 1 and 65535"
+	// Network sub-fields
+	if net, ok := updates["network"].(map[string]any); ok {
+		if v, ok := net["port"].(float64); ok {
+			if v < 1 || v > 65535 {
+				errs["network.port"] = "port must be between 1 and 65535"
+			}
+		}
+		if v, ok := net["network_access"].(string); ok {
+			switch v {
+			case "localhost", "lan", "external":
+			default:
+				errs["network.network_access"] = "network_access must be localhost, lan, or external"
+			}
+		}
+		if v, ok := net["tls_cert_path"].(string); ok {
+			if v != "" && !isSafePath(v) {
+				errs["network.tls_cert_path"] = "Path cannot contain .. or be absolute"
+			}
+		}
+		if v, ok := net["tls_key_path"].(string); ok {
+			if v != "" && !isSafePath(v) {
+				errs["network.tls_key_path"] = "Path cannot contain .. or be absolute"
+			}
 		}
 	}
-	if v, ok := updates["network_access"].(string); ok {
-		switch v {
-		case "localhost", "lan", "external":
-		default:
-			errs["network_access"] = "network_access must be localhost, lan, or external"
+
+	// Paths sub-fields
+	if paths, ok := updates["paths"].(map[string]any); ok {
+		if v, ok := paths["log_file_path"].(string); ok {
+			if !isSafePath(v) {
+				errs["paths.log_file_path"] = "Path cannot contain .. or be absolute"
+			}
+		}
+		if v, ok := paths["database_path"].(string); ok {
+			if !isSafePath(v) {
+				errs["paths.database_path"] = "Path cannot contain .. or be absolute"
+			}
+		}
+		if v, ok := paths["output_directory"].(string); ok {
+			if !isSafePath(v) {
+				errs["paths.output_directory"] = "Path cannot contain .. or be absolute"
+			}
+		}
+		if v, ok := paths["staging_directory"].(string); ok {
+			if !isSafePath(v) {
+				errs["paths.staging_directory"] = "Path cannot contain .. or be absolute"
+			}
 		}
 	}
-	if v, ok := updates["log_level"].(string); ok {
-		switch strings.ToUpper(v) {
-		case "DEBUG", "INFO", "WARN", "ERROR":
-		default:
-			errs["log_level"] = "log_level must be DEBUG, INFO, WARN, or ERROR"
+
+	// Logs sub-fields
+	if logs, ok := updates["logs"].(map[string]any); ok {
+		if v, ok := logs["log_level"].(string); ok {
+			switch strings.ToUpper(v) {
+			case "DEBUG", "INFO", "WARN", "ERROR":
+			default:
+				errs["logs.log_level"] = "log_level must be DEBUG, INFO, WARN, or ERROR"
+			}
+		}
+		if v, ok := logs["log_max_file_size"].(float64); ok {
+			if v < 1024 || v > 1073741824 {
+				errs["logs.log_max_file_size"] = "log_max_file_size must be between 1024 and 1073741824"
+			}
+		}
+		if v, ok := logs["log_max_files"].(float64); ok {
+			if v < 1 || v > 100 {
+				errs["logs.log_max_files"] = "log_max_files must be between 1 and 100"
+			}
 		}
 	}
-	if v, ok := updates["log_file_path"].(string); ok {
-		if !isSafePath(v) {
-			errs["log_file_path"] = "Path cannot contain .. or be absolute"
+
+	// Monitors sub-fields
+	if mon, ok := updates["monitors"].(map[string]any); ok {
+		if v, ok := mon["max_feed_items"].(float64); ok {
+			if v < 1 || v > 100 {
+				errs["monitors.max_feed_items"] = "max_feed_items must be between 1 and 100"
+			}
 		}
-	}
-	if v, ok := updates["log_max_file_size"].(float64); ok {
-		if v < 1024 || v > 1073741824 {
-			errs["log_max_file_size"] = "log_max_file_size must be between 1024 and 1073741824"
+		if v, ok := mon["decapi_check_interval"].(float64); ok {
+			if v < 15 || v > 3600 {
+				errs["monitors.decapi_check_interval"] = "decapi_check_interval must be between 15 and 3600"
+			}
 		}
-	}
-	if v, ok := updates["log_max_files"].(float64); ok {
-		if v < 1 || v > 100 {
-			errs["log_max_files"] = "log_max_files must be between 1 and 100"
-		}
-	}
-	if v, ok := updates["database_path"].(string); ok {
-		if !isSafePath(v) {
-			errs["database_path"] = "Path cannot contain .. or be absolute"
-		}
-	}
-	if v, ok := updates["max_feed_items"].(float64); ok {
-		if v < 1 || v > 100 {
-			errs["max_feed_items"] = "max_feed_items must be between 1 and 100"
-		}
-	}
-	if v, ok := updates["decapi_check_interval"].(float64); ok {
-		if v < 15 || v > 3600 {
-			errs["decapi_check_interval"] = "decapi_check_interval must be between 15 and 3600"
-		}
-	}
-	if v, ok := updates["twitch_check_interval"].(float64); ok {
-		if v < 5 || v > 3600 {
-			errs["twitch_check_interval"] = "twitch_check_interval must be between 5 and 3600"
+		if v, ok := mon["twitch_check_interval"].(float64); ok {
+			if v < 5 || v > 3600 {
+				errs["monitors.twitch_check_interval"] = "twitch_check_interval must be between 5 and 3600"
+			}
 		}
 	}
 
 	// Downloader sub-fields
 	if dl, ok := updates["downloader"].(map[string]any); ok {
-		if v, ok := dl["output_directory"].(string); ok {
-			if !isSafePath(v) {
-				errs["downloader.output_directory"] = "Path cannot contain .. or be absolute"
-			}
-		}
 		if v, ok := dl["output_template"].(string); ok {
 			if len(v) > 500 {
 				errs["downloader.output_template"] = "output_template must be at most 500 characters"
-			}
-		}
-		if v, ok := dl["staging_directory"].(string); ok {
-			if !isSafePath(v) {
-				errs["downloader.staging_directory"] = "Path cannot contain .. or be absolute"
 			}
 		}
 		if v, ok := dl["num_parallel_downloads"].(float64); ok {
@@ -1107,18 +1132,18 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["downloader.max_video_resolution"] = "max_video_resolution must be at least 1"
 			}
 		}
-		if v, ok := dl["cookie_file"].(string); ok {
-			if !isSafePath(v) {
-				errs["downloader.cookie_file"] = "Path cannot contain .. or be absolute"
-			}
-		}
 	}
 
-	// Auto cookies
-	if ac, ok := updates["auto_cookies"].(map[string]any); ok {
-		if v, ok := ac["browser_profile_dir"].(string); ok {
+	// Cookies sub-fields
+	if ck, ok := updates["cookies"].(map[string]any); ok {
+		if v, ok := ck["cookie_file"].(string); ok {
 			if !isSafePath(v) {
-				errs["auto_cookies.browser_profile_dir"] = "Path cannot contain .. or be absolute"
+				errs["cookies.cookie_file"] = "Path cannot contain .. or be absolute"
+			}
+		}
+		if v, ok := ck["browser_profile_dir"].(string); ok {
+			if !isSafePath(v) {
+				errs["cookies.browser_profile_dir"] = "Path cannot contain .. or be absolute"
 			}
 		}
 	}
@@ -1130,68 +1155,92 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 // to the config struct. Used by both PUT /config and POST /setup/complete.
 // Matches TypeScript updateConfigSchema field names exactly.
 func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
-	// Top-level fields
-	if v, ok := updates["port"].(float64); ok {
-		cfg.Port = int(v)
-	}
-	if v, ok := updates["network_access"].(string); ok {
-		cfg.NetworkAccess = v
-	}
-	if v, ok := updates["log_level"].(string); ok {
-		cfg.LogLevel = v
-	}
-	if v, ok := updates["log_file_path"].(string); ok {
-		cfg.LogFilePath = v
-	}
-	if v, ok := updates["log_max_file_size"].(float64); ok {
-		cfg.LogMaxFileSize = int(v)
-	}
-	if v, ok := updates["log_max_files"].(float64); ok {
-		cfg.LogMaxFiles = int(v)
-	}
-	if v, ok := updates["database_path"].(string); ok {
-		cfg.DatabasePath = v
-	}
-	if v, ok := updates["max_feed_items"].(float64); ok {
-		cfg.MaxFeedItems = int(v)
-	}
-	if v, ok := updates["feed_check_interval"].(float64); ok {
-		cfg.FeedCheckInterval = config.FlexDuration{Value: v}
-	}
-	if vs, ok := updates["feed_check_interval"].(string); ok {
-		cfg.FeedCheckInterval = config.ParseFlexDuration(vs, "minutes", cfg.FeedCheckInterval.Value)
-	}
-	if v, ok := updates["decapi_check_interval"].(float64); ok {
-		n := int(v)
-		cfg.DecapiCheckInterval = &n
-	}
-	if v, ok := updates["twitch_check_interval"].(float64); ok {
-		n := int(v)
-		cfg.TwitchCheckInterval = &n
+	// Network sub-fields
+	if net, ok := updates["network"].(map[string]any); ok {
+		if v, ok := net["port"].(float64); ok {
+			cfg.Network.Port = int(v)
+		}
+		if v, ok := net["network_access"].(string); ok {
+			cfg.Network.NetworkAccess = v
+		}
+		if v, ok := net["https_enabled"].(bool); ok {
+			cfg.Network.HTTPSEnabled = v
+		}
+		if v, ok := net["tls_cert_path"].(string); ok {
+			cfg.Network.TLSCertPath = v
+		}
+		if v, ok := net["tls_key_path"].(string); ok {
+			cfg.Network.TLSKeyPath = v
+		}
 	}
 
-	// Downloader sub-fields (nested object)
+	// Paths sub-fields
+	if paths, ok := updates["paths"].(map[string]any); ok {
+		if v, ok := paths["log_file_path"].(string); ok {
+			cfg.Paths.LogFilePath = v
+		}
+		if v, ok := paths["database_path"].(string); ok {
+			cfg.Paths.DatabasePath = v
+		}
+		if v, ok := paths["output_directory"].(string); ok {
+			cfg.Paths.OutputDirectory = v
+		}
+		if v, ok := paths["staging_directory"].(string); ok {
+			cfg.Paths.StagingDirectory = v
+		}
+		if v, ok := paths["ffmpeg_path"].(string); ok {
+			cfg.Paths.FfmpegPath = v
+		}
+	}
+
+	// Logs sub-fields
+	if logs, ok := updates["logs"].(map[string]any); ok {
+		if v, ok := logs["log_level"].(string); ok {
+			cfg.Logs.LogLevel = v
+		}
+		if v, ok := logs["log_max_file_size"].(float64); ok {
+			cfg.Logs.LogMaxFileSize = int(v)
+		}
+		if v, ok := logs["log_max_files"].(float64); ok {
+			cfg.Logs.LogMaxFiles = int(v)
+		}
+	}
+
+	// Monitors sub-fields
+	if mon, ok := updates["monitors"].(map[string]any); ok {
+		if v, ok := mon["max_feed_items"].(float64); ok {
+			cfg.Monitors.MaxFeedItems = int(v)
+		}
+		if v, ok := mon["feed_check_interval"].(float64); ok {
+			cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: v}
+		} else if vs, ok := mon["feed_check_interval"].(string); ok {
+			cfg.Monitors.FeedCheckInterval = config.ParseFlexDuration(vs, "minutes", cfg.Monitors.FeedCheckInterval.Value)
+		}
+		if v, ok := mon["decapi_check_interval"].(float64); ok {
+			n := int(v)
+			cfg.Monitors.DecapiCheckInterval = &n
+		}
+		if v, ok := mon["twitch_check_interval"].(float64); ok {
+			n := int(v)
+			cfg.Monitors.TwitchCheckInterval = &n
+		}
+		if v, ok := mon["hide_finished_age_days"].(float64); ok {
+			cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: v}
+		} else if vs, ok := mon["hide_finished_age_days"].(string); ok {
+			cfg.Monitors.HideFinishedAgeDays = config.ParseFlexDuration(vs, "days", cfg.Monitors.HideFinishedAgeDays.Value)
+		}
+	}
+
+	// Downloader sub-fields
 	if dl, ok := updates["downloader"].(map[string]any); ok {
 		if v, ok := dl["max_video_resolution"].(float64); ok {
 			cfg.Downloader.MaxVideoResolution = int(v)
-		}
-		if v, ok := dl["ffmpeg_path"].(string); ok {
-			cfg.Downloader.FfmpegPath = v
-		}
-		if v, ok := dl["staging_directory"].(string); ok {
-			cfg.Downloader.StagingDirectory = v
-		}
-		if v, ok := dl["output_directory"].(string); ok {
-			cfg.Downloader.OutputDirectory = v
 		}
 		if v, ok := dl["output_template"].(string); ok {
 			cfg.Downloader.OutputTemplate = v
 		}
 		if v, ok := dl["num_parallel_downloads"].(float64); ok {
 			cfg.Downloader.NumParallelDownloads = int(v)
-		}
-		if v, ok := dl["cookie_file"].(string); ok {
-			cfg.Downloader.CookieFile = v
 		}
 		if v, ok := dl["download_chat"].(bool); ok {
 			cfg.Downloader.DownloadChat = v
@@ -1216,32 +1265,30 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 	}
 
-	// Hide finished age
-	if v, ok := updates["hide_finished_age_days"].(float64); ok {
-		cfg.HideFinishedAgeDays = config.FlexDuration{Value: v}
-	} else if vs, ok := updates["hide_finished_age_days"].(string); ok {
-		cfg.HideFinishedAgeDays = config.ParseFlexDuration(vs, "days", cfg.HideFinishedAgeDays.Value)
-	}
-
-	// Auto cookies
-	if ac, ok := updates["auto_cookies"].(map[string]any); ok {
-		if cfg.AutoCookies == nil {
-			cfg.AutoCookies = &config.AutoCookiesConfig{}
+	// Cookies
+	if ck, ok := updates["cookies"].(map[string]any); ok {
+		if v, ok := ck["cookie_file"].(string); ok {
+			cfg.Cookies.CookieFile = v
 		}
-		if v, ok := ac["enabled"].(bool); ok {
-			cfg.AutoCookies.Enabled = v
+		if v, ok := ck["auto_enabled"].(bool); ok {
+			cfg.Cookies.AutoEnabled = v
 		}
-		if v, ok := ac["browser_profile_dir"].(string); ok {
-			cfg.AutoCookies.BrowserProfileDir = v
+		if v, ok := ck["browser_profile_dir"].(string); ok {
+			cfg.Cookies.BrowserProfileDir = v
 		}
-		if v, ok := ac["platforms"].([]any); ok {
+		if v, ok := ck["platforms"].([]any); ok {
 			var platforms []string
 			for _, p := range v {
 				if s, ok := p.(string); ok {
 					platforms = append(platforms, s)
 				}
 			}
-			cfg.AutoCookies.Platforms = platforms
+			cfg.Cookies.Platforms = platforms
+		}
+		if v, ok := ck["refresh_interval"].(float64); ok {
+			cfg.Cookies.RefreshInterval = config.FlexDuration{Value: v}
+		} else if vs, ok := ck["refresh_interval"].(string); ok {
+			cfg.Cookies.RefreshInterval = config.ParseFlexDuration(vs, "minutes", cfg.Cookies.RefreshInterval.Value)
 		}
 	}
 
@@ -1288,14 +1335,14 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*config.MoomboxConfig) error, callbacks *ConfigRoutesCallbacks) {
 	// GET /api/v1/config
 	r.Get("/api/v1/config", func(rw http.ResponseWriter, req *http.Request) {
-		// Clone config and return with hasPassword injected (matches TS flat structure).
+		// Clone config and return with hasPassword injected.
 		// PasswordHash has json:"-" tag so it's already excluded from marshaling.
 		jsonResponse(rw, struct {
 			*config.MoomboxConfig
 			HasPassword bool `json:"hasPassword"`
 		}{
 			MoomboxConfig: cfg,
-			HasPassword:   cfg.PasswordHash != "",
+			HasPassword:   cfg.Network.PasswordHash != "",
 		})
 	})
 
@@ -1319,20 +1366,19 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 		}
 
 		// Prevent enabling external access without a password
-		if v, ok := updates["network_access"].(string); ok && v == "external" {
-			if cfg.PasswordHash == "" {
-				jsonError(rw, "A password must be set before enabling external access. Go to Settings \u2192 Security.", http.StatusBadRequest)
-				return
+		if net, ok := updates["network"].(map[string]any); ok {
+			if v, ok := net["network_access"].(string); ok && v == "external" {
+				if cfg.Network.PasswordHash == "" {
+					jsonError(rw, "A password must be set before enabling external access. Go to Settings \u2192 Security.", http.StatusBadRequest)
+					return
+				}
 			}
 		}
 
-		// Never allow password_hash via config update (use /auth/set-password)
-		delete(updates, "password_hash")
-
 		// Snapshot values that need hot-reload comparison after save.
-		oldLogLevel := cfg.LogLevel
+		oldLogLevel := cfg.Logs.LogLevel
 		oldNumParallel := cfg.Downloader.NumParallelDownloads
-		oldHideAge := cfg.HideFinishedAgeDays.Value
+		oldHideAge := cfg.Monitors.HideFinishedAgeDays.Value
 
 		// Apply allowlisted updates — matches TypeScript updateConfigSchema (snake_case)
 		applyConfigUpdates(cfg, updates)
@@ -1347,13 +1393,13 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 
 		// Hot-reload runtime-reloadable settings
 		if callbacks != nil {
-			if cfg.LogLevel != oldLogLevel && callbacks.OnLogLevelChange != nil {
-				callbacks.OnLogLevelChange(cfg.LogLevel)
+			if cfg.Logs.LogLevel != oldLogLevel && callbacks.OnLogLevelChange != nil {
+				callbacks.OnLogLevelChange(cfg.Logs.LogLevel)
 			}
 			if cfg.Downloader.NumParallelDownloads != oldNumParallel && callbacks.OnMaxParallelChange != nil {
 				callbacks.OnMaxParallelChange(cfg.Downloader.NumParallelDownloads)
 			}
-			if cfg.HideFinishedAgeDays.Value != oldHideAge && callbacks.OnHideFinishedAgeChanged != nil {
+			if cfg.Monitors.HideFinishedAgeDays.Value != oldHideAge && callbacks.OnHideFinishedAgeChanged != nil {
 				callbacks.OnHideFinishedAgeChanged()
 			}
 		}
@@ -1680,30 +1726,29 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 					jsonError(rw, "failed to hash password", http.StatusInternalServerError)
 					return
 				}
-				cfg.PasswordHash = hash
+				cfg.Network.PasswordHash = hash
 			}
 		}
 
 		// Validate external access requires password (match TS)
-		if v, ok := updates["network_access"].(string); ok && v == "external" {
-			if cfg.PasswordHash == "" {
-				jsonError(rw, "A password (min 8 characters) is required for external access.", http.StatusBadRequest)
-				return
+		if net, ok := updates["network"].(map[string]any); ok {
+			if v, ok := net["network_access"].(string); ok && v == "external" {
+				if cfg.Network.PasswordHash == "" {
+					jsonError(rw, "A password (min 8 characters) is required for external access.", http.StatusBadRequest)
+					return
+				}
 			}
 		}
-
-		// Never allow password_hash via config update
-		delete(updates, "password_hash")
 
 		// Apply config updates (same schema as PUT /config)
 		applyConfigUpdates(cfg, updates)
 
 		// Create directories if specified
-		if cfg.Downloader.OutputDirectory != "" {
-			os.MkdirAll(cfg.Downloader.OutputDirectory, 0o755)
+		if cfg.Paths.OutputDirectory != "" {
+			os.MkdirAll(cfg.Paths.OutputDirectory, 0o755)
 		}
-		if cfg.Downloader.StagingDirectory != "" {
-			os.MkdirAll(cfg.Downloader.StagingDirectory, 0o755)
+		if cfg.Paths.StagingDirectory != "" {
+			os.MkdirAll(cfg.Paths.StagingDirectory, 0o755)
 		}
 
 		// Save config
@@ -1930,7 +1975,7 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		}
 
 		// Output paths
-		outputDir := cfg.Downloader.OutputDirectory
+		outputDir := cfg.Paths.OutputDirectory
 		if outputDir == "" {
 			outputDir = "./output"
 		}

@@ -176,7 +176,7 @@ func NewApp() *App {
 // SetConfig provides the config reference for the settings panel.
 func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.cfg = cfg
-	a.taskList.SetHideFinishedAgeDays(int(cfg.HideFinishedAgeDays.Days()))
+	a.taskList.SetHideFinishedAgeDays(int(cfg.Monitors.HideFinishedAgeDays.Days()))
 }
 
 // SetSetupCallbacks wires callback functions for the TUI setup wizard.
@@ -323,8 +323,8 @@ func (a *App) updateTerminalTitle() {
 
 // getPort returns the configured port or default 774.
 func (a *App) getPort() int {
-	if a.cfg != nil && a.cfg.Port > 0 {
-		return a.cfg.Port
+	if a.cfg != nil && a.cfg.Network.Port > 0 {
+		return a.cfg.Network.Port
 	}
 	return 774
 }
@@ -573,7 +573,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch action {
 		case "close":
 			// Re-apply hide_finished_age_days in case it changed
-			a.taskList.SetHideFinishedAgeDays(int(a.cfg.HideFinishedAgeDays.Days()))
+			a.taskList.SetHideFinishedAgeDays(int(a.cfg.Monitors.HideFinishedAgeDays.Days()))
 		case "restart":
 			if a.OnRestart != nil {
 				a.OnRestart()
@@ -680,7 +680,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.cycleFocus()
 		return a, nil
 	case "w":
-		url := fmt.Sprintf("http://localhost:%d", a.getPort())
+		scheme := "http"
+		if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
+			scheme = "https"
+		}
+		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
 		a.setFeedback(fmt.Sprintf("Opening: %s", url))
 		openBrowser(url)
 		return a, nil
@@ -1078,8 +1082,8 @@ func addOverlayMessage(content string, width int, msg string) string {
 
 // apiPort returns the port for local API calls.
 func (a *App) apiPort() int {
-	if a.cfg != nil && a.cfg.Port > 0 {
-		return a.cfg.Port
+	if a.cfg != nil && a.cfg.Network.Port > 0 {
+		return a.cfg.Network.Port
 	}
 	return 774
 }

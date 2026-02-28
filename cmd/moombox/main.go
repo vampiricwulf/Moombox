@@ -42,7 +42,7 @@ import (
 )
 
 var (
-	version = "2.0.4"
+	version = "2.0.5"
 	commit  = ""
 )
 
@@ -150,13 +150,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	}
 
 	if logLevelOverride != "" {
-		cfg.LogLevel = logLevelOverride
+		cfg.Logs.LogLevel = logLevelOverride
 	}
 
 	// =========================================================================
 	// 2. Initialize logger
 	// =========================================================================
-	log, err := logger.New(cfg.LogFilePath, cfg.LogLevel, cfg.LogMaxFileSize, cfg.LogMaxFiles)
+	log, err := logger.New(cfg.Paths.LogFilePath, cfg.Logs.LogLevel, cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Startup error: Failed to initialize logger: %v\n", err)
 		waitForKeypress()
@@ -167,12 +167,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
 
 	// Auto-convert plaintext password to scrypt hash (matches TS ConfigManager.load)
-	if cfg.PasswordHash != "" && !web.IsScryptHash(cfg.PasswordHash) {
+	if cfg.Network.PasswordHash != "" && !web.IsScryptHash(cfg.Network.PasswordHash) {
 		log.Info("[Config] Plaintext password detected, converting to secure hash")
 		tempAuth := web.NewAuthService()
-		hash, err := tempAuth.HashPassword(cfg.PasswordHash)
+		hash, err := tempAuth.HashPassword(cfg.Network.PasswordHash)
 		if err == nil {
-			cfg.PasswordHash = hash
+			cfg.Network.PasswordHash = hash
 			if saveErr := config.Save(cfg, configPath); saveErr != nil {
 				log.Warn("Failed to save auto-hashed password", slog.String("error", saveErr.Error()))
 			}
@@ -187,7 +187,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	if !useTUI {
 		fmt.Println("Initializing database...")
 	}
-	db, err := database.Open(cfg.DatabasePath, log)
+	db, err := database.Open(cfg.Paths.DatabasePath, log)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Startup error: Failed to open database: %v\n", err)
 		waitForKeypress()
@@ -202,8 +202,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		fmt.Println("Starting services...")
 	}
 	jar := cookies.NewCookieJar()
-	if cfg.Downloader.CookieFile != "" {
-		if err := jar.Load(cfg.Downloader.CookieFile); err != nil {
+	if cfg.Cookies.CookieFile != "" {
+		if err := jar.Load(cfg.Cookies.CookieFile); err != nil {
 			log.Warn("Failed to load cookies", slog.String("error", err.Error()))
 		} else {
 			log.Info("Cookies loaded", slog.Bool("hasAuth", jar.HasAuthCookies()))
@@ -292,13 +292,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// =========================================================================
 	// 15b. Auto-cookie service
 	// =========================================================================
-	browserProfileDir := cfg.AutoCookies.BrowserProfileDir
+	browserProfileDir := cfg.Cookies.BrowserProfileDir
 	if browserProfileDir == "" {
 		browserProfileDir = "./browser-profile"
 	}
 	autoCookieSvc := cookies.NewAutoCookieService(
 		browserProfileDir,
-		cfg.Downloader.CookieFile,
+		cfg.Cookies.CookieFile,
 		jar,
 		log,
 	)
@@ -308,11 +308,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms)
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
-		if cfg.AutoCookies == nil {
-			cfg.AutoCookies = &config.AutoCookiesConfig{}
-		}
 		existing := make(map[string]bool)
-		for _, p := range cfg.AutoCookies.Platforms {
+		for _, p := range cfg.Cookies.Platforms {
 			existing[p] = true
 		}
 		if youtubeVerified {
@@ -325,7 +322,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		for p := range existing {
 			platforms = append(platforms, p)
 		}
-		cfg.AutoCookies.Platforms = platforms
+		cfg.Cookies.Platforms = platforms
 		if err := config.Save(cfg, configPath); err != nil {
 			log.Warn("Failed to persist auto-cookie platforms", slog.String("error", err.Error()))
 		} else {
@@ -335,7 +332,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func() bool {
-		if cfg.AutoCookies == nil || !cfg.AutoCookies.Enabled {
+		if !cfg.Cookies.AutoEnabled {
 			return false
 		}
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -450,7 +447,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	routes.LogRoutes(r, log.GetRecentLines)
 	routes.ImportRoutes(r, db, cfg, apiRL)
 	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc)
-	routes.YtdlpRoutes(r, cfg.Port)
+	routes.YtdlpRoutes(r, cfg.Network.Port)
 	routes.RestartRoute(r, func() {
 		log.Info("Restart requested via API")
 		restartRequested.Store(true)
@@ -479,7 +476,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Wire WebSocket auth check for external connections
 	wsHub.AuthCheck = func(r *http.Request) bool {
-		if !web.IsAuthRequired(cfg.NetworkAccess, cfg.PasswordHash) {
+		if !web.IsAuthRequired(cfg.Network.NetworkAccess, cfg.Network.PasswordHash) {
 			return true
 		}
 		cookie, err := r.Cookie("moombox_session")
@@ -512,7 +509,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Wire cookie recovery callback
 	// =========================================================================
 	cookieRefresh.OnRecoveryNeeded = func(platform string) {
-		if cfg.AutoCookies == nil || !cfg.AutoCookies.Enabled {
+		if !cfg.Cookies.AutoEnabled {
 			log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
 			return
 		}
@@ -564,7 +561,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Determine output directory (channel-specific > global > default)
 		outputDir := ch.OutputDirectory
 		if outputDir == "" {
-			outputDir = cfg.Downloader.OutputDirectory
+			outputDir = cfg.Paths.OutputDirectory
 		}
 
 		thumbnailURL := fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", videoID)
@@ -628,7 +625,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Determine output directory
 		outputDir := ch.OutputDirectory
 		if outputDir == "" {
-			outputDir = cfg.Downloader.OutputDirectory
+			outputDir = cfg.Paths.OutputDirectory
 		}
 
 		now := time.Now().UTC().Format(time.RFC3339)
@@ -738,8 +735,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// =========================================================================
 
 	log.Info("Moombox initialized",
-		slog.Int("port", cfg.Port),
-		slog.String("network_access", cfg.NetworkAccess),
+		slog.Int("port", cfg.Network.Port),
+		slog.String("network_access", cfg.Network.NetworkAccess),
 	)
 
 	// Start monitors
@@ -751,10 +748,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	go dlWorker.Start(ctx)
 
 	// Start cookie refresh (only if a cookie file is configured, like TS)
-	if cfg.Downloader.CookieFile != "" {
+	if cfg.Cookies.CookieFile != "" {
 		// Seed expected auth from persisted platforms so auth loss is detected on restart
-		if cfg.AutoCookies != nil && cfg.AutoCookies.Enabled && len(cfg.AutoCookies.Platforms) > 0 {
-			cookieRefresh.SetExpectedPlatforms(cfg.AutoCookies.Platforms)
+		if cfg.Cookies.AutoEnabled && len(cfg.Cookies.Platforms) > 0 {
+			cookieRefresh.SetExpectedPlatforms(cfg.Cookies.Platforms)
 		}
 		cookieRefresh.Start(ctx)
 	} else {
@@ -762,9 +759,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	}
 
 	// Start auto-cookie periodic refresh if enabled and profile exists
-	if cfg.AutoCookies != nil && cfg.AutoCookies.Enabled {
+	if cfg.Cookies.AutoEnabled {
 		if _, err := os.Stat(browserProfileDir); err == nil {
-			interval := time.Duration(cfg.AutoCookies.RefreshInterval.Minutes()) * time.Minute
+			interval := time.Duration(cfg.Cookies.RefreshInterval.Minutes()) * time.Minute
 			if interval > 0 {
 				autoCookieSvc.StartPeriodicRefresh(ctx, interval)
 			}
@@ -803,7 +800,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Expose actual bound port for TUI and other components (matches TS: process.env.MOOMBOX_PORT)
 	if actualPort := webServer.ActualPort; actualPort > 0 {
-		cfg.Port = actualPort
+		cfg.Network.Port = actualPort
 	}
 
 	// Periodic memory usage logging (every 2 minutes) for diagnostics.
@@ -945,8 +942,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				log.Info("Config saved from TUI settings")
 			}
 			// Hot-reload runtime settings (match TS: refreshLogLevel + setMaxDownloadSlots)
-			if updatedCfg.LogLevel != "" {
-				log.SetLevel(updatedCfg.LogLevel)
+			if updatedCfg.Logs.LogLevel != "" {
+				log.SetLevel(updatedCfg.Logs.LogLevel)
 			}
 			if updatedCfg.Downloader.NumParallelDownloads > 0 {
 				dlWorker.SetParallelDownloads(updatedCfg.Downloader.NumParallelDownloads)
@@ -1214,7 +1211,7 @@ func addVideo(input string) {
 		os.Exit(1)
 	}
 
-	db, err := database.Open(cfg.DatabasePath)
+	db, err := database.Open(cfg.Paths.DatabasePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
 		os.Exit(1)
@@ -1496,7 +1493,7 @@ func (a *youtubeMetadataAdapter) FetchMetadata(ctx context.Context, videoID stri
 
 // filterJobsByAge excludes finished jobs older than hide_finished_age_days (match TS filterJobsByAge).
 func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig) []*database.Job {
-	ageDays := int(cfg.HideFinishedAgeDays.Value)
+	ageDays := int(cfg.Monitors.HideFinishedAgeDays.Value)
 	if ageDays < 0 {
 		return jobs // negative means never archive
 	}

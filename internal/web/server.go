@@ -5,8 +5,11 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io/fs"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"os/exec"
@@ -94,7 +97,7 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		// No auth required if not configured
-		if !IsAuthRequired(s.cfg.NetworkAccess, s.cfg.PasswordHash) {
+		if !IsAuthRequired(s.cfg.Network.NetworkAccess, s.cfg.Network.PasswordHash) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -208,14 +211,14 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 
 // Start begins listening for HTTP connections.
 func (s *Server) Start(ctx context.Context) error {
-	port := s.cfg.Port
+	port := s.cfg.Network.Port
 	if port <= 0 {
 		port = 774
 	}
 
 	// Bind to localhost unless LAN/external is enabled
 	host := "127.0.0.1"
-	switch s.cfg.NetworkAccess {
+	switch s.cfg.Network.NetworkAccess {
 	case "lan", "external", "public":
 		host = "0.0.0.0"
 	}
@@ -242,9 +245,32 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadHeaderTimeout: 30 * time.Second, // Protects against slowloris; clears deadline after headers are read
 		WriteTimeout:      0,                // Disable for WebSocket and video streaming
 		IdleTimeout:       120 * time.Second,
+		ErrorLog:          log.New(io.Discard, "", 0), // Suppress HTTP server errors from stdout/stderr (routed through app logger via middleware)
 	}
 
-	s.logger.Info("web server starting", "addr", addr)
+	// Configure TLS if enabled
+	scheme := "http"
+	var tlsConfig *tls.Config
+	if s.cfg.Network.HTTPSEnabled {
+		certPath := s.cfg.Network.TLSCertPath
+		if certPath == "" {
+			certPath = "./moombox.crt"
+		}
+		keyPath := s.cfg.Network.TLSKeyPath
+		if keyPath == "" {
+			keyPath = "./moombox.key"
+		}
+
+		var err error
+		tlsConfig, err = LoadOrGenerateTLSConfig(certPath, keyPath, s.cfg.Network.NetworkAccess, s.logger)
+		if err != nil {
+			return fmt.Errorf("TLS setup: %w", err)
+		}
+		s.server.TLSConfig = tlsConfig
+		scheme = "https"
+	}
+
+	s.logger.Info("web server starting", "addr", addr, "scheme", scheme)
 
 	go func() {
 		<-ctx.Done()
@@ -272,16 +298,21 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
+	// Wrap listener with TLS if enabled
+	if tlsConfig != nil {
+		ln = tls.NewListener(ln, tlsConfig)
+	}
+
 	// Log the actual URL (matches TS: "Web dashboard available at ...")
 	actualPort := ln.Addr().(*net.TCPAddr).Port
 	s.ActualPort = actualPort
-	url := fmt.Sprintf("http://localhost:%d", actualPort)
+	url := fmt.Sprintf("%s://localhost:%d", scheme, actualPort)
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
-	if s.cfg.NetworkAccess == "lan" || s.cfg.NetworkAccess == "external" {
+	if s.cfg.Network.NetworkAccess == "lan" || s.cfg.Network.NetworkAccess == "external" {
 		s.logger.Info(fmt.Sprintf("[WebServer] LAN access enabled (listening on %s)", host))
 	}
-	if (s.cfg.NetworkAccess == "external" || s.cfg.NetworkAccess == "public") && s.cfg.PasswordHash != "" {
-		s.logger.Warn("[WebServer] External access with authentication over plain HTTP — session cookies are not encrypted. Consider using a reverse proxy with HTTPS.")
+	if (s.cfg.Network.NetworkAccess == "external" || s.cfg.Network.NetworkAccess == "public") && s.cfg.Network.PasswordHash != "" && !s.cfg.Network.HTTPSEnabled {
+		s.logger.Warn("[WebServer] External access with authentication over plain HTTP — session cookies are not encrypted. Consider setting https_enabled = true or using a reverse proxy with HTTPS.")
 	}
 
 	// Open browser to dashboard URL (matches TS openBrowser behavior)

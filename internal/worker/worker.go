@@ -351,7 +351,7 @@ func isTerminalStatus(status database.JobStatus) bool {
 }
 
 func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
-	outputDir := w.cfg.Downloader.OutputDirectory
+	outputDir := w.cfg.Paths.OutputDirectory
 	if job.OutputDirectory != "" {
 		outputDir = job.OutputDirectory
 	}
@@ -360,7 +360,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	}
 
 	// Use config staging directory, falling back to ./staging/{jobID}
-	stagingBase := w.cfg.Downloader.StagingDirectory
+	stagingBase := w.cfg.Paths.StagingDirectory
 	if stagingBase == "" {
 		stagingBase = "./staging"
 	}

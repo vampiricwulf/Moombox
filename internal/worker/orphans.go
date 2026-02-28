@@ -94,7 +94,7 @@ func DeleteOrphanedFile(path string, cfg *config.MoomboxConfig) error {
 }
 
 func resolveStagingDir(cfg *config.MoomboxConfig) string {
-	dir := cfg.Downloader.StagingDirectory
+	dir := cfg.Paths.StagingDirectory
 	if dir == "" {
 		dir = "./staging"
 	}
@@ -106,7 +106,7 @@ func resolveStagingDir(cfg *config.MoomboxConfig) string {
 }
 
 func resolveOutputDir(cfg *config.MoomboxConfig) string {
-	dir := cfg.Downloader.OutputDirectory
+	dir := cfg.Paths.OutputDirectory
 	if dir == "" {
 		dir = "./output"
 	}
@@ -137,7 +137,7 @@ func isUnderDirectory(path, dir string) bool {
 
 // scanStagingOrphans scans the staging directory for orphaned subdirectories.
 func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]OrphanedEntry, error) {
-	stagingDir := cfg.Downloader.StagingDirectory
+	stagingDir := cfg.Paths.StagingDirectory
 	if stagingDir == "" {
 		stagingDir = "./staging"
 	}
@@ -206,7 +206,7 @@ func scanStagingOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orp
 
 // scanOutputOrphans scans the output directory for files not referenced by any job.
 func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]OrphanedEntry, error) {
-	outputDir := cfg.Downloader.OutputDirectory
+	outputDir := cfg.Paths.OutputDirectory
 	if outputDir == "" {
 		outputDir = "./output"
 	}
@@ -293,7 +293,7 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 
 // scanTrimOrphans scans for trim files not referenced by any DB trim record.
 func scanTrimOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]OrphanedEntry, error) {
-	outputDir := cfg.Downloader.OutputDirectory
+	outputDir := cfg.Paths.OutputDirectory
 	if outputDir == "" {
 		outputDir = "./output"
 	}

@@ -332,40 +332,48 @@ func (m *SetupWizardModel) finishSetup() string {
 	}
 
 	cfg := &config.MoomboxConfig{
-		NetworkAccess:  networkAccess,
-		LogLevel:       m.values["logLevel"],
-		LogFilePath:    v("logFilePath"),
-		LogMaxFileSize: vNum("logMaxSize"),
-		LogMaxFiles:    vNum("logMaxFiles"),
-		DatabasePath:   v("databasePath"),
-		MaxFeedItems:   vNum("maxFeedItems"),
+		Network: config.NetworkConfig{
+			NetworkAccess: networkAccess,
+		},
+		Paths: config.PathsConfig{
+			LogFilePath:      v("logFilePath"),
+			DatabasePath:     v("databasePath"),
+			OutputDirectory:  v("outputDir"),
+			StagingDirectory: v("stagingDir"),
+			FfmpegPath:       v("ffmpegPath"),
+		},
+		Logs: config.LogsConfig{
+			LogLevel:       m.values["logLevel"],
+			LogMaxFileSize: vNum("logMaxSize"),
+			LogMaxFiles:    vNum("logMaxFiles"),
+		},
+		Monitors: config.MonitorsConfig{
+			MaxFeedItems: vNum("maxFeedItems"),
+		},
 		Downloader: config.DownloaderConfig{
-			OutputDirectory:      v("outputDir"),
 			OutputTemplate:       v("outputTemplate"),
-			StagingDirectory:     v("stagingDir"),
 			NumParallelDownloads: vNum("numParallel"),
 			MaxVideoResolution:   vNum("maxRes"),
 			Prefer60fps:          vBool("prefer60fps", true),
 			DownloadChat:         vBool("downloadChat", true),
-			FfmpegPath:           v("ffmpegPath"),
-			CookieFile:           v("cookieFile"),
+		},
+		Cookies: config.CookiesConfig{
+			CookieFile: v("cookieFile"),
 		},
 	}
 
 	port := vNum("port")
 	if port > 0 {
-		cfg.Port = port
+		cfg.Network.Port = port
 	}
 
 	hideAge := vNum("hideAge")
 	if hideAge >= 0 {
-		cfg.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
+		cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
 	}
 
 	if vBool("autoCookies", false) {
-		cfg.AutoCookies = &config.AutoCookiesConfig{
-			Enabled: true,
-		}
+		cfg.Cookies.AutoEnabled = true
 	}
 
 	channelID := v("channelId")

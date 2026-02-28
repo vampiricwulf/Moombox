@@ -17,9 +17,17 @@ const ALL_NOTIFICATION_EVENTS = [
 const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 
 // Settings that require a process restart to take effect
-const RESTART_REQUIRED_KEYS = [
-  "port", "network_access", "database_path",
-  "log_file_path", "log_max_file_size", "log_max_files",
+// Each entry is [nestedPath, formElementId] for change detection
+const RESTART_REQUIRED_FIELDS = [
+  { path: "network.port", id: "cfg-port" },
+  { path: "network.network_access", id: "cfg-network-access" },
+  { path: "network.https_enabled", id: "cfg-https-enabled" },
+  { path: "network.tls_cert_path", id: "cfg-tls-cert-path" },
+  { path: "network.tls_key_path", id: "cfg-tls-key-path" },
+  { path: "paths.database_path", id: "cfg-database" },
+  { path: "paths.log_file_path", id: "cfg-log-file" },
+  { path: "logs.log_max_file_size", id: "cfg-log-max-size" },
+  { path: "logs.log_max_files", id: "cfg-log-max-files" },
 ];
 
 export class SettingsController {
@@ -208,8 +216,8 @@ export class SettingsController {
       this.loadYtdlpPluginStatus();
     }
 
-    // Load security status when that section is shown
-    if (section === "security") {
+    // Load security status when network section is shown (password UI is in network)
+    if (section === "network") {
       this.loadSecurityStatus();
     }
   }
@@ -218,13 +226,12 @@ export class SettingsController {
     const config = this.app.config;
     if (!config) return;
 
-    // General settings
-    this.app.setInputValue("cfg-port", config.port);
-    // Network access select
+    // Network settings
+    this.app.setInputValue("cfg-port", config.network?.port);
     const netAccessSelect = document.getElementById("cfg-network-access");
     const cfgExtWarning = document.getElementById("cfg-external-warning");
     if (netAccessSelect) {
-      const level = config.network_access || "localhost";
+      const level = config.network?.network_access || "localhost";
       netAccessSelect.value = level;
       if (cfgExtWarning) {
         cfgExtWarning.style.display = level === "external" ? "" : "none";
@@ -236,56 +243,60 @@ export class SettingsController {
         }
       }
     }
-    // Set log level select value
-    const logLevelSelect = document.getElementById("cfg-log-level");
-    if (logLevelSelect && config.log_level) {
-      logLevelSelect.value = config.log_level;
+    // HTTPS switch
+    const httpsSwitch = document.getElementById("cfg-https-enabled");
+    if (httpsSwitch) {
+      httpsSwitch.checked = config.network?.https_enabled === true;
     }
-    this.app.setInputValue("cfg-log-file", config.log_file_path);
-    this.app.setInputValue("cfg-log-max-size", config.log_max_file_size);
-    this.app.setInputValue("cfg-log-max-files", config.log_max_files);
-    this.app.setInputValue("cfg-database", config.database_path);
-    this.app.setInputValue("cfg-max-feed-items", config.max_feed_items);
-    this.app.setInputValue("cfg-feed-check-interval", config.feed_check_interval);
-    this.app.setInputValue("cfg-decapi-check-interval", config.decapi_check_interval ?? "");
-    this.app.setInputValue("cfg-twitch-check-interval", config.twitch_check_interval ?? "");
-    this.app.setInputValue(
-      "cfg-hide-finished-days",
-      config.hide_finished_age_days,
-    );
+    this.app.setInputValue("cfg-tls-cert-path", config.network?.tls_cert_path);
+    this.app.setInputValue("cfg-tls-key-path", config.network?.tls_key_path);
+
+    // Paths settings
+    this.app.setInputValue("cfg-database", config.paths?.database_path);
+    this.app.setInputValue("cfg-log-file", config.paths?.log_file_path);
+    this.app.setInputValue("cfg-output-dir", config.paths?.output_directory);
+    this.app.setInputValue("cfg-staging-dir", config.paths?.staging_directory);
+    this.app.setInputValue("cfg-ffmpeg-path", config.paths?.ffmpeg_path);
+
+    // Logs settings
+    const logLevelSelect = document.getElementById("cfg-log-level");
+    if (logLevelSelect && config.logs?.log_level) {
+      logLevelSelect.value = config.logs.log_level;
+    }
+    this.app.setInputValue("cfg-log-max-size", config.logs?.log_max_file_size);
+    this.app.setInputValue("cfg-log-max-files", config.logs?.log_max_files);
+
+    // Monitors settings
+    this.app.setInputValue("cfg-max-feed-items", config.monitors?.max_feed_items);
+    this.app.setInputValue("cfg-feed-check-interval", config.monitors?.feed_check_interval);
+    this.app.setInputValue("cfg-decapi-check-interval", config.monitors?.decapi_check_interval ?? "");
+    this.app.setInputValue("cfg-twitch-check-interval", config.monitors?.twitch_check_interval ?? "");
+    this.app.setInputValue("cfg-hide-finished-days", config.monitors?.hide_finished_age_days);
 
     // Downloader settings
-    if (config.downloader) {
-      this.app.setInputValue("cfg-output-dir", config.downloader.output_directory);
-      this.app.setInputValue("cfg-output-template", config.downloader.output_template);
-      this.app.setInputValue("cfg-staging-dir", config.downloader.staging_directory);
-      this.app.setInputValue("cfg-ffmpeg-path", config.downloader.ffmpeg_path);
-      this.app.setInputValue("cfg-cookie-file", config.downloader.cookie_file);
-      this.app.setInputValue("cfg-max-resolution", config.downloader.max_video_resolution);
-      this.app.setInputValue("cfg-parallel-downloads", config.downloader.num_parallel_downloads);
-      // Download chat switch
-      const downloadChatSwitch = document.getElementById("cfg-download-chat");
-      if (downloadChatSwitch) {
-        downloadChatSwitch.checked = config.downloader.download_chat !== false;
-      }
-      // Prefer 60fps switch
-      const prefer60fpsSwitch = document.getElementById("cfg-prefer-60fps");
-      if (prefer60fpsSwitch) {
-        prefer60fpsSwitch.checked = config.downloader.prefer_60fps !== false;
-      }
-      this.app.setInputValue("cfg-retry-delay-cap", config.downloader.segment_retry_delay_cap);
-      this.app.setInputValue("cfg-live-check-retries", config.downloader.segment_live_check_retries);
+    this.app.setInputValue("cfg-output-template", config.downloader?.output_template);
+    this.app.setInputValue("cfg-max-resolution", config.downloader?.max_video_resolution);
+    this.app.setInputValue("cfg-parallel-downloads", config.downloader?.num_parallel_downloads);
+    // Download chat switch
+    const downloadChatSwitch = document.getElementById("cfg-download-chat");
+    if (downloadChatSwitch) {
+      downloadChatSwitch.checked = config.downloader?.download_chat !== false;
     }
+    // Prefer 60fps switch
+    const prefer60fpsSwitch = document.getElementById("cfg-prefer-60fps");
+    if (prefer60fpsSwitch) {
+      prefer60fpsSwitch.checked = config.downloader?.prefer_60fps !== false;
+    }
+    this.app.setInputValue("cfg-retry-delay-cap", config.downloader?.segment_retry_delay_cap);
+    this.app.setInputValue("cfg-live-check-retries", config.downloader?.segment_live_check_retries);
 
-    // Auto cookies settings
+    // Cookies settings
+    this.app.setInputValue("cfg-cookie-file", config.cookies?.cookie_file);
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     if (autoCookiesSwitch) {
-      autoCookiesSwitch.checked = config.auto_cookies?.enabled === true;
+      autoCookiesSwitch.checked = config.cookies?.auto_enabled === true;
     }
-    this.app.setInputValue(
-      "cfg-auto-cookies-profile-dir",
-      config.auto_cookies?.browser_profile_dir,
-    );
+    this.app.setInputValue("cfg-auto-cookies-profile-dir", config.cookies?.browser_profile_dir);
     this.updateAutoCookieUI();
 
     // Track dirty state
@@ -305,95 +316,118 @@ export class SettingsController {
 
     // Snapshot restart-required values for change detection
     this._originalRestartValues = {
-      port: config.port,
-      network_access: config.network_access,
-      database_path: config.database_path,
-      log_file_path: config.log_file_path,
-      log_max_file_size: config.log_max_file_size,
-      log_max_files: config.log_max_files,
+      "network.port": config.network?.port,
+      "network.network_access": config.network?.network_access,
+      "network.https_enabled": config.network?.https_enabled,
+      "network.tls_cert_path": config.network?.tls_cert_path,
+      "network.tls_key_path": config.network?.tls_key_path,
+      "paths.database_path": config.paths?.database_path,
+      "paths.log_file_path": config.paths?.log_file_path,
+      "logs.log_max_file_size": config.logs?.log_max_file_size,
+      "logs.log_max_files": config.logs?.log_max_files,
     };
+
+    // Network is the default visible section, so load security status now
+    this.loadSecurityStatus();
   }
 
   async saveConfig() {
     if (!this.app.config) {
-      this.app.config = { downloader: {} };
+      this.app.config = {};
     }
     const config = this.app.config;
 
     // Gather values from form
     const port = this.app.getInputNumber("cfg-port");
+    const netAccessSelect = document.getElementById("cfg-network-access");
+    const networkAccess = netAccessSelect ? netAccessSelect.value : "localhost";
+    const httpsSwitch = document.getElementById("cfg-https-enabled");
+    const httpsEnabled = httpsSwitch ? httpsSwitch.checked : false;
+    const tlsCertPath = this.app.getInputValue("cfg-tls-cert-path");
+    const tlsKeyPath = this.app.getInputValue("cfg-tls-key-path");
+
+    const database = this.app.getInputValue("cfg-database");
+    const logFile = this.app.getInputValue("cfg-log-file");
+    const outputDir = this.app.getInputValue("cfg-output-dir");
+    const stagingDir = this.app.getInputValue("cfg-staging-dir");
+    const ffmpegPath = this.app.getInputValue("cfg-ffmpeg-path");
+
     const logLevelSelect = document.getElementById("cfg-log-level");
     const logLevel = logLevelSelect ? logLevelSelect.value : "";
-    const logFile = this.app.getInputValue("cfg-log-file");
     const logMaxSize = this.app.getInputNumber("cfg-log-max-size");
     const logMaxFiles = this.app.getInputNumber("cfg-log-max-files");
-    const database = this.app.getInputValue("cfg-database");
+
     const maxFeedItems = this.app.getInputNumber("cfg-max-feed-items");
     const feedCheckInterval = this.app.getInputNumber("cfg-feed-check-interval");
     const decapiCheckInterval = this.app.getInputNumber("cfg-decapi-check-interval");
     const twitchCheckInterval = this.app.getInputNumber("cfg-twitch-check-interval");
     const hideFinishedDays = this.app.getInputNumber("cfg-hide-finished-days");
 
-    const outputDir = this.app.getInputValue("cfg-output-dir");
     const outputTemplate = this.app.getInputValue("cfg-output-template");
-    const stagingDir = this.app.getInputValue("cfg-staging-dir");
-    const ffmpegPath = this.app.getInputValue("cfg-ffmpeg-path");
-    const cookieFile = this.app.getInputValue("cfg-cookie-file");
     const maxResolution = this.app.getInputNumber("cfg-max-resolution");
     const parallelDownloads = this.app.getInputNumber("cfg-parallel-downloads");
     const retryDelayCap = this.app.getInputNumber("cfg-retry-delay-cap");
     const liveCheckRetries = this.app.getInputNumber("cfg-live-check-retries");
+    const downloadChatSwitch = document.getElementById("cfg-download-chat");
+    const downloadChat = downloadChatSwitch ? downloadChatSwitch.checked : true;
+    const prefer60fpsSwitch = document.getElementById("cfg-prefer-60fps");
+    const prefer60fps = prefer60fpsSwitch ? prefer60fpsSwitch.checked : true;
 
-    // Network access
-    const netAccessSelect = document.getElementById("cfg-network-access");
-    const networkAccess = netAccessSelect ? netAccessSelect.value : "localhost";
+    const cookieFile = this.app.getInputValue("cfg-cookie-file");
+    const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
+    const autoEnabled = autoCookiesSwitch ? autoCookiesSwitch.checked : false;
+    const autoCookiesProfileDir = this.app.getInputValue("cfg-auto-cookies-profile-dir");
 
-    // Update config object
-    config.port = port;
-    config.network_access = networkAccess;
-    config.log_level = logLevel || undefined;
-    config.log_file_path = logFile || undefined;
-    config.log_max_file_size = logMaxSize;
-    config.log_max_files = logMaxFiles;
-    config.database_path = database || undefined;
-    config.max_feed_items = maxFeedItems;
-    config.feed_check_interval = feedCheckInterval;
+    // Build nested config object
+    config.network = {
+      port,
+      network_access: networkAccess,
+      https_enabled: httpsEnabled,
+      ...(tlsCertPath ? { tls_cert_path: tlsCertPath } : {}),
+      ...(tlsKeyPath ? { tls_key_path: tlsKeyPath } : {}),
+    };
+
+    config.paths = {
+      database_path: database || undefined,
+      log_file_path: logFile || undefined,
+      output_directory: outputDir || undefined,
+      staging_directory: stagingDir || undefined,
+      ffmpeg_path: ffmpegPath || undefined,
+    };
+
+    config.logs = {
+      log_level: logLevel || undefined,
+      log_max_file_size: logMaxSize,
+      log_max_files: logMaxFiles,
+    };
+
+    config.monitors = {
+      max_feed_items: maxFeedItems,
+      feed_check_interval: feedCheckInterval,
+      hide_finished_age_days: hideFinishedDays,
+    };
     if (decapiCheckInterval) {
-      config.decapi_check_interval = decapiCheckInterval;
-    } else {
-      delete config.decapi_check_interval;
+      config.monitors.decapi_check_interval = decapiCheckInterval;
     }
     if (twitchCheckInterval) {
-      config.twitch_check_interval = twitchCheckInterval;
-    } else {
-      delete config.twitch_check_interval;
+      config.monitors.twitch_check_interval = twitchCheckInterval;
     }
 
-    config.hide_finished_age_days = hideFinishedDays;
+    config.downloader = {
+      output_template: outputTemplate || undefined,
+      max_video_resolution: maxResolution,
+      num_parallel_downloads: parallelDownloads,
+      download_chat: downloadChat,
+      prefer_60fps: prefer60fps,
+      segment_retry_delay_cap: retryDelayCap,
+      segment_live_check_retries: liveCheckRetries,
+    };
 
-    if (!config.downloader) config.downloader = {};
-    config.downloader.output_directory = outputDir || undefined;
-    config.downloader.output_template = outputTemplate || undefined;
-    config.downloader.staging_directory = stagingDir || undefined;
-    config.downloader.ffmpeg_path = ffmpegPath || undefined;
-    config.downloader.cookie_file = cookieFile || undefined;
-    config.downloader.max_video_resolution = maxResolution;
-    config.downloader.num_parallel_downloads = parallelDownloads;
-    config.downloader.segment_retry_delay_cap = retryDelayCap;
-    config.downloader.segment_live_check_retries = liveCheckRetries;
-    // Download chat switch
-    const downloadChatSwitch = document.getElementById("cfg-download-chat");
-    config.downloader.download_chat = downloadChatSwitch ? downloadChatSwitch.checked : true;
-    // Prefer 60fps switch
-    const prefer60fpsSwitch = document.getElementById("cfg-prefer-60fps");
-    config.downloader.prefer_60fps = prefer60fpsSwitch ? prefer60fpsSwitch.checked : true;
-
-    // Auto cookies
-    if (!config.auto_cookies) config.auto_cookies = {};
-    const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
-    config.auto_cookies.enabled = autoCookiesSwitch ? autoCookiesSwitch.checked : false;
-    const autoCookiesProfileDir = this.app.getInputValue("cfg-auto-cookies-profile-dir");
-    config.auto_cookies.browser_profile_dir = autoCookiesProfileDir || undefined;
+    config.cookies = {
+      cookie_file: cookieFile || undefined,
+      auto_enabled: autoEnabled,
+      browser_profile_dir: autoCookiesProfileDir || undefined,
+    };
 
     try {
       const response = await fetch("/api/config", {
@@ -427,17 +461,24 @@ export class SettingsController {
    * If so, prompt the user and call POST /api/restart.
    */
   _checkRestartRequired(config) {
-    const current = {
-      port: config.port,
-      network_access: config.network_access,
-      database_path: config.database_path,
-      log_file_path: config.log_file_path,
-      log_max_file_size: config.log_max_file_size,
-      log_max_files: config.log_max_files,
+    /** Resolve a dotted path like "network.port" from the config object */
+    const resolve = (obj, path) => {
+      const parts = path.split(".");
+      let v = obj;
+      for (const p of parts) {
+        if (v == null) return undefined;
+        v = v[p];
+      }
+      return v;
     };
 
-    const changed = RESTART_REQUIRED_KEYS.some(
-      (k) => String(current[k] ?? "") !== String(this._originalRestartValues[k] ?? ""),
+    const current = {};
+    for (const { path } of RESTART_REQUIRED_FIELDS) {
+      current[path] = resolve(config, path);
+    }
+
+    const changed = RESTART_REQUIRED_FIELDS.some(
+      ({ path }) => String(current[path] ?? "") !== String(this._originalRestartValues[path] ?? ""),
     );
     if (!changed) return;
 
@@ -477,16 +518,8 @@ export class SettingsController {
   }
 
   _addRestartBadges() {
-    const fieldMap = {
-      port: "cfg-port",
-      network_access: "cfg-network-access",
-      database_path: "cfg-database",
-      log_file_path: "cfg-log-file",
-      log_max_file_size: "cfg-log-max-size",
-      log_max_files: "cfg-log-max-files",
-    };
-    for (const [, elId] of Object.entries(fieldMap)) {
-      const el = document.getElementById(elId);
+    for (const { id } of RESTART_REQUIRED_FIELDS) {
+      const el = document.getElementById(id);
       if (!el) continue;
       // Avoid duplicate badges
       const parent = el.parentElement;

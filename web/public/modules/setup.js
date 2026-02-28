@@ -133,35 +133,43 @@ export class SetupController {
       }
     }
 
-    // Build config
+    // Build nested config
     const config = {
-      port: port,
-      network_access: setupNetworkAccess,
+      network: {
+        port: port,
+        network_access: setupNetworkAccess,
+      },
       // Include password for server to hash (only for external access)
       ...(setupNetworkAccess === "external" && externalPassword ? { password: externalPassword } : {}),
-      log_level: logLevel,
-      log_file_path: logFilePath,
-      log_max_file_size: logMaxSize,
-      log_max_files: logMaxFiles,
-      database_path: databasePath,
-      max_feed_items: maxFeedItems,
-      feed_check_interval: feedCheckInterval,
-      downloader: {
+      paths: {
+        database_path: databasePath,
+        log_file_path: logFilePath,
         output_directory: outputDir,
-        output_template: outputTemplate,
         staging_directory: stagingDir,
+        ffmpeg_path: ffmpegPath,
+      },
+      logs: {
+        log_level: logLevel,
+        log_max_file_size: logMaxSize,
+        log_max_files: logMaxFiles,
+      },
+      monitors: {
+        max_feed_items: maxFeedItems,
+        feed_check_interval: feedCheckInterval,
+        hide_finished_age_days: hideAge,
+      },
+      downloader: {
+        output_template: outputTemplate,
         num_parallel_downloads: numParallel,
         max_video_resolution: maxResolution,
         prefer_60fps: prefer60fps,
         download_chat: downloadChat,
-        ffmpeg_path: ffmpegPath,
-        cookie_file: cookieFile,
         segment_retry_delay_cap: retryDelayCap,
         segment_live_check_retries: liveCheckRetries,
       },
-      hide_finished_age_days: hideAge,
-      auto_cookies: {
-        enabled: autoCookiesEnabled,
+      cookies: {
+        cookie_file: cookieFile,
+        auto_enabled: autoCookiesEnabled,
       },
     };
 

@@ -17,7 +17,7 @@ func CORSMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
 
 			if origin != "" {
 				// Validate origin based on network_access
-				if isAllowedOrigin(origin, cfg.NetworkAccess) {
+				if isAllowedOrigin(origin, cfg.Network.NetworkAccess) {
 					w.Header().Set("Access-Control-Allow-Origin", origin)
 					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
@@ -27,7 +27,7 @@ func CORSMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
 			}
 
 			if r.Method == http.MethodOptions {
-				if origin != "" && isAllowedOrigin(origin, cfg.NetworkAccess) {
+				if origin != "" && isAllowedOrigin(origin, cfg.Network.NetworkAccess) {
 					w.WriteHeader(http.StatusNoContent)
 				} else {
 					w.WriteHeader(http.StatusForbidden)
@@ -93,7 +93,7 @@ func CSRFMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
 
 			// If Origin/Referer present, validate it
 			if origin != "" {
-				if !isAllowedOrigin(origin, cfg.NetworkAccess) {
+				if !isAllowedOrigin(origin, cfg.Network.NetworkAccess) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusForbidden)
 					w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))
@@ -113,7 +113,7 @@ func IPGateMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := extractIP(r)
 
-			switch cfg.NetworkAccess {
+			switch cfg.Network.NetworkAccess {
 			case "external", "public":
 				// Allow all
 			case "lan":

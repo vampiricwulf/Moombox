@@ -5,7 +5,8 @@
 # Moombox also includes a first-time setup wizard (TUI and web dashboard)
 # that generates this file for you.
 
-# ─── Server ───────────────────────────────────────────────────────────────────
+# ─── Network ─────────────────────────────────────────────────────────────────
+[network]
 
 # Web dashboard and API port
 # port = 774
@@ -16,13 +17,38 @@
 #   "external" — any device (use with caution)
 # network_access = "localhost"
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
+# Enable built-in HTTPS with a self-signed certificate.
+# A certificate is auto-generated on first start and reused on restarts.
+# https_enabled = false
 
-# Log level: "DEBUG", "INFO" (default), "WARN", "ERROR"
-# log_level = "INFO"
+# Custom paths for TLS certificate and key (defaults shown).
+# Provide your own files to use a CA-signed certificate instead.
+# tls_cert_path = "./moombox.crt"
+# tls_key_path = "./moombox.key"
+
+# ─── Paths ────────────────────────────────────────────────────────────────────
+[paths]
+
+# Path to the SQLite database file
+# database_path = "./moombox.db"
 
 # Text log file path (rotated automatically)
 # log_file_path = "./moombox.log"
+
+# Output directory for finished downloads
+# output_directory = "./output"
+
+# Temporary directory for in-progress downloads (segments, chat, resume state)
+# staging_directory = "./staging"
+
+# Path to FFmpeg binary (auto-detected from PATH if not set)
+# ffmpeg_path = "/usr/bin/ffmpeg"
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+[logs]
+
+# Log level: "DEBUG", "INFO" (default), "WARN", "ERROR"
+# log_level = "INFO"
 
 # Max size per log file before rotation (bytes). Default: 10 MB.
 # log_max_file_size = 10485760
@@ -30,12 +56,8 @@
 # Number of rotated log files to keep
 # log_max_files = 5
 
-# ─── Database ─────────────────────────────────────────────────────────────────
-
-# Path to the SQLite database file
-# database_path = "./moombox.db"
-
-# ─── Feed Monitor ─────────────────────────────────────────────────────────────
+# ─── Monitors ─────────────────────────────────────────────────────────────────
+[monitors]
 
 # Maximum RSS feed items to check per channel
 # max_feed_items = 15
@@ -43,36 +65,35 @@
 # How often to check RSS feeds (in minutes, or duration string like "10m")
 # feed_check_interval = 10
 
+# DECAPI check interval in seconds (0 = dynamic rate-limit based). Optional.
+# decapi_check_interval = 0
+
+# Twitch check interval in seconds (default: 15). Optional.
+# twitch_check_interval = 15
+
+# Finished jobs older than this are moved to the Archived section in the
+# TUI and web dashboard. Accepts a number (days) or duration string like "30d".
+# Set to 0 to instantly archive all finished jobs.
+# hide_finished_age_days = 30
+
 # ─── Downloader ───────────────────────────────────────────────────────────────
 [downloader]
+
+# Filename template. Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}
+# output_template = "${channel}/${start_date} ${title} [${id}]"
 
 # Maximum video resolution. Based on max(width, height), so portrait videos
 # are handled correctly (e.g., 1080 allows both 1920x1080 and 1080x1920).
 # max_video_resolution = 1080
 
-# Prefer 60fps streams when available at the same resolution
-# prefer_60fps = true
+# Number of simultaneous download jobs
+# num_parallel_downloads = 2
 
 # Download live chat alongside streams
 # download_chat = true
 
-# Output directory for finished downloads
-# output_directory = "./output"
-
-# Filename template. Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}
-# output_template = "${channel}/${start_date} ${title} [${id}]"
-
-# Temporary directory for in-progress downloads (segments, chat, resume state)
-# staging_directory = "./staging"
-
-# Number of simultaneous download jobs
-# num_parallel_downloads = 2
-
-# Netscape-format cookie file for member-only content
-# cookie_file = "./cookies.txt"
-
-# Path to FFmpeg binary (auto-detected from PATH if not set)
-# ffmpeg_path = "/usr/bin/ffmpeg"
+# Prefer 60fps streams when available at the same resolution
+# prefer_60fps = true
 
 # Advanced: segment retry backoff cap in seconds (for live streams hitting 404s)
 # segment_retry_delay_cap = 60
@@ -89,14 +110,12 @@
 # Advanced: external POT provider URL (instead of built-in BotGuard)
 # pot_provider_url = ""
 
-# ─── Task List ────────────────────────────────────────────────────────────────
+# ─── Cookies ──────────────────────────────────────────────────────────────────
+[cookies]
 
-# Finished jobs older than this are moved to the Archived section in the
-# TUI and web dashboard. Accepts a number (days) or duration string like "30d".
-# Set to 0 to instantly archive all finished jobs.
-# hide_finished_age_days = 30
+# Netscape-format cookie file for member-only content
+# cookie_file = "./cookies.txt"
 
-# ─── Auto Cookies ────────────────────────────────────────────────────────────
 # Automatic cookie acquisition via browser. When enabled, Moombox can
 # launch a browser for you to log into YouTube, then extract and refresh
 # cookies automatically.
@@ -106,8 +125,7 @@
 #
 # Setup: enable below, then use the web dashboard Settings page or TUI
 # setup wizard to launch the browser and complete login.
-[auto_cookies]
-# enabled = false
+# auto_enabled = false
 # browser_profile_dir = "./browser-profile"
 
 # ─── Webhook Notifications ──────────────────────────────────────────────────

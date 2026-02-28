@@ -385,7 +385,7 @@ class MoomboxApp {
   }
 
   updateStatusBar() {
-    const autoCookiesEnabled = this.config?.auto_cookies?.enabled === true;
+    const autoCookiesEnabled = this.config?.cookies?.auto_enabled === true;
 
     // 1. Warnings (clickable, to the left)
     const warningsEl = document.getElementById("status-warnings");
