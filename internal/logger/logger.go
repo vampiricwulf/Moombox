@@ -204,6 +204,11 @@ func (l *Logger) log(level slog.Level, msg string, args ...any) {
 		return
 	}
 
+	// Check level before doing any work
+	if !l.slog.Enabled(nil, level) {
+		return
+	}
+
 	l.slog.Log(nil, level, msg, args...)
 
 	// Format for ring buffer and subscribers

@@ -20,7 +20,9 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-const pollInterval = 5 * time.Second
+// heartbeatInterval is the safety-net poll interval for catching missed jobs.
+// Normal job discovery is signal-driven via NotifyNewJob.
+const heartbeatInterval = 60 * time.Second
 
 // Logger is the interface for logging.
 type Logger interface {
@@ -68,6 +70,7 @@ type DownloadWorker struct {
 	notifier     *notifications.Manager
 	logger       Logger
 	wg           sync.WaitGroup // tracks in-flight processJob goroutines
+	notifyJob    chan struct{}   // signal to re-check for new jobs (non-blocking send)
 
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should be attempted.
 	// Returns true if cookies were refreshed successfully.
@@ -118,6 +121,7 @@ func NewDownloadWorker(
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,
+		notifyJob:    make(chan struct{}, 1),
 	}
 }
 
@@ -152,9 +156,14 @@ func (w *DownloadWorker) EnqueueJob(jobID string) {
 	job, err := w.db.GetJob(jobID)
 	if err != nil || job == nil {
 		w.queue.Enqueue(jobID, database.StatusUpcoming)
-		return
+	} else {
+		w.queue.Enqueue(jobID, job.Status)
 	}
-	w.queue.Enqueue(jobID, job.Status)
+	// Signal the poll loop to re-check (non-blocking)
+	select {
+	case w.notifyJob <- struct{}{}:
+	default:
+	}
 }
 
 // CancelJob cancels a running job and updates its status.
@@ -179,23 +188,27 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 	}
 }
 
+// pollForJobs is signal-driven: wakes on NotifyNewJob signals or a 60s safety heartbeat.
+// Most job discovery happens via explicit EnqueueJob calls; this is a catch-all.
 func (w *DownloadWorker) pollForJobs(ctx context.Context) {
-	ticker := time.NewTicker(pollInterval)
+	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-w.notifyJob:
 		case <-ticker.C:
-			jobs, err := w.db.GetAllJobs(false)
-			if err != nil {
-				continue
-			}
-			for _, job := range jobs {
-				if ShouldProcess(job) && !w.queue.IsProcessing(job.ID) {
-					w.queue.Enqueue(job.ID, job.Status)
-				}
+		}
+
+		jobs, err := w.db.GetAllJobs(false)
+		if err != nil {
+			continue
+		}
+		for _, job := range jobs {
+			if ShouldProcess(job) && !w.queue.IsProcessing(job.ID) {
+				w.queue.Enqueue(job.ID, job.Status)
 			}
 		}
 	}

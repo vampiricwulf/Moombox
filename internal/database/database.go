@@ -117,28 +117,38 @@ func (db *Database) prepareStatements() error {
 }
 
 // batchUpdateLoop coalesces rapid job updates into batched writes.
+// Signal-driven: sleeps until work arrives, then coalesces for 100ms before flushing.
+// Zero IO when idle.
 func (db *Database) batchUpdateLoop() {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
+	const coalesceDelay = 100 * time.Millisecond
 	pending := make(map[string]*Job)
+	var coalesceTimer *time.Timer
+	var timerC <-chan time.Time
 
 	for {
 		select {
 		case job, ok := <-db.updateCh:
 			if !ok {
 				// Channel closed, flush remaining
+				if coalesceTimer != nil {
+					coalesceTimer.Stop()
+				}
 				db.flushUpdates(pending)
 				close(db.batchDone)
 				return
 			}
 			pending[job.ID] = job
-
-		case <-ticker.C:
-			if len(pending) > 0 {
-				db.flushUpdates(pending)
-				pending = make(map[string]*Job)
+			// Start coalesce timer on first item; subsequent items just accumulate
+			if coalesceTimer == nil {
+				coalesceTimer = time.NewTimer(coalesceDelay)
+				timerC = coalesceTimer.C
 			}
+
+		case <-timerC:
+			db.flushUpdates(pending)
+			pending = make(map[string]*Job)
+			coalesceTimer = nil
+			timerC = nil
 		}
 	}
 }
