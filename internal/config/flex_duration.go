@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -78,6 +79,17 @@ func parseStringDuration(s string, unit string, defaultValue float64) FlexDurati
 	}
 }
 
+// MarshalJSON serializes FlexDuration as a plain number so the API returns
+// e.g. 30 instead of {"Value":30}. This matches what the frontend expects.
+func (d FlexDuration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.Value)
+}
+
+// UnmarshalJSON deserializes FlexDuration from a plain number.
+func (d *FlexDuration) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &d.Value)
+}
+
 // Minutes returns the value interpreted as minutes.
 func (d FlexDuration) Minutes() float64 {
 	return d.Value
@@ -119,7 +131,7 @@ func (d *FlexDuration) UnmarshalTOML(data interface{}) error {
 			}
 			return nil
 		}
-		d.Value = 0
+		return fmt.Errorf("invalid duration %q: expected number or duration string (e.g. \"10m\", \"7d\")", s)
 	case map[string]interface{}:
 		// Handle TOML table form: {Value = 5.0} (written by toml.Encoder for struct)
 		if val, ok := v["Value"]; ok {

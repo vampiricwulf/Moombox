@@ -121,6 +121,11 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
 	}
 
 	fm.mu.Lock()
+	// Don't schedule if monitor was stopped (cancel set to nil)
+	if fm.cancel == nil {
+		fm.mu.Unlock()
+		return
+	}
 	fm.NextCheckAt = time.Now().Add(interval).UnixMilli()
 	if fm.timer != nil {
 		fm.timer.Stop()

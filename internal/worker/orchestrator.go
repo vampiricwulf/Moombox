@@ -22,6 +22,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -57,29 +58,10 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, logger Logg
 }
 
 // formatFileSize formats bytes into human-readable string.
-func formatFileSize(bytes int64) string {
-	const gb = 1024 * 1024 * 1024
-	const mb = 1024 * 1024
-	if bytes > gb {
-		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(gb))
-	}
-	return fmt.Sprintf("%.1f MB", float64(bytes)/float64(mb))
-}
+var formatFileSize = utils.FormatFileSize
 
 // formatDurationHuman formats a time.Duration into a human-readable string (e.g. "1h 23m", "5m 30s").
-func formatDurationHuman(d time.Duration) string {
-	totalSeconds := int(d.Seconds())
-	hours := totalSeconds / 3600
-	minutes := (totalSeconds % 3600) / 60
-	seconds := totalSeconds % 60
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm", hours, minutes)
-	}
-	if minutes > 0 {
-		return fmt.Sprintf("%dm %ds", minutes, seconds)
-	}
-	return fmt.Sprintf("%ds", seconds)
-}
+var formatDurationHuman = utils.FormatDurationHuman
 
 // Execute runs the full download pipeline for a YouTube job.
 func (o *DownloadOrchestrator) Execute(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool) error {

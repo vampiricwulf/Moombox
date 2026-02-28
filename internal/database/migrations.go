@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const createSchema = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -136,7 +136,9 @@ func (db *Database) migrate() error {
 				// Chat file lives alongside the output file — replace video extension with .chat.json
 				ext := filepath.Ext(outputFile)
 				chatFile := strings.TrimSuffix(outputFile, ext) + ".chat.json"
-				db.db.ExecContext(db.getCtx(), `UPDATE jobs SET chat_file = ? WHERE id = ?`, chatFile, id)
+				if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET chat_file = ? WHERE id = ?`, chatFile, id); err != nil && db.logger != nil {
+					db.logger.Warn("migration v2: failed to backfill chat_file", "jobID", id, "err", err)
+				}
 			}
 		}
 
@@ -173,7 +175,9 @@ func (db *Database) migrate() error {
 				for _, thumbExt := range []string{".jpg", ".webp", ".png"} {
 					thumbPath := base + thumbExt
 					if fileExists(thumbPath) {
-						db.db.ExecContext(db.getCtx(), `UPDATE jobs SET thumbnail_file = ? WHERE id = ?`, thumbPath, id)
+						if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET thumbnail_file = ? WHERE id = ?`, thumbPath, id); err != nil && db.logger != nil {
+							db.logger.Warn("migration v3: failed to backfill thumbnail_file", "jobID", id, "err", err)
+						}
 						break
 					}
 				}
@@ -181,12 +185,26 @@ func (db *Database) migrate() error {
 				// Check if description file exists
 				descPath := base + ".description"
 				if fileExists(descPath) {
-					db.db.ExecContext(db.getCtx(), `UPDATE jobs SET description_file = ? WHERE id = ?`, descPath, id)
+					if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET description_file = ? WHERE id = ?`, descPath, id); err != nil && db.logger != nil {
+						db.logger.Warn("migration v3: failed to backfill description_file", "jobID", id, "err", err)
+					}
 				}
 			}
 		}
 
 		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 3)
+		if err != nil {
+			return err
+		}
+	}
+
+	if version < 4 {
+		// Add index for video_id (used by HasActiveJob, AddToHistory)
+		if _, err := db.db.ExecContext(db.getCtx(), `CREATE INDEX IF NOT EXISTS idx_jobs_video_id ON jobs(video_id)`); err != nil {
+			return err
+		}
+
+		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 4)
 		if err != nil {
 			return err
 		}

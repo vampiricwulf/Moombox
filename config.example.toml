@@ -90,10 +90,10 @@
 # pot_provider_url = ""
 
 # ─── Task List ────────────────────────────────────────────────────────────────
-[tasklist]
 
 # Finished jobs older than this are moved to the Archived section in the
 # TUI and web dashboard. Accepts a number (days) or duration string like "30d".
+# Set to 0 to instantly archive all finished jobs.
 # hide_finished_age_days = 30
 
 # ─── Auto Cookies ────────────────────────────────────────────────────────────

@@ -69,6 +69,7 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 	r.Use(SecurityHeaders)
 	r.Use(CSRFMiddleware(cfg))
 	r.Use(IPGateMiddleware(cfg))
+	r.Use(MaxBodySize(1 << 20)) // 1MB default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
 
 	return s
@@ -278,6 +279,9 @@ func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
 	if s.cfg.NetworkAccess == "lan" || s.cfg.NetworkAccess == "external" {
 		s.logger.Info(fmt.Sprintf("[WebServer] LAN access enabled (listening on %s)", host))
+	}
+	if (s.cfg.NetworkAccess == "external" || s.cfg.NetworkAccess == "public") && s.cfg.PasswordHash != "" {
+		s.logger.Warn("[WebServer] External access with authentication over plain HTTP — session cookies are not encrypted. Consider using a reverse proxy with HTTPS.")
 	}
 
 	// Open browser to dashboard URL (matches TS openBrowser behavior)

@@ -502,31 +502,12 @@ func sanitizeFilename(name string) string {
 	invalid := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
 	result := name
 	for _, ch := range invalid {
-		result = replaceAll(result, ch, "_")
+		result = strings.ReplaceAll(result, ch, "_")
 	}
 	if len(result) > 200 {
 		result = result[:200]
 	}
 	return result
-}
-
-func replaceAll(s, old, new string) string {
-	for {
-		i := indexOf(s, old)
-		if i < 0 {
-			return s
-		}
-		s = s[:i] + new + s[i+len(old):]
-	}
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 // fetchURL is a helper to download a URL's body.

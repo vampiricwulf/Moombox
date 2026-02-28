@@ -210,6 +210,40 @@ func MatchesTerms(text string, channel *config.ChannelConfig) bool {
 	return false
 }
 
+// Compiled regex cache for matchTerm (bounded to prevent unbounded growth).
+var (
+	regexCacheMu sync.RWMutex
+	regexCache   = make(map[string]*regexp.Regexp)
+)
+
+const maxRegexCacheSize = 200
+
+func getCachedRegex(pattern string) (*regexp.Regexp, error) {
+	regexCacheMu.RLock()
+	re, ok := regexCache[pattern]
+	regexCacheMu.RUnlock()
+	if ok {
+		return re, nil
+	}
+
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	regexCacheMu.Lock()
+	if len(regexCache) >= maxRegexCacheSize {
+		// Evict a random entry
+		for k := range regexCache {
+			delete(regexCache, k)
+			break
+		}
+	}
+	regexCache[pattern] = re
+	regexCacheMu.Unlock()
+	return re, nil
+}
+
 // matchTerm checks if text matches a single term pattern.
 // All patterns are treated as regex (matching TypeScript behavior).
 // Supports /pattern/flags syntax and (?i) prefix for case-insensitive.
@@ -219,7 +253,7 @@ func matchTerm(text, pattern string) bool {
 	// Check for /pattern/flags syntax
 	if isRegexPattern(pattern) {
 		inner, flags := parseRegexPattern(pattern)
-		re, err := regexp.Compile("(?" + flags + ")" + inner)
+		re, err := getCachedRegex("(?" + flags + ")" + inner)
 		if err != nil {
 			return fuzzyMatch(text, pattern)
 		}
@@ -233,7 +267,7 @@ func matchTerm(text, pattern string) bool {
 	}
 
 	// Try as regex first (TS always uses new RegExp(pattern))
-	re, err := regexp.Compile("(?i)" + finalPattern)
+	re, err := getCachedRegex("(?i)" + finalPattern)
 	if err != nil {
 		// Invalid regex — fall back to fuzzy substring match
 		return fuzzyMatch(text, pattern)

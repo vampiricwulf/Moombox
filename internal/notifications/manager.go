@@ -4,6 +4,7 @@ package notifications
 import (
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -64,6 +65,7 @@ type SendOptions struct {
 // Manager dispatches notifications to configured targets.
 type Manager struct {
 	targets []notificationTarget
+	wg      sync.WaitGroup
 	logger  interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -159,13 +161,21 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 			}
 		}
 
-		// Send asynchronously
+		// Send asynchronously (tracked by WaitGroup for graceful shutdown)
+		m.wg.Add(1)
 		go func(s sender) {
+			defer m.wg.Done()
 			if err := s.Send(title, description, color, fields, opts); err != nil {
 				m.logger.Error("notification send failed", "err", err)
 			}
 		}(target.sender)
 	}
+}
+
+// Wait blocks until all in-flight notification goroutines have finished.
+// Call during graceful shutdown to avoid losing notifications.
+func (m *Manager) Wait() {
+	m.wg.Wait()
 }
 
 // HasTargets returns true if any notification targets are configured.

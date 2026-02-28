@@ -176,12 +176,7 @@ func NewApp() *App {
 // SetConfig provides the config reference for the settings panel.
 func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.cfg = cfg
-	if cfg.Tasklist != nil {
-		days := int(cfg.Tasklist.HideFinishedAgeDays.Days())
-		if days > 0 {
-			a.taskList.SetHideFinishedAgeDays(days)
-		}
-	}
+	a.taskList.SetHideFinishedAgeDays(int(cfg.HideFinishedAgeDays.Days()))
 }
 
 // SetSetupCallbacks wires callback functions for the TUI setup wizard.
@@ -577,7 +572,8 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		action := a.settings.HandleKey(key)
 		switch action {
 		case "close":
-			// Settings closed
+			// Re-apply hide_finished_age_days in case it changed
+			a.taskList.SetHideFinishedAgeDays(int(a.cfg.HideFinishedAgeDays.Days()))
 		case "restart":
 			if a.OnRestart != nil {
 				a.OnRestart()

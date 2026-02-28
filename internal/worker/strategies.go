@@ -314,7 +314,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	}
 
 	// Store video metadata on job for notifications
-	if videoStream.Width > 0 || videoStream.Height > 0 {
+	if videoStream != nil && (videoStream.Width > 0 || videoStream.Height > 0) {
 		job.DB.UpdateJobFields(job.Job.ID, map[string]any{
 			"video_width":  videoStream.Width,
 			"video_height": videoStream.Height,
@@ -396,14 +396,11 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 
 	// Check for n parameter in path: /n/{encrypted_value}/
 	// Match values that look like encrypted n-params (10+ alphanumeric/special chars)
-	if nPathRe.MatchString(result) {
-		matches := nPathRe.FindStringSubmatch(result)
-		if len(matches) >= 2 {
-			encryptedN := matches[1]
-			decrypted, err := nDecrypt(encryptedN)
-			if err == nil && decrypted != encryptedN {
-				result = strings.Replace(result, "/n/"+encryptedN+"/", "/n/"+decrypted+"/", 1)
-			}
+	if matches := nPathRe.FindStringSubmatch(result); len(matches) >= 2 {
+		encryptedN := matches[1]
+		decrypted, err := nDecrypt(encryptedN)
+		if err == nil && decrypted != encryptedN {
+			result = strings.Replace(result, "/n/"+encryptedN+"/", "/n/"+decrypted+"/", 1)
 		}
 	}
 

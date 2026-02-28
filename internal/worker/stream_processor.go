@@ -219,38 +219,40 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	surgeCh := make(chan struct{}, 1)
 	lastChatDBUpdate := time.Now()
 
-	if chatDl != nil {
-		chatDl.OnProgress = func(p chat.ChatProgress) {
-			surgeMu.Lock()
-			defer surgeMu.Unlock()
-			elapsed := time.Since(surgeWindowStart)
+	chatProgressFn := func(p chat.ChatProgress) {
+		surgeMu.Lock()
+		defer surgeMu.Unlock()
 
-			// Throttled DB update for chat count (every 5 seconds)
-			if time.Since(lastChatDBUpdate) >= 5*time.Second {
-				sp.db.UpdateJobFields(job.ID, map[string]any{
-					"total_chat_messages": p.MessageCount,
-				})
-				lastChatDBUpdate = time.Now()
-			}
-
-			if elapsed >= time.Duration(chatSurgeWindowMs)*time.Millisecond {
-				surgeWindowStart = time.Now()
-				surgeWindowCount = p.MessageCount
-				return
-			}
-
-			delta := p.MessageCount - surgeWindowCount
-			if delta >= chatSurgeThreshold {
-				sp.logger.Info("chat surge detected — triggering early probe",
-					"delta", delta, "videoID", job.VideoID)
-				select {
-				case surgeCh <- struct{}{}:
-				default:
-				}
-				surgeWindowStart = time.Now()
-				surgeWindowCount = p.MessageCount
-			}
+		// Throttled DB update for chat count (every 5 seconds)
+		if time.Since(lastChatDBUpdate) >= 5*time.Second {
+			sp.db.UpdateJobFields(job.ID, map[string]any{
+				"total_chat_messages": p.MessageCount,
+			})
+			lastChatDBUpdate = time.Now()
 		}
+
+		elapsed := time.Since(surgeWindowStart)
+		if elapsed >= time.Duration(chatSurgeWindowMs)*time.Millisecond {
+			surgeWindowStart = time.Now()
+			surgeWindowCount = p.MessageCount
+			return
+		}
+
+		delta := p.MessageCount - surgeWindowCount
+		if delta >= chatSurgeThreshold {
+			sp.logger.Info("chat surge detected — triggering early probe",
+				"delta", delta, "videoID", job.VideoID)
+			select {
+			case surgeCh <- struct{}{}:
+			default:
+			}
+			surgeWindowStart = time.Now()
+			surgeWindowCount = p.MessageCount
+		}
+	}
+
+	if chatDl != nil {
+		chatDl.OnProgress = chatProgressFn
 	}
 
 	for {
@@ -323,34 +325,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		if chatDl == nil && sp.cfg.Downloader.DownloadChat {
 			chatDl = sp.tryStartEarlyChat(ctx, job, probeInfo)
 			if chatDl != nil {
-				chatDl.OnProgress = func(p chat.ChatProgress) {
-					surgeMu.Lock()
-					defer surgeMu.Unlock()
-
-					// Throttled DB update for chat count (every 5 seconds)
-					if time.Since(lastChatDBUpdate) >= 5*time.Second {
-						sp.db.UpdateJobFields(job.ID, map[string]any{
-							"total_chat_messages": p.MessageCount,
-						})
-						lastChatDBUpdate = time.Now()
-					}
-
-					elapsed := time.Since(surgeWindowStart)
-					if elapsed >= time.Duration(chatSurgeWindowMs)*time.Millisecond {
-						surgeWindowStart = time.Now()
-						surgeWindowCount = p.MessageCount
-						return
-					}
-					delta := p.MessageCount - surgeWindowCount
-					if delta >= chatSurgeThreshold {
-						select {
-						case surgeCh <- struct{}{}:
-						default:
-						}
-						surgeWindowStart = time.Now()
-						surgeWindowCount = p.MessageCount
-					}
-				}
+				chatDl.OnProgress = chatProgressFn
 			}
 		}
 

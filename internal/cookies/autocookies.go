@@ -44,9 +44,9 @@ var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket",
 
 // DetectedBrowser holds info about a detected browser.
 type DetectedBrowser struct {
-	Type string // "firefox", "edge", "chrome"
-	Path string
-	Name string
+	Type string `json:"type"` // "firefox", "edge", "chrome"
+	Path string `json:"path"`
+	Name string `json:"name"`
 }
 
 // AutoCookieReloginRequired tracks which platforms need manual re-login.
@@ -1307,7 +1307,7 @@ func mergeCookieFiles(existing, newCookies string) string {
 				continue
 			}
 			domain := fields[0]
-			name := fields[6]
+			name := fields[5]
 			k := cookieKey{name: name, domain: domain}
 			if _, exists := m[k]; !exists {
 				keys = append(keys, k)

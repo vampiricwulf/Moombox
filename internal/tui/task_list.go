@@ -270,9 +270,6 @@ func isTerminalStatus(status database.JobStatus) bool {
 func (m *TaskListModel) rebuildVirtualList() {
 	now := time.Now()
 	ageDays := m.hideFinishedAgeDays
-	if ageDays <= 0 {
-		ageDays = 30
-	}
 
 	var active, archived []*database.Job
 	for _, j := range m.jobs {
@@ -281,10 +278,12 @@ func (m *TaskListModel) rebuildVirtualList() {
 		}
 
 		// Archive check: only finished jobs older than threshold
-		if j.Status == database.StatusFinished && j.UpdatedAt != "" {
+		// ageDays == 0 means instantly archive all finished jobs
+		// ageDays < 0 means never archive (all stay active)
+		if ageDays >= 0 && j.Status == database.StatusFinished && j.UpdatedAt != "" {
 			if t, err := time.Parse(time.RFC3339, j.UpdatedAt); err == nil {
 				diffDays := int(math.Ceil(now.Sub(t).Hours() / 24))
-				if diffDays > ageDays {
+				if ageDays == 0 || diffDays > ageDays {
 					archived = append(archived, j)
 					continue
 				}
@@ -488,15 +487,13 @@ func (m *TaskListModel) renderHeader(w int) string {
 func (m *TaskListModel) buildStatusSummary() string {
 	now := time.Now()
 	ageDays := m.hideFinishedAgeDays
-	if ageDays <= 0 {
-		ageDays = 30
-	}
 	counts := make(map[database.JobStatus]int)
 	for _, j := range m.jobs {
 		// Skip archived finished jobs (same logic as rebuildVirtualList)
-		if j.Status == database.StatusFinished && j.UpdatedAt != "" {
+		if ageDays >= 0 && j.Status == database.StatusFinished && j.UpdatedAt != "" {
 			if t, err := time.Parse(time.RFC3339, j.UpdatedAt); err == nil {
-				if int(math.Ceil(now.Sub(t).Hours()/24)) > ageDays {
+				diffDays := int(math.Ceil(now.Sub(t).Hours() / 24))
+				if ageDays == 0 || diffDays > ageDays {
 					continue
 				}
 			}

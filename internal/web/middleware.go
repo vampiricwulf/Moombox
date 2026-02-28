@@ -256,6 +256,21 @@ func shouldSkipCompression(p string) bool {
 		strings.HasSuffix(p, "/video")
 }
 
+// MaxBodySize limits request body size for mutating methods to prevent
+// abuse. Individual endpoints (e.g., /import at 500MB) can override by
+// wrapping req.Body with their own http.MaxBytesReader.
+func MaxBodySize(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead &&
+				r.Method != http.MethodOptions && r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // APIAliasMiddleware rewrites /api/ requests to /api/v1/ for backward
 // compatibility. The TypeScript version mounts the same router at both
 // /api/v1 and /api — this middleware achieves the same effect by rewriting

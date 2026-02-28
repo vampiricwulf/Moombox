@@ -289,14 +289,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 		twitch = *cfg.TwitchCheckInterval
 	}
 	m.values["twitch_check_interval"] = strconv.Itoa(twitch)
-	hideAge := 30
-	if cfg.Tasklist != nil {
-		days := int(cfg.Tasklist.HideFinishedAgeDays.Days())
-		if days > 0 {
-			hideAge = days
-		}
-	}
-	m.values["hide_finished_age_days"] = strconv.Itoa(hideAge)
+	m.values["hide_finished_age_days"] = strconv.Itoa(int(cfg.HideFinishedAgeDays.Days()))
 
 	// Downloader
 	m.values["output_directory"] = cfg.Downloader.OutputDirectory
@@ -350,10 +343,7 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.TwitchCheckInterval = &twitchInt
 
 	hideAge, _ := strconv.Atoi(m.values["hide_finished_age_days"])
-	if m.cfg.Tasklist == nil {
-		m.cfg.Tasklist = &config.TasklistConfig{}
-	}
-	m.cfg.Tasklist.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
+	m.cfg.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
 
 	m.cfg.Downloader.OutputDirectory = m.values["output_directory"]
 	m.cfg.Downloader.OutputTemplate = m.values["output_template"]

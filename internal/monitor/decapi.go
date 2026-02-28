@@ -131,6 +131,11 @@ func (dm *DecapiMonitor) scheduleNext(ctx context.Context) {
 	interval := dm.calculateInterval(len(channels))
 
 	dm.mu.Lock()
+	// Don't schedule if monitor was stopped (cancel set to nil)
+	if dm.cancel == nil {
+		dm.mu.Unlock()
+		return
+	}
 	dm.NextCheckAt = time.Now().Add(interval).UnixMilli()
 	if dm.timer != nil {
 		dm.timer.Stop()
@@ -277,15 +282,12 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	}
 	defer resp.Body.Close()
 
-	// Start a 1-minute rate limit window if none is active (matches TS)
+	// Start a 1-minute rate limit window if none is active, and decrement
+	// remaining count after response (matches TS fetchDecapi post-fetch).
 	dm.mu.Lock()
 	if dm.rateLimit.resetAt.IsZero() {
 		dm.rateLimit.resetAt = time.Now().Add(60 * time.Second)
 	}
-	dm.mu.Unlock()
-
-	// Decrement rate limit after successful response (TS: fetchDecapi post-fetch)
-	dm.mu.Lock()
 	if dm.rateLimit.remaining > 0 {
 		dm.rateLimit.remaining--
 	}

@@ -39,8 +39,7 @@ type Database struct {
 	subMu        sync.RWMutex
 
 	// Prepared statements
-	stmtGetJob     *sql.Stmt
-	stmtUpdateJob  *sql.Stmt
+	stmtGetJob *sql.Stmt
 
 	// Per-job in-memory log buffers
 	jobLogsMu sync.RWMutex
@@ -177,16 +176,21 @@ func (db *Database) flushUpdates(pending map[string]*Job) {
 		return
 	}
 
-	// Only notify subscribers for jobs that were successfully persisted
+	// Snapshot subscribers, then notify outside lock to avoid blocking
 	db.subMu.RLock()
-	for _, job := range persisted {
-		for _, fn := range db.onJobUpdate {
-			if fn != nil {
-				db.safeCallJobUpdate(fn, job)
-			}
+	subs := make([]func(*Job), 0, len(db.onJobUpdate))
+	for _, fn := range db.onJobUpdate {
+		if fn != nil {
+			subs = append(subs, fn)
 		}
 	}
 	db.subMu.RUnlock()
+
+	for _, job := range persisted {
+		for _, fn := range subs {
+			db.safeCallJobUpdate(fn, job)
+		}
+	}
 }
 
 // AddJob inserts a new job into the database.
@@ -271,10 +275,22 @@ func (db *Database) GetJob(id string) (*Job, error) {
 		return nil, err
 	}
 
-	// Load gaps
-	job.Gaps, _ = db.getGaps(id)
-	// Load trims
-	job.Trims, _ = db.getTrims(id)
+	// Load gaps (non-fatal — gaps may simply not exist)
+	if gaps, err := db.getGaps(id); err != nil {
+		if db.logger != nil {
+			db.logger.Warn("failed to load gaps for job", "jobID", id, "err", err)
+		}
+	} else {
+		job.Gaps = gaps
+	}
+	// Load trims (non-fatal — trims may simply not exist)
+	if trims, err := db.getTrims(id); err != nil {
+		if db.logger != nil {
+			db.logger.Warn("failed to load trims for job", "jobID", id, "err", err)
+		}
+	} else {
+		job.Trims = trims
+	}
 
 	return job, nil
 }
@@ -284,6 +300,10 @@ func (db *Database) GetAllJobs(includeArchived bool) ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
+	// includeArchived controls whether the caller wants all jobs (true) or just
+	// non-archived ones (false). The actual age-based filtering of finished jobs
+	// is handled by filterJobsByAge in the route layer — the database returns all
+	// jobs and lets the caller decide what to show.
 	query := `SELECT id, video_id, url, title, channel_name, platform,
 		status, progress, percent, eta, speed, error, created_at, updated_at,
 		last_video_seq, last_audio_seq, total_video_seq, total_audio_seq,
@@ -439,6 +459,9 @@ func (db *Database) getGaps(jobID string) ([]Gap, error) {
 		}
 		gaps = append(gaps, g)
 	}
+	if err := rows.Err(); err != nil {
+		return gaps, err
+	}
 	return gaps, nil
 }
 
@@ -497,7 +520,9 @@ func (db *Database) AddToHistory(videoID string) error {
 
 func (db *Database) pruneHistory() error {
 	var count int
-	db.db.QueryRowContext(db.getCtx(), "SELECT COUNT(*) FROM history").Scan(&count)
+	if err := db.db.QueryRowContext(db.getCtx(), "SELECT COUNT(*) FROM history").Scan(&count); err != nil {
+		return fmt.Errorf("failed to count history: %w", err)
+	}
 	if count <= 10000 {
 		return nil
 	}
@@ -594,26 +619,35 @@ func (db *Database) ImportFromJSON(path string) error {
 			job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 			job.LastRecheckAt)
 		if err != nil {
+			if db.logger != nil {
+				db.logger.Warn("import: failed to insert job", "jobID", job.ID, "err", err)
+			}
 			continue
 		}
 
 		for _, gap := range job.Gaps {
-			tx.ExecContext(db.getCtx(), "INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)",
-				job.ID, gap.From, gap.To, gap.Stream)
+			if _, err := tx.ExecContext(db.getCtx(), "INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)",
+				job.ID, gap.From, gap.To, gap.Stream); err != nil && db.logger != nil {
+				db.logger.Warn("import: failed to insert gap", "jobID", job.ID, "err", err)
+			}
 		}
 	}
 
 	// Import history
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, videoID := range jsonDB.History {
-		tx.ExecContext(db.getCtx(), "INSERT OR IGNORE INTO history (video_id, added_at) VALUES (?, ?)", videoID, now)
+		if _, err := tx.ExecContext(db.getCtx(), "INSERT OR IGNORE INTO history (video_id, added_at) VALUES (?, ?)", videoID, now); err != nil && db.logger != nil {
+			db.logger.Warn("import: failed to insert history", "videoID", videoID, "err", err)
+		}
 	}
 
 	// Import last videos
 	for channelID, videoID := range jsonDB.LastVideos {
-		tx.ExecContext(db.getCtx(), `INSERT INTO last_videos (channel_id, video_id) VALUES (?, ?)
+		if _, err := tx.ExecContext(db.getCtx(), `INSERT INTO last_videos (channel_id, video_id) VALUES (?, ?)
 			ON CONFLICT(channel_id) DO UPDATE SET video_id = excluded.video_id`,
-			channelID, videoID)
+			channelID, videoID); err != nil && db.logger != nil {
+			db.logger.Warn("import: failed to insert last_video", "channelID", channelID, "err", err)
+		}
 	}
 
 	return tx.Commit()
@@ -656,18 +690,22 @@ func (db *Database) OnJobsChange(fn func([]*Job)) func() {
 // It uses getAllJobsUnlocked to avoid deadlock.
 func (db *Database) notifyJobsChange() {
 	db.subMu.RLock()
-	defer db.subMu.RUnlock()
+	subs := make([]func([]*Job), 0, len(db.onJobsChange))
+	for _, fn := range db.onJobsChange {
+		if fn != nil {
+			subs = append(subs, fn)
+		}
+	}
+	db.subMu.RUnlock()
 
-	if len(db.onJobsChange) == 0 {
+	if len(subs) == 0 {
 		return
 	}
 
 	// Use unlocked version since caller already holds db.mu
 	jobs, _ := db.getAllJobsUnlocked()
-	for _, fn := range db.onJobsChange {
-		if fn != nil {
-			db.safeCallJobsChange(fn, jobs)
-		}
+	for _, fn := range subs {
+		db.safeCallJobsChange(fn, jobs)
 	}
 }
 
@@ -776,6 +814,9 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 	query := "UPDATE jobs SET " + strings.Join(setClauses, ", ") + " WHERE id=?"
 	_, err := db.db.ExecContext(db.getCtx(), query, args...)
 	if err != nil {
+		if db.logger != nil {
+			db.logger.Error("UpdateJobFields failed", "jobID", id, "err", err)
+		}
 		return
 	}
 
@@ -794,16 +835,24 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		FROM jobs WHERE id = ?`, id)
 	job, scanErr := scanJob(row)
 	if scanErr != nil {
+		if db.logger != nil {
+			db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)
+		}
 		return
 	}
 
 	db.subMu.RLock()
+	subs := make([]func(*Job), 0, len(db.onJobUpdate))
 	for _, fn := range db.onJobUpdate {
 		if fn != nil {
-			db.safeCallJobUpdate(fn, job)
+			subs = append(subs, fn)
 		}
 	}
 	db.subMu.RUnlock()
+
+	for _, fn := range subs {
+		db.safeCallJobUpdate(fn, job)
+	}
 }
 
 // GetTrimsForJob returns all trim records for a given job.
@@ -829,6 +878,9 @@ func (db *Database) getTrimsUnlocked(jobID string) ([]TrimRecord, error) {
 			continue
 		}
 		trims = append(trims, tr)
+	}
+	if err := rows.Err(); err != nil {
+		return trims, err
 	}
 	return trims, nil
 }

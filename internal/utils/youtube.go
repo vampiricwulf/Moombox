@@ -28,6 +28,12 @@ func ExtractVideoID(input string) string {
 		return input
 	}
 
+	// Normalize bare URLs without protocol (e.g., youtube.com/watch?v=... or youtu.be/...)
+	if strings.HasPrefix(input, "youtube.com/") || strings.HasPrefix(input, "www.youtube.com/") ||
+		strings.HasPrefix(input, "m.youtube.com/") || strings.HasPrefix(input, "youtu.be/") {
+		input = "https://" + input
+	}
+
 	// Try parsing as URL
 	u, err := url.Parse(input)
 	if err != nil {

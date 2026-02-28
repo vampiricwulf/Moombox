@@ -177,15 +177,21 @@ func (l *Logger) rotate() {
 	for i := l.maxFiles - 1; i >= 1; i-- {
 		src := fmt.Sprintf("%s.%d", l.filePath, i)
 		dst := fmt.Sprintf("%s.%d", l.filePath, i+1)
-		os.Rename(src, dst)
+		if err := os.Rename(src, dst); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "logger: rotation rename %s -> %s failed: %v\n", src, dst, err)
+		}
 	}
 
 	// Rename current to .1
-	os.Rename(l.filePath, l.filePath+".1")
+	if err := os.Rename(l.filePath, l.filePath+".1"); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "logger: rotation rename current log failed: %v\n", err)
+	}
 
 	// Remove excess files
 	excess := fmt.Sprintf("%s.%d", l.filePath, l.maxFiles+1)
-	os.Remove(excess)
+	if err := os.Remove(excess); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "logger: rotation remove excess file failed: %v\n", err)
+	}
 
 	// Open fresh file — if this fails, log to stderr so we don't silently lose all logging
 	if err := l.openFile(); err != nil {
@@ -237,6 +243,10 @@ func (l *Logger) addToRingBuffer(line string) {
 }
 
 func (l *Logger) broadcast(line string) {
+	if l.closed {
+		return
+	}
+
 	l.subMu.RLock()
 	defer l.subMu.RUnlock()
 
@@ -281,8 +291,11 @@ func (l *Logger) LogForJob(jobID string, level slog.Level, msg string, args ...a
 
 	if !ok {
 		l.jobLogsMu.Lock()
-		buf = &jobLogBuffer{lines: make([]string, 0, 100)}
-		l.jobLogs[jobID] = buf
+		// Double-check under write lock to avoid overwriting concurrent creation
+		if buf, ok = l.jobLogs[jobID]; !ok {
+			buf = &jobLogBuffer{lines: make([]string, 0, 100)}
+			l.jobLogs[jobID] = buf
+		}
 		l.jobLogsMu.Unlock()
 	}
 
@@ -410,10 +423,15 @@ func (l *Logger) Close() {
 		l.file = nil
 	}
 
+	// Nil out subscribers under lock first, then close channels.
+	// This prevents broadcast() from sending to closed channels since
+	// it holds RLock and will see the nil/empty slice.
 	l.subMu.Lock()
-	for _, ch := range l.subscribers {
-		close(ch)
-	}
+	subs := l.subscribers
 	l.subscribers = nil
 	l.subMu.Unlock()
+
+	for _, ch := range subs {
+		close(ch)
+	}
 }

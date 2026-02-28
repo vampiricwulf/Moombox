@@ -16,7 +16,7 @@ type MoomboxConfig struct {
 	DecapiCheckInterval *int                 `toml:"decapi_check_interval,omitempty" json:"decapi_check_interval,omitempty"`
 	TwitchCheckInterval *int                 `toml:"twitch_check_interval,omitempty" json:"twitch_check_interval,omitempty"`
 	Downloader          DownloaderConfig     `toml:"downloader" json:"downloader"`
-	Tasklist            *TasklistConfig      `toml:"tasklist,omitempty" json:"tasklist,omitempty"`
+	HideFinishedAgeDays FlexDuration         `toml:"hide_finished_age_days" json:"hide_finished_age_days"`
 	AutoCookies         *AutoCookiesConfig   `toml:"auto_cookies,omitempty" json:"auto_cookies,omitempty"`
 	Notifications       []NotificationConfig `toml:"notifications,omitempty" json:"notifications,omitempty"`
 	Channels            []ChannelConfig      `toml:"channels,omitempty" json:"channels,omitempty"`
@@ -72,11 +72,6 @@ func (c *ChannelConfig) GetPlatform() string {
 		return "youtube"
 	}
 	return c.Platform
-}
-
-// TasklistConfig holds task list display settings.
-type TasklistConfig struct {
-	HideFinishedAgeDays FlexDuration `toml:"hide_finished_age_days,omitempty" json:"hide_finished_age_days,omitempty"`
 }
 
 // NotificationConfig holds notification endpoint configuration.

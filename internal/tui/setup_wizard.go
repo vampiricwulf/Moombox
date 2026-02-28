@@ -358,10 +358,8 @@ func (m *SetupWizardModel) finishSetup() string {
 	}
 
 	hideAge := vNum("hideAge")
-	if hideAge > 0 {
-		cfg.Tasklist = &config.TasklistConfig{
-			HideFinishedAgeDays: config.FlexDuration{Value: float64(hideAge)},
-		}
+	if hideAge >= 0 {
+		cfg.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
 	}
 
 	if vBool("autoCookies", false) {

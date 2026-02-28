@@ -26,11 +26,10 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
-
-var videoIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
 
 // YouTubeMetadataFetcher provides YouTube metadata for job creation.
 type YouTubeMetadataFetcher interface {
@@ -70,15 +69,13 @@ type TwitchJobMetadata struct {
 // filterJobsByAge splits jobs into active vs archived based on the
 // hide_finished_age_days config setting. Non-finished jobs are always active.
 // Finished jobs are archived when their age exceeds the threshold.
-// If hideAgeDays is 0, no finished jobs are ever archived (all stay active).
+// If hideAgeDays is 0, all finished jobs are immediately archived.
+// If hideAgeDays is negative, no finished jobs are ever archived (all stay active).
 func filterJobsByAge(jobs []*database.Job, archived bool, cfg *config.MoomboxConfig) []*database.Job {
-	hideAgeDays := 30.0 // default
-	if cfg.Tasklist != nil {
-		hideAgeDays = cfg.Tasklist.HideFinishedAgeDays.Value
-	}
+	hideAgeDays := cfg.HideFinishedAgeDays.Value
 
-	// 0 means never hide finished jobs — they all stay in active view
-	if hideAgeDays <= 0 {
+	// Negative means never hide finished jobs — they all stay in active view
+	if hideAgeDays < 0 {
 		if archived {
 			return nil
 		}
@@ -810,10 +807,18 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		if outputDir == "" {
 			outputDir = cfg.Downloader.OutputDirectory
 		}
-		filePath, _ := filepath.Abs(filepath.Join(outputDir, job.Filename))
+		filePath, err := filepath.Abs(filepath.Join(outputDir, job.Filename))
+		if err != nil {
+			jsonError(rw, "invalid file path", http.StatusBadRequest)
+			return
+		}
 
 		// Path traversal guard (match TS)
-		resolvedOutputDir, _ := filepath.Abs(outputDir)
+		resolvedOutputDir, err := filepath.Abs(outputDir)
+		if err != nil {
+			jsonError(rw, "invalid output directory", http.StatusInternalServerError)
+			return
+		}
 		if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
 			jsonError(rw, "Access denied", http.StatusForbidden)
 			return
@@ -867,14 +872,14 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 	// Note: /api/ → /api/v1/ aliasing handled by APIAliasMiddleware
 }
 
+var (
+	youtubeURLRe  = regexp.MustCompile(`(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/live/)([a-zA-Z0-9_-]{11})`)
+	twitchURLRe   = regexp.MustCompile(`(?:twitch\.tv/)([a-zA-Z0-9_]+)`)
+	bracketIDRe   = regexp.MustCompile(`\[([a-zA-Z0-9_-]{11})\]`)
+)
+
 func extractVideoIDFromURL(url string) string {
-	// YouTube video ID patterns
-	patterns := []string{
-		`(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/live/)([a-zA-Z0-9_-]{11})`,
-		`(?:twitch\.tv/)([a-zA-Z0-9_]+)`,
-	}
-	for _, p := range patterns {
-		re := regexp.MustCompile(p)
+	for _, re := range []*regexp.Regexp{youtubeURLRe, twitchURLRe} {
 		if m := re.FindStringSubmatch(url); m != nil {
 			return m[1]
 		}
@@ -896,7 +901,7 @@ func FormatRoutes(r chi.Router, deps *FormatRoutesDeps) {
 	// GET /api/v1/formats/:videoId
 	r.Get("/api/v1/formats/{videoId}", func(rw http.ResponseWriter, req *http.Request) {
 		videoID := chi.URLParam(req, "videoId")
-		if !videoIDRegex.MatchString(videoID) {
+		if !utils.IsVideoID(videoID) {
 			jsonError(rw, "invalid video ID", http.StatusBadRequest)
 			return
 		}
@@ -990,6 +995,9 @@ type ConfigRoutesCallbacks struct {
 	OnLogLevelChange func(level string)
 	// OnMaxParallelChange is called when num_parallel_downloads changes.
 	OnMaxParallelChange func(n int)
+	// OnHideFinishedAgeChanged is called when hide_finished_age_days changes,
+	// so callers can re-broadcast the job list with updated archive thresholds.
+	OnHideFinishedAgeChanged func()
 }
 
 // isSafePath validates that a path doesn't contain traversal or absolute paths.
@@ -1208,17 +1216,11 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 	}
 
-	// Tasklist
-	if tl, ok := updates["tasklist"].(map[string]any); ok {
-		if cfg.Tasklist == nil {
-			cfg.Tasklist = &config.TasklistConfig{}
-		}
-		if v, ok := tl["hide_finished_age_days"].(float64); ok {
-			cfg.Tasklist.HideFinishedAgeDays = config.FlexDuration{Value: v}
-		}
-		if vs, ok := tl["hide_finished_age_days"].(string); ok {
-			cfg.Tasklist.HideFinishedAgeDays = config.ParseFlexDuration(vs, "days", cfg.Tasklist.HideFinishedAgeDays.Value)
-		}
+	// Hide finished age
+	if v, ok := updates["hide_finished_age_days"].(float64); ok {
+		cfg.HideFinishedAgeDays = config.FlexDuration{Value: v}
+	} else if vs, ok := updates["hide_finished_age_days"].(string); ok {
+		cfg.HideFinishedAgeDays = config.ParseFlexDuration(vs, "days", cfg.HideFinishedAgeDays.Value)
 	}
 
 	// Auto cookies
@@ -1286,22 +1288,15 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*config.MoomboxConfig) error, callbacks *ConfigRoutesCallbacks) {
 	// GET /api/v1/config
 	r.Get("/api/v1/config", func(rw http.ResponseWriter, req *http.Request) {
-		// Clone config and strip sensitive fields.
-		// TypeScript returns a flat structure: { ...config, hasPassword }
-		safeCfg := *cfg
-		hasPassword := safeCfg.PasswordHash != ""
-		safeCfg.PasswordHash = ""
-
-		// Marshal to map to produce flat output with hasPassword injected
-		data, err := json.Marshal(safeCfg)
-		if err != nil {
-			jsonError(rw, "failed to serialize config", http.StatusInternalServerError)
-			return
-		}
-		var flat map[string]any
-		json.Unmarshal(data, &flat)
-		flat["hasPassword"] = hasPassword
-		jsonResponse(rw, flat)
+		// Clone config and return with hasPassword injected (matches TS flat structure).
+		// PasswordHash has json:"-" tag so it's already excluded from marshaling.
+		jsonResponse(rw, struct {
+			*config.MoomboxConfig
+			HasPassword bool `json:"hasPassword"`
+		}{
+			MoomboxConfig: cfg,
+			HasPassword:   cfg.PasswordHash != "",
+		})
 	})
 
 	// PUT /api/v1/config
@@ -1337,6 +1332,7 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 		// Snapshot values that need hot-reload comparison after save.
 		oldLogLevel := cfg.LogLevel
 		oldNumParallel := cfg.Downloader.NumParallelDownloads
+		oldHideAge := cfg.HideFinishedAgeDays.Value
 
 		// Apply allowlisted updates — matches TypeScript updateConfigSchema (snake_case)
 		applyConfigUpdates(cfg, updates)
@@ -1356,6 +1352,9 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 			}
 			if cfg.Downloader.NumParallelDownloads != oldNumParallel && callbacks.OnMaxParallelChange != nil {
 				callbacks.OnMaxParallelChange(cfg.Downloader.NumParallelDownloads)
+			}
+			if cfg.HideFinishedAgeDays.Value != oldHideAge && callbacks.OnHideFinishedAgeChanged != nil {
+				callbacks.OnHideFinishedAgeChanged()
 			}
 		}
 
@@ -1875,8 +1874,7 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		videoBasename := strings.TrimSuffix(videoFilename, videoExt)
 
 		// Try to extract video ID from [XXXXXXXXXXX] pattern
-		idRe := regexp.MustCompile(`\[([a-zA-Z0-9_-]{11})\]`)
-		idMatch := idRe.FindStringSubmatch(videoBasename)
+		idMatch := bracketIDRe.FindStringSubmatch(videoBasename)
 		videoID := ""
 		if idMatch != nil {
 			videoID = idMatch[1]
@@ -1891,9 +1889,11 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		var meta chatMeta
 		if chatFile != nil {
 			if rc, err := chatFile.Open(); err == nil {
-				data, _ := io.ReadAll(rc)
+				data, readErr := io.ReadAll(rc)
 				rc.Close()
-				json.Unmarshal(data, &meta)
+				if readErr == nil {
+					json.Unmarshal(data, &meta)
+				}
 			}
 		}
 

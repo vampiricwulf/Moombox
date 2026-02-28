@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,7 +33,7 @@ type VodChatDownloader struct {
 	messages      []TwitchChatMessage
 	seenIDs       map[string]struct{}
 	totalCount    int
-	running       bool
+	running       atomic.Bool
 	emoteResolver *EmoteResolver
 
 	logger interface {
@@ -83,8 +84,8 @@ func NewVodChatDownloader(api *API, opts VodChatOptions, logger interface {
 
 // Start downloads all VOD chat comments.
 func (vcd *VodChatDownloader) Start(ctx context.Context) error {
-	vcd.running = true
-	defer func() { vcd.running = false }()
+	vcd.running.Store(true)
+	defer vcd.running.Store(false)
 
 	vcd.logger.Info("starting VOD chat download", "vodID", vcd.vodID)
 
@@ -109,7 +110,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 
 	lastFlush := time.Now()
 
-	for vcd.running {
+	for vcd.running.Load() {
 		select {
 		case <-ctx.Done():
 			vcd.flush()
@@ -542,12 +543,12 @@ func (vcd *VodChatDownloader) MessageCount() int {
 
 // IsRunning returns whether the downloader is currently running.
 func (vcd *VodChatDownloader) IsRunning() bool {
-	return vcd.running
+	return vcd.running.Load()
 }
 
 // Stop cancels the VOD chat download.
 func (vcd *VodChatDownloader) Stop() {
-	vcd.running = false
+	vcd.running.Store(false)
 }
 
 // MarkStreamEnded signals that the stream has ended (no-op for VODs).

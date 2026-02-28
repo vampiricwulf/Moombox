@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -583,7 +584,7 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	// Simple string replacement approach
 	updated := header
 	// Replace messageCount value
-	mcStart := indexOf(updated, `"messageCount":`)
+	mcStart := strings.Index(updated, `"messageCount":`)
 	if mcStart >= 0 {
 		mcValStart := mcStart + len(`"messageCount":`)
 		// Skip whitespace
@@ -600,7 +601,7 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 		}
 	}
 
-	daStart := indexOf(updated, `"downloadedAt":`)
+	daStart := strings.Index(updated, `"downloadedAt":`)
 	if daStart >= 0 {
 		daValStart := daStart + len(`"downloadedAt":`)
 		// Skip whitespace and opening quote
@@ -623,15 +624,6 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	if len(updatedBytes) == n {
 		f.WriteAt(updatedBytes, 0)
 	}
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 func (cd *ChatDownloader) loadResume() (*ChatResumeState, error) {

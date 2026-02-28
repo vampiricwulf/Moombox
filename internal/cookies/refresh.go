@@ -87,6 +87,25 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 	}
 }
 
+// SetExpectedPlatforms seeds the previous auth state from persisted platforms
+// so that auth loss can be detected even if the app restarts after cookies expire.
+// Call this before Start().
+func (rs *RefreshService) SetExpectedPlatforms(platforms []string) {
+	for _, p := range platforms {
+		switch p {
+		case "youtube":
+			rs.prevYouTubeAuth = true
+		case "twitch":
+			rs.prevTwitchAuth = true
+		}
+	}
+	// If we have persisted platforms, consider the first check as a "subsequent"
+	// check so that auth loss transitions can fire immediately.
+	if len(platforms) > 0 {
+		rs.hasCheckedOnce = true
+	}
+}
+
 // Start begins the cookie refresh loop.
 func (rs *RefreshService) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)

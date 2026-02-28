@@ -22,6 +22,7 @@ type Service struct {
 	PlayerAPI   *PlayerAPI
 	Cookies     *cookies.CookieJar
 	visitorData string // Cached visitor data from watch page
+	vdMu        sync.RWMutex
 	initOnce    sync.Once
 	logger      interface {
 		Debug(msg string, args ...any)
@@ -79,8 +80,10 @@ func (s *Service) Init(ctx context.Context) {
 
 		// Extract visitor data
 		if m := homepageVisitorDataRe.FindStringSubmatch(html); m != nil {
+			s.vdMu.Lock()
 			s.visitorData = m[1]
-			s.logger.Debug("[YouTube] Visitor data extracted", "prefix", s.visitorData[:min(30, len(s.visitorData))])
+			s.vdMu.Unlock()
+			s.logger.Debug("[YouTube] Visitor data extracted", "prefix", m[1][:min(30, len(m[1]))])
 		}
 
 		// Extract API key
@@ -120,20 +123,28 @@ func (s *Service) GetVideoInfo(ctx context.Context, videoID string) (*VideoInfo,
 // ProbeVideoStatus performs a lightweight probe (ANDROID_VR, no auth).
 // Uses cached visitor data if available.
 func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoInfo, error) {
-	return s.PlayerAPI.ProbeVideoStatus(ctx, videoID, s.visitorData)
+	s.vdMu.RLock()
+	vd := s.visitorData
+	s.vdMu.RUnlock()
+	return s.PlayerAPI.ProbeVideoStatus(ctx, videoID, vd)
 }
 
 // SetVisitorData stores visitor data extracted from a watch page for use in probes.
 func (s *Service) SetVisitorData(vd string) {
 	if vd != "" {
+		s.vdMu.Lock()
 		s.visitorData = vd
+		s.vdMu.Unlock()
 	}
 }
 
 // ProbeVideoStatusAuthenticated performs an authenticated probe using TV_DOWNGRADED.
 // Used for polling members-only upcoming streams.
 func (s *Service) ProbeVideoStatusAuthenticated(ctx context.Context, videoID string) (*VideoInfo, error) {
-	return s.PlayerAPI.ProbeVideoStatusAuthenticated(ctx, videoID, s.visitorData)
+	s.vdMu.RLock()
+	vd := s.visitorData
+	s.vdMu.RUnlock()
+	return s.PlayerAPI.ProbeVideoStatusAuthenticated(ctx, videoID, vd)
 }
 
 // DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.
@@ -159,7 +170,10 @@ func (s *Service) HasAuthCookies() bool {
 
 // GetVisitorData returns the cached visitor data extracted from a watch page.
 func (s *Service) GetVisitorData() string {
-	return s.visitorData
+	s.vdMu.RLock()
+	vd := s.visitorData
+	s.vdMu.RUnlock()
+	return vd
 }
 
 // GetCookieHeader returns the Cookie header string for authenticated requests.

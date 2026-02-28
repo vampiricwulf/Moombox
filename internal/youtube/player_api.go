@@ -16,6 +16,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 var pathNParamRe = regexp.MustCompile(`/n/([a-zA-Z0-9_-]{10,})/`)
@@ -333,7 +334,10 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 		"contentPlaybackContext": pbCtx,
 	}
 
-	body, _ := json.Marshal(postData)
+	body, err := json.Marshal(postData)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request body: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -352,8 +356,13 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 		if attempt > 0 {
 			// Exponential backoff: 1s, 2s, 4s (matching p-retry default factor=2, minTimeout=1000)
 			delay := time.Duration(1<<(attempt-1)) * time.Second
-			time.Sleep(delay)
-			body, _ = json.Marshal(postData) // Re-create reader
+			if err := utils.Sleep(ctx, delay); err != nil {
+				return nil, err
+			}
+			body, err = json.Marshal(postData) // Re-create reader
+			if err != nil {
+				return nil, fmt.Errorf("marshal request body: %w", err)
+			}
 			req, err = http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 			if err != nil {
 				return nil, err
@@ -417,7 +426,10 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 		},
 	}
 
-	body, _ := json.Marshal(postData)
+	body, err := json.Marshal(postData)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request body: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -447,8 +459,13 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 		if attempt > 0 {
 			// Exponential backoff: 1s, 2s, 4s (matching p-retry default factor=2, minTimeout=1000)
 			delay := time.Duration(1<<(attempt-1)) * time.Second
-			time.Sleep(delay)
-			body, _ = json.Marshal(postData)
+			if err := utils.Sleep(ctx, delay); err != nil {
+				return nil, err
+			}
+			body, err = json.Marshal(postData)
+			if err != nil {
+				return nil, fmt.Errorf("marshal request body: %w", err)
+			}
 			req, err = http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 			if err != nil {
 				return nil, err

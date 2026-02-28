@@ -251,7 +251,7 @@ export class SettingsController {
     this.app.setInputValue("cfg-twitch-check-interval", config.twitch_check_interval ?? "");
     this.app.setInputValue(
       "cfg-hide-finished-days",
-      config.tasklist?.hide_finished_age_days,
+      config.hide_finished_age_days,
     );
 
     // Downloader settings
@@ -369,8 +369,7 @@ export class SettingsController {
       delete config.twitch_check_interval;
     }
 
-    if (!config.tasklist) config.tasklist = {};
-    config.tasklist.hide_finished_age_days = hideFinishedDays;
+    config.hide_finished_age_days = hideFinishedDays;
 
     if (!config.downloader) config.downloader = {};
     config.downloader.output_directory = outputDir || undefined;

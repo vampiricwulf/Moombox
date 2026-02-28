@@ -139,10 +139,10 @@ func (pt *ProgressTracker) SetChatCount(count int) {
 
 func (pt *ProgressTracker) maybeUpdate() {
 	pt.mu.Lock()
-	defer pt.mu.Unlock()
 
 	now := time.Now()
 	if now.Sub(pt.lastUpdate) < progressUpdateInterval {
+		pt.mu.Unlock()
 		return
 	}
 	pt.lastUpdate = now
@@ -171,7 +171,7 @@ func (pt *ProgressTracker) maybeUpdate() {
 	// B8: Calculate ETA
 	eta := pt.calculateETA()
 
-	// Update DB
+	// Snapshot values for DB update
 	updates := map[string]any{
 		"progress":            progress,
 		"percent":             percent,
@@ -186,15 +186,23 @@ func (pt *ProgressTracker) maybeUpdate() {
 		updates["eta"] = eta
 	}
 
+	// Snapshot gaps for persistence
+	var gapsToSave []database.Gap
+	shouldPersist := now.Sub(pt.lastPersist) >= progressPersistInterval
+	if shouldPersist {
+		pt.lastPersist = now
+		gapsToSave = make([]database.Gap, len(pt.gaps))
+		copy(gapsToSave, pt.gaps)
+		pt.gaps = nil
+	}
+
+	pt.mu.Unlock()
+
+	// DB operations outside the lock to reduce contention
 	pt.db.UpdateJobFields(pt.jobID, updates)
 
-	// Persist gaps
-	if now.Sub(pt.lastPersist) >= progressPersistInterval {
-		pt.lastPersist = now
-		for _, gap := range pt.gaps {
-			pt.db.AddGap(gap.JobID, gap.From, gap.To, gap.Stream)
-		}
-		pt.gaps = nil
+	for _, gap := range gapsToSave {
+		pt.db.AddGap(gap.JobID, gap.From, gap.To, gap.Stream)
 	}
 }
 

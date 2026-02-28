@@ -41,6 +41,7 @@ type JobQueue struct {
 	activeLifecycle int
 	activeDownloads int
 	pending         []pendingJob
+	pendingSet      map[string]struct{} // O(1) duplicate detection for pending queue
 	processing      map[string]context.CancelFunc
 	holdingDlSlot   map[string]bool // tracks which jobs hold download slots
 	cancelled       map[string]bool // tracks user-initiated cancellations (vs shutdown)
@@ -56,6 +57,7 @@ func NewJobQueue(maxDownloads int) *JobQueue {
 	return &JobQueue{
 		maxDownloads:  maxDownloads,
 		maxLifecycle:  100,
+		pendingSet:    make(map[string]struct{}),
 		processing:    make(map[string]context.CancelFunc),
 		holdingDlSlot: make(map[string]bool),
 		cancelled:     make(map[string]bool),
@@ -70,10 +72,8 @@ func (q *JobQueue) Enqueue(jobID string, status database.JobStatus) {
 	defer q.mu.Unlock()
 
 	// Don't add duplicates
-	for _, pj := range q.pending {
-		if pj.ID == jobID {
-			return
-		}
+	if _, ok := q.pendingSet[jobID]; ok {
+		return
 	}
 	if _, ok := q.processing[jobID]; ok {
 		return
@@ -85,6 +85,7 @@ func (q *JobQueue) Enqueue(jobID string, status database.JobStatus) {
 	}
 
 	q.pending = append(q.pending, pendingJob{ID: jobID, Priority: calculatePriority(status)})
+	q.pendingSet[jobID] = struct{}{}
 
 	// Signal that there's work
 	select {
@@ -110,6 +111,7 @@ func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) 
 			}
 			jobID := q.pending[bestIdx].ID
 			q.pending = append(q.pending[:bestIdx], q.pending[bestIdx+1:]...)
+			delete(q.pendingSet, jobID)
 			q.activeLifecycle++
 			jobCtx, cancel := context.WithCancel(ctx)
 			q.processing[jobID] = cancel
@@ -211,6 +213,7 @@ func (q *JobQueue) Cancel(jobID string) {
 	for i, pj := range q.pending {
 		if pj.ID == jobID {
 			q.pending = append(q.pending[:i], q.pending[i+1:]...)
+			delete(q.pendingSet, jobID)
 			break
 		}
 	}

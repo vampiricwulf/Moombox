@@ -159,9 +159,7 @@ export class SetupController {
         segment_retry_delay_cap: retryDelayCap,
         segment_live_check_retries: liveCheckRetries,
       },
-      tasklist: {
-        hide_finished_age_days: hideAge,
-      },
+      hide_finished_age_days: hideAge,
       auto_cookies: {
         enabled: autoCookiesEnabled,
       },

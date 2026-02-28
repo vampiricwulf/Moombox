@@ -42,7 +42,7 @@ import (
 )
 
 var (
-	version = "2.0.3"
+	version = "2.0.4"
 	commit  = ""
 )
 
@@ -419,6 +419,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		OnMaxParallelChange: func(n int) {
 			dlWorker.SetParallelDownloads(n)
 		},
+		OnHideFinishedAgeChanged: func() {
+			// Re-broadcast job list with updated archive threshold
+			jobs, _ := db.GetAllJobs(false)
+			wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg))
+		},
 	})
 	routes.ChannelRoutes(r, cfg, func(c *config.MoomboxConfig) error {
 		return config.Save(c, configPath)
@@ -507,6 +512,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Wire cookie recovery callback
 	// =========================================================================
 	cookieRefresh.OnRecoveryNeeded = func(platform string) {
+		if cfg.AutoCookies == nil || !cfg.AutoCookies.Enabled {
+			log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
+			return
+		}
 		log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
 		go func() {
 			refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -516,6 +525,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				log.Error("auto-cookie recovery failed", "platform", platform, "err", err)
 			} else if ok {
 				log.Info("auto-cookie recovery succeeded", "platform", platform)
+				// Re-check auth status immediately so the UI updates
+				cookieRefresh.CheckNow(context.Background())
+			} else {
+				log.Warn("auto-cookie recovery did not restore auth", "platform", platform)
 			}
 		}()
 	}
@@ -582,7 +595,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		db.AddToHistory(videoID)
 		dlWorker.EnqueueJob(videoID)
-		wsHub.BroadcastJobsUpdate(mustGetAllJobs(db))
+		wsHub.BroadcastJobsUpdate(getAllJobsSafe(db))
 		if notifyMgr.HasTargets() {
 			notifyMgr.Send("Stream Found",
 				fmt.Sprintf("Found matching stream: %s", title),
@@ -651,7 +664,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		db.AddToHistory(jobID)
 		dlWorker.EnqueueJob(jobID)
-		wsHub.BroadcastJobsUpdate(mustGetAllJobs(db))
+		wsHub.BroadcastJobsUpdate(getAllJobsSafe(db))
 		if notifyMgr.HasTargets() {
 			twitchFields := []notifications.Field{
 				{Name: "Channel", Value: info.ChannelDisplayName, Inline: true},
@@ -739,6 +752,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Start cookie refresh (only if a cookie file is configured, like TS)
 	if cfg.Downloader.CookieFile != "" {
+		// Seed expected auth from persisted platforms so auth loss is detected on restart
+		if cfg.AutoCookies != nil && cfg.AutoCookies.Enabled && len(cfg.AutoCookies.Platforms) > 0 {
+			cookieRefresh.SetExpectedPlatforms(cfg.AutoCookies.Platforms)
+		}
 		cookieRefresh.Start(ctx)
 	} else {
 		log.Debug("[CookieRefresh] No cookie file configured, skipping refresh service")
@@ -1154,20 +1171,23 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// 2. Stop worker (waits for active downloads to save state)
 	stopService("DownloadWorker", dlWorker.Stop)
 
-	// 3. Stop cookie refresh and auto-cookie service
+	// 3. Flush in-flight notifications (may have been fired during worker stop)
+	stopService("Notifications", notifyMgr.Wait)
+
+	// 4. Stop cookie refresh and auto-cookie service
 	stopService("CookieRefresh", cookieRefresh.Stop)
 	stopService("AutoCookies", autoCookieSvc.Stop)
 
-	// 4. Cleanup PO token provider
+	// 5. Cleanup PO token provider
 	stopService("PotProvider", potProvider.Cleanup)
 
-	// 5. Stop web server
+	// 6. Stop web server
 	stopService("WebServer", webServer.Stop)
 
-	// 6. Unsubscribe log forwarder
+	// 7. Unsubscribe log forwarder
 	log.Unsubscribe(logSub)
 
-	// 7. Flush database
+	// 8. Flush database
 	stopService("Database", func() { db.Close() })
 
 	if restartRequested.Load() {
@@ -1175,10 +1195,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	} else {
 		log.Info("Shutdown complete")
 	}
-
-	// Suppress unused variable warnings for services that are used
-	// only via side effects or will be more fully integrated later.
-	_ = cipherSolver
 
 	return restartRequested.Load()
 }
@@ -1310,7 +1326,7 @@ func (n *nopLogger) Info(_ string, _ ...any)  {}
 func (n *nopLogger) Warn(_ string, _ ...any)  {}
 func (n *nopLogger) Error(_ string, _ ...any) {}
 
-func mustGetAllJobs(db *database.Database) []*database.Job {
+func getAllJobsSafe(db *database.Database) []*database.Job {
 	jobs, _ := db.GetAllJobs(false)
 	return jobs
 }
@@ -1480,9 +1496,9 @@ func (a *youtubeMetadataAdapter) FetchMetadata(ctx context.Context, videoID stri
 
 // filterJobsByAge excludes finished jobs older than hide_finished_age_days (match TS filterJobsByAge).
 func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig) []*database.Job {
-	ageDays := 30
-	if cfg.Tasklist != nil && cfg.Tasklist.HideFinishedAgeDays.Value > 0 {
-		ageDays = int(cfg.Tasklist.HideFinishedAgeDays.Value)
+	ageDays := int(cfg.HideFinishedAgeDays.Value)
+	if ageDays < 0 {
+		return jobs // negative means never archive
 	}
 	cutoff := time.Now().AddDate(0, 0, -ageDays)
 	var filtered []*database.Job

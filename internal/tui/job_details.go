@@ -10,6 +10,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 const labelWidth = 14
@@ -835,23 +836,7 @@ func formatRelativeDuration(d time.Duration) string {
 	}
 }
 
-func formatFileSize(bytes int64) string {
-	const (
-		kb = 1024
-		mb = 1024 * kb
-		gb = 1024 * mb
-	)
-	switch {
-	case bytes >= gb:
-		return fmt.Sprintf("%.1fGB", float64(bytes)/float64(gb))
-	case bytes >= mb:
-		return fmt.Sprintf("%.1fMB", float64(bytes)/float64(mb))
-	case bytes >= kb:
-		return fmt.Sprintf("%.1fKB", float64(bytes)/float64(kb))
-	default:
-		return fmt.Sprintf("%dB", bytes)
-	}
-}
+var formatFileSize = utils.FormatFileSize
 
 func wrapText(text string, maxW int) []string {
 	if maxW <= 0 {

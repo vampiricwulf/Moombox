@@ -337,6 +337,12 @@ func (hub *WebSocketHub) BroadcastCheckTimers(data any) {
 
 // BroadcastLog sends a log line to all clients and stores in buffer.
 func (hub *WebSocketHub) BroadcastLog(line string) {
+	// Truncate very long log lines to prevent buffer bloat
+	const maxLineLen = 4096
+	if len(line) > maxLineLen {
+		line = line[:maxLineLen] + "... (truncated)"
+	}
+
 	// Add to ring buffer
 	hub.logBufMu.Lock()
 	hub.logBuf = append(hub.logBuf, line)

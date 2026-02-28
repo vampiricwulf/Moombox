@@ -17,6 +17,7 @@ type TimerManager struct {
 	timers  map[int64]*timerEntry
 	nextID  atomic.Int64
 	stopped bool
+	done    chan struct{} // closed by CancelAll to unblock interval goroutines
 }
 
 type timerEntry struct {
@@ -31,6 +32,7 @@ func NewTimerManager(vm *goja.Runtime) *TimerManager {
 	return &TimerManager{
 		vm:     vm,
 		timers: make(map[int64]*timerEntry),
+		done:   make(chan struct{}),
 	}
 }
 
@@ -90,15 +92,23 @@ func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 	tm.mu.Unlock()
 
 	go func() {
-		for range ticker.C {
-			tm.mu.Lock()
-			_, exists := tm.timers[id]
-			tm.mu.Unlock()
-			if !exists {
+		for {
+			select {
+			case <-tm.done:
 				return
-			}
-			if fn != nil {
-				fn(goja.Undefined())
+			case _, ok := <-ticker.C:
+				if !ok {
+					return
+				}
+				tm.mu.Lock()
+				_, exists := tm.timers[id]
+				tm.mu.Unlock()
+				if !exists {
+					return
+				}
+				if fn != nil {
+					fn(goja.Undefined())
+				}
 			}
 		}
 	}()
@@ -140,6 +150,14 @@ func (tm *TimerManager) CancelAll() {
 		}
 	}
 	tm.timers = make(map[int64]*timerEntry)
+
+	// Signal interval goroutines to exit (ticker.Stop doesn't close the channel)
+	select {
+	case <-tm.done:
+		// Already closed
+	default:
+		close(tm.done)
+	}
 }
 
 // ActiveCount returns the number of active timers.

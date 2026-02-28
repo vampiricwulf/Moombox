@@ -112,6 +112,11 @@ func (tm *TwitchMonitor) scheduleNext(ctx context.Context) {
 	interval := tm.calculateInterval()
 
 	tm.mu.Lock()
+	// Don't schedule if monitor was stopped (cancel set to nil)
+	if tm.cancel == nil {
+		tm.mu.Unlock()
+		return
+	}
 	tm.NextCheckAt = time.Now().Add(interval).UnixMilli()
 	if tm.timer != nil {
 		tm.timer.Stop()

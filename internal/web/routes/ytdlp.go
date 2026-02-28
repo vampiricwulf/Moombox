@@ -67,7 +67,10 @@ func YtdlpRoutes(r chi.Router, currentPort int) {
 		var body struct {
 			Force bool `json:"force"`
 		}
-		json.NewDecoder(req.Body).Decode(&body)
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			jsonError(rw, "invalid request body", http.StatusBadRequest)
+			return
+		}
 
 		pluginDir := ytdlpPluginDir()
 		if pluginDir == "" {

@@ -35,9 +35,7 @@ func Defaults() *MoomboxConfig {
 			SegmentRetryDelayCap:    60,
 			SegmentLiveCheckRetries: 16,
 		},
-		Tasklist: &TasklistConfig{
-			HideFinishedAgeDays: FlexDuration{Value: 30},
-		},
+		HideFinishedAgeDays: FlexDuration{Value: 30},
 		AutoCookies: &AutoCookiesConfig{
 			Enabled:           false,
 			BrowserProfileDir: "./browser-profile",
@@ -83,11 +81,11 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 		return nil, fmt.Errorf("failed to parse config %s: %w", path, err)
 	}
 
-	// Migrate legacy allow_lan/allow_external → network_access (matches TS config.ts)
-	// These fields are not in the Go struct, so decode into a map to detect them.
-	if cfg.NetworkAccess == "" || cfg.NetworkAccess == "localhost" {
-		var raw map[string]any
-		if _, err := toml.DecodeFile(path, &raw); err == nil {
+	// Migrate legacy fields not in the Go struct by decoding to a raw map.
+	var raw map[string]any
+	if _, err := toml.DecodeFile(path, &raw); err == nil {
+		// Legacy allow_lan/allow_external → network_access (matches TS config.ts)
+		if cfg.NetworkAccess == "" || cfg.NetworkAccess == "localhost" {
 			allowLan, hasLan := raw["allow_lan"].(bool)
 			allowExt, hasExt := raw["allow_external"].(bool)
 			if hasLan || hasExt {
@@ -97,6 +95,15 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 					cfg.NetworkAccess = "lan"
 				} else {
 					cfg.NetworkAccess = "localhost"
+				}
+			}
+		}
+
+		// Legacy [tasklist] section → top-level hide_finished_age_days
+		if tl, ok := raw["tasklist"].(map[string]any); ok {
+			if _, hasTopLevel := raw["hide_finished_age_days"]; !hasTopLevel {
+				if v, ok := tl["hide_finished_age_days"]; ok {
+					cfg.HideFinishedAgeDays = ParseFlexDuration(v, "days", cfg.HideFinishedAgeDays.Value)
 				}
 			}
 		}

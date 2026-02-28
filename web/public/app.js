@@ -252,6 +252,24 @@ class MoomboxApp {
       });
     }
 
+    // Thumbnail error handling via event delegation (error events don't bubble, use capture)
+    const handleThumbError = (e) => {
+      const img = e.target;
+      if (img.tagName !== "IMG" || !img.closest(".thumb")) return;
+      img.removeEventListener("error", handleThumbError);
+      const fallback = img.dataset.fallback;
+      if (fallback && img.src !== fallback) {
+        img.src = fallback;
+        img.classList.add("thumb-avatar");
+      } else {
+        img.style.display = "none";
+      }
+    };
+    for (const id of ["jobs-container", "archived-container"]) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("error", handleThumbError, true);
+    }
+
     // Event delegation for job items (prevents memory leaks from per-item listeners)
     const jobsContainer = document.getElementById("jobs-container");
     if (jobsContainer) {
@@ -291,6 +309,18 @@ class MoomboxApp {
           const jobId = videoItem.dataset.jobId;
           const job = this.archivedJobs.find((j) => j.id === jobId);
           if (job) this.showJobDetails(job);
+        }
+      });
+    }
+
+    // Event delegation for trim delete buttons (avoids inline onclick)
+    const detailsContent = document.getElementById("job-details-content");
+    if (detailsContent) {
+      detailsContent.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-delete-trim]");
+        if (btn) {
+          e.stopPropagation();
+          this.deleteTrim(btn.dataset.jobId, btn.dataset.trimId);
         }
       });
     }
@@ -687,7 +717,7 @@ class MoomboxApp {
         <div class="thumb">
           <img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
-               onerror="this.onerror=null;${fallbackThumb ? `this.src='${this.escapeHtml(fallbackThumb)}';this.classList.add('thumb-avatar')` : "this.style.display='none'"}">
+               ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}>
         </div>
         <div class="stream-info">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>
@@ -1109,7 +1139,7 @@ class MoomboxApp {
                 <span>
                   <strong>${range}</strong> (${duration}, ${size})
                 </span>
-                <sl-button size="small" variant="danger" onclick="app.deleteTrim('${this.escapeHtml(job.id)}', '${this.escapeHtml(trim.id)}')">
+                <sl-button size="small" variant="danger" data-delete-trim data-job-id="${this.escapeHtml(job.id)}" data-trim-id="${this.escapeHtml(trim.id)}">
                   Delete
                 </sl-button>
               </div>
@@ -1826,11 +1856,25 @@ class MoomboxApp {
       div.className = `log-line ${levelClass}`;
 
       if (searchQuery) {
-        // Highlight search matches
-        const escaped = this.escapeHtml(log);
-        const escapedQuery = this.escapeHtml(searchQuery);
-        const regex = new RegExp(escapedQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-        div.innerHTML = escaped.replace(regex, (match) => `<mark>${match}</mark>`);
+        // Highlight search matches using DOM text nodes (avoids innerHTML)
+        const regex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+        let lastIndex = 0;
+        let match;
+        while ((match = regex.exec(log)) !== null) {
+          if (match.index > lastIndex) {
+            div.appendChild(document.createTextNode(log.slice(lastIndex, match.index)));
+          }
+          const mark = document.createElement("mark");
+          mark.textContent = match[0];
+          div.appendChild(mark);
+          lastIndex = regex.lastIndex;
+        }
+        if (lastIndex < log.length) {
+          div.appendChild(document.createTextNode(log.slice(lastIndex)));
+        }
+        if (lastIndex === 0) {
+          div.textContent = log;
+        }
       } else {
         div.textContent = log;
       }
