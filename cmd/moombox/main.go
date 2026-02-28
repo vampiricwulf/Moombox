@@ -42,7 +42,7 @@ import (
 )
 
 var (
-	version = "2.0.8"
+	version = "2.0.9"
 	commit  = ""
 )
 
@@ -264,7 +264,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// =========================================================================
 	// 11. Trim service
 	// =========================================================================
-	trimSvc := worker.NewTrimService(db, log)
+	trimSvc := worker.NewTrimService(db, cfg.Paths.FfmpegPath, log)
 	if notifyMgr != nil {
 		trimSvc.SetNotifier(notifyMgr)
 	}

@@ -34,14 +34,14 @@ type TrimService struct {
 }
 
 // NewTrimService creates a new trim service.
-func NewTrimService(db *database.Database, logger interface {
+func NewTrimService(db *database.Database, ffmpegPath string, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *TrimService {
 	return &TrimService{
-		muxer:     engine.NewMuxer(logger),
+		muxer:     engine.NewMuxer(ffmpegPath, logger),
 		db:        db,
 		activeOps: make(map[string]bool),
 		logger:    logger,
@@ -122,7 +122,7 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 	ts.logger.Info("creating trim", "jobID", job.ID, "start", startTime, "end", endTime)
 
 	// Probe audio bitrate to match source quality (matches TS probeAudioBitrate)
-	audioBitrate := probeAudioBitrate(ctx, job.OutputFile)
+	audioBitrate := probeAudioBitrate(ctx, ts.muxer.FFprobePath(), job.OutputFile)
 
 	// Run FFmpeg
 	if err := ts.muxer.TrimWithAudio(ctx, job.OutputFile, trimPath, startTime, endTime, defaultTrimCRF, audioBitrate); err != nil {
@@ -238,13 +238,13 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 
 // probeAudioBitrate probes the audio bitrate of a source file in kbps.
 // Falls back to 128 kbps if the stream has no bitrate metadata (matches TS probeAudioBitrate).
-func probeAudioBitrate(ctx context.Context, filePath string) int {
+func probeAudioBitrate(ctx context.Context, ffprobePath, filePath string) int {
 	const defaultAudioBitrate = 128
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
+	cmd := exec.CommandContext(ctx, ffprobePath,
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",

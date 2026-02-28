@@ -117,7 +117,7 @@ func NewDownloadWorker(
 		tw:           tw,
 		cfg:          cfg,
 		queue:        queue,
-		orchestrator: NewDownloadOrchestrator(db, queue, logger, cs, pp, nm),
+		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, pp, nm),
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,

@@ -36,6 +36,7 @@ const (
 // DownloadOrchestrator coordinates the full download lifecycle for a job.
 type DownloadOrchestrator struct {
 	muxer        *engine.Muxer
+	ffmpegPath   string
 	db           *database.Database
 	queue        *JobQueue
 	cipherSolver *cipher.Solver
@@ -45,9 +46,10 @@ type DownloadOrchestrator struct {
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.
-func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, logger Logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager) *DownloadOrchestrator {
+func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger Logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager) *DownloadOrchestrator {
 	return &DownloadOrchestrator{
-		muxer:        engine.NewMuxer(logger),
+		muxer:        engine.NewMuxer(ffmpegPath, logger),
+		ffmpegPath:   ffmpegPath,
 		db:           db,
 		queue:        queue,
 		cipherSolver: cs,
@@ -349,7 +351,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			"startTime", jobCtx.Job.StartTime,
 			"endTime", jobCtx.Job.EndTime)
 
-		trimService := NewTrimService(o.db, o.logger)
+		trimService := NewTrimService(o.db, o.ffmpegPath, o.logger)
 		if o.notifier != nil {
 			trimService.SetNotifier(o.notifier)
 		}
@@ -1017,7 +1019,7 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
+	cmd := exec.CommandContext(ctx, o.muxer.FFprobePath(),
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",

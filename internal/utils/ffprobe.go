@@ -35,11 +35,15 @@ type ffprobeOutput struct {
 }
 
 // ExtractVideoMetadata extracts metadata from a video file using ffprobe.
-func ExtractVideoMetadata(ctx context.Context, filePath string) (*VideoMetadata, error) {
+// If ffprobePath is empty, "ffprobe" is used (resolved via PATH).
+func ExtractVideoMetadata(ctx context.Context, ffprobePath, filePath string) (*VideoMetadata, error) {
+	if ffprobePath == "" {
+		ffprobePath = "ffprobe"
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
+	cmd := exec.CommandContext(ctx, ffprobePath,
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_format",

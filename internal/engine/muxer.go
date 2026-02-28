@@ -25,7 +25,9 @@ type TrimOptions struct {
 
 // Muxer handles FFmpeg operations.
 type Muxer struct {
-	logger interface {
+	ffmpegPath  string
+	ffprobePath string
+	logger      interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -33,14 +35,37 @@ type Muxer struct {
 	}
 }
 
-// NewMuxer creates a new FFmpeg muxer.
-func NewMuxer(logger interface {
+// NewMuxer creates a new FFmpeg muxer. If ffmpegPath is empty, "ffmpeg" is
+// used (resolved via PATH). The ffprobe path is derived from the ffmpeg path.
+func NewMuxer(ffmpegPath string, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *Muxer {
-	return &Muxer{logger: logger}
+	if ffmpegPath == "" {
+		ffmpegPath = "ffmpeg"
+	}
+	return &Muxer{
+		ffmpegPath:  ffmpegPath,
+		ffprobePath: deriveFFprobePath(ffmpegPath),
+		logger:      logger,
+	}
+}
+
+// FFprobePath returns the resolved ffprobe binary path.
+func (m *Muxer) FFprobePath() string {
+	return m.ffprobePath
+}
+
+// deriveFFprobePath returns the ffprobe path corresponding to the given ffmpeg path.
+func deriveFFprobePath(ffmpegPath string) string {
+	if ffmpegPath == "" || ffmpegPath == "ffmpeg" {
+		return "ffprobe"
+	}
+	dir := filepath.Dir(ffmpegPath)
+	base := filepath.Base(ffmpegPath)
+	return filepath.Join(dir, strings.Replace(base, "ffmpeg", "ffprobe", 1))
 }
 
 // MuxCopy muxes video and audio streams using codec copy (fast, no re-encoding).
@@ -249,7 +274,7 @@ func (m *Muxer) runFFmpeg(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
 	cmd.Stdout = nil
 
 	// Capture stderr for error reporting

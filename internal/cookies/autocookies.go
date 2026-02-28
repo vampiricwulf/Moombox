@@ -44,9 +44,15 @@ var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket",
 
 // DetectedBrowser holds info about a detected browser.
 type DetectedBrowser struct {
-	Type string `json:"type"` // "firefox", "edge", "chrome", "brave", "opera"
+	Type string `json:"type"` // "firefox", "waterfox", "chrome", "brave", "opera", "edge"
 	Path string `json:"path"`
 	Name string `json:"name"`
+}
+
+// isFirefoxBased returns true for Firefox and Firefox-family browsers (Waterfox, etc.)
+// that use cookies.sqlite and the -profile flag.
+func isFirefoxBased(browserType string) bool {
+	return browserType == "firefox" || browserType == "waterfox"
 }
 
 // AutoCookieReloginRequired tracks which platforms need manual re-login.
@@ -187,7 +193,7 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 		loginTarget = twitchLoginURL
 	}
 
-	if browser.Type == "firefox" {
+	if isFirefoxBased(browser.Type) {
 		return s.startFirefoxSetup(browser, loginTarget)
 	}
 	return s.startChromiumSetup(browser, loginTarget)
@@ -209,7 +215,7 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 
 	var netscapeCookies string
 
-	if browser.Type == "firefox" {
+	if isFirefoxBased(browser.Type) {
 		s.closeFirefoxGracefully()
 		netscapeCookies, err = readFirefoxCookies(s.profileDir)
 	} else {
@@ -325,7 +331,7 @@ func (s *AutoCookieService) NavigateToTwitch() error {
 	port := s.cdpPort
 	s.mu.Unlock()
 
-	if browser.Type == "firefox" {
+	if isFirefoxBased(browser.Type) {
 		return nil // Firefox: user navigates manually
 	}
 
@@ -357,7 +363,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	var netscapeCookies string
 	var err error
 
-	if browser.Type == "firefox" {
+	if isFirefoxBased(browser.Type) {
 		netscapeCookies, err = s.refreshFirefox(browser)
 	} else {
 		netscapeCookies, err = s.refreshChromium(browser)
@@ -909,6 +915,7 @@ type browserInfo struct {
 
 var knownBrowsers = []browserInfo{
 	{"firefox", "Firefox", firefoxPaths, []string{`Mozilla Firefox\firefox.exe`}},
+	{"waterfox", "Waterfox", waterfoxPaths, []string{`Waterfox\waterfox.exe`}},
 	{"chrome", "Google Chrome", chromePaths, []string{`Google\Chrome\Application\chrome.exe`}},
 	{"brave", "Brave", bravePaths, []string{`BraveSoftware\Brave-Browser\Application\brave.exe`}},
 	{"opera", "Opera GX", operaPaths, []string{`Programs\Opera GX\opera.exe`, `Programs\Opera\opera.exe`}},
@@ -916,11 +923,13 @@ var knownBrowsers = []browserInfo{
 }
 
 // DetectBrowser finds the best available browser. It checks the system's
-// default browser first, then falls back to Firefox > Chrome > Brave > Opera > Edge.
+// default browser first, then falls back to Firefox > Waterfox > Chrome > Brave > Opera > Edge.
 func DetectBrowser() *DetectedBrowser {
 	// Build search order: default browser first, then remaining browsers.
+	// Edge is excluded from promotion — it frequently hijacks the Windows
+	// registry default even when the user has set another browser.
 	order := knownBrowsers
-	if defType := detectDefaultBrowserType(); defType != "" {
+	if defType := detectDefaultBrowserType(); defType != "" && defType != "edge" {
 		reordered := make([]browserInfo, 0, len(knownBrowsers))
 		for _, b := range knownBrowsers {
 			if b.typ == defType {
@@ -932,35 +941,34 @@ func DetectBrowser() *DetectedBrowser {
 		order = reordered
 	}
 
-	// Search PATH.
+	// Build Windows install path roots once.
+	var windowsRoots []string
+	if runtime.GOOS == "windows" {
+		if pf := os.Getenv("PROGRAMFILES"); pf != "" {
+			windowsRoots = append(windowsRoots, pf)
+		}
+		if pf86 := os.Getenv("PROGRAMFILES(X86)"); pf86 != "" {
+			windowsRoots = append(windowsRoots, pf86)
+		}
+		if localApp := os.Getenv("LOCALAPPDATA"); localApp != "" {
+			windowsRoots = append(windowsRoots, localApp)
+		}
+	}
+
+	// For each browser, try PATH then Windows install paths before moving
+	// to the next browser. This prevents Edge (always on PATH) from winning
+	// over browsers installed in Program Files but not on PATH.
 	for _, b := range order {
 		for _, name := range b.pathsFn() {
 			if path, err := exec.LookPath(name); err == nil {
 				return &DetectedBrowser{Type: b.typ, Path: path, Name: b.name}
 			}
 		}
-	}
-
-	// Check common install locations on Windows using env-based search roots.
-	if runtime.GOOS == "windows" {
-		var roots []string
-		if pf := os.Getenv("PROGRAMFILES"); pf != "" {
-			roots = append(roots, pf)
-		}
-		if pf86 := os.Getenv("PROGRAMFILES(X86)"); pf86 != "" {
-			roots = append(roots, pf86)
-		}
-		if localApp := os.Getenv("LOCALAPPDATA"); localApp != "" {
-			roots = append(roots, localApp)
-		}
-
-		for _, b := range order {
-			for _, relPath := range b.windowsPaths {
-				for _, root := range roots {
-					fullPath := filepath.Join(root, relPath)
-					if _, err := os.Stat(fullPath); err == nil {
-						return &DetectedBrowser{Type: b.typ, Path: fullPath, Name: b.name}
-					}
+		for _, relPath := range b.windowsPaths {
+			for _, root := range windowsRoots {
+				fullPath := filepath.Join(root, relPath)
+				if _, err := os.Stat(fullPath); err == nil {
+					return &DetectedBrowser{Type: b.typ, Path: fullPath, Name: b.name}
 				}
 			}
 		}
@@ -970,7 +978,7 @@ func DetectBrowser() *DetectedBrowser {
 }
 
 // detectDefaultBrowserType returns the type of the system's default browser
-// ("firefox", "edge", "chrome", "brave", "opera") or "" if detection fails or the browser is unknown.
+// or "" if detection fails or the browser is unknown.
 func detectDefaultBrowserType() string {
 	if runtime.GOOS == "windows" {
 		return detectDefaultBrowserWindows()
@@ -998,6 +1006,8 @@ func detectDefaultBrowserWindows() string {
 		}
 		progID := strings.ToLower(parts[2])
 		switch {
+		case strings.HasPrefix(progID, "waterfoxhtml"):
+			return "waterfox"
 		case strings.HasPrefix(progID, "firefoxurl"):
 			return "firefox"
 		case strings.HasPrefix(progID, "msedgehtm"):
@@ -1019,6 +1029,13 @@ func firefoxPaths() []string {
 		return []string{"firefox", "/Applications/Firefox.app/Contents/MacOS/firefox"}
 	}
 	return []string{"firefox"}
+}
+
+func waterfoxPaths() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"waterfox", "/Applications/Waterfox.app/Contents/MacOS/waterfox"}
+	}
+	return []string{"waterfox"}
 }
 
 func edgePaths() []string {
