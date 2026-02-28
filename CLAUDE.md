@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Release Process
+
+When bumping a version, follow this order:
+
+1. **Generate `RELEASE_NOTES.md`** — review commits since the last tag (`git log --oneline <prev-tag>..HEAD`), write concise user-facing release notes grouped by **Features**, **Improvements**, **Bug Fixes**, **Internal** (skip empty sections). No version heading — start directly with sections.
+2. **Bump version** in `cmd/moombox/main.go` (`version = "x.y.z"`).
+3. **Commit** both `RELEASE_NOTES.md` and the version bump together (e.g. `chore: bump version to x.y.z — short summary`).
+4. **Tag** (`git tag vx.y.z`) and **push** (`git push && git push origin vx.y.z`).
+
+CI reads `RELEASE_NOTES.md` from the repo — no API calls or CLI installs needed at build time.
+
 ## What This Is
 
 Moombox is a YouTube/Twitch live stream archiver written in Go. It monitors channels, detects live streams, downloads segments (DASH/HLS), records live chat, muxes with FFmpeg, and serves a web dashboard + TUI. This is a standalone program — feature work, bug fixes, and improvements are the primary focus.
@@ -46,7 +57,7 @@ go test -v -run TestParseDash ./internal/engine/...
 go vet ./...
 ```
 
-Runtime requires FFmpeg on PATH. CI: `.github/workflows/release.yml` builds Windows exe on tag push, generates release notes via Claude.
+Runtime requires FFmpeg on PATH. CI: `.github/workflows/release.yml` builds Windows exe on tag push, reads `RELEASE_NOTES.md` for the GitHub release body.
 
 ## Architecture
 
