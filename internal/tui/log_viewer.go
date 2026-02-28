@@ -213,17 +213,19 @@ func (m *LogViewerModel) matchLevel(line string) bool {
 }
 
 func extractLogLevel(line string) string {
+	// Log format: "2006-01-02 15:04:05 LEVEL msg..."
+	// The level token starts at position 20 (after "YYYY-MM-DD HH:MM:SS ")
 	upper := strings.ToUpper(line)
-	if strings.Contains(upper, " ERR ") || strings.Contains(upper, "[ERROR]") {
+	if strings.Contains(upper, " ERROR ") || strings.Contains(upper, "[ERROR]") {
 		return "ERROR"
 	}
-	if strings.Contains(upper, " WRN ") || strings.Contains(upper, "[WARN]") || strings.Contains(upper, "[WARNING]") {
+	if strings.Contains(upper, " WARN ") || strings.Contains(upper, "[WARN]") || strings.Contains(upper, "[WARNING]") {
 		return "WARN"
 	}
-	if strings.Contains(upper, " INF ") || strings.Contains(upper, "[INFO]") {
+	if strings.Contains(upper, " INFO ") || strings.Contains(upper, "[INFO]") {
 		return "INFO"
 	}
-	if strings.Contains(upper, " DBG ") || strings.Contains(upper, "[DEBUG]") {
+	if strings.Contains(upper, " DEBUG ") || strings.Contains(upper, "[DEBUG]") {
 		return "DEBUG"
 	}
 	return "" // no level marker found

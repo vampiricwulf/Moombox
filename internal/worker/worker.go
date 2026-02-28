@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -299,6 +300,15 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		}
 		w.setJobError(job, dlErr)
 		return
+	}
+
+	// Clean up staging directory after successful download + mux
+	if jobCtx.StagingDir != "" {
+		if err := os.RemoveAll(jobCtx.StagingDir); err != nil {
+			w.logger.Warn("failed to remove staging directory", "path", jobCtx.StagingDir, "err", err)
+		} else {
+			w.logger.Debug("removed staging directory", "path", jobCtx.StagingDir)
+		}
 	}
 }
 

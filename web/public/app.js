@@ -1720,7 +1720,7 @@ class MoomboxApp {
     const threshold = levelPriority[this.logFilter] ?? 3;
 
     return this.logs.filter((log) => {
-      const match = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
+      const match = log.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR)\b/i);
       if (!match) return true; // Show untagged lines always
       const level = match[1].toUpperCase();
       return (levelPriority[level] ?? 2) <= threshold;
@@ -1744,7 +1744,7 @@ class MoomboxApp {
     for (const log of filtered) {
       const div = document.createElement("div");
       // Determine log level class
-      const levelMatch = log.match(/\[(DEBUG|INFO|WARN(?:ING)?|ERROR)\]/i);
+      const levelMatch = log.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR)\b/i);
       const level = levelMatch ? levelMatch[1].toUpperCase() : "INFO";
       let levelClass = "log-info";
       if (level === "ERROR") levelClass = "log-error";
