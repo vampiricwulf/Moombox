@@ -1008,11 +1008,17 @@ class MoomboxApp {
           }
           <div class="details-row">
             <span class="details-label">Created:</span>
-            <span class="details-value">${this.formatRelativeTime(job.createdAt)}</span>
+            <span class="details-value" title="${new Date(job.createdAt).toLocaleString()}">${this.formatRelativeTime(job.createdAt)}</span>
           </div>
+          ${job.downloadStartedAt ? `
+          <div class="details-row">
+            <span class="details-label">DL Started:</span>
+            <span class="details-value" title="${new Date(job.downloadStartedAt).toLocaleString()}">${this.formatRelativeTime(job.downloadStartedAt)}</span>
+          </div>
+          ` : ""}
           <div class="details-row">
             <span class="details-label">Updated:</span>
-            <span class="details-value" data-field="updated">${this.formatRelativeTime(job.updatedAt)}</span>
+            <span class="details-value" data-field="updated" title="${new Date(job.updatedAt).toLocaleString()}">${this.formatRelativeTime(job.updatedAt)}</span>
           </div>
           ${isTwitch && job.twitchCategory ? `
           <div class="details-row">
@@ -1044,7 +1050,7 @@ class MoomboxApp {
           ${job.streamEndTime ? `
           <div class="details-row">
             <span class="details-label">Stream End:</span>
-            <span class="details-value">${this.formatRelativeTime(job.streamEndTime)}</span>
+            <span class="details-value" title="${new Date(job.streamEndTime).toLocaleString()}">${this.formatRelativeTime(job.streamEndTime)}</span>
           </div>
           ` : ""}
           ${job.lengthSeconds && job.lengthSeconds > 0 ? `
@@ -1122,6 +1128,73 @@ class MoomboxApp {
       `
           : ""
       }
+
+      ${(() => {
+        const hasResolution = job.videoWidth && job.videoHeight;
+        const hasFps = job.videoFps && job.videoFps > 0;
+        const hasFileSize = job.fileSize && job.fileSize > 0;
+        const isFinished = job.status === "Finished";
+        const hasFinishedSegs = isFinished && (job.lastVideoSeq || job.lastAudioSeq);
+        const hasGaps = job.gaps && job.gaps.length > 0;
+        if (!hasResolution && !hasFps && !hasFileSize && !hasFinishedSegs && !hasGaps) return "";
+
+        let rows = "";
+        if (hasResolution) {
+          rows += `<div class="details-row">
+            <span class="details-label">Resolution:</span>
+            <span class="details-value">${job.videoWidth}x${job.videoHeight}</span>
+          </div>`;
+        }
+        if (hasFps) {
+          rows += `<div class="details-row">
+            <span class="details-label">FPS:</span>
+            <span class="details-value">${job.videoFps}</span>
+          </div>`;
+        }
+        if (hasFileSize) {
+          rows += `<div class="details-row">
+            <span class="details-label">File Size:</span>
+            <span class="details-value">${this.formatBytes(job.fileSize)}</span>
+          </div>`;
+        }
+        if (hasFinishedSegs) {
+          const isTwitchSeg = job.platform === "twitch";
+          const vCurrent = job.lastVideoSeq || 0;
+          const aCurrent = job.lastAudioSeq || 0;
+          const vTotal = job.totalVideoSeq;
+          const aTotal = job.totalAudioSeq;
+          const vDisplay = vTotal ? `${vCurrent}/${vTotal}` : vCurrent;
+          const aDisplay = aTotal ? `${aCurrent}/${aTotal}` : aCurrent;
+          const segValue = isTwitchSeg ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
+          rows += `<div class="details-row">
+            <span class="details-label">Segments:</span>
+            <span class="details-value">${segValue}</span>
+          </div>`;
+        }
+        if (hasGaps) {
+          let videoGaps = 0, audioGaps = 0;
+          for (const g of job.gaps) {
+            if (g.stream === "video") videoGaps++;
+            else if (g.stream === "audio") audioGaps++;
+          }
+          const parts = [];
+          if (videoGaps > 0) parts.push(`video: ${videoGaps}`);
+          if (audioGaps > 0) parts.push(`audio: ${audioGaps}`);
+          const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+          rows += `<div class="details-row">
+            <span class="details-label">Gaps:</span>
+            <span class="details-value" style="color: var(--sl-color-warning-600)">${job.gaps.length} segments${detail}</span>
+          </div>`;
+        }
+        return `<div class="details-section"><strong>Media:</strong>${rows}</div>`;
+      })()}
+
+      ${job.description ? `
+      <div class="details-section">
+        <strong>Description:</strong>
+        <div style="white-space: pre-wrap; word-break: break-word; color: var(--sl-color-neutral-600); margin-top: 4px; font-size: 0.9em;">${this.escapeHtml(job.description)}</div>
+      </div>
+      ` : ""}
 
       <div class="details-section">
         <strong>Job Logs:</strong>

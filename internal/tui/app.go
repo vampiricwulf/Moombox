@@ -291,11 +291,11 @@ func (a *App) listenForUpdates() tea.Cmd {
 	}
 }
 
-// hasActiveDownloads returns true if any job is downloading/muxing.
+// hasActiveDownloads returns true if any job has live progress to display.
 func (a *App) hasActiveDownloads() bool {
 	for _, s := range a.statusMap {
 		switch s {
-		case database.StatusDownloading, database.StatusLive, database.StatusMuxing:
+		case database.StatusUpcoming, database.StatusDownloading, database.StatusLive, database.StatusMuxing:
 			return true
 		}
 	}

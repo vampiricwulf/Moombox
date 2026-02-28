@@ -175,6 +175,12 @@ func (m *JobDetailsModel) buildRows() {
 		m.addField("URL", j.URL)
 	}
 	m.addFieldColor("Status", status, StatusColor(status))
+	// VOD/Live type indicator (matching Web UI)
+	if j.IsVod {
+		m.addField("Type", "VOD")
+	} else {
+		m.addField("Type", "Live")
+	}
 	if isTwitch {
 		m.addFieldColor("Platform", "Twitch", ColorTwitch)
 		if j.TwitchCategory != "" {
@@ -293,13 +299,24 @@ func (m *JobDetailsModel) buildRows() {
 		m.addSegmentRowsWithOverlay(j)
 
 		// Chat status with color coding (J7) - always shown (not gated by hasProgress)
+		// Combined line: "status (X messages)" matching Web UI
 		chatStatus := j.ChatStatus
-		if p := m.progressOverlay; p != nil && p.ChatStatus != "" {
-			chatStatus = p.ChatStatus
+		totalChatMsgs := j.TotalChatMessages
+		if p := m.progressOverlay; p != nil {
+			if p.ChatStatus != "" {
+				chatStatus = p.ChatStatus
+			}
+			if p.TotalChatMessages != nil {
+				totalChatMsgs = p.TotalChatMessages
+			}
 		}
 		if chatStatus != "" {
+			chatVal := chatStatus
+			if totalChatMsgs != nil && *totalChatMsgs > 0 {
+				chatVal += fmt.Sprintf(" (%d messages)", *totalChatMsgs)
+			}
 			chatColor := m.chatStatusColor(chatStatus)
-			m.addFieldColor("Chat", chatStatus, chatColor)
+			m.addFieldColor("Chat", chatVal, chatColor)
 		}
 	}
 
@@ -332,17 +349,17 @@ func (m *JobDetailsModel) buildRows() {
 		}
 	}
 
-	// === Timestamps (J11 - human-readable, J13 - Scheduled label) — BEFORE Duration to match TS ===
+	// === Timestamps (J11 - human-readable with relative suffix, J13 - Scheduled label) — BEFORE Duration to match TS ===
 	now := time.Now()
 	m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Timestamps"})
 	if j.CreatedAt != "" {
-		m.addField("Created", formatDateStr(j.CreatedAt))
+		m.addField("Created", formatDateStrRelative(j.CreatedAt, now))
 	}
 	if j.DownloadStartedAt != "" {
-		m.addField("DL Started", formatDateStr(j.DownloadStartedAt))
+		m.addField("DL Started", formatDateStrRelative(j.DownloadStartedAt, now))
 	}
 	if j.UpdatedAt != "" {
-		m.addField("Updated", formatDateStr(j.UpdatedAt))
+		m.addField("Updated", formatDateStrRelative(j.UpdatedAt, now))
 	}
 	if j.StreamStartTime != "" {
 		// Show "Scheduled" if upcoming and future (J13)
@@ -352,10 +369,10 @@ func (m *JobDetailsModel) buildRows() {
 				label = "Scheduled"
 			}
 		}
-		m.addField(label, formatDateStr(j.StreamStartTime))
+		m.addField(label, formatDateStrRelative(j.StreamStartTime, now))
 	}
 	if j.StreamEndTime != "" {
-		m.addField("Stream End", formatDateStr(j.StreamEndTime))
+		m.addField("Stream End", formatDateStrRelative(j.StreamEndTime, now))
 	}
 	if j.LengthSeconds != nil && *j.LengthSeconds > 0 {
 		m.addField("Video Length", formatDuration(time.Duration(*j.LengthSeconds)*time.Second))
@@ -445,7 +462,6 @@ func (m *JobDetailsModel) addSegmentRowsWithOverlay(j *database.Job) {
 	lastAudioSeq := j.LastAudioSeq
 	totalVideoSeq := j.TotalVideoSeq
 	totalAudioSeq := j.TotalAudioSeq
-	totalChatMsgs := j.TotalChatMessages
 	if p != nil {
 		if p.LastVideoSeq != nil {
 			lastVideoSeq = p.LastVideoSeq
@@ -459,34 +475,30 @@ func (m *JobDetailsModel) addSegmentRowsWithOverlay(j *database.Job) {
 		if p.TotalAudioSeq != nil {
 			totalAudioSeq = p.TotalAudioSeq
 		}
-		if p.TotalChatMessages != nil {
-			totalChatMsgs = p.TotalChatMessages
-		}
 	}
 
-	// Show when defined (even if 0) - match TS "lastVideoSeq !== undefined"
+	// Combined inline segment display: "V: x/y | A: x/y" (matching Web UI)
 	if lastVideoSeq != nil {
-		segStr := fmt.Sprintf("%d", *lastVideoSeq)
+		vStr := fmt.Sprintf("%d", *lastVideoSeq)
 		if totalVideoSeq != nil && *totalVideoSeq > 0 {
-			segStr += fmt.Sprintf("/%d", *totalVideoSeq)
+			vStr += fmt.Sprintf("/%d", *totalVideoSeq)
 		}
-		label := "Video Segs"
 		if isTwitch {
-			label = "Segments"
+			m.addField("Segments", vStr)
+		} else {
+			aStr := ""
+			if lastAudioSeq != nil {
+				aStr = fmt.Sprintf("%d", *lastAudioSeq)
+				if totalAudioSeq != nil && *totalAudioSeq > 0 {
+					aStr += fmt.Sprintf("/%d", *totalAudioSeq)
+				}
+			}
+			if aStr != "" {
+				m.addField("Segments", fmt.Sprintf("V: %s | A: %s", vStr, aStr))
+			} else {
+				m.addField("Segments", fmt.Sprintf("V: %s", vStr))
+			}
 		}
-		m.addField(label, segStr)
-	}
-
-	if !isTwitch && lastAudioSeq != nil {
-		segStr := fmt.Sprintf("%d", *lastAudioSeq)
-		if totalAudioSeq != nil && *totalAudioSeq > 0 {
-			segStr += fmt.Sprintf("/%d", *totalAudioSeq)
-		}
-		m.addField("Audio Segs", segStr)
-	}
-
-	if totalChatMsgs != nil && *totalChatMsgs > 0 {
-		m.addField("Chat Msgs", fmt.Sprintf("%d", *totalChatMsgs))
 	}
 
 	// Gaps
@@ -519,30 +531,31 @@ func (m *JobDetailsModel) addSegmentRowsWithOverlay(j *database.Job) {
 func (m *JobDetailsModel) addSegmentRows(j *database.Job) {
 	isTwitch := j.Platform == "twitch"
 
-	// Show segment counts even when 0 (match TS: lastVideoSeq !== undefined)
+	// Combined inline segment display: "V: x/y | A: x/y" (matching Web UI)
 	if j.LastVideoSeq != nil {
-		segStr := fmt.Sprintf("%d", *j.LastVideoSeq)
+		vStr := fmt.Sprintf("%d", *j.LastVideoSeq)
 		if j.TotalVideoSeq != nil && *j.TotalVideoSeq > 0 {
-			segStr += fmt.Sprintf("/%d", *j.TotalVideoSeq)
+			vStr += fmt.Sprintf("/%d", *j.TotalVideoSeq)
 		}
-		// Platform-specific label (J12)
-		label := "Video Segs"
 		if isTwitch {
-			label = "Segments"
+			m.addField("Segments", vStr)
+		} else {
+			aStr := ""
+			if j.LastAudioSeq != nil {
+				aStr = fmt.Sprintf("%d", *j.LastAudioSeq)
+				if j.TotalAudioSeq != nil && *j.TotalAudioSeq > 0 {
+					aStr += fmt.Sprintf("/%d", *j.TotalAudioSeq)
+				}
+			}
+			if aStr != "" {
+				m.addField("Segments", fmt.Sprintf("V: %s | A: %s", vStr, aStr))
+			} else {
+				m.addField("Segments", fmt.Sprintf("V: %s", vStr))
+			}
 		}
-		m.addField(label, segStr)
 	}
 
-	// Audio segs only for YouTube (J12)
-	if !isTwitch && j.LastAudioSeq != nil {
-		segStr := fmt.Sprintf("%d", *j.LastAudioSeq)
-		if j.TotalAudioSeq != nil && *j.TotalAudioSeq > 0 {
-			segStr += fmt.Sprintf("/%d", *j.TotalAudioSeq)
-		}
-		m.addField("Audio Segs", segStr)
-	}
-
-	// Chat message count
+	// Chat message count (in Media section for finished jobs)
 	if j.TotalChatMessages != nil && *j.TotalChatMessages > 0 {
 		m.addField("Chat Msgs", fmt.Sprintf("%d", *j.TotalChatMessages))
 	}
@@ -780,6 +793,46 @@ func formatDateStr(dateStr string) string {
 		return dateStr // fallback to raw
 	}
 	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+// formatDateStrRelative formats a date with a relative suffix, e.g. "2025-01-02 15:04:05 (2h ago)".
+func formatDateStrRelative(dateStr string, now time.Time) string {
+	t, err := time.Parse(time.RFC3339, dateStr)
+	if err != nil {
+		return dateStr
+	}
+	abs := t.Local().Format("2006-01-02 15:04:05")
+	d := now.Sub(t)
+	if d < 0 {
+		d = -d
+		return abs + " (in " + formatRelativeDuration(d) + ")"
+	}
+	if d < time.Second {
+		return abs + " (just now)"
+	}
+	return abs + " (" + formatRelativeDuration(d) + " ago)"
+}
+
+func formatRelativeDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		if m > 0 {
+			return fmt.Sprintf("%dh %dm", h, m)
+		}
+		return fmt.Sprintf("%dh", h)
+	default:
+		days := int(d.Hours()) / 24
+		if days == 1 {
+			return "1 day"
+		}
+		return fmt.Sprintf("%d days", days)
+	}
 }
 
 func formatFileSize(bytes int64) string {
