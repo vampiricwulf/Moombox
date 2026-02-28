@@ -42,7 +42,7 @@ import (
 )
 
 var (
-	version = "2.0.10"
+	version = "2.0.11"
 	commit  = ""
 )
 
@@ -350,6 +350,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// =========================================================================
 	startTime := time.Now()
 	webServer := web.NewServer(cfg, log)
+	webServer.SetCommit(commit)
 	wsHub := webServer.WebSocket()
 	r := webServer.Router()
 

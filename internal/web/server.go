@@ -3,6 +3,7 @@ package web
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -36,6 +37,7 @@ type Server struct {
 	server      *http.Server
 	ws          *WebSocketHub
 	auth        *AuthService
+	commit    string             // Build commit hash for cache busting (e.g. "abc1234")
 	loginHTML   []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
 	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
 	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
@@ -76,6 +78,11 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 	r.Use(CompressionMiddleware)
 
 	return s
+}
+
+// SetCommit sets the build commit hash used for cache-busting static asset URLs.
+func (s *Server) SetCommit(c string) {
+	s.commit = c
 }
 
 // SetAuth sets the auth service for authentication middleware.
@@ -163,8 +170,13 @@ func (s *Server) SetWebSocketHandler(handler http.HandlerFunc) {
 func (s *Server) MountStaticFiles(staticFS fs.FS) {
 	fileServer := http.FileServer(http.FS(staticFS))
 
-	// Read index.html once for SPA fallback
+	// Read index.html once for SPA fallback, with cache-busted asset URLs
 	indexHTML, _ := fs.ReadFile(staticFS, "index.html")
+	if indexHTML != nil && s.commit != "" {
+		suffix := []byte("?v=" + s.commit)
+		indexHTML = bytes.ReplaceAll(indexHTML, []byte(`"/moombox.css"`), []byte(`"/moombox.css`+string(suffix)+`"`))
+		indexHTML = bytes.ReplaceAll(indexHTML, []byte(`"/app.js"`), []byte(`"/app.js`+string(suffix)+`"`))
+	}
 
 	// Cache login.html for auth middleware inline serving (matches TS serveLoginPage)
 	s.loginHTML, _ = fs.ReadFile(staticFS, "login.html")
@@ -188,8 +200,10 @@ func (s *Server) MountStaticFiles(staticFS fs.FS) {
 			// Set cache headers for static assets
 			ext := path.Ext(urlPath)
 			switch ext {
-			case ".css", ".js", ".png", ".jpg", ".svg", ".ico":
+			case ".png", ".jpg", ".svg", ".ico":
 				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			case ".css", ".js":
+				w.Header().Set("Cache-Control", "no-cache")
 			default:
 				w.Header().Set("Cache-Control", "no-cache")
 			}
