@@ -1419,27 +1419,148 @@ sl-progress-bar {
     }
 }
 
-/* Trim timeline preview */
-.trim-preview {
-    height: 1.5rem;
-    border-radius: var(--sl-border-radius-medium);
-    margin-bottom: var(--sl-spacing-small);
-    position: relative;
-    overflow: hidden;
-    background-color: var(--sl-color-neutral-300);
+/* ===== Trim Dialog ===== */
+#trim-dialog::part(panel) {
+    width: min(56rem, 95vw);
 }
 
-.trim-preview-range {
+#trim-video-wrapper {
+    background-color: #000;
+    border-radius: var(--sl-border-radius-medium);
+    overflow: hidden;
+    margin-bottom: var(--sl-spacing-small);
+}
+
+#trim-video {
+    width: 100%;
+    max-height: 50vh;
+    display: block;
+    cursor: pointer;
+}
+
+#trim-time-display {
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-font-size-small);
+    color: var(--sl-color-neutral-600);
+    text-align: center;
+    margin-bottom: var(--sl-spacing-x-small);
+}
+
+#trim-timeline-track {
+    position: relative;
+    height: 2rem;
+    background-color: var(--sl-color-neutral-300);
+    border-radius: var(--sl-border-radius-small);
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    margin-bottom: var(--sl-spacing-2x-small);
+}
+
+#trim-timeline-range {
     position: absolute;
     top: 0;
     bottom: 0;
     background-color: var(--sl-color-primary-600);
+    opacity: 0.35;
+    pointer-events: none;
+    border-radius: var(--sl-border-radius-small);
 }
 
-.trim-preview-label {
-    font-size: var(--sl-font-size-x-small);
-    color: var(--sl-color-neutral-500);
-    margin-bottom: var(--sl-spacing-2x-small);
+#trim-playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background-color: #fff;
+    box-shadow: 0 0 3px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+    z-index: 3;
+    transform: translateX(-1px);
+}
+
+.trim-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    z-index: 4;
+    border-radius: 2px;
+    transform: translateX(-4px);
+}
+
+#trim-handle-start {
+    background-color: var(--sl-color-success-500);
+}
+
+#trim-handle-end {
+    background-color: var(--sl-color-warning-500);
+}
+
+.trim-handle:hover {
+    filter: brightness(1.2);
+}
+
+.trim-existing-mark {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background-color: var(--sl-color-neutral-500);
+    opacity: 0.4;
+    pointer-events: none;
+    z-index: 1;
+}
+
+#trim-range-label {
+    font-size: var(--sl-font-size-small);
+    color: var(--sl-color-neutral-600);
+    text-align: center;
+    margin-bottom: var(--sl-spacing-small);
+}
+
+#trim-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--sl-spacing-2x-small);
+    margin-bottom: var(--sl-spacing-small);
+}
+
+.trim-spacer {
+    flex: 1;
+}
+
+#trim-fine-tune {
+    display: flex;
+    gap: var(--sl-spacing-small);
+}
+
+#trim-fine-tune sl-input {
+    flex: 1;
+}
+
+.trim-btn-flash {
+    animation: trimFlash 0.3s ease-out;
+}
+
+@keyframes trimFlash {
+    0% { filter: brightness(1.5); }
+    100% { filter: brightness(1); }
+}
+
+@media (max-width: 768px) {
+    #trim-video {
+        max-height: 35vh;
+    }
+
+    #trim-controls {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    #trim-controls .trim-spacer {
+        display: none;
+    }
 }
 
 /* Restart-required badge */

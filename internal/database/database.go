@@ -340,8 +340,12 @@ func (db *Database) GetAllJobs(includeArchived bool) ([]*Job, error) {
 		}
 		jobs = append(jobs, job)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	return jobs, rows.Err()
+	db.attachTrimsAndGaps(jobs)
+	return jobs, nil
 }
 
 // UpdateJob queues a job update for batch writing.
@@ -748,7 +752,12 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		}
 		jobs = append(jobs, job)
 	}
-	return jobs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	db.attachTrimsAndGaps(jobs)
+	return jobs, nil
 }
 
 // UpdateJobFields performs a partial update of a job using a map of field names to values.
@@ -862,6 +871,53 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 
 	for _, fn := range subs {
 		db.safeCallJobUpdate(fn, job)
+	}
+}
+
+// attachTrimsAndGaps batch-loads all trims and gaps and attaches them to jobs.
+// Caller must already hold db.mu (read or write).
+func (db *Database) attachTrimsAndGaps(jobs []*Job) {
+	if len(jobs) == 0 {
+		return
+	}
+
+	// Batch-load all trims in one query.
+	trimRows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size FROM trims`)
+	if err == nil {
+		trimMap := make(map[string][]TrimRecord)
+		for trimRows.Next() {
+			var tr TrimRecord
+			if err := trimRows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
+				&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err == nil {
+				trimMap[tr.JobID] = append(trimMap[tr.JobID], tr)
+			}
+		}
+		trimRows.Close()
+		for _, job := range jobs {
+			if trims, ok := trimMap[job.ID]; ok {
+				job.Trims = trims
+			}
+		}
+	}
+
+	// Batch-load all gaps in one query.
+	gapRows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, job_id, gap_from, gap_to, stream FROM gaps`)
+	if err == nil {
+		gapMap := make(map[string][]Gap)
+		for gapRows.Next() {
+			var g Gap
+			if err := gapRows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err == nil {
+				gapMap[g.JobID] = append(gapMap[g.JobID], g)
+			}
+		}
+		gapRows.Close()
+		for _, job := range jobs {
+			if gaps, ok := gapMap[job.ID]; ok {
+				job.Gaps = gaps
+			}
+		}
 	}
 }
 

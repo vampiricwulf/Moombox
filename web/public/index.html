@@ -135,19 +135,48 @@
 
                 <!-- Trim Dialog -->
                 <sl-dialog label="Create Trim" id="trim-dialog">
-                    <div style="margin-bottom: 12px;">
-                        <small>Enter start and end times as HH:MM:SS, MM:SS, or seconds</small>
+                    <!-- Video preview -->
+                    <div id="trim-video-wrapper">
+                        <video id="trim-video" preload="metadata"></video>
                     </div>
-                    <div style="display: flex; gap: 12px; margin-bottom: 16px;">
-                        <sl-input id="trim-start-input" label="Start Time" placeholder="0:00 or 0" style="flex: 1;"></sl-input>
-                        <sl-input id="trim-end-input" label="End Time" placeholder="1:30 or 90" style="flex: 1;"></sl-input>
+
+                    <!-- Time display -->
+                    <div id="trim-time-display">
+                        <span id="trim-time-current">0:00</span> / <span id="trim-time-total">0:00</span>
                     </div>
-                    <sl-button slot="footer" variant="default" onclick="document.getElementById('trim-dialog').hide()">
-                        Cancel
-                    </sl-button>
-                    <sl-button slot="footer" variant="primary" id="trim-submit-btn">
-                        Create Trim
-                    </sl-button>
+
+                    <!-- Timeline -->
+                    <div id="trim-timeline-track">
+                        <div id="trim-existing-marks"></div>
+                        <div id="trim-timeline-range"></div>
+                        <div id="trim-playhead"></div>
+                        <div class="trim-handle" id="trim-handle-start"></div>
+                        <div class="trim-handle" id="trim-handle-end"></div>
+                    </div>
+
+                    <!-- Range label -->
+                    <div id="trim-range-label"></div>
+
+                    <!-- Controls -->
+                    <div id="trim-controls">
+                        <sl-icon-button id="trim-goto-start-btn" name="skip-start-fill" label="Go to start marker"></sl-icon-button>
+                        <sl-icon-button id="trim-step-back-btn" name="skip-backward-fill" label="Frame back (,)"></sl-icon-button>
+                        <sl-icon-button id="trim-play-btn" name="play-fill" label="Play/Pause (Space)" style="font-size: 1.4rem;"></sl-icon-button>
+                        <sl-icon-button id="trim-step-fwd-btn" name="skip-forward-fill" label="Frame forward (.)"></sl-icon-button>
+                        <sl-icon-button id="trim-goto-end-btn" name="skip-end-fill" label="Go to end marker"></sl-icon-button>
+                        <div class="trim-spacer"></div>
+                        <sl-button id="trim-set-start-btn" size="small" variant="success">Set Start (I)</sl-button>
+                        <sl-button id="trim-set-end-btn" size="small" variant="warning">Set End (O)</sl-button>
+                    </div>
+
+                    <!-- Fine-tune inputs -->
+                    <div id="trim-fine-tune">
+                        <sl-input id="trim-start-input" label="Start Time" placeholder="0:00" size="small"></sl-input>
+                        <sl-input id="trim-end-input" label="End Time" placeholder="1:30" size="small"></sl-input>
+                    </div>
+
+                    <sl-button slot="footer" variant="default" id="trim-cancel-btn">Cancel</sl-button>
+                    <sl-button slot="footer" variant="primary" id="trim-submit-btn">Create Trim</sl-button>
                 </sl-dialog>
 
                 <!-- Jobs Table -->

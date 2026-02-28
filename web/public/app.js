@@ -5,6 +5,7 @@ import { SetupController } from "./modules/setup.js";
 import { ImportController } from "./modules/imports.js";
 import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
+import { TrimController } from "./modules/trimmer.js";
 import { formatTimestamp as _formatTimestamp, formatBytes as _formatBytes, formatDurationSeconds as _formatDurationSeconds, formatRelativeTime as _formatRelativeTime } from "./modules/utils.js";
 
 class MoomboxApp {
@@ -33,6 +34,7 @@ class MoomboxApp {
     this.imports = new ImportController(this);
     this.player = new PlayerController(this);
     this.settings = new SettingsController(this);
+    this.trimmer = new TrimController(this);
 
     this.init();
   }
@@ -137,6 +139,11 @@ class MoomboxApp {
     document
       .getElementById("details-delete-btn")
       .addEventListener("click", () => this.deleteJob());
+
+    // Trim dialog cleanup on close
+    document.getElementById("trim-dialog").addEventListener("sl-after-hide", () => {
+      this.trimmer.destroy();
+    });
 
     // Copy buttons in details dialog (event delegation via data-copy attribute)
     document.getElementById("details-dialog").addEventListener("click", (e) => {
@@ -1704,98 +1711,7 @@ class MoomboxApp {
   }
 
   openTrimDialog(job) {
-    const trimDialog = document.getElementById('trim-dialog');
-    const detailsDialog = document.getElementById('details-dialog');
-    const startInput = document.getElementById('trim-start-input');
-    const endInput = document.getElementById('trim-end-input');
-    const submitBtn = document.getElementById('trim-submit-btn');
-
-    // Reset inputs
-    startInput.value = '';
-    endInput.value = '';
-
-    // Update dialog title with job info
-    trimDialog.label = `Create Trim - ${job.title}`;
-
-    // Add/update trim timeline preview
-    let previewContainer = trimDialog.querySelector('.trim-preview-container');
-    if (!previewContainer) {
-      previewContainer = document.createElement('div');
-      previewContainer.className = 'trim-preview-container';
-      previewContainer.innerHTML = `
-        <div class="trim-preview-label"></div>
-        <div class="trim-preview"><div class="trim-preview-range"></div></div>
-      `;
-      // Insert before the footer
-      trimDialog.querySelector('[slot="footer"]')?.before(previewContainer);
-      // Fallback: just append
-      if (!previewContainer.parentNode) {
-        const body = trimDialog.querySelector('div') || trimDialog;
-        body.appendChild(previewContainer);
-      }
-    }
-    previewContainer.style.display = 'none';
-
-    const totalDuration = job.lengthSeconds || 0;
-    const updatePreview = () => {
-      const start = this.parseTimeInput(startInput.value);
-      const end = this.parseTimeInput(endInput.value);
-      if (start !== null && end !== null && end > start && totalDuration > 0) {
-        const startPct = Math.min(100, (start / totalDuration) * 100);
-        const endPct = Math.min(100, (end / totalDuration) * 100);
-        const rangeEl = previewContainer.querySelector('.trim-preview-range');
-        rangeEl.style.left = `${startPct}%`;
-        rangeEl.style.width = `${endPct - startPct}%`;
-        previewContainer.querySelector('.trim-preview-label').textContent =
-          `${this.formatTimestamp(start)} - ${this.formatTimestamp(end)} of ${this.formatTimestamp(totalDuration)}`;
-        previewContainer.style.display = '';
-      } else {
-        previewContainer.style.display = 'none';
-      }
-    };
-
-    // Abort previous trim listeners to prevent stacking on repeated opens
-    if (this._trimListenerAbort) this._trimListenerAbort.abort();
-    this._trimListenerAbort = new AbortController();
-    const trimSignal = this._trimListenerAbort.signal;
-    startInput.addEventListener('sl-input', updatePreview, { signal: trimSignal });
-    endInput.addEventListener('sl-input', updatePreview, { signal: trimSignal });
-
-    // Set up submit handler
-    submitBtn.onclick = async () => {
-      // Show loading state immediately
-      submitBtn.loading = true;
-
-      try {
-        const startTime = this.parseTimeInput(startInput.value);
-        const endTime = this.parseTimeInput(endInput.value);
-
-        if (startTime === null || endTime === null) {
-          this.showToast('Invalid time format', 'warning');
-          return;
-        }
-
-        if (endTime <= startTime) {
-          this.showToast('End time must be after start time', 'warning');
-          return;
-        }
-
-        await this.createTrim(job.id, startTime, endTime);
-        trimDialog.hide();
-        // Reopen details dialog to show updated trims
-        setTimeout(() => detailsDialog.show(), 100);
-      } catch (error) {
-        // Error already shown by createTrim()
-      } finally {
-        // Clear loading state
-        submitBtn.loading = false;
-      }
-    };
-
-    // Close details dialog first to avoid layering issues
-    detailsDialog.hide();
-    // Small delay to ensure smooth transition
-    setTimeout(() => trimDialog.show(), 100);
+    this.trimmer.open(job);
   }
 
   formatTimestamp(seconds) {
