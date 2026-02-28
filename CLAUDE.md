@@ -10,27 +10,13 @@ The Go rewrite from TypeScript is complete (all 12 phases, full file-by-file com
 
 ## TypeScript Reference
 
-The original TypeScript codebase at `D:\Git\Moombox\` serves as a **reference** — not an authoritative source. Consult it when:
-- Investigating behavioral gaps or edge cases
-- Looking at protocol/API details (YouTube InnerTube, Twitch GQL, BotGuard)
-- Needing inspiration for new features
-
-The TS repo also contains a `references/` folder with upstream sources we rely on:
-- `moombox` — the original Python moombox (Containerfile, config examples)
+The original TypeScript codebase is on the `abandoned-nodejs` branch. The local `references/` folder (gitignored) contains upstream source repos for cross-referencing protocol details:
+- `moombox` — the original Python moombox
 - `moonarchive` — Python stream archiver (segment download strategies)
 - `yt-dlp` — YouTube format/cipher/extraction logic
-- `BgUtils` — BotGuard/PO token generation (challenge + VM)
+- `BgUtils` — BotGuard/PO token generation
 - `chatterino7` — Twitch chat client (IRC, emotes, badges)
 - `bgutil-ytdlp-pot-provider` — yt-dlp plugin for PO tokens
-- `ejs` — template engine reference
-
-Key TS → Go mappings (for cross-referencing):
-- `src/bgutils/` → `internal/bgutils/`
-- `src/engine/` → `internal/engine/` + `internal/chat/`
-- `src/core/worker/` → `internal/worker/`
-- `src/core/monitors/` + `src/core/monitorUtils.ts` → `internal/monitor/`
-- `src/core/` → `internal/cookies/`, `internal/config/`, `internal/youtube/`
-- `src/engine/twitch/` → `internal/twitch/`
 
 ## Build & Test Commands
 
@@ -60,7 +46,7 @@ go test -v -run TestParseDash ./internal/engine/...
 go vet ./...
 ```
 
-No Makefile, linter config, or CI pipeline exists. Runtime requires FFmpeg on PATH.
+Runtime requires FFmpeg on PATH. CI: `.github/workflows/release.yml` builds Windows exe on tag push, generates release notes via Claude.
 
 ## Architecture
 
