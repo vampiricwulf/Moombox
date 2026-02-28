@@ -1,0 +1,467 @@
+// Package web provides the HTTP server and WebSocket handler for Moombox.
+package web
+
+import (
+	"bufio"
+	"compress/gzip"
+	"context"
+	"fmt"
+	"io/fs"
+	"net"
+	"net/http"
+	"os/exec"
+	"path"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
+)
+
+// ServiceContext holds references to all services needed by HTTP handlers.
+type ServiceContext struct {
+	Config *config.MoomboxConfig
+	// DB, Worker, YouTube, Twitch, etc. will be added as needed
+}
+
+// Server is the Moombox HTTP server.
+type Server struct {
+	cfg         *config.MoomboxConfig
+	router      chi.Router
+	server      *http.Server
+	ws          *WebSocketHub
+	auth        *AuthService
+	loginHTML   []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
+	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
+	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
+	ActualPort  int              // Actual bound port after Start (may differ from cfg if probed)
+
+	logger interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	}
+}
+
+// NewServer creates a new HTTP server.
+func NewServer(cfg *config.MoomboxConfig, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) *Server {
+	r := chi.NewRouter()
+
+	s := &Server{
+		cfg:    cfg,
+		router: r,
+		ws:     NewWebSocketHub(logger),
+		logger: logger,
+	}
+
+	// Apply middleware (order matters)
+	r.Use(RecoveryMiddleware(logger))
+	r.Use(APIAliasMiddleware) // Rewrite /api/ → /api/v1/ (backward compat, matches TS dual-mount)
+	r.Use(CORSMiddleware(cfg))
+	r.Use(SecurityHeaders)
+	r.Use(CSRFMiddleware(cfg))
+	r.Use(IPGateMiddleware(cfg))
+	r.Use(CompressionMiddleware)
+
+	return s
+}
+
+// SetAuth sets the auth service for authentication middleware.
+func (s *Server) SetAuth(auth *AuthService) {
+	s.auth = auth
+}
+
+// AuthMiddleware checks authentication for external connections.
+// Loopback and LAN clients skip auth. External clients need a valid session
+// when a password is configured.
+func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := extractIP(r)
+
+		// Loopback and private IPs skip auth
+		if isLoopback(ip) || isPrivateIP(ip) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// No auth required if not configured
+		if !IsAuthRequired(s.cfg.NetworkAccess, s.cfg.PasswordHash) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Unauthenticated paths (login page, auth endpoints, POT read-only, favicon)
+		p := r.URL.Path
+		if p == "/api/auth/login" || p == "/api/v1/auth/login" ||
+			p == "/api/auth/status" || p == "/api/v1/auth/status" ||
+			p == "/ping" || p == "/minter_cache" ||
+			p == "/favicon.svg" || p == "/login.html" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check session cookie
+		if s.auth != nil {
+			if cookie, err := r.Cookie("moombox_session"); err == nil {
+				if s.auth.ValidateSession(cookie.Value) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
+		// Unauthenticated — 401 JSON for API, serve login.html for browser
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"Authentication required"}`))
+		} else {
+			// Browser request — serve login page inline (matches TS serveLoginPage,
+			// preserves the URL bar instead of redirecting)
+			if s.loginHTML != nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Write(s.loginHTML)
+			} else {
+				http.Redirect(w, r, "/login.html", http.StatusFound)
+			}
+		}
+	})
+}
+
+// Router returns the chi router for route registration.
+func (s *Server) Router() chi.Router {
+	return s.router
+}
+
+// WebSocket returns the WebSocket hub.
+func (s *Server) WebSocket() *WebSocketHub {
+	return s.ws
+}
+
+// SetWebSocketHandler installs a WebSocket upgrade handler that intercepts
+// upgrade requests on any path. This matches the TypeScript noServer mode
+// where the frontend connects to ws://host/ (root path).
+func (s *Server) SetWebSocketHandler(handler http.HandlerFunc) {
+	s.wsHandler = handler
+}
+
+// MountStaticFiles serves embedded static assets with SPA fallback.
+// The staticFS should be the sub-FS pointing to the "public" directory.
+func (s *Server) MountStaticFiles(staticFS fs.FS) {
+	fileServer := http.FileServer(http.FS(staticFS))
+
+	// Read index.html once for SPA fallback
+	indexHTML, _ := fs.ReadFile(staticFS, "index.html")
+
+	// Cache login.html for auth middleware inline serving (matches TS serveLoginPage)
+	s.loginHTML, _ = fs.ReadFile(staticFS, "login.html")
+
+	s.router.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		// Don't serve SPA for API or WebSocket paths
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" {
+			http.NotFound(w, r)
+			return
+		}
+
+		// Try serving the actual file first
+		urlPath := strings.TrimPrefix(r.URL.Path, "/")
+		if urlPath == "" {
+			urlPath = "index.html"
+		}
+
+		// Check if the file exists in the embedded FS
+		if f, err := staticFS.Open(urlPath); err == nil {
+			f.Close()
+			// Set cache headers for static assets
+			ext := path.Ext(urlPath)
+			switch ext {
+			case ".css", ".js", ".png", ".jpg", ".svg", ".ico":
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			default:
+				w.Header().Set("Cache-Control", "no-cache")
+			}
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+
+		// SPA fallback: serve index.html for non-file routes
+		if indexHTML != nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Write(indexHTML)
+			return
+		}
+
+		http.NotFound(w, r)
+	})
+}
+
+// Start begins listening for HTTP connections.
+func (s *Server) Start(ctx context.Context) error {
+	port := s.cfg.Port
+	if port <= 0 {
+		port = 774
+	}
+
+	// Bind to localhost unless LAN/external is enabled
+	host := "127.0.0.1"
+	switch s.cfg.NetworkAccess {
+	case "lan", "external", "public":
+		host = "0.0.0.0"
+	}
+
+	addr := fmt.Sprintf("%s:%d", host, port)
+
+	// Wrap router to intercept WebSocket upgrades on any path (matches TS noServer mode)
+	var handler http.Handler = s.router
+	if s.wsHandler != nil {
+		wsHandler := s.wsHandler
+		router := s.router
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+				wsHandler(w, r)
+				return
+			}
+			router.ServeHTTP(w, r)
+		})
+	}
+
+	s.server = &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 30 * time.Second, // Protects against slowloris; clears deadline after headers are read
+		WriteTimeout:      0,                // Disable for WebSocket and video streaming
+		IdleTimeout:       120 * time.Second,
+	}
+
+	s.logger.Info("web server starting", "addr", addr)
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.server.Shutdown(shutdownCtx)
+	}()
+
+	// Try the preferred port, then probe nearby ports
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		s.logger.Warn("port in use, probing nearby ports", "port", port)
+		for offset := 1; offset <= 10; offset++ {
+			candidate := fmt.Sprintf("%s:%d", host, port+offset)
+			ln, err = net.Listen("tcp", candidate)
+			if err == nil {
+				s.logger.Info("using alternative port", "port", port+offset)
+				break
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("port %d (and nearby ports) already in use: %w", port, err)
+		}
+	}
+
+	// Log the actual URL (matches TS: "Web dashboard available at ...")
+	actualPort := ln.Addr().(*net.TCPAddr).Port
+	s.ActualPort = actualPort
+	url := fmt.Sprintf("http://localhost:%d", actualPort)
+	s.logger.Info(fmt.Sprintf("[Moombox] Web dashboard available at %s", url))
+	if s.cfg.NetworkAccess == "lan" || s.cfg.NetworkAccess == "external" {
+		s.logger.Info(fmt.Sprintf("[WebServer] LAN access enabled (listening on %s)", host))
+	}
+
+	// Open browser to dashboard URL (matches TS openBrowser behavior)
+	if s.OpenBrowser {
+		openBrowserURL(url)
+	}
+
+	if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("server error: %w", err)
+	}
+
+	return nil
+}
+
+// Stop gracefully shuts down the server.
+func (s *Server) Stop() {
+	if s.server != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.server.Shutdown(ctx)
+	}
+	s.ws.Close()
+	s.logger.Info("web server stopped")
+}
+
+// --- Gzip compression middleware ---
+
+const gzipMinSize = 1024 // Only compress responses > 1KB
+
+// CompressionMiddleware applies gzip compression to responses over 1KB.
+func CompressionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip if client doesn't accept gzip
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Skip for WebSocket upgrade and streaming endpoints
+		if r.Header.Get("Upgrade") != "" || shouldSkipCompression(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		gz := &gzipResponseWriter{
+			ResponseWriter: w,
+			minSize:        gzipMinSize,
+		}
+		defer gz.Close()
+
+		next.ServeHTTP(gz, r)
+	})
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	writer     *gzip.Writer
+	buf        []byte
+	minSize    int
+	statusCode int
+	headerSent bool
+}
+
+func (g *gzipResponseWriter) WriteHeader(code int) {
+	g.statusCode = code
+	if g.headerSent {
+		return
+	}
+	// Don't send headers yet — wait until we know if we need gzip
+}
+
+func (g *gzipResponseWriter) Write(b []byte) (int, error) {
+	if g.writer != nil {
+		// Already gzipping
+		return g.writer.Write(b)
+	}
+
+	g.buf = append(g.buf, b...)
+
+	if len(g.buf) >= g.minSize {
+		// Buffer is big enough, start gzipping
+		g.startGzip()
+		return len(b), nil
+	}
+
+	return len(b), nil
+}
+
+func (g *gzipResponseWriter) startGzip() {
+	g.ResponseWriter.Header().Set("Content-Encoding", "gzip")
+	g.ResponseWriter.Header().Del("Content-Length") // Length changes with compression
+	g.flushStatus()
+	g.headerSent = true
+
+	g.writer, _ = gzip.NewWriterLevel(g.ResponseWriter, gzip.DefaultCompression)
+	if len(g.buf) > 0 {
+		g.writer.Write(g.buf)
+		g.buf = nil
+	}
+}
+
+func (g *gzipResponseWriter) flushStatus() {
+	if g.statusCode == 0 {
+		g.statusCode = http.StatusOK
+	}
+	g.ResponseWriter.WriteHeader(g.statusCode)
+}
+
+func (g *gzipResponseWriter) Close() {
+	if g.writer != nil {
+		g.writer.Close()
+		return
+	}
+
+	// Buffer never reached threshold — send uncompressed
+	if !g.headerSent {
+		g.flushStatus()
+		g.headerSent = true
+	}
+	if len(g.buf) > 0 {
+		g.ResponseWriter.Write(g.buf)
+	}
+}
+
+// Flush implements http.Flusher for streaming compatibility.
+func (g *gzipResponseWriter) Flush() {
+	if g.writer != nil {
+		g.writer.Flush()
+	}
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap allows http.ResponseController to access the underlying ResponseWriter.
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter {
+	return g.ResponseWriter
+}
+
+// Push implements http.Pusher if the underlying writer supports it.
+func (g *gzipResponseWriter) Push(target string, opts *http.PushOptions) error {
+	if p, ok := g.ResponseWriter.(http.Pusher); ok {
+		return p.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+// Hijack implements http.Hijacker for WebSocket support.
+func (g *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := g.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("hijack not supported")
+}
+
+// RecoveryMiddleware catches panics and returns 500.
+func RecoveryMiddleware(logger interface {
+	Error(msg string, args ...any)
+}) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if rvr := recover(); rvr != nil {
+					logger.Error("panic recovered in HTTP handler", "panic", rvr, "path", r.URL.Path)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					w.Write([]byte(`{"error":"Internal server error"}`))
+				}
+			}()
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// openBrowserURL opens the default browser to the given URL.
+// Matches TypeScript's openBrowser() using platform-specific commands.
+func openBrowserURL(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer.exe", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	cmd.Start()
+}
+

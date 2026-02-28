@@ -1,0 +1,51 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+moombox
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Build artifacts
+/dist/
+/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Application data
+moombox.db
+moombox.log
+moombox.json
+config.toml
+cookies.txt
+staging/
+output/
+browser-profile/
+
+# Cache
+.cache/
+
+# Environment
+.env
+.env.*
+
+# Local reference repos
+references/

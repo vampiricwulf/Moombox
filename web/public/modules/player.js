@@ -1,0 +1,739 @@
+/**
+ * Player Controller — Video player + chat replay
+ */
+import { formatMsToTime } from "./utils.js";
+
+export class PlayerController {
+  constructor(app) {
+    this.app = app;
+    this.playerJob = null;
+    this.playerChatData = null;
+    this.playerChatMessages = [];
+    this.playerAutoScroll = true;
+    this.playerScrollLock = false;
+    this.playerActiveChatIndex = 0;
+    this.nicoEnabled = true;
+    this.nicoLaneCount = 15;
+    this.nicoLaneAvail = [];
+    this.nicoLastSpawnMs = -1;
+    this.playerInitialized = false;
+    /** @type {Map<string, string>} code → URL for 3rd-party Twitch emotes */
+    this.twitchEmoteMap = new Map();
+  }
+
+  initPlayer() {
+    this.playerInitialized = true;
+
+    const jobSelect = document.getElementById("player-job-select");
+    const nicoToggle = document.getElementById("player-nico-toggle");
+    const sidebarToggle = document.getElementById("player-sidebar-toggle");
+    const video = document.getElementById("player-video");
+    const sidebarMessages = document.getElementById("player-sidebar-messages");
+    const syncBtn = document.getElementById("player-sync-btn");
+
+    // Job selection
+    jobSelect.addEventListener("sl-change", () => {
+      const val = jobSelect.value;
+      if (val) {
+        this.onPlayerJobSelect(val);
+      } else {
+        this.clearPlayer();
+      }
+    });
+
+    // Restore saved toggle state
+    const savedNico = localStorage.getItem("player-nico-toggle");
+    const savedSidebar = localStorage.getItem("player-sidebar-toggle");
+    if (savedNico !== null) {
+      nicoToggle.checked = savedNico === "true";
+      this.nicoEnabled = nicoToggle.checked;
+      document.getElementById("player-nico-overlay").style.display = this.nicoEnabled ? "" : "none";
+    }
+    if (savedSidebar !== null) {
+      sidebarToggle.checked = savedSidebar === "true";
+      document.getElementById("player-sidebar").style.display = sidebarToggle.checked ? "" : "none";
+    }
+
+    // Nico toggle
+    nicoToggle.addEventListener("sl-change", () => {
+      this.nicoEnabled = nicoToggle.checked;
+      localStorage.setItem("player-nico-toggle", nicoToggle.checked);
+      const overlay = document.getElementById("player-nico-overlay");
+      overlay.style.display = this.nicoEnabled ? "" : "none";
+      if (!this.nicoEnabled) {
+        this.clearNicoOverlay();
+      }
+    });
+
+    // Sidebar toggle
+    sidebarToggle.addEventListener("sl-change", () => {
+      localStorage.setItem("player-sidebar-toggle", sidebarToggle.checked);
+      const sidebar = document.getElementById("player-sidebar");
+      sidebar.style.display = sidebarToggle.checked ? "" : "none";
+      if (sidebarToggle.checked && this.playerChatMessages.length > 0) {
+        const currentMs = video.currentTime * 1000;
+        this.resetSidebarToTime(currentMs);
+        this.syncSidebarToTime();
+      }
+    });
+
+    // Video timeupdate
+    video.addEventListener("timeupdate", () => this.onPlayerTimeUpdate());
+
+    // Video seeked — reset both systems
+    video.addEventListener("seeked", () => {
+      const currentMs = video.currentTime * 1000;
+      this.resetSidebarToTime(currentMs);
+      this.clearNicoOverlay();
+      this.nicoLastSpawnMs = currentMs;
+    });
+
+    // Pause/play nico animations
+    video.addEventListener("pause", () => {
+      document.querySelectorAll(".nico-message").forEach((el) => {
+        if (el._nicoAnim) el._nicoAnim.pause();
+      });
+    });
+
+    video.addEventListener("play", () => {
+      document.querySelectorAll(".nico-message").forEach((el) => {
+        if (el._nicoAnim) el._nicoAnim.play();
+      });
+    });
+
+    // Sidebar scroll locking
+    sidebarMessages.addEventListener("mouseenter", () => {
+      this.playerScrollLock = true;
+    });
+
+    sidebarMessages.addEventListener("mouseleave", () => {
+      if (this.playerAutoScroll) {
+        this.playerScrollLock = false;
+      }
+    });
+
+    sidebarMessages.addEventListener("scroll", () => {
+      if (!this._programmaticScroll) {
+        this.playerAutoScroll = false;
+      }
+    });
+
+    // Sync button
+    syncBtn.addEventListener("click", () => {
+      this.playerAutoScroll = true;
+      this.playerScrollLock = false;
+      this.syncSidebarToTime();
+    });
+
+    // Chat search
+    const chatSearch = document.getElementById("chat-search");
+    if (chatSearch) {
+      let searchTimeout = null;
+      chatSearch.addEventListener("input", () => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => this.filterChat(chatSearch.value), 200);
+      });
+    }
+
+    // Keyboard controls for player
+    this.setupKeyboardControls();
+  }
+
+  setupKeyboardControls() {
+    document.addEventListener("keydown", (e) => {
+      // Only active when player tab is shown
+      const playerPanel = document.querySelector('sl-tab-panel[name="player"]');
+      if (!playerPanel || !playerPanel.hasAttribute("active")) return;
+
+      // Skip when typing in inputs
+      const tag = e.target.tagName;
+      if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
+      if (e.target.id === "chat-search") return;
+
+      const video = document.getElementById("player-video");
+      if (!video || !video.src) return;
+
+      switch (e.key) {
+        case " ":
+          if (video.paused) video.play(); else video.pause();
+          e.preventDefault();
+          break;
+        case "ArrowLeft":
+          video.currentTime -= e.shiftKey ? 30 : 5;
+          e.preventDefault();
+          break;
+        case "ArrowRight":
+          video.currentTime += e.shiftKey ? 30 : 5;
+          e.preventDefault();
+          break;
+        case "ArrowUp":
+          video.volume = Math.min(1, video.volume + 0.1);
+          e.preventDefault();
+          break;
+        case "ArrowDown":
+          video.volume = Math.max(0, video.volume - 0.1);
+          e.preventDefault();
+          break;
+        case "f": {
+          const wrapper = document.getElementById("player-video-wrapper");
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          } else if (wrapper) {
+            wrapper.requestFullscreen();
+          }
+          e.preventDefault();
+          break;
+        }
+        case "m":
+          video.muted = !video.muted;
+          e.preventDefault();
+          break;
+        case "c": {
+          const nicoToggle = document.getElementById("player-nico-toggle");
+          if (nicoToggle) {
+            nicoToggle.checked = !nicoToggle.checked;
+            nicoToggle.dispatchEvent(new Event("sl-change"));
+          }
+          e.preventDefault();
+          break;
+        }
+        case "s": {
+          const sidebarToggle = document.getElementById("player-sidebar-toggle");
+          if (sidebarToggle) {
+            sidebarToggle.checked = !sidebarToggle.checked;
+            sidebarToggle.dispatchEvent(new Event("sl-change"));
+          }
+          e.preventDefault();
+          break;
+        }
+      }
+    });
+  }
+
+  filterChat(query) {
+    const container = document.getElementById("player-sidebar-messages");
+    if (!container) return;
+    const children = container.children;
+    const needle = query.trim().toLowerCase();
+
+    if (!needle) {
+      // Clear search — restore all messages
+      for (let i = 0; i < children.length; i++) {
+        children[i].classList.remove("search-hidden");
+      }
+      this.playerAutoScroll = true;
+      this.playerScrollLock = false;
+      return;
+    }
+
+    // Filter messages
+    for (let i = 0; i < this.playerChatMessages.length; i++) {
+      const msg = this.playerChatMessages[i];
+      const authorMatch = (msg.authorName || "").toLowerCase().includes(needle);
+      const textParts = msg.message || [];
+      let textMatch = false;
+      if (typeof textParts === "string") {
+        textMatch = textParts.toLowerCase().includes(needle);
+      } else if (Array.isArray(textParts)) {
+        textMatch = textParts.some((p) => (p.text || "").toLowerCase().includes(needle));
+      }
+      const child = children[i];
+      if (child) {
+        if (authorMatch || textMatch) {
+          child.classList.remove("search-hidden");
+        } else {
+          child.classList.add("search-hidden");
+        }
+      }
+    }
+    // Disable auto-scroll during search
+    this.playerAutoScroll = false;
+  }
+
+  clearPlayer() {
+    this.playerJob = null;
+    this.playerChatData = null;
+    this.playerChatMessages = [];
+    this.twitchEmoteMap = new Map();
+    this.playerActiveChatIndex = 0;
+    this.nicoLastSpawnMs = -1;
+
+    const video = document.getElementById("player-video");
+    video.removeAttribute("src");
+    video.load();
+
+    document.getElementById("player-viewport").style.display = "none";
+    document.getElementById("player-empty-state").style.display = "";
+    document.getElementById("player-sidebar-messages").innerHTML = "";
+    this.clearNicoOverlay();
+  }
+
+  async loadPlayerJobList() {
+    const select = document.getElementById("player-job-select");
+    const currentValue = select.value;
+
+    try {
+      const [jobsRes, archivedRes] = await Promise.all([
+        fetch("/api/jobs"),
+        fetch("/api/jobs/archived"),
+      ]);
+      const jobs = jobsRes.ok ? await jobsRes.json() : [];
+      const archived = archivedRes.ok ? await archivedRes.json() : [];
+
+      const all = [...jobs, ...archived]
+        .filter((j) => j.status === "Finished" && j.filename)
+        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+
+      // Remove existing options
+      select.querySelectorAll("sl-option").forEach((o) => o.remove());
+
+      all.forEach((job) => {
+        const opt = document.createElement("sl-option");
+        opt.value = job.id;
+        const noChat = !job.chatFilename ? " (no chat)" : "";
+        opt.textContent = `${job.title} — ${job.channelName}${noChat}`;
+        select.appendChild(opt);
+      });
+
+      // Restore selection if still valid
+      if (currentValue && all.some((j) => j.id === currentValue)) {
+        select.value = currentValue;
+      }
+
+      // Show/hide empty state
+      const emptyState = document.getElementById("player-empty-state");
+      if (all.length === 0) {
+        emptyState.style.display = "";
+        emptyState.querySelector("p").textContent = "No finished videos available.";
+      } else if (!select.value) {
+        emptyState.style.display = "";
+        emptyState.querySelector("p").textContent = "Select a finished video to play.";
+      }
+    } catch (e) {
+      console.error("Failed to load player job list:", e);
+    }
+  }
+
+  async onPlayerJobSelect(jobId) {
+    const video = document.getElementById("player-video");
+    const nicoToggle = document.getElementById("player-nico-toggle");
+    const sidebarToggle = document.getElementById("player-sidebar-toggle");
+
+    // Fetch job details
+    try {
+      const res = await fetch(`/api/jobs/${jobId}`);
+      if (!res.ok) return;
+      this.playerJob = await res.json();
+    } catch (e) {
+      console.error("Failed to fetch job:", e);
+      return;
+    }
+
+    // Show viewport, hide empty state
+    document.getElementById("player-viewport").style.display = "";
+    document.getElementById("player-empty-state").style.display = "none";
+
+    // Set video source
+    video.src = `/api/jobs/${jobId}/video`;
+
+    // Load chat if available
+    this.playerChatMessages = [];
+    this.playerChatData = null;
+    this.twitchEmoteMap = new Map();
+    this.playerActiveChatIndex = 0;
+    this.nicoLastSpawnMs = -1;
+
+    if (this.playerJob.chatFilename) {
+      try {
+        const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
+        if (chatRes.ok) {
+          this.playerChatData = await chatRes.json();
+          this.playerChatMessages = (this.playerChatData.messages || [])
+            .map((m) => ({
+              ...m,
+              offsetMs: m.offsetMs || 0,
+            }))
+            .sort((a, b) => a.offsetMs - b.offsetMs);
+
+          // Build 3rd-party emote lookup map for Twitch chat
+          // Priority (Chatterino order): FFZ > BTTV > 7TV — add lowest first so higher overwrites
+          if (this.playerChatData.emotes) {
+            const { bttv, ffz, seventv } = this.playerChatData.emotes;
+            for (const e of seventv || []) this.twitchEmoteMap.set(e.code, e.url);
+            for (const e of bttv || []) this.twitchEmoteMap.set(e.code, e.url);
+            for (const e of ffz || []) this.twitchEmoteMap.set(e.code, e.url);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load chat:", e);
+      }
+    }
+
+    // Show/hide chat UI based on whether chat is available.
+    // Toggles stay enabled so user preferences persist across selections;
+    // just hide the actual sidebar/overlay when there's no chat data.
+    const hasChat = this.playerChatMessages.length > 0;
+    document.getElementById("player-sidebar").style.display =
+      hasChat && sidebarToggle.checked ? "" : "none";
+    document.getElementById("player-nico-overlay").style.display =
+      hasChat && nicoToggle.checked ? "" : "none";
+
+    // Build sidebar chat
+    this.buildSidebarChat();
+    this.clearNicoOverlay();
+
+    // Update sidebar header
+    document.getElementById("player-sidebar-header").textContent =
+      `${this.playerChatMessages.length} messages`;
+  }
+
+  buildSidebarChat() {
+    const container = document.getElementById("player-sidebar-messages");
+    container.innerHTML = "";
+
+    if (this.playerChatMessages.length === 0) return;
+
+    const frag = document.createDocumentFragment();
+
+    this.playerChatMessages.forEach((msg) => {
+      const div = document.createElement("div");
+      div.className = "chat-msg future";
+      div.dataset.offset = msg.offsetMs;
+
+      if (msg.superchat) {
+        div.classList.add("superchat");
+      }
+
+      // Timestamp
+      const timeSpan = document.createElement("span");
+      timeSpan.className = "chat-msg-time";
+      timeSpan.textContent = this.formatMsToTime(msg.offsetMs);
+      div.appendChild(timeSpan);
+
+      // Superchat amount
+      if (msg.superchat) {
+        const scSpan = document.createElement("span");
+        scSpan.className = "chat-msg-superchat";
+        scSpan.textContent = msg.superchat.amount;
+        div.appendChild(scSpan);
+      }
+
+      // Author
+      const authorSpan = document.createElement("span");
+      authorSpan.className = "chat-msg-author";
+      if (msg.authorBadges && Array.isArray(msg.authorBadges)) {
+        // Twitch badges use "type/tier" format (e.g. "subscriber/12"), so check prefix
+        const hasBadge = (name) => msg.authorBadges.some((b) => b === name || b.startsWith(name + "/"));
+        if (hasBadge("owner") || hasBadge("broadcaster")) authorSpan.classList.add("owner");
+        else if (hasBadge("moderator")) authorSpan.classList.add("moderator");
+        else if (hasBadge("member") || hasBadge("subscriber")) authorSpan.classList.add("member");
+        else if (hasBadge("vip")) authorSpan.classList.add("member");
+      }
+      authorSpan.textContent = msg.authorName + ": ";
+      div.appendChild(authorSpan);
+
+      // Message content
+      const contentSpan = document.createElement("span");
+      contentSpan.innerHTML = this.renderChatMessageParts(msg.message || [], msg.emotes);
+      div.appendChild(contentSpan);
+
+      frag.appendChild(div);
+    });
+
+    container.appendChild(frag);
+    this.playerActiveChatIndex = 0;
+  }
+
+  onPlayerTimeUpdate() {
+    const video = document.getElementById("player-video");
+    if (!video || !this.playerChatMessages.length) return;
+
+    const currentMs = video.currentTime * 1000;
+
+    // Update sidebar active state
+    this.updateSidebarActiveState(currentMs);
+
+    // Spawn nico messages
+    if (this.nicoEnabled) {
+      this.spawnNicoMessages(currentMs);
+    }
+
+    // Auto-scroll sidebar
+    if (this.playerAutoScroll && !this.playerScrollLock) {
+      this.syncSidebarToTime();
+    }
+  }
+
+  updateSidebarActiveState(currentMs) {
+    const container = document.getElementById("player-sidebar-messages");
+    const children = container.children;
+
+    // Walk forward from current index
+    while (
+      this.playerActiveChatIndex < this.playerChatMessages.length &&
+      this.playerChatMessages[this.playerActiveChatIndex].offsetMs <= currentMs
+    ) {
+      const child = children[this.playerActiveChatIndex];
+      if (child) {
+        child.classList.remove("future");
+        child.classList.add("active");
+      }
+      this.playerActiveChatIndex++;
+    }
+  }
+
+  syncSidebarToTime() {
+    const container = document.getElementById("player-sidebar-messages");
+    if (!container || this.playerActiveChatIndex === 0) return;
+
+    const targetChild = container.children[this.playerActiveChatIndex - 1];
+    if (!targetChild) return;
+
+    // Scroll so last active message is at ~70% from top
+    const containerHeight = container.clientHeight;
+    const targetOffset = targetChild.offsetTop - containerHeight * 0.7;
+
+    this._programmaticScroll = true;
+    container.scrollTop = Math.max(0, targetOffset);
+    requestAnimationFrame(() => {
+      this._programmaticScroll = false;
+    });
+  }
+
+  resetSidebarToTime(currentMs) {
+    const container = document.getElementById("player-sidebar-messages");
+    const children = container.children;
+
+    this.playerActiveChatIndex = 0;
+
+    for (let i = 0; i < this.playerChatMessages.length; i++) {
+      const child = children[i];
+      if (!child) continue;
+
+      if (this.playerChatMessages[i].offsetMs <= currentMs) {
+        child.classList.remove("future");
+        child.classList.add("active");
+        this.playerActiveChatIndex = i + 1;
+      } else {
+        child.classList.remove("active");
+        child.classList.add("future");
+      }
+    }
+  }
+
+  // Niconico overlay engine
+
+  clearNicoOverlay() {
+    const overlay = document.getElementById("player-nico-overlay");
+    if (overlay) overlay.innerHTML = "";
+    this.nicoLaneAvail = new Array(this.nicoLaneCount).fill(0);
+  }
+
+  spawnNicoMessages(currentMs) {
+    // On first call, set cursor to -5001 so messages within 5s before stream
+    // start (offsetMs >= -5000) deploy instantly. Older pre-stream messages
+    // are permanently skipped from the overlay (still visible in sidebar).
+    const firstSpawn = this.nicoLastSpawnMs < 0;
+    if (firstSpawn) {
+      this.nicoLastSpawnMs = -5001;
+    }
+
+    const messages = this.playerChatMessages;
+    if (!messages.length) return;
+
+    // Binary search for start of window (nicoLastSpawnMs, currentMs]
+    let lo = 0;
+    let hi = messages.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (messages[mid].offsetMs <= this.nicoLastSpawnMs) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+
+    const overlay = document.getElementById("player-nico-overlay");
+    if (!overlay) return;
+
+    const overlayWidth = overlay.clientWidth;
+    const overlayHeight = overlay.clientHeight;
+    if (!overlayWidth || !overlayHeight) return;
+
+    const laneHeight = overlayHeight / this.nicoLaneCount;
+    const now = performance.now();
+    const duration = 8000;
+
+    let spawned = 0;
+    // No limit on first spawn so all offsetMs=0 pre-stream messages deploy at once
+    const maxPerFrame = firstSpawn ? Infinity : 10;
+
+    for (let i = lo; i < messages.length && messages[i].offsetMs <= currentMs; i++) {
+      if (spawned >= maxPerFrame) break;
+
+      const msg = messages[i];
+      const html = this.renderChatMessageParts(msg.message || [], msg.emotes);
+      if (!html) continue;
+
+      // Create element off-screen to measure its actual height
+      const el = document.createElement("div");
+      el.className = "nico-message";
+      el.innerHTML = html;
+      el.style.top = "0";
+      el.style.left = `${overlayWidth}px`;
+      overlay.appendChild(el);
+
+      // Measure actual dimensions (emotes can make height > laneHeight)
+      const msgWidth = el.offsetWidth;
+      const msgHeight = el.offsetHeight;
+      const lanesNeeded = Math.max(1, Math.ceil(msgHeight / laneHeight));
+
+      // Find a run of consecutive available lanes
+      let lane = -1;
+      for (let l = 0; l <= this.nicoLaneCount - lanesNeeded; l++) {
+        let allFree = true;
+        for (let k = 0; k < lanesNeeded; k++) {
+          if (this.nicoLaneAvail[l + k] > now) {
+            allFree = false;
+            break;
+          }
+        }
+        if (allFree) {
+          lane = l;
+          break;
+        }
+      }
+      if (lane === -1) {
+        el.remove();
+        continue; // All lanes busy
+      }
+
+      // Position at the chosen lane
+      el.style.top = `${lane * laneHeight}px`;
+
+      const totalTravel = overlayWidth + msgWidth;
+
+      // Animate using Web Animations API
+      const anim = el.animate(
+        [
+          { transform: "translateX(0)" },
+          { transform: `translateX(-${totalTravel}px)` },
+        ],
+        { duration, fill: "forwards" },
+      );
+      el._nicoAnim = anim;
+
+      // If video is paused, pause animation immediately
+      const video = document.getElementById("player-video");
+      if (video && video.paused) {
+        anim.pause();
+      }
+
+      anim.onfinish = () => el.remove();
+
+      // Calculate when these lanes become available (when the message clears the right edge)
+      const clearTime = (msgWidth / totalTravel) * duration;
+      const availAt = now + clearTime + 200; // 200ms buffer
+      for (let k = 0; k < lanesNeeded; k++) {
+        this.nicoLaneAvail[lane + k] = availAt;
+      }
+
+      spawned++;
+    }
+
+    this.nicoLastSpawnMs = currentMs;
+  }
+
+  renderChatMessageParts(parts, twitchNativeEmotes) {
+    // Twitch chat stores message as a plain string; YouTube uses MessagePart[]
+    if (typeof parts === "string") {
+      return this.renderTwitchMessage(parts, twitchNativeEmotes);
+    }
+    if (!Array.isArray(parts)) return "";
+    return parts
+      .map((part) => {
+        if (part.type === "emoji" && part.emojiUrl) {
+          const alt = part.text || part.emojiId || "";
+          const url = part.emojiUrl.replace(/=[^/]*$/, "");
+          // Only allow http/https URLs to prevent javascript: injection
+          if (/^https?:\/\//i.test(url)) {
+            return `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(alt)}" loading="lazy" referrerpolicy="no-referrer">`;
+          }
+          return this.app.escapeHtml(alt);
+        }
+        return this.app.escapeHtml(part.text || "");
+      })
+      .join("");
+  }
+
+  /**
+   * Render a Twitch message string with native + 3rd-party emote replacement.
+   * Uses native Twitch emote positions (from IRC tags) first, then does
+   * word-by-word lookup against BTTV/FFZ/7TV maps (Chatterino-style).
+   */
+  renderTwitchMessage(message, nativeEmotes) {
+    if (!message) return "";
+
+    // No emote data at all — fast path
+    if ((!nativeEmotes || nativeEmotes.length === 0) && this.twitchEmoteMap.size === 0) {
+      return this.app.escapeHtml(message);
+    }
+
+    // If no native emotes, just do word-by-word 3rd-party lookup
+    if (!nativeEmotes || nativeEmotes.length === 0) {
+      return this.renderTwitchWords(message);
+    }
+
+    // Sort native emotes by start position
+    const sorted = [...nativeEmotes].sort((a, b) => a.start - b.start);
+
+    let result = "";
+    let cursor = 0;
+
+    for (const emote of sorted) {
+      // Text before this emote — check for 3rd-party emotes
+      if (emote.start > cursor) {
+        result += this.renderTwitchWords(message.substring(cursor, emote.start));
+      }
+      // Native Twitch emote
+      const url = `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(emote.id)}/default/dark/2.0`;
+      result += `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(emote.name)}" loading="lazy" referrerpolicy="no-referrer">`;
+      cursor = emote.end + 1;
+    }
+
+    // Remaining text after last native emote
+    if (cursor < message.length) {
+      result += this.renderTwitchWords(message.substring(cursor));
+    }
+
+    return result;
+  }
+
+  /**
+   * Render a text segment with word-by-word 3rd-party emote lookup.
+   * Splits on whitespace, checks each word against twitchEmoteMap.
+   */
+  renderTwitchWords(text) {
+    if (!text) return "";
+    if (this.twitchEmoteMap.size === 0) {
+      return this.app.escapeHtml(text);
+    }
+
+    // Split preserving whitespace tokens
+    return text
+      .split(/(\s+)/)
+      .map((part) => {
+        if (/^\s+$/.test(part)) return part; // preserve whitespace
+        const url = this.twitchEmoteMap.get(part);
+        if (url && /^https?:\/\//i.test(url)) {
+          return `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(part)}" loading="lazy" referrerpolicy="no-referrer">`;
+        }
+        return this.app.escapeHtml(part);
+      })
+      .join("");
+  }
+
+  formatMsToTime(ms) {
+    return formatMsToTime(ms);
+  }
+}

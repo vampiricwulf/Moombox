@@ -1,0 +1,126 @@
+package routes
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/vampiricwulf/Moombox/internal/cookies"
+)
+
+// CookieRoutes registers cookie-related API routes.
+func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService) {
+	// POST /api/v1/cookies/recheck
+	r.Post("/api/v1/cookies/recheck", func(rw http.ResponseWriter, req *http.Request) {
+		refreshSvc.CheckNow(req.Context())
+		status := refreshSvc.GetStatus()
+		response := map[string]any{
+			"success": status.YouTubeAuthenticated || status.TwitchAuthenticated,
+			"cookieStatus": map[string]any{
+				"found":         status.HasYouTubeCookies,
+				"authenticated": status.YouTubeAuthenticated,
+			},
+			"twitchAuthStatus": map[string]any{
+				"authenticated": status.TwitchAuthenticated,
+			},
+		}
+		if autoCookieSvc != nil {
+			autoStatus := autoCookieSvc.GetStatus()
+			response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
+		} else {
+			response["autoCookieReloginRequired"] = cookies.AutoCookieReloginRequired{}
+		}
+		jsonResponse(rw, response)
+	})
+
+	// POST /api/v1/cookies/auto-setup/start
+	r.Post("/api/v1/cookies/auto-setup/start", func(rw http.ResponseWriter, req *http.Request) {
+		var body struct {
+			Platform string `json:"platform"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			body.Platform = "youtube"
+		}
+		if body.Platform == "" {
+			body.Platform = "youtube"
+		}
+
+		if autoCookieSvc == nil {
+			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		if err := autoCookieSvc.StartSetup(body.Platform); err != nil {
+			jsonResponse(rw, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// POST /api/v1/cookies/auto-setup/finish
+	r.Post("/api/v1/cookies/auto-setup/finish", func(rw http.ResponseWriter, req *http.Request) {
+		if autoCookieSvc == nil {
+			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		ytAuth, twAuth, err := autoCookieSvc.FinishSetup(req.Context())
+		if err != nil {
+			jsonResponse(rw, map[string]any{
+				"success":              false,
+				"authenticated":        false,
+				"twitchAuthenticated":  false,
+				"error":               err.Error(),
+			})
+			return
+		}
+		jsonResponse(rw, map[string]any{
+			"success":             true,
+			"authenticated":       ytAuth,
+			"twitchAuthenticated": twAuth,
+		})
+	})
+
+	// POST /api/v1/cookies/auto-setup/navigate-twitch
+	r.Post("/api/v1/cookies/auto-setup/navigate-twitch", func(rw http.ResponseWriter, req *http.Request) {
+		if autoCookieSvc == nil {
+			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		if err := autoCookieSvc.NavigateToTwitch(); err != nil {
+			jsonResponse(rw, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// POST /api/v1/cookies/auto-setup/cancel
+	r.Post("/api/v1/cookies/auto-setup/cancel", func(rw http.ResponseWriter, req *http.Request) {
+		if autoCookieSvc == nil {
+			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		autoCookieSvc.CancelSetup()
+		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// GET /api/v1/cookies/auto-status
+	r.Get("/api/v1/cookies/auto-status", func(rw http.ResponseWriter, req *http.Request) {
+		if autoCookieSvc == nil {
+			jsonResponse(rw, map[string]any{
+				"configured":         false,
+				"setupInProgress":    false,
+				"browser":            nil,
+				"lastRefresh":        nil,
+				"lastError":          nil,
+				"needsManualRelogin": cookies.AutoCookieReloginRequired{},
+			})
+			return
+		}
+
+		jsonResponse(rw, autoCookieSvc.GetStatus())
+	})
+}
