@@ -1206,7 +1206,7 @@ export class SettingsController {
         const infoEl = document.getElementById("auto-cookie-browser-info");
         if (infoEl) {
           if (status.browser) {
-            let info = `Detected: ${status.browser.type}`;
+            let info = `Detected: ${status.browser.name || status.browser.type}`;
             if (status.lastRefresh) {
               const d = new Date(status.lastRefresh);
               info += ` | Last refresh: ${d.toLocaleString()}`;

@@ -44,7 +44,7 @@ var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket",
 
 // DetectedBrowser holds info about a detected browser.
 type DetectedBrowser struct {
-	Type string `json:"type"` // "firefox", "edge", "chrome"
+	Type string `json:"type"` // "firefox", "edge", "chrome", "brave", "opera"
 	Path string `json:"path"`
 	Name string `json:"name"`
 }
@@ -105,6 +105,13 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *AutoCookieService {
+	// Resolve to absolute so browser subprocesses (Firefox -profile,
+	// Chromium --user-data-dir) always find the profile regardless of CWD.
+	if profileDir != "" {
+		if abs, err := filepath.Abs(profileDir); err == nil {
+			profileDir = abs
+		}
+	}
 	return &AutoCookieService{
 		profileDir: profileDir,
 		cookiePath: cookiePath,
@@ -892,29 +899,49 @@ func (s *AutoCookieService) setError(msg string) {
 
 // --- Browser detection ---
 
-// DetectBrowser finds the first available browser: Firefox > Edge > Chrome.
+// browserInfo maps a browser type to its display name and paths/candidates.
+type browserInfo struct {
+	typ          string
+	name         string
+	pathsFn      func() []string
+	windowsPaths []string // relative paths under Program Files / LocalAppData
+}
+
+var knownBrowsers = []browserInfo{
+	{"firefox", "Firefox", firefoxPaths, []string{`Mozilla Firefox\firefox.exe`}},
+	{"chrome", "Google Chrome", chromePaths, []string{`Google\Chrome\Application\chrome.exe`}},
+	{"brave", "Brave", bravePaths, []string{`BraveSoftware\Brave-Browser\Application\brave.exe`}},
+	{"opera", "Opera GX", operaPaths, []string{`Programs\Opera GX\opera.exe`, `Programs\Opera\opera.exe`}},
+	{"edge", "Microsoft Edge", edgePaths, []string{`Microsoft\Edge\Application\msedge.exe`}},
+}
+
+// DetectBrowser finds the best available browser. It checks the system's
+// default browser first, then falls back to Firefox > Chrome > Brave > Opera > Edge.
 func DetectBrowser() *DetectedBrowser {
-	// Firefox
-	for _, name := range firefoxPaths() {
-		if path, err := exec.LookPath(name); err == nil {
-			return &DetectedBrowser{Type: "firefox", Path: path, Name: "Firefox"}
+	// Build search order: default browser first, then remaining browsers.
+	order := knownBrowsers
+	if defType := detectDefaultBrowserType(); defType != "" {
+		reordered := make([]browserInfo, 0, len(knownBrowsers))
+		for _, b := range knownBrowsers {
+			if b.typ == defType {
+				reordered = append([]browserInfo{b}, reordered...)
+			} else {
+				reordered = append(reordered, b)
+			}
 		}
+		order = reordered
 	}
-	// Edge
-	for _, name := range edgePaths() {
-		if path, err := exec.LookPath(name); err == nil {
-			return &DetectedBrowser{Type: "edge", Path: path, Name: "Microsoft Edge"}
-		}
-	}
-	// Chrome
-	for _, name := range chromePaths() {
-		if path, err := exec.LookPath(name); err == nil {
-			return &DetectedBrowser{Type: "chrome", Path: path, Name: "Google Chrome"}
+
+	// Search PATH.
+	for _, b := range order {
+		for _, name := range b.pathsFn() {
+			if path, err := exec.LookPath(name); err == nil {
+				return &DetectedBrowser{Type: b.typ, Path: path, Name: b.name}
+			}
 		}
 	}
 
-	// Check common install locations on Windows using env-based search roots
-	// (matches TS browserDetect.ts getSearchRoots + CANDIDATES)
+	// Check common install locations on Windows using env-based search roots.
 	if runtime.GOOS == "windows" {
 		var roots []string
 		if pf := os.Getenv("PROGRAMFILES"); pf != "" {
@@ -927,30 +954,64 @@ func DetectBrowser() *DetectedBrowser {
 			roots = append(roots, localApp)
 		}
 
-		candidates := []struct {
-			typ          string
-			name         string
-			relativePath string
-		}{
-			{"firefox", "Firefox", `Mozilla Firefox\firefox.exe`},
-			{"edge", "Microsoft Edge", `Microsoft\Edge\Application\msedge.exe`},
-			{"chrome", "Google Chrome", `Google\Chrome\Application\chrome.exe`},
-		}
-		seenTypes := make(map[string]bool)
-		for _, c := range candidates {
-			if seenTypes[c.typ] {
-				continue
-			}
-			for _, root := range roots {
-				fullPath := filepath.Join(root, c.relativePath)
-				if _, err := os.Stat(fullPath); err == nil {
-					return &DetectedBrowser{Type: c.typ, Path: fullPath, Name: c.name}
+		for _, b := range order {
+			for _, relPath := range b.windowsPaths {
+				for _, root := range roots {
+					fullPath := filepath.Join(root, relPath)
+					if _, err := os.Stat(fullPath); err == nil {
+						return &DetectedBrowser{Type: b.typ, Path: fullPath, Name: b.name}
+					}
 				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// detectDefaultBrowserType returns the type of the system's default browser
+// ("firefox", "edge", "chrome", "brave", "opera") or "" if detection fails or the browser is unknown.
+func detectDefaultBrowserType() string {
+	if runtime.GOOS == "windows" {
+		return detectDefaultBrowserWindows()
+	}
+	return ""
+}
+
+// detectDefaultBrowserWindows queries the Windows registry for the default HTTPS handler.
+func detectDefaultBrowserWindows() string {
+	out, err := exec.Command("reg", "query",
+		`HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice`,
+		"/v", "ProgId").Output()
+	if err != nil {
+		return ""
+	}
+	// Output: "    ProgId    REG_SZ    ChromeHTML\r\n"
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "ProgId") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+		progID := strings.ToLower(parts[2])
+		switch {
+		case strings.HasPrefix(progID, "firefoxurl"):
+			return "firefox"
+		case strings.HasPrefix(progID, "msedgehtm"):
+			return "edge"
+		case strings.HasPrefix(progID, "chromehtml"):
+			return "chrome"
+		case strings.HasPrefix(progID, "bravehtml"):
+			return "brave"
+		case strings.HasPrefix(progID, "operagxstable"), strings.HasPrefix(progID, "operastable"):
+			return "opera"
+		}
+		return ""
+	}
+	return ""
 }
 
 func firefoxPaths() []string {
@@ -972,6 +1033,20 @@ func chromePaths() []string {
 		return []string{"google-chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"}
 	}
 	return []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"}
+}
+
+func bravePaths() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"brave-browser", "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"}
+	}
+	return []string{"brave-browser", "brave"}
+}
+
+func operaPaths() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"opera", "/Applications/Opera GX.app/Contents/MacOS/Opera"}
+	}
+	return []string{"opera"}
 }
 
 // --- CDP helpers (minimal implementation) ---
