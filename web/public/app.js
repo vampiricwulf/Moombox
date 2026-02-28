@@ -898,6 +898,9 @@ class MoomboxApp {
       job.status,
     );
     const hasFile = job.status === "Finished" && job.filename;
+    const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(
+      job.status,
+    );
 
     document.getElementById("details-cancel-btn").style.display = canCancel
       ? ""
@@ -915,7 +918,7 @@ class MoomboxApp {
       window.location.hostname,
     );
     document.getElementById("details-open-folder-btn").style.display =
-      hasFile && isLocalhost ? "" : "none";
+      (hasFile || isActive) && isLocalhost ? "" : "none";
     document.getElementById("details-play-btn").style.display = hasFile
       ? ""
       : "none";

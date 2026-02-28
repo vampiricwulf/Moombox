@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -747,11 +748,16 @@ func (a *App) handleTaskKey(key string) (tea.Model, tea.Cmd) {
 		}
 	case "o":
 		if job := a.taskList.SelectedJob(); job != nil && a.OnOpenFolder != nil {
-			if job.Status == database.StatusFinished && job.OutputFile != "" {
+			switch job.Status {
+			case database.StatusFinished:
+				if job.OutputFile != "" {
+					a.OnOpenFolder(job.ID)
+					a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
+				}
+			case database.StatusUpcoming, database.StatusLive,
+				database.StatusDownloading, database.StatusMuxing:
 				a.OnOpenFolder(job.ID)
-				a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
-			} else {
-				a.setFeedback("Can only open folder for finished jobs")
+				a.setFeedback(fmt.Sprintf("Opening staging folder for: %s", job.Title))
 			}
 		}
 	case "t":
@@ -1088,6 +1094,29 @@ func (a *App) apiPort() int {
 	return 774
 }
 
+// apiBaseURL returns the correct scheme + host for local API calls.
+func (a *App) apiBaseURL() string {
+	scheme := "http"
+	if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.apiPort())
+}
+
+// apiClient returns an HTTP client suitable for local API calls.
+// When HTTPS is enabled, TLS verification is skipped since the server
+// typically uses a self-signed certificate on localhost.
+func (a *App) apiClient() *http.Client {
+	if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
+		return &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		}
+	}
+	return http.DefaultClient
+}
+
 // addVideoCmd creates a job by POSTing to the local API (matches TS TUI behavior).
 func (a *App) addVideoCmd(input string) tea.Cmd {
 	platform := a.addVideo.GetPlatform()
@@ -1095,7 +1124,8 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 	audioItag := a.addVideo.GetSelectedAudioItag()
 	startTime := a.addVideo.GetStartTime()
 	endTime := a.addVideo.GetEndTime()
-	port := a.apiPort()
+	baseURL := a.apiBaseURL()
+	client := a.apiClient()
 
 	// Fire-and-forget OnAddVideo callback for logging
 	if a.OnAddVideo != nil {
@@ -1130,8 +1160,8 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		}
 
 		jsonBody, _ := json.Marshal(body)
-		url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/jobs", port)
-		resp, err := http.Post(url, "application/json", strings.NewReader(string(jsonBody)))
+		url := fmt.Sprintf("%s/api/v1/jobs", baseURL)
+		resp, err := client.Post(url, "application/json", strings.NewReader(string(jsonBody)))
 		if err != nil {
 			return addVideoResultMsg{Feedback: "Failed to connect to server", IsError: true}
 		}
@@ -1164,7 +1194,8 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 
 // fetchFormatsCmd fetches format options from the local API for advanced mode.
 func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
-	port := a.apiPort()
+	baseURL := a.apiBaseURL()
+	client := a.apiClient()
 
 	// If a callback is provided, use it directly (avoids HTTP round-trip)
 	if a.OnFetchFormats != nil {
@@ -1179,8 +1210,8 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/formats/%s", port, videoID)
-		resp, err := http.Get(url)
+		url := fmt.Sprintf("%s/api/v1/formats/%s", baseURL, videoID)
+		resp, err := client.Get(url)
 		if err != nil {
 			return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
 		}
@@ -1202,7 +1233,8 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 func (a *App) importFileCmd(path string) tea.Cmd {
 	title := a.addVideo.GetImportTitle()
 	channel := a.addVideo.GetImportChannel()
-	port := a.apiPort()
+	baseURL := a.apiBaseURL()
+	client := a.apiClient()
 
 	// If a callback is provided, use it directly
 	if a.OnImportFile != nil {
@@ -1222,7 +1254,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 		}
 
-		url := fmt.Sprintf("http://127.0.0.1:%d/api/import", port)
+		url := fmt.Sprintf("%s/api/import", baseURL)
 		req, err := http.NewRequest("POST", url, strings.NewReader(string(fileData)))
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
@@ -1235,7 +1267,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			req.Header.Set("X-Import-Channel", strings.TrimSpace(channel))
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 		}

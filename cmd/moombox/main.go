@@ -42,7 +42,7 @@ import (
 )
 
 var (
-	version = "2.0.6"
+	version = "2.0.7"
 	commit  = ""
 )
 
@@ -881,10 +881,25 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		app.OnOpenFolder = func(jobID string) {
 			job, err := db.GetJob(jobID)
-			if err != nil || job == nil || job.OutputFile == "" {
+			if err != nil || job == nil {
 				return
 			}
-			dir := filepath.Dir(job.OutputFile)
+
+			var dir string
+			if job.OutputFile != "" {
+				dir = filepath.Dir(job.OutputFile)
+			} else {
+				// Fall back to staging directory for active jobs
+				stagingBase := cfg.Paths.StagingDirectory
+				if stagingBase == "" {
+					stagingBase = "./staging"
+				}
+				dir = filepath.Join(stagingBase, job.ID)
+				if _, err := os.Stat(dir); err != nil {
+					return // staging dir doesn't exist yet
+				}
+			}
+
 			// Open folder in file manager (cross-platform)
 			var cmd *exec.Cmd
 			switch runtime.GOOS {

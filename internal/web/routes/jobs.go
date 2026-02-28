@@ -797,34 +797,53 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 	r.With(web.LoopbackOnly).Post("/api/v1/jobs/{id}/open-folder", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
-		if err != nil || job == nil || job.Filename == "" {
-			jsonError(rw, "Job or file not found", http.StatusNotFound)
+		if err != nil || job == nil {
+			jsonError(rw, "Job not found", http.StatusNotFound)
 			return
 		}
 
-		// Resolve path: join output directory + filename, then get parent dir (match TS)
-		outputDir := job.OutputDirectory
-		if outputDir == "" {
-			outputDir = cfg.Paths.OutputDirectory
-		}
-		filePath, err := filepath.Abs(filepath.Join(outputDir, job.Filename))
-		if err != nil {
-			jsonError(rw, "invalid file path", http.StatusBadRequest)
-			return
-		}
+		var dir string
+		if job.Filename != "" {
+			// Resolve path: join output directory + filename, then get parent dir (match TS)
+			outputDir := job.OutputDirectory
+			if outputDir == "" {
+				outputDir = cfg.Paths.OutputDirectory
+			}
+			filePath, err := filepath.Abs(filepath.Join(outputDir, job.Filename))
+			if err != nil {
+				jsonError(rw, "invalid file path", http.StatusBadRequest)
+				return
+			}
 
-		// Path traversal guard (match TS)
-		resolvedOutputDir, err := filepath.Abs(outputDir)
-		if err != nil {
-			jsonError(rw, "invalid output directory", http.StatusInternalServerError)
-			return
-		}
-		if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
-			jsonError(rw, "Access denied", http.StatusForbidden)
-			return
-		}
+			// Path traversal guard (match TS)
+			resolvedOutputDir, err := filepath.Abs(outputDir)
+			if err != nil {
+				jsonError(rw, "invalid output directory", http.StatusInternalServerError)
+				return
+			}
+			if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
+				jsonError(rw, "Access denied", http.StatusForbidden)
+				return
+			}
 
-		dir := filepath.Dir(filePath)
+			dir = filepath.Dir(filePath)
+		} else {
+			// Fall back to staging directory for active jobs
+			stagingBase := cfg.Paths.StagingDirectory
+			if stagingBase == "" {
+				stagingBase = "./staging"
+			}
+			stagingDir, err := filepath.Abs(filepath.Join(stagingBase, job.ID))
+			if err != nil {
+				jsonError(rw, "invalid staging path", http.StatusBadRequest)
+				return
+			}
+			if _, err := os.Stat(stagingDir); err != nil {
+				jsonError(rw, "Staging folder not found", http.StatusNotFound)
+				return
+			}
+			dir = stagingDir
+		}
 
 		var cmd *exec.Cmd
 		switch runtime.GOOS {
