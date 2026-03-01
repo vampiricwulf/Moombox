@@ -536,12 +536,25 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc, getActivePlatforms)
 	routes.YtdlpRoutes(r, cfg.Network.Port, cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(r, func() { triggerRestart("API") })
+	// TUI update status channel (created here so the OnFound closure can reference it)
+	tuiUpdateStatusCh := make(chan tui.UpdateStatusMsg, 2)
 	routes.UpdateRoutes(r, &routes.UpdateRouteDeps{
 		Updater:    upd,
 		Version:    version,
 		Cfg:        cfg,
 		ConfigPath: configPath,
 		OnRestart:  func() { triggerRestart("update") },
+		OnFound: func(release *updater.ReleaseInfo) {
+			wsHub.Broadcast("update_available", release)
+			select {
+			case tuiUpdateStatusCh <- tui.UpdateStatusMsg{
+				Version:      release.Version,
+				TagName:      release.TagName,
+				ReleaseNotes: release.ReleaseNotes,
+			}:
+			default:
+			}
+		},
 	})
 	routes.AuthRoutes(r, &routes.AuthRoutesDeps{
 		Cfg:        cfg,
@@ -914,8 +927,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// only receives messages when TUI mode is active).
 	tuiDiskStatusCh := make(chan tui.DiskStatusMsg, 5)
 
-	// TUI update status channel
-	tuiUpdateStatusCh := make(chan tui.UpdateStatusMsg, 2)
+	// tuiUpdateStatusCh created earlier (before route registration)
 
 	// Auto-update check: initial check + daily ticker
 	if upd != nil && cfg.Updates.AutoCheckUpdates {

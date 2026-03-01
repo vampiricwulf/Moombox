@@ -22,6 +22,7 @@ type UpdateRouteDeps struct {
 	Cfg        *config.MoomboxConfig
 	ConfigPath string
 	OnRestart  func()
+	OnFound    func(*updater.ReleaseInfo) // broadcast update to WebSocket + TUI
 }
 
 // UpdateRoutes registers the update check/apply/dismiss API endpoints.
@@ -62,6 +63,9 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 		}
 		if release != nil {
 			SharedUpdateInfo.Store(release)
+			if deps.OnFound != nil {
+				deps.OnFound(release)
+			}
 			resp["available"] = true
 			resp["version"] = release.Version
 			resp["tagName"] = release.TagName
