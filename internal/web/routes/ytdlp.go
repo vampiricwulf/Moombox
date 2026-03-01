@@ -171,14 +171,15 @@ func generateYtdlpPlugin(port int, httpsEnabled bool) string {
 	}
 	baseURL := fmt.Sprintf("%s://127.0.0.1:%d", scheme, port)
 
-	// When HTTPS is enabled, include an SSL context that skips cert verification
-	// for localhost (self-signed certs). The ssl_context extension is supported
-	// by yt-dlp's urllib request handler.
+	// When HTTPS is enabled, the plugin uses Python's stdlib urllib.request
+	// directly with a custom SSL context for localhost calls. yt-dlp's request
+	// handler pipeline does not support ssl_context as an extension, so we
+	// bypass it entirely for these simple localhost HTTP calls.
 	sslImports := ""
 	sslSetup := ""
-	sslExtensions := ""
+	sslHelper := ""
 	if httpsEnabled {
-		sslImports = "\nimport ssl"
+		sslImports = "\nimport ssl\nimport urllib.request"
 		sslSetup = `
 
 def _make_localhost_ssl_context():
@@ -189,7 +190,28 @@ def _make_localhost_ssl_context():
 
 _LOCALHOST_SSL_CTX = _make_localhost_ssl_context()
 `
-		sslExtensions = ", 'ssl_context': _LOCALHOST_SSL_CTX"
+		// Helper that uses stdlib urllib for HTTPS localhost requests,
+		// since yt-dlp's networking stack doesn't support custom SSL contexts.
+		sslHelper = `
+    def _localhost_request(self, url, data=None, headers=None, timeout=10):
+        """Make a direct HTTP(S) request to localhost, bypassing yt-dlp's networking."""
+        req = urllib.request.Request(url, data=data, headers=headers or {})
+        return urllib.request.urlopen(req, timeout=timeout, context=_LOCALHOST_SSL_CTX)
+`
+	}
+
+	// When HTTPS is disabled, _localhost_request uses yt-dlp's standard
+	// _request_webpage. When enabled, it uses the stdlib override above.
+	if !httpsEnabled {
+		sslHelper = `
+    def _localhost_request(self, url, data=None, headers=None, timeout=10):
+        """Make a request to localhost via yt-dlp's networking."""
+        return self._request_webpage(
+            Request(url, data=data, headers=headers or {},
+                    extensions={'timeout': timeout}, proxies={'all': None}),
+            note=False,
+        )
+`
 	}
 
 	return fmt.Sprintf(`"""
@@ -243,7 +265,7 @@ class MoomboxPTP(PoTokenProvider):
             return base_url
         self.logger.debug(f'No base_url provided, defaulting to {self.DEFAULT_BASE_URL}')
         return self.DEFAULT_BASE_URL
-
+%s
     def _check_server_availability(self):
         if self._last_server_check + 60 > time.time():
             return self._server_available
@@ -251,14 +273,7 @@ class MoomboxPTP(PoTokenProvider):
         self._server_available = False
         try:
             self.logger.trace(f'Checking Moombox server at {self._base_url}/ping')
-            self._request_webpage(
-                Request(
-                    f'{self._base_url}/ping',
-                    extensions={'timeout': self._PING_TIMEOUT%s},
-                    proxies={'all': None},
-                ),
-                note=False,
-            )
+            self._localhost_request(f'{self._base_url}/ping', timeout=self._PING_TIMEOUT)
         except TransportError as e:
             self.logger.warning(
                 f'Moombox server not reachable at {self._base_url}/ping '
@@ -293,19 +308,14 @@ class MoomboxPTP(PoTokenProvider):
         self.logger.trace('Generating PO token via Moombox')
 
         try:
-            response = self._request_webpage(
-                request=Request(
-                    f'{self._base_url}/get_pot',
-                    data=json.dumps({
-                        'bypass_cache': request.bypass_cache,
-                        'content_binding': get_webpo_content_binding(request)[0],
-                    }).encode(),
-                    headers={'Content-Type': 'application/json'},
-                    extensions={'timeout': self._GETPOT_TIMEOUT%s},
-                    proxies={'all': None},
-                ),
-                note=f'Requesting {request.context.value} PO token from Moombox '
-                     f'for {request.internal_client_name} client',
+            response = self._localhost_request(
+                f'{self._base_url}/get_pot',
+                data=json.dumps({
+                    'bypass_cache': request.bypass_cache,
+                    'content_binding': get_webpo_content_binding(request)[0],
+                }).encode(),
+                headers={'Content-Type': 'application/json'},
+                timeout=self._GETPOT_TIMEOUT,
             )
         except Exception as e:
             raise PoTokenProviderError(
@@ -338,5 +348,5 @@ def moombox_getpot_preference(provider, request):
 
 
 __all__ = [MoomboxPTP.__name__, moombox_getpot_preference.__name__]
-`, sslImports, sslSetup, baseURL, sslExtensions, sslExtensions)
+`, sslImports, sslSetup, baseURL, sslHelper)
 }
