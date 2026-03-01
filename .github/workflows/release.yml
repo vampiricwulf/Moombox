@@ -24,7 +24,7 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: |
-          $version = "${{ github.ref_name }}"
+          $version = "${{ github.ref_name }}".TrimStart("v")
           $commit = git rev-parse --short HEAD
           go build -ldflags "-s -w -X main.version=$version -X main.commit=$commit" -o Moombox.exe ./cmd/moombox
 

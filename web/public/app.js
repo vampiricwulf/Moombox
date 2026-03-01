@@ -622,9 +622,6 @@ class MoomboxApp {
         this.nextFeedCheck = message.payload.nextFeedCheck || 0;
         this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
         this.nextTwitchCheck = message.payload.nextTwitchCheck || 0;
-        // Hide loading skeletons
-        const skeleton = document.getElementById("jobs-skeleton");
-        if (skeleton) skeleton.style.display = "none";
         this.renderJobs();
         this.renderLogs();
         this.updateCheckCountdown();
@@ -716,6 +713,9 @@ class MoomboxApp {
   // ===== Job Rendering =====
 
   renderJobs() {
+    // Remove loading skeletons on first render (any message path)
+    document.getElementById("jobs-skeleton")?.remove();
+
     // Update active indicator in status bar
     this.stats.updateActiveIndicator(this.jobs);
 

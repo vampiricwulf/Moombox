@@ -52,6 +52,9 @@ var (
 const exitCodeRestart = 42
 
 func init() {
+	// Strip "v" prefix from version if set via -ldflags (tag name includes it)
+	version = strings.TrimPrefix(version, "v")
+
 	if commit != "" {
 		return
 	}
