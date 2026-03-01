@@ -13,6 +13,10 @@ When bumping a version, follow this order:
 
 CI reads `RELEASE_NOTES.md` from the repo — no API calls or CLI installs needed at build time.
 
+## Working Style
+
+When implementing features, fixes, or non-trivial changes, ask questions about design decisions and intent before diving in. Don't assume — clarify the "why" and preferred approach so the implementation matches what's actually wanted. This applies to things like naming, placement, scope, UX behavior, and architectural choices.
+
 ## What This Is
 
 Moombox is a YouTube/Twitch live stream archiver written in Go. It monitors channels, detects live streams, downloads segments (DASH/HLS), records live chat, muxes with FFmpeg, and serves a web dashboard + TUI. This is a standalone program — feature work, bug fixes, and improvements are the primary focus.
