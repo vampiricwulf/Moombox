@@ -287,7 +287,7 @@ export class SettingsController {
       if (activePlats && activePlats.length > 0) {
         activeYtSwitch.checked = activePlats.includes("youtube");
       } else {
-        activeYtSwitch.checked = this.app.activePlatforms?.youtube !== false;
+        activeYtSwitch.checked = this.app.activePlatforms?.youtube === true;
       }
     }
     if (activeTwSwitch) {

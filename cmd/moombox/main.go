@@ -207,6 +207,24 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			log.Warn("Failed to load cookies", slog.String("error", err.Error()))
 		} else {
 			log.Info("Cookies loaded", slog.Bool("hasAuth", jar.HasAuthCookies()))
+			// Auto-detect platforms from cookie file when not already set
+			if len(cfg.Cookies.Platforms) == 0 && len(cfg.Cookies.ActivePlatforms) == 0 {
+				var detected []string
+				if jar.HasAuthCookies() {
+					detected = append(detected, "youtube")
+				}
+				if jar.HasTwitchAuthCookies() {
+					detected = append(detected, "twitch")
+				}
+				if len(detected) > 0 {
+					cfg.Cookies.Platforms = detected
+					if err := config.Save(cfg, configPath); err != nil {
+						log.Warn("Failed to persist detected cookie platforms", slog.String("error", err.Error()))
+					} else {
+						log.Info("Detected cookie platforms from cookie file", slog.Any("platforms", detected))
+					}
+				}
+			}
 		}
 	}
 

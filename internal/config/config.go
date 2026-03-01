@@ -375,6 +375,7 @@ func Save(cfg *MoomboxConfig, path string) error {
 // display. If ActivePlatforms is explicitly set, it is used as-is. Otherwise,
 // the function infers active platforms from the enabled channels list.
 func GetActivePlatforms(cfg *MoomboxConfig) (youtube, twitch bool) {
+	// 1. Explicit override (user set via settings)
 	if len(cfg.Cookies.ActivePlatforms) > 0 {
 		for _, p := range cfg.Cookies.ActivePlatforms {
 			switch strings.ToLower(p) {
@@ -386,7 +387,19 @@ func GetActivePlatforms(cfg *MoomboxConfig) (youtube, twitch bool) {
 		}
 		return
 	}
-	// Infer from enabled channels
+	// 2. Platforms with verified cookies (set by auto-cookie or cookie file validation)
+	if len(cfg.Cookies.Platforms) > 0 {
+		for _, p := range cfg.Cookies.Platforms {
+			switch strings.ToLower(p) {
+			case "youtube":
+				youtube = true
+			case "twitch":
+				twitch = true
+			}
+		}
+		return
+	}
+	// 3. Infer from enabled channels
 	for i := range cfg.Channels {
 		if !cfg.Channels[i].IsEnabled() {
 			continue

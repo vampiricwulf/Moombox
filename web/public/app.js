@@ -406,8 +406,8 @@ class MoomboxApp {
 
   updateStatusBar() {
     const autoCookiesEnabled = this.config?.cookies?.auto_enabled === true;
-    const ytActive = this.activePlatforms?.youtube !== false;
-    const twActive = this.activePlatforms?.twitch !== false;
+    const ytActive = this.activePlatforms?.youtube === true;
+    const twActive = this.activePlatforms?.twitch === true;
 
     // 1. Warnings (clickable, to the left) — only for active platforms
     const warningsEl = document.getElementById("status-warnings");

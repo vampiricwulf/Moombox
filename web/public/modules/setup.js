@@ -331,11 +331,16 @@ export class SetupController {
     if (this.channels.length > 0) {
       config.channels = this.channels;
     }
-    // Auto-cookies: check if any badges are showing (cookies were set up)
+    // Auto-cookies: check which platform badges are showing (cookies were set up)
     const ytBadge = document.getElementById("setup-yt-badge");
     const twBadge = document.getElementById("setup-tw-badge");
-    if ((ytBadge && ytBadge.style.display !== "none") || (twBadge && twBadge.style.display !== "none")) {
-      config.cookies = { auto_enabled: true };
+    const ytDone = ytBadge && ytBadge.style.display !== "none";
+    const twDone = twBadge && twBadge.style.display !== "none";
+    if (ytDone || twDone) {
+      const platforms = [];
+      if (ytDone) platforms.push("youtube");
+      if (twDone) platforms.push("twitch");
+      config.cookies = { auto_enabled: true, platforms };
     }
 
     await this.submitSetup(config, finishBtn);
