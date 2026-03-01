@@ -6,6 +6,7 @@ import { ImportController } from "./modules/imports.js";
 import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
+import { StatsController } from "./modules/stats.js";
 import { formatTimestamp as _formatTimestamp, formatBytes as _formatBytes, formatDurationSeconds as _formatDurationSeconds, formatRelativeTime as _formatRelativeTime } from "./modules/utils.js";
 
 class MoomboxApp {
@@ -35,6 +36,7 @@ class MoomboxApp {
     this.player = new PlayerController(this);
     this.settings = new SettingsController(this);
     this.trimmer = new TrimController(this);
+    this.stats = new StatsController(this);
 
     this.init();
   }
@@ -209,6 +211,12 @@ class MoomboxApp {
           }
         } else if (e.detail.name === "files") {
           this.fetchOrphanedFiles();
+        } else if (e.detail.name === "stats") {
+          this.stats.activate();
+        }
+        // Deactivate stats auto-refresh when leaving the tab
+        if (e.detail.name !== "stats") {
+          this.stats.deactivate();
         }
       });
     }
@@ -368,6 +376,8 @@ class MoomboxApp {
         this.cookieStatus = status.cookieStatus;
         this.twitchAuthStatus = status.twitchAuthStatus;
         this.activePlatforms = status.activePlatforms || {};
+        if (status.uptime) this._uptimeSeconds = status.uptime;
+        if (status.disk) this.stats.updateDiskIndicator(status.disk);
         this.updateStatusBar();
       }
     } catch (e) {
@@ -567,6 +577,7 @@ class MoomboxApp {
         if (jobIndex !== -1) {
           this.jobs[jobIndex] = updatedJob;
           this.updateJobCard(updatedJob);
+          this.stats.updateActiveIndicator(this.jobs);
           // Update details dialog if this job is selected
           if (this.selectedJobId === updatedJob.id) {
             this.updateJobDetails(updatedJob);
@@ -588,6 +599,10 @@ class MoomboxApp {
         this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
         this.nextTwitchCheck = message.payload.nextTwitchCheck || 0;
         this.updateCheckCountdown();
+        break;
+
+      case "disk_status":
+        this.stats.updateDiskIndicator(message.payload);
         break;
 
       case "pong":
@@ -626,6 +641,9 @@ class MoomboxApp {
   // ===== Job Rendering =====
 
   renderJobs() {
+    // Update active indicator in status bar
+    this.stats.updateActiveIndicator(this.jobs);
+
     const container = document.getElementById("jobs-container");
     const emptyState = document.getElementById("empty-state");
     const filterCount = document.getElementById("tasks-filter-count");
@@ -1861,7 +1879,7 @@ class MoomboxApp {
       }
 
       const tabGroup = document.querySelector("sl-tab-group");
-      const panels = ["tasks", "archived", "player", "imports", "logs", "settings"];
+      const panels = ["tasks", "archived", "player", "imports", "files", "stats", "logs", "settings"];
       const activePanel = document.querySelector("sl-tab-panel[active]");
       const isPlayerActive = activePanel?.getAttribute("name") === "player";
 

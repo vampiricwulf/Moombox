@@ -985,6 +985,16 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 			"version": "1.0.0-go",
 		}
 
+		// Disk status from shared atomic
+		if ds := SharedDiskStatus.Load(); ds != nil {
+			resp["disk"] = map[string]any{
+				"free":      ds.Free,
+				"total":     ds.Total,
+				"usedPct":   ds.UsedPct,
+				"warnLevel": ds.WarnLevel,
+			}
+		}
+
 		if deps.GetActivePlatforms != nil {
 			resp["activePlatforms"] = deps.GetActivePlatforms()
 		}

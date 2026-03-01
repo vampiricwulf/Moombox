@@ -42,6 +42,7 @@
             <sl-tab slot="nav" panel="player">Player</sl-tab>
             <sl-tab slot="nav" panel="imports">Imports</sl-tab>
             <sl-tab slot="nav" panel="files">Files</sl-tab>
+            <sl-tab slot="nav" panel="stats">Stats</sl-tab>
             <sl-tab slot="nav" panel="logs">Logs</sl-tab>
             <sl-tab slot="nav" panel="settings">Settings</sl-tab>
 
@@ -351,6 +352,21 @@
                                 <span></span>
                             </div>
                         </div>
+                    </div>
+                </div>
+            </sl-tab-panel>
+
+            <!-- Stats Panel -->
+            <sl-tab-panel name="stats">
+                <div id="stats-content">
+                    <div class="stats-section">
+                        <h3>Storage</h3>
+                        <div id="stats-disk"></div>
+                        <div class="stats-grid" id="stats-storage"></div>
+                    </div>
+                    <div class="stats-section">
+                        <h3>Activity</h3>
+                        <div class="stats-grid" id="stats-activity"></div>
                     </div>
                 </div>
             </sl-tab-panel>
@@ -1347,6 +1363,8 @@
                 <sl-icon name="wifi-off"></sl-icon>
                 Connecting...
             </span>
+            <span id="disk-indicator" style="display:none"></span>
+            <span id="active-indicator" style="display:none"></span>
             <span id="check-countdown"></span>
             <div id="status-bar-right">
                 <sl-icon-button id="theme-toggle" name="moon" label="Toggle theme"></sl-icon-button>

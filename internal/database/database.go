@@ -951,6 +951,41 @@ func (db *Database) getTrimsUnlocked(jobID string) ([]TrimRecord, error) {
 	return trims, nil
 }
 
+// GetJobStats returns aggregate statistics across all jobs.
+func (db *Database) GetJobStats() (*JobStats, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var s JobStats
+	err := db.db.QueryRowContext(db.getCtx(), `SELECT
+		COALESCE(SUM(CASE WHEN status = 'Finished' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status IN ('Downloading', 'Live') THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = 'Muxing' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = 'Error' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN platform = 'twitch' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = 'Finished' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = 'Error' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = 'Cancelled' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN platform = 'twitch' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = 'Finished' THEN length_seconds ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = 'Finished' THEN total_chat_messages ELSE 0 END), 0)
+		FROM jobs`).Scan(
+		&s.FinishedCount, &s.ActiveCount, &s.MuxingCount,
+		&s.ErrorCount, &s.CancelledCount,
+		&s.YouTubeCount, &s.TwitchCount,
+		&s.FinishedSize, &s.ErrorSize, &s.CancelledSize,
+		&s.YouTubeSize, &s.TwitchSize,
+		&s.TotalDuration, &s.TotalChatMessages,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GetJobStats: %w", err)
+	}
+	return &s, nil
+}
+
 // AddJobLog adds a log line to the per-job in-memory buffer.
 func (db *Database) AddJobLog(jobID, line string) {
 	db.jobLogsMu.Lock()

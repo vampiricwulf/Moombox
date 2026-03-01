@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -28,11 +29,15 @@ type StatusBarModel struct {
 	twActive     bool
 	// Jobs list for detecting COOKIES? status (B1)
 	jobs []*database.Job
+	// Disk status
+	diskFree    uint64
+	diskUsedPct float64
+	diskWarn    string // "ok", "warn", "critical"
 }
 
 // NewStatusBarModel creates a new status bar model.
 func NewStatusBarModel() *StatusBarModel {
-	return &StatusBarModel{}
+	return &StatusBarModel{diskWarn: "ok"}
 }
 
 // SetWidth updates the bar width.
@@ -62,12 +67,19 @@ func (m *StatusBarModel) SetJobs(jobs []*database.Job) {
 	m.jobs = jobs
 }
 
+// SetDiskStatus updates the disk space display.
+func (m *StatusBarModel) SetDiskStatus(free uint64, usedPct float64, warn string) {
+	m.diskFree = free
+	m.diskUsedPct = usedPct
+	m.diskWarn = warn
+}
+
 // View renders the status bar.
 func (m *StatusBarModel) View() string {
 	bg := lipgloss.NewStyle().Background(lipgloss.Color("#1a1a2e")).Foreground(ColorWhite)
 
 	left := m.renderControls()
-	right := m.renderCookieStatus()
+	right := m.renderMetrics() + m.renderCookieStatus()
 
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
@@ -154,6 +166,56 @@ func (m *StatusBarModel) renderControls() string {
 	}
 
 	return " " + strings.Join(parts, " | ")
+}
+
+// renderMetrics renders disk usage and active download count indicators.
+func (m *StatusBarModel) renderMetrics() string {
+	var parts []string
+	compact := m.width < 100
+
+	// Disk indicator (only shown once we have data)
+	if m.diskFree > 0 || m.diskUsedPct > 0 {
+		var diskColor lipgloss.Color
+		switch m.diskWarn {
+		case "critical":
+			diskColor = ColorRed
+		case "warn":
+			diskColor = ColorWarning
+		default:
+			diskColor = ColorGreen
+		}
+		style := lipgloss.NewStyle().Foreground(diskColor)
+
+		freeGB := float64(m.diskFree) / (1024 * 1024 * 1024)
+		pct := int(m.diskUsedPct)
+		if compact {
+			parts = append(parts, style.Render(fmt.Sprintf("D:%d%% %.0fG", pct, freeGB)))
+		} else {
+			parts = append(parts, style.Render(fmt.Sprintf("Disk %d%% (%.0fG free)", pct, freeGB)))
+		}
+	}
+
+	// Active download count
+	activeCount := 0
+	for _, j := range m.jobs {
+		switch j.Status {
+		case database.StatusDownloading, database.StatusLive, database.StatusMuxing:
+			activeCount++
+		}
+	}
+	if activeCount > 0 {
+		style := lipgloss.NewStyle().Foreground(ColorGreen)
+		if compact {
+			parts = append(parts, style.Render(fmt.Sprintf("▶%d", activeCount)))
+		} else {
+			parts = append(parts, style.Render(fmt.Sprintf("Active: %d", activeCount)))
+		}
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ") + " "
 }
 
 // renderCookieStatus renders auth indicators and warnings (B2).

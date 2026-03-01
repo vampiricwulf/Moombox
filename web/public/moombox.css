@@ -1886,6 +1886,121 @@ html.sl-theme-light {
     #connection-status .status-label { display: none; }
 }
 
+/* ========================================================================
+   Stats Page
+   ======================================================================== */
+
+#stats-content {
+    padding: var(--sl-spacing-medium);
+    max-width: 960px;
+}
+
+.stats-section {
+    margin-bottom: var(--sl-spacing-large);
+}
+
+.stats-section h3 {
+    margin: 0 0 var(--sl-spacing-small) 0;
+    font-size: var(--sl-font-size-medium);
+    font-weight: 600;
+    color: var(--sl-color-neutral-700);
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--sl-spacing-small);
+}
+
+.stat-card {
+    background: var(--sl-color-neutral-100);
+    border: 1px solid var(--sl-color-neutral-200);
+    border-radius: var(--sl-border-radius-medium);
+    padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+    text-align: center;
+}
+
+.stat-value {
+    font-size: var(--sl-font-size-large);
+    font-weight: 700;
+    font-family: var(--sl-font-mono);
+    color: var(--sl-color-neutral-900);
+}
+
+.stat-label {
+    font-size: var(--sl-font-size-x-small);
+    color: var(--sl-color-neutral-500);
+    margin-top: 2px;
+}
+
+.stat-active .stat-value { color: var(--sl-color-success-600); }
+.stat-muxing .stat-value { color: var(--sl-color-warning-600); }
+.stat-error .stat-value  { color: var(--sl-color-danger-600); }
+.stat-finished .stat-value { color: var(--sl-color-primary-600); }
+
+/* Disk bar */
+.disk-bar-container {
+    margin-bottom: var(--sl-spacing-small);
+}
+
+.disk-bar {
+    height: 20px;
+    background: var(--sl-color-neutral-200);
+    border-radius: var(--sl-border-radius-medium);
+    overflow: hidden;
+}
+
+.disk-bar-fill {
+    height: 100%;
+    background: var(--sl-color-success-600);
+    border-radius: var(--sl-border-radius-medium);
+    transition: width 0.5s ease, background-color 0.3s ease;
+}
+
+.disk-bar-fill.disk-warn {
+    background: var(--sl-color-warning-600);
+}
+
+.disk-bar-fill.disk-critical {
+    background: var(--sl-color-danger-600);
+}
+
+.disk-bar-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: var(--sl-font-size-x-small);
+    color: var(--sl-color-neutral-500);
+    margin-top: 4px;
+}
+
+/* Status bar disk + active indicators */
+#disk-indicator, #active-indicator {
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-font-size-x-small);
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: var(--sl-border-radius-small);
+    white-space: nowrap;
+}
+
+.disk-indicator-ok       { color: var(--sl-color-success-600); }
+.disk-indicator-warn     { color: var(--sl-color-warning-600); background-color: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
+.disk-indicator-critical { color: var(--sl-color-danger-600); background-color: color-mix(in srgb, var(--sl-color-danger-600) 15%, transparent); }
+
+.active-indicator-on {
+    color: var(--sl-color-success-600);
+}
+
+/* Mobile responsive: stats single-column, hide disk text in status bar */
+@media (max-width: 768px) {
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    #disk-indicator {
+        display: none !important;
+    }
+}
+
 /* Hide keyboard shortcuts hint on touch devices (useless on mobile) */
 @media (hover: none) {
     .player-controls-hint { display: none; }

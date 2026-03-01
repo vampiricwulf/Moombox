@@ -46,6 +46,11 @@ type (
 		YTActive bool
 		TWActive bool
 	}
+	DiskStatusMsg struct {
+		Free    uint64
+		UsedPct float64
+		Warn    string // "ok", "warn", "critical"
+	}
 	tickMsg         struct{}
 	progressTickMsg struct{}
 	logFlushMsg     struct{} // 250ms log batching flush
@@ -136,6 +141,7 @@ type App struct {
 	logCh            <-chan string
 	checkTimersCh    <-chan CheckTimersMsg
 	cookieStatusCh   <-chan CookieStatusMsg
+	diskStatusCh     <-chan DiskStatusMsg
 
 	// BubbleTea program reference (set by Run, used by QuitTUI)
 	program *tea.Program
@@ -231,12 +237,14 @@ func (a *App) SetUpdateChannels(
 	logCh <-chan string,
 	checkTimers <-chan CheckTimersMsg,
 	cookieStatus <-chan CookieStatusMsg,
+	diskStatus <-chan DiskStatusMsg,
 ) {
 	a.jobUpdateCh = jobUpdate
 	a.jobsUpdateCh = jobsUpdate
 	a.logCh = logCh
 	a.checkTimersCh = checkTimers
 	a.cookieStatusCh = cookieStatus
+	a.diskStatusCh = diskStatus
 }
 
 // Init implements tea.Model.
@@ -320,6 +328,10 @@ func (a *App) listenForUpdates() tea.Cmd {
 		case cs, ok := <-a.cookieStatusCh:
 			if ok {
 				return cs
+			}
+		case ds, ok := <-a.diskStatusCh:
+			if ok {
+				return ds
 			}
 		}
 		return nil
@@ -474,6 +486,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case CookieStatusMsg:
 		a.statusBar.SetCookieStatus(msg.YT, msg.TW)
 		a.statusBar.SetActivePlatforms(msg.YTActive, msg.TWActive)
+		return a, a.listenForUpdates()
+
+	case DiskStatusMsg:
+		a.statusBar.SetDiskStatus(msg.Free, msg.UsedPct, msg.Warn)
 		return a, a.listenForUpdates()
 
 	case addVideoResultMsg:

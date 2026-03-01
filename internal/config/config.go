@@ -49,6 +49,10 @@ func Defaults() *MoomboxConfig {
 			Platforms:         []string{},
 			RefreshInterval:   FlexDuration{Value: 360}, // 6 hours in minutes
 		},
+		Disk: DiskConfig{
+			WarnPercent:     90,
+			CriticalPercent: 95,
+		},
 	}
 }
 
@@ -326,6 +330,20 @@ func validate(cfg *MoomboxConfig) {
 	}
 	if cfg.Cookies.RefreshInterval.Value < 10 {
 		cfg.Cookies.RefreshInterval = defaults.Cookies.RefreshInterval
+	}
+
+	// Disk thresholds
+	if cfg.Disk.WarnPercent < 1 || cfg.Disk.WarnPercent > 99 {
+		cfg.Disk.WarnPercent = defaults.Disk.WarnPercent
+	}
+	if cfg.Disk.CriticalPercent < 1 || cfg.Disk.CriticalPercent > 99 {
+		cfg.Disk.CriticalPercent = defaults.Disk.CriticalPercent
+	}
+	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
+		cfg.Disk.CriticalPercent = cfg.Disk.WarnPercent + 5
+		if cfg.Disk.CriticalPercent > 99 {
+			cfg.Disk.CriticalPercent = 99
+		}
 	}
 
 	// Validate channel-level quality_preference

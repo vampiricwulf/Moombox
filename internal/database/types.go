@@ -92,6 +92,24 @@ type Gap struct {
 	Stream string `json:"stream"` // "video" or "audio"
 }
 
+// JobStats holds aggregate statistics across all jobs.
+type JobStats struct {
+	FinishedCount     int   `json:"finishedCount"`
+	ActiveCount       int   `json:"activeCount"`
+	MuxingCount       int   `json:"muxingCount"`
+	ErrorCount        int   `json:"errorCount"`
+	CancelledCount    int   `json:"cancelledCount"`
+	YouTubeCount      int   `json:"youtubeCount"`
+	TwitchCount       int   `json:"twitchCount"`
+	FinishedSize      int64 `json:"finishedSize"`
+	ErrorSize         int64 `json:"errorSize"`
+	CancelledSize     int64 `json:"cancelledSize"`
+	YouTubeSize       int64 `json:"youtubeSize"`
+	TwitchSize        int64 `json:"twitchSize"`
+	TotalDuration     int64 `json:"totalDuration"`
+	TotalChatMessages int64 `json:"totalChatMessages"`
+}
+
 // TrimRecord represents a trimmed clip created from a downloaded video.
 type TrimRecord struct {
 	ID        string  `json:"id"`

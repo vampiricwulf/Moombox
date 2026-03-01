@@ -9,6 +9,7 @@ type MoomboxConfig struct {
 	Monitors      MonitorsConfig       `toml:"monitors" json:"monitors"`
 	Downloader    DownloaderConfig     `toml:"downloader" json:"downloader"`
 	Cookies       CookiesConfig        `toml:"cookies" json:"cookies"`
+	Disk          DiskConfig           `toml:"disk" json:"disk"`
 	Channels      []ChannelConfig      `toml:"channels,omitempty" json:"channels,omitempty"`
 	Notifications []NotificationConfig `toml:"notifications,omitempty" json:"notifications,omitempty"`
 
@@ -74,6 +75,12 @@ type CookiesConfig struct {
 	Platforms         []string     `toml:"platforms,omitempty" json:"platforms,omitempty"`
 	ActivePlatforms   []string     `toml:"active_platforms,omitempty" json:"active_platforms,omitempty"`
 	RefreshInterval   FlexDuration `toml:"refresh_interval" json:"refresh_interval"`
+}
+
+// DiskConfig holds disk space monitoring settings.
+type DiskConfig struct {
+	WarnPercent     int `toml:"disk_warn_percent" json:"disk_warn_percent"`
+	CriticalPercent int `toml:"disk_critical_percent" json:"disk_critical_percent"`
 }
 
 // ChannelConfig holds channel-specific monitoring settings.

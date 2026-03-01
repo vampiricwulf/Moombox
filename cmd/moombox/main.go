@@ -466,6 +466,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		Logger: log,
 	})
 	routes.TrimRoutes(r, db, trimSvc)
+	routes.StatsRoutes(r, &routes.StatsRouteDeps{
+		DB:  db,
+		Cfg: cfg,
+	})
 	routes.PotRoutes(r, &routes.PotRoutesDeps{
 		PotProvider: potProvider,
 		StartTime:   startTime,
@@ -855,12 +859,22 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		cfg.Network.Port = actualPort
 	}
 
-	// Periodic memory usage logging (every 2 minutes) for diagnostics.
+	// Initial disk space check (populate immediately so status bar has data).
+	routes.UpdateDiskStatus(cfg.Paths.OutputDirectory, cfg)
+
+	// TUI disk status channel (created early so the goroutine can reference it;
+	// only receives messages when TUI mode is active).
+	tuiDiskStatusCh := make(chan tui.DiskStatusMsg, 5)
+
+	// Periodic memory + disk usage logging (every 2 minutes) for diagnostics.
 	// Matches TS: process.memoryUsage() logging with heap delta tracking.
 	go func() {
 		ticker := time.NewTicker(2 * time.Minute)
 		defer ticker.Stop()
 		var prevHeapMB float64
+		var lastDiskNotify time.Time
+		var lastDiskLevel string
+		diskCheckCounter := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -888,6 +902,53 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					float64(m.StackInuse)/1048576,
 					m.NumGC,
 				))
+
+				// Disk space check every ~5th tick (~10 minutes at 2min interval,
+				// close enough to the 5-min target while reusing the existing ticker).
+				diskCheckCounter++
+				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
+					if ds := routes.UpdateDiskStatus(cfg.Paths.OutputDirectory, cfg); ds != nil {
+						// Broadcast to web clients
+						wsHub.Broadcast("disk_status", map[string]any{
+							"free":      ds.Free,
+							"total":     ds.Total,
+							"usedPct":   ds.UsedPct,
+							"warnLevel": ds.WarnLevel,
+						})
+
+						// Push to TUI
+						select {
+						case tuiDiskStatusCh <- tui.DiskStatusMsg{
+							Free: ds.Free, UsedPct: ds.UsedPct, Warn: ds.WarnLevel,
+						}:
+						default:
+						}
+
+						// Notification with 30-minute cooldown
+						if ds.WarnLevel != "ok" {
+							canNotify := lastDiskLevel != ds.WarnLevel ||
+								time.Since(lastDiskNotify) >= 30*time.Minute
+							if canNotify && notifyMgr.HasTargets() {
+								freeGB := float64(ds.Free) / (1024 * 1024 * 1024)
+								level := "Warning"
+								ntype := notifications.TypeWarning
+								if ds.WarnLevel == "critical" {
+									level = "Critical"
+									ntype = notifications.TypeError
+								}
+								notifyMgr.Send(
+									fmt.Sprintf("Disk Space %s", level),
+									fmt.Sprintf("%.1f%% used — %.1f GB free on output drive", ds.UsedPct, freeGB),
+									ntype, nil, notifications.SendOptions{Event: "disk_warning"},
+								)
+								lastDiskNotify = time.Now()
+								lastDiskLevel = ds.WarnLevel
+							}
+						} else {
+							lastDiskLevel = "" // Reset cooldown when back to ok
+						}
+					}
+				}
 			}
 		}
 	}()
@@ -1128,7 +1189,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		checkTimersCh := make(chan tui.CheckTimersMsg, 10)
 		cookieStatusCh := make(chan tui.CookieStatusMsg, 5)
 
-		app.SetUpdateChannels(jobUpdateCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh)
+		app.SetUpdateChannels(jobUpdateCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, tuiDiskStatusCh)
+
+		// Push initial disk status to TUI
+		if ds := routes.SharedDiskStatus.Load(); ds != nil {
+			select {
+			case tuiDiskStatusCh <- tui.DiskStatusMsg{Free: ds.Free, UsedPct: ds.UsedPct, Warn: ds.WarnLevel}:
+			default:
+			}
+		}
 
 		// Forward DB events to TUI channels
 		db.OnJobUpdate(func(job *database.Job) {
