@@ -227,6 +227,23 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	pp.minterCache[contentBinding] = minter
 	pp.mu.Unlock()
 
+	// Schedule automatic eviction so the Goja VM doesn't linger after expiry.
+	// The minter is per-video and won't be reused for different content bindings.
+	ttl := time.Until(minter.ExpiresAt)
+	if ttl > 0 {
+		time.AfterFunc(ttl, func() {
+			pp.mu.Lock()
+			defer pp.mu.Unlock()
+			if cached, ok := pp.minterCache[contentBinding]; ok && cached == minter {
+				if cached.Cleanup != nil {
+					cached.Cleanup()
+				}
+				delete(pp.minterCache, contentBinding)
+				pp.logger.Debug("[PotProvider] evicted expired minter", "binding", contentBinding[:min(len(contentBinding), 20)])
+			}
+		})
+	}
+
 	return pp.mintPoToken(minter, contentBinding)
 }
 

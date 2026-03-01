@@ -9,19 +9,16 @@ import (
 )
 
 const (
-	preprocessedCacheSize = 150
-	solverCacheSize       = 50
+	solverCacheSize = 3
 )
 
-// Solver manages 3-tier caching (disk -> preprocessed -> solver) for cipher decryption.
+// Solver manages 2-tier caching (disk -> solver) for cipher decryption.
 type Solver struct {
-	playerCache      *PlayerCache
-	stsCache         *StsCache
-	preprocessedMu   sync.RWMutex
-	preprocessedData map[string]string // key -> preprocessed JS code
-	solverMu         sync.RWMutex
-	solverData       map[string]*Solvers // key -> compiled solvers
-	logger           interface {
+	playerCache *PlayerCache
+	stsCache    *StsCache
+	solverMu    sync.RWMutex
+	solverData  map[string]*Solvers // key -> compiled solvers (Goja VMs)
+	logger      interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -42,11 +39,10 @@ func NewSolver(cacheDir string, logger interface {
 	}
 
 	s := &Solver{
-		playerCache:      pc,
-		stsCache:         NewStsCache(),
-		preprocessedData: make(map[string]string),
-		solverData:       make(map[string]*Solvers),
-		logger:           logger,
+		playerCache: pc,
+		stsCache:    NewStsCache(),
+		solverData:  make(map[string]*Solvers),
+		logger:      logger,
 	}
 
 	// Auto-evict expired player cache entries on startup
@@ -58,32 +54,17 @@ func NewSolver(cacheDir string, logger interface {
 }
 
 // GetSolvers returns the sig/n solver functions for a player URL.
-// Uses 3-tier caching: solver cache -> preprocessed cache -> disk cache.
+// Uses 2-tier caching: solver cache (compiled Goja VMs) -> disk cache (raw JS).
 func (s *Solver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, error) {
 	key := CacheKey(playerURL)
 	playerID := PlayerIDFromURL(playerURL)
 
-	// Tier 3: Check solver cache
+	// Tier 2: Check solver cache (compiled VMs)
 	s.solverMu.RLock()
 	solvers, ok := s.solverData[key]
 	s.solverMu.RUnlock()
 	if ok {
 		s.logger.Debug("cipher: solver cache hit", "playerID", playerID)
-		return solvers, nil
-	}
-
-	// Tier 2: Check preprocessed cache
-	s.preprocessedMu.RLock()
-	preprocessed, ok := s.preprocessedData[key]
-	s.preprocessedMu.RUnlock()
-
-	if ok {
-		s.logger.Debug("cipher: preprocessed cache hit", "playerID", playerID)
-		solvers, err := getFromPrepared(preprocessed)
-		if err != nil {
-			return nil, fmt.Errorf("execute preprocessed code: %w", err)
-		}
-		s.cacheSolvers(key, solvers)
 		return solvers, nil
 	}
 
@@ -94,19 +75,17 @@ func (s *Solver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, er
 		return nil, fmt.Errorf("fetch player JS for %s: %w", playerID, err)
 	}
 
-	// Preprocess
+	// Preprocess and compile into Goja VM
 	s.logger.Debug("cipher: preprocessing player JS", "playerID", playerID)
-	preprocessed, err = preprocessPlayer(playerJS)
+	preprocessed, err := preprocessPlayer(playerJS)
 	if err != nil {
 		return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
 	}
-	s.cachePreprocessed(key, preprocessed)
 
-	// Execute
-	s.logger.Debug("cipher: executing preprocessed code", "playerID", playerID)
+	s.logger.Debug("cipher: compiling solver", "playerID", playerID)
 	solvers, err = getFromPrepared(preprocessed)
 	if err != nil {
-		return nil, fmt.Errorf("execute preprocessed code for %s: %w", playerID, err)
+		return nil, fmt.Errorf("compile solver for %s: %w", playerID, err)
 	}
 	s.cacheSolvers(key, solvers)
 
@@ -120,25 +99,6 @@ func (s *Solver) InvalidateCache() {
 	s.solverMu.Lock()
 	s.solverData = make(map[string]*Solvers)
 	s.solverMu.Unlock()
-
-	s.preprocessedMu.Lock()
-	s.preprocessedData = make(map[string]string)
-	s.preprocessedMu.Unlock()
-}
-
-func (s *Solver) cachePreprocessed(key, code string) {
-	s.preprocessedMu.Lock()
-	defer s.preprocessedMu.Unlock()
-
-	// Simple size bound: evict oldest if too many
-	if len(s.preprocessedData) >= preprocessedCacheSize {
-		// Remove one entry (not LRU, just any)
-		for k := range s.preprocessedData {
-			delete(s.preprocessedData, k)
-			break
-		}
-	}
-	s.preprocessedData[key] = code
 }
 
 func (s *Solver) cacheSolvers(key string, solvers *Solvers) {
