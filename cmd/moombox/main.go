@@ -43,7 +43,7 @@ import (
 )
 
 var (
-	version = "2.1.0"
+	version = "2.1.1"
 	commit  = ""
 
 	// updateRestart is set when an update has been applied and the process
@@ -1815,10 +1815,12 @@ func checkAndBroadcastUpdate(
 	}
 }
 
-// execNewBinary launches the updated binary as a new OS process and exits.
+// execNewBinary launches the updated binary in a new console window and exits.
 // This is called after an update has been applied and the graceful shutdown
 // has completed (port is released, database is closed, etc).
-// On Windows there is no execve, so we start a child process and exit.
+// On Windows there is no execve, so we spawn a fresh console window for the
+// new binary — this avoids terminal state issues from inheriting the old
+// process's console and gives the child a clean environment.
 func execNewBinary() {
 	exe, err := os.Executable()
 	if err != nil {
@@ -1826,20 +1828,18 @@ func execNewBinary() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Launching updated binary: %s\n", exe)
+	fmt.Printf("Launching updated binary in new window: %s\n", exe)
 
-	proc, err := os.StartProcess(exe, os.Args, &os.ProcAttr{
-		Dir:   "",
-		Env:   os.Environ(),
-		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start new process: %v\n", err)
+	cmd := exec.Command(exe, os.Args[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: 0x00000010, // CREATE_NEW_CONSOLE
+	}
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start updated binary: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Detach from the child process so it survives our exit
-	proc.Release()
 	os.Exit(0)
 }
 

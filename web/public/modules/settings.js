@@ -131,6 +131,29 @@ export class SettingsController {
       ytdlpRefreshBtn.addEventListener("click", () => this.loadYtdlpPluginStatus());
     }
 
+    // Check Now button
+    document.getElementById("btn-check-update-now")?.addEventListener("click", async () => {
+      const btn = document.getElementById("btn-check-update-now");
+      const result = document.getElementById("update-check-result");
+      btn.loading = true;
+      result.textContent = "";
+      try {
+        const resp = await fetch("/api/v1/update/check", { method: "POST" });
+        const data = await resp.json();
+        if (data.available) {
+          result.textContent = `v${data.version} available!`;
+          result.style.color = "var(--sl-color-success-600)";
+        } else {
+          result.textContent = "Up to date";
+          result.style.color = "var(--sl-color-neutral-500)";
+        }
+      } catch {
+        result.textContent = "Check failed";
+        result.style.color = "var(--sl-color-danger-500)";
+      }
+      btn.loading = false;
+    });
+
     // Auto-cookie toggle → show/hide action buttons
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     if (autoCookiesSwitch) {
@@ -278,6 +301,7 @@ export class SettingsController {
 
     // Cookies settings
     this.app.setInputValue("cfg-cookie-file", config.cookies?.cookie_file);
+    this.app.setInputValue("cfg-cookie-refresh-interval", config.cookies?.refresh_interval);
 
     // Active platform toggles — use explicit override or infer from activePlatforms status
     const activePlats = config.cookies?.active_platforms;
@@ -304,6 +328,16 @@ export class SettingsController {
     }
     this.app.setInputValue("cfg-auto-cookies-profile-dir", config.cookies?.browser_profile_dir);
     this.updateAutoCookieUI();
+
+    // Disk settings
+    this.app.setInputValue("cfg-disk-warn-percent", config.disk?.disk_warn_percent);
+    this.app.setInputValue("cfg-disk-critical-percent", config.disk?.disk_critical_percent);
+
+    // Updates settings
+    const autoCheckSwitch = document.getElementById("cfg-auto-check-updates");
+    if (autoCheckSwitch) {
+      autoCheckSwitch.checked = config.updates?.auto_check_updates !== false;
+    }
 
     // Track dirty state
     this._dirty = false;
@@ -388,6 +422,13 @@ export class SettingsController {
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     const autoEnabled = autoCookiesSwitch ? autoCookiesSwitch.checked : false;
     const autoCookiesProfileDir = this.app.getInputValue("cfg-auto-cookies-profile-dir");
+    const cookieRefreshInterval = this.app.getInputNumber("cfg-cookie-refresh-interval");
+
+    const diskWarnPercent = this.app.getInputNumber("cfg-disk-warn-percent");
+    const diskCriticalPercent = this.app.getInputNumber("cfg-disk-critical-percent");
+
+    const autoCheckUpdatesSwitch = document.getElementById("cfg-auto-check-updates");
+    const autoCheckUpdates = autoCheckUpdatesSwitch ? autoCheckUpdatesSwitch.checked : true;
 
     // Build nested config object
     config.network = {
@@ -439,6 +480,16 @@ export class SettingsController {
       active_platforms: activePlatforms,
       auto_enabled: autoEnabled,
       browser_profile_dir: autoCookiesProfileDir || undefined,
+      refresh_interval: cookieRefreshInterval,
+    };
+
+    config.disk = {
+      disk_warn_percent: diskWarnPercent,
+      disk_critical_percent: diskCriticalPercent,
+    };
+
+    config.updates = {
+      auto_check_updates: autoCheckUpdates,
     };
 
     try {

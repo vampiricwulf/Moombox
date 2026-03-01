@@ -1180,6 +1180,20 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 	}
 
+	// Disk sub-fields
+	if dk, ok := updates["disk"].(map[string]any); ok {
+		if v, ok := dk["disk_warn_percent"].(float64); ok {
+			if v < 1 || v > 100 {
+				errs["disk.disk_warn_percent"] = "disk_warn_percent must be between 1 and 100"
+			}
+		}
+		if v, ok := dk["disk_critical_percent"].(float64); ok {
+			if v < 1 || v > 100 {
+				errs["disk.disk_critical_percent"] = "disk_critical_percent must be between 1 and 100"
+			}
+		}
+	}
+
 	// Cookies sub-fields
 	if ck, ok := updates["cookies"].(map[string]any); ok {
 		if v, ok := ck["cookie_file"].(string); ok {
@@ -1344,6 +1358,23 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 			cfg.Cookies.RefreshInterval = config.FlexDuration{Value: v}
 		} else if vs, ok := ck["refresh_interval"].(string); ok {
 			cfg.Cookies.RefreshInterval = config.ParseFlexDuration(vs, "minutes", cfg.Cookies.RefreshInterval.Value)
+		}
+	}
+
+	// Disk
+	if dk, ok := updates["disk"].(map[string]any); ok {
+		if v, ok := dk["disk_warn_percent"].(float64); ok {
+			cfg.Disk.WarnPercent = int(v)
+		}
+		if v, ok := dk["disk_critical_percent"].(float64); ok {
+			cfg.Disk.CriticalPercent = int(v)
+		}
+	}
+
+	// Updates
+	if upd, ok := updates["updates"].(map[string]any); ok {
+		if v, ok := upd["auto_check_updates"].(bool); ok {
+			cfg.Updates.AutoCheckUpdates = v
 		}
 	}
 

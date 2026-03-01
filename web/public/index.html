@@ -426,6 +426,20 @@
                                 <sl-icon slot="prefix" name="key"></sl-icon>
                                 Cookies
                             </sl-menu-item>
+                            <sl-menu-item value="disk">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="hdd"
+                                ></sl-icon>
+                                Disk
+                            </sl-menu-item>
+                            <sl-menu-item value="updates">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="arrow-repeat"
+                                ></sl-icon>
+                                Updates
+                            </sl-menu-item>
                             <sl-menu-item value="channels">
                                 <sl-icon
                                     slot="prefix"
@@ -730,6 +744,13 @@
                                 placeholder="./cookies.txt"
                                 help-text="Path to Netscape format cookies file for authentication"
                             ></sl-input>
+                            <sl-input
+                                id="cfg-cookie-refresh-interval"
+                                type="number"
+                                label="Refresh Interval"
+                                placeholder="360"
+                                help-text="How often to refresh cookies in minutes (default: 360 = 6 hours)"
+                            ></sl-input>
 
                             <sl-divider></sl-divider>
                             <h4>Active Platforms</h4>
@@ -777,6 +798,65 @@
                                     style="margin-left: 0.5em; color: var(--sl-color-neutral-500)"
                                 ></span>
                             </div>
+                        </div>
+
+                        <!-- Disk Settings -->
+                        <div
+                            id="settings-disk"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Disk</h3>
+                            <sl-input
+                                id="cfg-disk-warn-percent"
+                                type="number"
+                                label="Warning Threshold"
+                                placeholder="90"
+                                help-text="Show a warning when disk usage exceeds this percentage (default: 90%)"
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-disk-critical-percent"
+                                type="number"
+                                label="Critical Threshold"
+                                placeholder="95"
+                                help-text="Pause new downloads when disk usage exceeds this percentage (default: 95%)"
+                            ></sl-input>
+                        </div>
+
+                        <!-- Updates Settings -->
+                        <div
+                            id="settings-updates"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Updates</h3>
+                            <sl-switch id="cfg-auto-check-updates">
+                                Automatically check for updates
+                                <span slot="help-text"
+                                    >Check GitHub for new versions on startup
+                                    and every 24 hours</span
+                                >
+                            </sl-switch>
+                            <sl-button
+                                id="btn-check-update-now"
+                                variant="default"
+                                size="small"
+                                style="margin-top: 1em"
+                            >
+                                <sl-icon
+                                    slot="prefix"
+                                    name="arrow-clockwise"
+                                ></sl-icon>
+                                Check Now
+                            </sl-button>
+                            <span
+                                id="update-check-result"
+                                style="
+                                    margin-left: 0.75em;
+                                    font-size: 0.9em;
+                                    color: var(--sl-color-neutral-500);
+                                "
+                            ></span>
                         </div>
 
                         <!-- Channels Settings -->

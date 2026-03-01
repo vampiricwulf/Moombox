@@ -56,6 +56,8 @@ var sections = []settingsSection{
 			{"port", "Port", fieldNumber, nil, "1-65535"},
 			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, ""},
 			{"https_enabled", "HTTPS enabled", fieldToggle, nil, ""},
+			{"tls_cert_path", "TLS cert path", fieldText, nil, "path to TLS certificate"},
+			{"tls_key_path", "TLS key path", fieldText, nil, "path to TLS private key"},
 		},
 	},
 	{
@@ -106,6 +108,20 @@ var sections = []settingsSection{
 			{"active_twitch", "Twitch cookies", fieldToggle, nil, "show Twitch cookie status"},
 			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "browser-based cookie acquisition"},
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data"},
+			{"refresh_interval", "Refresh interval", fieldNumber, nil, "minutes (default: 360 = 6h)"},
+		},
+	},
+	{
+		name: "Disk",
+		fields: []fieldDef{
+			{"disk_warn_percent", "Warning threshold", fieldNumber, nil, "% disk usage"},
+			{"disk_critical_percent", "Critical threshold", fieldNumber, nil, "% disk usage, pauses downloads"},
+		},
+	},
+	{
+		name: "Updates",
+		fields: []fieldDef{
+			{"auto_check_updates", "Auto-check updates", fieldToggle, nil, "check GitHub on startup + daily"},
 		},
 	},
 	{
@@ -298,6 +314,8 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["port"] = strconv.Itoa(cfg.Network.Port)
 	m.values["network_access"] = cfg.Network.NetworkAccess
 	m.values["https_enabled"] = boolToDisplay(cfg.Network.HTTPSEnabled)
+	m.values["tls_cert_path"] = cfg.Network.TLSCertPath
+	m.values["tls_key_path"] = cfg.Network.TLSKeyPath
 
 	// Paths
 	m.values["database_path"] = cfg.Paths.DatabasePath
@@ -342,6 +360,14 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["active_twitch"] = boolToDisplay(twActive)
 	m.values["auto_enabled"] = boolToDisplay(cfg.Cookies.AutoEnabled)
 	m.values["browser_profile_dir"] = cfg.Cookies.BrowserProfileDir
+	m.values["refresh_interval"] = strconv.Itoa(int(cfg.Cookies.RefreshInterval.Minutes()))
+
+	// Disk
+	m.values["disk_warn_percent"] = strconv.Itoa(cfg.Disk.WarnPercent)
+	m.values["disk_critical_percent"] = strconv.Itoa(cfg.Disk.CriticalPercent)
+
+	// Updates
+	m.values["auto_check_updates"] = boolToDisplay(cfg.Updates.AutoCheckUpdates)
 }
 
 func (m *SettingsModel) applyValues() {
@@ -368,6 +394,8 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Network.Port = port
 	m.cfg.Network.NetworkAccess = m.values["network_access"]
 	m.cfg.Network.HTTPSEnabled = m.values["https_enabled"] == "Yes"
+	m.cfg.Network.TLSCertPath = m.values["tls_cert_path"]
+	m.cfg.Network.TLSKeyPath = m.values["tls_key_path"]
 
 	// Paths
 	m.cfg.Paths.DatabasePath = m.values["database_path"]
@@ -413,6 +441,15 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Cookies.ActivePlatforms = activePlats
 	m.cfg.Cookies.AutoEnabled = m.values["auto_enabled"] == "Yes"
 	m.cfg.Cookies.BrowserProfileDir = m.values["browser_profile_dir"]
+	refreshMin, _ := strconv.Atoi(m.values["refresh_interval"])
+	m.cfg.Cookies.RefreshInterval = config.FlexDuration{Value: float64(refreshMin)}
+
+	// Disk
+	m.cfg.Disk.WarnPercent, _ = strconv.Atoi(m.values["disk_warn_percent"])
+	m.cfg.Disk.CriticalPercent, _ = strconv.Atoi(m.values["disk_critical_percent"])
+
+	// Updates
+	m.cfg.Updates.AutoCheckUpdates = m.values["auto_check_updates"] == "Yes"
 
 	// Apply channels and notifications
 	m.cfg.Channels = m.channels
