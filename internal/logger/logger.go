@@ -339,6 +339,17 @@ func (l *Logger) ClearJobLogs(jobID string) {
 	l.jobLogsMu.Unlock()
 }
 
+// PruneJobLogs removes log buffers for job IDs not in the provided set.
+func (l *Logger) PruneJobLogs(activeIDs map[string]struct{}) {
+	l.jobLogsMu.Lock()
+	defer l.jobLogsMu.Unlock()
+	for id := range l.jobLogs {
+		if _, ok := activeIDs[id]; !ok {
+			delete(l.jobLogs, id)
+		}
+	}
+}
+
 // GetRecentLines returns the most recent log lines from the ring buffer.
 func (l *Logger) GetRecentLines() []string {
 	l.ringMu.RLock()

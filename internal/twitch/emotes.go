@@ -20,6 +20,7 @@ type EmoteResolver struct {
 	mu         sync.Mutex
 	cache      map[string]*TwitchEmoteData // channelLogin (lowered) -> emotes
 	cacheOrder []string                     // insertion order for LRU eviction
+	inflight   map[string]chan struct{}      // dedup concurrent fetches for same key
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -37,8 +38,9 @@ func NewEmoteResolver(logger interface {
 	Error(msg string, args ...any)
 }) *EmoteResolver {
 	return &EmoteResolver{
-		cache:  make(map[string]*TwitchEmoteData),
-		logger: logger,
+		cache:    make(map[string]*TwitchEmoteData),
+		inflight: make(map[string]chan struct{}),
+		logger:   logger,
 	}
 }
 
@@ -65,6 +67,19 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 		er.mu.Unlock()
 		return cached
 	}
+	// Dedup: if another goroutine is already fetching this key, wait for it
+	if wait, ok := er.inflight[cacheKey]; ok {
+		er.mu.Unlock()
+		<-wait
+		// Now it should be in cache
+		er.mu.Lock()
+		cached := er.cache[cacheKey]
+		er.mu.Unlock()
+		return cached
+	}
+	// Mark this key as inflight
+	done := make(chan struct{})
+	er.inflight[cacheKey] = done
 	er.mu.Unlock()
 
 	er.logger.Debug("resolving emotes", "channelID", channelID)
@@ -110,6 +125,8 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 	}
 	er.cache[cacheKey] = data
 	er.cacheOrder = append(er.cacheOrder, cacheKey)
+	delete(er.inflight, cacheKey)
+	close(done) // unblock any waiters
 	er.mu.Unlock()
 
 	total := len(bttvResult) + len(ffzResult) + len(sevenTVResult)

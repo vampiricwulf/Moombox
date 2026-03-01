@@ -839,8 +839,8 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		return
 	}
 
-	// Notify subscribers of the update
-	// Read the updated job (unlocked since we already hold db.mu)
+	// Notify subscribers with the full job object (TUI + WebSocket need all fields).
+	// A full SELECT is required here because UpdateJobFields only writes a subset.
 	row := db.db.QueryRowContext(db.getCtx(), `SELECT id, video_id, url, title, channel_name, platform,
 		status, progress, percent, eta, speed, error, created_at, updated_at,
 		last_video_seq, last_audio_seq, total_video_seq, total_audio_seq,

@@ -876,6 +876,9 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 
 func (m *SettingsModel) handleChannelEditKey(key string) string {
 	fields := m.visibleChannelFields()
+	if len(fields) == 0 {
+		return ""
+	}
 	if m.channelEditField >= len(fields) {
 		m.channelEditField = len(fields) - 1
 	}

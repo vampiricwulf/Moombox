@@ -672,13 +672,7 @@ func (a *App) handleJobUpdate(job *database.Job) tea.Cmd {
 
 	a.statusMap[job.ID] = job.Status
 
-	for i, j := range a.taskList.jobs {
-		if j.ID == job.ID {
-			a.taskList.jobs[i] = job
-			a.taskList.rebuildVirtualList()
-			break
-		}
-	}
+	a.taskList.UpdateJob(job)
 	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
 		a.details.SetJob(job)
 	}

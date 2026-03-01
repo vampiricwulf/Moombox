@@ -58,6 +58,11 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 	// Execute the interpreter JS with a timeout to prevent hangs from malicious/buggy scripts
 	vmDone := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				vmDone <- fmt.Errorf("goja panic: %v", r)
+			}
+		}()
 		_, runErr := vm.RunString(interpreterJS)
 		vmDone <- runErr
 	}()

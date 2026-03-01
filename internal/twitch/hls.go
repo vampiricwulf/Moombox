@@ -181,6 +181,7 @@ func FetchHLSMasterPlaylist(ctx context.Context, url string) ([]TwitchHLSVariant
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body) // drain for connection reuse
 		return nil, fmt.Errorf("hls playlist http %d", resp.StatusCode)
 	}
 

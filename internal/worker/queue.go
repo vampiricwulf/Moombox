@@ -81,7 +81,7 @@ func (q *JobQueue) Enqueue(jobID string, status database.JobStatus) {
 
 	// Backlog limit to prevent unbounded growth (matches TS queue.size >= 100)
 	if len(q.pending) >= 100 {
-		return
+		return // Queue full — caller should log this
 	}
 
 	q.pending = append(q.pending, pendingJob{ID: jobID, Priority: calculatePriority(status)})

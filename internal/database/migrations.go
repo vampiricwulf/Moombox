@@ -127,7 +127,6 @@ func (db *Database) migrate() error {
 		rows, err := db.db.QueryContext(db.getCtx(),
 			`SELECT id, output_file, chat_filename FROM jobs WHERE output_file != '' AND chat_filename != '' AND (chat_file IS NULL OR chat_file = '')`)
 		if err == nil {
-			defer rows.Close()
 			for rows.Next() {
 				var id, outputFile, chatFilename string
 				if err := rows.Scan(&id, &outputFile, &chatFilename); err != nil {
@@ -140,6 +139,7 @@ func (db *Database) migrate() error {
 					db.logger.Warn("migration v2: failed to backfill chat_file", "jobID", id, "err", err)
 				}
 			}
+			rows.Close()
 		}
 
 		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 2)
@@ -162,7 +162,6 @@ func (db *Database) migrate() error {
 		rows, err := db.db.QueryContext(db.getCtx(),
 			`SELECT id, output_file FROM jobs WHERE output_file != '' AND (thumbnail_file IS NULL OR thumbnail_file = '')`)
 		if err == nil {
-			defer rows.Close()
 			for rows.Next() {
 				var id, outputFile string
 				if err := rows.Scan(&id, &outputFile); err != nil {
@@ -190,6 +189,7 @@ func (db *Database) migrate() error {
 					}
 				}
 			}
+			rows.Close()
 		}
 
 		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 3)

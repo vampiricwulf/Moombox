@@ -43,7 +43,7 @@ import (
 )
 
 var (
-	version = "2.1.3"
+	version = "2.1.4"
 	commit  = ""
 )
 
@@ -218,7 +218,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		waitForKeypress()
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "database close error: %v\n", err)
+		}
+	}()
 
 	// =========================================================================
 	// 4. Load cookies
@@ -524,7 +528,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		SaveConfig: func(c *config.MoomboxConfig) error {
 			return config.Save(c, configPath)
 		},
-		Logger: log,
+		RateLimit: apiRL,
+		Logger:    log,
 	})
 	routes.LogRoutes(r, log.GetRecentLines)
 	routes.ImportRoutes(r, db, cfg, apiRL)
@@ -691,16 +696,32 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 	}
 
-	// Monitor -> Worker: create jobs for found videos
+	// Monitor -> Worker: create jobs for found videos.
+	// Wrapped with panic recovery to prevent a single bad callback from crashing the monitor goroutine.
 	feedMon.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("Panic in OnVideoFound (feed)", slog.Any("panic", r))
+			}
+		}()
 		createYouTubeJob(videoID, title, url, ch, "feed")
 	}
 
 	decapiMon.OnVideoFound = func(videoID, title, url string, ch *config.ChannelConfig) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("Panic in OnVideoFound (decapi)", slog.Any("panic", r))
+			}
+		}()
 		createYouTubeJob(videoID, title, url, ch, "decapi")
 	}
 
 	twitchMon.OnStreamFound = func(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("Panic in OnStreamFound (twitch)", slog.Any("panic", r))
+			}
+		}()
 		jobID := twitch.BuildJobID(info.StreamID, false)
 		log.Info("Stream found by Twitch monitor", slog.String("jobID", jobID), slog.String("title", info.Title))
 
@@ -799,6 +820,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			db.TrackJobForLogs(j.ID)
 		}
 		db.PruneJobLogs(activeIDs)
+		log.PruneJobLogs(activeIDs)
 
 		wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg))
 	})
@@ -904,7 +926,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			case <-ctx.Done():
 				return
 			}
-			checkAndBroadcastUpdate(upd, wsHub, notifyMgr, tuiUpdateStatusCh, log)
+			checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log)
 
 			ticker := time.NewTicker(24 * time.Hour)
 			defer ticker.Stop()
@@ -913,7 +935,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					checkAndBroadcastUpdate(upd, wsHub, notifyMgr, tuiUpdateStatusCh, log)
+					checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log)
 				}
 			}
 		}()
@@ -933,7 +955,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runtime.GC() // Force GC for accurate measurement (like TS --expose-gc)
 				var m runtime.MemStats
 				runtime.ReadMemStats(&m)
 				heapMB := float64(m.HeapAlloc) / 1048576
@@ -1078,7 +1099,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			default:
 				cmd = exec.Command("xdg-open", dir)
 			}
-			_ = cmd.Start()
+			if err := cmd.Start(); err != nil {
+				log.Debug("Failed to open folder in file manager", slog.String("error", err.Error()))
+			}
 		}
 		app.OnCreateTrim = func(jobID string, startSec, endSec float64) {
 			job, err := db.GetJob(jobID)
@@ -1142,7 +1165,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					return "no update info available"
 				}
 				log.Info("Update requested from TUI", slog.String("version", ver))
-				if err := upd.ApplyUpdate(release); err != nil {
+				if err := upd.ApplyUpdate(context.Background(), release); err != nil {
 					log.Error("[Updater] Update failed", slog.String("error", err.Error()))
 					return err.Error()
 				}
@@ -1235,10 +1258,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				ffmpegPath = "ffmpeg"
 			}
 			checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer checkCancel()
 			if err := exec.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
 				app.ShowFFmpegCheck()
 			}
-			checkCancel()
 		}
 
 		// Create async update channels for TUI
@@ -1249,6 +1272,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		cookieStatusCh := make(chan tui.CookieStatusMsg, 5)
 
 		app.SetUpdateChannels(jobUpdateCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, tuiDiskStatusCh, tuiUpdateStatusCh)
+
+		// Dropped-message counters — track silent drops on TUI channels
+		var tuiDroppedJobs, tuiDroppedLogs atomic.Int64
 
 		// Push initial disk status to TUI
 		if ds := routes.SharedDiskStatus.Load(); ds != nil {
@@ -1262,7 +1288,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		db.OnJobUpdate(func(job *database.Job) {
 			select {
 			case jobUpdateCh <- job:
-			default: // Drop if channel is full
+			default:
+				tuiDroppedJobs.Add(1)
 			}
 		})
 		db.OnJobsChange(func(jobs []*database.Job) {
@@ -1279,44 +1306,33 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				select {
 				case logCh <- line:
 				default:
+					tuiDroppedLogs.Add(1)
 				}
 			}
 		}()
 
 		// Forward monitor schedule events to TUI
-		origFeedOnSchedule := feedMon.OnSchedule
-		feedMon.OnSchedule = func(nextCheckAt int64) {
-			if origFeedOnSchedule != nil {
-				origFeedOnSchedule(nextCheckAt)
-			}
-			t := time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
-			select {
-			case checkTimersCh <- tui.CheckTimersMsg{NextFeedCheck: t}:
-			default:
-			}
-		}
-		origDecapiOnSchedule := decapiMon.OnSchedule
-		decapiMon.OnSchedule = func(nextCheckAt int64) {
-			if origDecapiOnSchedule != nil {
-				origDecapiOnSchedule(nextCheckAt)
-			}
-			t := time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
-			select {
-			case checkTimersCh <- tui.CheckTimersMsg{NextDecapiCheck: t}:
-			default:
+		wrapOnSchedule := func(orig func(int64), makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
+			return func(nextCheckAt int64) {
+				if orig != nil {
+					orig(nextCheckAt)
+				}
+				t := time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
+				select {
+				case checkTimersCh <- makeMsg(t):
+				default:
+				}
 			}
 		}
-		origTwitchOnSchedule := twitchMon.OnSchedule
-		twitchMon.OnSchedule = func(nextCheckAt int64) {
-			if origTwitchOnSchedule != nil {
-				origTwitchOnSchedule(nextCheckAt)
-			}
-			t := time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
-			select {
-			case checkTimersCh <- tui.CheckTimersMsg{NextTwitchCheck: t}:
-			default:
-			}
-		}
+		feedMon.OnSchedule = wrapOnSchedule(feedMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+			return tui.CheckTimersMsg{NextFeedCheck: t}
+		})
+		decapiMon.OnSchedule = wrapOnSchedule(decapiMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+			return tui.CheckTimersMsg{NextDecapiCheck: t}
+		})
+		twitchMon.OnSchedule = wrapOnSchedule(twitchMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+			return tui.CheckTimersMsg{NextTwitchCheck: t}
+		})
 
 		// Send initial timer values — monitors fire OnSchedule during Start()
 		// before the TUI wrappers above are installed, so the TUI misses those.
@@ -1400,6 +1416,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// mean no goroutine will block, and GC handles cleanup.
 		cancel() // TUI quit triggers shutdown
 		log.Unsubscribe(tuiLogSub)
+
+		// Report dropped messages (helps diagnose missed TUI updates)
+		if n := tuiDroppedJobs.Load(); n > 0 {
+			log.Warn("TUI dropped job update messages", slog.Int64("count", n))
+		}
+		if n := tuiDroppedLogs.Load(); n > 0 {
+			log.Warn("TUI dropped log messages", slog.Int64("count", n))
+		}
 	}
 
 	log.Info("Shutdown signal received, shutting down gracefully...")
@@ -1592,7 +1616,10 @@ func (n *nopLogger) Warn(_ string, _ ...any)  {}
 func (n *nopLogger) Error(_ string, _ ...any) {}
 
 func getAllJobsSafe(db *database.Database) []*database.Job {
-	jobs, _ := db.GetAllJobs(false)
+	jobs, err := db.GetAllJobs(false)
+	if err != nil {
+		return []*database.Job{}
+	}
 	return jobs
 }
 
@@ -1762,13 +1789,14 @@ func (a *youtubeMetadataAdapter) FetchMetadata(ctx context.Context, videoID stri
 // filterJobsByAge excludes finished jobs older than hide_finished_age_days (match TS filterJobsByAge).
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.
 func checkAndBroadcastUpdate(
+	ctx context.Context,
 	upd *updater.Updater,
 	wsHub *web.WebSocketHub,
 	notifyMgr *notifications.Manager,
 	tuiCh chan<- tui.UpdateStatusMsg,
 	log *logger.Logger,
 ) {
-	release, err := upd.CheckForUpdate()
+	release, err := upd.CheckForUpdate(ctx)
 	if err != nil {
 		log.Warn("[Updater] Check failed", slog.String("error", err.Error()))
 		return

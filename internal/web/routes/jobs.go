@@ -303,8 +303,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		}
 
 		// Cache headers (match TS: immutable for finished, no-cache for others)
-		job2, _ := db.GetJob(jobID)
-		if job2 != nil && job2.Status == database.StatusFinished {
+		if job.Status == database.StatusFinished {
 			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
 			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")

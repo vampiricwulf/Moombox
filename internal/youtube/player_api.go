@@ -338,14 +338,8 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 	if err != nil {
 		return nil, fmt.Errorf("marshal request body: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
 
+	var req *http.Request
 	// Retry on 5xx/429 errors (matching TS fetchWithTimeout + p-retry behavior)
 	var data map[string]interface{}
 	var lastErr error
@@ -359,17 +353,14 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 			if err := utils.Sleep(ctx, delay); err != nil {
 				return nil, err
 			}
-			body, err = json.Marshal(postData) // Re-create reader
-			if err != nil {
-				return nil, fmt.Errorf("marshal request body: %w", err)
-			}
-			req, err = http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
-			if err != nil {
-				return nil, err
-			}
-			for k, v := range headers {
-				req.Header.Set(k, v)
-			}
+		}
+		// Re-create request with fresh reader on each attempt (body bytes are reused)
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
 		}
 
 		resp, err := apiClient.Do(req)

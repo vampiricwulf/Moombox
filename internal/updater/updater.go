@@ -2,6 +2,7 @@
 package updater
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,11 +72,11 @@ func New(currentVersion string, log logger) (*Updater, error) {
 
 // CheckForUpdate queries GitHub for the latest release. Returns nil if
 // already up-to-date, or a ReleaseInfo if a newer version exists.
-func (u *Updater) CheckForUpdate() (*ReleaseInfo, error) {
+func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest",
 		u.repoOwner, u.repoName)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +136,7 @@ func (u *Updater) CheckForUpdate() (*ReleaseInfo, error) {
 // ApplyUpdate downloads the new binary and replaces the running executable.
 // On Windows, the running exe is renamed to .old before the new one is placed.
 // The caller should trigger a restart after this returns nil.
-func (u *Updater) ApplyUpdate(release *ReleaseInfo) error {
+func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	u.logger.Info("[Updater] Downloading update",
 		"version", release.Version,
 		"url", release.DownloadURL,
@@ -143,7 +144,7 @@ func (u *Updater) ApplyUpdate(release *ReleaseInfo) error {
 
 	// Download to .new
 	newPath := u.exePath + ".new"
-	if err := u.downloadFile(release.DownloadURL, newPath); err != nil {
+	if err := u.downloadFile(ctx, release.DownloadURL, newPath); err != nil {
 		os.Remove(newPath)
 		return fmt.Errorf("download failed: %w", err)
 	}
@@ -196,8 +197,8 @@ func (u *Updater) CleanupOldBinary() {
 	}
 }
 
-func (u *Updater) downloadFile(url, dest string) error {
-	req, err := http.NewRequest("GET", url, nil)
+func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}

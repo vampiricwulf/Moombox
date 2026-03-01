@@ -50,7 +50,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 			return
 		}
 
-		release, err := deps.Updater.CheckForUpdate()
+		release, err := deps.Updater.CheckForUpdate(r.Context())
 		if err != nil {
 			jsonError(w, "check failed: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -86,7 +86,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 			return
 		}
 
-		if err := deps.Updater.ApplyUpdate(release); err != nil {
+		if err := deps.Updater.ApplyUpdate(r.Context(), release); err != nil {
 			jsonError(w, "update failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}

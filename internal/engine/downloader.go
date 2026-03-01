@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -101,7 +102,7 @@ type SegmentDownloader struct {
 	cancelled         bool
 	streamEnded       bool
 	outputFile        *os.File
-	bytesWritten      int64
+	bytesWritten      atomic.Int64
 	currentSeq        int
 	headSeq           int
 	lastSegTime       time.Time
@@ -169,8 +170,14 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	resuming := false
 	state, err := d.loadResume()
 	if err == nil && state != nil {
+		// Validate resume state: base URL must match current download
+		if state.BaseURL != "" && state.BaseURL != d.opts.BaseURL {
+			d.logger.Warn("[Downloader] Resume state URL mismatch, starting fresh",
+				"saved", state.BaseURL, "current", d.opts.BaseURL)
+			state = nil
+		}
 		// Validate resume state: file must exist and be at least as large as saved position
-		if state.BytesWritten > 0 {
+		if state != nil && state.BytesWritten > 0 {
 			if info, statErr := os.Stat(d.opts.OutputFile); statErr != nil || info.Size() < state.BytesWritten {
 				d.logger.Warn("[Downloader] Resume state invalid, starting fresh",
 					"savedBytes", state.BytesWritten,
@@ -180,7 +187,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		}
 		if state != nil {
 			d.currentSeq = state.LastSeq + 1
-			d.bytesWritten = state.BytesWritten
+			d.bytesWritten.Store(state.BytesWritten)
 			resuming = true
 		}
 	}
@@ -191,7 +198,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	// where the resume file was lost (e.g., crash without graceful shutdown).
 	if !resuming && d.currentSeq > 0 && !d.opts.IsHls {
 		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
-			d.bytesWritten = info.Size()
+			d.bytesWritten.Store(info.Size())
 			d.currentSeq++ // StartSeq is the last downloaded; advance to the next
 			resuming = true
 			d.logger.Info("[Downloader] Resuming from database state (no resume file)",
@@ -263,11 +270,9 @@ func (d *SegmentDownloader) LastSeq() int {
 	return d.currentSeq - 1
 }
 
-// BytesWritten returns total bytes written.
+// BytesWritten returns total bytes written (lock-free).
 func (d *SegmentDownloader) BytesWritten() int64 {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.bytesWritten
+	return d.bytesWritten.Load()
 }
 
 func (d *SegmentDownloader) isCancelled() bool {
@@ -327,7 +332,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 			return fmt.Errorf("write chunk: %w", err)
 		}
 		offset += int64(n)
-		d.bytesWritten = offset
+		d.bytesWritten.Store(offset)
 
 		// Throttled progress emission
 		now := time.Now()
@@ -345,7 +350,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	// Final 100% progress callback
 	if d.OnProgress != nil {
 		d.OnProgress(DownloadProgress{
-			Bytes:      d.bytesWritten,
+			Bytes:      d.bytesWritten.Load(),
 			TotalBytes: totalSize,
 			Percent:    100,
 		})
@@ -497,11 +502,11 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 			if writeErr != nil {
 				return fmt.Errorf("write: %w", writeErr)
 			}
-			d.bytesWritten += int64(written)
+			d.bytesWritten.Add(int64(written))
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
-					Bytes: d.bytesWritten,
+					Bytes: d.bytesWritten.Load(),
 				})
 			}
 		}
@@ -534,7 +539,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		if d.OnProgress != nil && d.currentSeq > 0 {
 			d.OnProgress(DownloadProgress{
 				Seq:     d.currentSeq - 1,
-				Bytes:   d.bytesWritten,
+				Bytes:   d.bytesWritten.Load(),
 				HeadSeq: d.headSeq,
 			})
 		}
@@ -632,6 +637,19 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				continue
 			}
 
+			if statusCode == 429 {
+				// Rate limited — use longer exponential backoff before retrying
+				consecutiveGoneErrors = 0
+				sameHeadRetryDelay++
+				if sameHeadRetryDelay > delayCap {
+					sameHeadRetryDelay = delayCap
+				}
+				backoff := time.Duration(sameHeadRetryDelay*2) * time.Second
+				d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq, "delay", backoff)
+				sleepCtx(ctx, backoff)
+				continue
+			}
+
 			if statusCode >= 400 {
 				// HTTP error (404, 5xx, etc.) — backoff with status checks
 				if d.currentSeq == lastRetrySeq {
@@ -704,7 +722,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("write segment %d: %w", d.currentSeq, err)
 		}
-		d.bytesWritten += int64(n)
+		d.bytesWritten.Add(int64(n))
 		d.lastSegTime = time.Now()
 		consecutiveGoneErrors = 0
 		sameHeadRetryDelay = 0
@@ -715,7 +733,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		if d.OnProgress != nil {
 			d.OnProgress(DownloadProgress{
 				Seq:     d.currentSeq,
-				Bytes:   d.bytesWritten,
+				Bytes:   d.bytesWritten.Load(),
 				HeadSeq: d.headSeq,
 			})
 		}
@@ -831,14 +849,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			if writeErr != nil {
 				return fmt.Errorf("write HLS segment %d: %w", d.currentSeq, writeErr)
 			}
-			d.bytesWritten += int64(n)
+			d.bytesWritten.Add(int64(n))
 			d.currentSeq++
 			d.lastSegTime = time.Now()
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
 					Seq:   d.currentSeq,
-					Bytes: d.bytesWritten,
+					Bytes: d.bytesWritten.Load(),
 				})
 			}
 		}
@@ -911,19 +929,8 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				if d.isCancelled() || ctx.Err() != nil {
 					continue // drain channel
 				}
-				for attempt := 0; attempt < MaxSegmentRetries; attempt++ {
-					if d.isCancelled() || ctx.Err() != nil {
-						break
-					}
-					data, status, err := d.fetchSegment(ctx, item.segURL)
-					if err == nil && status < 400 {
-						results <- segResult{idx: item.idx, data: data}
-						break
-					}
-					if status == 403 || status == 410 {
-						break
-					}
-					sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
+				if data := d.fetchSegmentWithRetry(ctx, item.segURL); data != nil {
+					results <- segResult{idx: item.idx, data: data}
 				}
 			}
 		}()
@@ -946,7 +953,8 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 		close(results)
 	}()
 
-	// Stream write: buffer out-of-order segments, write in order as they arrive
+	// Stream write: buffer out-of-order segments, write in order as they arrive.
+	// Buffer size is naturally bounded by the results channel capacity (ParallelDownloads*3 = 18).
 	buffer := make(map[int][]byte)
 	nextIdx := 0
 
@@ -965,14 +973,14 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 			if err != nil {
 				return fmt.Errorf("write HLS VOD segment %d: %w", nextIdx, err)
 			}
-			d.bytesWritten += int64(n)
+			d.bytesWritten.Add(int64(n))
 			d.currentSeq++
 			nextIdx++
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
 					Seq:   d.currentSeq,
-					Bytes: d.bytesWritten,
+					Bytes: d.bytesWritten.Load(),
 					Total: totalSegs,
 				})
 			}
@@ -997,7 +1005,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 			if writeErr != nil {
 				d.logger.Warn("[Downloader] Write error during HLS VOD gap flush", "segment", nextIdx, "error", writeErr)
 			}
-			d.bytesWritten += int64(n)
+			d.bytesWritten.Add(int64(n))
 			d.currentSeq++
 			delete(buffer, nextIdx)
 		} else {
@@ -1033,7 +1041,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	if d.OnProgress != nil {
 		d.OnProgress(DownloadProgress{
 			Seq:        d.currentSeq,
-			Bytes:      d.bytesWritten,
+			Bytes:      d.bytesWritten.Load(),
 			HeadSeq:    d.headSeq,
 			CatchingUp: true,
 		})
@@ -1062,19 +1070,8 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 					continue // drain channel
 				}
 				segURL := d.buildSegmentURL(item.seq)
-				for attempt := 0; attempt < MaxSegmentRetries; attempt++ {
-					if d.isCancelled() || ctx.Err() != nil {
-						break
-					}
-					data, status, err := d.fetchSegment(ctx, segURL)
-					if err == nil && status < 400 {
-						results <- segResult{seq: item.seq, data: data}
-						break
-					}
-					if status == 403 || status == 410 {
-						break // Segment gone permanently
-					}
-					sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
+				if data := d.fetchSegmentWithRetry(ctx, segURL); data != nil {
+					results <- segResult{seq: item.seq, data: data}
 				}
 			}
 		}()
@@ -1118,7 +1115,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			if err != nil {
 				return nextSeq, fmt.Errorf("write segment %d: %w", nextSeq, err)
 			}
-			d.bytesWritten += int64(n)
+			d.bytesWritten.Add(int64(n))
 			d.lastSegTime = time.Now()
 
 			// Throttle progress emission during catch-up (every N segments)
@@ -1126,7 +1123,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			if d.OnProgress != nil && progressCounter >= CatchupProgressInterval {
 				d.OnProgress(DownloadProgress{
 					Seq:        nextSeq,
-					Bytes:      d.bytesWritten,
+					Bytes:      d.bytesWritten.Load(),
 					HeadSeq:    d.headSeq,
 					CatchingUp: true,
 				})
@@ -1147,7 +1144,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	if d.OnProgress != nil && progressCounter > 0 {
 		d.OnProgress(DownloadProgress{
 			Seq:        nextSeq - 1,
-			Bytes:      d.bytesWritten,
+			Bytes:      d.bytesWritten.Load(),
 			HeadSeq:    d.headSeq,
 			CatchingUp: false,
 		})
@@ -1166,7 +1163,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			if writeErr != nil {
 				d.logger.Warn("[Downloader] Write error during catch-up gap flush", "segment", nextSeq, "error", writeErr)
 			}
-			d.bytesWritten += int64(n)
+			d.bytesWritten.Add(int64(n))
 			delete(buffer, nextSeq)
 		} else {
 			if catchupGapStart < 0 {
@@ -1270,6 +1267,25 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 	return data, resp.StatusCode, nil
 }
 
+// fetchSegmentWithRetry attempts to fetch a segment with retries and exponential backoff.
+// Returns the data on success, or nil if all retries failed or the segment is permanently gone.
+func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string) []byte {
+	for attempt := 0; attempt < MaxSegmentRetries; attempt++ {
+		if d.isCancelled() || ctx.Err() != nil {
+			return nil
+		}
+		data, status, err := d.fetchSegment(ctx, segURL)
+		if err == nil && status < 400 {
+			return data
+		}
+		if status == 403 || status == 410 {
+			return nil // Segment gone permanently
+		}
+		sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
+	}
+	return nil
+}
+
 func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
 	data, status, err := d.fetchSegment(ctx, d.opts.InitURL)
 	if err != nil || status >= 400 {
@@ -1279,7 +1295,7 @@ func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	d.bytesWritten += int64(n)
+	d.bytesWritten.Add(int64(n))
 	return nil
 }
 
@@ -1301,7 +1317,7 @@ func (d *SegmentDownloader) saveResume() {
 	}
 	state := ResumeState{
 		LastSeq:      d.currentSeq - 1,
-		BytesWritten: d.bytesWritten,
+		BytesWritten: d.bytesWritten.Load(),
 		Timestamp:    time.Now().Unix(),
 		BaseURL:      d.opts.BaseURL,
 	}

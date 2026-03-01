@@ -138,10 +138,11 @@ func (tm *TwitchMonitor) scheduleNext(ctx context.Context) {
 	tm.timer = time.AfterFunc(interval, func() {
 		tm.runCycle(ctx)
 	})
+	next := tm.NextCheckAt
 	tm.mu.Unlock()
 
 	if tm.OnSchedule != nil {
-		tm.OnSchedule(tm.NextCheckAt)
+		tm.OnSchedule(next)
 	}
 
 	tm.logger.Debug("twitch check scheduled", "in", interval.Round(time.Second))

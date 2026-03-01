@@ -29,7 +29,9 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 	r.Get("/api/v1/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
 		entries, err := worker.ScanOrphanedFiles(deps.DB, deps.Cfg)
 		if err != nil {
-			http.Error(rw, `{"error":"failed to scan orphaned files"}`, http.StatusInternalServerError)
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusInternalServerError)
+			rw.Write([]byte(`{"error":"failed to scan orphaned files"}`))
 			return
 		}
 		if entries == nil {
@@ -46,11 +48,15 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 			Paths []string `json:"paths"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-			http.Error(rw, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusBadRequest)
+			rw.Write([]byte(`{"error":"invalid request body"}`))
 			return
 		}
 		if len(body.Paths) == 0 {
-			http.Error(rw, `{"error":"no paths specified"}`, http.StatusBadRequest)
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusBadRequest)
+			rw.Write([]byte(`{"error":"no paths specified"}`))
 			return
 		}
 

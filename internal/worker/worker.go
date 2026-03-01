@@ -145,6 +145,15 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
+					w.db.UpdateJobFields(jobID, map[string]any{
+						"status": database.StatusError,
+						"error":  fmt.Sprintf("internal panic: %v", r),
+					})
+				}
+			}()
 			w.processJob(jobCtx, jobID)
 		}()
 	}

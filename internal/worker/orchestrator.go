@@ -230,6 +230,11 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}
 		go func() {
 			defer close(chatDone)
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("panic in YouTube chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
+				}
+			}()
 			chatDl.Start(ctx)
 		}()
 	}
@@ -1196,6 +1201,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		chatDone = make(chan struct{})
 		go func() {
 			defer close(chatDone)
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("panic in Twitch chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
+				}
+			}()
 			twitchChatDl.Start(ctx)
 		}()
 	}

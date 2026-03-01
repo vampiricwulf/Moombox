@@ -25,6 +25,7 @@ type timerEntry struct {
 	timer    *time.Timer
 	ticker   *time.Ticker
 	interval bool
+	done     chan struct{} // closed on ClearTimer to stop the interval goroutine
 }
 
 // NewTimerManager creates a timer manager for a Goja runtime.
@@ -87,7 +88,8 @@ func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 	}
 
 	ticker := time.NewTicker(delay)
-	entry := &timerEntry{id: id, ticker: ticker, interval: true}
+	entryDone := make(chan struct{})
+	entry := &timerEntry{id: id, ticker: ticker, interval: true, done: entryDone}
 	tm.timers[id] = entry
 	tm.mu.Unlock()
 
@@ -95,6 +97,8 @@ func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 		for {
 			select {
 			case <-tm.done:
+				return
+			case <-entryDone:
 				return
 			case _, ok := <-ticker.C:
 				if !ok {
@@ -131,6 +135,9 @@ func (tm *TimerManager) ClearTimer(id int64) {
 	}
 	if entry.ticker != nil {
 		entry.ticker.Stop()
+	}
+	if entry.done != nil {
+		close(entry.done)
 	}
 	delete(tm.timers, id)
 }

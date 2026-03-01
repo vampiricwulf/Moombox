@@ -459,7 +459,6 @@ func (m *JobDetailsModel) buildRows() {
 // addSegmentRowsWithOverlay adds segment rows using progressOverlay for real-time counts.
 // Used during active download in Progress section (J8).
 func (m *JobDetailsModel) addSegmentRowsWithOverlay(j *database.Job) {
-	isTwitch := j.Platform == "twitch"
 	p := m.progressOverlay
 
 	// Use overlay values with fallback to job (match TS pd?.field ?? job.field)
@@ -481,6 +480,19 @@ func (m *JobDetailsModel) addSegmentRowsWithOverlay(j *database.Job) {
 			totalAudioSeq = p.TotalAudioSeq
 		}
 	}
+
+	m.addSegmentRowsCommon(j, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq, false)
+}
+
+// addSegmentRows adds segment counter rows from job data only (for finished jobs in Media section).
+func (m *JobDetailsModel) addSegmentRows(j *database.Job) {
+	m.addSegmentRowsCommon(j, j.LastVideoSeq, j.LastAudioSeq, j.TotalVideoSeq, j.TotalAudioSeq, true)
+}
+
+// addSegmentRowsCommon renders segment counters and gap info. If showChat is true,
+// also shows chat message count (used for finished jobs in Media section).
+func (m *JobDetailsModel) addSegmentRowsCommon(j *database.Job, lastVideoSeq, lastAudioSeq, totalVideoSeq, totalAudioSeq *int, showChat bool) {
+	isTwitch := j.Platform == "twitch"
 
 	// Combined inline segment display: "V: x/y | A: x/y" (matching Web UI)
 	if lastVideoSeq != nil {
@@ -506,62 +518,8 @@ func (m *JobDetailsModel) addSegmentRowsWithOverlay(j *database.Job) {
 		}
 	}
 
-	// Gaps
-	if len(j.Gaps) > 0 {
-		videoGaps := 0
-		audioGaps := 0
-		for _, g := range j.Gaps {
-			if g.Stream == "video" {
-				videoGaps++
-			} else if g.Stream == "audio" {
-				audioGaps++
-			}
-		}
-		var detail string
-		var parts []string
-		if videoGaps > 0 {
-			parts = append(parts, fmt.Sprintf("video: %d", videoGaps))
-		}
-		if audioGaps > 0 {
-			parts = append(parts, fmt.Sprintf("audio: %d", audioGaps))
-		}
-		if len(parts) > 0 {
-			detail = " (" + strings.Join(parts, ", ") + ")"
-		}
-		m.addFieldColor("Gaps", fmt.Sprintf("%d segments%s", len(j.Gaps), detail), ColorWarning)
-	}
-}
-
-// addSegmentRows adds segment counter rows from job data only (for finished jobs in Media section).
-func (m *JobDetailsModel) addSegmentRows(j *database.Job) {
-	isTwitch := j.Platform == "twitch"
-
-	// Combined inline segment display: "V: x/y | A: x/y" (matching Web UI)
-	if j.LastVideoSeq != nil {
-		vStr := fmt.Sprintf("%d", *j.LastVideoSeq)
-		if j.TotalVideoSeq != nil && *j.TotalVideoSeq > 0 {
-			vStr += fmt.Sprintf("/%d", *j.TotalVideoSeq)
-		}
-		if isTwitch {
-			m.addField("Segments", vStr)
-		} else {
-			aStr := ""
-			if j.LastAudioSeq != nil {
-				aStr = fmt.Sprintf("%d", *j.LastAudioSeq)
-				if j.TotalAudioSeq != nil && *j.TotalAudioSeq > 0 {
-					aStr += fmt.Sprintf("/%d", *j.TotalAudioSeq)
-				}
-			}
-			if aStr != "" {
-				m.addField("Segments", fmt.Sprintf("V: %s | A: %s", vStr, aStr))
-			} else {
-				m.addField("Segments", fmt.Sprintf("V: %s", vStr))
-			}
-		}
-	}
-
 	// Chat message count (in Media section for finished jobs)
-	if j.TotalChatMessages != nil && *j.TotalChatMessages > 0 {
+	if showChat && j.TotalChatMessages != nil && *j.TotalChatMessages > 0 {
 		m.addField("Chat Msgs", fmt.Sprintf("%d", *j.TotalChatMessages))
 	}
 

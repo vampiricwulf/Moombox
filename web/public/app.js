@@ -910,10 +910,11 @@ class MoomboxApp {
       const canRetry = ["Error", "Cancelled", "COOKIES?"].includes(job.status);
       const canDelete = ["Finished", "Error", "Cancelled", "COOKIES?"].includes(job.status);
 
+      const safeId = this.escapeHtml(job.id);
       let actionsHtml = "";
-      if (canCancel) actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${job.id}"></sl-icon-button>`;
-      if (canRetry) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${job.id}"></sl-icon-button>`;
-      if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${job.id}"></sl-icon-button>`;
+      if (canCancel) actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${safeId}"></sl-icon-button>`;
+      if (canRetry) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${safeId}"></sl-icon-button>`;
+      if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${safeId}"></sl-icon-button>`;
       actionsContainer.innerHTML = actionsHtml;
     }
   }

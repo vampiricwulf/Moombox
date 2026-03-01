@@ -154,10 +154,11 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
 	fm.timer = time.AfterFunc(interval, func() {
 		fm.runCycle(ctx)
 	})
+	next := fm.NextCheckAt
 	fm.mu.Unlock()
 
 	if fm.OnSchedule != nil {
-		fm.OnSchedule(fm.NextCheckAt)
+		fm.OnSchedule(next)
 	}
 
 	fm.logger.Debug("feed check scheduled", "in", interval.Round(time.Second))
@@ -223,6 +224,7 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body) // drain for connection reuse
 		return fmt.Errorf("feed http %d", resp.StatusCode)
 	}
 

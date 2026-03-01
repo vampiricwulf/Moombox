@@ -2,6 +2,7 @@
 package notifications
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -165,6 +166,11 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 		m.wg.Add(1)
 		go func(s sender) {
 			defer m.wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					m.logger.Error("panic in notification sender", "panic", fmt.Sprint(r))
+				}
+			}()
 			if err := s.Send(title, description, color, fields, opts); err != nil {
 				m.logger.Error("notification send failed", "err", err)
 			}

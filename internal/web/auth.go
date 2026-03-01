@@ -25,7 +25,7 @@ const (
 type AuthService struct {
 	mu       sync.RWMutex
 	sessions map[string]sessionEntry
-	cancel   func()
+	done     chan struct{} // closed by Stop() to exit cleanup goroutine
 }
 
 type sessionEntry struct {
@@ -42,25 +42,33 @@ func NewAuthService() *AuthService {
 
 // Start begins the session cleanup goroutine.
 func (as *AuthService) Start() {
+	done := make(chan struct{})
+	as.mu.Lock()
+	as.done = done
+	as.mu.Unlock()
+
 	ticker := time.NewTicker(sessionCleanup)
 	go func() {
-		for range ticker.C {
-			as.evictExpired()
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				as.evictExpired()
+			}
 		}
 	}()
-	// Store cancel for cleanup
-	as.mu.Lock()
-	as.cancel = ticker.Stop
-	as.mu.Unlock()
 }
 
 // Stop stops the session cleanup goroutine.
 func (as *AuthService) Stop() {
-	as.mu.RLock()
-	cancel := as.cancel
-	as.mu.RUnlock()
-	if cancel != nil {
-		cancel()
+	as.mu.Lock()
+	done := as.done
+	as.done = nil
+	as.mu.Unlock()
+	if done != nil {
+		close(done)
 	}
 }
 

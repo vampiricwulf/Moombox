@@ -246,6 +246,17 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 		"twitch", twAuth)
 }
 
+// setYouTubeHeaders applies the standard YouTube API headers for cookie-authenticated requests.
+func setYouTubeHeaders(req *http.Request, cookieHeader, origin, authHeader string) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Cookie", cookieHeader)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Origin", origin)
+}
+
 func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	if !rs.jar.HasAuthCookies() {
 		return false, nil // No auth cookies
@@ -272,13 +283,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	req.Header.Set("Cookie", cookieHeader)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("Authorization", authHeader)
-	req.Header.Set("X-Origin", origin)
+	setYouTubeHeaders(req, cookieHeader, origin, authHeader)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -360,13 +365,7 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 		return false, err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	req.Header.Set("Cookie", cookieHeader)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("Authorization", authHeader)
-	req.Header.Set("X-Origin", origin)
+	setYouTubeHeaders(req, cookieHeader, origin, authHeader)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -510,7 +509,7 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 		trimmed := strings.TrimSpace(line)
 
 		// Check if this is a cookie line that we need to update
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "#HttpOnly_") {
+		if trimmed != "" && (!strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "#HttpOnly_")) {
 			parts := strings.Split(trimmed, "\t")
 			if len(parts) >= 7 {
 				cookieName := strings.TrimSpace(parts[5])

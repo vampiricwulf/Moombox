@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -98,7 +100,10 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // Allow any origin (CORS handled by middleware)
+		// Validate same-origin: nhooyr.io/websocket checks Origin vs Host by default.
+		// Override with a custom check to allow loopback/LAN variants (localhost,
+		// 127.0.0.1, 192.168.x.x, etc.) that may not match Host exactly.
+		OriginPatterns: hub.allowedOriginPatterns(r),
 	})
 	if err != nil {
 		hub.logger.Error("websocket upgrade failed", "err", err)
@@ -136,6 +141,35 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	go hub.readPump(client)
 }
 
+// allowedOriginPatterns builds a list of host patterns for the WebSocket
+// upgrade. The library already allows same-origin (Origin host == Request host),
+// so these patterns only need to cover cross-origin localhost/LAN aliases.
+// Patterns are matched against the Origin header's host using filepath.Match.
+func (hub *WebSocketHub) allowedOriginPatterns(r *http.Request) []string {
+	host := r.Host
+	if host == "" {
+		return nil // no extra patterns; library still allows same-origin
+	}
+	// Strip port from host
+	hostname := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		hostname = h
+	}
+
+	// Allow any port on the same hostname (e.g., dev server on a different port)
+	var patterns []string
+	patterns = append(patterns, hostname+":*")
+
+	// For loopback, also allow the localhost/127.0.0.1 aliases
+	if hostname == "127.0.0.1" || hostname == "::1" {
+		patterns = append(patterns, "localhost", "localhost:*")
+	}
+	if strings.EqualFold(hostname, "localhost") {
+		patterns = append(patterns, "127.0.0.1", "127.0.0.1:*")
+	}
+	return patterns
+}
+
 func (hub *WebSocketHub) sendInitialState(client *wsClient) {
 	var data map[string]any
 	if hub.InitialState != nil {
@@ -160,7 +194,14 @@ func (hub *WebSocketHub) sendInitialState(client *wsClient) {
 
 	ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
 	defer cancel()
-	client.conn.Write(ctx, websocket.MessageText, msgBytes)
+	if err = client.conn.Write(ctx, websocket.MessageText, msgBytes); err != nil {
+		// Client failed to receive initial state — remove and close
+		hub.mu.Lock()
+		delete(hub.clients, client)
+		hub.mu.Unlock()
+		client.cancel()
+		client.conn.Close(websocket.StatusInternalError, "initial state write failed")
+	}
 }
 
 // pingPump sends periodic pings to keep the connection alive and detect stale clients.
@@ -321,6 +362,17 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 			if pending != nil {
 				hub.Broadcast("job_update", pending)
 			}
+
+			// Clean up the timestamp after the throttle window so the map
+			// doesn't grow unbounded over the process lifetime.
+			time.AfterFunc(wsThrottleWindow, func() {
+				hub.throttleMu.Lock()
+				// Only delete if no new activity has occurred since our trailing send
+				if t, ok := hub.throttleTimestamps[jobID]; ok && time.Since(t) >= wsThrottleWindow {
+					delete(hub.throttleTimestamps, jobID)
+				}
+				hub.throttleMu.Unlock()
+			})
 		})
 	}
 }

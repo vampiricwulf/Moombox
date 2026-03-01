@@ -100,7 +100,15 @@ func CSRFMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
 					return
 				}
 			}
-			// If no Origin/Referer, allow (IP check + CORS provide protection)
+			// If no Origin/Referer: reject when external access with auth is enabled
+			// (prevents CSRF from form submissions that omit Origin), otherwise allow
+			// since IP gate + auth middleware provide sufficient protection for local access.
+			if origin == "" && (cfg.Network.NetworkAccess == "external" || cfg.Network.NetworkAccess == "public") && cfg.Network.PasswordHash != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden: missing origin"}`))
+				return
+			}
 
 			next.ServeHTTP(w, r)
 		})

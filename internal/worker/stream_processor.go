@@ -498,6 +498,11 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 
 	// Start in background
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				sp.logger.Error("panic in early chat downloader", "jobID", job.ID, "panic", fmt.Sprint(r))
+			}
+		}()
 		dl.Start(ctx)
 	}()
 

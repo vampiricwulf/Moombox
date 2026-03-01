@@ -159,10 +159,11 @@ func (dm *DecapiMonitor) scheduleNext(ctx context.Context) {
 	dm.timer = time.AfterFunc(interval, func() {
 		dm.runCycle(ctx)
 	})
+	next := dm.NextCheckAt
 	dm.mu.Unlock()
 
 	if dm.OnSchedule != nil {
-		dm.OnSchedule(dm.NextCheckAt)
+		dm.OnSchedule(next)
 	}
 
 	dm.logger.Debug("decapi check scheduled", "in", interval.Round(time.Second))

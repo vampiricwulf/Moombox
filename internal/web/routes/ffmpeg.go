@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 // installMu prevents concurrent FFmpeg install operations.
@@ -66,6 +67,7 @@ func InvalidateFFmpegCache() {
 type FFmpegDeps struct {
 	Cfg        *config.MoomboxConfig
 	SaveConfig func(*config.MoomboxConfig) error
+	RateLimit  *web.RateLimiter
 	Logger     interface {
 		Info(msg string, args ...any)
 		Error(msg string, args ...any)
@@ -94,8 +96,14 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 		})
 	})
 
+	// Rate-limit mutating ffmpeg endpoints (spawns processes)
+	rl := r.With()
+	if deps.RateLimit != nil {
+		rl = r.With(deps.RateLimit.Middleware)
+	}
+
 	// POST /api/v1/ffmpeg/check — check a custom ffmpeg path, save to config if valid
-	r.Post("/api/v1/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
+	rl.Post("/api/v1/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Path string `json:"path"`
 		}
@@ -146,7 +154,7 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 	})
 
 	// POST /api/v1/ffmpeg/install — install ffmpeg via a package manager
-	r.Post("/api/v1/ffmpeg/install", func(rw http.ResponseWriter, req *http.Request) {
+	rl.Post("/api/v1/ffmpeg/install", func(rw http.ResponseWriter, req *http.Request) {
 		if runtime.GOOS != "windows" {
 			jsonError(rw, "automatic installation is only supported on Windows", http.StatusBadRequest)
 			return
