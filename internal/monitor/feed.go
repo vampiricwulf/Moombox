@@ -115,6 +115,17 @@ func (fm *FeedMonitor) CheckNow() {
 }
 
 func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
+	channels := fm.getYouTubeChannels()
+	if len(channels) == 0 {
+		fm.mu.Lock()
+		fm.NextCheckAt = 0
+		fm.mu.Unlock()
+		if fm.OnSchedule != nil {
+			fm.OnSchedule(0)
+		}
+		return
+	}
+
 	intervalMin := fm.cfg.Monitors.FeedCheckInterval.Value
 	if intervalMin <= 0 {
 		intervalMin = 10 // default 10 minutes
