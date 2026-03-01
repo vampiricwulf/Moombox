@@ -226,6 +226,12 @@ func NewApp() *App {
 	}
 }
 
+// BackfillLogs seeds the log viewer with historical lines (e.g. from the logger's ring buffer).
+// Must be called before Run().
+func (a *App) BackfillLogs(lines []string) {
+	a.logs.AddLines(lines)
+}
+
 // ShowFFmpegCheck marks the FFmpeg check overlay to show after init.
 func (a *App) ShowFFmpegCheck() {
 	a.showFFmpeg = true

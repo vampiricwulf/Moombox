@@ -43,7 +43,7 @@ import (
 )
 
 var (
-	version = "2.1.5"
+	version = "2.1.6"
 	commit  = ""
 )
 
@@ -1339,6 +1339,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				}
 			}
 		}()
+
+		// Backfill TUI with logs emitted before subscription
+		app.BackfillLogs(log.GetRecentLines())
 
 		// Forward monitor schedule events to TUI
 		wrapOnSchedule := func(orig func(int64), makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
