@@ -43,13 +43,13 @@ import (
 )
 
 var (
-	version = "2.1.1"
+	version = "2.1.2"
 	commit  = ""
-
-	// updateRestart is set when an update has been applied and the process
-	// should exec the new binary instead of re-entering run().
-	updateRestart atomic.Bool
 )
+
+// exitCodeRestart is the exit code the child uses to signal the launcher
+// that it should respawn. Used for both config restarts and update restarts.
+const exitCodeRestart = 42
 
 func init() {
 	if commit != "" {
@@ -81,6 +81,17 @@ func waitForKeypress() {
 }
 
 func main() {
+	// Launcher/supervisor: if we're not already a child process, act as the
+	// launcher. The launcher spawns moombox as a child, waits for it, and
+	// respawns when the child exits with exitCodeRestart (config change or
+	// update applied). This keeps one stable parent holding the console so
+	// the child's TUI restores terminal state cleanly on exit, and avoids
+	// process chain buildup across multiple restarts.
+	if os.Getenv("_MOOMBOX_CHILD") != "1" {
+		launchAndSupervise()
+		return
+	}
+
 	// Check for subcommands before flag parsing
 	if len(os.Args) > 1 && os.Args[1] == "add" {
 		if len(os.Args) < 3 {
@@ -114,30 +125,22 @@ func main() {
 		fmt.Println()
 	}
 
-	// Resolve config path once before the run loop
+	// Resolve config path
 	cfgPath := *configPath
 	if cfgPath == "" {
 		cwd, _ := os.Getwd()
 		cfgPath = filepath.Join(cwd, "config.toml")
 	}
 
-	// Run loop: restart re-initializes everything within the same process.
-	// On restart, run() returns true and the loop starts a fresh iteration.
-	for run(cfgPath, *logLevel, useTUI) {
-		// After an update, the new binary is on disk but this process is still
-		// the old code. Launch the new binary as a separate process and exit.
-		if updateRestart.Load() {
-			execNewBinary()
-			return // execNewBinary calls os.Exit, but return as a safeguard
-		}
-		if !useTUI {
-			fmt.Println("\nRestarting...")
-		}
+	// Run the application. If a restart is requested (config change or
+	// update), exit with exitCodeRestart so the launcher respawns us.
+	if run(cfgPath, *logLevel, useTUI) {
+		os.Exit(exitCodeRestart)
 	}
 }
 
 // run initializes and runs the full application. Returns true if a restart was
-// requested (by TUI settings or web API), in which case the caller should loop.
+// requested (config change, update applied, or via web API).
 func run(configPath string, logLevelOverride string, useTUI bool) (restart bool) {
 	var restartRequested atomic.Bool
 	var quitTUI func() // set when TUI is running; called on restart to unblock Run()
@@ -496,8 +499,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		RateLimit:   potRL,
 		Logger:      log,
 	})
-	restartFunc := func() {
-		log.Info("Restart requested via setup")
+	triggerRestart := func(source string) {
+		log.Info("Restart requested", slog.String("source", source))
 		restartRequested.Store(true)
 		cancel()
 		if quitTUI != nil {
@@ -511,7 +514,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			return config.Save(c, configPath)
 		},
 		OnChannelChange: kickMonitors,
-		OnRestart:       restartFunc,
+		OnRestart:       func() { triggerRestart("setup") },
 	})
 	routes.FFmpegRoutes(r, &routes.FFmpegDeps{
 		Cfg: cfg,
@@ -524,23 +527,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	routes.ImportRoutes(r, db, cfg, apiRL)
 	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc, getActivePlatforms)
 	routes.YtdlpRoutes(r, cfg.Network.Port, cfg.Network.HTTPSEnabled)
-	routes.RestartRoute(r, func() {
-		log.Info("Restart requested via API")
-		restartRequested.Store(true)
-		cancel()
-		if quitTUI != nil {
-			quitTUI()
-		}
-	})
+	routes.RestartRoute(r, func() { triggerRestart("API") })
 	routes.UpdateRoutes(r, &routes.UpdateRouteDeps{
-		Updater:          upd,
-		Version:          version,
-		Cfg:              cfg,
-		ConfigPath:       configPath,
-		RestartRequested: &restartRequested,
-		UpdateRestart:    &updateRestart,
-		CancelFunc:       cancel,
-		QuitTUI:          &quitTUI,
+		Updater:    upd,
+		Version:    version,
+		Cfg:        cfg,
+		ConfigPath: configPath,
+		OnRestart:  func() { triggerRestart("update") },
 	})
 	routes.AuthRoutes(r, &routes.AuthRoutesDeps{
 		Cfg:        cfg,
@@ -1138,12 +1131,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			// Kick monitors so they re-evaluate channels (may have been added/removed)
 			kickMonitors()
 		}
-		app.OnRestart = func() {
-			log.Info("Restart requested from TUI settings")
-			restartRequested.Store(true)
-			cancel()
-			app.QuitTUI()
-		}
+		app.OnRestart = func() { triggerRestart("TUI settings") }
 		if upd != nil {
 			app.OnApplyUpdate = func(ver string) string {
 				release := routes.SharedUpdateInfo.Load()
@@ -1155,10 +1143,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					log.Error("[Updater] Update failed", slog.String("error", err.Error()))
 					return err.Error()
 				}
-				restartRequested.Store(true)
-				updateRestart.Store(true)
-				cancel()
-				app.QuitTUI()
+				triggerRestart("TUI update")
 				return ""
 			}
 		}
@@ -1208,12 +1193,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					autoCookieSvc.CancelSetup()
 				}
 			},
-			func() {
-				log.Info("Restart requested from setup wizard")
-				restartRequested.Store(true)
-				cancel()
-				app.QuitTUI()
-			},
+			func() { triggerRestart("TUI setup wizard") },
 		)
 
 		// Wire FFmpeg check callbacks for TUI
@@ -1815,37 +1795,46 @@ func checkAndBroadcastUpdate(
 	}
 }
 
-// execNewBinary launches the updated binary in the same console and waits.
-// This is called after an update has been applied and the graceful shutdown
-// has completed (port is released, database is closed, etc).
-// The parent process is an empty shell at this point — all services are stopped.
-// It only stays alive to hold the console connection stable so the child's
-// BubbleTea properly saves and restores terminal state on exit.
-func execNewBinary() {
-	exe, err := os.Executable()
+// launchAndSupervise is the launcher/supervisor loop. It spawns moombox as a
+// child process in the same console and waits. If the child exits with
+// exitCodeRestart (config change or update applied), it respawns — picking up
+// any new binary on disk. For any other exit code it propagates and exits.
+//
+// This keeps one stable parent holding the console connection so the child's
+// BubbleTea properly restores terminal state, and avoids process chain buildup
+// since the launcher always swaps to a fresh child rather than nesting.
+func launchAndSupervise() {
+	exePath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to determine executable path: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Launching updated binary: %s\n", exe)
-
-	cmd := exec.Command(exe, os.Args[1:]...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Ignore interrupts in the parent — let the child handle Ctrl+C.
+	// Ignore interrupts in the launcher — the child handles Ctrl+C.
 	signal.Ignore(os.Interrupt)
 
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
+	for {
+		cmd := exec.Command(exePath, os.Args[1:]...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Env = append(os.Environ(), "_MOOMBOX_CHILD=1")
+
+		if err := cmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				if exitErr.ExitCode() == exitCodeRestart {
+					// Restart requested — respawn. If an update was
+					// applied, the binary on disk is the new version.
+					continue
+				}
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Fprintf(os.Stderr, "Failed to run moombox: %v\n", err)
+			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "Failed to run updated binary: %v\n", err)
-		os.Exit(1)
+		// Normal exit (code 0)
+		os.Exit(0)
 	}
-	os.Exit(0)
 }
 
 func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig) []*database.Job {

@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"sync/atomic"
@@ -18,14 +17,11 @@ var SharedUpdateInfo atomic.Pointer[updater.ReleaseInfo]
 
 // UpdateRouteDeps holds dependencies for the update routes.
 type UpdateRouteDeps struct {
-	Updater          *updater.Updater
-	Version          string
-	Cfg              *config.MoomboxConfig
-	ConfigPath       string
-	RestartRequested *atomic.Bool
-	UpdateRestart    *atomic.Bool // signals main() to exec new binary
-	CancelFunc       context.CancelFunc
-	QuitTUI          *func()
+	Updater    *updater.Updater
+	Version    string
+	Cfg        *config.MoomboxConfig
+	ConfigPath string
+	OnRestart  func()
 }
 
 // UpdateRoutes registers the update check/apply/dismiss API endpoints.
@@ -106,11 +102,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 
 		// Trigger restart after response is flushed
 		go func() {
-			deps.RestartRequested.Store(true)
-			deps.UpdateRestart.Store(true)
-			deps.CancelFunc()
-			if deps.QuitTUI != nil && *deps.QuitTUI != nil {
-				(*deps.QuitTUI)()
+			if deps.OnRestart != nil {
+				deps.OnRestart()
 			}
 		}()
 	})
