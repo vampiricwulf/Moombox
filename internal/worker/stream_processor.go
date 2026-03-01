@@ -490,6 +490,9 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	}
 
 	dl := chat.NewChatDownloader(opts)
+	dl.OnError = func(err error) {
+		sp.logger.Warn("[Chat] Early chat API error", "jobID", job.ID, "err", err)
+	}
 	sp.trackChat(dl)
 
 	sp.db.UpdateJobFields(job.ID, map[string]any{

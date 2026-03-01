@@ -28,10 +28,11 @@ var ytInitialDataRegex = regexp.MustCompile(`(?s)var ytInitialData = ({.+?});</s
 
 // ChatApiResponse contains the parsed response from a chat API call.
 type ChatApiResponse struct {
-	Messages         []ChatMessage
-	NextContinuation string
-	TimeoutMs        int
-	IsComplete       bool
+	Messages            []ChatMessage
+	NextContinuation    string
+	AllChatContinuation string // Unfiltered "Live Chat" token from header (first response only)
+	TimeoutMs           int
+	IsComplete          bool
 }
 
 // ChatAPI handles YouTube live chat API interactions.
@@ -334,6 +335,23 @@ func parseResponse(data map[string]any) (*ChatApiResponse, error) {
 		}
 
 		result.Messages = append(result.Messages, *msg)
+	}
+
+	// Extract unfiltered "Live Chat" continuation from header (available on first response).
+	// YouTube defaults to "Top Chat" (filtered); index [1] is the unfiltered "Live Chat" view.
+	if header, _ := liveChatCont["header"].(map[string]any); header != nil {
+		lchRenderer, _ := header["liveChatHeaderRenderer"].(map[string]any)
+		viewSelector, _ := lchRenderer["viewSelector"].(map[string]any)
+		sortFilter, _ := viewSelector["sortFilterSubMenuRenderer"].(map[string]any)
+		subMenuItems, _ := sortFilter["subMenuItems"].([]any)
+		if len(subMenuItems) > 1 {
+			item, _ := subMenuItems[1].(map[string]any)
+			cont, _ := item["continuation"].(map[string]any)
+			reload, _ := cont["reloadContinuationData"].(map[string]any)
+			if token, ok := reload["continuation"].(string); ok && token != "" {
+				result.AllChatContinuation = token
+			}
+		}
 	}
 
 	return result, nil

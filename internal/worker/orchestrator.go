@@ -624,6 +624,9 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 	}
 
 	dl := chat.NewChatDownloader(opts)
+	dl.OnError = func(err error) {
+		o.logger.Warn("[Chat] Chat API error", "jobID", jobCtx.Job.ID, "err", err)
+	}
 	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"chat_status": "pending",
 	})

@@ -136,7 +136,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	}
 
 	// Run chat loop
-	cd.runChatLoop(ctx)
+	cd.runChatLoop(ctx, resuming)
 
 	// Write remaining messages
 	if len(cd.messages) > 0 {
@@ -214,8 +214,9 @@ func (cd *ChatDownloader) shouldStop() bool {
 	return !cd.running || cd.cancelFlag || cd.streamEnded
 }
 
-func (cd *ChatDownloader) runChatLoop(ctx context.Context) {
+func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 	consecutiveErrors := 0
+	switchedToAllChat := resuming // Skip All Chat switch when resuming — continuation is already mid-stream
 
 	for !cd.shouldStop() {
 		if cd.continuation == "" {
@@ -265,6 +266,15 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context) {
 		}
 
 		consecutiveErrors = 0
+
+		// Switch from "Top Chat" (filtered) to "All Chat" (unfiltered) on the first response.
+		// YouTube defaults to Top Chat which can aggressively filter messages to zero.
+		if !switchedToAllChat && resp.AllChatContinuation != "" {
+			cd.continuation = resp.AllChatContinuation
+			switchedToAllChat = true
+			continue // Re-poll immediately with the unfiltered continuation
+		}
+		switchedToAllChat = true // Don't check again even if header wasn't present
 
 		// Process messages
 		newInBatch := 0
@@ -330,6 +340,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context) {
 				fresh, _, freshErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
 				if freshErr == nil && fresh != "" {
 					cd.continuation = fresh
+					switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
 					cd.sleep(ctx, 10*time.Second)
 					continue
 				}
@@ -345,6 +356,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context) {
 					retry, _, retryErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
 					if retryErr == nil && retry != "" {
 						cd.continuation = retry
+						switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
 						break
 					}
 					// Exponential backoff: 10s, 20s, 40s, 80s, cap at 5min

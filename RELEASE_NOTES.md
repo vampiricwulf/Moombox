@@ -1,6 +1,7 @@
-### Improvements
-- Trim dialog: move transport controls (play, skip, frame step) above time display for better layout
-- Trim dialog: Set Start / Set End buttons now split the full row 50/50
-- TUI settings: replace S/R password shortcuts with backtick/tilde to avoid conflicts with text entry fields
-- TUI settings: remove 1-8 number key section jumps (conflicted with text/number field input)
-- TUI settings: spell out "Shift" in hint bar instead of ambiguous "S" abbreviation
+### Bug Fixes
+- Fix YouTube chat returning 0 messages by switching from "Top Chat" (filtered) to "All Chat" (unfiltered) on first API response
+- Re-trigger All Chat switch after stale continuation recovery to avoid silently reverting to Top Chat
+- Log chat API errors instead of silently swallowing them (surfaces auth failures, member-gated 403s, etc.)
+
+### Internal
+- Fix TUI CSRF bypass via shared secret token
