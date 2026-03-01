@@ -135,6 +135,7 @@ func (pt *ProgressTracker) SetChatCount(count int) {
 	pt.mu.Lock()
 	pt.chatCount = count
 	pt.mu.Unlock()
+	pt.maybeUpdate()
 }
 
 func (pt *ProgressTracker) maybeUpdate() {
