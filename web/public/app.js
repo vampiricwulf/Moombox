@@ -278,6 +278,12 @@ class MoomboxApp {
       });
     }
 
+    // Update dialog buttons
+    const updateNowBtn = document.getElementById("update-now-btn");
+    if (updateNowBtn) updateNowBtn.addEventListener("click", () => this.applyUpdate());
+    const updateDismissBtn = document.getElementById("update-dismiss-btn");
+    if (updateDismissBtn) updateDismissBtn.addEventListener("click", () => this.dismissUpdate());
+
     // Thumbnail error handling via event delegation (error events don't bubble, use capture)
     const handleThumbError = (e) => {
       const img = e.target;
@@ -376,8 +382,11 @@ class MoomboxApp {
         this.cookieStatus = status.cookieStatus;
         this.twitchAuthStatus = status.twitchAuthStatus;
         this.activePlatforms = status.activePlatforms || {};
+        if (status.version) this._version = status.version;
+        if (status.updateAvailable) this._updateAvailable = status.updateAvailable;
         if (status.uptime) this._uptimeSeconds = status.uptime;
         if (status.disk) this.stats.updateDiskIndicator(status.disk);
+        this.updateVersionIndicator();
         this.updateStatusBar();
       }
     } catch (e) {
@@ -466,6 +475,67 @@ class MoomboxApp {
     const refreshBtn = document.getElementById("btn-refresh-cookies");
     if (refreshBtn) {
       refreshBtn.style.display = (ytActive || twActive) ? "" : "none";
+    }
+  }
+
+  // ===== Version / Update Indicator =====
+
+  updateVersionIndicator() {
+    const el = document.getElementById("version-indicator");
+    if (!el) return;
+    if (!this._version) { el.style.display = "none"; return; }
+
+    el.style.display = "";
+    if (this._updateAvailable) {
+      el.textContent = `v${this._version} ⬆`;
+      el.className = "version-indicator has-update";
+      el.title = `Update available: v${this._updateAvailable.version}`;
+      el.onclick = () => this.showUpdateDialog();
+    } else {
+      el.textContent = `v${this._version}`;
+      el.className = "version-indicator";
+      el.title = `Moombox v${this._version}`;
+      el.onclick = null;
+    }
+  }
+
+  showUpdateDialog() {
+    const dlg = document.getElementById("update-dialog");
+    const notes = document.getElementById("update-release-notes");
+    if (!dlg || !this._updateAvailable) return;
+    dlg.label = `Update to v${this._updateAvailable.version}`;
+    notes.textContent = this._updateAvailable.releaseNotes || "No release notes available.";
+    dlg.show();
+  }
+
+  async applyUpdate() {
+    const btn = document.getElementById("update-now-btn");
+    if (btn) { btn.loading = true; btn.disabled = true; }
+    try {
+      const resp = await fetch("/api/v1/update/apply", { method: "POST" });
+      if (resp.ok) {
+        this.showToast("Update applied. Restarting...", "success");
+        document.getElementById("update-dialog")?.hide();
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        this.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
+      }
+    } catch (e) {
+      this.showToast("Update failed: " + e.message, "danger");
+    } finally {
+      if (btn) { btn.loading = false; btn.disabled = false; }
+    }
+  }
+
+  async dismissUpdate() {
+    try {
+      await fetch("/api/v1/update/dismiss", { method: "POST" });
+      this._updateAvailable = null;
+      this.updateVersionIndicator();
+      document.getElementById("update-dialog")?.hide();
+      this.showToast("Auto-updates disabled. Re-enable in Settings > Updates.", "primary");
+    } catch (e) {
+      this.showToast("Failed to dismiss: " + e.message, "danger");
     }
   }
 
@@ -603,6 +673,11 @@ class MoomboxApp {
 
       case "disk_status":
         this.stats.updateDiskIndicator(message.payload);
+        break;
+
+      case "update_available":
+        this._updateAvailable = message.payload;
+        this.updateVersionIndicator();
         break;
 
       case "pong":

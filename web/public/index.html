@@ -1357,6 +1357,12 @@
             </div>
         </sl-dialog>
 
+        <sl-dialog id="update-dialog" label="Update Available">
+            <div id="update-release-notes"></div>
+            <sl-button slot="footer" id="update-now-btn" variant="primary">Update Now</sl-button>
+            <sl-button slot="footer" id="update-dismiss-btn" variant="default">Don't ask again</sl-button>
+        </sl-dialog>
+
         <!-- Status Bar -->
         <div id="status-bar">
             <span id="connection-status">
@@ -1367,6 +1373,7 @@
             <span id="active-indicator" style="display:none"></span>
             <span id="check-countdown"></span>
             <div id="status-bar-right">
+                <span id="version-indicator" class="version-indicator" style="display:none"></span>
                 <sl-icon-button id="theme-toggle" name="moon" label="Toggle theme"></sl-icon-button>
                 <span id="status-warnings"></span>
                 <span id="yt-indicator" title="YouTube">YT</span>

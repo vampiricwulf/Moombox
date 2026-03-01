@@ -53,6 +53,9 @@ func Defaults() *MoomboxConfig {
 			WarnPercent:     90,
 			CriticalPercent: 95,
 		},
+		Updates: UpdatesConfig{
+			AutoCheckUpdates: true,
+		},
 	}
 }
 

@@ -2005,3 +2005,9 @@ html.sl-theme-light {
 @media (hover: none) {
     .player-controls-hint { display: none; }
 }
+
+/* Version indicator */
+.version-indicator { cursor: default; font-size: 0.85em; color: var(--sl-color-neutral-400); user-select: none; }
+.version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
+.version-indicator.has-update:hover { text-decoration: underline; }
+#update-release-notes { max-height: 400px; overflow-y: auto; white-space: pre-wrap; font-size: 0.9em; }

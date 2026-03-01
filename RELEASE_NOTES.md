@@ -1,10 +1,9 @@
 ### Features
 
-- **Disk Space Monitoring** — Output drive free space is checked every ~6 minutes. Both the Web UI and TUI status bars show a color-coded disk indicator (green/yellow/red). Discord notifications fire when configurable thresholds are crossed (default 90% warn, 95% critical) with a 30-minute cooldown. New `[disk]` config section with `disk_warn_percent` and `disk_critical_percent` fields.
-- **Stats Dashboard** — New "Stats" tab in the Web UI with a disk usage bar, storage breakdown by platform and status, and activity metrics (streams archived, total recording time, chat messages, active downloads). Auto-refreshes every 60 seconds.
-- **TUI Status Bar Metrics** — Disk percentage/free space and active download count now display in the TUI status bar alongside cookie indicators.
+- **Auto-Update Checker + Self-Updater** — Moombox now checks GitHub Releases for new versions on startup and every 24 hours. When an update is available, the Web UI status bar shows a green version badge with an update dialog (release notes, "Update Now", "Don't ask again"), and the TUI details panel shows an "⬆ Update!" indicator with a U-U chord keybind to apply. Updating downloads the new binary, replaces the running exe, and relaunches the process automatically. Discord notifications fire when an update is detected.
 
-### Bug Fixes
+### Improvements
 
-- **Idle heap reduced ~30 MB** — BotGuard VMs are evicted when not in use, cipher solver cache trimmed to 3 entries.
-- **Keyboard navigation** now includes the Files tab (previously skipped when cycling with number keys).
+- **Version display** — Both the Web UI status bar and TUI details panel now show the current version (previously the status API returned a hardcoded `1.0.0-go`).
+- **Self-replacement on Windows** — Uses rename-swap (`Moombox.exe` → `.old`, download → `Moombox.exe`) with rollback on failure, then `os.StartProcess` to launch the new binary after graceful shutdown.
+- **Config toggle** — `auto_check_updates` (default `true`) in a new `[updates]` config section. Clicking "Don't ask again" in the Web UI sets this to `false` and persists it.

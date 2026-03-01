@@ -24,6 +24,7 @@ import (
 
 	isatty "github.com/mattn/go-isatty"
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
+	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -42,8 +43,12 @@ import (
 )
 
 var (
-	version = "2.0.15"
+	version = "2.1.0"
 	commit  = ""
+
+	// updateRestart is set when an update has been applied and the process
+	// should exec the new binary instead of re-entering run().
+	updateRestart atomic.Bool
 )
 
 func init() {
@@ -119,6 +124,12 @@ func main() {
 	// Run loop: restart re-initializes everything within the same process.
 	// On restart, run() returns true and the loop starts a fresh iteration.
 	for run(cfgPath, *logLevel, useTUI) {
+		// After an update, the new binary is on disk but this process is still
+		// the old code. Launch the new binary as a separate process and exit.
+		if updateRestart.Load() {
+			execNewBinary()
+			return // execNewBinary calls os.Exit, but return as a safeguard
+		}
 		if !useTUI {
 			fmt.Println("\nRestarting...")
 		}
@@ -165,6 +176,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	defer log.Close()
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
+
+	// Updater: create instance and clean up .old binary from previous update
+	upd, updErr := updater.New(version, log)
+	if updErr != nil {
+		log.Warn("Updater unavailable", slog.String("error", updErr.Error()))
+	} else {
+		upd.CleanupOldBinary()
+	}
 
 	// Auto-convert plaintext password to scrypt hash (matches TS ConfigManager.load)
 	if cfg.Network.PasswordHash != "" && !web.IsScryptHash(cfg.Network.PasswordHash) {
@@ -416,6 +435,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	})
 	routes.StatusRoute(r, &routes.StatusRouteDeps{
 		Cfg:       cfg,
+		Version:   version,
 		StartTime: startTime,
 		GetActivePlatforms: getActivePlatforms,
 		GetCookieStatus: func() map[string]any {
@@ -511,6 +531,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		if quitTUI != nil {
 			quitTUI()
 		}
+	})
+	routes.UpdateRoutes(r, &routes.UpdateRouteDeps{
+		Updater:          upd,
+		Version:          version,
+		Cfg:              cfg,
+		ConfigPath:       configPath,
+		RestartRequested: &restartRequested,
+		UpdateRestart:    &updateRestart,
+		CancelFunc:       cancel,
+		QuitTUI:          &quitTUI,
 	})
 	routes.AuthRoutes(r, &routes.AuthRoutesDeps{
 		Cfg:        cfg,
@@ -866,6 +896,33 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// only receives messages when TUI mode is active).
 	tuiDiskStatusCh := make(chan tui.DiskStatusMsg, 5)
 
+	// TUI update status channel
+	tuiUpdateStatusCh := make(chan tui.UpdateStatusMsg, 2)
+
+	// Auto-update check: initial check + daily ticker
+	if upd != nil && cfg.Updates.AutoCheckUpdates {
+		go func() {
+			// Initial check (slight delay to avoid slowing startup)
+			select {
+			case <-time.After(5 * time.Second):
+			case <-ctx.Done():
+				return
+			}
+			checkAndBroadcastUpdate(upd, wsHub, notifyMgr, tuiUpdateStatusCh, log)
+
+			ticker := time.NewTicker(24 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					checkAndBroadcastUpdate(upd, wsHub, notifyMgr, tuiUpdateStatusCh, log)
+				}
+			}
+		}()
+	}
+
 	// Periodic memory + disk usage logging (every 2 minutes) for diagnostics.
 	// Matches TS: process.memoryUsage() logging with heap delta tracking.
 	go func() {
@@ -968,8 +1025,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		app := tui.NewApp()
 		quitTUI = app.QuitTUI // allow API restart to exit TUI
 
-		// Pass config reference for settings panel
+		// Pass config reference and version for settings panel
 		app.SetConfig(cfg)
+		app.SetVersion(version)
 		app.IsFirstRun = !cfg.ConfigLoaded
 
 		// Wire TUI callbacks
@@ -1086,6 +1144,24 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			cancel()
 			app.QuitTUI()
 		}
+		if upd != nil {
+			app.OnApplyUpdate = func(ver string) string {
+				release := routes.SharedUpdateInfo.Load()
+				if release == nil {
+					return "no update info available"
+				}
+				log.Info("Update requested from TUI", slog.String("version", ver))
+				if err := upd.ApplyUpdate(release); err != nil {
+					log.Error("[Updater] Update failed", slog.String("error", err.Error()))
+					return err.Error()
+				}
+				restartRequested.Store(true)
+				updateRestart.Store(true)
+				cancel()
+				app.QuitTUI()
+				return ""
+			}
+		}
 		app.OnHashPassword = func(password string) string {
 			hash, err := authSvc.HashPassword(password)
 			if err != nil {
@@ -1189,7 +1265,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		checkTimersCh := make(chan tui.CheckTimersMsg, 10)
 		cookieStatusCh := make(chan tui.CookieStatusMsg, 5)
 
-		app.SetUpdateChannels(jobUpdateCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, tuiDiskStatusCh)
+		app.SetUpdateChannels(jobUpdateCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, tuiDiskStatusCh, tuiUpdateStatusCh)
 
 		// Push initial disk status to TUI
 		if ds := routes.SharedDiskStatus.Load(); ds != nil {
@@ -1701,6 +1777,72 @@ func (a *youtubeMetadataAdapter) FetchMetadata(ctx context.Context, videoID stri
 }
 
 // filterJobsByAge excludes finished jobs older than hide_finished_age_days (match TS filterJobsByAge).
+// checkAndBroadcastUpdate checks for a new release and broadcasts the result.
+func checkAndBroadcastUpdate(
+	upd *updater.Updater,
+	wsHub *web.WebSocketHub,
+	notifyMgr *notifications.Manager,
+	tuiCh chan<- tui.UpdateStatusMsg,
+	log *logger.Logger,
+) {
+	release, err := upd.CheckForUpdate()
+	if err != nil {
+		log.Warn("[Updater] Check failed", slog.String("error", err.Error()))
+		return
+	}
+	if release == nil {
+		return // already up to date
+	}
+
+	routes.SharedUpdateInfo.Store(release)
+	wsHub.Broadcast("update_available", release)
+
+	select {
+	case tuiCh <- tui.UpdateStatusMsg{
+		Version:      release.Version,
+		TagName:      release.TagName,
+		ReleaseNotes: release.ReleaseNotes,
+	}:
+	default:
+	}
+
+	if notifyMgr.HasTargets() {
+		notifyMgr.Send("Update Available",
+			"Moombox "+release.TagName+" is available",
+			notifications.TypeInfo, nil,
+			notifications.SendOptions{Event: "update_available"},
+		)
+	}
+}
+
+// execNewBinary launches the updated binary as a new OS process and exits.
+// This is called after an update has been applied and the graceful shutdown
+// has completed (port is released, database is closed, etc).
+// On Windows there is no execve, so we start a child process and exit.
+func execNewBinary() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to determine executable path: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Launching updated binary: %s\n", exe)
+
+	proc, err := os.StartProcess(exe, os.Args, &os.ProcAttr{
+		Dir:   "",
+		Env:   os.Environ(),
+		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start new process: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Detach from the child process so it survives our exit
+	proc.Release()
+	os.Exit(0)
+}
+
 func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig) []*database.Job {
 	ageDays := int(cfg.Monitors.HideFinishedAgeDays.Value)
 	cutoff := time.Now().AddDate(0, 0, -ageDays)

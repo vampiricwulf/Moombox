@@ -29,6 +29,10 @@ type JobDetailsModel struct {
 	// Progress overlay: updated at 100ms by progress store,
 	// without rebuilding all rows.
 	progressOverlay *ProgressData
+
+	// Version display
+	version    string
+	updateInfo *UpdateStatusMsg
 }
 
 type rowKind int
@@ -644,6 +648,26 @@ func (m *JobDetailsModel) View() string {
 		}
 	} else {
 		header = titleStyle.Render("Details") + DimStyle.Render(" (no job selected)")
+	}
+
+	// Version indicator (right-aligned in header)
+	if m.version != "" {
+		versionText := "v" + m.version
+		if m.updateInfo != nil {
+			updateStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
+			versionText = updateStyle.Render("v"+m.version+" ⬆ Update!")
+			if m.focused {
+				versionText += " " + DimStyle.Render("UU to update")
+			}
+		} else {
+			versionText = DimStyle.Render(versionText)
+		}
+		headerW := lipgloss.Width(header)
+		versionW := lipgloss.Width(versionText)
+		gap := contentW - headerW - versionW
+		if gap > 0 {
+			header += strings.Repeat(" ", gap) + versionText
+		}
 	}
 
 	contentH := m.contentHeight()

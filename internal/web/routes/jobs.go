@@ -955,6 +955,7 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 // StatusRouteDeps holds dependencies for the status route.
 type StatusRouteDeps struct {
 	Cfg                        *config.MoomboxConfig
+	Version                    string
 	StartTime                  time.Time
 	GetCookieStatus            func() map[string]any
 	GetTwitchAuthStatus        func() map[string]any
@@ -982,7 +983,17 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 				"external":  mem.MSpanSys / 1048576,
 				"goroutines": runtime.NumGoroutine(),
 			},
-			"version": "1.0.0-go",
+			"version": deps.Version,
+		}
+
+		// Update status from shared atomic
+		if ui := SharedUpdateInfo.Load(); ui != nil {
+			resp["updateAvailable"] = map[string]any{
+				"version":      ui.Version,
+				"tagName":      ui.TagName,
+				"releaseNotes": ui.ReleaseNotes,
+				"publishedAt":  ui.PublishedAt,
+			}
 		}
 
 		// Disk status from shared atomic

@@ -51,10 +51,20 @@ type (
 		UsedPct float64
 		Warn    string // "ok", "warn", "critical"
 	}
+	UpdateStatusMsg struct {
+		Version      string
+		TagName      string
+		ReleaseNotes string
+	}
 	tickMsg         struct{}
 	progressTickMsg struct{}
 	logFlushMsg     struct{} // 250ms log batching flush
 	marqueeTickMsg  struct{} // 150ms marquee scroll tick
+
+	// Async result for update apply
+	updateApplyResultMsg struct {
+		Err string // empty on success (process exits before this is seen)
+	}
 
 	// Async results for AddVideo dialog
 	fetchFormatsAutoAdvanceMsg struct{} // timer msg to auto-skip format on error
@@ -142,6 +152,12 @@ type App struct {
 	checkTimersCh    <-chan CheckTimersMsg
 	cookieStatusCh   <-chan CookieStatusMsg
 	diskStatusCh     <-chan DiskStatusMsg
+	updateStatusCh   <-chan UpdateStatusMsg
+
+	// Update status
+	updateAvailable *UpdateStatusMsg
+	lastUPress      time.Time
+	version         string
 
 	// BubbleTea program reference (set by Run, used by QuitTUI)
 	program *tea.Program
@@ -168,6 +184,9 @@ type App struct {
 	OnImportFile     func(path, title, channel string) (string, error)  // optional: import zip, returns title
 	OnListOrphans    func() ([]OrphanedFileEntry, error)                // list orphaned files
 	OnDeleteOrphan   func(path string) error                            // delete orphaned file
+
+	// Update callback — returns error string (empty on success, process exits)
+	OnApplyUpdate func(version string) string
 
 	// FFmpeg check callbacks
 	OnCheckFFmpeg  func(path string) (bool, string) // check if ffmpeg path is valid
@@ -207,6 +226,12 @@ func (a *App) ShowFFmpegCheck() {
 	a.showFFmpeg = true
 }
 
+// SetVersion sets the current application version for display.
+func (a *App) SetVersion(v string) {
+	a.version = v
+	a.details.version = v
+}
+
 // SetConfig provides the config reference for the settings panel.
 func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.cfg = cfg
@@ -238,6 +263,7 @@ func (a *App) SetUpdateChannels(
 	checkTimers <-chan CheckTimersMsg,
 	cookieStatus <-chan CookieStatusMsg,
 	diskStatus <-chan DiskStatusMsg,
+	updateStatus <-chan UpdateStatusMsg,
 ) {
 	a.jobUpdateCh = jobUpdate
 	a.jobsUpdateCh = jobsUpdate
@@ -245,6 +271,7 @@ func (a *App) SetUpdateChannels(
 	a.checkTimersCh = checkTimers
 	a.cookieStatusCh = cookieStatus
 	a.diskStatusCh = diskStatus
+	a.updateStatusCh = updateStatus
 }
 
 // Init implements tea.Model.
@@ -332,6 +359,10 @@ func (a *App) listenForUpdates() tea.Cmd {
 		case ds, ok := <-a.diskStatusCh:
 			if ok {
 				return ds
+			}
+		case us, ok := <-a.updateStatusCh:
+			if ok {
+				return us
 			}
 		}
 		return nil
@@ -491,6 +522,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DiskStatusMsg:
 		a.statusBar.SetDiskStatus(msg.Free, msg.UsedPct, msg.Warn)
 		return a, a.listenForUpdates()
+
+	case UpdateStatusMsg:
+		a.updateAvailable = &msg
+		a.details.updateInfo = &msg
+		return a, a.listenForUpdates()
+
+	case updateApplyResultMsg:
+		if msg.Err != "" {
+			a.setFeedback("Update failed: " + msg.Err)
+		}
+		// On success, the process is already exiting (QuitTUI was called)
+		return a, nil
 
 	case addVideoResultMsg:
 		a.addVideo.Close()
@@ -759,6 +802,25 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Done AFTER dialog intercepts so text inputs preserve case.
 	if len(key) == 1 && key[0] >= 'A' && key[0] <= 'Z' {
 		key = strings.ToLower(key)
+	}
+
+	// U-U chord: update and restart
+	if key == "u" && a.updateAvailable != nil && a.OnApplyUpdate != nil {
+		if !a.lastUPress.IsZero() && time.Since(a.lastUPress) < 3*time.Second {
+			a.lastUPress = time.Time{}
+			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
+			ver := a.updateAvailable.Version
+			return a, func() tea.Msg {
+				errStr := a.OnApplyUpdate(ver)
+				return updateApplyResultMsg{Err: errStr}
+			}
+		}
+		a.lastUPress = time.Now()
+		a.setFeedback(fmt.Sprintf("Press U again within 3s to update to %s", a.updateAvailable.TagName))
+		return a, nil
+	}
+	if key != "u" {
+		a.lastUPress = time.Time{}
 	}
 
 	// Clear confirmations on any non-matching key (A9)

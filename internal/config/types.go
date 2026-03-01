@@ -10,6 +10,7 @@ type MoomboxConfig struct {
 	Downloader    DownloaderConfig     `toml:"downloader" json:"downloader"`
 	Cookies       CookiesConfig        `toml:"cookies" json:"cookies"`
 	Disk          DiskConfig           `toml:"disk" json:"disk"`
+	Updates       UpdatesConfig        `toml:"updates" json:"updates"`
 	Channels      []ChannelConfig      `toml:"channels,omitempty" json:"channels,omitempty"`
 	Notifications []NotificationConfig `toml:"notifications,omitempty" json:"notifications,omitempty"`
 
@@ -81,6 +82,11 @@ type CookiesConfig struct {
 type DiskConfig struct {
 	WarnPercent     int `toml:"disk_warn_percent" json:"disk_warn_percent"`
 	CriticalPercent int `toml:"disk_critical_percent" json:"disk_critical_percent"`
+}
+
+// UpdatesConfig holds auto-update settings.
+type UpdatesConfig struct {
+	AutoCheckUpdates bool `toml:"auto_check_updates" json:"auto_check_updates"`
 }
 
 // ChannelConfig holds channel-specific monitoring settings.
