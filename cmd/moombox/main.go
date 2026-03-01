@@ -381,6 +381,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		return map[string]bool{"youtube": yt, "twitch": tw}
 	}
 
+	// Shared callback to kick all monitors when channels change.
+	// Wakes monitors that went idle when they had no channels of their type.
+	kickMonitors := func() {
+		feedMon.CheckNow()
+		decapiMon.CheckNow()
+		twitchMon.CheckNow()
+	}
+
 	// Register all routes
 	routes.JobRoutes(r, db, cfg, dlWorker, apiRL, &twitchMetadataAdapter{svc: twService}, &youtubeMetadataAdapter{svc: ytService}, notifyMgr)
 	routes.FormatRoutes(r, &routes.FormatRoutesDeps{
@@ -429,10 +437,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			jobs, _ := db.GetAllJobs(false)
 			wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg))
 		},
+		OnChannelChange: kickMonitors,
 	})
 	routes.ChannelRoutes(r, cfg, func(c *config.MoomboxConfig) error {
 		return config.Save(c, configPath)
-	})
+	}, kickMonitors)
 	routes.FileRoutes(r, &routes.FileRoutesDeps{
 		DB:     db,
 		Cfg:    cfg,
@@ -451,6 +460,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		SaveConfig: func(c *config.MoomboxConfig) error {
 			return config.Save(c, configPath)
 		},
+		OnChannelChange: kickMonitors,
 	})
 	routes.LogRoutes(r, log.GetRecentLines)
 	routes.ImportRoutes(r, db, cfg, apiRL)
@@ -971,6 +981,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			if updatedCfg.Downloader.NumParallelDownloads > 0 {
 				dlWorker.SetParallelDownloads(updatedCfg.Downloader.NumParallelDownloads)
 			}
+			// Kick monitors so they re-evaluate channels (may have been added/removed)
+			kickMonitors()
 		}
 		app.OnRestart = func() {
 			log.Info("Restart requested from TUI settings")

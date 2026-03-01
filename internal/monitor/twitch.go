@@ -14,8 +14,6 @@ import (
 
 const (
 	twitchDefaultInterval = 15 * time.Second
-	twitchJitter          = 5 * time.Second
-	twitchMinInterval     = 5 * time.Second
 	twitchStagger         = 500 * time.Millisecond
 )
 
@@ -27,6 +25,7 @@ type TwitchMonitor struct {
 	tw          *twitch.Service
 	checking    bool
 	timer       *time.Timer
+	ctx         context.Context
 	cancel      context.CancelFunc
 	NextCheckAt int64
 
@@ -64,6 +63,7 @@ func (tm *TwitchMonitor) Start(ctx context.Context) {
 		return // Already running
 	}
 	ctx, cancel := context.WithCancel(ctx)
+	tm.ctx = ctx
 	tm.cancel = cancel
 	tm.mu.Unlock()
 
@@ -80,6 +80,7 @@ func (tm *TwitchMonitor) Stop() {
 
 	if tm.cancel != nil {
 		tm.cancel()
+		tm.ctx = nil
 		tm.cancel = nil
 	}
 	if tm.timer != nil {
@@ -95,6 +96,19 @@ func (tm *TwitchMonitor) GetNextCheckAt() int64 {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return tm.NextCheckAt
+}
+
+// CheckNow triggers an immediate check cycle if the monitor is running.
+// Used to wake the monitor when channels are added while it was idle.
+func (tm *TwitchMonitor) CheckNow() {
+	tm.mu.Lock()
+	if tm.cancel == nil {
+		tm.mu.Unlock()
+		return // Not running
+	}
+	ctx := tm.ctx
+	tm.mu.Unlock()
+	go tm.runCycle(ctx)
 }
 
 func (tm *TwitchMonitor) scheduleNext(ctx context.Context) {
@@ -140,17 +154,13 @@ func (tm *TwitchMonitor) calculateInterval() time.Duration {
 		base = time.Duration(*tm.cfg.Monitors.TwitchCheckInterval) * time.Second
 	}
 
-	// Apply ±5 second jitter
-	jitterRange := int64(twitchJitter * 2)
-	jitter := time.Duration(rand.Int63n(jitterRange)) - twitchJitter
-	interval := base + jitter
-
-	// Floor
-	if interval < twitchMinInterval {
-		interval = twitchMinInterval
+	// Apply ±10% jitter (scales with interval)
+	tenPercent := int64(base) / 10
+	if tenPercent > 0 {
+		base = base - time.Duration(tenPercent) + time.Duration(rand.Int63n(2*tenPercent))
 	}
 
-	return interval
+	return base
 }
 
 func (tm *TwitchMonitor) runCycle(ctx context.Context) {

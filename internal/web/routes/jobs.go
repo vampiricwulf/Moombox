@@ -1021,6 +1021,9 @@ type ConfigRoutesCallbacks struct {
 	// OnHideFinishedAgeChanged is called when hide_finished_age_days changes,
 	// so callers can re-broadcast the job list with updated archive thresholds.
 	OnHideFinishedAgeChanged func()
+	// OnChannelChange is called when channels are added, updated, or removed,
+	// so monitors can re-evaluate their channel lists immediately.
+	OnChannelChange func()
 }
 
 // isSafePath validates that a path doesn't contain traversal or absolute paths.
@@ -1434,6 +1437,9 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 			if cfg.Monitors.HideFinishedAgeDays.Value != oldHideAge && callbacks.OnHideFinishedAgeChanged != nil {
 				callbacks.OnHideFinishedAgeChanged()
 			}
+			if _, hasChannels := updates["channels"]; hasChannels && callbacks.OnChannelChange != nil {
+				callbacks.OnChannelChange()
+			}
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
@@ -1441,7 +1447,7 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 }
 
 // ChannelRoutes registers channel-related API routes.
-func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*config.MoomboxConfig) error) {
+func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*config.MoomboxConfig) error, onChannelChange func()) {
 	// POST /api/v1/config/channels
 	r.Post("/api/v1/config/channels", func(rw http.ResponseWriter, req *http.Request) {
 		var channel config.ChannelConfig
@@ -1476,6 +1482,10 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*con
 			}
 		}
 
+		if onChannelChange != nil {
+			onChannelChange()
+		}
+
 		jsonResponse(rw, map[string]any{"success": true, "channel": channel})
 	})
 
@@ -1493,6 +1503,10 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*con
 						jsonError(rw, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 						return
 					}
+				}
+
+				if onChannelChange != nil {
+					onChannelChange()
 				}
 
 				jsonResponse(rw, map[string]any{"success": true})
@@ -1706,9 +1720,10 @@ func PotRoutes(r chi.Router, deps *PotRoutesDeps) {
 
 // SetupDeps holds dependencies for setup wizard routes.
 type SetupDeps struct {
-	Cfg        *config.MoomboxConfig
-	Auth       *web.AuthService
-	SaveConfig func(*config.MoomboxConfig) error
+	Cfg             *config.MoomboxConfig
+	Auth            *web.AuthService
+	SaveConfig      func(*config.MoomboxConfig) error
+	OnChannelChange func()
 }
 
 // SetupRoutes registers setup wizard endpoints.
@@ -1789,6 +1804,11 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 				jsonError(rw, "failed to save config: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
+		}
+
+		// Kick monitors to pick up any channels added during setup
+		if deps.OnChannelChange != nil {
+			deps.OnChannelChange()
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})

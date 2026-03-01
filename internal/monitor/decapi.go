@@ -39,6 +39,7 @@ type DecapiMonitor struct {
 	db          *database.Database
 	checking    bool
 	timer       *time.Timer
+	ctx         context.Context
 	cancel      context.CancelFunc
 	rateLimit   rateLimitState
 	NextCheckAt int64
@@ -83,6 +84,7 @@ func (dm *DecapiMonitor) Start(ctx context.Context) {
 		return // Already running
 	}
 	ctx, cancel := context.WithCancel(ctx)
+	dm.ctx = ctx
 	dm.cancel = cancel
 	dm.mu.Unlock()
 
@@ -99,6 +101,7 @@ func (dm *DecapiMonitor) Stop() {
 
 	if dm.cancel != nil {
 		dm.cancel()
+		dm.ctx = nil
 		dm.cancel = nil
 	}
 	if dm.timer != nil {
@@ -114,6 +117,19 @@ func (dm *DecapiMonitor) GetNextCheckAt() int64 {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	return dm.NextCheckAt
+}
+
+// CheckNow triggers an immediate check cycle if the monitor is running.
+// Used to wake the monitor when channels are added while it was idle.
+func (dm *DecapiMonitor) CheckNow() {
+	dm.mu.Lock()
+	if dm.cancel == nil {
+		dm.mu.Unlock()
+		return // Not running
+	}
+	ctx := dm.ctx
+	dm.mu.Unlock()
+	go dm.runCycle(ctx)
 }
 
 func (dm *DecapiMonitor) scheduleNext(ctx context.Context) {

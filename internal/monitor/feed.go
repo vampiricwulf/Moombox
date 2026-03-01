@@ -27,6 +27,7 @@ type FeedMonitor struct {
 	db          *database.Database
 	checking    bool
 	timer       *time.Timer
+	ctx         context.Context
 	cancel      context.CancelFunc
 	NextCheckAt int64 // epoch ms
 
@@ -66,6 +67,7 @@ func (fm *FeedMonitor) Start(ctx context.Context) {
 		return // Already running
 	}
 	ctx, cancel := context.WithCancel(ctx)
+	fm.ctx = ctx
 	fm.cancel = cancel
 	fm.mu.Unlock()
 
@@ -82,6 +84,7 @@ func (fm *FeedMonitor) Stop() {
 
 	if fm.cancel != nil {
 		fm.cancel()
+		fm.ctx = nil
 		fm.cancel = nil
 	}
 	if fm.timer != nil {
@@ -99,8 +102,15 @@ func (fm *FeedMonitor) GetNextCheckAt() int64 {
 	return fm.NextCheckAt
 }
 
-// CheckNow triggers an immediate feed check.
-func (fm *FeedMonitor) CheckNow(ctx context.Context) {
+// CheckNow triggers an immediate feed check if the monitor is running.
+func (fm *FeedMonitor) CheckNow() {
+	fm.mu.Lock()
+	if fm.cancel == nil {
+		fm.mu.Unlock()
+		return // Not running
+	}
+	ctx := fm.ctx
+	fm.mu.Unlock()
 	go fm.runCycle(ctx)
 }
 
