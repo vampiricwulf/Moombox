@@ -619,6 +619,9 @@ func (m *JobDetailsModel) View() string {
 			}
 		} else {
 			versionText = DimStyle.Render(versionText)
+			if m.focused {
+				versionText += " " + DimStyle.Render("UU to check")
+			}
 		}
 		headerW := lipgloss.Width(header)
 		versionW := lipgloss.Width(versionText)

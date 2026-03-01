@@ -48,6 +48,7 @@ var detailKeys = helpSection{
 	title: "Details Panel",
 	keys: []helpKey{
 		{"↑/↓", "Scroll details up/down"},
+		{"U U", "Check for updates"},
 	},
 }
 

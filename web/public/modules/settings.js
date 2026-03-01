@@ -143,6 +143,8 @@ export class SettingsController {
         if (data.available) {
           result.textContent = `v${data.version} available!`;
           result.style.color = "var(--sl-color-success-600)";
+          this.app._updateAvailable = data;
+          this.app.updateVersionIndicator();
         } else {
           result.textContent = "Up to date";
           result.style.color = "var(--sl-color-neutral-500)";

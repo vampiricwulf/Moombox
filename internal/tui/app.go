@@ -61,7 +61,11 @@ type (
 	logFlushMsg     struct{} // 250ms log batching flush
 	marqueeTickMsg  struct{} // 150ms marquee scroll tick
 
-	// Async result for update apply
+	// Async results for update check/apply
+	updateCheckResultMsg struct {
+		Info *UpdateStatusMsg // nil = up to date
+		Err  string
+	}
 	updateApplyResultMsg struct {
 		Err string // empty on success (process exits before this is seen)
 	}
@@ -185,8 +189,9 @@ type App struct {
 	OnListOrphans    func() ([]OrphanedFileEntry, error)                // list orphaned files
 	OnDeleteOrphan   func(path string) error                            // delete orphaned file
 
-	// Update callback — returns error string (empty on success, process exits)
-	OnApplyUpdate func(version string) string
+	// Update callbacks
+	OnCheckUpdate func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
+	OnApplyUpdate func(version string) string      // returns error string (empty on success, process exits)
 
 	// FFmpeg check callbacks
 	OnCheckFFmpeg  func(path string) (bool, string) // check if ffmpeg path is valid
@@ -528,6 +533,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.details.updateInfo = &msg
 		return a, a.listenForUpdates()
 
+	case updateCheckResultMsg:
+		if msg.Err != "" {
+			a.setFeedback("Update check failed: " + msg.Err)
+		} else if msg.Info != nil {
+			a.updateAvailable = msg.Info
+			a.details.updateInfo = msg.Info
+			a.setFeedback(fmt.Sprintf("Update available: %s — press U U to install", msg.Info.TagName))
+		} else {
+			a.setFeedback("Already up to date")
+		}
+		return a, nil
+
 	case updateApplyResultMsg:
 		if msg.Err != "" {
 			a.setFeedback("Update failed: " + msg.Err)
@@ -798,20 +815,38 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		key = strings.ToLower(key)
 	}
 
-	// U-U chord: update and restart
-	if key == "u" && a.updateAvailable != nil && a.OnApplyUpdate != nil {
-		if !a.lastUPress.IsZero() && time.Since(a.lastUPress) < 3*time.Second {
-			a.lastUPress = time.Time{}
-			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
-			ver := a.updateAvailable.Version
-			return a, func() tea.Msg {
-				errStr := a.OnApplyUpdate(ver)
-				return updateApplyResultMsg{Err: errStr}
+	// U-U chord: apply update (if available) or check for updates
+	if key == "u" {
+		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
+			if !a.lastUPress.IsZero() && time.Since(a.lastUPress) < 3*time.Second {
+				a.lastUPress = time.Time{}
+				a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
+				ver := a.updateAvailable.Version
+				return a, func() tea.Msg {
+					errStr := a.OnApplyUpdate(ver)
+					return updateApplyResultMsg{Err: errStr}
+				}
 			}
+			a.lastUPress = time.Now()
+			a.setFeedback(fmt.Sprintf("Press U again within 3s to update to %s", a.updateAvailable.TagName))
+			return a, nil
 		}
-		a.lastUPress = time.Now()
-		a.setFeedback(fmt.Sprintf("Press U again within 3s to update to %s", a.updateAvailable.TagName))
-		return a, nil
+		if a.OnCheckUpdate != nil && a.focusedPanel == PanelDetails {
+			if !a.lastUPress.IsZero() && time.Since(a.lastUPress) < 3*time.Second {
+				a.lastUPress = time.Time{}
+				a.setFeedback("Checking for updates...")
+				return a, func() tea.Msg {
+					info, err := a.OnCheckUpdate()
+					if err != nil {
+						return updateCheckResultMsg{Err: err.Error()}
+					}
+					return updateCheckResultMsg{Info: info}
+				}
+			}
+			a.lastUPress = time.Now()
+			a.setFeedback("Press U again within 3s to check for updates")
+			return a, nil
+		}
 	}
 	if key != "u" {
 		a.lastUPress = time.Time{}

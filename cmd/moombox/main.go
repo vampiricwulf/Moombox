@@ -1159,6 +1159,23 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		app.OnRestart = func() { triggerRestart("TUI settings") }
 		if upd != nil {
+			app.OnCheckUpdate = func() (*tui.UpdateStatusMsg, error) {
+				log.Info("Update check requested from TUI")
+				release, err := upd.CheckForUpdate(context.Background())
+				if err != nil {
+					return nil, err
+				}
+				if release == nil {
+					return nil, nil
+				}
+				routes.SharedUpdateInfo.Store(release)
+				wsHub.Broadcast("update_available", release)
+				return &tui.UpdateStatusMsg{
+					Version:      release.Version,
+					TagName:      release.TagName,
+					ReleaseNotes: release.ReleaseNotes,
+				}, nil
+			}
 			app.OnApplyUpdate = func(ver string) string {
 				release := routes.SharedUpdateInfo.Load()
 				if release == nil {
