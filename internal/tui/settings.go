@@ -155,8 +155,27 @@ const (
 	securityRemove
 )
 
-// Notification events.
-var allNotifEvents = []string{"found", "live", "downloading", "finished", "error", "cancelled", "auth", "added"}
+// notifEventGroup groups notification events under a heading.
+type notifEventGroup struct {
+	name   string
+	events []string
+}
+
+// Notification event groups.
+var notifEventGroups = []notifEventGroup{
+	{"Job Lifecycle", []string{"found", "added", "scheduled", "live", "downloading", "muxing", "finished", "error", "cancelled", "auth"}},
+	{"Trim", []string{"trim_created", "trim_deleted", "trim_error"}},
+	{"System", []string{"disk_warning", "update_available"}},
+}
+
+// allNotifEvents is a flat list derived from the groups (preserves order).
+var allNotifEvents = func() []string {
+	var out []string
+	for _, g := range notifEventGroups {
+		out = append(out, g.events...)
+	}
+	return out
+}()
 
 // channelFieldDef defines a channel editor field.
 type channelFieldDef struct {
@@ -1944,36 +1963,42 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 	lines = append(lines, "")
 	lines = append(lines, DimStyle.Render("  Events (Space to toggle):"))
 
-	// Event checkboxes
-	for i, event := range allNotifEvents {
-		isFocused := m.notifEditFocus == i+1
-		isChecked := m.notifEditEvents[event]
+	// Event checkboxes grouped by category
+	flatIdx := 0
+	for _, group := range notifEventGroups {
+		lines = append(lines, "")
+		lines = append(lines, DimStyle.Render("  "+group.name))
+		for _, event := range group.events {
+			isFocused := m.notifEditFocus == flatIdx+1
+			isChecked := m.notifEditEvents[event]
 
-		prefix := "  "
-		if isFocused {
-			prefix = "> "
-		}
-
-		checkStr := " "
-		checkColor := ColorGray
-		if isChecked {
-			checkStr = "x"
-			checkColor = ColorGreen
-		}
-
-		eventStyle := lipgloss.NewStyle().Foreground(ColorWhite)
-		if isFocused {
-			eventStyle = lipgloss.NewStyle().Foreground(ColorCyan)
-		}
-
-		lines = append(lines, lipgloss.NewStyle().Foreground(func() lipgloss.Color {
+			prefix := "  "
 			if isFocused {
-				return ColorCyan
+				prefix = "> "
 			}
-			return ColorWhite
-		}()).Render(prefix)+
-			lipgloss.NewStyle().Foreground(checkColor).Render("["+checkStr+"]")+
-			eventStyle.Render(" "+event))
+
+			checkStr := " "
+			checkColor := ColorGray
+			if isChecked {
+				checkStr = "x"
+				checkColor = ColorGreen
+			}
+
+			eventStyle := lipgloss.NewStyle().Foreground(ColorWhite)
+			if isFocused {
+				eventStyle = lipgloss.NewStyle().Foreground(ColorCyan)
+			}
+
+			lines = append(lines, lipgloss.NewStyle().Foreground(func() lipgloss.Color {
+				if isFocused {
+					return ColorCyan
+				}
+				return ColorWhite
+			}()).Render(prefix)+
+				lipgloss.NewStyle().Foreground(checkColor).Render("["+checkStr+"]")+
+				eventStyle.Render(" "+event))
+			flatIdx++
+		}
 	}
 
 	return strings.Join(lines, "\n")

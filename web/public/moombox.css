@@ -845,6 +845,16 @@ sl-progress-bar {
     margin-right: var(--sl-spacing-2x-small);
 }
 
+.notification-group-label {
+    font-size: var(--sl-font-size-small);
+    color: var(--sl-color-neutral-500);
+    margin-left: var(--sl-spacing-2x-small);
+}
+
+.notification-group-label:first-child {
+    margin-left: 0;
+}
+
 .notification-events sl-tag {
     cursor: pointer;
 }

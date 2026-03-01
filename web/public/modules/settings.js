@@ -2,18 +2,39 @@
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
 
-const ALL_NOTIFICATION_EVENTS = [
-  { id: "found", label: "Found" },
-  { id: "added", label: "Added" },
-  { id: "scheduled", label: "Scheduled" },
-  { id: "live", label: "Live" },
-  { id: "downloading", label: "Downloading" },
-  { id: "muxing", label: "Muxing" },
-  { id: "finished", label: "Finished" },
-  { id: "error", label: "Error" },
-  { id: "cancelled", label: "Cancelled" },
-  { id: "auth", label: "Auth" },
+const NOTIFICATION_EVENT_GROUPS = [
+  {
+    name: "Job Lifecycle",
+    events: [
+      { id: "found", label: "Found" },
+      { id: "added", label: "Added" },
+      { id: "scheduled", label: "Scheduled" },
+      { id: "live", label: "Live" },
+      { id: "downloading", label: "Downloading" },
+      { id: "muxing", label: "Muxing" },
+      { id: "finished", label: "Finished" },
+      { id: "error", label: "Error" },
+      { id: "cancelled", label: "Cancelled" },
+      { id: "auth", label: "Auth" },
+    ],
+  },
+  {
+    name: "Trim",
+    events: [
+      { id: "trim_created", label: "Trim Created" },
+      { id: "trim_deleted", label: "Trim Deleted" },
+      { id: "trim_error", label: "Trim Error" },
+    ],
+  },
+  {
+    name: "System",
+    events: [
+      { id: "disk_warning", label: "Disk Warning" },
+      { id: "update_available", label: "Update Available" },
+    ],
+  },
 ];
+const ALL_NOTIFICATION_EVENTS = NOTIFICATION_EVENT_GROUPS.flatMap((g) => g.events);
 const ALL_EVENT_IDS = ALL_NOTIFICATION_EVENTS.map((e) => e.id);
 
 // Settings that require a process restart to take effect
@@ -902,15 +923,19 @@ export class SettingsController {
         let eventsHtml;
 
         if (hasFilter) {
-          const chips = ALL_NOTIFICATION_EVENTS.map((evt) => {
-            const active = notif.events.includes(evt.id);
-            const variant = active ? 'variant="primary"' : "";
-            return `<sl-tag size="small" ${variant} onclick="app.settings.toggleNotificationEvent(${idx}, '${evt.id}')">${evt.label}</sl-tag>`;
+          const grouped = NOTIFICATION_EVENT_GROUPS.map((group) => {
+            const chips = group.events
+              .map((evt) => {
+                const active = notif.events.includes(evt.id);
+                const variant = active ? 'variant="primary"' : "";
+                return `<sl-tag size="small" ${variant} onclick="app.settings.toggleNotificationEvent(${idx}, '${evt.id}')">${evt.label}</sl-tag>`;
+              })
+              .join("");
+            return `<span class="notification-group-label">${group.name}:</span>${chips}`;
           }).join("");
           eventsHtml = `
             <div class="notification-events">
-              <span class="notification-events-label">Events:</span>
-              ${chips}
+              ${grouped}
               <sl-tag size="small" variant="neutral" onclick="app.settings.clearNotificationFilter(${idx})">Clear filter</sl-tag>
             </div>`;
         } else {
