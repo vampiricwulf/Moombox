@@ -17,7 +17,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"io/fs"
 	"net/http"
@@ -1816,14 +1815,12 @@ func checkAndBroadcastUpdate(
 	}
 }
 
-// execNewBinary launches the updated binary in a new console window and exits.
+// execNewBinary launches the updated binary in the same console and waits.
 // This is called after an update has been applied and the graceful shutdown
 // has completed (port is released, database is closed, etc).
-// Uses syscall.CreateProcess directly (instead of exec.Command) because Go's
-// exec package always sets STARTF_USESTDHANDLES which overrides the new
-// console's handles with DevNull — leaving the new window empty. By calling
-// CreateProcess without that flag, the child gets proper stdio from its new
-// console.
+// The parent process is an empty shell at this point — all services are stopped.
+// It only stays alive to hold the console connection stable so the child's
+// BubbleTea properly saves and restores terminal state on exit.
 func execNewBinary() {
 	exe, err := os.Executable()
 	if err != nil {
@@ -1831,44 +1828,23 @@ func execNewBinary() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Launching updated binary in new window: %s\n", exe)
+	fmt.Printf("Launching updated binary: %s\n", exe)
 
-	// Build quoted command line: "exe" "arg1" "arg2" ...
-	cmdLine := syscall.EscapeArg(exe)
-	for _, arg := range os.Args[1:] {
-		cmdLine += " " + syscall.EscapeArg(arg)
-	}
-	cmdLineUTF16, err := syscall.UTF16PtrFromString(cmdLine)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to encode command line: %v\n", err)
+	cmd := exec.Command(exe, os.Args[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Ignore interrupts in the parent — let the child handle Ctrl+C.
+	signal.Ignore(os.Interrupt)
+
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "Failed to run updated binary: %v\n", err)
 		os.Exit(1)
 	}
-
-	var si syscall.StartupInfo
-	si.Cb = uint32(unsafe.Sizeof(si))
-	// Don't set Flags to STARTF_USESTDHANDLES — let the new console
-	// provide its own stdin/stdout/stderr.
-
-	var pi syscall.ProcessInformation
-	err = syscall.CreateProcess(
-		nil,          // lpApplicationName (parsed from command line)
-		cmdLineUTF16, // lpCommandLine
-		nil,          // lpProcessAttributes
-		nil,          // lpThreadAttributes
-		false,        // bInheritHandles
-		0x00000010,   // dwCreationFlags: CREATE_NEW_CONSOLE
-		nil,          // lpEnvironment (inherit)
-		nil,          // lpCurrentDirectory (inherit)
-		&si,
-		&pi,
-	)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start updated binary: %v\n", err)
-		os.Exit(1)
-	}
-
-	syscall.CloseHandle(pi.Thread)
-	syscall.CloseHandle(pi.Process)
 	os.Exit(0)
 }
 
