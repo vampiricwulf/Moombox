@@ -1624,14 +1624,21 @@ sl-progress-bar {
     margin-bottom: var(--sl-spacing-small);
 }
 
-#trim-controls {
+#trim-transport {
     display: flex;
+    justify-content: center;
     align-items: center;
     gap: var(--sl-spacing-2x-small);
+    margin-top: var(--sl-spacing-small);
+}
+
+#trim-controls {
+    display: flex;
+    gap: var(--sl-spacing-small);
     margin-bottom: var(--sl-spacing-small);
 }
 
-.trim-spacer {
+#trim-controls sl-button {
     flex: 1;
 }
 
@@ -1656,15 +1663,6 @@ sl-progress-bar {
 @media (max-width: 768px) {
     #trim-video {
         max-height: 35vh;
-    }
-
-    #trim-controls {
-        flex-wrap: wrap;
-        justify-content: center;
-    }
-
-    #trim-controls .trim-spacer {
-        display: none;
     }
 }
 
