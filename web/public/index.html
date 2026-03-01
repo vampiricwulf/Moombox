@@ -716,6 +716,16 @@
                             ></sl-input>
 
                             <sl-divider></sl-divider>
+                            <h4>Active Platforms</h4>
+                            <div style="display: flex; gap: 1.5em; margin-bottom: 0.75em;">
+                                <sl-switch id="cfg-active-youtube">YouTube cookies</sl-switch>
+                                <sl-switch id="cfg-active-twitch">Twitch cookies</sl-switch>
+                            </div>
+                            <p class="settings-help" style="margin-top: 0;">
+                                Controls which platform indicators are shown. Auto-detected from channels if not overridden.
+                            </p>
+
+                            <sl-divider></sl-divider>
                             <h4>Automatic Cookie Login</h4>
                             <sl-switch id="cfg-auto-cookies-enabled">
                                 Enable automatic cookie acquisition
@@ -733,11 +743,18 @@
                             ></sl-input>
                             <div id="auto-cookie-actions" style="display: none">
                                 <sl-button
-                                    id="btn-auto-cookie-setup"
+                                    id="btn-auto-cookie-setup-yt"
                                     variant="primary"
                                     size="small"
                                 >
-                                    Setup / Re-login
+                                    Setup YouTube
+                                </sl-button>
+                                <sl-button
+                                    id="btn-auto-cookie-setup-tw"
+                                    variant="primary"
+                                    size="small"
+                                >
+                                    Setup Twitch
                                 </sl-button>
                                 <span
                                     id="auto-cookie-browser-info"
@@ -1014,37 +1031,12 @@
 
         <!-- Auto Cookie Setup Dialog (global, accessible from any tab) -->
         <sl-dialog label="Cookie Login" id="auto-cookie-setup-dialog" style="--width: 28rem">
-            <!-- Full mode: Step 1 — YouTube login -->
-            <div id="auto-cookie-step-1">
-                <sl-alert variant="primary" open>
-                    A browser window has opened. Sign in to
-                    Google/YouTube, then choose an option below.
-                </sl-alert>
-                <div style="margin-top: 0.5em; display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap;">
-                    <sl-button id="btn-auto-cookie-twitch" variant="primary" size="small">Next: Twitch Login</sl-button>
-                    <sl-button id="btn-auto-cookie-done" variant="success" size="small">Skip Twitch, Finish</sl-button>
-                    <sl-button id="btn-auto-cookie-cancel" variant="neutral" size="small">Cancel</sl-button>
-                </div>
-            </div>
-            <!-- Full mode: Step 2 — Twitch login -->
-            <div id="auto-cookie-step-2" style="display: none">
-                <sl-alert variant="primary" open>
-                    <span id="auto-cookie-twitch-instructions">Now sign in to Twitch in the browser window, then click Done.</span>
-                </sl-alert>
-                <div style="margin-top: 0.5em; display: flex; gap: 0.5em; align-items: center;">
-                    <sl-button id="btn-auto-cookie-finish" variant="success" size="small">I'm Done</sl-button>
-                    <sl-button id="btn-auto-cookie-cancel-2" variant="neutral" size="small">Cancel</sl-button>
-                </div>
-            </div>
-            <!-- Single-platform mode — re-login for one platform -->
-            <div id="auto-cookie-single-platform" style="display: none">
-                <sl-alert variant="warning" open>
-                    <span id="auto-cookie-single-instructions">A browser window has opened. Please sign in, then click "I'm Logged In".</span>
-                </sl-alert>
-                <div style="margin-top: 0.5em; display: flex; gap: 0.5em; align-items: center;">
-                    <sl-button id="btn-auto-cookie-single-done" variant="success" size="small">I'm Logged In</sl-button>
-                    <sl-button id="btn-auto-cookie-single-cancel" variant="neutral" size="small">Cancel</sl-button>
-                </div>
+            <sl-alert variant="primary" open>
+                <span id="auto-cookie-instructions">A browser window has opened. Please sign in, then click "I'm Logged In".</span>
+            </sl-alert>
+            <div style="margin-top: 0.5em; display: flex; gap: 0.5em; align-items: center;">
+                <sl-button id="btn-auto-cookie-done" variant="success" size="small">I'm Logged In</sl-button>
+                <sl-button id="btn-auto-cookie-cancel" variant="neutral" size="small">Cancel</sl-button>
             </div>
             <span id="auto-cookie-setup-result" style="display: block; margin-top: 0.5em;"></span>
         </sl-dialog>

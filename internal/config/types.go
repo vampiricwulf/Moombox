@@ -72,6 +72,7 @@ type CookiesConfig struct {
 	AutoEnabled       bool         `toml:"auto_enabled" json:"auto_enabled"`
 	BrowserProfileDir string       `toml:"browser_profile_dir,omitempty" json:"browser_profile_dir,omitempty"`
 	Platforms         []string     `toml:"platforms,omitempty" json:"platforms,omitempty"`
+	ActivePlatforms   []string     `toml:"active_platforms,omitempty" json:"active_platforms,omitempty"`
 	RefreshInterval   FlexDuration `toml:"refresh_interval" json:"refresh_interval"`
 }
 

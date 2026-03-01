@@ -24,6 +24,8 @@ type StatusBarModel struct {
 	focusedPanel FocusPanel
 	ytCookie     CookieStatus
 	twCookie     CookieStatus
+	ytActive     bool
+	twActive     bool
 	// Jobs list for detecting COOKIES? status (B1)
 	jobs []*database.Job
 }
@@ -47,6 +49,12 @@ func (m *StatusBarModel) SetFocused(panel FocusPanel) {
 func (m *StatusBarModel) SetCookieStatus(yt, tw CookieStatus) {
 	m.ytCookie = yt
 	m.twCookie = tw
+}
+
+// SetActivePlatforms sets which platform indicators are visible.
+func (m *StatusBarModel) SetActivePlatforms(yt, tw bool) {
+	m.ytActive = yt
+	m.twActive = tw
 }
 
 // SetJobs updates the jobs reference for COOKIES? detection (B1).
@@ -150,6 +158,10 @@ func (m *StatusBarModel) renderControls() string {
 
 // renderCookieStatus renders auth indicators and warnings (B2).
 func (m *StatusBarModel) renderCookieStatus() string {
+	if !m.ytActive && !m.twActive {
+		return ""
+	}
+
 	var parts []string
 
 	// Check if any job has COOKIES? status (B1)
@@ -161,31 +173,34 @@ func (m *StatusBarModel) renderCookieStatus() string {
 		}
 	}
 
-	// YouTube status
-	switch {
-	case m.ytCookie == CookieStatusRelogin:
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("YT: Re-login"))
-	case m.ytCookie == CookieStatusNone:
-		parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("YT"))
-	case cookiesRejected || m.ytCookie == CookieStatusCookiesOnly:
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("YT"))
-	case m.ytCookie == CookieStatusOK:
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorGreen).Render("YT"))
-	default:
-		parts = append(parts, DimStyle.Render("YT"))
+	// YouTube status (only if active)
+	if m.ytActive {
+		switch {
+		case m.ytCookie == CookieStatusRelogin:
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("YT: Re-login"))
+		case m.ytCookie == CookieStatusNone:
+			parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("YT"))
+		case cookiesRejected || m.ytCookie == CookieStatusCookiesOnly:
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("YT"))
+		case m.ytCookie == CookieStatusOK:
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorGreen).Render("YT"))
+		default:
+			parts = append(parts, DimStyle.Render("YT"))
+		}
 	}
 
-	// Twitch status
-	switch {
-	case m.twCookie == CookieStatusRelogin:
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("TW: Re-login"))
-	case m.twCookie == CookieStatusCookiesOnly:
-		// Cookies present but auth failed (match TS: red for CookiesOnly)
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("TW"))
-	case m.twCookie == CookieStatusOK:
-		parts = append(parts, lipgloss.NewStyle().Foreground(ColorGreen).Render("TW"))
-	default:
-		parts = append(parts, DimStyle.Render("TW"))
+	// Twitch status (only if active)
+	if m.twActive {
+		switch {
+		case m.twCookie == CookieStatusRelogin:
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("TW: Re-login"))
+		case m.twCookie == CookieStatusCookiesOnly:
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("TW"))
+		case m.twCookie == CookieStatusOK:
+			parts = append(parts, lipgloss.NewStyle().Foreground(ColorGreen).Render("TW"))
+		default:
+			parts = append(parts, DimStyle.Render("TW"))
+		}
 	}
 
 	return strings.Join(parts, " ") + " "

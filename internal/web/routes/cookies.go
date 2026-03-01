@@ -10,7 +10,7 @@ import (
 )
 
 // CookieRoutes registers cookie-related API routes.
-func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService) {
+func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool) {
 	// POST /api/v1/cookies/recheck
 	r.Post("/api/v1/cookies/recheck", func(rw http.ResponseWriter, req *http.Request) {
 		refreshSvc.CheckNow(req.Context())
@@ -30,6 +30,9 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
 		} else {
 			response["autoCookieReloginRequired"] = cookies.AutoCookieReloginRequired{}
+		}
+		if getActivePlatforms != nil {
+			response["activePlatforms"] = getActivePlatforms()
 		}
 		jsonResponse(rw, response)
 	})
@@ -80,20 +83,6 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			"authenticated":       ytAuth,
 			"twitchAuthenticated": twAuth,
 		})
-	})
-
-	// POST /api/v1/cookies/auto-setup/navigate-twitch
-	r.Post("/api/v1/cookies/auto-setup/navigate-twitch", func(rw http.ResponseWriter, req *http.Request) {
-		if autoCookieSvc == nil {
-			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
-			return
-		}
-
-		if err := autoCookieSvc.NavigateToTwitch(); err != nil {
-			jsonResponse(rw, map[string]any{"success": false, "error": err.Error()})
-			return
-		}
-		jsonResponse(rw, map[string]any{"success": true})
 	})
 
 	// POST /api/v1/cookies/auto-setup/cancel

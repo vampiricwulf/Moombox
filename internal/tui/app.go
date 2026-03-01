@@ -41,8 +41,10 @@ type (
 		NextTwitchCheck time.Time
 	}
 	CookieStatusMsg struct {
-		YT CookieStatus
-		TW CookieStatus
+		YT       CookieStatus
+		TW       CookieStatus
+		YTActive bool
+		TWActive bool
 	}
 	tickMsg         struct{}
 	progressTickMsg struct{}
@@ -436,6 +438,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CookieStatusMsg:
 		a.statusBar.SetCookieStatus(msg.YT, msg.TW)
+		a.statusBar.SetActivePlatforms(msg.YTActive, msg.TWActive)
 		return a, a.listenForUpdates()
 
 	case addVideoResultMsg:

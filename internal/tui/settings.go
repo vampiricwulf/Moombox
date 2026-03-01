@@ -102,6 +102,8 @@ var sections = []settingsSection{
 		name: "Cookies",
 		fields: []fieldDef{
 			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt"},
+			{"active_youtube", "YouTube cookies", fieldToggle, nil, "show YouTube cookie status"},
+			{"active_twitch", "Twitch cookies", fieldToggle, nil, "show Twitch cookie status"},
 			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "browser-based cookie acquisition"},
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data"},
 		},
@@ -335,6 +337,9 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 
 	// Cookies
 	m.values["cookie_file"] = cfg.Cookies.CookieFile
+	ytActive, twActive := config.GetActivePlatforms(cfg)
+	m.values["active_youtube"] = boolToDisplay(ytActive)
+	m.values["active_twitch"] = boolToDisplay(twActive)
 	m.values["auto_enabled"] = boolToDisplay(cfg.Cookies.AutoEnabled)
 	m.values["browser_profile_dir"] = cfg.Cookies.BrowserProfileDir
 }
@@ -398,6 +403,14 @@ func (m *SettingsModel) applyValues() {
 
 	// Cookies
 	m.cfg.Cookies.CookieFile = m.values["cookie_file"]
+	var activePlats []string
+	if m.values["active_youtube"] == "Yes" {
+		activePlats = append(activePlats, "youtube")
+	}
+	if m.values["active_twitch"] == "Yes" {
+		activePlats = append(activePlats, "twitch")
+	}
+	m.cfg.Cookies.ActivePlatforms = activePlats
 	m.cfg.Cookies.AutoEnabled = m.values["auto_enabled"] == "Yes"
 	m.cfg.Cookies.BrowserProfileDir = m.values["browser_profile_dir"]
 

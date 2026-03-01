@@ -1156,7 +1156,6 @@ All routes below are under `/api/v1` (aliased to `/api`). Error responses: `{ "e
 | POST | `/cookies/recheck` | Full cookie validation cycle. Returns `{ success, cookieStatus, twitchAuthStatus, autoCookieReloginRequired }`. |
 | POST | `/cookies/auto-setup/start` | Body: `{ platform?: "youtube"\|"twitch" }`. Launches browser. |
 | POST | `/cookies/auto-setup/finish` | Extracts cookies from browser. Returns `{ success, authenticated, twitchAuthenticated }`. |
-| POST | `/cookies/auto-setup/navigate-twitch` | CDP navigate to Twitch login (Chromium only). |
 | POST | `/cookies/auto-setup/cancel` | Kills browser. |
 | GET | `/cookies/auto-status` | `{ configured, setupInProgress, browser, lastRefresh, lastError, needsManualRelogin }`. |
 

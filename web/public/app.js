@@ -356,6 +356,7 @@ class MoomboxApp {
         this.autoCookieReloginRequired = status.autoCookieReloginRequired || null;
         this.cookieStatus = status.cookieStatus;
         this.twitchAuthStatus = status.twitchAuthStatus;
+        this.activePlatforms = status.activePlatforms || {};
         this.updateStatusBar();
       }
     } catch (e) {
@@ -374,6 +375,7 @@ class MoomboxApp {
         this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
         this.cookieStatus = data.cookieStatus;
         this.twitchAuthStatus = data.twitchAuthStatus;
+        if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
         this.showToast(
           data.success
@@ -393,42 +395,56 @@ class MoomboxApp {
 
   updateStatusBar() {
     const autoCookiesEnabled = this.config?.cookies?.auto_enabled === true;
+    const ytActive = this.activePlatforms?.youtube !== false;
+    const twActive = this.activePlatforms?.twitch !== false;
 
-    // 1. Warnings (clickable, to the left)
+    // 1. Warnings (clickable, to the left) — only for active platforms
     const warningsEl = document.getElementById("status-warnings");
     if (warningsEl) {
       const warnings = [];
-      if (autoCookiesEnabled && this.autoCookieReloginRequired?.youtube)
+      if (ytActive && autoCookiesEnabled && this.autoCookieReloginRequired?.youtube)
         warnings.push('<span class="status-warning" data-action="yt-relogin" title="Click to re-login">YT: Re-login</span>');
-      if (autoCookiesEnabled && this.autoCookieReloginRequired?.twitch)
+      if (twActive && autoCookiesEnabled && this.autoCookieReloginRequired?.twitch)
         warnings.push('<span class="status-warning" data-action="tw-relogin" title="Click to re-login">TW: Re-login</span>');
       warningsEl.innerHTML = warnings.join("");
     }
 
-    // 2. YT indicator (color only)
+    // 2. YT indicator (hidden if platform not active)
     const ytEl = document.getElementById("yt-indicator");
     if (ytEl) {
-      if (this.autoCookieReloginRequired?.youtube && autoCookiesEnabled) {
-        ytEl.className = "indicator-error"; ytEl.title = "YouTube: Re-login required";
-      } else if (!this.cookieStatus?.found) {
-        ytEl.className = "indicator-warn"; ytEl.title = "YouTube: No cookies";
-      } else if (this.cookieStatus?.authenticated) {
-        ytEl.className = "indicator-ok"; ytEl.title = "YouTube: Authenticated";
-      } else {
-        ytEl.className = "indicator-error"; ytEl.title = "YouTube: Not verified";
+      ytEl.style.display = ytActive ? "" : "none";
+      if (ytActive) {
+        if (this.autoCookieReloginRequired?.youtube && autoCookiesEnabled) {
+          ytEl.className = "indicator-error"; ytEl.title = "YouTube: Re-login required";
+        } else if (!this.cookieStatus?.found) {
+          ytEl.className = "indicator-warn"; ytEl.title = "YouTube: No cookies";
+        } else if (this.cookieStatus?.authenticated) {
+          ytEl.className = "indicator-ok"; ytEl.title = "YouTube: Authenticated";
+        } else {
+          ytEl.className = "indicator-error"; ytEl.title = "YouTube: Not verified";
+        }
       }
     }
 
-    // 3. TW indicator (color only)
+    // 3. TW indicator (hidden if platform not active)
     const twEl = document.getElementById("tw-indicator");
     if (twEl) {
-      if (this.autoCookieReloginRequired?.twitch && autoCookiesEnabled) {
-        twEl.className = "indicator-error"; twEl.title = "Twitch: Re-login required";
-      } else if (this.twitchAuthStatus?.authenticated) {
-        twEl.className = "indicator-ok"; twEl.title = "Twitch: Authenticated";
-      } else {
-        twEl.className = "indicator-off"; twEl.title = "Twitch: Anonymous";
+      twEl.style.display = twActive ? "" : "none";
+      if (twActive) {
+        if (this.autoCookieReloginRequired?.twitch && autoCookiesEnabled) {
+          twEl.className = "indicator-error"; twEl.title = "Twitch: Re-login required";
+        } else if (this.twitchAuthStatus?.authenticated) {
+          twEl.className = "indicator-ok"; twEl.title = "Twitch: Authenticated";
+        } else {
+          twEl.className = "indicator-off"; twEl.title = "Twitch: Anonymous";
+        }
       }
+    }
+
+    // 4. Hide refresh button if neither platform is active
+    const refreshBtn = document.getElementById("btn-refresh-cookies");
+    if (refreshBtn) {
+      refreshBtn.style.display = (ytActive || twActive) ? "" : "none";
     }
   }
 

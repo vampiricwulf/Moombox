@@ -137,48 +137,34 @@ export class SettingsController {
       autoCookiesSwitch.addEventListener("sl-change", () => this.updateAutoCookieUI());
     }
 
-    // Auto-cookie setup button
-    const autoCookieSetupBtn = document.getElementById("btn-auto-cookie-setup");
-    if (autoCookieSetupBtn) {
-      autoCookieSetupBtn.addEventListener("click", () => this.startAutoCookieSetup());
+    // Per-platform setup buttons
+    const setupYtBtn = document.getElementById("btn-auto-cookie-setup-yt");
+    if (setupYtBtn) {
+      setupYtBtn.addEventListener("click", () => this.startAutoCookieSetup("youtube"));
+    }
+    const setupTwBtn = document.getElementById("btn-auto-cookie-setup-tw");
+    if (setupTwBtn) {
+      setupTwBtn.addEventListener("click", () => this.startAutoCookieSetup("twitch"));
     }
 
-    // Auto-cookie "Skip Twitch, Finish" button (step 1)
+    // Auto-cookie dialog buttons
     const autoCookieDoneBtn = document.getElementById("btn-auto-cookie-done");
     if (autoCookieDoneBtn) {
       autoCookieDoneBtn.addEventListener("click", () => this.finishAutoCookieSetup());
     }
-
-    // Auto-cookie "Next: Twitch Login" button (step 1 → step 2)
-    const autoCookieTwitchBtn = document.getElementById("btn-auto-cookie-twitch");
-    if (autoCookieTwitchBtn) {
-      autoCookieTwitchBtn.addEventListener("click", () => this.navigateToTwitch());
-    }
-
-    // Auto-cookie "I'm Done" button (step 2)
-    const autoCookieFinishBtn = document.getElementById("btn-auto-cookie-finish");
-    if (autoCookieFinishBtn) {
-      autoCookieFinishBtn.addEventListener("click", () => this.finishAutoCookieSetup());
-    }
-
-    // Auto-cookie cancel buttons (both steps)
     const autoCookieCancelBtn = document.getElementById("btn-auto-cookie-cancel");
     if (autoCookieCancelBtn) {
       autoCookieCancelBtn.addEventListener("click", () => this.cancelAutoCookieSetup());
     }
-    const autoCookieCancelBtn2 = document.getElementById("btn-auto-cookie-cancel-2");
-    if (autoCookieCancelBtn2) {
-      autoCookieCancelBtn2.addEventListener("click", () => this.cancelAutoCookieSetup());
-    }
 
-    // Auto-cookie single-platform mode buttons
-    const singleDoneBtn = document.getElementById("btn-auto-cookie-single-done");
-    if (singleDoneBtn) {
-      singleDoneBtn.addEventListener("click", () => this.finishAutoCookieSetup());
+    // Active platform toggles
+    const activeYtSwitch = document.getElementById("cfg-active-youtube");
+    if (activeYtSwitch) {
+      activeYtSwitch.addEventListener("sl-change", () => this.updateAutoCookieUI());
     }
-    const singleCancelBtn = document.getElementById("btn-auto-cookie-single-cancel");
-    if (singleCancelBtn) {
-      singleCancelBtn.addEventListener("click", () => this.cancelAutoCookieSetup());
+    const activeTwSwitch = document.getElementById("cfg-active-twitch");
+    if (activeTwSwitch) {
+      activeTwSwitch.addEventListener("sl-change", () => this.updateAutoCookieUI());
     }
 
     // Unsaved changes warning
@@ -292,6 +278,26 @@ export class SettingsController {
 
     // Cookies settings
     this.app.setInputValue("cfg-cookie-file", config.cookies?.cookie_file);
+
+    // Active platform toggles — use explicit override or infer from activePlatforms status
+    const activePlats = config.cookies?.active_platforms;
+    const activeYtSwitch = document.getElementById("cfg-active-youtube");
+    const activeTwSwitch = document.getElementById("cfg-active-twitch");
+    if (activeYtSwitch) {
+      if (activePlats && activePlats.length > 0) {
+        activeYtSwitch.checked = activePlats.includes("youtube");
+      } else {
+        activeYtSwitch.checked = this.app.activePlatforms?.youtube !== false;
+      }
+    }
+    if (activeTwSwitch) {
+      if (activePlats && activePlats.length > 0) {
+        activeTwSwitch.checked = activePlats.includes("twitch");
+      } else {
+        activeTwSwitch.checked = this.app.activePlatforms?.twitch === true;
+      }
+    }
+
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     if (autoCookiesSwitch) {
       autoCookiesSwitch.checked = config.cookies?.auto_enabled === true;
@@ -374,6 +380,11 @@ export class SettingsController {
     const prefer60fps = prefer60fpsSwitch ? prefer60fpsSwitch.checked : true;
 
     const cookieFile = this.app.getInputValue("cfg-cookie-file");
+    const activeYtSwitch = document.getElementById("cfg-active-youtube");
+    const activeTwSwitch = document.getElementById("cfg-active-twitch");
+    const activePlatforms = [];
+    if (activeYtSwitch?.checked) activePlatforms.push("youtube");
+    if (activeTwSwitch?.checked) activePlatforms.push("twitch");
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     const autoEnabled = autoCookiesSwitch ? autoCookiesSwitch.checked : false;
     const autoCookiesProfileDir = this.app.getInputValue("cfg-auto-cookies-profile-dir");
@@ -425,6 +436,7 @@ export class SettingsController {
 
     config.cookies = {
       cookie_file: cookieFile || undefined,
+      active_platforms: activePlatforms,
       auto_enabled: autoEnabled,
       browser_profile_dir: autoCookiesProfileDir || undefined,
     };
@@ -1192,6 +1204,13 @@ export class SettingsController {
     if (actionsDiv) {
       actionsDiv.style.display = enabled ? "" : "none";
     }
+    // Show/hide per-platform setup buttons based on active toggles
+    const ytActive = document.getElementById("cfg-active-youtube")?.checked;
+    const twActive = document.getElementById("cfg-active-twitch")?.checked;
+    const ytBtn = document.getElementById("btn-auto-cookie-setup-yt");
+    const twBtn = document.getElementById("btn-auto-cookie-setup-tw");
+    if (ytBtn) ytBtn.style.display = (enabled && ytActive) ? "" : "none";
+    if (twBtn) twBtn.style.display = (enabled && twActive) ? "" : "none";
     // Fetch and show detected browser info
     if (enabled) {
       this.loadAutoCookieStatus();
@@ -1229,62 +1248,38 @@ export class SettingsController {
   }
 
   async startAutoCookieSetup(platform) {
+    if (!platform) return;
+
     const resultEl = document.getElementById("auto-cookie-setup-result");
     if (resultEl) {
       resultEl.textContent = "";
       resultEl.style.color = "";
     }
 
-    // For full mode (from Settings button), save config first
-    if (!platform) {
-      await this.saveConfig();
-    }
-
-    const body = platform ? { platform } : {};
-
     try {
       const response = await fetch("/api/cookies/auto-setup/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ platform }),
       });
       const data = await response.json();
 
       if (data.success) {
         const dialog = document.getElementById("auto-cookie-setup-dialog");
-        const step1 = document.getElementById("auto-cookie-step-1");
-        const step2 = document.getElementById("auto-cookie-step-2");
-        const singlePlatform = document.getElementById("auto-cookie-single-platform");
+        const instructions = document.getElementById("auto-cookie-instructions");
 
-        if (platform) {
-          // Single-platform re-login mode
-          if (step1) step1.style.display = "none";
-          if (step2) step2.style.display = "none";
-          if (singlePlatform) singlePlatform.style.display = "";
-
-          // Update instructions
-          const instructions = document.getElementById("auto-cookie-single-instructions");
-          if (instructions) {
-            if (platform === "twitch") {
-              instructions.textContent = "A browser window has opened to Twitch. Please sign in, then click \"I'm Logged In\".";
-            } else {
-              instructions.textContent = "A browser window has opened to Google. Please sign in to YouTube, then click \"I'm Logged In\".";
-            }
+        if (instructions) {
+          if (platform === "twitch") {
+            instructions.textContent = "A browser window has opened to Twitch. Please sign in, then click \"I'm Logged In\".";
+          } else {
+            instructions.textContent = "A browser window has opened to Google. Please sign in to YouTube, then click \"I'm Logged In\".";
           }
-
-          // Update dialog title
-          if (dialog) {
-            dialog.label = platform === "twitch" ? "Re-login: Twitch" : "Re-login: YouTube";
-          }
-        } else {
-          // Full two-step mode
-          if (step1) step1.style.display = "";
-          if (step2) step2.style.display = "none";
-          if (singlePlatform) singlePlatform.style.display = "none";
-          if (dialog) dialog.label = "Cookie Login";
         }
 
-        if (dialog) dialog.show();
+        if (dialog) {
+          dialog.label = platform === "twitch" ? "Setup: Twitch" : "Setup: YouTube";
+          dialog.show();
+        }
       } else {
         this.app.showToast(data.error || "Failed to start setup", "danger");
       }
@@ -1293,62 +1288,10 @@ export class SettingsController {
     }
   }
 
-  async navigateToTwitch() {
-    const resultEl = document.getElementById("auto-cookie-setup-result");
-    const twitchBtn = document.getElementById("btn-auto-cookie-twitch");
-    if (twitchBtn) twitchBtn.loading = true;
-    if (resultEl) {
-      resultEl.textContent = "Navigating to Twitch...";
-      resultEl.style.color = "";
-    }
-
-    try {
-      const response = await fetch("/api/cookies/auto-setup/navigate-twitch", { method: "POST" });
-      const data = await response.json();
-
-      if (data.success) {
-        // Switch to step 2
-        const step1 = document.getElementById("auto-cookie-step-1");
-        const step2 = document.getElementById("auto-cookie-step-2");
-        if (step1) step1.style.display = "none";
-        if (step2) step2.style.display = "";
-
-        // Update instructions based on whether browser was auto-navigated
-        const instructions = document.getElementById("auto-cookie-twitch-instructions");
-        if (instructions) {
-          if (data.manual) {
-            instructions.textContent = "Navigate to twitch.tv in the browser window and sign in, then click Done.";
-          } else {
-            instructions.textContent = "The browser has navigated to Twitch. Sign in, then click Done.";
-          }
-        }
-
-        if (resultEl) resultEl.textContent = "";
-      } else {
-        if (resultEl) {
-          resultEl.textContent = data.error || "Failed to navigate to Twitch";
-          resultEl.style.color = "var(--sl-color-danger-600)";
-        }
-      }
-    } catch (e) {
-      if (resultEl) {
-        resultEl.textContent = "Error: " + e.message;
-        resultEl.style.color = "var(--sl-color-danger-600)";
-      }
-    } finally {
-      if (twitchBtn) twitchBtn.loading = false;
-    }
-  }
-
   async finishAutoCookieSetup() {
     const resultEl = document.getElementById("auto-cookie-setup-result");
-    // Disable all finish buttons during extraction
     const doneBtn = document.getElementById("btn-auto-cookie-done");
-    const finishBtn = document.getElementById("btn-auto-cookie-finish");
-    const singleDoneBtn = document.getElementById("btn-auto-cookie-single-done");
     if (doneBtn) doneBtn.loading = true;
-    if (finishBtn) finishBtn.loading = true;
-    if (singleDoneBtn) singleDoneBtn.loading = true;
     if (resultEl) {
       resultEl.textContent = "Extracting cookies...";
       resultEl.style.color = "";
@@ -1365,12 +1308,10 @@ export class SettingsController {
         if (resultEl) resultEl.textContent = "";
         const dialog = document.getElementById("auto-cookie-setup-dialog");
         if (dialog) dialog.hide();
-        const ytStatus = ytOk ? "\u2713" : "\u2717";
-        const twStatus = twOk ? "\u2713" : "\u2717";
-        this.app.showToast(
-          `Setup complete \u2014 YouTube: ${ytStatus}, Twitch: ${twStatus}`,
-          "success",
-        );
+        const parts = [];
+        if (ytOk) parts.push("YouTube: \u2713");
+        if (twOk) parts.push("Twitch: \u2713");
+        this.app.showToast(`Setup complete \u2014 ${parts.join(", ")}`, "success");
         this.app.loadStatus();
       } else {
         if (resultEl) {
@@ -1385,8 +1326,6 @@ export class SettingsController {
       }
     } finally {
       if (doneBtn) doneBtn.loading = false;
-      if (finishBtn) finishBtn.loading = false;
-      if (singleDoneBtn) singleDoneBtn.loading = false;
     }
   }
 
@@ -1403,12 +1342,5 @@ export class SettingsController {
       resultEl.textContent = "";
       resultEl.style.color = "";
     }
-    // Reset all content divs for next time
-    const step1 = document.getElementById("auto-cookie-step-1");
-    const step2 = document.getElementById("auto-cookie-step-2");
-    const singlePlatform = document.getElementById("auto-cookie-single-platform");
-    if (step1) step1.style.display = "";
-    if (step2) step2.style.display = "none";
-    if (singlePlatform) singlePlatform.style.display = "none";
   }
 }

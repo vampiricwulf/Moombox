@@ -320,31 +320,6 @@ func (s *AutoCookieService) CancelSetup() {
 	s.logger.Info("auto-cookie setup cancelled")
 }
 
-// NavigateToTwitch navigates the Chromium setup browser to Twitch login.
-func (s *AutoCookieService) NavigateToTwitch() error {
-	s.mu.Lock()
-	if s.setupProcess == nil || s.setupBrowser == nil {
-		s.mu.Unlock()
-		return fmt.Errorf("no setup in progress")
-	}
-	browser := s.setupBrowser
-	port := s.cdpPort
-	s.mu.Unlock()
-
-	if isFirefoxBased(browser.Type) {
-		return nil // Firefox: user navigates manually
-	}
-
-	if port == 0 {
-		return fmt.Errorf("CDP port not available")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	return cdpNavigate(ctx, port, twitchLoginURL)
-}
-
 // RefreshCookies performs a headless browser visit to refresh cookies.
 func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	browser := DetectBrowser()

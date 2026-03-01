@@ -375,6 +375,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	webServer.SetAuth(authSvc)
 	r.Use(webServer.AuthMiddleware)
 
+	// Shared closure: determines which platforms are active for cookie status display.
+	getActivePlatforms := func() map[string]bool {
+		yt, tw := config.GetActivePlatforms(cfg)
+		return map[string]bool{"youtube": yt, "twitch": tw}
+	}
+
 	// Register all routes
 	routes.JobRoutes(r, db, cfg, dlWorker, apiRL, &twitchMetadataAdapter{svc: twService}, &youtubeMetadataAdapter{svc: ytService}, notifyMgr)
 	routes.FormatRoutes(r, &routes.FormatRoutesDeps{
@@ -385,6 +391,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	routes.StatusRoute(r, &routes.StatusRouteDeps{
 		Cfg:       cfg,
 		StartTime: startTime,
+		GetActivePlatforms: getActivePlatforms,
 		GetCookieStatus: func() map[string]any {
 			status := cookieRefresh.GetStatus()
 			return map[string]any{
@@ -447,7 +454,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	})
 	routes.LogRoutes(r, log.GetRecentLines)
 	routes.ImportRoutes(r, db, cfg, apiRL)
-	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc)
+	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc, getActivePlatforms)
 	routes.YtdlpRoutes(r, cfg.Network.Port)
 	routes.RestartRoute(r, func() {
 		log.Info("Restart requested via API")
@@ -1108,8 +1115,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					tw = tui.CookieStatusRelogin
 				}
 			}
+			ytActive, twActive := config.GetActivePlatforms(cfg)
 			select {
-			case cookieStatusCh <- tui.CookieStatusMsg{YT: yt, TW: tw}:
+			case cookieStatusCh <- tui.CookieStatusMsg{YT: yt, TW: tw, YTActive: ytActive, TWActive: twActive}:
 			default:
 			}
 		}

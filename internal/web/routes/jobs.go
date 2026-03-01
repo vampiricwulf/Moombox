@@ -960,6 +960,7 @@ type StatusRouteDeps struct {
 	GetCookieStatus            func() map[string]any
 	GetTwitchAuthStatus        func() map[string]any
 	GetAutoCookieReloginNeeded func() any
+	GetActivePlatforms         func() map[string]bool
 	GetNextFeedCheck           func() int64
 	GetNextDecapiCheck         func() int64
 	GetNextTwitchCheck         func() int64
@@ -985,6 +986,9 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 			"version": "1.0.0-go",
 		}
 
+		if deps.GetActivePlatforms != nil {
+			resp["activePlatforms"] = deps.GetActivePlatforms()
+		}
 		if deps.GetCookieStatus != nil {
 			resp["cookieStatus"] = deps.GetCookieStatus()
 		}
@@ -1303,6 +1307,15 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 				}
 			}
 			cfg.Cookies.Platforms = platforms
+		}
+		if v, ok := ck["active_platforms"].([]any); ok {
+			var activePlatforms []string
+			for _, p := range v {
+				if s, ok := p.(string); ok {
+					activePlatforms = append(activePlatforms, s)
+				}
+			}
+			cfg.Cookies.ActivePlatforms = activePlatforms
 		}
 		if v, ok := ck["refresh_interval"].(float64); ok {
 			cfg.Cookies.RefreshInterval = config.FlexDuration{Value: v}

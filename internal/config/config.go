@@ -357,6 +357,39 @@ func Save(cfg *MoomboxConfig, path string) error {
 	return nil
 }
 
+// GetActivePlatforms determines which platforms are active for cookie status
+// display. If ActivePlatforms is explicitly set, it is used as-is. Otherwise,
+// the function infers active platforms from the enabled channels list.
+func GetActivePlatforms(cfg *MoomboxConfig) (youtube, twitch bool) {
+	if len(cfg.Cookies.ActivePlatforms) > 0 {
+		for _, p := range cfg.Cookies.ActivePlatforms {
+			switch strings.ToLower(p) {
+			case "youtube":
+				youtube = true
+			case "twitch":
+				twitch = true
+			}
+		}
+		return
+	}
+	// Infer from enabled channels
+	for i := range cfg.Channels {
+		if !cfg.Channels[i].IsEnabled() {
+			continue
+		}
+		switch cfg.Channels[i].GetPlatform() {
+		case "youtube":
+			youtube = true
+		case "twitch":
+			twitch = true
+		}
+		if youtube && twitch {
+			return
+		}
+	}
+	return
+}
+
 // sanitizeTemplateStr removes invalid filesystem characters from a string,
 // preserving Unicode characters (CJK, Japanese, etc).
 var invalidFSChars = regexp.MustCompile(`[^\w\s\-\x{3000}-\x{303F}\x{3040}-\x{309F}\x{30A0}-\x{30FF}\x{FF00}-\x{FFEF}\x{4E00}-\x{9FAF}]`)

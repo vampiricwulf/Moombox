@@ -211,7 +211,7 @@ export class SetupController {
 
         // Trigger auto-cookie setup if enabled in wizard
         if (autoCookiesEnabled) {
-          this.app.settings.startAutoCookieSetup();
+          this.app.settings.startAutoCookieSetup("youtube");
         }
       } else {
         const data = await response.json();
