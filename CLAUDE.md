@@ -63,17 +63,28 @@ Runtime requires FFmpeg on PATH. CI: `.github/workflows/release.yml` builds Wind
 
 Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary, all code under `internal/`.
 
-### Service initialization order (cmd/moombox/main.go, ~840 lines)
+### Process model (cmd/moombox/main.go, ~1850 lines)
 
-Config → Logger → Database (SQLite) → CookieJar → YouTube Service → Twitch Service → PotProvider (BotGuard) → CipherSolver → NotificationManager → DownloadWorker (orchestrator + stream processor + job queue) → TrimService → Monitors (Feed/DECAPI/Twitch) → CookieRefresh → AutoCookies → WebServer (chi + WebSocket) → TUI (BubbleTea)
+Moombox uses a **launcher/supervisor pattern**. The binary checks `_MOOMBOX_CHILD` env var on startup:
+- **Without it** → launcher mode: spawns itself as a child, waits, respawns on exit code 42
+- **With it** → application mode: runs the full service stack
+
+All restarts (config change, update applied, setup wizard, API) set `restartRequested` and exit with code 42. The launcher respawns, picking up any new binary on disk (for updates). This avoids process chain buildup and keeps terminal state clean for BubbleTea.
+
+A single `triggerRestart(source)` closure in `run()` handles all restart triggers.
+
+### Service initialization order (inside `run()`)
+
+Config → Logger → Updater → Database (SQLite) → CookieJar → YouTube Service → Twitch Service → PotProvider (BotGuard) → CipherSolver → NotificationManager → DownloadWorker (orchestrator + stream processor + job queue) → TrimService → Monitors (Feed/DECAPI/Twitch) → CookieRefresh → AutoCookies → WebServer (chi + WebSocket) → TUI (BubbleTea)
 
 All services are wired together in main.go via callback closures (OnVideoFound, OnStreamFound, OnSchedule) and struct-based dependency injection.
 
 ### Package dependency graph
 
 ```
-cmd/moombox/main.go          ← orchestrates everything
+cmd/moombox/main.go          ← launcher + orchestrator
 ├── internal/config           ← TOML config parsing
+├── internal/updater          ← GitHub release checker + self-updater
 ├── internal/logger           ← slog wrapper with file rotation, ring buffer, pub/sub
 ├── internal/database         ← SQLite with WAL, batch updates, pub/sub for job changes
 ├── internal/cookies          ← jar, refresh service, auto-cookie (CDP browser extraction)
