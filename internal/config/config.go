@@ -324,7 +324,7 @@ func validate(cfg *MoomboxConfig) {
 	if cfg.Cookies.CookieFile == "" {
 		cfg.Cookies.CookieFile = defaults.Cookies.CookieFile
 	}
-	if cfg.Cookies.RefreshInterval.Value < 1 {
+	if cfg.Cookies.RefreshInterval.Value < 10 {
 		cfg.Cookies.RefreshInterval = defaults.Cookies.RefreshInterval
 	}
 
