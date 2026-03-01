@@ -981,7 +981,7 @@ export class SettingsController {
         badge.textContent = "Installed";
       } else if (status.installed && status.portMismatch) {
         badge.variant = "warning";
-        badge.textContent = "Port mismatch";
+        badge.textContent = "Config mismatch";
       } else {
         badge.variant = "neutral";
         badge.textContent = "Not installed";
@@ -1021,7 +1021,8 @@ export class SettingsController {
       if (status.extractedPath) {
         manualCmd.textContent = `yt-dlp --plugin-dirs "${status.extractedPath}" <URL>`;
       }
-      extractorCmd.textContent = `yt-dlp --extractor-args "youtube:player-client=web;po_token=web.gvs+http://127.0.0.1:${status.currentPort}/get_pot" <URL>`;
+      const scheme = status.httpsEnabled ? "https" : "http";
+      extractorCmd.textContent = `yt-dlp --extractor-args "youtube:player-client=web;po_token=web.gvs+${scheme}://127.0.0.1:${status.currentPort}/get_pot" <URL>`;
     } catch (e) {
       badge.variant = "danger";
       badge.textContent = "Error";

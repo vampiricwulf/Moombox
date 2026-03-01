@@ -12,17 +12,16 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-var pluginPortRe = regexp.MustCompile(`(?:DEFAULT_BASE_URL|_MOOMBOX_URL)\s*=\s*["']https?://[^:]+:(\d+)["']`)
+var pluginURLRe = regexp.MustCompile(`(?:DEFAULT_BASE_URL|_MOOMBOX_URL)\s*=\s*["'](https?)://[^:]+:(\d+)["']`)
 
-// parseInstalledPort extracts the port number from a plugin file's DEFAULT_BASE_URL line.
-func parseInstalledPort(content string) int {
-	m := pluginPortRe.FindStringSubmatch(content)
+// parseInstalledPlugin extracts the scheme and port from a plugin file's DEFAULT_BASE_URL line.
+func parseInstalledPlugin(content string) (scheme string, port int) {
+	m := pluginURLRe.FindStringSubmatch(content)
 	if m == nil {
-		return 0
+		return "", 0
 	}
-	var port int
-	fmt.Sscanf(m[1], "%d", &port)
-	return port
+	fmt.Sscanf(m[2], "%d", &port)
+	return m[1], port
 }
 
 // YtdlpRoutes registers yt-dlp plugin routes.
@@ -34,13 +33,18 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 		var installedPort *int
 		portMismatch := false
 
+		expectedScheme := "http"
+		if httpsEnabled {
+			expectedScheme = "https"
+		}
+
 		if pluginDir != "" {
 			pluginPath := filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor", "getpot_moombox.py")
 			if data, err := os.ReadFile(pluginPath); err == nil {
 				installed = true
-				if p := parseInstalledPort(string(data)); p > 0 {
+				if scheme, p := parseInstalledPlugin(string(data)); p > 0 {
 					installedPort = &p
-					portMismatch = p != currentPort
+					portMismatch = p != currentPort || scheme != expectedScheme
 				}
 			}
 		}
@@ -56,7 +60,8 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 			"installed":     installed,
 			"pluginDir":     pluginDir,
 			"currentPort":   currentPort,
-			"installedPort":  installedPort,
+			"httpsEnabled":  httpsEnabled,
+			"installedPort": installedPort,
 			"portMismatch":  portMismatch,
 			"extractedPath": extractedPath,
 		})
@@ -87,11 +92,15 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 
 		pluginPath := filepath.Join(targetDir, "getpot_moombox.py")
 
-		// Check if already installed with correct port
+		// Check if already installed with correct port and scheme
+		expectedScheme := "http"
+		if httpsEnabled {
+			expectedScheme = "https"
+		}
 		if !body.Force {
 			if data, err := os.ReadFile(pluginPath); err == nil {
-				existingPort := parseInstalledPort(string(data))
-				if existingPort == currentPort {
+				existingScheme, existingPort := parseInstalledPlugin(string(data))
+				if existingPort == currentPort && existingScheme == expectedScheme {
 					jsonResponse(rw, map[string]any{
 						"success":          true,
 						"alreadyInstalled": true,
