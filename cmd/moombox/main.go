@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"io/fs"
 	"net/http"
@@ -1818,9 +1819,11 @@ func checkAndBroadcastUpdate(
 // execNewBinary launches the updated binary in a new console window and exits.
 // This is called after an update has been applied and the graceful shutdown
 // has completed (port is released, database is closed, etc).
-// On Windows there is no execve, so we spawn a fresh console window for the
-// new binary — this avoids terminal state issues from inheriting the old
-// process's console and gives the child a clean environment.
+// Uses syscall.CreateProcess directly (instead of exec.Command) because Go's
+// exec package always sets STARTF_USESTDHANDLES which overrides the new
+// console's handles with DevNull — leaving the new window empty. By calling
+// CreateProcess without that flag, the child gets proper stdio from its new
+// console.
 func execNewBinary() {
 	exe, err := os.Executable()
 	if err != nil {
@@ -1830,16 +1833,42 @@ func execNewBinary() {
 
 	fmt.Printf("Launching updated binary in new window: %s\n", exe)
 
-	cmd := exec.Command(exe, os.Args[1:]...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: 0x00000010, // CREATE_NEW_CONSOLE
+	// Build quoted command line: "exe" "arg1" "arg2" ...
+	cmdLine := syscall.EscapeArg(exe)
+	for _, arg := range os.Args[1:] {
+		cmdLine += " " + syscall.EscapeArg(arg)
+	}
+	cmdLineUTF16, err := syscall.UTF16PtrFromString(cmdLine)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to encode command line: %v\n", err)
+		os.Exit(1)
 	}
 
-	if err := cmd.Start(); err != nil {
+	var si syscall.StartupInfo
+	si.Cb = uint32(unsafe.Sizeof(si))
+	// Don't set Flags to STARTF_USESTDHANDLES — let the new console
+	// provide its own stdin/stdout/stderr.
+
+	var pi syscall.ProcessInformation
+	err = syscall.CreateProcess(
+		nil,          // lpApplicationName (parsed from command line)
+		cmdLineUTF16, // lpCommandLine
+		nil,          // lpProcessAttributes
+		nil,          // lpThreadAttributes
+		false,        // bInheritHandles
+		0x00000010,   // dwCreationFlags: CREATE_NEW_CONSOLE
+		nil,          // lpEnvironment (inherit)
+		nil,          // lpCurrentDirectory (inherit)
+		&si,
+		&pi,
+	)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start updated binary: %v\n", err)
 		os.Exit(1)
 	}
 
+	syscall.CloseHandle(pi.Thread)
+	syscall.CloseHandle(pi.Process)
 	os.Exit(0)
 }
 
