@@ -833,8 +833,7 @@ sl-progress-bar {
 
 .notification-events {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
+    flex-direction: column;
     gap: var(--sl-spacing-2x-small);
     margin-top: var(--sl-spacing-x-small);
 }
@@ -845,14 +844,16 @@ sl-progress-bar {
     margin-right: var(--sl-spacing-2x-small);
 }
 
+.notification-event-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sl-spacing-2x-small);
+}
+
 .notification-group-label {
     font-size: var(--sl-font-size-small);
     color: var(--sl-color-neutral-500);
-    margin-left: var(--sl-spacing-2x-small);
-}
-
-.notification-group-label:first-child {
-    margin-left: 0;
 }
 
 .notification-events sl-tag {

@@ -581,8 +581,6 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.toggleField(field)
 		} else if field.ftype == fieldCycle {
 			m.cycleFieldReverse(field)
-		} else if m.sectionIndex > 0 {
-			m.switchSection(m.sectionIndex - 1)
 		}
 		return ""
 
@@ -591,7 +589,17 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.toggleField(field)
 		} else if field.ftype == fieldCycle {
 			m.cycleFieldForward(field)
-		} else if m.sectionIndex < len(sections)-1 {
+		}
+		return ""
+
+	case "shift+left":
+		if m.sectionIndex > 0 {
+			m.switchSection(m.sectionIndex - 1)
+		}
+		return ""
+
+	case "shift+right":
+		if m.sectionIndex < len(sections)-1 {
 			m.switchSection(m.sectionIndex + 1)
 		}
 		return ""
@@ -873,11 +881,11 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		if len(m.channels) > 0 {
 			m.channelDeleteConf = true
 		}
-	case "left":
+	case "shift+left":
 		if m.sectionIndex > 0 {
 			m.switchSection(m.sectionIndex - 1)
 		}
-	case "right":
+	case "shift+right":
 		if m.sectionIndex < len(sections)-1 {
 			m.switchSection(m.sectionIndex + 1)
 		}
@@ -1062,11 +1070,11 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		if len(m.notifications) > 0 {
 			m.notifDeleteConf = true
 		}
-	case "left":
+	case "shift+left":
 		if m.sectionIndex > 0 {
 			m.switchSection(m.sectionIndex - 1)
 		}
-	case "right":
+	case "shift+right":
 		if m.sectionIndex < len(sections)-1 {
 			m.switchSection(m.sectionIndex + 1)
 		}
@@ -1410,7 +1418,7 @@ func (m *SettingsModel) View() string {
 		return m.renderRestartOverlay()
 	}
 
-	boxW := min(78, m.width)
+	boxW := m.width - 4
 	if boxW < 40 {
 		boxW = 40
 	}
@@ -1516,17 +1524,16 @@ func (m *SettingsModel) renderHintText() string {
 	}
 	if m.isFieldSection() {
 		field := sec.fields[m.fieldIndex]
-		toggle := "Section"
+		hint := "S\u2190/S\u2192: Section  \u2191/\u2193: Navigate  1-8: Jump"
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
-			toggle = "Toggle"
+			hint = "\u2190/\u2192: Toggle  " + hint
 		}
-		hint := fmt.Sprintf("\u2190/\u2192: %s  \u2191/\u2193: Navigate  1-8: Jump", toggle)
 		if sec.name == "Network" {
 			hint += "  S: Password"
 		}
 		return hint
 	}
-	return "\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete  1-8: Jump"
+	return "S\u2190/S\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete  1-8: Jump"
 }
 
 func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {

@@ -931,19 +931,23 @@ export class SettingsController {
                 return `<sl-tag size="small" ${variant} onclick="app.settings.toggleNotificationEvent(${idx}, '${evt.id}')">${evt.label}</sl-tag>`;
               })
               .join("");
-            return `<span class="notification-group-label">${group.name}:</span>${chips}`;
+            return `<div class="notification-event-group"><span class="notification-group-label">${group.name}:</span>${chips}</div>`;
           }).join("");
           eventsHtml = `
             <div class="notification-events">
               ${grouped}
-              <sl-tag size="small" variant="neutral" onclick="app.settings.clearNotificationFilter(${idx})">Clear filter</sl-tag>
+              <div class="notification-event-group">
+                <sl-tag size="small" variant="neutral" onclick="app.settings.clearNotificationFilter(${idx})">Clear filter</sl-tag>
+              </div>
             </div>`;
         } else {
           eventsHtml = `
             <div class="notification-events">
-              <span class="notification-events-label">Events:</span>
-              <sl-tag size="small" variant="success">All events</sl-tag>
-              <sl-tag size="small" variant="neutral" onclick="app.settings.enableNotificationFilter(${idx})">Filter...</sl-tag>
+              <div class="notification-event-group">
+                <span class="notification-events-label">Events:</span>
+                <sl-tag size="small" variant="success">All events</sl-tag>
+                <sl-tag size="small" variant="neutral" onclick="app.settings.enableNotificationFilter(${idx})">Filter...</sl-tag>
+              </div>
             </div>`;
         }
 

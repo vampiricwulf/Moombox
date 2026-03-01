@@ -1,3 +1,4 @@
-### Bug Fixes
-- Add missing Discord webhook notification event filters: scheduled, muxing, trim_created, trim_deleted, trim_error, disk_warning, update_available — all 15 backend events now exposed in both web UI and TUI
-- Group notification events by category (Job Lifecycle, Trim, System) in both web UI and TUI for easier scanning
+### Improvements
+- Group notification event filters onto separate rows in web UI for cleaner layout
+- TUI settings panel now uses full terminal width instead of fixed 78-char cap
+- Change TUI settings tab navigation to Shift+Arrow (was Arrow, which conflicted with toggle/cycle fields)
