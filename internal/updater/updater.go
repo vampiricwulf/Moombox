@@ -176,17 +176,22 @@ func (u *Updater) ApplyUpdate(release *ReleaseInfo) error {
 	return nil
 }
 
-// CleanupOldBinary removes the .old binary left over from a previous update.
+// CleanupOldBinary removes .old and .super binaries left over from previous
+// updates. The .old file is the standard leftover; .super is the launcher's
+// renamed copy (Windows locks running executables, so the launcher renames
+// .old → .super to free the name for future updates).
 func (u *Updater) CleanupOldBinary() {
-	oldPath := u.exePath + ".old"
-	if _, err := os.Stat(oldPath); err == nil {
-		if err := os.Remove(oldPath); err != nil {
-			u.logger.Warn("[Updater] Failed to remove old binary",
-				"path", oldPath,
-				"error", err.Error(),
-			)
-		} else {
-			u.logger.Info("[Updater] Cleaned up old binary", "path", oldPath)
+	for _, suffix := range []string{".old", ".super"} {
+		path := u.exePath + suffix
+		if _, err := os.Stat(path); err == nil {
+			if err := os.Remove(path); err != nil {
+				u.logger.Warn("[Updater] Failed to remove old binary",
+					"path", path,
+					"error", err.Error(),
+				)
+			} else {
+				u.logger.Info("[Updater] Cleaned up old binary", "path", path)
+			}
 		}
 	}
 }

@@ -53,18 +53,18 @@ var sections = []settingsSection{
 	{
 		name: "Network",
 		fields: []fieldDef{
-			{"port", "Port", fieldNumber, nil, "1-65535"},
-			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, ""},
-			{"https_enabled", "HTTPS enabled", fieldToggle, nil, ""},
-			{"tls_cert_path", "TLS cert path", fieldText, nil, "path to TLS certificate"},
-			{"tls_key_path", "TLS key path", fieldText, nil, "path to TLS private key"},
+			{"port", "Port", fieldNumber, nil, "web dashboard port, 1-65535 (requires restart)"},
+			{"network_access", "Network access", fieldCycle, []string{"localhost", "lan", "external"}, "who can reach the dashboard (requires restart)"},
+			{"https_enabled", "HTTPS enabled", fieldToggle, nil, "serve over HTTPS, needs TLS cert + key (requires restart)"},
+			{"tls_cert_path", "TLS cert path", fieldText, nil, "PEM format certificate file (requires restart)"},
+			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)"},
 		},
 	},
 	{
 		name: "Paths",
 		fields: []fieldDef{
-			{"database_path", "Database path", fieldText, nil, ""},
-			{"log_file_path", "Log file path", fieldText, nil, ""},
+			{"database_path", "Database path", fieldText, nil, "SQLite database file (requires restart)"},
+			{"log_file_path", "Log file path", fieldText, nil, "log output file (requires restart)"},
 			{"output_directory", "Output directory", fieldText, nil, "where finished files go"},
 			{"staging_directory", "Staging directory", fieldText, nil, "temp files during download"},
 			{"ffmpeg_path", "FFmpeg path", fieldText, nil, "empty = system PATH"},
@@ -73,39 +73,39 @@ var sections = []settingsSection{
 	{
 		name: "Logs",
 		fields: []fieldDef{
-			{"log_level", "Log level", fieldCycle, []string{"DEBUG", "INFO", "WARN", "ERROR"}, ""},
-			{"log_max_file_size", "Max log file size", fieldNumber, nil, "bytes"},
-			{"log_max_files", "Max log files", fieldNumber, nil, ""},
+			{"log_level", "Log level", fieldCycle, []string{"DEBUG", "INFO", "WARN", "ERROR"}, "logging verbosity"},
+			{"log_max_file_size", "Max log file size", fieldNumber, nil, "bytes, default: 10MB (requires restart)"},
+			{"log_max_files", "Max log files", fieldNumber, nil, "rotated files to keep (requires restart)"},
 		},
 	},
 	{
 		name: "Monitors",
 		fields: []fieldDef{
-			{"max_feed_items", "Max feed items", fieldNumber, nil, "RSS items per feed"},
-			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes"},
-			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds (0=dynamic)"},
-			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds (default: 15)"},
-			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days"},
+			{"max_feed_items", "Max feed items", fieldNumber, nil, "RSS items per feed (default: 15)"},
+			{"feed_check_interval", "Feed check interval", fieldNumber, nil, "minutes (default: 10)"},
+			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds, 15-3600 or empty for dynamic"},
+			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds (default: 15, range: 1-3600)"},
+			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days (default: 30)"},
 		},
 	},
 	{
 		name: "Downloader",
 		fields: []fieldDef{
 			{"output_template", "Output template", fieldText, nil, "${title} ${id} ${channel} ${start_date} ${start_time}"},
-			{"max_video_resolution", "Max resolution", fieldNumber, nil, "pixels"},
-			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "concurrent jobs"},
-			{"download_chat", "Download chat", fieldToggle, nil, ""},
-			{"prefer_60fps", "Prefer 60fps", fieldToggle, nil, ""},
-			{"segment_retry_delay_cap", "Segment retry cap", fieldNumber, nil, "seconds"},
-			{"segment_live_check_retries", "Live check retries", fieldNumber, nil, "before marking stream ended"},
+			{"max_video_resolution", "Max resolution", fieldNumber, nil, "pixels (e.g. 1080, 2160)"},
+			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "concurrent download jobs"},
+			{"download_chat", "Download chat", fieldToggle, nil, "save live chat as JSON alongside video"},
+			{"prefer_60fps", "Prefer 60fps", fieldToggle, nil, "prefer 60fps when same resolution available"},
+			{"segment_retry_delay_cap", "Segment retry cap", fieldNumber, nil, "max retry backoff in seconds (default: 60)"},
+			{"segment_live_check_retries", "Live check retries", fieldNumber, nil, "failures before API check (default: 16)"},
 		},
 	},
 	{
 		name: "Cookies",
 		fields: []fieldDef{
 			{"cookie_file", "Cookie file", fieldText, nil, "Netscape format cookies.txt"},
-			{"active_youtube", "YouTube cookies", fieldToggle, nil, "show YouTube cookie status"},
-			{"active_twitch", "Twitch cookies", fieldToggle, nil, "show Twitch cookie status"},
+			{"active_youtube", "YouTube cookies", fieldToggle, nil, "YouTube cookie indicator in status bar"},
+			{"active_twitch", "Twitch cookies", fieldToggle, nil, "Twitch cookie indicator in status bar"},
 			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "browser-based cookie acquisition"},
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data"},
 			{"refresh_interval", "Refresh interval", fieldNumber, nil, "minutes (default: 360 = 6h)"},
@@ -114,8 +114,8 @@ var sections = []settingsSection{
 	{
 		name: "Disk",
 		fields: []fieldDef{
-			{"disk_warn_percent", "Warning threshold", fieldNumber, nil, "% disk usage"},
-			{"disk_critical_percent", "Critical threshold", fieldNumber, nil, "% disk usage, pauses downloads"},
+			{"disk_warn_percent", "Warning threshold", fieldNumber, nil, "% disk usage (default: 90)"},
+			{"disk_critical_percent", "Critical threshold", fieldNumber, nil, "% disk usage, pauses downloads (default: 95)"},
 		},
 	},
 	{

@@ -481,19 +481,19 @@
                             </sl-alert>
                             <sl-switch id="cfg-https-enabled">
                                 Enable HTTPS
-                                <span slot="help-text">Serve the dashboard over HTTPS. Requires TLS certificate and key files.</span>
+                                <span slot="help-text">Serve the dashboard over HTTPS. Requires TLS certificate and key files. Requires restart.</span>
                             </sl-switch>
                             <sl-input
                                 id="cfg-tls-cert-path"
                                 label="TLS Certificate Path"
                                 placeholder="./cert.pem"
-                                help-text="Path to TLS certificate file (PEM format)"
+                                help-text="Path to TLS certificate file (PEM format). Requires restart."
                             ></sl-input>
                             <sl-input
                                 id="cfg-tls-key-path"
                                 label="TLS Key Path"
                                 placeholder="./key.pem"
-                                help-text="Path to TLS private key file (PEM format)"
+                                help-text="Path to TLS private key file (PEM format). Requires restart."
                             ></sl-input>
 
                             <sl-divider></sl-divider>

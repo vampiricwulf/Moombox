@@ -1803,12 +1803,20 @@ func checkAndBroadcastUpdate(
 // This keeps one stable parent holding the console connection so the child's
 // BubbleTea properly restores terminal state, and avoids process chain buildup
 // since the launcher always swaps to a fresh child rather than nesting.
+//
+// After an update restart, the launcher renames .old → .super so the .old name
+// stays free for future updates. Windows locks running executables (the launcher
+// itself is running from the old binary), so the .old can't be deleted — but it
+// CAN be renamed. The .super file is cleaned up on the next fresh launcher start.
 func launchAndSupervise() {
 	exePath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to determine executable path: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Clean up .super from a previous launcher session (now unlocked).
+	os.Remove(exePath + ".super")
 
 	// Ignore interrupts in the launcher — the child handles Ctrl+C.
 	signal.Ignore(os.Interrupt)
@@ -1823,8 +1831,13 @@ func launchAndSupervise() {
 		if err := cmd.Run(); err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				if exitErr.ExitCode() == exitCodeRestart {
-					// Restart requested — respawn. If an update was
-					// applied, the binary on disk is the new version.
+					// If an update was applied, the old binary is now
+					// .old but is locked by us (the launcher). Rename
+					// to .super to free the .old name for future updates.
+					oldPath := exePath + ".old"
+					if _, statErr := os.Stat(oldPath); statErr == nil {
+						os.Rename(oldPath, exePath+".super")
+					}
 					continue
 				}
 				os.Exit(exitErr.ExitCode())
