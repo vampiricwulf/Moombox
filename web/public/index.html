@@ -622,14 +622,14 @@
                                 type="number"
                                 label="DECAPI Check Interval (seconds)"
                                 placeholder="dynamic"
-                                help-text="Seconds between DECAPI live-status checks. Leave empty for automatic rate-based timing (default: dynamic)"
+                                help-text="Seconds between DECAPI live-status checks (range: 15–3600). Leave empty for automatic rate-based timing (default: dynamic)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-twitch-check-interval"
                                 type="number"
                                 label="Twitch Check Interval (seconds)"
                                 placeholder="15"
-                                help-text="Seconds between Twitch GQL live-status checks (default: 15, min: 5). Jitter is always applied."
+                                help-text="Seconds between Twitch GQL live-status checks (default: 15, range: 5–3600). Jitter is always applied."
                             ></sl-input>
                             <sl-input
                                 id="cfg-hide-finished-days"
@@ -986,7 +986,7 @@
                 id="channel-terms-input"
                 label="Filter Pattern (regex)"
                 placeholder="(?i)(karaoke|singing|歌枠)"
-                help-text="Only download streams matching this regex pattern in title or description. Leave empty to download all streams."
+                help-text="Only download streams matching this pattern. Matches title (all monitors), description (RSS), or game category (Twitch). Leave empty for all."
             ></sl-input>
             <sl-details summary="Pattern examples">
                 <div class="pattern-examples">
