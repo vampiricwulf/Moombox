@@ -282,7 +282,7 @@ func validate(cfg *MoomboxConfig) {
 	if cfg.Monitors.DecapiCheckInterval != nil && (*cfg.Monitors.DecapiCheckInterval < 15 || *cfg.Monitors.DecapiCheckInterval > 3600) {
 		cfg.Monitors.DecapiCheckInterval = nil
 	}
-	if cfg.Monitors.TwitchCheckInterval != nil && (*cfg.Monitors.TwitchCheckInterval < 5 || *cfg.Monitors.TwitchCheckInterval > 3600) {
+	if cfg.Monitors.TwitchCheckInterval != nil && (*cfg.Monitors.TwitchCheckInterval < 1 || *cfg.Monitors.TwitchCheckInterval > 3600) {
 		cfg.Monitors.TwitchCheckInterval = nil
 	}
 	if cfg.Logs.LogMaxFileSize < 1 {
