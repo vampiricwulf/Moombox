@@ -83,8 +83,8 @@
 # output_template = "${channel}/${start_date} ${title} [${id}]"
 
 # Maximum video resolution. Based on max(width, height), so portrait videos
-# are handled correctly (e.g., 1080 allows both 1920x1080 and 1080x1920).
-# max_video_resolution = 1080
+# are handled correctly (e.g., 2160 allows both 3840x2160 and 2160x3840).
+# max_video_resolution = 2160
 
 # Number of simultaneous download jobs
 # num_parallel_downloads = 2

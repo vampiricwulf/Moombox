@@ -36,7 +36,7 @@ func Defaults() *MoomboxConfig {
 		},
 		Downloader: DownloaderConfig{
 			OutputTemplate:          "${channel}/${start_date} ${title} [${id}]",
-			MaxVideoResolution:      1080,
+			MaxVideoResolution:      2160,
 			NumParallelDownloads:    2,
 			DownloadChat:            true,
 			Prefer60fps:             true,
@@ -276,6 +276,9 @@ func validate(cfg *MoomboxConfig) {
 	if cfg.Monitors.FeedCheckInterval.Value < 1 {
 		cfg.Monitors.FeedCheckInterval = defaults.Monitors.FeedCheckInterval
 	}
+	if cfg.Monitors.HideFinishedAgeDays.Value < 0 {
+		cfg.Monitors.HideFinishedAgeDays = defaults.Monitors.HideFinishedAgeDays
+	}
 	if cfg.Monitors.DecapiCheckInterval != nil && (*cfg.Monitors.DecapiCheckInterval < 15 || *cfg.Monitors.DecapiCheckInterval > 3600) {
 		cfg.Monitors.DecapiCheckInterval = nil
 	}
@@ -306,6 +309,12 @@ func validate(cfg *MoomboxConfig) {
 		d.SegmentLiveCheckRetries = defaults.Downloader.SegmentLiveCheckRetries
 	}
 
+	if cfg.Paths.DatabasePath == "" {
+		cfg.Paths.DatabasePath = defaults.Paths.DatabasePath
+	}
+	if cfg.Paths.LogFilePath == "" {
+		cfg.Paths.LogFilePath = defaults.Paths.LogFilePath
+	}
 	if cfg.Paths.OutputDirectory == "" {
 		cfg.Paths.OutputDirectory = defaults.Paths.OutputDirectory
 	}
@@ -314,6 +323,9 @@ func validate(cfg *MoomboxConfig) {
 	}
 	if cfg.Cookies.CookieFile == "" {
 		cfg.Cookies.CookieFile = defaults.Cookies.CookieFile
+	}
+	if cfg.Cookies.RefreshInterval.Value < 1 {
+		cfg.Cookies.RefreshInterval = defaults.Cookies.RefreshInterval
 	}
 
 	// Validate channel-level quality_preference
@@ -340,6 +352,8 @@ func Save(cfg *MoomboxConfig, path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
+
+	validate(cfg)
 
 	enc := toml.NewEncoder(f)
 	if err := enc.Encode(cfg); err != nil {

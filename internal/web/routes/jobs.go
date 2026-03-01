@@ -70,7 +70,6 @@ type TwitchJobMetadata struct {
 // hide_finished_age_days config setting. Non-finished jobs are always active.
 // Finished jobs are archived when their age exceeds the threshold.
 // If hideAgeDays is 0, all finished jobs are immediately archived.
-// If hideAgeDays is negative, no finished jobs are ever archived (all stay active).
 func filterJobsByAge(jobs []*database.Job, archived bool, cfg *config.MoomboxConfig) []*database.Job {
 	hideAgeDays := cfg.Monitors.HideFinishedAgeDays.Value
 

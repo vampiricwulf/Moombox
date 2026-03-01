@@ -47,7 +47,7 @@ var setupSteps = []setupStepDef{
 			{"outputDir", "Output directory", "./output", "Where finished downloads are saved", setupFieldText, nil},
 			{"outputTemplate", "Filename template", "${channel}/${start_date} ${title} [${id}]", "Variables: ${title} ${id} ${channel} ${start_date} ${start_time}", setupFieldText, nil},
 			{"stagingDir", "Staging directory", "./staging", "Temporary directory for segments during download", setupFieldText, nil},
-			{"databasePath", "Database path", "./moombox.json", "Job database file location", setupFieldText, nil},
+			{"databasePath", "Database path", "./moombox.db", "Job database file location", setupFieldText, nil},
 			{"ffmpegPath", "FFmpeg path", "system PATH", "Leave empty to use system ffmpeg", setupFieldText, nil},
 		},
 	},
@@ -55,12 +55,12 @@ var setupSteps = []setupStepDef{
 		title:    "Download Preferences",
 		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
-			{"maxRes", "Max resolution", "1080", "Maximum video dimension (width or height)", setupFieldNumber, nil},
+			{"maxRes", "Max resolution", "2160", "Maximum video dimension (width or height)", setupFieldNumber, nil},
 			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
 			{"numParallel", "Parallel downloads", "2", "How many streams to download simultaneously", setupFieldNumber, nil},
 			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
 			{"autoCookies", "Auto cookie login", "No", "Opens browser for Google login, grabs cookies automatically", setupFieldToggle, []string{"No", "Yes"}},
-			{"cookieFile", "Cookie file (manual)", "empty = none", "Netscape-format cookie file. Not needed if auto-login is enabled", setupFieldText, nil},
+			{"cookieFile", "Cookie file (manual)", "./cookies.txt", "Netscape-format cookie file. Not needed if auto-login is enabled", setupFieldText, nil},
 		},
 	},
 	{
@@ -331,50 +331,72 @@ func (m *SetupWizardModel) finishSetup() string {
 		networkAccess = "localhost"
 	}
 
-	cfg := &config.MoomboxConfig{
-		Network: config.NetworkConfig{
-			NetworkAccess: networkAccess,
-		},
-		Paths: config.PathsConfig{
-			LogFilePath:      v("logFilePath"),
-			DatabasePath:     v("databasePath"),
-			OutputDirectory:  v("outputDir"),
-			StagingDirectory: v("stagingDir"),
-			FfmpegPath:       v("ffmpegPath"),
-		},
-		Logs: config.LogsConfig{
-			LogLevel:       m.values["logLevel"],
-			LogMaxFileSize: vNum("logMaxSize"),
-			LogMaxFiles:    vNum("logMaxFiles"),
-		},
-		Monitors: config.MonitorsConfig{
-			MaxFeedItems: vNum("maxFeedItems"),
-		},
-		Downloader: config.DownloaderConfig{
-			OutputTemplate:       v("outputTemplate"),
-			NumParallelDownloads: vNum("numParallel"),
-			MaxVideoResolution:   vNum("maxRes"),
-			Prefer60fps:          vBool("prefer60fps", true),
-			DownloadChat:         vBool("downloadChat", true),
-		},
-		Cookies: config.CookiesConfig{
-			CookieFile: v("cookieFile"),
-		},
-	}
+	// Start from defaults so empty fields keep their default values.
+	cfg := config.Defaults()
 
-	port := vNum("port")
-	if port > 0 {
+	// Network
+	cfg.Network.NetworkAccess = networkAccess
+	if port := vNum("port"); port > 0 {
 		cfg.Network.Port = port
 	}
 
-	hideAge := vNum("hideAge")
-	if hideAge >= 0 {
-		cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
+	// Paths — only override non-empty
+	if s := v("logFilePath"); s != "" {
+		cfg.Paths.LogFilePath = s
+	}
+	if s := v("databasePath"); s != "" {
+		cfg.Paths.DatabasePath = s
+	}
+	if s := v("outputDir"); s != "" {
+		cfg.Paths.OutputDirectory = s
+	}
+	if s := v("stagingDir"); s != "" {
+		cfg.Paths.StagingDirectory = s
+	}
+	if s := v("ffmpegPath"); s != "" {
+		cfg.Paths.FfmpegPath = s
 	}
 
-	if vBool("autoCookies", false) {
-		cfg.Cookies.AutoEnabled = true
+	// Logs
+	if s := m.values["logLevel"]; s != "" {
+		cfg.Logs.LogLevel = s
 	}
+	if n := vNum("logMaxSize"); n > 0 {
+		cfg.Logs.LogMaxFileSize = n
+	}
+	if n := vNum("logMaxFiles"); n > 0 {
+		cfg.Logs.LogMaxFiles = n
+	}
+
+	// Monitors
+	if n := vNum("maxFeedItems"); n > 0 {
+		cfg.Monitors.MaxFeedItems = n
+	}
+	if s := v("hideAge"); s != "" {
+		hideAge, _ := strconv.Atoi(s)
+		if hideAge >= 0 {
+			cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
+		}
+	}
+
+	// Downloader — only override non-empty/non-zero
+	if s := v("outputTemplate"); s != "" {
+		cfg.Downloader.OutputTemplate = s
+	}
+	if n := vNum("numParallel"); n > 0 {
+		cfg.Downloader.NumParallelDownloads = n
+	}
+	if n := vNum("maxRes"); n > 0 {
+		cfg.Downloader.MaxVideoResolution = n
+	}
+	cfg.Downloader.Prefer60fps = vBool("prefer60fps", true)
+	cfg.Downloader.DownloadChat = vBool("downloadChat", true)
+
+	// Cookies
+	if s := v("cookieFile"); s != "" {
+		cfg.Cookies.CookieFile = s
+	}
+	cfg.Cookies.AutoEnabled = vBool("autoCookies", false)
 
 	channelID := v("channelId")
 	if channelID != "" {
@@ -403,11 +425,7 @@ func (m *SetupWizardModel) finishSetup() string {
 
 	// Post-save actions (non-fatal, match TS behavior)
 	if vBool("installYtdlpPlugin", false) && m.OnInstallYtdlp != nil {
-		p := port
-		if p == 0 {
-			p = 774
-		}
-		m.OnInstallYtdlp(p)
+		m.OnInstallYtdlp(cfg.Network.Port)
 	}
 
 	if vBool("autoCookies", false) && m.OnStartAutoCookie != nil {

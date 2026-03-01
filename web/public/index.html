@@ -657,7 +657,7 @@
                                 id="cfg-max-resolution"
                                 type="number"
                                 label="Max Video Resolution"
-                                placeholder="1080"
+                                placeholder="2160"
                                 help-text="Maximum video resolution in pixels (e.g., 1080, 720, 480)"
                             ></sl-input>
                             <sl-input
@@ -1117,8 +1117,8 @@
                     <sl-input
                         id="setup-database-path"
                         label="Database Path"
-                        placeholder="./moombox.json"
-                        help-text="Job database file location (default: ./moombox.json)"
+                        placeholder="./moombox.db"
+                        help-text="Job database file location (default: ./moombox.db)"
                     ></sl-input>
 
                     <sl-input
@@ -1148,8 +1148,8 @@
                         id="setup-max-resolution"
                         type="number"
                         label="Max Resolution"
-                        placeholder="1080"
-                        help-text="Maximum video dimension in pixels (default: 1080)"
+                        placeholder="2160"
+                        help-text="Maximum video dimension in pixels (default: 2160)"
                     ></sl-input>
 
                     <sl-switch id="setup-prefer-60fps" checked>
@@ -1185,8 +1185,8 @@
                     <sl-input
                         id="setup-cookie-file"
                         label="Cookie File (manual)"
-                        placeholder="(empty = none)"
-                        help-text="Netscape-format cookie file for member-only content. Not needed if auto-login is enabled."
+                        placeholder="./cookies.txt"
+                        help-text="Netscape-format cookie file. Default: ./cookies.txt"
                     ></sl-input>
 
                     <sl-details summary="Advanced retry settings">

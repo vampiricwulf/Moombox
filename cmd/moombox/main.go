@@ -1530,9 +1530,6 @@ func (a *youtubeMetadataAdapter) FetchMetadata(ctx context.Context, videoID stri
 // filterJobsByAge excludes finished jobs older than hide_finished_age_days (match TS filterJobsByAge).
 func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig) []*database.Job {
 	ageDays := int(cfg.Monitors.HideFinishedAgeDays.Value)
-	if ageDays < 0 {
-		return jobs // negative means never archive
-	}
 	cutoff := time.Now().AddDate(0, 0, -ageDays)
 	var filtered []*database.Job
 	for _, j := range jobs {

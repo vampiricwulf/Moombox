@@ -14,8 +14,8 @@ func TestDefaults(t *testing.T) {
 	if cfg.Network.NetworkAccess != "localhost" {
 		t.Errorf("expected localhost, got %s", cfg.Network.NetworkAccess)
 	}
-	if cfg.Downloader.MaxVideoResolution != 1080 {
-		t.Errorf("expected 1080, got %d", cfg.Downloader.MaxVideoResolution)
+	if cfg.Downloader.MaxVideoResolution != 2160 {
+		t.Errorf("expected 2160, got %d", cfg.Downloader.MaxVideoResolution)
 	}
 	if cfg.Downloader.NumParallelDownloads != 2 {
 		t.Errorf("expected 2, got %d", cfg.Downloader.NumParallelDownloads)
@@ -192,8 +192,8 @@ func TestValidation(t *testing.T) {
 	if cfg.Downloader.NumParallelDownloads != 2 {
 		t.Errorf("expected parallel downloads reset to 2, got %d", cfg.Downloader.NumParallelDownloads)
 	}
-	if cfg.Downloader.MaxVideoResolution != 1080 {
-		t.Errorf("expected resolution reset to 1080, got %d", cfg.Downloader.MaxVideoResolution)
+	if cfg.Downloader.MaxVideoResolution != 2160 {
+		t.Errorf("expected resolution reset to 2160, got %d", cfg.Downloader.MaxVideoResolution)
 	}
 }
 
