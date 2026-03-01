@@ -68,7 +68,7 @@ class MoomboxApp {
     this.connectWebSocket();
     this.loadConfig();
     this.loadStatus();
-    this._countdownInterval = setInterval(() => this.updateCheckCountdown(), 1000);
+    this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);
   }
 
   async checkSetupStatus() {
@@ -567,7 +567,7 @@ class MoomboxApp {
       this.loadStatus();
       // Restart countdown interval (cleared above to prevent duplicates)
       if (!this._countdownInterval) {
-        this._countdownInterval = setInterval(() => this.updateCheckCountdown(), 1000);
+        this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);
       }
     };
 
@@ -694,6 +694,27 @@ class MoomboxApp {
     }
     if (minutes > 0) return `${minutes}m ${seconds}s`;
     return `${seconds}s`;
+  }
+
+  refreshRelativeTimestamps() {
+    document.querySelectorAll("[data-timestamp]").forEach((el) => {
+      const ts = el.dataset.timestamp;
+      if (!ts) return;
+      const relative = this.formatRelativeTime(ts);
+      const prefix = el.dataset.timestampPrefix || "";
+      const text = prefix + relative;
+      el.textContent = text;
+      // Update title only for prefixed elements (e.g. job progress);
+      // details panel spans keep their fixed full-date title set at render time
+      if (prefix) el.title = text;
+    });
+    // Update "Starts In" countdown in details panel
+    document.querySelectorAll("[data-timestamp-countdown]").forEach((el) => {
+      const ts = el.dataset.timestampCountdown;
+      if (!ts) return;
+      const diff = Math.floor((new Date(ts).getTime() - Date.now()) / 1000);
+      el.textContent = diff > 0 ? this.formatDurationSeconds(diff) : "Now";
+    });
   }
 
   updateCheckCountdown() {
@@ -854,7 +875,7 @@ class MoomboxApp {
           <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(job.status)}</sl-badge>
         </div>
         <div class="job-progress">
-          <div class="job-progress-text" title="${this.escapeHtml(progress)}">${this.escapeHtml(progress)}</div>
+          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(progress)}">${this.escapeHtml(progress)}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${percent}"></sl-progress-bar>` : ""}
         </div>
         <div class="job-quick-actions">${actionsHtml}</div>
@@ -883,6 +904,13 @@ class MoomboxApp {
       const progress = this.formatProgress(job);
       progressText.textContent = progress;
       progressText.title = progress;
+      if (job.status === "Upcoming" && job.lastRecheckAt) {
+        progressText.dataset.timestamp = job.lastRecheckAt;
+        progressText.dataset.timestampPrefix = "Last check: ";
+      } else {
+        delete progressText.dataset.timestamp;
+        delete progressText.dataset.timestampPrefix;
+      }
     }
 
     // Update progress bar
@@ -993,6 +1021,8 @@ class MoomboxApp {
     const updatedRow = content.querySelector('[data-field="updated"]');
     if (updatedRow) {
       updatedRow.textContent = this.formatRelativeTime(job.updatedAt);
+      updatedRow.dataset.timestamp = job.updatedAt;
+      updatedRow.title = new Date(job.updatedAt).toLocaleString();
     }
 
     // Update error display
@@ -1169,17 +1199,17 @@ class MoomboxApp {
           }
           <div class="details-row">
             <span class="details-label">Created:</span>
-            <span class="details-value" title="${new Date(job.createdAt).toLocaleString()}">${this.formatRelativeTime(job.createdAt)}</span>
+            <span class="details-value" data-timestamp="${this.escapeHtml(job.createdAt)}" title="${new Date(job.createdAt).toLocaleString()}">${this.formatRelativeTime(job.createdAt)}</span>
           </div>
           ${job.downloadStartedAt ? `
           <div class="details-row">
             <span class="details-label">DL Started:</span>
-            <span class="details-value" title="${new Date(job.downloadStartedAt).toLocaleString()}">${this.formatRelativeTime(job.downloadStartedAt)}</span>
+            <span class="details-value" data-timestamp="${this.escapeHtml(job.downloadStartedAt)}" title="${new Date(job.downloadStartedAt).toLocaleString()}">${this.formatRelativeTime(job.downloadStartedAt)}</span>
           </div>
           ` : ""}
           <div class="details-row">
             <span class="details-label">Updated:</span>
-            <span class="details-value" data-field="updated" title="${new Date(job.updatedAt).toLocaleString()}">${this.formatRelativeTime(job.updatedAt)}</span>
+            <span class="details-value" data-field="updated" data-timestamp="${this.escapeHtml(job.updatedAt)}" title="${new Date(job.updatedAt).toLocaleString()}">${this.formatRelativeTime(job.updatedAt)}</span>
           </div>
           ${isTwitch && job.twitchCategory ? `
           <div class="details-row">
@@ -1197,21 +1227,22 @@ class MoomboxApp {
             const isScheduled = job.status === "Upcoming" && new Date(job.streamStartTime).getTime() > Date.now();
             const label = isScheduled ? "Scheduled" : "Stream Start";
             const value = isScheduled ? new Date(job.streamStartTime).toLocaleString() : this.formatRelativeTime(job.streamStartTime);
+            const tsAttr = isScheduled ? "" : ` data-timestamp="${this.escapeHtml(job.streamStartTime)}" title="${new Date(job.streamStartTime).toLocaleString()}"`;
             return `
           <div class="details-row">
             <span class="details-label">${label}:</span>
-            <span class="details-value">${this.escapeHtml(value)}</span>
+            <span class="details-value"${tsAttr}>${this.escapeHtml(value)}</span>
           </div>
           ${isScheduled ? `
           <div class="details-row">
             <span class="details-label">Starts In:</span>
-            <span class="details-value">${this.formatDurationSeconds(Math.floor((new Date(job.streamStartTime).getTime() - Date.now()) / 1000))}</span>
+            <span class="details-value" data-timestamp-countdown="${this.escapeHtml(job.streamStartTime)}">${this.formatDurationSeconds(Math.floor((new Date(job.streamStartTime).getTime() - Date.now()) / 1000))}</span>
           </div>` : ""}`;
           })() : ""}
           ${job.streamEndTime ? `
           <div class="details-row">
             <span class="details-label">Stream End:</span>
-            <span class="details-value" title="${new Date(job.streamEndTime).toLocaleString()}">${this.formatRelativeTime(job.streamEndTime)}</span>
+            <span class="details-value" data-timestamp="${this.escapeHtml(job.streamEndTime)}" title="${new Date(job.streamEndTime).toLocaleString()}">${this.formatRelativeTime(job.streamEndTime)}</span>
           </div>
           ` : ""}
           ${job.lengthSeconds && job.lengthSeconds > 0 ? `
@@ -2327,7 +2358,7 @@ class MoomboxApp {
       const typeBadge = `<span class="files-type-badge ${this.escapeHtml(file.type)}">${this.escapeHtml(file.type)}</span>`;
       const pathStr = `<span class="files-path" title="${this.escapeHtml(file.path)}">${this.escapeHtml(file.relPath)}</span>`;
       const sizeStr = `<span>${this.formatBytes(file.size)}</span>`;
-      const modStr = `<span>${this.formatRelativeTime(file.modified)}</span>`;
+      const modStr = `<span data-timestamp="${this.escapeHtml(file.modified)}" title="${new Date(file.modified).toLocaleString()}">${this.formatRelativeTime(file.modified)}</span>`;
 
       let jobStr = "";
       if (file.jobTitle) {
