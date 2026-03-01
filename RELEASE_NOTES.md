@@ -1,5 +1,9 @@
+### Bug Fixes
+
+- **Double "v" in version display** — Fixed "vv2.1.2" showing in both Web UI and TUI. The CI release workflow was passing the tag name (with "v" prefix) as the version, and the UI added another "v". Now stripped in both CI and at startup.
+- **Old binary cleanup after update** — The launcher now renames `.old` to `.super` after an update restart so future updates can reuse the `.old` name. Previous versions couldn't delete the locked `.old` binary, which would cause the next update to fail.
+- **Mobile skeleton loading indicators** — Job skeleton placeholders no longer persist on mobile after tasks load. Skeleton removal moved to `renderJobs()` and changed from CSS hide to DOM removal for robustness.
+
 ### Improvements
 
-- **Launcher/supervisor restart model** — Moombox now starts as a lightweight launcher that spawns the application as a child process. Both config restarts and update restarts exit the child and let the launcher respawn it, eliminating process chain buildup across multiple restarts and keeping terminal state clean.
-- **Consolidated restart logic** — All restart triggers (settings save, update apply, setup wizard, API) now share a single code path, reducing duplication and making the restart mechanism easier to maintain.
-- **Simplified update route dependencies** — `UpdateRouteDeps` now uses a single `OnRestart` callback instead of three separate fields, matching the pattern used by all other route handlers.
+- **Settings help text** — Added missing "Requires restart" to Web UI TLS fields. Filled in empty or minimal TUI help text across all settings sections with descriptions, defaults, and restart warnings.
