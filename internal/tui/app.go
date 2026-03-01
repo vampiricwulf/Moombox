@@ -169,6 +169,9 @@ type App struct {
 	// Config reference for settings panel
 	cfg *config.MoomboxConfig
 
+	// Internal token for CSRF bypass on local API calls
+	internalToken string
+
 	// First-run flag: triggers setup wizard
 	IsFirstRun bool
 
@@ -241,6 +244,11 @@ func (a *App) ShowFFmpegCheck() {
 func (a *App) SetVersion(v string) {
 	a.version = v
 	a.details.version = v
+}
+
+// SetInternalToken sets the secret token for CSRF bypass on local API calls.
+func (a *App) SetInternalToken(token string) {
+	a.internalToken = token
 }
 
 // SetConfig provides the config reference for the settings panel.
@@ -1310,18 +1318,33 @@ func (a *App) apiBaseURL() string {
 	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.apiPort())
 }
 
+// internalTokenTransport injects the X-Internal-Token header on every request
+// so that local API calls bypass the CSRF middleware.
+type internalTokenTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t *internalTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.token != "" {
+		req.Header.Set("X-Internal-Token", t.token)
+	}
+	return t.base.RoundTrip(req)
+}
+
 // apiClient returns an HTTP client suitable for local API calls.
-// When HTTPS is enabled, TLS verification is skipped since the server
-// typically uses a self-signed certificate on localhost.
+// Injects the internal CSRF bypass token. When HTTPS is enabled, TLS
+// verification is skipped since the server uses a self-signed certificate.
 func (a *App) apiClient() *http.Client {
+	base := http.DefaultTransport
 	if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
-		return &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
+		base = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
 	}
-	return http.DefaultClient
+	return &http.Client{
+		Transport: &internalTokenTransport{base: base, token: a.internalToken},
+	}
 }
 
 // addVideoCmd creates a job by POSTing to the local API (matches TS TUI behavior).

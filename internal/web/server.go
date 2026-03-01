@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"io"
@@ -30,18 +32,23 @@ type ServiceContext struct {
 	// DB, Worker, YouTube, Twitch, etc. will be added as needed
 }
 
+// InternalTokenHeader is the header name used by same-process clients (TUI)
+// to bypass CSRF checks. The value must match the token generated at startup.
+const InternalTokenHeader = "X-Internal-Token"
+
 // Server is the Moombox HTTP server.
 type Server struct {
-	cfg         *config.MoomboxConfig
-	router      chi.Router
-	server      *http.Server
-	ws          *WebSocketHub
-	auth        *AuthService
-	commit    string             // Build commit hash for cache busting (e.g. "abc1234")
-	loginHTML   []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
-	wsHandler   http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
-	OpenBrowser bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
-	ActualPort  int              // Actual bound port after Start (may differ from cfg if probed)
+	cfg           *config.MoomboxConfig
+	router        chi.Router
+	server        *http.Server
+	ws            *WebSocketHub
+	auth          *AuthService
+	internalToken string           // Random secret for same-process CSRF bypass
+	commit        string           // Build commit hash for cache busting (e.g. "abc1234")
+	loginHTML     []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
+	wsHandler     http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
+	OpenBrowser   bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
+	ActualPort    int              // Actual bound port after Start (may differ from cfg if probed)
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -60,11 +67,17 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 }) *Server {
 	r := chi.NewRouter()
 
+	// Generate a random internal token for same-process CSRF bypass (TUI).
+	tokenBytes := make([]byte, 16)
+	_, _ = rand.Read(tokenBytes)
+	token := hex.EncodeToString(tokenBytes)
+
 	s := &Server{
-		cfg:    cfg,
-		router: r,
-		ws:     NewWebSocketHub(logger),
-		logger: logger,
+		cfg:           cfg,
+		router:        r,
+		ws:            NewWebSocketHub(logger),
+		internalToken: token,
+		logger:        logger,
 	}
 
 	// Apply middleware (order matters)
@@ -72,12 +85,18 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 	r.Use(APIAliasMiddleware) // Rewrite /api/ → /api/v1/ (backward compat, matches TS dual-mount)
 	r.Use(CORSMiddleware(cfg))
 	r.Use(SecurityHeaders)
-	r.Use(CSRFMiddleware(cfg))
+	r.Use(CSRFMiddleware(cfg, token))
 	r.Use(IPGateMiddleware(cfg))
 	r.Use(MaxBodySize(1 << 20)) // 1MB default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
 
 	return s
+}
+
+// InternalToken returns the secret token that same-process clients (TUI) must
+// send in the X-Internal-Token header to bypass CSRF checks.
+func (s *Server) InternalToken() string {
+	return s.internalToken
 }
 
 // SetCommit sets the build commit hash used for cache-busting static asset URLs.

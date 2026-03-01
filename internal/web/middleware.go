@@ -77,11 +77,20 @@ func SecurityHeaders(next http.Handler) http.Handler {
 }
 
 // CSRFMiddleware validates Origin/Referer headers on mutating requests.
-func CSRFMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
+// Same-process clients (TUI) bypass CSRF by sending the internal token.
+func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Only check mutating methods
 			if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Same-process clients (TUI) send the internal token to bypass CSRF.
+			// Browsers cannot set custom headers cross-origin without a CORS
+			// preflight, which the server does not grant, so this is safe.
+			if r.Header.Get(InternalTokenHeader) == internalToken {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -99,11 +108,15 @@ func CSRFMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
 					w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))
 					return
 				}
+				next.ServeHTTP(w, r)
+				return
 			}
-			// If no Origin/Referer: reject when external access with auth is enabled
-			// (prevents CSRF from form submissions that omit Origin), otherwise allow
-			// since IP gate + auth middleware provide sufficient protection for local access.
-			if origin == "" && (cfg.Network.NetworkAccess == "external" || cfg.Network.NetworkAccess == "public") && cfg.Network.PasswordHash != "" {
+
+			// No Origin/Referer and no internal token: reject when external
+			// access with auth is enabled (prevents CSRF from form submissions
+			// that omit Origin). Local/LAN access is safe since IP gate +
+			// auth middleware provide sufficient protection.
+			if (cfg.Network.NetworkAccess == "external" || cfg.Network.NetworkAccess == "public") && cfg.Network.PasswordHash != "" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"Forbidden: missing origin"}`))

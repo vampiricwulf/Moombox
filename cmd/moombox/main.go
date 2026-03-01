@@ -1057,6 +1057,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Pass config reference and version for settings panel
 		app.SetConfig(cfg)
 		app.SetVersion(version)
+		app.SetInternalToken(webServer.InternalToken())
 		app.IsFirstRun = !cfg.ConfigLoaded
 
 		// Wire TUI callbacks
