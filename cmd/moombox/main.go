@@ -455,7 +455,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	routes.LogRoutes(r, log.GetRecentLines)
 	routes.ImportRoutes(r, db, cfg, apiRL)
 	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc, getActivePlatforms)
-	routes.YtdlpRoutes(r, cfg.Network.Port)
+	routes.YtdlpRoutes(r, cfg.Network.Port, cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(r, func() {
 		log.Info("Restart requested via API")
 		restartRequested.Store(true)
@@ -996,7 +996,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				return config.Save(updatedCfg, configPath)
 			},
 			func(port int) {
-				if err := routes.InstallYtdlpPlugin(port); err != nil {
+				if err := routes.InstallYtdlpPlugin(port, cfg.Network.HTTPSEnabled); err != nil {
 					log.Error("Failed to install yt-dlp plugin from setup", slog.String("error", err.Error()))
 				} else {
 					log.Info("yt-dlp plugin installed from setup wizard", slog.Int("port", port))

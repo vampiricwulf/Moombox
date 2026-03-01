@@ -26,7 +26,7 @@ func parseInstalledPort(content string) int {
 }
 
 // YtdlpRoutes registers yt-dlp plugin routes.
-func YtdlpRoutes(r chi.Router, currentPort int) {
+func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 	// GET /api/v1/ytdlp-plugin/status
 	r.Get("/api/v1/ytdlp-plugin/status", func(rw http.ResponseWriter, req *http.Request) {
 		pluginDir := ytdlpPluginDir()
@@ -103,7 +103,7 @@ func YtdlpRoutes(r chi.Router, currentPort int) {
 		}
 
 		// Write the plugin file with the current port
-		pluginContent := generateYtdlpPlugin(currentPort)
+		pluginContent := generateYtdlpPlugin(currentPort, httpsEnabled)
 		if err := os.WriteFile(pluginPath, []byte(pluginContent), 0o644); err != nil {
 			jsonError(rw, "failed to write plugin: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -119,7 +119,7 @@ func YtdlpRoutes(r chi.Router, currentPort int) {
 
 // InstallYtdlpPlugin writes the yt-dlp PO token provider plugin to the standard
 // yt-dlp plugin directory. Called from TUI setup wizard and web install route.
-func InstallYtdlpPlugin(port int) error {
+func InstallYtdlpPlugin(port int, httpsEnabled bool) error {
 	pluginDir := ytdlpPluginDir()
 	if pluginDir == "" {
 		return fmt.Errorf("cannot determine yt-dlp plugin directory")
@@ -129,7 +129,7 @@ func InstallYtdlpPlugin(port int) error {
 		return fmt.Errorf("create plugin directory: %w", err)
 	}
 	pluginPath := filepath.Join(targetDir, "getpot_moombox.py")
-	return os.WriteFile(pluginPath, []byte(generateYtdlpPlugin(port)), 0o644)
+	return os.WriteFile(pluginPath, []byte(generateYtdlpPlugin(port, httpsEnabled)), 0o644)
 }
 
 func ytdlpPluginDir() string {
@@ -155,7 +155,34 @@ func ytdlpPluginDir() string {
 	return ""
 }
 
-func generateYtdlpPlugin(port int) string {
+func generateYtdlpPlugin(port int, httpsEnabled bool) string {
+	scheme := "http"
+	if httpsEnabled {
+		scheme = "https"
+	}
+	baseURL := fmt.Sprintf("%s://127.0.0.1:%d", scheme, port)
+
+	// When HTTPS is enabled, include an SSL context that skips cert verification
+	// for localhost (self-signed certs). The ssl_context extension is supported
+	// by yt-dlp's urllib request handler.
+	sslImports := ""
+	sslSetup := ""
+	sslExtensions := ""
+	if httpsEnabled {
+		sslImports = "\nimport ssl"
+		sslSetup = `
+
+def _make_localhost_ssl_context():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+_LOCALHOST_SSL_CTX = _make_localhost_ssl_context()
+`
+		sslExtensions = ", 'ssl_context': _LOCALHOST_SSL_CTX"
+	}
+
 	return fmt.Sprintf(`"""
 yt-dlp PO Token provider plugin for Moombox.
 
@@ -168,7 +195,7 @@ from __future__ import annotations
 
 import functools
 import json
-import time
+import time%s
 
 from yt_dlp.extractor.youtube.pot.provider import (
     PoTokenContext,
@@ -183,7 +210,7 @@ from yt_dlp.extractor.youtube.pot.provider import (
 from yt_dlp.extractor.youtube.pot.utils import WEBPO_CLIENTS, get_webpo_content_binding
 from yt_dlp.networking.common import Request
 from yt_dlp.networking.exceptions import TransportError
-
+%s
 
 @register_provider
 class MoomboxPTP(PoTokenProvider):
@@ -193,7 +220,7 @@ class MoomboxPTP(PoTokenProvider):
     _SUPPORTED_CONTEXTS = (PoTokenContext.GVS, PoTokenContext.PLAYER, PoTokenContext.SUBS)
     _PING_TIMEOUT = 5.0
     _GETPOT_TIMEOUT = 20.0
-    DEFAULT_BASE_URL = 'http://127.0.0.1:%d'
+    DEFAULT_BASE_URL = '%s'
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -218,7 +245,7 @@ class MoomboxPTP(PoTokenProvider):
             self._request_webpage(
                 Request(
                     f'{self._base_url}/ping',
-                    extensions={'timeout': self._PING_TIMEOUT},
+                    extensions={'timeout': self._PING_TIMEOUT%s},
                     proxies={'all': None},
                 ),
                 note=False,
@@ -265,7 +292,7 @@ class MoomboxPTP(PoTokenProvider):
                         'content_binding': get_webpo_content_binding(request)[0],
                     }).encode(),
                     headers={'Content-Type': 'application/json'},
-                    extensions={'timeout': self._GETPOT_TIMEOUT},
+                    extensions={'timeout': self._GETPOT_TIMEOUT%s},
                     proxies={'all': None},
                 ),
                 note=f'Requesting {request.context.value} PO token from Moombox '
@@ -302,5 +329,5 @@ def moombox_getpot_preference(provider, request):
 
 
 __all__ = [MoomboxPTP.__name__, moombox_getpot_preference.__name__]
-`, port)
+`, sslImports, sslSetup, baseURL, sslExtensions, sslExtensions)
 }
