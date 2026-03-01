@@ -1,4 +1,4 @@
 ### Improvements
-- Group notification event filters onto separate rows in web UI for cleaner layout
-- TUI settings panel now uses full terminal width instead of fixed 78-char cap
-- Change TUI settings tab navigation to Shift+Arrow (was Arrow, which conflicted with toggle/cycle fields)
+- TUI settings: replace S/R password shortcuts with backtick/tilde to avoid conflicts with text entry fields (TLS cert/key paths)
+- TUI settings: remove 1-8 number key section jumps (conflicted with text/number field input)
+- TUI settings: spell out "Shift" in hint bar instead of ambiguous "S" abbreviation

@@ -523,10 +523,8 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		if m.secMode != securityStatus {
 			return m.handleSecurityKey(key)
 		}
-		// Check for S/R to enter security mode (these won't conflict with
-		// Network fields since port is number-only, the rest are cycle/toggle)
-		switch key {
-		case "s", "S":
+		// Backtick/tilde for security mode (won't conflict with text fields)
+		if key == "`" {
 			m.secMode = securitySet
 			m.secCurrentPw = ""
 			m.secNewPw = ""
@@ -534,13 +532,12 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 			m.secFieldIndex = 0
 			m.secMessage = ""
 			return ""
-		case "r", "R":
-			if m.hasPassword() {
-				m.secMode = securityRemove
-				m.secRemovePw = ""
-				m.secMessage = ""
-				return ""
-			}
+		}
+		if key == "~" && m.hasPassword() {
+			m.secMode = securityRemove
+			m.secRemovePw = ""
+			m.secMessage = ""
+			return ""
 		}
 		return m.handleFieldKey(key)
 	}
@@ -649,15 +646,6 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 		return ""
 
 	default:
-		// Number keys 1-5: jump to section (only when NOT on text/number field)
-		if !isTextual && len(key) == 1 && key[0] >= '1' && key[0] <= '8' {
-			idx := int(key[0]-'0') - 1
-			if idx >= 0 && idx < len(sections) {
-				m.switchSection(idx)
-			}
-			return ""
-		}
-
 		// Text input for text/number fields
 		if isTextual && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
 			// Reject escape sequences
@@ -889,14 +877,6 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		if m.sectionIndex < len(sections)-1 {
 			m.switchSection(m.sectionIndex + 1)
 		}
-	default:
-		// Number keys for section jump
-		if len(key) == 1 && key[0] >= '1' && key[0] <= '8' {
-			idx := int(key[0]-'0') - 1
-			if idx >= 0 && idx < len(sections) {
-				m.switchSection(idx)
-			}
-		}
 	}
 	return ""
 }
@@ -1077,13 +1057,6 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 	case "shift+right":
 		if m.sectionIndex < len(sections)-1 {
 			m.switchSection(m.sectionIndex + 1)
-		}
-	default:
-		if len(key) == 1 && key[0] >= '1' && key[0] <= '8' {
-			idx := int(key[0]-'0') - 1
-			if idx >= 0 && idx < len(sections) {
-				m.switchSection(idx)
-			}
 		}
 	}
 	return ""
@@ -1524,16 +1497,20 @@ func (m *SettingsModel) renderHintText() string {
 	}
 	if m.isFieldSection() {
 		field := sec.fields[m.fieldIndex]
-		hint := "S\u2190/S\u2192: Section  \u2191/\u2193: Navigate  1-8: Jump"
+		hint := "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate"
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			hint = "\u2190/\u2192: Toggle  " + hint
 		}
 		if sec.name == "Network" {
-			hint += "  S: Password"
+			if m.hasPassword() {
+				hint += "  `: Change pw  ~: Remove pw"
+			} else {
+				hint += "  `: Set pw"
+			}
 		}
 		return hint
 	}
-	return "S\u2190/S\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete  1-8: Jump"
+	return "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete"
 }
 
 func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
@@ -2036,13 +2013,9 @@ func (m *SettingsModel) renderSecurityStatus(w int) string {
 	lines = append(lines, "")
 
 	// Actions
-	actionLabel := "Set"
+	actionLine := DimStyle.Render("  `: Set password")
 	if m.hasPassword() {
-		actionLabel = "Change"
-	}
-	actionLine := DimStyle.Render("  S: "+actionLabel+" password")
-	if m.hasPassword() {
-		actionLine += DimStyle.Render("  R: Remove password")
+		actionLine = DimStyle.Render("  `: Change password  ~: Remove password")
 	}
 	lines = append(lines, actionLine)
 
@@ -2065,13 +2038,9 @@ func (m *SettingsModel) renderSecurityCompact(w int) string {
 	}
 	lines = append(lines, "  Password: "+status)
 
-	actionLabel := "Set"
+	actionLine := DimStyle.Render("  `: Set password")
 	if m.hasPassword() {
-		actionLabel = "Change"
-	}
-	actionLine := DimStyle.Render("  S: "+actionLabel+" password")
-	if m.hasPassword() {
-		actionLine += DimStyle.Render("  R: Remove")
+		actionLine = DimStyle.Render("  `: Change  ~: Remove")
 	}
 	lines = append(lines, actionLine)
 
