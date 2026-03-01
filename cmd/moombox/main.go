@@ -454,6 +454,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		RateLimit:   potRL,
 		Logger:      log,
 	})
+	restartFunc := func() {
+		log.Info("Restart requested via setup")
+		restartRequested.Store(true)
+		cancel()
+		if quitTUI != nil {
+			quitTUI()
+		}
+	}
 	routes.SetupRoutes(r, &routes.SetupDeps{
 		Cfg:  cfg,
 		Auth: authSvc,
@@ -461,6 +469,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			return config.Save(c, configPath)
 		},
 		OnChannelChange: kickMonitors,
+		OnRestart:       restartFunc,
+	})
+	routes.FFmpegRoutes(r, &routes.FFmpegDeps{
+		Cfg: cfg,
+		SaveConfig: func(c *config.MoomboxConfig) error {
+			return config.Save(c, configPath)
+		},
+		Logger: log,
 	})
 	routes.LogRoutes(r, log.GetRecentLines)
 	routes.ImportRoutes(r, db, cfg, apiRL)
@@ -875,6 +891,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 		// Pass config reference for settings panel
 		app.SetConfig(cfg)
+		app.IsFirstRun = !cfg.ConfigLoaded
 
 		// Wire TUI callbacks
 		app.OnAddVideo = func(url string) {
@@ -1014,8 +1031,77 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					log.Info("yt-dlp plugin installed from setup wizard", slog.Int("port", port))
 				}
 			},
-			nil, // OnStartAutoCookie: auto-cookie starts on its own during initialization
+			func(platform string) {
+				if autoCookieSvc != nil {
+					if err := autoCookieSvc.StartSetup(platform); err != nil {
+						log.Error("Failed to start auto-cookie setup", slog.String("platform", platform), slog.String("error", err.Error()))
+					}
+				}
+			},
+			func() (bool, bool) {
+				if autoCookieSvc != nil {
+					yt, tw, err := autoCookieSvc.FinishSetup(context.Background())
+					if err != nil {
+						log.Error("Failed to finish auto-cookie setup", slog.String("error", err.Error()))
+					}
+					return yt, tw
+				}
+				return false, false
+			},
+			func() {
+				if autoCookieSvc != nil {
+					autoCookieSvc.CancelSetup()
+				}
+			},
+			func() {
+				log.Info("Restart requested from setup wizard")
+				restartRequested.Store(true)
+				cancel()
+				app.QuitTUI()
+			},
 		)
+
+		// Wire FFmpeg check callbacks for TUI
+		app.OnCheckFFmpeg = func(path string) (bool, string) {
+			if path == "" {
+				path = "ffmpeg"
+			}
+			cmd := exec.Command(path, "-version")
+			out, err := cmd.Output()
+			if err != nil {
+				return false, ""
+			}
+			ver := string(out)
+			if idx := strings.IndexByte(ver, '\n'); idx > 0 {
+				ver = ver[:idx]
+			}
+			return true, strings.TrimSpace(ver)
+		}
+		app.OnInstallFFmpeg = routes.InstallFFmpeg
+		app.OnCheckPrereqs = func() (bool, bool) {
+			chocoAvail := false
+			wingetAvail := false
+			if _, err := exec.LookPath("choco"); err == nil {
+				chocoAvail = true
+			}
+			if _, err := exec.LookPath("winget"); err == nil {
+				wingetAvail = true
+			}
+			return chocoAvail, wingetAvail
+		}
+
+		// Check FFmpeg on startup (after config is loaded)
+		if cfg.ConfigLoaded {
+			ffmpegPath := cfg.Paths.FfmpegPath
+			if ffmpegPath == "" {
+				ffmpegPath = "ffmpeg"
+			}
+			checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := exec.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
+				app.ShowFFmpegCheck()
+			}
+			checkCancel()
+		}
 
 		// Create async update channels for TUI
 		jobUpdateCh := make(chan *database.Job, 100)

@@ -1052,362 +1052,269 @@
         <div id="setup-overlay" style="display: none">
             <div class="setup-container">
                 <div class="setup-header">
-                    <sl-icon
-                        name="box-seam"
-                        style="
-                            font-size: 3rem;
-                            color: var(--sl-color-primary-600);
-                        "
-                    ></sl-icon>
+                    <sl-icon name="box-seam" style="font-size: 3rem; color: var(--sl-color-primary-600);"></sl-icon>
                     <h1>Welcome to Moombox</h1>
-                    <p>Let's configure your YouTube live stream archiver</p>
+                    <p>Let's configure your live stream archiver</p>
                 </div>
 
-                <div class="setup-steps">
-                    <div class="setup-step active" data-step="1">
-                        <div class="step-number">1</div>
-                        <div class="step-label">Paths</div>
-                    </div>
-                    <div class="setup-step" data-step="2">
-                        <div class="step-number">2</div>
-                        <div class="step-label">Downloads</div>
-                    </div>
-                    <div class="setup-step" data-step="3">
-                        <div class="step-number">3</div>
-                        <div class="step-label">Logging</div>
-                    </div>
-                    <div class="setup-step" data-step="4">
-                        <div class="step-number">4</div>
-                        <div class="step-label">Display</div>
-                    </div>
-                    <div class="setup-step" data-step="5">
-                        <div class="step-number">5</div>
-                        <div class="step-label">Channel</div>
+                <!-- Mode Selection -->
+                <div class="setup-page" id="setup-mode-select">
+                    <div class="setup-mode-cards">
+                        <button class="setup-mode-card" id="setup-mode-quick" tabindex="0">
+                            <sl-icon name="lightning-charge" style="font-size: 2rem; color: var(--sl-color-primary-600);"></sl-icon>
+                            <h3>Quick Setup</h3>
+                            <p>Use defaults for everything. Set up cookies and add channels.</p>
+                        </button>
+                        <button class="setup-mode-card" id="setup-mode-advanced" tabindex="0">
+                            <sl-icon name="gear" style="font-size: 2rem; color: var(--sl-color-neutral-500);"></sl-icon>
+                            <h3>Advanced Setup</h3>
+                            <p>Walk through all configuration sections step by step.</p>
+                        </button>
                     </div>
                 </div>
 
-                <!-- Step 1: Output & Paths -->
-                <div class="setup-page" id="setup-step-1">
-                    <h2>Output &amp; Paths</h2>
-                    <p class="setup-help">
-                        Leave fields empty to use defaults.
-                    </p>
-
-                    <sl-input
-                        id="setup-output-dir"
-                        label="Output Directory"
-                        placeholder="./output"
-                        help-text="Where finished downloads are saved (default: ./output)"
-                    ></sl-input>
-
-                    <sl-input
-                        id="setup-output-template"
-                        label="Filename Template"
-                        placeholder="${channel}/${start_date} ${title} [${id}]"
-                        help-text="Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
-                    ></sl-input>
-
-                    <sl-input
-                        id="setup-staging-dir"
-                        label="Staging Directory"
-                        placeholder="./staging"
-                        help-text="Temporary directory for segments during download (default: ./staging)"
-                    ></sl-input>
-
-                    <sl-input
-                        id="setup-database-path"
-                        label="Database Path"
-                        placeholder="./moombox.db"
-                        help-text="Job database file location (default: ./moombox.db)"
-                    ></sl-input>
-
-                    <sl-input
-                        id="setup-ffmpeg-path"
-                        label="FFmpeg Path"
-                        placeholder="(system PATH)"
-                        help-text="Leave empty to use system ffmpeg"
-                    ></sl-input>
-
+                <!-- Simplified: Step 1 - Cookie Setup -->
+                <div class="setup-page" id="setup-simple-cookies" style="display: none">
+                    <div class="setup-steps">
+                        <div class="setup-step active" data-step="1"><div class="step-number">1</div><div class="step-label">Cookies</div></div>
+                        <div class="setup-step" data-step="2"><div class="step-number">2</div><div class="step-label">Channels</div></div>
+                    </div>
+                    <h2>Cookie Setup</h2>
+                    <p class="setup-help">Log in to platforms so Moombox can access members-only and age-gated content. You can skip this and set it up later in Settings.</p>
+                    <div class="cookie-platform-cards">
+                        <div class="cookie-platform-card">
+                            <div style="display: flex; align-items: center; gap: 0.5em;">
+                                <sl-icon name="youtube" style="font-size: 1.5rem; color: #ff0000;"></sl-icon>
+                                <strong>YouTube</strong>
+                                <sl-badge id="setup-yt-badge" variant="neutral" style="display: none;">Done</sl-badge>
+                            </div>
+                            <sl-button id="setup-cookie-yt" size="small" variant="primary">Set up YouTube</sl-button>
+                        </div>
+                        <div class="cookie-platform-card">
+                            <div style="display: flex; align-items: center; gap: 0.5em;">
+                                <sl-icon name="twitch" style="font-size: 1.5rem; color: #9146ff;"></sl-icon>
+                                <strong>Twitch</strong>
+                                <sl-badge id="setup-tw-badge" variant="neutral" style="display: none;">Done</sl-badge>
+                            </div>
+                            <sl-button id="setup-cookie-tw" size="small" variant="primary">Set up Twitch</sl-button>
+                        </div>
+                    </div>
                     <div class="setup-nav">
-                        <div></div>
-                        <sl-button variant="primary" id="setup-next-1">
-                            Next
-                            <sl-icon slot="suffix" name="arrow-right"></sl-icon>
+                        <sl-button variant="default" id="setup-simple-cookies-back">
+                            <sl-icon slot="prefix" name="arrow-left"></sl-icon> Back
+                        </sl-button>
+                        <sl-button variant="primary" id="setup-simple-cookies-next">
+                            Next <sl-icon slot="suffix" name="arrow-right"></sl-icon>
                         </sl-button>
                     </div>
                 </div>
 
-                <!-- Step 2: Download Preferences -->
-                <div class="setup-page" id="setup-step-2" style="display: none">
-                    <h2>Download Preferences</h2>
-                    <p class="setup-help">
-                        Leave fields empty to use defaults.
-                    </p>
-
-                    <sl-input
-                        id="setup-max-resolution"
-                        type="number"
-                        label="Max Resolution"
-                        placeholder="2160"
-                        help-text="Maximum video dimension in pixels (default: 2160)"
-                    ></sl-input>
-
-                    <sl-switch id="setup-prefer-60fps" checked>
-                        Prefer 60fps
-                        <span slot="help-text"
-                            >When multiple formats share the same resolution,
-                            prefer 60fps. Resolution always takes priority.</span
-                        >
-                    </sl-switch>
-
-                    <sl-input
-                        id="setup-parallel-downloads"
-                        type="number"
-                        label="Parallel Downloads"
-                        placeholder="2"
-                        help-text="How many streams to download simultaneously (default: 2)"
-                    ></sl-input>
-
-                    <sl-switch id="setup-download-chat" checked>
-                        Download Live Chat
-                        <span slot="help-text"
-                            >Save live chat as JSON alongside video</span
-                        >
-                    </sl-switch>
-
-                    <sl-switch id="setup-auto-cookies">
-                        Enable automatic cookie login
-                        <span slot="help-text"
-                            >Opens a browser for Google login, grabs cookies
-                            automatically. Refreshes on auth failure.</span
-                        >
-                    </sl-switch>
-                    <sl-input
-                        id="setup-cookie-file"
-                        label="Cookie File (manual)"
-                        placeholder="./cookies.txt"
-                        help-text="Netscape-format cookie file. Default: ./cookies.txt"
-                    ></sl-input>
-
-                    <sl-details summary="Advanced retry settings">
-                        <sl-input
-                            id="setup-retry-delay-cap"
-                            type="number"
-                            label="Retry Delay Cap (seconds)"
-                            placeholder="60"
-                            help-text="Wait time increases by 1s per retry up to this cap when a segment isn't ready (default: 60)"
-                        ></sl-input>
-                        <sl-input
-                            id="setup-live-check-retries"
-                            type="number"
-                            label="Live Check Retries"
-                            placeholder="16"
-                            help-text="After this many failures, check YouTube API for stream status (default: 16). Lower = faster detection of ended streams."
-                        ></sl-input>
-                    </sl-details>
-
+                <!-- Simplified: Step 2 - Channels -->
+                <div class="setup-page" id="setup-simple-channels" style="display: none">
+                    <div class="setup-steps">
+                        <div class="setup-step completed" data-step="1"><div class="step-number">1</div><div class="step-label">Cookies</div></div>
+                        <div class="setup-step active" data-step="2"><div class="step-number">2</div><div class="step-label">Channels</div></div>
+                    </div>
+                    <h2>Monitor Channels</h2>
+                    <p class="setup-help">Add YouTube or Twitch channels to automatically monitor for live streams. You can add more later in Settings.</p>
+                    <div id="setup-channel-list" class="setup-channel-list"></div>
+                    <sl-button id="setup-add-channel-btn" size="small" variant="default">
+                        <sl-icon slot="prefix" name="plus-lg"></sl-icon> Add Channel
+                    </sl-button>
                     <div class="setup-nav">
-                        <sl-button variant="default" id="setup-back-2">
-                            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-                            Back
+                        <sl-button variant="default" id="setup-simple-channels-back">
+                            <sl-icon slot="prefix" name="arrow-left"></sl-icon> Back
                         </sl-button>
-                        <sl-button variant="primary" id="setup-next-2">
-                            Next
-                            <sl-icon slot="suffix" name="arrow-right"></sl-icon>
+                        <sl-button variant="primary" id="setup-simple-finish">
+                            <sl-icon slot="prefix" name="check-lg"></sl-icon> Finish Setup
                         </sl-button>
                     </div>
                 </div>
 
-                <!-- Step 3: Logging -->
-                <div class="setup-page" id="setup-step-3" style="display: none">
+                <!-- Advanced: Step 1 - Network -->
+                <div class="setup-page" id="setup-adv-step-1" style="display: none">
+                    <div class="setup-steps" id="setup-adv-steps">
+                        <div class="setup-step active" data-step="1"><div class="step-number">1</div><div class="step-label">Network</div></div>
+                        <div class="setup-step" data-step="2"><div class="step-number">2</div><div class="step-label">Paths</div></div>
+                        <div class="setup-step" data-step="3"><div class="step-number">3</div><div class="step-label">Logs</div></div>
+                        <div class="setup-step" data-step="4"><div class="step-number">4</div><div class="step-label">Monitors</div></div>
+                        <div class="setup-step" data-step="5"><div class="step-number">5</div><div class="step-label">Download</div></div>
+                        <div class="setup-step" data-step="6"><div class="step-number">6</div><div class="step-label">Cookies</div></div>
+                        <div class="setup-step" data-step="7"><div class="step-number">7</div><div class="step-label">Channels</div></div>
+                        <div class="setup-step" data-step="8"><div class="step-number">8</div><div class="step-label">Extras</div></div>
+                    </div>
+                    <h2>Network</h2>
+                    <p class="setup-help">Leave fields empty to use defaults.</p>
+                    <sl-input id="setup-port" type="number" label="Dashboard Port" placeholder="774" help-text="Web dashboard & API port (default: 774)"></sl-input>
+                    <sl-select id="setup-network-access" label="Network Access" value="localhost" help-text="Controls who can access the dashboard">
+                        <sl-option value="localhost">Localhost Only</sl-option>
+                        <sl-option value="lan">LAN</sl-option>
+                        <sl-option value="external">External (dangerous)</sl-option>
+                    </sl-select>
+                    <sl-alert id="setup-external-warning" variant="warning" open style="display: none; margin-bottom: 1em;">
+                        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                        <strong>Password required.</strong> External access requires authentication.
+                    </sl-alert>
+                    <sl-input id="setup-external-password" type="password" label="External Access Password" placeholder="Minimum 8 characters" toggle-password style="display: none; margin-bottom: 1em;"></sl-input>
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-adv-back-1"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
+                        <sl-button variant="primary" id="setup-adv-next-1">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
+                    </div>
+                </div>
+
+                <!-- Advanced: Step 2 - Paths -->
+                <div class="setup-page" id="setup-adv-step-2" style="display: none">
+                    <h2>Paths</h2>
+                    <p class="setup-help">Leave fields empty to use defaults.</p>
+                    <sl-input id="setup-output-dir" label="Output Directory" placeholder="./output" help-text="Where finished downloads are saved"></sl-input>
+                    <sl-input id="setup-output-template" label="Filename Template" placeholder="${channel}/${start_date} ${title} [${id}]" help-text="Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"></sl-input>
+                    <sl-input id="setup-staging-dir" label="Staging Directory" placeholder="./staging" help-text="Temporary directory for segments during download"></sl-input>
+                    <sl-input id="setup-database-path" label="Database Path" placeholder="./moombox.db" help-text="Job database file location"></sl-input>
+                    <sl-input id="setup-ffmpeg-path" label="FFmpeg Path" placeholder="(system PATH)" help-text="Leave empty to use system ffmpeg"></sl-input>
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-adv-back-2"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
+                        <sl-button variant="primary" id="setup-adv-next-2">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
+                    </div>
+                </div>
+
+                <!-- Advanced: Step 3 - Logs -->
+                <div class="setup-page" id="setup-adv-step-3" style="display: none">
                     <h2>Logging</h2>
-                    <p class="setup-help">
-                        Leave fields empty to use defaults.
-                    </p>
-
-                    <sl-select
-                        id="setup-log-level"
-                        label="Log Level"
-                        value="INFO"
-                        help-text="Verbosity of log output (default: INFO)"
-                    >
+                    <p class="setup-help">Leave fields empty to use defaults.</p>
+                    <sl-select id="setup-log-level" label="Log Level" value="INFO" help-text="Verbosity of log output">
                         <sl-option value="DEBUG">DEBUG</sl-option>
                         <sl-option value="INFO">INFO</sl-option>
                         <sl-option value="WARN">WARN</sl-option>
                         <sl-option value="ERROR">ERROR</sl-option>
                     </sl-select>
-
-                    <sl-input
-                        id="setup-log-file"
-                        label="Log File Path"
-                        placeholder="./moombox.log"
-                        help-text="Where log file is written (default: ./moombox.log)"
-                    ></sl-input>
-
-                    <sl-input
-                        id="setup-log-max-size"
-                        type="number"
-                        label="Max Log File Size (bytes)"
-                        placeholder="10485760"
-                        help-text="Maximum bytes before log rotation (default: 10MB)"
-                    ></sl-input>
-
-                    <sl-input
-                        id="setup-log-max-files"
-                        type="number"
-                        label="Max Log Files"
-                        placeholder="5"
-                        help-text="Number of rotated log files to keep (default: 5)"
-                    ></sl-input>
-
+                    <sl-input id="setup-log-file" label="Log File Path" placeholder="./moombox.log"></sl-input>
+                    <sl-input id="setup-log-max-size" type="number" label="Max Log File Size (bytes)" placeholder="10485760"></sl-input>
+                    <sl-input id="setup-log-max-files" type="number" label="Max Log Files" placeholder="5"></sl-input>
                     <div class="setup-nav">
-                        <sl-button variant="default" id="setup-back-3">
-                            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-                            Back
-                        </sl-button>
-                        <sl-button variant="primary" id="setup-next-3">
-                            Next
-                            <sl-icon slot="suffix" name="arrow-right"></sl-icon>
-                        </sl-button>
+                        <sl-button variant="default" id="setup-adv-back-3"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
+                        <sl-button variant="primary" id="setup-adv-next-3">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
                     </div>
                 </div>
 
-                <!-- Step 4: Display & Monitoring -->
-                <div class="setup-page" id="setup-step-4" style="display: none">
-                    <h2>Display &amp; Monitoring</h2>
-                    <p class="setup-help">
-                        Leave fields empty to use defaults.
-                    </p>
+                <!-- Advanced: Step 4 - Monitors -->
+                <div class="setup-page" id="setup-adv-step-4" style="display: none">
+                    <h2>Monitors</h2>
+                    <p class="setup-help">Leave fields empty to use defaults.</p>
+                    <sl-input id="setup-hide-age" type="number" label="Hide Finished After (days)" placeholder="30"></sl-input>
+                    <sl-input id="setup-max-feed-items" type="number" label="Max Feed Items" placeholder="15"></sl-input>
+                    <sl-input id="setup-feed-check-interval" type="number" label="Feed Check Interval (minutes)" placeholder="10"></sl-input>
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-adv-back-4"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
+                        <sl-button variant="primary" id="setup-adv-next-4">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
+                    </div>
+                </div>
 
-                    <sl-input
-                        id="setup-hide-age"
-                        type="number"
-                        label="Hide Finished After (days)"
-                        placeholder="30"
-                        help-text="Finished jobs older than this move to Archived (default: 30)"
-                    ></sl-input>
+                <!-- Advanced: Step 5 - Downloader -->
+                <div class="setup-page" id="setup-adv-step-5" style="display: none">
+                    <h2>Download Preferences</h2>
+                    <p class="setup-help">Leave fields empty to use defaults.</p>
+                    <sl-input id="setup-max-resolution" type="number" label="Max Resolution" placeholder="2160"></sl-input>
+                    <sl-switch id="setup-prefer-60fps" checked>Prefer 60fps</sl-switch>
+                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2"></sl-input>
+                    <sl-switch id="setup-download-chat" checked>Download Live Chat</sl-switch>
+                    <sl-details summary="Advanced retry settings">
+                        <sl-input id="setup-retry-delay-cap" type="number" label="Retry Delay Cap (seconds)" placeholder="60"></sl-input>
+                        <sl-input id="setup-live-check-retries" type="number" label="Live Check Retries" placeholder="16"></sl-input>
+                    </sl-details>
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-adv-back-5"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
+                        <sl-button variant="primary" id="setup-adv-next-5">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
+                    </div>
+                </div>
 
-                    <sl-input
-                        id="setup-max-feed-items"
-                        type="number"
-                        label="Max Feed Items"
-                        placeholder="15"
-                        help-text="RSS feed items to check per channel (default: 15)"
-                    ></sl-input>
+                <!-- Advanced: Step 6 - Cookies -->
+                <div class="setup-page" id="setup-adv-step-6" style="display: none">
+                    <h2>Cookies</h2>
+                    <p class="setup-help">Configure cookie-based authentication.</p>
+                    <sl-switch id="setup-auto-cookies">Enable automatic cookie login</sl-switch>
+                    <sl-input id="setup-cookie-file" label="Cookie File (manual)" placeholder="./cookies.txt" help-text="Netscape-format cookie file"></sl-input>
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-adv-back-6"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
+                        <sl-button variant="primary" id="setup-adv-next-6">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
+                    </div>
+                </div>
 
-                    <sl-input
-                        id="setup-feed-check-interval"
-                        type="number"
-                        label="Feed Check Interval (minutes)"
-                        placeholder="10"
-                        help-text="How often to check feeds for new streams (default: 10)"
-                    ></sl-input>
+                <!-- Advanced: Step 7 - Channels -->
+                <div class="setup-page" id="setup-adv-step-7" style="display: none">
+                    <h2>Monitor Channels</h2>
+                    <p class="setup-help">Add channels to automatically monitor for live streams.</p>
+                    <div id="setup-adv-channel-list" class="setup-channel-list"></div>
+                    <sl-button id="setup-adv-add-channel-btn" size="small" variant="default">
+                        <sl-icon slot="prefix" name="plus-lg"></sl-icon> Add Channel
+                    </sl-button>
+                    <div class="setup-nav">
+                        <sl-button variant="default" id="setup-adv-back-7"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
+                        <sl-button variant="primary" id="setup-adv-next-7">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
+                    </div>
+                </div>
 
-                    <sl-input
-                        id="setup-port"
-                        type="number"
-                        label="Dashboard Port"
-                        placeholder="774"
-                        help-text="Web dashboard & API port. If busy, nearby ports are tried (default: 774)"
-                    ></sl-input>
-                    <sl-select
-                        id="setup-network-access"
-                        label="Network Access"
-                        value="localhost"
-                        help-text="Controls who can access the dashboard (default: Localhost Only)"
-                    >
-                        <sl-option value="localhost">Localhost Only — This machine only</sl-option>
-                        <sl-option value="lan">LAN — Local network devices</sl-option>
-                        <sl-option value="external">External — All networks (dangerous)</sl-option>
-                    </sl-select>
-                    <sl-alert id="setup-external-warning" variant="warning" open style="display: none; margin-bottom: 1em;">
-                        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                        <strong>Password required.</strong> External access requires a password. All external connections must authenticate. LAN and loopback connections are always allowed without a password.
-                    </sl-alert>
-                    <sl-input
-                        id="setup-external-password"
-                        type="password"
-                        label="External Access Password"
-                        placeholder="Minimum 8 characters"
-                        help-text="Required when enabling external access"
-                        toggle-password
-                        style="display: none; margin-bottom: 1em;"
-                    ></sl-input>
-
-                    <sl-switch id="setup-install-ytdlp-plugin">
-                        Install yt-dlp Plugin
+                <!-- Advanced: Step 8 - Integrations -->
+                <div class="setup-page" id="setup-adv-step-8" style="display: none">
+                    <h2>Integrations</h2>
+                    <p class="setup-help">Optional extras.</p>
+                    <sl-switch id="setup-install-ytdlp-plugin">Install yt-dlp Plugin
                         <span slot="help-text">Install a yt-dlp plugin so it can use Moombox for PO token generation</span>
                     </sl-switch>
-
                     <div class="setup-nav">
-                        <sl-button variant="default" id="setup-back-4">
-                            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-                            Back
-                        </sl-button>
-                        <sl-button variant="primary" id="setup-next-4">
-                            Next
-                            <sl-icon slot="suffix" name="arrow-right"></sl-icon>
-                        </sl-button>
-                    </div>
-                </div>
-
-                <!-- Step 5: Monitor a Channel (Optional) -->
-                <div class="setup-page" id="setup-step-5" style="display: none">
-                    <h2>Monitor a Channel (Optional)</h2>
-                    <p class="setup-help">
-                        Automatically download new streams from a YouTube
-                        channel. You can add more channels later in Settings.
-                    </p>
-
-                    <sl-input
-                        id="setup-channel-id"
-                        label="Channel ID"
-                        placeholder="UCxxxxxxxx"
-                        help-text="YouTube channel ID (starts with UC). Leave empty to skip."
-                    ></sl-input>
-
-                    <sl-input
-                        id="setup-channel-name"
-                        label="Display Name"
-                        placeholder="My Favorite Channel"
-                        help-text="Friendly name shown in task list"
-                    ></sl-input>
-
-                    <sl-input
-                        id="setup-channel-terms"
-                        label="Filter Regex"
-                        placeholder="(?i)(karaoke|singing|歌枠)"
-                        help-text="Only archive streams matching this pattern. Leave empty to download all."
-                    ></sl-input>
-
-                    <sl-details summary="Pattern examples">
-                        <div class="pattern-examples">
-                            <code>(?i)karaoke</code> - Match "karaoke"
-                            (case-insensitive)<br />
-                            <code>(?i)(singing|歌枠)</code> - Match singing
-                            streams<br />
-                            <code>(?i)unarchived</code> - Match unarchived
-                            streams
-                        </div>
-                    </sl-details>
-
-                    <sl-checkbox id="setup-include-non-live"
-                        >Include non-live content (VODs, premieres)</sl-checkbox
-                    >
-
-                    <div class="setup-nav">
-                        <sl-button variant="default" id="setup-back-5">
-                            <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-                            Back
-                        </sl-button>
-                        <sl-button variant="primary" id="setup-finish">
-                            <sl-icon slot="prefix" name="check-lg"></sl-icon>
-                            Finish Setup
+                        <sl-button variant="default" id="setup-adv-back-8"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
+                        <sl-button variant="primary" id="setup-adv-finish">
+                            <sl-icon slot="prefix" name="check-lg"></sl-icon> Finish Setup
                         </sl-button>
                     </div>
                 </div>
             </div>
         </div>
+
+        <!-- FFmpeg Check Overlay -->
+        <div id="ffmpeg-overlay" style="display: none">
+            <div class="setup-container">
+                <div class="setup-header">
+                    <sl-icon name="exclamation-triangle" style="font-size: 3rem; color: var(--sl-color-warning-600);"></sl-icon>
+                    <h1>FFmpeg Not Found</h1>
+                    <p>FFmpeg is required for muxing video and audio streams.</p>
+                </div>
+                <div id="ffmpeg-main-view">
+                    <sl-button id="ffmpeg-install-btn" variant="primary" style="width: 100%; margin-bottom: 0.75em;">
+                        <sl-icon slot="prefix" name="download"></sl-icon> Install FFmpeg
+                    </sl-button>
+                    <sl-divider></sl-divider>
+                    <div style="display: flex; gap: 0.5em; align-items: flex-end;">
+                        <sl-input id="ffmpeg-custom-path" label="Custom FFmpeg path" placeholder="C:\path\to\ffmpeg.exe" style="flex: 1;"></sl-input>
+                        <sl-button id="ffmpeg-check-btn" variant="default">Check</sl-button>
+                    </div>
+                    <div id="ffmpeg-check-result" style="margin-top: 0.5em;"></div>
+                    <sl-divider></sl-divider>
+                    <sl-button id="ffmpeg-quit-btn" variant="text" style="width: 100%;">Quit Moombox</sl-button>
+                </div>
+                <div id="ffmpeg-install-view" style="display: none">
+                    <div id="ffmpeg-install-options"></div>
+                    <div id="ffmpeg-install-progress" style="display: none; margin-top: 1em;">
+                        <sl-spinner style="font-size: 1.5rem;"></sl-spinner>
+                        <span style="margin-left: 0.5em;">Installing FFmpeg...</span>
+                    </div>
+                    <div id="ffmpeg-install-result" style="margin-top: 0.5em;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Setup Add Channel Dialog -->
+        <sl-dialog label="Add Channel" id="setup-add-channel-dialog" style="--width: 28rem">
+            <sl-input id="setup-ch-id" label="Channel ID" placeholder="UC... or twitch login" help-text="YouTube channel ID or Twitch login name"></sl-input>
+            <sl-input id="setup-ch-name" label="Display Name" placeholder="My Channel"></sl-input>
+            <sl-select id="setup-ch-platform" label="Platform" value="youtube">
+                <sl-option value="youtube">YouTube</sl-option>
+                <sl-option value="twitch">Twitch</sl-option>
+            </sl-select>
+            <sl-input id="setup-ch-terms" label="Filter Regex" placeholder="(?i)karaoke" help-text="Only archive streams matching this pattern. Leave empty for all."></sl-input>
+            <sl-checkbox id="setup-ch-include-non-live">Include non-live content</sl-checkbox>
+            <sl-button slot="footer" variant="default" id="setup-ch-cancel">Cancel</sl-button>
+            <sl-button slot="footer" variant="primary" id="setup-ch-save">Add Channel</sl-button>
+        </sl-dialog>
 
         <!-- Keyboard Help Dialog -->
         <sl-dialog label="Keyboard Shortcuts" id="keyboard-help-dialog">

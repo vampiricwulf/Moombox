@@ -41,33 +41,44 @@ class MoomboxApp {
 
   async init() {
     // Check if this is a first-run (no config)
-    const isFirstRun = await this.checkFirstRun();
+    const status = await this.checkSetupStatus();
 
-    if (isFirstRun) {
+    if (status.isFirstRun) {
       this.setup.show();
     } else {
-      this.setTheme(this.theme);
-      this.setupEventListeners();
-      this.setupKeyboardShortcuts();
-      this.settings.setupListeners();
-      this.connectWebSocket();
-      this.loadConfig();
-      this.loadStatus();
-      this._countdownInterval = setInterval(() => this.updateCheckCountdown(), 1000);
+      // Check FFmpeg before initializing
+      if (status.ffmpegValid === false) {
+        this.setup.showFFmpegOverlay();
+      } else {
+        this.initializeApp();
+      }
     }
   }
 
-  async checkFirstRun() {
+  initializeApp() {
+    if (this._initialized) return;
+    this._initialized = true;
+
+    this.setTheme(this.theme);
+    this.setupEventListeners();
+    this.setupKeyboardShortcuts();
+    this.settings.setupListeners();
+    this.connectWebSocket();
+    this.loadConfig();
+    this.loadStatus();
+    this._countdownInterval = setInterval(() => this.updateCheckCountdown(), 1000);
+  }
+
+  async checkSetupStatus() {
     try {
       const response = await fetch("/api/setup/status");
       if (response.ok) {
-        const data = await response.json();
-        return data.isFirstRun;
+        return await response.json();
       }
     } catch (e) {
-      console.error("Failed to check first-run status:", e);
+      console.error("Failed to check setup status:", e);
     }
-    return false;
+    return { isFirstRun: false };
   }
 
   setupEventListeners() {

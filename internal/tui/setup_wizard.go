@@ -11,6 +11,23 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
+// setupMode identifies which wizard flow is active.
+type setupMode int
+
+const (
+	setupModeSelect   setupMode = iota // Mode selection screen
+	setupModeSimple                    // Quick Setup
+	setupModeAdvanced                  // Advanced Setup
+)
+
+// setupSimpleStage identifies the current stage in simplified setup.
+type setupSimpleStage int
+
+const (
+	setupSimpleCookies  setupSimpleStage = iota // Cookie acquisition
+	setupSimpleChannels                         // Channel management
+)
+
 // setupFieldType identifies field editing behavior in the wizard.
 type setupFieldType int
 
@@ -39,9 +56,19 @@ type setupStepDef struct {
 	footer   string
 }
 
-var setupSteps = []setupStepDef{
+// Advanced setup steps — 8 sections matching settings.go
+var advancedSetupSteps = []setupStepDef{
 	{
-		title:    "Output & Paths",
+		title:    "Network",
+		subtitle: "Leave fields empty to use defaults",
+		fields: []setupFieldDef{
+			{"port", "Dashboard port", "774", "Web dashboard & API port (tries nearby if busy)", setupFieldNumber, nil},
+			{"networkAccess", "Network access", "Localhost", "Who can access the dashboard", setupFieldCycle, []string{"Localhost", "LAN"}},
+			{"httpsEnabled", "HTTPS enabled", "No", "Enable HTTPS for the dashboard", setupFieldToggle, []string{"No", "Yes"}},
+		},
+	},
+	{
+		title:    "Paths",
 		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
 			{"outputDir", "Output directory", "./output", "Where finished downloads are saved", setupFieldText, nil},
@@ -52,19 +79,7 @@ var setupSteps = []setupStepDef{
 		},
 	},
 	{
-		title:    "Download Preferences",
-		subtitle: "Leave fields empty to use defaults",
-		fields: []setupFieldDef{
-			{"maxRes", "Max resolution", "2160", "Maximum video dimension (width or height)", setupFieldNumber, nil},
-			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
-			{"numParallel", "Parallel downloads", "2", "How many streams to download simultaneously", setupFieldNumber, nil},
-			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
-			{"autoCookies", "Auto cookie login", "No", "Opens browser for Google login, grabs cookies automatically", setupFieldToggle, []string{"No", "Yes"}},
-			{"cookieFile", "Cookie file (manual)", "./cookies.txt", "Netscape-format cookie file. Not needed if auto-login is enabled", setupFieldText, nil},
-		},
-	},
-	{
-		title:    "Logging",
+		title:    "Logs",
 		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
 			{"logLevel", "Log level", "INFO", "Verbosity of log output", setupFieldCycle, []string{"DEBUG", "INFO", "WARN", "ERROR"}},
@@ -74,26 +89,43 @@ var setupSteps = []setupStepDef{
 		},
 	},
 	{
-		title:    "Display & Monitoring",
+		title:    "Monitors",
 		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
-			{"hideAge", "Hide finished after (days)", "30", "Finished jobs older than this move to Archived", setupFieldNumber, nil},
 			{"maxFeedItems", "Max feed items", "15", "RSS feed items to check per channel", setupFieldNumber, nil},
-			{"port", "Dashboard port", "774", "Web dashboard & API port (tries nearby if busy)", setupFieldNumber, nil},
-			{"networkAccess", "Network access", "Localhost", "Who can access the dashboard", setupFieldCycle, []string{"Localhost", "LAN", "External"}},
-			{"installYtdlpPlugin", "Install yt-dlp plugin", "No", "Install a yt-dlp plugin so it uses Moombox for PO tokens", setupFieldToggle, []string{"Yes", "No"}},
+			{"feedCheckInterval", "Feed check interval", "10", "Minutes between feed checks", setupFieldNumber, nil},
+			{"hideAge", "Hide finished after (days)", "30", "Finished jobs older than this move to Archived", setupFieldNumber, nil},
 		},
 	},
 	{
-		title:    "Monitor a Channel (Optional)",
-		subtitle: "Leave empty to skip channel monitoring",
+		title:    "Downloader",
+		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
-			{"channelId", "Channel ID", "empty = skip", "YouTube channel ID (starts with UC)", setupFieldText, nil},
-			{"channelName", "Display name", "empty", "Friendly name shown in task list", setupFieldText, nil},
-			{"channelTerms", "Filter regex", "empty = all streams", "Only archive streams matching this pattern", setupFieldText, nil},
-			{"includeNonLive", "Include non-live", "No", "Also download regular uploaded videos", setupFieldToggle, []string{"No", "Yes"}},
+			{"maxRes", "Max resolution", "2160", "Maximum video dimension (width or height)", setupFieldNumber, nil},
+			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
+			{"numParallel", "Parallel downloads", "2", "How many streams to download simultaneously", setupFieldNumber, nil},
+			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
 		},
-		footer: "Examples: (?i)karaoke  |  (?i)(singing|\u6b4c\u679a)  |  (?i)unarchived",
+	},
+	{
+		title:    "Cookies",
+		subtitle: "Leave fields empty to use defaults",
+		fields: []setupFieldDef{
+			{"cookieFile", "Cookie file (manual)", "./cookies.txt", "Netscape-format cookie file", setupFieldText, nil},
+			{"autoCookies", "Auto cookie login", "No", "Opens browser for login, grabs cookies automatically", setupFieldToggle, []string{"No", "Yes"}},
+		},
+	},
+	{
+		title:    "Channels",
+		subtitle: "Add channels to monitor",
+		fields:   nil, // Channel sub-editor
+	},
+	{
+		title:    "Integrations",
+		subtitle: "Optional integrations",
+		fields: []setupFieldDef{
+			{"installYtdlpPlugin", "Install yt-dlp plugin", "No", "Install a yt-dlp plugin so it uses Moombox for PO tokens", setupFieldToggle, []string{"No", "Yes"}},
+		},
 	},
 }
 
@@ -103,33 +135,69 @@ type SetupWizardModel struct {
 	width   int
 	height  int
 
+	mode         setupMode
+	modeChoice   int // 0=Quick, 1=Advanced on mode selection screen
 	step         int
 	focusedField int
 	values       map[string]string
 	saving       bool
 	errorMsg     string
 
+	// Simplified setup state
+	simpleStage  setupSimpleStage
+	cookieFocus  int  // 0=YouTube, 1=Twitch, 2=Skip
+	cookieActive bool // true when browser is open
+	cookiePlatform string
+	cookieYTDone bool
+	cookieTWDone bool
+
+	// Channel sub-editor (shared by simple and advanced)
+	channels          []config.ChannelConfig
+	channelIndex      int
+	channelMode       string // "list" or "edit"
+	channelEditValues map[string]string
+	channelEditField  int
+	channelDeleteConf bool
+
 	// Callbacks for finishing setup
-	OnComplete        func(cfg *config.MoomboxConfig) error
-	OnInstallYtdlp    func(port int)
-	OnStartAutoCookie func()
+	OnComplete         func(cfg *config.MoomboxConfig) error
+	OnInstallYtdlp     func(port int)
+	OnStartAutoCookie  func(platform string)
+	OnFinishAutoCookie func() (bool, bool)
+	OnCancelAutoCookie func()
+	OnRestart          func()
 }
 
 // NewSetupWizardModel creates a new setup wizard model.
 func NewSetupWizardModel() *SetupWizardModel {
 	return &SetupWizardModel{
-		values: make(map[string]string),
+		values:      make(map[string]string),
+		channelMode: "list",
 	}
 }
 
 // Open shows the setup wizard.
 func (m *SetupWizardModel) Open() {
 	m.visible = true
+	m.mode = setupModeSelect
+	m.modeChoice = 0
 	m.step = 0
 	m.focusedField = 0
 	m.values = make(map[string]string)
 	m.saving = false
 	m.errorMsg = ""
+	m.simpleStage = setupSimpleCookies
+	m.cookieFocus = 0
+	m.cookieActive = false
+	m.cookiePlatform = ""
+	m.cookieYTDone = false
+	m.cookieTWDone = false
+	m.channels = nil
+	m.channelIndex = 0
+	m.channelMode = "list"
+	m.channelEditValues = nil
+	m.channelEditField = 0
+	m.channelDeleteConf = false
 }
 
 // Close hides the wizard.
@@ -149,7 +217,6 @@ func (m *SetupWizardModel) SetSize(w, h int) {
 }
 
 // getFieldValue returns the current value for a field.
-// Toggles and cycles default to their defaultDisplay; text/number default to "".
 func (m *SetupWizardModel) getFieldValue(field setupFieldDef) string {
 	if val, ok := m.values[field.key]; ok {
 		return val
@@ -165,16 +232,380 @@ func (m *SetupWizardModel) HandleKey(key string) string {
 	if m.saving {
 		return ""
 	}
-
-	// Clear error on any input
 	if m.errorMsg != "" {
 		m.errorMsg = ""
 	}
 
-	currentStep := setupSteps[m.step]
+	switch m.mode {
+	case setupModeSelect:
+		return m.handleModeSelectKey(key)
+	case setupModeSimple:
+		return m.handleSimpleKey(key)
+	case setupModeAdvanced:
+		return m.handleAdvancedKey(key)
+	}
+	return ""
+}
+
+// --- Mode Selection ---
+
+func (m *SetupWizardModel) handleModeSelectKey(key string) string {
+	switch key {
+	case keyUp:
+		if m.modeChoice > 0 {
+			m.modeChoice--
+		}
+	case keyDown:
+		if m.modeChoice < 1 {
+			m.modeChoice++
+		}
+	case keyEnter, keyTab:
+		if m.modeChoice == 0 {
+			m.mode = setupModeSimple
+			m.simpleStage = setupSimpleCookies
+			m.cookieFocus = 0
+		} else {
+			m.mode = setupModeAdvanced
+			m.step = 0
+			m.focusedField = 0
+		}
+	}
+	return ""
+}
+
+// --- Simplified Setup ---
+
+func (m *SetupWizardModel) handleSimpleKey(key string) string {
+	switch m.simpleStage {
+	case setupSimpleCookies:
+		return m.handleSimpleCookieKey(key)
+	case setupSimpleChannels:
+		return m.handleSimpleChannelKey(key)
+	}
+	return ""
+}
+
+func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
+	if m.cookieActive {
+		// Waiting for user to finish login
+		switch key {
+		case keyEnter:
+			// Finish auto-cookie
+			if m.OnFinishAutoCookie != nil {
+				yt, tw := m.OnFinishAutoCookie()
+				if m.cookiePlatform == "youtube" {
+					m.cookieYTDone = yt
+				} else {
+					m.cookieTWDone = tw
+				}
+			}
+			m.cookieActive = false
+			m.cookiePlatform = ""
+		case keyEsc:
+			if m.OnCancelAutoCookie != nil {
+				m.OnCancelAutoCookie()
+			}
+			m.cookieActive = false
+			m.cookiePlatform = ""
+		}
+		return ""
+	}
+
+	switch key {
+	case keyEsc:
+		m.mode = setupModeSelect
+	case keyUp:
+		if m.cookieFocus > 0 {
+			m.cookieFocus--
+		}
+	case keyDown:
+		if m.cookieFocus < 2 {
+			m.cookieFocus++
+		}
+	case keyEnter, keyTab:
+		switch m.cookieFocus {
+		case 0: // YouTube
+			if m.OnStartAutoCookie != nil {
+				m.OnStartAutoCookie("youtube")
+				m.cookieActive = true
+				m.cookiePlatform = "youtube"
+			}
+		case 1: // Twitch
+			if m.OnStartAutoCookie != nil {
+				m.OnStartAutoCookie("twitch")
+				m.cookieActive = true
+				m.cookiePlatform = "twitch"
+			}
+		case 2: // Skip / Next
+			m.simpleStage = setupSimpleChannels
+			m.channelIndex = 0
+			m.channelMode = "list"
+		}
+	}
+	return ""
+}
+
+func (m *SetupWizardModel) handleSimpleChannelKey(key string) string {
+	if m.channelMode == "edit" {
+		return m.handleChannelEditKey(key)
+	}
+
+	// Channel list mode with delete confirmation
+	if m.channelDeleteConf {
+		if key == "d" || key == "D" {
+			if m.channelIndex < len(m.channels) {
+				m.channels = append(m.channels[:m.channelIndex], m.channels[m.channelIndex+1:]...)
+				if m.channelIndex >= len(m.channels) && m.channelIndex > 0 {
+					m.channelIndex--
+				}
+			}
+			m.channelDeleteConf = false
+		} else {
+			m.channelDeleteConf = false
+		}
+		return ""
+	}
+
+	switch key {
+	case keyEsc:
+		m.simpleStage = setupSimpleCookies
+	case keyUp:
+		if m.channelIndex > 0 {
+			m.channelIndex--
+		}
+	case keyDown:
+		if m.channelIndex < len(m.channels)-1 {
+			m.channelIndex++
+		}
+	case "a", "A":
+		m.channelEditValues = map[string]string{
+			"id": "", "name": "", "platform": "youtube",
+			"enabled": "Yes", "terms": "",
+			"include_non_live": "No", "quality_preference": "best",
+		}
+		m.channelEditField = 0
+		m.channelIndex = len(m.channels)
+		m.channelMode = "edit"
+	case keyEnter:
+		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
+			m.channelMode = "edit"
+			m.channelEditValues = channelToValues(m.channels[m.channelIndex])
+			m.channelEditField = 0
+		}
+	case "d", "D":
+		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
+			m.channelDeleteConf = true
+		}
+	case keyTab:
+		// Finish simplified setup
+		return m.finishSimpleSetup()
+	}
+	return ""
+}
+
+// visibleSetupChannelFields returns channel fields filtered by platform.
+func (m *SetupWizardModel) visibleSetupChannelFields() []channelFieldDef {
+	platform := "youtube"
+	if m.channelEditValues != nil {
+		if p, ok := m.channelEditValues["platform"]; ok {
+			platform = p
+		}
+	}
+	var fields []channelFieldDef
+	for _, f := range channelFields {
+		if f.platformFilter == "" || f.platformFilter == platform {
+			fields = append(fields, f)
+		}
+	}
+	return fields
+}
+
+func (m *SetupWizardModel) handleChannelEditKey(key string) string {
+	fields := m.visibleSetupChannelFields()
+	if len(fields) == 0 {
+		return ""
+	}
+	if m.channelEditField >= len(fields) {
+		m.channelEditField = len(fields) - 1
+	}
+	field := fields[m.channelEditField]
+
+	switch key {
+	case keyEsc:
+		m.channelMode = "list"
+		// Clamp index after cancelling an add (channelIndex may be past the end)
+		if m.channelIndex >= len(m.channels) && len(m.channels) > 0 {
+			m.channelIndex = len(m.channels) - 1
+		} else if len(m.channels) == 0 {
+			m.channelIndex = 0
+		}
+		return ""
+
+	case keyEnter:
+		// Save channel
+		if id := strings.TrimSpace(m.channelEditValues["id"]); id == "" {
+			return ""
+		}
+		ch := valuesToChannel(m.channelEditValues)
+		if m.channelIndex < len(m.channels) {
+			m.channels[m.channelIndex] = ch
+		} else {
+			m.channels = append(m.channels, ch)
+		}
+		m.channelMode = "list"
+		return ""
+
+	case keyUp:
+		if m.channelEditField > 0 {
+			m.channelEditField--
+		}
+		return ""
+
+	case keyDown, keyTab:
+		if m.channelEditField < len(fields)-1 {
+			m.channelEditField++
+		}
+		return ""
+
+	case "left":
+		if field.ftype == fieldToggle || field.ftype == fieldCycle {
+			m.cycleChannelFieldReverse(field)
+		}
+		return ""
+
+	case "right":
+		if field.ftype == fieldToggle || field.ftype == fieldCycle {
+			m.cycleChannelField(field)
+		}
+		return ""
+
+	case "backspace", "delete":
+		if field.ftype == fieldToggle || field.ftype == fieldCycle {
+			return ""
+		}
+		cur := m.channelEditValues[field.key]
+		if len(cur) > 0 {
+			runes := []rune(cur)
+			m.channelEditValues[field.key] = string(runes[:len(runes)-1])
+		}
+		return ""
+
+	case "ctrl+v":
+		if field.ftype == fieldToggle || field.ftype == fieldCycle {
+			return ""
+		}
+		if clip := readClipboard(); clip != "" {
+			if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
+				clip = clip[:idx]
+			}
+			clip = strings.TrimSpace(clip)
+			if clip != "" {
+				cur := m.channelEditValues[field.key]
+				m.channelEditValues[field.key] = cur + clip
+			}
+		}
+		return ""
+
+	default:
+		if field.ftype == fieldToggle || field.ftype == fieldCycle {
+			return ""
+		}
+		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
+			if key[0] == 0x1b {
+				return ""
+			}
+			cur := m.channelEditValues[field.key]
+			m.channelEditValues[field.key] = cur + key
+		}
+		return ""
+	}
+}
+
+func (m *SetupWizardModel) cycleChannelField(field channelFieldDef) {
+	if field.options == nil {
+		return
+	}
+	cur := m.channelEditValues[field.key]
+	for i, opt := range field.options {
+		if strings.EqualFold(opt, cur) {
+			m.channelEditValues[field.key] = field.options[(i+1)%len(field.options)]
+			return
+		}
+	}
+	if len(field.options) > 0 {
+		m.channelEditValues[field.key] = field.options[0]
+	}
+}
+
+func (m *SetupWizardModel) cycleChannelFieldReverse(field channelFieldDef) {
+	if field.options == nil {
+		return
+	}
+	cur := m.channelEditValues[field.key]
+	for i, opt := range field.options {
+		if strings.EqualFold(opt, cur) {
+			idx := (i - 1 + len(field.options)) % len(field.options)
+			m.channelEditValues[field.key] = field.options[idx]
+			return
+		}
+	}
+	if len(field.options) > 0 {
+		m.channelEditValues[field.key] = field.options[len(field.options)-1]
+	}
+}
+
+func (m *SetupWizardModel) finishSimpleSetup() string {
+	m.saving = true
+	m.errorMsg = ""
+
+	cfg := config.Defaults()
+
+	// Enable auto-cookies if any platform was set up
+	if m.cookieYTDone || m.cookieTWDone {
+		cfg.Cookies.AutoEnabled = true
+		var platforms []string
+		if m.cookieYTDone {
+			platforms = append(platforms, "youtube")
+		}
+		if m.cookieTWDone {
+			platforms = append(platforms, "twitch")
+		}
+		cfg.Cookies.Platforms = platforms
+	}
+
+	// Channels
+	cfg.Channels = m.channels
+
+	if m.OnComplete != nil {
+		if err := m.OnComplete(cfg); err != nil {
+			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
+			m.saving = false
+			return ""
+		}
+	}
+
+	m.saving = false
+
+	// Trigger restart so all services re-init with new config
+	if m.OnRestart != nil {
+		m.OnRestart()
+	}
+
+	return "complete"
+}
+
+// --- Advanced Setup ---
+
+func (m *SetupWizardModel) handleAdvancedKey(key string) string {
+	currentStep := advancedSetupSteps[m.step]
+
+	// Channel sub-editor in the Channels step
+	if currentStep.fields == nil && currentStep.title == "Channels" {
+		return m.handleAdvancedChannelKey(key)
+	}
+
 	fieldCount := len(currentStep.fields)
 
-	// Determine focused field
 	var field *setupFieldDef
 	if m.focusedField >= 0 && m.focusedField < fieldCount {
 		field = &currentStep.fields[m.focusedField]
@@ -185,6 +616,8 @@ func (m *SetupWizardModel) HandleKey(key string) string {
 		if m.step > 0 {
 			m.step--
 			m.focusedField = 0
+		} else {
+			m.mode = setupModeSelect
 		}
 		return ""
 
@@ -201,11 +634,11 @@ func (m *SetupWizardModel) HandleKey(key string) string {
 		return ""
 
 	case keyEnter, keyTab:
-		if m.step < len(setupSteps)-1 {
+		if m.step < len(advancedSetupSteps)-1 {
 			m.step++
 			m.focusedField = 0
 		} else {
-			return m.finishSetup()
+			return m.finishAdvancedSetup()
 		}
 		return ""
 
@@ -222,7 +655,6 @@ func (m *SetupWizardModel) HandleKey(key string) string {
 		return ""
 
 	case "backspace", "delete":
-		// Match TS: key.backspace || key.delete
 		if field == nil || field.ftype == setupFieldToggle || field.ftype == setupFieldCycle {
 			return ""
 		}
@@ -234,17 +666,14 @@ func (m *SetupWizardModel) HandleKey(key string) string {
 		return ""
 
 	case "ctrl+v":
-		// Clipboard paste support (match TS)
 		if field == nil || field.ftype == setupFieldToggle || field.ftype == setupFieldCycle {
 			return ""
 		}
 		if clip := readClipboard(); clip != "" {
-			// Take first line only (match TS: text.split(/[\r\n]/)[0].trim())
 			if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
 				clip = clip[:idx]
 			}
 			clip = strings.TrimSpace(clip)
-			// Filter non-digits for number fields (match TS clipboard paste behavior)
 			if field.ftype == setupFieldNumber {
 				var filtered strings.Builder
 				for _, ch := range clip {
@@ -266,11 +695,9 @@ func (m *SetupWizardModel) HandleKey(key string) string {
 			return ""
 		}
 		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			// Reject escape sequence fragments
 			if key[0] == 0x1b {
 				return ""
 			}
-			// Number fields only accept digits
 			if field.ftype == setupFieldNumber && (key[0] < '0' || key[0] > '9') {
 				return ""
 			}
@@ -281,6 +708,72 @@ func (m *SetupWizardModel) HandleKey(key string) string {
 	}
 }
 
+func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
+	if m.channelMode == "edit" {
+		return m.handleChannelEditKey(key)
+	}
+
+	if m.channelDeleteConf {
+		if key == "d" || key == "D" {
+			if m.channelIndex < len(m.channels) {
+				m.channels = append(m.channels[:m.channelIndex], m.channels[m.channelIndex+1:]...)
+				if m.channelIndex >= len(m.channels) && m.channelIndex > 0 {
+					m.channelIndex--
+				}
+			}
+			m.channelDeleteConf = false
+		} else {
+			m.channelDeleteConf = false
+		}
+		return ""
+	}
+
+	switch key {
+	case keyEsc:
+		if m.step > 0 {
+			m.step--
+			m.focusedField = 0
+		} else {
+			m.mode = setupModeSelect
+		}
+	case keyUp:
+		if m.channelIndex > 0 {
+			m.channelIndex--
+		}
+	case keyDown:
+		if m.channelIndex < len(m.channels)-1 {
+			m.channelIndex++
+		}
+	case "a", "A":
+		m.channelEditValues = map[string]string{
+			"id": "", "name": "", "platform": "youtube",
+			"enabled": "Yes", "terms": "",
+			"include_non_live": "No", "quality_preference": "best",
+		}
+		m.channelEditField = 0
+		m.channelIndex = len(m.channels)
+		m.channelMode = "edit"
+	case keyEnter:
+		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
+			m.channelMode = "edit"
+			m.channelEditValues = channelToValues(m.channels[m.channelIndex])
+			m.channelEditField = 0
+		}
+	case "d", "D":
+		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
+			m.channelDeleteConf = true
+		}
+	case keyTab:
+		if m.step < len(advancedSetupSteps)-1 {
+			m.step++
+			m.focusedField = 0
+		} else {
+			return m.finishAdvancedSetup()
+		}
+	}
+	return ""
+}
+
 func (m *SetupWizardModel) cycleOption(field setupFieldDef, direction int) {
 	if field.options == nil {
 		return
@@ -288,7 +781,7 @@ func (m *SetupWizardModel) cycleOption(field setupFieldDef, direction int) {
 	current := m.getFieldValue(field)
 	idx := 0
 	for i, opt := range field.options {
-		if opt == current {
+		if strings.EqualFold(opt, current) {
 			idx = i
 			break
 		}
@@ -297,7 +790,7 @@ func (m *SetupWizardModel) cycleOption(field setupFieldDef, direction int) {
 	m.values[field.key] = field.options[next]
 }
 
-func (m *SetupWizardModel) finishSetup() string {
+func (m *SetupWizardModel) finishAdvancedSetup() string {
 	m.saving = true
 	m.errorMsg = ""
 
@@ -320,18 +813,15 @@ func (m *SetupWizardModel) finishSetup() string {
 		return s == "Yes"
 	}
 
-	// Map display names to config values
 	netAccessMap := map[string]string{
 		"Localhost": "localhost",
 		"LAN":      "lan",
-		"External":  "external",
 	}
 	networkAccess := netAccessMap[m.values["networkAccess"]]
 	if networkAccess == "" {
 		networkAccess = "localhost"
 	}
 
-	// Start from defaults so empty fields keep their default values.
 	cfg := config.Defaults()
 
 	// Network
@@ -339,8 +829,9 @@ func (m *SetupWizardModel) finishSetup() string {
 	if port := vNum("port"); port > 0 {
 		cfg.Network.Port = port
 	}
+	cfg.Network.HTTPSEnabled = vBool("httpsEnabled", false)
 
-	// Paths — only override non-empty
+	// Paths
 	if s := v("logFilePath"); s != "" {
 		cfg.Paths.LogFilePath = s
 	}
@@ -372,6 +863,9 @@ func (m *SetupWizardModel) finishSetup() string {
 	if n := vNum("maxFeedItems"); n > 0 {
 		cfg.Monitors.MaxFeedItems = n
 	}
+	if n := vNum("feedCheckInterval"); n > 0 {
+		cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: float64(n)}
+	}
 	if s := v("hideAge"); s != "" {
 		hideAge, _ := strconv.Atoi(s)
 		if hideAge >= 0 {
@@ -379,7 +873,7 @@ func (m *SetupWizardModel) finishSetup() string {
 		}
 	}
 
-	// Downloader — only override non-empty/non-zero
+	// Downloader
 	if s := v("outputTemplate"); s != "" {
 		cfg.Downloader.OutputTemplate = s
 	}
@@ -398,23 +892,9 @@ func (m *SetupWizardModel) finishSetup() string {
 	}
 	cfg.Cookies.AutoEnabled = vBool("autoCookies", false)
 
-	channelID := v("channelId")
-	if channelID != "" {
-		ch := config.ChannelConfig{
-			ID:   channelID,
-			Name: v("channelName"),
-		}
-		terms := v("channelTerms")
-		if terms != "" {
-			ch.Terms = config.ChannelTerms{Simple: terms}
-		}
-		if vBool("includeNonLive", false) {
-			ch.IncludeNonLiveContent = true
-		}
-		cfg.Channels = []config.ChannelConfig{ch}
-	}
+	// Channels
+	cfg.Channels = m.channels
 
-	// Save config (match TS try/catch around ConfigManager.save)
 	if m.OnComplete != nil {
 		if err := m.OnComplete(cfg); err != nil {
 			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
@@ -423,13 +903,20 @@ func (m *SetupWizardModel) finishSetup() string {
 		}
 	}
 
-	// Post-save actions (non-fatal, match TS behavior)
+	// Post-save actions (run before restart since they're fast and synchronous)
 	if vBool("installYtdlpPlugin", false) && m.OnInstallYtdlp != nil {
 		m.OnInstallYtdlp(cfg.Network.Port)
 	}
 
-	if vBool("autoCookies", false) && m.OnStartAutoCookie != nil {
-		m.OnStartAutoCookie()
+	// Note: auto-cookies are enabled via config (auto_enabled: true).
+	// The auto-cookie service will initialize on restart — no need to
+	// call OnStartAutoCookie here (the restart would kill it immediately).
+
+	m.saving = false
+
+	// Trigger restart
+	if m.OnRestart != nil {
+		m.OnRestart()
 	}
 
 	return "complete"
@@ -450,164 +937,68 @@ func (m *SetupWizardModel) View() string {
 		return ""
 	}
 
-	boxW := min(72, m.width)
+	switch m.mode {
+	case setupModeSelect:
+		return m.viewModeSelect()
+	case setupModeSimple:
+		return m.viewSimple()
+	case setupModeAdvanced:
+		return m.viewAdvanced()
+	}
+	return ""
+}
+
+// --- Mode Selection View ---
+
+func (m *SetupWizardModel) viewModeSelect() string {
+	boxW := min(60, m.width)
 	if boxW < 40 {
 		boxW = 40
 	}
 	contentW := boxW - 4
-	totalSteps := len(setupSteps)
-	currentStep := setupSteps[m.step]
-	fieldCount := len(currentStep.fields)
 
 	var lines []string
 
-	// Title bar: "Moombox Setup" left, "Step X/Y" right
-	titleText := "Moombox Setup"
-	stepText := fmt.Sprintf("Step %d/%d", m.step+1, totalSteps)
-	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(titleText)
-	stepRendered := DimStyle.Render(stepText)
-	titlePad := contentW - runewidth.StringWidth(titleText) - runewidth.StringWidth(stepText)
-	if titlePad < 1 {
-		titlePad = 1
-	}
-	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
-
-	// Step indicator: [+] 1 - [>] 2 - [ ] 3 - [ ] 4 - [ ] 5
-	var stepParts []string
-	for i := range setupSteps {
-		marker := " "
-		color := ColorGray
-		if i < m.step {
-			marker = "+"
-			color = ColorGreen
-		} else if i == m.step {
-			marker = ">"
-			color = ColorCyan
-		}
-		stepParts = append(stepParts, lipgloss.NewStyle().Foreground(color).Render(
-			fmt.Sprintf("[%s] %d", marker, i+1),
-		))
-	}
-	lines = append(lines, strings.Join(stepParts, DimStyle.Render(" - ")))
-
-	// Step title + subtitle
-	lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render(currentStep.title))
-	if currentStep.subtitle != "" {
-		lines = append(lines, DimStyle.Render(currentStep.subtitle))
-	}
-
-	// Divider
-	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
-
-	// Fields
-	for idx := range fieldCount {
-		field := currentStep.fields[idx]
-		isFocused := idx == m.focusedField
-		val := m.getFieldValue(field)
-		isToggleOrCycle := field.ftype == setupFieldToggle || field.ftype == setupFieldCycle
-
-		// Label line: "> Label (default: value)" or "  Label (default: value)"
-		prefix := "  "
-		if isFocused {
-			prefix = "> "
-		}
-		labelColor := ColorWhite
-		if isFocused {
-			labelColor = ColorCyan
-		}
-		labelStyle := lipgloss.NewStyle().Foreground(labelColor)
-		if isFocused {
-			labelStyle = labelStyle.Bold(true)
-		}
-		prefixStyle := lipgloss.NewStyle().Foreground(labelColor)
-		defaultHint := DimStyle.Render(" (default: " + field.defaultDisplay + ")")
-		lines = append(lines, prefixStyle.Render(prefix)+labelStyle.Render(field.label)+defaultHint)
-
-		// Value line
-		if isToggleOrCycle {
-			lines = append(lines, "  "+renderSetupOptionSelector(field.options, val, isFocused))
-		} else {
-			if val == "" && !isFocused {
-				// Show placeholder
-				lines = append(lines, "  "+DimStyle.Render("["+field.defaultDisplay+"]"))
-			} else {
-				cursor := ""
-				if isFocused {
-					cursor = lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
-				}
-				lines = append(lines, "  "+DimStyle.Render("[")+val+cursor+DimStyle.Render("]"))
-			}
-		}
-
-		// Help text
-		if field.help != "" {
-			lines = append(lines, "   "+DimStyle.Render(field.help))
-		}
-
-		// External network access warning
-		if field.key == "networkAccess" && val == "External" {
-			warnBold := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Bold(true)
-			warnNorm := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
-			lines = append(lines, "   "+warnBold.Render("Warning: ")+warnNorm.Render(
-				"Security measures were not audited by a specialist. No authentication \u2014 anyone who reaches this port has full access."))
-		}
-
-		// Spacing between fields (match TS marginBottom={1})
-		if idx < fieldCount-1 {
-			lines = append(lines, "")
-		}
-	}
-
-	// Step footer (e.g., regex examples)
-	if currentStep.footer != "" {
-		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render(currentStep.footer))
-	}
-
-	// Error
-	if m.errorMsg != "" {
-		lines = append(lines, ErrorStyle.Render(m.errorMsg))
-	}
-
-	// Saving indicator
-	if m.saving {
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("Saving configuration..."))
-	}
-
-	// Navigation hints
+	// Header
+	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Welcome to Moombox"))
+	lines = append(lines, DimStyle.Render("Choose how to set up your archiver"))
 	lines = append(lines, "")
-	if m.step < totalSteps-1 {
-		var hintLeft string
-		if m.step > 0 {
-			hintLeft = DimStyle.Render("Esc: Back")
-		}
-		hintRight := DimStyle.Render("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  Tab/Enter: Next")
-		if hintLeft != "" {
-			hintLeft += strings.Repeat(" ", max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  Tab/Enter: Next")))
-			lines = append(lines, hintLeft+hintRight)
-		} else {
-			lines = append(lines, strings.Repeat(" ", max(0, contentW-runewidth.StringWidth("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  Tab/Enter: Next")))+hintRight)
-		}
-	} else {
-		// Last step: highlight "Tab: Finish"
-		var hintLeft string
-		if m.step > 0 {
-			hintLeft = DimStyle.Render("Esc: Back")
-		}
-		navHint := DimStyle.Render("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  ")
-		finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
-		rightSide := navHint + finishHint
-		if hintLeft != "" {
-			gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  Tab: Finish"))
-			lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
-		} else {
-			lines = append(lines, rightSide)
-		}
+
+	// Quick Setup card
+	quickPrefix := "  "
+	quickColor := ColorWhite
+	if m.modeChoice == 0 {
+		quickPrefix = "> "
+		quickColor = ColorCyan
 	}
+	quickStyle := lipgloss.NewStyle().Foreground(quickColor)
+	if m.modeChoice == 0 {
+		quickStyle = quickStyle.Bold(true)
+	}
+	lines = append(lines, quickStyle.Render(quickPrefix+"Quick Setup"))
+	lines = append(lines, DimStyle.Render("   Defaults for everything. Set up cookies and channels."))
+	lines = append(lines, "")
+
+	// Advanced Setup card
+	advPrefix := "  "
+	advColor := ColorWhite
+	if m.modeChoice == 1 {
+		advPrefix = "> "
+		advColor = ColorCyan
+	}
+	advStyle := lipgloss.NewStyle().Foreground(advColor)
+	if m.modeChoice == 1 {
+		advStyle = advStyle.Bold(true)
+	}
+	lines = append(lines, advStyle.Render(advPrefix+"Advanced Setup"))
+	lines = append(lines, DimStyle.Render("   Walk through all configuration sections."))
+	lines = append(lines, "")
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+	lines = append(lines, DimStyle.Render("\u2191/\u2193: Select  Enter: Continue"))
 
 	content := strings.Join(lines, "\n")
 
-	h := min(m.height-2, m.height)
+	h := m.height - 2
 	if h < 10 {
 		h = 10
 	}
@@ -622,11 +1013,448 @@ func (m *SetupWizardModel) View() string {
 	return centerBox(box, m.width, m.height)
 }
 
+// --- Simplified Setup Views ---
+
+func (m *SetupWizardModel) viewSimple() string {
+	switch m.simpleStage {
+	case setupSimpleCookies:
+		return m.viewSimpleCookies()
+	case setupSimpleChannels:
+		return m.viewSimpleChannels()
+	}
+	return ""
+}
+
+func (m *SetupWizardModel) viewSimpleCookies() string {
+	boxW := min(65, m.width)
+	if boxW < 40 {
+		boxW = 40
+	}
+	contentW := boxW - 4
+
+	var lines []string
+
+	// Header
+	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
+	stepRendered := DimStyle.Render("Step 1/2")
+	titlePad := contentW - runewidth.StringWidth("Quick Setup") - runewidth.StringWidth("Step 1/2")
+	if titlePad < 1 {
+		titlePad = 1
+	}
+	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
+
+	// Step indicator
+	step1 := lipgloss.NewStyle().Foreground(ColorCyan).Render("[>] 1")
+	step2 := lipgloss.NewStyle().Foreground(ColorGray).Render("[ ] 2")
+	lines = append(lines, step1+DimStyle.Render(" - ")+step2)
+
+	lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Cookie Setup"))
+	lines = append(lines, DimStyle.Render("Log in to platforms to enable cookie-based access"))
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+
+	if m.cookieActive {
+		// Browser is open, waiting for login
+		platformName := "YouTube"
+		if m.cookiePlatform == "twitch" {
+			platformName = "Twitch"
+		}
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render(
+			fmt.Sprintf("Browser opened for %s login.", platformName)))
+		lines = append(lines, "")
+		lines = append(lines, "Sign in, then press "+
+			lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Enter")+" to extract cookies.")
+		lines = append(lines, DimStyle.Render("Press Esc to cancel."))
+	} else {
+		// Platform selection
+		options := []struct {
+			label  string
+			done   bool
+		}{
+			{"YouTube", m.cookieYTDone},
+			{"Twitch", m.cookieTWDone},
+			{"Skip / Next", false},
+		}
+
+		for i, opt := range options {
+			prefix := "  "
+			color := ColorWhite
+			if i == m.cookieFocus {
+				prefix = "> "
+				color = ColorCyan
+			}
+			label := opt.label
+			if opt.done {
+				label += " " + lipgloss.NewStyle().Foreground(ColorGreen).Render("\u2713")
+			}
+			style := lipgloss.NewStyle().Foreground(color)
+			if i == m.cookieFocus {
+				style = style.Bold(true)
+			}
+			lines = append(lines, style.Render(prefix+label))
+			if i < len(options)-1 {
+				lines = append(lines, "")
+			}
+		}
+	}
+
+	// Navigation
+	lines = append(lines, "")
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+	hintLeft := DimStyle.Render("Esc: Back")
+	hintRight := DimStyle.Render("Enter: Select")
+	gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("Enter: Select"))
+	lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
+
+	content := strings.Join(lines, "\n")
+
+	h := m.height - 2
+	if h < 10 {
+		h = 10
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorCyan).
+		Width(contentW).
+		Height(h).
+		Render(content)
+
+	return centerBox(box, m.width, m.height)
+}
+
+func (m *SetupWizardModel) viewSimpleChannels() string {
+	boxW := min(65, m.width)
+	if boxW < 40 {
+		boxW = 40
+	}
+	contentW := boxW - 4
+
+	var lines []string
+
+	// Header
+	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
+	stepRendered := DimStyle.Render("Step 2/2")
+	titlePad := contentW - runewidth.StringWidth("Quick Setup") - runewidth.StringWidth("Step 2/2")
+	if titlePad < 1 {
+		titlePad = 1
+	}
+	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
+
+	// Step indicator
+	step1 := lipgloss.NewStyle().Foreground(ColorGreen).Render("[+] 1")
+	step2 := lipgloss.NewStyle().Foreground(ColorCyan).Render("[>] 2")
+	lines = append(lines, step1+DimStyle.Render(" - ")+step2)
+
+	lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Channels"))
+	lines = append(lines, DimStyle.Render("Add channels to monitor for live streams"))
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+
+	if m.channelMode == "edit" {
+		lines = append(lines, m.renderChannelEditor(contentW)...)
+	} else {
+		lines = append(lines, m.renderChannelList(contentW)...)
+	}
+
+	// Error
+	if m.errorMsg != "" {
+		lines = append(lines, ErrorStyle.Render(m.errorMsg))
+	}
+	if m.saving {
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("Saving configuration..."))
+	}
+
+	// Navigation
+	lines = append(lines, "")
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+	if m.channelMode == "edit" {
+		lines = append(lines, DimStyle.Render("Esc: Cancel  Enter: Save  \u2191/\u2193: Fields"))
+	} else {
+		hintLeft := DimStyle.Render("Esc: Back")
+		navHint := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
+		finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
+		rightSide := navHint + finishHint
+		gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
+		lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
+	}
+
+	content := strings.Join(lines, "\n")
+
+	h := m.height - 2
+	if h < 10 {
+		h = 10
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorCyan).
+		Width(contentW).
+		Height(h).
+		Render(content)
+
+	return centerBox(box, m.width, m.height)
+}
+
+// --- Advanced Setup View ---
+
+func (m *SetupWizardModel) viewAdvanced() string {
+	boxW := min(72, m.width)
+	if boxW < 40 {
+		boxW = 40
+	}
+	contentW := boxW - 4
+	totalSteps := len(advancedSetupSteps)
+	currentStep := advancedSetupSteps[m.step]
+
+	var lines []string
+
+	// Title bar
+	titleText := "Advanced Setup"
+	stepText := fmt.Sprintf("Step %d/%d", m.step+1, totalSteps)
+	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(titleText)
+	stepRendered := DimStyle.Render(stepText)
+	titlePad := contentW - runewidth.StringWidth(titleText) - runewidth.StringWidth(stepText)
+	if titlePad < 1 {
+		titlePad = 1
+	}
+	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
+
+	// Step indicator
+	var stepParts []string
+	for i := range advancedSetupSteps {
+		marker := " "
+		color := ColorGray
+		if i < m.step {
+			marker = "+"
+			color = ColorGreen
+		} else if i == m.step {
+			marker = ">"
+			color = ColorCyan
+		}
+		stepParts = append(stepParts, lipgloss.NewStyle().Foreground(color).Render(
+			fmt.Sprintf("[%s] %d", marker, i+1),
+		))
+	}
+	lines = append(lines, strings.Join(stepParts, DimStyle.Render(" ")))
+
+	// Step title + subtitle
+	lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render(currentStep.title))
+	if currentStep.subtitle != "" {
+		lines = append(lines, DimStyle.Render(currentStep.subtitle))
+	}
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+
+	// Channels sub-editor
+	if currentStep.fields == nil && currentStep.title == "Channels" {
+		if m.channelMode == "edit" {
+			lines = append(lines, m.renderChannelEditor(contentW)...)
+		} else {
+			lines = append(lines, m.renderChannelList(contentW)...)
+		}
+	} else if currentStep.fields != nil {
+		// Regular fields
+		fieldCount := len(currentStep.fields)
+		for idx := range fieldCount {
+			field := currentStep.fields[idx]
+			isFocused := idx == m.focusedField
+			val := m.getFieldValue(field)
+			isToggleOrCycle := field.ftype == setupFieldToggle || field.ftype == setupFieldCycle
+
+			prefix := "  "
+			if isFocused {
+				prefix = "> "
+			}
+			labelColor := ColorWhite
+			if isFocused {
+				labelColor = ColorCyan
+			}
+			labelStyle := lipgloss.NewStyle().Foreground(labelColor)
+			if isFocused {
+				labelStyle = labelStyle.Bold(true)
+			}
+			prefixStyle := lipgloss.NewStyle().Foreground(labelColor)
+			defaultHint := DimStyle.Render(" (default: " + field.defaultDisplay + ")")
+			lines = append(lines, prefixStyle.Render(prefix)+labelStyle.Render(field.label)+defaultHint)
+
+			if isToggleOrCycle {
+				lines = append(lines, "  "+renderSetupOptionSelector(field.options, val, isFocused))
+			} else {
+				if val == "" && !isFocused {
+					lines = append(lines, "  "+DimStyle.Render("["+field.defaultDisplay+"]"))
+				} else {
+					cursor := ""
+					if isFocused {
+						cursor = lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
+					}
+					lines = append(lines, "  "+DimStyle.Render("[")+val+cursor+DimStyle.Render("]"))
+				}
+			}
+
+			if field.help != "" {
+				lines = append(lines, "   "+DimStyle.Render(field.help))
+			}
+
+			if idx < fieldCount-1 {
+				lines = append(lines, "")
+			}
+		}
+	}
+
+	// Step footer
+	if currentStep.footer != "" {
+		lines = append(lines, "")
+		lines = append(lines, DimStyle.Render(currentStep.footer))
+	}
+
+	// Error
+	if m.errorMsg != "" {
+		lines = append(lines, ErrorStyle.Render(m.errorMsg))
+	}
+	if m.saving {
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("Saving configuration..."))
+	}
+
+	// Navigation hints
+	lines = append(lines, "")
+	if m.step < totalSteps-1 {
+		var hintLeft string
+		if m.step > 0 {
+			hintLeft = DimStyle.Render("Esc: Back")
+		} else {
+			hintLeft = DimStyle.Render("Esc: Mode select")
+		}
+
+		var hintRight string
+		if currentStep.fields == nil && currentStep.title == "Channels" {
+			if m.channelMode == "edit" {
+				hintRight = DimStyle.Render("Enter: Save  Esc: Cancel  Tab: Next step")
+			} else {
+				hintRight = DimStyle.Render("A: Add  Enter: Edit  D: Delete  Tab: Next")
+			}
+		} else {
+			hintRight = DimStyle.Render("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  Tab/Enter: Next")
+		}
+		hintLeftW := runewidth.StringWidth("Esc: Back")
+		if m.step == 0 {
+			hintLeftW = runewidth.StringWidth("Esc: Mode select")
+		}
+		hintRightW := runewidth.StringWidth(hintRight) // approximate since it has style
+		_ = hintRightW
+		gap := max(1, contentW-hintLeftW-40) // approximate gap
+		lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
+	} else {
+		// Last step
+		hintLeft := DimStyle.Render("Esc: Back")
+		navHint := DimStyle.Render("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  ")
+		finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
+		rightSide := navHint + finishHint
+		gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  Tab: Finish"))
+		lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
+	}
+
+	content := strings.Join(lines, "\n")
+
+	h := m.height - 2
+	if h < 10 {
+		h = 10
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorCyan).
+		Width(contentW).
+		Height(h).
+		Render(content)
+
+	return centerBox(box, m.width, m.height)
+}
+
+// --- Shared Channel Rendering ---
+
+func (m *SetupWizardModel) renderChannelList(contentW int) []string {
+	var lines []string
+
+	if len(m.channels) == 0 {
+		lines = append(lines, DimStyle.Render("No channels added yet."))
+		lines = append(lines, DimStyle.Render("Press A to add a channel."))
+	} else {
+		for i, ch := range m.channels {
+			prefix := "  "
+			color := ColorWhite
+			if i == m.channelIndex {
+				prefix = "> "
+				color = ColorCyan
+			}
+			name := ch.Name
+			if name == "" {
+				name = ch.ID
+			}
+			platform := ch.GetPlatform()
+			platBadge := lipgloss.NewStyle().Foreground(ColorUpcoming).Render("[" + platform + "]")
+			if platform == "twitch" {
+				platBadge = lipgloss.NewStyle().Foreground(ColorTwitch).Render("[twitch]")
+			}
+
+			style := lipgloss.NewStyle().Foreground(color)
+			if i == m.channelIndex {
+				style = style.Bold(true)
+			}
+			lines = append(lines, style.Render(prefix+name)+" "+platBadge)
+		}
+	}
+
+	if m.channelDeleteConf {
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+			"Press D again to confirm delete"))
+	}
+
+	return lines
+}
+
+func (m *SetupWizardModel) renderChannelEditor(contentW int) []string {
+	var lines []string
+	fields := m.visibleSetupChannelFields()
+
+	for i, f := range fields {
+		isFocused := i == m.channelEditField
+		val := m.channelEditValues[f.key]
+
+		prefix := "  "
+		color := ColorWhite
+		if isFocused {
+			prefix = "> "
+			color = ColorCyan
+		}
+
+		labelStyle := lipgloss.NewStyle().Foreground(color)
+		if isFocused {
+			labelStyle = labelStyle.Bold(true)
+		}
+
+		if f.ftype == fieldToggle || f.ftype == fieldCycle {
+			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+
+				renderSetupOptionSelector(f.options, val, isFocused))
+		} else {
+			cursor := ""
+			if isFocused {
+				cursor = lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
+			}
+			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+val+cursor)
+		}
+
+		if f.help != "" && isFocused {
+			lines = append(lines, "   "+DimStyle.Render(f.help))
+		}
+	}
+
+	return lines
+}
+
 // renderSetupOptionSelector renders toggle/cycle options like [Yes] / No.
 func renderSetupOptionSelector(options []string, selected string, focused bool) string {
 	var parts []string
 	for _, opt := range options {
-		if opt == selected {
+		if strings.EqualFold(opt, selected) {
 			color := ColorWhite
 			if focused {
 				color = ColorCyan
@@ -639,5 +1467,3 @@ func renderSetupOptionSelector(options []string, selected string, focused bool) 
 	return strings.Join(parts, DimStyle.Render(" / "))
 }
 
-// ensure runewidth is used
-var _ = runewidth.StringWidth

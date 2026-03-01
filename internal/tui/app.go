@@ -78,6 +78,16 @@ type (
 		Path string
 		Err  string
 	}
+
+	// Async results for FFmpeg check overlay
+	ffmpegInstallResultMsg struct {
+		Err string // empty on success
+	}
+	ffmpegCheckResultMsg struct {
+		Valid   bool
+		Version string
+		Path    string // the path that was checked
+	}
 )
 
 // App is the root BubbleTea model.
@@ -152,6 +162,15 @@ type App struct {
 	OnImportFile     func(path, title, channel string) (string, error)  // optional: import zip, returns title
 	OnListOrphans    func() ([]OrphanedFileEntry, error)                // list orphaned files
 	OnDeleteOrphan   func(path string) error                            // delete orphaned file
+
+	// FFmpeg check callbacks
+	OnCheckFFmpeg  func(path string) (bool, string) // check if ffmpeg path is valid
+	OnInstallFFmpeg func(method string) error        // install ffmpeg via choco/winget
+	OnCheckPrereqs  func() (bool, bool)              // returns (chocoAvail, wingetAvail)
+
+	// FFmpeg check overlay
+	ffmpegCheck *FFmpegCheckModel
+	showFFmpeg  bool // flag to show FFmpeg check on startup
 }
 
 // NewApp creates a new TUI application.
@@ -171,9 +190,15 @@ func NewApp() *App {
 		filesDlg:      NewFilesDialogModel(),
 		setupWiz:      NewSetupWizardModel(),
 		settings:      NewSettingsModel(),
+		ffmpegCheck:   NewFFmpegCheckModel(),
 		progressStore: ps,
 		statusMap:     make(map[string]database.JobStatus),
 	}
+}
+
+// ShowFFmpegCheck marks the FFmpeg check overlay to show after init.
+func (a *App) ShowFFmpegCheck() {
+	a.showFFmpeg = true
 }
 
 // SetConfig provides the config reference for the settings panel.
@@ -186,11 +211,17 @@ func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 func (a *App) SetSetupCallbacks(
 	onComplete func(cfg *config.MoomboxConfig) error,
 	onInstallYtdlp func(port int),
-	onStartAutoCookie func(),
+	onStartAutoCookie func(platform string),
+	onFinishAutoCookie func() (bool, bool),
+	onCancelAutoCookie func(),
+	onRestart func(),
 ) {
 	a.setupWiz.OnComplete = onComplete
 	a.setupWiz.OnInstallYtdlp = onInstallYtdlp
 	a.setupWiz.OnStartAutoCookie = onStartAutoCookie
+	a.setupWiz.OnFinishAutoCookie = onFinishAutoCookie
+	a.setupWiz.OnCancelAutoCookie = onCancelAutoCookie
+	a.setupWiz.OnRestart = onRestart
 }
 
 // SetUpdateChannels configures the async update channels.
@@ -216,6 +247,12 @@ func (a *App) Init() tea.Cmd {
 	// Auto-trigger setup wizard on first run (A3)
 	if a.IsFirstRun {
 		a.setupWiz.Open()
+	}
+
+	// Show FFmpeg check overlay if flagged
+	if a.showFFmpeg && !a.IsFirstRun {
+		a.ffmpegCheck.OnCheckPrereqs = a.OnCheckPrereqs
+		a.ffmpegCheck.Open()
 	}
 
 	return tea.Batch(a.tick(), a.progressTick(), a.logFlushTick(), a.marqueeTick(), a.listenForUpdates())
@@ -300,8 +337,9 @@ func (a *App) hasActiveDownloads() bool {
 	return false
 }
 
-// updateTerminalTitle sets the terminal title with active/upcoming counts (A1).
-func (a *App) updateTerminalTitle() {
+// updateTerminalTitle returns a tea.Cmd that sets the terminal title with
+// active/upcoming counts via BubbleTea's render pipeline (not direct stdout).
+func (a *App) updateTerminalTitle() tea.Cmd {
 	var activeCount, upcomingCount int
 	for _, s := range a.statusMap {
 		switch s {
@@ -320,8 +358,7 @@ func (a *App) updateTerminalTitle() {
 		title += fmt.Sprintf(" — %d upcoming", upcomingCount)
 	}
 
-	// Set terminal title via escape sequence
-	fmt.Fprintf(os.Stdout, "\x1b]0;%s\x07", title)
+	return tea.SetWindowTitle(title)
 }
 
 // getPort returns the configured port or default 774.
@@ -359,8 +396,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.feedbackTimer = time.Time{}
 		}
 		// Update terminal title
-		a.updateTerminalTitle()
-		return a, a.tick()
+		return a, tea.Batch(a.updateTerminalTitle(), a.tick())
 
 	case progressTickMsg:
 		if a.hasActiveDownloads() {
@@ -386,8 +422,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.marqueeTick()
 
 	case JobUpdateMsg:
-		a.handleJobUpdate(msg.Job)
-		return a, a.listenForUpdates()
+		titleCmd := a.handleJobUpdate(msg.Job)
+		return a, tea.Batch(titleCmd, a.listenForUpdates())
 
 	case JobsUpdateMsg:
 		// Structural change: clear and rebuild progress store + status map (match TS onJobsChange)
@@ -411,8 +447,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.taskList.SetJobs(msg.Jobs)
 		a.statusBar.SetJobs(msg.Jobs)
 		a.updateSelectedJob()
-		a.updateTerminalTitle()
-		return a, a.listenForUpdates()
+		return a, tea.Batch(a.updateTerminalTitle(), a.listenForUpdates())
 
 	case LogMsg:
 		// Buffer logs instead of adding directly (A2)
@@ -506,6 +541,40 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case ffmpegInstallResultMsg:
+		if msg.Err != "" {
+			a.ffmpegCheck.SetInstallResult(fmt.Sprintf("Install failed: %s", msg.Err), true)
+		} else {
+			// Install succeeded — verify FFmpeg is available
+			return a, a.ffmpegCheckCmd("")
+		}
+		return a, nil
+
+	case ffmpegCheckResultMsg:
+		if msg.Valid {
+			if a.ffmpegCheck.mode == ffmpegCustom {
+				a.ffmpegCheck.SetCustomResult("Valid: "+msg.Version, true)
+				// Persist the custom FFmpeg path to config
+				if msg.Path != "" && a.cfg != nil {
+					a.cfg.Paths.FfmpegPath = msg.Path
+					if a.OnSaveConfig != nil {
+						a.OnSaveConfig(a.cfg)
+					}
+				}
+			} else {
+				a.ffmpegCheck.SetInstallResult("FFmpeg installed: "+msg.Version, false)
+			}
+			// Show success message — next keypress will dismiss the overlay
+			a.ffmpegCheck.successDismiss = true
+		} else {
+			if a.ffmpegCheck.mode == ffmpegCustom {
+				a.ffmpegCheck.SetCustomResult("Invalid: ffmpeg not found at this path", false)
+			} else {
+				a.ffmpegCheck.SetInstallResult("FFmpeg installed but not found on PATH. Restart may be needed.", true)
+			}
+		}
+		return a, nil
+
 	case tea.KeyMsg:
 		return a.handleKey(msg)
 
@@ -521,7 +590,7 @@ func (a *App) setFeedback(msg string) {
 	a.feedbackTimer = time.Now().Add(3 * time.Second)
 }
 
-func (a *App) handleJobUpdate(job *database.Job) {
+func (a *App) handleJobUpdate(job *database.Job) tea.Cmd {
 	// Always update progress store (zero-cost)
 	a.progressStore.Set(job.ID, &ProgressData{
 		Progress:          job.Progress,
@@ -539,7 +608,7 @@ func (a *App) handleJobUpdate(job *database.Job) {
 	// Only re-sort/re-render if status changed
 	prevStatus, exists := a.statusMap[job.ID]
 	if exists && prevStatus == job.Status {
-		return
+		return nil
 	}
 
 	a.statusMap[job.ID] = job.Status
@@ -560,8 +629,8 @@ func (a *App) handleJobUpdate(job *database.Job) {
 		a.progressStore.Delete(job.ID)
 	}
 
-	// Update terminal title immediately on status change (match TS reactivity)
-	a.updateTerminalTitle()
+	// Update terminal title on status change (via BubbleTea render pipeline)
+	return a.updateTerminalTitle()
 }
 
 func (a *App) updateSelectedJob() {
@@ -595,6 +664,31 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.help.ScrollUp()
 		case keyDown:
 			a.help.ScrollDown()
+		}
+		return a, nil
+	}
+
+	// FFmpeg check overlay takes priority over all other dialogs
+	if a.ffmpegCheck.IsVisible() {
+		action := a.ffmpegCheck.HandleKey(key)
+		switch {
+		case action == "quit":
+			return a, tea.Quit
+		case strings.HasPrefix(action, "install:"):
+			method := strings.TrimPrefix(action, "install:")
+			return a, a.ffmpegInstallCmd(method)
+		case strings.HasPrefix(action, "check_custom:"):
+			path := strings.TrimPrefix(action, "check_custom:")
+			return a, a.ffmpegCheckCmd(path)
+		}
+		return a, nil
+	}
+
+	// Setup wizard
+	if a.setupWiz.IsVisible() {
+		action := a.setupWiz.HandleKey(key)
+		if action == "complete" {
+			a.setupWiz.Close()
 		}
 		return a, nil
 	}
@@ -641,13 +735,6 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if sel := a.filesDlg.SelectedFile(); sel != nil {
 				return a, a.deleteOrphanCmd(sel.Path)
 			}
-		}
-		return a, nil
-	}
-	if a.setupWiz.IsVisible() {
-		action := a.setupWiz.HandleKey(key)
-		if action == "complete" {
-			a.setupWiz.Close()
 		}
 		return a, nil
 	}
@@ -874,7 +961,7 @@ func (a *App) handleCancel() {
 }
 
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if a.settings.IsVisible() || a.help.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.setupWiz.IsVisible() {
+	if a.settings.IsVisible() || a.help.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.setupWiz.IsVisible() || a.ffmpegCheck.IsVisible() {
 		return a, nil
 	}
 
@@ -1011,6 +1098,7 @@ func (a *App) recalcLayout() {
 	a.trimDlg.SetSize(a.width, a.height)
 	a.filesDlg.SetSize(a.width, a.height)
 	a.setupWiz.SetSize(a.width, a.height)
+	a.ffmpegCheck.SetSize(a.width, a.height)
 	a.settings.SetSize(a.width, a.height)
 
 	// Store regions for mouse
@@ -1025,15 +1113,18 @@ func (a *App) View() string {
 		return "Initializing..."
 	}
 
-	// Render overlays on top
-	if a.setupWiz.IsVisible() {
-		return a.setupWiz.View()
-	}
+	// Render overlays on top (priority matches handleKey order)
 	if a.settings.IsVisible() {
 		return a.settings.View()
 	}
 	if a.help.IsVisible() {
 		return a.help.View()
+	}
+	if a.ffmpegCheck.IsVisible() {
+		return a.ffmpegCheck.View()
+	}
+	if a.setupWiz.IsVisible() {
+		return a.setupWiz.View()
 	}
 	if a.addVideo.IsVisible() {
 		return a.addVideo.View()
@@ -1301,30 +1392,31 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 }
 
 func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
+	// Capture state on the main goroutine to avoid data races in the closure.
+	deleteFn := a.OnDeleteTrim
+	var filename string
+	for _, t := range a.trimDlg.trims {
+		if t.ID == trimID {
+			filename = t.Filename
+			break
+		}
+	}
 	return func() tea.Msg {
-		// Call the callback directly (matches TS pattern of DELETE /api/jobs/:id/trims/:trimId)
-		if a.OnDeleteTrim == nil {
+		if deleteFn == nil {
 			return deleteTrimResultMsg{Err: "Delete trim not available"}
 		}
-		// Find the filename before deletion for feedback
-		var filename string
-		for _, t := range a.trimDlg.trims {
-			if t.ID == trimID {
-				filename = t.Filename
-				break
-			}
-		}
-		a.OnDeleteTrim(jobID, trimID)
+		deleteFn(jobID, trimID)
 		return deleteTrimResultMsg{TrimID: trimID, Filename: filename}
 	}
 }
 
 func (a *App) fetchOrphansCmd() tea.Cmd {
+	listFn := a.OnListOrphans
 	return func() tea.Msg {
-		if a.OnListOrphans == nil {
+		if listFn == nil {
 			return fetchOrphansResultMsg{Err: "Not available"}
 		}
-		files, err := a.OnListOrphans()
+		files, err := listFn()
 		if err != nil {
 			return fetchOrphansResultMsg{Err: err.Error()}
 		}
@@ -1333,14 +1425,44 @@ func (a *App) fetchOrphansCmd() tea.Cmd {
 }
 
 func (a *App) deleteOrphanCmd(path string) tea.Cmd {
+	deleteFn := a.OnDeleteOrphan
 	return func() tea.Msg {
-		if a.OnDeleteOrphan == nil {
+		if deleteFn == nil {
 			return deleteOrphanResultMsg{Path: path, Err: "Not available"}
 		}
-		if err := a.OnDeleteOrphan(path); err != nil {
+		if err := deleteFn(path); err != nil {
 			return deleteOrphanResultMsg{Path: path, Err: err.Error()}
 		}
 		return deleteOrphanResultMsg{Path: path}
+	}
+}
+
+// ffmpegInstallCmd runs FFmpeg installation asynchronously via tea.Cmd.
+func (a *App) ffmpegInstallCmd(method string) tea.Cmd {
+	installFn := a.OnInstallFFmpeg
+	return func() tea.Msg {
+		if installFn == nil {
+			return ffmpegInstallResultMsg{Err: "install not available"}
+		}
+		if err := installFn(method); err != nil {
+			return ffmpegInstallResultMsg{Err: err.Error()}
+		}
+		return ffmpegInstallResultMsg{}
+	}
+}
+
+// ffmpegCheckCmd runs FFmpeg path validation asynchronously via tea.Cmd.
+func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
+	checkFn := a.OnCheckFFmpeg
+	return func() tea.Msg {
+		if checkFn == nil {
+			return ffmpegCheckResultMsg{Valid: false, Path: path}
+		}
+		if path == "" {
+			path = "ffmpeg"
+		}
+		valid, ver := checkFn(path)
+		return ffmpegCheckResultMsg{Valid: valid, Version: ver, Path: path}
 	}
 }
 

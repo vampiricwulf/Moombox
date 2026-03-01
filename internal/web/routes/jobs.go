@@ -1723,15 +1723,26 @@ type SetupDeps struct {
 	Auth            *web.AuthService
 	SaveConfig      func(*config.MoomboxConfig) error
 	OnChannelChange func()
+	OnRestart       func()
 }
 
 // SetupRoutes registers setup wizard endpoints.
 func SetupRoutes(r chi.Router, deps *SetupDeps) {
 	r.Get("/api/v1/setup/status", func(rw http.ResponseWriter, req *http.Request) {
 		// isFirstRun matches TypeScript: !configManager.hasConfig()
-		jsonResponse(rw, map[string]any{
+		resp := map[string]any{
 			"isFirstRun": !deps.Cfg.ConfigLoaded,
-		})
+		}
+		// Include FFmpeg status when config exists (post-setup check)
+		if deps.Cfg.ConfigLoaded {
+			path := deps.Cfg.Paths.FfmpegPath
+			if path == "" {
+				path = "ffmpeg"
+			}
+			valid, _ := CheckFFmpegCached(path)
+			resp["ffmpegValid"] = valid
+		}
+		jsonResponse(rw, resp)
 	})
 
 	// POST /api/v1/setup/complete — uses same updateConfigSchema as PUT /config (snake_case, nested)
@@ -1811,6 +1822,14 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
+
+		// Trigger a restart so all services re-initialize with new config
+		if deps.OnRestart != nil {
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				deps.OnRestart()
+			}()
+		}
 	})
 }
 
