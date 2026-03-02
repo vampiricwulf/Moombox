@@ -24,6 +24,8 @@ const (
 	chatSurgeWindowMs        = 15_000 // 15 seconds (matches TS CHAT_SURGE_WINDOW_MS)
 	chatSurgeThreshold       = 30     // messages in window to trigger early probe (matches TS CHAT_SURGE_THRESHOLD)
 	probeJitterMax           = 30 * time.Second
+	twitchPollInterval       = 15 * time.Second
+	twitchPollJitterMax      = 5 * time.Second
 )
 
 // StreamProcessResult contains the result of processing a stream.
@@ -821,8 +823,20 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}
 
 	if streamInfo == nil || !streamInfo.IsLive {
-		sp.logger.Info("twitch channel is offline", "channel", login)
-		return &StreamProcessResult{ShouldDownload: false, Error: "twitch channel is offline"}, nil
+		if job.ManuallyAdded {
+			sp.logger.Info("twitch channel is offline, waiting for stream", "channel", login)
+			streamInfo, err = sp.waitForTwitchLive(ctx, job, login)
+			if err != nil {
+				return nil, err
+			}
+			if streamInfo == nil {
+				return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+			}
+			// Fall through to existing live handling below
+		} else {
+			sp.logger.Info("twitch channel is offline", "channel", login)
+			return &StreamProcessResult{ShouldDownload: false, Error: "twitch channel is offline"}, nil
+		}
 	}
 
 	// Update job metadata from stream info
@@ -931,6 +945,63 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 	}, nil
 }
 
+// waitForTwitchLive polls a Twitch channel until it goes live or is cancelled.
+// Returns (streamInfo, nil) when live, (nil, nil) when cancelled, (nil, err) on fatal error.
+func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.Job, login string) (*twitch.TwitchStreamInfo, error) {
+	sp.db.UpdateJobFields(job.ID, map[string]any{
+		"status":          database.StatusUpcoming,
+		"progress":        "Waiting for stream...",
+		"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
+	})
+
+	consecutiveErrors := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		default:
+		}
+
+		// Check if job was cancelled by user
+		currentJob, err := sp.db.GetJob(job.ID)
+		if err == nil && currentJob.Status == database.StatusCancelled {
+			return nil, nil
+		}
+
+		// Sleep with jitter (15-20s effective)
+		jitter := time.Duration(rand.Int63n(int64(twitchPollJitterMax)))
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-time.After(twitchPollInterval + jitter):
+		}
+
+		sp.db.UpdateJobFields(job.ID, map[string]any{
+			"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
+		})
+
+		streamInfo, err := sp.tw.GetStreamInfo(ctx, login)
+		if err != nil {
+			consecutiveErrors++
+			sp.logger.Warn("twitch poll error", "channel", login, "err", err, "consecutive", consecutiveErrors)
+			if consecutiveErrors >= maxConsecutiveProbeErrors {
+				return nil, fmt.Errorf("max probe errors: %w", err)
+			}
+			continue
+		}
+		consecutiveErrors = 0
+
+		if streamInfo != nil && streamInfo.IsLive {
+			sp.logger.Info("twitch channel is now live", "channel", login)
+			sp.db.UpdateJobFields(job.ID, map[string]any{
+				"progress": "",
+			})
+			return streamInfo, nil
+		}
+	}
+}
+
 // extractTwitchLoginFromJob extracts the Twitch channel login from a job.
 func extractTwitchLoginFromJob(job *database.Job) string {
 	// Try URL first
@@ -950,8 +1021,15 @@ func extractTwitchLoginFromJob(job *database.Job) string {
 		return strings.ToLower(job.ChannelName)
 	}
 
-	// Try videoID (tw_{login} or tw_v{vodId})
+	// Try videoID (tw_manual_{login}_{timestamp}, tw_{login}, or tw_v{vodId})
 	id := job.VideoID
+	if strings.HasPrefix(id, "tw_manual_") {
+		remainder := strings.TrimPrefix(id, "tw_manual_")
+		if idx := strings.LastIndex(remainder, "_"); idx > 0 {
+			return strings.ToLower(remainder[:idx])
+		}
+		return strings.ToLower(remainder)
+	}
 	if strings.HasPrefix(id, "tw_v") {
 		return "" // VOD ID, not a login
 	}
