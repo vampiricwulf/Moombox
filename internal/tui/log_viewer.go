@@ -18,7 +18,6 @@ const (
 	LogLevelError
 	LogLevelWarn
 	LogLevelInfo
-	LogLevelDebug
 )
 
 func (l LogLevel) String() string {
@@ -29,8 +28,6 @@ func (l LogLevel) String() string {
 		return "WARN"
 	case LogLevelInfo:
 		return "INFO"
-	case LogLevelDebug:
-		return "DEBUG"
 	default:
 		return "ALL"
 	}
@@ -38,7 +35,7 @@ func (l LogLevel) String() string {
 
 // Next cycles to the next log level filter.
 func (l LogLevel) Next() LogLevel {
-	return (l + 1) % 5
+	return (l + 1) % 4
 }
 
 // LogViewerModel manages the log panel.
@@ -205,8 +202,6 @@ func (m *LogViewerModel) matchLevel(line string) bool {
 		return lineLevel == "ERROR" || lineLevel == "WARN"
 	case LogLevelInfo:
 		return lineLevel == "ERROR" || lineLevel == "WARN" || lineLevel == "INFO"
-	case LogLevelDebug:
-		return true
 	default:
 		return true
 	}

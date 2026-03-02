@@ -178,12 +178,14 @@ func (hub *WebSocketHub) sendInitialState(client *wsClient) {
 		data = make(map[string]any)
 	}
 
-	// Include log buffer
-	hub.logBufMu.RLock()
-	if hub.logBuf != nil {
-		data["logs"] = hub.logBuf
+	// Include log buffer (fallback if InitialState didn't provide logs)
+	if data["logs"] == nil {
+		hub.logBufMu.RLock()
+		if hub.logBuf != nil {
+			data["logs"] = hub.logBuf
+		}
+		hub.logBufMu.RUnlock()
 	}
-	hub.logBufMu.RUnlock()
 
 	msg := WSMessage{Type: "initial_state", Payload: data}
 	msgBytes, err := json.Marshal(msg)

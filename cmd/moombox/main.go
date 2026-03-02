@@ -592,6 +592,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		jobs = filterJobsByAge(jobs, cfg)
 		return map[string]any{
 			"jobs":             jobs,
+			"logs":             log.GetRecentLines(),
 			"nextFeedCheck":    feedMon.GetNextCheckAt(),
 			"nextDecapiCheck":  decapiMon.GetNextCheckAt(),
 			"nextTwitchCheck":  twitchMon.GetNextCheckAt(),

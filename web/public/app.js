@@ -177,9 +177,19 @@ class MoomboxApp {
         this.logFilter = btn.dataset.level;
         document.querySelectorAll(".log-filter").forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
+        this._logAutoScroll = true;
         this.renderLogs();
       });
     });
+
+    // Log scroll tracking — pause auto-scroll when user scrolls up
+    const logsViewer = document.getElementById("logs-viewer");
+    if (logsViewer) {
+      logsViewer.addEventListener("scroll", () => {
+        if (this._logRebuildingDOM) return;
+        this._logAutoScroll = logsViewer.scrollTop + logsViewer.clientHeight >= logsViewer.scrollHeight - 30;
+      });
+    }
 
     // Log search
     let logSearchTimeout = null;
@@ -1968,19 +1978,24 @@ class MoomboxApp {
       frag.appendChild(div);
     }
 
+    this._logRebuildingDOM = true;
     viewer.innerHTML = "";
     viewer.appendChild(frag);
+    this._logRebuildingDOM = false;
 
     const suffix = this.logFilter !== "all" ? ` (${this.logFilter}+)` : "";
     const searchSuffix = searchQuery ? `, matching "${searchQuery}"` : "";
     countEl.textContent = `${filtered.length} log entries${suffix}${searchSuffix}`;
 
-    // Auto-scroll to bottom
-    viewer.scrollTop = viewer.scrollHeight;
+    // Auto-scroll to bottom (only when not paused by user scrolling up)
+    if (this._logAutoScroll !== false) {
+      viewer.scrollTop = viewer.scrollHeight;
+    }
   }
 
   clearLogs() {
     this.logs = [];
+    this._logAutoScroll = true;
     this.renderLogs();
   }
 
