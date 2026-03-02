@@ -349,15 +349,16 @@ func validate(cfg *MoomboxConfig) {
 		}
 	}
 
-	// Validate channel-level quality_preference
+	// Validate channel-level quality_preference (applies to both YouTube and Twitch)
+	validQualities := map[string]bool{
+		"best": true, "2160p60": true, "2160p": true, "1440p60": true, "1440p": true,
+		"1080p60": true, "1080p": true, "900p60": true, "900p": true,
+		"720p60": true, "720p": true, "480p": true, "360p": true, "160p": true,
+		"audio_only": true,
+	}
 	for i := range cfg.Channels {
-		if cfg.Channels[i].QualityPreference != "" {
-			switch cfg.Channels[i].QualityPreference {
-			case "best", "720p", "480p", "audio_only":
-				// valid
-			default:
-				cfg.Channels[i].QualityPreference = ""
-			}
+		if cfg.Channels[i].QualityPreference != "" && !validQualities[cfg.Channels[i].QualityPreference] {
+			cfg.Channels[i].QualityPreference = ""
 		}
 	}
 }

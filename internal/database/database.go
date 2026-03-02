@@ -107,7 +107,7 @@ func (db *Database) prepareStatements() error {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at
+		last_recheck_at, quality_preference
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -221,9 +221,11 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 		filename, output_directory, chat_status, total_chat_messages, chat_filename, chat_file,
 		thumbnail_file, description_file,
 		twitch_quality, twitch_category, channel_avatar_url,
-		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at)
+		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
+		quality_preference)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		?)`,
 		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 		job.CreatedAt, job.UpdatedAt,
@@ -235,7 +237,8 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 		job.ThumbnailFile, job.DescriptionFile,
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
-		job.LastRecheckAt)
+		job.LastRecheckAt,
+		job.QualityPreference)
 	if err != nil {
 		return false, fmt.Errorf("failed to insert job: %w", err)
 	}
@@ -301,6 +304,14 @@ func (db *Database) GetJob(id string) (*Job, error) {
 	} else {
 		job.Trims = trims
 	}
+	// Load segments (non-fatal — segments may simply not exist)
+	if segments, err := db.getSegments(id); err != nil {
+		if db.logger != nil {
+			db.logger.Warn("failed to load segments for job", "jobID", id, "err", err)
+		}
+	} else {
+		job.Segments = segments
+	}
 
 	return job, nil
 }
@@ -323,7 +334,7 @@ func (db *Database) GetAllJobs(includeArchived bool) ([]*Job, error) {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at
+		last_recheck_at, quality_preference
 		FROM jobs ORDER BY updated_at DESC`
 
 	rows, err := db.db.QueryContext(db.getCtx(), query)
@@ -385,7 +396,7 @@ func updateJobDirect(ctx context.Context, db *sql.DB, job *Job) error {
 		thumbnail_file=?, description_file=?,
 		twitch_quality=?, twitch_category=?, channel_avatar_url=?,
 		selected_video_itag=?, selected_audio_itag=?, start_time=?, end_time=?,
-		last_recheck_at=?
+		last_recheck_at=?, quality_preference=?
 		WHERE id=?`,
 		job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform, job.Status,
 		job.Progress, job.Percent, job.ETA, job.Speed, job.Error, job.UpdatedAt,
@@ -398,7 +409,7 @@ func updateJobDirect(ctx context.Context, db *sql.DB, job *Job) error {
 		job.ThumbnailFile, job.DescriptionFile,
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
-		job.LastRecheckAt,
+		job.LastRecheckAt, job.QualityPreference,
 		job.ID)
 	return err
 }
@@ -416,7 +427,7 @@ func updateJobInTx(ctx context.Context, tx *sql.Tx, job *Job) error {
 		thumbnail_file=?, description_file=?,
 		twitch_quality=?, twitch_category=?, channel_avatar_url=?,
 		selected_video_itag=?, selected_audio_itag=?, start_time=?, end_time=?,
-		last_recheck_at=?
+		last_recheck_at=?, quality_preference=?
 		WHERE id=?`,
 		job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform, job.Status,
 		job.Progress, job.Percent, job.ETA, job.Speed, job.Error, job.UpdatedAt,
@@ -429,7 +440,7 @@ func updateJobInTx(ctx context.Context, tx *sql.Tx, job *Job) error {
 		job.ThumbnailFile, job.DescriptionFile,
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
-		job.LastRecheckAt,
+		job.LastRecheckAt, job.QualityPreference,
 		job.ID)
 	return err
 }
@@ -502,6 +513,55 @@ func (db *Database) DeleteTrim(trimID string) error {
 
 func (db *Database) getTrims(jobID string) ([]TrimRecord, error) {
 	return db.getTrimsUnlocked(jobID)
+}
+
+// AddSegment adds a segment record for a multi-segment quality-split job.
+func (db *Database) AddSegment(seg *Segment) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	result, err := db.db.ExecContext(db.getCtx(), `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		seg.JobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
+		seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds)
+	if err != nil {
+		return err
+	}
+	id, _ := result.LastInsertId()
+	seg.ID = int(id)
+	return nil
+}
+
+// GetSegments returns all segments for a given job, ordered by segment_index.
+func (db *Database) GetSegments(jobID string) ([]Segment, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.getSegments(jobID)
+}
+
+func (db *Database) getSegments(jobID string) ([]Segment, error) {
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds
+		FROM segments WHERE job_id = ? ORDER BY segment_index`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var segments []Segment
+	for rows.Next() {
+		var s Segment
+		if err := rows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
+			&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
+			&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds); err != nil {
+			continue
+		}
+		segments = append(segments, s)
+	}
+	if err := rows.Err(); err != nil {
+		return segments, err
+	}
+	return segments, nil
 }
 
 // HasProcessed checks if a video ID has been previously processed.
@@ -618,9 +678,11 @@ func (db *Database) ImportFromJSON(path string) error {
 			filename, output_directory, chat_status, total_chat_messages, chat_filename, chat_file,
 			thumbnail_file, description_file,
 			twitch_quality, twitch_category, channel_avatar_url,
-			selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at)
+			selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
+			quality_preference)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?)`,
 			job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
 			job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
 			job.CreatedAt, job.UpdatedAt,
@@ -631,7 +693,8 @@ func (db *Database) ImportFromJSON(path string) error {
 			job.ThumbnailFile, job.DescriptionFile,
 			job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 			job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
-			job.LastRecheckAt)
+			job.LastRecheckAt,
+			job.QualityPreference)
 		if err != nil {
 			if db.logger != nil {
 				db.logger.Warn("import: failed to insert job", "jobID", job.ID, "err", err)
@@ -735,7 +798,7 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at
+		last_recheck_at, quality_preference
 		FROM jobs ORDER BY updated_at DESC`
 
 	rows, err := db.db.QueryContext(db.getCtx(), query)
@@ -810,6 +873,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		"twitch_quality":      "twitch_quality",
 		"twitch_category":     "twitch_category",
 		"channel_avatar_url":  "channel_avatar_url",
+		"quality_preference":  "quality_preference",
 	}
 
 	for key, val := range fields {
@@ -850,7 +914,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at
+		last_recheck_at, quality_preference
 		FROM jobs WHERE id = ?`, id)
 	job, scanErr := scanJob(row)
 	if scanErr != nil {
@@ -916,6 +980,28 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 		for _, job := range jobs {
 			if gaps, ok := gapMap[job.ID]; ok {
 				job.Gaps = gaps
+			}
+		}
+	}
+
+	// Batch-load all segments in one query.
+	segRows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds
+		FROM segments ORDER BY segment_index`)
+	if err == nil {
+		segMap := make(map[string][]Segment)
+		for segRows.Next() {
+			var s Segment
+			if err := segRows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
+				&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
+				&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds); err == nil {
+				segMap[s.JobID] = append(segMap[s.JobID], s)
+			}
+		}
+		segRows.Close()
+		for _, job := range jobs {
+			if segs, ok := segMap[job.ID]; ok {
+				job.Segments = segs
 			}
 		}
 	}
@@ -1119,7 +1205,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 		&j.ThumbnailFile, &j.DescriptionFile,
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
-		&j.LastRecheckAt,
+		&j.LastRecheckAt, &j.QualityPreference,
 	)
 	if err != nil {
 		return nil, err
@@ -1146,7 +1232,7 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 		&j.ThumbnailFile, &j.DescriptionFile,
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
-		&j.LastRecheckAt,
+		&j.LastRecheckAt, &j.QualityPreference,
 	)
 	if err != nil {
 		return nil, err

@@ -31,6 +31,12 @@ export class TrimController {
     this._dragCleanup = null; // cleanup fn for active drag listeners
     /** @type {Record<string, HTMLElement>} cached DOM refs, populated in open() */
     this._el = {};
+
+    // Multi-segment playback state
+    this._segments = null;
+    this._segOffsets = null;
+    this._segIdx = 0;
+    this._segTimeOffset = 0;
   }
 
   /**
@@ -41,6 +47,12 @@ export class TrimController {
     this.duration = job.lengthSeconds || 0;
     this.startMarker = 0;
     this.endMarker = this.duration;
+
+    // Reset multi-segment state
+    this._segments = null;
+    this._segOffsets = null;
+    this._segIdx = 0;
+    this._segTimeOffset = 0;
 
     // Cache all DOM refs once
     this._el = {
@@ -68,8 +80,13 @@ export class TrimController {
 
     dialog.label = `Create Trim — ${job.title}`;
 
-    // Set video source and reset play icon
-    video.src = `/api/jobs/${job.id}/video`;
+    // Multi-segment or single-file video source
+    if (job.segments && job.segments.length > 0) {
+      this._initMultiSegment(job.id, job.segments);
+    } else {
+      video.src = `/api/jobs/${job.id}/video`;
+    }
+
     video.currentTime = 0;
     this._setPlayIcon(true);
 
@@ -77,7 +94,7 @@ export class TrimController {
     startInput.value = fmtPrecise(0);
     endInput.value = this.duration > 0 ? fmtPrecise(this.duration) : "";
 
-    // Show initial total time from job metadata (refined later by loadedmetadata)
+    // Show initial total time from job metadata (refined later by loadedmetadata for single-file)
     this._el.timeCurrent.textContent = formatTimestamp(0);
     this._el.timeTotal.textContent = this.duration > 0 ? formatTimestamp(this.duration) : "0:00";
 
@@ -86,9 +103,9 @@ export class TrimController {
     this._abort = new AbortController();
     const sig = this._abort.signal;
 
-    // Video metadata — refine duration once the browser knows it
+    // Video metadata — refine duration once the browser knows it (single-file only)
     video.addEventListener("loadedmetadata", () => {
-      if (video.duration && isFinite(video.duration)) {
+      if (!this._segments && video.duration && isFinite(video.duration)) {
         this.duration = video.duration;
         this.endMarker = this.duration;
         endInput.value = fmtPrecise(this.duration);
@@ -100,13 +117,16 @@ export class TrimController {
 
     // Playhead tracking
     video.addEventListener("timeupdate", () => {
-      this._el.timeCurrent.textContent = formatTimestamp(video.currentTime);
+      this._el.timeCurrent.textContent = formatTimestamp(this._getGlobalTime());
       this._updatePlayhead();
     }, { signal: sig });
 
     // Reset play icon when video ends or is paused externally
     video.addEventListener("pause", () => this._setPlayIcon(true), { signal: sig });
     video.addEventListener("play", () => this._setPlayIcon(false), { signal: sig });
+
+    // Multi-segment: auto-advance on segment end
+    video.addEventListener("ended", () => this._onSegmentEnded(), { signal: sig });
 
     // Click video to toggle play/pause
     video.addEventListener("click", () => this._togglePlay(), { signal: sig });
@@ -120,8 +140,12 @@ export class TrimController {
     this._el.setEndBtn.addEventListener("click", () => this._setEndMarker(), { signal: sig });
     document.getElementById("trim-step-back-btn").addEventListener("click", () => this._frameStep(-1), { signal: sig });
     document.getElementById("trim-step-fwd-btn").addEventListener("click", () => this._frameStep(1), { signal: sig });
-    document.getElementById("trim-goto-start-btn").addEventListener("click", () => { video.currentTime = this.startMarker; }, { signal: sig });
-    document.getElementById("trim-goto-end-btn").addEventListener("click", () => { video.currentTime = this.endMarker; }, { signal: sig });
+    document.getElementById("trim-goto-start-btn").addEventListener("click", () => {
+      this._seekToGlobalTime(this.startMarker);
+    }, { signal: sig });
+    document.getElementById("trim-goto-end-btn").addEventListener("click", () => {
+      this._seekToGlobalTime(this.endMarker);
+    }, { signal: sig });
 
     // Keyboard shortcuts
     dialog.addEventListener("keydown", (e) => this._onKeyDown(e), { signal: sig });
@@ -179,8 +203,91 @@ export class TrimController {
       this._abort = null;
     }
     this._dragging = null;
+    this._segments = null;
+    this._segOffsets = null;
+    this._segIdx = 0;
+    this._segTimeOffset = 0;
     this._el = {};
     this.job = null;
+  }
+
+  // ===== Multi-segment playback =====
+
+  _initMultiSegment(jobId, segments) {
+    this._segments = segments;
+    this._segIdx = 0;
+    this._segTimeOffset = 0;
+
+    let cumulative = 0;
+    this._segOffsets = segments.map((seg) => {
+      const entry = {
+        ...seg,
+        startOffset: cumulative,
+        url: `/api/v1/jobs/${jobId}/segments/${seg.segmentIndex}/video`,
+      };
+      cumulative += seg.durationSeconds || 0;
+      return entry;
+    });
+
+    // Use total segment duration (more accurate than job.lengthSeconds which is truncated to int)
+    this.duration = cumulative;
+    this.endMarker = this.duration;
+
+    // Load first segment
+    this._loadSegment(0);
+  }
+
+  _loadSegment(idx) {
+    if (!this._segOffsets || idx >= this._segOffsets.length) return;
+    this._segIdx = idx;
+    this._segTimeOffset = this._segOffsets[idx].startOffset;
+    this._el.video.src = this._segOffsets[idx].url;
+  }
+
+  _onSegmentEnded() {
+    if (!this._segments || this._segments.length === 0) return;
+    if (this._segIdx + 1 < this._segments.length) {
+      this._loadSegment(this._segIdx + 1);
+      this._el.video.play();
+    }
+  }
+
+  /** Get current playback position in global seconds (accounting for segment offset). */
+  _getGlobalTime() {
+    const video = this._el.video;
+    if (!video) return 0;
+    if (this._segments && this._segments.length > 0) {
+      return this._segTimeOffset + video.currentTime;
+    }
+    return video.currentTime;
+  }
+
+  /** Seek to a global time (seconds), switching segments if needed. */
+  _seekToGlobalTime(globalSeconds) {
+    const video = this._el.video;
+    if (!this._segOffsets || this._segOffsets.length === 0) {
+      // Single-file: seek directly
+      video.currentTime = Math.max(0, Math.min(this.duration, globalSeconds));
+      return;
+    }
+
+    for (let i = 0; i < this._segOffsets.length; i++) {
+      const seg = this._segOffsets[i];
+      const segEnd = seg.startOffset + (seg.durationSeconds || 0);
+      if (globalSeconds < segEnd || i === this._segOffsets.length - 1) {
+        if (i !== this._segIdx) {
+          const wasPlaying = !video.paused;
+          this._loadSegment(i);
+          video.addEventListener("loadeddata", () => {
+            video.currentTime = globalSeconds - seg.startOffset;
+            if (wasPlaying) video.play();
+          }, { once: true });
+        } else {
+          video.currentTime = globalSeconds - seg.startOffset;
+        }
+        return;
+      }
+    }
   }
 
   // ===== Timeline rendering =====
@@ -209,7 +316,7 @@ export class TrimController {
 
   _updatePlayhead() {
     if (!this._el.video || !this.duration) return;
-    const pct = (this._el.video.currentTime / this.duration) * 100;
+    const pct = (this._getGlobalTime() / this.duration) * 100;
     this._el.playhead.style.left = `${pct}%`;
   }
 
@@ -250,9 +357,9 @@ export class TrimController {
       const handle = distStart < distEnd ? "start" : "end";
       this._startDrag(handle, e, track);
     } else {
-      // Seek to clicked position
+      // Seek to clicked position (global time)
       const pct = x / rect.width;
-      this._el.video.currentTime = Math.max(0, Math.min(this.duration, pct * this.duration));
+      this._seekToGlobalTime(Math.max(0, Math.min(this.duration, pct * this.duration)));
     }
   }
 
@@ -308,24 +415,24 @@ export class TrimController {
   }
 
   _setStartMarker() {
-    this.startMarker = Math.min(this._el.video.currentTime, this.endMarker);
+    this.startMarker = Math.min(this._getGlobalTime(), this.endMarker);
     this._el.startInput.value = fmtPrecise(this.startMarker);
     this._updateTimeline();
     this._flashButton(this._el.setStartBtn);
   }
 
   _setEndMarker() {
-    this.endMarker = Math.max(this._el.video.currentTime, this.startMarker);
+    this.endMarker = Math.max(this._getGlobalTime(), this.startMarker);
     this._el.endInput.value = fmtPrecise(this.endMarker);
     this._updateTimeline();
     this._flashButton(this._el.setEndBtn);
   }
 
   _frameStep(direction) {
-    const video = this._el.video;
     // Approximate frame duration at ~30fps
     const step = 1 / 30;
-    video.currentTime = Math.max(0, Math.min(this.duration, video.currentTime + step * direction));
+    const target = this._getGlobalTime() + step * direction;
+    this._seekToGlobalTime(Math.max(0, Math.min(this.duration, target)));
   }
 
   /** @param {HTMLElement} btn */
@@ -356,14 +463,18 @@ export class TrimController {
         e.preventDefault();
         this._setEndMarker();
         break;
-      case "ArrowLeft":
+      case "ArrowLeft": {
         e.preventDefault();
-        this._el.video.currentTime = Math.max(0, this._el.video.currentTime - (e.shiftKey ? 30 : 5));
+        const delta = e.shiftKey ? 30 : 5;
+        this._seekToGlobalTime(Math.max(0, this._getGlobalTime() - delta));
         break;
-      case "ArrowRight":
+      }
+      case "ArrowRight": {
         e.preventDefault();
-        this._el.video.currentTime = Math.min(this.duration, this._el.video.currentTime + (e.shiftKey ? 30 : 5));
+        const delta = e.shiftKey ? 30 : 5;
+        this._seekToGlobalTime(Math.min(this.duration, this._getGlobalTime() + delta));
         break;
+      }
       case ",":
         e.preventDefault();
         this._frameStep(-1);

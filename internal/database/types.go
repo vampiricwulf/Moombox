@@ -74,8 +74,12 @@ type Job struct {
 	SelectedAudioItag *int       `json:"selectedAudioItag,omitempty"`
 	StartTime         *float64   `json:"startTime,omitempty"`
 	EndTime           *float64   `json:"endTime,omitempty"`
+	// Quality monitoring
+	QualityPreference string     `json:"qualityPreference,omitempty"`
 	// Trims (loaded via join)
 	Trims             []TrimRecord `json:"trims,omitempty"`
+	// Segments (loaded via join, for multi-segment quality-split jobs)
+	Segments          []Segment    `json:"segments,omitempty"`
 }
 
 // IsTerminal returns true if the job status is a terminal state.
@@ -108,6 +112,25 @@ type JobStats struct {
 	TwitchSize        int64 `json:"twitchSize"`
 	TotalDuration     int64 `json:"totalDuration"`
 	TotalChatMessages int64 `json:"totalChatMessages"`
+}
+
+// Segment represents a quality-split segment of a multi-segment download.
+// When stream quality changes mid-download, each quality period is muxed
+// as a separate segment file.
+type Segment struct {
+	ID              int     `json:"id,omitempty"`
+	JobID           string  `json:"jobId,omitempty"`
+	SegmentIndex    int     `json:"segmentIndex"`
+	UnixStart       int64   `json:"unixStart"`
+	UnixEnd         int64   `json:"unixEnd"`
+	Quality         string  `json:"quality"`
+	Filename        string  `json:"filename"`
+	FilePath        string  `json:"filePath,omitempty"`
+	FileSize        *int64  `json:"fileSize,omitempty"`
+	VideoWidth      *int    `json:"videoWidth,omitempty"`
+	VideoHeight     *int    `json:"videoHeight,omitempty"`
+	VideoFps        *int    `json:"videoFps,omitempty"`
+	DurationSeconds float64 `json:"durationSeconds,omitempty"`
 }
 
 // TrimRecord represents a trimmed clip created from a downloaded video.

@@ -194,7 +194,7 @@ var channelFields = []channelFieldDef{
 	{"enabled", "Enabled", fieldToggle, []string{"Yes", "No"}, "", ""},
 	{"terms", "Filter regex", fieldText, nil, "e.g. (?i)karaoke", ""},
 	{"include_non_live", "Include non-live", fieldToggle, []string{"No", "Yes"}, "", "youtube"},
-	{"quality_preference", "Quality preference", fieldCycle, []string{"best", "720p", "480p", "audio_only"}, "", "twitch"},
+	{"quality_preference", "Quality preference", fieldCycle, []string{"best", "2160p60", "2160p", "1440p60", "1440p", "1080p60", "1080p", "900p60", "900p", "720p60", "720p", "480p", "360p", "160p", "audio_only"}, "", ""},
 }
 
 // SettingsModel manages the settings overlay panel.
@@ -811,7 +811,7 @@ func valuesToChannel(vals map[string]string) config.ChannelConfig {
 	if vals["platform"] == "youtube" && vals["include_non_live"] == "Yes" {
 		ch.IncludeNonLiveContent = true
 	}
-	if vals["platform"] == "twitch" && vals["quality_preference"] != "" {
+	if vals["quality_preference"] != "" && vals["quality_preference"] != "best" {
 		ch.QualityPreference = vals["quality_preference"]
 	}
 	return ch

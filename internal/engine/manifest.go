@@ -26,6 +26,7 @@ type DashStream struct {
 	Codecs         string
 	Width          int
 	Height         int
+	FPS            int           // From frameRate attribute (0 if not present)
 	Bandwidth      int
 	BaseURL        string        // Template URL with $Number$ placeholder
 	StartNumber    int           // First segment sequence number
@@ -47,6 +48,7 @@ type HlsVariant struct {
 	Bandwidth int
 	Width     int
 	Height    int
+	FPS       int // From FRAME-RATE attribute (0 if not present)
 	Codecs    string
 	URL       string
 	Name      string
@@ -105,6 +107,7 @@ type representationXML struct {
 	Bandwidth       int                 `xml:"bandwidth,attr"`
 	Width           int                 `xml:"width,attr"`
 	Height          int                 `xml:"height,attr"`
+	FrameRate       string              `xml:"frameRate,attr"` // e.g. "30", "60", "30/1"
 	Codecs          string              `xml:"codecs,attr"`
 	MimeType        string              `xml:"mimeType,attr"`
 	BaseURL         string              `xml:"BaseURL"`
@@ -195,6 +198,7 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 		Bandwidth: rep.Bandwidth,
 		Width:     rep.Width,
 		Height:    rep.Height,
+		FPS:       parseFrameRate(rep.FrameRate),
 	}
 
 	// Parse itag from ID
@@ -449,6 +453,10 @@ func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 					variant.Width, _ = strconv.Atoi(parts[0])
 					variant.Height, _ = strconv.Atoi(parts[1])
 				}
+			case "FRAME-RATE":
+				if v, err := strconv.ParseFloat(attr.value, 64); err == nil {
+					variant.FPS = int(math.Round(v))
+				}
 			case "CODECS":
 				variant.Codecs = strings.Trim(attr.value, "\"")
 			case "VIDEO":
@@ -620,4 +628,30 @@ func SegmentDurationSec(stream *DashStream) float64 {
 // EstimateSegmentCount estimates the number of segments for a given duration.
 func EstimateSegmentCount(durationSec float64) int {
 	return int(math.Ceil(durationSec / defaultSegmentDuration))
+}
+
+// parseFrameRate parses a DASH frameRate attribute value.
+// YouTube uses plain integers ("30", "60") but the spec also allows
+// fractional notation ("30000/1001"). Returns 0 if empty or unparseable.
+func parseFrameRate(s string) int {
+	if s == "" {
+		return 0
+	}
+	// Try fractional "num/den"
+	if idx := strings.Index(s, "/"); idx > 0 {
+		num, err1 := strconv.Atoi(s[:idx])
+		den, err2 := strconv.Atoi(s[idx+1:])
+		if err1 == nil && err2 == nil && den > 0 {
+			return int(math.Round(float64(num) / float64(den)))
+		}
+	}
+	// Plain integer
+	if v, err := strconv.Atoi(s); err == nil {
+		return v
+	}
+	// Float string (rare)
+	if v, err := strconv.ParseFloat(s, 64); err == nil {
+		return int(math.Round(v))
+	}
+	return 0
 }

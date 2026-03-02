@@ -663,7 +663,7 @@ export class SettingsController {
             : ""
         }
         ${ch.include_non_live_content ? '<sl-badge variant="neutral">Include VODs</sl-badge>' : ""}
-        ${isTwitch && ch.quality_preference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.quality_preference)}</sl-badge>` : ""}
+        ${ch.quality_preference ? `<sl-badge variant="neutral">Quality: ${this.app.escapeHtml(ch.quality_preference)}</sl-badge>` : ""}
       </div>
     `;
         },
@@ -786,9 +786,9 @@ export class SettingsController {
       idInput.helpText = isTwitch ? "Twitch channel login name (lowercase)" : "YouTube channel ID (starts with UC)";
     }
 
-    // Toggle YouTube-only and Twitch-only fields
+    // Toggle YouTube-only fields (quality preference applies to both platforms)
     if (includeVodsRow) includeVodsRow.style.display = isTwitch ? "none" : "";
-    if (qualityRow) qualityRow.style.display = isTwitch ? "" : "none";
+    if (qualityRow) qualityRow.style.display = "";
   }
 
   editChannel(channelId) {
@@ -828,13 +828,11 @@ export class SettingsController {
       ...(!isTwitch ? { include_non_live_content: includeVods || undefined } : {}),
     };
 
-    // Add Twitch quality preference
-    if (isTwitch) {
-      const qualitySelect = document.getElementById("channel-quality-select");
-      const quality = qualitySelect ? qualitySelect.value : "best";
-      if (quality !== "best") {
-        channel.quality_preference = quality;
-      }
+    // Add quality preference (both platforms)
+    const qualitySelect = document.getElementById("channel-quality-select");
+    const quality = qualitySelect ? qualitySelect.value : "best";
+    if (quality !== "best") {
+      channel.quality_preference = quality;
     }
 
     try {

@@ -43,7 +43,7 @@ import (
 )
 
 var (
-	version = "2.1.12"
+	version = "2.1.13"
 	commit  = ""
 )
 
@@ -668,18 +668,19 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		job := &database.Job{
-			ID:               videoID,
-			VideoID:          videoID,
-			URL:              videoURL,
-			Title:            title,
-			ChannelName:      ch.Name,
-			Platform:         "youtube",
-			Status:           database.StatusUpcoming,
-			ThumbnailURL:     thumbnailURL,
-			OutputDirectory:  outputDir,
-			AllowNonStream:   includeNonLive,
-			CreatedAt:        now,
-			UpdatedAt:        now,
+			ID:                videoID,
+			VideoID:           videoID,
+			URL:               videoURL,
+			Title:             title,
+			ChannelName:       ch.Name,
+			Platform:          "youtube",
+			Status:            database.StatusUpcoming,
+			ThumbnailURL:      thumbnailURL,
+			OutputDirectory:   outputDir,
+			AllowNonStream:    includeNonLive,
+			QualityPreference: ch.QualityPreference,
+			CreatedAt:         now,
+			UpdatedAt:         now,
 		}
 
 		added, err := db.AddJob(job)
@@ -751,21 +752,22 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 
 		job := &database.Job{
-			ID:               jobID,
-			VideoID:          info.StreamID,
-			URL:              "https://twitch.tv/" + info.ChannelLogin,
-			Title:            title,
-			ChannelName:      info.ChannelDisplayName,
-			Platform:         "twitch",
-			Status:           database.StatusLive, // Twitch: immediately Live (confirmed by GQL)
-			ThumbnailURL:     info.ThumbnailURL,
-			ChannelAvatarURL: info.ProfileImageURL,
-			TwitchCategory:   info.GameCategory,
-			TwitchQuality:    ch.QualityPreference,
-			StreamStartTime:  info.StartedAt,
-			OutputDirectory:  outputDir,
-			CreatedAt:        now,
-			UpdatedAt:        now,
+			ID:                jobID,
+			VideoID:           info.StreamID,
+			URL:               "https://twitch.tv/" + info.ChannelLogin,
+			Title:             title,
+			ChannelName:       info.ChannelDisplayName,
+			Platform:          "twitch",
+			Status:            database.StatusLive, // Twitch: immediately Live (confirmed by GQL)
+			ThumbnailURL:      info.ThumbnailURL,
+			ChannelAvatarURL:  info.ProfileImageURL,
+			TwitchCategory:    info.GameCategory,
+			TwitchQuality:     ch.QualityPreference,
+			QualityPreference: ch.QualityPreference,
+			StreamStartTime:   info.StartedAt,
+			OutputDirectory:   outputDir,
+			CreatedAt:         now,
+			UpdatedAt:         now,
 		}
 		added, err := db.AddJob(job)
 		if err != nil {

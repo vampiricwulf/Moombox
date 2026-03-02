@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// ErrQualityLost signals that the stream is still live but the selected
+// quality variant/format has become unavailable (e.g. transcode removed).
+var ErrQualityLost = errors.New("stream quality became unavailable")
 
 const (
 	CatchupThreshold        = 10
@@ -621,6 +626,15 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				consecutiveGoneErrors++
 
 				if hasStartedDownloading && consecutiveGoneErrors > 10 {
+					// Check if stream is actually ended, or if our format just disappeared
+					if d.opts.CheckStreamStatus != nil {
+						ended, checkErr := d.opts.CheckStreamStatus(ctx)
+						if checkErr != nil {
+							d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
+						} else if !ended {
+							return ErrQualityLost
+						}
+					}
 					d.streamEnded = true
 					return nil // Stream ended
 				}
@@ -700,10 +714,22 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 					if ended {
 						return nil
 					}
+					// Stream still live but we can't get segments — format may have changed
+					if hasStartedDownloading {
+						return ErrQualityLost
+					}
 				}
 
 				// Also check no-segment timeout
 				if time.Since(d.lastSegTime) > NoSegmentTimeout {
+					if d.opts.CheckStreamStatus != nil && hasStartedDownloading {
+						ended, checkErr := d.opts.CheckStreamStatus(ctx)
+						if checkErr != nil {
+							d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
+						} else if !ended {
+							return ErrQualityLost
+						}
+					}
 					return nil
 				}
 
@@ -771,13 +797,30 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		// Fetch playlist
 		data, plStatus, err := d.fetchSegment(ctx, d.opts.BaseURL)
 		if err != nil {
-			// 404/410 on playlist fetch means the stream has ended
+			// 404/410 on playlist fetch — variant may have been removed
 			if plStatus == 404 || plStatus == 410 {
+				if d.opts.CheckStreamStatus != nil {
+					ended, checkErr := d.opts.CheckStreamStatus(ctx)
+					if checkErr != nil {
+						d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
+					} else if !ended {
+						return ErrQualityLost
+					}
+				}
 				d.streamEnded = true
 				return nil
 			}
 			consecutiveErrors++
 			if consecutiveErrors > 5 {
+				// Before giving up, check if stream is still live (quality may have changed)
+				if d.opts.CheckStreamStatus != nil {
+					ended, checkErr := d.opts.CheckStreamStatus(ctx)
+					if checkErr != nil {
+						d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
+					} else if !ended {
+						return ErrQualityLost
+					}
+				}
 				return fmt.Errorf("HLS playlist fetch failed after %d consecutive errors: %w", consecutiveErrors, err)
 			}
 			sleepCtx(ctx, 5*time.Second)

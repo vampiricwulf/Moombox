@@ -1381,6 +1381,21 @@ class MoomboxApp {
         return `<div class="details-section"><strong>Media:</strong>${rows}</div>`;
       })()}
 
+      ${(() => {
+        if (!job.segments || job.segments.length === 0) return "";
+        let segRows = "";
+        job.segments.forEach((seg, i) => {
+          const dur = seg.durationSeconds ? `${Math.round(seg.durationSeconds)}s` : "—";
+          const size = seg.fileSize ? this.formatBytes(seg.fileSize) : "—";
+          const res = seg.videoWidth && seg.videoHeight ? `${seg.videoWidth}x${seg.videoHeight}` : "";
+          segRows += `<div class="details-row" style="padding-left:8px;">
+            <span class="details-label">Segment ${i}:</span>
+            <span class="details-value">${this.escapeHtml(seg.quality)} — ${dur} — ${size}${res ? ` — ${res}` : ""}</span>
+          </div>`;
+        });
+        return `<div class="details-section"><strong>Quality Segments:</strong>${segRows}</div>`;
+      })()}
+
       ${job.description ? `
       <div class="details-section">
         <strong>Description:</strong>

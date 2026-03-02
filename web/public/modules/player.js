@@ -19,6 +19,13 @@ export class PlayerController {
     this.playerInitialized = false;
     /** @type {Map<string, string>} code → URL for 3rd-party Twitch emotes */
     this.twitchEmoteMap = new Map();
+
+    // Multi-segment playback state
+    this.segments = null;
+    this.segmentOffsets = null;
+    this.segmentIdx = 0;
+    this.segmentTimeOffset = 0;
+    this.totalDuration = 0;
   }
 
   initPlayer() {
@@ -71,7 +78,7 @@ export class PlayerController {
       const sidebar = document.getElementById("player-sidebar");
       sidebar.style.display = sidebarToggle.checked ? "" : "none";
       if (sidebarToggle.checked && this.playerChatMessages.length > 0) {
-        const currentMs = video.currentTime * 1000;
+        const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
         this.syncSidebarToTime();
       }
@@ -82,7 +89,7 @@ export class PlayerController {
 
     // Video seeked — reset both systems
     video.addEventListener("seeked", () => {
-      const currentMs = video.currentTime * 1000;
+      const currentMs = this.getGlobalTimeMs();
       this.resetSidebarToTime(currentMs);
       this.clearNicoOverlay();
       this.nicoLastSpawnMs = currentMs;
@@ -100,6 +107,9 @@ export class PlayerController {
         if (el._nicoAnim) el._nicoAnim.play();
       });
     });
+
+    // Multi-segment: auto-advance to next segment when current one ends
+    video.addEventListener("ended", () => this.onSegmentEnded());
 
     // Sidebar scroll locking
     sidebarMessages.addEventListener("mouseenter", () => {
@@ -158,14 +168,28 @@ export class PlayerController {
           if (video.paused) video.play(); else video.pause();
           e.preventDefault();
           break;
-        case "ArrowLeft":
-          video.currentTime -= e.shiftKey ? 30 : 5;
+        case "ArrowLeft": {
+          const delta = e.shiftKey ? 30 : 5;
+          if (this.segments && this.segments.length > 0) {
+            const globalSec = this.getGlobalTimeMs() / 1000 - delta;
+            this.seekToGlobalTime(Math.max(0, globalSec));
+          } else {
+            video.currentTime -= delta;
+          }
           e.preventDefault();
           break;
-        case "ArrowRight":
-          video.currentTime += e.shiftKey ? 30 : 5;
+        }
+        case "ArrowRight": {
+          const delta = e.shiftKey ? 30 : 5;
+          if (this.segments && this.segments.length > 0) {
+            const globalSec = this.getGlobalTimeMs() / 1000 + delta;
+            this.seekToGlobalTime(Math.min(this.totalDuration, globalSec));
+          } else {
+            video.currentTime += delta;
+          }
           e.preventDefault();
           break;
+        }
         case "ArrowUp":
           video.volume = Math.min(1, video.volume + 0.1);
           e.preventDefault();
@@ -258,6 +282,13 @@ export class PlayerController {
     this.playerActiveChatIndex = 0;
     this.nicoLastSpawnMs = -1;
 
+    // Reset multi-segment state
+    this.segments = null;
+    this.segmentOffsets = null;
+    this.segmentIdx = 0;
+    this.segmentTimeOffset = 0;
+    this.totalDuration = 0;
+
     const video = document.getElementById("player-video");
     video.removeAttribute("src");
     video.load();
@@ -265,7 +296,128 @@ export class PlayerController {
     document.getElementById("player-viewport").style.display = "none";
     document.getElementById("player-empty-state").style.display = "";
     document.getElementById("player-sidebar-messages").innerHTML = "";
+    // Remove segment indicator if present
+    const segIndicator = document.getElementById("player-segment-indicator");
+    if (segIndicator) segIndicator.remove();
     this.clearNicoOverlay();
+  }
+
+  /**
+   * Get the global playback time in milliseconds (accounting for multi-segment offset).
+   */
+  getGlobalTimeMs() {
+    const video = document.getElementById("player-video");
+    if (!video) return 0;
+    if (this.segments && this.segments.length > 0) {
+      return (this.segmentTimeOffset + video.currentTime) * 1000;
+    }
+    return video.currentTime * 1000;
+  }
+
+  /**
+   * Initialize multi-segment playback with sequential source switching.
+   */
+  initMultiSegmentPlayer(jobId, segments) {
+    this.segments = segments;
+    this.segmentIdx = 0;
+    this.segmentTimeOffset = 0;
+
+    // Calculate cumulative time offsets
+    let cumulative = 0;
+    this.segmentOffsets = segments.map((seg) => {
+      const entry = {
+        ...seg,
+        startOffset: cumulative,
+        url: `/api/v1/jobs/${jobId}/segments/${seg.segmentIndex}/video`,
+      };
+      cumulative += seg.durationSeconds || 0;
+      return entry;
+    });
+    this.totalDuration = cumulative;
+
+    // Load first segment
+    this.loadSegment(0);
+
+    // Build segment indicator
+    this.buildSegmentIndicator();
+  }
+
+  loadSegment(idx) {
+    const video = document.getElementById("player-video");
+    if (!this.segmentOffsets || idx >= this.segmentOffsets.length) return;
+    this.segmentIdx = idx;
+    this.segmentTimeOffset = this.segmentOffsets[idx].startOffset;
+    video.src = this.segmentOffsets[idx].url;
+  }
+
+  onSegmentEnded() {
+    if (!this.segments || this.segments.length === 0) return;
+    if (this.segmentIdx + 1 < this.segments.length) {
+      this.loadSegment(this.segmentIdx + 1);
+      const video = document.getElementById("player-video");
+      video.play();
+    }
+  }
+
+  /**
+   * Seek to a global time (seconds) across segments.
+   */
+  seekToGlobalTime(globalSeconds) {
+    if (!this.segmentOffsets || this.segmentOffsets.length === 0) return;
+    const video = document.getElementById("player-video");
+
+    for (let i = 0; i < this.segmentOffsets.length; i++) {
+      const seg = this.segmentOffsets[i];
+      const segEnd = seg.startOffset + (seg.durationSeconds || 0);
+      if (globalSeconds < segEnd || i === this.segmentOffsets.length - 1) {
+        if (i !== this.segmentIdx) {
+          const wasPlaying = !video.paused;
+          this.loadSegment(i);
+          video.addEventListener("loadeddata", () => {
+            video.currentTime = globalSeconds - seg.startOffset;
+            if (wasPlaying) video.play();
+          }, { once: true });
+        } else {
+          video.currentTime = globalSeconds - seg.startOffset;
+        }
+        return;
+      }
+    }
+  }
+
+  /**
+   * Build a segment indicator bar showing quality changes below the video.
+   */
+  buildSegmentIndicator() {
+    // Remove existing indicator
+    let indicator = document.getElementById("player-segment-indicator");
+    if (indicator) indicator.remove();
+    if (!this.segmentOffsets || this.segmentOffsets.length <= 1) return;
+    if (this.totalDuration <= 0) return;
+
+    indicator = document.createElement("div");
+    indicator.id = "player-segment-indicator";
+    indicator.style.cssText = "display:flex;height:20px;margin:4px 0;border-radius:4px;overflow:hidden;font-size:11px;";
+
+    const colors = ["#3b82f6", "#8b5cf6", "#06b6d4", "#f59e0b", "#ef4444", "#10b981"];
+
+    this.segmentOffsets.forEach((seg, i) => {
+      const pct = ((seg.durationSeconds || 0) / this.totalDuration) * 100;
+      const block = document.createElement("div");
+      block.style.cssText = `width:${pct}%;background:${colors[i % colors.length]};display:flex;align-items:center;justify-content:center;color:#fff;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 4px;`;
+      block.title = `Segment ${i}: ${seg.quality} (${Math.round(seg.durationSeconds || 0)}s)`;
+      block.textContent = seg.quality || `Seg ${i}`;
+      block.addEventListener("click", () => {
+        this.seekToGlobalTime(seg.startOffset);
+      });
+      indicator.appendChild(block);
+    });
+
+    // Insert after video element
+    const videoWrapper = document.getElementById("player-video-wrapper");
+    if (videoWrapper) {
+      videoWrapper.parentNode.insertBefore(indicator, videoWrapper.nextSibling);
+    }
   }
 
   async loadPlayerJobList() {
@@ -333,8 +485,21 @@ export class PlayerController {
     document.getElementById("player-viewport").style.display = "";
     document.getElementById("player-empty-state").style.display = "none";
 
-    // Set video source
-    video.src = `/api/jobs/${jobId}/video`;
+    // Reset multi-segment state
+    this.segments = null;
+    this.segmentOffsets = null;
+    this.segmentIdx = 0;
+    this.segmentTimeOffset = 0;
+    this.totalDuration = 0;
+    const segIndicator = document.getElementById("player-segment-indicator");
+    if (segIndicator) segIndicator.remove();
+
+    // Multi-segment or single-file video source
+    if (this.playerJob.segments && this.playerJob.segments.length > 0) {
+      this.initMultiSegmentPlayer(jobId, this.playerJob.segments);
+    } else {
+      video.src = `/api/jobs/${jobId}/video`;
+    }
 
     // Load chat if available
     this.playerChatMessages = [];
@@ -448,7 +613,7 @@ export class PlayerController {
     const video = document.getElementById("player-video");
     if (!video || !this.playerChatMessages.length) return;
 
-    const currentMs = video.currentTime * 1000;
+    const currentMs = this.getGlobalTimeMs();
 
     // Update sidebar active state
     this.updateSidebarActiveState(currentMs);

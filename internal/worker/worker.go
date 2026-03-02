@@ -286,12 +286,15 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	var dlErr error
 	if job.Platform == "twitch" && result.TwitchVariant != nil {
 		variant := &TwitchVariantInfo{
-			URL:    result.TwitchVariant.URL,
-			Name:   result.TwitchVariant.Name,
-			Height: result.TwitchVariant.Height,
-			FPS:    result.TwitchVariant.FPS,
+			URL:           result.TwitchVariant.URL,
+			Name:          result.TwitchVariant.Name,
+			Width:         result.TwitchVariant.Width,
+			Height:        result.TwitchVariant.Height,
+			FPS:           result.TwitchVariant.FPS,
+			QualityPref:   job.QualityPreference,
+			MaxResolution: w.cfg.Downloader.MaxVideoResolution,
 		}
-		// For live streams, provide a stream-end check function
+		// For live streams, provide a stream-end check function and quality probe
 		if !result.IsVod && result.TwitchStreamInfo != nil && w.tw != nil {
 			login := result.TwitchStreamInfo.ChannelLogin
 			variant.CheckStreamFn = func(innerCtx context.Context) (bool, error) {
@@ -300,6 +303,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 					return false, err
 				}
 				return info != nil && info.IsLive, nil
+			}
+			variant.FetchVariantsFn = func(innerCtx context.Context) ([]twitch.TwitchHLSVariant, error) {
+				return w.tw.GetHLSMasterPlaylist(innerCtx, login)
 			}
 		}
 		// Determine which Twitch chat downloader to use

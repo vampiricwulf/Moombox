@@ -31,6 +31,10 @@ type DownloadResult struct {
 	VideoFormat     *youtube.Format
 	AudioFormat     *youtube.Format
 	IsHls           bool // true if HLS strategy was used
+	// Stream dimensions (populated by all strategies for quality monitoring)
+	VideoWidth  int
+	VideoHeight int
+	VideoFps    int
 }
 
 // DownloadVod downloads a VOD using direct format URLs.
@@ -92,6 +96,12 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 				job.Logger.Warn(fmt.Sprintf("[FormatSelector] Manual audio itag %d not found, falling back to auto", itag))
 			}
 		}
+	}
+
+	// audio_only quality preference skips video (unless user manually selected a video itag)
+	if job.Job.QualityPreference == "audio_only" && job.Job.SelectedVideoItag == nil {
+		selected.Video = nil
+		job.Logger.Info("audio_only preference: skipping video format")
 	}
 
 	result := &DownloadResult{}
@@ -277,6 +287,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			Codecs:         s.Codecs,
 			Width:          s.Width,
 			Height:         s.Height,
+			FPS:            s.FPS,
 			Bandwidth:      s.Bandwidth,
 			BaseURL:        s.BaseURL,
 			Initialization: s.Initialization,
@@ -293,13 +304,19 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		audioItag = *job.Job.SelectedAudioItag
 	}
 
+	// audio_only quality preference skips video (unless user manually selected a video itag)
+	if job.Job.QualityPreference == "audio_only" && job.Job.SelectedVideoItag == nil {
+		videoItag = -1
+		job.Logger.Info("audio_only preference: skipping video stream")
+	}
+
 	// -1 means user explicitly chose "no video/audio"
 	var videoStream, audioStream *DashStreamInfo
 	if videoItag != -1 {
-		videoStream = SelectBestDashStream(streamInfos, videoItag, job.Config.MaxVideoResolution, true)
+		videoStream = SelectBestDashStream(streamInfos, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference)
 	}
 	if audioItag != -1 {
-		audioStream = SelectBestDashStream(streamInfos, audioItag, 0, false)
+		audioStream = SelectBestDashStream(streamInfos, audioItag, 0, false, "")
 	}
 
 	// DASH requires both video and audio streams (matching TS), unless user explicitly excluded one
@@ -322,6 +339,13 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	}
 
 	result := &DownloadResult{}
+
+	// Populate stream dimensions for quality monitoring
+	if videoStream != nil {
+		result.VideoWidth = videoStream.Width
+		result.VideoHeight = videoStream.Height
+		result.VideoFps = videoStream.FPS
+	}
 
 	// Get cookie header for authenticated downloads
 	var dashCookieHeader string
@@ -476,29 +500,63 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		return nil, fmt.Errorf("invalid HLS master playlist (no variants found)")
 	}
 
-	// Step 3: Select best variant respecting max_video_resolution
+	// Step 3: Select best variant respecting max_video_resolution and quality preference
 	maxRes := job.Config.MaxVideoResolution
 	if maxRes <= 0 {
 		maxRes = 9999
 	}
 
-	var bestVariant *engine.HlsVariant
+	// Filter by maxRes cap
+	var filtered []*engine.HlsVariant
 	for i := range parsed.Variants {
 		v := &parsed.Variants[i]
 		varMaxDim := v.Width
 		if v.Height > varMaxDim {
 			varMaxDim = v.Height
 		}
-		if varMaxDim > maxRes {
-			continue
-		}
-		if bestVariant == nil || v.Bandwidth > bestVariant.Bandwidth {
-			bestVariant = v
+		if varMaxDim <= maxRes {
+			filtered = append(filtered, v)
 		}
 	}
 
-	if bestVariant == nil {
+	if len(filtered) == 0 {
 		return nil, fmt.Errorf("no HLS variants found within resolution limit (%d)", maxRes)
+	}
+
+	// Apply quality preference targeting
+	var bestVariant *engine.HlsVariant
+	qualityPref := job.Job.QualityPreference
+	if qualityPref == "audio_only" {
+		// YouTube HLS doesn't have audio-only variants — select lowest bandwidth
+		// to minimize wasted video data (audio quality is the same across variants)
+		job.Logger.Warn("audio_only preference with HLS: YouTube HLS has no audio-only variants, selecting lowest bandwidth")
+		bestVariant = filtered[0]
+		for _, v := range filtered[1:] {
+			if v.Bandwidth < bestVariant.Bandwidth {
+				bestVariant = v
+			}
+		}
+	} else if qualityPref != "" && qualityPref != "best" {
+		targetHeight, targetFPS := ParseQualityPreference(qualityPref)
+		if targetHeight > 0 {
+			// Try exact height match
+			bestVariant = selectHlsByHeight(filtered, targetHeight, targetFPS)
+			// Descend through lower heights
+			if bestVariant == nil {
+				bestVariant = selectNextLowerHls(filtered, targetHeight)
+			}
+			// No lower heights — fall through to source/best
+		}
+	}
+
+	// Fallback: highest bandwidth among all filtered candidates (source/best)
+	if bestVariant == nil {
+		bestVariant = filtered[0]
+		for _, v := range filtered[1:] {
+			if v.Bandwidth > bestVariant.Bandwidth {
+				bestVariant = v
+			}
+		}
 	}
 
 	job.Logger.Info("selected HLS variant",
@@ -515,9 +573,12 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 
 	// Step 5: Create downloader using the selected variant's playlist URL
 	result := &DownloadResult{
-		HasVideo:  true,
-		IsHls:     true,
-		VideoPath: filepath.Join(job.StagingDir, "video.ts"),
+		HasVideo:    true,
+		IsHls:       true,
+		VideoPath:   filepath.Join(job.StagingDir, "video.ts"),
+		VideoWidth:  bestVariant.Width,
+		VideoHeight: bestVariant.Height,
+		VideoFps:    bestVariant.FPS,
 	}
 
 	// Apply PO token to variant playlist URL (path mode) and pass for segment URLs (query mode)
@@ -552,6 +613,64 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	})
 
 	return result, nil
+}
+
+// selectHlsByHeight finds an HLS variant matching the target height, optionally with FPS.
+func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight, targetFPS int) *engine.HlsVariant {
+	var heightMatches []*engine.HlsVariant
+	for _, v := range variants {
+		if v.Height == targetHeight {
+			heightMatches = append(heightMatches, v)
+		}
+	}
+	if len(heightMatches) == 0 {
+		return nil
+	}
+	// If FPS-specific, prefer highest bandwidth among FPS matches
+	if targetFPS > 0 {
+		var bestFPS *engine.HlsVariant
+		for _, v := range heightMatches {
+			if v.FPS >= targetFPS-1 {
+				if bestFPS == nil || v.Bandwidth > bestFPS.Bandwidth {
+					bestFPS = v
+				}
+			}
+		}
+		if bestFPS != nil {
+			return bestFPS
+		}
+	}
+	// Return highest bandwidth at target height
+	best := heightMatches[0]
+	for _, v := range heightMatches[1:] {
+		if v.Bandwidth > best.Bandwidth {
+			best = v
+		}
+	}
+	return best
+}
+
+// selectNextLowerHls finds the best HLS variant below the target height,
+// descending through available heights. Returns nil if no lower heights exist.
+func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int) *engine.HlsVariant {
+	bestHeight := 0
+	for _, v := range variants {
+		if v.Height < targetHeight && v.Height > bestHeight {
+			bestHeight = v.Height
+		}
+	}
+	if bestHeight == 0 {
+		return nil
+	}
+	var best *engine.HlsVariant
+	for _, v := range variants {
+		if v.Height == bestHeight {
+			if best == nil || v.Bandwidth > best.Bandwidth {
+				best = v
+			}
+		}
+	}
+	return best
 }
 
 // downloadDirectURL downloads a complete file from a URL to a local path.

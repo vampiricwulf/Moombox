@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 const createSchema = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     selected_audio_itag INTEGER,
     start_time REAL,
     end_time REAL,
-    last_recheck_at TEXT
+    last_recheck_at TEXT,
+    quality_preference TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -95,8 +96,25 @@ CREATE TABLE IF NOT EXISTS last_videos (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at);
+CREATE TABLE IF NOT EXISTS segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    segment_index INTEGER NOT NULL,
+    unix_start INTEGER NOT NULL,
+    unix_end INTEGER NOT NULL,
+    quality TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    file_path TEXT,
+    file_size INTEGER,
+    video_width INTEGER,
+    video_height INTEGER,
+    video_fps INTEGER,
+    duration_seconds REAL
+);
+
 CREATE INDEX IF NOT EXISTS idx_gaps_job_id ON gaps(job_id);
 CREATE INDEX IF NOT EXISTS idx_trims_job_id ON trims(job_id);
+CREATE INDEX IF NOT EXISTS idx_segments_job_id ON segments(job_id);
 `
 
 func (db *Database) migrate() error {
@@ -205,6 +223,42 @@ func (db *Database) migrate() error {
 		}
 
 		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 4)
+		if err != nil {
+			return err
+		}
+	}
+
+	if version < 5 {
+		// Add quality_preference column to jobs
+		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN quality_preference TEXT DEFAULT ''`); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return err
+			}
+		}
+
+		// Create segments table for multi-segment quality-split jobs
+		if _, err := db.db.ExecContext(db.getCtx(), `CREATE TABLE IF NOT EXISTS segments (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+			segment_index INTEGER NOT NULL,
+			unix_start INTEGER NOT NULL,
+			unix_end INTEGER NOT NULL,
+			quality TEXT NOT NULL,
+			filename TEXT NOT NULL,
+			file_path TEXT,
+			file_size INTEGER,
+			video_width INTEGER,
+			video_height INTEGER,
+			video_fps INTEGER,
+			duration_seconds REAL
+		)`); err != nil {
+			return err
+		}
+		if _, err := db.db.ExecContext(db.getCtx(), `CREATE INDEX IF NOT EXISTS idx_segments_job_id ON segments(job_id)`); err != nil {
+			return err
+		}
+
+		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 5)
 		if err != nil {
 			return err
 		}

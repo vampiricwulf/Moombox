@@ -1105,15 +1105,26 @@
                     >Include non-live content (VODs, premieres)</sl-checkbox
                 >
             </div>
-            <div id="channel-quality-row" style="display: none">
+            <div id="channel-quality-row">
                 <sl-select
                     id="channel-quality-select"
                     label="Quality Preference"
                     value="best"
                 >
                     <sl-option value="best">Best (Source)</sl-option>
+                    <sl-option value="2160p60">2160p60 (4K 60fps)</sl-option>
+                    <sl-option value="2160p">2160p (4K)</sl-option>
+                    <sl-option value="1440p60">1440p60</sl-option>
+                    <sl-option value="1440p">1440p</sl-option>
+                    <sl-option value="1080p60">1080p60</sl-option>
+                    <sl-option value="1080p">1080p</sl-option>
+                    <sl-option value="900p60">900p60</sl-option>
+                    <sl-option value="900p">900p</sl-option>
+                    <sl-option value="720p60">720p60</sl-option>
                     <sl-option value="720p">720p</sl-option>
                     <sl-option value="480p">480p</sl-option>
+                    <sl-option value="360p">360p</sl-option>
+                    <sl-option value="160p">160p</sl-option>
                     <sl-option value="audio_only">Audio Only</sl-option>
                 </sl-select>
             </div>

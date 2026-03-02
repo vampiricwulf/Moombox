@@ -312,6 +312,112 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		http.ServeFile(rw, req, filePath)
 	})
 
+	// GET /api/v1/jobs/:id/segments — returns segments for multi-segment jobs
+	r.Get("/api/v1/jobs/{id}/segments", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+
+		segments, err := db.GetSegments(jobID)
+		if err != nil {
+			jsonError(rw, "failed to get segments", http.StatusInternalServerError)
+			return
+		}
+		if len(segments) == 0 {
+			jsonError(rw, "no segments", http.StatusNotFound)
+			return
+		}
+
+		if job.Status == database.StatusFinished {
+			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		}
+		jsonResponse(rw, segments)
+	})
+
+	// GET /api/v1/jobs/:id/segments/:index/video — serves individual segment video file
+	r.Get("/api/v1/jobs/{id}/segments/{index}/video", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		indexStr := chi.URLParam(req, "index")
+
+		segIndex, err := strconv.Atoi(indexStr)
+		if err != nil {
+			jsonError(rw, "invalid segment index", http.StatusBadRequest)
+			return
+		}
+
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+
+		segments, err := db.GetSegments(jobID)
+		if err != nil {
+			jsonError(rw, "failed to get segments", http.StatusInternalServerError)
+			return
+		}
+
+		// Find the segment by index
+		var seg *database.Segment
+		for i := range segments {
+			if segments[i].SegmentIndex == segIndex {
+				seg = &segments[i]
+				break
+			}
+		}
+		if seg == nil {
+			jsonError(rw, "segment not found", http.StatusNotFound)
+			return
+		}
+
+		if seg.FilePath == "" {
+			jsonError(rw, "segment file not available", http.StatusNotFound)
+			return
+		}
+
+		filePath, err := filepath.Abs(seg.FilePath)
+		if err != nil {
+			jsonError(rw, "invalid path", http.StatusBadRequest)
+			return
+		}
+
+		// Path traversal guard: resolved path must be within output directory
+		outputDir := job.OutputDirectory
+		if outputDir == "" {
+			outputDir = cfg.Paths.OutputDirectory
+		}
+		if outputDir == "" {
+			outputDir = "./output"
+		}
+		resolvedOutputDir, err := filepath.Abs(outputDir)
+		if err != nil {
+			jsonError(rw, "invalid output directory", http.StatusBadRequest)
+			return
+		}
+		if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
+			jsonError(rw, "access denied", http.StatusForbidden)
+			return
+		}
+
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			jsonError(rw, "segment file not found", http.StatusNotFound)
+			return
+		}
+
+		rw.Header().Set("Content-Type", "video/mp4")
+		if job.Status == database.StatusFinished {
+			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		}
+		http.ServeFile(rw, req, filePath)
+	})
+
 	// GET /api/v1/jobs/:id/chat
 	r.Get("/api/v1/jobs/{id}/chat", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
@@ -543,9 +649,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 				ChannelAvatarURL: avatarURL,
 				StreamStartTime:  streamStartTime,
 				TwitchCategory:   twitchCategory,
-				TwitchQuality:    body.QualityPreference,
-				IsVod:            isVod,
-				ManuallyAdded:    true,
+				TwitchQuality:     body.QualityPreference,
+				QualityPreference: body.QualityPreference,
+				IsVod:             isVod,
+				ManuallyAdded:     true,
 				OutputDirectory:  body.OutputDirectory,
 				CreatedAt:        now,
 				UpdatedAt:        now,
@@ -626,6 +733,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 			OutputDirectory:   body.OutputDirectory,
 			SelectedVideoItag: body.SelectedVideoItag,
 			SelectedAudioItag: body.SelectedAudioItag,
+			QualityPreference: body.QualityPreference,
 			StartTime:         body.StartTime,
 			EndTime:           body.EndTime,
 			CreatedAt:         now,

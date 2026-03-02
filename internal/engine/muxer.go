@@ -297,6 +297,115 @@ func (m *Muxer) runFFmpeg(ctx context.Context, args []string) error {
 	return nil
 }
 
+// TrimSegmentInput describes one segment for the TrimAndConcat pipeline.
+type TrimSegmentInput struct {
+	InputPath string
+	StartTime float64 // local start time within this segment
+	Duration  float64 // duration to extract from this segment
+	NeedScale bool    // true if resolution/FPS differs from target
+}
+
+// TrimAndConcat trims multiple segment files, optionally scales to a common
+// resolution/FPS, and concatenates them into a single output file.
+// Used for cross-segment trims on multi-segment quality-split jobs.
+func (m *Muxer) TrimAndConcat(ctx context.Context, segments []TrimSegmentInput, outputPath string, targetWidth, targetHeight, targetFPS, crf, audioBitrate int) error {
+	if len(segments) == 0 {
+		return fmt.Errorf("no segments to trim")
+	}
+
+	// Single segment: trim directly to output (no concat needed)
+	if len(segments) == 1 {
+		seg := segments[0]
+		return m.TrimWithAudio(ctx, seg.InputPath, outputPath, seg.StartTime, seg.StartTime+seg.Duration, crf, audioBitrate)
+	}
+
+	// Multi-segment: trim each to intermediate, then concat
+	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("moombox-trim-%d", time.Now().UnixMilli()))
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	var intermediates []string
+
+	for i, seg := range segments {
+		intermediatePath := filepath.Join(tempDir, fmt.Sprintf("seg_%d.mp4", i))
+		intermediates = append(intermediates, intermediatePath)
+
+		args := []string{"-y"}
+
+		// Seek to start
+		if seg.StartTime > 0 {
+			args = append(args, "-ss", fmt.Sprintf("%.3f", seg.StartTime))
+		}
+		args = append(args, "-i", seg.InputPath)
+
+		// Duration
+		if seg.Duration > 0 {
+			args = append(args, "-t", fmt.Sprintf("%.3f", seg.Duration))
+		}
+
+		// Video: re-encode with optional scaling
+		args = append(args, "-c:v", "libx264", "-crf", fmt.Sprintf("%d", crf), "-preset", "slow")
+		if seg.NeedScale {
+			vf := fmt.Sprintf("scale=%d:%d,fps=%d", targetWidth, targetHeight, targetFPS)
+			args = append(args, "-vf", vf)
+		}
+
+		// Audio
+		if audioBitrate > 0 {
+			args = append(args, "-c:a", "aac", "-b:a", fmt.Sprintf("%dk", audioBitrate))
+		} else {
+			args = append(args, "-c:a", "aac")
+		}
+
+		args = append(args, "-movflags", "faststart", intermediatePath)
+
+		m.logger.Debug("ffmpeg trim segment", "index", i, "args", strings.Join(args, " "))
+		if err := m.runFFmpeg(ctx, args); err != nil {
+			return fmt.Errorf("trim segment %d: %w", i, err)
+		}
+	}
+
+	// Write concat list
+	concatListPath := filepath.Join(tempDir, "concat.txt")
+	var listContent strings.Builder
+	for _, p := range intermediates {
+		// FFmpeg concat demuxer: forward slashes on Windows, backslash-escape single quotes
+		escaped := strings.ReplaceAll(p, "\\", "/")
+		escaped = strings.ReplaceAll(escaped, "'", "\\'")
+		listContent.WriteString(fmt.Sprintf("file '%s'\n", escaped))
+	}
+	if err := os.WriteFile(concatListPath, []byte(listContent.String()), 0o644); err != nil {
+		return fmt.Errorf("write concat list: %w", err)
+	}
+
+	// Ensure output directory exists
+	if dir := filepath.Dir(outputPath); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create output directory: %w", err)
+		}
+	}
+
+	// Concat with codec copy (all intermediates are same codec/resolution/FPS)
+	concatArgs := []string{
+		"-y",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", concatListPath,
+		"-c", "copy",
+		"-movflags", "faststart",
+		outputPath,
+	}
+
+	m.logger.Debug("ffmpeg concat", "args", strings.Join(concatArgs, " "))
+	if err := m.runFFmpeg(ctx, concatArgs); err != nil {
+		return fmt.Errorf("concat segments: %w", err)
+	}
+
+	return nil
+}
+
 func hasTrim(opts *TrimOptions) bool {
 	return opts != nil && (opts.TrimStartOffset > 0 || opts.TrimDuration > 0)
 }

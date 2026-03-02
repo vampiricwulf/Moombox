@@ -128,22 +128,25 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 		}
 	}
 
-	// Specific quality preference — match by height like TS
-	if qualityPref != "" {
-		// Try exact height match first (e.g. "720p" → height==720)
-		var targetHeight int
-		fmt.Sscanf(qualityPref, "%dp", &targetHeight)
+	// Specific quality preference — match by height and optionally FPS
+	if qualityPref != "" && qualityPref != "best" {
+		targetHeight, targetFPS := parseQualityPref(qualityPref)
 		if targetHeight > 0 {
+			// Try exact height match
+			if match := selectVariantByHeight(filtered, targetHeight, targetFPS); match != nil {
+				return match
+			}
+			// Descend through lower heights
+			if match := selectNextLowerVariant(filtered, targetHeight); match != nil {
+				return match
+			}
+			// No lower heights — fall through to source/best
+		} else {
+			// Non-height pref (e.g. named quality) — substring match on name
 			for i := range filtered {
-				if filtered[i].Height == targetHeight {
+				if strings.Contains(filtered[i].Name, qualityPref) {
 					return &filtered[i]
 				}
-			}
-		}
-		// Fallback to substring match on name
-		for i := range filtered {
-			if strings.Contains(filtered[i].Name, qualityPref) {
-				return &filtered[i]
 			}
 		}
 	}
@@ -163,6 +166,76 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 		}
 	}
 	return best
+}
+
+// selectVariantByHeight finds a variant matching the target height, optionally with FPS.
+func selectVariantByHeight(variants []TwitchHLSVariant, targetHeight, targetFPS int) *TwitchHLSVariant {
+	var heightMatches []int
+	for i := range variants {
+		if variants[i].Height == targetHeight {
+			heightMatches = append(heightMatches, i)
+		}
+	}
+	if len(heightMatches) == 0 {
+		return nil
+	}
+	// If FPS-specific, prefer highest bandwidth among FPS matches
+	if targetFPS > 0 {
+		bestFPS := -1
+		for _, idx := range heightMatches {
+			if variants[idx].FPS >= float64(targetFPS)-1 {
+				if bestFPS == -1 || variants[idx].Bandwidth > variants[bestFPS].Bandwidth {
+					bestFPS = idx
+				}
+			}
+		}
+		if bestFPS >= 0 {
+			return &variants[bestFPS]
+		}
+	}
+	// Return highest bandwidth at target height
+	best := heightMatches[0]
+	for _, idx := range heightMatches[1:] {
+		if variants[idx].Bandwidth > variants[best].Bandwidth {
+			best = idx
+		}
+	}
+	return &variants[best]
+}
+
+// selectNextLowerVariant finds the best variant below the target height,
+// descending through available heights. Returns nil if no lower heights exist.
+func selectNextLowerVariant(variants []TwitchHLSVariant, targetHeight int) *TwitchHLSVariant {
+	bestHeight := 0
+	for i := range variants {
+		h := variants[i].Height
+		if h < targetHeight && h > bestHeight {
+			bestHeight = h
+		}
+	}
+	if bestHeight == 0 {
+		return nil
+	}
+	var best *TwitchHLSVariant
+	for i := range variants {
+		if variants[i].Height == bestHeight {
+			if best == nil || variants[i].Bandwidth > best.Bandwidth {
+				best = &variants[i]
+			}
+		}
+	}
+	return best
+}
+
+// parseQualityPref parses a quality preference string like "1080p60" into height and fps.
+// "1080p60" → (1080, 60), "720p" → (720, 0), "best" → (0, 0).
+func parseQualityPref(pref string) (height int, fps int) {
+	// Try "NNNpNN" format first
+	n, _ := fmt.Sscanf(pref, "%dp%d", &height, &fps)
+	if n >= 1 {
+		return
+	}
+	return 0, 0
 }
 
 // FetchHLSMasterPlaylist fetches and parses an HLS master playlist from a URL.
