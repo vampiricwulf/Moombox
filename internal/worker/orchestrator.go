@@ -561,7 +561,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				segmentMuxWg.Add(1)
 				go func() {
 					defer segmentMuxWg.Done()
-					seg, muxErr := o.muxSegment(ctx, jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
+					// Use background context — data is already downloaded, let FFmpeg finish
+					// even during cancellation to avoid orphaned partial output files.
+					seg, muxErr := o.muxSegment(context.Background(), jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
 					if muxErr != nil {
 						o.logger.Error("failed to mux quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
 					} else if seg != nil {
@@ -1629,7 +1631,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				go func() {
 					defer segmentMuxWg.Done()
 					muxResult := &DownloadResult{HasVideo: true, VideoPath: muxVideoPath}
-					seg, muxErr := o.muxSegment(ctx, jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
+					// Use background context — data is already downloaded, let FFmpeg finish
+					// even during cancellation to avoid orphaned partial output files.
+					seg, muxErr := o.muxSegment(context.Background(), jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
 					if muxErr != nil {
 						o.logger.Error("failed to mux Twitch quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
 					} else if seg != nil {
