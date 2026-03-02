@@ -163,7 +163,7 @@ Route handlers similarly use `FormatRoutesDeps`, `StatusRouteDeps`, etc.
 Used for two things only: BotGuard VM (PO token generation) and YouTube cipher decryption. Package `internal/goja/` provides minimal DOM shims. No CGo or V8 dependency.
 
 ### Download orchestration
-- **StreamProcessor**: Probes video status, waits for live, handles auth upgrades
+- **StreamProcessor**: Probes video status, waits for live, handles auth upgrades. For Twitch, polls offline channels until live when manually added (one-time monitor)
 - **DownloadOrchestrator**: Manages full lifecycle — segment downloaders + chat + mux + trim
 - **SegmentDownloader**: Handles DASH sequential loop, HLS playlist polling, VOD parallel, and catch-up with bounded concurrency (6 parallel)
 - **Live stream verification loop**: After downloaders stop, probes YouTube API to confirm stream ended vs still live (up to 6 consecutive checks)
