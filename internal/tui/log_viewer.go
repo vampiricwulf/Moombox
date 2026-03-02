@@ -15,9 +15,9 @@ type LogLevel int
 
 const (
 	LogLevelAll LogLevel = iota
-	LogLevelError
-	LogLevelWarn
 	LogLevelInfo
+	LogLevelWarn
+	LogLevelError
 )
 
 func (l LogLevel) String() string {
