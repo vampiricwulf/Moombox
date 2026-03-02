@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -436,6 +437,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	segmentStartTime := time.Now().Unix()
 	currentQuality := o.extractQualityFromResult(result)
 	qualityChangeCh := make(chan QualityInfo, 1)
+	var segmentMuxWg sync.WaitGroup // tracks background segment mux goroutines
+	defer segmentMuxWg.Wait()       // ensure all background muxes finish before returning
 
 	// Only monitor quality if user hasn't manually selected itags and isn't audio-only
 	monitoringEnabled := jobCtx.Job.SelectedVideoItag == nil && jobCtx.Job.QualityPreference != "audio_only"
@@ -547,16 +550,26 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			segmentEndTime := time.Now().Unix()
 			shortSegment := time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
 
-			// Mux this segment (skip muxing very short segments to avoid tiny files)
+			// Mux this segment in the background so the new download starts immediately.
+			// All values are captured by the goroutine — no shared mutable state.
 			if !shortSegment {
-				seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)
-				if muxErr != nil {
-					o.logger.Error("failed to mux quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
-				} else if seg != nil {
-					o.logger.Info("quality segment muxed",
-						"segment", segmentIndex, "quality", currentQuality.Label,
-						"file", seg.Filename, "jobID", jobCtx.Job.ID)
-				}
+				muxIdx := segmentIndex
+				muxStart := segmentStartTime
+				muxEnd := segmentEndTime
+				muxQuality := currentQuality
+				muxResult := result
+				segmentMuxWg.Add(1)
+				go func() {
+					defer segmentMuxWg.Done()
+					seg, muxErr := o.muxSegment(ctx, jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
+					if muxErr != nil {
+						o.logger.Error("failed to mux quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
+					} else if seg != nil {
+						o.logger.Info("quality segment muxed",
+							"segment", muxIdx, "quality", muxQuality.Label,
+							"file", seg.Filename, "jobID", jobCtx.Job.ID)
+					}
+				}()
 				segmentIndex++
 			} else {
 				o.logger.Debug("skipping short segment mux",
@@ -564,7 +577,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					"jobID", jobCtx.Job.ID)
 			}
 
-			// Re-fetch manifest and select new best quality
+			// Re-fetch manifest and select new best quality (concurrent with background mux)
 			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
 			if err != nil {
 				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
@@ -712,6 +725,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	}
 
 streamEnded:
+	// Wait for background segment muxes to finish before final mux —
+	// their DB records must exist before muxAndFinalize calls GetSegments.
+	segmentMuxWg.Wait()
+
 	// If we had quality splits, mux the final segment
 	if segmentIndex > 0 {
 		segmentEndTime := time.Now().Unix()
@@ -1466,6 +1483,8 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Quality monitoring state (live streams only)
 	segmentIndex := 0
 	segmentStartTime := time.Now().Unix()
+	var segmentMuxWg sync.WaitGroup // tracks background segment mux goroutines
+	defer segmentMuxWg.Wait()       // ensure all background muxes finish before returning
 	currentQuality := QualityInfo{
 		Width:  variant.Width,
 		Height: variant.Height,
@@ -1599,17 +1618,26 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			segmentEndTime := time.Now().Unix()
 			shortSegment := time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
 
-			// Mux this segment (skip muxing very short segments to avoid tiny files)
+			// Mux this segment in the background so the new download starts immediately.
 			if !shortSegment {
-				result := &DownloadResult{HasVideo: true, VideoPath: videoPath}
-				seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)
-				if muxErr != nil {
-					o.logger.Error("failed to mux Twitch quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
-				} else if seg != nil {
-					o.logger.Info("Twitch quality segment muxed",
-						"segment", segmentIndex, "quality", currentQuality.Label,
-						"file", seg.Filename, "jobID", jobCtx.Job.ID)
-				}
+				muxIdx := segmentIndex
+				muxStart := segmentStartTime
+				muxEnd := segmentEndTime
+				muxQuality := currentQuality
+				muxVideoPath := videoPath
+				segmentMuxWg.Add(1)
+				go func() {
+					defer segmentMuxWg.Done()
+					muxResult := &DownloadResult{HasVideo: true, VideoPath: muxVideoPath}
+					seg, muxErr := o.muxSegment(ctx, jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
+					if muxErr != nil {
+						o.logger.Error("failed to mux Twitch quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
+					} else if seg != nil {
+						o.logger.Info("Twitch quality segment muxed",
+							"segment", muxIdx, "quality", muxQuality.Label,
+							"file", seg.Filename, "jobID", jobCtx.Job.ID)
+					}
+				}()
 				segmentIndex++
 			} else {
 				o.logger.Debug("skipping short segment mux",
@@ -1673,6 +1701,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	}
 
 	tracker.Finalize()
+
+	// Wait for any background segment muxes to finish
+	segmentMuxWg.Wait()
 
 	if ctx.Err() != nil {
 		// Shutdown: stop chat but preserve staging dir for resume
