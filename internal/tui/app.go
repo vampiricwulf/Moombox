@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // FocusPanel identifies which panel is focused.
@@ -106,6 +108,14 @@ type (
 		Valid   bool
 		Version string
 		Path    string // the path that was checked
+	}
+
+	// Async results for channel URL resolution
+	channelResolvedMsg struct {
+		ID       string
+		Name     string
+		Platform string
+		Err      error
 	}
 )
 
@@ -665,6 +675,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case channelResolvedMsg:
+		a.settings.HandleChannelResolved(msg.ID, msg.Name, msg.Platform, msg.Err)
+		return a, nil
+
 	case tea.KeyMsg:
 		return a.handleKey(msg)
 
@@ -735,6 +749,8 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if a.OnRestart != nil {
 				a.OnRestart()
 			}
+		case "resolve_channel":
+			return a, a.resolveChannelCmd(a.settings.GetChannelResolveInput())
 		}
 		return a, nil
 	}
@@ -1599,6 +1615,25 @@ func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 		}
 		valid, ver := checkFn(path)
 		return ffmpegCheckResultMsg{Valid: valid, Version: ver, Path: path}
+	}
+}
+
+// resolveChannelCmd resolves a channel URL asynchronously via tea.Cmd.
+func (a *App) resolveChannelCmd(input string) tea.Cmd {
+	return func() tea.Msg {
+		resolved, err := utils.ResolveChannelInput(context.Background(), input)
+		if err != nil {
+			return channelResolvedMsg{Err: err}
+		}
+		if resolved == nil {
+			// Not a recognized URL — return input as-is
+			return channelResolvedMsg{ID: input}
+		}
+		return channelResolvedMsg{
+			ID:       resolved.ID,
+			Name:     resolved.Name,
+			Platform: resolved.Platform,
+		}
 	}
 }
 

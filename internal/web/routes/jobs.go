@@ -1619,6 +1619,20 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*con
 			return
 		}
 
+		// Safety net: if the ID looks like a URL, try to resolve it
+		if utils.LooksLikeURL(channel.ID) {
+			resolved, err := utils.ResolveChannelInput(req.Context(), channel.ID)
+			if err == nil && resolved != nil {
+				channel.ID = resolved.ID
+				if channel.Name == "" && resolved.Name != "" {
+					channel.Name = resolved.Name
+				}
+				if resolved.Platform != "" {
+					channel.Platform = resolved.Platform
+				}
+			}
+		}
+
 		// Upsert
 		found := false
 		for i, ch := range cfg.Channels {
@@ -1673,6 +1687,41 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*con
 		}
 
 		jsonError(rw, "channel not found", http.StatusNotFound)
+	})
+
+	// POST /api/v1/resolve-channel
+	r.Post("/api/v1/resolve-channel", func(rw http.ResponseWriter, req *http.Request) {
+		var body struct {
+			Input string `json:"input"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			jsonError(rw, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		input := strings.TrimSpace(body.Input)
+		if input == "" {
+			jsonError(rw, "input required", http.StatusBadRequest)
+			return
+		}
+
+		resolved, err := utils.ResolveChannelInput(req.Context(), input)
+		if err != nil {
+			jsonError(rw, "failed to resolve channel: "+err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+
+		if resolved == nil {
+			// Not a recognized URL — return input as-is
+			jsonResponse(rw, map[string]any{"id": input, "name": "", "platform": ""})
+			return
+		}
+
+		jsonResponse(rw, map[string]any{
+			"id":       resolved.ID,
+			"name":     resolved.Name,
+			"platform": resolved.Platform,
+		})
 	})
 }
 

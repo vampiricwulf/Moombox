@@ -49,6 +49,77 @@ func TestExtractVideoID(t *testing.T) {
 	}
 }
 
+func TestParseYouTubeChannelURL(t *testing.T) {
+	tests := []struct {
+		input     string
+		wantNil   bool
+		wantID    string // expected ChannelID (direct extraction)
+		wantPath  string // expected Path (needs resolution)
+	}{
+		// /channel/UCxxx → direct extraction
+		{"https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx", false, "UCxxxxxxxxxxxxxxxxxxxxxx", ""},
+		{"https://youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx", false, "UCxxxxxxxxxxxxxxxxxxxxxx", ""},
+		{"https://m.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx", false, "UCxxxxxxxxxxxxxxxxxxxxxx", ""},
+		{"www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx", false, "UCxxxxxxxxxxxxxxxxxxxxxx", ""},
+		// /channel/UCxxx with trailing path
+		{"https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx/videos", false, "UCxxxxxxxxxxxxxxxxxxxxxx", ""},
+
+		// /@Handle → needs resolution
+		{"https://www.youtube.com/@SomeHandle", false, "", "/@SomeHandle"},
+		{"youtube.com/@SomeHandle", false, "", "/@SomeHandle"},
+		{"https://www.youtube.com/@SomeHandle/videos", false, "", "/@SomeHandle"},
+
+		// /c/CustomName → needs resolution
+		{"https://www.youtube.com/c/CustomChannel", false, "", "/c/CustomChannel"},
+		{"https://www.youtube.com/c/CustomChannel/live", false, "", "/c/CustomChannel"},
+
+		// /user/Username → needs resolution
+		{"https://www.youtube.com/user/SomeUser", false, "", "/user/SomeUser"},
+		{"https://www.youtube.com/user/SomeUser/videos", false, "", "/user/SomeUser"},
+
+		// Video URLs → nil (not channel URLs)
+		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ", true, "", ""},
+		{"https://www.youtube.com/live/dQw4w9WgXcQ", true, "", ""},
+		{"https://youtu.be/dQw4w9WgXcQ", true, "", ""},
+
+		// Non-YouTube URLs → nil
+		{"https://example.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx", true, "", ""},
+		{"https://twitch.tv/streamer", true, "", ""},
+
+		// Bare strings → nil
+		{"UCxxxxxxxxxxxxxxxxxxxxxx", true, "", ""},
+		{"@SomeHandle", true, "", ""},
+		{"", true, "", ""},
+
+		// Invalid channel ID format
+		{"https://www.youtube.com/channel/NotAChannelID", true, "", ""},
+
+		// Empty handle
+		{"https://www.youtube.com/@", true, "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := ParseYouTubeChannelURL(tt.input)
+			if tt.wantNil {
+				if result != nil {
+					t.Errorf("ParseYouTubeChannelURL(%q) = %+v, want nil", tt.input, result)
+				}
+				return
+			}
+			if result == nil {
+				t.Fatalf("ParseYouTubeChannelURL(%q) = nil, want non-nil", tt.input)
+			}
+			if result.ChannelID != tt.wantID {
+				t.Errorf("ParseYouTubeChannelURL(%q).ChannelID = %q, want %q", tt.input, result.ChannelID, tt.wantID)
+			}
+			if result.Path != tt.wantPath {
+				t.Errorf("ParseYouTubeChannelURL(%q).Path = %q, want %q", tt.input, result.Path, tt.wantPath)
+			}
+		})
+	}
+}
+
 func TestIsVideoID(t *testing.T) {
 	if !IsVideoID("dQw4w9WgXcQ") {
 		t.Error("expected true for valid ID")

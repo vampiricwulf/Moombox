@@ -134,6 +134,28 @@ export class SettingsController {
       });
     }
 
+    // Auto-detect platform from channel ID input
+    const channelIdInput = document.getElementById("channel-id-input");
+    if (channelIdInput) {
+      channelIdInput.addEventListener("sl-input", () => {
+        if (this.editingChannelId) return; // Don't auto-switch when editing
+        const val = (channelIdInput.value || "").trim();
+        const platformSelect = document.getElementById("channel-platform-select");
+        if (!platformSelect || platformSelect.disabled) return;
+        if (val.includes("youtube.com") || val.includes("youtu.be")) {
+          if (platformSelect.value !== "youtube") {
+            platformSelect.value = "youtube";
+            this.updateChannelDialogForPlatform("youtube");
+          }
+        } else if (val.includes("twitch.tv")) {
+          if (platformSelect.value !== "twitch") {
+            platformSelect.value = "twitch";
+            this.updateChannelDialogForPlatform("twitch");
+          }
+        }
+      });
+    }
+
     // Add notification
     const addNotifBtn = document.getElementById("add-notification-btn");
     if (addNotifBtn) {
@@ -782,8 +804,8 @@ export class SettingsController {
 
     if (idInput) {
       idInput.label = isTwitch ? "Channel Login" : "Channel ID";
-      idInput.placeholder = isTwitch ? "streamer_username" : "UCxxxxxxxxxxxxxxxxxxxxxxxx";
-      idInput.helpText = isTwitch ? "Twitch channel login name (lowercase)" : "YouTube channel ID (starts with UC)";
+      idInput.placeholder = isTwitch ? "username or channel URL" : "UC... or @handle or channel URL";
+      idInput.helpText = isTwitch ? "Channel login name or twitch.tv URL" : "Channel ID, @handle, or channel URL";
     }
 
     // Toggle YouTube-only fields (quality preference applies to both platforms)
@@ -799,8 +821,8 @@ export class SettingsController {
   }
 
   async saveChannel() {
-    const id = document.getElementById("channel-id-input").value.trim();
-    const name = document.getElementById("channel-name-input").value.trim();
+    let id = document.getElementById("channel-id-input").value.trim();
+    let name = document.getElementById("channel-name-input").value.trim();
     const termsValue = document
       .getElementById("channel-terms-input")
       .value.trim();
@@ -813,11 +835,52 @@ export class SettingsController {
 
     // Read platform and quality
     const platformSelect = document.getElementById("channel-platform-select");
-    const platform = platformSelect ? platformSelect.value : "youtube";
-    const isTwitch = platform === "twitch";
+    let platform = platformSelect ? platformSelect.value : "youtube";
 
     const enabledSwitch = document.getElementById("channel-enabled-switch");
     const enabled = enabledSwitch ? enabledSwitch.checked : true;
+
+    // Resolve channel URL if it looks like a URL (only for new channels)
+    if (!this.editingChannelId && (id.includes("youtube.com") || id.includes("youtu.be") || id.includes("twitch.tv"))) {
+      const saveBtn = document.getElementById("channel-save-btn");
+      if (saveBtn) saveBtn.loading = true;
+      try {
+        const resp = await fetch("/api/resolve-channel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ input: id }),
+        });
+        if (resp.ok) {
+          const resolved = await resp.json();
+          if (resolved.id) {
+            id = resolved.id;
+            document.getElementById("channel-id-input").value = id;
+          }
+          if (resolved.name && !name) {
+            name = resolved.name;
+            document.getElementById("channel-name-input").value = name;
+          }
+          if (resolved.platform) {
+            platform = resolved.platform;
+            if (platformSelect) {
+              platformSelect.value = platform;
+              this.updateChannelDialogForPlatform(platform);
+            }
+          }
+        } else {
+          const data = await resp.json();
+          this.app.showToast(data.error || "Failed to resolve channel URL", "danger");
+          return;
+        }
+      } catch (e) {
+        this.app.showToast("Failed to resolve channel URL: " + e.message, "danger");
+        return;
+      } finally {
+        if (saveBtn) saveBtn.loading = false;
+      }
+    }
+
+    const isTwitch = platform === "twitch";
 
     const channel = {
       id,

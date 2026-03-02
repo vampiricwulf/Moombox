@@ -113,6 +113,21 @@ export class SetupController {
       this.saveChannelFromDialog();
     });
 
+    // Auto-detect platform from channel ID input in setup dialog
+    const setupChId = document.getElementById("setup-ch-id");
+    if (setupChId) {
+      setupChId.addEventListener("sl-input", () => {
+        const val = (setupChId.value || "").trim();
+        const platformSel = document.getElementById("setup-ch-platform");
+        if (!platformSel) return;
+        if (val.includes("youtube.com") || val.includes("youtu.be")) {
+          if (platformSel.value !== "youtube") platformSel.value = "youtube";
+        } else if (val.includes("twitch.tv")) {
+          if (platformSel.value !== "twitch") platformSel.value = "twitch";
+        }
+      });
+    }
+
     // --- FFmpeg overlay ---
     document.getElementById("ffmpeg-install-btn")?.addEventListener("click", () => {
       this.showFFmpegInstallOptions();
@@ -278,16 +293,47 @@ export class SetupController {
     if (dialog) dialog.show();
   }
 
-  saveChannelFromDialog() {
-    const id = (document.getElementById("setup-ch-id")?.value || "").trim();
+  async saveChannelFromDialog() {
+    let id = (document.getElementById("setup-ch-id")?.value || "").trim();
     if (!id) {
       this.app.showToast("Channel ID is required", "warning");
       return;
     }
+    let name = (document.getElementById("setup-ch-name")?.value || "").trim();
+    let platform = document.getElementById("setup-ch-platform")?.value || "youtube";
+
+    // Resolve channel URL if it looks like a URL
+    if (id.includes("youtube.com") || id.includes("youtu.be") || id.includes("twitch.tv")) {
+      const saveBtn = document.getElementById("setup-ch-save");
+      if (saveBtn) saveBtn.loading = true;
+      try {
+        const resp = await fetch("/api/resolve-channel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ input: id }),
+        });
+        if (resp.ok) {
+          const resolved = await resp.json();
+          if (resolved.id) id = resolved.id;
+          if (resolved.name && !name) name = resolved.name;
+          if (resolved.platform) platform = resolved.platform;
+        } else {
+          const data = await resp.json();
+          this.app.showToast(data.error || "Failed to resolve channel URL", "danger");
+          return;
+        }
+      } catch (e) {
+        this.app.showToast("Failed to resolve channel URL: " + e.message, "danger");
+        return;
+      } finally {
+        if (saveBtn) saveBtn.loading = false;
+      }
+    }
+
     const ch = {
       id,
-      name: (document.getElementById("setup-ch-name")?.value || "").trim() || undefined,
-      platform: document.getElementById("setup-ch-platform")?.value || "youtube",
+      name: name || undefined,
+      platform,
       terms: (document.getElementById("setup-ch-terms")?.value || "").trim() || undefined,
       include_non_live_content: document.getElementById("setup-ch-include-non-live")?.checked || undefined,
     };

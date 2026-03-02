@@ -1071,8 +1071,8 @@
             <sl-input
                 id="channel-id-input"
                 label="Channel ID"
-                placeholder="UCxxxxxxxx"
-                help-text="YouTube channel ID (starts with UC)"
+                placeholder="UC... or @handle or channel URL"
+                help-text="Channel ID, @handle, or channel URL"
                 required
             ></sl-input>
             <sl-input
@@ -1414,7 +1414,7 @@
 
         <!-- Setup Add Channel Dialog -->
         <sl-dialog label="Add Channel" id="setup-add-channel-dialog" style="--width: 28rem">
-            <sl-input id="setup-ch-id" label="Channel ID" placeholder="UC... or twitch login" help-text="YouTube channel ID or Twitch login name"></sl-input>
+            <sl-input id="setup-ch-id" label="Channel ID" placeholder="UC... or @handle or channel URL" help-text="Channel ID, @handle, or channel URL"></sl-input>
             <sl-input id="setup-ch-name" label="Display Name" placeholder="My Channel"></sl-input>
             <sl-select id="setup-ch-platform" label="Platform" value="youtube">
                 <sl-option value="youtube">YouTube</sl-option>

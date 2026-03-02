@@ -1,9 +1,15 @@
 package utils
 
 import (
+	"context"
+	"fmt"
+	"html"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
 var videoIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
@@ -88,4 +94,144 @@ func ExtractVideoID(input string) string {
 // IsVideoID returns true if the string is a valid YouTube video ID.
 func IsVideoID(s string) bool {
 	return videoIDRegex.MatchString(s)
+}
+
+var channelIDRegex = regexp.MustCompile(`^UC[a-zA-Z0-9_-]{22}$`)
+
+// YouTubeChannelInput represents a parsed YouTube channel URL.
+type YouTubeChannelInput struct {
+	ChannelID string // Set if /channel/UCxxx (no network needed)
+	Path      string // Set if /@Handle, /c/Name, /user/Name (needs resolution)
+}
+
+// ParseYouTubeChannelURL detects YouTube channel-path URLs and extracts the channel reference.
+// Returns nil for non-channel URLs (video/watch URLs, bare IDs, etc.).
+func ParseYouTubeChannelURL(input string) *YouTubeChannelInput {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil
+	}
+
+	// Normalize bare URLs without protocol
+	if strings.HasPrefix(input, "youtube.com/") || strings.HasPrefix(input, "www.youtube.com/") ||
+		strings.HasPrefix(input, "m.youtube.com/") {
+		input = "https://" + input
+	}
+
+	u, err := url.Parse(input)
+	if err != nil {
+		return nil
+	}
+
+	host := strings.ToLower(u.Hostname())
+	if host != "www.youtube.com" && host != "youtube.com" && host != "m.youtube.com" {
+		return nil
+	}
+
+	path := u.Path
+
+	// /channel/UCxxxxxxxx → extract directly
+	if strings.HasPrefix(path, "/channel/") {
+		id := strings.TrimPrefix(path, "/channel/")
+		if idx := strings.Index(id, "/"); idx >= 0 {
+			id = id[:idx]
+		}
+		if channelIDRegex.MatchString(id) {
+			return &YouTubeChannelInput{ChannelID: id}
+		}
+		return nil
+	}
+
+	// /@Handle → needs resolution
+	if strings.HasPrefix(path, "/@") {
+		handle := strings.TrimPrefix(path, "/")
+		if idx := strings.Index(handle, "/"); idx >= 0 {
+			handle = handle[:idx]
+		}
+		if len(handle) > 1 { // at least "@X"
+			return &YouTubeChannelInput{Path: "/" + handle}
+		}
+		return nil
+	}
+
+	// /c/CustomName → needs resolution
+	if strings.HasPrefix(path, "/c/") {
+		name := strings.TrimPrefix(path, "/c/")
+		if idx := strings.Index(name, "/"); idx >= 0 {
+			name = name[:idx]
+		}
+		if name != "" {
+			return &YouTubeChannelInput{Path: "/c/" + name}
+		}
+		return nil
+	}
+
+	// /user/Username → needs resolution
+	if strings.HasPrefix(path, "/user/") {
+		name := strings.TrimPrefix(path, "/user/")
+		if idx := strings.Index(name, "/"); idx >= 0 {
+			name = name[:idx]
+		}
+		if name != "" {
+			return &YouTubeChannelInput{Path: "/user/" + name}
+		}
+		return nil
+	}
+
+	return nil
+}
+
+var (
+	canonicalChannelRe = regexp.MustCompile(`<link\s+rel="canonical"\s+href="https://www\.youtube\.com/channel/(UC[a-zA-Z0-9_-]{22})"`)
+	externalIDRe       = regexp.MustCompile(`"externalId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"`)
+	ogTitleRe          = regexp.MustCompile(`<meta\s+property="og:title"\s+content="([^"]+)"`)
+	titleRe            = regexp.MustCompile(`<title>([^<]+)</title>`)
+)
+
+// YouTubeChannelInfo holds resolved YouTube channel information.
+type YouTubeChannelInfo struct {
+	ChannelID string
+	Name      string
+}
+
+// ResolveYouTubeChannel fetches a YouTube channel page and extracts the channel ID and name.
+// urlPath should be like "/@Handle", "/c/Name", or "/user/Name".
+func ResolveYouTubeChannel(ctx context.Context, urlPath string) (*YouTubeChannelInfo, error) {
+	pageURL := "https://www.youtube.com" + urlPath
+	body, err := FetchBody(ctx, pageURL, 15*time.Second, map[string]string{
+		"User-Agent": constants.UserAgents.Web,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch channel page: %w", err)
+	}
+
+	page := string(body)
+
+	// Extract channel ID from canonical link
+	var channelID string
+	if m := canonicalChannelRe.FindStringSubmatch(page); m != nil {
+		channelID = m[1]
+	} else if m := externalIDRe.FindStringSubmatch(page); m != nil {
+		// Fallback: extract from ytInitialData JSON
+		channelID = m[1]
+	}
+
+	if channelID == "" {
+		return nil, fmt.Errorf("could not find channel ID on page %s", pageURL)
+	}
+
+	// Extract display name
+	var name string
+	if m := ogTitleRe.FindStringSubmatch(page); m != nil {
+		name = html.UnescapeString(m[1])
+	} else if m := titleRe.FindStringSubmatch(page); m != nil {
+		name = html.UnescapeString(m[1])
+		name = strings.TrimSuffix(name, " - YouTube")
+		name = strings.TrimSpace(name)
+	}
+
+	return &YouTubeChannelInfo{
+		ChannelID: channelID,
+		Name:      name,
+	}, nil
 }

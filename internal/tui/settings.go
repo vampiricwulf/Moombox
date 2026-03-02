@@ -188,7 +188,7 @@ type channelFieldDef struct {
 }
 
 var channelFields = []channelFieldDef{
-	{"id", "Channel ID", fieldText, nil, "e.g. UC... or twitch login", ""},
+	{"id", "Channel ID", fieldText, nil, "ID, @handle, or URL", ""},
 	{"name", "Display name", fieldText, nil, "", ""},
 	{"platform", "Platform", fieldCycle, []string{"youtube", "twitch"}, "", ""},
 	{"enabled", "Enabled", fieldToggle, []string{"Yes", "No"}, "", ""},
@@ -234,6 +234,7 @@ type SettingsModel struct {
 	channelEditValues map[string]string
 	channelEditField  int
 	channelDeleteConf bool
+	channelResolving  bool // true while async URL resolution is in progress
 	channels          []config.ChannelConfig
 
 	// Notification sub-editor state
@@ -894,22 +895,24 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 	switch key {
 	case keyEsc:
 		m.channelMode = "list"
+		m.channelResolving = false
 		return ""
 
 	case keyEnter:
+		if m.channelResolving {
+			return "" // Already resolving
+		}
 		// Save the channel
-		if id := strings.TrimSpace(m.channelEditValues["id"]); id == "" {
+		id := strings.TrimSpace(m.channelEditValues["id"])
+		if id == "" {
 			return "" // ID required
 		}
-		ch := valuesToChannel(m.channelEditValues)
-		if m.channelIndex < len(m.channels) {
-			m.channels[m.channelIndex] = ch
-		} else {
-			m.channels = append(m.channels, ch)
+		// If ID looks like a URL, trigger async resolution
+		if strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") || strings.Contains(id, "twitch.tv/") {
+			m.channelResolving = true
+			return "resolve_channel"
 		}
-		m.dirty = true
-		m.status = saveIdle
-		m.channelMode = "list"
+		m.saveCurrentChannel()
 		return ""
 
 	case keyUp:
@@ -950,6 +953,10 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 		if field.ftype == fieldText {
 			if clip := readClipboard(); clip != "" {
 				m.channelEditValues[field.key] += clip
+				// Auto-detect platform from pasted URL
+				if field.key == "id" {
+					m.autoDetectPlatform()
+				}
 			}
 		}
 		return ""
@@ -960,9 +967,68 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 				return ""
 			}
 			m.channelEditValues[field.key] = m.channelEditValues[field.key] + key
+			// Auto-detect platform from URL in ID field
+			if field.key == "id" {
+				m.autoDetectPlatform()
+			}
 		}
 		return ""
 	}
+}
+
+// autoDetectPlatform checks the ID field value and auto-switches the platform if it contains a known domain.
+func (m *SettingsModel) autoDetectPlatform() {
+	id := m.channelEditValues["id"]
+	if strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") {
+		m.channelEditValues["platform"] = "youtube"
+	} else if strings.Contains(id, "twitch.tv/") {
+		m.channelEditValues["platform"] = "twitch"
+	}
+}
+
+// saveCurrentChannel saves the current channel edit values to the channel list.
+func (m *SettingsModel) saveCurrentChannel() {
+	ch := valuesToChannel(m.channelEditValues)
+	if m.channelIndex < len(m.channels) {
+		m.channels[m.channelIndex] = ch
+	} else {
+		m.channels = append(m.channels, ch)
+	}
+	m.dirty = true
+	m.status = saveIdle
+	m.channelMode = "list"
+}
+
+// GetChannelResolveInput returns the current channel ID being resolved.
+func (m *SettingsModel) GetChannelResolveInput() string {
+	if m.channelEditValues == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.channelEditValues["id"])
+}
+
+// HandleChannelResolved processes the result of an async channel resolution.
+// If the user cancelled (Esc) before the result arrived, the result is silently discarded.
+func (m *SettingsModel) HandleChannelResolved(id, name, platform string, err error) {
+	if !m.channelResolving {
+		return // User cancelled or navigated away — discard stale result
+	}
+	m.channelResolving = false
+	if err != nil {
+		m.errorMsg = "Resolve failed: " + err.Error()
+		m.status = saveError
+		return
+	}
+	if id != "" {
+		m.channelEditValues["id"] = id
+	}
+	if name != "" && m.channelEditValues["name"] == "" {
+		m.channelEditValues["name"] = name
+	}
+	if platform != "" {
+		m.channelEditValues["platform"] = platform
+	}
+	m.saveCurrentChannel()
 }
 
 func (m *SettingsModel) cycleChannelOption(field channelFieldDef, direction int) {
@@ -1754,8 +1820,12 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 	if m.channelIndex >= len(m.channels) {
 		title = "Add Channel"
 	}
+	hint := " (Enter: save, Esc: cancel)"
+	if m.channelResolving {
+		hint = " (resolving URL...)"
+	}
 	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(title)+
-		DimStyle.Render(" (Enter: save, Esc: cancel)"))
+		DimStyle.Render(hint))
 
 	fields := m.visibleChannelFields()
 	maxLabel := 0
