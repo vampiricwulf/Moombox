@@ -618,6 +618,9 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		IsReplay:            isReplay,
 		IsLiveOrUpcoming:    videoInfo.IsLive || videoInfo.IsUpcoming,
 	}
+	if jobCtx.YT != nil && jobCtx.YT.Auth != nil {
+		opts.GenerateAuth = jobCtx.YT.Auth.GenerateAuthorizationHeader
+	}
 
 	if videoInfo.ScheduledStartTime != "" {
 		opts.StreamStartTime = videoInfo.ScheduledStartTime

@@ -40,6 +40,7 @@ type ChatAPI struct {
 	apiKey       string
 	visitorData  string
 	cookieHeader string
+	generateAuth func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
 	client       *http.Client
 }
 
@@ -136,6 +137,13 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 	req.Header.Set("Referer", youtubeBase)
 	if api.cookieHeader != "" {
 		req.Header.Set("Cookie", api.cookieHeader)
+	}
+	// Add SAPISIDHASH authorization for member-gated chat
+	if api.generateAuth != nil {
+		if auth := api.generateAuth(); auth != "" {
+			req.Header.Set("Authorization", auth)
+			req.Header.Set("X-Origin", youtubeBase)
+		}
 	}
 
 	resp, err := api.client.Do(req)

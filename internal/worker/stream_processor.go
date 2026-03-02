@@ -485,6 +485,9 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		IsReplay:            isReplay,
 		IsLiveOrUpcoming:    true,
 	}
+	if sp.yt != nil && sp.yt.Auth != nil {
+		opts.GenerateAuth = sp.yt.Auth.GenerateAuthorizationHeader
+	}
 	if info.ScheduledStartTime != "" {
 		opts.StreamStartTime = info.ScheduledStartTime
 	}

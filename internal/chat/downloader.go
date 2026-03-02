@@ -31,6 +31,7 @@ type ChatDownloaderOptions struct {
 	ApiKey              string
 	VisitorData         string
 	CookieHeader        string
+	GenerateAuth        func() string // Returns SAPISIDHASH Authorization header for member-gated chat
 	IsReplay            bool
 	IsLiveOrUpcoming    bool
 	StreamStartTime     string
@@ -65,6 +66,7 @@ type ChatDownloader struct {
 // NewChatDownloader creates a new chat downloader.
 func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 	api := NewChatAPI(opts.ApiKey, opts.VisitorData, opts.CookieHeader)
+	api.generateAuth = opts.GenerateAuth
 
 	if opts.ResumeFile == "" {
 		opts.ResumeFile = opts.OutputFile + ".resume.json"

@@ -27,6 +27,11 @@ func NewAuth(jar *cookies.CookieJar, logger interface {
 	return &Auth{jar: jar, logger: logger}
 }
 
+// GenerateAuthorizationHeader generates the SAPISIDHASH Authorization header for YouTube API requests.
+func (a *Auth) GenerateAuthorizationHeader() string {
+	return a.jar.GenerateAuthorizationHeader("https://www.youtube.com")
+}
+
 // HasAuthCookies returns true if valid authentication cookies are present.
 func (a *Auth) HasAuthCookies() bool {
 	return a.jar.HasAuthCookies()
