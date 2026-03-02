@@ -67,7 +67,7 @@ Runtime requires FFmpeg on PATH. CI: `.github/workflows/release.yml` builds Wind
 
 Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary, all code under `internal/`.
 
-### Process model (cmd/moombox/main.go, ~1850 lines)
+### Process model (cmd/moombox/main.go, ~1950 lines)
 
 Moombox uses a **launcher/supervisor pattern**. The binary checks `_MOOMBOX_CHILD` env var on startup:
 - **Without it** → launcher mode: spawns itself as a child, waits, respawns on exit code 42
@@ -98,13 +98,14 @@ cmd/moombox/main.go          ← launcher + orchestrator
 ├── internal/cipher           ← YouTube signature cipher: extract transforms from player.js, execute via Goja
 ├── internal/engine           ← SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer
 ├── internal/chat             ← YouTube live chat downloader (polling API with batching)
-├── internal/worker           ← DownloadWorker, StreamProcessor, Orchestrator, JobQueue, TrimService
+├── internal/worker           ← DownloadWorker, StreamProcessor, Orchestrator, JobQueue, TrimService, QualityMonitor
 ├── internal/monitor          ← FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
 ├── internal/notifications    ← Manager + Discord webhook
 ├── internal/web              ← chi router, WebSocket hub, auth, middleware, embedded SPA
 │   └── internal/web/routes   ← All REST API route handlers
 ├── internal/tui              ← BubbleTea 3-panel layout
 ├── internal/goja             ← JS runtime shims (minimal DOM, TextEncoder, timers)
+├── internal/disk             ← Windows-only disk space queries (kernel32 GetDiskFreeSpaceExW)
 ├── internal/errors           ← Typed error hierarchy (MoomboxError, YouTubeError, etc.)
 ├── internal/constants        ← All hardcoded values (API keys, URLs, timeouts)
 └── internal/utils            ← HTTP helpers, text/time formatters, YouTube URL parsing
@@ -146,7 +147,7 @@ db.UpdateJobFields(jobID, map[string]any{
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`
 Error paths: any state → `Error`, `Cancelled`, or `COOKIES?`
 
-`JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings (not `time.Time`). Optional numeric fields use pointers (`*int`, `*int64`).
+`JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings (not `time.Time`). Optional numeric fields use pointers (`*int`, `*int64`). Database schema is at **v5** — includes a `segments` table for quality-split multi-segment recordings.
 
 ### Dependency injection via deps structs
 ```go
@@ -164,19 +165,27 @@ Used for two things only: BotGuard VM (PO token generation) and YouTube cipher d
 
 ### Download orchestration
 - **StreamProcessor**: Probes video status, waits for live, handles auth upgrades. For Twitch, polls offline channels until live when manually added (one-time monitor)
-- **DownloadOrchestrator**: Manages full lifecycle — segment downloaders + chat + mux + trim
-- **SegmentDownloader**: Handles DASH sequential loop, HLS playlist polling, VOD parallel, and catch-up with bounded concurrency (6 parallel)
+- **DownloadOrchestrator**: Manages full lifecycle — segment downloaders + chat + mux + trim. Supports quality-split multi-segment recordings
+- **SegmentDownloader**: Handles DASH sequential loop, HLS playlist polling, VOD parallel, and catch-up with bounded concurrency (6 parallel). Returns `ErrQualityLost` sentinel when selected quality disappears mid-stream
+- **QualityMonitor**: Probes stream quality every 30s during live downloads. On resolution change, signals orchestrator to cleanly mux the current segment and start a new one at the new quality
+- **Background mux pattern**: Completed segments are muxed in goroutines with `context.Background()` (detached from job context) so already-downloaded data is always muxed even during cancellation. Coordinated via `sync.WaitGroup`
 - **Live stream verification loop**: After downloaders stop, probes YouTube API to confirm stream ended vs still live (up to 6 consecutive checks)
 
 ### Monitor → Worker wiring
 Monitors fire `OnVideoFound`/`OnStreamFound` callbacks. These are closures set in main.go that create database jobs and enqueue them to the DownloadWorker's JobQueue.
+
+### CSRF protection
+`CSRFMiddleware` in `web/middleware.go` validates Origin/Referer headers on mutating requests. The TUI bypasses this via a shared secret: the web server generates a 16-byte random hex token at startup (`X-Internal-Token` header), passed to the TUI which injects it on every API call via a custom `http.RoundTripper`. Browsers cannot set custom headers cross-origin without CORS preflight (which the server doesn't grant).
+
+### Panic recovery
+All spawned goroutines use inline `defer func() { if r := recover(); r != nil { ... } }()`. No shared helper — pattern is consistently inline. HTTP handlers are covered by `RecoveryMiddleware` in `web/server.go`. Database subscriber callbacks use `safeCallJobUpdate`/`safeCallJobsChange` wrappers.
 
 ## Web UI
 
 Static assets live in `web/public/` and are embedded via `go:embed` in `web/embed.go`. Changes to CSS/JS/HTML require `go build` to take effect.
 
 - `app.js` — main SPA logic (jobs, logs, status bar, WebSocket, settings dialogs)
-- `modules/player.js` — video player with niconico-style chat overlay + sidebar chat
+- `modules/player.js` — video player with niconico-style chat overlay + sidebar chat, multi-segment playback with cross-segment seeking and trim
 - `modules/utils.js` — shared formatting helpers
 - `moombox.css` — all styles including mobile responsive rules
 - `login.html` — standalone auth page
