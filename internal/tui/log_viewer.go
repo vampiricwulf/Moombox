@@ -179,7 +179,7 @@ func (m *LogViewerModel) scrollToBottom() {
 
 func (m *LogViewerModel) rebuildFiltered() {
 	if m.level == LogLevelAll {
-		m.filtered = m.lines
+		m.filtered = append(m.filtered[:0], m.lines...)
 		return
 	}
 
