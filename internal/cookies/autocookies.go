@@ -79,6 +79,7 @@ type AutoCookieService struct {
 	jar            *CookieJar
 	setupProcess   *os.Process
 	setupCmd       *exec.Cmd
+	refreshCmd     *exec.Cmd // tracks in-flight headless refresh browser
 	setupBrowser   *DetectedBrowser
 	browserExited  bool
 	cdpPort        int
@@ -165,6 +166,10 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	if s.setupProcess != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("setup already in progress")
+	}
+	if s.refreshCmd != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("cookie refresh in progress, please try again shortly")
 	}
 	s.mu.Unlock()
 
@@ -322,6 +327,25 @@ func (s *AutoCookieService) CancelSetup() {
 
 // RefreshCookies performs a headless browser visit to refresh cookies.
 func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
+	s.mu.Lock()
+	if s.setupProcess != nil {
+		s.mu.Unlock()
+		s.logger.Debug("skipping cookie refresh — setup in progress")
+		return false, nil
+	}
+	if s.refreshCmd != nil {
+		s.mu.Unlock()
+		s.logger.Debug("skipping cookie refresh — already refreshing")
+		return false, nil
+	}
+	s.refreshCmd = &exec.Cmd{} // sentinel to claim slot
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.refreshCmd = nil
+		s.mu.Unlock()
+	}()
+
 	browser := DetectBrowser()
 	if browser == nil {
 		s.setError("no browser found for refresh")
@@ -339,9 +363,9 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	var err error
 
 	if isFirefoxBased(browser.Type) {
-		netscapeCookies, err = s.refreshFirefox(browser)
+		netscapeCookies, err = s.refreshFirefox(ctx, browser)
 	} else {
-		netscapeCookies, err = s.refreshChromium(browser)
+		netscapeCookies, err = s.refreshChromium(ctx, browser)
 	}
 
 	if err != nil {
@@ -440,6 +464,7 @@ func (s *AutoCookieService) Stop() {
 	s.cancelled = true
 	s.mu.Unlock()
 	s.killSetupProcess()
+	s.killRefreshProcess()
 	s.cleanup()
 }
 
@@ -535,26 +560,33 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 
 	// Force kill
 	s.logger.Warn("Firefox did not exit gracefully, force killing")
-	if runtime.GOOS == "windows" {
-		exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", proc.Pid)).Run()
-	} else {
-		proc.Kill()
-	}
+	killProcessTree(proc)
 	time.Sleep(500 * time.Millisecond)
 }
 
-func (s *AutoCookieService) refreshFirefox(browser *DetectedBrowser) (string, error) {
+func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, error) {
 	tempScreenshot := filepath.Join(s.profileDir, "refresh-screenshot.png")
 	defer os.Remove(tempScreenshot)
 
 	// Visit YouTube
 	cmd1 := exec.Command(browser.Path, "--screenshot", tempScreenshot, "-no-remote", "-profile", s.profileDir, refreshURL)
+	s.mu.Lock()
+	s.refreshCmd = cmd1
+	s.mu.Unlock()
 	if err := runWithTimeout(cmd1, processTimeoutMs); err != nil {
 		s.logger.Warn("firefox youtube refresh failed", "err", err)
 	}
 
+	// Check if cancelled before spawning second browser
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+
 	// Visit Twitch
 	cmd2 := exec.Command(browser.Path, "--screenshot", tempScreenshot, "-no-remote", "-profile", s.profileDir, twitchRefreshURL)
+	s.mu.Lock()
+	s.refreshCmd = cmd2
+	s.mu.Unlock()
 	if err := runWithTimeout(cmd2, processTimeoutMs); err != nil {
 		s.logger.Warn("firefox twitch refresh failed", "err", err)
 	}
@@ -788,7 +820,7 @@ func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 	return cdpGetCookiesAsNetscape(ctx, port)
 }
 
-func (s *AutoCookieService) refreshChromium(browser *DetectedBrowser) (string, error) {
+func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *DetectedBrowser) (string, error) {
 	cleanChromiumLockFiles(s.profileDir)
 
 	port, err := getFreePort()
@@ -810,38 +842,57 @@ func (s *AutoCookieService) refreshChromium(browser *DetectedBrowser) (string, e
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start headless browser: %w", err)
 	}
+	s.mu.Lock()
+	s.refreshCmd = cmd
+	s.mu.Unlock()
 	defer func() {
 		if cmd.Process != nil {
-			cmd.Process.Kill()
+			killProcessTree(cmd.Process)
 			cmd.Wait()
 		}
+		s.mu.Lock()
+		s.refreshCmd = nil
+		s.mu.Unlock()
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	cdpCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	if err := waitForCDP(ctx, port, cdpPollTimeoutMs); err != nil {
+	if err := waitForCDP(cdpCtx, port, cdpPollTimeoutMs); err != nil {
 		return "", err
 	}
 
 	// Navigate to YouTube and Twitch (waits for page load, matching TS)
-	cdpNavigate(ctx, port, refreshURL)
-	cdpNavigate(ctx, port, twitchRefreshURL)
+	cdpNavigate(cdpCtx, port, refreshURL)
+	cdpNavigate(cdpCtx, port, twitchRefreshURL)
 
 	// Extract cookies
-	netscapeCookies, err := cdpGetCookiesAsNetscape(ctx, port)
+	netscapeCookies, err := cdpGetCookiesAsNetscape(cdpCtx, port)
 	if err != nil {
 		return "", err
 	}
 
 	// Close browser
-	cdpCloseBrowser(ctx, port)
+	cdpCloseBrowser(cdpCtx, port)
 	time.Sleep(500 * time.Millisecond)
 
 	return netscapeCookies, nil
 }
 
 // --- helpers ---
+
+// killProcessTree kills a process and all its children on Windows (taskkill /T /F),
+// or just the process itself on other platforms.
+func killProcessTree(proc *os.Process) {
+	if proc == nil {
+		return
+	}
+	if runtime.GOOS == "windows" {
+		exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", proc.Pid)).Run()
+	} else {
+		proc.Kill()
+	}
+}
 
 func (s *AutoCookieService) killSetupProcess() {
 	s.mu.Lock()
@@ -852,12 +903,20 @@ func (s *AutoCookieService) killSetupProcess() {
 		return
 	}
 
-	if runtime.GOOS == "windows" {
-		exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprintf("%d", proc.Pid)).Run()
-	} else {
-		proc.Kill()
-	}
+	killProcessTree(proc)
 	time.Sleep(300 * time.Millisecond)
+}
+
+func (s *AutoCookieService) killRefreshProcess() {
+	s.mu.Lock()
+	cmd := s.refreshCmd
+	s.mu.Unlock()
+
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+
+	killProcessTree(cmd.Process)
 }
 
 func (s *AutoCookieService) cleanup() {
@@ -1443,7 +1502,8 @@ func runWithTimeout(cmd *exec.Cmd, timeoutMs int) error {
 	case err := <-done:
 		return err
 	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
-		cmd.Process.Kill()
+		killProcessTree(cmd.Process)
+		<-done // reap process and release resources
 		return fmt.Errorf("process timed out after %dms", timeoutMs)
 	}
 }
