@@ -102,8 +102,26 @@ func (m *TaskListModel) SetJobs(jobs []*database.Job) {
 // Returns true if the job was found and replaced.
 func (m *TaskListModel) UpdateJob(job *database.Job) bool {
 	if idx, ok := m.jobIndex[job.ID]; ok && idx < len(m.jobs) {
+		// Remember which job was selected so we can follow it after re-sort.
+		var prevSelectedID string
+		if sel := m.SelectedJob(); sel != nil {
+			prevSelectedID = sel.ID
+		}
+
 		m.jobs[idx] = job
 		m.rebuildVirtualList()
+
+		// Follow the previously selected job to its new position.
+		if prevSelectedID != "" {
+			for i, item := range m.virtualItems {
+				if item.job != nil && item.job.ID == prevSelectedID {
+					m.selectedIndex = i
+					break
+				}
+			}
+		}
+		m.ensureVisible()
+		m.resetMarquee()
 		return true
 	}
 	return false

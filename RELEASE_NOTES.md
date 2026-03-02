@@ -1,4 +1,3 @@
 ### Bug Fixes
 
-- Fixed background segment mux goroutines being killed on job cancellation, leaving orphaned partial `.mp4` files in the output directory with no database record
-- Background muxes now use a detached context so already-downloaded data is always muxed to completion, even during cancellation
+- Fixed TUI job list selector not following the selected job when its status changes (e.g. cancelling a task moved it in the sort order but the selector stayed in place, showing stale marquee text)
