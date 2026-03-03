@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is working memory for Claude Code (claude.ai/code). It should contain everything needed to pick up development on any machine without re-analyzing the codebase. Keep it current.
 
 ## Release Process
 
@@ -15,23 +15,51 @@ CI reads `RELEASE_NOTES.md` from the repo — no API calls or CLI installs neede
 
 ## Working Style
 
-When implementing features, fixes, or non-trivial changes, ask questions about design decisions and intent before diving in. Don't assume — clarify the "why" and preferred approach so the implementation matches what's actually wanted. This applies to things like naming, placement, scope, UX behavior, and architectural choices.
+When implementing features, fixes, or non-trivial changes, ask questions about design decisions and intent before diving in. Don't assume — clarify the "why" and preferred approach so the implementation matches what's actually wanted. This applies to things like naming, placement, scope, UX behavior, architectural choices, and aesthetic preferences (even for trivial changes). Ask questions one at a time with suggested answers rather than batching multiple questions together.
 
 ## What This Is
 
-Moombox is a YouTube/Twitch live stream archiver written in Go. It monitors channels, detects live streams, downloads segments (DASH/HLS), records live chat, muxes with FFmpeg, and serves a web dashboard + TUI. This is a standalone program — feature work, bug fixes, and improvements are the primary focus.
+Moombox is a YouTube/Twitch live stream archiver written in Go. It monitors channels, detects live streams, downloads segments (DASH/HLS), records live chat, muxes with FFmpeg, and serves a web dashboard + TUI. It also serves as a lightweight yt-dlp alternative for YouTube/Twitch — keep track of upstream yt-dlp changes to their extraction/download logic. This is a standalone program — feature work, bug fixes, and improvements are the primary focus.
 
 The Go rewrite from TypeScript is complete (all 12 phases, full file-by-file comparison done). `REWRITE_GUIDE.md` documents the original porting strategy for historical reference.
+
+## Design Constraints
+
+- **Windows-only** — Linux/Mac support only if explicitly requested. Always assume Windows.
+- **No CGo** — Pure Go dependencies only. Simpler build chain over raw performance.
+- **Resource efficiency** — Runs 24/7, minimize constant CPU/IO/Network/RAM usage.
+- **Goja VMs are expensive** — BotGuard + cipher each hold multi-MB JS runtimes. Auto-evict when idle. Cipher solver capped at 3 cached VMs.
+- **UX philosophy** — Intuitive for non-technical users, with advanced controls for power users. Sensible defaults, don't require expertise to get started.
+- **Dual UI parity** — Web UI for accessibility/casual users, TUI for advanced users. Both are first-class citizens with full feature parity.
+
+## Key Dependencies
+
+| Library | Purpose |
+|---------|---------|
+| `go-chi/chi/v5` | HTTP router |
+| `charmbracelet/bubbletea` + `lipgloss` | TUI framework + styling |
+| `dop251/goja` | Pure-Go JS engine (BotGuard, cipher) |
+| `modernc.org/sqlite` | SQLite driver (no CGo) |
+| `nhooyr.io/websocket` | WebSocket |
+| `BurntSushi/toml` | Config parsing |
+| Shoelace v2.16 (CDN) | Web UI components |
 
 ## TypeScript Reference
 
 The original TypeScript codebase is on the `abandoned-nodejs` branch. The local `references/` folder (gitignored) contains upstream source repos for cross-referencing protocol details:
+- `yt-dlp` — YouTube format/cipher/extraction logic, Twitch extractor, PO token system, downloaders, cookies
+- `BgUtils` — BotGuard/PO token generation (challenge, attestation, integrity tokens)
+- `bgutil-ytdlp-pot-provider` — yt-dlp plugin for PO tokens (provider protocol)
+- `ejs` — yt-dlp external JS for cipher/signature solving across runtimes
+- `moonarchive` — Python stream archiver (DASH/HLS segment download strategies)
 - `moombox` — the original Python moombox
-- `moonarchive` — Python stream archiver (segment download strategies)
-- `yt-dlp` — YouTube format/cipher/extraction logic
-- `BgUtils` — BotGuard/PO token generation
 - `chatterino7` — Twitch chat client (IRC, emotes, badges)
-- `bgutil-ytdlp-pot-provider` — yt-dlp plugin for PO tokens
+
+The most important references are **yt-dlp**, **BgUtils**, and **ejs** — these directly affect YouTube/Twitch extraction, authentication, and cipher solving that Moombox reimplements in Go.
+
+### Updating references
+
+Run `bash references/update-all.sh` to pull all upstream repos and see what changed. The script records each repo's HEAD before pulling, then shows new commits and highlights Moombox-relevant file changes (YouTube/Twitch extractors, PO token system, cipher, downloaders, BotGuard core, etc.). Use `--diff` for verbose file-level diffs. Review the output for changes worth porting to Moombox.
 
 ## Build & Test Commands
 
@@ -180,6 +208,9 @@ Monitors fire `OnVideoFound`/`OnStreamFound` callbacks. These are closures set i
 ### FFmpeg install with UAC elevation
 The FFmpeg install process uses a two-phase flow for non-elevated processes. `PrepareInstall` checks `isElevated()` — if already elevated, runs `InstallFFmpeg` directly. If not, it generates a PowerShell script, stores it in `pendingInstalls` (keyed by random token, 5-minute TTL), and returns the script for user review. `ConfirmInstall` writes the script to a temp file, launches it via `ShellExecuteExW` with `runas` verb (UAC prompt), waits on the process handle, then reads a JSON result file. `RejectInstall` cleans up the pending entry. The elevation code in `ffmpeg_elevation_windows.go` uses the same `syscall.NewLazyDLL` pattern as `internal/disk/`.
 
+### Config migrations
+`migrateOldFormat()` in `config/config.go` handles backward compatibility with older config layouts. It migrates flat top-level fields into their current sections (`[network]`, `[paths]`, `[logs]`, `[monitors]`, `[cookies]`), converts legacy boolean flags (e.g. `allow_lan`/`allow_external` → `network_access`), and merges the old `[auto_cookies]` and `[tasklist]` sections into their new homes. Migrations are non-destructive — they only apply when the new section doesn't already exist. When restructuring the config schema, add migration logic here for any renamed or relocated fields so existing user configs keep working.
+
 ### API route prefix
 All REST endpoints use `/api/` prefix (no version number). Route registration and frontend fetch calls must stay in sync across Go route files and `web/public/` JS files.
 
@@ -203,3 +234,12 @@ Static assets live in `web/public/` and are embedded via `go:embed` in `web/embe
 - `index.html` — SPA shell with Shoelace UI components
 
 Mobile breakpoints: `992px` (tablet/layout), `768px` (phone/touch), `hover: none` (touch devices).
+
+## Maintaining This File
+
+When asked to update CLAUDE.md, don't just add context from the current session — check git history for all changes since the last substantive update:
+1. `git log --oneline --all -- CLAUDE.md` to find when it was last updated
+2. `git log --oneline <last-update>..HEAD` to see all commits since then
+3. Read RELEASE_NOTES.md at each version tag for architectural changes
+4. Look for: new packages, line count drift in main.go, new critical patterns, database schema changes, new worker components, web UI capabilities
+5. Keep updates concise — this documents architecture and patterns, not a changelog
