@@ -13,6 +13,8 @@ const (
 	ffmpegMain    ffmpegMode = iota // Main menu: Install / Custom path / Quit
 	ffmpegInstall                   // Install sub-menu: Choco / Choco+Install / Winget / Cancel
 	ffmpegCustom                    // Custom path text entry
+	ffmpegReview                    // Script review: Trust / Distrust
+	ffmpegManual                    // Manual install: download link + custom path
 )
 
 // FFmpegCheckModel manages the FFmpeg validation overlay.
@@ -38,6 +40,20 @@ type FFmpegCheckModel struct {
 
 	// Success state — any keypress dismisses the overlay
 	successDismiss bool
+
+	// Version warning (e.g. outdated FFmpeg)
+	warning string
+
+	// Script review state (elevation required)
+	reviewScript string
+	reviewToken  string
+	reviewFocus  int // 0=Trust, 1=Distrust
+	reviewScroll int // scroll offset for script display
+
+	// Manual install state
+	manualPath   string
+	manualResult string
+	manualValid  bool
 
 	// Callbacks — only OnCheckPrereqs runs synchronously (fast LookPath),
 	// the others are dispatched as tea.Cmd by App.
@@ -68,6 +84,7 @@ func (m *FFmpegCheckModel) Open() {
 	m.installError = false
 	m.installOptions = nil
 	m.successDismiss = false
+	m.warning = ""
 }
 
 // Close hides the overlay.
@@ -88,10 +105,13 @@ func (m *FFmpegCheckModel) SetSize(w, h int) {
 
 // HandleKey processes key input. Returns an action string:
 //
-//	"quit"                — user chose Quit
-//	"install:<method>"    — user chose an install method (run async)
-//	"check_custom:<path>" — user pressed Enter on a custom path (run async)
-//	""                    — no action
+//	"quit"                 — user chose Quit
+//	"dismiss"              — user dismissed the success message
+//	"prepare:<method>"     — user chose an install method, needs elevation check (run async)
+//	"check_custom:<path>"  — user pressed Enter on a custom path (run async)
+//	"confirm:<token>"      — user approved the elevated install script
+//	"reject:<token>"       — user declined the elevated install script
+//	""                     — no action
 func (m *FFmpegCheckModel) HandleKey(key string) string {
 	if m.successDismiss {
 		m.Close()
@@ -108,6 +128,10 @@ func (m *FFmpegCheckModel) HandleKey(key string) string {
 		return m.handleInstallKey(key)
 	case ffmpegCustom:
 		return m.handleCustomKey(key)
+	case ffmpegReview:
+		return m.handleReviewKey(key)
+	case ffmpegManual:
+		return m.handleManualKey(key)
 	}
 	return ""
 }
@@ -200,9 +224,9 @@ func (m *FFmpegCheckModel) handleInstallKey(key string) string {
 
 		// Signal the install to run async — App handles via tea.Cmd
 		m.installing = true
-		m.installResult = "Installing FFmpeg..."
+		m.installResult = "Checking permissions..."
 		m.installError = false
-		return "install:" + opt.method
+		return "prepare:" + opt.method
 	}
 	return ""
 }
@@ -251,6 +275,90 @@ func (m *FFmpegCheckModel) handleCustomKey(key string) string {
 		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
 			m.customPath += key
 			m.customResult = ""
+		}
+	}
+	return ""
+}
+
+// ShowReview switches to script review mode for elevated installs.
+func (m *FFmpegCheckModel) ShowReview(script, token string) {
+	m.mode = ffmpegReview
+	m.reviewScript = script
+	m.reviewToken = token
+	m.reviewFocus = 0
+	m.reviewScroll = 0
+	m.installing = false
+	m.installResult = ""
+}
+
+// SetManualResult updates the manual path check result.
+func (m *FFmpegCheckModel) SetManualResult(result string, valid bool) {
+	m.manualResult = result
+	m.manualValid = valid
+}
+
+func (m *FFmpegCheckModel) handleReviewKey(key string) string {
+	if m.installing {
+		return "" // Ignore input while installing
+	}
+	switch key {
+	case keyLeft:
+		m.reviewFocus = 0
+	case keyRight:
+		m.reviewFocus = 1
+	case keyUp:
+		if m.reviewScroll > 0 {
+			m.reviewScroll--
+		}
+	case keyDown:
+		m.reviewScroll++
+	case keyEnter:
+		if m.reviewFocus == 0 {
+			// Trust & Continue
+			m.installing = true
+			m.installResult = "Installing with administrator privileges..."
+			return "confirm:" + m.reviewToken
+		}
+		// Distrust — switch to manual install
+		return "reject:" + m.reviewToken
+	case keyEsc:
+		return "reject:" + m.reviewToken
+	}
+	return ""
+}
+
+func (m *FFmpegCheckModel) handleManualKey(key string) string {
+	switch key {
+	case keyEsc:
+		m.mode = ffmpegMain
+		m.manualPath = ""
+		m.manualResult = ""
+	case keyEnter:
+		if m.manualPath == "" {
+			return ""
+		}
+		return "check_custom:" + m.manualPath
+	case "backspace", "delete":
+		if len(m.manualPath) > 0 {
+			runes := []rune(m.manualPath)
+			m.manualPath = string(runes[:len(runes)-1])
+		}
+		m.manualResult = ""
+	case "ctrl+v":
+		if clip := readClipboard(); clip != "" {
+			if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
+				clip = clip[:idx]
+			}
+			clip = strings.TrimSpace(clip)
+			if clip != "" {
+				m.manualPath += clip
+			}
+		}
+		m.manualResult = ""
+	default:
+		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
+			m.manualPath += key
+			m.manualResult = ""
 		}
 	}
 	return ""
@@ -345,6 +453,84 @@ func (m *FFmpegCheckModel) View() string {
 			}
 			lines = append(lines, lipgloss.NewStyle().Foreground(resultColor).Render(m.customResult))
 		}
+
+	case ffmpegReview:
+		lockIcon := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("\u26a0")
+		lines = append(lines, lockIcon+" "+lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("Administrator privileges required"))
+		lines = append(lines, "")
+		lines = append(lines, DimStyle.Render("The following script will run elevated."))
+		lines = append(lines, DimStyle.Render("Review it before proceeding:"))
+		lines = append(lines, "")
+
+		// Scrollable script display
+		scriptLines := strings.Split(m.reviewScript, "\n")
+		maxVisible := 6
+		if m.reviewScroll > len(scriptLines)-maxVisible {
+			m.reviewScroll = max(0, len(scriptLines)-maxVisible)
+		}
+		end := min(m.reviewScroll+maxVisible, len(scriptLines))
+		scriptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+		for _, sl := range scriptLines[m.reviewScroll:end] {
+			if len(sl) > contentW-2 {
+				sl = sl[:contentW-2]
+			}
+			lines = append(lines, scriptStyle.Render("  "+sl))
+		}
+		if end < len(scriptLines) {
+			lines = append(lines, DimStyle.Render("  ... (scroll with \u2191/\u2193)"))
+		}
+
+		lines = append(lines, "")
+		if m.installing {
+			lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("Installing... please wait"))
+		} else if m.installResult != "" {
+			resultColor := ColorGreen
+			if m.installError {
+				resultColor = ColorError
+			}
+			lines = append(lines, lipgloss.NewStyle().Foreground(resultColor).Render(m.installResult))
+		} else {
+			// Two options: Trust / Distrust
+			trustPrefix, distrustPrefix := "  ", "  "
+			trustColor, distrustColor := ColorWhite, ColorWhite
+			if m.reviewFocus == 0 {
+				trustPrefix = "> "
+				trustColor = ColorGreen
+			} else {
+				distrustPrefix = "> "
+				distrustColor = ColorCyan
+			}
+			lines = append(lines, lipgloss.NewStyle().Foreground(trustColor).Bold(m.reviewFocus == 0).Render(trustPrefix+"Trust & Continue"))
+			lines = append(lines, lipgloss.NewStyle().Foreground(distrustColor).Bold(m.reviewFocus == 1).Render(distrustPrefix+"Distrust & Manually Install"))
+		}
+
+	case ffmpegManual:
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Manual FFmpeg Install"))
+		lines = append(lines, "")
+		lines = append(lines, DimStyle.Render("Download from:"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("  https://www.gyan.dev/ffmpeg/builds/"))
+		lines = append(lines, "")
+		lines = append(lines, DimStyle.Render("Recommended: ffmpeg-release-full-shared.7z"))
+		lines = append(lines, DimStyle.Render("(under \"release builds\")"))
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Enter FFmpeg path:"))
+		cursor := lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
+		lines = append(lines, DimStyle.Render("[")+m.manualPath+cursor+DimStyle.Render("]"))
+
+		if m.manualResult != "" {
+			lines = append(lines, "")
+			resultColor := ColorGreen
+			if !m.manualValid {
+				resultColor = ColorError
+			}
+			lines = append(lines, lipgloss.NewStyle().Foreground(resultColor).Render(m.manualResult))
+		}
+	}
+
+	// Version warning (e.g. outdated FFmpeg)
+	if m.warning != "" {
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render(m.warning))
 	}
 
 	// Navigation hints
@@ -359,6 +545,12 @@ func (m *FFmpegCheckModel) View() string {
 		case ffmpegInstall:
 			lines = append(lines, DimStyle.Render("Esc: Back  \u2191/\u2193: Select  Enter: Install"))
 		case ffmpegCustom:
+			lines = append(lines, DimStyle.Render("Esc: Back  Enter: Check path"))
+		case ffmpegReview:
+			if !m.installing {
+				lines = append(lines, DimStyle.Render("\u2190/\u2192: Select  \u2191/\u2193: Scroll  Enter: Choose  Esc: Cancel"))
+			}
+		case ffmpegManual:
 			lines = append(lines, DimStyle.Render("Esc: Back  Enter: Check path"))
 		}
 	}

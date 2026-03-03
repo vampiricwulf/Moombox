@@ -250,27 +250,27 @@ func TestShouldSkipCompression(t *testing.T) {
 	}{
 		{
 			name:     "video endpoint",
-			path:     "/api/v1/jobs/abc123/video",
+			path:     "/api/jobs/abc123/video",
 			expected: true,
 		},
 		{
 			name:     "video endpoint with different job ID",
-			path:     "/api/v1/jobs/xyz-789/video",
+			path:     "/api/jobs/xyz-789/video",
 			expected: true,
 		},
 		{
 			name:     "jobs list endpoint",
-			path:     "/api/v1/jobs",
+			path:     "/api/jobs",
 			expected: false,
 		},
 		{
 			name:     "job detail (not video)",
-			path:     "/api/v1/jobs/abc123",
+			path:     "/api/jobs/abc123",
 			expected: false,
 		},
 		{
 			name:     "status endpoint",
-			path:     "/api/v1/status",
+			path:     "/api/status",
 			expected: false,
 		},
 		{
@@ -285,7 +285,7 @@ func TestShouldSkipCompression(t *testing.T) {
 		},
 		{
 			name:     "jobs prefix but no video suffix",
-			path:     "/api/v1/jobs/abc123/logs",
+			path:     "/api/jobs/abc123/logs",
 			expected: false,
 		},
 	}

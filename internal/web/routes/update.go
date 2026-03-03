@@ -27,8 +27,8 @@ type UpdateRouteDeps struct {
 
 // UpdateRoutes registers the update check/apply/dismiss API endpoints.
 func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
-	// GET /api/v1/update/status — current update status
-	r.Get("/api/v1/update/status", func(w http.ResponseWriter, r *http.Request) {
+	// GET /api/update/status — current update status
+	r.Get("/api/update/status", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
 			"currentVersion": deps.Version,
 			"available":      false,
@@ -44,8 +44,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 		json.NewEncoder(w).Encode(resp)
 	})
 
-	// POST /api/v1/update/check — manually trigger an update check
-	r.Post("/api/v1/update/check", func(w http.ResponseWriter, r *http.Request) {
+	// POST /api/update/check — manually trigger an update check
+	r.Post("/api/update/check", func(w http.ResponseWriter, r *http.Request) {
 		if deps.Updater == nil {
 			jsonError(w, "updater not available", http.StatusServiceUnavailable)
 			return
@@ -77,8 +77,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 		json.NewEncoder(w).Encode(resp)
 	})
 
-	// POST /api/v1/update/apply — download update and restart
-	r.Post("/api/v1/update/apply", func(w http.ResponseWriter, r *http.Request) {
+	// POST /api/update/apply — download update and restart
+	r.Post("/api/update/apply", func(w http.ResponseWriter, r *http.Request) {
 		if deps.Updater == nil {
 			jsonError(w, "updater not available", http.StatusServiceUnavailable)
 			return
@@ -112,8 +112,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 		}()
 	})
 
-	// POST /api/v1/update/dismiss — disable auto-check and clear update info
-	r.Post("/api/v1/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
+	// POST /api/update/dismiss — disable auto-check and clear update info
+	r.Post("/api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		deps.Cfg.Updates.AutoCheckUpdates = false
 		SharedUpdateInfo.Store(nil)
 

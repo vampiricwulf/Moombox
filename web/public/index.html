@@ -1408,6 +1408,46 @@
                     </div>
                     <div id="ffmpeg-install-result" style="margin-top: 0.5em;"></div>
                 </div>
+                <div id="ffmpeg-script-review" style="display: none">
+                    <p style="margin-bottom: 0.75em;">
+                        <sl-icon name="shield-lock" style="color: var(--sl-color-warning-600);"></sl-icon>
+                        <strong>Administrator privileges required.</strong>
+                        The following script will run with elevated permissions. Review it before proceeding:
+                    </p>
+                    <div style="max-height: 200px; overflow: auto; border: 1px solid var(--sl-color-neutral-300); border-radius: var(--sl-border-radius-medium); margin-bottom: 1em;">
+                        <pre style="margin: 0; padding: 0.75em; font-size: var(--sl-font-size-small);"><code id="ffmpeg-review-script"></code></pre>
+                    </div>
+                    <div style="display: flex; gap: 0.5em;">
+                        <sl-button id="ffmpeg-trust-btn" variant="primary" style="flex: 1;">
+                            <sl-icon slot="prefix" name="check-lg"></sl-icon> Trust &amp; Continue
+                        </sl-button>
+                        <sl-button id="ffmpeg-distrust-btn" variant="default" style="flex: 1;">
+                            <sl-icon slot="prefix" name="x-lg"></sl-icon> Distrust &amp; Manually Install
+                        </sl-button>
+                    </div>
+                    <div id="ffmpeg-confirm-progress" style="display: none; margin-top: 1em;">
+                        <sl-spinner style="font-size: 1.5rem;"></sl-spinner>
+                        <span style="margin-left: 0.5em;">Installing with administrator privileges...</span>
+                    </div>
+                    <div id="ffmpeg-confirm-result" style="margin-top: 0.5em;"></div>
+                </div>
+                <div id="ffmpeg-manual-install" style="display: none">
+                    <p style="margin-bottom: 0.75em;">Download FFmpeg manually and provide the path:</p>
+                    <sl-alert variant="neutral" open style="margin-bottom: 1em;">
+                        <sl-icon slot="icon" name="download"></sl-icon>
+                        Download from <a href="https://www.gyan.dev/ffmpeg/builds/" target="_blank" rel="noopener">gyan.dev/ffmpeg/builds</a><br />
+                        <small>Recommended: <strong>ffmpeg-release-full-shared.7z</strong> under "release builds"</small>
+                    </sl-alert>
+                    <div style="display: flex; gap: 0.5em; align-items: flex-end;">
+                        <sl-input id="ffmpeg-manual-path" label="FFmpeg path" placeholder="C:\path\to\ffmpeg.exe" style="flex: 1;"></sl-input>
+                        <sl-button id="ffmpeg-manual-check-btn" variant="default">Check</sl-button>
+                    </div>
+                    <div id="ffmpeg-manual-result" style="margin-top: 0.5em;"></div>
+                    <sl-divider></sl-divider>
+                    <sl-button id="ffmpeg-manual-back-btn" variant="text" style="width: 100%;">
+                        <sl-icon slot="prefix" name="arrow-left"></sl-icon> Back
+                    </sl-button>
+                </div>
             </div>
         </div>
 

@@ -142,6 +142,18 @@ export class SetupController {
     document.getElementById("ffmpeg-custom-path")?.addEventListener("keypress", (e) => {
       if (e.key === "Enter") this.checkCustomFFmpegPath();
     });
+
+    // Manual install view
+    document.getElementById("ffmpeg-manual-check-btn")?.addEventListener("click", () => {
+      this.checkManualFFmpegPath();
+    });
+    document.getElementById("ffmpeg-manual-path")?.addEventListener("keypress", (e) => {
+      if (e.key === "Enter") this.checkManualFFmpegPath();
+    });
+    document.getElementById("ffmpeg-manual-back-btn")?.addEventListener("click", () => {
+      document.getElementById("ffmpeg-manual-install").style.display = "none";
+      document.getElementById("ffmpeg-main-view").style.display = "";
+    });
   }
 
   // --- Cookie Setup ---
@@ -551,6 +563,8 @@ export class SetupController {
     document.getElementById("ffmpeg-overlay").style.display = "flex";
     document.getElementById("ffmpeg-main-view").style.display = "";
     document.getElementById("ffmpeg-install-view").style.display = "none";
+    document.getElementById("ffmpeg-script-review").style.display = "none";
+    document.getElementById("ffmpeg-manual-install").style.display = "none";
   }
 
   async showFFmpegInstallOptions() {
@@ -617,15 +631,16 @@ export class SetupController {
       });
       const data = await resp.json();
 
+      if (data.needsElevation) {
+        // Show script review view
+        if (progress) progress.style.display = "none";
+        document.getElementById("ffmpeg-install-view").style.display = "none";
+        this.showScriptReview(data.script, data.token);
+        return;
+      }
+
       if (data.success) {
-        if (resultEl) {
-          resultEl.innerHTML = `<sl-alert variant="success" open>FFmpeg installed: ${this.esc(data.version)}</sl-alert>`;
-        }
-        // Hide FFmpeg overlay and init app
-        setTimeout(() => {
-          document.getElementById("ffmpeg-overlay").style.display = "none";
-          this.initializeApp();
-        }, 1500);
+        this.showInstallSuccess(resultEl, data);
       } else {
         if (resultEl) {
           resultEl.innerHTML = `<sl-alert variant="danger" open>${this.esc(data.error || "Install failed")}</sl-alert>`;
@@ -639,6 +654,128 @@ export class SetupController {
       optionsEl.querySelectorAll("sl-button").forEach((b) => { b.disabled = false; });
     } finally {
       if (progress) progress.style.display = "none";
+    }
+  }
+
+  showInstallSuccess(resultEl, data) {
+    let html = `<sl-alert variant="success" open>FFmpeg installed: ${this.esc(data.version)}</sl-alert>`;
+    if (data.warning) {
+      html += `<sl-alert variant="warning" open style="margin-top: 0.5em;">${this.esc(data.warning)}</sl-alert>`;
+    }
+    if (resultEl) {
+      resultEl.innerHTML = html;
+    }
+    setTimeout(() => {
+      document.getElementById("ffmpeg-overlay").style.display = "none";
+      this.initializeApp();
+    }, data.warning ? 3000 : 1500);
+  }
+
+  showScriptReview(script, token) {
+    const reviewEl = document.getElementById("ffmpeg-script-review");
+    const codeEl = document.getElementById("ffmpeg-review-script");
+    if (codeEl) codeEl.textContent = script;
+    if (reviewEl) reviewEl.style.display = "";
+
+    // Wire trust button
+    const trustBtn = document.getElementById("ffmpeg-trust-btn");
+    const distrustBtn = document.getElementById("ffmpeg-distrust-btn");
+
+    const newTrust = trustBtn.cloneNode(true);
+    trustBtn.replaceWith(newTrust);
+    newTrust.addEventListener("click", () => this.confirmElevatedInstall(token));
+
+    const newDistrust = distrustBtn.cloneNode(true);
+    distrustBtn.replaceWith(newDistrust);
+    newDistrust.addEventListener("click", () => this.rejectElevatedInstall(token));
+  }
+
+  async confirmElevatedInstall(token) {
+    const progress = document.getElementById("ffmpeg-confirm-progress");
+    const resultEl = document.getElementById("ffmpeg-confirm-result");
+    const trustBtn = document.getElementById("ffmpeg-trust-btn");
+    const distrustBtn = document.getElementById("ffmpeg-distrust-btn");
+
+    if (trustBtn) trustBtn.disabled = true;
+    if (distrustBtn) distrustBtn.disabled = true;
+    if (progress) progress.style.display = "flex";
+    if (resultEl) resultEl.innerHTML = "";
+
+    try {
+      const resp = await fetch("/api/ffmpeg/install/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const data = await resp.json();
+
+      if (data.success) {
+        this.showInstallSuccess(resultEl, data);
+      } else {
+        if (resultEl) {
+          resultEl.innerHTML = `<sl-alert variant="danger" open>${this.esc(data.error || "Install failed")}</sl-alert>`;
+        }
+        if (trustBtn) trustBtn.disabled = false;
+        if (distrustBtn) distrustBtn.disabled = false;
+      }
+    } catch (e) {
+      if (resultEl) {
+        resultEl.innerHTML = `<sl-alert variant="danger" open>Install failed: ${this.esc(e.message)}</sl-alert>`;
+      }
+      if (trustBtn) trustBtn.disabled = false;
+      if (distrustBtn) distrustBtn.disabled = false;
+    } finally {
+      if (progress) progress.style.display = "none";
+    }
+  }
+
+  async rejectElevatedInstall(token) {
+    try {
+      await fetch("/api/ffmpeg/install/reject", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+    } catch { /* ignore */ }
+
+    // Show manual install view
+    document.getElementById("ffmpeg-script-review").style.display = "none";
+    document.getElementById("ffmpeg-manual-install").style.display = "";
+  }
+
+  async checkManualFFmpegPath() {
+    const input = document.getElementById("ffmpeg-manual-path");
+    const resultEl = document.getElementById("ffmpeg-manual-result");
+    const path = (input?.value || "").trim();
+    if (!path) return;
+
+    try {
+      const resp = await fetch("/api/ffmpeg/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const data = await resp.json();
+
+      if (data.valid) {
+        let html = `<sl-alert variant="success" open>Valid: ${this.esc(data.version)}</sl-alert>`;
+        if (data.warning) {
+          html += `<sl-alert variant="warning" open style="margin-top: 0.5em;">${this.esc(data.warning)}</sl-alert>`;
+        }
+        if (resultEl) resultEl.innerHTML = html;
+        setTimeout(() => {
+          document.getElementById("ffmpeg-overlay").style.display = "none";
+          this.initializeApp();
+        }, data.warning ? 3000 : 1500);
+      } else {
+        if (resultEl) {
+          resultEl.innerHTML = '<sl-alert variant="danger" open>FFmpeg not found at this path</sl-alert>';
+        }
+      }
+    } catch (e) {
+      if (resultEl) {
+        resultEl.innerHTML = `<sl-alert variant="danger" open>Check failed: ${this.esc(e.message)}</sl-alert>`;
+      }
     }
   }
 
@@ -657,13 +794,17 @@ export class SetupController {
       const data = await resp.json();
 
       if (data.valid) {
+        let html = `<sl-alert variant="success" open>Valid: ${this.esc(data.version)}</sl-alert>`;
+        if (data.warning) {
+          html += `<sl-alert variant="warning" open style="margin-top: 0.5em;">${this.esc(data.warning)}</sl-alert>`;
+        }
         if (resultEl) {
-          resultEl.innerHTML = `<sl-alert variant="success" open>Valid: ${this.esc(data.version)}</sl-alert>`;
+          resultEl.innerHTML = html;
         }
         setTimeout(() => {
           document.getElementById("ffmpeg-overlay").style.display = "none";
           this.initializeApp();
-        }, 1500);
+        }, data.warning ? 3000 : 1500);
       } else {
         if (resultEl) {
           resultEl.innerHTML = '<sl-alert variant="danger" open>FFmpeg not found at this path</sl-alert>';

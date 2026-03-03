@@ -82,7 +82,6 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 
 	// Apply middleware (order matters)
 	r.Use(RecoveryMiddleware(logger))
-	r.Use(APIAliasMiddleware) // Rewrite /api/ → /api/v1/ (backward compat, matches TS dual-mount)
 	r.Use(CORSMiddleware(cfg))
 	r.Use(SecurityHeaders)
 	r.Use(CSRFMiddleware(cfg, token))
@@ -130,8 +129,8 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 
 		// Unauthenticated paths (login page, auth endpoints, POT read-only, favicon)
 		p := r.URL.Path
-		if p == "/api/auth/login" || p == "/api/v1/auth/login" ||
-			p == "/api/auth/status" || p == "/api/v1/auth/status" ||
+		if p == "/api/auth/login" ||
+			p == "/api/auth/status" ||
 			p == "/ping" || p == "/minter_cache" ||
 			p == "/favicon.svg" || p == "/login.html" {
 			next.ServeHTTP(w, r)

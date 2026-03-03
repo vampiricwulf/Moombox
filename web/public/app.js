@@ -522,7 +522,7 @@ class MoomboxApp {
     const btn = document.getElementById("update-now-btn");
     if (btn) { btn.loading = true; btn.disabled = true; }
     try {
-      const resp = await fetch("/api/v1/update/apply", { method: "POST" });
+      const resp = await fetch("/api/update/apply", { method: "POST" });
       if (resp.ok) {
         this.showToast("Update applied. Restarting...", "success");
         document.getElementById("update-dialog")?.hide();
@@ -539,7 +539,7 @@ class MoomboxApp {
 
   async dismissUpdate() {
     try {
-      await fetch("/api/v1/update/dismiss", { method: "POST" });
+      await fetch("/api/update/dismiss", { method: "POST" });
       this._updateAvailable = null;
       this.updateVersionIndicator();
       document.getElementById("update-dialog")?.hide();
@@ -2347,7 +2347,7 @@ class MoomboxApp {
 
   async fetchOrphanedFiles() {
     try {
-      const resp = await fetch("/api/v1/files/orphaned");
+      const resp = await fetch("/api/files/orphaned");
       if (!resp.ok) throw new Error("Failed to fetch");
       const data = await resp.json();
       this._orphanedFiles = data;
@@ -2413,7 +2413,7 @@ class MoomboxApp {
     if (!confirm(`Delete this file?\n\n${path}`)) return;
 
     try {
-      const resp = await fetch("/api/v1/files/orphaned", {
+      const resp = await fetch("/api/files/orphaned", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paths: [path] }),
@@ -2437,7 +2437,7 @@ class MoomboxApp {
 
     const paths = this._orphanedFiles.map((f) => f.path);
     try {
-      const resp = await fetch("/api/v1/files/orphaned", {
+      const resp = await fetch("/api/files/orphaned", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paths }),

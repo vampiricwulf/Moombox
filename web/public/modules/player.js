@@ -328,7 +328,7 @@ export class PlayerController {
       const entry = {
         ...seg,
         startOffset: cumulative,
-        url: `/api/v1/jobs/${jobId}/segments/${seg.segmentIndex}/video`,
+        url: `/api/jobs/${jobId}/segments/${seg.segmentIndex}/video`,
       };
       cumulative += seg.durationSeconds || 0;
       return entry;

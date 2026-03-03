@@ -175,8 +175,8 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 
 // JobRoutes registers job-related API routes.
 func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager) {
-	// GET /api/v1/jobs
-	r.Get("/api/v1/jobs", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs
+	r.Get("/api/jobs", func(rw http.ResponseWriter, req *http.Request) {
 		jobs, err := db.GetAllJobs(false)
 		if err != nil {
 			jsonError(rw, "failed to get jobs", http.StatusInternalServerError)
@@ -188,8 +188,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		sendPaginated(rw, req, filtered)
 	})
 
-	// GET /api/v1/jobs/archived — finished jobs older than hide_finished_age_days
-	r.Get("/api/v1/jobs/archived", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs/archived — finished jobs older than hide_finished_age_days
+	r.Get("/api/jobs/archived", func(rw http.ResponseWriter, req *http.Request) {
 		jobs, err := db.GetAllJobs(true)
 		if err != nil {
 			jsonError(rw, "failed to get jobs", http.StatusInternalServerError)
@@ -207,8 +207,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		sendPaginated(rw, req, archived)
 	})
 
-	// GET /api/v1/jobs/:id
-	r.Get("/api/v1/jobs/{id}", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs/:id
+	r.Get("/api/jobs/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -227,8 +227,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, job)
 	})
 
-	// GET /api/v1/jobs/:id/video — range-request video streaming
-	r.Get("/api/v1/jobs/{id}/video", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs/:id/video — range-request video streaming
+	r.Get("/api/jobs/{id}/video", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -312,8 +312,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		http.ServeFile(rw, req, filePath)
 	})
 
-	// GET /api/v1/jobs/:id/segments — returns segments for multi-segment jobs
-	r.Get("/api/v1/jobs/{id}/segments", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs/:id/segments — returns segments for multi-segment jobs
+	r.Get("/api/jobs/{id}/segments", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -339,8 +339,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, segments)
 	})
 
-	// GET /api/v1/jobs/:id/segments/:index/video — serves individual segment video file
-	r.Get("/api/v1/jobs/{id}/segments/{index}/video", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs/:id/segments/:index/video — serves individual segment video file
+	r.Get("/api/jobs/{id}/segments/{index}/video", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		indexStr := chi.URLParam(req, "index")
 
@@ -418,8 +418,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		http.ServeFile(rw, req, filePath)
 	})
 
-	// GET /api/v1/jobs/:id/chat
-	r.Get("/api/v1/jobs/{id}/chat", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs/:id/chat
+	r.Get("/api/jobs/{id}/chat", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -492,8 +492,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		rw.Write(data)
 	})
 
-	// GET /api/v1/jobs/:id/trims
-	r.Get("/api/v1/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs/:id/trims
+	r.Get("/api/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 
 		// Verify job exists (match TS: 404 if not found)
@@ -514,8 +514,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, map[string]any{"trims": trims})
 	})
 
-	// GET /api/v1/jobs/:id/logs — per-job log buffer
-	r.Get("/api/v1/jobs/{id}/logs", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/jobs/:id/logs — per-job log buffer
+	r.Get("/api/jobs/{id}/logs", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		// Verify job exists
 		job, err := db.GetJob(jobID)
@@ -532,8 +532,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, logs)
 	})
 
-	// POST /api/v1/jobs — create a new job
-	r.With(rl.Middleware).Post("/api/v1/jobs", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/jobs — create a new job
+	r.With(rl.Middleware).Post("/api/jobs", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			URL               string   `json:"url"`
 			VideoID           string   `json:"videoId"`
@@ -813,8 +813,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, job)
 	})
 
-	// POST /api/v1/jobs/:id/cancel
-	r.Post("/api/v1/jobs/{id}/cancel", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/jobs/:id/cancel
+	r.Post("/api/jobs/{id}/cancel", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -867,8 +867,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// POST /api/v1/jobs/:id/retry
-	r.Post("/api/v1/jobs/{id}/retry", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/jobs/:id/retry
+	r.Post("/api/jobs/{id}/retry", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -899,8 +899,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// POST /api/v1/jobs/:id/open-folder — loopback only (match TS: resolve via outputDir + filename)
-	r.With(web.LoopbackOnly).Post("/api/v1/jobs/{id}/open-folder", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/jobs/:id/open-folder — loopback only (match TS: resolve via outputDir + filename)
+	r.With(web.LoopbackOnly).Post("/api/jobs/{id}/open-folder", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -965,8 +965,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, map[string]bool{"success": true})
 	})
 
-	// DELETE /api/v1/jobs/:id
-	r.Delete("/api/v1/jobs/{id}", func(rw http.ResponseWriter, req *http.Request) {
+	// DELETE /api/jobs/:id
+	r.Delete("/api/jobs/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -994,7 +994,6 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// Note: /api/ → /api/v1/ aliasing handled by APIAliasMiddleware
 }
 
 var (
@@ -1023,8 +1022,8 @@ type FormatRoutesDeps struct {
 
 // FormatRoutes registers format-related API routes.
 func FormatRoutes(r chi.Router, deps *FormatRoutesDeps) {
-	// GET /api/v1/formats/:videoId
-	r.Get("/api/v1/formats/{videoId}", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/formats/:videoId
+	r.Get("/api/formats/{videoId}", func(rw http.ResponseWriter, req *http.Request) {
 		videoID := chi.URLParam(req, "videoId")
 		if !utils.IsVideoID(videoID) {
 			jsonError(rw, "invalid video ID", http.StatusBadRequest)
@@ -1075,7 +1074,7 @@ type StatusRouteDeps struct {
 
 // StatusRoute returns the server status.
 func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
-	r.Get("/api/v1/status", func(rw http.ResponseWriter, req *http.Request) {
+	r.Get("/api/status", func(rw http.ResponseWriter, req *http.Request) {
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
 
@@ -1526,8 +1525,8 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 
 // ConfigRoutes registers config-related API routes.
 func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*config.MoomboxConfig) error, callbacks *ConfigRoutesCallbacks) {
-	// GET /api/v1/config
-	r.Get("/api/v1/config", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/config
+	r.Get("/api/config", func(rw http.ResponseWriter, req *http.Request) {
 		// Clone config and return with hasPassword injected.
 		// PasswordHash has json:"-" tag so it's already excluded from marshaling.
 		jsonResponse(rw, struct {
@@ -1539,8 +1538,8 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 		})
 	})
 
-	// PUT /api/v1/config
-	r.Put("/api/v1/config", func(rw http.ResponseWriter, req *http.Request) {
+	// PUT /api/config
+	r.Put("/api/config", func(rw http.ResponseWriter, req *http.Request) {
 		var updates map[string]any
 		if err := json.NewDecoder(req.Body).Decode(&updates); err != nil {
 			jsonError(rw, "invalid request body", http.StatusBadRequest)
@@ -1606,8 +1605,8 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 
 // ChannelRoutes registers channel-related API routes.
 func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*config.MoomboxConfig) error, onChannelChange func()) {
-	// POST /api/v1/config/channels
-	r.Post("/api/v1/config/channels", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/config/channels
+	r.Post("/api/config/channels", func(rw http.ResponseWriter, req *http.Request) {
 		var channel config.ChannelConfig
 		if err := json.NewDecoder(req.Body).Decode(&channel); err != nil {
 			jsonError(rw, "invalid channel config", http.StatusBadRequest)
@@ -1661,8 +1660,8 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*con
 		jsonResponse(rw, map[string]any{"success": true, "channel": channel})
 	})
 
-	// DELETE /api/v1/config/channels/:id
-	r.Delete("/api/v1/config/channels/{id}", func(rw http.ResponseWriter, req *http.Request) {
+	// DELETE /api/config/channels/:id
+	r.Delete("/api/config/channels/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		channelID := chi.URLParam(req, "id")
 
 		for i, ch := range cfg.Channels {
@@ -1689,8 +1688,8 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*con
 		jsonError(rw, "channel not found", http.StatusNotFound)
 	})
 
-	// POST /api/v1/resolve-channel
-	r.Post("/api/v1/resolve-channel", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/resolve-channel
+	r.Post("/api/resolve-channel", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Input string `json:"input"`
 		}
@@ -1727,8 +1726,8 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*con
 
 // TrimRoutes registers trim-related API routes.
 func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService) {
-	// POST /api/v1/jobs/:id/trims
-	r.Post("/api/v1/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/jobs/:id/trims
+	r.Post("/api/jobs/{id}/trims", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
 		if err != nil || job == nil {
@@ -1777,8 +1776,8 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 		jsonResponse(rw, map[string]any{"trim": record})
 	})
 
-	// DELETE /api/v1/jobs/:id/trims/:trimId
-	r.Delete("/api/v1/jobs/{id}/trims/{trimId}", func(rw http.ResponseWriter, req *http.Request) {
+	// DELETE /api/jobs/:id/trims/:trimId
+	r.Delete("/api/jobs/{id}/trims/{trimId}", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		trimID := chi.URLParam(req, "trimId")
 
@@ -1936,7 +1935,7 @@ type SetupDeps struct {
 
 // SetupRoutes registers setup wizard endpoints.
 func SetupRoutes(r chi.Router, deps *SetupDeps) {
-	r.Get("/api/v1/setup/status", func(rw http.ResponseWriter, req *http.Request) {
+	r.Get("/api/setup/status", func(rw http.ResponseWriter, req *http.Request) {
 		// isFirstRun matches TypeScript: !configManager.hasConfig()
 		resp := map[string]any{
 			"isFirstRun": !deps.Cfg.ConfigLoaded,
@@ -1947,15 +1946,15 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 			if path == "" {
 				path = "ffmpeg"
 			}
-			valid, _ := CheckFFmpegCached(path)
+			valid, _, _ := CheckFFmpegCached(path)
 			resp["ffmpegValid"] = valid
 		}
 		jsonResponse(rw, resp)
 	})
 
-	// POST /api/v1/setup/complete — uses same updateConfigSchema as PUT /config (snake_case, nested)
+	// POST /api/setup/complete — uses same updateConfigSchema as PUT /config (snake_case, nested)
 	// plus an additional "password" field for first-run password setup.
-	r.Post("/api/v1/setup/complete", func(rw http.ResponseWriter, req *http.Request) {
+	r.Post("/api/setup/complete", func(rw http.ResponseWriter, req *http.Request) {
 		var updates map[string]any
 		if err := json.NewDecoder(req.Body).Decode(&updates); err != nil {
 			jsonError(rw, "invalid request body", http.StatusBadRequest)
@@ -2043,7 +2042,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 
 // LogRoutes registers log-related API routes.
 func LogRoutes(r chi.Router, getRecentLogs func() []string) {
-	r.Get("/api/v1/logs", func(rw http.ResponseWriter, req *http.Request) {
+	r.Get("/api/logs", func(rw http.ResponseWriter, req *http.Request) {
 		logs := getRecentLogs()
 		jsonResponse(rw, logs)
 	})
@@ -2053,7 +2052,7 @@ func LogRoutes(r chi.Router, getRecentLogs func() []string) {
 // Uses its own 5/min rate limiter per the spec.
 func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, rl *web.RateLimiter) {
 	importRL := web.NewRateLimiter(5, time.Minute)
-	r.With(importRL.Middleware).Post("/api/v1/import", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
 		// Max 500MB upload
 		req.Body = http.MaxBytesReader(rw, req.Body, 500*1024*1024)
 
@@ -2359,7 +2358,7 @@ func sanitizeForFilename(s string) string {
 // The onRestart callback is invoked after the HTTP response is sent.
 // It should spawn a new process and then trigger graceful shutdown.
 func RestartRoute(r chi.Router, onRestart func()) {
-	r.With(web.LoopbackOnly).Post("/api/v1/restart", func(rw http.ResponseWriter, req *http.Request) {
+	r.With(web.LoopbackOnly).Post("/api/restart", func(rw http.ResponseWriter, req *http.Request) {
 		jsonResponse(rw, map[string]any{"success": true, "message": "Restarting..."})
 
 		go func() {

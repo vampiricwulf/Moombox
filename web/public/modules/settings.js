@@ -181,7 +181,7 @@ export class SettingsController {
       btn.loading = true;
       result.textContent = "";
       try {
-        const resp = await fetch("/api/v1/update/check", { method: "POST" });
+        const resp = await fetch("/api/update/check", { method: "POST" });
         const data = await resp.json();
         if (data.available) {
           result.textContent = `v${data.version} available!`;

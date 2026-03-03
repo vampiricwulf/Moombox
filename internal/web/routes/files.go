@@ -25,8 +25,8 @@ type FileRoutesDeps struct {
 
 // FileRoutes registers orphaned file management endpoints.
 func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
-	// GET /api/v1/files/orphaned — scan and return orphaned files
-	r.Get("/api/v1/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/files/orphaned — scan and return orphaned files
+	r.Get("/api/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
 		entries, err := worker.ScanOrphanedFiles(deps.DB, deps.Cfg)
 		if err != nil {
 			rw.Header().Set("Content-Type", "application/json")
@@ -42,8 +42,8 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 		json.NewEncoder(rw).Encode(entries)
 	})
 
-	// DELETE /api/v1/files/orphaned — delete specific orphaned paths
-	r.Delete("/api/v1/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
+	// DELETE /api/files/orphaned — delete specific orphaned paths
+	r.Delete("/api/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Paths []string `json:"paths"`
 		}

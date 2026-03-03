@@ -11,8 +11,8 @@ import (
 
 // CookieRoutes registers cookie-related API routes.
 func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool) {
-	// POST /api/v1/cookies/recheck
-	r.Post("/api/v1/cookies/recheck", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/cookies/recheck
+	r.Post("/api/cookies/recheck", func(rw http.ResponseWriter, req *http.Request) {
 		refreshSvc.CheckNow(req.Context())
 		status := refreshSvc.GetStatus()
 		response := map[string]any{
@@ -37,8 +37,8 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		jsonResponse(rw, response)
 	})
 
-	// POST /api/v1/cookies/auto-setup/start
-	r.Post("/api/v1/cookies/auto-setup/start", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/cookies/auto-setup/start
+	r.Post("/api/cookies/auto-setup/start", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Platform string `json:"platform"`
 		}
@@ -61,8 +61,8 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// POST /api/v1/cookies/auto-setup/finish
-	r.Post("/api/v1/cookies/auto-setup/finish", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/cookies/auto-setup/finish
+	r.Post("/api/cookies/auto-setup/finish", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
 			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
@@ -85,8 +85,8 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		})
 	})
 
-	// POST /api/v1/cookies/auto-setup/cancel
-	r.Post("/api/v1/cookies/auto-setup/cancel", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/cookies/auto-setup/cancel
+	r.Post("/api/cookies/auto-setup/cancel", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
 			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
@@ -96,8 +96,8 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// GET /api/v1/cookies/auto-status
-	r.Get("/api/v1/cookies/auto-status", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/cookies/auto-status
+	r.Get("/api/cookies/auto-status", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
 			jsonResponse(rw, map[string]any{
 				"configured":         false,

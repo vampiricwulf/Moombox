@@ -29,7 +29,7 @@ export class StatsController {
 
   async loadStats() {
     try {
-      const response = await fetch("/api/v1/stats");
+      const response = await fetch("/api/stats");
       if (!response.ok) return;
       const data = await response.json();
       this.render(data);

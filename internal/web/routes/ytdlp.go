@@ -26,8 +26,8 @@ func parseInstalledPlugin(content string) (scheme string, port int) {
 
 // YtdlpRoutes registers yt-dlp plugin routes.
 func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
-	// GET /api/v1/ytdlp-plugin/status
-	r.Get("/api/v1/ytdlp-plugin/status", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/ytdlp-plugin/status
+	r.Get("/api/ytdlp-plugin/status", func(rw http.ResponseWriter, req *http.Request) {
 		pluginDir := ytdlpPluginDir()
 		installed := false
 		var installedPort *int
@@ -67,8 +67,8 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 		})
 	})
 
-	// POST /api/v1/ytdlp-plugin/install
-	r.Post("/api/v1/ytdlp-plugin/install", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/ytdlp-plugin/install
+	r.Post("/api/ytdlp-plugin/install", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Force bool `json:"force"`
 		}

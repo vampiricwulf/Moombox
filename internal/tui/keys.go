@@ -9,6 +9,8 @@ const (
 	keyTab    = "tab"
 	keyUp     = "up"
 	keyDown   = "down"
+	keyLeft   = "left"
+	keyRight  = "right"
 	keyPgUp   = "pgup"
 	keyPgDown = "pgdown"
 	keyHome   = "home"

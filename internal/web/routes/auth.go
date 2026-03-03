@@ -26,8 +26,8 @@ type AuthRoutesDeps struct {
 
 // AuthRoutes registers authentication endpoints.
 func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
-	// GET /api/v1/auth/status - public, returns auth state
-	r.Get("/api/v1/auth/status", func(rw http.ResponseWriter, req *http.Request) {
+	// GET /api/auth/status - public, returns auth state
+	r.Get("/api/auth/status", func(rw http.ResponseWriter, req *http.Request) {
 		sessionToken := getSessionToken(req)
 		authenticated := deps.Auth.ValidateSession(sessionToken)
 
@@ -38,8 +38,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		})
 	})
 
-	// POST /api/v1/auth/login - rate limited
-	r.With(deps.LoginRL.Middleware).Post("/api/v1/auth/login", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/auth/login - rate limited
+	r.With(deps.LoginRL.Middleware).Post("/api/auth/login", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Password string `json:"password"`
 		}
@@ -91,8 +91,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		})
 	})
 
-	// POST /api/v1/auth/logout - requires valid session
-	r.Post("/api/v1/auth/logout", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/auth/logout - requires valid session
+	r.Post("/api/auth/logout", func(rw http.ResponseWriter, req *http.Request) {
 		token := getSessionToken(req)
 		if token != "" {
 			deps.Auth.InvalidateSession(token)
@@ -101,8 +101,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// POST /api/v1/auth/set-password - rate limited, requires session OR local/LAN
-	r.With(deps.PasswordRL.Middleware).Post("/api/v1/auth/set-password", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/auth/set-password - rate limited, requires session OR local/LAN
+	r.With(deps.PasswordRL.Middleware).Post("/api/auth/set-password", func(rw http.ResponseWriter, req *http.Request) {
 		// Must be authenticated via session OR from loopback/private IP
 		token := getSessionToken(req)
 		isAuthenticated := deps.Auth.ValidateSession(token)
@@ -170,8 +170,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// POST /api/v1/auth/remove-password - rate limited
-	r.With(deps.PasswordRL.Middleware).Post("/api/v1/auth/remove-password", func(rw http.ResponseWriter, req *http.Request) {
+	// POST /api/auth/remove-password - rate limited
+	r.With(deps.PasswordRL.Middleware).Post("/api/auth/remove-password", func(rw http.ResponseWriter, req *http.Request) {
 		token := getSessionToken(req)
 		isAuthenticated := deps.Auth.ValidateSession(token)
 		isLocal := web.IsLocalOrPrivateRequest(req)

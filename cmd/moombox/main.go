@@ -43,7 +43,7 @@ import (
 )
 
 var (
-	version = "2.2.1"
+	version = "2.2.2"
 	commit  = ""
 )
 
@@ -566,9 +566,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		},
 		Logger: log,
 	})
-
-	// NOTE: /api/ → /api/v1/ rewriting is handled by APIAliasMiddleware.
-	// No catch-all route needed here.
 
 	// WebSocket upgrade handler — register on the router before static file mounting.
 	// TS uses noServer mode which upgrades on any path; frontend connects to ws://host/ (root).
@@ -1256,22 +1253,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		)
 
 		// Wire FFmpeg check callbacks for TUI
-		app.OnCheckFFmpeg = func(path string) (bool, string) {
+		app.OnCheckFFmpeg = func(path string) (bool, string, string) {
 			if path == "" {
 				path = "ffmpeg"
 			}
-			cmd := exec.Command(path, "-version")
-			out, err := cmd.Output()
-			if err != nil {
-				return false, ""
-			}
-			ver := string(out)
-			if idx := strings.IndexByte(ver, '\n'); idx > 0 {
-				ver = ver[:idx]
-			}
-			return true, strings.TrimSpace(ver)
+			return routes.CheckFFmpegCached(path)
 		}
-		app.OnInstallFFmpeg = routes.InstallFFmpeg
+		app.OnPrepareInstall = routes.PrepareInstall
+		app.OnConfirmInstall = routes.ConfirmInstall
+		app.OnRejectInstall = routes.RejectInstall
 		app.OnCheckPrereqs = func() (bool, bool) {
 			chocoAvail := false
 			wingetAvail := false

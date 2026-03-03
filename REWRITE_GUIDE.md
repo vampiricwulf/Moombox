@@ -270,7 +270,7 @@ TV:         "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
 
 Express 5 HTTP + WebSocket server:
 - Port 774 (configurable)
-- REST API at `/api/v1/` and `/api/`
+- REST API at `/api/`
 - WebSocket for real-time updates
 - Static file serving for dashboard
 - CORS, IP gating, rate limiting, CSRF protection
@@ -1103,7 +1103,7 @@ The web dashboard (`public/` directory) should be embedded via `//go:embed` and 
 
 ## Detailed API Routes
 
-All routes below are under `/api/v1` (aliased to `/api`). Error responses: `{ "error": "message" }`. Validation errors: `{ "error": "Validation failed", "details": { "field": ["messages"] } }`.
+All routes below are under `/api/`. Error responses: `{ "error": "message" }`. Validation errors: `{ "error": "Validation failed", "details": { "field": ["messages"] } }`.
 
 ### Job Routes
 

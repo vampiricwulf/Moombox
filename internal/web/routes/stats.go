@@ -58,9 +58,9 @@ type StatsRouteDeps struct {
 	Cfg *config.MoomboxConfig
 }
 
-// StatsRoutes registers the /api/v1/stats endpoint.
+// StatsRoutes registers the /api/stats endpoint.
 func StatsRoutes(r chi.Router, deps *StatsRouteDeps) {
-	r.Get("/api/v1/stats", func(rw http.ResponseWriter, req *http.Request) {
+	r.Get("/api/stats", func(rw http.ResponseWriter, req *http.Request) {
 		// Disk status from shared atomic
 		diskResp := map[string]any{
 			"free": 0, "total": 0, "usedPct": 0.0, "warnLevel": "ok",

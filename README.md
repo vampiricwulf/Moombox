@@ -199,29 +199,29 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 
 ### API
 
-All endpoints are available under `/api/v1` (aliased to `/api`). Real-time updates are delivered via WebSocket at `/ws`.
+All endpoints are available under `/api/`. Real-time updates are delivered via WebSocket at `/ws`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/jobs` | List active jobs (supports pagination) |
-| GET | `/api/v1/jobs/archived` | List archived jobs |
-| GET | `/api/v1/jobs/{id}` | Get job details |
-| GET | `/api/v1/jobs/{id}/video` | Stream video file (Range requests supported) |
-| GET | `/api/v1/jobs/{id}/chat` | Get chat data |
-| GET | `/api/v1/formats/{videoId}` | Get available formats for a video |
-| POST | `/api/v1/jobs` | Add new job |
-| POST | `/api/v1/jobs/{id}/cancel` | Cancel job |
-| POST | `/api/v1/jobs/{id}/retry` | Retry failed job |
-| DELETE | `/api/v1/jobs/{id}` | Delete job |
-| POST | `/api/v1/jobs/{id}/trims` | Create trimmed clip |
-| POST | `/api/v1/import` | Import zip archive |
-| GET | `/api/v1/config` | Get configuration |
-| PUT | `/api/v1/config` | Update configuration |
-| GET | `/api/v1/status` | Server status |
-| POST | `/api/v1/restart` | Restart server (loopback only) |
-| POST | `/api/v1/auth/login` | Authenticate with password |
-| POST | `/api/v1/auth/set-password` | Set or change password |
-| GET | `/api/v1/auth/status` | Check auth status |
+| GET | `/api/jobs` | List active jobs (supports pagination) |
+| GET | `/api/jobs/archived` | List archived jobs |
+| GET | `/api/jobs/{id}` | Get job details |
+| GET | `/api/jobs/{id}/video` | Stream video file (Range requests supported) |
+| GET | `/api/jobs/{id}/chat` | Get chat data |
+| GET | `/api/formats/{videoId}` | Get available formats for a video |
+| POST | `/api/jobs` | Add new job |
+| POST | `/api/jobs/{id}/cancel` | Cancel job |
+| POST | `/api/jobs/{id}/retry` | Retry failed job |
+| DELETE | `/api/jobs/{id}` | Delete job |
+| POST | `/api/jobs/{id}/trims` | Create trimmed clip |
+| POST | `/api/import` | Import zip archive |
+| GET | `/api/config` | Get configuration |
+| PUT | `/api/config` | Update configuration |
+| GET | `/api/status` | Server status |
+| POST | `/api/restart` | Restart server (loopback only) |
+| POST | `/api/auth/login` | Authenticate with password |
+| POST | `/api/auth/set-password` | Set or change password |
+| GET | `/api/auth/status` | Check auth status |
 
 WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `pong`
 

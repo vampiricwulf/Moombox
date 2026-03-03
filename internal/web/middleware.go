@@ -273,8 +273,7 @@ func IsLocalOrPrivateRequest(r *http.Request) bool {
 // SkipCompression can be used to check if compression should be skipped
 // for certain paths (e.g., video streaming).
 func shouldSkipCompression(p string) bool {
-	return (strings.HasPrefix(p, "/api/v1/jobs/") || strings.HasPrefix(p, "/api/jobs/")) &&
-		strings.HasSuffix(p, "/video")
+	return strings.HasPrefix(p, "/api/jobs/") && strings.HasSuffix(p, "/video")
 }
 
 // MaxBodySize limits request body size for mutating methods to prevent
@@ -292,20 +291,3 @@ func MaxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 	}
 }
 
-// APIAliasMiddleware rewrites /api/ requests to /api/v1/ for backward
-// compatibility. The TypeScript version mounts the same router at both
-// /api/v1 and /api — this middleware achieves the same effect by rewriting
-// the URL path before chi routing.
-func APIAliasMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Path
-		if strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/api/v1/") {
-			// Rewrite /api/foo → /api/v1/foo
-			r.URL.Path = "/api/v1/" + p[len("/api/"):]
-			if r.URL.RawPath != "" {
-				r.URL.RawPath = "/api/v1/" + r.URL.RawPath[len("/api/"):]
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}

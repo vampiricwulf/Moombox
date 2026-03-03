@@ -101,13 +101,20 @@ type (
 	}
 
 	// Async results for FFmpeg check overlay
-	ffmpegInstallResultMsg struct {
-		Err string // empty on success
-	}
 	ffmpegCheckResultMsg struct {
 		Valid   bool
 		Version string
+		Warning string
 		Path    string // the path that was checked
+	}
+	ffmpegPrepareResultMsg struct {
+		NeedsElevation bool
+		Script         string
+		Token          string
+		Err            string
+	}
+	ffmpegConfirmResultMsg struct {
+		Err string
 	}
 
 	// Async results for channel URL resolution
@@ -207,9 +214,11 @@ type App struct {
 	OnApplyUpdate func(version string) string      // returns error string (empty on success, process exits)
 
 	// FFmpeg check callbacks
-	OnCheckFFmpeg  func(path string) (bool, string) // check if ffmpeg path is valid
-	OnInstallFFmpeg func(method string) error        // install ffmpeg via choco/winget
-	OnCheckPrereqs  func() (bool, bool)              // returns (chocoAvail, wingetAvail)
+	OnCheckFFmpeg    func(path string) (bool, string, string)                                    // check if ffmpeg path is valid → (valid, version, warning)
+	OnCheckPrereqs   func() (bool, bool)                                                         // returns (chocoAvail, wingetAvail)
+	OnPrepareInstall func(method string) (needsElevation bool, script, token string, err error)  // elevation check + prepare
+	OnConfirmInstall func(token string) error                                                    // execute reviewed elevated install
+	OnRejectInstall  func(token string)                                                          // decline pending elevated install
 
 	// FFmpeg check overlay
 	ffmpegCheck *FFmpegCheckModel
@@ -641,11 +650,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case ffmpegInstallResultMsg:
+	case ffmpegPrepareResultMsg:
+		if msg.Err != "" {
+			a.ffmpegCheck.SetInstallResult(fmt.Sprintf("Install failed: %s", msg.Err), true)
+		} else if msg.NeedsElevation {
+			// Show script review mode
+			a.ffmpegCheck.ShowReview(msg.Script, msg.Token)
+		} else {
+			// Ran directly (already elevated) — verify
+			return a, a.ffmpegCheckCmd("")
+		}
+		return a, nil
+
+	case ffmpegConfirmResultMsg:
 		if msg.Err != "" {
 			a.ffmpegCheck.SetInstallResult(fmt.Sprintf("Install failed: %s", msg.Err), true)
 		} else {
-			// Install succeeded — verify FFmpeg is available
+			// Elevated install succeeded — verify FFmpeg is available
 			return a, a.ffmpegCheckCmd("")
 		}
 		return a, nil
@@ -661,14 +682,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						a.OnSaveConfig(a.cfg)
 					}
 				}
+			} else if a.ffmpegCheck.mode == ffmpegManual {
+				a.ffmpegCheck.SetManualResult("Valid: "+msg.Version, true)
+				// Persist the custom FFmpeg path to config
+				if msg.Path != "" && a.cfg != nil {
+					a.cfg.Paths.FfmpegPath = msg.Path
+					if a.OnSaveConfig != nil {
+						a.OnSaveConfig(a.cfg)
+					}
+				}
 			} else {
 				a.ffmpegCheck.SetInstallResult("FFmpeg installed: "+msg.Version, false)
 			}
+			a.ffmpegCheck.warning = msg.Warning
 			// Show success message — next keypress will dismiss the overlay
 			a.ffmpegCheck.successDismiss = true
 		} else {
 			if a.ffmpegCheck.mode == ffmpegCustom {
 				a.ffmpegCheck.SetCustomResult("Invalid: ffmpeg not found at this path", false)
+			} else if a.ffmpegCheck.mode == ffmpegManual {
+				a.ffmpegCheck.SetManualResult("Invalid: ffmpeg not found at this path", false)
 			} else {
 				a.ffmpegCheck.SetInstallResult("FFmpeg installed but not found on PATH. Restart may be needed.", true)
 			}
@@ -774,9 +807,20 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case action == "quit":
 			return a, tea.Quit
-		case strings.HasPrefix(action, "install:"):
-			method := strings.TrimPrefix(action, "install:")
-			return a, a.ffmpegInstallCmd(method)
+		case strings.HasPrefix(action, "prepare:"):
+			method := strings.TrimPrefix(action, "prepare:")
+			return a, a.ffmpegPrepareCmd(method)
+		case strings.HasPrefix(action, "confirm:"):
+			token := strings.TrimPrefix(action, "confirm:")
+			return a, a.ffmpegConfirmCmd(token)
+		case strings.HasPrefix(action, "reject:"):
+			token := strings.TrimPrefix(action, "reject:")
+			if a.OnRejectInstall != nil {
+				a.OnRejectInstall(token)
+			}
+			a.ffmpegCheck.mode = ffmpegManual
+			a.ffmpegCheck.manualPath = ""
+			a.ffmpegCheck.manualResult = ""
 		case strings.HasPrefix(action, "check_custom:"):
 			path := strings.TrimPrefix(action, "check_custom:")
 			return a, a.ffmpegCheckCmd(path)
@@ -1406,7 +1450,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		}
 
 		jsonBody, _ := json.Marshal(body)
-		url := fmt.Sprintf("%s/api/v1/jobs", baseURL)
+		url := fmt.Sprintf("%s/api/jobs", baseURL)
 		resp, err := client.Post(url, "application/json", strings.NewReader(string(jsonBody)))
 		if err != nil {
 			return addVideoResultMsg{Feedback: "Failed to connect to server", IsError: true}
@@ -1456,7 +1500,7 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		url := fmt.Sprintf("%s/api/v1/formats/%s", baseURL, videoID)
+		url := fmt.Sprintf("%s/api/formats/%s", baseURL, videoID)
 		resp, err := client.Get(url)
 		if err != nil {
 			return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
@@ -1589,20 +1633,6 @@ func (a *App) deleteOrphanCmd(path string) tea.Cmd {
 	}
 }
 
-// ffmpegInstallCmd runs FFmpeg installation asynchronously via tea.Cmd.
-func (a *App) ffmpegInstallCmd(method string) tea.Cmd {
-	installFn := a.OnInstallFFmpeg
-	return func() tea.Msg {
-		if installFn == nil {
-			return ffmpegInstallResultMsg{Err: "install not available"}
-		}
-		if err := installFn(method); err != nil {
-			return ffmpegInstallResultMsg{Err: err.Error()}
-		}
-		return ffmpegInstallResultMsg{}
-	}
-}
-
 // ffmpegCheckCmd runs FFmpeg path validation asynchronously via tea.Cmd.
 func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 	checkFn := a.OnCheckFFmpeg
@@ -1613,8 +1643,42 @@ func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 		if path == "" {
 			path = "ffmpeg"
 		}
-		valid, ver := checkFn(path)
-		return ffmpegCheckResultMsg{Valid: valid, Version: ver, Path: path}
+		valid, ver, warn := checkFn(path)
+		return ffmpegCheckResultMsg{Valid: valid, Version: ver, Warning: warn, Path: path}
+	}
+}
+
+// ffmpegPrepareCmd checks elevation and either installs directly or returns
+// a script for review.
+func (a *App) ffmpegPrepareCmd(method string) tea.Cmd {
+	prepareFn := a.OnPrepareInstall
+	return func() tea.Msg {
+		if prepareFn == nil {
+			return ffmpegPrepareResultMsg{Err: "install not available"}
+		}
+		needsElev, script, token, err := prepareFn(method)
+		if err != nil {
+			return ffmpegPrepareResultMsg{Err: err.Error()}
+		}
+		return ffmpegPrepareResultMsg{
+			NeedsElevation: needsElev,
+			Script:         script,
+			Token:          token,
+		}
+	}
+}
+
+// ffmpegConfirmCmd executes a reviewed elevated install.
+func (a *App) ffmpegConfirmCmd(token string) tea.Cmd {
+	confirmFn := a.OnConfirmInstall
+	return func() tea.Msg {
+		if confirmFn == nil {
+			return ffmpegConfirmResultMsg{Err: "confirm not available"}
+		}
+		if err := confirmFn(token); err != nil {
+			return ffmpegConfirmResultMsg{Err: err.Error()}
+		}
+		return ffmpegConfirmResultMsg{}
 	}
 }
 
