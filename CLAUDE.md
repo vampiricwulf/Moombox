@@ -91,6 +91,10 @@ go vet ./...
 
 Runtime requires FFmpeg on PATH. CI: `.github/workflows/release.yml` builds Windows exe on tag push, reads `RELEASE_NOTES.md` for the GitHub release body.
 
+### Windows resource embedding
+
+The exe icon and version info are embedded via `.syso` files generated at build time. Source files live in `cmd/moombox/winres/` (icon + `winres.json` config). CI generates the `.syso` files with the correct version from the git tag before building — no `.syso` files are committed. For local builds with an icon: `go install github.com/tc-hib/go-winres@latest && cd cmd/moombox && go-winres make`.
+
 ## Architecture
 
 Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary, all code under `internal/`.

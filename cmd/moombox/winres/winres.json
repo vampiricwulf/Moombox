@@ -1,0 +1,58 @@
+{
+  "RT_GROUP_ICON": {
+    "IDI_ICON1": {
+      "0409": "moom.ico"
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "Moombox",
+          "version": "0.0.0.0"
+        },
+        "description": "YouTube/Twitch Stream Archiver",
+        "minimum-os": "win7",
+        "execution-level": "as invoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "system",
+        "disable-theming": false,
+        "disable-window-filtering": false,
+        "high-resolution-scrolling-aware": false,
+        "ultra-high-resolution-scrolling-aware": false,
+        "long-path-aware": false,
+        "printer-driver-isolation": false,
+        "gdi-scaling": false,
+        "segment-heap": false,
+        "use-common-controls-v6": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "Comments": "",
+            "CompanyName": "Moombox",
+            "FileDescription": "YouTube/Twitch Stream Archiver",
+            "FileVersion": "0.0.0.0",
+            "InternalName": "Moombox",
+            "LegalCopyright": "",
+            "LegalTrademarks": "",
+            "OriginalFilename": "Moombox.exe",
+            "PrivateBuild": "",
+            "ProductName": "Moombox",
+            "ProductVersion": "0.0.0.0",
+            "SpecialBuild": ""
+          }
+        }
+      }
+    }
+  }
+}

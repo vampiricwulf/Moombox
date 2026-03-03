@@ -18,6 +18,26 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Generate Windows resources
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $commit = (git rev-parse --short HEAD)
+          $versionString = "$version ($commit)"
+          $numericVersion = "$version.0"
+          go install github.com/tc-hib/go-winres@latest
+          $json = Get-Content cmd/moombox/winres/winres.json -Raw | ConvertFrom-Json
+          $json.RT_MANIFEST.'#1'.'0409'.identity.version = $numericVersion
+          $fixed = $json.RT_VERSION.'#1'.'0000'.fixed
+          $fixed.file_version = $numericVersion
+          $fixed.product_version = $numericVersion
+          $info = $json.RT_VERSION.'#1'.'0000'.info.'0409'
+          $info.FileVersion = $versionString
+          $info.ProductVersion = $versionString
+          $json | ConvertTo-Json -Depth 10 | Set-Content cmd/moombox/winres/winres.json
+          Push-Location cmd/moombox
+          go-winres make --arch amd64
+          Pop-Location
+
       - name: Build Windows executable
         env:
           CGO_ENABLED: 0
