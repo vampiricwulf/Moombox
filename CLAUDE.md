@@ -55,7 +55,7 @@ The original TypeScript codebase is on the `abandoned-nodejs` branch. The local 
 - `moombox` — the original Python moombox
 - `chatterino7` — Twitch chat client (IRC, emotes, badges)
 
-The most important references are **yt-dlp**, **BgUtils**, and **ejs** — these directly affect YouTube/Twitch extraction, authentication, and cipher solving that Moombox reimplements in Go.
+The most important references are **yt-dlp**, **BgUtils**, **ejs**, and **chatterino7** — these directly affect YouTube/Twitch extraction, authentication, cipher solving, and Twitch chat (IRC, emotes, badges) that Moombox reimplements in Go.
 
 ### Updating references
 
