@@ -47,6 +47,7 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - **YouTube cipher decryption** — Native implementation of signature and n-parameter decryption via Goja
 - **Webhook notifications** — Notifications for stream events via any webhook-compatible service (Discord, Slack, ntfy, etc.)
 - **Single binary** — Compiles to a single executable with embedded web assets, no external runtime dependencies
+- **Built-in FFmpeg installer** — Install FFmpeg via Chocolatey or Winget directly from the setup flow, with UAC elevation support and script review for non-admin users
 
 ## Requirements
 
@@ -222,6 +223,11 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | POST | `/api/auth/login` | Authenticate with password |
 | POST | `/api/auth/set-password` | Set or change password |
 | GET | `/api/auth/status` | Check auth status |
+| GET | `/api/ffmpeg/check` | Check if FFmpeg is available |
+| POST | `/api/ffmpeg/install` | Install FFmpeg via package manager |
+| GET | `/api/update/status` | Check for available updates |
+| POST | `/api/update/apply` | Download and apply update |
+| GET | `/api/stats` | Get download statistics |
 
 WebSocket messages: `initial_state`, `jobs_update`, `job_update`, `check_timers`, `log`, `pong`
 

@@ -67,7 +67,7 @@ Runtime requires FFmpeg on PATH. CI: `.github/workflows/release.yml` builds Wind
 
 Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary, all code under `internal/`.
 
-### Process model (cmd/moombox/main.go, ~1950 lines)
+### Process model (cmd/moombox/main.go, ~1925 lines)
 
 Moombox uses a **launcher/supervisor pattern**. The binary checks `_MOOMBOX_CHILD` env var on startup:
 - **Without it** → launcher mode: spawns itself as a child, waits, respawns on exit code 42
@@ -177,6 +177,12 @@ Monitors fire `OnVideoFound`/`OnStreamFound` callbacks. These are closures set i
 ### CSRF protection
 `CSRFMiddleware` in `web/middleware.go` validates Origin/Referer headers on mutating requests. The TUI bypasses this via a shared secret: the web server generates a 16-byte random hex token at startup (`X-Internal-Token` header), passed to the TUI which injects it on every API call via a custom `http.RoundTripper`. Browsers cannot set custom headers cross-origin without CORS preflight (which the server doesn't grant).
 
+### FFmpeg install with UAC elevation
+The FFmpeg install process uses a two-phase flow for non-elevated processes. `PrepareInstall` checks `isElevated()` — if already elevated, runs `InstallFFmpeg` directly. If not, it generates a PowerShell script, stores it in `pendingInstalls` (keyed by random token, 5-minute TTL), and returns the script for user review. `ConfirmInstall` writes the script to a temp file, launches it via `ShellExecuteExW` with `runas` verb (UAC prompt), waits on the process handle, then reads a JSON result file. `RejectInstall` cleans up the pending entry. The elevation code in `ffmpeg_elevation_windows.go` uses the same `syscall.NewLazyDLL` pattern as `internal/disk/`.
+
+### API route prefix
+All REST endpoints use `/api/` prefix (no version number). Route registration and frontend fetch calls must stay in sync across Go route files and `web/public/` JS files.
+
 ### Panic recovery
 All spawned goroutines use inline `defer func() { if r := recover(); r != nil { ... } }()`. No shared helper — pattern is consistently inline. HTTP handlers are covered by `RecoveryMiddleware` in `web/server.go`. Database subscriber callbacks use `safeCallJobUpdate`/`safeCallJobsChange` wrappers.
 
@@ -186,6 +192,11 @@ Static assets live in `web/public/` and are embedded via `go:embed` in `web/embe
 
 - `app.js` — main SPA logic (jobs, logs, status bar, WebSocket, settings dialogs)
 - `modules/player.js` — video player with niconico-style chat overlay + sidebar chat, multi-segment playback with cross-segment seeking and trim
+- `modules/setup.js` — first-run wizard + FFmpeg overlay (install flow, UAC elevation, manual path)
+- `modules/settings.js` — settings dialog (config, channels, cookies, integrations)
+- `modules/trimmer.js` — trim clip creation UI
+- `modules/stats.js` — statistics dashboard
+- `modules/imports.js` — zip archive import UI
 - `modules/utils.js` — shared formatting helpers
 - `moombox.css` — all styles including mobile responsive rules
 - `login.html` — standalone auth page
