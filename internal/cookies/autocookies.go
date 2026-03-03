@@ -589,6 +589,9 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		return "", ctx.Err()
 	}
 
+	// Clean lock files again — the first Firefox visit leaves a fresh parent.lock
+	cleanFirefoxLockFiles(s.profileDir)
+
 	// Visit Twitch
 	cmd2 := exec.Command(browser.Path, "--screenshot", tempScreenshot, "-no-remote", "-profile", s.profileDir, twitchRefreshURL)
 	s.mu.Lock()
