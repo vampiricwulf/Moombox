@@ -18,12 +18,17 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - **VOD downloads** — Download regular videos and post-live DVR recordings with parallel segment fetching
 - **Resume on crash** — Periodic state saves allow resuming interrupted downloads without data loss
 - **Parallel downloads** — Process multiple streams simultaneously with configurable concurrency
+- **Quality monitoring** — Probes stream quality every 30 seconds during live downloads. If the resolution or framerate changes mid-stream, automatically muxes the current segment and starts a new one — no data lost, no mismatched frames
 
 ### Advanced Download Options
 - **Manual format selection** — Choose specific video and audio formats per download, or select "None" for video-only/audio-only
 - **Timestamp selection** — Download a specific time range of a stream (start/end time), with frame-accurate trimming via FFmpeg re-encode
 - **Post-download trimming** — Create trimmed clips from finished downloads with CRF-based encoding for optimal quality/size
 - **60fps support** — Prefers 60fps streams when available at the same resolution
+
+### Updates
+- **Auto-updater** — Checks GitHub for new releases and downloads updates in-place. Apply updates from the web dashboard or TUI — the app restarts automatically with the new version
+- **Launcher/supervisor** — A lightweight launcher process manages the app lifecycle. Config changes, updates, and setup wizard restarts are seamless — no terminal flicker, no process chain buildup
 
 ### Security
 - **HTTPS support** — Auto-generated self-signed certificates with dual-protocol (TLS + plain HTTP) on a single port
@@ -38,7 +43,9 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 ### Interfaces
 - **Terminal UI** — Full-screen TUI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) with mouse support, keyboard navigation, job management, settings editor, and live logs
 - **Web dashboard** — Real-time job monitoring at `localhost:774` (HTTPS when external) with video player, synchronized chat replay (Niconico-style flying overlay + sidebar), settings management, and zip import
-- **First-run wizard** — Built-in setup wizard in both TUI and web dashboard for initial configuration
+- **Mobile responsive** — Web dashboard adapts to tablets and phones with reorganized layouts and touch-friendly controls
+- **Statistics dashboard** — At-a-glance disk usage, total archive size, platform breakdown (YouTube vs Twitch), job counts, and activity metrics
+- **First-run wizard** — Built-in setup wizard in both TUI and web dashboard for initial configuration (quick mode or 8-step advanced walkthrough)
 - **Process restart** — Restart Moombox from the TUI or web dashboard when settings require it
 
 ### Integration
@@ -192,9 +199,11 @@ Available at `http://localhost:774` (auto-upgrades to HTTPS for external access)
 - **Archived tab** — Browse finished jobs older than `hide_finished_age_days`
 - **Player tab** — Replay archived videos with synchronized chat:
   - Niconico-style flying chat overlay (togglable)
-  - Sidebar chat panel with auto-scroll (togglable)
+  - Sidebar chat panel with auto-scroll and search (togglable)
   - Superchat highlighting and emoji support
+  - Multi-segment playback with cross-segment seeking for quality-split recordings
 - **Imports tab** — Upload `.zip` archives containing video + optional chat JSON for playback in the Player tab
+- **Stats tab** — Disk usage, archive size, platform breakdown, job counts, and recent activity
 - **Logs tab** — Live log viewer
 - **Settings** — General config, downloader settings, channel management (YouTube + Twitch), webhook notifications, password security, yt-dlp plugin installation, and auto-cookie setup
 
