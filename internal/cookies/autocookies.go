@@ -42,6 +42,9 @@ const (
 // Chromium lock files that prevent headless launch when a headed session was killed.
 var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"}
 
+// Firefox lock files that prevent launch when a previous session was force-killed.
+var firefoxLockFiles = []string{"parent.lock", ".parentlock"}
+
 // DetectedBrowser holds info about a detected browser.
 type DetectedBrowser struct {
 	Type string `json:"type"` // "firefox", "waterfox", "chrome", "brave", "opera", "edge"
@@ -498,6 +501,8 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 // --- Firefox flows ---
 
 func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url string) error {
+	cleanFirefoxLockFiles(s.profileDir)
+
 	// Write user.js to suppress first-run dialogs
 	if err := os.WriteFile(filepath.Join(s.profileDir, "user.js"), []byte(firefoxUserJS), 0o644); err != nil {
 		return fmt.Errorf("write user.js: %w", err)
@@ -565,6 +570,8 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 }
 
 func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, error) {
+	cleanFirefoxLockFiles(s.profileDir)
+
 	tempScreenshot := filepath.Join(s.profileDir, "refresh-screenshot.png")
 	defer os.Remove(tempScreenshot)
 
@@ -1486,6 +1493,12 @@ func getFreePort() (int, error) {
 
 func cleanChromiumLockFiles(profileDir string) {
 	for _, name := range chromiumLockFiles {
+		os.Remove(filepath.Join(profileDir, name))
+	}
+}
+
+func cleanFirefoxLockFiles(profileDir string) {
+	for _, name := range firefoxLockFiles {
 		os.Remove(filepath.Join(profileDir, name))
 	}
 }
