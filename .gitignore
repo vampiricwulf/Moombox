@@ -47,5 +47,6 @@ browser-profile/
 .env
 .env.*
 
-# Local reference repos
-references/
+# Local reference repos (keep the update script tracked)
+references/*/
+!references/update-all.sh
