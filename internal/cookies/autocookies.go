@@ -597,15 +597,21 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 	tempScreenshot := filepath.Join(s.profileDir, "refresh-screenshot.png")
 	defer os.Remove(tempScreenshot)
 
-	for _, platform := range s.refreshPlatforms() {
+	platforms := s.refreshPlatforms()
+	for i, platform := range platforms {
 		url := platformRefreshURLs[platform]
 
-		// Clean lock files before each launch — Firefox leaves parent.lock on exit
-		cleanFirefoxLockFiles(s.profileDir)
+		// Wait between launches so Firefox fully releases the profile
+		if i > 0 {
+			time.Sleep(30 * time.Second)
+		}
 
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+
+		// Clean lock files right before launch — Firefox leaves parent.lock on exit
+		cleanFirefoxLockFiles(s.profileDir)
 
 		cmd := exec.Command(browser.Path, "--new-instance", "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
 		s.mu.Lock()
@@ -1523,8 +1529,22 @@ func cleanFirefoxLockFiles(profileDir string) {
 }
 
 func runWithTimeout(cmd *exec.Cmd, timeoutMs int) error {
+	// Create a Job Object so all child processes (including reparented ones)
+	// are killed when we close the job handle.
+	job, _ := newProcessJob()
+	defer func() {
+		if job != nil {
+			job.close()
+		}
+	}()
+
 	if err := cmd.Start(); err != nil {
 		return err
+	}
+
+	// Assign immediately after start so children are tracked from the beginning
+	if job != nil {
+		job.assign(cmd.Process)
 	}
 
 	done := make(chan error, 1)
@@ -1534,12 +1554,13 @@ func runWithTimeout(cmd *exec.Cmd, timeoutMs int) error {
 	case err := <-done:
 		return err
 	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+		// Closing the job handle kills all processes in the job.
+		// Also try direct kill as a belt-and-suspenders approach.
 		killProcessTree(cmd.Process)
 		// Wait briefly for reap, but don't block forever if kill failed
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			// Last resort: direct process kill
 			if cmd.Process != nil {
 				cmd.Process.Kill()
 			}
