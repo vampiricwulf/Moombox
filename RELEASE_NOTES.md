@@ -1,3 +1,3 @@
-### Internal
+### Bug Fixes
 
-- Removed unreachable `.exe~` cleanup from updater — the launcher handles its own binary cleanup
+- Deferred `.exe~` cleanup process is now fully silent — use `CREATE_NO_WINDOW` flag and redirect all output to nul

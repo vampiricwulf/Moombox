@@ -43,7 +43,7 @@ import (
 )
 
 var (
-	version = "2.3.3"
+	version = "2.3.4"
 	commit  = ""
 )
 
@@ -1943,9 +1943,9 @@ func deferDeleteOldLauncher(exePath string) {
 	// non-interactive contexts). -n 3 ≈ 2 seconds, enough for the launcher
 	// to fully exit and release the file lock.
 	cleanup := exec.Command("cmd", "/C",
-		"ping", "127.0.0.1", "-n", "3", ">nul", "&",
-		"del", "/f", "/q", oldPath)
-	cleanup.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x00000008} // DETACHED_PROCESS
+		"ping", "127.0.0.1", "-n", "3", ">nul", "2>nul", "&",
+		"del", "/f", "/q", oldPath, ">nul", "2>nul")
+	cleanup.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000} // CREATE_NO_WINDOW
 	cleanup.Start() // fire and forget
 }
 
