@@ -177,12 +177,12 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	return nil
 }
 
-// CleanupOldBinary removes .old and .super binaries left over from previous
-// updates. The .old file is the standard leftover; .super is the launcher's
+// CleanupOldBinary removes .old and .exe~ binaries left over from previous
+// updates. The .old file is the standard leftover; .exe~ is the launcher's
 // renamed copy (Windows locks running executables, so the launcher renames
-// .old → .super to free the name for future updates).
+// .old → .exe~ to free the name for future updates).
 func (u *Updater) CleanupOldBinary() {
-	for _, suffix := range []string{".old", ".super"} {
+	for _, suffix := range []string{".old", "~"} {
 		path := u.exePath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {

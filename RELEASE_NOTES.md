@@ -1,4 +1,4 @@
 ### Improvements
 
-- Details panel now shows `[filtered]` indicator in the header when the description is hidden via `F`
-- Removed `R V` / `R U` chord hints from the Details version line to reduce clutter
+- Superseded launcher binary (`.exe~`) is now automatically deleted on exit via a deferred cleanup process, instead of waiting until the next launch
+- Renamed leftover binary suffix from `.super` to `.exe~` to match Go convention
