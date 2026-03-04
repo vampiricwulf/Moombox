@@ -532,7 +532,7 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 		return fmt.Errorf("write user.js: %w", err)
 	}
 
-	cmd := exec.Command(browser.Path, "-profile", s.profileDir, "-no-remote", url)
+	cmd := exec.Command(browser.Path, "--profile", s.profileDir, url)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start firefox: %w", err)
 	}
@@ -607,7 +607,7 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 			return "", ctx.Err()
 		}
 
-		cmd := exec.Command(browser.Path, "--screenshot", tempScreenshot, "-no-remote", "-profile", s.profileDir, url)
+		cmd := exec.Command(browser.Path, "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
 		s.mu.Lock()
 		s.refreshCmd = cmd
 		s.mu.Unlock()

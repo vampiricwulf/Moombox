@@ -1,8 +1,9 @@
+### Features
+
+- Shift+click the cookie refresh button in the web UI to trigger a full browser-based cookie refresh (requires auto-cookie acquisition enabled)
+
 ### Improvements
 
-- Refactored browser cookie refresh to iterate over active platforms instead of hardcoding YouTube + Twitch visits — only visits platforms that have cookies in the jar, skips entirely when none are present
-- Renamed `HasAuthCookies` to `HasYouTubeAuthCookies` on CookieJar for symmetry with existing `HasTwitchAuthCookies`, replaced all raw `GetCookie("auth-token")` checks with the proper method
-
-### Bug Fixes
-
-- Fixed Firefox "already running" error during auto-cookie refresh when both YouTube and Twitch cookies are configured — lock files are now cleaned between sequential Firefox launches
+- Removed deprecated `-no-remote` flag from Firefox commands — unnecessary with separate profiles since Firefox 67, officially removed in Firefox 131
+- Removed explicit `--headless` from Firefox screenshot command to avoid known hang bug when combined with `--screenshot` (which already implies headless)
+- Standardized Firefox flags to double-dash format (`--profile` instead of `-profile`)

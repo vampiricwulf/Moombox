@@ -37,6 +37,41 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		jsonResponse(rw, response)
 	})
 
+	// POST /api/cookies/auto-refresh — trigger headless browser cookie refresh
+	r.Post("/api/cookies/auto-refresh", func(rw http.ResponseWriter, req *http.Request) {
+		if autoCookieSvc == nil {
+			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		ok, err := autoCookieSvc.RefreshCookies(req.Context())
+		if err != nil {
+			jsonResponse(rw, map[string]any{"success": false, "error": err.Error()})
+			return
+		}
+
+		// Re-check auth status after browser refresh
+		refreshSvc.CheckNow(req.Context())
+		status := refreshSvc.GetStatus()
+
+		response := map[string]any{
+			"success": ok,
+			"cookieStatus": map[string]any{
+				"found":         status.HasYouTubeCookies,
+				"authenticated": status.YouTubeAuthenticated,
+			},
+			"twitchAuthStatus": map[string]any{
+				"authenticated": status.TwitchAuthenticated,
+			},
+		}
+		autoStatus := autoCookieSvc.GetStatus()
+		response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
+		if getActivePlatforms != nil {
+			response["activePlatforms"] = getActivePlatforms()
+		}
+		jsonResponse(rw, response)
+	})
+
 	// POST /api/cookies/auto-setup/start
 	r.Post("/api/cookies/auto-setup/start", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {

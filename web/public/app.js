@@ -231,10 +231,16 @@ class MoomboxApp {
       });
     }
 
-    // Refresh cookies button
+    // Refresh cookies button (shift+click triggers auto-cookie browser refresh)
     const refreshBtn = document.getElementById("btn-refresh-cookies");
     if (refreshBtn) {
-      refreshBtn.addEventListener("click", () => this.recheckCookies());
+      refreshBtn.addEventListener("click", (e) => {
+        if (e.shiftKey && this.config?.cookies?.auto_enabled) {
+          this.autoCookieRefresh();
+        } else {
+          this.recheckCookies();
+        }
+      });
     }
 
     // Files tab buttons
@@ -428,6 +434,36 @@ class MoomboxApp {
       }
     } catch (e) {
       this.showToast("Failed to recheck cookies: " + e.message, "danger");
+    } finally {
+      if (btn) btn.classList.remove("checking");
+    }
+  }
+
+  async autoCookieRefresh() {
+    const btn = document.getElementById("btn-refresh-cookies");
+    if (btn) btn.classList.add("checking");
+    this.showToast("Running browser cookie refresh...", "primary");
+
+    try {
+      const response = await fetch("/api/cookies/auto-refresh", { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && !data.error) {
+        if (data.cookieStatus) this.cookieStatus = data.cookieStatus;
+        if (data.twitchAuthStatus) this.twitchAuthStatus = data.twitchAuthStatus;
+        if (data.autoCookieReloginRequired) this.autoCookieReloginRequired = data.autoCookieReloginRequired;
+        if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
+        this.updateStatusBar();
+        this.showToast(
+          data.success
+            ? "Browser cookie refresh successful"
+            : "Browser cookie refresh completed — auth verification failed",
+          data.success ? "success" : "warning",
+        );
+      } else {
+        this.showToast(data.error || "Browser cookie refresh failed", "danger");
+      }
+    } catch (e) {
+      this.showToast("Browser cookie refresh failed: " + e.message, "danger");
     } finally {
       if (btn) btn.classList.remove("checking");
     }
