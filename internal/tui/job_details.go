@@ -602,6 +602,9 @@ func (m *JobDetailsModel) View() string {
 	var header string
 	if m.job != nil {
 		header = titleStyle.Render("Details")
+		if m.hideDescription {
+			header += " " + DimStyle.Render("[filtered]")
+		}
 		// Scroll percentage indicator (match TS [XX%])
 		// Only append if it fits within contentW to prevent header wrapping
 		if ms := m.maxScroll(); ms > 0 {
@@ -620,11 +623,9 @@ func (m *JobDetailsModel) View() string {
 		versionText := "v" + m.version
 		if m.updateInfo != nil {
 			updateStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
-			versionText = updateStyle.Render("v"+m.version+" ⬆ Update!")
-			versionText += " " + DimStyle.Render("R U")
+			versionText = updateStyle.Render("v" + m.version + " ⬆ Update!")
 		} else {
 			versionText = DimStyle.Render(versionText)
-			versionText += " " + DimStyle.Render("R V")
 		}
 		headerW := lipgloss.Width(header)
 		versionW := lipgloss.Width(versionText)
