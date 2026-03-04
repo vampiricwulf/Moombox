@@ -603,7 +603,8 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 
 		// Wait between launches so Firefox fully releases the profile
 		if i > 0 {
-			time.Sleep(30 * time.Second)
+			s.logger.Info("waiting 5s before next Firefox launch", "platform", platform)
+			time.Sleep(5 * time.Second)
 		}
 
 		if ctx.Err() != nil {
@@ -613,12 +614,16 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		// Clean lock files right before launch — Firefox leaves parent.lock on exit
 		cleanFirefoxLockFiles(s.profileDir)
 
+		s.logger.Info("launching Firefox for cookie refresh", "platform", platform, "url", url)
 		cmd := exec.Command(browser.Path, "--new-instance", "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
 		s.mu.Lock()
 		s.refreshCmd = cmd
 		s.mu.Unlock()
-		if err := runWithTimeout(cmd, processTimeoutMs); err != nil {
-			s.logger.Warn("firefox "+platform+" refresh failed", "err", err)
+		startTime := time.Now()
+		if err := runWithTimeout(cmd, processTimeoutMs, s.logger); err != nil {
+			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", time.Since(startTime).Round(time.Millisecond))
+		} else {
+			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", time.Since(startTime).Round(time.Millisecond))
 		}
 	}
 
@@ -1528,12 +1533,22 @@ func cleanFirefoxLockFiles(profileDir string) {
 	}
 }
 
-func runWithTimeout(cmd *exec.Cmd, timeoutMs int) error {
+func runWithTimeout(cmd *exec.Cmd, timeoutMs int, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+}) error {
 	// Create a Job Object so all child processes (including reparented ones)
 	// are killed when we close the job handle.
-	job, _ := newProcessJob()
+	job, jobErr := newProcessJob()
+	if jobErr != nil {
+		logger.Warn("failed to create job object", "err", jobErr)
+	} else if job != nil {
+		logger.Debug("created job object for process tracking")
+	}
 	defer func() {
 		if job != nil {
+			logger.Debug("closing job object (killing all tracked processes)")
 			job.close()
 		}
 	}()
@@ -1541,10 +1556,15 @@ func runWithTimeout(cmd *exec.Cmd, timeoutMs int) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	logger.Debug("process started", "pid", cmd.Process.Pid)
 
 	// Assign immediately after start so children are tracked from the beginning
 	if job != nil {
-		job.assign(cmd.Process)
+		if err := job.assign(cmd.Process); err != nil {
+			logger.Warn("failed to assign process to job object", "pid", cmd.Process.Pid, "err", err)
+		} else {
+			logger.Debug("assigned process to job object", "pid", cmd.Process.Pid)
+		}
 	}
 
 	done := make(chan error, 1)
@@ -1552,15 +1572,19 @@ func runWithTimeout(cmd *exec.Cmd, timeoutMs int) error {
 
 	select {
 	case err := <-done:
+		logger.Debug("process exited normally", "pid", cmd.Process.Pid, "err", err)
 		return err
 	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+		logger.Warn("process timed out, killing", "pid", cmd.Process.Pid, "timeoutMs", timeoutMs)
 		// Closing the job handle kills all processes in the job.
 		// Also try direct kill as a belt-and-suspenders approach.
 		killProcessTree(cmd.Process)
 		// Wait briefly for reap, but don't block forever if kill failed
 		select {
 		case <-done:
+			logger.Debug("process reaped after kill", "pid", cmd.Process.Pid)
 		case <-time.After(5 * time.Second):
+			logger.Warn("process did not exit after kill, forcing", "pid", cmd.Process.Pid)
 			if cmd.Process != nil {
 				cmd.Process.Kill()
 			}
