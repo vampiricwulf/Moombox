@@ -34,7 +34,7 @@ func (a *Auth) GenerateAuthorizationHeader() string {
 
 // HasAuthCookies returns true if valid authentication cookies are present.
 func (a *Auth) HasAuthCookies() bool {
-	return a.jar.HasAuthCookies()
+	return a.jar.HasYouTubeAuthCookies()
 }
 
 // GetCookieHeader returns the Cookie header string.
@@ -89,7 +89,7 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 		headers["X-Origin"] = origin
 	}
 
-	if a.jar.HasAuthCookies() {
+	if a.jar.HasYouTubeAuthCookies() {
 		headers["X-Youtube-Bootstrap-Logged-In"] = "true"
 	}
 

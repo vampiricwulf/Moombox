@@ -147,8 +147,8 @@ func (j *CookieJar) GetCookieHeader() string {
 	return strings.Join(pairs, "; ")
 }
 
-// HasAuthCookies returns true if SAPISID (or __Secure-3PAPISID) AND LOGIN_INFO are present.
-func (j *CookieJar) HasAuthCookies() bool {
+// HasYouTubeAuthCookies returns true if SAPISID (or __Secure-3PAPISID) AND LOGIN_INFO are present.
+func (j *CookieJar) HasYouTubeAuthCookies() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 

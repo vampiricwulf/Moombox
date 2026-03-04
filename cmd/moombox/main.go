@@ -43,7 +43,7 @@ import (
 )
 
 var (
-	version = "2.2.5"
+	version = "2.2.6"
 	commit  = ""
 )
 
@@ -235,11 +235,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		if err := jar.Load(cfg.Cookies.CookieFile); err != nil {
 			log.Warn("Failed to load cookies", slog.String("error", err.Error()))
 		} else {
-			log.Info("Cookies loaded", slog.Bool("hasAuth", jar.HasAuthCookies()))
+			log.Info("Cookies loaded", slog.Bool("hasAuth", jar.HasYouTubeAuthCookies()))
 			// Auto-detect platforms from cookie file when not already set
 			if len(cfg.Cookies.Platforms) == 0 && len(cfg.Cookies.ActivePlatforms) == 0 {
 				var detected []string
-				if jar.HasAuthCookies() {
+				if jar.HasYouTubeAuthCookies() {
 					detected = append(detected, "youtube")
 				}
 				if jar.HasTwitchAuthCookies() {

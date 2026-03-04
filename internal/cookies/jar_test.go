@@ -46,8 +46,8 @@ func TestLoadCookies(t *testing.T) {
 	}
 
 	// Has auth
-	if !jar.HasAuthCookies() {
-		t.Error("expected HasAuthCookies to be true")
+	if !jar.HasYouTubeAuthCookies() {
+		t.Error("expected HasYouTubeAuthCookies to be true")
 	}
 
 	// HttpOnly_ cookies should be parsed
@@ -109,7 +109,7 @@ func TestGenerateAuthorizationHeader(t *testing.T) {
 
 func TestEmptyJar(t *testing.T) {
 	jar := NewCookieJar()
-	if jar.HasAuthCookies() {
+	if jar.HasYouTubeAuthCookies() {
 		t.Error("empty jar should not have auth cookies")
 	}
 	if jar.GetCookieHeader() != "" {

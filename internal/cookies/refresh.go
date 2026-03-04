@@ -201,7 +201,7 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 	rs.status = AuthStatus{
 		YouTubeAuthenticated: ytAuth,
 		TwitchAuthenticated:  twAuth,
-		HasYouTubeCookies:    rs.jar.HasAuthCookies(),
+		HasYouTubeCookies:    rs.jar.HasYouTubeAuthCookies(),
 		LastCheck:            time.Now().UTC().Format(time.RFC3339),
 		YouTubeError:         ytErrStr,
 		TwitchError:          twErrStr,
@@ -258,7 +258,7 @@ func setYouTubeHeaders(req *http.Request, cookieHeader, origin, authHeader strin
 }
 
 func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
-	if !rs.jar.HasAuthCookies() {
+	if !rs.jar.HasYouTubeAuthCookies() {
 		return false, nil // No auth cookies
 	}
 
@@ -341,7 +341,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 // YouTube auth status and refresh session cookies from Set-Cookie headers.
 // This avoids the redundancy of separate check + refresh requests.
 func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, error) {
-	if !rs.jar.HasAuthCookies() {
+	if !rs.jar.HasYouTubeAuthCookies() {
 		return false, nil
 	}
 
@@ -566,10 +566,10 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 }
 
 func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
-	token := rs.jar.GetCookie("auth-token")
-	if token == "" {
+	if !rs.jar.HasTwitchAuthCookies() {
 		return false, nil // No auth token
 	}
+	token := rs.jar.GetCookie("auth-token")
 
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()

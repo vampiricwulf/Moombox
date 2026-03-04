@@ -39,6 +39,12 @@ const (
 	cdpPollTimeoutMs  = 15_000
 )
 
+// platformRefreshURLs maps platform names to their refresh URLs.
+var platformRefreshURLs = map[string]string{
+	"youtube": refreshURL,
+	"twitch":  twitchRefreshURL,
+}
+
 // Chromium lock files that prevent headless launch when a headed session was killed.
 var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"}
 
@@ -128,6 +134,19 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 		jar:        jar,
 		logger:     logger,
 	}
+}
+
+// refreshPlatforms returns the platforms that have cookies in the jar and need refreshing.
+// Order is stable: YouTube first, then Twitch.
+func (s *AutoCookieService) refreshPlatforms() []string {
+	var platforms []string
+	if s.jar.HasYouTubeAuthCookies() {
+		platforms = append(platforms, "youtube")
+	}
+	if s.jar.HasTwitchAuthCookies() {
+		platforms = append(platforms, "twitch")
+	}
+	return platforms
 }
 
 // GetStatus returns the current auto-cookie status.
@@ -260,8 +279,8 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	}
 
 	// Validate: first check cookie presence, then verify via API if callbacks available
-	ytAuth = s.jar.HasAuthCookies()
-	twAuth = s.jar.GetCookie("auth-token") != ""
+	ytAuth = s.jar.HasYouTubeAuthCookies()
+	twAuth = s.jar.HasTwitchAuthCookies()
 
 	// Real API verification (more reliable than just checking cookie presence)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -360,6 +379,11 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("profile not found")
 	}
 
+	if len(s.refreshPlatforms()) == 0 {
+		s.logger.Debug("skipping cookie refresh — no platforms have cookies")
+		return false, nil
+	}
+
 	s.logger.Info("refreshing cookies via " + browser.Type)
 
 	var netscapeCookies string
@@ -399,20 +423,20 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	ytAuth := false
 	twAuth := false
 
-	if s.jar.HasAuthCookies() && s.VerifyYouTubeAuth != nil {
+	if s.jar.HasYouTubeAuthCookies() && s.VerifyYouTubeAuth != nil {
 		if verified, err := s.VerifyYouTubeAuth(verifyCtx); err == nil {
 			ytAuth = verified
 		}
 	}
-	if s.jar.GetCookie("auth-token") != "" && s.VerifyTwitchAuth != nil {
+	if s.jar.HasTwitchAuthCookies() && s.VerifyTwitchAuth != nil {
 		if verified, err := s.VerifyTwitchAuth(verifyCtx); err == nil {
 			twAuth = verified
 		}
 	}
 
 	// Update re-login flags based on verification results
-	ytHasCookies := s.jar.HasAuthCookies()
-	twHasCookies := s.jar.GetCookie("auth-token") != ""
+	ytHasCookies := s.jar.HasYouTubeAuthCookies()
+	twHasCookies := s.jar.HasTwitchAuthCookies()
 
 	s.mu.Lock()
 	if !ytAuth && ytHasCookies {
@@ -570,35 +594,26 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 }
 
 func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, error) {
-	cleanFirefoxLockFiles(s.profileDir)
-
 	tempScreenshot := filepath.Join(s.profileDir, "refresh-screenshot.png")
 	defer os.Remove(tempScreenshot)
 
-	// Visit YouTube
-	cmd1 := exec.Command(browser.Path, "--screenshot", tempScreenshot, "-no-remote", "-profile", s.profileDir, refreshURL)
-	s.mu.Lock()
-	s.refreshCmd = cmd1
-	s.mu.Unlock()
-	if err := runWithTimeout(cmd1, processTimeoutMs); err != nil {
-		s.logger.Warn("firefox youtube refresh failed", "err", err)
-	}
+	for _, platform := range s.refreshPlatforms() {
+		url := platformRefreshURLs[platform]
 
-	// Check if cancelled before spawning second browser
-	if ctx.Err() != nil {
-		return "", ctx.Err()
-	}
+		// Clean lock files before each launch — Firefox leaves parent.lock on exit
+		cleanFirefoxLockFiles(s.profileDir)
 
-	// Clean lock files again — the first Firefox visit leaves a fresh parent.lock
-	cleanFirefoxLockFiles(s.profileDir)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 
-	// Visit Twitch
-	cmd2 := exec.Command(browser.Path, "--screenshot", tempScreenshot, "-no-remote", "-profile", s.profileDir, twitchRefreshURL)
-	s.mu.Lock()
-	s.refreshCmd = cmd2
-	s.mu.Unlock()
-	if err := runWithTimeout(cmd2, processTimeoutMs); err != nil {
-		s.logger.Warn("firefox twitch refresh failed", "err", err)
+		cmd := exec.Command(browser.Path, "--screenshot", tempScreenshot, "-no-remote", "-profile", s.profileDir, url)
+		s.mu.Lock()
+		s.refreshCmd = cmd
+		s.mu.Unlock()
+		if err := runWithTimeout(cmd, processTimeoutMs); err != nil {
+			s.logger.Warn("firefox "+platform+" refresh failed", "err", err)
+		}
 	}
 
 	return readFirefoxCookies(s.profileDir)
@@ -872,9 +887,10 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		return "", err
 	}
 
-	// Navigate to YouTube and Twitch (waits for page load, matching TS)
-	cdpNavigate(cdpCtx, port, refreshURL)
-	cdpNavigate(cdpCtx, port, twitchRefreshURL)
+	// Navigate to each active platform
+	for _, platform := range s.refreshPlatforms() {
+		cdpNavigate(cdpCtx, port, platformRefreshURLs[platform])
+	}
 
 	// Extract cookies
 	netscapeCookies, err := cdpGetCookiesAsNetscape(cdpCtx, port)
