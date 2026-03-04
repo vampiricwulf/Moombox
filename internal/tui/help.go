@@ -17,49 +17,57 @@ type helpKey struct {
 	desc string
 }
 
-var globalKeys = helpSection{
-	title: "Global",
+var actionKeys = helpSection{
+	title: "Action (A)",
 	keys: []helpKey{
-		{"Tab", "Cycle focus: Tasks → Details → Logs"},
-		{"`", "Open settings panel"},
-		{"~", "Browse orphaned files"},
-		{"W", "Open web dashboard in browser"},
-		{"?", "Toggle this help overlay"},
-		{"Q / Ctrl+C", "Quit"},
+		{"A A", "Add video"},
+		{"A R", "Retry failed/cancelled job"},
+		{"A C C", "Cancel active job (confirm)"},
+		{"A D D", "Delete job (confirm)"},
+		{"A T", "Trim finished video"},
+		{"A O", "Browse orphaned files"},
 	},
 }
 
-var taskKeys = helpSection{
-	title: "Tasks Panel",
+var requestKeys = helpSection{
+	title: "Request (R)",
 	keys: []helpKey{
-		{"↑/↓", "Select previous/next task"},
-		{"A", "Add video by URL or ID (Tab: cycle mode)"},
-		{"T", "Trim finished video"},
-		{"C", "Cancel selected job"},
-		{"R", "Retry failed/cancelled job"},
-		{"D", "Delete job (press twice to confirm)"},
-		{"F", "Cycle status filter"},
-		{"O", "Open output folder (finished jobs)"},
-		{"Enter", "Expand/collapse archived jobs"},
+		{"R C", "Recheck cookie authentication"},
+		{"R F", "Force browser cookie refresh"},
+		{"R V", "Check for updates"},
+		{"R U", "Apply pending update"},
+		{"R P P", "Restart program (confirm)"},
 	},
 }
 
-var detailKeys = helpSection{
-	title: "Details Panel",
+var openKeys = helpSection{
+	title: "Open (O)",
 	keys: []helpKey{
-		{"↑/↓", "Scroll details up/down"},
-		{"U U", "Check for updates"},
+		{"O F", "Open output/staging folder"},
+		{"O S", "Open stream page in browser"},
+		{"O W", "Open web dashboard"},
 	},
 }
 
-var logKeys = helpSection{
-	title: "Logs Panel",
+var singleKeys = helpSection{
+	title: "Quick Keys",
 	keys: []helpKey{
-		{"↑/↓", "Scroll logs up/down"},
-		{"PgUp/PgDn", "Page up/down"},
-		{"L", "Cycle log level filter"},
-		{"", "Auto-scroll pauses when scrolling up"},
-		{"", "Resume by scrolling to bottom"},
+		{"F", "Filter (panel-sensitive)"},
+		{"M", "Action menu"},
+		{"Q Q", "Quit program"},
+		{"Ctrl+C", "Quit immediately"},
+		{"Tab", "Cycle panel focus"},
+		{"`", "Open settings"},
+		{"?", "Toggle help"},
+	},
+}
+
+var navigationKeys = helpSection{
+	title: "Navigation",
+	keys: []helpKey{
+		{"↑/↓", "Select / Scroll"},
+		{"PgUp/PgDn", "Page scroll (Logs)"},
+		{"Enter", "Expand/collapse archives"},
 	},
 }
 
@@ -77,7 +85,6 @@ type HelpModel struct {
 	scrollOffset int
 	width        int
 	height       int
-	activePanel  FocusPanel
 }
 
 // NewHelpModel creates a new help model.
@@ -100,11 +107,6 @@ func (m *HelpModel) IsVisible() bool {
 func (m *HelpModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-}
-
-// SetActivePanel sets which panel is active (for ordering sections).
-func (m *HelpModel) SetActivePanel(panel FocusPanel) {
-	m.activePanel = panel
 }
 
 // ScrollUp scrolls the help overlay up.
@@ -141,11 +143,7 @@ func (m *HelpModel) View() string {
 		if i > 0 {
 			allLines = append(allLines, "")
 		}
-		title := sec.title
-		if m.isActiveSection(sec.title) {
-			title += " [active]"
-		}
-		allLines = append(allLines, HeaderStyle.Render(title))
+		allLines = append(allLines, HeaderStyle.Render(sec.title))
 		for _, k := range sec.keys {
 			// Yellow keys (match TS), 14-char padding (match TS padEnd(14))
 			keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Width(14)
@@ -212,32 +210,12 @@ func (m *HelpModel) View() string {
 }
 
 func (m *HelpModel) orderedSections() []helpSection {
-	// Match TS: Global first, then active panel's section moved before Global
-	var sections []helpSection
-
-	switch m.activePanel {
-	case PanelTasks:
-		sections = append(sections, taskKeys, globalKeys, detailKeys, logKeys)
-	case PanelDetails:
-		sections = append(sections, detailKeys, globalKeys, taskKeys, logKeys)
-	case PanelLogs:
-		sections = append(sections, logKeys, globalKeys, taskKeys, detailKeys)
-	default:
-		sections = append(sections, globalKeys, taskKeys, detailKeys, logKeys)
+	return []helpSection{
+		actionKeys,
+		requestKeys,
+		openKeys,
+		singleKeys,
+		navigationKeys,
+		mouseKeys,
 	}
-
-	sections = append(sections, mouseKeys)
-	return sections
-}
-
-func (m *HelpModel) isActiveSection(title string) bool {
-	switch m.activePanel {
-	case PanelTasks:
-		return title == "Tasks Panel"
-	case PanelDetails:
-		return title == "Details Panel"
-	case PanelLogs:
-		return title == "Logs Panel"
-	}
-	return false
 }

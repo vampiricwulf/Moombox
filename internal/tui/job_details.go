@@ -17,11 +17,12 @@ const labelWidth = 14
 
 // JobDetailsModel renders details for a selected job.
 type JobDetailsModel struct {
-	job           *database.Job
-	scrollOffset  int
-	width, height int
-	focused       bool
-	rows          []detailRow
+	job             *database.Job
+	scrollOffset    int
+	width, height   int
+	focused         bool
+	rows            []detailRow
+	hideDescription bool
 
 	// Marquee for scrolling the title value when it overflows.
 	marquee Marquee
@@ -115,6 +116,12 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 // SetFocused sets the focus state.
 func (m *JobDetailsModel) SetFocused(f bool) {
 	m.focused = f
+}
+
+// ToggleDescription toggles the description section visibility.
+func (m *JobDetailsModel) ToggleDescription() {
+	m.hideDescription = !m.hideDescription
+	m.buildRows()
 }
 
 // ScrollUp scrolls the detail view up.
@@ -442,7 +449,7 @@ func (m *JobDetailsModel) buildRows() {
 	}
 
 	// === Description ===
-	if j.Description != "" {
+	if j.Description != "" && !m.hideDescription {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Description"})
 		// Match TS: wrap to value column width (contentWidth - 14), not full width
@@ -614,14 +621,10 @@ func (m *JobDetailsModel) View() string {
 		if m.updateInfo != nil {
 			updateStyle := lipgloss.NewStyle().Foreground(ColorGreen).Bold(true)
 			versionText = updateStyle.Render("v"+m.version+" ⬆ Update!")
-			if m.focused {
-				versionText += " " + DimStyle.Render("UU to update")
-			}
+			versionText += " " + DimStyle.Render("R U")
 		} else {
 			versionText = DimStyle.Render(versionText)
-			if m.focused {
-				versionText += " " + DimStyle.Render("UU to check")
-			}
+			versionText += " " + DimStyle.Render("R V")
 		}
 		headerW := lipgloss.Width(header)
 		versionW := lipgloss.Width(versionText)

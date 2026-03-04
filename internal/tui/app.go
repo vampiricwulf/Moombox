@@ -117,6 +117,16 @@ type (
 		Err string
 	}
 
+	// Async results for cookie refresh
+	cookieRecheckResultMsg struct {
+		YouTubeAuth bool
+		TwitchAuth  bool
+	}
+	cookieForceRefreshResultMsg struct {
+		Success bool
+		Err     error
+	}
+
 	// Async results for channel URL resolution
 	channelResolvedMsg struct {
 		ID       string
@@ -125,6 +135,14 @@ type (
 		Err      error
 	}
 )
+
+// chordState tracks the two-key chord system state machine.
+type chordState struct {
+	prefix     string    // "a", "r", "o", "q" or ""
+	prefixTime time.Time // when prefix was pressed
+	action     string    // second key (for confirm step), empty if waiting
+	actionTime time.Time // when confirm prompt shown
+}
 
 // App is the root BubbleTea model.
 type App struct {
@@ -154,10 +172,11 @@ type App struct {
 	detailRegion PanelRegion
 	logRegion    PanelRegion
 
-	// Confirmation state
-	deleteConfirmID string
-	cancelConfirmID string
-	confirmTimer    time.Time
+	// Chord state machine
+	chord chordState
+
+	// Action menu (command palette)
+	actionMenu *ActionMenuModel
 
 	// Feedback message (auto-clears after 3s)
 	feedbackMsg   string
@@ -177,7 +196,6 @@ type App struct {
 
 	// Update status
 	updateAvailable *UpdateStatusMsg
-	lastUPress      time.Time
 	version         string
 
 	// BubbleTea program reference (set by Run, used by QuitTUI)
@@ -213,6 +231,10 @@ type App struct {
 	OnCheckUpdate func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
 	OnApplyUpdate func(version string) string      // returns error string (empty on success, process exits)
 
+	// Cookie refresh callbacks
+	OnRecheckCookies      func() (ytAuth bool, twAuth bool)
+	OnForceRefreshCookies func() (ok bool, err error) // nil if auto-cookies not configured
+
 	// FFmpeg check callbacks
 	OnCheckFFmpeg    func(path string) (bool, string, string)                                    // check if ffmpeg path is valid → (valid, version, warning)
 	OnCheckPrereqs   func() (bool, bool)                                                         // returns (chocoAvail, wingetAvail)
@@ -243,6 +265,7 @@ func NewApp() *App {
 		setupWiz:      NewSetupWizardModel(),
 		settings:      NewSettingsModel(),
 		ffmpegCheck:   NewFFmpegCheckModel(),
+		actionMenu:    NewActionMenuModel(),
 		progressStore: ps,
 		statusMap:     make(map[string]database.JobStatus),
 	}
@@ -460,16 +483,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tickMsg:
-		// Confirmation timeout (A7)
-		if !a.confirmTimer.IsZero() && time.Now().After(a.confirmTimer) {
-			if a.deleteConfirmID != "" {
-				a.setFeedback("Delete cancelled")
-			} else if a.cancelConfirmID != "" {
-				a.setFeedback("Cancel dismissed")
+		// Chord timeout
+		if a.chord.prefix != "" {
+			now := time.Now()
+			if a.chord.action != "" && now.After(a.chord.actionTime.Add(3*time.Second)) {
+				a.chord = chordState{}
+			} else if a.chord.action == "" && now.After(a.chord.prefixTime.Add(3*time.Second)) {
+				a.chord = chordState{}
 			}
-			a.deleteConfirmID = ""
-			a.cancelConfirmID = ""
-			a.confirmTimer = time.Time{}
 		}
 		// Feedback message timeout
 		if !a.feedbackTimer.IsZero() && time.Now().After(a.feedbackTimer) {
@@ -527,6 +548,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.taskList.SetJobs(msg.Jobs)
 		a.statusBar.SetJobs(msg.Jobs)
+		a.actionMenu.SetJobs(msg.Jobs)
 		a.updateSelectedJob()
 		return a, tea.Batch(a.updateTerminalTitle(), a.listenForUpdates())
 
@@ -572,7 +594,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.Info != nil {
 			a.updateAvailable = msg.Info
 			a.details.updateInfo = msg.Info
-			a.setFeedback(fmt.Sprintf("Update available: %s — press U U to install", msg.Info.TagName))
+			a.setFeedback(fmt.Sprintf("Update available: %s — press R U to install", msg.Info.TagName))
 		} else {
 			a.setFeedback("Already up to date")
 		}
@@ -583,6 +605,39 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setFeedback("Update failed: " + msg.Err)
 		}
 		// On success, the process is already exiting (QuitTUI was called)
+		return a, nil
+
+	case cookieRecheckResultMsg:
+		var parts []string
+		if a.statusBar.ytActive {
+			if msg.YouTubeAuth {
+				parts = append(parts, "YouTube OK")
+			} else {
+				parts = append(parts, "YouTube not authenticated")
+			}
+		}
+		if a.statusBar.twActive {
+			if msg.TwitchAuth {
+				parts = append(parts, "Twitch OK")
+			} else {
+				parts = append(parts, "Twitch not authenticated")
+			}
+		}
+		if len(parts) == 0 {
+			a.setFeedback("Cookies: no platforms configured")
+		} else {
+			a.setFeedback("Cookies: " + strings.Join(parts, ", "))
+		}
+		return a, nil
+
+	case cookieForceRefreshResultMsg:
+		if msg.Err != nil {
+			a.setFeedback("Browser cookie refresh failed: " + msg.Err.Error())
+		} else if msg.Success {
+			a.setFeedback("Browser cookie refresh successful")
+		} else {
+			a.setFeedback("Browser cookie refresh: no cookies acquired")
+		}
 		return a, nil
 
 	case addVideoResultMsg:
@@ -837,6 +892,19 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// Action menu intercepts
+	if a.actionMenu.IsVisible() {
+		action := a.actionMenu.HandleKey(key)
+		if action == "close" {
+			return a, nil
+		}
+		if action != "" {
+			a.actionMenu.Close()
+			return a.dispatchMenuAction(action)
+		}
+		return a, nil
+	}
+
 	// Dialog intercepts
 	if a.addVideo.IsVisible() {
 		action, data := a.addVideo.HandleKey(key)
@@ -889,76 +957,27 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		key = strings.ToLower(key)
 	}
 
-	// U-U chord: apply update (if available) or check for updates
-	if key == "u" {
-		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
-			if !a.lastUPress.IsZero() && time.Since(a.lastUPress) < 3*time.Second {
-				a.lastUPress = time.Time{}
-				a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
-				ver := a.updateAvailable.Version
-				return a, func() tea.Msg {
-					errStr := a.OnApplyUpdate(ver)
-					return updateApplyResultMsg{Err: errStr}
-				}
-			}
-			a.lastUPress = time.Now()
-			a.setFeedback(fmt.Sprintf("Press U again within 3s to update to %s", a.updateAvailable.TagName))
-			return a, nil
-		}
-		if a.OnCheckUpdate != nil && a.focusedPanel == PanelDetails {
-			if !a.lastUPress.IsZero() && time.Since(a.lastUPress) < 3*time.Second {
-				a.lastUPress = time.Time{}
-				a.setFeedback("Checking for updates...")
-				return a, func() tea.Msg {
-					info, err := a.OnCheckUpdate()
-					if err != nil {
-						return updateCheckResultMsg{Err: err.Error()}
-					}
-					return updateCheckResultMsg{Info: info}
-				}
-			}
-			a.lastUPress = time.Now()
-			a.setFeedback("Press U again within 3s to check for updates")
-			return a, nil
-		}
-	}
-	if key != "u" {
-		a.lastUPress = time.Time{}
-	}
-
-	// Clear confirmations on any non-matching key (A9)
-	if a.deleteConfirmID != "" && key != "d" {
-		a.deleteConfirmID = ""
-		a.confirmTimer = time.Time{}
-	}
-	if a.cancelConfirmID != "" && key != "c" {
-		a.cancelConfirmID = ""
-		a.confirmTimer = time.Time{}
-	}
-
-	// Global keys
-	switch key {
-	case keyQ, keyCtrlC:
+	// Ctrl+C: immediate quit (bypass chord)
+	if key == keyCtrlC {
 		return a, tea.Quit
+	}
+
+	// Chord system
+	if model, cmd, handled := a.handleChord(key); handled {
+		return model, cmd
+	}
+
+	// Single-press keys
+	switch key {
+	case "f":
+		a.handleFilter()
+		return a, nil
+	case "m":
+		a.actionMenu.SetSize(a.width, a.height)
+		a.actionMenu.Open(a.buildMenuItems())
+		return a, nil
 	case "?":
-		a.help.SetActivePanel(a.focusedPanel)
 		a.help.Toggle()
-		// Clear confirmations when opening help (match TS)
-		a.deleteConfirmID = ""
-		a.cancelConfirmID = ""
-		a.confirmTimer = time.Time{}
-		return a, nil
-	case keyTab:
-		a.cycleFocus()
-		return a, nil
-	case "w":
-		scheme := "http"
-		if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
-			scheme = "https"
-		}
-		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
-		a.setFeedback(fmt.Sprintf("Opening: %s", url))
-		openBrowser(url)
 		return a, nil
 	case "`":
 		if a.cfg != nil {
@@ -970,13 +989,12 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.settings.Open(a.cfg)
 		}
 		return a, nil
-	case "~":
-		a.filesDlg.SetSize(a.width, a.height)
-		a.filesDlg.Open()
-		return a, a.fetchOrphansCmd()
+	case keyTab:
+		a.cycleFocus()
+		return a, nil
 	}
 
-	// Panel-specific keys
+	// Panel navigation
 	switch a.focusedPanel {
 	case PanelTasks:
 		return a.handleTaskKey(key)
@@ -997,75 +1015,9 @@ func (a *App) handleTaskKey(key string) (tea.Model, tea.Cmd) {
 	case keyDown:
 		a.taskList.MoveDown()
 		a.updateSelectedJob()
-	case "a":
-		a.feedbackMsg = "" // match TS: clear feedback when opening add dialog
-		a.addVideo.SetSize(a.width, a.height)
-		a.addVideo.Open()
-	case "f":
-		a.taskList.CycleFilter()
 	case keyEnter:
 		if a.taskList.SelectedIsDivider() {
 			a.taskList.ToggleArchive()
-		}
-	case "d":
-		a.handleDelete()
-	case "c":
-		a.handleCancel()
-	case "r":
-		if job := a.taskList.SelectedJob(); job != nil && a.OnRetryJob != nil {
-			if job.Status == database.StatusError || job.Status == database.StatusCancelled || job.Status == database.StatusCookies {
-				a.OnRetryJob(job.ID)
-			}
-		}
-	case "o":
-		if job := a.taskList.SelectedJob(); job != nil && a.OnOpenFolder != nil {
-			switch job.Status {
-			case database.StatusFinished:
-				if job.OutputFile != "" {
-					a.OnOpenFolder(job.ID)
-					a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
-				}
-			case database.StatusUpcoming, database.StatusLive,
-				database.StatusDownloading, database.StatusMuxing:
-				a.OnOpenFolder(job.ID)
-				a.setFeedback(fmt.Sprintf("Opening staging folder for: %s", job.Title))
-			}
-		}
-	case "t":
-		if job := a.taskList.SelectedJob(); job != nil {
-			if job.Status == database.StatusFinished && job.OutputFile != "" {
-				a.trimDlg.SetSize(a.width, a.height)
-				a.trimDlg.Open(job.ID, job.Title)
-				// Provide job metadata for estimated size calculation
-				var lenSec float64
-				var fSize int64
-				if job.LengthSeconds != nil {
-					lenSec = float64(*job.LengthSeconds)
-				}
-				if job.FileSize != nil {
-					fSize = *job.FileSize
-				}
-				a.trimDlg.SetJobMetadata(lenSec, fSize)
-				// Provide existing trims for delete mode
-				var trimInfos []TrimInfo
-				for _, tr := range job.Trims {
-					var fs int64
-					if tr.FileSize != nil {
-						fs = *tr.FileSize
-					}
-					trimInfos = append(trimInfos, TrimInfo{
-						ID:        tr.ID,
-						StartTime: tr.StartTime,
-						EndTime:   tr.EndTime,
-						Duration:  tr.Duration,
-						FileSize:  fs,
-						Filename:  tr.Filename,
-					})
-				}
-				a.trimDlg.SetTrims(trimInfos)
-			} else {
-				a.setFeedback("Trim only available for finished jobs with files")
-			}
 		}
 	}
 	return a, nil
@@ -1091,57 +1043,534 @@ func (a *App) handleLogKey(key string) (tea.Model, tea.Cmd) {
 		a.logs.PageUp()
 	case keyPgDown:
 		a.logs.PageDown()
-	case "l":
-		a.logs.CycleLevel()
 	}
 	return a, nil
 }
 
-func (a *App) handleDelete() {
-	job := a.taskList.SelectedJob()
-	if job == nil || a.OnDeleteJob == nil {
-		return
-	}
-	if a.deleteConfirmID == job.ID && time.Now().Before(a.confirmTimer) {
-		a.OnDeleteJob(job.ID)
-		a.deleteConfirmID = ""
-		a.confirmTimer = time.Time{}
-		a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
-		// Move selection up by 1 after deletion (match TS)
-		if a.taskList.selectedIndex > 0 {
-			a.taskList.selectedIndex--
-		}
-	} else {
-		a.deleteConfirmID = job.ID
-		a.cancelConfirmID = ""
-		a.confirmTimer = time.Now().Add(3 * time.Second)
-		a.setFeedback(fmt.Sprintf("Press D again to delete \"%s\"", job.Title))
+// handleFilter applies the F key action based on the focused panel.
+func (a *App) handleFilter() {
+	switch a.focusedPanel {
+	case PanelTasks:
+		a.taskList.CycleFilter()
+	case PanelDetails:
+		a.details.ToggleDescription()
+	case PanelLogs:
+		a.logs.CycleLevel()
 	}
 }
 
-func (a *App) handleCancel() {
-	job := a.taskList.SelectedJob()
-	if job == nil || a.OnCancelJob == nil {
-		return
+// handleChord processes the chord state machine. Returns (model, cmd, handled).
+func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
+	now := time.Now()
+
+	// Check timeout on active chord
+	if a.chord.prefix != "" {
+		if a.chord.action != "" && now.After(a.chord.actionTime.Add(3*time.Second)) {
+			a.chord = chordState{}
+		} else if a.chord.action == "" && now.After(a.chord.prefixTime.Add(3*time.Second)) {
+			a.chord = chordState{}
+		}
 	}
-	// Status guard: only allow cancel on non-terminal, non-error jobs (match TS)
-	if job.Status == database.StatusFinished || job.Status == database.StatusCancelled || job.Status == database.StatusError {
-		return
+
+	// Confirm step: waiting for third key press
+	if a.chord.prefix != "" && a.chord.action != "" {
+		if key == a.chord.action {
+			// Confirmed — execute
+			m, cmd := a.executeChord(a.chord.prefix, a.chord.action)
+			a.chord = chordState{}
+			return m, cmd, true
+		}
+		// Wrong key — reset and fall through to check if key starts a new chord
+		a.chord = chordState{}
 	}
-	if a.cancelConfirmID == job.ID && time.Now().Before(a.confirmTimer) {
-		a.OnCancelJob(job.ID)
-		a.cancelConfirmID = ""
-		a.confirmTimer = time.Time{}
-		a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
+
+	// Active prefix, waiting for second key
+	if a.chord.prefix != "" {
+		m, cmd, handled := a.processSecondKey(a.chord.prefix, key)
+		if handled {
+			return m, cmd, true
+		}
+		// Not a valid second key — reset and fall through to check if key starts a new chord
+		a.chord = chordState{}
+	}
+
+	// No active chord — check if key is a prefix
+	switch key {
+	case "a", "r", "o", "q":
+		a.chord = chordState{prefix: key, prefixTime: now}
+		a.setFeedback(a.chordFeedback(key))
+		return a, nil, true
+	}
+
+	return a, nil, false
+}
+
+// processSecondKey handles the second key in a chord sequence.
+func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
+	switch prefix {
+	case "a":
+		switch key {
+		case "a", "r", "t", "o":
+			m, cmd := a.executeChord(prefix, key)
+			a.chord = chordState{}
+			return m, cmd, true
+		case "c", "d":
+			// Confirm-required: enter confirm step
+			a.chord.action = key
+			a.chord.actionTime = time.Now()
+			if key == "d" {
+				if job := a.taskList.SelectedJob(); job != nil {
+					a.setFeedback(fmt.Sprintf("Press D to confirm delete \"%s\" (3s)", job.Title))
+				} else {
+					a.setFeedback("Press D to confirm delete (3s)")
+				}
+			} else {
+				if job := a.taskList.SelectedJob(); job != nil {
+					a.setFeedback(fmt.Sprintf("Press C to confirm cancel \"%s\" (3s)", job.Title))
+				} else {
+					a.setFeedback("Press C to confirm cancel (3s)")
+				}
+			}
+			return a, nil, true
+		}
+	case "r":
+		switch key {
+		case "c", "f", "v", "u":
+			m, cmd := a.executeChord(prefix, key)
+			a.chord = chordState{}
+			return m, cmd, true
+		case "p":
+			// Confirm-required: enter confirm step
+			a.chord.action = key
+			a.chord.actionTime = time.Now()
+			a.setFeedback("Press P to confirm restart (3s)")
+			return a, nil, true
+		}
+	case "o":
+		switch key {
+		case "f", "s", "w":
+			m, cmd := a.executeChord(prefix, key)
+			a.chord = chordState{}
+			return m, cmd, true
+		}
+	case "q":
+		if key == "q" {
+			return a, tea.Quit, true
+		}
+	}
+	return a, nil, false
+}
+
+// executeChord executes a completed chord action.
+func (a *App) executeChord(prefix, action string) (tea.Model, tea.Cmd) {
+	switch prefix {
+	case "a":
+		return a.executeActionChord(action)
+	case "r":
+		return a.executeRequestChord(action)
+	case "o":
+		return a.executeOpenChord(action)
+	}
+	return a, nil
+}
+
+func (a *App) executeActionChord(action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case "a":
+		a.feedbackMsg = ""
+		a.addVideo.SetSize(a.width, a.height)
+		a.addVideo.Open()
+	case "r":
+		if job := a.taskList.SelectedJob(); job != nil && a.OnRetryJob != nil {
+			if job.Status == database.StatusError || job.Status == database.StatusCancelled || job.Status == database.StatusCookies {
+				a.OnRetryJob(job.ID)
+				a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
+			}
+		}
+	case "c":
+		if job := a.taskList.SelectedJob(); job != nil && a.OnCancelJob != nil {
+			if job.Status != database.StatusFinished && job.Status != database.StatusCancelled && job.Status != database.StatusError {
+				a.OnCancelJob(job.ID)
+				a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
+			}
+		}
+	case "d":
+		if job := a.taskList.SelectedJob(); job != nil && a.OnDeleteJob != nil {
+			a.OnDeleteJob(job.ID)
+			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
+			if a.taskList.selectedIndex > 0 {
+				a.taskList.selectedIndex--
+			}
+		}
+	case "t":
+		if job := a.taskList.SelectedJob(); job != nil {
+			a.openTrimForJob(job)
+		}
+	case "o":
+		a.filesDlg.SetSize(a.width, a.height)
+		a.filesDlg.Open()
+		return a, a.fetchOrphansCmd()
+	}
+	return a, nil
+}
+
+func (a *App) executeRequestChord(action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case "c":
+		if a.OnRecheckCookies != nil {
+			a.setFeedback("Rechecking cookies...")
+			recheckFn := a.OnRecheckCookies
+			return a, func() tea.Msg {
+				ytAuth, twAuth := recheckFn()
+				return cookieRecheckResultMsg{YouTubeAuth: ytAuth, TwitchAuth: twAuth}
+			}
+		}
+	case "f":
+		if a.OnForceRefreshCookies != nil {
+			a.setFeedback("Running browser cookie refresh...")
+			refreshFn := a.OnForceRefreshCookies
+			return a, func() tea.Msg {
+				ok, err := refreshFn()
+				return cookieForceRefreshResultMsg{Success: ok, Err: err}
+			}
+		}
+	case "v":
+		if a.OnCheckUpdate != nil {
+			a.setFeedback("Checking for updates...")
+			return a, func() tea.Msg {
+				info, err := a.OnCheckUpdate()
+				if err != nil {
+					return updateCheckResultMsg{Err: err.Error()}
+				}
+				return updateCheckResultMsg{Info: info}
+			}
+		}
+	case "u":
+		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
+			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
+			ver := a.updateAvailable.Version
+			return a, func() tea.Msg {
+				errStr := a.OnApplyUpdate(ver)
+				return updateApplyResultMsg{Err: errStr}
+			}
+		}
+		a.setFeedback("No update available — use R V to check")
+	case "p":
+		if a.OnRestart != nil {
+			a.OnRestart()
+		}
+	}
+	return a, nil
+}
+
+func (a *App) executeOpenChord(action string) (tea.Model, tea.Cmd) {
+	switch action {
+	case "f":
+		if job := a.taskList.SelectedJob(); job != nil && a.OnOpenFolder != nil {
+			if canOpenFolder(job) {
+				a.OnOpenFolder(job.ID)
+				a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
+			}
+		}
+	case "s":
+		if job := a.taskList.SelectedJob(); job != nil {
+			if url := streamURL(job); url != "" {
+				openBrowser(url)
+				a.setFeedback("Opening: " + url)
+			}
+		}
+	case "w":
+		scheme := "http"
+		if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
+			scheme = "https"
+		}
+		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
+		a.setFeedback(fmt.Sprintf("Opening: %s", url))
+		openBrowser(url)
+	}
+	return a, nil
+}
+
+// chordFeedback builds contextual feedback for a chord prefix.
+func (a *App) chordFeedback(prefix string) string {
+	switch prefix {
+	case "a":
+		var parts []string
+		parts = append(parts, "A Add")
+		if job := a.taskList.SelectedJob(); job != nil {
+			if job.Status == database.StatusError || job.Status == database.StatusCancelled || job.Status == database.StatusCookies {
+				parts = append(parts, "R Retry")
+			}
+			if job.Status != database.StatusFinished && job.Status != database.StatusCancelled && job.Status != database.StatusError {
+				parts = append(parts, "C Cancel")
+			}
+			parts = append(parts, "D Delete")
+			if job.Status == database.StatusFinished && job.OutputFile != "" {
+				parts = append(parts, "T Trim")
+			}
+		}
+		parts = append(parts, "O Orphans")
+		return "Action: " + strings.Join(parts, " | ") + " (3s)"
+	case "r":
+		var parts []string
+		if a.OnRecheckCookies != nil {
+			parts = append(parts, "C Cookies")
+		}
+		if a.OnForceRefreshCookies != nil {
+			parts = append(parts, "F Force Refresh")
+		}
+		if a.OnCheckUpdate != nil {
+			parts = append(parts, "V Version")
+		}
+		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
+			parts = append(parts, "U Update")
+		}
+		if a.OnRestart != nil {
+			parts = append(parts, "P Restart")
+		}
+		if len(parts) == 0 {
+			return "Request: (none available) (3s)"
+		}
+		return "Request: " + strings.Join(parts, " | ") + " (3s)"
+	case "o":
+		var parts []string
+		if job := a.taskList.SelectedJob(); job != nil && canOpenFolder(job) {
+			parts = append(parts, "F Folder")
+		}
+		if job := a.taskList.SelectedJob(); job != nil && canOpenStream(job) {
+			parts = append(parts, "S Stream")
+		}
+		parts = append(parts, "W Web")
+		return "Open: " + strings.Join(parts, " | ") + " (3s)"
+	case "q":
+		return "Quit: Q Confirm (3s)"
+	}
+	return ""
+}
+
+// canOpenFolder returns true if the job's folder can be opened.
+func canOpenFolder(j *database.Job) bool {
+	switch j.Status {
+	case database.StatusFinished:
+		return j.OutputFile != ""
+	case database.StatusUpcoming, database.StatusLive, database.StatusDownloading, database.StatusMuxing:
+		return true
+	}
+	return false
+}
+
+// canOpenStream returns true if the job has a stream URL to open.
+func canOpenStream(j *database.Job) bool {
+	return j.URL != "" || j.VideoID != ""
+}
+
+// streamURL returns the stream page URL for a job, or "" if unavailable.
+func streamURL(j *database.Job) string {
+	if j.URL != "" {
+		return j.URL
+	}
+	if j.VideoID == "" {
+		return ""
+	}
+	if j.Platform == "twitch" {
+		if j.IsVod {
+			return "https://www.twitch.tv/videos/" + j.VideoID
+		}
+		return "https://www.twitch.tv/" + j.ChannelName
+	}
+	return "https://www.youtube.com/watch?v=" + j.VideoID
+}
+
+// openTrimForJob opens the trim dialog for a specific job.
+func (a *App) openTrimForJob(job *database.Job) {
+	if job.Status == database.StatusFinished && job.OutputFile != "" {
+		a.trimDlg.SetSize(a.width, a.height)
+		a.trimDlg.Open(job.ID, job.Title)
+		var lenSec float64
+		var fSize int64
+		if job.LengthSeconds != nil {
+			lenSec = float64(*job.LengthSeconds)
+		}
+		if job.FileSize != nil {
+			fSize = *job.FileSize
+		}
+		a.trimDlg.SetJobMetadata(lenSec, fSize)
+		var trimInfos []TrimInfo
+		for _, tr := range job.Trims {
+			var fs int64
+			if tr.FileSize != nil {
+				fs = *tr.FileSize
+			}
+			trimInfos = append(trimInfos, TrimInfo{
+				ID:        tr.ID,
+				StartTime: tr.StartTime,
+				EndTime:   tr.EndTime,
+				Duration:  tr.Duration,
+				FileSize:  fs,
+				Filename:  tr.Filename,
+			})
+		}
+		a.trimDlg.SetTrims(trimInfos)
 	} else {
-		a.cancelConfirmID = job.ID
-		a.deleteConfirmID = ""
-		a.confirmTimer = time.Now().Add(3 * time.Second)
-		a.setFeedback(fmt.Sprintf("Press C again to cancel \"%s\"", job.Title))
+		a.setFeedback("Trim only available for finished jobs with files")
 	}
+}
+
+// buildMenuItems builds context-sensitive action menu items.
+func (a *App) buildMenuItems() []ActionMenuItem {
+	items := []ActionMenuItem{
+		{Chord: "A A", Label: "Add Video", Category: "Action"},
+		{Chord: "A R", Label: "Retry Job", Category: "Action", NeedsJob: true,
+			JobFilter: func(j *database.Job) bool {
+				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
+			}},
+		{Chord: "A C", Label: "Cancel Job", Category: "Action", NeedsJob: true,
+			JobFilter: func(j *database.Job) bool {
+				return j.Status != database.StatusFinished && j.Status != database.StatusCancelled && j.Status != database.StatusError
+			}},
+		{Chord: "A D", Label: "Delete Job", Category: "Action", NeedsJob: true},
+		{Chord: "A T", Label: "Trim Video", Category: "Action", NeedsJob: true,
+			JobFilter: func(j *database.Job) bool {
+				return j.Status == database.StatusFinished && j.OutputFile != ""
+			}},
+		{Chord: "A O", Label: "Browse Orphaned Files", Category: "Action"},
+	}
+
+	// Request — conditional on callbacks being set
+	if a.OnRecheckCookies != nil {
+		items = append(items, ActionMenuItem{Chord: "R C", Label: "Recheck Cookies", Category: "Request"})
+	}
+	if a.OnForceRefreshCookies != nil {
+		items = append(items, ActionMenuItem{Chord: "R F", Label: "Force Cookie Refresh", Category: "Request"})
+	}
+	if a.OnCheckUpdate != nil {
+		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", Category: "Request"})
+	}
+	if a.updateAvailable != nil && a.OnApplyUpdate != nil {
+		items = append(items, ActionMenuItem{Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName, Category: "Request"})
+	}
+	if a.OnRestart != nil {
+		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", Category: "Request", NeedsConfirm: true})
+	}
+
+	// Open
+	items = append(items,
+		ActionMenuItem{Chord: "O F", Label: "Open Folder", Category: "Open", NeedsJob: true,
+			JobFilter: func(j *database.Job) bool { return canOpenFolder(j) }},
+		ActionMenuItem{Chord: "O S", Label: "Open Stream Page", Category: "Open", NeedsJob: true,
+			JobFilter: func(j *database.Job) bool { return canOpenStream(j) }},
+		ActionMenuItem{Chord: "O W", Label: "Open Web UI", Category: "Open"},
+	)
+
+	// Filter + Other
+	items = append(items,
+		ActionMenuItem{Chord: "F", Label: "Cycle Filter", Category: "Filter"},
+		ActionMenuItem{Chord: "`", Label: "Settings", Category: "Other"},
+		ActionMenuItem{Chord: "?", Label: "Help", Category: "Other"},
+		ActionMenuItem{Chord: "Q Q", Label: "Quit", Category: "Other"},
+	)
+	return items
+}
+
+// dispatchMenuAction handles an action returned from the action menu.
+func (a *App) dispatchMenuAction(action string) (tea.Model, tea.Cmd) {
+	// Parse "CHORD" or "CHORD:jobID"
+	chord := action
+	jobID := ""
+	if idx := strings.Index(action, ":"); idx >= 0 {
+		chord = action[:idx]
+		jobID = action[idx+1:]
+	}
+
+	// Find the job by ID for job-specific actions
+	var job *database.Job
+	if jobID != "" {
+		for _, j := range a.actionMenu.jobs {
+			if j.ID == jobID {
+				job = j
+				break
+			}
+		}
+	}
+
+	switch chord {
+	case "A A":
+		a.feedbackMsg = ""
+		a.addVideo.SetSize(a.width, a.height)
+		a.addVideo.Open()
+	case "A R":
+		if job != nil && a.OnRetryJob != nil {
+			a.OnRetryJob(job.ID)
+			a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
+		}
+	case "A C":
+		if job != nil && a.OnCancelJob != nil {
+			a.OnCancelJob(job.ID)
+			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
+		}
+	case "A D":
+		if job != nil && a.OnDeleteJob != nil {
+			a.OnDeleteJob(job.ID)
+			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
+		}
+	case "A T":
+		if job != nil {
+			a.openTrimForJob(job)
+		}
+	case "A O":
+		a.filesDlg.SetSize(a.width, a.height)
+		a.filesDlg.Open()
+		return a, a.fetchOrphansCmd()
+	case "R C":
+		return a.executeRequestChord("c")
+	case "R F":
+		return a.executeRequestChord("f")
+	case "R V":
+		return a.executeRequestChord("v")
+	case "R U":
+		return a.executeRequestChord("u")
+	case "R P":
+		return a.executeRequestChord("p")
+	case "O F":
+		if job != nil && a.OnOpenFolder != nil {
+			a.OnOpenFolder(job.ID)
+			a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
+		}
+	case "O S":
+		if job != nil {
+			if url := streamURL(job); url != "" {
+				openBrowser(url)
+				a.setFeedback("Opening: " + url)
+			}
+		}
+	case "O W":
+		return a.executeOpenChord("w")
+	case "F":
+		a.handleFilter()
+	case "`":
+		if a.cfg != nil {
+			a.settings.SetSize(a.width, a.height)
+			a.settings.OnSave = a.OnSaveConfig
+			a.settings.OnRestart = a.OnRestart
+			a.settings.OnHashPassword = a.OnHashPassword
+			a.settings.OnVerifyPassword = a.OnVerifyPassword
+			a.settings.Open(a.cfg)
+		}
+	case "?":
+		a.help.Toggle()
+	case "Q Q":
+		return a, tea.Quit
+	}
+	return a, nil
 }
 
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Route mouse to action menu when visible
+	if a.actionMenu.IsVisible() {
+		a.actionMenu.HandleMouse(msg)
+		return a, nil
+	}
+
 	if a.settings.IsVisible() || a.help.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.setupWiz.IsVisible() || a.ffmpegCheck.IsVisible() {
 		return a, nil
 	}
@@ -1226,7 +1655,6 @@ func (a *App) cycleFocus() {
 	a.taskList.SetFocused(a.focusedPanel == PanelTasks)
 	a.details.SetFocused(a.focusedPanel == PanelDetails)
 	a.logs.SetFocused(a.focusedPanel == PanelLogs)
-	a.statusBar.SetFocused(a.focusedPanel)
 	// Re-enable log auto-scroll when tabbing away from logs (match TS)
 	if prevPanel == PanelLogs && a.focusedPanel != PanelLogs {
 		a.logs.ReEnableAutoScroll()
@@ -1239,7 +1667,6 @@ func (a *App) setFocus(panel FocusPanel) {
 	a.taskList.SetFocused(panel == PanelTasks)
 	a.details.SetFocused(panel == PanelDetails)
 	a.logs.SetFocused(panel == PanelLogs)
-	a.statusBar.SetFocused(panel)
 	a.recalcLayout()
 }
 
@@ -1307,6 +1734,9 @@ func (a *App) View() string {
 	if a.setupWiz.IsVisible() {
 		return a.setupWiz.View()
 	}
+	if a.actionMenu.IsVisible() {
+		return a.actionMenu.View()
+	}
 	if a.addVideo.IsVisible() {
 		return a.addVideo.View()
 	}
@@ -1333,13 +1763,17 @@ func (a *App) View() string {
 	// Feedback / confirmation messages
 	if a.feedbackMsg != "" {
 		msgColor := ColorGreen
-		if strings.HasPrefix(a.feedbackMsg, "Press D") || strings.HasPrefix(a.feedbackMsg, "Press C") {
-			msgColor = lipgloss.Color("#f1c40f") // yellow for confirmations
+		if strings.HasPrefix(a.feedbackMsg, "Press ") || strings.HasPrefix(a.feedbackMsg, "Action:") ||
+			strings.HasPrefix(a.feedbackMsg, "Request:") || strings.HasPrefix(a.feedbackMsg, "Open:") ||
+			strings.HasPrefix(a.feedbackMsg, "Quit:") {
+			msgColor = lipgloss.Color("#f1c40f") // yellow for chord feedback
 		} else if strings.HasPrefix(a.feedbackMsg, "Can only") || strings.HasPrefix(a.feedbackMsg, "Trim only") {
 			msgColor = lipgloss.Color("#f1c40f") // yellow for warnings
+		} else if strings.HasPrefix(a.feedbackMsg, "No update") {
+			msgColor = lipgloss.Color("#f1c40f")
 		} else if strings.HasPrefix(a.feedbackMsg, "Cancelled:") {
 			msgColor = ColorRed
-		} else if strings.Contains(a.feedbackMsg, "Deleted:") || a.feedbackMsg == "Delete cancelled" || a.feedbackMsg == "Cancel dismissed" {
+		} else if strings.Contains(a.feedbackMsg, "Deleted:") {
 			msgColor = ColorGray
 		}
 		content = addOverlayMessage(content, a.width,

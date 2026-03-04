@@ -21,12 +21,11 @@ const (
 
 // StatusBarModel renders the bottom status bar.
 type StatusBarModel struct {
-	width        int
-	focusedPanel FocusPanel
-	ytCookie     CookieStatus
-	twCookie     CookieStatus
-	ytActive     bool
-	twActive     bool
+	width    int
+	ytCookie CookieStatus
+	twCookie CookieStatus
+	ytActive bool
+	twActive bool
 	// Jobs list for detecting COOKIES? status (B1)
 	jobs []*database.Job
 	// Disk status
@@ -43,11 +42,6 @@ func NewStatusBarModel() *StatusBarModel {
 // SetWidth updates the bar width.
 func (m *StatusBarModel) SetWidth(w int) {
 	m.width = w
-}
-
-// SetFocused updates which panel is focused.
-func (m *StatusBarModel) SetFocused(panel FocusPanel) {
-	m.focusedPanel = panel
 }
 
 // SetCookieStatus sets the cookie status for a platform.
@@ -98,73 +92,35 @@ func (m *StatusBarModel) View() string {
 	return bg.Render(bar)
 }
 
-// renderControls renders context-aware controls per panel (B4).
+// renderControls renders uniform chord hints in the status bar.
 func (m *StatusBarModel) renderControls() string {
 	compact := m.width < 100
-
-	var parts []string
 	key := lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
 
-	switch m.focusedPanel {
-	case PanelTasks:
-		if compact {
-			// Compact mode abbreviations (B3) - no duplicates with global section
-			parts = append(parts,
-				"↑↓ Sel",
-				key.Render("A")+" C R D F O",
-			)
-		} else {
-			parts = append(parts,
-				"↑↓ Select",
-				key.Render("A")+" Add",
-				key.Render("C")+" Cancel",
-				key.Render("R")+" Retry",
-				key.Render("D")+" Delete",
-				key.Render("F")+" Filter",
-				key.Render("O")+" Open",
-			)
-		}
-
-	case PanelDetails:
-		if compact {
-			parts = append(parts, "↑↓ Scroll")
-		} else {
-			parts = append(parts, "↑↓ Scroll")
-		}
-
-	case PanelLogs:
-		if compact {
-			parts = append(parts,
-				"↑↓ Nav",
-				"PgUp/Dn",
-				key.Render("L")+" Filter",
-			)
-		} else {
-			parts = append(parts,
-				"↑↓ Navigate",
-				"PgUp/PgDn Page",
-				key.Render("L")+" Filter",
-			)
-		}
-	}
-
-	// Global controls (match TS: Tab, `, ?, Q — no W)
-	if !compact {
+	var parts []string
+	if compact {
 		parts = append(parts,
-			key.Render("Tab")+" Focus",
-			key.Render("`")+" Settings",
-			key.Render("?")+" Help",
-			key.Render("Q")+" Quit",
-		)
-	} else {
-		parts = append(parts,
+			key.Render("A")+" Action",
+			key.Render("R")+" Request",
+			key.Render("O")+" Open",
+			key.Render("F")+" Filter",
+			key.Render("M")+" Menu",
 			key.Render("Tab"),
 			key.Render("`"),
 			key.Render("?"),
-			key.Render("Q"),
+		)
+	} else {
+		parts = append(parts,
+			key.Render("A")+" Action",
+			key.Render("R")+" Request",
+			key.Render("O")+" Open",
+			key.Render("F")+" Filter",
+			key.Render("M")+" Menu",
+			key.Render("Tab")+" Focus",
+			key.Render("`")+" Settings",
+			key.Render("?")+" Help",
 		)
 	}
-
 	return " " + strings.Join(parts, " | ")
 }
 

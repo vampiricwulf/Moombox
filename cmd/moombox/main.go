@@ -43,7 +43,7 @@ import (
 )
 
 var (
-	version = "2.2.10"
+	version = "2.3.0"
 	commit  = ""
 )
 
@@ -1203,6 +1203,26 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				return ""
 			}
 		}
+		app.OnRecheckCookies = func() (bool, bool) {
+			log.Info("Cookie recheck requested from TUI")
+			cookieRefresh.CheckNow(context.Background())
+			status := cookieRefresh.GetStatus()
+			return status.YouTubeAuthenticated, status.TwitchAuthenticated
+		}
+		if cfg.Cookies.AutoEnabled {
+			app.OnForceRefreshCookies = func() (bool, error) {
+				log.Info("Browser cookie refresh requested from TUI")
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				ok, err := autoCookieSvc.RefreshCookies(ctx)
+				if err != nil {
+					return false, err
+				}
+				cookieRefresh.CheckNow(context.Background())
+				return ok, nil
+			}
+		}
+
 		app.OnHashPassword = func(password string) string {
 			hash, err := authSvc.HashPassword(password)
 			if err != nil {
