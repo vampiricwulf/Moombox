@@ -532,7 +532,7 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 		return fmt.Errorf("write user.js: %w", err)
 	}
 
-	cmd := exec.Command(browser.Path, "--profile", s.profileDir, url)
+	cmd := exec.Command(browser.Path, "--new-instance", "--profile", s.profileDir, url)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start firefox: %w", err)
 	}
@@ -607,7 +607,7 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 			return "", ctx.Err()
 		}
 
-		cmd := exec.Command(browser.Path, "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
+		cmd := exec.Command(browser.Path, "--new-instance", "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
 		s.mu.Lock()
 		s.refreshCmd = cmd
 		s.mu.Unlock()
@@ -1535,7 +1535,15 @@ func runWithTimeout(cmd *exec.Cmd, timeoutMs int) error {
 		return err
 	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
 		killProcessTree(cmd.Process)
-		<-done // reap process and release resources
+		// Wait briefly for reap, but don't block forever if kill failed
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			// Last resort: direct process kill
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+		}
 		return fmt.Errorf("process timed out after %dms", timeoutMs)
 	}
 }
