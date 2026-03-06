@@ -520,6 +520,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		SaveConfig: func(c *config.MoomboxConfig) error {
 			return config.Save(c, configPath)
 		},
+		OnInstallYtdlp: func(port int, httpsEnabled bool) {
+			if err := routes.InstallYtdlpPlugin(port, httpsEnabled); err != nil {
+				log.Error("Failed to install yt-dlp plugin from setup", slog.String("error", err.Error()))
+			} else {
+				log.Info("yt-dlp plugin installed from setup wizard", slog.Int("port", port))
+			}
+		},
 		OnChannelChange: kickMonitors,
 		OnRestart:       func() { triggerRestart("setup") },
 	})

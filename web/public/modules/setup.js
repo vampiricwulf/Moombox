@@ -7,6 +7,8 @@ export class SetupController {
     this.channels = []; // Client-side channel accumulator
     this.mode = null; // "quick" or "advanced"
     this.advStep = 1;
+    this.cookieYTDone = false;
+    this.cookieTWDone = false;
   }
 
   /** Escape HTML entities for safe innerHTML insertion. */
@@ -133,22 +135,22 @@ export class SetupController {
       this.showFFmpegInstallOptions();
     });
     document.getElementById("ffmpeg-check-btn")?.addEventListener("click", () => {
-      this.checkCustomFFmpegPath();
+      this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result");
     });
     document.getElementById("ffmpeg-quit-btn")?.addEventListener("click", () => {
       window.close();
     });
     // Enter key in custom path input
     document.getElementById("ffmpeg-custom-path")?.addEventListener("keypress", (e) => {
-      if (e.key === "Enter") this.checkCustomFFmpegPath();
+      if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result");
     });
 
     // Manual install view
     document.getElementById("ffmpeg-manual-check-btn")?.addEventListener("click", () => {
-      this.checkManualFFmpegPath();
+      this.checkFFmpegPath("ffmpeg-manual-path", "ffmpeg-manual-result");
     });
     document.getElementById("ffmpeg-manual-path")?.addEventListener("keypress", (e) => {
-      if (e.key === "Enter") this.checkManualFFmpegPath();
+      if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-manual-path", "ffmpeg-manual-result");
     });
     document.getElementById("ffmpeg-manual-back-btn")?.addEventListener("click", () => {
       document.getElementById("ffmpeg-manual-install").style.display = "none";
@@ -217,12 +219,14 @@ export class SetupController {
       if (ytOk || twOk) {
         if (resultEl) resultEl.textContent = "";
         document.getElementById("auto-cookie-setup-dialog")?.hide();
-        // Update badges
+        // Track completion in state and update badges
         if (ytOk) {
+          this.cookieYTDone = true;
           const badge = document.getElementById("setup-yt-badge");
           if (badge) { badge.style.display = ""; badge.variant = "success"; }
         }
         if (twOk) {
+          this.cookieTWDone = true;
           const badge = document.getElementById("setup-tw-badge");
           if (badge) { badge.style.display = ""; badge.variant = "success"; }
         }
@@ -389,15 +393,10 @@ export class SetupController {
     if (this.channels.length > 0) {
       config.channels = this.channels;
     }
-    // Auto-cookies: check which platform badges are showing (cookies were set up)
-    const ytBadge = document.getElementById("setup-yt-badge");
-    const twBadge = document.getElementById("setup-tw-badge");
-    const ytDone = ytBadge && ytBadge.style.display !== "none";
-    const twDone = twBadge && twBadge.style.display !== "none";
-    if (ytDone || twDone) {
+    if (this.cookieYTDone || this.cookieTWDone) {
       const platforms = [];
-      if (ytDone) platforms.push("youtube");
-      if (twDone) platforms.push("twitch");
+      if (this.cookieYTDone) platforms.push("youtube");
+      if (this.cookieTWDone) platforms.push("twitch");
       config.cookies = { auto_enabled: true, platforms };
     }
 
@@ -422,8 +421,10 @@ export class SetupController {
       return;
     }
 
+    const httpsEnabled = document.getElementById("setup-https-enabled")?.checked || false;
+
     const config = {
-      network: { port, network_access: networkAccess },
+      network: { port, network_access: networkAccess, https_enabled: httpsEnabled },
       ...(networkAccess === "external" && externalPassword ? { password: externalPassword } : {}),
       paths: {
         database_path: val("setup-database-path") || undefined,
@@ -461,20 +462,12 @@ export class SetupController {
       config.channels = this.channels;
     }
 
-    // Install yt-dlp plugin if checked
-    const installPlugin = document.getElementById("setup-install-ytdlp-plugin")?.checked;
-
-    const ok = await this.submitSetup(config, finishBtn);
-
-    if (ok && installPlugin) {
-      try {
-        await fetch("/api/ytdlp-plugin/install", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ force: true }),
-        });
-      } catch { /* ignore */ }
+    // Include yt-dlp plugin flag — server handles install before restart
+    if (document.getElementById("setup-install-ytdlp-plugin")?.checked) {
+      config.install_ytdlp_plugin = true;
     }
+
+    await this.submitSetup(config, finishBtn);
   }
 
   async submitSetup(config, finishBtn) {
@@ -743,9 +736,9 @@ export class SetupController {
     document.getElementById("ffmpeg-manual-install").style.display = "";
   }
 
-  async checkManualFFmpegPath() {
-    const input = document.getElementById("ffmpeg-manual-path");
-    const resultEl = document.getElementById("ffmpeg-manual-result");
+  async checkFFmpegPath(inputId, resultId) {
+    const input = document.getElementById(inputId);
+    const resultEl = document.getElementById(resultId);
     const path = (input?.value || "").trim();
     if (!path) return;
 
@@ -763,44 +756,6 @@ export class SetupController {
           html += `<sl-alert variant="warning" open style="margin-top: 0.5em;">${this.esc(data.warning)}</sl-alert>`;
         }
         if (resultEl) resultEl.innerHTML = html;
-        setTimeout(() => {
-          document.getElementById("ffmpeg-overlay").style.display = "none";
-          this.initializeApp();
-        }, data.warning ? 3000 : 1500);
-      } else {
-        if (resultEl) {
-          resultEl.innerHTML = '<sl-alert variant="danger" open>FFmpeg not found at this path</sl-alert>';
-        }
-      }
-    } catch (e) {
-      if (resultEl) {
-        resultEl.innerHTML = `<sl-alert variant="danger" open>Check failed: ${this.esc(e.message)}</sl-alert>`;
-      }
-    }
-  }
-
-  async checkCustomFFmpegPath() {
-    const input = document.getElementById("ffmpeg-custom-path");
-    const resultEl = document.getElementById("ffmpeg-check-result");
-    const path = (input?.value || "").trim();
-    if (!path) return;
-
-    try {
-      const resp = await fetch("/api/ffmpeg/check", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      });
-      const data = await resp.json();
-
-      if (data.valid) {
-        let html = `<sl-alert variant="success" open>Valid: ${this.esc(data.version)}</sl-alert>`;
-        if (data.warning) {
-          html += `<sl-alert variant="warning" open style="margin-top: 0.5em;">${this.esc(data.warning)}</sl-alert>`;
-        }
-        if (resultEl) {
-          resultEl.innerHTML = html;
-        }
         setTimeout(() => {
           document.getElementById("ffmpeg-overlay").style.display = "none";
           this.initializeApp();

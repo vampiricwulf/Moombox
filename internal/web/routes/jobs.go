@@ -1929,6 +1929,7 @@ type SetupDeps struct {
 	Cfg             *config.MoomboxConfig
 	Auth            *web.AuthService
 	SaveConfig      func(*config.MoomboxConfig) error
+	OnInstallYtdlp  func(port int, httpsEnabled bool)
 	OnChannelChange func()
 	OnRestart       func()
 }
@@ -1963,9 +1964,11 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 
 		cfg := deps.Cfg
 
-		// Extract password before validation (not part of updateConfigSchema)
+		// Extract special fields before validation (not part of updateConfigSchema)
 		password, _ := updates["password"].(string)
 		delete(updates, "password")
+		installYtdlp, _ := updates["install_ytdlp_plugin"].(bool)
+		delete(updates, "install_ytdlp_plugin")
 
 		// Validate with Zod-equivalent schema constraints (match TS updateConfigSchema)
 		if validationErrs := validateConfigUpdates(updates); len(validationErrs) > 0 {
@@ -2026,6 +2029,11 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 		// Kick monitors to pick up any channels added during setup
 		if deps.OnChannelChange != nil {
 			deps.OnChannelChange()
+		}
+
+		// Install yt-dlp plugin if requested (before restart so it uses the new config values)
+		if installYtdlp && deps.OnInstallYtdlp != nil {
+			deps.OnInstallYtdlp(cfg.Network.Port, cfg.Network.HTTPSEnabled)
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
