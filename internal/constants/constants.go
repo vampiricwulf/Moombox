@@ -185,8 +185,8 @@ const (
 	// DownloadTimeoutMs is the download timeout in milliseconds.
 	DownloadTimeoutMs = 30_000
 
-	// ProgressUpdateIntervalMs is the in-memory progress update interval.
-	ProgressUpdateIntervalMs = 100
+	// ProgressUpdateIntervalMs is the in-memory progress update interval (~60fps).
+	ProgressUpdateIntervalMs = 16
 
 	// ProgressPersistIntervalMs is the disk persistence interval for crash recovery.
 	ProgressPersistIntervalMs = 1_000

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	progressUpdateInterval  = 100 * time.Millisecond
+	progressUpdateInterval  = 16 * time.Millisecond // ~60fps, matches TUI tick rate
 	progressPersistInterval = 1 * time.Second
 )
 

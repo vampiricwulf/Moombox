@@ -13,7 +13,6 @@ import (
 )
 
 const (
-	vodChatProgressInterval     = 500
 	vodChatMaxConsecutiveErrors = 5
 	vodChatFlushInterval        = 5 * time.Second
 	vodChatResumeMaxRecentIDs   = 1000
@@ -168,7 +167,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			vcd.totalCount++
 			newCount++
 
-			if vcd.OnProgress != nil && vcd.totalCount%vodChatProgressInterval == 0 {
+			if vcd.OnProgress != nil {
 				vcd.reportProgress(contentOffset)
 			}
 		}

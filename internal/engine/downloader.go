@@ -20,9 +20,8 @@ import (
 var ErrQualityLost = errors.New("stream quality became unavailable")
 
 const (
-	CatchupThreshold        = 10
-	CatchupProgressInterval = 10 // Throttle progress emission during catch-up (every N segments)
-	MaxSegmentRetries       = 5
+	CatchupThreshold  = 10
+	MaxSegmentRetries = 5
 	ParallelDownloads       = 6  // Bounded parallel downloads during catch-up
 	DefaultRetryDelayCap    = 60 // seconds
 	HeadProbeInterval       = 5 * time.Second
@@ -1141,8 +1140,6 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	buffer := make(map[int][]byte)
 	nextSeq := d.currentSeq
 	segsSinceResume := 0
-	progressCounter := 0
-
 	for r := range results {
 		buffer[r.seq] = r.data
 
@@ -1161,16 +1158,13 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			d.bytesWritten.Add(int64(n))
 			d.lastSegTime = time.Now()
 
-			// Throttle progress emission during catch-up (every N segments)
-			progressCounter++
-			if d.OnProgress != nil && progressCounter >= CatchupProgressInterval {
+			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
 					Seq:        nextSeq,
 					Bytes:      d.bytesWritten.Load(),
 					HeadSeq:    d.headSeq,
 					CatchingUp: true,
 				})
-				progressCounter = 0
 			}
 
 			nextSeq++
@@ -1184,7 +1178,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	}
 
 	// Final progress emission — CatchingUp: false signals catch-up is complete
-	if d.OnProgress != nil && progressCounter > 0 {
+	if d.OnProgress != nil {
 		d.OnProgress(DownloadProgress{
 			Seq:        nextSeq - 1,
 			Bytes:      d.bytesWritten.Load(),

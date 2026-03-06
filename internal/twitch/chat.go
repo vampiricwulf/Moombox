@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	chatProgressInterval    = 100
 	chatMaxConsecutiveErrs  = 20
 	chatDedupMax            = 5000
 	chatFlushThresholdCount = 50_000
@@ -562,7 +561,7 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 		cd.lastTimestampMs = msg.TimestampMs
 	}
 
-	if cd.OnProgress != nil && cd.totalCount%chatProgressInterval == 0 {
+	if cd.OnProgress != nil {
 		cd.OnProgress(cd.totalCount)
 	}
 }
