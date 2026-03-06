@@ -744,12 +744,13 @@ func (p *PlayerAPI) decryptNParam(rawURL, playerURL string) string {
 
 	solvers, err := p.cipherSolver.GetSolvers(context.Background(), playerURL)
 	if err != nil {
+		p.logger.Warn("[PlayerApi] N-param solver unavailable", slog.String("error", err.Error()))
 		return rawURL
 	}
 
 	decryptedN, err := solvers.DecryptN(nParam)
 	if err != nil {
-		p.logger.Debug("[PlayerApi] N-param decryption failed", slog.String("error", err.Error()))
+		p.logger.Warn("[PlayerApi] N-param decryption failed", slog.String("error", err.Error()))
 		return rawURL
 	}
 

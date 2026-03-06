@@ -47,6 +47,12 @@ func CacheKey(playerURL string) string {
 	return fmt.Sprintf("%x", h)
 }
 
+// OverridePlayerURL allows rewriting a player URL before use.
+// Currently a pass-through; can be extended to force a specific player version/variant.
+func OverridePlayerURL(playerURL string) string {
+	return playerURL
+}
+
 // PlayerIDFromURL extracts the player ID from a player URL.
 // e.g. "https://www.youtube.com/s/player/abcdef12/player_ias.vflset/en_US/base.js" -> "abcdef12"
 func PlayerIDFromURL(playerURL string) string {

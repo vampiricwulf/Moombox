@@ -41,6 +41,7 @@ func (s *Solver) DecryptSignature(ctx context.Context, req SignatureRequest) (*S
 
 // GetSts returns the signatureTimestamp for a player URL.
 func (s *Solver) GetSts(ctx context.Context, playerURL string) (string, error) {
+	playerURL = OverridePlayerURL(playerURL)
 	if s.stsCache == nil {
 		s.stsCache = NewStsCache()
 	}

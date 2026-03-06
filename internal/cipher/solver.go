@@ -18,6 +18,7 @@ type Solver struct {
 	stsCache    *StsCache
 	solverMu    sync.RWMutex
 	solverData  map[string]*Solvers // key -> compiled solvers (Goja VMs)
+	compileMu   sync.Mutex         // serializes compilation to prevent thundering herd
 	logger      interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -55,42 +56,72 @@ func NewSolver(cacheDir string, logger interface {
 
 // GetSolvers returns the sig/n solver functions for a player URL.
 // Uses 2-tier caching: solver cache (compiled Goja VMs) -> disk cache (raw JS).
+// Serializes compilation so only one goroutine compiles per player URL.
 func (s *Solver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, error) {
+	playerURL = OverridePlayerURL(playerURL)
 	key := CacheKey(playerURL)
 	playerID := PlayerIDFromURL(playerURL)
 
-	// Tier 2: Check solver cache (compiled VMs)
+	// Check solver cache (fast path)
 	s.solverMu.RLock()
 	solvers, ok := s.solverData[key]
 	s.solverMu.RUnlock()
 	if ok {
-		s.logger.Debug("cipher: solver cache hit", "playerID", playerID)
 		return solvers, nil
 	}
 
-	// Tier 1: Fetch player JS (from disk cache or network)
+	// Serialize compilation — only one goroutine compiles at a time.
+	// Others block here then find the result in cache.
+	s.compileMu.Lock()
+	defer s.compileMu.Unlock()
+
+	// Re-check cache after acquiring compile lock (another goroutine may have compiled)
+	s.solverMu.RLock()
+	solvers, ok = s.solverData[key]
+	s.solverMu.RUnlock()
+	if ok {
+		return solvers, nil
+	}
+
+	// Fetch, preprocess, compile
+	solvers, err := s.compileSolver(ctx, playerURL, playerID)
+	if err != nil {
+		// Don't cache errors — allow retry on next request (may be transient).
+		// The compileMu serialization prevents thundering herd during this request.
+		s.logger.Error("cipher: solver compilation failed", "playerID", playerID, "error", err.Error())
+		return nil, err
+	}
+
+	s.cacheSolvers(key, solvers)
+	s.logger.Info("cipher: solver ready", "playerID", playerID,
+		"hasSig", solvers.Sig != nil, "hasN", solvers.N != nil)
+	return solvers, nil
+}
+
+func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) (*Solvers, error) {
 	s.logger.Debug("cipher: fetching player JS", "playerID", playerID)
 	playerJS, err := s.playerCache.Fetch(ctx, playerURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch player JS for %s: %w", playerID, err)
 	}
 
-	// Preprocess and compile into Goja VM
-	s.logger.Debug("cipher: preprocessing player JS", "playerID", playerID)
+	nArrayCands := findNArrayCandidates(playerJS)
+	sigOldCands := findSigCandidates(playerJS)
+	alrSigChain := findAlrTransformChain(playerJS)
+	s.logger.Debug("cipher: preprocessing player JS", "playerID", playerID, "size", len(playerJS),
+		"nArrayCandidates", len(nArrayCands), "sigOldCandidates", len(sigOldCands),
+		"hasAlrSigChain", alrSigChain != "")
 	preprocessed, err := preprocessPlayer(playerJS)
 	if err != nil {
 		return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
 	}
 
 	s.logger.Debug("cipher: compiling solver", "playerID", playerID)
-	solvers, err = getFromPrepared(preprocessed)
+	solvers, err := getFromPrepared(preprocessed)
 	if err != nil {
 		return nil, fmt.Errorf("compile solver for %s: %w", playerID, err)
 	}
-	s.cacheSolvers(key, solvers)
 
-	s.logger.Info("cipher: solver ready", "playerID", playerID,
-		"hasSig", solvers.Sig != nil, "hasN", solvers.N != nil)
 	return solvers, nil
 }
 

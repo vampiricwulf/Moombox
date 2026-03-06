@@ -20,17 +20,26 @@ type sigCandidate struct {
 // findNArrayCandidates finds n-parameter function candidates by searching for
 // single-element array assignments: varName=[funcName];
 // This matches the TypeScript AST pattern: ArrayExpression with 1 Identifier element.
-var nArrayPattern = regexp.MustCompile(`;([a-zA-Z_$][\w$]*)\s*=\s*\[([a-zA-Z_$][\w$]*)\]\s*;`)
+// Two patterns are needed: the main variant uses ";X=[func];" while the tv/ES6
+// variant uses bare "X=[func];" without a leading semicolon.
+var nArrayPatterns = []*regexp.Regexp{
+	// Main variant: ;varName=[funcName];
+	regexp.MustCompile(`;([a-zA-Z_$][\w$]*)\s*=\s*\[([a-zA-Z_$][\w$]*)\]\s*;`),
+	// TV/ES6 variant: var varName=[funcName]; or varName=[funcName]; (no leading ;)
+	regexp.MustCompile(`(?:^|[;\n])\s*(?:var\s+)?([a-zA-Z_$][\w$]*)\s*=\s*\[([a-zA-Z_$][\w$]*)\]\s*;`),
+}
 
 func findNArrayCandidates(playerJS string) []string {
-	matches := nArrayPattern.FindAllStringSubmatch(playerJS, -1)
-	var names []string
 	seen := make(map[string]bool)
-	for _, m := range matches {
-		funcName := m[2]
-		if !seen[funcName] {
-			seen[funcName] = true
-			names = append(names, funcName)
+	var names []string
+	for _, pattern := range nArrayPatterns {
+		matches := pattern.FindAllStringSubmatch(playerJS, -1)
+		for _, m := range matches {
+			funcName := m[2]
+			if !seen[funcName] {
+				seen[funcName] = true
+				names = append(names, funcName)
+			}
 		}
 	}
 	return names
@@ -60,29 +69,118 @@ func findSigCandidates(playerJS string) []sigCandidate {
 	return candidates
 }
 
+// alrTransformHeadPattern matches the start of a transform chain after set("alr","yes").
+// Captures the parameter name and the start of the assignment.
+var alrTransformHeadPattern = regexp.MustCompile(`(\w+)&&\((\w+)=`)
+
+// findAlrTransformChain finds the signature decipher chain in YouTube's newer
+// player.js format. The URL builder function is identified by its set("alr","yes")
+// marker. The transform chain after it applies signature decryption:
+//
+//	eg=function(r,p="",I=""){r=new g.fb(r,!0);r.set("alr","yes");
+//	  I&&(I=OF(24,6183,XF(82,6137,I)),r[O[8]](p,XF(2,8431,I)));return D};
+//
+// The chain is: OF(24,6183,XF(82,6137,I)) = decipher(decodeURIComponent(sig)).
+// Returns the expression with the parameter replaced by "sig", or empty string if not found.
+func findAlrTransformChain(playerJS string) string {
+	// Find the URL builder function by its unique marker: set("alr","yes")
+	alrIdx := strings.Index(playerJS, `set("alr","yes");`)
+	if alrIdx < 0 {
+		return ""
+	}
+
+	rest := playerJS[alrIdx+len(`set("alr","yes");`):]
+
+	// Match: PARAM&&(PARAM=
+	m := alrTransformHeadPattern.FindStringSubmatchIndex(rest)
+	if m == nil {
+		return ""
+	}
+
+	param := rest[m[2]:m[3]]
+	assignParam := rest[m[4]:m[5]]
+	if param != assignParam {
+		return ""
+	}
+
+	// Extract the transform expression by tracking parenthesis depth.
+	// We're inside the outer ( from &&(, so depth starts at 1.
+	// The expression ends at a comma at depth 1.
+	exprStart := m[1] // position right after the full match "PARAM&&(PARAM="
+	depth := 1
+	pos := exprStart
+	for pos < len(rest) {
+		ch := rest[pos]
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				// Reached the end without finding a comma — expression is the whole thing
+				goto done
+			}
+		case ',':
+			if depth == 1 {
+				goto done
+			}
+		}
+		pos++
+	}
+done:
+	if pos <= exprStart {
+		return ""
+	}
+
+	transform := rest[exprStart:pos]
+
+	// Replace the parameter name with "sig" using word-boundary matching
+	paramRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(param) + `\b`)
+	return paramRe.ReplaceAllString(transform, "sig")
+}
+
 // preprocessPlayerFull includes the entire player.js with solver bindings
 // inserted inside the IIFE. This is the robust approach that handles YouTube's
 // modern obfuscation (string tables, combined multipurpose functions, etc.).
 func preprocessPlayerFull(playerJS string) (string, error) {
-	// Find n-param candidates
-	nFuncs := findNArrayCandidates(playerJS)
+	// Build n-param generator expressions.
+	// Array candidates (older players: ;X=[func];)
+	var nGenerators []string
+	for _, name := range findNArrayCandidates(playerJS) {
+		nGenerators = append(nGenerators, fmt.Sprintf("function(n){return %s(n)}", name))
+	}
 
-	// Find sig candidates
-	sigCands := findSigCandidates(playerJS)
+	// Build sig generator expressions.
+	var sigGenerators []string
+	// Old sig candidate pattern (older players)
+	for _, c := range findSigCandidates(playerJS) {
+		sigGenerators = append(sigGenerators, fmt.Sprintf(
+			"function(sig){return %s(%s,sig)}", c.funcName, c.literal,
+		))
+	}
+	// New: transform chain from set("alr","yes") marker (this IS the sig function)
+	if sigChain := findAlrTransformChain(playerJS); sigChain != "" {
+		sigGenerators = append(sigGenerators, fmt.Sprintf("function(sig){return %s}", sigChain))
+	}
 
-	if len(nFuncs) == 0 && len(sigCands) == 0 {
-		return "", fmt.Errorf("no n-param or sig candidates found in player JS")
+	if len(nGenerators) == 0 && len(sigGenerators) == 0 {
+		return "", fmt.Errorf("no n-param or sig candidates found in player JS (size=%d)", len(playerJS))
 	}
 
 	// Find the IIFE closing point to insert bindings inside the function scope.
-	// Player JS structure: var _yt_player={};(function(g){...})(_yt_player);
+	// Main variant: var _yt_player={};(function(g){...})(_yt_player);
+	// TV variant: 'use strict';(function(){var window=this;...}).call(this);
 	closeIdx := strings.LastIndex(playerJS, "})(")
+	if closeIdx < 0 {
+		// TV/ES6 variant uses }).call(this) instead of })(arg)
+		closeIdx = strings.LastIndex(playerJS, "}).call(")
+	}
 	if closeIdx < 0 {
 		return "", fmt.Errorf("could not find IIFE closing bracket")
 	}
 
 	// Build solver binding code
-	bindingCode := buildSolverBindings(nFuncs, sigCands)
+	bindingCode := buildSolverBindings(nGenerators, sigGenerators)
 
 	// Insert bindings inside the IIFE, just before the closing })
 	modified := playerJS[:closeIdx] + "\n" + bindingCode + "\n" + playerJS[closeIdx:]
@@ -96,36 +194,71 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 }
 
 // buildSolverBindings generates JS code that assigns solver functions to _result.
-// Uses a multiTry pattern (like the TS version) to handle multiple candidates.
-func buildSolverBindings(nFuncs []string, sigCands []sigCandidate) string {
+// nGenerators and sigGenerators are pre-built JS function expressions.
+func buildSolverBindings(nGenerators, sigGenerators []string) string {
 	var parts []string
 
-	if len(nFuncs) > 0 {
-		var generators []string
-		for _, name := range nFuncs {
-			generators = append(generators, fmt.Sprintf("function(n){return %s(n)}", name))
-		}
-		parts = append(parts, fmt.Sprintf(
-			"_result.n = _multiTry([%s]);",
-			strings.Join(generators, ","),
-		))
+	// N-param: single IIFE that tries URL builder first (newer players where
+	// n-param transform is embedded in g.fb serialization), then falls back to
+	// validated array candidates (older players with standalone n-param functions).
+	nCandidatesJS := "[]"
+	if len(nGenerators) > 0 {
+		nCandidatesJS = "[" + strings.Join(nGenerators, ",") + "]"
 	}
+	parts = append(parts, fmt.Sprintf(nBindingTemplate, nCandidatesJS))
 
-	if len(sigCands) > 0 {
-		var generators []string
-		for _, c := range sigCands {
-			generators = append(generators, fmt.Sprintf(
-				"function(sig){return %s(%s,sig)}", c.funcName, c.literal,
-			))
-		}
+	if len(sigGenerators) > 0 {
 		parts = append(parts, fmt.Sprintf(
 			"_result.sig = _multiTry([%s]);",
-			strings.Join(generators, ","),
+			strings.Join(sigGenerators, ","),
 		))
 	}
 
 	return strings.Join(parts, "\n")
 }
+
+// nBindingTemplate is a JS IIFE that finds the n-param transform function.
+// It tries two strategies:
+//  1. URL builder serialization (newer players): creates a g.fb instance with a
+//     known n-param, serializes it, and checks if the value was transformed.
+//  2. Validated array candidates (older players): tests each candidate with a
+//     dummy value and only accepts candidates that produce a different string.
+//
+// Falls back to null (passthrough) if neither strategy works.
+// The %s placeholder receives the array of candidate function expressions.
+const nBindingTemplate = `
+_result.n = (function() {
+  try {
+    var fb = g && g.fb;
+    if (fb) {
+      var testN = "AAAAAA_TESTN_VAL";
+      var u = new fb("https://rr1---sn-a.googlevideo.com/videoplayback?n=" + testN, true);
+      var s = (typeof u.A_ === "function") ? u.A_() : "" + u;
+      if (typeof s === "string") {
+        var m = s.match(/[?&]n=([^&]+)/);
+        if (m && m[1] && m[1] !== testN) {
+          return function(input) {
+            var url = new fb("https://rr1---sn-a.googlevideo.com/videoplayback?n=" + input, true);
+            var result = (typeof url.A_ === "function") ? url.A_() : "" + url;
+            var match = result.match(/[?&]n=([^&]+)/);
+            return (match && match[1]) ? match[1] : input;
+          };
+        }
+      }
+    }
+  } catch(e) {}
+  var _cands = %s;
+  for (var _i = 0; _i < _cands.length; _i++) {
+    try {
+      var _test = _cands[_i]("AAAA_VALIDATE");
+      if (typeof _test === "string" && _test.length > 0 && _test !== "AAAA_VALIDATE") {
+        return _cands[_i];
+      }
+    } catch(e) {}
+  }
+  return null;
+})();
+`
 
 // fullPlayerSetupCode provides comprehensive browser stubs for running the full
 // YouTube player.js in Goja. More comprehensive than the legacy setupCode since
@@ -133,13 +266,17 @@ func buildSolverBindings(nFuncs []string, sigCands []sigCandidate) string {
 const fullPlayerSetupCode = `
 var _multiTry = function(_generators) {
     return function(_input) {
+        var _errors = [];
         for (var _i = 0; _i < _generators.length; _i++) {
             try {
                 var _r = _generators[_i](_input);
                 if (typeof _r === "string" && _r.length > 0) return _r;
-            } catch(_e) {}
+                _errors.push("candidate " + _i + ": returned " + (typeof _r) + " " + JSON.stringify(_r));
+            } catch(_e) {
+                _errors.push("candidate " + _i + ": " + (_e.message || _e));
+            }
         }
-        throw new Error("no cipher solutions found");
+        throw new Error("no cipher solutions found (" + _generators.length + " candidates tried: " + _errors.join("; ") + ")");
     };
 };
 if (typeof globalThis.XMLHttpRequest === "undefined") {
