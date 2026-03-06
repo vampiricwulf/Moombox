@@ -134,6 +134,13 @@ type (
 		Platform string
 		Err      error
 	}
+
+	// Async results for setup wizard cookie extraction
+	setupCookieFinishMsg struct {
+		Platform string // "youtube" or "twitch"
+		YTAuth   bool
+		TWAuth   bool
+	}
 )
 
 // chordState tracks the two-key chord system state machine.
@@ -304,8 +311,8 @@ func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 // SetSetupCallbacks wires callback functions for the TUI setup wizard.
 func (a *App) SetSetupCallbacks(
 	onComplete func(cfg *config.MoomboxConfig) error,
-	onInstallYtdlp func(port int),
-	onStartAutoCookie func(platform string),
+	onInstallYtdlp func(port int, httpsEnabled bool),
+	onStartAutoCookie func(platform string) error,
 	onFinishAutoCookie func() (bool, bool),
 	onCancelAutoCookie func(),
 	onRestart func(),
@@ -772,6 +779,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.settings.HandleChannelResolved(msg.ID, msg.Name, msg.Platform, msg.Err)
 		return a, nil
 
+	case setupCookieFinishMsg:
+		if msg.Platform == "youtube" {
+			a.setupWiz.cookieYTDone = msg.YTAuth
+		} else {
+			a.setupWiz.cookieTWDone = msg.TWAuth
+		}
+		a.setupWiz.cookieActive = false
+		a.setupWiz.cookieFinishing = false
+		a.setupWiz.cookiePlatform = ""
+		return a, nil
+
 	case tea.KeyMsg:
 		var cmds []tea.Cmd
 		if cmd := a.routeComponentMsg(msg); cmd != nil {
@@ -941,11 +959,27 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if action == "complete" {
 			a.setupWiz.Close()
 		}
-		// Start spinner if cookie active was just triggered
-		if a.setupWiz.cookieActive {
-			return a, a.setupWiz.spinner.Tick
+		var cmds []tea.Cmd
+		if action == "finish_cookie" {
+			// Run cookie extraction async so TUI doesn't freeze
+			platform := a.setupWiz.cookiePlatform
+			cmds = append(cmds, func() tea.Msg {
+				yt, tw := false, false
+				if a.setupWiz.OnFinishAutoCookie != nil {
+					yt, tw = a.setupWiz.OnFinishAutoCookie()
+				}
+				return setupCookieFinishMsg{Platform: platform, YTAuth: yt, TWAuth: tw}
+			})
 		}
-		return a, nil
+		if a.setupWiz.cookieActive {
+			cmds = append(cmds, a.setupWiz.spinner.Tick)
+		}
+		// Deliver pending huh form init cmd immediately (cursor blink, focus)
+		if a.setupWiz.advancedInitCmd != nil {
+			cmds = append(cmds, a.setupWiz.advancedInitCmd)
+			a.setupWiz.advancedInitCmd = nil
+		}
+		return a, tea.Batch(cmds...)
 	}
 
 	// Action menu intercepts

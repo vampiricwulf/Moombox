@@ -1240,19 +1240,19 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			func(updatedCfg *config.MoomboxConfig) error {
 				return config.Save(updatedCfg, configPath)
 			},
-			func(port int) {
-				if err := routes.InstallYtdlpPlugin(port, cfg.Network.HTTPSEnabled); err != nil {
+			func(port int, httpsEnabled bool) {
+				if err := routes.InstallYtdlpPlugin(port, httpsEnabled); err != nil {
 					log.Error("Failed to install yt-dlp plugin from setup", slog.String("error", err.Error()))
 				} else {
 					log.Info("yt-dlp plugin installed from setup wizard", slog.Int("port", port))
 				}
 			},
-			func(platform string) {
-				if autoCookieSvc != nil {
-					if err := autoCookieSvc.StartSetup(platform); err != nil {
-						log.Error("Failed to start auto-cookie setup", slog.String("platform", platform), slog.String("error", err.Error()))
-					}
+			func(platform string) error {
+				if err := autoCookieSvc.StartSetup(platform); err != nil {
+					log.Error("Failed to start auto-cookie setup", slog.String("platform", platform), slog.String("error", err.Error()))
+					return err
 				}
+				return nil
 			},
 			func() (bool, bool) {
 				if autoCookieSvc != nil {

@@ -141,9 +141,8 @@ type SetupWizardModel struct {
 
 	mode       setupMode
 	modeChoice int // 0=Quick, 1=Advanced on mode selection screen
-	values     map[string]string
-	saving       bool
-	errorMsg     string
+	values   map[string]string
+	errorMsg string
 
 	// Advanced setup huh form
 	advancedForm     *huh.Form
@@ -152,11 +151,12 @@ type SetupWizardModel struct {
 
 	// Simplified setup state
 	simpleStage  setupSimpleStage
-	cookieFocus  int  // 0=YouTube, 1=Twitch, 2=Skip
-	cookieActive bool // true when browser is open
-	cookiePlatform string
-	cookieYTDone bool
-	cookieTWDone bool
+	cookieFocus     int  // 0=YouTube, 1=Twitch, 2=Skip
+	cookieActive    bool // true when browser is open
+	cookieFinishing bool // true while async cookie extraction runs
+	cookiePlatform  string
+	cookieYTDone    bool
+	cookieTWDone    bool
 
 	// Channel sub-editor (shared by simple and advanced)
 	channels          []config.ChannelConfig
@@ -169,13 +169,13 @@ type SetupWizardModel struct {
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
 
-	// Loading spinner (shown during cookie extraction and saving)
+	// Loading spinner (shown during cookie extraction)
 	spinner spinner.Model
 
 	// Callbacks for finishing setup
 	OnComplete         func(cfg *config.MoomboxConfig) error
-	OnInstallYtdlp     func(port int)
-	OnStartAutoCookie  func(platform string)
+	OnInstallYtdlp     func(port int, httpsEnabled bool)
+	OnStartAutoCookie  func(platform string) error
 	OnFinishAutoCookie func() (bool, bool)
 	OnCancelAutoCookie func()
 	OnRestart          func()
@@ -197,7 +197,6 @@ func (m *SetupWizardModel) Open() {
 	m.mode = setupModeSelect
 	m.modeChoice = 0
 	m.values = make(map[string]string)
-	m.saving = false
 	m.errorMsg = ""
 	m.advancedForm = nil
 	m.advancedFormDone = false
@@ -205,6 +204,7 @@ func (m *SetupWizardModel) Open() {
 	m.simpleStage = setupSimpleCookies
 	m.cookieFocus = 0
 	m.cookieActive = false
+	m.cookieFinishing = false
 	m.cookiePlatform = ""
 	m.cookieYTDone = false
 	m.cookieTWDone = false
@@ -304,8 +304,8 @@ func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		return nil
 	}
 
-	// Route spinner when saving or cookie active
-	if m.saving || m.cookieActive {
+	// Route spinner when cookie extraction browser is active
+	if m.cookieActive {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return cmd
@@ -314,14 +314,6 @@ func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	// Advanced mode: route to huh form or channel editor textinput
 	if m.mode == setupModeAdvanced {
 		if m.advancedForm != nil {
-			// Deliver any pending Init cmd first
-			if m.advancedInitCmd != nil {
-				initCmd := m.advancedInitCmd
-				m.advancedInitCmd = nil
-				model, cmd := m.advancedForm.Update(msg)
-				m.advancedForm = model.(*huh.Form)
-				return tea.Batch(initCmd, cmd)
-			}
 			model, cmd := m.advancedForm.Update(msg)
 			m.advancedForm = model.(*huh.Form)
 			if m.advancedForm.State == huh.StateCompleted {
@@ -398,9 +390,6 @@ func (m *SetupWizardModel) updateTextInputForField() {
 
 // HandleKey processes key input. Returns "complete" when setup finishes.
 func (m *SetupWizardModel) HandleKey(key string) string {
-	if m.saving {
-		return ""
-	}
 	if m.errorMsg != "" {
 		m.errorMsg = ""
 	}
@@ -455,20 +444,14 @@ func (m *SetupWizardModel) handleSimpleKey(key string) string {
 
 func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 	if m.cookieActive {
-		// Waiting for user to finish login
+		if m.cookieFinishing {
+			return "" // extraction in progress, ignore keys
+		}
 		switch key {
 		case keyEnter:
-			// Finish auto-cookie
-			if m.OnFinishAutoCookie != nil {
-				yt, tw := m.OnFinishAutoCookie()
-				if m.cookiePlatform == "youtube" {
-					m.cookieYTDone = yt
-				} else {
-					m.cookieTWDone = tw
-				}
-			}
-			m.cookieActive = false
-			m.cookiePlatform = ""
+			// Signal app.go to run async cookie extraction
+			m.cookieFinishing = true
+			return "finish_cookie"
 		case keyEsc:
 			if m.OnCancelAutoCookie != nil {
 				m.OnCancelAutoCookie()
@@ -494,17 +477,23 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 		switch m.cookieFocus {
 		case 0: // YouTube
 			if m.OnStartAutoCookie != nil {
-				m.OnStartAutoCookie("youtube")
-				m.cookieActive = true
-				m.cookiePlatform = "youtube"
-				m.spinner = newSpinner()
+				if err := m.OnStartAutoCookie("youtube"); err != nil {
+					m.errorMsg = fmt.Sprintf("YouTube cookies: %v", err)
+				} else {
+					m.cookieActive = true
+					m.cookiePlatform = "youtube"
+					m.spinner = newSpinner()
+				}
 			}
 		case 1: // Twitch
 			if m.OnStartAutoCookie != nil {
-				m.OnStartAutoCookie("twitch")
-				m.cookieActive = true
-				m.cookiePlatform = "twitch"
-				m.spinner = newSpinner()
+				if err := m.OnStartAutoCookie("twitch"); err != nil {
+					m.errorMsg = fmt.Sprintf("Twitch cookies: %v", err)
+				} else {
+					m.cookieActive = true
+					m.cookiePlatform = "twitch"
+					m.spinner = newSpinner()
+				}
 			}
 		case 2: // Skip / Next
 			m.simpleStage = setupSimpleChannels
@@ -685,7 +674,6 @@ func (m *SetupWizardModel) cycleChannelFieldReverse(field channelFieldDef) {
 }
 
 func (m *SetupWizardModel) finishSimpleSetup() string {
-	m.saving = true
 	m.errorMsg = ""
 
 	cfg := config.Defaults()
@@ -709,12 +697,9 @@ func (m *SetupWizardModel) finishSimpleSetup() string {
 	if m.OnComplete != nil {
 		if err := m.OnComplete(cfg); err != nil {
 			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
-			m.saving = false
 			return ""
 		}
 	}
-
-	m.saving = false
 
 	// Trigger restart so all services re-init with new config
 	if m.OnRestart != nil {
@@ -808,7 +793,6 @@ func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
 }
 
 func (m *SetupWizardModel) finishAdvancedSetup() string {
-	m.saving = true
 	m.errorMsg = ""
 
 	v := func(key string) string {
@@ -915,21 +899,18 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	if m.OnComplete != nil {
 		if err := m.OnComplete(cfg); err != nil {
 			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
-			m.saving = false
 			return ""
 		}
 	}
 
 	// Post-save actions (run before restart since they're fast and synchronous)
 	if vBool("installYtdlpPlugin", false) && m.OnInstallYtdlp != nil {
-		m.OnInstallYtdlp(cfg.Network.Port)
+		m.OnInstallYtdlp(cfg.Network.Port, cfg.Network.HTTPSEnabled)
 	}
 
 	// Note: auto-cookies are enabled via config (auto_enabled: true).
 	// The auto-cookie service will initialize on restart — no need to
 	// call OnStartAutoCookie here (the restart would kill it immediately).
-
-	m.saving = false
 
 	// Trigger restart
 	if m.OnRestart != nil {
@@ -1070,17 +1051,23 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 
 	if m.cookieActive {
-		// Browser is open, waiting for login
 		platformName := "YouTube"
 		if m.cookiePlatform == "twitch" {
 			platformName = "Twitch"
 		}
-		lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
-			fmt.Sprintf("Browser opened for %s login.", platformName)))
-		lines = append(lines, "")
-		lines = append(lines, "Sign in, then press "+
-			lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Enter")+" to extract cookies.")
-		lines = append(lines, DimStyle.Render("Press Esc to cancel."))
+		if m.cookieFinishing {
+			// Extracting cookies from browser
+			lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
+				fmt.Sprintf("Extracting %s cookies...", platformName)))
+		} else {
+			// Browser is open, waiting for login
+			lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
+				fmt.Sprintf("Browser opened for %s login.", platformName)))
+			lines = append(lines, "")
+			lines = append(lines, "Sign in, then press "+
+				lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Enter")+" to extract cookies.")
+			lines = append(lines, DimStyle.Render("Press Esc to cancel."))
+		}
 	} else {
 		// Platform selection
 		options := []struct {
@@ -1112,6 +1099,12 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 				lines = append(lines, "")
 			}
 		}
+	}
+
+	// Error
+	if m.errorMsg != "" {
+		lines = append(lines, "")
+		lines = append(lines, ErrorStyle.Render(m.errorMsg))
 	}
 
 	// Navigation
@@ -1175,9 +1168,6 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	// Error
 	if m.errorMsg != "" {
 		lines = append(lines, ErrorStyle.Render(m.errorMsg))
-	}
-	if m.saving {
-		lines = append(lines, m.spinner.View()+" Saving configuration...")
 	}
 
 	// Navigation
@@ -1266,9 +1256,6 @@ func (m *SetupWizardModel) viewAdvanced() string {
 
 		if m.errorMsg != "" {
 			lines = append(lines, ErrorStyle.Render(m.errorMsg))
-		}
-		if m.saving {
-			lines = append(lines, m.spinner.View()+" Saving configuration...")
 		}
 
 		// Navigation hints
