@@ -41,7 +41,7 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 - **Auto-reacquisition** — When cookies expire or are deleted, Moombox automatically re-launches the browser to reacquire them
 
 ### Interfaces
-- **Terminal UI** — Full-screen TUI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) with mouse support, keyboard navigation, job management, settings editor, and live logs
+- **Terminal UI** — Full-screen TUI built with [Charmbracelet's Bubble Tea suite](https://github.com/charmbracelet) ([Bubble Tea](https://github.com/charmbracelet/bubbletea) + [Bubbles](https://github.com/charmbracelet/bubbles) + [Huh](https://github.com/charmbracelet/huh) + [Lip Gloss](https://github.com/charmbracelet/lipgloss)) with mouse support, keyboard navigation, job management, settings editor, and live logs
 - **Web dashboard** — Real-time job monitoring at `localhost:774` (HTTPS when external) with video player, synchronized chat replay (Niconico-style flying overlay + sidebar), settings management, and zip import
 - **Mobile responsive** — Web dashboard adapts to tablets and phones with reorganized layouts and touch-friendly controls
 - **Statistics dashboard** — At-a-glance disk usage, total archive size, platform breakdown (YouTube vs Twitch), job counts, and activity metrics
@@ -327,7 +327,7 @@ Key components:
 - **Chat system** — YouTube live chat polling + Twitch IRC with memory bounding, stale continuation recovery, and replay support
 - **Database** — SQLite with WAL mode, batch updates, and pub/sub for real-time UI updates
 - **Web server** — [chi](https://github.com/go-chi/chi) router with WebSocket real-time updates, CORS, CSP, rate limiting, password auth, and IP-based access control
-- **TUI** — [Bubble Tea](https://github.com/charmbracelet/bubbletea) 3-panel layout with [Lip Gloss](https://github.com/charmbracelet/lipgloss) styling
+- **TUI** — Built on [Charmbracelet's full Bubble Tea suite](https://github.com/charmbracelet): [Bubble Tea](https://github.com/charmbracelet/bubbletea) framework, [Bubbles](https://github.com/charmbracelet/bubbles) components, [Huh](https://github.com/charmbracelet/huh) forms, and [Lip Gloss](https://github.com/charmbracelet/lipgloss) styling
 
 See [CLAUDE.md](CLAUDE.md) for comprehensive architecture documentation including initialization order, package dependency graph, code patterns, and design decisions.
 

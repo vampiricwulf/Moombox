@@ -37,12 +37,25 @@ The Go rewrite from TypeScript is complete (all 12 phases, full file-by-file com
 | Library | Purpose |
 |---------|---------|
 | `go-chi/chi/v5` | HTTP router |
-| `charmbracelet/bubbletea` + `lipgloss` | TUI framework + styling |
+| `charmbracelet/bubbletea` + `bubbles` + `huh` + `lipgloss` | TUI framework (Charm ecosystem — see below) |
 | `dop251/goja` | Pure-Go JS engine (BotGuard, cipher) |
 | `modernc.org/sqlite` | SQLite driver (no CGo) |
 | `nhooyr.io/websocket` | WebSocket |
 | `BurntSushi/toml` | Config parsing |
 | Shoelace v2.16 (CDN) | Web UI components |
+
+### Charmbracelet / Charm ecosystem (TUI)
+
+The TUI is built on **Charmbracelet's full Bubble Tea suite**. Before implementing or refactoring any TUI feature, check what's available in the Charm ecosystem — there may already be a well-tested component that fits.
+
+| Package | What we use it for |
+|---------|-------------------|
+| `bubbletea` | Core TUI framework (Elm architecture, `Model`/`Update`/`View`) |
+| `bubbles` | Pre-built components: `list`, `viewport`, `spinner`, `key`, `cursor`, `paginator` |
+| `huh` | Form framework: multi-step wizards (setup wizard, add video advanced mode) |
+| `lipgloss` | Styling: colors, borders, padding, layout composition |
+
+**Design rule**: When designing TUI features, always check [Charm's repos](https://github.com/charmbracelet) first for existing components or patterns. Prefer using or extending their building blocks over rolling custom implementations. This applies to lists, text inputs, forms, file pickers, tables, progress bars, overlays, and any UI primitive.
 
 ## TypeScript Reference
 
@@ -135,7 +148,7 @@ cmd/moombox/main.go          ← launcher + orchestrator
 ├── internal/notifications    ← Manager + Discord webhook
 ├── internal/web              ← chi router, WebSocket hub, auth, middleware, embedded SPA
 │   └── internal/web/routes   ← All REST API route handlers
-├── internal/tui              ← BubbleTea 3-panel layout
+├── internal/tui              ← Charm ecosystem TUI (bubbletea + bubbles + huh + lipgloss)
 ├── internal/goja             ← JS runtime shims (minimal DOM, TextEncoder, timers)
 ├── internal/disk             ← Windows-only disk space queries (kernel32 GetDiskFreeSpaceExW)
 ├── internal/errors           ← Typed error hierarchy (MoomboxError, YouTubeError, etc.)
