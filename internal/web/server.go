@@ -50,6 +50,11 @@ type Server struct {
 	OpenBrowser   bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
 	ActualPort    int              // Actual bound port after Start (may differ from cfg if probed)
 
+	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
+	// Called by AuthMiddleware when the session cookie is missing/invalid.
+	// Returns (valid, newSessionToken).
+	ClientTokenCheck func(rawToken, ip string) (bool, string)
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -141,6 +146,17 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		if s.auth != nil {
 			if cookie, err := r.Cookie("moombox_session"); err == nil {
 				if s.auth.ValidateSession(cookie.Value) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+
+		// Fallback: check persistent client token cookie
+		if s.ClientTokenCheck != nil {
+			if cookie, err := r.Cookie("moombox_client"); err == nil && cookie.Value != "" {
+				if valid, sessionToken := s.ClientTokenCheck(cookie.Value, ip); valid {
+					SetSessionCookie(w, r, sessionToken)
 					next.ServeHTTP(w, r)
 					return
 				}

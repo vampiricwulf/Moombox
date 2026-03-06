@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"io/fs"
+	"net"
 	"net/http"
 	"os/exec"
 
@@ -563,31 +564,65 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			}
 		},
 	})
-	routes.AuthRoutes(r, &routes.AuthRoutesDeps{
+	authDeps := &routes.AuthRoutesDeps{
 		Cfg:        cfg,
 		Auth:       authSvc,
+		DB:         db,
 		LoginRL:    loginRL,
 		PasswordRL: passwordRL,
 		SaveConfig: func(c *config.MoomboxConfig) error {
 			return config.Save(c, configPath)
 		},
 		Logger: log,
-	})
+	}
+	routes.AuthRoutes(r, authDeps)
+	routes.ClientTokenRoutes(r, authDeps)
 
 	// WebSocket upgrade handler — register on the router before static file mounting.
 	// TS uses noServer mode which upgrades on any path; frontend connects to ws://host/ (root).
 	webServer.SetWebSocketHandler(wsHub.HandleUpgrade)
+
+	// Wire persistent client token check for AuthMiddleware fallback
+	webServer.ClientTokenCheck = func(rawToken, ip string) (bool, string) {
+		prefix := web.TokenPrefix(rawToken)
+		ct, err := db.GetClientTokenByPrefix(prefix)
+		if err != nil || ct == nil {
+			return false, ""
+		}
+		if !web.VerifyToken(rawToken, ct.TokenHash) {
+			return false, ""
+		}
+		sessionToken, err := authSvc.CreateSession()
+		if err != nil {
+			return false, ""
+		}
+		// Fire-and-forget usage update
+		go db.UpdateClientTokenUsage(ct.ID, ip)
+		return true, sessionToken
+	}
 
 	// Wire WebSocket auth check for external connections
 	wsHub.AuthCheck = func(r *http.Request) bool {
 		if !web.IsAuthRequired(cfg.Network.NetworkAccess, cfg.Network.PasswordHash) {
 			return true
 		}
-		cookie, err := r.Cookie("moombox_session")
-		if err != nil {
-			return false
+		// Check session cookie
+		if cookie, err := r.Cookie("moombox_session"); err == nil {
+			if authSvc.ValidateSession(cookie.Value) {
+				return true
+			}
 		}
-		return authSvc.ValidateSession(cookie.Value)
+		// Fallback: check persistent client token (can't set cookies on WS upgrade, just allow)
+		if cookie, err := r.Cookie("moombox_client"); err == nil && cookie.Value != "" {
+			prefix := web.TokenPrefix(cookie.Value)
+			if ct, err := db.GetClientTokenByPrefix(prefix); err == nil && ct != nil {
+				if web.VerifyToken(cookie.Value, ct.TokenHash) {
+					go db.UpdateClientTokenUsage(ct.ID, extractWSIP(r))
+					return true
+				}
+			}
+		}
+		return false
 	}
 
 	// Wire initial state provider for WebSocket connections
@@ -1160,6 +1195,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		app.OnDeleteOrphan = func(path string) error {
 			return worker.DeleteOrphanedFile(path, cfg)
+		}
+		app.OnListClientTokens = func() ([]*database.ClientToken, error) {
+			return db.ListClientTokens()
+		}
+		app.OnDeleteClientToken = func(id string) error {
+			return db.DeleteClientToken(id)
 		}
 		app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) {
 			if err := config.Save(updatedCfg, configPath); err != nil {
@@ -1954,6 +1995,14 @@ func deferDeleteOldLauncher(exePath string) {
 		"del", "/f", "/q", oldPath, ">nul", "2>nul")
 	cleanup.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000} // CREATE_NO_WINDOW
 	cleanup.Start() // fire and forget
+}
+
+func extractWSIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig) []*database.Job {

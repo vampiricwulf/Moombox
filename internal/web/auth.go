@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -188,6 +189,72 @@ func (as *AuthService) evictExpired() {
 			delete(as.sessions, token)
 		}
 	}
+}
+
+// --- Client Token helpers ---
+
+// GenerateToken creates a 32-byte random hex token (64 chars).
+func GenerateToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// TokenPrefix returns the first 8 hex chars of a raw token, used for indexed DB lookup.
+func TokenPrefix(rawToken string) string {
+	if len(rawToken) < 8 {
+		return rawToken
+	}
+	return rawToken[:8]
+}
+
+// HashToken hashes a raw token using scrypt. Returns "salt_hex:hash_hex" (no "scrypt:" prefix).
+func HashToken(token string) (string, error) {
+	salt := make([]byte, saltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	hash, err := scrypt.Key([]byte(token), salt, scryptN, scryptR, scryptP, scryptKeyLen)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(salt) + ":" + hex.EncodeToString(hash), nil
+}
+
+// VerifyToken checks a raw token against a stored hash ("salt_hex:hash_hex").
+func VerifyToken(token, storedHash string) bool {
+	parts := strings.SplitN(storedHash, ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	salt, err := hex.DecodeString(parts[0])
+	if err != nil || len(salt) != saltLen {
+		return false
+	}
+	expectedHash, err := hex.DecodeString(parts[1])
+	if err != nil || len(expectedHash) != scryptKeyLen {
+		return false
+	}
+	hash, err := scrypt.Key([]byte(token), salt, scryptN, scryptR, scryptP, scryptKeyLen)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(hash, expectedHash) == 1
+}
+
+// SetSessionCookie sets the moombox_session cookie on the response.
+func SetSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "moombox_session",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   86400, // 24 hours
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // IsScryptHash checks if a string looks like a scrypt hash ("scrypt:<salt>:<hash>").

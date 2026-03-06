@@ -135,6 +135,16 @@ type (
 		Err      error
 	}
 
+	// Async results for client token management
+	fetchClientTokensResultMsg struct {
+		Tokens []*database.ClientToken
+		Err    string
+	}
+	deleteClientTokenResultMsg struct {
+		ID  string
+		Err string
+	}
+
 	// Async results for setup wizard cookie extraction
 	setupCookieFinishMsg struct {
 		Platform string // "youtube" or "twitch"
@@ -162,8 +172,9 @@ type App struct {
 	addVideo  *AddVideoModel
 	importDlg *ImportDialogModel
 	trimDlg   *TrimDialogModel
-	filesDlg  *FilesDialogModel
-	setupWiz  *SetupWizardModel
+	filesDlg       *FilesDialogModel
+	clientTokensDlg *ClientTokensDialogModel
+	setupWiz       *SetupWizardModel
 	settings  *SettingsModel
 
 	// Progress
@@ -235,6 +246,10 @@ type App struct {
 	OnListOrphans    func() ([]OrphanedFileEntry, error)                // list orphaned files
 	OnDeleteOrphan   func(path string) error                            // delete orphaned file
 
+	// Client token callbacks
+	OnListClientTokens  func() ([]*database.ClientToken, error)
+	OnDeleteClientToken func(id string) error
+
 	// Update callbacks
 	OnCheckUpdate func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
 	OnApplyUpdate func(version string) string      // returns error string (empty on success, process exits)
@@ -270,8 +285,9 @@ func NewApp() *App {
 		addVideo:      NewAddVideoModel(),
 		importDlg:     NewImportDialogModel(),
 		trimDlg:       NewTrimDialogModel(),
-		filesDlg:      NewFilesDialogModel(),
-		setupWiz:      NewSetupWizardModel(),
+		filesDlg:        NewFilesDialogModel(),
+		clientTokensDlg: NewClientTokensDialogModel(),
+		setupWiz:        NewSetupWizardModel(),
 		settings:      NewSettingsModel(),
 		ffmpegCheck:   NewFFmpegCheckModel(),
 		actionMenu:    NewActionMenuModel(),
@@ -717,6 +733,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case fetchClientTokensResultMsg:
+		if msg.Err != "" {
+			a.clientTokensDlg.SetError(msg.Err)
+			return a, nil
+		}
+		cmd := a.clientTokensDlg.SetTokens(msg.Tokens)
+		return a, cmd
+
+	case deleteClientTokenResultMsg:
+		if msg.Err != "" {
+			a.clientTokensDlg.SetError(msg.Err)
+		} else {
+			a.clientTokensDlg.RemoveToken(msg.ID)
+			a.clientTokensDlg.feedbackMsg = "Revoked"
+		}
+		return a, nil
+
 	case ffmpegPrepareResultMsg:
 		if msg.Err != "" {
 			a.ffmpegCheck.SetInstallResult(fmt.Sprintf("Install failed: %s", msg.Err), true)
@@ -885,6 +918,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	if a.filesDlg.IsVisible() {
 		return a.filesDlg.UpdateComponents(msg)
 	}
+	if a.clientTokensDlg.IsVisible() {
+		return a.clientTokensDlg.UpdateComponents(msg)
+	}
 	// Help overlay viewport
 	if a.help.IsVisible() {
 		return a.help.UpdateViewport(msg)
@@ -1041,6 +1077,21 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "delete":
 			if sel := a.filesDlg.SelectedFile(); sel != nil {
 				return a, a.deleteOrphanCmd(sel.Path)
+			}
+		}
+		if cmd != nil {
+			return a, cmd
+		}
+		return a, nil
+	}
+	if a.clientTokensDlg.IsVisible() {
+		action, cmd := a.clientTokensDlg.HandleKey(msg)
+		switch action {
+		case "refresh":
+			return a, tea.Batch(a.fetchClientTokensCmd(), a.clientTokensDlg.SpinnerInit())
+		case "revoke":
+			if sel := a.clientTokensDlg.SelectedToken(); sel != nil {
+				return a, a.deleteClientTokenCmd(sel.ID)
 			}
 		}
 		if cmd != nil {
@@ -1300,6 +1351,12 @@ func (a *App) executeActionChord(action string) (tea.Model, tea.Cmd) {
 		a.filesDlg.SetSize(a.width, a.height)
 		a.filesDlg.Open()
 		return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
+	case "k":
+		if a.OnListClientTokens != nil {
+			a.clientTokensDlg.SetSize(a.width, a.height)
+			a.clientTokensDlg.Open()
+			return a, tea.Batch(a.fetchClientTokensCmd(), a.clientTokensDlg.SpinnerInit())
+		}
 	}
 	return a, nil
 }
@@ -1527,6 +1584,10 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A O", Label: "Browse Orphaned Files", Category: "Action"},
 	}
 
+	if a.OnListClientTokens != nil {
+		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", Category: "Action"})
+	}
+
 	// Request — conditional on callbacks being set
 	if a.OnRecheckCookies != nil {
 		items = append(items, ActionMenuItem{Chord: "R C", Label: "Recheck Cookies", Category: "Request"})
@@ -1620,6 +1681,10 @@ func (a *App) dispatchMenuAction(action string) (tea.Model, tea.Cmd) {
 		a.filesDlg.SetSize(a.width, a.height)
 		a.filesDlg.Open()
 		return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
+	case "A K":
+		a.clientTokensDlg.SetSize(a.width, a.height)
+		a.clientTokensDlg.Open()
+		return a, tea.Batch(a.fetchClientTokensCmd(), a.clientTokensDlg.SpinnerInit())
 	case "R C":
 		return a.executeRequestChord("c")
 	case "R F":
@@ -1670,7 +1735,7 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	if a.settings.IsVisible() || a.help.IsVisible() || a.importDlg.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.setupWiz.IsVisible() || a.ffmpegCheck.IsVisible() {
+	if a.settings.IsVisible() || a.help.IsVisible() || a.importDlg.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.clientTokensDlg.IsVisible() || a.setupWiz.IsVisible() || a.ffmpegCheck.IsVisible() {
 		return a, nil
 	}
 
@@ -1800,6 +1865,7 @@ func (a *App) recalcLayout() {
 	a.addVideo.SetSize(a.width, a.height)
 	a.trimDlg.SetSize(a.width, a.height)
 	a.filesDlg.SetSize(a.width, a.height)
+	a.clientTokensDlg.SetSize(a.width, a.height)
 	a.setupWiz.SetSize(a.width, a.height)
 	a.ffmpegCheck.SetSize(a.width, a.height)
 	a.settings.SetSize(a.width, a.height)
@@ -1843,6 +1909,9 @@ func (a *App) View() string {
 	}
 	if a.filesDlg.IsVisible() {
 		return a.filesDlg.View()
+	}
+	if a.clientTokensDlg.IsVisible() {
+		return a.clientTokensDlg.View()
 	}
 
 	// Top row: task list + details
@@ -2149,6 +2218,33 @@ func (a *App) fetchOrphansCmd() tea.Cmd {
 			return fetchOrphansResultMsg{Err: err.Error()}
 		}
 		return fetchOrphansResultMsg{Files: files}
+	}
+}
+
+func (a *App) fetchClientTokensCmd() tea.Cmd {
+	listFn := a.OnListClientTokens
+	return func() tea.Msg {
+		if listFn == nil {
+			return fetchClientTokensResultMsg{Err: "Not available"}
+		}
+		tokens, err := listFn()
+		if err != nil {
+			return fetchClientTokensResultMsg{Err: err.Error()}
+		}
+		return fetchClientTokensResultMsg{Tokens: tokens}
+	}
+}
+
+func (a *App) deleteClientTokenCmd(id string) tea.Cmd {
+	deleteFn := a.OnDeleteClientToken
+	return func() tea.Msg {
+		if deleteFn == nil {
+			return deleteClientTokenResultMsg{ID: id, Err: "Not available"}
+		}
+		if err := deleteFn(id); err != nil {
+			return deleteClientTokenResultMsg{ID: id, Err: err.Error()}
+		}
+		return deleteClientTokenResultMsg{ID: id}
 	}
 }
 

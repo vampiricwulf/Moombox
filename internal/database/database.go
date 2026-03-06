@@ -1141,6 +1141,94 @@ func (db *Database) PruneJobLogs(activeIDs map[string]struct{}) {
 	}
 }
 
+// --- Client Token CRUD ---
+
+// AddClientToken inserts a new client token.
+func (db *Database) AddClientToken(ct *ClientToken) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.db.ExecContext(db.getCtx(),
+		`INSERT INTO client_tokens (id, token_prefix, token_hash, label, created_at, last_used_at, last_ip)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		ct.ID, ct.TokenPrefix, ct.TokenHash, ct.Label, ct.CreatedAt, ct.LastUsedAt, ct.LastIP)
+	return err
+}
+
+// GetClientTokenByPrefix returns the client token matching the given prefix, or nil.
+func (db *Database) GetClientTokenByPrefix(prefix string) (*ClientToken, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var ct ClientToken
+	err := db.db.QueryRowContext(db.getCtx(),
+		`SELECT id, token_prefix, token_hash, label, created_at, last_used_at, last_ip
+		FROM client_tokens WHERE token_prefix = ?`, prefix).Scan(
+		&ct.ID, &ct.TokenPrefix, &ct.TokenHash, &ct.Label, &ct.CreatedAt, &ct.LastUsedAt, &ct.LastIP)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &ct, nil
+}
+
+// ListClientTokens returns all client tokens, newest first.
+func (db *Database) ListClientTokens() ([]*ClientToken, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.db.QueryContext(db.getCtx(),
+		`SELECT id, token_prefix, token_hash, label, created_at, last_used_at, last_ip
+		FROM client_tokens ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []*ClientToken
+	for rows.Next() {
+		var ct ClientToken
+		if err := rows.Scan(&ct.ID, &ct.TokenPrefix, &ct.TokenHash, &ct.Label,
+			&ct.CreatedAt, &ct.LastUsedAt, &ct.LastIP); err != nil {
+			continue
+		}
+		tokens = append(tokens, &ct)
+	}
+	return tokens, rows.Err()
+}
+
+// UpdateClientTokenUsage updates the last-used timestamp and IP for a token.
+func (db *Database) UpdateClientTokenUsage(id, ip string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.db.ExecContext(db.getCtx(),
+		`UPDATE client_tokens SET last_used_at = ?, last_ip = ? WHERE id = ?`,
+		now, ip, id)
+	return err
+}
+
+// DeleteClientToken removes a single client token.
+func (db *Database) DeleteClientToken(id string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.db.ExecContext(db.getCtx(), `DELETE FROM client_tokens WHERE id = ?`, id)
+	return err
+}
+
+// DeleteAllClientTokens removes all client tokens.
+func (db *Database) DeleteAllClientTokens() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.db.ExecContext(db.getCtx(), `DELETE FROM client_tokens`)
+	return err
+}
+
 // Close flushes pending updates and closes the database.
 func (db *Database) Close() error {
 	if db.closed {

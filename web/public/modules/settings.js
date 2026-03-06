@@ -1254,6 +1254,9 @@ export class SettingsController {
     if (currentPasswordInput) currentPasswordInput.value = "";
     document.getElementById("security-new-password").value = "";
     document.getElementById("security-confirm-password").value = "";
+
+    // Load connected clients
+    this.loadClientTokens();
   }
 
   async setPassword() {
@@ -1338,6 +1341,89 @@ export class SettingsController {
     } finally {
       btn.loading = false;
     }
+  }
+
+  // ─── Client Token Methods ────────────────────────────────────
+
+  async loadClientTokens() {
+    const container = document.getElementById("client-tokens-list");
+    if (!container) return;
+
+    try {
+      const response = await fetch("/api/client-tokens");
+      if (!response.ok) {
+        container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">Unable to load tokens</span>';
+        return;
+      }
+      const tokens = await response.json();
+
+      if (!tokens || tokens.length === 0) {
+        container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">No connected clients</span>';
+        return;
+      }
+
+      container.innerHTML = "";
+      for (const token of tokens) {
+        const row = document.createElement("div");
+        row.style.cssText = "display: flex; align-items: center; gap: 0.5em; margin-bottom: 0.5em;";
+
+        const label = document.createElement("span");
+        label.style.cssText = "flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85rem;";
+        label.textContent = token.label || "Unknown";
+        label.title = token.label || "";
+
+        const meta = document.createElement("span");
+        meta.style.cssText = "color: var(--sl-color-neutral-500); font-size: 0.75rem; white-space: nowrap;";
+        const lastUsed = token.lastUsedAt ? this.formatRelativeTime(token.lastUsedAt) : "never";
+        meta.textContent = lastUsed;
+
+        const revokeBtn = document.createElement("sl-icon-button");
+        revokeBtn.name = "x-circle";
+        revokeBtn.label = "Revoke";
+        revokeBtn.style.fontSize = "1rem";
+        revokeBtn.addEventListener("click", () => this.revokeClientToken(token.id));
+
+        row.appendChild(label);
+        row.appendChild(meta);
+        row.appendChild(revokeBtn);
+        container.appendChild(row);
+      }
+    } catch (e) {
+      console.error("Failed to load client tokens:", e);
+      container.innerHTML = '<span style="color: var(--sl-color-neutral-500);">Error loading tokens</span>';
+    }
+  }
+
+  async revokeClientToken(id) {
+    try {
+      const response = await fetch(`/api/client-tokens/${id}`, { method: "DELETE" });
+      if (response.ok) {
+        this.app.showToast("Client token revoked", "success");
+        this.loadClientTokens();
+      } else {
+        const data = await response.json();
+        this.app.showToast(data.error || "Failed to revoke token", "danger");
+      }
+    } catch (e) {
+      this.app.showToast("Failed to revoke token: " + e.message, "danger");
+    }
+  }
+
+  formatRelativeTime(isoDate) {
+    if (!isoDate) return "never";
+    const date = new Date(isoDate);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHr = Math.floor(diffMin / 60);
+    const diffDays = Math.floor(diffHr / 24);
+
+    if (diffSec < 60) return "just now";
+    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffHr < 24) return `${diffHr}h ago`;
+    if (diffDays === 1) return "1d ago";
+    return `${diffDays}d ago`;
   }
 
   // ─── Auto Cookie Methods ─────────────────────────────────────

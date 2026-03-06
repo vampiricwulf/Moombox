@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 const createSchema = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -112,9 +112,20 @@ CREATE TABLE IF NOT EXISTS segments (
     duration_seconds REAL
 );
 
+CREATE TABLE IF NOT EXISTS client_tokens (
+    id TEXT PRIMARY KEY,
+    token_prefix TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL DEFAULT '',
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT '',
+    last_used_at TEXT NOT NULL DEFAULT '',
+    last_ip TEXT NOT NULL DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_gaps_job_id ON gaps(job_id);
 CREATE INDEX IF NOT EXISTS idx_trims_job_id ON trims(job_id);
 CREATE INDEX IF NOT EXISTS idx_segments_job_id ON segments(job_id);
+CREATE INDEX IF NOT EXISTS idx_client_tokens_prefix ON client_tokens(token_prefix);
 `
 
 func (db *Database) migrate() error {
@@ -259,6 +270,28 @@ func (db *Database) migrate() error {
 		}
 
 		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 5)
+		if err != nil {
+			return err
+		}
+	}
+
+	if version < 6 {
+		if _, err := db.db.ExecContext(db.getCtx(), `CREATE TABLE IF NOT EXISTS client_tokens (
+			id TEXT PRIMARY KEY,
+			token_prefix TEXT NOT NULL DEFAULT '',
+			token_hash TEXT NOT NULL DEFAULT '',
+			label TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT '',
+			last_used_at TEXT NOT NULL DEFAULT '',
+			last_ip TEXT NOT NULL DEFAULT ''
+		)`); err != nil {
+			return err
+		}
+		if _, err := db.db.ExecContext(db.getCtx(), `CREATE INDEX IF NOT EXISTS idx_client_tokens_prefix ON client_tokens(token_prefix)`); err != nil {
+			return err
+		}
+
+		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 6)
 		if err != nil {
 			return err
 		}

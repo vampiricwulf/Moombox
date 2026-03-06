@@ -1,13 +1,19 @@
 package routes
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
@@ -15,6 +21,7 @@ import (
 type AuthRoutesDeps struct {
 	Cfg        *config.MoomboxConfig
 	Auth       *web.AuthService
+	DB         *database.Database
 	LoginRL    *web.RateLimiter // 5 attempts/60s
 	PasswordRL *web.RateLimiter // 3 attempts/60s
 	SaveConfig func(*config.MoomboxConfig) error
@@ -85,7 +92,36 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			deps.Logger.Info("[Auth] Successful login from " + extractClientIP(req))
 		}
 
-		setSessionCookie(rw, req, token)
+		web.SetSessionCookie(rw, req, token)
+
+		// Issue persistent client token for remote clients.
+		// Revoke any existing client token first (re-login from same browser).
+		if deps.DB != nil {
+			if oldCookie, err := req.Cookie("moombox_client"); err == nil && oldCookie.Value != "" {
+				prefix := web.TokenPrefix(oldCookie.Value)
+				if oldCT, err := deps.DB.GetClientTokenByPrefix(prefix); err == nil && oldCT != nil {
+					deps.DB.DeleteClientToken(oldCT.ID)
+				}
+			}
+			if rawToken, err := web.GenerateToken(); err == nil {
+				if tokenHash, err := web.HashToken(rawToken); err == nil {
+					now := time.Now().UTC().Format(time.RFC3339)
+					ct := &database.ClientToken{
+						ID:          generateShortID(),
+						TokenPrefix: web.TokenPrefix(rawToken),
+						TokenHash:   tokenHash,
+						Label:       buildTokenLabel(req),
+						CreatedAt:   now,
+						LastUsedAt:  now,
+						LastIP:      extractClientIP(req),
+					}
+					if err := deps.DB.AddClientToken(ct); err == nil {
+						setClientCookie(rw, req, rawToken)
+					}
+				}
+			}
+		}
+
 		jsonResponse(rw, map[string]any{
 			"success": true,
 		})
@@ -97,7 +133,21 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		if token != "" {
 			deps.Auth.InvalidateSession(token)
 		}
+
+		// Revoke persistent client token
+		if deps.DB != nil {
+			if cookie, err := req.Cookie("moombox_client"); err == nil && cookie.Value != "" {
+				prefix := web.TokenPrefix(cookie.Value)
+				if ct, err := deps.DB.GetClientTokenByPrefix(prefix); err == nil && ct != nil {
+					if web.VerifyToken(cookie.Value, ct.TokenHash) {
+						deps.DB.DeleteClientToken(ct.ID)
+					}
+				}
+			}
+		}
+
 		clearSessionCookie(rw)
+		clearClientCookie(rw)
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
@@ -163,6 +213,12 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			deps.Auth.InvalidateAllSessions()
 		}
 
+		// Clear all client tokens — password changed, all remotes must re-auth
+		if deps.DB != nil {
+			deps.DB.DeleteAllClientTokens()
+		}
+		clearClientCookie(rw)
+
 		if deps.Logger != nil {
 			deps.Logger.Info("[Auth] Password set/changed from " + extractClientIP(req))
 		}
@@ -219,7 +275,11 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		}
 
 		deps.Auth.InvalidateAllSessions()
+		if deps.DB != nil {
+			deps.DB.DeleteAllClientTokens()
+		}
 		clearSessionCookie(rw)
+		clearClientCookie(rw)
 
 		if deps.Logger != nil {
 			deps.Logger.Info("[Auth] Password removed, network_access reset to localhost from " + extractClientIP(req))
@@ -229,6 +289,44 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			"success":              true,
 			"networkAccessChanged": true,
 		})
+	})
+}
+
+// ClientTokenRoutes registers client token management endpoints.
+func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
+	// GET /api/client-tokens — list all tokens
+	r.Get("/api/client-tokens", func(rw http.ResponseWriter, req *http.Request) {
+		if deps.DB == nil {
+			jsonResponse(rw, []any{})
+			return
+		}
+		tokens, err := deps.DB.ListClientTokens()
+		if err != nil {
+			jsonError(rw, "failed to list tokens", http.StatusInternalServerError)
+			return
+		}
+		if tokens == nil {
+			tokens = []*database.ClientToken{}
+		}
+		jsonResponse(rw, tokens)
+	})
+
+	// DELETE /api/client-tokens/{id} — revoke one token
+	r.Delete("/api/client-tokens/{id}", func(rw http.ResponseWriter, req *http.Request) {
+		id := chi.URLParam(req, "id")
+		if id == "" {
+			jsonError(rw, "id required", http.StatusBadRequest)
+			return
+		}
+		if deps.DB == nil {
+			jsonError(rw, "database unavailable", http.StatusInternalServerError)
+			return
+		}
+		if err := deps.DB.DeleteClientToken(id); err != nil {
+			jsonError(rw, "failed to delete token", http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(rw, map[string]any{"success": true})
 	})
 }
 
@@ -276,18 +374,6 @@ func getSessionToken(r *http.Request) string {
 	return cookie.Value
 }
 
-func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     "moombox_session",
-		Value:    token,
-		Path:     "/",
-		MaxAge:   86400, // 24 hours
-		HttpOnly: true,
-		Secure:   r.TLS != nil, // Dynamic: match TS req.secure behavior
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
 func clearSessionCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "moombox_session",
@@ -297,4 +383,55 @@ func clearSessionCookie(w http.ResponseWriter) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+func setClientCookie(w http.ResponseWriter, r *http.Request, rawToken string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "moombox_client",
+		Value:    rawToken,
+		Path:     "/",
+		MaxAge:   315360000, // ~10 years
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearClientCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "moombox_client",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// buildTokenLabel creates a human-readable label from the User-Agent and IP.
+func buildTokenLabel(r *http.Request) string {
+	ua := r.UserAgent()
+	ip := extractClientIP(r)
+
+	// Truncate UA to something useful
+	label := ua
+	if len(label) > 60 {
+		label = label[:60]
+	}
+	// Extract just the browser/device portion if possible
+	if idx := strings.Index(label, "("); idx > 0 {
+		label = strings.TrimSpace(label[:idx])
+	}
+	if label == "" {
+		label = "Unknown"
+	}
+
+	return fmt.Sprintf("%s — %s", label, ip)
+}
+
+// generateShortID creates a short random hex ID for client tokens.
+func generateShortID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }

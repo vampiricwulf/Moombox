@@ -546,6 +546,15 @@
                                     Removing the password will also set network access back to Localhost Only.
                                 </p>
                             </div>
+
+                            <sl-divider></sl-divider>
+                            <h4>Connected Clients</h4>
+                            <p class="settings-help">
+                                Persistent tokens that allow remote clients to stay logged in across restarts. Revoking a token forces that client to re-enter the password.
+                            </p>
+                            <div id="client-tokens-list" style="margin-top: 0.75em;">
+                                <sl-spinner style="font-size: 1rem;"></sl-spinner>
+                            </div>
                         </div>
 
                         <!-- Paths Settings -->

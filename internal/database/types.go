@@ -133,6 +133,17 @@ type Segment struct {
 	DurationSeconds float64 `json:"durationSeconds,omitempty"`
 }
 
+// ClientToken represents a persistent client token for remote auth across restarts.
+type ClientToken struct {
+	ID          string `json:"id"`
+	TokenPrefix string `json:"tokenPrefix"`
+	TokenHash   string `json:"-"`
+	Label       string `json:"label"`
+	CreatedAt   string `json:"createdAt"`
+	LastUsedAt  string `json:"lastUsedAt"`
+	LastIP      string `json:"lastIp"`
+}
+
 // TrimRecord represents a trimmed clip created from a downloaded video.
 type TrimRecord struct {
 	ID        string  `json:"id"`
