@@ -1,3 +1,3 @@
-### Improvements
+### Bug Fixes
 
-- Web dashboard progress bars now match the job's status color instead of using a fixed blue
+- Fix TUI progress bar gradient compressing the full color range into the filled portion — now spreads the gradient across the full bar width so early progress stays near the starting color

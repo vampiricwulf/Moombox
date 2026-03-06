@@ -705,7 +705,7 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 		m.progress.Width = barW
 		// Gradient: blend from the previous phase's color into the current status color
 		colorA, colorB := progressGradient(r.value)
-		progress.WithScaledGradient(colorA, colorB)(&m.progress)
+		progress.WithGradient(colorA, colorB)(&m.progress)
 		label := padRight("", labelWidth)
 		return label + m.progress.ViewAs(percent/100) + lipgloss.NewStyle().Foreground(r.color).Render(pctLabel)
 
