@@ -2,11 +2,11 @@
 
 :root {
     --status-upcoming: #9333ea;
-    --status-live: #ef4444;
-    --status-downloading: #22c55e;
-    --status-muxing: #eab308;
-    --status-finished: #3b82f6;
-    --status-error: #dc2626;
+    --status-live: #2ecc71;
+    --status-downloading: #2ecc71;
+    --status-muxing: #f1c40f;
+    --status-finished: #1abc9c;
+    --status-error: #e74c3c;
     --status-cancelled: #6b7280;
     --status-cookies: #d946ef;
 }
@@ -1842,11 +1842,11 @@ sl-progress-bar {
 /* ===== Light Theme Overrides ===== */
 html.sl-theme-light {
     --status-upcoming: #7c3aed;
-    --status-live: #dc2626;
-    --status-downloading: #16a34a;
-    --status-muxing: #ca8a04;
-    --status-finished: #2563eb;
-    --status-error: #b91c1c;
+    --status-live: #229954;
+    --status-downloading: #229954;
+    --status-muxing: #d4ac0d;
+    --status-finished: #16a085;
+    --status-error: #c0392b;
     --status-cancelled: #6b7280;
     --status-cookies: #c026d3;
 }

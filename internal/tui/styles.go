@@ -11,11 +11,11 @@ var (
 	ColorDownloading = lipgloss.Color("#2ecc71")
 	ColorLive        = lipgloss.Color("#2ecc71")
 	ColorMuxing      = lipgloss.Color("#f1c40f")
-	ColorUpcoming    = lipgloss.Color("#3498db")
+	ColorUpcoming    = lipgloss.Color("#9333ea")
 	ColorFinished    = lipgloss.Color("#1abc9c")
 	ColorError       = lipgloss.Color("#e74c3c")
-	ColorCancelled   = lipgloss.Color("#95a5a6")
-	ColorCookies     = lipgloss.Color("#e91e63")
+	ColorCancelled   = lipgloss.Color("#6b7280")
+	ColorCookies     = lipgloss.Color("#d946ef")
 	ColorTwitch      = lipgloss.Color("#e91e63")
 
 	ColorWarning = lipgloss.Color("#f39c12")
@@ -135,21 +135,21 @@ func StatusColor(status string) lipgloss.Color {
 // StatusIcon returns a display icon for a job status.
 func StatusIcon(status string) string {
 	switch status {
-	case "Live":
-		return "●"
-	case "Downloading":
+	case "Live", "Downloading":
 		return "▼"
 	case "Muxing":
-		return "⚙"
+		return "⎈"
 	case "Finished":
 		return "✓"
 	case "Error":
 		return "✗"
 	case "COOKIES?":
-		return "⚠"
-	case "Upcoming", "Cancelled":
+		return "⏣"
+	case "Cancelled":
+		return "⊘"
+	case "Upcoming":
 		return "○"
 	default:
-		return "○" // match TS: empty circle for unknown statuses
+		return "○"
 	}
 }
