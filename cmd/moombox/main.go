@@ -44,7 +44,7 @@ import (
 )
 
 var (
-	version = "2.3.10"
+	version = "2.3.11"
 	commit  = ""
 )
 
@@ -1158,15 +1158,18 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				log.Debug("Failed to open folder in file manager", slog.String("error", err.Error()))
 			}
 		}
-		app.OnCreateTrim = func(jobID string, startSec, endSec float64) {
+		app.OnCreateTrim = func(jobID string, startSec, endSec float64, onProgress func(float64)) (string, string) {
 			job, err := db.GetJob(jobID)
 			if err != nil || job == nil {
 				log.Error("Failed to get job for trim", slog.String("jobID", jobID))
-				return
+				return "", "Failed to get job"
 			}
-			if _, err := trimSvc.CreateTrim(context.Background(), job, startSec, endSec); err != nil {
+			record, err := trimSvc.CreateTrimWithProgress(context.Background(), job, startSec, endSec, onProgress)
+			if err != nil {
 				log.Error("Failed to create trim", slog.String("error", err.Error()))
+				return "", err.Error()
 			}
+			return record.Filename, ""
 		}
 		app.OnDeleteTrim = func(jobID, trimID string) {
 			if err := trimSvc.DeleteTrim(jobID, trimID); err != nil {

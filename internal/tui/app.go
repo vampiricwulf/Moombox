@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -86,6 +87,10 @@ type (
 	importResultMsg struct {
 		Title string
 		Err   string
+	}
+	createTrimResultMsg struct {
+		Filename string
+		Err      string
 	}
 	deleteTrimResultMsg struct {
 		TrimID   string
@@ -178,6 +183,12 @@ type App struct {
 	setupWiz       *SetupWizardModel
 	settings  *SettingsModel
 
+	// Trim progress (async encoding)
+	trimInProgress  bool
+	trimStartedAt  time.Time
+	trimProgressMu sync.Mutex
+	trimProgressPct float64
+
 	// Progress
 	progressStore *ProgressStore
 	statusMap     map[string]database.JobStatus // track last-known status per job
@@ -238,7 +249,7 @@ type App struct {
 	OnCancelJob  func(jobID string)
 	OnDeleteJob  func(jobID string)
 	OnRetryJob   func(jobID string)
-	OnCreateTrim func(jobID string, startSec, endSec float64)
+	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
 	OnDeleteTrim func(jobID, trimID string)
 	OnOpenFolder func(jobID string)
 	OnSaveConfig     func(cfg *config.MoomboxConfig)
@@ -391,7 +402,7 @@ func (a *App) tick() tea.Cmd {
 
 func (a *App) progressTick() tea.Cmd {
 	interval := 500 * time.Millisecond
-	if a.hasActiveDownloads() {
+	if a.hasActiveDownloads() || (a.trimInProgress && a.trimDlg.IsVisible()) {
 		interval = 16 * time.Millisecond // ~60fps during active downloads
 	}
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
@@ -540,6 +551,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.details.SetProgress(p)
 				}
 			}
+		}
+		// Update trim progress overlay if active
+		if a.trimInProgress && a.trimDlg.IsVisible() {
+			a.trimProgressMu.Lock()
+			pct := a.trimProgressPct
+			a.trimProgressMu.Unlock()
+			elapsed := time.Since(a.trimStartedAt)
+			a.trimDlg.SetProgress(pct, elapsed)
 		}
 		return a, a.progressTick()
 
@@ -707,6 +726,28 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.importDlg.Close()
 		a.setFeedback("Imported: " + msg.Title)
+		return a, nil
+
+	case createTrimResultMsg:
+		a.trimInProgress = false
+		if a.trimDlg.IsVisible() {
+			// Dialog still open — show result or error inline
+			if msg.Err != "" {
+				a.trimDlg.SetLoading(false)
+				a.trimDlg.createStep = 1 // back to confirmation so user can retry or Esc
+				a.trimDlg.SetError(msg.Err)
+			} else {
+				a.trimDlg.Close()
+				a.setFeedback(fmt.Sprintf("Trim created: %s", msg.Filename))
+			}
+		} else {
+			// Dialog was dismissed (background) — show feedback
+			if msg.Err != "" {
+				a.setFeedback(fmt.Sprintf("Trim failed: %s", msg.Err))
+			} else {
+				a.setFeedback(fmt.Sprintf("Trim created: %s", msg.Filename))
+			}
+		}
 		return a, nil
 
 	case deleteTrimResultMsg:
@@ -1071,9 +1112,19 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch action {
 		case "submit":
 			if a.OnCreateTrim != nil {
-				a.OnCreateTrim(a.trimDlg.JobID(), a.trimDlg.ParsedStartSeconds(), a.trimDlg.ParsedEndSeconds())
-				a.trimDlg.Close()
+				a.trimDlg.StartProgress()
+				a.trimInProgress = true
+				a.trimStartedAt = time.Now()
+				a.trimProgressMu.Lock()
+				a.trimProgressPct = 0
+				a.trimProgressMu.Unlock()
+				jobID := a.trimDlg.JobID()
+				startSec := a.trimDlg.ParsedStartSeconds()
+				endSec := a.trimDlg.ParsedEndSeconds()
+				return a, tea.Batch(a.createTrimCmd(jobID, startSec, endSec), a.trimDlg.spinner.Tick)
 			}
+		case "background":
+			a.setFeedback("Trim encoding in background...")
 		case "delete":
 			if a.OnDeleteTrim != nil {
 				trimID := a.trimDlg.SelectedTrimID()
@@ -1366,6 +1417,10 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.taskList.MoveUp()
 		}
 	case "A T":
+		if a.trimInProgress {
+			a.setFeedback("A trim is already in progress")
+			return a, nil
+		}
 		if job != nil {
 			a.openTrimForJob(job)
 		}
@@ -2101,6 +2156,27 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			importedTitle = "archive"
 		}
 		return importResultMsg{Title: importedTitle}
+	}
+}
+
+func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
+	createFn := a.OnCreateTrim
+	progressMu := &a.trimProgressMu
+	progressPct := &a.trimProgressPct
+	return func() tea.Msg {
+		if createFn == nil {
+			return createTrimResultMsg{Err: "Create trim not available"}
+		}
+		onProgress := func(pct float64) {
+			progressMu.Lock()
+			*progressPct = pct
+			progressMu.Unlock()
+		}
+		filename, errMsg := createFn(jobID, startSec, endSec, onProgress)
+		if errMsg != "" {
+			return createTrimResultMsg{Err: errMsg}
+		}
+		return createTrimResultMsg{Filename: filename}
 	}
 }
 

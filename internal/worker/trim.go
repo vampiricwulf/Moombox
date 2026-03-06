@@ -53,8 +53,18 @@ func (ts *TrimService) SetNotifier(nm *notifications.Manager) {
 	ts.notifier = nm
 }
 
+// CreateTrimWithProgress creates a trimmed version with FFmpeg progress reporting.
+// progressFn is called with 0-100 as encoding progresses.
+func (ts *TrimService) CreateTrimWithProgress(ctx context.Context, job *database.Job, startTime, endTime float64, progressFn func(float64)) (*database.TrimRecord, error) {
+	return ts.createTrimInternal(ctx, job, startTime, endTime, progressFn)
+}
+
 // CreateTrim creates a trimmed version of a finished download.
 func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startTime, endTime float64) (*database.TrimRecord, error) {
+	return ts.createTrimInternal(ctx, job, startTime, endTime, nil)
+}
+
+func (ts *TrimService) createTrimInternal(ctx context.Context, job *database.Job, startTime, endTime float64, progressFn func(float64)) (*database.TrimRecord, error) {
 	// Prevent concurrent trim operations on the same job (matching TS activeTrimOps)
 	ts.activeMu.Lock()
 	if ts.activeOps[job.ID] {
@@ -76,7 +86,7 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 
 	// Multi-segment path: if the job has segments, dispatch to segment-aware trim
 	if len(job.Segments) > 0 {
-		return ts.createMultiSegmentTrim(ctx, job, startTime, endTime)
+		return ts.createMultiSegmentTrimInternal(ctx, job, startTime, endTime, progressFn)
 	}
 
 	if job.OutputFile == "" {
@@ -130,8 +140,16 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 	// Probe audio bitrate to match source quality (matches TS probeAudioBitrate)
 	audioBitrate := probeAudioBitrate(ctx, ts.muxer.FFprobePath(), job.OutputFile)
 
-	// Run FFmpeg
-	if err := ts.muxer.TrimWithAudio(ctx, job.OutputFile, trimPath, startTime, endTime, defaultTrimCRF, audioBitrate); err != nil {
+	// Run FFmpeg with progress if callback provided
+	opts := &engine.TrimOptions{
+		TrimStartOffset: startTime,
+		TrimDuration:    duration,
+		CRF:             defaultTrimCRF,
+		AudioBitrate:    audioBitrate,
+		UsePreciseTrim:  true,
+		ProgressFn:      progressFn,
+	}
+	if err := ts.muxer.Mux(ctx, job.OutputFile, "", trimPath, opts); err != nil {
 		return nil, fmt.Errorf("ffmpeg trim: %w", err)
 	}
 
@@ -242,10 +260,10 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 	return nil
 }
 
-// createMultiSegmentTrim handles trimming for multi-segment quality-split jobs.
+// createMultiSegmentTrimInternal handles trimming for multi-segment quality-split jobs.
 // It maps global start/end times to segment-local times, trims each involved
 // segment, and concatenates them (with quality normalization if needed).
-func (ts *TrimService) createMultiSegmentTrim(ctx context.Context, job *database.Job, startTime, endTime float64) (*database.TrimRecord, error) {
+func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *database.Job, startTime, endTime float64, progressFn func(float64)) (*database.TrimRecord, error) {
 	if startTime < 0 {
 		return nil, fmt.Errorf("start time cannot be negative")
 	}
@@ -349,11 +367,20 @@ func (ts *TrimService) createMultiSegmentTrim(ctx context.Context, job *database
 	ts.logger.Info("creating multi-segment trim", "jobID", job.ID,
 		"start", startTime, "end", endTime, "segments", len(involved))
 
-	// Single-segment fast path: use existing TrimWithAudio
+	// Single-segment fast path
 	if len(involved) == 1 {
 		seg := involved[0]
 		audioBitrate := probeAudioBitrate(ctx, ts.muxer.FFprobePath(), seg.Segment.FilePath)
-		if err := ts.muxer.TrimWithAudio(ctx, seg.Segment.FilePath, trimPath, seg.LocalStart, seg.LocalEnd, defaultTrimCRF, audioBitrate); err != nil {
+		duration := seg.LocalEnd - seg.LocalStart
+		opts := &engine.TrimOptions{
+			TrimStartOffset: seg.LocalStart,
+			TrimDuration:    duration,
+			CRF:             defaultTrimCRF,
+			AudioBitrate:    audioBitrate,
+			UsePreciseTrim:  true,
+			ProgressFn:      progressFn,
+		}
+		if err := ts.muxer.Mux(ctx, seg.Segment.FilePath, "", trimPath, opts); err != nil {
 			return nil, fmt.Errorf("ffmpeg trim: %w", err)
 		}
 	} else {
@@ -411,8 +438,14 @@ func (ts *TrimService) createMultiSegmentTrim(ctx context.Context, job *database
 			})
 		}
 
-		if err := ts.muxer.TrimAndConcat(ctx, inputs, trimPath, targetW, targetH, targetFPS, defaultTrimCRF, audioBitrate); err != nil {
-			return nil, fmt.Errorf("multi-segment trim: %w", err)
+		if progressFn != nil {
+			if err := ts.muxer.TrimAndConcatWithProgress(ctx, inputs, trimPath, targetW, targetH, targetFPS, defaultTrimCRF, audioBitrate, progressFn); err != nil {
+				return nil, fmt.Errorf("multi-segment trim: %w", err)
+			}
+		} else {
+			if err := ts.muxer.TrimAndConcat(ctx, inputs, trimPath, targetW, targetH, targetFPS, defaultTrimCRF, audioBitrate); err != nil {
+				return nil, fmt.Errorf("multi-segment trim: %w", err)
+			}
 		}
 	}
 

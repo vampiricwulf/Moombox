@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ type TrimOptions struct {
 	CRF             int     // 0-51, 18 = perceptually lossless (0 = copy)
 	UsePreciseTrim  bool    // Default true
 	TwoPass         bool    // Only for ABR with VideoBitrate
+	ProgressFn      func(percent float64) // Optional: called with 0-100 as FFmpeg encodes
 }
 
 // Muxer handles FFmpeg operations.
@@ -111,6 +113,9 @@ func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string
 	args := m.buildArgs(videoPath, audioPath, outputPath, opts, needsEncode)
 
 	m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
+	if opts != nil && opts.ProgressFn != nil && hasTrim(opts) && opts.TrimDuration > 0 {
+		return m.runFFmpegWithProgress(ctx, args, opts.TrimDuration, opts.ProgressFn)
+	}
 	return m.runFFmpeg(ctx, args)
 }
 
@@ -404,6 +409,228 @@ func (m *Muxer) TrimAndConcat(ctx context.Context, segments []TrimSegmentInput, 
 		return fmt.Errorf("concat segments: %w", err)
 	}
 
+	return nil
+}
+
+// runFFmpegWithProgress runs FFmpeg, parsing stderr for time= progress lines.
+// progressFn is called with 0-100 based on currentTime/totalDuration.
+func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalDuration float64, progressFn func(float64)) error {
+	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
+	cmd.Stdout = nil
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("ffmpeg start: %w", err)
+	}
+
+	// Read stderr fully before cmd.Wait() per Go docs
+	var lastErr string
+	scanner := bufio.NewScanner(stderr)
+	scanner.Split(scanFFmpegLines)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if t := parseFFmpegTime(line); t > 0 && totalDuration > 0 {
+			pct := (t / totalDuration) * 100
+			if pct > 100 {
+				pct = 100
+			}
+			progressFn(pct)
+		}
+		// Keep tail of stderr for error reporting
+		if strings.TrimSpace(line) != "" {
+			lastErr = line
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("ffmpeg timed out: %w", ctx.Err())
+		}
+		m.logger.Error("ffmpeg failed", "stderr", lastErr)
+		return fmt.Errorf("ffmpeg: %w (stderr: %s)", err, lastErr)
+	}
+
+	progressFn(100)
+	return nil
+}
+
+// scanFFmpegLines is a bufio.SplitFunc that splits on \r or \n.
+// FFmpeg writes progress lines with \r (carriage return) on the same line.
+func scanFFmpegLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i, b := range data {
+		if b == '\r' || b == '\n' {
+			return i + 1, data[:i], nil
+		}
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
+// parseFFmpegTime extracts the time in seconds from an FFmpeg progress line.
+// Looks for "time=HH:MM:SS.xx" or "time=SS.xx" patterns.
+func parseFFmpegTime(line string) float64 {
+	idx := strings.Index(line, "time=")
+	if idx < 0 {
+		return 0
+	}
+	rest := line[idx+5:]
+	// Find end of time value (space or end of string)
+	end := strings.IndexByte(rest, ' ')
+	if end < 0 {
+		end = len(rest)
+	}
+	timeStr := strings.TrimSpace(rest[:end])
+	if timeStr == "" || timeStr == "N/A" {
+		return 0
+	}
+
+	// Try HH:MM:SS.xx format
+	parts := strings.Split(timeStr, ":")
+	switch len(parts) {
+	case 3:
+		h, _ := strconv.ParseFloat(parts[0], 64)
+		m, _ := strconv.ParseFloat(parts[1], 64)
+		s, _ := strconv.ParseFloat(parts[2], 64)
+		return h*3600 + m*60 + s
+	case 2:
+		m, _ := strconv.ParseFloat(parts[0], 64)
+		s, _ := strconv.ParseFloat(parts[1], 64)
+		return m*60 + s
+	default:
+		s, _ := strconv.ParseFloat(timeStr, 64)
+		return s
+	}
+}
+
+// TrimAndConcatWithProgress is like TrimAndConcat but reports progress via progressFn.
+// Progress is distributed across segments weighted by duration (95% for encoding, 5% for concat).
+func (m *Muxer) TrimAndConcatWithProgress(ctx context.Context, segments []TrimSegmentInput, outputPath string, targetWidth, targetHeight, targetFPS, crf, audioBitrate int, progressFn func(float64)) error {
+	if len(segments) == 0 {
+		return fmt.Errorf("no segments to trim")
+	}
+
+	// Single segment: trim directly with progress
+	if len(segments) == 1 {
+		seg := segments[0]
+		opts := &TrimOptions{
+			TrimStartOffset: seg.StartTime,
+			TrimDuration:    seg.Duration,
+			CRF:             crf,
+			AudioBitrate:    audioBitrate,
+			UsePreciseTrim:  true,
+			ProgressFn:      progressFn,
+		}
+		return m.Mux(ctx, seg.InputPath, "", outputPath, opts)
+	}
+
+	// Calculate total encoding duration for progress weighting
+	var totalDuration float64
+	for _, seg := range segments {
+		totalDuration += seg.Duration
+	}
+
+	const encodePortion = 0.95 // 95% of progress for encoding, 5% for concat
+
+	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("moombox-trim-%d", time.Now().UnixMilli()))
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	var intermediates []string
+	var cumulativeDuration float64
+
+	for i, seg := range segments {
+		intermediatePath := filepath.Join(tempDir, fmt.Sprintf("seg_%d.mp4", i))
+		intermediates = append(intermediates, intermediatePath)
+
+		baseProgress := (cumulativeDuration / totalDuration) * encodePortion * 100
+		segWeight := (seg.Duration / totalDuration) * encodePortion * 100
+
+		segProgress := func(pct float64) {
+			overall := baseProgress + (pct/100)*segWeight
+			progressFn(overall)
+		}
+
+		args := []string{"-y"}
+		if seg.StartTime > 0 {
+			args = append(args, "-ss", fmt.Sprintf("%.3f", seg.StartTime))
+		}
+		args = append(args, "-i", seg.InputPath)
+		if seg.Duration > 0 {
+			args = append(args, "-t", fmt.Sprintf("%.3f", seg.Duration))
+		}
+
+		args = append(args, "-c:v", "libx264", "-crf", strconv.Itoa(crf), "-preset", "slow")
+		if seg.NeedScale {
+			vf := fmt.Sprintf("scale=%d:%d,fps=%d", targetWidth, targetHeight, targetFPS)
+			args = append(args, "-vf", vf)
+		}
+
+		if audioBitrate > 0 {
+			args = append(args, "-c:a", "aac", "-b:a", fmt.Sprintf("%dk", audioBitrate))
+		} else {
+			args = append(args, "-c:a", "aac")
+		}
+
+		args = append(args, "-movflags", "faststart", intermediatePath)
+
+		m.logger.Debug("ffmpeg trim segment", "index", i, "args", strings.Join(args, " "))
+		if err := m.runFFmpegWithProgress(ctx, args, seg.Duration, segProgress); err != nil {
+			return fmt.Errorf("trim segment %d: %w", i, err)
+		}
+
+		cumulativeDuration += seg.Duration
+	}
+
+	// Concat phase (remaining 5%)
+	progressFn(encodePortion * 100)
+
+	concatListPath := filepath.Join(tempDir, "concat.txt")
+	var listContent strings.Builder
+	for _, p := range intermediates {
+		escaped := strings.ReplaceAll(p, "\\", "/")
+		escaped = strings.ReplaceAll(escaped, "'", "\\'")
+		listContent.WriteString(fmt.Sprintf("file '%s'\n", escaped))
+	}
+	if err := os.WriteFile(concatListPath, []byte(listContent.String()), 0o644); err != nil {
+		return fmt.Errorf("write concat list: %w", err)
+	}
+
+	if dir := filepath.Dir(outputPath); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create output directory: %w", err)
+		}
+	}
+
+	concatArgs := []string{
+		"-y",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", concatListPath,
+		"-c", "copy",
+		"-movflags", "faststart",
+		outputPath,
+	}
+
+	m.logger.Debug("ffmpeg concat", "args", strings.Join(concatArgs, " "))
+	if err := m.runFFmpeg(ctx, concatArgs); err != nil {
+		return fmt.Errorf("concat segments: %w", err)
+	}
+
+	progressFn(100)
 	return nil
 }
 

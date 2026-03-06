@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -41,13 +42,18 @@ type TrimDialogModel struct {
 	mode     TrimMode
 
 	// Create mode state
-	createStep     int // 0=time input, 1=confirmation
+	createStep     int // 0=time input, 1=confirmation, 2=progress
 	startTimeInput string
 	endTimeInput   string
 	activeField    int // 0=start, 1=end
 	textInput      textinput.Model
 	errorMsg       string
 	loading        bool
+
+	// Progress state (step 2)
+	progressBar     progress.Model
+	progressPercent float64
+	progressElapsed time.Duration
 
 	// Job metadata for display
 	lengthSeconds float64
@@ -68,9 +74,14 @@ type TrimDialogModel struct {
 
 // NewTrimDialogModel creates a new trim dialog.
 func NewTrimDialogModel() *TrimDialogModel {
+	pb := progress.New(progress.WithoutPercentage())
+	pb.Full = '\u2588'  // █
+	pb.Empty = '\u2591' // ░
+	pb.EmptyColor = string(ColorGray)
 	return &TrimDialogModel{
-		textInput: newTextInput(),
-		spinner:   newSpinner(),
+		textInput:   newTextInput(),
+		spinner:     newSpinner(),
+		progressBar: pb,
 	}
 }
 
@@ -130,6 +141,22 @@ func (m *TrimDialogModel) SetLoading(loading bool) {
 	m.loading = loading
 }
 
+// StartProgress transitions to the progress step (createStep 2).
+func (m *TrimDialogModel) StartProgress() {
+	m.createStep = 2
+	m.loading = true
+	m.spinner = newSpinner()
+	m.progressPercent = 0
+	m.progressElapsed = 0
+	m.errorMsg = ""
+}
+
+// SetProgress updates the progress display.
+func (m *TrimDialogModel) SetProgress(percent float64, elapsed time.Duration) {
+	m.progressPercent = percent
+	m.progressElapsed = elapsed
+}
+
 // SetError sets an error message on the dialog.
 func (m *TrimDialogModel) SetError(msg string) {
 	m.errorMsg = msg
@@ -173,14 +200,17 @@ func (m *TrimDialogModel) SelectedTrimID() string {
 }
 
 // HandleKey processes key input. Returns action:
-// "submit" for create, "delete" for delete confirm, "" for no action.
+// "submit" for create, "delete" for delete confirm, "background" to dismiss progress overlay, "" for no action.
 func (m *TrimDialogModel) HandleKey(key string) string {
 	if key == keyEsc {
 		return m.handleEscape()
 	}
 
-	// Mode toggle (R1)
+	// Block mode toggle during progress
 	if key == "m" || key == "M" {
+		if m.mode == TrimModeCreate && m.createStep == 2 {
+			return ""
+		}
 		m.toggleMode()
 		return ""
 	}
@@ -192,6 +222,11 @@ func (m *TrimDialogModel) HandleKey(key string) string {
 }
 
 func (m *TrimDialogModel) handleEscape() string {
+	if m.mode == TrimModeCreate && m.createStep == 2 {
+		// During progress: dismiss overlay, continue in background
+		m.Close()
+		return "background"
+	}
 	if m.mode == TrimModeCreate && m.createStep > 0 {
 		m.createStep--
 		m.errorMsg = ""
@@ -251,6 +286,9 @@ func (m *TrimDialogModel) handleCreateKey(key string) string {
 		if key == keyEnter {
 			return "submit"
 		}
+
+	case 2: // Progress — only Esc works (handled in HandleKey before this)
+		return ""
 	}
 	return ""
 }
@@ -411,7 +449,7 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 
 	switch m.createStep {
 	case 0: // Time input (R6)
-		stepStr := "Step 1/2"
+		stepStr := "Step 1/3"
 		lines = append(lines, TitleStyle.Render("Create Trim")+" "+DimStyle.Render("("+stepStr+")"))
 		lines = append(lines, "")
 
@@ -455,7 +493,7 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 		lines = append(lines, DimStyle.Render("Format: HH:MM:SS, MM:SS, or seconds"))
 
 	case 1: // Confirmation (R3)
-		stepStr := "Step 2/2"
+		stepStr := "Step 2/3"
 		lines = append(lines, TitleStyle.Render("Confirm Trim")+" "+DimStyle.Render("("+stepStr+")"))
 		lines = append(lines, "")
 
@@ -476,16 +514,35 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
 			"  ⚠ This will create a new file with re-encoded video/audio",
 		))
+
+	case 2: // Progress
+		lines = append(lines, TitleStyle.Render("Creating Trim")+" "+DimStyle.Render("(Step 3/3)"))
+		lines = append(lines, "")
+
+		// Spinner + percentage
+		pctStr := fmt.Sprintf("%.1f%%", m.progressPercent)
+		lines = append(lines, m.spinner.View()+" Encoding... "+lipgloss.NewStyle().Foreground(ColorCyan).Render(pctStr))
+		lines = append(lines, "")
+
+		// Progress bar
+		barWidth := w - 4
+		if barWidth < 10 {
+			barWidth = 10
+		}
+		m.progressBar.Width = barWidth
+		// Set gradient colors based on progress
+		m.progressBar.FullColor = string(ColorCyan)
+		lines = append(lines, "  "+m.progressBar.ViewAs(m.progressPercent/100))
+		lines = append(lines, "")
+
+		// Elapsed time
+		elapsed := m.progressElapsed.Truncate(time.Second)
+		lines = append(lines, DimStyle.Render(fmt.Sprintf("  Elapsed: %s", elapsed)))
 	}
 
 	if m.errorMsg != "" {
 		lines = append(lines, "")
 		lines = append(lines, ErrorStyle.Render(m.errorMsg))
-	}
-
-	if m.loading {
-		lines = append(lines, "")
-		lines = append(lines, m.spinner.View()+" Creating trim, please wait...")
 	}
 
 	lines = append(lines, "")
@@ -494,6 +551,8 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 		lines = append(lines, DimStyle.Render("Tab: Switch field | Enter: Continue | M: Delete mode | Esc: Cancel"))
 	case 1:
 		lines = append(lines, DimStyle.Render("Enter: Create Trim | Esc: Back"))
+	case 2:
+		lines = append(lines, DimStyle.Render("Esc: Continue In Background"))
 	}
 
 	return strings.Join(lines, "\n")
