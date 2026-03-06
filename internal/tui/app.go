@@ -250,7 +250,7 @@ type App struct {
 	OnDeleteJob  func(jobID string)
 	OnRetryJob   func(jobID string)
 	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
-	OnDeleteTrim func(jobID, trimID string)
+	OnDeleteTrim func(jobID, trimID string) error
 	OnOpenFolder func(jobID string)
 	OnSaveConfig     func(cfg *config.MoomboxConfig)
 	OnRestart        func()
@@ -602,6 +602,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusBar.SetJobs(msg.Jobs)
 		a.actionMenu.SetJobs(msg.Jobs)
 		a.updateSelectedJob()
+		// Refresh trim dialog's trim list if open (trims may have been added/deleted)
+		if a.trimDlg.IsVisible() {
+			for _, j := range msg.Jobs {
+				if j.ID == a.trimDlg.JobID() {
+					a.refreshTrimList(j)
+					break
+				}
+			}
+		}
 		return a, tea.Batch(a.updateTerminalTitle(), a.listenForUpdates())
 
 	case LogMsg:
@@ -1631,6 +1640,26 @@ func (a *App) openTrimForJob(job *database.Job) {
 	}
 }
 
+// refreshTrimList updates the trim dialog's trim list without resetting dialog state.
+func (a *App) refreshTrimList(job *database.Job) {
+	var trimInfos []TrimInfo
+	for _, tr := range job.Trims {
+		var fs int64
+		if tr.FileSize != nil {
+			fs = *tr.FileSize
+		}
+		trimInfos = append(trimInfos, TrimInfo{
+			ID:        tr.ID,
+			StartTime: tr.StartTime,
+			EndTime:   tr.EndTime,
+			Duration:  tr.Duration,
+			FileSize:  fs,
+			Filename:  tr.Filename,
+		})
+	}
+	a.trimDlg.SetTrims(trimInfos)
+}
+
 // buildMenuItems builds context-sensitive action menu items.
 // This is the single source of truth for all chords, menu entries, feedback hints, and help text.
 func (a *App) buildMenuItems() []ActionMenuItem {
@@ -2194,7 +2223,9 @@ func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
 		if deleteFn == nil {
 			return deleteTrimResultMsg{Err: "Delete trim not available"}
 		}
-		deleteFn(jobID, trimID)
+		if err := deleteFn(jobID, trimID); err != nil {
+			return deleteTrimResultMsg{Err: err.Error()}
+		}
 		return deleteTrimResultMsg{TrimID: trimID, Filename: filename}
 	}
 }

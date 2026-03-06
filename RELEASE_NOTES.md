@@ -1,13 +1,9 @@
-### Features
+### Bug Fixes
 
-- Async TUI trim with progress overlay — trim creation no longer freezes the UI while FFmpeg encodes
-  - Real-time progress bar with percentage, spinner, and elapsed time (Step 3/3)
-  - "Esc: Continue In Background" dismisses the overlay while encoding continues
-  - Completion or error feedback shown whether the dialog is open or backgrounded
-  - Guard against starting a second trim while one is already in progress
+- Trims now properly persist across restarts — AddTrim/DeleteTrim notify UI subscribers so both TUI and Web UI stay in sync
+- Trim dialog refreshes its trim list in real-time when trims are added or deleted
+- Delete trim errors are now surfaced to the user instead of silently swallowed
 
 ### Improvements
 
-- FFmpeg stderr progress parsing (`time=HH:MM:SS.xx`) for real percentage-based progress reporting
-- Multi-segment trim progress weighted across segments by duration (95% encode, 5% concat)
-- TrimService now exposes `CreateTrimWithProgress` for callers that want progress callbacks
+- Trim progress bar uses the mux gradient (green → yellow) instead of flat cyan

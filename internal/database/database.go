@@ -540,6 +540,9 @@ func (db *Database) AddTrim(trim *TrimRecord) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		trim.ID, trim.JobID, trim.StartTime, trim.EndTime, trim.Filename,
 		trim.CreatedAt, trim.Duration, trim.FileSize)
+	if err == nil {
+		db.notifyJobsChange()
+	}
 	return err
 }
 
@@ -549,6 +552,9 @@ func (db *Database) DeleteTrim(trimID string) error {
 	defer db.mu.Unlock()
 
 	_, err := db.db.ExecContext(db.getCtx(), "DELETE FROM trims WHERE id = ?", trimID)
+	if err == nil {
+		db.notifyJobsChange()
+	}
 	return err
 }
 

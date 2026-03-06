@@ -530,8 +530,8 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 			barWidth = 10
 		}
 		m.progressBar.Width = barWidth
-		// Set gradient colors based on progress
-		m.progressBar.FullColor = string(ColorCyan)
+		// Mux gradient: green (encoding) → yellow (muxing)
+		progress.WithGradient(string(ColorDownloading), string(ColorMuxing))(&m.progressBar)
 		lines = append(lines, "  "+m.progressBar.ViewAs(m.progressPercent/100))
 		lines = append(lines, "")
 

@@ -44,7 +44,7 @@ import (
 )
 
 var (
-	version = "2.3.11"
+	version = "2.3.12"
 	commit  = ""
 )
 
@@ -1171,10 +1171,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			}
 			return record.Filename, ""
 		}
-		app.OnDeleteTrim = func(jobID, trimID string) {
+		app.OnDeleteTrim = func(jobID, trimID string) error {
 			if err := trimSvc.DeleteTrim(jobID, trimID); err != nil {
 				log.Error("Failed to delete trim", slog.String("error", err.Error()))
+				return err
 			}
+			return nil
 		}
 		app.OnListOrphans = func() ([]tui.OrphanedFileEntry, error) {
 			entries, err := worker.ScanOrphanedFiles(db, cfg)
