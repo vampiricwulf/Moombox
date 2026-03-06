@@ -153,6 +153,7 @@ type App struct {
 	statusBar *StatusBarModel
 	help      *HelpModel
 	addVideo  *AddVideoModel
+	importDlg *ImportDialogModel
 	trimDlg   *TrimDialogModel
 	filesDlg  *FilesDialogModel
 	setupWiz  *SetupWizardModel
@@ -260,6 +261,7 @@ func NewApp() *App {
 		statusBar:     NewStatusBarModel(),
 		help:          NewHelpModel(),
 		addVideo:      NewAddVideoModel(),
+		importDlg:     NewImportDialogModel(),
 		trimDlg:       NewTrimDialogModel(),
 		filesDlg:      NewFilesDialogModel(),
 		setupWiz:      NewSetupWizardModel(),
@@ -361,7 +363,11 @@ func (a *App) tick() tea.Cmd {
 }
 
 func (a *App) progressTick() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+	interval := 500 * time.Millisecond
+	if a.hasActiveDownloads() {
+		interval = 16 * time.Millisecond // ~60fps during active downloads
+	}
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return progressTickMsg{}
 	})
 }
@@ -669,11 +675,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case importResultMsg:
 		if msg.Err != "" {
-			a.addVideo.SetError(msg.Err)
-			a.addVideo.importStep = 1 // Back to metadata step (match TS)
+			a.importDlg.SetError(msg.Err)
 			return a, nil
 		}
-		a.addVideo.Close()
+		a.importDlg.Close()
 		a.setFeedback("Imported: " + msg.Title)
 		return a, nil
 
@@ -691,10 +696,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fetchOrphansResultMsg:
 		if msg.Err != "" {
 			a.filesDlg.SetError(msg.Err)
-		} else {
-			a.filesDlg.SetFiles(msg.Files)
+			return a, nil
 		}
-		return a, nil
+		cmd := a.filesDlg.SetFiles(msg.Files)
+		return a, cmd
 
 	case deleteOrphanResultMsg:
 		if msg.Err != "" {
@@ -768,10 +773,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
-		return a.handleKey(msg)
+		var cmds []tea.Cmd
+		if cmd := a.routeComponentMsg(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		_, cmd := a.handleKey(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return a, tea.Batch(cmds...)
 
 	case tea.MouseMsg:
 		return a.handleMouse(msg)
+
+	default:
+		// Route spinner ticks and other component messages to active dialogs
+		if cmd := a.routeComponentMsg(msg); cmd != nil {
+			return a, cmd
+		}
 	}
 
 	return a, nil
@@ -823,6 +842,45 @@ func (a *App) updateSelectedJob() {
 	a.details.SetJob(a.taskList.SelectedJob())
 }
 
+// routeComponentMsg forwards tea.Msg to the active dialog's embedded components
+// (textinput, viewport). Called before handleKey so that text editing and
+// viewport scrolling are processed before structural navigation.
+func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
+	if a.settings.IsVisible() {
+		return a.settings.UpdateComponents(msg)
+	}
+	if a.setupWiz.IsVisible() {
+		return a.setupWiz.UpdateComponents(msg)
+	}
+	if a.ffmpegCheck.IsVisible() {
+		return a.ffmpegCheck.UpdateComponents(msg)
+	}
+	if a.importDlg.IsVisible() {
+		return a.importDlg.UpdateComponents(msg)
+	}
+	if a.addVideo.IsVisible() {
+		return a.addVideo.UpdateComponents(msg)
+	}
+	if a.trimDlg.IsVisible() {
+		return a.trimDlg.UpdateComponents(msg)
+	}
+	if a.filesDlg.IsVisible() {
+		return a.filesDlg.UpdateComponents(msg)
+	}
+	// Help overlay viewport
+	if a.help.IsVisible() {
+		return a.help.UpdateViewport(msg)
+	}
+	// Panel viewports (when no dialog visible)
+	switch a.focusedPanel {
+	case PanelLogs:
+		return a.logs.UpdateViewport(msg)
+	case PanelDetails:
+		return a.details.UpdateViewport(msg)
+	}
+	return nil
+}
+
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
@@ -843,15 +901,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	// Help overlay intercepts all keys
+	// Help overlay intercepts all keys (scroll handled by viewport in routeComponentMsg)
 	if a.help.IsVisible() {
 		switch key {
 		case "?", keyEsc:
 			a.help.Toggle()
-		case keyUp:
-			a.help.ScrollUp()
-		case keyDown:
-			a.help.ScrollDown()
 		}
 		return a, nil
 	}
@@ -864,18 +918,16 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		case strings.HasPrefix(action, "prepare:"):
 			method := strings.TrimPrefix(action, "prepare:")
-			return a, a.ffmpegPrepareCmd(method)
+			return a, tea.Batch(a.ffmpegPrepareCmd(method), a.ffmpegCheck.spinner.Tick)
 		case strings.HasPrefix(action, "confirm:"):
 			token := strings.TrimPrefix(action, "confirm:")
-			return a, a.ffmpegConfirmCmd(token)
+			return a, tea.Batch(a.ffmpegConfirmCmd(token), a.ffmpegCheck.spinner.Tick)
 		case strings.HasPrefix(action, "reject:"):
 			token := strings.TrimPrefix(action, "reject:")
 			if a.OnRejectInstall != nil {
 				a.OnRejectInstall(token)
 			}
-			a.ffmpegCheck.mode = ffmpegManual
-			a.ffmpegCheck.manualPath = ""
-			a.ffmpegCheck.manualResult = ""
+			a.ffmpegCheck.ShowManual()
 		case strings.HasPrefix(action, "check_custom:"):
 			path := strings.TrimPrefix(action, "check_custom:")
 			return a, a.ffmpegCheckCmd(path)
@@ -888,6 +940,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		action := a.setupWiz.HandleKey(key)
 		if action == "complete" {
 			a.setupWiz.Close()
+		}
+		// Start spinner if cookie active was just triggered
+		if a.setupWiz.cookieActive {
+			return a, a.setupWiz.spinner.Tick
 		}
 		return a, nil
 	}
@@ -906,15 +962,20 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Dialog intercepts
+	if a.importDlg.IsVisible() {
+		action, data := a.importDlg.HandleKey(key)
+		if action == "import" {
+			return a, tea.Batch(a.importFileCmd(data), a.importDlg.SpinnerInit())
+		}
+		return a, nil
+	}
 	if a.addVideo.IsVisible() {
 		action, data := a.addVideo.HandleKey(key)
 		switch action {
 		case "submit":
 			return a, a.addVideoCmd(data)
 		case "fetch_formats":
-			return a, a.fetchFormatsCmd(data)
-		case "import":
-			return a, a.importFileCmd(data)
+			return a, tea.Batch(a.fetchFormatsCmd(data), a.addVideo.SpinnerInit())
 		}
 		return a, nil
 	}
@@ -932,21 +993,24 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if trimID != "" {
 					a.trimDlg.SetLoading(true)
 					jobID := a.trimDlg.JobID()
-					return a, a.deleteTrimCmd(jobID, trimID)
+					return a, tea.Batch(a.deleteTrimCmd(jobID, trimID), a.trimDlg.spinner.Tick)
 				}
 			}
 		}
 		return a, nil
 	}
 	if a.filesDlg.IsVisible() {
-		action := a.filesDlg.HandleKey(key)
+		action, cmd := a.filesDlg.HandleKey(msg)
 		switch action {
 		case "refresh":
-			return a, a.fetchOrphansCmd()
+			return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
 		case "delete":
 			if sel := a.filesDlg.SelectedFile(); sel != nil {
 				return a, a.deleteOrphanCmd(sel.Path)
 			}
+		}
+		if cmd != nil {
+			return a, cmd
 		}
 		return a, nil
 	}
@@ -1024,26 +1088,12 @@ func (a *App) handleTaskKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleDetailKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case keyUp:
-		a.details.ScrollUp()
-	case keyDown:
-		a.details.ScrollDown()
-	}
+	// Scroll handled by viewport in routeComponentMsg
 	return a, nil
 }
 
 func (a *App) handleLogKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case keyUp:
-		a.logs.ScrollUp()
-	case keyDown:
-		a.logs.ScrollDown()
-	case keyPgUp:
-		a.logs.PageUp()
-	case keyPgDown:
-		a.logs.PageDown()
-	}
+	// Scroll handled by viewport in routeComponentMsg
 	return a, nil
 }
 
@@ -1110,7 +1160,7 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	switch prefix {
 	case "a":
 		switch key {
-		case "a", "r", "t", "o":
+		case "a", "i", "r", "t", "o":
 			m, cmd := a.executeChord(prefix, key)
 			a.chord = chordState{}
 			return m, cmd, true
@@ -1180,6 +1230,14 @@ func (a *App) executeActionChord(action string) (tea.Model, tea.Cmd) {
 		a.feedbackMsg = ""
 		a.addVideo.SetSize(a.width, a.height)
 		a.addVideo.Open()
+	case "i":
+		a.feedbackMsg = ""
+		a.importDlg.SetSize(a.width, a.height)
+		startDir := "."
+		if a.cfg != nil && a.cfg.Paths.OutputDirectory != "" {
+			startDir = a.cfg.Paths.OutputDirectory
+		}
+		return a, a.importDlg.Open(startDir)
 	case "r":
 		if job := a.taskList.SelectedJob(); job != nil && a.OnRetryJob != nil {
 			if job.Status == database.StatusError || job.Status == database.StatusCancelled || job.Status == database.StatusCookies {
@@ -1198,9 +1256,7 @@ func (a *App) executeActionChord(action string) (tea.Model, tea.Cmd) {
 		if job := a.taskList.SelectedJob(); job != nil && a.OnDeleteJob != nil {
 			a.OnDeleteJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
-			if a.taskList.selectedIndex > 0 {
-				a.taskList.selectedIndex--
-			}
+			a.taskList.MoveUp()
 		}
 	case "t":
 		if job := a.taskList.SelectedJob(); job != nil {
@@ -1209,7 +1265,7 @@ func (a *App) executeActionChord(action string) (tea.Model, tea.Cmd) {
 	case "o":
 		a.filesDlg.SetSize(a.width, a.height)
 		a.filesDlg.Open()
-		return a, a.fetchOrphansCmd()
+		return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
 	}
 	return a, nil
 }
@@ -1420,6 +1476,7 @@ func (a *App) openTrimForJob(job *database.Job) {
 func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
 		{Chord: "A A", Label: "Add Video", Category: "Action"},
+		{Chord: "A I", Label: "Import Archive", Category: "Action"},
 		{Chord: "A R", Label: "Retry Job", Category: "Action", NeedsJob: true,
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
@@ -1498,6 +1555,14 @@ func (a *App) dispatchMenuAction(action string) (tea.Model, tea.Cmd) {
 		a.feedbackMsg = ""
 		a.addVideo.SetSize(a.width, a.height)
 		a.addVideo.Open()
+	case "A I":
+		a.feedbackMsg = ""
+		a.importDlg.SetSize(a.width, a.height)
+		startDir := "."
+		if a.cfg != nil && a.cfg.Paths.OutputDirectory != "" {
+			startDir = a.cfg.Paths.OutputDirectory
+		}
+		return a, a.importDlg.Open(startDir)
 	case "A R":
 		if job != nil && a.OnRetryJob != nil {
 			a.OnRetryJob(job.ID)
@@ -1520,7 +1585,7 @@ func (a *App) dispatchMenuAction(action string) (tea.Model, tea.Cmd) {
 	case "A O":
 		a.filesDlg.SetSize(a.width, a.height)
 		a.filesDlg.Open()
-		return a, a.fetchOrphansCmd()
+		return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
 	case "R C":
 		return a.executeRequestChord("c")
 	case "R F":
@@ -1571,7 +1636,7 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	if a.settings.IsVisible() || a.help.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.setupWiz.IsVisible() || a.ffmpegCheck.IsVisible() {
+	if a.settings.IsVisible() || a.help.IsVisible() || a.importDlg.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.setupWiz.IsVisible() || a.ffmpegCheck.IsVisible() {
 		return a, nil
 	}
 
@@ -1587,15 +1652,11 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				a.logs.ReEnableAutoScroll()
 			}
 			contentY := a.taskRegion.ContentY(y) - 1 // additional -1 for header row (TS: y - 2)
-			if contentY >= 0 {
-				idx := a.taskList.scrollOffset + contentY
-				if idx < len(a.taskList.virtualItems) {
-					a.taskList.selectedIndex = idx
-					if a.taskList.SelectedIsDivider() {
-						a.taskList.ToggleArchive()
-					} else {
-						a.updateSelectedJob()
-					}
+			if contentY >= 0 && a.taskList.SelectAtOffset(contentY) {
+				if a.taskList.SelectedIsDivider() {
+					a.taskList.ToggleArchive()
+				} else {
+					a.updateSelectedJob()
 				}
 			}
 		case a.detailRegion.Contains(x, y):
@@ -1736,6 +1797,9 @@ func (a *App) View() string {
 	}
 	if a.actionMenu.IsVisible() {
 		return a.actionMenu.View()
+	}
+	if a.importDlg.IsVisible() {
+		return a.importDlg.View()
 	}
 	if a.addVideo.IsVisible() {
 		return a.addVideo.View()
@@ -1955,8 +2019,8 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 
 // importFileCmd reads a ZIP file and uploads it to the import API.
 func (a *App) importFileCmd(path string) tea.Cmd {
-	title := a.addVideo.GetImportTitle()
-	channel := a.addVideo.GetImportChannel()
+	title := a.importDlg.GetImportTitle()
+	channel := a.importDlg.GetImportChannel()
 	baseURL := a.apiBaseURL()
 	client := a.apiClient()
 

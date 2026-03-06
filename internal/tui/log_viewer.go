@@ -2,9 +2,10 @@ package tui
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -40,20 +41,26 @@ func (l LogLevel) Next() LogLevel {
 
 // LogViewerModel manages the log panel.
 type LogViewerModel struct {
-	lines        []string
-	filtered     []string
-	scrollOffset int
-	autoScroll   bool
-	width        int
-	height       int
-	focused      bool
-	level        LogLevel
+	lines      []string
+	filtered   []string
+	viewport   viewport.Model
+	autoScroll bool
+	width      int
+	height     int
+	focused    bool
+	level      LogLevel
 }
 
 // NewLogViewerModel creates a new log viewer model.
 func NewLogViewerModel() *LogViewerModel {
+	vp := viewport.New(0, 1)
+	// Use helpViewportKeyMap to prevent letter keys (j/k/d/u/f/b) from
+	// conflicting with app chord bindings. Mouse scroll is handled
+	// explicitly in app.go handleMouse.
+	vp.KeyMap = helpViewportKeyMap()
 	return &LogViewerModel{
 		autoScroll: true,
+		viewport:   vp,
 	}
 }
 
@@ -65,7 +72,7 @@ func (m *LogViewerModel) AddLine(line string) {
 	}
 	m.rebuildFiltered()
 	if m.autoScroll {
-		m.scrollToBottom()
+		m.viewport.GotoBottom()
 	}
 }
 
@@ -78,7 +85,7 @@ func (m *LogViewerModel) AddLines(batch []string) {
 	}
 	m.rebuildFiltered()
 	if m.autoScroll {
-		m.scrollToBottom()
+		m.viewport.GotoBottom()
 	}
 }
 
@@ -86,8 +93,15 @@ func (m *LogViewerModel) AddLines(batch []string) {
 func (m *LogViewerModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	contentH := h - 3
+	if contentH < 1 {
+		contentH = 1
+	}
+	m.viewport.Width = w - 2 // account for borders
+	m.viewport.Height = contentH
+	m.updateViewportContent()
 	if m.autoScroll {
-		m.scrollToBottom()
+		m.viewport.GotoBottom()
 	}
 }
 
@@ -96,87 +110,56 @@ func (m *LogViewerModel) SetFocused(f bool) {
 	m.focused = f
 }
 
-// ScrollUp scrolls up and disables auto-scroll.
+// ScrollUp scrolls up by one line via the viewport.
 func (m *LogViewerModel) ScrollUp() {
-	if m.scrollOffset > 0 {
-		m.scrollOffset--
-		m.autoScroll = false
-	}
+	m.viewport.LineUp(1)
+	m.autoScroll = m.viewport.AtBottom()
 }
 
-// ScrollDown scrolls down, re-enabling auto-scroll at bottom.
+// ScrollDown scrolls down by one line via the viewport.
 func (m *LogViewerModel) ScrollDown() {
-	ms := m.maxScroll()
-	if m.scrollOffset < ms {
-		m.scrollOffset++
-	}
-	if m.scrollOffset >= ms {
-		m.autoScroll = true
-	}
+	m.viewport.LineDown(1)
+	m.autoScroll = m.viewport.AtBottom()
 }
 
-// PageUp scrolls up by a page.
+// PageUp scrolls up by a page via the viewport.
 func (m *LogViewerModel) PageUp() {
-	// Page by contentHeight (match TS: logHeight - 3 where logHeight is panel height)
-	ch := m.contentHeight()
-	m.scrollOffset -= ch
-	if m.scrollOffset < 0 {
-		m.scrollOffset = 0
-	}
-	m.autoScroll = false
+	m.viewport.HalfViewUp()
+	m.autoScroll = m.viewport.AtBottom()
 }
 
-// PageDown scrolls down by a page.
+// PageDown scrolls down by a page via the viewport.
 func (m *LogViewerModel) PageDown() {
-	ch := m.contentHeight()
-	m.scrollOffset += ch
-	ms := m.maxScroll()
-	if m.scrollOffset > ms {
-		m.scrollOffset = ms
-	}
-	if m.scrollOffset >= ms {
-		m.autoScroll = true
-	}
+	m.viewport.HalfViewDown()
+	m.autoScroll = m.viewport.AtBottom()
 }
 
 // ReEnableAutoScroll re-enables auto-scroll (called when clicking away from logs panel).
 func (m *LogViewerModel) ReEnableAutoScroll() {
 	m.autoScroll = true
-	m.scrollToBottom()
+	m.viewport.GotoBottom()
+}
+
+// UpdateViewport delegates a tea.Msg to the viewport and syncs autoScroll state.
+func (m *LogViewerModel) UpdateViewport(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	m.autoScroll = m.viewport.AtBottom()
+	return cmd
 }
 
 // CycleLevel cycles the log level filter.
 func (m *LogViewerModel) CycleLevel() {
 	m.level = m.level.Next()
-	m.rebuildFiltered()
-	// Unconditionally re-enable auto-scroll and jump to bottom (match TS)
 	m.autoScroll = true
-	m.scrollToBottom()
-}
-
-func (m *LogViewerModel) contentHeight() int {
-	h := m.height - 3
-	if h < 1 {
-		h = 1
-	}
-	return h
-}
-
-func (m *LogViewerModel) maxScroll() int {
-	ms := len(m.filtered) - m.contentHeight()
-	if ms < 0 {
-		return 0
-	}
-	return ms
-}
-
-func (m *LogViewerModel) scrollToBottom() {
-	m.scrollOffset = m.maxScroll()
+	m.rebuildFiltered()
+	m.viewport.GotoBottom()
 }
 
 func (m *LogViewerModel) rebuildFiltered() {
 	if m.level == LogLevelAll {
 		m.filtered = append(m.filtered[:0], m.lines...)
+		m.updateViewportContent()
 		return
 	}
 
@@ -186,6 +169,27 @@ func (m *LogViewerModel) rebuildFiltered() {
 			m.filtered = append(m.filtered, line)
 		}
 	}
+	m.updateViewportContent()
+}
+
+func (m *LogViewerModel) updateViewportContent() {
+	contentW := m.width - 2
+	if contentW < 1 {
+		contentW = 1
+	}
+
+	if len(m.filtered) == 0 {
+		m.viewport.SetContent(DimStyle.Render("No logs yet."))
+		return
+	}
+
+	var rendered []string
+	for _, line := range m.filtered {
+		display := truncateString(line, contentW)
+		color := logLineColor(line)
+		rendered = append(rendered, lipgloss.NewStyle().Foreground(color).Render(display))
+	}
+	m.viewport.SetContent(strings.Join(rendered, "\n"))
 }
 
 func (m *LogViewerModel) matchLevel(line string) bool {
@@ -272,42 +276,15 @@ func (m *LogViewerModel) View() string {
 		}
 	}
 	// Scroll percentage with brackets (L1 - match TS format [XX%])
-	if ms := m.maxScroll(); ms > 0 {
-		pct := int(math.Round(float64(m.scrollOffset) * 100 / float64(ms)))
+	if len(m.filtered) > m.viewport.Height {
+		pct := int(m.viewport.ScrollPercent() * 100)
 		suffix := " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
 		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
 			header += suffix
 		}
 	}
 
-	contentH := m.contentHeight()
-	var lines []string
-
-	// Empty state message (match TS)
-	if len(m.filtered) == 0 {
-		lines = append(lines, DimStyle.Render("No logs yet."))
-	}
-
-	end := m.scrollOffset + contentH
-	if end > len(m.filtered) {
-		end = len(m.filtered)
-	}
-
-	for i := m.scrollOffset; i < end; i++ {
-		line := m.filtered[i]
-		color := logLineColor(line)
-		rendered := lipgloss.NewStyle().Foreground(color).Render(
-			truncateString(line, contentW),
-		)
-		lines = append(lines, rendered)
-	}
-
-	// Pad
-	for len(lines) < contentH {
-		lines = append(lines, strings.Repeat(" ", contentW))
-	}
-
-	content := header + "\n" + strings.Join(lines, "\n")
+	content := header + "\n" + m.viewport.View()
 
 	style := UnfocusedBorder
 	if m.focused {
@@ -316,4 +293,3 @@ func (m *LogViewerModel) View() string {
 
 	return style.Width(contentW).Height(m.height - 2).Render(content)
 }
-

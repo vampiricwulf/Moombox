@@ -5,6 +5,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
@@ -135,13 +139,16 @@ type SetupWizardModel struct {
 	width   int
 	height  int
 
-	mode         setupMode
-	modeChoice   int // 0=Quick, 1=Advanced on mode selection screen
-	step         int
-	focusedField int
-	values       map[string]string
+	mode       setupMode
+	modeChoice int // 0=Quick, 1=Advanced on mode selection screen
+	values     map[string]string
 	saving       bool
 	errorMsg     string
+
+	// Advanced setup huh form
+	advancedForm     *huh.Form
+	advancedFormDone bool
+	advancedInitCmd  tea.Cmd // pending Init cmd from buildAdvancedForm
 
 	// Simplified setup state
 	simpleStage  setupSimpleStage
@@ -159,6 +166,12 @@ type SetupWizardModel struct {
 	channelEditField  int
 	channelDeleteConf bool
 
+	// Shared text input component (holds the currently-active text field)
+	textInput textinput.Model
+
+	// Loading spinner (shown during cookie extraction and saving)
+	spinner spinner.Model
+
 	// Callbacks for finishing setup
 	OnComplete         func(cfg *config.MoomboxConfig) error
 	OnInstallYtdlp     func(port int)
@@ -173,6 +186,8 @@ func NewSetupWizardModel() *SetupWizardModel {
 	return &SetupWizardModel{
 		values:      make(map[string]string),
 		channelMode: "list",
+		textInput:   newTextInput(),
+		spinner:     newSpinner(),
 	}
 }
 
@@ -181,11 +196,12 @@ func (m *SetupWizardModel) Open() {
 	m.visible = true
 	m.mode = setupModeSelect
 	m.modeChoice = 0
-	m.step = 0
-	m.focusedField = 0
 	m.values = make(map[string]string)
 	m.saving = false
 	m.errorMsg = ""
+	m.advancedForm = nil
+	m.advancedFormDone = false
+	m.advancedInitCmd = nil
 	m.simpleStage = setupSimpleCookies
 	m.cookieFocus = 0
 	m.cookieActive = false
@@ -216,15 +232,168 @@ func (m *SetupWizardModel) SetSize(w, h int) {
 	m.height = h
 }
 
-// getFieldValue returns the current value for a field.
-func (m *SetupWizardModel) getFieldValue(field setupFieldDef) string {
-	if val, ok := m.values[field.key]; ok {
-		return val
+// buildAdvancedForm creates a huh.Form from advancedSetupSteps.
+func (m *SetupWizardModel) buildAdvancedForm() {
+	// Initialize default values for toggle/cycle fields so Select has a starting value.
+	for _, step := range advancedSetupSteps {
+		for _, f := range step.fields {
+			if f.ftype == setupFieldToggle || f.ftype == setupFieldCycle {
+				if _, ok := m.values[f.key]; !ok {
+					m.values[f.key] = f.defaultDisplay
+				}
+			}
+		}
 	}
-	if field.ftype == setupFieldToggle || field.ftype == setupFieldCycle {
-		return field.defaultDisplay
+
+	var groups []*huh.Group
+	for _, step := range advancedSetupSteps {
+		if step.fields == nil {
+			continue // Skip Channels — handled as sub-editor
+		}
+		var fields []huh.Field
+		for _, f := range step.fields {
+			switch f.ftype {
+			case setupFieldText:
+				fields = append(fields,
+					huh.NewInput().
+						Key(f.key).
+						Title(f.label).
+						Description(f.help).
+						Placeholder(f.defaultDisplay).
+						Accessor(&MapAccessor{M: m.values, Key: f.key}),
+				)
+			case setupFieldNumber:
+				fields = append(fields,
+					huh.NewInput().
+						Key(f.key).
+						Title(f.label).
+						Description(f.help).
+						Placeholder(f.defaultDisplay).
+						Validate(func(s string) error { return validateDigitsOnly(s) }).
+						Accessor(&MapAccessor{M: m.values, Key: f.key}),
+				)
+			case setupFieldToggle, setupFieldCycle:
+				var opts []huh.Option[string]
+				for _, o := range f.options {
+					opts = append(opts, huh.NewOption(o, o))
+				}
+				fields = append(fields,
+					huh.NewSelect[string]().
+						Key(f.key).
+						Title(f.label).
+						Description(f.help).
+						Options(opts...).
+						Filtering(false).
+						Accessor(&MapAccessor{M: m.values, Key: f.key}),
+				)
+			}
+		}
+		groups = append(groups, huh.NewGroup(fields...).Title(step.title).Description(step.subtitle))
 	}
-	return ""
+
+	m.advancedForm = huh.NewForm(groups...).
+		WithTheme(moomboxTheme()).
+		WithShowHelp(false)
+	m.advancedForm.SubmitCmd = nil // Don't quit on submit
+	m.advancedInitCmd = m.advancedForm.Init()
+}
+
+// UpdateComponents routes tea.Msg to the embedded textinput, huh form, or spinner and syncs.
+func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
+	if !m.visible {
+		return nil
+	}
+
+	// Route spinner when saving or cookie active
+	if m.saving || m.cookieActive {
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return cmd
+	}
+
+	// Advanced mode: route to huh form or channel editor textinput
+	if m.mode == setupModeAdvanced {
+		if m.advancedForm != nil {
+			// Deliver any pending Init cmd first
+			if m.advancedInitCmd != nil {
+				initCmd := m.advancedInitCmd
+				m.advancedInitCmd = nil
+				model, cmd := m.advancedForm.Update(msg)
+				m.advancedForm = model.(*huh.Form)
+				return tea.Batch(initCmd, cmd)
+			}
+			model, cmd := m.advancedForm.Update(msg)
+			m.advancedForm = model.(*huh.Form)
+			if m.advancedForm.State == huh.StateCompleted {
+				// Transition to channel editing
+				m.advancedForm = nil
+				m.advancedFormDone = true
+				m.channelMode = "list"
+				m.channels = nil
+				m.channelIndex = 0
+			}
+			return cmd
+		}
+		// Channel editing mode — route to textinput
+		if m.advancedFormDone && m.channelMode == "edit" && m.textInput.Focused() {
+			prev := m.textInput.Value()
+			var cmd tea.Cmd
+			m.textInput, cmd = m.textInput.Update(msg)
+			if m.textInput.Value() != prev {
+				m.syncFromTextInput()
+			}
+			return cmd
+		}
+		return nil
+	}
+
+	// Simple mode / other: route to textinput
+	if !m.textInput.Focused() {
+		return nil
+	}
+	prev := m.textInput.Value()
+	var cmd tea.Cmd
+	m.textInput, cmd = m.textInput.Update(msg)
+	if m.textInput.Value() != prev {
+		m.syncFromTextInput()
+	}
+	return cmd
+}
+
+func (m *SetupWizardModel) syncFromTextInput() {
+	val := m.textInput.Value()
+
+	// Channel edit mode (used by both simple and advanced channel editors)
+	if m.channelMode == "edit" {
+		fields := m.visibleSetupChannelFields()
+		if m.channelEditField < len(fields) {
+			field := fields[m.channelEditField]
+			if field.ftype == fieldText {
+				m.channelEditValues[field.key] = val
+			}
+		}
+	}
+}
+
+func (m *SetupWizardModel) updateTextInputForField() {
+	// Channel edit mode (used by both simple and advanced channel editors)
+	if m.channelMode == "edit" {
+		fields := m.visibleSetupChannelFields()
+		if m.channelEditField < len(fields) {
+			field := fields[m.channelEditField]
+			if field.ftype == fieldText {
+				m.textInput.EchoMode = textinput.EchoNormal
+				m.textInput.Validate = nil
+				m.textInput.SetValue(m.channelEditValues[field.key])
+				m.textInput.Focus()
+				return
+			}
+		}
+		m.textInput.Blur()
+		return
+	}
+
+	m.textInput.Blur()
 }
 
 // HandleKey processes key input. Returns "complete" when setup finishes.
@@ -266,8 +435,7 @@ func (m *SetupWizardModel) handleModeSelectKey(key string) string {
 			m.cookieFocus = 0
 		} else {
 			m.mode = setupModeAdvanced
-			m.step = 0
-			m.focusedField = 0
+			m.buildAdvancedForm()
 		}
 	}
 	return ""
@@ -329,12 +497,14 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 				m.OnStartAutoCookie("youtube")
 				m.cookieActive = true
 				m.cookiePlatform = "youtube"
+				m.spinner = newSpinner()
 			}
 		case 1: // Twitch
 			if m.OnStartAutoCookie != nil {
 				m.OnStartAutoCookie("twitch")
 				m.cookieActive = true
 				m.cookiePlatform = "twitch"
+				m.spinner = newSpinner()
 			}
 		case 2: // Skip / Next
 			m.simpleStage = setupSimpleChannels
@@ -386,11 +556,13 @@ func (m *SetupWizardModel) handleSimpleChannelKey(key string) string {
 		m.channelEditField = 0
 		m.channelIndex = len(m.channels)
 		m.channelMode = "edit"
+		m.updateTextInputForField()
 	case keyEnter:
 		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
 			m.channelMode = "edit"
 			m.channelEditValues = channelToValues(m.channels[m.channelIndex])
 			m.channelEditField = 0
+			m.updateTextInputForField()
 		}
 	case "d", "D":
 		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
@@ -433,16 +605,14 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 	switch key {
 	case keyEsc:
 		m.channelMode = "list"
-		// Clamp index after cancelling an add (channelIndex may be past the end)
 		if m.channelIndex >= len(m.channels) && len(m.channels) > 0 {
 			m.channelIndex = len(m.channels) - 1
 		} else if len(m.channels) == 0 {
 			m.channelIndex = 0
 		}
+		m.textInput.Blur()
 		return ""
-
 	case keyEnter:
-		// Save channel
 		if id := strings.TrimSpace(m.channelEditValues["id"]); id == "" {
 			return ""
 		}
@@ -453,72 +623,32 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 			m.channels = append(m.channels, ch)
 		}
 		m.channelMode = "list"
+		m.textInput.Blur()
 		return ""
-
 	case keyUp:
 		if m.channelEditField > 0 {
 			m.channelEditField--
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case keyDown, keyTab:
 		if m.channelEditField < len(fields)-1 {
 			m.channelEditField++
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case "left":
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelFieldReverse(field)
 		}
 		return ""
-
 	case "right":
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelField(field)
 		}
 		return ""
-
-	case "backspace", "delete":
-		if field.ftype == fieldToggle || field.ftype == fieldCycle {
-			return ""
-		}
-		cur := m.channelEditValues[field.key]
-		if len(cur) > 0 {
-			runes := []rune(cur)
-			m.channelEditValues[field.key] = string(runes[:len(runes)-1])
-		}
-		return ""
-
-	case "ctrl+v":
-		if field.ftype == fieldToggle || field.ftype == fieldCycle {
-			return ""
-		}
-		if clip := readClipboard(); clip != "" {
-			if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
-				clip = clip[:idx]
-			}
-			clip = strings.TrimSpace(clip)
-			if clip != "" {
-				cur := m.channelEditValues[field.key]
-				m.channelEditValues[field.key] = cur + clip
-			}
-		}
-		return ""
-
-	default:
-		if field.ftype == fieldToggle || field.ftype == fieldCycle {
-			return ""
-		}
-		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			if key[0] == 0x1b {
-				return ""
-			}
-			cur := m.channelEditValues[field.key]
-			m.channelEditValues[field.key] = cur + key
-		}
-		return ""
 	}
+	return ""
 }
 
 func (m *SetupWizardModel) cycleChannelField(field channelFieldDef) {
@@ -597,115 +727,24 @@ func (m *SetupWizardModel) finishSimpleSetup() string {
 // --- Advanced Setup ---
 
 func (m *SetupWizardModel) handleAdvancedKey(key string) string {
-	currentStep := advancedSetupSteps[m.step]
+	if m.advancedForm != nil {
+		// Form is active — only handle Esc for back navigation.
+		// All other keys are handled by the form via UpdateComponents.
+		if key == keyEsc {
+			m.advancedForm = nil
+			m.advancedInitCmd = nil
+			m.mode = setupModeSelect
+			return ""
+		}
+		return ""
+	}
 
-	// Channel sub-editor in the Channels step
-	if currentStep.fields == nil && currentStep.title == "Channels" {
+	// Channel editing mode (after form completes)
+	if m.advancedFormDone {
 		return m.handleAdvancedChannelKey(key)
 	}
 
-	fieldCount := len(currentStep.fields)
-
-	var field *setupFieldDef
-	if m.focusedField >= 0 && m.focusedField < fieldCount {
-		field = &currentStep.fields[m.focusedField]
-	}
-
-	switch key {
-	case keyEsc:
-		if m.step > 0 {
-			m.step--
-			m.focusedField = 0
-		} else {
-			m.mode = setupModeSelect
-		}
-		return ""
-
-	case "left":
-		if field != nil && (field.ftype == setupFieldToggle || field.ftype == setupFieldCycle) {
-			m.cycleOption(*field, -1)
-		}
-		return ""
-
-	case "right":
-		if field != nil && (field.ftype == setupFieldToggle || field.ftype == setupFieldCycle) {
-			m.cycleOption(*field, 1)
-		}
-		return ""
-
-	case keyEnter, keyTab:
-		if m.step < len(advancedSetupSteps)-1 {
-			m.step++
-			m.focusedField = 0
-		} else {
-			return m.finishAdvancedSetup()
-		}
-		return ""
-
-	case keyUp:
-		if m.focusedField > 0 {
-			m.focusedField--
-		}
-		return ""
-
-	case keyDown:
-		if m.focusedField < fieldCount-1 {
-			m.focusedField++
-		}
-		return ""
-
-	case "backspace", "delete":
-		if field == nil || field.ftype == setupFieldToggle || field.ftype == setupFieldCycle {
-			return ""
-		}
-		cur := m.getFieldValue(*field)
-		if len(cur) > 0 {
-			runes := []rune(cur)
-			m.values[field.key] = string(runes[:len(runes)-1])
-		}
-		return ""
-
-	case "ctrl+v":
-		if field == nil || field.ftype == setupFieldToggle || field.ftype == setupFieldCycle {
-			return ""
-		}
-		if clip := readClipboard(); clip != "" {
-			if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
-				clip = clip[:idx]
-			}
-			clip = strings.TrimSpace(clip)
-			if field.ftype == setupFieldNumber {
-				var filtered strings.Builder
-				for _, ch := range clip {
-					if ch >= '0' && ch <= '9' {
-						filtered.WriteRune(ch)
-					}
-				}
-				clip = filtered.String()
-			}
-			if clip != "" {
-				cur := m.getFieldValue(*field)
-				m.values[field.key] = cur + clip
-			}
-		}
-		return ""
-
-	default:
-		if field == nil || field.ftype == setupFieldToggle || field.ftype == setupFieldCycle {
-			return ""
-		}
-		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			if key[0] == 0x1b {
-				return ""
-			}
-			if field.ftype == setupFieldNumber && (key[0] < '0' || key[0] > '9') {
-				return ""
-			}
-			cur := m.getFieldValue(*field)
-			m.values[field.key] = cur + key
-		}
-		return ""
-	}
+	return ""
 }
 
 func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
@@ -730,12 +769,9 @@ func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
 
 	switch key {
 	case keyEsc:
-		if m.step > 0 {
-			m.step--
-			m.focusedField = 0
-		} else {
-			m.mode = setupModeSelect
-		}
+		// Back to mode select from channel editor
+		m.advancedFormDone = false
+		m.mode = setupModeSelect
 	case keyUp:
 		if m.channelIndex > 0 {
 			m.channelIndex--
@@ -753,41 +789,22 @@ func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
 		m.channelEditField = 0
 		m.channelIndex = len(m.channels)
 		m.channelMode = "edit"
+		m.updateTextInputForField()
 	case keyEnter:
 		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
 			m.channelMode = "edit"
 			m.channelEditValues = channelToValues(m.channels[m.channelIndex])
 			m.channelEditField = 0
+			m.updateTextInputForField()
 		}
 	case "d", "D":
 		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
 			m.channelDeleteConf = true
 		}
 	case keyTab:
-		if m.step < len(advancedSetupSteps)-1 {
-			m.step++
-			m.focusedField = 0
-		} else {
-			return m.finishAdvancedSetup()
-		}
+		return m.finishAdvancedSetup()
 	}
 	return ""
-}
-
-func (m *SetupWizardModel) cycleOption(field setupFieldDef, direction int) {
-	if field.options == nil {
-		return
-	}
-	current := m.getFieldValue(field)
-	idx := 0
-	for i, opt := range field.options {
-		if strings.EqualFold(opt, current) {
-			idx = i
-			break
-		}
-	}
-	next := (idx + direction + len(field.options)) % len(field.options)
-	m.values[field.key] = field.options[next]
 }
 
 func (m *SetupWizardModel) finishAdvancedSetup() string {
@@ -1058,7 +1075,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 		if m.cookiePlatform == "twitch" {
 			platformName = "Twitch"
 		}
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render(
+		lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
 			fmt.Sprintf("Browser opened for %s login.", platformName)))
 		lines = append(lines, "")
 		lines = append(lines, "Sign in, then press "+
@@ -1160,7 +1177,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 		lines = append(lines, ErrorStyle.Render(m.errorMsg))
 	}
 	if m.saving {
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("Saving configuration..."))
+		lines = append(lines, m.spinner.View()+" Saving configuration...")
 	}
 
 	// Navigation
@@ -1202,170 +1219,85 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		boxW = 40
 	}
 	contentW := boxW - 4
-	totalSteps := len(advancedSetupSteps)
-	currentStep := advancedSetupSteps[m.step]
-
-	var lines []string
-
-	// Title bar
-	titleText := "Advanced Setup"
-	stepText := fmt.Sprintf("Step %d/%d", m.step+1, totalSteps)
-	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render(titleText)
-	stepRendered := DimStyle.Render(stepText)
-	titlePad := contentW - runewidth.StringWidth(titleText) - runewidth.StringWidth(stepText)
-	if titlePad < 1 {
-		titlePad = 1
-	}
-	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
-
-	// Step indicator
-	var stepParts []string
-	for i := range advancedSetupSteps {
-		marker := " "
-		color := ColorGray
-		if i < m.step {
-			marker = "+"
-			color = ColorGreen
-		} else if i == m.step {
-			marker = ">"
-			color = ColorCyan
-		}
-		stepParts = append(stepParts, lipgloss.NewStyle().Foreground(color).Render(
-			fmt.Sprintf("[%s] %d", marker, i+1),
-		))
-	}
-	lines = append(lines, strings.Join(stepParts, DimStyle.Render(" ")))
-
-	// Step title + subtitle
-	lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render(currentStep.title))
-	if currentStep.subtitle != "" {
-		lines = append(lines, DimStyle.Render(currentStep.subtitle))
-	}
-	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
-
-	// Channels sub-editor
-	if currentStep.fields == nil && currentStep.title == "Channels" {
-		if m.channelMode == "edit" {
-			lines = append(lines, m.renderChannelEditor(contentW)...)
-		} else {
-			lines = append(lines, m.renderChannelList(contentW)...)
-		}
-	} else if currentStep.fields != nil {
-		// Regular fields
-		fieldCount := len(currentStep.fields)
-		for idx := range fieldCount {
-			field := currentStep.fields[idx]
-			isFocused := idx == m.focusedField
-			val := m.getFieldValue(field)
-			isToggleOrCycle := field.ftype == setupFieldToggle || field.ftype == setupFieldCycle
-
-			prefix := "  "
-			if isFocused {
-				prefix = "> "
-			}
-			labelColor := ColorWhite
-			if isFocused {
-				labelColor = ColorCyan
-			}
-			labelStyle := lipgloss.NewStyle().Foreground(labelColor)
-			if isFocused {
-				labelStyle = labelStyle.Bold(true)
-			}
-			prefixStyle := lipgloss.NewStyle().Foreground(labelColor)
-			defaultHint := DimStyle.Render(" (default: " + field.defaultDisplay + ")")
-			lines = append(lines, prefixStyle.Render(prefix)+labelStyle.Render(field.label)+defaultHint)
-
-			if isToggleOrCycle {
-				lines = append(lines, "  "+renderSetupOptionSelector(field.options, val, isFocused))
-			} else {
-				if val == "" && !isFocused {
-					lines = append(lines, "  "+DimStyle.Render("["+field.defaultDisplay+"]"))
-				} else {
-					cursor := ""
-					if isFocused {
-						cursor = lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
-					}
-					lines = append(lines, "  "+DimStyle.Render("[")+val+cursor+DimStyle.Render("]"))
-				}
-			}
-
-			if field.help != "" {
-				lines = append(lines, "   "+DimStyle.Render(field.help))
-			}
-
-			if idx < fieldCount-1 {
-				lines = append(lines, "")
-			}
-		}
-	}
-
-	// Step footer
-	if currentStep.footer != "" {
-		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render(currentStep.footer))
-	}
-
-	// Error
-	if m.errorMsg != "" {
-		lines = append(lines, ErrorStyle.Render(m.errorMsg))
-	}
-	if m.saving {
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("Saving configuration..."))
-	}
-
-	// Navigation hints
-	lines = append(lines, "")
-	if m.step < totalSteps-1 {
-		var hintLeft string
-		if m.step > 0 {
-			hintLeft = DimStyle.Render("Esc: Back")
-		} else {
-			hintLeft = DimStyle.Render("Esc: Mode select")
-		}
-
-		var hintRight string
-		if currentStep.fields == nil && currentStep.title == "Channels" {
-			if m.channelMode == "edit" {
-				hintRight = DimStyle.Render("Enter: Save  Esc: Cancel  Tab: Next step")
-			} else {
-				hintRight = DimStyle.Render("A: Add  Enter: Edit  D: Delete  Tab: Next")
-			}
-		} else {
-			hintRight = DimStyle.Render("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  Tab/Enter: Next")
-		}
-		hintLeftW := runewidth.StringWidth("Esc: Back")
-		if m.step == 0 {
-			hintLeftW = runewidth.StringWidth("Esc: Mode select")
-		}
-		hintRightW := runewidth.StringWidth(hintRight) // approximate since it has style
-		_ = hintRightW
-		gap := max(1, contentW-hintLeftW-40) // approximate gap
-		lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
-	} else {
-		// Last step
-		hintLeft := DimStyle.Render("Esc: Back")
-		navHint := DimStyle.Render("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  ")
-		finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
-		rightSide := navHint + finishHint
-		gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("\u2191/\u2193: Fields  \u2190/\u2192: Toggle  Tab: Finish"))
-		lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
-	}
-
-	content := strings.Join(lines, "\n")
 
 	h := m.height - 2
 	if h < 10 {
 		h = 10
 	}
 
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorCyan).
-		Width(contentW).
-		Height(h).
-		Render(content)
+	if m.advancedForm != nil {
+		// Render huh form
+		m.advancedForm = m.advancedForm.WithWidth(contentW).WithHeight(h - 4)
 
-	return centerBox(box, m.width, m.height)
+		var lines []string
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Advanced Setup"))
+		lines = append(lines, "")
+		lines = append(lines, m.advancedForm.View())
+
+		if m.errorMsg != "" {
+			lines = append(lines, ErrorStyle.Render(m.errorMsg))
+		}
+		lines = append(lines, DimStyle.Render("Esc: Back to mode select"))
+
+		content := strings.Join(lines, "\n")
+
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorCyan).
+			Width(contentW).
+			Height(h).
+			Render(content)
+
+		return centerBox(box, m.width, m.height)
+	}
+
+	if m.advancedFormDone {
+		// Render channel editor
+		var lines []string
+		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Advanced Setup \u2014 Channels"))
+		lines = append(lines, DimStyle.Render("Add channels to monitor for live streams"))
+		lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+
+		if m.channelMode == "edit" {
+			lines = append(lines, m.renderChannelEditor(contentW)...)
+		} else {
+			lines = append(lines, m.renderChannelList(contentW)...)
+		}
+
+		if m.errorMsg != "" {
+			lines = append(lines, ErrorStyle.Render(m.errorMsg))
+		}
+		if m.saving {
+			lines = append(lines, m.spinner.View()+" Saving configuration...")
+		}
+
+		// Navigation hints
+		lines = append(lines, "")
+		lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+		if m.channelMode == "edit" {
+			lines = append(lines, DimStyle.Render("Esc: Cancel  Enter: Save  \u2191/\u2193: Fields"))
+		} else {
+			hintLeft := DimStyle.Render("Esc: Back")
+			navHint := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
+			finishHint := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Tab: Finish")
+			rightSide := navHint + finishHint
+			gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("A: Add  Enter: Edit  D: Delete  Tab: Finish"))
+			lines = append(lines, hintLeft+strings.Repeat(" ", gap)+rightSide)
+		}
+
+		content := strings.Join(lines, "\n")
+
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorCyan).
+			Width(contentW).
+			Height(h).
+			Render(content)
+
+		return centerBox(box, m.width, m.height)
+	}
+
+	return ""
 }
 
 // --- Shared Channel Rendering ---
@@ -1434,12 +1366,11 @@ func (m *SetupWizardModel) renderChannelEditor(contentW int) []string {
 		if f.ftype == fieldToggle || f.ftype == fieldCycle {
 			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+
 				renderSetupOptionSelector(f.options, val, isFocused))
+		} else if isFocused {
+			m.textInput.Width = contentW - runewidth.StringWidth(prefix+f.label+": ") - 1
+			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+m.textInput.View())
 		} else {
-			cursor := ""
-			if isFocused {
-				cursor = lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
-			}
-			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+val+cursor)
+			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+renderInactiveInput(val, contentW-runewidth.StringWidth(prefix+f.label+": "), ColorWhite))
 		}
 
 		if f.help != "" && isFocused {

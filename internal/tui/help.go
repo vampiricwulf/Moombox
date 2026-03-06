@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -21,6 +24,7 @@ var actionKeys = helpSection{
 	title: "Action (A)",
 	keys: []helpKey{
 		{"A A", "Add video"},
+		{"A I", "Import archive"},
 		{"A R", "Retry failed/cancelled job"},
 		{"A C C", "Cancel active job (confirm)"},
 		{"A D D", "Delete job (confirm)"},
@@ -79,23 +83,60 @@ var mouseKeys = helpSection{
 	},
 }
 
+// helpViewportKeyMap returns a KeyMap with only arrow keys and pgup/pgdn,
+// disabling letter keys (f, b, u, d, k, j, h, l) that conflict with app chords.
+func helpViewportKeyMap() viewport.KeyMap {
+	return viewport.KeyMap{
+		PageDown: key.NewBinding(
+			key.WithKeys("pgdown"),
+		),
+		PageUp: key.NewBinding(
+			key.WithKeys("pgup"),
+		),
+		HalfPageUp: key.NewBinding(
+			key.WithKeys("ctrl+u"),
+		),
+		HalfPageDown: key.NewBinding(
+			key.WithKeys("ctrl+d"),
+		),
+		Up: key.NewBinding(
+			key.WithKeys("up"),
+		),
+		Down: key.NewBinding(
+			key.WithKeys("down"),
+		),
+		Left: key.NewBinding(
+			key.WithDisabled(),
+		),
+		Right: key.NewBinding(
+			key.WithDisabled(),
+		),
+	}
+}
+
 // HelpModel renders the help overlay.
 type HelpModel struct {
-	visible      bool
-	scrollOffset int
-	width        int
-	height       int
+	visible  bool
+	viewport viewport.Model
+	width    int
+	height   int
 }
 
 // NewHelpModel creates a new help model.
 func NewHelpModel() *HelpModel {
-	return &HelpModel{}
+	vp := viewport.New(0, 0)
+	vp.KeyMap = helpViewportKeyMap()
+	return &HelpModel{
+		viewport: vp,
+	}
 }
 
 // Toggle toggles the help overlay visibility.
 func (m *HelpModel) Toggle() {
 	m.visible = !m.visible
-	m.scrollOffset = 0
+	if m.visible {
+		m.buildContent()
+	}
 }
 
 // IsVisible returns true if the help overlay is shown.
@@ -107,18 +148,49 @@ func (m *HelpModel) IsVisible() bool {
 func (m *HelpModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-}
-
-// ScrollUp scrolls the help overlay up.
-func (m *HelpModel) ScrollUp() {
-	if m.scrollOffset > 0 {
-		m.scrollOffset--
+	if m.visible {
+		m.buildContent()
 	}
 }
 
-// ScrollDown scrolls the help overlay down.
-func (m *HelpModel) ScrollDown() {
-	m.scrollOffset++
+// UpdateViewport delegates messages to the viewport for scrolling.
+func (m *HelpModel) UpdateViewport(msg tea.Msg) tea.Cmd {
+	if !m.visible {
+		return nil
+	}
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	return cmd
+}
+
+// buildContent constructs the help text and sets it into the viewport.
+func (m *HelpModel) buildContent() {
+	sections := m.orderedSections()
+	var allLines []string
+	for i, sec := range sections {
+		if i > 0 {
+			allLines = append(allLines, "")
+		}
+		allLines = append(allLines, HeaderStyle.Render(sec.title))
+		for _, k := range sec.keys {
+			keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Width(14)
+			allLines = append(allLines, "  "+keyStyle.Render(k.key)+k.desc)
+		}
+	}
+
+	w := m.width - 4
+	h := m.height - 4
+	if w < 20 {
+		w = 20
+	}
+	if h < 5 {
+		h = 5
+	}
+
+	m.viewport.Width = w
+	m.viewport.Height = h - 1 // -1 for header line
+	m.viewport.SetContent(strings.Join(allLines, "\n"))
+	m.viewport.GotoTop()
 }
 
 // View renders the help overlay.
@@ -136,56 +208,15 @@ func (m *HelpModel) View() string {
 		h = 5
 	}
 
-	sections := m.orderedSections()
-
-	var allLines []string
-	for i, sec := range sections {
-		if i > 0 {
-			allLines = append(allLines, "")
-		}
-		allLines = append(allLines, HeaderStyle.Render(sec.title))
-		for _, k := range sec.keys {
-			// Yellow keys (match TS), 14-char padding (match TS padEnd(14))
-			keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Width(14)
-			allLines = append(allLines, "  "+keyStyle.Render(k.key)+k.desc)
-		}
-	}
-
-	// Apply scroll
-	maxScroll := len(allLines) - h
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	if m.scrollOffset > maxScroll {
-		m.scrollOffset = maxScroll
-	}
-
-	end := m.scrollOffset + h
-	if end > len(allLines) {
-		end = len(allLines)
-	}
-	start := m.scrollOffset
-	if start > len(allLines) {
-		start = len(allLines)
-	}
-	visible := allLines[start:end]
-
-	for len(visible) < h {
-		visible = append(visible, "")
-	}
-
-	// Header with scroll percentage (H1) - brackets match TS [XX%]
+	// Header with scroll percentage
 	headerParts := TitleStyle.Render("Help")
-	if maxScroll > 0 {
-		pct := 0
-		if maxScroll > 0 {
-			pct = m.scrollOffset * 100 / maxScroll
-		}
+	if m.viewport.TotalLineCount() > m.viewport.Height {
+		pct := int(m.viewport.ScrollPercent() * 100)
 		headerParts += " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
 	}
 	headerParts += strings.Repeat(" ", max(0, w-20)) + DimStyle.Render("(press ? or Esc to close)")
 
-	content := headerParts + "\n" + strings.Join(visible, "\n")
+	content := headerParts + "\n" + m.viewport.View()
 
 	box := FocusedBorder.Width(w).Height(h).Render(content)
 

@@ -5,6 +5,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
@@ -42,6 +45,7 @@ type TrimDialogModel struct {
 	startTimeInput string
 	endTimeInput   string
 	activeField    int // 0=start, 1=end
+	textInput      textinput.Model
 	errorMsg       string
 	loading        bool
 
@@ -57,11 +61,17 @@ type TrimDialogModel struct {
 	// Parsed values (after validation)
 	parsedStart float64
 	parsedEnd   float64
+
+	// Loading spinner
+	spinner spinner.Model
 }
 
 // NewTrimDialogModel creates a new trim dialog.
 func NewTrimDialogModel() *TrimDialogModel {
-	return &TrimDialogModel{}
+	return &TrimDialogModel{
+		textInput: newTextInput(),
+		spinner:   newSpinner(),
+	}
 }
 
 // Open shows the dialog for a specific job.
@@ -74,6 +84,9 @@ func (m *TrimDialogModel) Open(jobID, jobTitle string) {
 	m.startTimeInput = ""
 	m.endTimeInput = ""
 	m.activeField = 0
+	m.textInput.Validate = validateTimeChars
+	m.textInput.SetValue("")
+	m.textInput.Focus()
 	m.errorMsg = ""
 	m.loading = false
 	m.selectedTrimIdx = 0
@@ -111,6 +124,9 @@ func (m *TrimDialogModel) SetTrims(trims []TrimInfo) {
 
 // SetLoading sets the loading state.
 func (m *TrimDialogModel) SetLoading(loading bool) {
+	if loading {
+		m.spinner = newSpinner()
+	}
 	m.loading = loading
 }
 
@@ -209,6 +225,9 @@ func (m *TrimDialogModel) toggleMode() {
 		m.parsedStart = 0
 		m.parsedEnd = 0
 		m.activeField = 0
+		m.textInput.SetValue("")
+		m.textInput.Validate = validateTimeChars
+		m.textInput.Focus()
 	}
 	m.errorMsg = ""
 }
@@ -219,17 +238,13 @@ func (m *TrimDialogModel) handleCreateKey(key string) string {
 		switch key {
 		case keyTab:
 			m.activeField = 1 - m.activeField
+			if m.activeField == 0 {
+				m.textInput.SetValue(m.startTimeInput)
+			} else {
+				m.textInput.SetValue(m.endTimeInput)
+			}
 		case keyEnter:
 			return m.validateAndAdvance()
-		default:
-			if key != keyEnter {
-				m.errorMsg = ""
-			}
-			if m.activeField == 0 {
-				m.handleTextInput(key, &m.startTimeInput)
-			} else {
-				m.handleTextInput(key, &m.endTimeInput)
-			}
 		}
 
 	case 1: // Confirmation
@@ -322,28 +337,34 @@ func (m *TrimDialogModel) handleDeleteKey(key string) string {
 	return ""
 }
 
-func (m *TrimDialogModel) handleTextInput(key string, target *string) {
-	switch key {
-	case "backspace":
-		if len(*target) > 0 {
-			runes := []rune(*target)
-			*target = string(runes[:len(runes)-1])
-		}
-	case "ctrl+v":
-		if text := readClipboard(); text != "" {
-			// Filter pasted text to only valid time characters
-			for _, ch := range text {
-				if (ch >= '0' && ch <= '9') || ch == ':' || ch == '.' {
-					*target += string(ch)
-				}
-			}
-		}
-	default:
-		// Only allow digits, colons, and dots for time input (match TS /^[0-9:.]$/)
-		if len(key) == 1 && (key[0] >= '0' && key[0] <= '9' || key[0] == ':' || key[0] == '.') {
-			*target += key
+// UpdateComponents routes tea.Msg to the embedded textinput/spinner and syncs.
+func (m *TrimDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
+	if !m.visible {
+		return nil
+	}
+	// Route spinner when loading
+	if m.loading {
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return cmd
+	}
+	if m.mode != TrimModeCreate || m.createStep != 0 {
+		return nil
+	}
+	if !m.textInput.Focused() {
+		return nil
+	}
+	prev := m.textInput.Value()
+	var cmd tea.Cmd
+	m.textInput, cmd = m.textInput.Update(msg)
+	if m.textInput.Value() != prev {
+		if m.activeField == 0 {
+			m.startTimeInput = m.textInput.Value()
+		} else {
+			m.endTimeInput = m.textInput.Value()
 		}
 	}
+	return cmd
 }
 
 // View renders the trim dialog.
@@ -420,8 +441,16 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 			endStyle = lipgloss.NewStyle().Foreground(ColorCyan)
 		}
 
-		lines = append(lines, startStyle.Render(startLabel)+renderInputBox(m.startTimeInput, w-12, false))
-		lines = append(lines, endStyle.Render(endLabel)+renderInputBox(m.endTimeInput, w-12, false))
+		m.textInput.TextStyle = lipgloss.NewStyle().Foreground(ColorCyan)
+		m.textInput.Cursor.Style = lipgloss.NewStyle().Foreground(ColorCyan)
+		m.textInput.Width = w - 12
+		if m.activeField == 0 {
+			lines = append(lines, startStyle.Render(startLabel)+m.textInput.View())
+			lines = append(lines, endStyle.Render(endLabel)+renderInactiveInput(m.endTimeInput, w-12, ColorCyan))
+		} else {
+			lines = append(lines, startStyle.Render(startLabel)+renderInactiveInput(m.startTimeInput, w-12, ColorCyan))
+			lines = append(lines, endStyle.Render(endLabel)+m.textInput.View())
+		}
 		lines = append(lines, "")
 		lines = append(lines, DimStyle.Render("Format: HH:MM:SS, MM:SS, or seconds"))
 
@@ -456,7 +485,7 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 
 	if m.loading {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("⏳ Creating trim, please wait..."))
+		lines = append(lines, m.spinner.View()+" Creating trim, please wait...")
 	}
 
 	lines = append(lines, "")
@@ -523,7 +552,7 @@ func (m *TrimDialogModel) renderDeleteMode(w, h int) string {
 
 	if m.loading {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("⏳ Deleting..."))
+		lines = append(lines, m.spinner.View()+" Deleting...")
 	}
 
 	lines = append(lines, "")

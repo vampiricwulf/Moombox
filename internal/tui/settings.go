@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
@@ -258,6 +260,9 @@ type SettingsModel struct {
 
 	// Restart overlay
 	showRestartOverlay bool
+
+	// Shared text input component (holds the currently-active text field)
+	textInput textinput.Model
 }
 
 // NewSettingsModel creates a new settings model.
@@ -267,6 +272,7 @@ func NewSettingsModel() *SettingsModel {
 		originalValues: make(map[string]string),
 		channelMode:    "list",
 		notifMode:      "list",
+		textInput:      newTextInput(),
 	}
 }
 
@@ -311,6 +317,8 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	for k, v := range m.values {
 		m.originalValues[k] = v
 	}
+
+	m.updateTextInputForField()
 }
 
 // Close hides the settings panel.
@@ -532,12 +540,14 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 			m.secConfirmPw = ""
 			m.secFieldIndex = 0
 			m.secMessage = ""
+			m.updateTextInputForField()
 			return ""
 		}
 		if key == "~" && m.hasPassword() {
 			m.secMode = securityRemove
 			m.secRemovePw = ""
 			m.secMessage = ""
+			m.updateTextInputForField()
 			return ""
 		}
 		return m.handleFieldKey(key)
@@ -552,28 +562,25 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 	if sec.fields == nil {
 		return ""
 	}
-
 	field := sec.fields[m.fieldIndex]
-	isTextual := field.ftype == fieldText || field.ftype == fieldNumber
 
 	switch key {
 	case keyEsc:
 		return m.handleClose()
-
 	case keyUp:
 		if m.fieldIndex > 0 {
 			m.fieldIndex--
 			m.ensureFieldVisible()
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case keyDown:
 		if m.fieldIndex < len(sec.fields)-1 {
 			m.fieldIndex++
 			m.ensureFieldVisible()
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case "left":
 		if field.ftype == fieldToggle {
 			m.toggleField(field)
@@ -581,7 +588,6 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.cycleFieldReverse(field)
 		}
 		return ""
-
 	case "right":
 		if field.ftype == fieldToggle {
 			m.toggleField(field)
@@ -589,80 +595,24 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.cycleFieldForward(field)
 		}
 		return ""
-
 	case "shift+left":
 		if m.sectionIndex > 0 {
 			m.switchSection(m.sectionIndex - 1)
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case "shift+right":
 		if m.sectionIndex < len(sections)-1 {
 			m.switchSection(m.sectionIndex + 1)
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case keyTab:
 		m.switchSection((m.sectionIndex + 1) % len(sections))
-		return ""
-
-	case "backspace":
-		if isTextual {
-			cur := m.values[field.key]
-			if len(cur) > 0 {
-				runes := []rune(cur)
-				m.values[field.key] = string(runes[:len(runes)-1])
-				m.dirty = true
-				m.status = saveIdle
-			}
-		}
-		return ""
-
-	case "ctrl+v":
-		// Clipboard paste support (match TS: first line only, filter for number fields)
-		if isTextual {
-			if clip := readClipboard(); clip != "" {
-				// Use first line only
-				if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
-					clip = clip[:idx]
-				}
-				clip = strings.TrimSpace(clip)
-				// Filter for number fields: strip non-digits (match TS)
-				if field.ftype == fieldNumber {
-					filtered := strings.Map(func(r rune) rune {
-						if r >= '0' && r <= '9' {
-							return r
-						}
-						return -1
-					}, clip)
-					clip = filtered
-				}
-				if clip != "" {
-					m.values[field.key] += clip
-					m.dirty = true
-					m.status = saveIdle
-				}
-			}
-		}
-		return ""
-
-	default:
-		// Text input for text/number fields
-		if isTextual && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			// Reject escape sequences
-			if key[0] == 0x1b {
-				return ""
-			}
-			// Number fields only accept digits
-			if field.ftype == fieldNumber && (key[0] < '0' || key[0] > '9') {
-				return ""
-			}
-			m.values[field.key] = m.values[field.key] + key
-			m.dirty = true
-			m.status = saveIdle
-		}
+		m.updateTextInputForField()
 		return ""
 	}
+	return ""
 }
 
 func (m *SettingsModel) handleClose() string {
@@ -761,6 +711,136 @@ func (m *SettingsModel) settingsContentHeight() int {
 	return h
 }
 
+// updateTextInputForField configures the textInput based on the current state.
+func (m *SettingsModel) updateTextInputForField() {
+	sec := sections[m.sectionIndex]
+
+	// Security sub-editor
+	if sec.name == "Network" && m.secMode == securitySet {
+		m.textInput.EchoMode = textinput.EchoPassword
+		m.textInput.Validate = nil
+		target := m.secActiveField()
+		if target != nil {
+			m.textInput.SetValue(*target)
+		}
+		m.textInput.Focus()
+		return
+	}
+	if sec.name == "Network" && m.secMode == securityRemove {
+		m.textInput.EchoMode = textinput.EchoPassword
+		m.textInput.Validate = nil
+		m.textInput.SetValue(m.secRemovePw)
+		m.textInput.Focus()
+		return
+	}
+
+	// Channel edit mode
+	if sec.name == "Channels" && m.channelMode == "edit" {
+		fields := m.visibleChannelFields()
+		if m.channelEditField < len(fields) {
+			field := fields[m.channelEditField]
+			if field.ftype == fieldText {
+				m.textInput.EchoMode = textinput.EchoNormal
+				m.textInput.Validate = nil
+				m.textInput.SetValue(m.channelEditValues[field.key])
+				m.textInput.Focus()
+				return
+			}
+		}
+		m.textInput.Blur()
+		return
+	}
+
+	// Notification edit mode - URL field
+	if sec.name == "Integrations" && m.notifMode == "edit" && m.notifEditFocus == 0 {
+		m.textInput.EchoMode = textinput.EchoNormal
+		m.textInput.Validate = nil
+		m.textInput.SetValue(m.notifEditURL)
+		m.textInput.Focus()
+		return
+	}
+
+	// Normal field sections
+	if sec.fields != nil {
+		field := sec.fields[m.fieldIndex]
+		if field.ftype == fieldText || field.ftype == fieldNumber {
+			m.textInput.EchoMode = textinput.EchoNormal
+			if field.ftype == fieldNumber {
+				m.textInput.Validate = validateDigitsOnly
+			} else {
+				m.textInput.Validate = nil
+			}
+			m.textInput.SetValue(m.values[field.key])
+			m.textInput.Focus()
+			return
+		}
+	}
+
+	m.textInput.Blur()
+}
+
+// UpdateComponents routes tea.Msg to the embedded textinput and syncs.
+func (m *SettingsModel) UpdateComponents(msg tea.Msg) tea.Cmd {
+	if !m.visible || !m.textInput.Focused() {
+		return nil
+	}
+	prev := m.textInput.Value()
+	var cmd tea.Cmd
+	m.textInput, cmd = m.textInput.Update(msg)
+	if m.textInput.Value() != prev {
+		m.syncFromTextInput()
+	}
+	return cmd
+}
+
+func (m *SettingsModel) syncFromTextInput() {
+	val := m.textInput.Value()
+	sec := sections[m.sectionIndex]
+
+	// Security sub-editor
+	if sec.name == "Network" && m.secMode == securitySet {
+		if target := m.secActiveField(); target != nil {
+			*target = val
+		}
+		return
+	}
+	if sec.name == "Network" && m.secMode == securityRemove {
+		m.secRemovePw = val
+		return
+	}
+
+	// Channel edit
+	if sec.name == "Channels" && m.channelMode == "edit" {
+		fields := m.visibleChannelFields()
+		if m.channelEditField < len(fields) {
+			field := fields[m.channelEditField]
+			if field.ftype == fieldText {
+				m.channelEditValues[field.key] = val
+				if field.key == "id" {
+					m.autoDetectPlatform()
+				}
+			}
+		}
+		return
+	}
+
+	// Notification edit - URL
+	if sec.name == "Integrations" && m.notifMode == "edit" && m.notifEditFocus == 0 {
+		m.notifEditURL = val
+		return
+	}
+
+	// Normal fields
+	if sec.fields != nil {
+		field := sec.fields[m.fieldIndex]
+		if field.ftype == fieldText || field.ftype == fieldNumber {
+			m.values[field.key] = val
+			m.dirty = true
+			m.status = saveIdle
+		}
+	}
+}
+
 // --- Channel sub-editor ---
 
 func (m *SettingsModel) visibleChannelFields() []channelFieldDef {
@@ -856,6 +936,7 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 			m.channelMode = "edit"
 			m.channelEditValues = channelToValues(m.channels[m.channelIndex])
 			m.channelEditField = 0
+			m.updateTextInputForField()
 		}
 	case "a", "A":
 		m.channelEditValues = map[string]string{
@@ -866,6 +947,7 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		m.channelEditField = 0
 		m.channelIndex = len(m.channels) // Will be new index
 		m.channelMode = "edit"
+		m.updateTextInputForField()
 	case "d", "D":
 		if len(m.channels) > 0 {
 			m.channelDeleteConf = true
@@ -873,10 +955,12 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 	case "shift+left":
 		if m.sectionIndex > 0 {
 			m.switchSection(m.sectionIndex - 1)
+			m.updateTextInputForField()
 		}
 	case "shift+right":
 		if m.sectionIndex < len(sections)-1 {
 			m.switchSection(m.sectionIndex + 1)
+			m.updateTextInputForField()
 		}
 	}
 	return ""
@@ -896,84 +980,46 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 	case keyEsc:
 		m.channelMode = "list"
 		m.channelResolving = false
+		m.textInput.Blur()
 		return ""
-
 	case keyEnter:
 		if m.channelResolving {
-			return "" // Already resolving
+			return ""
 		}
-		// Save the channel
 		id := strings.TrimSpace(m.channelEditValues["id"])
 		if id == "" {
-			return "" // ID required
+			return ""
 		}
-		// If ID looks like a URL, trigger async resolution
 		if strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") || strings.Contains(id, "twitch.tv/") {
 			m.channelResolving = true
 			return "resolve_channel"
 		}
 		m.saveCurrentChannel()
 		return ""
-
 	case keyUp:
 		if m.channelEditField > 0 {
 			m.channelEditField--
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case keyDown:
 		if m.channelEditField < len(fields)-1 {
 			m.channelEditField++
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case "left":
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelOption(field, -1)
 		}
 		return ""
-
 	case "right":
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelOption(field, 1)
 		}
 		return ""
-
-	case "backspace":
-		if field.ftype == fieldText {
-			cur := m.channelEditValues[field.key]
-			if len(cur) > 0 {
-				runes := []rune(cur)
-				m.channelEditValues[field.key] = string(runes[:len(runes)-1])
-			}
-		}
-		return ""
-
-	case "ctrl+v":
-		if field.ftype == fieldText {
-			if clip := readClipboard(); clip != "" {
-				m.channelEditValues[field.key] += clip
-				// Auto-detect platform from pasted URL
-				if field.key == "id" {
-					m.autoDetectPlatform()
-				}
-			}
-		}
-		return ""
-
-	default:
-		if field.ftype == fieldText && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			if key[0] == 0x1b {
-				return ""
-			}
-			m.channelEditValues[field.key] = m.channelEditValues[field.key] + key
-			// Auto-detect platform from URL in ID field
-			if field.key == "id" {
-				m.autoDetectPlatform()
-			}
-		}
-		return ""
 	}
+	return ""
 }
 
 // autoDetectPlatform checks the ID field value and auto-switches the platform if it contains a known domain.
@@ -1102,6 +1148,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 			}
 			m.notifEditFocus = 0
 			m.notifMode = "edit"
+			m.updateTextInputForField()
 		}
 	case "a", "A":
 		m.notifEditURL = ""
@@ -1112,6 +1159,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		m.notifEditFocus = 0
 		m.notifIndex = len(m.notifications)
 		m.notifMode = "edit"
+		m.updateTextInputForField()
 	case "d", "D":
 		if len(m.notifications) > 0 {
 			m.notifDeleteConf = true
@@ -1119,25 +1167,26 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 	case "shift+left":
 		if m.sectionIndex > 0 {
 			m.switchSection(m.sectionIndex - 1)
+			m.updateTextInputForField()
 		}
 	case "shift+right":
 		if m.sectionIndex < len(sections)-1 {
 			m.switchSection(m.sectionIndex + 1)
+			m.updateTextInputForField()
 		}
 	}
 	return ""
 }
 
 func (m *SettingsModel) handleNotifEditKey(key string) string {
-	totalItems := 1 + len(allNotifEvents) // URL + events
+	totalItems := 1 + len(allNotifEvents)
 
 	switch key {
 	case keyEsc:
 		m.notifMode = "list"
+		m.textInput.Blur()
 		return ""
-
 	case keyEnter:
-		// Save
 		if strings.TrimSpace(m.notifEditURL) == "" {
 			return ""
 		}
@@ -1161,22 +1210,21 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		m.dirty = true
 		m.status = saveIdle
 		m.notifMode = "list"
+		m.textInput.Blur()
 		return ""
-
 	case keyUp:
 		if m.notifEditFocus > 0 {
 			m.notifEditFocus--
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case keyDown:
 		if m.notifEditFocus < totalItems-1 {
 			m.notifEditFocus++
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case " ":
-		// Toggle event checkbox
 		if m.notifEditFocus > 0 {
 			eventIdx := m.notifEditFocus - 1
 			if eventIdx < len(allNotifEvents) {
@@ -1185,33 +1233,8 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 			}
 		}
 		return ""
-
-	case "backspace":
-		if m.notifEditFocus == 0 {
-			if len(m.notifEditURL) > 0 {
-				runes := []rune(m.notifEditURL)
-				m.notifEditURL = string(runes[:len(runes)-1])
-			}
-		}
-		return ""
-
-	case "ctrl+v":
-		if m.notifEditFocus == 0 {
-			if clip := readClipboard(); clip != "" {
-				m.notifEditURL += clip
-			}
-		}
-		return ""
-
-	default:
-		if m.notifEditFocus == 0 && len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			if key[0] == 0x1b {
-				return ""
-			}
-			m.notifEditURL += key
-		}
-		return ""
 	}
+	return ""
 }
 
 // --- Security sub-editor ---
@@ -1245,69 +1268,33 @@ func (m *SettingsModel) handleSecurityStatusKey(key string) string {
 }
 
 func (m *SettingsModel) handleSecuritySetKey(key string) string {
-	// Determine visible fields
-	fieldCount := 2 // new, confirm
+	fieldCount := 2
 	if m.hasPassword() {
-		fieldCount = 3 // current, new, confirm
+		fieldCount = 3
 	}
 
 	switch key {
 	case keyEsc:
 		m.secMode = securityStatus
+		m.updateTextInputForField()
 		return ""
-
 	case keyEnter:
 		m.handleSetPassword()
 		return ""
-
-	case keyUp:
+	case keyUp, "shift+tab":
 		if m.secFieldIndex > 0 {
 			m.secFieldIndex--
+			m.updateTextInputForField()
 		}
 		return ""
-
 	case keyDown, keyTab:
 		if m.secFieldIndex < fieldCount-1 {
 			m.secFieldIndex++
-		}
-		return ""
-
-	case "backspace":
-		target := m.secActiveField()
-		if target != nil && len(*target) > 0 {
-			runes := []rune(*target)
-			*target = string(runes[:len(runes)-1])
-		}
-		return ""
-
-	case "shift+tab":
-		// Backward navigation (match TS Shift+Tab)
-		if m.secFieldIndex > 0 {
-			m.secFieldIndex--
-		}
-		return ""
-
-	case "ctrl+v":
-		target := m.secActiveField()
-		if target != nil {
-			if clip := readClipboard(); clip != "" {
-				*target += clip
-			}
-		}
-		return ""
-
-	default:
-		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			if key[0] == 0x1b {
-				return ""
-			}
-			target := m.secActiveField()
-			if target != nil {
-				*target += key
-			}
+			m.updateTextInputForField()
 		}
 		return ""
 	}
+	return ""
 }
 
 func (m *SettingsModel) secActiveField() *string {
@@ -1382,34 +1369,13 @@ func (m *SettingsModel) handleSecurityRemoveKey(key string) string {
 	switch key {
 	case keyEsc:
 		m.secMode = securityStatus
+		m.updateTextInputForField()
 		return ""
-
 	case keyEnter:
 		m.handleRemovePassword()
 		return ""
-
-	case "backspace":
-		if len(m.secRemovePw) > 0 {
-			runes := []rune(m.secRemovePw)
-			m.secRemovePw = string(runes[:len(runes)-1])
-		}
-		return ""
-
-	case "ctrl+v":
-		if text := readClipboard(); text != "" {
-			m.secRemovePw += text
-		}
-		return ""
-
-	default:
-		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			if key[0] == 0x1b {
-				return ""
-			}
-			m.secRemovePw += key
-		}
-		return ""
 	}
+	return ""
 }
 
 func (m *SettingsModel) handleRemovePassword() {
@@ -1626,13 +1592,6 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		case fieldCycle:
 			value = renderCycleOptions(fd.options, m.values[fd.key], selected)
 		default:
-			rawVal := m.values[fd.key]
-			// For text/number fields: show tail of value when it overflows,
-			// so the user always sees near the cursor.
-			cursorStr := ""
-			if selected {
-				cursorStr = "_"
-			}
 			indicatorW := 0
 			if isChanged || needsRestart {
 				indicatorW = 2 // " *"
@@ -1641,32 +1600,11 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 			if valueMaxW < 5 {
 				valueMaxW = 5
 			}
-			display := rawVal + cursorStr
-			if runewidth.StringWidth(display) > valueMaxW {
-				// Show tail: "…" + last (valueMaxW-1) chars
-				displayRunes := []rune(display)
-				tailW := valueMaxW - 1 // room for ellipsis
-				start := len(displayRunes)
-				w2 := 0
-				for start > 0 {
-					rw := runewidth.RuneWidth(displayRunes[start-1])
-					if w2+rw > tailW {
-						break
-					}
-					w2 += rw
-					start--
-				}
-				display = "\u2026" + string(displayRunes[start:])
-			}
 			if selected {
-				// Re-split to style the cursor
-				if strings.HasSuffix(display, "_") {
-					value = display[:len(display)-1] + lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
-				} else {
-					value = display
-				}
+				m.textInput.Width = valueMaxW
+				value = m.textInput.View()
 			} else {
-				value = display
+				value = renderInactiveInput(m.values[fd.key], valueMaxW, ColorWhite)
 			}
 		}
 
@@ -1863,35 +1801,15 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		case fieldCycle:
 			value = renderCycleOptions(field.options, val, isFocused)
 		default:
-			// Tail-visible for text fields in edit mode
-			cursorStr := ""
-			if isFocused {
-				cursorStr = "_"
-			}
-			display := val + cursorStr
 			valueMaxW := w - len(prefix) - padW - 2
 			if valueMaxW < 5 {
 				valueMaxW = 5
 			}
-			if runewidth.StringWidth(display) > valueMaxW {
-				displayRunes := []rune(display)
-				tailW := valueMaxW - 1
-				start := len(displayRunes)
-				w2 := 0
-				for start > 0 {
-					rw := runewidth.RuneWidth(displayRunes[start-1])
-					if w2+rw > tailW {
-						break
-					}
-					w2 += rw
-					start--
-				}
-				display = "\u2026" + string(displayRunes[start:])
-			}
-			if isFocused && strings.HasSuffix(display, "_") {
-				value = display[:len(display)-1] + lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
+			if isFocused {
+				m.textInput.Width = valueMaxW
+				value = m.textInput.View()
 			} else {
-				value = display
+				value = renderInactiveInput(val, valueMaxW, ColorWhite)
 			}
 		}
 
@@ -1975,36 +1893,16 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 	if urlFocused {
 		urlLabelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
 	}
-	urlVal := m.notifEditURL
-	// Tail-visible for URL field
-	cursorStr := ""
-	if urlFocused {
-		cursorStr = "_"
-	}
-	urlDisplay := urlVal + cursorStr
 	urlMaxW := w - len(urlPrefix) - 16 - 2
 	if urlMaxW < 10 {
 		urlMaxW = 10
 	}
-	if runewidth.StringWidth(urlDisplay) > urlMaxW {
-		urlRunes := []rune(urlDisplay)
-		tailW := urlMaxW - 1
-		start := len(urlRunes)
-		w2 := 0
-		for start > 0 {
-			rw := runewidth.RuneWidth(urlRunes[start-1])
-			if w2+rw > tailW {
-				break
-			}
-			w2 += rw
-			start--
-		}
-		urlDisplay = "\u2026" + string(urlRunes[start:])
-	}
-	if urlFocused && strings.HasSuffix(urlDisplay, "_") {
-		urlVal = urlDisplay[:len(urlDisplay)-1] + lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
+	var urlVal string
+	if urlFocused {
+		m.textInput.Width = urlMaxW
+		urlVal = m.textInput.View()
 	} else {
-		urlVal = urlDisplay
+		urlVal = renderInactiveInput(m.notifEditURL, urlMaxW, ColorWhite)
 	}
 	lines = append(lines, lipgloss.NewStyle().Foreground(func() lipgloss.Color {
 		if urlFocused {
@@ -2166,13 +2064,19 @@ func (m *SettingsModel) renderSecuritySet(w int) string {
 			prefixStyle = lipgloss.NewStyle().Foreground(ColorCyan)
 		}
 
-		masked := strings.Repeat("*", len(f.value))
-		cursor := ""
+		var val string
 		if isFocused {
-			cursor = lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
+			pwMaxW := w - len(prefix) - padW - 2
+			if pwMaxW < 10 {
+				pwMaxW = 10
+			}
+			m.textInput.Width = pwMaxW
+			val = m.textInput.View()
+		} else {
+			val = renderPasswordDots(f.value)
 		}
 
-		lines = append(lines, prefixStyle.Render(prefix)+labelStyle.Render(padRight(f.label, padW))+masked+cursor)
+		lines = append(lines, prefixStyle.Render(prefix)+labelStyle.Render(padRight(f.label, padW))+val)
 	}
 
 	if m.secMessage != "" {
@@ -2197,9 +2101,12 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 
 	// Password field
 	labelStyle := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
-	masked := strings.Repeat("*", len(m.secRemovePw))
-	cursor := lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
-	lines = append(lines, "> "+labelStyle.Render(padRight("Current password", 20))+masked+cursor)
+	pwMaxW := w - 2 - 20 - 2
+	if pwMaxW < 10 {
+		pwMaxW = 10
+	}
+	m.textInput.Width = pwMaxW
+	lines = append(lines, "> "+labelStyle.Render(padRight("Current password", 20))+m.textInput.View())
 
 	if m.secMessage != "" {
 		lines = append(lines, "")

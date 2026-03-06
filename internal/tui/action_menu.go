@@ -2,8 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -20,34 +22,117 @@ const (
 
 // ActionMenuItem describes a single entry in the action menu.
 type ActionMenuItem struct {
-	Chord        string                     // e.g. "A A", "R C", "F"
-	Label        string                     // e.g. "Add Video"
-	Category     string                     // "Action", "Request", "Open", "Filter", "Other"
-	NeedsJob     bool                       // true → transitions to job selector
-	NeedsConfirm bool                       // true → transitions to confirm prompt
-	JobFilter    func(*database.Job) bool   // filter for job selector (nil = show all)
+	Chord        string                   // e.g. "A A", "R C", "F"
+	Label        string                   // e.g. "Add Video"
+	Category     string                   // "Action", "Request", "Open", "Filter", "Other"
+	NeedsJob     bool                     // true → transitions to job selector
+	NeedsConfirm bool                     // true → transitions to confirm prompt
+	JobFilter    func(*database.Job) bool // filter for job selector (nil = show all)
+}
+
+// menuActionItem is a list.Item for the main action menu.
+type menuActionItem struct {
+	isHeader  bool
+	isBlank   bool
+	category  string
+	action    *ActionMenuItem
+	actionIdx int  // index in m.items (-1 for header/blank)
+	noJobs    bool // pre-computed: NeedsJob && count == 0
+}
+
+func (i menuActionItem) FilterValue() string {
+	if i.action != nil {
+		return i.action.Label
+	}
+	return ""
+}
+
+// menuJobItem is a list.Item for the job selector.
+type menuJobItem struct {
+	job *database.Job
+}
+
+func (i menuJobItem) FilterValue() string { return i.job.Title }
+
+// menuActionDelegate renders action menu items.
+type menuActionDelegate struct{}
+
+func (d menuActionDelegate) Height() int                             { return 1 }
+func (d menuActionDelegate) Spacing() int                            { return 0 }
+func (d menuActionDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+
+func (d menuActionDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	mi, ok := item.(menuActionItem)
+	if !ok {
+		return
+	}
+
+	if mi.isBlank {
+		return
+	}
+	if mi.isHeader {
+		fmt.Fprint(w, HeaderStyle.Render(mi.category))
+		return
+	}
+
+	contentW := m.Width()
+	chord := lipgloss.NewStyle().Foreground(ColorCyan).Width(6).Render(mi.action.Chord)
+	label := mi.action.Label
+	if mi.noJobs {
+		label += DimStyle.Render(" (none)")
+	}
+	text := "  " + chord + " " + label
+	if index == m.Index() {
+		text = lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Background(lipgloss.Color("#333355")).Render(
+			padToWidth(text, contentW),
+		)
+	}
+	fmt.Fprint(w, text)
+}
+
+// menuJobDelegate renders job selector items.
+type menuJobDelegate struct{}
+
+func (d menuJobDelegate) Height() int                             { return 1 }
+func (d menuJobDelegate) Spacing() int                            { return 0 }
+func (d menuJobDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+
+func (d menuJobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	ji, ok := item.(menuJobItem)
+	if !ok {
+		return
+	}
+	j := ji.job
+	contentW := m.Width()
+	statusStyle := lipgloss.NewStyle().Foreground(StatusColor(string(j.Status)))
+	icon := StatusIcon(string(j.Status))
+	title := truncateString(j.Title, contentW-12)
+	line := fmt.Sprintf("  %s %s %s", icon, statusStyle.Render(padRight(string(j.Status), 6)), title)
+	if index == m.Index() {
+		line = lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Background(lipgloss.Color("#333355")).Render(
+			padToWidth(line, contentW),
+		)
+	}
+	fmt.Fprint(w, line)
 }
 
 // ActionMenuModel manages the command palette overlay.
 type ActionMenuModel struct {
-	visible      bool
+	visible       bool
 	width, height int
-	mode         menuMode
+	mode          menuMode
 
 	// Main list
-	items          []ActionMenuItem
-	selectedIdx    int
-	scrollOffset   int
-	visibleEntries []int // maps visible content line → itemIdx (-1 for headers/blanks)
+	items    []ActionMenuItem
+	mainList list.Model
 
 	// Job selector
-	pendingAction string           // chord of action being executed
-	pendingLabel  string           // label for display
-	jobs          []*database.Job  // all jobs (unfiltered source)
-	filtered      []*database.Job  // filtered job list for current action
-	jobIdx        int              // selected job index
-	jobScroll     int              // job list scroll offset
-	jobConfirm    bool             // true after first Enter (waiting for second)
+	pendingAction string          // chord of action being executed
+	pendingLabel  string          // label for display
+	jobs          []*database.Job // all jobs (unfiltered source)
+	filtered      []*database.Job // filtered job list for current action
+	jobList       list.Model
+	jobConfirm    bool // true after first Enter (waiting for second)
 
 	// Confirm prompt (for R P etc.)
 	confirmLabel string
@@ -55,7 +140,32 @@ type ActionMenuModel struct {
 
 // NewActionMenuModel creates a new action menu.
 func NewActionMenuModel() *ActionMenuModel {
-	return &ActionMenuModel{}
+	m := &ActionMenuModel{}
+	m.mainList = m.newMenuList(menuActionDelegate{})
+	m.jobList = m.newMenuList(menuJobDelegate{})
+	return m
+}
+
+func (m *ActionMenuModel) newMenuList(delegate list.ItemDelegate) list.Model {
+	l := list.New(nil, delegate, 0, 0)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetShowHelp(false)
+	l.SetShowFilter(false)
+	l.SetShowPagination(false)
+	l.SetFilteringEnabled(false)
+	l.DisableQuitKeybindings()
+
+	km := l.KeyMap
+	km.CursorUp.SetKeys("up")
+	km.CursorDown.SetKeys("down")
+	km.NextPage.SetKeys("pgdown")
+	km.PrevPage.SetKeys("pgup")
+	km.GoToStart.SetKeys("home")
+	km.GoToEnd.SetKeys("end")
+	l.KeyMap = km
+
+	return l
 }
 
 // Open shows the menu with the given items.
@@ -63,15 +173,49 @@ func (m *ActionMenuModel) Open(items []ActionMenuItem) {
 	m.visible = true
 	m.mode = menuMain
 	m.items = items
-	m.selectedIdx = 0
-	m.scrollOffset = 0
 	m.pendingAction = ""
 	m.pendingLabel = ""
 	m.filtered = nil
-	m.jobIdx = 0
-	m.jobScroll = 0
 	m.jobConfirm = false
 	m.confirmLabel = ""
+
+	// Build list items with category headers
+	var listItems []list.Item
+	lastCat := ""
+	for i := range items {
+		if items[i].Category != lastCat {
+			if lastCat != "" {
+				listItems = append(listItems, menuActionItem{isBlank: true, actionIdx: -1})
+			}
+			listItems = append(listItems, menuActionItem{
+				isHeader: true,
+				category: items[i].Category,
+				actionIdx: -1,
+			})
+			lastCat = items[i].Category
+		}
+		noJobs := false
+		if items[i].NeedsJob {
+			count := 0
+			for _, j := range m.jobs {
+				if items[i].JobFilter == nil || items[i].JobFilter(j) {
+					count++
+				}
+			}
+			noJobs = count == 0
+		}
+		listItems = append(listItems, menuActionItem{
+			action:    &items[i],
+			actionIdx: i,
+			noJobs:    noJobs,
+		})
+	}
+	m.mainList.SetItems(listItems)
+	m.updateListSizes()
+
+	// Skip cursor to first selectable action item
+	m.mainList.Select(0)
+	m.skipMainForward()
 }
 
 // Close hides the menu.
@@ -88,6 +232,21 @@ func (m *ActionMenuModel) IsVisible() bool {
 func (m *ActionMenuModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	m.updateListSizes()
+}
+
+func (m *ActionMenuModel) updateListSizes() {
+	boxW := m.width - 8
+	if boxW > 60 {
+		boxW = 60
+	}
+	if boxW < 30 {
+		boxW = 30
+	}
+	contentW := boxW - 2
+	ch := m.contentHeight()
+	m.mainList.SetSize(contentW, ch)
+	m.jobList.SetSize(contentW, ch)
 }
 
 // SetJobs provides the full job list for job selector filtering.
@@ -102,6 +261,65 @@ func (m *ActionMenuModel) contentHeight() int {
 		h = 3
 	}
 	return h
+}
+
+// isSelectable returns true if the item at the given index is an action (not header/blank).
+func (m *ActionMenuModel) isMainSelectable(idx int) bool {
+	items := m.mainList.Items()
+	if idx < 0 || idx >= len(items) {
+		return false
+	}
+	mi, ok := items[idx].(menuActionItem)
+	return ok && !mi.isHeader && !mi.isBlank
+}
+
+// skipMainForward moves the cursor forward until it lands on a selectable item.
+func (m *ActionMenuModel) skipMainForward() {
+	for !m.isMainSelectable(m.mainList.Index()) {
+		if m.mainList.Index() >= len(m.mainList.Items())-1 {
+			return // at end, can't skip further
+		}
+		m.mainList.CursorDown()
+	}
+}
+
+// mainCursorDown moves cursor down, skipping non-selectable items.
+func (m *ActionMenuModel) mainCursorDown() {
+	prev := m.mainList.Index()
+	m.mainList.CursorDown()
+	for !m.isMainSelectable(m.mainList.Index()) {
+		if m.mainList.Index() >= len(m.mainList.Items())-1 {
+			m.mainList.Select(prev) // can't skip — revert
+			return
+		}
+		m.mainList.CursorDown()
+	}
+}
+
+// mainCursorUp moves cursor up, skipping non-selectable items.
+func (m *ActionMenuModel) mainCursorUp() {
+	prev := m.mainList.Index()
+	m.mainList.CursorUp()
+	for !m.isMainSelectable(m.mainList.Index()) {
+		if m.mainList.Index() <= 0 {
+			m.mainList.Select(prev) // can't skip — revert
+			return
+		}
+		m.mainList.CursorUp()
+	}
+}
+
+// selectedAction returns the ActionMenuItem at the current cursor, or nil.
+func (m *ActionMenuModel) selectedAction() *ActionMenuItem {
+	sel := m.mainList.SelectedItem()
+	if sel == nil {
+		return nil
+	}
+	mi, ok := sel.(menuActionItem)
+	if !ok || mi.action == nil {
+		return nil
+	}
+	return mi.action
 }
 
 // HandleKey processes a key press and returns an action string.
@@ -125,43 +343,41 @@ func (m *ActionMenuModel) handleMainKey(key string) string {
 		m.Close()
 		return "close"
 	case keyUp:
-		if m.selectedIdx > 0 {
-			m.selectedIdx--
-			m.ensureMainVisible()
-		}
+		m.mainCursorUp()
 	case keyDown:
-		if m.selectedIdx < len(m.items)-1 {
-			m.selectedIdx++
-			m.ensureMainVisible()
-		}
+		m.mainCursorDown()
 	case keyEnter:
-		if m.selectedIdx >= 0 && m.selectedIdx < len(m.items) {
-			item := m.items[m.selectedIdx]
-			if item.NeedsJob {
-				// Transition to job selector
-				m.pendingAction = item.Chord
-				m.pendingLabel = item.Label
-				m.filtered = m.filterJobs(item.JobFilter)
-				m.jobIdx = 0
-				m.jobScroll = 0
-				m.jobConfirm = false
-				if len(m.filtered) == 0 {
-					// No matching jobs — stay in main
-					return ""
-				}
-				m.mode = menuJobSelect
-				return ""
-			}
-			if item.NeedsConfirm {
-				m.confirmLabel = item.Label
-				m.pendingAction = item.Chord
-				m.mode = menuConfirm
-				return ""
-			}
-			// Direct action
-			m.Close()
-			return item.Chord
+		item := m.selectedAction()
+		if item == nil {
+			return ""
 		}
+		if item.NeedsJob {
+			m.pendingAction = item.Chord
+			m.pendingLabel = item.Label
+			m.filtered = m.filterJobs(item.JobFilter)
+			m.jobConfirm = false
+			if len(m.filtered) == 0 {
+				return ""
+			}
+			// Build job list items
+			jobItems := make([]list.Item, len(m.filtered))
+			for i, j := range m.filtered {
+				jobItems[i] = menuJobItem{job: j}
+			}
+			m.jobList.SetItems(jobItems)
+			m.jobList.Select(0)
+			m.mode = menuJobSelect
+			return ""
+		}
+		if item.NeedsConfirm {
+			m.confirmLabel = item.Label
+			m.pendingAction = item.Chord
+			m.mode = menuConfirm
+			return ""
+		}
+		// Direct action
+		m.Close()
+		return item.Chord
 	}
 	return ""
 }
@@ -173,34 +389,30 @@ func (m *ActionMenuModel) handleJobSelectKey(key string) string {
 			m.jobConfirm = false
 			return ""
 		}
-		// Back to main
 		m.mode = menuMain
 		return ""
 	case keyUp:
-		if m.jobIdx > 0 {
-			m.jobIdx--
-			m.jobConfirm = false
-			m.ensureJobVisible()
-		}
+		m.jobList.CursorUp()
+		m.jobConfirm = false
 	case keyDown:
-		if m.jobIdx < len(m.filtered)-1 {
-			m.jobIdx++
-			m.jobConfirm = false
-			m.ensureJobVisible()
-		}
+		m.jobList.CursorDown()
+		m.jobConfirm = false
 	case keyEnter:
-		if m.jobIdx >= 0 && m.jobIdx < len(m.filtered) {
-			if m.jobConfirm {
-				// Second Enter: confirmed
-				job := m.filtered[m.jobIdx]
-				action := m.pendingAction + ":" + job.ID
-				m.Close()
-				return action
-			}
-			// First Enter: show confirm
-			m.jobConfirm = true
+		sel := m.jobList.SelectedItem()
+		if sel == nil {
 			return ""
 		}
+		ji, ok := sel.(menuJobItem)
+		if !ok {
+			return ""
+		}
+		if m.jobConfirm {
+			action := m.pendingAction + ":" + ji.job.ID
+			m.Close()
+			return action
+		}
+		m.jobConfirm = true
+		return ""
 	}
 	return ""
 }
@@ -227,26 +439,6 @@ func (m *ActionMenuModel) filterJobs(filter func(*database.Job) bool) []*databas
 		}
 	}
 	return result
-}
-
-func (m *ActionMenuModel) ensureMainVisible() {
-	ch := m.contentHeight()
-	if m.selectedIdx < m.scrollOffset {
-		m.scrollOffset = m.selectedIdx
-	}
-	if m.selectedIdx >= m.scrollOffset+ch {
-		m.scrollOffset = m.selectedIdx - ch + 1
-	}
-}
-
-func (m *ActionMenuModel) ensureJobVisible() {
-	ch := m.contentHeight()
-	if m.jobIdx < m.jobScroll {
-		m.jobScroll = m.jobIdx
-	}
-	if m.jobIdx >= m.jobScroll+ch {
-		m.jobScroll = m.jobIdx - ch + 1
-	}
 }
 
 // overlayGeometry returns the overlay box position and content dimensions.
@@ -299,19 +491,25 @@ func (m *ActionMenuModel) HandleMouse(msg tea.MouseMsg) {
 
 		switch m.mode {
 		case menuMain:
-			if lineIdx < len(m.visibleEntries) {
-				itemIdx := m.visibleEntries[lineIdx]
-				if itemIdx >= 0 && itemIdx < len(m.items) {
-					m.selectedIdx = itemIdx
-				}
+			perPage := m.mainList.Paginator.PerPage
+			if perPage <= 0 {
+				return
+			}
+			globalIdx := m.mainList.Paginator.Page*perPage + lineIdx
+			if globalIdx >= 0 && globalIdx < len(m.mainList.Items()) && m.isMainSelectable(globalIdx) {
+				m.mainList.Select(globalIdx)
 			}
 		case menuJobSelect:
-			jobIdx := m.jobScroll + lineIdx
-			if jobIdx >= 0 && jobIdx < len(m.filtered) {
-				if jobIdx != m.jobIdx {
-					m.jobConfirm = false // reset confirm on re-select
+			perPage := m.jobList.Paginator.PerPage
+			if perPage <= 0 {
+				return
+			}
+			globalIdx := m.jobList.Paginator.Page*perPage + lineIdx
+			if globalIdx >= 0 && globalIdx < len(m.jobList.Items()) {
+				if globalIdx != m.jobList.Index() {
+					m.jobConfirm = false
 				}
-				m.jobIdx = jobIdx
+				m.jobList.Select(globalIdx)
 			}
 		}
 		return
@@ -321,30 +519,17 @@ func (m *ActionMenuModel) HandleMouse(msg tea.MouseMsg) {
 		switch m.mode {
 		case menuMain:
 			if isScrollUp(msg) {
-				if m.selectedIdx > 0 {
-					m.selectedIdx--
-					m.ensureMainVisible()
-				}
+				m.mainCursorUp()
 			} else {
-				if m.selectedIdx < len(m.items)-1 {
-					m.selectedIdx++
-					m.ensureMainVisible()
-				}
+				m.mainCursorDown()
 			}
 		case menuJobSelect:
 			if isScrollUp(msg) {
-				if m.jobIdx > 0 {
-					m.jobIdx--
-					m.jobConfirm = false
-					m.ensureJobVisible()
-				}
+				m.jobList.CursorUp()
 			} else {
-				if m.jobIdx < len(m.filtered)-1 {
-					m.jobIdx++
-					m.jobConfirm = false
-					m.ensureJobVisible()
-				}
+				m.jobList.CursorDown()
 			}
+			m.jobConfirm = false
 		}
 	}
 }
@@ -376,132 +561,20 @@ func (m *ActionMenuModel) View() string {
 }
 
 func (m *ActionMenuModel) renderMain(boxW, contentW int) string {
-	ch := m.contentHeight()
-
-	// Build lines with category headers
-	type lineEntry struct {
-		text     string
-		isHeader bool
-		itemIdx  int // index into m.items (-1 for headers)
-	}
-	var entries []lineEntry
-	lastCat := ""
-	for i, item := range m.items {
-		if item.Category != lastCat {
-			if lastCat != "" {
-				entries = append(entries, lineEntry{text: "", isHeader: true, itemIdx: -1})
-			}
-			entries = append(entries, lineEntry{
-				text:     HeaderStyle.Render(item.Category),
-				isHeader: true,
-				itemIdx:  -1,
-			})
-			lastCat = item.Category
-		}
-		chord := lipgloss.NewStyle().Foreground(ColorCyan).Width(6).Render(item.Chord)
-		label := item.Label
-		if item.NeedsJob {
-			// Count matching jobs
-			count := 0
-			for _, j := range m.jobs {
-				if item.JobFilter == nil || item.JobFilter(j) {
-					count++
-				}
-			}
-			if count == 0 {
-				label += DimStyle.Render(" (none)")
-			}
-		}
-		text := "  " + chord + " " + label
-		if i == m.selectedIdx {
-			text = lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Background(lipgloss.Color("#333355")).Render(
-				padToWidth(text, contentW),
-			)
-		}
-		entries = append(entries, lineEntry{text: text, itemIdx: i})
-	}
-
-	// Map selectedIdx to entry position for scroll
-	selectedEntry := 0
-	for ei, e := range entries {
-		if e.itemIdx == m.selectedIdx {
-			selectedEntry = ei
-			break
-		}
-	}
-
-	// Scroll to keep selected visible
-	if selectedEntry < m.scrollOffset {
-		m.scrollOffset = selectedEntry
-	}
-	if selectedEntry >= m.scrollOffset+ch {
-		m.scrollOffset = selectedEntry - ch + 1
-	}
-
-	end := m.scrollOffset + ch
-	if end > len(entries) {
-		end = len(entries)
-	}
-	start := m.scrollOffset
-	if start > len(entries) {
-		start = len(entries)
-	}
-	visible := entries[start:end]
-
-	// Build visible lines and track line→item mapping for mouse
-	m.visibleEntries = make([]int, ch)
-	for i := range ch {
-		m.visibleEntries[i] = -1
-	}
-	var lines []string
-	for i, e := range visible {
-		lines = append(lines, e.text)
-		if i < ch {
-			m.visibleEntries[i] = e.itemIdx
-		}
-	}
-	for len(lines) < ch {
-		lines = append(lines, "")
-	}
-
 	header := TitleStyle.Render("Action Menu") +
 		strings.Repeat(" ", max(0, contentW-28)) +
 		DimStyle.Render("↑↓ navigate | Enter | Esc")
 
 	footer := DimStyle.Render("M to close")
 
-	content := header + "\n" + strings.Join(lines, "\n") + "\n" + footer
+	content := header + "\n" + m.mainList.View() + "\n" + footer
 	box := FocusedBorder.Width(contentW).Render(content)
 	return m.centerOverlay(box)
 }
 
 func (m *ActionMenuModel) renderJobSelect(boxW, contentW int) string {
-	ch := m.contentHeight()
-
 	header := TitleStyle.Render(m.pendingLabel) +
 		DimStyle.Render(fmt.Sprintf(" — Select job (%d)", len(m.filtered)))
-
-	var lines []string
-	end := m.jobScroll + ch
-	if end > len(m.filtered) {
-		end = len(m.filtered)
-	}
-	for i := m.jobScroll; i < end; i++ {
-		j := m.filtered[i]
-		statusStyle := lipgloss.NewStyle().Foreground(StatusColor(string(j.Status)))
-		icon := StatusIcon(string(j.Status))
-		title := truncateString(j.Title, contentW-12)
-		line := fmt.Sprintf("  %s %s %s", icon, statusStyle.Render(padRight(string(j.Status), 6)), title)
-		if i == m.jobIdx {
-			line = lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Background(lipgloss.Color("#333355")).Render(
-				padToWidth(line, contentW),
-			)
-		}
-		lines = append(lines, line)
-	}
-	for len(lines) < ch {
-		lines = append(lines, "")
-	}
 
 	var footer string
 	if m.jobConfirm {
@@ -511,7 +584,7 @@ func (m *ActionMenuModel) renderJobSelect(boxW, contentW int) string {
 		footer = DimStyle.Render("Enter: select | Esc: back")
 	}
 
-	content := header + "\n" + strings.Join(lines, "\n") + "\n" + footer
+	content := header + "\n" + m.jobList.View() + "\n" + footer
 	box := FocusedBorder.Width(contentW).Render(content)
 	return m.centerOverlay(box)
 }

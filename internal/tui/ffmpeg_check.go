@@ -3,6 +3,10 @@ package tui
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -27,6 +31,9 @@ type FFmpegCheckModel struct {
 	mainFocus    int // 0=Install, 1=Custom path, 2=Quit
 	installFocus int
 
+	// Shared text input component
+	textInput textinput.Model
+
 	// Custom path
 	customPath   string
 	customResult string // result message after check
@@ -45,15 +52,18 @@ type FFmpegCheckModel struct {
 	warning string
 
 	// Script review state (elevation required)
-	reviewScript string
-	reviewToken  string
-	reviewFocus  int // 0=Trust, 1=Distrust
-	reviewScroll int // scroll offset for script display
+	reviewScript   string
+	reviewToken    string
+	reviewFocus    int // 0=Trust, 1=Distrust
+	reviewViewport viewport.Model
 
 	// Manual install state
 	manualPath   string
 	manualResult string
 	manualValid  bool
+
+	// Loading spinner
+	spinner spinner.Model
 
 	// Callbacks — only OnCheckPrereqs runs synchronously (fast LookPath),
 	// the others are dispatched as tea.Cmd by App.
@@ -67,7 +77,10 @@ type installOption struct {
 
 // NewFFmpegCheckModel creates a new FFmpeg check model.
 func NewFFmpegCheckModel() *FFmpegCheckModel {
-	return &FFmpegCheckModel{}
+	return &FFmpegCheckModel{
+		textInput: newTextInput(),
+		spinner:   newSpinner(),
+	}
 }
 
 // Open shows the FFmpeg check overlay.
@@ -101,6 +114,55 @@ func (m *FFmpegCheckModel) IsVisible() bool {
 func (m *FFmpegCheckModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+
+	if m.mode == ffmpegReview {
+		boxW := min(60, w)
+		if boxW < 40 {
+			boxW = 40
+		}
+		contentW := boxW - 4
+		m.reviewViewport.Width = contentW - 4
+	}
+}
+
+// UpdateComponents routes tea.Msg to the embedded textinput, viewport, or spinner and syncs.
+func (m *FFmpegCheckModel) UpdateComponents(msg tea.Msg) tea.Cmd {
+	if !m.visible {
+		return nil
+	}
+
+	// Route spinner when installing
+	if m.installing {
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return cmd
+	}
+
+	// Review mode: route to viewport (no textinput active)
+	if m.mode == ffmpegReview {
+		var cmd tea.Cmd
+		m.reviewViewport, cmd = m.reviewViewport.Update(msg)
+		return cmd
+	}
+
+	// Other modes: route to textinput
+	if !m.textInput.Focused() {
+		return nil
+	}
+	prev := m.textInput.Value()
+	var cmd tea.Cmd
+	m.textInput, cmd = m.textInput.Update(msg)
+	if m.textInput.Value() != prev {
+		switch m.mode {
+		case ffmpegCustom:
+			m.customPath = m.textInput.Value()
+			m.customResult = ""
+		case ffmpegManual:
+			m.manualPath = m.textInput.Value()
+			m.manualResult = ""
+		}
+	}
+	return cmd
 }
 
 // HandleKey processes key input. Returns an action string:
@@ -159,6 +221,8 @@ func (m *FFmpegCheckModel) handleMainKey(key string) string {
 			m.customPath = ""
 			m.customResult = ""
 			m.customValid = false
+			m.textInput.SetValue("")
+			m.textInput.Focus()
 		case 2: // Quit
 			return "quit"
 		}
@@ -224,6 +288,7 @@ func (m *FFmpegCheckModel) handleInstallKey(key string) string {
 
 		// Signal the install to run async — App handles via tea.Cmd
 		m.installing = true
+		m.spinner = newSpinner()
 		m.installResult = "Checking permissions..."
 		m.installError = false
 		return "prepare:" + opt.method
@@ -248,34 +313,12 @@ func (m *FFmpegCheckModel) handleCustomKey(key string) string {
 	switch key {
 	case keyEsc:
 		m.mode = ffmpegMain
+		m.textInput.Blur()
 	case keyEnter:
-		// Signal the check to run async — App handles via tea.Cmd
 		if m.customPath == "" {
 			return ""
 		}
 		return "check_custom:" + m.customPath
-	case "backspace", "delete":
-		if len(m.customPath) > 0 {
-			runes := []rune(m.customPath)
-			m.customPath = string(runes[:len(runes)-1])
-		}
-		m.customResult = ""
-	case "ctrl+v":
-		if clip := readClipboard(); clip != "" {
-			if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
-				clip = clip[:idx]
-			}
-			clip = strings.TrimSpace(clip)
-			if clip != "" {
-				m.customPath += clip
-			}
-		}
-		m.customResult = ""
-	default:
-		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			m.customPath += key
-			m.customResult = ""
-		}
 	}
 	return ""
 }
@@ -286,15 +329,33 @@ func (m *FFmpegCheckModel) ShowReview(script, token string) {
 	m.reviewScript = script
 	m.reviewToken = token
 	m.reviewFocus = 0
-	m.reviewScroll = 0
 	m.installing = false
 	m.installResult = ""
+	m.textInput.Blur()
+
+	// Initialize review viewport
+	boxW := min(60, m.width)
+	if boxW < 40 {
+		boxW = 40
+	}
+	contentW := boxW - 4
+	m.reviewViewport = viewport.New(contentW-4, 6)
+	m.reviewViewport.SetContent(script)
 }
 
 // SetManualResult updates the manual path check result.
 func (m *FFmpegCheckModel) SetManualResult(result string, valid bool) {
 	m.manualResult = result
 	m.manualValid = valid
+}
+
+// ShowManual switches to manual install mode with a fresh text input.
+func (m *FFmpegCheckModel) ShowManual() {
+	m.mode = ffmpegManual
+	m.manualPath = ""
+	m.manualResult = ""
+	m.textInput.SetValue("")
+	m.textInput.Focus()
 }
 
 func (m *FFmpegCheckModel) handleReviewKey(key string) string {
@@ -306,16 +367,11 @@ func (m *FFmpegCheckModel) handleReviewKey(key string) string {
 		m.reviewFocus = 0
 	case keyRight:
 		m.reviewFocus = 1
-	case keyUp:
-		if m.reviewScroll > 0 {
-			m.reviewScroll--
-		}
-	case keyDown:
-		m.reviewScroll++
 	case keyEnter:
 		if m.reviewFocus == 0 {
 			// Trust & Continue
 			m.installing = true
+			m.spinner = newSpinner()
 			m.installResult = "Installing with administrator privileges..."
 			return "confirm:" + m.reviewToken
 		}
@@ -333,33 +389,12 @@ func (m *FFmpegCheckModel) handleManualKey(key string) string {
 		m.mode = ffmpegMain
 		m.manualPath = ""
 		m.manualResult = ""
+		m.textInput.Blur()
 	case keyEnter:
 		if m.manualPath == "" {
 			return ""
 		}
 		return "check_custom:" + m.manualPath
-	case "backspace", "delete":
-		if len(m.manualPath) > 0 {
-			runes := []rune(m.manualPath)
-			m.manualPath = string(runes[:len(runes)-1])
-		}
-		m.manualResult = ""
-	case "ctrl+v":
-		if clip := readClipboard(); clip != "" {
-			if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
-				clip = clip[:idx]
-			}
-			clip = strings.TrimSpace(clip)
-			if clip != "" {
-				m.manualPath += clip
-			}
-		}
-		m.manualResult = ""
-	default:
-		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			m.manualPath += key
-			m.manualResult = ""
-		}
 	}
 	return ""
 }
@@ -436,14 +471,14 @@ func (m *FFmpegCheckModel) View() string {
 
 		if m.installing {
 			lines = append(lines, "")
-			lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("Installing... please wait"))
+			lines = append(lines, m.spinner.View()+" Installing... please wait")
 		}
 
 	case ffmpegCustom:
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Enter FFmpeg path:"))
 		lines = append(lines, "")
-		cursor := lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
-		lines = append(lines, DimStyle.Render("[")+m.customPath+cursor+DimStyle.Render("]"))
+		m.textInput.Width = contentW - 2
+		lines = append(lines, m.textInput.View())
 
 		if m.customResult != "" {
 			lines = append(lines, "")
@@ -462,27 +497,19 @@ func (m *FFmpegCheckModel) View() string {
 		lines = append(lines, DimStyle.Render("Review it before proceeding:"))
 		lines = append(lines, "")
 
-		// Scrollable script display
-		scriptLines := strings.Split(m.reviewScript, "\n")
-		maxVisible := 6
-		if m.reviewScroll > len(scriptLines)-maxVisible {
-			m.reviewScroll = max(0, len(scriptLines)-maxVisible)
-		}
-		end := min(m.reviewScroll+maxVisible, len(scriptLines))
+		// Scrollable script display via viewport
+		m.reviewViewport.Width = contentW - 4
 		scriptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-		for _, sl := range scriptLines[m.reviewScroll:end] {
-			if len(sl) > contentW-2 {
-				sl = sl[:contentW-2]
-			}
+		for _, sl := range strings.Split(m.reviewViewport.View(), "\n") {
 			lines = append(lines, scriptStyle.Render("  "+sl))
 		}
-		if end < len(scriptLines) {
+		if m.reviewViewport.ScrollPercent() < 1.0 {
 			lines = append(lines, DimStyle.Render("  ... (scroll with \u2191/\u2193)"))
 		}
 
 		lines = append(lines, "")
 		if m.installing {
-			lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("Installing... please wait"))
+			lines = append(lines, m.spinner.View()+" Installing... please wait")
 		} else if m.installResult != "" {
 			resultColor := ColorGreen
 			if m.installError {
@@ -514,8 +541,8 @@ func (m *FFmpegCheckModel) View() string {
 		lines = append(lines, DimStyle.Render("(under \"release builds\")"))
 		lines = append(lines, "")
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Enter FFmpeg path:"))
-		cursor := lipgloss.NewStyle().Foreground(ColorCyan).Render("_")
-		lines = append(lines, DimStyle.Render("[")+m.manualPath+cursor+DimStyle.Render("]"))
+		m.textInput.Width = contentW - 2
+		lines = append(lines, m.textInput.View())
 
 		if m.manualResult != "" {
 			lines = append(lines, "")

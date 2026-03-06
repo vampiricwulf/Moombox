@@ -3,10 +3,13 @@ package tui
 import (
 	"fmt"
 	"math"
-	"os"
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
@@ -20,14 +23,6 @@ const (
 	AddStepAudioFormat                     // Select audio format (advanced)
 	AddStepTimestamps                      // Start/end times (advanced)
 	AddStepConfirm                         // Confirmation (advanced)
-)
-
-// InputMode for add video dialog.
-type InputMode int
-
-const (
-	InputModeURL    InputMode = iota
-	InputModeImport
 )
 
 // VideoFormat represents a video format option.
@@ -83,26 +78,30 @@ type AddVideoModel struct {
 	formats           *FormatsData
 	selectedVideoItag *int // nil=auto, -1=none, else specific itag
 	selectedAudioItag *int
-	scrollOffset      int
 	loading           bool
+
+	// Format tables (built when formats arrive)
+	videoTable table.Model
+	audioTable table.Model
 
 	// Timestamps (advanced)
 	startTimeInput string
 	endTimeInput   string
 	timeInputFocus int // 0=start, 1=end
 
-	// Import mode state
-	inputMode       InputMode
-	importPath      string
-	importTitle     string
-	importChannel   string
-	importStep      int // 0=path, 1=metadata, 2=uploading
-	importMetaFocus int // 0=title, 1=channel
+	// Shared text input component (holds the currently-active text field)
+	textInput textinput.Model
+
+	// Loading spinner
+	spinner spinner.Model
 }
 
 // NewAddVideoModel creates a new add video dialog.
 func NewAddVideoModel() *AddVideoModel {
-	return &AddVideoModel{}
+	return &AddVideoModel{
+		textInput: newTextInput(),
+		spinner:   newSpinner(),
+	}
 }
 
 // Open shows the dialog and resets state.
@@ -138,34 +137,212 @@ func (m *AddVideoModel) reset() {
 	m.formats = nil
 	m.selectedVideoItag = nil
 	m.selectedAudioItag = nil
-	m.scrollOffset = 0
 	m.loading = false
 	m.startTimeInput = ""
 	m.endTimeInput = ""
 	m.timeInputFocus = 0
-	m.inputMode = InputModeURL
-	m.importPath = ""
-	m.importTitle = ""
-	m.importChannel = ""
-	m.importStep = 0
-	m.importMetaFocus = 0
+	m.syncToTextInput()
 }
 
 // SetFormats is called after format data is fetched from the API.
 func (m *AddVideoModel) SetFormats(f *FormatsData) {
 	m.formats = f
 	m.loading = false
+	m.buildFormatTables()
 }
 
-// SetError is called when a format fetch or import fails.
+// buildFormatTables constructs bubbles/table models for video and audio format selection.
+func (m *AddVideoModel) buildFormatTables() {
+	if m.formats == nil {
+		return
+	}
+
+	ts := formatTableStyles()
+
+	// Video table
+	videoCols := []table.Column{
+		{Title: "#", Width: 3},
+		{Title: "Resolution", Width: 12},
+		{Title: "FPS", Width: 4},
+		{Title: "Codec", Width: 5},
+		{Title: "Bitrate", Width: 10},
+		{Title: "Note", Width: 12},
+	}
+	var videoRows []table.Row
+	for i, f := range m.formats.VideoFormats {
+		codec := ""
+		if strings.Contains(f.MimeType, "mp4") {
+			codec = "MP4"
+		} else if strings.Contains(f.MimeType, "webm") {
+			codec = "WEBM"
+		}
+		bitrate := ""
+		if f.Bitrate > 0 {
+			bitrate = fmt.Sprintf("%dkbps", f.Bitrate/1000)
+		}
+		fps := ""
+		if f.Fps > 0 {
+			fps = fmt.Sprintf("%d", f.Fps)
+		}
+		note := ""
+		if f.Itag == m.formats.BestMp4Video {
+			note = "Best MP4"
+		}
+		if f.Itag == m.formats.BestWebmVideo {
+			note = "Best WEBM"
+		}
+		videoRows = append(videoRows, table.Row{
+			fmt.Sprintf("%d", i+1),
+			fmt.Sprintf("%dx%d", f.Width, f.Height),
+			fps, codec, bitrate, note,
+		})
+	}
+	m.videoTable = table.New(
+		table.WithColumns(videoCols),
+		table.WithRows(videoRows),
+		table.WithHeight(min(8, len(videoRows))),
+		table.WithFocused(true),
+		table.WithStyles(ts),
+	)
+
+	// Audio table
+	audioCols := []table.Column{
+		{Title: "#", Width: 3},
+		{Title: "Bitrate", Width: 10},
+		{Title: "Rate", Width: 8},
+		{Title: "Codec", Width: 5},
+		{Title: "Note", Width: 12},
+	}
+	var audioRows []table.Row
+	for i, f := range m.formats.AudioFormats {
+		bitrate := ""
+		if f.Bitrate > 0 {
+			bitrate = fmt.Sprintf("%dkbps", f.Bitrate/1000)
+		}
+		sampleRate := ""
+		if f.AudioSampleRate != "" {
+			if rate, err := strconv.Atoi(f.AudioSampleRate); err == nil {
+				sampleRate = fmt.Sprintf("%dkHz", rate/1000)
+			}
+		}
+		codec := ""
+		if strings.Contains(f.MimeType, "opus") {
+			codec = "OPUS"
+		} else if strings.Contains(f.MimeType, "mp4a") || strings.Contains(f.MimeType, "aac") {
+			codec = "AAC"
+		}
+		note := ""
+		if f.Itag == m.formats.BestOpusAudio {
+			note = "Best OPUS"
+		}
+		if f.Itag == m.formats.BestAacAudio {
+			note = "Best AAC"
+		}
+		audioRows = append(audioRows, table.Row{
+			fmt.Sprintf("%d", i+1),
+			bitrate, sampleRate, codec, note,
+		})
+	}
+	m.audioTable = table.New(
+		table.WithColumns(audioCols),
+		table.WithRows(audioRows),
+		table.WithHeight(min(8, len(audioRows))),
+		table.WithFocused(true),
+		table.WithStyles(ts),
+	)
+}
+
+// SetError is called when a format fetch fails.
 func (m *AddVideoModel) SetError(err string) {
 	m.errorMsg = err
 	m.loading = false
 }
 
+// UpdateComponents routes tea.Msg to embedded textinput/spinner/table and syncs.
+func (m *AddVideoModel) UpdateComponents(msg tea.Msg) tea.Cmd {
+	if !m.visible {
+		return nil
+	}
+	var cmds []tea.Cmd
+	// Route spinner tick when loading
+	if m.loading {
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	// Route table events during format selection
+	if !m.loading && m.formats != nil {
+		switch m.step {
+		case AddStepVideoFormat:
+			var cmd tea.Cmd
+			m.videoTable, cmd = m.videoTable.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		case AddStepAudioFormat:
+			var cmd tea.Cmd
+			m.audioTable, cmd = m.audioTable.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	}
+	// Route text input
+	if m.textInput.Focused() {
+		prev := m.textInput.Value()
+		var cmd tea.Cmd
+		m.textInput, cmd = m.textInput.Update(msg)
+		if m.textInput.Value() != prev {
+			m.syncFromTextInput()
+		}
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// activeTextTarget returns a pointer to the currently active text field, or nil if none.
+func (m *AddVideoModel) activeTextTarget() *string {
+	switch m.step {
+	case AddStepURL:
+		return &m.urlInput
+	case AddStepTimestamps:
+		if m.timeInputFocus == 0 {
+			return &m.startTimeInput
+		}
+		return &m.endTimeInput
+	}
+	return nil
+}
+
+// syncFromTextInput writes the textinput value back to the active field.
+func (m *AddVideoModel) syncFromTextInput() {
+	if target := m.activeTextTarget(); target != nil {
+		*target = m.textInput.Value()
+	}
+}
+
+// syncToTextInput loads the active field into the textinput and sets validation.
+func (m *AddVideoModel) syncToTextInput() {
+	target := m.activeTextTarget()
+	if target != nil {
+		m.textInput.SetValue(*target)
+		if m.step == AddStepTimestamps {
+			m.textInput.Validate = validateTimeChars
+		} else {
+			m.textInput.Validate = nil
+		}
+		m.textInput.Focus()
+	} else {
+		m.textInput.Blur()
+	}
+}
+
 // HandleKey processes key input. Returns (action, data) where action can be:
-// "submit" with URL, "fetch_formats" with video ID, "import" with path,
-// or "" for no action.
+// "submit" with URL, "fetch_formats" with video ID, or "" for no action.
 func (m *AddVideoModel) HandleKey(key string) (string, string) {
 	// Clear error on input
 	if key != keyEnter && key != keyEsc && key != keyTab {
@@ -174,10 +351,6 @@ func (m *AddVideoModel) HandleKey(key string) (string, string) {
 
 	if key == keyEsc {
 		return m.handleEscape()
-	}
-
-	if m.inputMode == InputModeImport {
-		return m.handleImportKey(key)
 	}
 
 	switch m.step {
@@ -197,28 +370,20 @@ func (m *AddVideoModel) HandleKey(key string) (string, string) {
 }
 
 func (m *AddVideoModel) handleEscape() (string, string) {
-	if m.inputMode == InputModeImport {
-		if m.importStep > 0 {
-			m.importStep--
-			return "", ""
-		}
-		m.inputMode = InputModeURL
-		m.advancedEnabled = false
-		return "", ""
-	}
-
 	switch m.step {
 	case AddStepURL:
 		m.Close()
 	case AddStepVideoFormat:
 		m.step = AddStepURL
 		m.advancedMode = false
+		m.syncToTextInput()
 	case AddStepAudioFormat:
 		m.step = AddStepVideoFormat
 	case AddStepTimestamps:
 		m.step = AddStepAudioFormat
 	case AddStepConfirm:
 		m.step = AddStepTimestamps
+		m.syncToTextInput()
 	}
 	return "", ""
 }
@@ -226,14 +391,7 @@ func (m *AddVideoModel) handleEscape() (string, string) {
 func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 	switch key {
 	case keyTab:
-		// Cycle: not advanced → advanced → import mode → back
-		if !m.advancedEnabled {
-			m.advancedEnabled = true
-		} else {
-			m.advancedEnabled = false
-			m.inputMode = InputModeImport
-			m.importStep = 0
-		}
+		m.advancedEnabled = !m.advancedEnabled
 		return "", ""
 
 	case keyEnter:
@@ -266,22 +424,20 @@ func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 			return "submit", vid
 		}
 
-		// Advanced: move to format selection
+		// Advanced: move to format selection (blur textinput)
 		m.advancedMode = true
 		m.step = AddStepVideoFormat
-		m.scrollOffset = 0
 		m.loading = true
+		m.spinner = newSpinner()
+		m.textInput.Blur()
 		return "fetch_formats", vid
-
-	default:
-		m.handleTextInput(key, &m.urlInput)
 	}
 	return "", ""
 }
 
 func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, string) {
 	switch key {
-	case keyEnter, "a", "A":
+	case "a", "A":
 		// Auto selection
 		if isVideo {
 			m.selectedVideoItag = nil
@@ -290,7 +446,6 @@ func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, stri
 			m.selectedAudioItag = nil
 			m.step = AddStepTimestamps
 		}
-		m.scrollOffset = 0
 		return "", ""
 
 	case "n", "N":
@@ -302,22 +457,29 @@ func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, stri
 			m.selectedAudioItag = &none
 			m.step = AddStepTimestamps
 		}
-		m.scrollOffset = 0
 		return "", ""
 
-	case keyUp:
-		if m.scrollOffset > 0 {
-			m.scrollOffset--
+	case keyEnter:
+		// Select the table's highlighted row
+		if m.formats == nil {
+			return "", ""
 		}
-	case keyDown:
-		m.scrollOffset++
-	case keyPgUp:
-		m.scrollOffset -= 10
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
+		if isVideo {
+			idx := m.videoTable.Cursor()
+			if idx >= 0 && idx < len(m.formats.VideoFormats) {
+				itag := m.formats.VideoFormats[idx].Itag
+				m.selectedVideoItag = &itag
+				m.step = AddStepAudioFormat
+			}
+		} else {
+			idx := m.audioTable.Cursor()
+			if idx >= 0 && idx < len(m.formats.AudioFormats) {
+				itag := m.formats.AudioFormats[idx].Itag
+				m.selectedAudioItag = &itag
+				m.step = AddStepTimestamps
+			}
 		}
-	case keyPgDown:
-		m.scrollOffset += 10
+		return "", ""
 
 	default:
 		// Digit selection (1-9)
@@ -327,14 +489,13 @@ func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, stri
 				itag := m.formats.VideoFormats[idx].Itag
 				m.selectedVideoItag = &itag
 				m.step = AddStepAudioFormat
-				m.scrollOffset = 0
 			} else if !isVideo && m.formats != nil && idx < len(m.formats.AudioFormats) {
 				itag := m.formats.AudioFormats[idx].Itag
 				m.selectedAudioItag = &itag
 				m.step = AddStepTimestamps
-				m.scrollOffset = 0
 			}
 		}
+		// Arrow keys and other navigation are handled by table via UpdateComponents
 	}
 	return "", ""
 }
@@ -343,6 +504,7 @@ func (m *AddVideoModel) handleTimestampsStep(key string) (string, string) {
 	switch key {
 	case keyTab:
 		m.timeInputFocus = 1 - m.timeInputFocus
+		m.syncToTextInput()
 		return "", ""
 	case keyEnter:
 		if m.startTimeInput != "" {
@@ -366,13 +528,8 @@ func (m *AddVideoModel) handleTimestampsStep(key string) (string, string) {
 			}
 		}
 		m.step = AddStepConfirm
+		m.textInput.Blur()
 		return "", ""
-	default:
-		if m.timeInputFocus == 0 {
-			m.handleTextInput(key, &m.startTimeInput)
-		} else {
-			m.handleTextInput(key, &m.endTimeInput)
-		}
 	}
 	return "", ""
 }
@@ -389,86 +546,6 @@ func (m *AddVideoModel) handleConfirmStep(key string) (string, string) {
 	return "", ""
 }
 
-func (m *AddVideoModel) handleImportKey(key string) (string, string) {
-	switch m.importStep {
-	case 0:
-		switch key {
-		case keyTab:
-			m.inputMode = InputModeURL
-			m.advancedEnabled = false
-			return "", ""
-		case keyEnter:
-			path := strings.TrimSpace(m.importPath)
-			if path == "" {
-				m.errorMsg = "Please enter a file path"
-				return "", ""
-			}
-			if !strings.HasSuffix(strings.ToLower(path), ".zip") {
-				m.errorMsg = "File must be a .zip archive"
-				return "", ""
-			}
-			// Validate file exists (match TS fs.pathExists check)
-			if _, err := os.Stat(path); err != nil {
-				m.errorMsg = "File not found"
-				return "", ""
-			}
-			m.importStep = 1
-			return "", ""
-		default:
-			m.handleTextInput(key, &m.importPath)
-		}
-
-	case 1:
-		switch key {
-		case keyTab:
-			m.importMetaFocus = 1 - m.importMetaFocus
-			return "", ""
-		case keyEnter:
-			m.importStep = 2
-			return "import", m.importPath
-		default:
-			if m.importMetaFocus == 0 {
-				m.handleTextInput(key, &m.importTitle)
-			} else {
-				m.handleTextInput(key, &m.importChannel)
-			}
-		}
-
-	case 2:
-		// No input during upload
-		return "", ""
-	}
-	return "", ""
-}
-
-func (m *AddVideoModel) handleTextInput(key string, target *string) {
-	switch key {
-	case "backspace":
-		if len(*target) > 0 {
-			runes := []rune(*target)
-			*target = string(runes[:len(runes)-1])
-		}
-	case "ctrl+v":
-		// Clipboard paste support (match TS: take first line only)
-		if clip := readClipboard(); clip != "" {
-			// Match TS: text.split(/[\r\n]/)[0].trim()
-			if idx := strings.IndexAny(clip, "\r\n"); idx >= 0 {
-				clip = clip[:idx]
-			}
-			clip = strings.TrimSpace(clip)
-			if clip != "" {
-				*target += clip
-			}
-		}
-	default:
-		if len(key) == 1 && key[0] >= 0x20 && key[0] < 0x7f {
-			*target += key
-		} else if len(key) > 1 && key[0] != 0x1b {
-			*target += key
-		}
-	}
-}
-
 // GetSelectedVideoItag returns the selected video itag (nil=auto, -1=none).
 func (m *AddVideoModel) GetSelectedVideoItag() *int { return m.selectedVideoItag }
 
@@ -481,11 +558,8 @@ func (m *AddVideoModel) GetStartTime() string { return m.startTimeInput }
 // GetEndTime returns the end time input.
 func (m *AddVideoModel) GetEndTime() string { return m.endTimeInput }
 
-// GetImportTitle returns the import title.
-func (m *AddVideoModel) GetImportTitle() string { return m.importTitle }
-
-// GetImportChannel returns the import channel name.
-func (m *AddVideoModel) GetImportChannel() string { return m.importChannel }
+// SpinnerInit returns the spinner's initial tick command when loading.
+func (m *AddVideoModel) SpinnerInit() tea.Cmd { return m.spinner.Tick }
 
 // GetPlatform returns the detected platform.
 func (m *AddVideoModel) GetPlatform() string { return m.platform }
@@ -508,30 +582,24 @@ func (m *AddVideoModel) View() string {
 	contentW := boxW - 2
 
 	var borderColor lipgloss.Color
-	if m.inputMode == InputModeImport {
-		borderColor = ColorGreen
-	} else if m.advancedMode || m.advancedEnabled {
+	if m.advancedMode || m.advancedEnabled {
 		borderColor = ColorCookies // magenta
 	} else {
 		borderColor = ColorCyan
 	}
 
 	var content string
-	if m.inputMode == InputModeImport {
-		content = m.renderImport(contentW, boxH)
-	} else {
-		switch m.step {
-		case AddStepURL:
-			content = m.renderURLStep(contentW, boxH)
-		case AddStepVideoFormat:
-			content = m.renderFormatStep(contentW, boxH, true)
-		case AddStepAudioFormat:
-			content = m.renderFormatStep(contentW, boxH, false)
-		case AddStepTimestamps:
-			content = m.renderTimestamps(contentW, boxH)
-		case AddStepConfirm:
-			content = m.renderConfirm(contentW, boxH)
-		}
+	switch m.step {
+	case AddStepURL:
+		content = m.renderURLStep(contentW, boxH)
+	case AddStepVideoFormat:
+		content = m.renderFormatStep(contentW, boxH, true)
+	case AddStepAudioFormat:
+		content = m.renderFormatStep(contentW, boxH, false)
+	case AddStepTimestamps:
+		content = m.renderTimestamps(contentW, boxH)
+	case AddStepConfirm:
+		content = m.renderConfirm(contentW, boxH)
 	}
 
 	box := lipgloss.NewStyle().
@@ -555,7 +623,14 @@ func (m *AddVideoModel) renderURLStep(w, h int) string {
 	lines = append(lines, "")
 	lines = append(lines, "Enter a YouTube URL, video ID, or Twitch channel:")
 	lines = append(lines, "")
-	lines = append(lines, renderInputBox(m.urlInput, w-2, m.advancedEnabled))
+	color := ColorCyan
+	if m.advancedEnabled {
+		color = ColorCookies
+	}
+	m.textInput.TextStyle = lipgloss.NewStyle().Foreground(color)
+	m.textInput.Cursor.Style = lipgloss.NewStyle().Foreground(color)
+	m.textInput.Width = w - 2
+	lines = append(lines, m.textInput.View())
 	lines = append(lines, "")
 
 	check := "[ ]"
@@ -579,7 +654,7 @@ func (m *AddVideoModel) renderURLStep(w, h int) string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("Tab: Cycle mode | Enter: Continue | Esc: Cancel"))
+	lines = append(lines, DimStyle.Render("Tab: Advanced | Enter: Continue | Esc: Cancel"))
 
 	return strings.Join(lines, "\n")
 }
@@ -597,7 +672,7 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 	lines = append(lines, "")
 
 	if m.loading {
-		lines = append(lines, "Fetching formats...")
+		lines = append(lines, m.spinner.View()+" Fetching formats...")
 		return strings.Join(lines, "\n")
 	}
 
@@ -615,79 +690,22 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 	lines = append(lines, "")
 
 	if m.formats != nil {
-		var fmtLines []string
+		// Adjust table height to fit available space
+		tableH := h - 10
+		if tableH < 3 {
+			tableH = 3
+		}
 		if isVideo {
-			for i, f := range m.formats.VideoFormats {
-				line := fmt.Sprintf("[%d] %dx%d", i+1, f.Width, f.Height)
-				if f.Fps > 0 {
-					line += fmt.Sprintf("@%d", f.Fps)
-				}
-				if strings.Contains(f.MimeType, "mp4") {
-					line += " MP4"
-				} else if strings.Contains(f.MimeType, "webm") {
-					line += " WEBM"
-				}
-				if f.Bitrate > 0 {
-					line += fmt.Sprintf(" %dkbps", f.Bitrate/1000)
-				}
-				if f.Itag == m.formats.BestMp4Video {
-					line += " [Best MP4]"
-				}
-				if f.Itag == m.formats.BestWebmVideo {
-					line += " [Best WEBM]"
-				}
-				fmtLines = append(fmtLines, line)
-			}
+			m.videoTable.SetHeight(min(tableH, len(m.formats.VideoFormats)))
+			lines = append(lines, m.videoTable.View())
 		} else {
-			for i, f := range m.formats.AudioFormats {
-				line := fmt.Sprintf("[%d]", i+1)
-				if f.Bitrate > 0 {
-					line += fmt.Sprintf(" %dkbps", f.Bitrate/1000)
-				}
-				if f.AudioSampleRate != "" {
-					if rate, err := strconv.Atoi(f.AudioSampleRate); err == nil {
-						line += fmt.Sprintf(" %dkHz", rate/1000)
-					}
-				}
-				if strings.Contains(f.MimeType, "opus") {
-					line += " OPUS"
-				} else if strings.Contains(f.MimeType, "mp4a") || strings.Contains(f.MimeType, "aac") {
-					line += " AAC"
-				}
-				if f.Itag == m.formats.BestOpusAudio {
-					line += " [Best OPUS]"
-				}
-				if f.Itag == m.formats.BestAacAudio {
-					line += " [Best AAC]"
-				}
-				fmtLines = append(fmtLines, line)
-			}
-		}
-
-		maxVisible := h - 8
-		if maxVisible < 3 {
-			maxVisible = 3
-		}
-		if m.scrollOffset > len(fmtLines)-maxVisible {
-			m.scrollOffset = max(0, len(fmtLines)-maxVisible)
-		}
-		end := m.scrollOffset + maxVisible
-		if end > len(fmtLines) {
-			end = len(fmtLines)
-		}
-		if m.scrollOffset > 0 {
-			lines = append(lines, DimStyle.Render("  [↑ more above]"))
-		}
-		for i := m.scrollOffset; i < end; i++ {
-			lines = append(lines, fmtLines[i])
-		}
-		if end < len(fmtLines) {
-			lines = append(lines, DimStyle.Render("  [↓ more below]"))
+			m.audioTable.SetHeight(min(tableH, len(m.formats.AudioFormats)))
+			lines = append(lines, m.audioTable.View())
 		}
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, DimStyle.Render("Enter/A: Auto | N: None | 1-9: Select | Esc: Back"))
+	lines = append(lines, DimStyle.Render("A: Auto | N: None | Enter/1-9: Select | Esc: Back"))
 
 	return strings.Join(lines, "\n")
 }
@@ -717,8 +735,16 @@ func (m *AddVideoModel) renderTimestamps(w, h int) string {
 		endStyle = lipgloss.NewStyle().Foreground(accentColor)
 	}
 
-	lines = append(lines, startStyle.Render(startLabel)+renderInputBoxCursor(m.startTimeInput, w-12, false, m.timeInputFocus == 0))
-	lines = append(lines, endStyle.Render(endLabel)+renderInputBoxCursor(m.endTimeInput, w-12, false, m.timeInputFocus == 1))
+	m.textInput.TextStyle = lipgloss.NewStyle().Foreground(ColorCyan)
+	m.textInput.Cursor.Style = lipgloss.NewStyle().Foreground(ColorCyan)
+	m.textInput.Width = w - 12
+	if m.timeInputFocus == 0 {
+		lines = append(lines, startStyle.Render(startLabel)+m.textInput.View())
+		lines = append(lines, endStyle.Render(endLabel)+renderInactiveInput(m.endTimeInput, w-12, ColorCyan))
+	} else {
+		lines = append(lines, startStyle.Render(startLabel)+renderInactiveInput(m.startTimeInput, w-12, ColorCyan))
+		lines = append(lines, endStyle.Render(endLabel)+m.textInput.View())
+	}
 	lines = append(lines, "")
 	lines = append(lines, DimStyle.Render("Format: HH:MM:SS, MM:SS, or seconds (blank = default)"))
 
@@ -814,95 +840,6 @@ func (m *AddVideoModel) renderConfirm(w, h int) string {
 	lines = append(lines, DimStyle.Render("Enter: Submit | Esc: Back"))
 
 	return strings.Join(lines, "\n")
-}
-
-func (m *AddVideoModel) renderImport(w, h int) string {
-	var lines []string
-
-	switch m.importStep {
-	case 0:
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorGreen).Bold(true).Render("Import Archive")+" "+DimStyle.Render("(Step 1/3)"))
-		lines = append(lines, "")
-		lines = append(lines, "Enter path to a .zip file:")
-		lines = append(lines, "")
-		lines = append(lines, renderInputBox(m.importPath, w-2, false))
-		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render("ZIP should contain video file + optional chat JSON"))
-
-	case 1:
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorGreen).Bold(true).Render("Metadata (Optional)")+" "+DimStyle.Render("(Step 2/3)"))
-		lines = append(lines, "")
-		fn := m.importPath
-		if len(fn) > 50 {
-			fn = "..." + fn[len(fn)-47:]
-		}
-		lines = append(lines, DimStyle.Render("File: "+fn))
-		lines = append(lines, "")
-
-		titleLabel := "  Title:   "
-		chanLabel := "  Channel: "
-		if m.importMetaFocus == 0 {
-			titleLabel = "> Title:   "
-		}
-		if m.importMetaFocus == 1 {
-			chanLabel = "> Channel: "
-		}
-
-		titleStyle := DimStyle
-		chanStyle := DimStyle
-		if m.importMetaFocus == 0 {
-			titleStyle = lipgloss.NewStyle().Foreground(ColorGreen)
-		}
-		if m.importMetaFocus == 1 {
-			chanStyle = lipgloss.NewStyle().Foreground(ColorGreen)
-		}
-
-		lines = append(lines, titleStyle.Render(titleLabel)+renderInputBox(m.importTitle, w-14, false))
-		lines = append(lines, chanStyle.Render(chanLabel)+renderInputBox(m.importChannel, w-14, false))
-		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render("Leave blank to auto-detect from archive"))
-
-	case 2:
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorGreen).Bold(true).Render("Importing...")+" "+DimStyle.Render("(Step 3/3)"))
-		lines = append(lines, "")
-		lines = append(lines, "Reading file and importing...")
-	}
-
-	if m.errorMsg != "" {
-		lines = append(lines, "")
-		lines = append(lines, ErrorStyle.Render(m.errorMsg))
-	}
-
-	lines = append(lines, "")
-	switch m.importStep {
-	case 0:
-		lines = append(lines, DimStyle.Render("Tab: URL mode | Enter: Continue | Esc: Cancel"))
-	case 1:
-		lines = append(lines, DimStyle.Render("Tab: Switch field | Enter: Import | Esc: Back"))
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-// renderInputBox renders a text input with optional cursor.
-func renderInputBox(value string, w int, accent bool) string {
-	return renderInputBoxCursor(value, w, accent, true)
-}
-
-// renderInputBoxCursor renders a text input with cursor only if showCursor is true.
-func renderInputBoxCursor(value string, w int, accent bool, showCursor bool) string {
-	color := ColorCyan
-	if accent {
-		color = ColorCookies
-	}
-	display := value
-	if showCursor {
-		display += "_"
-	}
-	if runewidth.StringWidth(display) > w {
-		display = truncateString(display, w)
-	}
-	return lipgloss.NewStyle().Foreground(color).Render(display)
 }
 
 // centerBox centers content on screen.

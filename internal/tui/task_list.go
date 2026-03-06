@@ -2,11 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
@@ -41,27 +44,54 @@ func (f Filter) Next() Filter {
 	return (f + 1) % 4
 }
 
-// virtualItem is either a job or the archive divider.
-type virtualItem struct {
+// taskItem wraps a job or archive divider as a list.Item.
+type taskItem struct {
 	job      *database.Job // nil for divider
 	divider  bool
 	count    int  // archived count (only for divider)
 	archived bool // true if this job is in the archived section
 }
 
+func (t taskItem) FilterValue() string {
+	if t.job != nil {
+		return t.job.Title
+	}
+	return ""
+}
+
+// taskDelegate renders task list items with status colors and progress.
+type taskDelegate struct {
+	panel *TaskListModel
+}
+
+func (d taskDelegate) Height() int                             { return 1 }
+func (d taskDelegate) Spacing() int                            { return 0 }
+func (d taskDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+
+func (d taskDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	ti, ok := item.(taskItem)
+	if !ok {
+		return
+	}
+	selected := index == m.Index()
+	contentW := m.Width()
+	if ti.divider {
+		fmt.Fprint(w, d.panel.renderDivider(ti.count, selected, contentW))
+	} else {
+		fmt.Fprint(w, d.panel.renderJob(ti.job, selected, ti.archived, contentW))
+	}
+}
+
 // TaskListModel manages the job list panel.
 type TaskListModel struct {
-	jobs         []*database.Job
-	jobIndex     map[string]int // job ID → index in jobs slice (O(1) lookup)
-	activeJobs   []*database.Job // non-archived jobs (filtered + sorted)
-	archivedJobs []*database.Job // archived finished jobs
-	virtualItems []virtualItem   // what we actually render
-	selectedIndex int
-	scrollOffset  int
-	width, height int
-	focused       bool
-	filter        Filter
-	archiveExpanded bool
+	jobs     []*database.Job
+	jobIndex map[string]int // job ID → index in jobs slice (O(1) lookup)
+	list     list.Model
+
+	width, height       int
+	focused             bool
+	filter              Filter
+	archiveExpanded     bool
 	hideFinishedAgeDays int // from config, default 30
 
 	// Marquee for scrolling selected item title.
@@ -78,10 +108,36 @@ type TaskListModel struct {
 
 // NewTaskListModel creates a new task list model.
 func NewTaskListModel() *TaskListModel {
-	return &TaskListModel{
+	m := &TaskListModel{
 		hideFinishedAgeDays: 30,
 		progressStore:       NewProgressStore(),
 	}
+	m.list = m.newTaskList()
+	return m
+}
+
+func (m *TaskListModel) newTaskList() list.Model {
+	delegate := taskDelegate{panel: m}
+	l := list.New(nil, delegate, 0, 0)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetShowHelp(false)
+	l.SetShowFilter(false)
+	l.SetShowPagination(false)
+	l.SetFilteringEnabled(false)
+	l.DisableQuitKeybindings()
+
+	// Only arrow keys for navigation (letter keys handled by app chord system)
+	km := l.KeyMap
+	km.CursorUp.SetKeys("up")
+	km.CursorDown.SetKeys("down")
+	km.NextPage.SetKeys("pgdown")
+	km.PrevPage.SetKeys("pgup")
+	km.GoToStart.SetKeys("home")
+	km.GoToEnd.SetKeys("end")
+	l.KeyMap = km
+
+	return l
 }
 
 // SetHideFinishedAgeDays updates the archive threshold.
@@ -113,14 +169,13 @@ func (m *TaskListModel) UpdateJob(job *database.Job) bool {
 
 		// Follow the previously selected job to its new position.
 		if prevSelectedID != "" {
-			for i, item := range m.virtualItems {
-				if item.job != nil && item.job.ID == prevSelectedID {
-					m.selectedIndex = i
+			for i, item := range m.list.Items() {
+				if ti, ok := item.(taskItem); ok && ti.job != nil && ti.job.ID == prevSelectedID {
+					m.list.Select(i)
 					break
 				}
 			}
 		}
-		m.ensureVisible()
 		m.resetMarquee()
 		return true
 	}
@@ -136,22 +191,25 @@ func (m *TaskListModel) rebuildJobIndex() {
 
 // SelectedJob returns the currently selected job, or nil.
 func (m *TaskListModel) SelectedJob() *database.Job {
-	if m.selectedIndex < 0 || m.selectedIndex >= len(m.virtualItems) {
+	sel := m.list.SelectedItem()
+	if sel == nil {
 		return nil
 	}
-	item := m.virtualItems[m.selectedIndex]
-	if item.divider {
+	ti, ok := sel.(taskItem)
+	if !ok || ti.divider {
 		return nil
 	}
-	return item.job
+	return ti.job
 }
 
 // SelectedIsDivider returns true if the selected item is the archive divider.
 func (m *TaskListModel) SelectedIsDivider() bool {
-	if m.selectedIndex < 0 || m.selectedIndex >= len(m.virtualItems) {
+	sel := m.list.SelectedItem()
+	if sel == nil {
 		return false
 	}
-	return m.virtualItems[m.selectedIndex].divider
+	ti, ok := sel.(taskItem)
+	return ok && ti.divider
 }
 
 // SetSize updates the panel dimensions.
@@ -159,8 +217,13 @@ func (m *TaskListModel) SetSize(w, h int) {
 	prevW := m.width
 	m.width = w
 	m.height = h
-	// Recalculate marquee width when panel width changes (e.g. focus change,
-	// or initial WindowSizeMsg arriving after jobs are already loaded).
+	contentW := w - 2
+	if contentW < 1 {
+		contentW = 1
+	}
+	contentH := m.contentHeight()
+	m.list.SetSize(contentW, contentH)
+	// Recalculate marquee width when panel width changes.
 	if prevW != w {
 		m.resetMarquee()
 	}
@@ -173,21 +236,30 @@ func (m *TaskListModel) SetFocused(f bool) {
 
 // MoveUp moves the selection up.
 func (m *TaskListModel) MoveUp() {
-	if m.selectedIndex > 0 {
-		m.selectedIndex--
-		m.ensureVisible()
-		m.resetMarquee()
-	}
+	m.list.CursorUp()
+	m.resetMarquee()
 }
 
 // MoveDown moves the selection down.
 func (m *TaskListModel) MoveDown() {
-	maxIdx := len(m.virtualItems) - 1
-	if m.selectedIndex < maxIdx {
-		m.selectedIndex++
-		m.ensureVisible()
-		m.resetMarquee()
+	m.list.CursorDown()
+	m.resetMarquee()
+}
+
+// SelectAtOffset selects the item at the given Y offset within the visible page.
+// Returns true if a valid item was selected.
+func (m *TaskListModel) SelectAtOffset(y int) bool {
+	perPage := m.list.Paginator.PerPage
+	if perPage <= 0 {
+		return false
 	}
+	globalIdx := m.list.Paginator.Page*perPage + y
+	if globalIdx < 0 || globalIdx >= len(m.list.Items()) {
+		return false
+	}
+	m.list.Select(globalIdx)
+	m.resetMarquee()
+	return true
 }
 
 // resetMarquee resets the marquee animation for the currently selected job title.
@@ -238,13 +310,8 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 func (m *TaskListModel) CycleFilter() {
 	m.filter = m.filter.Next()
 	m.rebuildVirtualList()
-	// Reset selection and scroll on filter change (match TS)
-	m.selectedIndex = 0
-	m.scrollOffset = 0
-	if m.selectedIndex >= len(m.virtualItems) {
-		m.selectedIndex = max(0, len(m.virtualItems)-1)
-	}
-	m.ensureVisible()
+	// Reset selection on filter change (match TS)
+	m.list.Select(0)
 	m.resetMarquee()
 }
 
@@ -252,22 +319,6 @@ func (m *TaskListModel) CycleFilter() {
 func (m *TaskListModel) ToggleArchive() {
 	m.archiveExpanded = !m.archiveExpanded
 	m.rebuildVirtualList()
-	if m.selectedIndex >= len(m.virtualItems) {
-		m.selectedIndex = max(0, len(m.virtualItems)-1)
-	}
-}
-
-func (m *TaskListModel) ensureVisible() {
-	contentH := m.contentHeight()
-	if contentH <= 0 {
-		return
-	}
-	if m.selectedIndex < m.scrollOffset {
-		m.scrollOffset = m.selectedIndex
-	}
-	if m.selectedIndex >= m.scrollOffset+contentH {
-		m.scrollOffset = m.selectedIndex - contentH + 1
-	}
 }
 
 func (m *TaskListModel) contentHeight() int {
@@ -356,33 +407,26 @@ func (m *TaskListModel) rebuildVirtualList() {
 		return archived[i].UpdatedAt > archived[j].UpdatedAt
 	})
 
-	m.activeJobs = active
-	m.archivedJobs = archived
-
-	// Build virtual item list
-	m.virtualItems = nil
+	// Build list items
+	var items []list.Item
 	for _, j := range active {
-		m.virtualItems = append(m.virtualItems, virtualItem{job: j})
+		items = append(items, taskItem{job: j})
 	}
 
 	showArchive := len(archived) > 0 && (m.filter == FilterAll || m.filter == FilterFinished)
 	if showArchive {
-		m.virtualItems = append(m.virtualItems, virtualItem{
+		items = append(items, taskItem{
 			divider: true,
 			count:   len(archived),
 		})
 		if m.archiveExpanded {
 			for _, j := range archived {
-				m.virtualItems = append(m.virtualItems, virtualItem{job: j, archived: true})
+				items = append(items, taskItem{job: j, archived: true})
 			}
 		}
 	}
 
-	// Clamp scroll offset when virtual list shrinks (match TS useEffect)
-	maxOff := max(0, len(m.virtualItems)-(m.contentHeight()))
-	if m.scrollOffset > maxOff {
-		m.scrollOffset = maxOff
-	}
+	m.list.SetItems(items)
 }
 
 func (m *TaskListModel) passesFilter(j *database.Job) bool {
@@ -407,34 +451,13 @@ func (m *TaskListModel) View() string {
 
 	header := m.renderHeader(contentW)
 
-	contentH := m.contentHeight()
-	var lines []string
-
-	// Empty state message (T5)
-	if len(m.virtualItems) == 0 {
-		lines = append(lines, DimStyle.Render("No tasks. Press A to add, or use Web UI."))
+	var listContent string
+	if len(m.list.Items()) == 0 {
+		listContent = DimStyle.Render("No tasks. Press A to add, or use Web UI.")
+	} else {
+		listContent = m.list.View()
 	}
-
-	visibleEnd := m.scrollOffset + contentH
-	if visibleEnd > len(m.virtualItems) {
-		visibleEnd = len(m.virtualItems)
-	}
-
-	for i := m.scrollOffset; i < visibleEnd; i++ {
-		item := m.virtualItems[i]
-		selected := i == m.selectedIndex
-		if item.divider {
-			lines = append(lines, m.renderDivider(item.count, selected, contentW))
-		} else {
-			lines = append(lines, m.renderJob(item.job, selected, item.archived, contentW))
-		}
-	}
-
-	for len(lines) < contentH {
-		lines = append(lines, strings.Repeat(" ", contentW))
-	}
-
-	content := header + "\n" + strings.Join(lines, "\n")
+	content := header + "\n" + listContent
 
 	style := UnfocusedBorder
 	if m.focused {
@@ -453,8 +476,8 @@ func (m *TaskListModel) renderHeader(w int) string {
 	} else {
 		// Fallback: just total count
 		total := 0
-		for _, item := range m.virtualItems {
-			if !item.divider {
+		for _, item := range m.list.Items() {
+			if ti, ok := item.(taskItem); ok && !ti.divider {
 				total++
 			}
 		}
@@ -496,14 +519,20 @@ func (m *TaskListModel) renderHeader(w int) string {
 
 	right := strings.Join(timers, " ")
 
-	// Scrollbar range display (T4)
-	if len(m.virtualItems) > m.contentHeight() {
-		start := m.scrollOffset + 1
-		end := m.scrollOffset + m.contentHeight()
-		if end > len(m.virtualItems) {
-			end = len(m.virtualItems)
+	// Scroll range display
+	total := len(m.list.Items())
+	contentH := m.contentHeight()
+	if total > contentH {
+		perPage := m.list.Paginator.PerPage
+		if perPage <= 0 {
+			perPage = contentH
 		}
-		scrollInfo := fmt.Sprintf("[%d-%d/%d]", start, end, len(m.virtualItems))
+		start := m.list.Paginator.Page*perPage + 1
+		end := start + perPage - 1
+		if end > total {
+			end = total
+		}
+		scrollInfo := fmt.Sprintf("[%d-%d/%d]", start, end, total)
 		if right != "" {
 			right += " "
 		}

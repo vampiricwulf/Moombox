@@ -2,9 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -20,32 +24,116 @@ type OrphanedFileEntry struct {
 	JobStatus string
 }
 
+// fileItem wraps OrphanedFileEntry as a list.Item.
+type fileItem struct {
+	entry OrphanedFileEntry
+}
+
+func (f fileItem) FilterValue() string { return f.entry.RelPath }
+
+// fileDelegate renders file list items with type badges and delete confirmation.
+type fileDelegate struct {
+	dialog *FilesDialogModel
+}
+
+func (d fileDelegate) Height() int                             { return 1 }
+func (d fileDelegate) Spacing() int                            { return 0 }
+func (d fileDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+
+func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	fi, ok := item.(fileItem)
+	if !ok {
+		return
+	}
+	f := fi.entry
+
+	prefix := "  "
+	if index == m.Index() {
+		prefix = "▸ "
+	}
+
+	// Type badge
+	typeStr := fmt.Sprintf("[%s]", f.Type)
+	typeStyle := DimStyle
+	switch f.Type {
+	case "staging":
+		typeStyle = lipgloss.NewStyle().Foreground(ColorMuxing)
+	case "output":
+		typeStyle = lipgloss.NewStyle().Foreground(ColorCyan)
+	case "trim":
+		typeStyle = lipgloss.NewStyle().Foreground(ColorGray)
+	}
+
+	sizeStr := formatFileSize(f.Size)
+	line := fmt.Sprintf("%s%s %s (%s)", prefix, typeStyle.Render(fmt.Sprintf("%-9s", typeStr)), f.RelPath, sizeStr)
+
+	var style lipgloss.Style
+	if d.dialog != nil && d.dialog.deleteConfirmID == f.Path {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+	} else if index == m.Index() {
+		style = lipgloss.NewStyle().Foreground(ColorCyan)
+	} else {
+		style = lipgloss.NewStyle()
+	}
+
+	fmt.Fprint(w, style.Render(truncateString(line, m.Width())))
+}
+
 // FilesDialogModel manages the orphaned files dialog.
 type FilesDialogModel struct {
 	visible         bool
 	width, height   int
-	files           []OrphanedFileEntry
-	selectedIdx     int
-	scrollOffset    int
+	list            list.Model
 	deleteConfirmID string // path of file pending double-press confirm
 	confirmTimer    time.Time
 	loading         bool
 	errorMsg        string
 	feedbackMsg     string
+
+	// Loading spinner
+	spinner spinner.Model
 }
 
 // NewFilesDialogModel creates a new files dialog.
 func NewFilesDialogModel() *FilesDialogModel {
-	return &FilesDialogModel{}
+	m := &FilesDialogModel{
+		spinner: newSpinner(),
+	}
+	m.list = m.newFileList()
+	return m
+}
+
+func (m *FilesDialogModel) newFileList() list.Model {
+	delegate := fileDelegate{dialog: m}
+	l := list.New(nil, delegate, 0, 0)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetShowHelp(false)
+	l.SetShowFilter(false)
+	l.SetShowPagination(false)
+	l.SetFilteringEnabled(false)
+	l.DisableQuitKeybindings()
+	l.InfiniteScrolling = true
+
+	// Only use arrow keys for navigation (avoid letter key conflicts)
+	km := l.KeyMap
+	km.CursorUp.SetKeys("up")
+	km.CursorDown.SetKeys("down")
+	km.NextPage.SetKeys("pgdown")
+	km.PrevPage.SetKeys("pgup")
+	km.GoToStart.SetKeys("home")
+	km.GoToEnd.SetKeys("end")
+	l.KeyMap = km
+
+	return l
 }
 
 // Open shows the dialog and sets loading state.
 func (m *FilesDialogModel) Open() {
 	m.visible = true
 	m.loading = true
-	m.files = nil
-	m.selectedIdx = 0
-	m.scrollOffset = 0
+	m.spinner = newSpinner()
+	m.list.SetItems(nil)
 	m.deleteConfirmID = ""
 	m.confirmTimer = time.Time{}
 	m.errorMsg = ""
@@ -66,16 +154,30 @@ func (m *FilesDialogModel) IsVisible() bool {
 func (m *FilesDialogModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	boxW := min(80, w-4)
+	boxH := min(24, h-4)
+	if boxW < 40 {
+		boxW = 40
+	}
+	if boxH < 10 {
+		boxH = 10
+	}
+	listH := boxH - 6
+	if listH < 1 {
+		listH = 1
+	}
+	m.list.SetSize(boxW-2, listH)
 }
 
 // SetFiles populates the file list after async fetch.
-func (m *FilesDialogModel) SetFiles(files []OrphanedFileEntry) {
-	m.files = files
+func (m *FilesDialogModel) SetFiles(files []OrphanedFileEntry) tea.Cmd {
 	m.loading = false
 	m.errorMsg = ""
-	if m.selectedIdx >= len(files) {
-		m.selectedIdx = 0
+	items := make([]list.Item, len(files))
+	for i, f := range files {
+		items[i] = fileItem{entry: f}
 	}
+	return m.list.SetItems(items)
 }
 
 // SetError sets an error message.
@@ -86,29 +188,48 @@ func (m *FilesDialogModel) SetError(msg string) {
 
 // SelectedFile returns the currently selected file entry.
 func (m *FilesDialogModel) SelectedFile() *OrphanedFileEntry {
-	if m.selectedIdx >= 0 && m.selectedIdx < len(m.files) {
-		return &m.files[m.selectedIdx]
+	sel := m.list.SelectedItem()
+	if sel == nil {
+		return nil
 	}
-	return nil
+	fi, ok := sel.(fileItem)
+	if !ok {
+		return nil
+	}
+	return &fi.entry
 }
 
 // RemoveFile removes a file by path from the list after successful deletion.
 func (m *FilesDialogModel) RemoveFile(path string) {
-	for i, f := range m.files {
-		if f.Path == path {
-			m.files = append(m.files[:i], m.files[i+1:]...)
-			if m.selectedIdx >= len(m.files) && m.selectedIdx > 0 {
-				m.selectedIdx--
-			}
+	for i, item := range m.list.Items() {
+		fi, ok := item.(fileItem)
+		if ok && fi.entry.Path == path {
+			m.list.RemoveItem(i)
 			m.deleteConfirmID = ""
 			break
 		}
 	}
 }
 
-// HandleKey processes key input. Returns action string:
+// UpdateComponents routes tea.Msg to the spinner when loading.
+func (m *FilesDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
+	if !m.visible {
+		return nil
+	}
+	if m.loading {
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return cmd
+	}
+	return nil
+}
+
+// SpinnerInit returns the spinner's initial tick command.
+func (m *FilesDialogModel) SpinnerInit() tea.Cmd { return m.spinner.Tick }
+
+// HandleKey processes key input. Returns action string and optional command:
 // "close", "refresh", "delete", or "" for no action.
-func (m *FilesDialogModel) HandleKey(key string) string {
+func (m *FilesDialogModel) HandleKey(msg tea.KeyMsg) (string, tea.Cmd) {
 	// Confirmation timeout check
 	if m.deleteConfirmID != "" && !m.confirmTimer.IsZero() && time.Now().After(m.confirmTimer) {
 		m.deleteConfirmID = ""
@@ -116,66 +237,49 @@ func (m *FilesDialogModel) HandleKey(key string) string {
 		m.feedbackMsg = ""
 	}
 
+	key := msg.String()
 	switch key {
 	case keyEsc:
 		m.Close()
-		return "close"
+		return "close", nil
 	case "r", "R":
 		m.loading = true
 		m.errorMsg = ""
-		return "refresh"
-	case keyUp:
-		if m.selectedIdx > 0 {
-			m.selectedIdx--
-		} else if len(m.files) > 0 {
-			m.selectedIdx = len(m.files) - 1
-		}
-		m.deleteConfirmID = ""
-		m.feedbackMsg = ""
-		m.ensureVisible()
-	case keyDown:
-		if m.selectedIdx < len(m.files)-1 {
-			m.selectedIdx++
-		} else {
-			m.selectedIdx = 0
-		}
-		m.deleteConfirmID = ""
-		m.feedbackMsg = ""
-		m.ensureVisible()
+		return "refresh", nil
 	case "d", "D":
-		if len(m.files) == 0 {
-			return ""
+		if len(m.list.Items()) == 0 {
+			return "", nil
 		}
 		sel := m.SelectedFile()
 		if sel == nil {
-			return ""
+			return "", nil
 		}
 		if m.deleteConfirmID == sel.Path && !m.confirmTimer.IsZero() && time.Now().Before(m.confirmTimer) {
 			// Second press: execute delete
 			m.deleteConfirmID = ""
 			m.confirmTimer = time.Time{}
-			return "delete"
+			return "delete", nil
 		}
 		// First press: set confirmation
 		m.deleteConfirmID = sel.Path
 		m.confirmTimer = time.Now().Add(3 * time.Second)
 		m.feedbackMsg = fmt.Sprintf("Press D again to delete \"%s\"", sel.RelPath)
+		return "", nil
 	}
-	return ""
-}
 
-func (m *FilesDialogModel) ensureVisible() {
-	boxH := min(m.height-4, 24)
-	listH := boxH - 6 // header + footer lines
-	if listH < 1 {
-		listH = 1
+	// Reset confirm on navigation
+	if key == keyUp || key == keyDown {
+		m.deleteConfirmID = ""
+		m.feedbackMsg = ""
 	}
-	if m.selectedIdx < m.scrollOffset {
-		m.scrollOffset = m.selectedIdx
+
+	// Route to list for navigation
+	if !m.loading && len(m.list.Items()) > 0 {
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return "", cmd
 	}
-	if m.selectedIdx >= m.scrollOffset+listH {
-		m.scrollOffset = m.selectedIdx - listH + 1
-	}
+	return "", nil
 }
 
 // View renders the files dialog overlay.
@@ -194,72 +298,21 @@ func (m *FilesDialogModel) View() string {
 	}
 
 	contentW := boxW - 2
+	fileCount := len(m.list.Items())
 
 	var lines []string
 
-	lines = append(lines, TitleStyle.Render("Orphaned Files")+" "+DimStyle.Render(fmt.Sprintf("(%d files)", len(m.files))))
+	lines = append(lines, TitleStyle.Render("Orphaned Files")+" "+DimStyle.Render(fmt.Sprintf("(%d files)", fileCount)))
 	lines = append(lines, "")
 
 	if m.loading {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("  Scanning..."))
+		lines = append(lines, "  "+m.spinner.View()+" Scanning...")
 	} else if m.errorMsg != "" {
 		lines = append(lines, ErrorStyle.Render("  "+m.errorMsg))
-	} else if len(m.files) == 0 {
+	} else if fileCount == 0 {
 		lines = append(lines, DimStyle.Render("  No orphaned files found."))
 	} else {
-		listH := boxH - 6 // Reserve for header, footer, padding
-		if listH < 1 {
-			listH = 1
-		}
-
-		end := m.scrollOffset + listH
-		if end > len(m.files) {
-			end = len(m.files)
-		}
-		start := m.scrollOffset
-
-		for i := start; i < end; i++ {
-			f := m.files[i]
-			prefix := "  "
-			if i == m.selectedIdx {
-				prefix = "▸ "
-			}
-
-			// Type badge
-			typeStr := fmt.Sprintf("[%s]", f.Type)
-			typeStyle := DimStyle
-			switch f.Type {
-			case "staging":
-				typeStyle = lipgloss.NewStyle().Foreground(ColorMuxing)
-			case "output":
-				typeStyle = lipgloss.NewStyle().Foreground(ColorCyan)
-			case "trim":
-				typeStyle = lipgloss.NewStyle().Foreground(ColorGray)
-			}
-
-			sizeStr := formatFileSize(f.Size)
-			line := fmt.Sprintf("%s%s %s (%s)", prefix, typeStyle.Render(fmt.Sprintf("%-9s", typeStr)), f.RelPath, sizeStr)
-
-			var style lipgloss.Style
-			if m.deleteConfirmID == f.Path {
-				style = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
-			} else if i == m.selectedIdx {
-				style = lipgloss.NewStyle().Foreground(ColorCyan)
-			} else {
-				style = lipgloss.NewStyle()
-			}
-			lines = append(lines, style.Render(truncateString(line, contentW)))
-		}
-
-		// Scroll indicator
-		if len(m.files) > listH {
-			pct := 0
-			maxScroll := len(m.files) - listH
-			if maxScroll > 0 {
-				pct = m.scrollOffset * 100 / maxScroll
-			}
-			lines = append(lines, DimStyle.Render(fmt.Sprintf("  [%d%%] %d files", pct, len(m.files))))
-		}
+		lines = append(lines, m.list.View())
 	}
 
 	if m.feedbackMsg != "" {

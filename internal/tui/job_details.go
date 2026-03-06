@@ -6,6 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
@@ -17,11 +20,12 @@ const labelWidth = 14
 
 // JobDetailsModel renders details for a selected job.
 type JobDetailsModel struct {
-	job             *database.Job
-	scrollOffset    int
-	width, height   int
-	focused         bool
-	rows            []detailRow
+	job           *database.Job
+	viewport      viewport.Model
+	progress      progress.Model
+	width, height int
+	focused       bool
+	rows          []detailRow
 	hideDescription bool
 
 	// Marquee for scrolling the title value when it overflows.
@@ -54,12 +58,22 @@ type detailRow struct {
 
 // NewJobDetailsModel creates a new job details model.
 func NewJobDetailsModel() *JobDetailsModel {
-	return &JobDetailsModel{}
+	vp := viewport.New(0, 1)
+	// Use helpViewportKeyMap so arrow keys work but letter keys (j/k/d/u/f/b)
+	// don't conflict with app chord bindings. Mouse scroll is handled
+	// explicitly in app.go handleMouse.
+	vp.KeyMap = helpViewportKeyMap()
+
+	pb := progress.New(progress.WithoutPercentage())
+	pb.Full = '█'
+	pb.Empty = '░'
+	pb.EmptyColor = string(ColorGray)
+
+	return &JobDetailsModel{viewport: vp, progress: pb}
 }
 
 // SetJob updates the displayed job.
 func (m *JobDetailsModel) SetJob(job *database.Job) {
-	// Reset scroll to top on job change (match TS useEffect)
 	prevID := ""
 	if m.job != nil {
 		prevID = m.job.ID
@@ -67,14 +81,13 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 	m.job = job
 	m.progressOverlay = nil
 	m.buildRows()
+	m.updateViewportContent()
 	newID := ""
 	if job != nil {
 		newID = job.ID
 	}
 	if prevID != newID {
-		m.scrollOffset = 0
-	} else if m.scrollOffset > m.maxScroll() {
-		m.scrollOffset = m.maxScroll()
+		m.viewport.GotoTop()
 	}
 	// Reset marquee for title field (use m.width - 2 to match renderRow's
 	// maxW = contentW = m.width - 2, minus labelWidth for the value column).
@@ -94,7 +107,10 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 // are recomputed from live data every 100ms (matches TS re-render behavior).
 func (m *JobDetailsModel) SetProgress(p *ProgressData) {
 	m.progressOverlay = p
+	yOffset := m.viewport.YOffset
 	m.buildRows()
+	m.updateViewportContent()
+	m.viewport.SetYOffset(yOffset)
 }
 
 // SetSize updates the panel dimensions.
@@ -102,6 +118,13 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	prevW := m.width
 	m.width = w
 	m.height = h
+	contentH := h - 3
+	if contentH < 1 {
+		contentH = 1
+	}
+	m.viewport.Width = w - 2
+	m.viewport.Height = contentH
+	m.updateViewportContent()
 	// Recalculate marquee width when panel width changes (e.g. focus change,
 	// or initial WindowSizeMsg arriving after jobs are already loaded).
 	if prevW != w && m.job != nil {
@@ -122,36 +145,42 @@ func (m *JobDetailsModel) SetFocused(f bool) {
 func (m *JobDetailsModel) ToggleDescription() {
 	m.hideDescription = !m.hideDescription
 	m.buildRows()
+	m.updateViewportContent()
 }
 
-// ScrollUp scrolls the detail view up.
+// ScrollUp scrolls the detail view up by one line.
 func (m *JobDetailsModel) ScrollUp() {
-	if m.scrollOffset > 0 {
-		m.scrollOffset--
-	}
+	m.viewport.ScrollUp(1)
 }
 
-// ScrollDown scrolls the detail view down.
+// ScrollDown scrolls the detail view down by one line.
 func (m *JobDetailsModel) ScrollDown() {
-	if m.scrollOffset < m.maxScroll() {
-		m.scrollOffset++
-	}
+	m.viewport.ScrollDown(1)
 }
 
-func (m *JobDetailsModel) contentHeight() int {
-	h := m.height - 3
-	if h < 1 {
-		h = 1
-	}
-	return h
+// UpdateViewport passes a Bubble Tea message to the viewport for built-in
+// key/mouse handling and returns any resulting command.
+func (m *JobDetailsModel) UpdateViewport(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	return cmd
 }
 
-func (m *JobDetailsModel) maxScroll() int {
-	ms := len(m.rows) - m.contentHeight()
-	if ms < 0 {
-		return 0
+// updateViewportContent rebuilds the viewport's string content from m.rows.
+func (m *JobDetailsModel) updateViewportContent() {
+	contentW := m.width - 2
+	if contentW < 1 {
+		contentW = 1
 	}
-	return ms
+	if m.job == nil {
+		m.viewport.SetContent(DimStyle.Render("Select a job to view details"))
+		return
+	}
+	var lines []string
+	for _, r := range m.rows {
+		lines = append(lines, m.renderRow(r, contentW))
+	}
+	m.viewport.SetContent(strings.Join(lines, "\n"))
 }
 
 func (m *JobDetailsModel) buildRows() {
@@ -296,7 +325,7 @@ func (m *JobDetailsModel) buildRows() {
 		if percent > 0 {
 			m.rows = append(m.rows, detailRow{
 				kind:  rowProgressBar,
-				value: fmt.Sprintf("%.1f%%", percent), // J9: 1 decimal
+				value: status, // status string used for gradient mapping
 				color: StatusColor(status),
 			})
 		}
@@ -607,8 +636,8 @@ func (m *JobDetailsModel) View() string {
 		}
 		// Scroll percentage indicator (match TS [XX%])
 		// Only append if it fits within contentW to prevent header wrapping
-		if ms := m.maxScroll(); ms > 0 {
-			pct := int(math.Round(float64(m.scrollOffset) * 100 / float64(ms)))
+		if m.viewport.TotalLineCount() > m.viewport.Height {
+			pct := int(math.Round(m.viewport.ScrollPercent() * 100))
 			suffix := " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
 			if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
 				header += suffix
@@ -635,26 +664,7 @@ func (m *JobDetailsModel) View() string {
 		}
 	}
 
-	contentH := m.contentHeight()
-	var lines []string
-
-	if m.job == nil {
-		lines = append(lines, DimStyle.Render("Select a job to view details"))
-	} else {
-		end := m.scrollOffset + contentH
-		if end > len(m.rows) {
-			end = len(m.rows)
-		}
-		for i := m.scrollOffset; i < end; i++ {
-			lines = append(lines, m.renderRow(m.rows[i], contentW))
-		}
-	}
-
-	for len(lines) < contentH {
-		lines = append(lines, strings.Repeat(" ", contentW))
-	}
-
-	content := header + "\n" + strings.Join(lines, "\n")
+	content := header + "\n" + m.viewport.View()
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -682,7 +692,22 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 		if m.progressOverlay != nil && m.progressOverlay.Percent > 0 {
 			percent = m.progressOverlay.Percent
 		}
-		return renderProgressBar(percent, r.color, maxW)
+		pctLabel := fmt.Sprintf(" %.1f%%", percent)
+		barW := maxW - labelWidth - len(pctLabel)
+		if barW > 30 {
+			barW = 30
+		}
+		if barW < 5 {
+			// Narrow fallback: plain text percentage
+			label := padRight("", labelWidth)
+			return label + lipgloss.NewStyle().Foreground(r.color).Render(strings.TrimSpace(pctLabel))
+		}
+		m.progress.Width = barW
+		// Gradient: blend from the previous phase's color into the current status color
+		colorA, colorB := progressGradient(r.value)
+		progress.WithScaledGradient(colorA, colorB)(&m.progress)
+		label := padRight("", labelWidth)
+		return label + m.progress.ViewAs(percent/100) + lipgloss.NewStyle().Foreground(r.color).Render(pctLabel)
 
 	case rowField:
 		if r.label == "" {
@@ -715,29 +740,19 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 	return ""
 }
 
-func renderProgressBar(percent float64, color lipgloss.Color, maxW int) string {
-	pctLabel := fmt.Sprintf(" %.1f%%", percent) // J9: 1 decimal, space prefix matches TS
-	barW := maxW - labelWidth - len(pctLabel) - 2 // 2 for bar brackets (match TS)
-	if barW > 30 {
-		barW = 30 // cap at 30 like TypeScript
-	}
-	if barW < 5 {
-		// Narrow fallback: plain text percentage (match TS behavior)
-		label := padRight("", labelWidth)
-		return label + lipgloss.NewStyle().Foreground(color).Render(strings.TrimSpace(pctLabel))
-	}
-	filled := int(math.Round(float64(barW) * percent / 100)) // match TS Math.round
-	if filled > barW {
-		filled = barW
-	}
-	empty := barW - filled
 
-	bar := lipgloss.NewStyle().Foreground(color).Render(strings.Repeat("█", filled)) +
-		lipgloss.NewStyle().Foreground(ColorGray).Render(strings.Repeat("░", empty))
-
-	label := padRight("", labelWidth)
-
-	return label + bar + lipgloss.NewStyle().Foreground(color).Render(pctLabel)
+// progressGradient returns gradient start/end colors for a progress bar based on job status.
+// The bar blends from the previous phase color into the current status color.
+func progressGradient(status string) (string, string) {
+	switch status {
+	case "Downloading", "Live":
+		return string(ColorUpcoming), string(ColorDownloading)
+	case "Muxing":
+		return string(ColorDownloading), string(ColorMuxing)
+	default:
+		color := string(StatusColor(status))
+		return color, color
+	}
 }
 
 func padRight(s string, w int) string {
