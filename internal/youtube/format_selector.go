@@ -55,6 +55,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 	Debug(msg string, args ...any)
 }) SelectedFormats {
 	var bestVideo, bestAudio *Format
+	var bestVideoCodecScore, bestAudioCodecScore int
 
 	// Log available video formats (matching TS FormatSelector debug output)
 	if logger != nil {
@@ -96,6 +97,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 
 			if bestVideo == nil {
 				bestVideo = f
+				bestVideoCodecScore = scoreVideoCodec(extractCodec(f.MimeType))
 				continue
 			}
 
@@ -104,6 +106,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 			// Prefer higher resolution
 			if maxDim > bestMaxDim {
 				bestVideo = f
+				bestVideoCodecScore = scoreVideoCodec(extractCodec(f.MimeType))
 				continue
 			}
 
@@ -129,10 +132,10 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 
 				// Codec score tiebreaker
 				fCodec := scoreVideoCodec(extractCodec(f.MimeType))
-				bestCodec := scoreVideoCodec(extractCodec(bestVideo.MimeType))
-				if fCodec != bestCodec {
-					if fCodec > bestCodec {
+				if fCodec != bestVideoCodecScore {
+					if fCodec > bestVideoCodecScore {
 						bestVideo = f
+						bestVideoCodecScore = fCodec
 					}
 					continue
 				}
@@ -156,15 +159,16 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 
 			if bestAudio == nil {
 				bestAudio = f
+				bestAudioCodecScore = scoreAudioCodec(extractCodec(f.MimeType))
 				continue
 			}
 
 			// Codec score
 			fCodec := scoreAudioCodec(extractCodec(f.MimeType))
-			bestCodec := scoreAudioCodec(extractCodec(bestAudio.MimeType))
-			if fCodec != bestCodec {
-				if fCodec > bestCodec {
+			if fCodec != bestAudioCodecScore {
+				if fCodec > bestAudioCodecScore {
 					bestAudio = f
+					bestAudioCodecScore = fCodec
 				}
 				continue
 			}

@@ -152,19 +152,23 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 	}
 
 	// Wait for async callback with timeout
+	loadTimer := time.NewTimer(BotGuardLoadTimeout)
 	select {
 	case cb := <-resultCh:
+		loadTimer.Stop()
 		client.asyncSnapshot = cb.asyncSnapshot
 		if cb.shutdownFn != nil {
 			client.shutdownFn = cb.shutdownFn
 		}
-	case <-time.After(BotGuardLoadTimeout):
+	case <-loadTimer.C:
 		client.Shutdown()
 		return nil, &BGError{Code: ErrTimeout, Message: "BotGuard callback timed out"}
 	case <-ctx.Done():
+		loadTimer.Stop()
 		client.Shutdown()
 		return nil, ctx.Err()
 	case err := <-errCh:
+		loadTimer.Stop()
 		client.Shutdown()
 		return nil, &BGError{Code: ErrVMError, Message: fmt.Sprintf("callback error: %v", err)}
 	}
@@ -217,12 +221,15 @@ func (c *BotGuardClient) Snapshot(timeout time.Duration) (string, *goja.Object, 
 	}
 
 	// Wait for result
+	snapshotTimer := time.NewTimer(timeout)
 	select {
 	case result := <-resultCh:
+		snapshotTimer.Stop()
 		return result, webPoSignalOutput, nil
 	case err := <-errCh:
+		snapshotTimer.Stop()
 		return "", nil, &BGError{Code: ErrAsyncSnapshot, Message: fmt.Sprintf("snapshot error: %v", err)}
-	case <-time.After(timeout):
+	case <-snapshotTimer.C:
 		return "", nil, &BGError{Code: ErrTimeout, Message: "snapshot timed out"}
 	}
 }

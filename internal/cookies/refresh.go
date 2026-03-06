@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -502,7 +503,7 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 
 	var result strings.Builder
 	updated := make(map[string]bool)
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 
 	for scanner.Scan() {
 		line := scanner.Text()

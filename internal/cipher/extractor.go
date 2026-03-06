@@ -72,6 +72,7 @@ func findSigCandidates(playerJS string) []sigCandidate {
 // alrTransformHeadPattern matches the start of a transform chain after set("alr","yes").
 // Captures the parameter name and the start of the assignment.
 var alrTransformHeadPattern = regexp.MustCompile(`(\w+)&&\((\w+)=`)
+var sigHelperPattern = regexp.MustCompile(`([a-zA-Z_$][\w$]*)\.\w+\(\s*\w`)
 
 // findAlrTransformChain finds the signature decipher chain in YouTube's newer
 // player.js format. The URL builder function is identified by its set("alr","yes")
@@ -457,7 +458,7 @@ func extractSigFunction(playerJS string) (string, error) {
 
 	// Step 3: Find the helper object name from the function body
 	// The function body calls methods on a helper object like: XX.YY(a,ZZ)
-	helperPattern := regexp.MustCompile(`([a-zA-Z_$][\w$]*)\.\w+\(\s*\w`)
+	helperPattern := sigHelperPattern
 	helperMatch := helperPattern.FindStringSubmatch(funcBody)
 	if helperMatch == nil {
 		return "", fmt.Errorf("could not find helper object in sig function")

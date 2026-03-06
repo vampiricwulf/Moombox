@@ -278,13 +278,16 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		jitter := time.Duration(rand.Int63n(int64(probeJitterMax)))
 
 		// B2: Race sleep against chat surge
+		probeTimer := time.NewTimer(interval + jitter)
 		select {
 		case <-ctx.Done():
+			probeTimer.Stop()
 			sp.stopEarlyChat(chatDl)
 			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
-		case <-time.After(interval + jitter):
+		case <-probeTimer.C:
 			// Normal poll
 		case <-surgeCh:
+			probeTimer.Stop()
 			sp.logger.Info("chat surge triggered early probe", "videoID", job.VideoID)
 		}
 
@@ -971,10 +974,12 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 
 		// Sleep with jitter (15-20s effective)
 		jitter := time.Duration(rand.Int63n(int64(twitchPollJitterMax)))
+		pollTimer := time.NewTimer(twitchPollInterval + jitter)
 		select {
 		case <-ctx.Done():
+			pollTimer.Stop()
 			return nil, nil
-		case <-time.After(twitchPollInterval + jitter):
+		case <-pollTimer.C:
 		}
 
 		sp.db.UpdateJobFields(job.ID, map[string]any{

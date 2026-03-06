@@ -9,6 +9,16 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
+// Package-level styles for status bar rendering (avoid alloc per render).
+var (
+	statusBarBgStyle  = lipgloss.NewStyle().Background(lipgloss.Color("#1a1a2e")).Foreground(ColorWhite)
+	statusBarKeyStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
+	statusBarRedStyle = lipgloss.NewStyle().Foreground(ColorRed)
+	statusBarGrnStyle = lipgloss.NewStyle().Foreground(ColorGreen)
+	statusBarWrnStyle = lipgloss.NewStyle().Foreground(ColorWarning)
+	statusBarYelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+)
+
 // CookieStatus represents the authentication state for a platform.
 type CookieStatus int
 
@@ -70,7 +80,7 @@ func (m *StatusBarModel) SetDiskStatus(free uint64, usedPct float64, warn string
 
 // View renders the status bar.
 func (m *StatusBarModel) View() string {
-	bg := lipgloss.NewStyle().Background(lipgloss.Color("#1a1a2e")).Foreground(ColorWhite)
+	bg := statusBarBgStyle
 
 	left := m.renderControls()
 	right := m.renderMetrics() + m.renderCookieStatus()
@@ -95,7 +105,7 @@ func (m *StatusBarModel) View() string {
 // renderControls renders uniform chord hints in the status bar.
 func (m *StatusBarModel) renderControls() string {
 	compact := m.width < 100
-	key := lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
+	key := statusBarKeyStyle
 
 	var parts []string
 	if compact {
@@ -131,16 +141,15 @@ func (m *StatusBarModel) renderMetrics() string {
 
 	// Disk indicator (only shown once we have data)
 	if m.diskFree > 0 || m.diskUsedPct > 0 {
-		var diskColor lipgloss.Color
+		var style lipgloss.Style
 		switch m.diskWarn {
 		case "critical":
-			diskColor = ColorRed
+			style = statusBarRedStyle
 		case "warn":
-			diskColor = ColorWarning
+			style = statusBarWrnStyle
 		default:
-			diskColor = ColorGreen
+			style = statusBarGrnStyle
 		}
-		style := lipgloss.NewStyle().Foreground(diskColor)
 
 		freeGB := float64(m.diskFree) / (1024 * 1024 * 1024)
 		pct := int(m.diskUsedPct)
@@ -160,7 +169,7 @@ func (m *StatusBarModel) renderMetrics() string {
 		}
 	}
 	if activeCount > 0 {
-		style := lipgloss.NewStyle().Foreground(ColorGreen)
+		style := statusBarGrnStyle
 		if compact {
 			parts = append(parts, style.Render(fmt.Sprintf("▶%d", activeCount)))
 		} else {
@@ -195,13 +204,13 @@ func (m *StatusBarModel) renderCookieStatus() string {
 	if m.ytActive {
 		switch {
 		case m.ytCookie == CookieStatusRelogin:
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("YT: Re-login"))
+			parts = append(parts, statusBarRedStyle.Render("YT: Re-login"))
 		case m.ytCookie == CookieStatusNone:
-			parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("YT"))
+			parts = append(parts, statusBarYelStyle.Render("YT"))
 		case cookiesRejected || m.ytCookie == CookieStatusCookiesOnly:
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("YT"))
+			parts = append(parts, statusBarRedStyle.Render("YT"))
 		case m.ytCookie == CookieStatusOK:
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorGreen).Render("YT"))
+			parts = append(parts, statusBarGrnStyle.Render("YT"))
 		default:
 			parts = append(parts, DimStyle.Render("YT"))
 		}
@@ -211,11 +220,11 @@ func (m *StatusBarModel) renderCookieStatus() string {
 	if m.twActive {
 		switch {
 		case m.twCookie == CookieStatusRelogin:
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("TW: Re-login"))
+			parts = append(parts, statusBarRedStyle.Render("TW: Re-login"))
 		case m.twCookie == CookieStatusCookiesOnly:
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorRed).Render("TW"))
+			parts = append(parts, statusBarRedStyle.Render("TW"))
 		case m.twCookie == CookieStatusOK:
-			parts = append(parts, lipgloss.NewStyle().Foreground(ColorGreen).Render("TW"))
+			parts = append(parts, statusBarGrnStyle.Render("TW"))
 		default:
 			parts = append(parts, DimStyle.Render("TW"))
 		}

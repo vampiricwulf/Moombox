@@ -449,14 +449,8 @@ func sanitizeTemplateStr(s string) string {
 
 // ResolveTemplate resolves an output template with the given variables.
 func ResolveTemplate(template string, vars TemplateVariables) string {
-	result := template
-
 	safeTitle := sanitizeTemplateStr(vars.Title)
 	safeChannel := sanitizeTemplateStr(vars.Channel)
-
-	result = strings.ReplaceAll(result, "${title}", safeTitle)
-	result = strings.ReplaceAll(result, "${id}", vars.ID)
-	result = strings.ReplaceAll(result, "${channel}", safeChannel)
 
 	now := time.Now()
 	if vars.Date != nil {
@@ -465,8 +459,11 @@ func ResolveTemplate(template string, vars TemplateVariables) string {
 		}
 	}
 
-	result = strings.ReplaceAll(result, "${start_date}", now.Format("20060102"))
-	result = strings.ReplaceAll(result, "${start_time}", now.Format("1504"))
-
-	return result
+	return strings.NewReplacer(
+		"${title}", safeTitle,
+		"${id}", vars.ID,
+		"${channel}", safeChannel,
+		"${start_date}", now.Format("20060102"),
+		"${start_time}", now.Format("1504"),
+	).Replace(template)
 }

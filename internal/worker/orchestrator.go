@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,9 +275,11 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			if chatDl != nil {
 				chatDl.Stop()
 				if chatDone != nil {
+					chatTimer := time.NewTimer(2 * time.Second)
 					select {
 					case <-chatDone:
-					case <-time.After(2 * time.Second):
+						chatTimer.Stop()
+					case <-chatTimer.C:
 					}
 				}
 			}
@@ -656,7 +659,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 
 			// Wait and retry
-			sleepCtx(ctx, streamEndVerifyInterval)
+			utils.Sleep(ctx, streamEndVerifyInterval)
 			continue
 		}
 
@@ -683,7 +686,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				"progress": "Waiting for stream to end...",
 			})
 
-			sleepCtx(ctx, streamEndVerifyInterval)
+			utils.Sleep(ctx, streamEndVerifyInterval)
 
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -708,7 +711,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			if refreshErr != nil {
 				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				sleepCtx(ctx, streamEndVerifyInterval)
+				utils.Sleep(ctx, streamEndVerifyInterval)
 				continue
 			}
 
@@ -832,18 +835,22 @@ func (o *DownloadOrchestrator) waitForChat(chatDl *chat.ChatDownloader, chatDone
 		return
 	}
 
+	timer := time.NewTimer(timeout)
 	select {
 	case <-chatDone:
+		timer.Stop()
 		// Chat finished naturally
-	case <-time.After(timeout):
+	case <-timer.C:
 		// Timeout — force stop
 		if chatDl.IsRunning() {
 			chatDl.Stop()
 		}
 		// Wait a bit more for cleanup
+		cleanupTimer := time.NewTimer(2 * time.Second)
 		select {
 		case <-chatDone:
-		case <-time.After(2 * time.Second):
+			cleanupTimer.Stop()
+		case <-cleanupTimer.C:
 		}
 	}
 }
@@ -853,9 +860,11 @@ func (o *DownloadOrchestrator) cleanup(jobCtx *JobContext, chatDl *chat.ChatDown
 	if chatDl != nil {
 		chatDl.Stop()
 		if chatDone != nil {
+			cleanupTimer := time.NewTimer(2 * time.Second)
 			select {
 			case <-chatDone:
-			case <-time.After(2 * time.Second):
+				cleanupTimer.Stop()
+			case <-cleanupTimer.C:
 			}
 		}
 	}
@@ -1031,14 +1040,12 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	if _, err := os.Stat(chatSrc); err == nil {
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
-		if data, err := os.ReadFile(chatSrc); err == nil {
-			if err := os.WriteFile(chatDst, data, 0o644); err != nil {
-				o.logger.Warn("failed to copy chat file", "err", err)
-			} else {
-				updates["chat_file"] = chatDst
-				updates["chat_filename"] = relBase + ".chat.json"
-				updates["chat_status"] = "finished"
-			}
+		if err := copyFile(chatSrc, chatDst); err != nil {
+			o.logger.Warn("failed to copy chat file", "err", err)
+		} else {
+			updates["chat_file"] = chatDst
+			updates["chat_filename"] = relBase + ".chat.json"
+			updates["chat_status"] = "finished"
 		}
 	}
 
@@ -1058,11 +1065,9 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		stagingThumb := filepath.Join(jobCtx.StagingDir, "thumbnail"+ext)
 		if _, err := os.Stat(stagingThumb); err == nil {
 			thumbDst := filepath.Join(outputDir, filenameBase+ext)
-			if data, err := os.ReadFile(stagingThumb); err == nil {
-				if err := os.WriteFile(thumbDst, data, 0o644); err == nil {
-					thumbnailSaved = true
-					updates["thumbnail_file"] = thumbDst
-				}
+			if err := copyFile(stagingThumb, thumbDst); err == nil {
+				thumbnailSaved = true
+				updates["thumbnail_file"] = thumbDst
 			}
 			break
 		}
@@ -1265,14 +1270,12 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	if _, err := os.Stat(chatSrc); err == nil {
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
-		if data, err := os.ReadFile(chatSrc); err == nil {
-			if err := os.WriteFile(chatDst, data, 0o644); err != nil {
-				o.logger.Warn("failed to copy chat file", "err", err)
-			} else {
-				updates["chat_file"] = chatDst
-				updates["chat_filename"] = relBase + ".chat.json"
-				updates["chat_status"] = "finished"
-			}
+		if err := copyFile(chatSrc, chatDst); err != nil {
+			o.logger.Warn("failed to copy chat file", "err", err)
+		} else {
+			updates["chat_file"] = chatDst
+			updates["chat_filename"] = relBase + ".chat.json"
+			updates["chat_status"] = "finished"
 		}
 	}
 
@@ -1291,10 +1294,8 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		stagingThumb := filepath.Join(jobCtx.StagingDir, "thumbnail"+ext)
 		if _, err := os.Stat(stagingThumb); err == nil {
 			thumbDst := filepath.Join(outputDir, filenameBase+ext)
-			if data, err := os.ReadFile(stagingThumb); err == nil {
-				if err := os.WriteFile(thumbDst, data, 0o644); err == nil {
-					updates["thumbnail_file"] = thumbDst
-				}
+			if err := copyFile(stagingThumb, thumbDst); err == nil {
+				updates["thumbnail_file"] = thumbDst
 			}
 			break
 		}
@@ -1735,9 +1736,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	if twitchChatDl != nil {
 		twitchChatDl.MarkStreamEnded()
 		if chatDone != nil {
+			chatEndTimer := time.NewTimer(2 * time.Minute)
 			select {
 			case <-chatDone:
-			case <-time.After(2 * time.Minute):
+				chatEndTimer.Stop()
+			case <-chatEndTimer.C:
 				twitchChatDl.Stop()
 			}
 		}
@@ -1805,12 +1808,25 @@ type TwitchRecordingTimeAware interface {
 	SetRecordingStartTime(isoString string)
 }
 
-// sleepCtx waits for the given duration, returning early on context cancellation.
-func sleepCtx(ctx context.Context, d time.Duration) {
-	select {
-	case <-ctx.Done():
-	case <-time.After(d):
+// copyFile copies a file from src to dst using streaming I/O.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
 	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 // extractQualityFromResult derives QualityInfo from a DownloadResult.

@@ -176,7 +176,7 @@ func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) []Emot
 		return nil
 	}
 
-	var emotes []EmoteInfo
+	emotes := make([]EmoteInfo, 0, len(resp.ChannelEmotes)+len(resp.SharedEmotes))
 	for _, e := range resp.ChannelEmotes {
 		emotes = append(emotes, EmoteInfo{
 			ID:   e.ID,

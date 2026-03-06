@@ -87,10 +87,16 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 		return nil
 	}
 
+	// Pre-compute lowered names to avoid repeated ToLower calls
+	loweredNames := make([]string, len(variants))
+	for i := range variants {
+		loweredNames[i] = strings.ToLower(variants[i].Name)
+	}
+
 	// Audio-only request
 	if qualityPref == "audio_only" {
 		for i := range variants {
-			if strings.Contains(strings.ToLower(variants[i].Name), "audio_only") {
+			if strings.Contains(loweredNames[i], "audio_only") {
 				return &variants[i]
 			}
 		}
@@ -100,8 +106,8 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 
 	// Build filtered list (exclude audio_only)
 	var filtered []TwitchHLSVariant
-	for _, v := range variants {
-		if strings.Contains(strings.ToLower(v.Name), "audio_only") {
+	for i, v := range variants {
+		if strings.Contains(loweredNames[i], "audio_only") {
 			continue
 		}
 		filtered = append(filtered, v)

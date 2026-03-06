@@ -32,7 +32,7 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 	}
 
 	// Build filtered candidate list
-	var candidates []int // indices into streams
+	candidates := make([]int, 0, len(streams)) // indices into streams
 	for i := range streams {
 		s := &streams[i]
 

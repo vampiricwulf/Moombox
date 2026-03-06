@@ -1,8 +1,8 @@
 package youtube
 
 import (
-	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
@@ -78,7 +78,7 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 			if ytcfg.SessionIndex != nil {
 				idx = *ytcfg.SessionIndex
 			}
-			headers["X-Goog-AuthUser"] = fmt.Sprintf("%d", idx)
+			headers["X-Goog-AuthUser"] = strconv.Itoa(idx)
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -178,7 +179,7 @@ func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOpt
 func (m *Muxer) appendEncodeArgs(args []string, audioPath string, opts *TrimOptions) []string {
 	if opts.CRF > 0 {
 		// CRF mode: re-encode video with constant quality
-		args = append(args, "-c:v", "libx264", "-crf", fmt.Sprintf("%d", opts.CRF), "-preset", "slow")
+		args = append(args, "-c:v", "libx264", "-crf", strconv.Itoa(opts.CRF), "-preset", "slow")
 		// Re-encode audio to keep sync with re-encoded video
 		if opts.AudioBitrate > 0 {
 			args = append(args, "-c:a", "aac", "-b:a", fmt.Sprintf("%dk", opts.AudioBitrate))
@@ -346,7 +347,7 @@ func (m *Muxer) TrimAndConcat(ctx context.Context, segments []TrimSegmentInput, 
 		}
 
 		// Video: re-encode with optional scaling
-		args = append(args, "-c:v", "libx264", "-crf", fmt.Sprintf("%d", crf), "-preset", "slow")
+		args = append(args, "-c:v", "libx264", "-crf", strconv.Itoa(crf), "-preset", "slow")
 		if seg.NeedScale {
 			vf := fmt.Sprintf("scale=%d:%d,fps=%d", targetWidth, targetHeight, targetFPS)
 			args = append(args, "-vf", vf)

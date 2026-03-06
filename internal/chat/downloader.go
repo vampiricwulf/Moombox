@@ -521,21 +521,23 @@ func (cd *ChatDownloader) writeChatFile() {
 	}
 
 	// Build append content
-	var appendStr string
+	var sb strings.Builder
 	if hasExisting {
-		appendStr = ",\n"
+		sb.WriteString(",\n")
 	}
 	for i, msg := range newMessages {
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
 			continue
 		}
-		appendStr += "    " + string(msgBytes)
+		sb.WriteString("    ")
+		sb.Write(msgBytes)
 		if i < len(newMessages)-1 {
-			appendStr += ",\n"
+			sb.WriteString(",\n")
 		}
 	}
-	appendStr += "\n  ]\n}"
+	sb.WriteString("\n  ]\n}")
+	appendStr := sb.String()
 
 	// Truncate at ']' position, then write new content
 	if err := f.Truncate(bracketBytePos); err != nil {

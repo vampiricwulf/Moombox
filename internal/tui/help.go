@@ -20,40 +20,7 @@ type helpKey struct {
 	desc string
 }
 
-var actionKeys = helpSection{
-	title: "Action (A)",
-	keys: []helpKey{
-		{"A A", "Add video"},
-		{"A I", "Import archive"},
-		{"A R", "Retry failed/cancelled job"},
-		{"A C C", "Cancel active job (confirm)"},
-		{"A D D", "Delete job (confirm)"},
-		{"A T", "Trim finished video"},
-		{"A O", "Browse orphaned files"},
-	},
-}
-
-var requestKeys = helpSection{
-	title: "Request (R)",
-	keys: []helpKey{
-		{"R C", "Recheck cookie authentication"},
-		{"R F", "Force browser cookie refresh"},
-		{"R V", "Check for updates"},
-		{"R U", "Apply pending update"},
-		{"R P P", "Restart program (confirm)"},
-	},
-}
-
-var openKeys = helpSection{
-	title: "Open (O)",
-	keys: []helpKey{
-		{"O F", "Open output/staging folder"},
-		{"O S", "Open stream page in browser"},
-		{"O W", "Open web dashboard"},
-	},
-}
-
-var singleKeys = helpSection{
+var quickKeys = helpSection{
 	title: "Quick Keys",
 	keys: []helpKey{
 		{"F", "Filter (panel-sensitive)"},
@@ -81,6 +48,13 @@ var mouseKeys = helpSection{
 		{"Click", "Select task / focus panel"},
 		{"Scroll", "Scroll focused panel"},
 	},
+}
+
+// Category display titles for help sections.
+var categoryHelpTitles = map[string]string{
+	"Action":  "Action (A)",
+	"Request": "Request (R)",
+	"Open":    "Open (O)",
 }
 
 // helpViewportKeyMap returns a KeyMap with only arrow keys and pgup/pgdn,
@@ -116,10 +90,11 @@ func helpViewportKeyMap() viewport.KeyMap {
 
 // HelpModel renders the help overlay.
 type HelpModel struct {
-	visible  bool
-	viewport viewport.Model
-	width    int
-	height   int
+	visible   bool
+	viewport  viewport.Model
+	width     int
+	height    int
+	menuItems []ActionMenuItem
 }
 
 // NewHelpModel creates a new help model.
@@ -129,6 +104,11 @@ func NewHelpModel() *HelpModel {
 	return &HelpModel{
 		viewport: vp,
 	}
+}
+
+// SetMenuItems updates the menu items used to generate help sections.
+func (m *HelpModel) SetMenuItems(items []ActionMenuItem) {
+	m.menuItems = items
 }
 
 // Toggle toggles the help overlay visibility.
@@ -240,13 +220,54 @@ func (m *HelpModel) View() string {
 	return result.String()
 }
 
-func (m *HelpModel) orderedSections() []helpSection {
-	return []helpSection{
-		actionKeys,
-		requestKeys,
-		openKeys,
-		singleKeys,
-		navigationKeys,
-		mouseKeys,
+// sectionsFromMenu generates help sections for Action/Request/Open from menu items.
+func (m *HelpModel) sectionsFromMenu() []helpSection {
+	// Preserve category order
+	categoryOrder := []string{"Action", "Request", "Open"}
+	grouped := make(map[string][]helpKey)
+
+	for _, item := range m.menuItems {
+		if _, ok := categoryHelpTitles[item.Category]; !ok {
+			continue // Skip Filter/Other — handled as static sections
+		}
+
+		chord := item.Chord
+		if item.NeedsConfirm {
+			// Show confirm chord: "A C" → "A C C", "R P" → "R P P"
+			parts := strings.Fields(chord)
+			if len(parts) == 2 {
+				chord = chord + " " + parts[1]
+			}
+		}
+		grouped[item.Category] = append(grouped[item.Category], helpKey{
+			key:  chord,
+			desc: item.Label,
+		})
 	}
+
+	var sections []helpSection
+	for _, cat := range categoryOrder {
+		keys, ok := grouped[cat]
+		if !ok || len(keys) == 0 {
+			continue
+		}
+		sections = append(sections, helpSection{
+			title: categoryHelpTitles[cat],
+			keys:  keys,
+		})
+	}
+	return sections
+}
+
+func (m *HelpModel) orderedSections() []helpSection {
+	var sections []helpSection
+
+	// Dynamic sections from menu items (Action, Request, Open)
+	if len(m.menuItems) > 0 {
+		sections = append(sections, m.sectionsFromMenu()...)
+	}
+
+	// Static sections
+	sections = append(sections, quickKeys, navigationKeys, mouseKeys)
+	return sections
 }

@@ -1378,8 +1378,10 @@ func (d *SegmentDownloader) ClearResume() {
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
 	case <-ctx.Done():
-	case <-time.After(d):
+	case <-t.C:
 	}
 }

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -220,13 +221,13 @@ func (pt *ProgressTracker) buildProgressString() string {
 	}
 
 	if pt.audioTotal > 0 || pt.audioSeq > 0 {
-		vPart := fmt.Sprintf("%d", pt.videoSeq)
+		vPart := strconv.Itoa(pt.videoSeq)
 		if pt.videoTotal > 0 {
-			vPart = fmt.Sprintf("%d/%d", pt.videoSeq, pt.videoTotal)
+			vPart = strconv.Itoa(pt.videoSeq) + "/" + strconv.Itoa(pt.videoTotal)
 		}
-		aPart := fmt.Sprintf("%d", pt.audioSeq)
+		aPart := strconv.Itoa(pt.audioSeq)
 		if pt.audioTotal > 0 {
-			aPart = fmt.Sprintf("%d/%d", pt.audioSeq, pt.audioTotal)
+			aPart = strconv.Itoa(pt.audioSeq) + "/" + strconv.Itoa(pt.audioTotal)
 		}
 		s := fmt.Sprintf("(A: %s V: %s", aPart, vPart)
 		if pt.chatCount > 0 {

@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/mattn/go-runewidth"
+import (
+	"strings"
+
+	"github.com/mattn/go-runewidth"
+)
 
 // marqueeWaitTicks is the number of 150ms ticks to pause at each end (~2 seconds).
 const marqueeWaitTicks = 13
@@ -106,9 +110,7 @@ func (m *Marquee) View() string {
 	// Pad to maxWidth
 	sw := runewidth.StringWidth(s)
 	if sw < m.maxWidth {
-		for i := sw; i < m.maxWidth; i++ {
-			s += " "
-		}
+		s += strings.Repeat(" ", m.maxWidth-sw)
 	}
 	return s
 }

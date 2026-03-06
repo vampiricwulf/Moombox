@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,16 +17,12 @@ import (
 // Used to suppress stdout output when the TUI is running (BubbleTea
 // owns the alternate screen, so raw log writes corrupt the display).
 type switchableWriter struct {
-	mu      sync.Mutex
 	w       io.Writer
-	enabled bool
+	enabled atomic.Bool
 }
 
 func (sw *switchableWriter) Write(p []byte) (int, error) {
-	sw.mu.Lock()
-	enabled := sw.enabled
-	sw.mu.Unlock()
-	if !enabled {
+	if !sw.enabled.Load() {
 		return len(p), nil
 	}
 	return sw.w.Write(p)
@@ -100,7 +97,8 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	// Create multi-writer (stdout + file)
 	// Stdout goes through a switchable writer so it can be suppressed
 	// when the TUI is running (the TUI log panel uses Subscribe() instead).
-	l.stdout = &switchableWriter{w: os.Stdout, enabled: true}
+	l.stdout = &switchableWriter{w: os.Stdout}
+	l.stdout.enabled.Store(true)
 	var writers []io.Writer
 	writers = append(writers, l.stdout)
 	if l.file != nil {
@@ -415,16 +413,12 @@ func (l *Logger) SetLevel(level string) {
 // SuppressStdout disables stdout logging. Call this when the TUI starts
 // so raw log writes don't corrupt BubbleTea's alternate screen.
 func (l *Logger) SuppressStdout() {
-	l.stdout.mu.Lock()
-	l.stdout.enabled = false
-	l.stdout.mu.Unlock()
+	l.stdout.enabled.Store(false)
 }
 
 // RestoreStdout re-enables stdout logging. Call this after the TUI exits.
 func (l *Logger) RestoreStdout() {
-	l.stdout.mu.Lock()
-	l.stdout.enabled = true
-	l.stdout.mu.Unlock()
+	l.stdout.enabled.Store(true)
 }
 
 // Close flushes and closes the logger.

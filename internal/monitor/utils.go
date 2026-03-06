@@ -202,8 +202,9 @@ func MatchesTerms(text string, channel *config.ChannelConfig) bool {
 		return true
 	}
 
+	normText := normalizeText(text)
 	for _, pattern := range terms {
-		if matchTerm(text, pattern) {
+		if matchTermNormalized(normText, text, pattern) {
 			return true
 		}
 	}
@@ -248,14 +249,17 @@ func getCachedRegex(pattern string) (*regexp.Regexp, error) {
 // All patterns are treated as regex (matching TypeScript behavior).
 // Supports /pattern/flags syntax and (?i) prefix for case-insensitive.
 func matchTerm(text, pattern string) bool {
-	normText := normalizeText(text)
+	return matchTermNormalized(normalizeText(text), text, pattern)
+}
 
+// matchTermNormalized is like matchTerm but takes pre-normalized text to avoid redundant work.
+func matchTermNormalized(normText, rawText, pattern string) bool {
 	// Check for /pattern/flags syntax
 	if isRegexPattern(pattern) {
 		inner, flags := parseRegexPattern(pattern)
 		re, err := getCachedRegex("(?" + flags + ")" + inner)
 		if err != nil {
-			return fuzzyMatch(text, pattern)
+			return fuzzyMatch(rawText, pattern)
 		}
 		return re.MatchString(normText)
 	}
@@ -270,7 +274,7 @@ func matchTerm(text, pattern string) bool {
 	re, err := getCachedRegex("(?i)" + finalPattern)
 	if err != nil {
 		// Invalid regex — fall back to fuzzy substring match
-		return fuzzyMatch(text, pattern)
+		return fuzzyMatch(rawText, pattern)
 	}
 	return re.MatchString(normText)
 }

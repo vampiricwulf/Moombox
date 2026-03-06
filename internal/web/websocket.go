@@ -298,6 +298,13 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 
 // Broadcast sends a message to all connected clients.
 func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
+	hub.mu.Lock()
+	n := len(hub.clients)
+	hub.mu.Unlock()
+	if n == 0 {
+		return
+	}
+
 	msg := WSMessage{Type: msgType, Payload: payload}
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {

@@ -13,6 +13,47 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// fieldToColumn maps UpdateJobFields key names to database column names.
+var fieldToColumn = map[string]string{
+	"status":              "status",
+	"progress":            "progress",
+	"percent":             "percent",
+	"eta":                 "eta",
+	"speed":               "speed",
+	"error":               "error",
+	"title":               "title",
+	"channel_name":        "channel_name",
+	"thumbnail_url":       "thumbnail_url",
+	"description":         "description",
+	"output_file":         "output_file",
+	"filename":            "filename",
+	"output_directory":    "output_directory",
+	"download_started_at": "download_started_at",
+	"stream_start_time":   "stream_start_time",
+	"stream_end_time":     "stream_end_time",
+	"length_seconds":      "length_seconds",
+	"last_video_seq":      "last_video_seq",
+	"last_audio_seq":      "last_audio_seq",
+	"total_video_seq":     "total_video_seq",
+	"total_audio_seq":     "total_audio_seq",
+	"total_chat_messages": "total_chat_messages",
+	"chat_status":         "chat_status",
+	"chat_filename":       "chat_filename",
+	"chat_file":           "chat_file",
+	"thumbnail_file":      "thumbnail_file",
+	"description_file":    "description_file",
+	"is_vod":              "is_vod",
+	"video_width":         "video_width",
+	"video_height":        "video_height",
+	"video_fps":           "video_fps",
+	"file_size":           "file_size",
+	"last_recheck_at":     "last_recheck_at",
+	"twitch_quality":      "twitch_quality",
+	"twitch_category":     "twitch_category",
+	"channel_avatar_url":  "channel_avatar_url",
+	"quality_preference":  "quality_preference",
+}
+
 // dbLogger is the interface for database error logging.
 type dbLogger interface {
 	Debug(msg string, args ...any)
@@ -569,12 +610,15 @@ func (db *Database) HasProcessed(videoID string) (bool, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	var count int
-	err := db.db.QueryRowContext(db.getCtx(), "SELECT COUNT(*) FROM history WHERE video_id = ?", videoID).Scan(&count)
+	var one int
+	err := db.db.QueryRowContext(db.getCtx(), "SELECT 1 FROM history WHERE video_id = ? LIMIT 1", videoID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	return count > 0, nil
+	return true, nil
 }
 
 // AddToHistory adds a video ID to the processing history.
@@ -593,17 +637,10 @@ func (db *Database) AddToHistory(videoID string) error {
 }
 
 func (db *Database) pruneHistory() error {
-	var count int
-	if err := db.db.QueryRowContext(db.getCtx(), "SELECT COUNT(*) FROM history").Scan(&count); err != nil {
-		return fmt.Errorf("failed to count history: %w", err)
-	}
-	if count <= 10000 {
-		return nil
-	}
-
 	_, err := db.db.ExecContext(db.getCtx(), `DELETE FROM history WHERE video_id IN (
-		SELECT video_id FROM history ORDER BY added_at ASC LIMIT ?
-	)`, count-10000)
+		SELECT video_id FROM history ORDER BY added_at ASC
+		LIMIT MAX(0, (SELECT COUNT(*) FROM history) - 10000)
+	)`)
 	return err
 }
 
@@ -636,10 +673,16 @@ func (db *Database) HasActiveJob(videoID string) (bool, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	var count int
-	err := db.db.QueryRowContext(db.getCtx(), `SELECT COUNT(*) FROM jobs WHERE video_id = ? AND status NOT IN (?, ?, ?)`,
-		videoID, StatusFinished, StatusError, StatusCancelled).Scan(&count)
-	return count > 0, err
+	var one int
+	err := db.db.QueryRowContext(db.getCtx(), `SELECT 1 FROM jobs WHERE video_id = ? AND status NOT IN (?, ?, ?) LIMIT 1`,
+		videoID, StatusFinished, StatusError, StatusCancelled).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ImportFromJSON imports data from a TypeScript-version moombox.json file.
@@ -833,48 +876,8 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	var setClauses []string
-	var args []any
-
-	fieldToColumn := map[string]string{
-		"status":              "status",
-		"progress":            "progress",
-		"percent":             "percent",
-		"eta":                 "eta",
-		"speed":               "speed",
-		"error":               "error",
-		"title":               "title",
-		"channel_name":        "channel_name",
-		"thumbnail_url":       "thumbnail_url",
-		"description":         "description",
-		"output_file":         "output_file",
-		"filename":            "filename",
-		"output_directory":    "output_directory",
-		"download_started_at": "download_started_at",
-		"stream_start_time":   "stream_start_time",
-		"stream_end_time":     "stream_end_time",
-		"length_seconds":      "length_seconds",
-		"last_video_seq":      "last_video_seq",
-		"last_audio_seq":      "last_audio_seq",
-		"total_video_seq":     "total_video_seq",
-		"total_audio_seq":     "total_audio_seq",
-		"total_chat_messages": "total_chat_messages",
-		"chat_status":         "chat_status",
-		"chat_filename":       "chat_filename",
-		"chat_file":           "chat_file",
-		"thumbnail_file":      "thumbnail_file",
-		"description_file":    "description_file",
-		"is_vod":              "is_vod",
-		"video_width":         "video_width",
-		"video_height":        "video_height",
-		"video_fps":           "video_fps",
-		"file_size":           "file_size",
-		"last_recheck_at":     "last_recheck_at",
-		"twitch_quality":      "twitch_quality",
-		"twitch_category":     "twitch_category",
-		"channel_avatar_url":  "channel_avatar_url",
-		"quality_preference":  "quality_preference",
-	}
+	setClauses := make([]string, 0, len(fields)+1)
+	args := make([]any, 0, len(fields)+2)
 
 	for key, val := range fields {
 		col, ok := fieldToColumn[key]
@@ -949,7 +952,7 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	trimRows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size FROM trims`)
 	if err == nil {
-		trimMap := make(map[string][]TrimRecord)
+		trimMap := make(map[string][]TrimRecord, len(jobs))
 		for trimRows.Next() {
 			var tr TrimRecord
 			if err := trimRows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
@@ -969,7 +972,7 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	gapRows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT id, job_id, gap_from, gap_to, stream FROM gaps`)
 	if err == nil {
-		gapMap := make(map[string][]Gap)
+		gapMap := make(map[string][]Gap, len(jobs))
 		for gapRows.Next() {
 			var g Gap
 			if err := gapRows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err == nil {
@@ -989,7 +992,7 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 		`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds
 		FROM segments ORDER BY segment_index`)
 	if err == nil {
-		segMap := make(map[string][]Segment)
+		segMap := make(map[string][]Segment, len(jobs))
 		for segRows.Next() {
 			var s Segment
 			if err := segRows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,

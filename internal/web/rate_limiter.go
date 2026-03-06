@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -54,7 +55,7 @@ func (rl *RateLimiter) AllowWithRetry(ip string) (bool, int) {
 
 	// Filter expired entries
 	times := rl.requests[ip]
-	var valid []time.Time
+	valid := make([]time.Time, 0, len(times))
 	for _, t := range times {
 		if t.After(cutoff) {
 			valid = append(valid, t)
@@ -87,7 +88,7 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := extractIP(r)
 		if allowed, retryAfter := rl.AllowWithRetry(ip); !allowed {
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
 			fmt.Fprintf(w, `{"error":"Too many requests, please try again later","retryAfter":%d}`, retryAfter)

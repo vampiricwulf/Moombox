@@ -295,7 +295,7 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 }
 
 func parseTimeline(tl *segmentTimeline) []DashSegment {
-	var segments []DashSegment
+	segments := make([]DashSegment, 0, len(tl.Segments))
 	for _, s := range tl.Segments {
 		segments = append(segments, DashSegment{
 			T: s.T,

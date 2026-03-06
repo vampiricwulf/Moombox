@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -67,11 +69,7 @@ func renderInactiveInput(value string, w int, color lipgloss.Color) string {
 
 // renderPasswordDots renders a masked password string (dots).
 func renderPasswordDots(value string) string {
-	dots := ""
-	for range []rune(value) {
-		dots += "•"
-	}
-	return dots
+	return strings.Repeat("•", utf8.RuneCountInString(value))
 }
 
 // MapAccessor implements huh.Accessor[string] for map-backed form values.

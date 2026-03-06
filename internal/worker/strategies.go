@@ -279,7 +279,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	}
 
 	// Convert to DashStreamInfo for selection
-	var streamInfos []DashStreamInfo
+	streamInfos := make([]DashStreamInfo, 0, len(streams))
 	for _, s := range streams {
 		streamInfos = append(streamInfos, DashStreamInfo{
 			Itag:           s.Itag,

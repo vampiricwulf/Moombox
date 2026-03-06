@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +14,12 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
+)
+
+// Package-level styles for task list rendering (avoid alloc per render).
+var (
+	taskSelectedBgStyle = lipgloss.NewStyle().Background(lipgloss.Color("4")).Foreground(ColorWhite)
+	taskTwitchTagStyle  = lipgloss.NewStyle().Foreground(ColorTwitch)
 )
 
 // Filter represents a task list filter mode.
@@ -376,7 +382,8 @@ func (m *TaskListModel) rebuildVirtualList() {
 	now := time.Now()
 	ageDays := m.hideFinishedAgeDays
 
-	var active, archived []*database.Job
+	active := make([]*database.Job, 0, len(m.jobs))
+	archived := make([]*database.Job, 0, len(m.jobs)/4)
 	for _, j := range m.jobs {
 		if !m.passesFilter(j) {
 			continue
@@ -390,25 +397,48 @@ func (m *TaskListModel) rebuildVirtualList() {
 	}
 
 	// Sort active jobs
-	sort.SliceStable(active, func(i, j int) bool {
-		pi := statusPriority(active[i].Status)
-		pj := statusPriority(active[j].Status)
-		if pi != pj {
-			return pi < pj
+	slices.SortStableFunc(active, func(a, b *database.Job) int {
+		pa := statusPriority(a.Status)
+		pb := statusPriority(b.Status)
+		if pa != pb {
+			if pa < pb {
+				return -1
+			}
+			return 1
 		}
-		if pi >= 6 {
-			return active[i].UpdatedAt > active[j].UpdatedAt
+		if pa >= 6 {
+			if a.UpdatedAt > b.UpdatedAt {
+				return -1
+			}
+			if a.UpdatedAt < b.UpdatedAt {
+				return 1
+			}
+			return 0
 		}
-		return strings.ToLower(active[i].Title) < strings.ToLower(active[j].Title)
+		la := strings.ToLower(a.Title)
+		lb := strings.ToLower(b.Title)
+		if la < lb {
+			return -1
+		}
+		if la > lb {
+			return 1
+		}
+		return 0
 	})
 
 	// Sort archived: newest first
-	sort.SliceStable(archived, func(i, j int) bool {
-		return archived[i].UpdatedAt > archived[j].UpdatedAt
+	slices.SortStableFunc(archived, func(a, b *database.Job) int {
+		if a.UpdatedAt > b.UpdatedAt {
+			return -1
+		}
+		if a.UpdatedAt < b.UpdatedAt {
+			return 1
+		}
+		return 0
 	})
 
 	// Build list items
-	var items []list.Item
+	items := make([]list.Item, 0, len(active)+len(archived)+1)
 	for _, j := range active {
 		items = append(items, taskItem{job: j})
 	}
@@ -687,12 +717,11 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	}
 
 	// Build styled output - order: selector | icon | progress | [TW] | title (match TS)
-	selectedBg := lipgloss.NewStyle().Background(lipgloss.Color("4")).Foreground(ColorWhite)
 	var parts []string
 
 	// Selector
 	if selected {
-		parts = append(parts, selectedBg.Render("> "))
+		parts = append(parts, taskSelectedBgStyle.Render("> "))
 	} else {
 		parts = append(parts, "  ")
 	}
@@ -715,7 +744,7 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 
 	// Platform tag
 	if job.Platform == "twitch" {
-		tagStyle := lipgloss.NewStyle().Foreground(ColorTwitch)
+		tagStyle := taskTwitchTagStyle
 		if dimmed {
 			tagStyle = tagStyle.Faint(true)
 		}
@@ -724,7 +753,7 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 
 	// Title (blue bg + white text when selected, status color when not selected, match TS)
 	if selected {
-		parts = append(parts, selectedBg.Render(title))
+		parts = append(parts, taskSelectedBgStyle.Render(title))
 	} else if dimmed {
 		parts = append(parts, lipgloss.NewStyle().Faint(true).Render(title))
 	} else {

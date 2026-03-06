@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -200,8 +200,14 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		archived := filterJobsByAge(jobs, true, cfg)
 
 		// Sort by updatedAt descending (most recent first)
-		sort.Slice(archived, func(i, j int) bool {
-			return archived[i].UpdatedAt > archived[j].UpdatedAt
+		slices.SortFunc(archived, func(a, b *database.Job) int {
+			if a.UpdatedAt > b.UpdatedAt {
+				return -1
+			}
+			if a.UpdatedAt < b.UpdatedAt {
+				return 1
+			}
+			return 0
 		})
 
 		sendPaginated(rw, req, archived)

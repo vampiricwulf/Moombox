@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -206,7 +207,7 @@ func (j *CookieJar) GenerateAuthorizationHeader(origin string) string {
 }
 
 func makeSidAuthorization(scheme, sid, origin string) string {
-	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	hashInput := timestamp + " " + sid + " " + origin
 	hash := fmt.Sprintf("%x", sha1.Sum([]byte(hashInput)))
 	return fmt.Sprintf("%s %s_%s", scheme, timestamp, hash)

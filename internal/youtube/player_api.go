@@ -453,10 +453,6 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 			if err := utils.Sleep(ctx, delay); err != nil {
 				return nil, err
 			}
-			body, err = json.Marshal(postData)
-			if err != nil {
-				return nil, fmt.Errorf("marshal request body: %w", err)
-			}
 			req, err = http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 			if err != nil {
 				return nil, err

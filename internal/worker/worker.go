@@ -525,13 +525,14 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	}
 }
 
+var filenameReplacer = strings.NewReplacer(
+	"/", "_", "\\", "_", ":", "_", "*", "_", "?", "_",
+	"\"", "_", "<", "_", ">", "_", "|", "_",
+)
+
 // sanitizeFilename removes invalid characters from a filename.
 func sanitizeFilename(name string) string {
-	invalid := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
-	result := name
-	for _, ch := range invalid {
-		result = strings.ReplaceAll(result, ch, "_")
-	}
+	result := filenameReplacer.Replace(name)
 	if len(result) > 200 {
 		result = result[:200]
 	}

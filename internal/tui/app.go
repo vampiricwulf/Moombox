@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -225,6 +226,9 @@ type App struct {
 
 	// Internal token for CSRF bypass on local API calls
 	internalToken string
+
+	// Cached HTTP client for local API calls (avoids re-creating per request)
+	cachedClient *http.Client
 
 	// First-run flag: triggers setup wizard
 	IsFirstRun bool
@@ -1026,7 +1030,20 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if action != "" {
 			a.actionMenu.Close()
-			return a.dispatchMenuAction(action)
+			// Parse "CHORD" or "CHORD:jobID"
+			chord := action
+			var job *database.Job
+			if idx := strings.Index(action, ":"); idx >= 0 {
+				chord = action[:idx]
+				jobID := action[idx+1:]
+				for _, j := range a.actionMenu.jobs {
+					if j.ID == jobID {
+						job = j
+						break
+					}
+				}
+			}
+			return a.dispatchAction(chord, job)
 		}
 		return a, nil
 	}
@@ -1126,6 +1143,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.actionMenu.Open(a.buildMenuItems())
 		return a, nil
 	case "?":
+		a.help.SetMenuItems(a.buildMenuItems())
 		a.help.Toggle()
 		return a, nil
 	case "`":
@@ -1210,9 +1228,21 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 	// Confirm step: waiting for third key press
 	if a.chord.prefix != "" && a.chord.action != "" {
 		if key == a.chord.action {
-			// Confirmed — execute
-			m, cmd := a.executeChord(a.chord.prefix, a.chord.action)
+			// Confirmed — build chord, resolve job if needed, execute
+			chord := strings.ToUpper(a.chord.prefix) + " " + strings.ToUpper(a.chord.action)
+			var job *database.Job
+			// Look up the item to check if it needs a job, re-validate filter
+			for _, item := range a.buildMenuItems() {
+				if item.Chord == chord && item.NeedsJob {
+					job = a.taskList.SelectedJob()
+					if job != nil && item.JobFilter != nil && !item.JobFilter(job) {
+						job = nil // job status changed during confirm window
+					}
+					break
+				}
+			}
 			a.chord = chordState{}
+			m, cmd := a.dispatchAction(chord, job)
 			return m, cmd, true
 		}
 		// Wrong key — reset and fall through to check if key starts a new chord
@@ -1241,81 +1271,77 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 }
 
 // processSecondKey handles the second key in a chord sequence.
+// It looks up the chord in buildMenuItems() instead of hardcoding valid keys.
 func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
-	switch prefix {
-	case "a":
-		switch key {
-		case "a", "i", "r", "t", "o":
-			m, cmd := a.executeChord(prefix, key)
-			a.chord = chordState{}
-			return m, cmd, true
-		case "c", "d":
-			// Confirm-required: enter confirm step
-			a.chord.action = key
-			a.chord.actionTime = time.Now()
-			if key == "d" {
-				if job := a.taskList.SelectedJob(); job != nil {
-					a.setFeedback(fmt.Sprintf("Press D to confirm delete \"%s\" (3s)", job.Title))
-				} else {
-					a.setFeedback("Press D to confirm delete (3s)")
-				}
-			} else {
-				if job := a.taskList.SelectedJob(); job != nil {
-					a.setFeedback(fmt.Sprintf("Press C to confirm cancel \"%s\" (3s)", job.Title))
-				} else {
-					a.setFeedback("Press C to confirm cancel (3s)")
-				}
-			}
-			return a, nil, true
-		}
-	case "r":
-		switch key {
-		case "c", "f", "v", "u":
-			m, cmd := a.executeChord(prefix, key)
-			a.chord = chordState{}
-			return m, cmd, true
-		case "p":
-			// Confirm-required: enter confirm step
-			a.chord.action = key
-			a.chord.actionTime = time.Now()
-			a.setFeedback("Press P to confirm restart (3s)")
-			return a, nil, true
-		}
-	case "o":
-		switch key {
-		case "f", "s", "w":
-			m, cmd := a.executeChord(prefix, key)
-			a.chord = chordState{}
-			return m, cmd, true
-		}
-	case "q":
-		if key == "q" {
-			return a, tea.Quit, true
+	// Special case: Q Q (quit) is not in buildMenuItems the same way
+	if prefix == "q" && key == "q" {
+		return a, tea.Quit, true
+	}
+
+	// Form the full chord string: prefix "a" + key "k" → "A K"
+	chord := strings.ToUpper(prefix) + " " + strings.ToUpper(key)
+	items := a.buildMenuItems()
+
+	// Find matching item
+	var item *ActionMenuItem
+	for i := range items {
+		if items[i].Chord == chord {
+			item = &items[i]
+			break
 		}
 	}
-	return a, nil, false
-}
-
-// executeChord executes a completed chord action.
-func (a *App) executeChord(prefix, action string) (tea.Model, tea.Cmd) {
-	switch prefix {
-	case "a":
-		return a.executeActionChord(action)
-	case "r":
-		return a.executeRequestChord(action)
-	case "o":
-		return a.executeOpenChord(action)
+	if item == nil {
+		return a, nil, false
 	}
-	return a, nil
+
+	// NeedsConfirm + NeedsJob: check job first, then enter confirm step
+	if item.NeedsConfirm && item.NeedsJob {
+		job := a.taskList.SelectedJob()
+		if job == nil || (item.JobFilter != nil && !item.JobFilter(job)) {
+			return a, nil, true // no valid job — consume key but do nothing
+		}
+		a.chord.action = key
+		a.chord.actionTime = time.Now()
+		a.setFeedback(fmt.Sprintf("Press %s to confirm %s \"%s\" (3s)",
+			strings.ToUpper(key), strings.ToLower(item.HintLabel), job.Title))
+		return a, nil, true
+	}
+
+	// NeedsConfirm (no job): enter confirm step
+	if item.NeedsConfirm {
+		a.chord.action = key
+		a.chord.actionTime = time.Now()
+		a.setFeedback(fmt.Sprintf("Press %s to confirm %s (3s)",
+			strings.ToUpper(key), strings.ToLower(item.HintLabel)))
+		return a, nil, true
+	}
+
+	// NeedsJob (no confirm): use selected job, check filter
+	if item.NeedsJob {
+		job := a.taskList.SelectedJob()
+		if job == nil || (item.JobFilter != nil && !item.JobFilter(job)) {
+			return a, nil, true // no valid job — consume key but do nothing
+		}
+		a.chord = chordState{}
+		m, cmd := a.dispatchAction(chord, job)
+		return m, cmd, true
+	}
+
+	// Direct action (no job, no confirm)
+	a.chord = chordState{}
+	m, cmd := a.dispatchAction(chord, nil)
+	return m, cmd, true
 }
 
-func (a *App) executeActionChord(action string) (tea.Model, tea.Cmd) {
-	switch action {
-	case "a":
+// dispatchAction executes a chord action. For job-specific actions, job comes from
+// the selected task (keyboard chords) or from the menu's job picker (menu flow).
+func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cmd) {
+	switch chord {
+	case "A A":
 		a.feedbackMsg = ""
 		a.addVideo.SetSize(a.width, a.height)
 		a.addVideo.Open()
-	case "i":
+	case "A I":
 		a.feedbackMsg = ""
 		a.importDlg.SetSize(a.width, a.height)
 		startDir := "."
@@ -1323,47 +1349,37 @@ func (a *App) executeActionChord(action string) (tea.Model, tea.Cmd) {
 			startDir = a.cfg.Paths.OutputDirectory
 		}
 		return a, a.importDlg.Open(startDir)
-	case "r":
-		if job := a.taskList.SelectedJob(); job != nil && a.OnRetryJob != nil {
-			if job.Status == database.StatusError || job.Status == database.StatusCancelled || job.Status == database.StatusCookies {
-				a.OnRetryJob(job.ID)
-				a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
-			}
+	case "A R":
+		if job != nil && a.OnRetryJob != nil {
+			a.OnRetryJob(job.ID)
+			a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
 		}
-	case "c":
-		if job := a.taskList.SelectedJob(); job != nil && a.OnCancelJob != nil {
-			if job.Status != database.StatusFinished && job.Status != database.StatusCancelled && job.Status != database.StatusError {
-				a.OnCancelJob(job.ID)
-				a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
-			}
+	case "A C":
+		if job != nil && a.OnCancelJob != nil {
+			a.OnCancelJob(job.ID)
+			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
 		}
-	case "d":
-		if job := a.taskList.SelectedJob(); job != nil && a.OnDeleteJob != nil {
+	case "A D":
+		if job != nil && a.OnDeleteJob != nil {
 			a.OnDeleteJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
 			a.taskList.MoveUp()
 		}
-	case "t":
-		if job := a.taskList.SelectedJob(); job != nil {
+	case "A T":
+		if job != nil {
 			a.openTrimForJob(job)
 		}
-	case "o":
+	case "A O":
 		a.filesDlg.SetSize(a.width, a.height)
 		a.filesDlg.Open()
 		return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
-	case "k":
+	case "A K":
 		if a.OnListClientTokens != nil {
 			a.clientTokensDlg.SetSize(a.width, a.height)
 			a.clientTokensDlg.Open()
 			return a, tea.Batch(a.fetchClientTokensCmd(), a.clientTokensDlg.SpinnerInit())
 		}
-	}
-	return a, nil
-}
-
-func (a *App) executeRequestChord(action string) (tea.Model, tea.Cmd) {
-	switch action {
-	case "c":
+	case "R C":
 		if a.OnRecheckCookies != nil {
 			a.setFeedback("Rechecking cookies...")
 			recheckFn := a.OnRecheckCookies
@@ -1372,7 +1388,7 @@ func (a *App) executeRequestChord(action string) (tea.Model, tea.Cmd) {
 				return cookieRecheckResultMsg{YouTubeAuth: ytAuth, TwitchAuth: twAuth}
 			}
 		}
-	case "f":
+	case "R F":
 		if a.OnForceRefreshCookies != nil {
 			a.setFeedback("Running browser cookie refresh...")
 			refreshFn := a.OnForceRefreshCookies
@@ -1381,7 +1397,7 @@ func (a *App) executeRequestChord(action string) (tea.Model, tea.Cmd) {
 				return cookieForceRefreshResultMsg{Success: ok, Err: err}
 			}
 		}
-	case "v":
+	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
 			return a, func() tea.Msg {
@@ -1392,7 +1408,7 @@ func (a *App) executeRequestChord(action string) (tea.Model, tea.Cmd) {
 				return updateCheckResultMsg{Info: info}
 			}
 		}
-	case "u":
+	case "R U":
 		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
 			ver := a.updateAvailable.Version
@@ -1402,31 +1418,23 @@ func (a *App) executeRequestChord(action string) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.setFeedback("No update available — use R V to check")
-	case "p":
+	case "R P":
 		if a.OnRestart != nil {
 			a.OnRestart()
 		}
-	}
-	return a, nil
-}
-
-func (a *App) executeOpenChord(action string) (tea.Model, tea.Cmd) {
-	switch action {
-	case "f":
-		if job := a.taskList.SelectedJob(); job != nil && a.OnOpenFolder != nil {
-			if canOpenFolder(job) {
-				a.OnOpenFolder(job.ID)
-				a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
-			}
+	case "O F":
+		if job != nil && a.OnOpenFolder != nil {
+			a.OnOpenFolder(job.ID)
+			a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
 		}
-	case "s":
-		if job := a.taskList.SelectedJob(); job != nil {
+	case "O S":
+		if job != nil {
 			if url := streamURL(job); url != "" {
 				openBrowser(url)
 				a.setFeedback("Opening: " + url)
 			}
 		}
-	case "w":
+	case "O W":
 		scheme := "http"
 		if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
 			scheme = "https"
@@ -1434,65 +1442,70 @@ func (a *App) executeOpenChord(action string) (tea.Model, tea.Cmd) {
 		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
 		a.setFeedback(fmt.Sprintf("Opening: %s", url))
 		openBrowser(url)
+	case "F":
+		a.handleFilter()
+	case "`":
+		if a.cfg != nil {
+			a.settings.SetSize(a.width, a.height)
+			a.settings.OnSave = a.OnSaveConfig
+			a.settings.OnRestart = a.OnRestart
+			a.settings.OnHashPassword = a.OnHashPassword
+			a.settings.OnVerifyPassword = a.OnVerifyPassword
+			a.settings.Open(a.cfg)
+		}
+	case "?":
+		a.help.SetMenuItems(a.buildMenuItems())
+		a.help.Toggle()
+	case "Q Q":
+		return a, tea.Quit
 	}
 	return a, nil
 }
 
 // chordFeedback builds contextual feedback for a chord prefix.
+// It derives available options from buildMenuItems() using HintLabel.
 func (a *App) chordFeedback(prefix string) string {
-	switch prefix {
-	case "a":
-		var parts []string
-		parts = append(parts, "A Add")
-		if job := a.taskList.SelectedJob(); job != nil {
-			if job.Status == database.StatusError || job.Status == database.StatusCancelled || job.Status == database.StatusCookies {
-				parts = append(parts, "R Retry")
-			}
-			if job.Status != database.StatusFinished && job.Status != database.StatusCancelled && job.Status != database.StatusError {
-				parts = append(parts, "C Cancel")
-			}
-			parts = append(parts, "D Delete")
-			if job.Status == database.StatusFinished && job.OutputFile != "" {
-				parts = append(parts, "T Trim")
-			}
-		}
-		parts = append(parts, "O Orphans")
-		return "Action: " + strings.Join(parts, " | ") + " (3s)"
-	case "r":
-		var parts []string
-		if a.OnRecheckCookies != nil {
-			parts = append(parts, "C Cookies")
-		}
-		if a.OnForceRefreshCookies != nil {
-			parts = append(parts, "F Force Refresh")
-		}
-		if a.OnCheckUpdate != nil {
-			parts = append(parts, "V Version")
-		}
-		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
-			parts = append(parts, "U Update")
-		}
-		if a.OnRestart != nil {
-			parts = append(parts, "P Restart")
-		}
-		if len(parts) == 0 {
-			return "Request: (none available) (3s)"
-		}
-		return "Request: " + strings.Join(parts, " | ") + " (3s)"
-	case "o":
-		var parts []string
-		if job := a.taskList.SelectedJob(); job != nil && canOpenFolder(job) {
-			parts = append(parts, "F Folder")
-		}
-		if job := a.taskList.SelectedJob(); job != nil && canOpenStream(job) {
-			parts = append(parts, "S Stream")
-		}
-		parts = append(parts, "W Web")
-		return "Open: " + strings.Join(parts, " | ") + " (3s)"
-	case "q":
+	if prefix == "q" {
 		return "Quit: Q Confirm (3s)"
 	}
-	return ""
+
+	upperPrefix := strings.ToUpper(prefix)
+	items := a.buildMenuItems()
+	job := a.taskList.SelectedJob()
+
+	var parts []string
+	for i := range items {
+		item := &items[i]
+		// Match items whose chord starts with this prefix (e.g. "A " for prefix "a")
+		if !strings.HasPrefix(item.Chord, upperPrefix+" ") {
+			continue
+		}
+		// For NeedsJob items, check if selected job passes the filter
+		if item.NeedsJob && (job == nil || (item.JobFilter != nil && !item.JobFilter(job))) {
+			continue
+		}
+		// Extract the second key character from the chord (e.g. "A K" → "K")
+		secondKey := item.Chord[len(upperPrefix)+1:]
+		parts = append(parts, secondKey+" "+item.HintLabel)
+	}
+
+	// Category label from prefix
+	var label string
+	switch prefix {
+	case "a":
+		label = "Action"
+	case "r":
+		label = "Request"
+	case "o":
+		label = "Open"
+	default:
+		label = strings.ToUpper(prefix)
+	}
+
+	if len(parts) == 0 {
+		return label + ": (none available) (3s)"
+	}
+	return label + ": " + strings.Join(parts, " | ") + " (3s)"
 }
 
 // canOpenFolder returns true if the job's folder can be opened.
@@ -1564,168 +1577,65 @@ func (a *App) openTrimForJob(job *database.Job) {
 }
 
 // buildMenuItems builds context-sensitive action menu items.
+// This is the single source of truth for all chords, menu entries, feedback hints, and help text.
 func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
-		{Chord: "A A", Label: "Add Video", Category: "Action"},
-		{Chord: "A I", Label: "Import Archive", Category: "Action"},
-		{Chord: "A R", Label: "Retry Job", Category: "Action", NeedsJob: true,
+		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action"},
+		{Chord: "A I", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
+		{Chord: "A R", Label: "Retry Job", HintLabel: "Retry", Category: "Action", NeedsJob: true,
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
 			}},
-		{Chord: "A C", Label: "Cancel Job", Category: "Action", NeedsJob: true,
+		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			JobFilter: func(j *database.Job) bool {
 				return j.Status != database.StatusFinished && j.Status != database.StatusCancelled && j.Status != database.StatusError
 			}},
-		{Chord: "A D", Label: "Delete Job", Category: "Action", NeedsJob: true},
-		{Chord: "A T", Label: "Trim Video", Category: "Action", NeedsJob: true,
+		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true},
+		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusFinished && j.OutputFile != ""
 			}},
-		{Chord: "A O", Label: "Browse Orphaned Files", Category: "Action"},
+		{Chord: "A O", Label: "Browse Orphaned Files", HintLabel: "Orphans", Category: "Action"},
 	}
 
 	if a.OnListClientTokens != nil {
-		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", Category: "Action"})
+		items = append(items, ActionMenuItem{Chord: "A K", Label: "Manage Client Tokens", HintLabel: "Tokens", Category: "Action"})
 	}
 
 	// Request — conditional on callbacks being set
 	if a.OnRecheckCookies != nil {
-		items = append(items, ActionMenuItem{Chord: "R C", Label: "Recheck Cookies", Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R C", Label: "Recheck Cookies", HintLabel: "Cookies", Category: "Request"})
 	}
 	if a.OnForceRefreshCookies != nil {
-		items = append(items, ActionMenuItem{Chord: "R F", Label: "Force Cookie Refresh", Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R F", Label: "Force Cookie Refresh", HintLabel: "Force Refresh", Category: "Request"})
 	}
 	if a.OnCheckUpdate != nil {
-		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})
 	}
 	if a.updateAvailable != nil && a.OnApplyUpdate != nil {
-		items = append(items, ActionMenuItem{Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName, Category: "Request"})
+		items = append(items, ActionMenuItem{Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName, HintLabel: "Update", Category: "Request"})
 	}
 	if a.OnRestart != nil {
-		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", Category: "Request", NeedsConfirm: true})
+		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", HintLabel: "Restart", Category: "Request", NeedsConfirm: true})
 	}
 
 	// Open
 	items = append(items,
-		ActionMenuItem{Chord: "O F", Label: "Open Folder", Category: "Open", NeedsJob: true,
+		ActionMenuItem{Chord: "O F", Label: "Open Folder", HintLabel: "Folder", Category: "Open", NeedsJob: true,
 			JobFilter: func(j *database.Job) bool { return canOpenFolder(j) }},
-		ActionMenuItem{Chord: "O S", Label: "Open Stream Page", Category: "Open", NeedsJob: true,
+		ActionMenuItem{Chord: "O S", Label: "Open Stream Page", HintLabel: "Stream", Category: "Open", NeedsJob: true,
 			JobFilter: func(j *database.Job) bool { return canOpenStream(j) }},
-		ActionMenuItem{Chord: "O W", Label: "Open Web UI", Category: "Open"},
+		ActionMenuItem{Chord: "O W", Label: "Open Web UI", HintLabel: "Web", Category: "Open"},
 	)
 
 	// Filter + Other
 	items = append(items,
-		ActionMenuItem{Chord: "F", Label: "Cycle Filter", Category: "Filter"},
-		ActionMenuItem{Chord: "`", Label: "Settings", Category: "Other"},
-		ActionMenuItem{Chord: "?", Label: "Help", Category: "Other"},
-		ActionMenuItem{Chord: "Q Q", Label: "Quit", Category: "Other"},
+		ActionMenuItem{Chord: "F", Label: "Cycle Filter", HintLabel: "Filter", Category: "Filter"},
+		ActionMenuItem{Chord: "`", Label: "Settings", HintLabel: "Settings", Category: "Other"},
+		ActionMenuItem{Chord: "?", Label: "Help", HintLabel: "Help", Category: "Other"},
+		ActionMenuItem{Chord: "Q Q", Label: "Quit", HintLabel: "Quit", Category: "Other"},
 	)
 	return items
-}
-
-// dispatchMenuAction handles an action returned from the action menu.
-func (a *App) dispatchMenuAction(action string) (tea.Model, tea.Cmd) {
-	// Parse "CHORD" or "CHORD:jobID"
-	chord := action
-	jobID := ""
-	if idx := strings.Index(action, ":"); idx >= 0 {
-		chord = action[:idx]
-		jobID = action[idx+1:]
-	}
-
-	// Find the job by ID for job-specific actions
-	var job *database.Job
-	if jobID != "" {
-		for _, j := range a.actionMenu.jobs {
-			if j.ID == jobID {
-				job = j
-				break
-			}
-		}
-	}
-
-	switch chord {
-	case "A A":
-		a.feedbackMsg = ""
-		a.addVideo.SetSize(a.width, a.height)
-		a.addVideo.Open()
-	case "A I":
-		a.feedbackMsg = ""
-		a.importDlg.SetSize(a.width, a.height)
-		startDir := "."
-		if a.cfg != nil && a.cfg.Paths.OutputDirectory != "" {
-			startDir = a.cfg.Paths.OutputDirectory
-		}
-		return a, a.importDlg.Open(startDir)
-	case "A R":
-		if job != nil && a.OnRetryJob != nil {
-			a.OnRetryJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
-		}
-	case "A C":
-		if job != nil && a.OnCancelJob != nil {
-			a.OnCancelJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
-		}
-	case "A D":
-		if job != nil && a.OnDeleteJob != nil {
-			a.OnDeleteJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
-		}
-	case "A T":
-		if job != nil {
-			a.openTrimForJob(job)
-		}
-	case "A O":
-		a.filesDlg.SetSize(a.width, a.height)
-		a.filesDlg.Open()
-		return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
-	case "A K":
-		a.clientTokensDlg.SetSize(a.width, a.height)
-		a.clientTokensDlg.Open()
-		return a, tea.Batch(a.fetchClientTokensCmd(), a.clientTokensDlg.SpinnerInit())
-	case "R C":
-		return a.executeRequestChord("c")
-	case "R F":
-		return a.executeRequestChord("f")
-	case "R V":
-		return a.executeRequestChord("v")
-	case "R U":
-		return a.executeRequestChord("u")
-	case "R P":
-		return a.executeRequestChord("p")
-	case "O F":
-		if job != nil && a.OnOpenFolder != nil {
-			a.OnOpenFolder(job.ID)
-			a.setFeedback(fmt.Sprintf("Opening folder for: %s", job.Title))
-		}
-	case "O S":
-		if job != nil {
-			if url := streamURL(job); url != "" {
-				openBrowser(url)
-				a.setFeedback("Opening: " + url)
-			}
-		}
-	case "O W":
-		return a.executeOpenChord("w")
-	case "F":
-		a.handleFilter()
-	case "`":
-		if a.cfg != nil {
-			a.settings.SetSize(a.width, a.height)
-			a.settings.OnSave = a.OnSaveConfig
-			a.settings.OnRestart = a.OnRestart
-			a.settings.OnHashPassword = a.OnHashPassword
-			a.settings.OnVerifyPassword = a.OnVerifyPassword
-			a.settings.Open(a.cfg)
-		}
-	case "?":
-		a.help.Toggle()
-	case "Q Q":
-		return a, tea.Quit
-	}
-	return a, nil
 }
 
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -1996,16 +1906,21 @@ func (t *internalTokenTransport) RoundTrip(req *http.Request) (*http.Response, e
 // apiClient returns an HTTP client suitable for local API calls.
 // Injects the internal CSRF bypass token. When HTTPS is enabled, TLS
 // verification is skipped since the server uses a self-signed certificate.
+// The client is cached on first call and reused for all subsequent requests.
 func (a *App) apiClient() *http.Client {
+	if a.cachedClient != nil {
+		return a.cachedClient
+	}
 	base := http.DefaultTransport
 	if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
 		base = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
 	}
-	return &http.Client{
+	a.cachedClient = &http.Client{
 		Transport: &internalTokenTransport{base: base, token: a.internalToken},
 	}
+	return a.cachedClient
 }
 
 // addVideoCmd creates a job by POSTing to the local API (matches TS TUI behavior).
@@ -2052,7 +1967,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 
 		jsonBody, _ := json.Marshal(body)
 		url := fmt.Sprintf("%s/api/jobs", baseURL)
-		resp, err := client.Post(url, "application/json", strings.NewReader(string(jsonBody)))
+		resp, err := client.Post(url, "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
 			return addVideoResultMsg{Feedback: "Failed to connect to server", IsError: true}
 		}
@@ -2140,13 +2055,14 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		fileData, err := os.ReadFile(path)
+		f, err := os.Open(path)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 		}
+		defer f.Close()
 
 		url := fmt.Sprintf("%s/api/import", baseURL)
-		req, err := http.NewRequest("POST", url, strings.NewReader(string(fileData)))
+		req, err := http.NewRequest("POST", url, f)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 		}

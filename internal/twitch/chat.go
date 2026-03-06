@@ -706,21 +706,23 @@ func (cd *ChatDownloader) appendToFile(msgs []TwitchChatMessage) error {
 	}
 
 	// Build append content
-	var appendStr string
+	var sb strings.Builder
 	if hasExisting {
-		appendStr = ",\n"
+		sb.WriteString(",\n")
 	}
 	for i, msg := range msgs {
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
 			continue
 		}
-		appendStr += "    " + string(msgBytes)
+		sb.WriteString("    ")
+		sb.Write(msgBytes)
 		if i < len(msgs)-1 {
-			appendStr += ",\n"
+			sb.WriteString(",\n")
 		}
 	}
-	appendStr += "\n  ]\n}"
+	sb.WriteString("\n  ]\n}")
+	appendStr := sb.String()
 
 	// Truncate at ']' position, then write new content
 	if err := f.Truncate(bracketBytePos); err != nil {
@@ -856,7 +858,7 @@ func (cd *ChatDownloader) MarkStreamEnded() {
 
 // parseIRCTags parses IRC tags from a string like "key=value;key2=value2".
 func parseIRCTags(s string) map[string]string {
-	tags := make(map[string]string)
+	tags := make(map[string]string, 16)
 	if s == "" {
 		return tags
 	}
