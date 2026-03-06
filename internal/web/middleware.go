@@ -87,6 +87,16 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.H
 				return
 			}
 
+			// Exempt loopback-only POT provider endpoints from CSRF.
+			// These are called by yt-dlp (Python scripts) which don't send
+			// Origin/Referer headers. The routes themselves enforce LoopbackOnly,
+			// so CSRF protection is redundant.
+			p := r.URL.Path
+			if p == "/get_pot" || p == "/invalidate_caches" || p == "/invalidate_it" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Same-process clients (TUI) send the internal token to bypass CSRF.
 			// Browsers cannot set custom headers cross-origin without a CORS
 			// preflight, which the server does not grant, so this is safe.
