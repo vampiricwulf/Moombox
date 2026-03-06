@@ -265,9 +265,14 @@ sl-badge.status.cookies::part(base) {
 
 .job-progress-bar {
     --height: 4px;
-    --indicator-color: var(--sl-color-primary-600);
     --indicator-transition-duration: 0.3s;
 }
+.video-item[data-status="downloading"] .job-progress-bar { --indicator-color: var(--status-downloading); }
+.video-item[data-status="live"] .job-progress-bar { --indicator-color: var(--status-live); }
+.video-item[data-status="muxing"] .job-progress-bar { --indicator-color: var(--status-muxing); }
+.video-item[data-status="upcoming"] .job-progress-bar { --indicator-color: var(--status-upcoming); }
+.video-item[data-status="error"] .job-progress-bar { --indicator-color: var(--status-error); }
+.video-item[data-status="cookies"] .job-progress-bar { --indicator-color: var(--status-cookies); }
 
 /* Archived table - same layout as #video-table */
 .archived-table {

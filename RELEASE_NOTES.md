@@ -1,5 +1,3 @@
 ### Improvements
 
-- Synchronized status colors across TUI and Web UI — both now use the same palette for all job states
-- Updated TUI status icons: Muxing `⎈`, Cancelled `⊘`, COOKIES? `⏣` (all single-width Unicode for proper column alignment)
-- Live status now shares Downloading's color and icon (`▼`) since it transitions instantly
+- Web dashboard progress bars now match the job's status color instead of using a fixed blue
