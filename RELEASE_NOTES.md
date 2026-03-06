@@ -1,16 +1,21 @@
+### Features
+
+- **Persistent client tokens** — remote users stay logged in across server restarts. Every successful login issues a scrypt-hashed token stored in SQLite; on restart, the middleware transparently creates a fresh session from the persistent cookie. Tokens are manageable from both the TUI (`A K` chord) and Web UI (Settings → Connected Clients). Logout revokes that browser's token; password change/remove clears all tokens.
+
 ### Improvements
 
-- Adopt charmbracelet ecosystem components across the TUI: `bubbles/spinner` for loading states, `bubbles/table` for format selection, `bubbles/list` for task list, files dialog, and action menu
-- Animated loading spinners in all dialogs (add video, import, trim, FFmpeg install, setup wizard, orphaned files)
-- Format selection now uses a proper table with column headers, row highlighting, and built-in scrolling
-- Progress tick rate increased to ~60fps during active downloads for smoother updates (adaptive: drops to 500ms when idle)
-- Split import dialog into its own component for cleaner separation from add-video flow
-- Shared text input utilities extracted to reduce code duplication across dialogs
+- Setup wizard: server-side yt-dlp plugin install (runs before restart instead of fire-and-forget client fetch), HTTPS toggle in web setup, consolidated FFmpeg path-check helpers
+- Progress reporting now shows real counts on every event instead of artificial increments (Twitch chat was every 100, VOD chat every 500, catch-up segments every 10)
+- ProgressTracker coalesce interval reduced from 100ms to 16ms to match TUI 60fps tick rate
 
 ### Bug Fixes
 
-- Fix viewport arrow key navigation in job details panel (KeyMap was zeroed out, disabling all keys)
-- Fix log viewer letter keys (j/k/d/u/f/b) conflicting with app chord bindings
-- Remove misleading `MouseWheelEnabled` on log viewer (mouse scroll handled explicitly)
-- Fix cipher solver for YouTube's restructured player.js
-- Exempt POT provider endpoints from CSRF middleware
+- Fix setup wizard passing stale HTTPS flag from config instead of the wizard's own value
+- Fix setup wizard cookie extraction freezing the TUI (now runs async)
+- Fix setup wizard silently swallowing auto-cookie errors (now surfaces them in the UI)
+- Fix re-login accumulating stale client tokens (old token is revoked before issuing a new one)
+
+### Internal
+
+- Database schema bumped to v6 (`client_tokens` table with prefix index)
+- Token hash format uses `salt_hex:hash_hex` (no `scrypt:` prefix) to distinguish from password hashes
