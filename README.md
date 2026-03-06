@@ -163,28 +163,56 @@ The TUI displays a three-panel layout: task list + job details (top) and live lo
 
 ### Keyboard Controls
 
+The TUI uses a two-key chord system. Press a prefix key, then the action key within 3 seconds. Confirm-required actions (marked with ×2) need a third keypress.
+
+**Action (A)**
+
+| Chord | Action |
+|-------|--------|
+| A A | Add video |
+| A I | Import archive |
+| A R | Retry failed/cancelled job |
+| A C C | Cancel active job (confirm) |
+| A D D | Delete job (confirm) |
+| A T | Trim finished video |
+| A O | Browse orphaned files |
+| A K | Manage client tokens |
+
+**Request (R)**
+
+| Chord | Action |
+|-------|--------|
+| R C | Recheck cookie authentication |
+| R F | Force browser cookie refresh |
+| R V | Check for updates |
+| R U | Apply pending update |
+| R P P | Restart program (confirm) |
+
+**Open (O)**
+
+| Chord | Action |
+|-------|--------|
+| O F | Open output/staging folder |
+| O S | Open stream page in browser |
+| O W | Open web dashboard |
+
+**Quick Keys**
+
 | Key | Action |
 |-----|--------|
-| Tab | Switch focus between Tasks/Details/Logs |
-| Up/Down | Navigate tasks or scroll panels |
-| Enter | Expand/collapse archived jobs |
-| A | Add video (Tab cycles: URL, Advanced, Import) |
-| C | Cancel selected job |
-| R | Retry failed job |
-| D | Delete job (press twice to confirm) |
 | F | Cycle status filter (All/Active/Errors/Finished) |
-| T | Trim a finished video |
-| O | Open output folder (finished jobs) |
-| W | Open web dashboard in browser |
-| ` | Open settings panel |
+| M | Open action menu |
+| Q Q | Quit |
+| Ctrl+C | Quit immediately |
+| Tab | Switch focus between Tasks/Details/Logs |
+| ` | Open settings |
 | ? | Toggle help overlay |
-| Q | Quit |
 
-Mouse support: click to select tasks, scroll wheel to navigate.
+**Navigation**: Up/Down to select/scroll, PgUp/PgDn for log pages, Enter to expand/collapse archives. Mouse support: click to select tasks, scroll wheel to navigate.
 
 ### Add Video Dialog
 
-Press **A** to open the Add Video dialog. By default it's in quick-add mode — paste a URL and press Enter. Press **Tab** to cycle through modes:
+Press **A A** to open the Add Video dialog. By default it's in quick-add mode — paste a URL and press Enter. Press **Tab** to cycle through modes:
 
 - **Quick Add** — Paste a YouTube or Twitch URL and press Enter
 - **Advanced** — 5-step wizard: URL, Video Format, Audio Format, Timestamps, Confirm

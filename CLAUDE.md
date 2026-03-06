@@ -112,7 +112,7 @@ The exe icon and version info are embedded via `.syso` files generated at build 
 
 Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary, all code under `internal/`.
 
-### Process model (cmd/moombox/main.go, ~1925 lines)
+### Process model (cmd/moombox/main.go, ~2025 lines)
 
 Moombox uses a **launcher/supervisor pattern**. The binary checks `_MOOMBOX_CHILD` env var on startup:
 - **Without it** → launcher mode: spawns itself as a child, waits, respawns on exit code 42
@@ -192,7 +192,7 @@ db.UpdateJobFields(jobID, map[string]any{
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`
 Error paths: any state → `Error`, `Cancelled`, or `COOKIES?`
 
-`JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings (not `time.Time`). Optional numeric fields use pointers (`*int`, `*int64`). Database schema is at **v5** — includes a `segments` table for quality-split multi-segment recordings.
+`JobStatus` is `type JobStatus string`. Timestamps are ISO 8601 strings (not `time.Time`). Optional numeric fields use pointers (`*int`, `*int64`). Database schema is at **v6** — v5 added a `segments` table for quality-split multi-segment recordings, v6 added `client_tokens` for persistent login tokens.
 
 ### Dependency injection via deps structs
 ```go
@@ -233,6 +233,13 @@ All REST endpoints use `/api/` prefix (no version number). Route registration an
 
 ### Panic recovery
 All spawned goroutines use inline `defer func() { if r := recover(); r != nil { ... } }()`. No shared helper — pattern is consistently inline. HTTP handlers are covered by `RecoveryMiddleware` in `web/server.go`. Database subscriber callbacks use `safeCallJobUpdate`/`safeCallJobsChange` wrappers.
+
+### TUI chord system
+`buildMenuItems()` in `app.go` is the **single source of truth** for all keyboard chords, the action menu (M key), chord feedback hints, and help text. `dispatchAction(chord, job)` is the unified execution handler. Adding a new chord requires changes in only two places: the item in `buildMenuItems()` and a case in `dispatchAction()`.
+
+Chord prefixes: **A** (Action), **R** (Request), **O** (Open), **Q** (Quit). Single-key shortcuts: **F** (Filter), **M** (Menu), **`** (Settings), **?** (Help). Each `ActionMenuItem` has `Chord`, `Label`, `HintLabel`, `Category`, `NeedsJob`, `NeedsConfirm`, and `JobFilter` fields. The chord routing (`processSecondKey`), feedback hints (`chordFeedback`), and help text (`HelpModel.SetMenuItems`) all derive from this list.
+
+Confirm chords (e.g. A C, A D, R P) require a third keypress matching the second key within 3 seconds. Job-specific chords validate the selected job against the item's `JobFilter` before executing.
 
 ## Web UI
 
