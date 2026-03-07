@@ -48,6 +48,11 @@ jobs:
           $commit = git rev-parse --short HEAD
           go build -ldflags "-s -w -X main.version=$version -X main.commit=$commit" -o Moombox.exe ./cmd/moombox
 
+      - name: Sign binary
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: go run ./cmd/sign Moombox.exe
+
       - name: Build release body
         shell: bash
         env:
@@ -75,4 +80,6 @@ jobs:
         with:
           body_path: release_body.md
           generate_release_notes: ${{ env.use_github_notes == 'true' }}
-          files: Moombox.exe
+          files: |
+            Moombox.exe
+            Moombox.exe.sig

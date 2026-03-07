@@ -21,10 +21,11 @@ type logger interface {
 
 // ReleaseInfo holds information about an available update.
 type ReleaseInfo struct {
-	Version      string `json:"version"`      // "2.0.16" (stripped "v" prefix)
-	TagName      string `json:"tagName"`      // "v2.0.16"
-	DownloadURL  string `json:"downloadUrl"`  // asset browser_download_url for Moombox.exe
-	ReleaseNotes string `json:"releaseNotes"` // body from GitHub release
+	Version      string `json:"version"`                // "2.0.16" (stripped "v" prefix)
+	TagName      string `json:"tagName"`                // "v2.0.16"
+	DownloadURL  string `json:"downloadUrl"`            // asset browser_download_url for Moombox.exe
+	SignatureURL string `json:"signatureUrl,omitempty"` // asset browser_download_url for Moombox.exe.sig
+	ReleaseNotes string `json:"releaseNotes"`           // body from GitHub release
 	PublishedAt  string `json:"publishedAt"`
 }
 
@@ -107,16 +108,21 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		return nil, nil
 	}
 
-	// Find the Moombox.exe asset
-	var downloadURL string
+	// Find the Moombox.exe and Moombox.exe.sig assets
+	var downloadURL, signatureURL string
 	for _, asset := range release.Assets {
-		if strings.EqualFold(asset.Name, "Moombox.exe") {
+		switch {
+		case strings.EqualFold(asset.Name, "Moombox.exe"):
 			downloadURL = asset.BrowserDownloadURL
-			break
+		case strings.EqualFold(asset.Name, "Moombox.exe.sig"):
+			signatureURL = asset.BrowserDownloadURL
 		}
 	}
 	if downloadURL == "" {
 		return nil, fmt.Errorf("no Moombox.exe asset found in release %s", release.TagName)
+	}
+	if signatureURL == "" {
+		return nil, fmt.Errorf("no signature file found in release %s", release.TagName)
 	}
 
 	u.logger.Info("[Updater] Update available",
@@ -128,6 +134,7 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		Version:      remoteVersion,
 		TagName:      release.TagName,
 		DownloadURL:  downloadURL,
+		SignatureURL: signatureURL,
 		ReleaseNotes: release.Body,
 		PublishedAt:  release.PublishedAt,
 	}, nil
@@ -147,6 +154,23 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	if err := u.downloadFile(ctx, release.DownloadURL, newPath); err != nil {
 		os.Remove(newPath)
 		return fmt.Errorf("download failed: %w", err)
+	}
+
+	// Download and verify signature
+	if release.SignatureURL != "" {
+		sigPath := newPath + ".sig"
+		if err := u.downloadFile(ctx, release.SignatureURL, sigPath); err != nil {
+			os.Remove(newPath)
+			return fmt.Errorf("signature download failed: %w", err)
+		}
+
+		if err := VerifySignature(newPath, sigPath); err != nil {
+			os.Remove(newPath)
+			os.Remove(sigPath)
+			return fmt.Errorf("signature verification failed: %w", err)
+		}
+		os.Remove(sigPath)
+		u.logger.Info("[Updater] Signature verified", "version", release.Version)
 	}
 
 	// Rename current exe to .old
@@ -177,20 +201,19 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	return nil
 }
 
-// CleanupOldBinary removes .old binaries left over from previous updates.
-// This handles the edge case where the launcher was killed before it could
-// rename .old → .exe~ (the launcher handles .exe~ cleanup itself).
+// CleanupOldBinary removes stale files left over from previous updates:
+// .old (previous binary), .new (interrupted download), .new.sig (interrupted verification).
 func (u *Updater) CleanupOldBinary() {
-	for _, suffix := range []string{".old"} {
+	for _, suffix := range []string{".old", ".new", ".new.sig"} {
 		path := u.exePath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {
-				u.logger.Warn("[Updater] Failed to remove old binary",
+				u.logger.Warn("[Updater] Failed to remove stale file",
 					"path", path,
 					"error", err.Error(),
 				)
 			} else {
-				u.logger.Info("[Updater] Cleaned up old binary", "path", path)
+				u.logger.Info("[Updater] Cleaned up stale file", "path", path)
 			}
 		}
 	}
