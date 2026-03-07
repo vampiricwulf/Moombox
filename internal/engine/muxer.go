@@ -107,16 +107,26 @@ func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string
 	needsTwoPass := needsEncode && opts.TwoPass && opts.VideoBitrate > 0
 
 	if needsTwoPass {
-		return m.runTwoPassEncode(ctx, videoPath, audioPath, outputPath, opts)
+		err := m.runTwoPassEncode(ctx, videoPath, audioPath, outputPath, opts)
+		if err != nil {
+			os.Remove(outputPath)
+		}
+		return err
 	}
 
 	args := m.buildArgs(videoPath, audioPath, outputPath, opts, needsEncode)
 
 	m.logger.Debug("ffmpeg", "args", strings.Join(args, " "))
+	var err error
 	if opts != nil && opts.ProgressFn != nil && hasTrim(opts) && opts.TrimDuration > 0 {
-		return m.runFFmpegWithProgress(ctx, args, opts.TrimDuration, opts.ProgressFn)
+		err = m.runFFmpegWithProgress(ctx, args, opts.TrimDuration, opts.ProgressFn)
+	} else {
+		err = m.runFFmpeg(ctx, args)
 	}
-	return m.runFFmpeg(ctx, args)
+	if err != nil {
+		os.Remove(outputPath)
+	}
+	return err
 }
 
 // Trim creates a trimmed version of a file.
@@ -209,12 +219,12 @@ func (m *Muxer) appendEncodeArgs(args []string, audioPath string, opts *TrimOpti
 }
 
 func (m *Muxer) runTwoPassEncode(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions) error {
-	passLogFile := filepath.Join(os.TempDir(), fmt.Sprintf("moombox-2pass-%d", time.Now().UnixMilli()))
-	defer func() {
-		// Clean up passlog files
-		os.Remove(passLogFile + "-0.log")
-		os.Remove(passLogFile + "-0.log.mbtree")
-	}()
+	passLogDir, err := os.MkdirTemp("", "moombox-2pass-*")
+	if err != nil {
+		return fmt.Errorf("create passlog temp dir: %w", err)
+	}
+	passLogFile := filepath.Join(passLogDir, "passlog")
+	defer os.RemoveAll(passLogDir)
 
 	// Pass 1: Analysis
 	args1 := []string{"-y"}
@@ -283,9 +293,10 @@ func (m *Muxer) runFFmpeg(ctx context.Context, args []string) error {
 	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
 	cmd.Stdout = nil
 
-	// Capture stderr for error reporting
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
+	// Capture stderr for error reporting with a 1MB cap.
+	// If output exceeds the cap, only the last 512KB is kept.
+	stderrBuf := &cappedBuffer{maxSize: 1 << 20, keepSize: 512 << 10}
+	cmd.Stderr = stderrBuf
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -301,6 +312,29 @@ func (m *Muxer) runFFmpeg(ctx context.Context, args []string) error {
 	}
 
 	return nil
+}
+
+// cappedBuffer is an io.Writer that caps its size. When the buffer exceeds
+// maxSize, it truncates to keep only the last keepSize bytes.
+type cappedBuffer struct {
+	buf      []byte
+	maxSize  int
+	keepSize int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.buf = append(c.buf, p...)
+	if len(c.buf) > c.maxSize {
+		// Copy to a new slice so the old backing array can be GC'd
+		tail := c.buf[len(c.buf)-c.keepSize:]
+		c.buf = make([]byte, len(tail))
+		copy(c.buf, tail)
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string {
+	return string(c.buf)
 }
 
 // TrimSegmentInput describes one segment for the TrimAndConcat pipeline.
@@ -326,8 +360,8 @@ func (m *Muxer) TrimAndConcat(ctx context.Context, segments []TrimSegmentInput, 
 	}
 
 	// Multi-segment: trim each to intermediate, then concat
-	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("moombox-trim-%d", time.Now().UnixMilli()))
-	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+	tempDir, err := os.MkdirTemp("", "moombox-trim-*")
+	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
@@ -543,8 +577,8 @@ func (m *Muxer) TrimAndConcatWithProgress(ctx context.Context, segments []TrimSe
 
 	const encodePortion = 0.95 // 95% of progress for encoding, 5% for concat
 
-	tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("moombox-trim-%d", time.Now().UnixMilli()))
-	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+	tempDir, err := os.MkdirTemp("", "moombox-trim-*")
+	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir)

@@ -1,6 +1,7 @@
 package twitch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,10 +19,10 @@ import (
 )
 
 const (
-	chatMaxConsecutiveErrs  = 20
-	chatDedupMax            = 5000
-	chatFlushThresholdCount = 50_000
-	chatSaveInterval        = 1 * time.Second
+	chatMaxConsecutiveErrs = 20
+	chatDedupMax           = 5000
+	chatSaveInterval       = 1 * time.Second
+	messageCountWidth      = 20 // Fixed-width padding for messageCount in JSON header
 )
 
 // ChatDownloader connects to Twitch IRC and records live chat messages.
@@ -209,10 +210,13 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		// Clear resume state on successful completion (matches TS clearResumeState)
 		cd.clearResumeState()
 
-		// Inject third-party emotes (7TV, BTTV, FFZ) after final flush
+		// Inject third-party emotes (7TV, BTTV, FFZ) after final flush.
+		// Use a fresh context — the original ctx may already be cancelled.
 		if cd.totalCount > 0 && cd.emoteResolver != nil && cd.channelID != "" {
 			cd.logger.Info("resolving emotes for Twitch chat", "channelID", cd.channelID)
-			emoteData := cd.emoteResolver.Resolve(ctx, cd.channelID, cd.channelLogin)
+			emoteCtx, emoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			emoteData := cd.emoteResolver.Resolve(emoteCtx, cd.channelID, cd.channelLogin)
+			emoteCancel()
 			if emoteData != nil {
 				if err := EnrichWithEmotes(cd.outputPath, emoteData); err != nil {
 					cd.logger.Warn("emote injection failed", "err", err)
@@ -232,7 +236,8 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 
 		if reconnectAttempts > 0 {
 			// Exponential backoff: 1000 * 2^attempts, capped at 30s (matches TypeScript)
-			delayMs := 1000 * (1 << reconnectAttempts)
+			shift := min(reconnectAttempts, 15) // cap shift to prevent overflow
+			delayMs := 1000 * (1 << shift)
 			if delayMs > 30000 {
 				delayMs = 30000
 			}
@@ -267,6 +272,8 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		return fmt.Errorf("connect IRC: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "done")
+
+	conn.SetReadLimit(512 * 1024) // 512KB cap on incoming IRC messages
 
 	// Authenticate
 	if cd.authToken != "" {
@@ -331,7 +338,9 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 
 			// Handle PING
 			if strings.HasPrefix(line, "PING") {
-				conn.Write(ctx, websocket.MessageText, []byte("PONG :tmi.twitch.tv"))
+				if err := conn.Write(ctx, websocket.MessageText, []byte("PONG :tmi.twitch.tv")); err != nil {
+					cd.logger.Warn("IRC PONG write failed", "err", err)
+				}
 				continue
 			}
 
@@ -633,6 +642,7 @@ func (cd *ChatDownloader) writeFullChatFile(msgs []TwitchChatMessage, count int)
 	if err != nil {
 		return err
 	}
+	data = padMessageCountJSON(data)
 
 	tmpPath := cd.outputPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
@@ -761,29 +771,32 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	}
 	header := string(headerBuf[:n])
 
-	// Replace messageCount value
-	mcStart := strings.Index(header, `"messageCount":`)
-	if mcStart >= 0 {
-		mcValStart := mcStart + len(`"messageCount":`)
-		for mcValStart < len(header) && (header[mcValStart] == ' ' || header[mcValStart] == '\t') {
-			mcValStart++
-		}
-		mcValEnd := mcValStart
-		for mcValEnd < len(header) && header[mcValEnd] >= '0' && header[mcValEnd] <= '9' {
-			mcValEnd++
-		}
-		if mcValEnd > mcValStart {
-			newVal := strconv.Itoa(cd.totalCount)
-			header = header[:mcValStart] + newVal + header[mcValEnd:]
-		}
-	}
+	// Replace messageCount value (padded to fixed width)
+	header = replaceMessageCount(header, cd.totalCount)
 
 	// Replace downloadedAt value (matches TS: header.replace(/"downloadedAt": "[^"]*"/, ...))
 	replaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
 
+	// With padded messageCount, the header size should be constant.
+	// Fallback handles legacy files written before padding was added.
 	updatedBytes := []byte(header)
 	if len(updatedBytes) == n {
 		f.WriteAt(updatedBytes, 0)
+	} else if len(updatedBytes) > n {
+		// Header grew — must read rest BEFORE writing header, since the new
+		// header is longer and would overwrite the first byte(s) of the rest data.
+		restSize := info.Size() - int64(n)
+		var restBuf []byte
+		if restSize > 0 {
+			restBuf = make([]byte, restSize)
+			nRest, _ := f.ReadAt(restBuf, int64(n))
+			restBuf = restBuf[:nRest]
+		}
+		f.WriteAt(updatedBytes, 0)
+		if len(restBuf) > 0 {
+			f.WriteAt(restBuf, int64(len(updatedBytes)))
+		}
+		f.Truncate(int64(len(updatedBytes)) + restSize)
 	}
 }
 
@@ -813,6 +826,74 @@ func replaceQuotedField(header *string, key, newValue string) {
 		return
 	}
 	*header = h[:valStart] + newValue + h[valEnd:]
+}
+
+// padMessageCountJSON pads the messageCount numeric value in serialized JSON to
+// messageCountWidth characters with trailing whitespace. This ensures the header
+// byte size stays constant during in-place updates as the count grows.
+func padMessageCountJSON(data []byte) []byte {
+	marker := []byte(`"messageCount":`)
+	idx := bytes.Index(data, marker)
+	if idx < 0 {
+		return data
+	}
+	pos := idx + len(marker)
+	for pos < len(data) && (data[pos] == ' ' || data[pos] == '\t') {
+		pos++
+	}
+	numStart := pos
+	for pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
+		pos++
+	}
+	if pos == numStart {
+		return data
+	}
+
+	padNeeded := messageCountWidth - (pos - numStart)
+	if padNeeded <= 0 {
+		return data
+	}
+
+	result := make([]byte, len(data)+padNeeded)
+	copy(result, data[:pos])
+	for i := range padNeeded {
+		result[pos+i] = ' '
+	}
+	copy(result[pos+padNeeded:], data[pos:])
+	return result
+}
+
+// replaceMessageCount replaces the messageCount value in a JSON header string
+// with the new count padded to fixed width. Handles both legacy (unpadded) and
+// padded files by scanning digits + trailing whitespace as the old value field.
+func replaceMessageCount(header string, count int) string {
+	mcStart := strings.Index(header, `"messageCount":`)
+	if mcStart < 0 {
+		return header
+	}
+
+	pos := mcStart + len(`"messageCount":`)
+	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
+		pos++
+	}
+	numStart := pos
+	for pos < len(header) && header[pos] >= '0' && header[pos] <= '9' {
+		pos++
+	}
+	if pos == numStart {
+		return header
+	}
+	// Also scan trailing whitespace (from previous padding)
+	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
+		pos++
+	}
+
+	oldFieldWidth := pos - numStart
+	newVal := strconv.Itoa(count)
+	targetWidth := max(messageCountWidth, oldFieldWidth)
+	padded := newVal + strings.Repeat(" ", max(0, targetWidth-len(newVal)))
+
+	return header[:numStart] + padded + header[pos:]
 }
 
 // pruneDedup trims the seenIDs set to keep only the most recent entries.

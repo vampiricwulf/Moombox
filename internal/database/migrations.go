@@ -10,7 +10,7 @@ const schemaVersion = 6
 
 const createSchema = `
 CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER NOT NULL
+    version INTEGER NOT NULL UNIQUE
 );
 
 CREATE TABLE IF NOT EXISTS jobs (

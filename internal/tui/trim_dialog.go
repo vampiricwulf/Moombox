@@ -10,7 +10,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 // TrimMode represents create vs delete mode.
@@ -619,6 +618,3 @@ func (m *TrimDialogModel) renderDeleteMode(w, h int) string {
 
 	return strings.Join(lines, "\n")
 }
-
-// ensure runewidth is used
-var _ = runewidth.StringWidth

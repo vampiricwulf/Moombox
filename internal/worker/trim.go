@@ -214,6 +214,9 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
 	}
+	if job == nil {
+		return fmt.Errorf("job not found: %s", jobID)
+	}
 
 	trims, err := ts.db.GetTrimsForJob(jobID)
 	if err != nil {

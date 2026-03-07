@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -82,7 +83,9 @@ func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID s
 // GetVideoInfoAuthenticated fetches video info using the full multi-client strategy.
 func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// Fetch watch page
-	_ = p.auth.SyncCookies()
+	if err := p.auth.SyncCookies(); err != nil {
+		p.logger.Warn("[PlayerApi] SyncCookies failed", slog.String("error", err.Error()))
+	}
 	wp, err := FetchWatchPage(ctx, videoID, p.auth.GetCookieHeader())
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Could not fetch watch page", slog.String("error", err.Error()))
@@ -113,7 +116,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// Parse watch page player response
 	var wpParsed *VideoInfo
 	if wp.PlayerResponse != nil {
-		wpParsed, _ = p.parsePlayerResponse(wp.PlayerResponse, ytcfg.PlayerURL, ytcfg)
+		wpParsed, _ = p.parsePlayerResponse(ctx, wp.PlayerResponse, ytcfg.PlayerURL, ytcfg)
 		if wpParsed != nil {
 			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPage)
 		}
@@ -246,7 +249,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 
 	var wpParsed *VideoInfo
 	if wp.PlayerResponse != nil {
-		wpParsed, _ = p.parsePlayerResponse(wp.PlayerResponse, wp.Ytcfg.PlayerURL, wp.Ytcfg)
+		wpParsed, _ = p.parsePlayerResponse(ctx, wp.PlayerResponse, wp.Ytcfg.PlayerURL, wp.Ytcfg)
 		if wpParsed != nil {
 			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPage)
 		}
@@ -387,7 +390,11 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 		if err := json.Unmarshal(respBody, &data); err != nil {
 			return nil, fmt.Errorf("failed to parse response: %w", err)
 		}
-		return p.parsePlayerResponse(data, ytcfg.PlayerURL, ytcfg)
+		var playerURL string
+		if ytcfg != nil {
+			playerURL = ytcfg.PlayerURL
+		}
+		return p.parsePlayerResponse(ctx, data, playerURL, ytcfg)
 	}
 	return nil, lastErr
 }
@@ -486,12 +493,12 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 		if err := json.Unmarshal(respBody, &data); err != nil {
 			return nil, err
 		}
-		return p.parsePlayerResponse(data, "", nil)
+		return p.parsePlayerResponse(ctx, data, "", nil)
 	}
 	return nil, lastErr
 }
 
-func (p *PlayerAPI) parsePlayerResponse(data map[string]interface{}, playerURL string, ytcfg *YtcfgData) (*VideoInfo, error) {
+func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]interface{}, playerURL string, ytcfg *YtcfgData) (*VideoInfo, error) {
 	videoDetails, _ := data["videoDetails"].(map[string]interface{})
 	streamingData, _ := data["streamingData"].(map[string]interface{})
 	playabilityStatus, _ := data["playabilityStatus"].(map[string]interface{})
@@ -501,7 +508,7 @@ func (p *PlayerAPI) parsePlayerResponse(data map[string]interface{}, playerURL s
 	playErr, playReason := parsePlayabilityStatus(playabilityStatus)
 
 	// Parse formats (with cipher decryption if available)
-	formats := p.parseFormatsWithCipher(streamingData, playerURL)
+	formats := p.parseFormatsWithCipher(ctx, streamingData, playerURL)
 
 	// Stream classification
 	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0)
@@ -604,7 +611,7 @@ func (p *PlayerAPI) parsePlayerResponse(data map[string]interface{}, playerURL s
 
 // parseFormatsWithCipher parses formats from streaming data, decrypting signatures and
 // n-parameters using the cipher solver when available.
-func (p *PlayerAPI) parseFormatsWithCipher(streamingData map[string]interface{}, playerURL string) []Format {
+func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData map[string]interface{}, playerURL string) []Format {
 	if streamingData == nil {
 		return nil
 	}
@@ -626,7 +633,7 @@ func (p *PlayerAPI) parseFormatsWithCipher(streamingData map[string]interface{},
 
 			// Handle signatureCipher (older format without direct URL)
 			if formatURL == "" && sigCipher != "" && playerURL != "" && p.cipherSolver != nil {
-				decrypted := p.decryptSignatureCipher(sigCipher, playerURL)
+				decrypted := p.decryptSignatureCipher(ctx, sigCipher, playerURL)
 				if decrypted != "" {
 					formatURL = decrypted
 				}
@@ -638,7 +645,7 @@ func (p *PlayerAPI) parseFormatsWithCipher(streamingData map[string]interface{},
 
 			// Decrypt n-parameter to avoid throttling
 			if playerURL != "" && p.cipherSolver != nil {
-				formatURL = p.decryptNParam(formatURL, playerURL)
+				formatURL = p.decryptNParam(ctx, formatURL, playerURL)
 			}
 
 			format := Format{
@@ -671,7 +678,7 @@ func (p *PlayerAPI) parseFormatsWithCipher(streamingData map[string]interface{},
 
 // decryptSignatureCipher decodes a signatureCipher string, decrypts the signature,
 // and returns the fully resolved URL.
-func (p *PlayerAPI) decryptSignatureCipher(sigCipher, playerURL string) string {
+func (p *PlayerAPI) decryptSignatureCipher(ctx context.Context, sigCipher, playerURL string) string {
 	params, err := url.ParseQuery(sigCipher)
 	if err != nil {
 		p.logger.Debug("[PlayerApi] Failed to parse signatureCipher", slog.String("error", err.Error()))
@@ -689,7 +696,7 @@ func (p *PlayerAPI) decryptSignatureCipher(sigCipher, playerURL string) string {
 		return ""
 	}
 
-	solvers, err := p.cipherSolver.GetSolvers(context.Background(), playerURL)
+	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Failed to get cipher solvers", slog.String("error", err.Error()))
 		return ""
@@ -727,7 +734,7 @@ func (p *PlayerAPI) decryptSignatureCipher(sigCipher, playerURL string) string {
 // Uses string replacement to preserve original URL parameter order —
 // Go's url.Values.Encode() sorts parameters alphabetically, which breaks
 // YouTube's URL signature verification and causes HTTP 403.
-func (p *PlayerAPI) decryptNParam(rawURL, playerURL string) string {
+func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
@@ -738,7 +745,7 @@ func (p *PlayerAPI) decryptNParam(rawURL, playerURL string) string {
 		return rawURL
 	}
 
-	solvers, err := p.cipherSolver.GetSolvers(context.Background(), playerURL)
+	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
 	if err != nil {
 		p.logger.Warn("[PlayerApi] N-param solver unavailable", slog.String("error", err.Error()))
 		return rawURL
@@ -757,16 +764,16 @@ func (p *PlayerAPI) decryptNParam(rawURL, playerURL string) string {
 }
 
 // DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.
-func (p *PlayerAPI) DecryptDashManifestUrl(dashURL, playerURL string) string {
+func (p *PlayerAPI) DecryptDashManifestUrl(ctx context.Context, dashURL, playerURL string) string {
 	if playerURL == "" || p.cipherSolver == nil {
 		return dashURL
 	}
-	return p.decryptNParam(dashURL, playerURL)
+	return p.decryptNParam(ctx, dashURL, playerURL)
 }
 
 // DecryptNParamInUrl decrypts the n-parameter in any URL.
 // Handles both path-based /n/{value}/ format and query string ?n= format.
-func (p *PlayerAPI) DecryptNParamInUrl(rawURL, playerURL string) string {
+func (p *PlayerAPI) DecryptNParamInUrl(ctx context.Context, rawURL, playerURL string) string {
 	if playerURL == "" || p.cipherSolver == nil {
 		return rawURL
 	}
@@ -774,7 +781,7 @@ func (p *PlayerAPI) DecryptNParamInUrl(rawURL, playerURL string) string {
 	// Check for n parameter in path: /n/{encrypted_value}/
 	if m := pathNParamRe.FindStringSubmatch(rawURL); m != nil {
 		encryptedN := m[1]
-		solvers, err := p.cipherSolver.GetSolvers(context.Background(), playerURL)
+		solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
 		if err == nil && solvers.N != nil {
 			decryptedN, err := solvers.DecryptN(encryptedN)
 			if err == nil && decryptedN != encryptedN {
@@ -784,7 +791,7 @@ func (p *PlayerAPI) DecryptNParamInUrl(rawURL, playerURL string) string {
 	}
 
 	// Also check query string n param
-	return p.decryptNParam(rawURL, playerURL)
+	return p.decryptNParam(ctx, rawURL, playerURL)
 }
 
 func parsePlayabilityStatus(status map[string]interface{}) (PlayabilityError, string) {
@@ -930,6 +937,9 @@ func deduplicateFormats(pool []Format) []Format {
 	for _, f := range byItag {
 		result = append(result, f)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Itag < result[j].Itag
+	})
 	return result
 }
 

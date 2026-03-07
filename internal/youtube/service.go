@@ -62,7 +62,9 @@ func NewService(jar *cookies.CookieJar, logger interface {
 func (s *Service) Init(ctx context.Context) {
 	s.initOnce.Do(func() {
 		// Load/sync cookies
-		_ = s.Auth.SyncCookies()
+		if err := s.Auth.SyncCookies(); err != nil {
+			s.logger.Warn("[YouTube] SyncCookies failed during init", "error", err)
+		}
 
 		// Fetch YouTube homepage for visitor data and API key
 		headers := map[string]string{
@@ -112,7 +114,9 @@ func (s *Service) GetApiKey() string {
 // GetVideoInfo fetches video info, using authentication if cookies are available.
 func (s *Service) GetVideoInfo(ctx context.Context, videoID string) (*VideoInfo, error) {
 	// Sync cookies (may have been refreshed since last call)
-	_ = s.Auth.SyncCookies()
+	if err := s.Auth.SyncCookies(); err != nil {
+		s.logger.Warn("[YouTube] SyncCookies failed", "error", err)
+	}
 
 	if s.Auth.HasAuthCookies() {
 		return s.PlayerAPI.GetVideoInfoAuthenticated(ctx, videoID)
@@ -149,13 +153,13 @@ func (s *Service) ProbeVideoStatusAuthenticated(ctx context.Context, videoID str
 
 // DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.
 func (s *Service) DecryptDashManifestUrl(ctx context.Context, dashURL, playerURL string) string {
-	return s.PlayerAPI.DecryptDashManifestUrl(dashURL, playerURL)
+	return s.PlayerAPI.DecryptDashManifestUrl(ctx, dashURL, playerURL)
 }
 
 // DecryptNParamInUrl decrypts the n-parameter in any URL.
 // Handles both query string (?n=...) and path-based (/n/{value}/) formats.
 func (s *Service) DecryptNParamInUrl(ctx context.Context, rawURL, playerURL string) string {
-	return s.PlayerAPI.DecryptNParamInUrl(rawURL, playerURL)
+	return s.PlayerAPI.DecryptNParamInUrl(ctx, rawURL, playerURL)
 }
 
 // ReloadCookies forces a reload of cookies from the cookie file.

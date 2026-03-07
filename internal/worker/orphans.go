@@ -126,6 +126,11 @@ func isUnderDirectory(path, dir string) bool {
 	if err != nil {
 		return false
 	}
+	// Normalize case on Windows for case-insensitive filesystem comparison
+	if runtime.GOOS == "windows" {
+		absPath = strings.ToLower(absPath)
+		absDir = strings.ToLower(absDir)
+	}
 	// Normalize and ensure the path is strictly under the directory
 	rel, err := filepath.Rel(absDir, absPath)
 	if err != nil {
@@ -222,7 +227,7 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 
 	// Collect all known output and chat file paths from DB.
 	// Uses normalizePath for case-insensitive comparison on Windows.
-	jobs, err := db.GetAllJobs(true)
+	jobs, err := db.GetAllJobs()
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +313,7 @@ func scanTrimOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orphan
 	}
 
 	// Collect all known trim filenames from DB
-	jobs, err := db.GetAllJobs(true)
+	jobs, err := db.GetAllJobs()
 	if err != nil {
 		return nil, err
 	}

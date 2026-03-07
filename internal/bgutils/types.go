@@ -1,6 +1,9 @@
 package bgutils
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 const (
 	// BotGuard API endpoints
@@ -14,6 +17,10 @@ const (
 
 	// Default request key for PO token generation
 	DefaultRequestKey = "O43z0dpjhgX20SCx4KAo"
+
+	// User agent strings used across bgutils package
+	UserAgentFull  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	UserAgentShort = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 	// Timeouts
 	BotGuardLoadTimeout = 10 * time.Second
@@ -81,7 +88,7 @@ type BGError struct {
 
 func (e *BGError) Error() string {
 	if e.Info != nil {
-		return e.Code + ": " + e.Message
+		return fmt.Sprintf("%s: %s (%v)", e.Code, e.Message, e.Info)
 	}
 	return e.Code + ": " + e.Message
 }

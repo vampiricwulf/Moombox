@@ -30,13 +30,13 @@ user_pref("browser.rights.3.shown", true);
 `
 
 const (
-	loginURL          = "https://accounts.google.com/ServiceLogin?service=youtube"
-	refreshURL        = "https://www.youtube.com"
-	twitchLoginURL    = "https://www.twitch.tv/login"
-	twitchRefreshURL  = "https://www.twitch.tv"
-	processTimeoutMs  = 30_000
-	cdpPollIntervalMs = 500
-	cdpPollTimeoutMs  = 15_000
+	loginURL         = "https://accounts.google.com/ServiceLogin?service=youtube"
+	refreshURL       = "https://www.youtube.com"
+	twitchLoginURL   = "https://www.twitch.tv/login"
+	twitchRefreshURL = "https://www.twitch.tv"
+	processTimeout   = 30 * time.Second
+	cdpPollInterval  = 500 * time.Millisecond
+	cdpPollTimeout   = 15 * time.Second
 )
 
 // platformRefreshURLs maps platform names to their refresh URLs.
@@ -50,6 +50,17 @@ var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket",
 
 // Firefox lock files that prevent launch when a previous session was force-killed.
 var firefoxLockFiles = []string{"parent.lock", ".parentlock"}
+
+// browserDetectCache caches the DetectBrowser result to avoid repeated registry
+// queries and filesystem I/O on every GetStatus call.
+var browserDetectCache struct {
+	mu      sync.Mutex
+	browser *DetectedBrowser
+	checked bool
+	expires time.Time
+}
+
+const browserDetectCacheTTL = 60 * time.Second
 
 // DetectedBrowser holds info about a detected browser.
 type DetectedBrowser struct {
@@ -151,6 +162,9 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 
 // GetStatus returns the current auto-cookie status.
 func (s *AutoCookieService) GetStatus() AutoCookieStatus {
+	// DetectBrowser does filesystem I/O and registry queries — call outside the lock.
+	browser := DetectBrowser()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -163,7 +177,7 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	return AutoCookieStatus{
 		Configured:         s.profileDir != "",
 		SetupInProgress:    s.setupProcess != nil,
-		Browser:            DetectBrowser(),
+		Browser:            browser,
 		LastRefresh:        lastRefreshStr,
 		LastError:          s.lastError,
 		NeedsManualRelogin: s.needsRelogin,
@@ -283,7 +297,7 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	twAuth = s.jar.HasTwitchAuthCookies()
 
 	// Real API verification (more reliable than just checking cookie presence)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if ytAuth && s.VerifyYouTubeAuth != nil {
 		if verified, err := s.VerifyYouTubeAuth(ctx); err == nil {
@@ -500,6 +514,11 @@ func (s *AutoCookieService) Stop() {
 func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval time.Duration) {
 	s.logger.Info("auto-cookie periodic refresh enabled", "interval", interval.String())
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("panic in periodic cookie refresh goroutine", "panic", fmt.Sprintf("%v", r))
+			}
+		}()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -620,7 +639,7 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 		s.refreshCmd = cmd
 		s.mu.Unlock()
 		startTime := time.Now()
-		if err := runWithTimeout(cmd, processTimeoutMs, s.logger); err != nil {
+		if err := runWithTimeout(cmd, processTimeout, s.logger); err != nil {
 			s.logger.Warn("firefox "+platform+" refresh failed", "err", err, "elapsed", time.Since(startTime).Round(time.Millisecond))
 		} else {
 			s.logger.Info("firefox "+platform+" refresh completed", "elapsed", time.Since(startTime).Round(time.Millisecond))
@@ -832,8 +851,10 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		s.mu.Unlock()
 	}()
 
-	// Wait for CDP to be available
-	if err := waitForCDP(context.Background(), port, cdpPollTimeoutMs); err != nil {
+	// Wait for CDP to be available (use a timeout context so this doesn't block forever)
+	cdpCtx, cdpCancel := context.WithTimeout(context.Background(), cdpPollTimeout)
+	defer cdpCancel()
+	if err := waitForCDP(cdpCtx, port, cdpPollTimeout); err != nil {
 		s.killSetupProcess()
 		return err
 	}
@@ -894,7 +915,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 	cdpCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	if err := waitForCDP(cdpCtx, port, cdpPollTimeoutMs); err != nil {
+	if err := waitForCDP(cdpCtx, port, cdpPollTimeout); err != nil {
 		return "", err
 	}
 
@@ -993,9 +1014,26 @@ var knownBrowsers = []browserInfo{
 	{"edge", "Microsoft Edge", edgePaths, []string{`Microsoft\Edge\Application\msedge.exe`}},
 }
 
-// DetectBrowser finds the best available browser. It checks the system's
-// default browser first, then falls back to Firefox > Waterfox > Chrome > Brave > Opera > Edge.
+// DetectBrowser finds the best available browser, caching the result for 60s.
+// It checks the system's default browser first, then falls back to
+// Firefox > Waterfox > Chrome > Brave > Opera > Edge.
 func DetectBrowser() *DetectedBrowser {
+	browserDetectCache.mu.Lock()
+	defer browserDetectCache.mu.Unlock()
+
+	if browserDetectCache.checked && time.Now().Before(browserDetectCache.expires) {
+		return browserDetectCache.browser
+	}
+
+	result := detectBrowserUncached()
+	browserDetectCache.browser = result
+	browserDetectCache.checked = true
+	browserDetectCache.expires = time.Now().Add(browserDetectCacheTTL)
+	return result
+}
+
+// detectBrowserUncached performs the actual browser detection (registry + filesystem I/O).
+func detectBrowserUncached() *DetectedBrowser {
 	// Build search order: default browser first, then remaining browsers.
 	// Edge is excluded from promotion — it frequently hijacks the Windows
 	// registry default even when the user has set another browser.
@@ -1139,8 +1177,8 @@ func operaPaths() []string {
 
 // --- CDP helpers (minimal implementation) ---
 
-func waitForCDP(ctx context.Context, port int, timeoutMs int) error {
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+func waitForCDP(ctx context.Context, port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -1153,7 +1191,7 @@ func waitForCDP(ctx context.Context, port int, timeoutMs int) error {
 				return nil
 			}
 		}
-		time.Sleep(time.Duration(cdpPollIntervalMs) * time.Millisecond)
+		time.Sleep(cdpPollInterval)
 	}
 	return fmt.Errorf("timeout waiting for CDP endpoint on port %d", port)
 }
@@ -1423,26 +1461,36 @@ func cdpSendCommandWithResult(wsURL string, method string, params map[string]any
 		return nil, fmt.Errorf("CDP write: %w", err)
 	}
 
-	// Read response
-	_, respData, err := conn.Read(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("CDP read: %w", err)
-	}
+	// Read responses until we find one with a matching command ID.
+	// CDP can send interleaved events that don't have an "id" field.
+	for {
+		_, respData, err := conn.Read(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("CDP read: %w", err)
+		}
 
-	var result struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(respData, &result); err != nil {
-		return nil, fmt.Errorf("CDP parse: %w", err)
-	}
-	if result.Error != nil {
-		return nil, fmt.Errorf("CDP error: %s", result.Error.Message)
-	}
+		var result struct {
+			ID     *int            `json:"id"`
+			Result json.RawMessage `json:"result"`
+			Error  *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(respData, &result); err != nil {
+			return nil, fmt.Errorf("CDP parse: %w", err)
+		}
 
-	return result.Result, nil
+		// Skip messages without an id (CDP events)
+		if result.ID == nil || *result.ID != 1 {
+			continue
+		}
+
+		if result.Error != nil {
+			return nil, fmt.Errorf("CDP error: %s", result.Error.Message)
+		}
+
+		return result.Result, nil
+	}
 }
 
 // mergeCookieFiles merges existing and new Netscape cookie strings.
@@ -1533,7 +1581,7 @@ func cleanFirefoxLockFiles(profileDir string) {
 	}
 }
 
-func runWithTimeout(cmd *exec.Cmd, timeoutMs int, logger interface {
+func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -1574,8 +1622,8 @@ func runWithTimeout(cmd *exec.Cmd, timeoutMs int, logger interface {
 	case err := <-done:
 		logger.Debug("process exited normally", "pid", cmd.Process.Pid, "err", err)
 		return err
-	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
-		logger.Warn("process timed out, killing", "pid", cmd.Process.Pid, "timeoutMs", timeoutMs)
+	case <-time.After(timeout):
+		logger.Warn("process timed out, killing", "pid", cmd.Process.Pid, "timeout", timeout)
 		// Closing the job handle kills all processes in the job.
 		// Also try direct kill as a belt-and-suspenders approach.
 		killProcessTree(cmd.Process)
@@ -1589,6 +1637,6 @@ func runWithTimeout(cmd *exec.Cmd, timeoutMs int, logger interface {
 				cmd.Process.Kill()
 			}
 		}
-		return fmt.Errorf("process timed out after %dms", timeoutMs)
+		return fmt.Errorf("process timed out after %s", timeout)
 	}
 }

@@ -206,6 +206,7 @@ func (db *Database) flushUpdates(pending map[string]*Job) {
 		}
 		return
 	}
+	defer tx.Rollback() // no-op after successful commit, ensures cleanup on any error path
 
 	// Track which jobs were successfully persisted
 	persisted := make(map[string]*Job, len(pending))
@@ -220,7 +221,6 @@ func (db *Database) flushUpdates(pending map[string]*Job) {
 	}
 
 	if err := tx.Commit(); err != nil {
-		tx.Rollback()
 		if db.logger != nil {
 			db.logger.Error("database batch flush: commit failed", "err", err, "jobs", len(pending))
 		}
@@ -338,7 +338,7 @@ func (db *Database) GetJob(id string) (*Job, error) {
 		job.Gaps = gaps
 	}
 	// Load trims (non-fatal — trims may simply not exist)
-	if trims, err := db.getTrims(id); err != nil {
+	if trims, err := db.getTrimsUnlocked(id); err != nil {
 		if db.logger != nil {
 			db.logger.Warn("failed to load trims for job", "jobID", id, "err", err)
 		}
@@ -357,15 +357,12 @@ func (db *Database) GetJob(id string) (*Job, error) {
 	return job, nil
 }
 
-// GetAllJobs returns all jobs, optionally excluding archived ones.
-func (db *Database) GetAllJobs(includeArchived bool) ([]*Job, error) {
+// GetAllJobs returns all jobs from the database. Age-based filtering of
+// finished jobs is handled by filterJobsByAge in the route/presentation layer.
+func (db *Database) GetAllJobs() ([]*Job, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	// includeArchived controls whether the caller wants all jobs (true) or just
-	// non-archived ones (false). The actual age-based filtering of finished jobs
-	// is handled by filterJobsByAge in the route layer — the database returns all
-	// jobs and lets the caller decide what to show.
 	query := `SELECT id, video_id, url, title, channel_name, platform,
 		status, progress, percent, eta, speed, error, created_at, updated_at,
 		last_video_seq, last_audio_seq, total_video_seq, total_audio_seq,
@@ -388,6 +385,9 @@ func (db *Database) GetAllJobs(includeArchived bool) ([]*Job, error) {
 	for rows.Next() {
 		job, err := scanJobRows(rows)
 		if err != nil {
+			if db.logger != nil {
+				db.logger.Debug("GetAllJobs: scan error", "err", err)
+			}
 			continue
 		}
 		jobs = append(jobs, job)
@@ -521,6 +521,9 @@ func (db *Database) getGaps(jobID string) ([]Gap, error) {
 	for rows.Next() {
 		var g Gap
 		if err := rows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err != nil {
+			if db.logger != nil {
+				db.logger.Debug("getGaps: scan error", "jobID", jobID, "err", err)
+			}
 			continue
 		}
 		gaps = append(gaps, g)
@@ -556,10 +559,6 @@ func (db *Database) DeleteTrim(trimID string) error {
 		db.notifyJobsChange()
 	}
 	return err
-}
-
-func (db *Database) getTrims(jobID string) ([]TrimRecord, error) {
-	return db.getTrimsUnlocked(jobID)
 }
 
 // AddSegment adds a segment record for a multi-segment quality-split job.
@@ -601,6 +600,9 @@ func (db *Database) getSegments(jobID string) ([]Segment, error) {
 		if err := rows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
 			&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
 			&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds); err != nil {
+			if db.logger != nil {
+				db.logger.Debug("getSegments: scan error", "jobID", jobID, "err", err)
+			}
 			continue
 		}
 		segments = append(segments, s)
@@ -830,9 +832,16 @@ func (db *Database) notifyJobsChange() {
 
 	// Use unlocked version since caller already holds db.mu
 	jobs, _ := db.getAllJobsUnlocked()
-	for _, fn := range subs {
-		db.safeCallJobsChange(fn, jobs)
-	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// silently recover
+			}
+		}()
+		for _, fn := range subs {
+			db.safeCallJobsChange(fn, jobs)
+		}
+	}()
 }
 
 // getAllJobsUnlocked queries all jobs without acquiring db.mu.
@@ -860,6 +869,9 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 	for rows.Next() {
 		job, err := scanJobRows(rows)
 		if err != nil {
+			if db.logger != nil {
+				db.logger.Debug("getAllJobsUnlocked: scan error", "err", err)
+			}
 			continue
 		}
 		jobs = append(jobs, job)
@@ -1036,6 +1048,9 @@ func (db *Database) getTrimsUnlocked(jobID string) ([]TrimRecord, error) {
 		var tr TrimRecord
 		if err := rows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
 			&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err != nil {
+			if db.logger != nil {
+				db.logger.Debug("getTrimsUnlocked: scan error", "jobID", jobID, "err", err)
+			}
 			continue
 		}
 		trims = append(trims, tr)

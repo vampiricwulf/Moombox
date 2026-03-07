@@ -106,7 +106,8 @@ func FetchBody(ctx context.Context, url string, timeout time.Duration, headers m
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 
-	return io.ReadAll(resp.Body)
+	const maxFetchBodySize = 50 << 20 // 50MB cap
+	return io.ReadAll(io.LimitReader(resp.Body, maxFetchBodySize))
 }
 
 // RetryConfig holds configuration for retry logic.

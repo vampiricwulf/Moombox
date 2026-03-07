@@ -205,10 +205,12 @@ func (tm *TwitchMonitor) doCheck(ctx context.Context) {
 
 		// Stagger between requests
 		if i < len(channels)-1 {
+			staggerTimer := time.NewTimer(twitchStagger)
 			select {
 			case <-ctx.Done():
+				staggerTimer.Stop()
 				return
-			case <-time.After(twitchStagger):
+			case <-staggerTimer.C:
 			}
 		}
 	}

@@ -18,6 +18,7 @@ type Solver struct {
 	stsCache    *StsCache
 	solverMu    sync.RWMutex
 	solverData  map[string]*Solvers // key -> compiled solvers (Goja VMs)
+	solverOrder []string            // insertion order for LRU eviction
 	compileMu   sync.Mutex         // serializes compilation to prevent thundering herd
 	logger      interface {
 		Debug(msg string, args ...any)
@@ -34,7 +35,7 @@ func NewSolver(cacheDir string, logger interface {
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) (*Solver, error) {
-	pc, err := NewPlayerCache(cacheDir)
+	pc, err := NewPlayerCache(cacheDir, logger)
 	if err != nil {
 		return nil, fmt.Errorf("create player cache: %w", err)
 	}
@@ -129,6 +130,7 @@ func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) 
 func (s *Solver) InvalidateCache() {
 	s.solverMu.Lock()
 	s.solverData = make(map[string]*Solvers)
+	s.solverOrder = nil
 	s.solverMu.Unlock()
 }
 
@@ -136,13 +138,23 @@ func (s *Solver) cacheSolvers(key string, solvers *Solvers) {
 	s.solverMu.Lock()
 	defer s.solverMu.Unlock()
 
-	if len(s.solverData) >= solverCacheSize {
-		for k := range s.solverData {
-			delete(s.solverData, k)
-			break
+	// If key already exists, move it to the end (most recently used)
+	if _, exists := s.solverData[key]; exists {
+		for i, k := range s.solverOrder {
+			if k == key {
+				s.solverOrder = append(s.solverOrder[:i], s.solverOrder[i+1:]...)
+				break
+			}
 		}
+	} else if len(s.solverData) >= solverCacheSize {
+		// Evict the oldest entry (LRU)
+		evictKey := s.solverOrder[0]
+		s.solverOrder = s.solverOrder[1:]
+		delete(s.solverData, evictKey)
 	}
+
 	s.solverData[key] = solvers
+	s.solverOrder = append(s.solverOrder, key)
 }
 
 // getFromPrepared executes preprocessed JS code in a Goja VM and extracts sig/n functions.
@@ -169,12 +181,17 @@ func getFromPrepared(code string) (*Solvers, error) {
 	if sigVal != nil && !gojavm.IsUndefined(sigVal) && !gojavm.IsNull(sigVal) {
 		sigFn, ok := gojavm.AssertFunction(sigVal)
 		if ok {
-			solvers.Sig = func(input string) (string, error) {
-				result, err := sigFn(gojavm.Undefined(), vm.ToValue(input))
-				if err != nil {
-					return "", fmt.Errorf("sig decrypt: %w", err)
+			solvers.Sig = func(input string) (result string, err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("sig decrypt panic: %v", r)
+					}
+				}()
+				val, callErr := sigFn(gojavm.Undefined(), vm.ToValue(input))
+				if callErr != nil {
+					return "", fmt.Errorf("sig decrypt: %w", callErr)
 				}
-				return result.String(), nil
+				return val.String(), nil
 			}
 		}
 	}
@@ -184,12 +201,17 @@ func getFromPrepared(code string) (*Solvers, error) {
 	if nVal != nil && !gojavm.IsUndefined(nVal) && !gojavm.IsNull(nVal) {
 		nFn, ok := gojavm.AssertFunction(nVal)
 		if ok {
-			solvers.N = func(input string) (string, error) {
-				result, err := nFn(gojavm.Undefined(), vm.ToValue(input))
-				if err != nil {
-					return "", fmt.Errorf("n decrypt: %w", err)
+			solvers.N = func(input string) (result string, err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("n decrypt panic: %v", r)
+					}
+				}()
+				val, callErr := nFn(gojavm.Undefined(), vm.ToValue(input))
+				if callErr != nil {
+					return "", fmt.Errorf("n decrypt: %w", callErr)
 				}
-				return result.String(), nil
+				return val.String(), nil
 			}
 		}
 	}

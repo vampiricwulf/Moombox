@@ -343,5 +343,5 @@ func fetchJSON(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("http %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 }

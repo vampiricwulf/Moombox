@@ -92,6 +92,9 @@ func NewRefreshService(jar *CookieJar, refreshInterval time.Duration, logger int
 // so that auth loss can be detected even if the app restarts after cookies expire.
 // Call this before Start().
 func (rs *RefreshService) SetExpectedPlatforms(platforms []string) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
 	for _, p := range platforms {
 		switch p {
 		case "youtube":
@@ -313,7 +316,10 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 		} `json:"responseContext"`
 	}
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Errorf("read YouTube auth response: %w", err)
+	}
 	if err := json.Unmarshal(respBody, &data); err != nil {
 		// Fallback to string matching if JSON parse fails
 		respStr := string(respBody)
@@ -380,7 +386,10 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 	}
 
 	// Read body for auth check
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Errorf("read YouTube auth response: %w", err)
+	}
 
 	// Check auth status from response
 	authenticated := false

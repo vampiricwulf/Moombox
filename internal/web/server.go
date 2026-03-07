@@ -17,8 +17,8 @@ import (
 	"net/http"
 	"os/exec"
 	"path"
-	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -36,6 +36,8 @@ type ServiceContext struct {
 // to bypass CSRF checks. The value must match the token generated at startup.
 const InternalTokenHeader = "X-Internal-Token"
 
+const maxCompressBodySize = 1 << 20 // 1MB
+
 // Server is the Moombox HTTP server.
 type Server struct {
 	cfg           *config.MoomboxConfig
@@ -43,6 +45,7 @@ type Server struct {
 	server        *http.Server
 	ws            *WebSocketHub
 	auth          *AuthService
+	shutdownOnce  sync.Once        // Ensures shutdown logic runs only once
 	internalToken string           // Random secret for same-process CSRF bypass
 	commit        string           // Build commit hash for cache busting (e.g. "abc1234")
 	loginHTML     []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
@@ -91,7 +94,7 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 	r.Use(SecurityHeaders)
 	r.Use(CSRFMiddleware(cfg, token))
 	r.Use(IPGateMiddleware(cfg))
-	r.Use(MaxBodySize(1 << 20)) // 1MB default body limit (import endpoint overrides to 500MB)
+	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
 
 	return s
@@ -118,7 +121,7 @@ func (s *Server) SetAuth(auth *AuthService) {
 // when a password is configured.
 func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := extractIP(r)
+		ip := ExtractIP(r)
 
 		// Loopback and private IPs skip auth
 		if isLoopback(ip) || isPrivateIP(ip) {
@@ -322,11 +325,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		s.server.Shutdown(shutdownCtx)
-		// Ensure WebSocket hub is closed even if Stop() is never called
-		s.ws.Close()
+		s.doShutdown()
 	}()
 
 	// Try the preferred port, then probe nearby ports
@@ -375,15 +374,22 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+// doShutdown performs the actual shutdown logic, guarded by sync.Once.
+func (s *Server) doShutdown() {
+	s.shutdownOnce.Do(func() {
+		if s.server != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s.server.Shutdown(ctx)
+		}
+		s.ws.Close()
+		s.logger.Info("web server stopped")
+	})
+}
+
 // Stop gracefully shuts down the server.
 func (s *Server) Stop() {
-	if s.server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		s.server.Shutdown(ctx)
-	}
-	s.ws.Close()
-	s.logger.Info("web server stopped")
+	s.doShutdown()
 }
 
 // --- Gzip compression middleware ---
@@ -442,24 +448,31 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 
 	if len(g.buf) >= g.minSize {
 		// Buffer is big enough, start gzipping
-		g.startGzip()
+		if err := g.startGzip(); err != nil {
+			return 0, err
+		}
 		return len(b), nil
 	}
 
 	return len(b), nil
 }
 
-func (g *gzipResponseWriter) startGzip() {
+func (g *gzipResponseWriter) startGzip() error {
 	g.ResponseWriter.Header().Set("Content-Encoding", "gzip")
 	g.ResponseWriter.Header().Del("Content-Length") // Length changes with compression
 	g.flushStatus()
 	g.headerSent = true
 
-	g.writer, _ = gzip.NewWriterLevel(g.ResponseWriter, gzip.DefaultCompression)
+	var err error
+	g.writer, err = gzip.NewWriterLevel(g.ResponseWriter, gzip.DefaultCompression)
+	if err != nil {
+		return err
+	}
 	if len(g.buf) > 0 {
-		g.writer.Write(g.buf)
+		_, err = g.writer.Write(g.buf)
 		g.buf = nil
 	}
+	return err
 }
 
 func (g *gzipResponseWriter) flushStatus() {
@@ -516,37 +529,53 @@ func (g *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("hijack not supported")
 }
 
+// recoveryWriter tracks whether headers have been sent so the recovery
+// middleware can avoid writing a 500 response after a partial write.
+type recoveryWriter struct {
+	http.ResponseWriter
+	headersSent bool
+}
+
+func (rw *recoveryWriter) WriteHeader(code int) {
+	rw.headersSent = true
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *recoveryWriter) Write(b []byte) (int, error) {
+	rw.headersSent = true
+	return rw.ResponseWriter.Write(b)
+}
+
+func (rw *recoveryWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
 // RecoveryMiddleware catches panics and returns 500.
 func RecoveryMiddleware(logger interface {
 	Error(msg string, args ...any)
 }) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rw := &recoveryWriter{ResponseWriter: w}
 			defer func() {
 				if rvr := recover(); rvr != nil {
 					logger.Error("panic recovered in HTTP handler", "panic", rvr, "path", r.URL.Path)
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusInternalServerError)
-					w.Write([]byte(`{"error":"Internal server error"}`))
+					if !rw.headersSent {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusInternalServerError)
+						w.Write([]byte(`{"error":"Internal server error"}`))
+					}
 				}
 			}()
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(rw, r)
 		})
 	}
 }
 
 // openBrowserURL opens the default browser to the given URL.
-// Matches TypeScript's openBrowser() using platform-specific commands.
+// Windows-only: uses explorer.exe to launch the URL.
 func openBrowserURL(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("explorer.exe", url)
-	case "darwin":
-		cmd = exec.Command("open", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
+	cmd := exec.Command("explorer.exe", url)
 	cmd.Start()
 }
 

@@ -15,6 +15,7 @@ type Auth struct {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
 	}
 }
 
@@ -23,6 +24,7 @@ func NewAuth(jar *cookies.CookieJar, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
 }) *Auth {
 	return &Auth{jar: jar, logger: logger}
 }

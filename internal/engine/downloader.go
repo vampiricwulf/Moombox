@@ -103,7 +103,7 @@ type SegmentDownloader struct {
 	opts              DownloaderOptions
 	mu                sync.Mutex
 	running           bool
-	cancelled         bool
+	cancelled         atomic.Bool
 	streamEnded       bool
 	outputFile        *os.File
 	bytesWritten      atomic.Int64
@@ -262,9 +262,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 
 // Cancel cancels the download.
 func (d *SegmentDownloader) Cancel() {
-	d.mu.Lock()
-	d.cancelled = true
-	d.mu.Unlock()
+	d.cancelled.Store(true)
 }
 
 // LastSeq returns the last successfully downloaded sequence number.
@@ -280,9 +278,20 @@ func (d *SegmentDownloader) BytesWritten() int64 {
 }
 
 func (d *SegmentDownloader) isCancelled() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.cancelled
+	return d.cancelled.Load()
+}
+
+// cancelErr returns context.Canceled when the user-initiated cancel flag is set
+// but the context hasn't been cancelled yet. This ensures callers always get a
+// non-nil error when the download was cancelled.
+func (d *SegmentDownloader) cancelErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d.isCancelled() {
+		return context.Canceled
+	}
+	return nil
 }
 
 // setCommonHeaders applies User-Agent and Cookie headers to a request.
@@ -311,7 +320,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 
 	for offset < totalSize {
 		if d.isCancelled() || ctx.Err() != nil {
-			return ctx.Err()
+			return d.cancelErr(ctx)
 		}
 
 		end := offset + DownloadChunkSize - 1
@@ -404,7 +413,7 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end int64) ([]byte, int, error) {
 	for attempt := 0; attempt < MaxChunkRetries; attempt++ {
 		if d.isCancelled() || ctx.Err() != nil {
-			return nil, 0, ctx.Err()
+			return nil, 0, d.cancelErr(ctx)
 		}
 
 		data, status, err := d.fetchChunk(ctx, start, end)
@@ -484,20 +493,18 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 		// Read partial body for diagnostics
 		bodySnippet := make([]byte, 1024)
 		n, _ := resp.Body.Read(bodySnippet)
-		if d.opts.Logger != nil {
-			d.opts.Logger.Debug("[Downloader] direct URL failed",
-				"status", resp.StatusCode,
-				"url_prefix", truncateURL(d.opts.BaseURL, 120),
-				"body_snippet", string(bodySnippet[:n]),
-			)
-		}
+		d.logger.Debug("[Downloader] direct URL failed",
+			"status", resp.StatusCode,
+			"url_prefix", truncateURL(d.opts.BaseURL, 120),
+			"body_snippet", string(bodySnippet[:n]),
+		)
 		return fmt.Errorf("HTTP %d downloading direct URL", resp.StatusCode)
 	}
 
 	buf := make([]byte, 64*1024) // 64KB buffer
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
-			return ctx.Err()
+			return d.cancelErr(ctx)
 		}
 
 		n, readErr := resp.Body.Read(buf)
@@ -575,7 +582,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
-			return ctx.Err()
+			return d.cancelErr(ctx)
 		}
 
 		// Check end sequence
@@ -790,7 +797,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
-			return ctx.Err()
+			return d.cancelErr(ctx)
 		}
 
 		// Fetch playlist
@@ -874,7 +881,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		segFailed := false
 		for _, seg := range newSegments {
 			if d.isCancelled() || ctx.Err() != nil {
-				return ctx.Err()
+				return d.cancelErr(ctx)
 			}
 
 			segData, _, err := d.fetchSegment(ctx, seg.URL)
@@ -996,7 +1003,8 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	}()
 
 	// Stream write: buffer out-of-order segments, write in order as they arrive.
-	// Buffer size is naturally bounded by the results channel capacity (ParallelDownloads*3 = 18).
+	// Buffer size is bounded by the number of in-flight workers (ParallelDownloads);
+	// segments are flushed in order so the map typically holds only a few entries.
 	buffer := make(map[int][]byte)
 	nextIdx := 0
 
@@ -1045,7 +1053,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 			}
 			n, writeErr := d.outputFile.Write(data)
 			if writeErr != nil {
-				d.logger.Warn("[Downloader] Write error during HLS VOD gap flush", "segment", nextIdx, "error", writeErr)
+				return fmt.Errorf("write error during HLS VOD gap flush (segment %d): %w", nextIdx, writeErr)
 			}
 			d.bytesWritten.Add(int64(n))
 			d.currentSeq++
@@ -1198,7 +1206,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			}
 			n, writeErr := d.outputFile.Write(buffer[nextSeq])
 			if writeErr != nil {
-				d.logger.Warn("[Downloader] Write error during catch-up gap flush", "segment", nextSeq, "error", writeErr)
+				return 0, fmt.Errorf("write error during catch-up gap flush (segment %d): %w", nextSeq, writeErr)
 			}
 			d.bytesWritten.Add(int64(n))
 			delete(buffer, nextSeq)

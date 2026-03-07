@@ -71,7 +71,7 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 	}
 	defer resp.Body.Close()
 
-	respData, err := io.ReadAll(resp.Body)
+	respData, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
 		return nil, fmt.Errorf("read gql response: %w", err)
 	}

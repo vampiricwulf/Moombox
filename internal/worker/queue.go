@@ -47,6 +47,7 @@ type JobQueue struct {
 	cancelled       map[string]bool // tracks user-initiated cancellations (vs shutdown)
 	notify          chan struct{}
 	dlNotify        chan struct{} // signaling for download slot availability
+	logger          Logger       // optional logger for warnings
 }
 
 // NewJobQueue creates a new job queue.
@@ -66,6 +67,13 @@ func NewJobQueue(maxDownloads int) *JobQueue {
 	}
 }
 
+// SetLogger sets an optional logger for queue warnings.
+func (q *JobQueue) SetLogger(l Logger) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.logger = l
+}
+
 // Enqueue adds a job ID to the queue with priority based on its status.
 func (q *JobQueue) Enqueue(jobID string, status database.JobStatus) {
 	q.mu.Lock()
@@ -81,7 +89,10 @@ func (q *JobQueue) Enqueue(jobID string, status database.JobStatus) {
 
 	// Backlog limit to prevent unbounded growth (matches TS queue.size >= 100)
 	if len(q.pending) >= 100 {
-		return // Queue full — caller should log this
+		if q.logger != nil {
+			q.logger.Warn("job queue full, dropping job", "jobID", jobID, "limit", 100)
+		}
+		return
 	}
 
 	q.pending = append(q.pending, pendingJob{ID: jobID, Priority: calculatePriority(status)})

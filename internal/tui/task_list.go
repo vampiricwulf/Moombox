@@ -768,8 +768,12 @@ func formatCountdown(d time.Duration) string {
 	if d <= 0 {
 		return "now"
 	}
-	m := int(d.Minutes())
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
 	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	}
 	if m > 0 {
 		return fmt.Sprintf("%dm %ds", m, s)
 	}

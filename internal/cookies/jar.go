@@ -136,6 +136,14 @@ func (j *CookieJar) GetCookie(name string) string {
 	return j.cookies[name]
 }
 
+// cookieValueSanitizer strips characters that could enable header injection.
+var cookieValueSanitizer = strings.NewReplacer("\r", "", "\n", "")
+
+// sanitizeCookieValue strips characters that could enable header injection.
+func sanitizeCookieValue(v string) string {
+	return cookieValueSanitizer.Replace(v)
+}
+
 // GetCookieHeader returns a Cookie header string with all cookies.
 func (j *CookieJar) GetCookieHeader() string {
 	j.mu.RLock()
@@ -143,7 +151,7 @@ func (j *CookieJar) GetCookieHeader() string {
 
 	pairs := make([]string, 0, len(j.cookies))
 	for name, value := range j.cookies {
-		pairs = append(pairs, name+"="+value)
+		pairs = append(pairs, name+"="+sanitizeCookieValue(value))
 	}
 	return strings.Join(pairs, "; ")
 }

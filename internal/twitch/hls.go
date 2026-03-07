@@ -264,7 +264,7 @@ func FetchHLSMasterPlaylist(ctx context.Context, url string) ([]TwitchHLSVariant
 		return nil, fmt.Errorf("hls playlist http %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
 		return nil, err
 	}

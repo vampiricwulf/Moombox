@@ -37,8 +37,7 @@ const (
 type (
 	JobUpdateMsg   struct{ Job *database.Job }
 	JobsUpdateMsg  struct{ Jobs []*database.Job }
-	LogMsg         struct{ Line string }
-	LogBatchMsg    struct{ Lines []string }
+	LogBatchMsg struct{ Lines []string }
 	CheckTimersMsg struct {
 		NextFeedCheck   time.Time
 		NextDecapiCheck time.Time
@@ -474,6 +473,20 @@ func (a *App) listenForUpdates() tea.Cmd {
 	}
 }
 
+// hasActiveOverlay returns true if any overlay dialog is currently visible.
+func (a *App) hasActiveOverlay() bool {
+	return a.settings.IsVisible() ||
+		a.help.IsVisible() ||
+		a.importDlg.IsVisible() ||
+		a.addVideo.IsVisible() ||
+		a.trimDlg.IsVisible() ||
+		a.filesDlg.IsVisible() ||
+		a.clientTokensDlg.IsVisible() ||
+		a.setupWiz.IsVisible() ||
+		a.ffmpegCheck.IsVisible() ||
+		a.actionMenu.IsVisible()
+}
+
 // hasActiveDownloads returns true if any job has live progress to display.
 func (a *App) hasActiveDownloads() bool {
 	for _, s := range a.statusMap {
@@ -612,11 +625,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return a, tea.Batch(a.updateTerminalTitle(), a.listenForUpdates())
-
-	case LogMsg:
-		// Buffer logs instead of adding directly (A2)
-		a.logBuffer = append(a.logBuffer, msg.Line)
-		return a, a.listenForUpdates()
 
 	case LogBatchMsg:
 		// Batched log messages — single Update/View cycle for all pending logs
@@ -1729,7 +1737,7 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	if a.settings.IsVisible() || a.help.IsVisible() || a.importDlg.IsVisible() || a.addVideo.IsVisible() || a.trimDlg.IsVisible() || a.filesDlg.IsVisible() || a.clientTokensDlg.IsVisible() || a.setupWiz.IsVisible() || a.ffmpegCheck.IsVisible() {
+	if a.hasActiveOverlay() {
 		return a, nil
 	}
 

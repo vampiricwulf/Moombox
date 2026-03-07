@@ -17,7 +17,8 @@ const (
 	wsPingInterval   = 30 * time.Second
 	wsThrottleWindow = 100 * time.Millisecond
 	wsMaxMessageSize = 1024 * 1024 // 1MB (match TS maxPayload)
-	wsBackpressure   = 256 * 1024 // 256KB
+	wsBackpressure   = 256 * 1024  // 256KB
+	maxLogBuffer     = 200         // Trim log ring buffer to this size
 )
 
 // WSMessage is a WebSocket message sent to clients.
@@ -89,7 +90,7 @@ func NewWebSocketHub(logger interface {
 func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Verify authentication for external connections (matching TypeScript verifyWsClient)
 	if hub.AuthCheck != nil {
-		ip := extractIP(r)
+		ip := ExtractIP(r)
 		if !isLoopback(ip) && !isPrivateIP(ip) {
 			if !hub.AuthCheck(r) {
 				hub.logger.Debug("websocket upgrade rejected: auth required", "ip", ip)
@@ -216,6 +217,14 @@ func (hub *WebSocketHub) pingPump(client *wsClient) {
 		case <-client.ctx.Done():
 			return
 		case <-ticker.C:
+			// Check if hub is closed before attempting ping
+			hub.mu.Lock()
+			closed := hub.closed
+			hub.mu.Unlock()
+			if closed {
+				return
+			}
+
 			ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
 			err := client.conn.Ping(ctx)
 			cancel()
@@ -223,7 +232,9 @@ func (hub *WebSocketHub) pingPump(client *wsClient) {
 				// Client is unresponsive — close connection
 				client.cancel()
 				hub.mu.Lock()
-				delete(hub.clients, client)
+				if !hub.closed {
+					delete(hub.clients, client)
+				}
 				hub.mu.Unlock()
 				client.conn.Close(websocket.StatusGoingAway, "ping timeout")
 				return
@@ -236,7 +247,9 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 	defer func() {
 		client.cancel() // Cancel the detached context to stop pingPump
 		hub.mu.Lock()
-		delete(hub.clients, client)
+		if !hub.closed {
+			delete(hub.clients, client)
+		}
 		remaining := len(hub.clients)
 		hub.mu.Unlock()
 		client.conn.Close(websocket.StatusNormalClosure, "")
@@ -408,7 +421,7 @@ func (hub *WebSocketHub) BroadcastLog(line string) {
 	hub.logBufMu.Lock()
 	hub.logBuf = append(hub.logBuf, line)
 	if len(hub.logBuf) > 400 {
-		hub.logBuf = hub.logBuf[len(hub.logBuf)-200:]
+		hub.logBuf = append([]string{}, hub.logBuf[len(hub.logBuf)-maxLogBuffer:]...)
 	}
 	hub.logBufMu.Unlock()
 

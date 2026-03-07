@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -71,7 +70,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 
 		if !deps.Auth.VerifyPassword(body.Password, deps.Cfg.Network.PasswordHash) {
 			if deps.Logger != nil {
-				deps.Logger.Warn("[Auth] Failed login attempt from " + extractClientIP(req))
+				deps.Logger.Warn("[Auth] Failed login attempt from " + web.ExtractIP(req))
 			}
 			jsonError(rw, "Invalid password", http.StatusUnauthorized)
 			return
@@ -89,7 +88,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		}
 
 		if deps.Logger != nil {
-			deps.Logger.Info("[Auth] Successful login from " + extractClientIP(req))
+			deps.Logger.Info("[Auth] Successful login from " + web.ExtractIP(req))
 		}
 
 		web.SetSessionCookie(rw, req, token)
@@ -113,7 +112,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 						Label:       buildTokenLabel(req),
 						CreatedAt:   now,
 						LastUsedAt:  now,
-						LastIP:      extractClientIP(req),
+						LastIP:      web.ExtractIP(req),
 					}
 					if err := deps.DB.AddClientToken(ct); err == nil {
 						setClientCookie(rw, req, rawToken)
@@ -220,7 +219,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		clearClientCookie(rw)
 
 		if deps.Logger != nil {
-			deps.Logger.Info("[Auth] Password set/changed from " + extractClientIP(req))
+			deps.Logger.Info("[Auth] Password set/changed from " + web.ExtractIP(req))
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
@@ -265,7 +264,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		}
 
 		deps.Cfg.Network.PasswordHash = ""
-		deps.Cfg.Network.NetworkAccess = "localhost" // Reset to safe default
+		deps.Cfg.Network.NetworkAccess = "local" // Reset to safe default
 
 		if deps.SaveConfig != nil {
 			if err := deps.SaveConfig(deps.Cfg); err != nil {
@@ -282,7 +281,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		clearClientCookie(rw)
 
 		if deps.Logger != nil {
-			deps.Logger.Info("[Auth] Password removed, network_access reset to localhost from " + extractClientIP(req))
+			deps.Logger.Info("[Auth] Password removed, network_access reset to local from " + web.ExtractIP(req))
 		}
 
 		jsonResponse(rw, map[string]any{
@@ -358,13 +357,6 @@ func AuthMiddleware(cfg *config.MoomboxConfig, auth *web.AuthService) func(http.
 	}
 }
 
-func extractClientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
 
 func getSessionToken(r *http.Request) string {
 	cookie, err := r.Cookie("moombox_session")
@@ -411,7 +403,7 @@ func clearClientCookie(w http.ResponseWriter) {
 // buildTokenLabel creates a human-readable label from the User-Agent and IP.
 func buildTokenLabel(r *http.Request) string {
 	ua := r.UserAgent()
-	ip := extractClientIP(r)
+	ip := web.ExtractIP(r)
 
 	// Truncate UA to something useful
 	label := ua

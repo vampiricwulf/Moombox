@@ -108,7 +108,11 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 			raw := strings.TrimPrefix(url, "discord://")
 			// Only use the first two path segments (ID/TOKEN), matching TS behavior
 			segments := strings.SplitN(raw, "/", 3)
-			parts := strings.Join(segments[:min(len(segments), 2)], "/")
+			if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
+				logger.Warn("invalid discord:// URL: expected discord://ID/TOKEN", "url", url)
+				continue
+			}
+			parts := strings.Join(segments[:2], "/")
 			webhookURL := "https://discord.com/api/webhooks/" + parts
 			s = &DiscordWebhook{URL: webhookURL, Logger: logger}
 

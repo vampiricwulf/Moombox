@@ -238,10 +238,12 @@ func (dm *DecapiMonitor) doCheck(ctx context.Context) {
 
 		// Stagger between requests
 		if i < len(channels)-1 {
+			staggerTimer := time.NewTimer(decapiStagger)
 			select {
 			case <-ctx.Done():
+				staggerTimer.Stop()
 				return
-			case <-time.After(decapiStagger):
+			case <-staggerTimer.C:
 			}
 		}
 	}
@@ -328,7 +330,7 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 		return fmt.Errorf("decapi http %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
 		return err
 	}

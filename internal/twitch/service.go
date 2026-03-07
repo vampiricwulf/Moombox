@@ -102,7 +102,9 @@ func (s *Service) ResolveEmotes(ctx context.Context, channelID string) *TwitchEm
 
 // ReloadAuth reloads auth cookies from disk.
 func (s *Service) ReloadAuth() {
-	s.Auth.Reload()
+	if err := s.Auth.Reload(); err != nil {
+		s.logger.Warn("failed to reload twitch auth", "err", err)
+	}
 }
 
 // BuildJobID generates a job ID for a Twitch stream or VOD.

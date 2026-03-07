@@ -3,6 +3,7 @@ package cipher
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -723,7 +724,9 @@ func resolveArrayFunction(js, arrayName, index string) (string, error) {
 	elements := strings.Split(m[1], ",")
 	idx := 0
 	if index != "" {
-		fmt.Sscanf(index, "%d", &idx)
+		if parsed, err := strconv.Atoi(index); err == nil {
+			idx = parsed
+		}
 	}
 
 	if idx < 0 || idx >= len(elements) {

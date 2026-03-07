@@ -193,7 +193,7 @@ func generateIntegrityToken(ctx context.Context, config *BgConfig, botguardRespo
 	if !config.UseYouTubeAPI {
 		req.Header.Set("x-goog-api-key", BotGuardAPIKey)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", UserAgentShort)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -208,7 +208,8 @@ func generateIntegrityToken(ctx context.Context, config *BgConfig, botguardRespo
 		}
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Limit read to 1MB — integrity token responses are small
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

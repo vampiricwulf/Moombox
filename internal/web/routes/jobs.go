@@ -177,7 +177,7 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager) {
 	// GET /api/jobs
 	r.Get("/api/jobs", func(rw http.ResponseWriter, req *http.Request) {
-		jobs, err := db.GetAllJobs(false)
+		jobs, err := db.GetAllJobs()
 		if err != nil {
 			jsonError(rw, "failed to get jobs", http.StatusInternalServerError)
 			return
@@ -190,7 +190,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 
 	// GET /api/jobs/archived — finished jobs older than hide_finished_age_days
 	r.Get("/api/jobs/archived", func(rw http.ResponseWriter, req *http.Request) {
-		jobs, err := db.GetAllJobs(true)
+		jobs, err := db.GetAllJobs()
 		if err != nil {
 			jsonError(rw, "failed to get jobs", http.StatusInternalServerError)
 			return
@@ -277,11 +277,17 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 			}
 		}
 
-		// Path traversal guard: resolved path must be within output directory
+		// Path traversal guard: resolve symlinks before prefix check
 		resolvedOutputDir, err := filepath.Abs(outputDir)
 		if err != nil {
 			jsonError(rw, "invalid output directory", http.StatusBadRequest)
 			return
+		}
+		if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
+			resolvedOutputDir = real
+		}
+		if real, err := filepath.EvalSymlinks(filePath); err == nil {
+			filePath = real
 		}
 		if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
 			jsonError(rw, "access denied", http.StatusForbidden)
@@ -392,7 +398,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 			return
 		}
 
-		// Path traversal guard: resolved path must be within output directory
+		// Path traversal guard: resolve symlinks before prefix check
 		outputDir := job.OutputDirectory
 		if outputDir == "" {
 			outputDir = cfg.Paths.OutputDirectory
@@ -404,6 +410,12 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 		if err != nil {
 			jsonError(rw, "invalid output directory", http.StatusBadRequest)
 			return
+		}
+		if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
+			resolvedOutputDir = real
+		}
+		if real, err := filepath.EvalSymlinks(filePath); err == nil {
+			filePath = real
 		}
 		if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
 			jsonError(rw, "access denied", http.StatusForbidden)
@@ -466,11 +478,17 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 			}
 		}
 
-		// Path traversal guard
+		// Path traversal guard: resolve symlinks before prefix check
 		resolvedOutputDir, err := filepath.Abs(outputDir)
 		if err != nil {
 			jsonError(rw, "invalid output directory", http.StatusBadRequest)
 			return
+		}
+		if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
+			resolvedOutputDir = real
+		}
+		if real, err := filepath.EvalSymlinks(chatPath); err == nil {
+			chatPath = real
 		}
 		if !strings.HasPrefix(chatPath, resolvedOutputDir+string(filepath.Separator)) {
 			jsonError(rw, "access denied", http.StatusForbidden)
@@ -927,11 +945,17 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 				return
 			}
 
-			// Path traversal guard (match TS)
+			// Path traversal guard: resolve symlinks before prefix check
 			resolvedOutputDir, err := filepath.Abs(outputDir)
 			if err != nil {
 				jsonError(rw, "invalid output directory", http.StatusInternalServerError)
 				return
+			}
+			if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
+				resolvedOutputDir = real
+			}
+			if real, err := filepath.EvalSymlinks(filePath); err == nil {
+				filePath = real
 			}
 			if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
 				jsonError(rw, "Access denied", http.StatusForbidden)
@@ -939,6 +963,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 			}
 
 			dir = filepath.Dir(filePath)
+			if _, err := os.Stat(dir); err != nil {
+				jsonError(rw, "Output folder not found", http.StatusNotFound)
+				return
+			}
 		} else {
 			// Fall back to staging directory for active jobs
 			stagingBase := cfg.Paths.StagingDirectory
@@ -957,16 +985,11 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 			dir = stagingDir
 		}
 
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "windows":
-			cmd = exec.Command("explorer", dir)
-		case "darwin":
-			cmd = exec.Command("open", dir)
-		default:
-			cmd = exec.Command("xdg-open", dir)
+		cmd := exec.Command("explorer", dir)
+		if err := cmd.Start(); err != nil {
+			jsonError(rw, "failed to open folder: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
-		cmd.Start()
 
 		jsonResponse(rw, map[string]bool{"success": true})
 	})
@@ -1192,9 +1215,9 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 		if v, ok := net["network_access"].(string); ok {
 			switch v {
-			case "localhost", "lan", "external":
+			case "local", "lan", "external", "public":
 			default:
-				errs["network.network_access"] = "network_access must be localhost, lan, or external"
+				errs["network.network_access"] = "network_access must be local, lan, external, or public"
 			}
 		}
 		if v, ok := net["tls_cert_path"].(string); ok {
@@ -2064,7 +2087,8 @@ func LogRoutes(r chi.Router, getRecentLogs func() []string) {
 
 // ImportRoutes registers import-related API routes.
 // Uses its own 5/min rate limiter per the spec.
-func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, rl *web.RateLimiter) {
+// Returns a cleanup function that stops the rate limiter's background goroutine.
+func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, rl *web.RateLimiter) func() {
 	importRL := web.NewRateLimiter(5, time.Minute)
 	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
 		// Max 500MB upload
@@ -2321,6 +2345,8 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		rw.WriteHeader(http.StatusCreated)
 		jsonResponse(rw, job)
 	})
+
+	return func() { importRL.Close() }
 }
 
 // extractZipEntry extracts a single zip entry to a destination path.

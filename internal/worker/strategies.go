@@ -118,7 +118,7 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		}
 	}
 
-	if selected.Audio != nil && selected.Audio.URL != "" && !IsProgressiveFormat(selected.Video) {
+	if selected.Audio != nil && selected.Audio.URL != "" && (selected.Video == nil || !IsProgressiveFormat(selected.Video)) {
 		result.HasAudio = true
 		result.AudioFormat = selected.Audio
 		result.AudioPath = filepath.Join(job.StagingDir, "audio.m4a")

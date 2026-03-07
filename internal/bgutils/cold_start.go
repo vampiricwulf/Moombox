@@ -1,9 +1,9 @@
 package bgutils
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
-	"math/rand"
 	"time"
 )
 
@@ -22,9 +22,13 @@ func GenerateColdStartToken(identifier string, clientState int) (string, error) 
 
 	timestamp := time.Now().Unix()
 
-	// Random XOR keys
-	key0 := byte(rand.Intn(256))
-	key1 := byte(rand.Intn(256))
+	// Random XOR keys (crypto/rand for unpredictable values)
+	var randKeys [2]byte
+	if _, err := rand.Read(randKeys[:]); err != nil {
+		return "", &BGError{Code: ErrBadConfig, Message: "crypto/rand failed: " + err.Error()}
+	}
+	key0 := randKeys[0]
+	key1 := randKeys[1]
 
 	// Build header: [key0, key1, 0, clientState, timestamp (4 bytes big-endian)]
 	header := make([]byte, 8)

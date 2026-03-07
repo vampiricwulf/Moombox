@@ -67,8 +67,14 @@ func Load(customPath string) (*MoomboxConfig, error) {
 		paths = append(paths, customPath)
 	}
 
-	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to get working directory: %v\n", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to get home directory: %v\n", err)
+	}
 
 	paths = append(paths,
 		filepath.Join(cwd, "config.toml"),

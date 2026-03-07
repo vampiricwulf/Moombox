@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +19,13 @@ var (
 	sessionIndexRegex      = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
 	delegatedSessionRegex  = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
 	dataSyncIDRegex        = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
-	playerResponseRegex    = regexp.MustCompile(`(?s)var ytInitialPlayerResponse = ({.+?});`)
+	// Multiple patterns for extracting player response — YouTube occasionally
+	// changes the variable name or assignment format.
+	playerResponsePatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?s)var ytInitialPlayerResponse\s*=\s*({.+?});`),
+		regexp.MustCompile(`(?s)window\["ytInitialPlayerResponse"\]\s*=\s*({.+?});`),
+		regexp.MustCompile(`(?s)ytInitialPlayerResponse\s*=\s*({.+?});`),
+	}
 )
 
 // WatchPageResult contains data extracted from a YouTube watch page.
@@ -78,9 +85,9 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]interfac
 
 	// Extract session index
 	if m := sessionIndexRegex.FindStringSubmatch(html); m != nil {
-		idx := 0
-		fmt.Sscanf(m[1], "%d", &idx)
-		ytcfg.SessionIndex = &idx
+		if idx, err := strconv.Atoi(m[1]); err == nil {
+			ytcfg.SessionIndex = &idx
+		}
 	}
 
 	// Extract delegated session ID
@@ -93,33 +100,36 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]interfac
 		ytcfg.DataSyncID = m[1]
 	}
 
-	// Extract ytInitialPlayerResponse
+	// Extract ytInitialPlayerResponse (try multiple patterns)
 	var playerResponse map[string]interface{}
-	if m := playerResponseRegex.FindSubmatch([]byte(html)); m != nil {
-		if err := json.Unmarshal(m[1], &playerResponse); err == nil {
-			// Extract video metadata from response
-			if vd, ok := playerResponse["videoDetails"].(map[string]interface{}); ok {
-				if title, ok := vd["title"].(string); ok {
-					ytcfg.Title = title
-				}
-				if author, ok := vd["author"].(string); ok {
-					ytcfg.Author = author
-				}
-				if channelID, ok := vd["channelId"].(string); ok {
-					ytcfg.ChannelID = channelID
-				}
-				if desc, ok := vd["shortDescription"].(string); ok {
-					ytcfg.Description = desc
-				}
-				if thumb, ok := vd["thumbnail"].(map[string]interface{}); ok {
-					if thumbs, ok := thumb["thumbnails"].([]interface{}); ok && len(thumbs) > 0 {
-						if last, ok := thumbs[len(thumbs)-1].(map[string]interface{}); ok {
-							if url, ok := last["url"].(string); ok {
-								ytcfg.ThumbnailURL = url
+	for _, re := range playerResponsePatterns {
+		if m := re.FindStringSubmatch(html); m != nil {
+			if err := json.Unmarshal([]byte(m[1]), &playerResponse); err == nil {
+				// Extract video metadata from response
+				if vd, ok := playerResponse["videoDetails"].(map[string]interface{}); ok {
+					if title, ok := vd["title"].(string); ok {
+						ytcfg.Title = title
+					}
+					if author, ok := vd["author"].(string); ok {
+						ytcfg.Author = author
+					}
+					if channelID, ok := vd["channelId"].(string); ok {
+						ytcfg.ChannelID = channelID
+					}
+					if desc, ok := vd["shortDescription"].(string); ok {
+						ytcfg.Description = desc
+					}
+					if thumb, ok := vd["thumbnail"].(map[string]interface{}); ok {
+						if thumbs, ok := thumb["thumbnails"].([]interface{}); ok && len(thumbs) > 0 {
+							if last, ok := thumbs[len(thumbs)-1].(map[string]interface{}); ok {
+								if url, ok := last["url"].(string); ok {
+									ytcfg.ThumbnailURL = url
+								}
 							}
 						}
 					}
 				}
+				break
 			}
 		}
 	}

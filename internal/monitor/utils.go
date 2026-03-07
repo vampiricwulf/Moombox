@@ -264,13 +264,9 @@ func matchTermNormalized(normText, rawText, pattern string) bool {
 		return re.MatchString(normText)
 	}
 
-	// Handle (?i) prefix
-	finalPattern := pattern
-	if strings.HasPrefix(finalPattern, "(?i)") {
-		finalPattern = finalPattern[4:]
-	}
-
-	// Try as regex first (TS always uses new RegExp(pattern))
+	// Try as regex first (TS always uses new RegExp(pattern)).
+	// Always case-insensitive — strip redundant (?i) prefix if present.
+	finalPattern := strings.TrimPrefix(pattern, "(?i)")
 	re, err := getCachedRegex("(?i)" + finalPattern)
 	if err != nil {
 		// Invalid regex — fall back to fuzzy substring match
@@ -307,6 +303,18 @@ func fuzzyMatch(text, needle string) bool {
 
 // normalizeText applies NFD normalization, strips diacritics, and lowercases.
 func normalizeText(s string) string {
+	// Fast path: ASCII-only strings don't need NFD decomposition or diacritic stripping
+	isASCII := true
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			isASCII = false
+			break
+		}
+	}
+	if isASCII {
+		return strings.ToLower(s)
+	}
+
 	// NFD decompose
 	decomposed := norm.NFD.String(s)
 

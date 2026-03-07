@@ -43,7 +43,7 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 	}
 
 	// Create runtime with full shims
-	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	userAgent := UserAgentFull
 	vm, tm, err := gojahelpers.NewRuntimeWithShims(userAgent)
 	if err != nil {
 		return nil, &BGError{Code: ErrVMInit, Message: fmt.Sprintf("create runtime: %v", err)}
@@ -111,7 +111,6 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 	}
 
 	resultCh := make(chan callbackResult, 1)
-	errCh := make(chan error, 1)
 
 	callbackFn := vm.ToValue(func(call goja.FunctionCall) goja.Value {
 		if len(call.Arguments) > 0 {
@@ -167,10 +166,6 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 		loadTimer.Stop()
 		client.Shutdown()
 		return nil, ctx.Err()
-	case err := <-errCh:
-		loadTimer.Stop()
-		client.Shutdown()
-		return nil, &BGError{Code: ErrVMError, Message: fmt.Sprintf("callback error: %v", err)}
 	}
 
 	return client, nil
@@ -195,7 +190,6 @@ func (c *BotGuardClient) Snapshot(timeout time.Duration) (string, *goja.Object, 
 	webPoSignalOutput := c.vm.NewArray()
 
 	resultCh := make(chan string, 1)
-	errCh := make(chan error, 1)
 
 	// Create callback for async snapshot result
 	callback := c.vm.ToValue(func(call goja.FunctionCall) goja.Value {
@@ -226,9 +220,6 @@ func (c *BotGuardClient) Snapshot(timeout time.Duration) (string, *goja.Object, 
 	case result := <-resultCh:
 		snapshotTimer.Stop()
 		return result, webPoSignalOutput, nil
-	case err := <-errCh:
-		snapshotTimer.Stop()
-		return "", nil, &BGError{Code: ErrAsyncSnapshot, Message: fmt.Sprintf("snapshot error: %v", err)}
 	case <-snapshotTimer.C:
 		return "", nil, &BGError{Code: ErrTimeout, Message: "snapshot timed out"}
 	}
@@ -276,7 +267,7 @@ func fetchInterpreter(ctx context.Context, interpreterURL string) (string, error
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", UserAgentShort)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -288,7 +279,8 @@ func fetchInterpreter(ctx context.Context, interpreterURL string) (string, error
 		return "", fmt.Errorf("interpreter fetch returned status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit read to 20MB — interpreter JS can be large but shouldn't be unbounded
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 20<<20))
 	if err != nil {
 		return "", err
 	}

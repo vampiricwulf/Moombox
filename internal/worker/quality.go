@@ -48,7 +48,6 @@ func ParseQualityPreference(pref string) (height int, fps int) {
 	}
 
 	// Try "NNNpNN" format
-	s := strings.TrimSuffix(pref, "p")
 	if idx := strings.Index(pref, "p"); idx > 0 {
 		heightStr := pref[:idx]
 		fpsStr := pref[idx+1:]
@@ -66,7 +65,7 @@ func ParseQualityPreference(pref string) (height int, fps int) {
 	}
 
 	// Fallback: try plain number
-	if h, err := strconv.Atoi(s); err == nil && h > 0 {
+	if h, err := strconv.Atoi(pref); err == nil && h > 0 {
 		return h, 0
 	}
 	return 0, 0

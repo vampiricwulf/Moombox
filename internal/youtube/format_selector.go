@@ -57,6 +57,26 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 	var bestVideo, bestAudio *Format
 	var bestVideoCodecScore, bestAudioCodecScore int
 
+	// Cache codec scores by mimeType to avoid redundant regex matching
+	codecScoreCache := make(map[string]int)
+	cachedVideoCodecScore := func(mimeType string) int {
+		if score, ok := codecScoreCache[mimeType]; ok {
+			return score
+		}
+		score := scoreVideoCodec(extractCodec(mimeType))
+		codecScoreCache[mimeType] = score
+		return score
+	}
+	cachedAudioCodecScore := func(mimeType string) int {
+		key := "a:" + mimeType
+		if score, ok := codecScoreCache[key]; ok {
+			return score
+		}
+		score := scoreAudioCodec(extractCodec(mimeType))
+		codecScoreCache[key] = score
+		return score
+	}
+
 	// Log available video formats (matching TS FormatSelector debug output)
 	if logger != nil {
 		var available []string
@@ -97,7 +117,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 
 			if bestVideo == nil {
 				bestVideo = f
-				bestVideoCodecScore = scoreVideoCodec(extractCodec(f.MimeType))
+				bestVideoCodecScore = cachedVideoCodecScore(f.MimeType)
 				continue
 			}
 
@@ -106,7 +126,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 			// Prefer higher resolution
 			if maxDim > bestMaxDim {
 				bestVideo = f
-				bestVideoCodecScore = scoreVideoCodec(extractCodec(f.MimeType))
+				bestVideoCodecScore = cachedVideoCodecScore(f.MimeType)
 				continue
 			}
 
@@ -131,7 +151,7 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 				}
 
 				// Codec score tiebreaker
-				fCodec := scoreVideoCodec(extractCodec(f.MimeType))
+				fCodec := cachedVideoCodecScore(f.MimeType)
 				if fCodec != bestVideoCodecScore {
 					if fCodec > bestVideoCodecScore {
 						bestVideo = f
@@ -159,12 +179,12 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 
 			if bestAudio == nil {
 				bestAudio = f
-				bestAudioCodecScore = scoreAudioCodec(extractCodec(f.MimeType))
+				bestAudioCodecScore = cachedAudioCodecScore(f.MimeType)
 				continue
 			}
 
 			// Codec score
-			fCodec := scoreAudioCodec(extractCodec(f.MimeType))
+			fCodec := cachedAudioCodecScore(f.MimeType)
 			if fCodec != bestAudioCodecScore {
 				if fCodec > bestAudioCodecScore {
 					bestAudio = f

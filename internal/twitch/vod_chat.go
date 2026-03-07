@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -31,6 +30,7 @@ type VodChatDownloader struct {
 	vodStartMs    int64 // epoch ms when VOD started
 	messages      []TwitchChatMessage
 	seenIDs       map[string]struct{}
+	seenOrder     []string // Insertion-order tracking for deterministic pruning
 	totalCount    int
 	running       atomic.Bool
 	emoteResolver *EmoteResolver
@@ -96,8 +96,11 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		if state.StreamID == vcd.vodID {
 			contentOffset = state.LastOffsetSeconds
 			vcd.totalCount = state.MessageCount
+			vcd.seenIDs = make(map[string]struct{}, len(state.RecentIDs))
+			vcd.seenOrder = make([]string, 0, len(state.RecentIDs))
 			for _, id := range state.RecentIDs {
 				vcd.seenIDs[id] = struct{}{}
+				vcd.seenOrder = append(vcd.seenOrder, id)
 			}
 			vcd.logger.Info("resumed VOD chat download",
 				"vodID", vcd.vodID,
@@ -138,6 +141,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 				continue
 			}
 			vcd.seenIDs[edge.ID] = struct{}{}
+			vcd.seenOrder = append(vcd.seenOrder, edge.ID)
 
 			authorName := edge.CommenterDisplayName
 			if authorName == "" {
@@ -167,9 +171,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			vcd.totalCount++
 			newCount++
 
-			if vcd.OnProgress != nil {
-				vcd.reportProgress(contentOffset)
-			}
+			vcd.reportProgress(contentOffset)
 		}
 
 		// Server returned no results — end of VOD comments
@@ -199,27 +201,25 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			lastFlush = time.Now()
 		}
 
-		// Prune dedup map — keep chatDedupMax entries (TS: slice(-DEDUP_IDS))
-		if len(vcd.seenIDs) > chatDedupMax {
-			// Map iteration order is random in Go, but we just need to reduce
-			// the size. Keep chatDedupMax entries by deleting the excess.
-			excess := len(vcd.seenIDs) - chatDedupMax
-			for id := range vcd.seenIDs {
-				if excess <= 0 {
-					break
-				}
+		// Prune dedup — keep most recent chatDedupMax entries by insertion order
+		if len(vcd.seenOrder) > chatDedupMax*2 {
+			removeIDs := vcd.seenOrder[:len(vcd.seenOrder)-chatDedupMax]
+			for _, id := range removeIDs {
 				delete(vcd.seenIDs, id)
-				excess--
 			}
+			vcd.seenOrder = vcd.seenOrder[len(vcd.seenOrder)-chatDedupMax:]
 		}
 	}
 
 	vcd.flush()
 
-	// Resolve and inject third-party emotes (7TV, BTTV, FFZ)
+	// Resolve and inject third-party emotes (7TV, BTTV, FFZ).
+	// Use a fresh context — the original ctx may already be cancelled.
 	if vcd.totalCount > 0 && vcd.emoteResolver != nil && vcd.channelID != "" {
 		vcd.logger.Info("resolving emotes for VOD chat", "channelID", vcd.channelID)
-		emoteData := vcd.emoteResolver.Resolve(ctx, vcd.channelID, vcd.channelLogin)
+		emoteCtx, emoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		emoteData := vcd.emoteResolver.Resolve(emoteCtx, vcd.channelID, vcd.channelLogin)
+		emoteCancel()
 		if emoteData != nil {
 			if err := EnrichWithEmotes(vcd.outputPath, emoteData); err != nil {
 				vcd.logger.Warn("emote injection failed", "err", err)
@@ -261,6 +261,7 @@ func (vcd *VodChatDownloader) flush() {
 			vcd.logger.Error("marshal vod chat data", "err", err)
 			return
 		}
+		data = padMessageCountJSON(data)
 
 		tmpPath := vcd.outputPath + ".tmp"
 		if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
@@ -399,29 +400,32 @@ func (vcd *VodChatDownloader) updateVodChatFileHeader() {
 	}
 	header := string(headerBuf[:n])
 
-	// Replace messageCount value
-	mcStart := strings.Index(header, `"messageCount":`)
-	if mcStart >= 0 {
-		mcValStart := mcStart + len(`"messageCount":`)
-		for mcValStart < len(header) && (header[mcValStart] == ' ' || header[mcValStart] == '\t') {
-			mcValStart++
-		}
-		mcValEnd := mcValStart
-		for mcValEnd < len(header) && header[mcValEnd] >= '0' && header[mcValEnd] <= '9' {
-			mcValEnd++
-		}
-		if mcValEnd > mcValStart {
-			newVal := strconv.Itoa(vcd.totalCount)
-			header = header[:mcValStart] + newVal + header[mcValEnd:]
-		}
-	}
+	// Replace messageCount value (padded to fixed width)
+	header = replaceMessageCount(header, vcd.totalCount)
 
 	// Replace downloadedAt value (matches TS appendToFile header updates)
 	replaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
 
+	// With padded messageCount, the header size should be constant.
+	// Fallback handles legacy files written before padding was added.
 	updatedBytes := []byte(header)
 	if len(updatedBytes) == n {
 		f.WriteAt(updatedBytes, 0)
+	} else if len(updatedBytes) > n {
+		// Header grew — must read rest BEFORE writing header, since the new
+		// header is longer and would overwrite the first byte(s) of the rest data.
+		restSize := info.Size() - int64(n)
+		var restBuf []byte
+		if restSize > 0 {
+			restBuf = make([]byte, restSize)
+			nRest, _ := f.ReadAt(restBuf, int64(n))
+			restBuf = restBuf[:nRest]
+		}
+		f.WriteAt(updatedBytes, 0)
+		if len(restBuf) > 0 {
+			f.WriteAt(restBuf, int64(len(updatedBytes)))
+		}
+		f.Truncate(int64(len(updatedBytes)) + restSize)
 	}
 }
 
@@ -441,6 +445,7 @@ func (vcd *VodChatDownloader) writeFullFile() {
 	if err != nil {
 		return
 	}
+	data = padMessageCountJSON(data)
 
 	tmpPath := vcd.outputPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
@@ -492,14 +497,17 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 		return
 	}
 
-	// Collect recent IDs from seenIDs map (messages may be cleared after flush)
-	recentIDs := make([]string, 0, vodChatResumeMaxRecentIDs)
-	for id := range vcd.seenIDs {
-		recentIDs = append(recentIDs, id)
-		if len(recentIDs) >= vodChatResumeMaxRecentIDs {
-			break
-		}
+	// Use seenOrder (insertion order) for deterministic resume state,
+	// not map iteration which is non-deterministic in Go.
+	// Keep only the most recent vodChatResumeMaxRecentIDs entries.
+	recentIDs := vcd.seenOrder
+	if len(recentIDs) > vodChatResumeMaxRecentIDs {
+		recentIDs = recentIDs[len(recentIDs)-vodChatResumeMaxRecentIDs:]
 	}
+	// Copy to avoid aliasing the live slice
+	recentIDsCopy := make([]string, len(recentIDs))
+	copy(recentIDsCopy, recentIDs)
+	recentIDs = recentIDsCopy
 
 	state := ChatResumeState{
 		MessageCount:      vcd.totalCount,
@@ -576,6 +584,7 @@ func EnrichWithEmotes(chatPath string, emoteData *TwitchEmoteData) error {
 	if err != nil {
 		return err
 	}
+	out = padMessageCountJSON(out)
 
 	tmpPath := chatPath + ".tmp"
 	if err := os.WriteFile(tmpPath, out, 0o644); err != nil {

@@ -94,6 +94,7 @@ func NewDownloadWorker(
 	deps *DownloadWorkerDeps,
 ) *DownloadWorker {
 	queue := NewJobQueue(cfg.Downloader.NumParallelDownloads)
+	queue.SetLogger(logger)
 
 	var cs *cipher.Solver
 	var pp *bgutils.PotProvider
@@ -184,7 +185,7 @@ func (w *DownloadWorker) CancelJob(jobID string) {
 }
 
 func (w *DownloadWorker) enqueueExistingJobs() {
-	jobs, err := w.db.GetAllJobs(false)
+	jobs, err := w.db.GetAllJobs()
 	if err != nil {
 		w.logger.Error("failed to get existing jobs", "err", err)
 		return
@@ -200,6 +201,12 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 // pollForJobs is signal-driven: wakes on NotifyNewJob signals or a 60s safety heartbeat.
 // Most job discovery happens via explicit EnqueueJob calls; this is a catch-all.
 func (w *DownloadWorker) pollForJobs(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error("panic in pollForJobs", "panic", fmt.Sprint(r))
+		}
+	}()
+
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -211,7 +218,7 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 		case <-ticker.C:
 		}
 
-		jobs, err := w.db.GetAllJobs(false)
+		jobs, err := w.db.GetAllJobs()
 		if err != nil {
 			continue
 		}
@@ -553,7 +560,7 @@ func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB cap
 	return data, resp.StatusCode, err
 }
 

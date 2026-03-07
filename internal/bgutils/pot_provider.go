@@ -2,9 +2,10 @@ package bgutils
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"sync"
 	"time"
 )
@@ -232,13 +233,19 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	ttl := time.Until(minter.ExpiresAt)
 	if ttl > 0 {
 		time.AfterFunc(ttl, func() {
+			var cleanup func()
 			pp.mu.Lock()
-			defer pp.mu.Unlock()
+			evicted := false
 			if cached, ok := pp.minterCache[contentBinding]; ok && cached == minter {
-				if cached.Cleanup != nil {
-					cached.Cleanup()
-				}
+				cleanup = cached.Cleanup
 				delete(pp.minterCache, contentBinding)
+				evicted = true
+			}
+			pp.mu.Unlock()
+			if cleanup != nil {
+				cleanup()
+			}
+			if evicted {
 				pp.logger.Debug("[PotProvider] evicted expired minter", "binding", contentBinding[:min(len(contentBinding), 20)])
 			}
 		})
@@ -268,8 +275,15 @@ const alphaNum = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 func randomAlphaNum(n int) string {
 	b := make([]byte, n)
+	max := big.NewInt(int64(len(alphaNum)))
 	for i := range b {
-		b[i] = alphaNum[rand.Intn(len(alphaNum))]
+		idx, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			// Fallback: use index 0 (extremely unlikely to fail)
+			b[i] = alphaNum[0]
+			continue
+		}
+		b[i] = alphaNum[idx.Int64()]
 	}
 	return string(b)
 }

@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,7 @@ const (
 	maxStaleContinuation = 30
 	writeIntervalMs      = 1000 // Flush to disk within 1 second
 	resumeSaveInterval   = 10 * time.Second
+	messageCountWidth    = 20 // Fixed-width padding for messageCount in JSON header
 )
 
 // ChatDownloaderOptions configures a ChatDownloader.
@@ -563,12 +565,17 @@ func (cd *ChatDownloader) writeFullChatFile() {
 	if err != nil {
 		return
 	}
+	jsonBytes = padMessageCountJSON(jsonBytes)
 
 	tmpFile := cd.opts.OutputFile + ".tmp"
 	if err := os.WriteFile(tmpFile, jsonBytes, 0o644); err != nil {
 		return
 	}
-	os.Rename(tmpFile, cd.opts.OutputFile)
+	if err := os.Rename(tmpFile, cd.opts.OutputFile); err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("rename chat file: %w", err))
+		}
+	}
 }
 
 // updateChatFileHeader updates messageCount and downloadedAt in the JSON header
@@ -597,49 +604,125 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	}
 	header := string(headerBuf[:n])
 
-	// Simple string replacement approach
-	updated := header
-	// Replace messageCount value
-	mcStart := strings.Index(updated, `"messageCount":`)
-	if mcStart >= 0 {
-		mcValStart := mcStart + len(`"messageCount":`)
-		// Skip whitespace
-		for mcValStart < len(updated) && (updated[mcValStart] == ' ' || updated[mcValStart] == '\t') {
-			mcValStart++
-		}
-		mcValEnd := mcValStart
-		for mcValEnd < len(updated) && updated[mcValEnd] >= '0' && updated[mcValEnd] <= '9' {
-			mcValEnd++
-		}
-		if mcValEnd > mcValStart {
-			newVal := strconv.Itoa(cd.messageCount)
-			updated = updated[:mcValStart] + newVal + updated[mcValEnd:]
-		}
-	}
+	// Replace messageCount value (padded to fixed width)
+	header = replaceMessageCount(header, cd.messageCount)
 
-	daStart := strings.Index(updated, `"downloadedAt":`)
-	if daStart >= 0 {
-		daValStart := daStart + len(`"downloadedAt":`)
-		// Skip whitespace and opening quote
-		for daValStart < len(updated) && (updated[daValStart] == ' ' || updated[daValStart] == '\t') {
-			daValStart++
-		}
-		if daValStart < len(updated) && updated[daValStart] == '"' {
-			daValStart++ // skip opening quote
-			daValEnd := daValStart
-			for daValEnd < len(updated) && updated[daValEnd] != '"' {
-				daValEnd++
-			}
-			newVal := time.Now().UTC().Format(time.RFC3339)
-			updated = updated[:daValStart] + newVal + updated[daValEnd:]
-		}
-	}
+	// Replace downloadedAt value
+	replaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
 
-	// Only write if byte length matches (safe in-place update)
-	updatedBytes := []byte(updated)
+	// With padded messageCount, the header size should be constant.
+	// Fallback handles legacy files written before padding was added.
+	updatedBytes := []byte(header)
 	if len(updatedBytes) == n {
 		f.WriteAt(updatedBytes, 0)
+	} else if len(updatedBytes) > n {
+		restSize := info.Size() - int64(n)
+		var restBuf []byte
+		if restSize > 0 {
+			restBuf = make([]byte, restSize)
+			nRest, _ := f.ReadAt(restBuf, int64(n))
+			restBuf = restBuf[:nRest]
+		}
+		f.WriteAt(updatedBytes, 0)
+		if len(restBuf) > 0 {
+			f.WriteAt(restBuf, int64(len(updatedBytes)))
+		}
+		f.Truncate(int64(len(updatedBytes)) + restSize)
 	}
+}
+
+// padMessageCountJSON pads the messageCount numeric value in serialized JSON to
+// messageCountWidth characters with trailing whitespace. This ensures the header
+// byte size stays constant during in-place updates as the count grows.
+func padMessageCountJSON(data []byte) []byte {
+	marker := []byte(`"messageCount":`)
+	idx := bytes.Index(data, marker)
+	if idx < 0 {
+		return data
+	}
+	pos := idx + len(marker)
+	for pos < len(data) && (data[pos] == ' ' || data[pos] == '\t') {
+		pos++
+	}
+	numStart := pos
+	for pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
+		pos++
+	}
+	if pos == numStart {
+		return data
+	}
+
+	padNeeded := messageCountWidth - (pos - numStart)
+	if padNeeded <= 0 {
+		return data
+	}
+
+	result := make([]byte, len(data)+padNeeded)
+	copy(result, data[:pos])
+	for i := range padNeeded {
+		result[pos+i] = ' '
+	}
+	copy(result[pos+padNeeded:], data[pos:])
+	return result
+}
+
+// replaceMessageCount replaces the messageCount value in a JSON header string
+// with the new count padded to fixed width. Handles both legacy (unpadded) and
+// padded files by scanning digits + trailing whitespace as the old value field.
+func replaceMessageCount(header string, count int) string {
+	mcStart := strings.Index(header, `"messageCount":`)
+	if mcStart < 0 {
+		return header
+	}
+
+	pos := mcStart + len(`"messageCount":`)
+	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
+		pos++
+	}
+	numStart := pos
+	for pos < len(header) && header[pos] >= '0' && header[pos] <= '9' {
+		pos++
+	}
+	if pos == numStart {
+		return header
+	}
+	// Also scan trailing whitespace (from previous padding)
+	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
+		pos++
+	}
+
+	oldFieldWidth := pos - numStart
+	newVal := strconv.Itoa(count)
+	targetWidth := max(messageCountWidth, oldFieldWidth)
+	padded := newVal + strings.Repeat(" ", max(0, targetWidth-len(newVal)))
+
+	return header[:numStart] + padded + header[pos:]
+}
+
+// replaceQuotedField replaces a JSON string value in a header buffer.
+// Finds `"key": "old_value"` and replaces with `"key": "new_value"`.
+func replaceQuotedField(header *string, key, newValue string) {
+	h := *header
+	keyIdx := strings.Index(h, key)
+	if keyIdx < 0 {
+		return
+	}
+	valStart := keyIdx + len(key)
+	for valStart < len(h) && h[valStart] != '"' {
+		valStart++
+	}
+	if valStart >= len(h) {
+		return
+	}
+	valStart++ // skip opening quote
+	valEnd := valStart
+	for valEnd < len(h) && h[valEnd] != '"' {
+		valEnd++
+	}
+	if valEnd >= len(h) {
+		return
+	}
+	*header = h[:valStart] + newValue + h[valEnd:]
 }
 
 func (cd *ChatDownloader) loadResume() (*ChatResumeState, error) {
@@ -690,8 +773,10 @@ func (cd *ChatDownloader) clearResume() {
 // sleep waits for the given duration, but returns early if the context is cancelled
 // (which happens on Stop() or MarkStreamEnded()).
 func (cd *ChatDownloader) sleep(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-	case <-time.After(d):
+	case <-timer.C:
 	}
 }

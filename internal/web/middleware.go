@@ -1,6 +1,7 @@
 package web
 
 import (
+	"crypto/subtle"
 	"net"
 	"net/http"
 	"net/url"
@@ -66,7 +67,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
 				"font-src 'self' https://cdn.jsdelivr.net; "+
 				"img-src 'self' data: https://i.ytimg.com https://yt3.ggpht.com https://*.jtvnw.net https://*.ttvnw.net https://cdn.jsdelivr.net https://fonts.gstatic.com; "+
-				"connect-src 'self' https://cdn.jsdelivr.net data:; "+
+				"connect-src 'self' ws: wss: https://cdn.jsdelivr.net data:; "+
 				"frame-src https://www.youtube-nocookie.com https://player.twitch.tv; "+
 				"object-src 'none'; "+
 				"base-uri 'self'; "+
@@ -100,7 +101,8 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.H
 			// Same-process clients (TUI) send the internal token to bypass CSRF.
 			// Browsers cannot set custom headers cross-origin without a CORS
 			// preflight, which the server does not grant, so this is safe.
-			if r.Header.Get(InternalTokenHeader) == internalToken {
+			// Use constant-time comparison to prevent timing side-channels.
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get(InternalTokenHeader)), []byte(internalToken)) == 1 {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -142,7 +144,7 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.H
 func IPGateMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := extractIP(r)
+			ip := ExtractIP(r)
 
 			switch cfg.Network.NetworkAccess {
 			case "external", "public":
@@ -168,7 +170,7 @@ func IPGateMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler
 // LoopbackOnly is a middleware that restricts to loopback addresses only.
 func LoopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := extractIP(r)
+		ip := ExtractIP(r)
 		if !isLoopback(ip) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -204,9 +206,10 @@ func isAllowedOrigin(origin, networkAccess string) bool {
 	}
 }
 
-// extractIP gets the client's real IP from the request.
+// ExtractIP gets the client's real IP from the request.
 // Does NOT trust X-Forwarded-For to prevent spoofing attacks.
-func extractIP(r *http.Request) string {
+// Exported so route handlers can use it without duplicating the logic.
+func ExtractIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -270,14 +273,14 @@ func isLocalIP(ipStr string) bool {
 
 // IsLoopbackRequest returns true if the request is from a loopback address.
 func IsLoopbackRequest(r *http.Request) bool {
-	return isLoopback(extractIP(r))
+	return isLoopback(ExtractIP(r))
 }
 
 // IsLocalOrPrivateRequest returns true if the request is from a loopback or
 // private (LAN) address. Used by auth endpoints to match the server's
 // AuthMiddleware trust policy which allows both loopback and private IPs.
 func IsLocalOrPrivateRequest(r *http.Request) bool {
-	return isLocalIP(extractIP(r))
+	return isLocalIP(ExtractIP(r))
 }
 
 // SkipCompression can be used to check if compression should be skipped

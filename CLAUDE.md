@@ -112,7 +112,7 @@ The exe icon and version info are embedded via `.syso` files generated at build 
 
 Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary, all code under `internal/`.
 
-### Process model (cmd/moombox/main.go, ~2025 lines)
+### Process model (cmd/moombox/main.go, ~2028 lines)
 
 Moombox uses a **launcher/supervisor pattern**. The binary checks `_MOOMBOX_CHILD` env var on startup:
 - **Without it** → launcher mode: spawns itself as a child, waits, respawns on exit code 42
@@ -120,7 +120,7 @@ Moombox uses a **launcher/supervisor pattern**. The binary checks `_MOOMBOX_CHIL
 
 All restarts (config change, update applied, setup wizard, API) set `restartRequested` and exit with code 42. The launcher respawns, picking up any new binary on disk (for updates). This avoids process chain buildup and keeps terminal state clean for BubbleTea.
 
-A single `triggerRestart(source)` closure in `run()` handles all restart triggers.
+A single `triggerRestart(source)` closure in `run()` handles all restart triggers. Shutdown uses a 10-second force-exit timer if graceful cleanup stalls. Non-blocking channel sends to the TUI use drop counters to avoid blocking the main event loop.
 
 ### Service initialization order (inside `run()`)
 
@@ -131,30 +131,32 @@ All services are wired together in main.go via callback closures (OnVideoFound, 
 ### Package dependency graph
 
 ```
-cmd/moombox/main.go          ← launcher + orchestrator
-├── internal/config           ← TOML config parsing
-├── internal/updater          ← GitHub release checker + self-updater
-├── internal/logger           ← slog wrapper with file rotation, ring buffer, pub/sub
-├── internal/database         ← SQLite with WAL, batch updates, pub/sub for job changes
-├── internal/cookies          ← jar, refresh service, auto-cookie (CDP browser extraction)
-├── internal/youtube          ← Service (PlayerAPI + Auth + watch page + format selector)
-├── internal/twitch           ← Service (GQL API + auth + HLS + IRC chat + VOD chat + emotes)
-├── internal/bgutils          ← PO token: challenge → BotGuard VM (Goja) → integrity token → mint
-├── internal/cipher           ← YouTube signature cipher: extract transforms from player.js, execute via Goja
-├── internal/engine           ← SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer
-├── internal/chat             ← YouTube live chat downloader (polling API with batching)
-├── internal/worker           ← DownloadWorker, StreamProcessor, Orchestrator, JobQueue, TrimService, QualityMonitor
-├── internal/monitor          ← FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
-├── internal/notifications    ← Manager + Discord webhook
-├── internal/web              ← chi router, WebSocket hub, auth, middleware, embedded SPA
-│   └── internal/web/routes   ← All REST API route handlers
-├── internal/tui              ← Charm ecosystem TUI (bubbletea + bubbles + huh + lipgloss)
-├── internal/goja             ← JS runtime shims (minimal DOM, TextEncoder, timers)
-├── internal/disk             ← Windows-only disk space queries (kernel32 GetDiskFreeSpaceExW)
-├── internal/errors           ← Typed error hierarchy (MoomboxError, YouTubeError, etc.)
-├── internal/constants        ← All hardcoded values (API keys, URLs, timeouts)
-└── internal/utils            ← HTTP helpers, text/time formatters, YouTube URL parsing
+cmd/moombox/main.go               ← launcher + orchestrator (~2,028 lines)
+├── internal/config         ~470   ← TOML config parsing, FlexDuration, channel terms
+├── internal/updater        ~350   ← GitHub release checker + self-updater (3 files)
+├── internal/logger         ~600   ← slog wrapper with file rotation, ring buffer (200), pub/sub
+├── internal/database      ~1,650  ← SQLite with WAL, batch updates (100ms coalesce), pub/sub (2 files)
+├── internal/cookies       ~2,100  ← jar, refresh, auto-cookie with Firefox/Chromium (6 files)
+├── internal/youtube       ~2,030  ← Service, PlayerAPI, Auth, watch page, format selector (7 files)
+├── internal/twitch        ~3,300  ← Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes (9 files)
+├── internal/bgutils       ~2,000  ← PO token: challenge → BotGuard VM (Goja) → integrity token → mint
+├── internal/cipher        ~1,500  ← YouTube signature cipher: AST + regex fallback, 3-VM LRU (4 files)
+├── internal/engine        ~2,895  ← SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer (4 files)
+├── internal/chat           ~700   ← YouTube live chat downloader (polling API with batching)
+├── internal/worker        ~5,000  ← Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality (16 files)
+├── internal/monitor         ~900  ← FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
+├── internal/notifications   ~500  ← Manager + Discord webhook
+├── internal/web           ~4,000  ← chi router, WebSocket hub, auth, middleware, 40+ endpoints
+│   └── internal/web/routes        ← All REST API route handlers
+├── internal/tui           ~7,000  ← 3-panel layout, 8 overlay dialogs, chord system (21 files)
+├── internal/goja           ~500   ← JS runtime shims (minimal DOM, TextEncoder, timers)
+├── internal/disk           ~100   ← Windows-only disk space queries (kernel32 GetDiskFreeSpaceExW)
+├── internal/errors         ~500   ← Typed error hierarchy, 100+ sentinel codes
+├── internal/constants      ~300   ← All hardcoded values (API keys, URLs, timeouts)
+└── internal/utils          ~700   ← HTTP helpers, text/time formatters, YouTube URL parsing
 ```
+
+Total codebase: **~35,000+ lines** of Go across 80+ files (excluding tests, web assets, and main.go).
 
 ### Key data flow
 
@@ -206,7 +208,7 @@ type DownloadWorkerDeps struct {
 Route handlers similarly use `FormatRoutesDeps`, `StatusRouteDeps`, etc.
 
 ### Goja (pure-Go JavaScript engine)
-Used for two things only: BotGuard VM (PO token generation) and YouTube cipher decryption. Package `internal/goja/` provides minimal DOM shims. No CGo or V8 dependency.
+Used for two things only: BotGuard VM (PO token generation) and YouTube cipher decryption. Package `internal/goja/` provides minimal DOM shims. No CGo or V8 dependency. BotGuard uses a **triple-tier cache**: session tokens (6h TTL) → minter instances (dynamic TTL) → inflight request dedup. Cold start uses fallback tokens while the VM initializes. Cipher solver uses **full player.js AST approach** with legacy regex fallback — 3-VM LRU cache keyed by player.js URL.
 
 ### Download orchestration
 - **StreamProcessor**: Probes video status, waits for live, handles auth upgrades. For Twitch, polls offline channels until live when manually added (one-time monitor)
@@ -215,6 +217,30 @@ Used for two things only: BotGuard VM (PO token generation) and YouTube cipher d
 - **QualityMonitor**: Probes stream quality every 30s during live downloads. On resolution change, signals orchestrator to cleanly mux the current segment and start a new one at the new quality
 - **Background mux pattern**: Completed segments are muxed in goroutines with `context.Background()` (detached from job context) so already-downloaded data is always muxed even during cancellation. Coordinated via `sync.WaitGroup`
 - **Live stream verification loop**: After downloaders stop, probes YouTube API to confirm stream ended vs still live (up to 6 consecutive checks)
+
+### Worker concurrency model
+The DownloadWorker uses **dual-layer concurrency**: 100 lifecycle goroutine slots (for probing, waiting, auth upgrades) and a separate configurable download semaphore (default 2) for actual segment downloading. This prevents slow probes from blocking downloads and vice versa. The JobQueue uses a `sync.Map` for O(1) lookups alongside a mutex-protected slice for ordered iteration.
+
+### WebSocket throttling
+WebSocket broadcasts to web clients use **100ms leading/trailing edge throttling**. The first update fires immediately (leading edge), then subsequent updates within 100ms are coalesced and the latest state is sent after the window expires (trailing edge). This prevents flooding clients during rapid progress updates while maintaining responsiveness.
+
+### Database batch coalescing
+`OnJobUpdate` subscriber callbacks are debounced via a **100ms signal-driven coalescing window**. When a job update occurs, it starts a 100ms timer — additional updates reset the timer. Only after 100ms of quiet does the batch callback fire. This dramatically reduces UI update frequency during heavy download activity.
+
+### YouTube multi-client auth strategy
+The YouTube service uses a **multi-client fallback chain** across Innertube API clients: WEB, ANDROID, IOS, TV_EMBEDDED, MWEB, WEB_CREATOR. Each client has different capabilities and auth requirements. Format selection priority: resolution > FPS > codec > bitrate > auth level. Auth levels range from AndroidVR(0) to WebCreator(5).
+
+### Twitch emote caching
+Twitch emotes (BTTV, FFZ, 7TV) use an **LRU cache** capped at 200 channels. Global emotes are cached separately. Emote data is fetched lazily on first chat connection to a channel and evicted LRU when the cache is full.
+
+### Auto-cookies browser extraction
+Cookie extraction supports **Firefox** (direct SQLite read from `cookies.sqlite`) and **Chromium** browsers (Chrome, Edge, Brave — via Chrome DevTools Protocol). Browser processes spawned for cookie extraction use **Windows Job Objects** (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) to guarantee cleanup even on crashes. Browser detection uses Windows Registry lookups.
+
+### Updater binary swap
+Self-update uses a **three-step rename dance**: download new binary to `.new`, rename current to `.old`, rename `.new` to current. Separate HTTP timeouts: 10s for API calls, 5min for binary downloads. On restart, the launcher picks up the new binary automatically.
+
+### Web server middleware stack
+7-layer middleware: RecoveryMiddleware → RequestLogger → CSRFMiddleware → AuthMiddleware → IPAccessControl → RateLimiter → CSP/security headers. Auth uses scrypt password hashing with 24-hour sessions and persistent client tokens (database v6).
 
 ### Monitor → Worker wiring
 Monitors fire `OnVideoFound`/`OnStreamFound` callbacks. These are closures set in main.go that create database jobs and enqueue them to the DownloadWorker's JobQueue.
@@ -233,6 +259,9 @@ All REST endpoints use `/api/` prefix (no version number). Route registration an
 
 ### Panic recovery
 All spawned goroutines use inline `defer func() { if r := recover(); r != nil { ... } }()`. No shared helper — pattern is consistently inline. HTTP handlers are covered by `RecoveryMiddleware` in `web/server.go`. Database subscriber callbacks use `safeCallJobUpdate`/`safeCallJobsChange` wrappers.
+
+### TUI structure (21 files, ~7,000 lines)
+3-panel layout: task list (left) + job details (right) + log viewer (bottom). Tab switches focus — focused panel expands. 8 overlay dialogs: add video (quick/advanced/import modes), settings, help, trim, orphans, client tokens, action menu, confirm. `ProgressStore` manages per-job progress state with 100ms update batching. `StyleCache` pre-computes lipgloss styles on resize to avoid per-render allocation.
 
 ### TUI chord system
 `buildMenuItems()` in `app.go` is the **single source of truth** for all keyboard chords, the action menu (M key), chord feedback hints, and help text. `dispatchAction(chord, job)` is the unified execution handler. Adding a new chord requires changes in only two places: the item in `buildMenuItems()` and a case in `dispatchAction()`.

@@ -80,7 +80,7 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 		return "", false, fmt.Errorf("watch page returned status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
 		return "", false, err
 	}
@@ -157,7 +157,7 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 		return nil, fmt.Errorf("chat API returned status %d", resp.StatusCode)
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,6 @@ func parseResponse(data map[string]any) (*ChatApiResponse, error) {
 		}
 
 		// Handle replay wrapper
-		origActionMap := actionMap
 		var replayOffsetMs int64
 		hasReplayOffset := false
 		if replayAction, ok := actionMap["replayChatItemAction"].(map[string]any); ok {
@@ -291,7 +290,6 @@ func parseResponse(data map[string]any) (*ChatApiResponse, error) {
 				replayOffsetMs, _ = strconv.ParseInt(offsetStr, 10, 64)
 				hasReplayOffset = true
 			}
-			_ = origActionMap // avoid unused warning
 		}
 
 		// Find message renderer

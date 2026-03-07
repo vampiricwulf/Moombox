@@ -20,11 +20,22 @@ const (
 // PlayerCache manages disk-cached YouTube player JS files.
 type PlayerCache struct {
 	cacheDir string
+	logger   interface {
+		Debug(msg string, args ...any)
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
+	}
 }
 
 // NewPlayerCache creates a player cache at the given base directory.
 // If cacheDir is empty, uses ~/.cache/yt-cipher/.
-func NewPlayerCache(cacheDir string) (*PlayerCache, error) {
+func NewPlayerCache(cacheDir string, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) (*PlayerCache, error) {
 	if cacheDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -38,7 +49,7 @@ func NewPlayerCache(cacheDir string) (*PlayerCache, error) {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 
-	return &PlayerCache{cacheDir: dir}, nil
+	return &PlayerCache{cacheDir: dir, logger: logger}, nil
 }
 
 // CacheKey returns the SHA256 hash of the player URL for use as a cache key.
@@ -94,10 +105,6 @@ func (pc *PlayerCache) Get(playerURL string) (string, error) {
 		return "", err
 	}
 
-	// Touch access time (update mod time to extend TTL on access)
-	now := time.Now()
-	os.Chtimes(path, now, now)
-
 	return string(data), nil
 }
 
@@ -150,10 +157,9 @@ func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, err
 
 	js := string(body)
 
-	// Cache to disk
-	if putErr := pc.Put(playerURL, js); putErr != nil {
-		// Non-fatal: continue even if caching fails
-		_ = putErr
+	// Cache to disk (non-fatal if caching fails)
+	if putErr := pc.Put(playerURL, js); putErr != nil && pc.logger != nil {
+		pc.logger.Warn("cipher: failed to cache player JS to disk", "err", putErr)
 	}
 
 	return js, nil

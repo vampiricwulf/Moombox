@@ -86,7 +86,7 @@ func (rl *RateLimiter) Allow(ip string) bool {
 // Includes Retry-After header to match TypeScript behavior.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := extractIP(r)
+		ip := ExtractIP(r)
 		if allowed, retryAfter := rl.AllowWithRetry(ip); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			w.Header().Set("Content-Type", "application/json")

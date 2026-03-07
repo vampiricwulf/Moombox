@@ -53,9 +53,9 @@ func TestExtractIP(t *testing.T) {
 			r.Header.Set("X-Forwarded-For", "99.99.99.99")
 			r.Header.Set("X-Real-IP", "88.88.88.88")
 
-			result := extractIP(r)
+			result := ExtractIP(r)
 			if result != tt.expected {
-				t.Errorf("extractIP(RemoteAddr=%q) = %q, expected %q", tt.remoteAddr, result, tt.expected)
+				t.Errorf("ExtractIP(RemoteAddr=%q) = %q, expected %q", tt.remoteAddr, result, tt.expected)
 			}
 		})
 	}

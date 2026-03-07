@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"regexp"
 	"runtime"
@@ -44,13 +45,17 @@ import (
 )
 
 var (
-	version = "2.3.12"
+	version = "2.3.13"
 	commit  = ""
 )
 
 // exitCodeRestart is the exit code the child uses to signal the launcher
 // that it should respawn. Used for both config restarts and update restarts.
 const exitCodeRestart = 42
+
+// createNoWindow prevents a console window from appearing when spawning
+// detached processes on Windows (passed to SysProcAttr.CreationFlags).
+const createNoWindow = 0x08000000
 
 func init() {
 	// Strip "v" prefix from version if set via -ldflags (tag name includes it)
@@ -132,7 +137,10 @@ func main() {
 	// Resolve config path
 	cfgPath := *configPath
 	if cfgPath == "" {
-		cwd, _ := os.Getwd()
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to get working directory: %v\n", err)
+		}
 		cfgPath = filepath.Join(cwd, "config.toml")
 	}
 
@@ -355,7 +363,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms)
+	var cfgMu sync.Mutex
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
+		cfgMu.Lock()
+		defer cfgMu.Unlock()
 		existing := make(map[string]bool)
 		for _, p := range cfg.Cookies.Platforms {
 			existing[p] = true
@@ -370,6 +381,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		for p := range existing {
 			platforms = append(platforms, p)
 		}
+		sort.Strings(platforms)
 		cfg.Cookies.Platforms = platforms
 		if err := config.Save(cfg, configPath); err != nil {
 			log.Warn("Failed to persist auto-cookie platforms", slog.String("error", err.Error()))
@@ -425,6 +437,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Shared closure: determines which platforms are active for cookie status display.
 	getActivePlatforms := func() map[string]bool {
+		cfgMu.Lock()
+		defer cfgMu.Unlock()
 		yt, tw := config.GetActivePlatforms(cfg)
 		return map[string]bool{"youtube": yt, "twitch": tw}
 	}
@@ -483,7 +497,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		},
 		OnHideFinishedAgeChanged: func() {
 			// Re-broadcast job list with updated archive threshold
-			jobs, _ := db.GetAllJobs(false)
+			jobs, _ := db.GetAllJobs()
 			wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg))
 		},
 		OnChannelChange: kickMonitors,
@@ -540,7 +554,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		Logger:    log,
 	})
 	routes.LogRoutes(r, log.GetRecentLines)
-	routes.ImportRoutes(r, db, cfg, apiRL)
+	importCleanup := routes.ImportRoutes(r, db, cfg, apiRL)
+	defer importCleanup()
 	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc, getActivePlatforms)
 	routes.YtdlpRoutes(r, cfg.Network.Port, cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(r, func() { triggerRestart("API") })
@@ -627,7 +642,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Wire initial state provider for WebSocket connections
 	wsHub.InitialState = func() map[string]any {
-		jobs, _ := db.GetAllJobs(false)
+		jobs, _ := db.GetAllJobs()
 		jobs = filterJobsByAge(jobs, cfg)
 		return map[string]any{
 			"jobs":             jobs,
@@ -857,17 +872,17 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	twitchMon.OnSchedule = func(_ int64) { broadcastAllTimers() }
 
 	// Initialize per-job log tracking with existing jobs (matches TS knownJobIds)
-	if existingJobs, err := db.GetAllJobs(true); err == nil {
+	if existingJobs, err := db.GetAllJobs(); err == nil {
 		for _, j := range existingJobs {
 			db.TrackJobForLogs(j.ID)
 		}
 	}
 
 	// Database -> WebSocket: broadcast job updates
-	db.OnJobUpdate(func(job *database.Job) {
+	unsubWSJobUpdate := db.OnJobUpdate(func(job *database.Job) {
 		wsHub.BroadcastJobUpdate(job.ID, job)
 	})
-	db.OnJobsChange(func(jobs []*database.Job) {
+	unsubWSJobsChange := db.OnJobsChange(func(jobs []*database.Job) {
 		// Keep per-job log tracking in sync (matches TS knownJobIds update)
 		activeIDs := make(map[string]struct{}, len(jobs))
 		for _, j := range jobs {
@@ -1354,10 +1369,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				ffmpegPath = "ffmpeg"
 			}
 			checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer checkCancel()
 			if err := exec.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
 				app.ShowFFmpegCheck()
 			}
+			checkCancel()
 		}
 
 		// Create async update channels for TUI
@@ -1381,14 +1396,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 
 		// Forward DB events to TUI channels
-		db.OnJobUpdate(func(job *database.Job) {
+		unsubTUIJobUpdate := db.OnJobUpdate(func(job *database.Job) {
 			select {
 			case jobUpdateCh <- job:
 			default:
 				tuiDroppedJobs.Add(1)
 			}
 		})
-		db.OnJobsChange(func(jobs []*database.Job) {
+		unsubTUIJobsChange := db.OnJobsChange(func(jobs []*database.Job) {
 			select {
 			case jobsUpdateCh <- jobs:
 			default:
@@ -1491,7 +1506,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		authStatusToTUI(cookieRefresh.GetStatus())
 
 		// Send initial job list
-		if jobs, err := db.GetAllJobs(false); err == nil {
+		if jobs, err := db.GetAllJobs(); err == nil {
 			select {
 			case jobsUpdateCh <- jobs:
 			default:
@@ -1515,6 +1530,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// mean no goroutine will block, and GC handles cleanup.
 		cancel() // TUI quit triggers shutdown
 		log.Unsubscribe(tuiLogSub)
+		unsubTUIJobUpdate()
+		unsubTUIJobsChange()
 
 		// Report dropped messages (helps diagnose missed TUI updates)
 		if n := tuiDroppedJobs.Load(); n > 0 {
@@ -1530,6 +1547,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// 10-second force-exit timer
 	forceExit := time.AfterFunc(10*time.Second, func() {
 		log.Error("Graceful shutdown timed out, forcing exit")
+		log.Close() // flush buffered logs before force exit
 		os.Exit(1)
 	})
 	defer forceExit.Stop()
@@ -1572,8 +1590,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// 6. Stop web server
 	stopService("WebServer", webServer.Stop)
 
-	// 7. Unsubscribe log forwarder
+	// 7. Unsubscribe log forwarder and DB event subscribers
 	log.Unsubscribe(logSub)
+	unsubWSJobUpdate()
+	unsubWSJobsChange()
 
 	// 8. Flush database
 	stopService("Database", func() { db.Close() })
@@ -1715,7 +1735,7 @@ func (n *nopLogger) Warn(_ string, _ ...any)  {}
 func (n *nopLogger) Error(_ string, _ ...any) {}
 
 func getAllJobsSafe(db *database.Database) []*database.Job {
-	jobs, err := db.GetAllJobs(false)
+	jobs, err := db.GetAllJobs()
 	if err != nil {
 		return []*database.Job{}
 	}
@@ -1885,7 +1905,6 @@ func (a *youtubeMetadataAdapter) FetchMetadata(ctx context.Context, videoID stri
 	}, nil
 }
 
-// filterJobsByAge excludes finished jobs older than hide_finished_age_days (match TS filterJobsByAge).
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.
 func checkAndBroadcastUpdate(
 	ctx context.Context,
@@ -1998,7 +2017,7 @@ func deferDeleteOldLauncher(exePath string) {
 	cleanup := exec.Command("cmd", "/C",
 		"ping", "127.0.0.1", "-n", "3", ">nul", "2>nul", "&",
 		"del", "/f", "/q", oldPath, ">nul", "2>nul")
-	cleanup.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000} // CREATE_NO_WINDOW
+	cleanup.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
 	cleanup.Start() // fire and forget
 }
 
@@ -2010,10 +2029,28 @@ func extractWSIP(r *http.Request) string {
 	return host
 }
 
+// filterJobsByAge removes finished jobs older than hide_finished_age_days from
+// the slice. When ageDays is 0, the cutoff is "now" so all finished jobs are
+// hidden (any finished job's updated_at will be before the current moment).
+// Returns the original slice unchanged when no jobs are filtered out.
 func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig) []*database.Job {
 	ageDays := int(cfg.Monitors.HideFinishedAgeDays.Value)
 	cutoff := time.Now().AddDate(0, 0, -ageDays)
-	var filtered []*database.Job
+	anyFiltered := false
+	for _, j := range jobs {
+		if j.Status == database.StatusFinished && j.UpdatedAt != "" {
+			if t, err := time.Parse(time.RFC3339, j.UpdatedAt); err == nil {
+				if t.Before(cutoff) {
+					anyFiltered = true
+					break
+				}
+			}
+		}
+	}
+	if !anyFiltered {
+		return jobs
+	}
+	filtered := make([]*database.Job, 0, len(jobs))
 	for _, j := range jobs {
 		if j.Status == database.StatusFinished && j.UpdatedAt != "" {
 			if t, err := time.Parse(time.RFC3339, j.UpdatedAt); err == nil {

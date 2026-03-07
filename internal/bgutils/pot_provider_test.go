@@ -1011,7 +1011,7 @@ func TestBGError_WithInfo(t *testing.T) {
 		Message: "detail",
 		Info:    map[string]any{"key": "val"},
 	}
-	expected := "VM_ERROR: detail"
+	expected := "VM_ERROR: detail (map[key:val])"
 	if err.Error() != expected {
 		t.Errorf("expected %q, got %q", expected, err.Error())
 	}

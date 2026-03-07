@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -212,10 +213,10 @@ func TestResolveTemplate(t *testing.T) {
 		t.Error("expected non-empty result")
 	}
 	// Verify the ID and date are present
-	if !contains(result, "dQw4w9WgXcQ") {
+	if !strings.Contains(result, "dQw4w9WgXcQ") {
 		t.Error("expected result to contain video ID")
 	}
-	if !contains(result, "20240315") {
+	if !strings.Contains(result, "20240315") {
 		t.Error("expected result to contain date")
 	}
 }
@@ -243,15 +244,3 @@ func TestFlexDurationParse(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
