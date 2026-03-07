@@ -201,6 +201,72 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	return nil
 }
 
+// VerifyCurrentSignature downloads the .sig for the current version from GitHub
+// and verifies it against the running binary. Returns nil if the signature is valid.
+func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
+	tag := "v" + u.currentVersion
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
+		u.repoOwner, u.repoName, tag)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "Moombox/"+u.currentVersion)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to fetch release: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("no release found for %s (local/dev build?)", tag)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+	}
+
+	var release githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return fmt.Errorf("failed to parse release: %w", err)
+	}
+
+	// Find the .sig asset
+	var signatureURL string
+	for _, asset := range release.Assets {
+		if strings.EqualFold(asset.Name, "Moombox.exe.sig") {
+			signatureURL = asset.BrowserDownloadURL
+			break
+		}
+	}
+	if signatureURL == "" {
+		return fmt.Errorf("no signature file in release %s (pre-signing release?)", tag)
+	}
+
+	// Download sig to temp file
+	sigFile, err := os.CreateTemp("", "moombox-verify-*.sig")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	sigPath := sigFile.Name()
+	sigFile.Close()
+	defer os.Remove(sigPath)
+
+	if err := u.downloadFile(ctx, signatureURL, sigPath); err != nil {
+		return fmt.Errorf("signature download failed: %w", err)
+	}
+
+	if err := VerifySignature(u.exePath, sigPath); err != nil {
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	u.logger.Info("[Updater] Current binary signature verified", "version", u.currentVersion)
+	return nil
+}
+
 // CleanupOldBinary removes stale files left over from previous updates:
 // .old (previous binary), .new (interrupted download), .new.sig (interrupted verification).
 func (u *Updater) CleanupOldBinary() {

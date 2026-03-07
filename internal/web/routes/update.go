@@ -112,6 +112,21 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 		}()
 	})
 
+	// POST /api/update/verify — verify current binary's signature
+	r.Post("/api/update/verify", func(w http.ResponseWriter, r *http.Request) {
+		if deps.Updater == nil {
+			jsonError(w, "updater not available", http.StatusServiceUnavailable)
+			return
+		}
+		if err := deps.Updater.VerifyCurrentSignature(r.Context()); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"verified": true})
+	})
+
 	// POST /api/update/dismiss — disable auto-check and clear update info
 	r.Post("/api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		deps.Cfg.Updates.AutoCheckUpdates = false

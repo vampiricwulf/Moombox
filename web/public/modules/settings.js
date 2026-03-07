@@ -199,6 +199,31 @@ export class SettingsController {
       btn.loading = false;
     });
 
+    // Verify Signature button
+    document
+      .getElementById("btn-verify-signature")
+      ?.addEventListener("click", async () => {
+        const btn = document.getElementById("btn-verify-signature");
+        const result = document.getElementById("verify-signature-result");
+        btn.loading = true;
+        result.textContent = "";
+        try {
+          const resp = await fetch("/api/update/verify", { method: "POST" });
+          const data = await resp.json();
+          if (data.verified) {
+            result.textContent = "Signature valid";
+            result.style.color = "var(--sl-color-success-600)";
+          } else {
+            result.textContent = data.error || "Verification failed";
+            result.style.color = "var(--sl-color-danger-500)";
+          }
+        } catch {
+          result.textContent = "Verification failed";
+          result.style.color = "var(--sl-color-danger-500)";
+        }
+        btn.loading = false;
+      });
+
     // Auto-cookie toggle → show/hide action buttons
     const autoCookiesSwitch = document.getElementById("cfg-auto-cookies-enabled");
     if (autoCookiesSwitch) {

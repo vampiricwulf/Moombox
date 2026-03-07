@@ -72,6 +72,9 @@ type (
 	updateApplyResultMsg struct {
 		Err string // empty on success (process exits before this is seen)
 	}
+	signatureVerifyResultMsg struct {
+		Err string // empty on success
+	}
 
 	// Async results for AddVideo dialog
 	fetchFormatsAutoAdvanceMsg struct{} // timer msg to auto-skip format on error
@@ -265,8 +268,9 @@ type App struct {
 	OnDeleteClientToken func(id string) error
 
 	// Update callbacks
-	OnCheckUpdate func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
-	OnApplyUpdate func(version string) string      // returns error string (empty on success, process exits)
+	OnCheckUpdate       func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
+	OnApplyUpdate       func(version string) string      // returns error string (empty on success, process exits)
+	OnVerifySignature   func() error                     // verify current binary's signature
 
 	// Cookie refresh callbacks
 	OnRecheckCookies      func() (ytAuth bool, twAuth bool)
@@ -674,6 +678,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setFeedback("Update failed: " + msg.Err)
 		}
 		// On success, the process is already exiting (QuitTUI was called)
+		return a, nil
+
+	case signatureVerifyResultMsg:
+		if msg.Err != "" {
+			a.setFeedback("Signature verification failed: " + msg.Err)
+		} else {
+			a.setFeedback("Signature verified — binary is authentic")
+		}
 		return a, nil
 
 	case cookieRecheckResultMsg:
@@ -1490,6 +1502,18 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			}
 		}
 		a.setFeedback("No update available — use R V to check")
+	case "R S":
+		if a.OnVerifySignature != nil {
+			a.setFeedback("Verifying signature...")
+			verifyFn := a.OnVerifySignature
+			return a, func() tea.Msg {
+				err := verifyFn()
+				if err != nil {
+					return signatureVerifyResultMsg{Err: err.Error()}
+				}
+				return signatureVerifyResultMsg{}
+			}
+		}
 	case "R P":
 		if a.OnRestart != nil {
 			a.OnRestart()
@@ -1706,6 +1730,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	}
 	if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName, HintLabel: "Update", Category: "Request"})
+	}
+	if a.OnVerifySignature != nil {
+		items = append(items, ActionMenuItem{Chord: "R S", Label: "Verify Signature", HintLabel: "Signature", Category: "Request"})
 	}
 	if a.OnRestart != nil {
 		items = append(items, ActionMenuItem{Chord: "R P", Label: "Restart Program", HintLabel: "Restart", Category: "Request", NeedsConfirm: true})

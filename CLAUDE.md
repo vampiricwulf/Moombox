@@ -132,8 +132,9 @@ All services are wired together in main.go via callback closures (OnVideoFound, 
 
 ```
 cmd/moombox/main.go               ← launcher + orchestrator (~2,028 lines)
+cmd/sign/main.go                  ← CI signing tool (Ed25519 key gen + binary signing)
 ├── internal/config         ~470   ← TOML config parsing, FlexDuration, channel terms
-├── internal/updater        ~350   ← GitHub release checker + self-updater (3 files)
+├── internal/updater        ~420   ← GitHub release checker + self-updater + Ed25519 signing (4 files)
 ├── internal/logger         ~600   ← slog wrapper with file rotation, ring buffer (200), pub/sub
 ├── internal/database      ~1,650  ← SQLite with WAL, batch updates (100ms coalesce), pub/sub (2 files)
 ├── internal/cookies       ~2,100  ← jar, refresh, auto-cookie with Firefox/Chromium (6 files)
@@ -236,8 +237,10 @@ Twitch emotes (BTTV, FFZ, 7TV) use an **LRU cache** capped at 200 channels. Glob
 ### Auto-cookies browser extraction
 Cookie extraction supports **Firefox** (direct SQLite read from `cookies.sqlite`) and **Chromium** browsers (Chrome, Edge, Brave — via Chrome DevTools Protocol). Browser processes spawned for cookie extraction use **Windows Job Objects** (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) to guarantee cleanup even on crashes. Browser detection uses Windows Registry lookups.
 
-### Updater binary swap
+### Updater binary swap + Ed25519 signing
 Self-update uses a **three-step rename dance**: download new binary to `.new`, rename current to `.old`, rename `.new` to current. Separate HTTP timeouts: 10s for API calls, 5min for binary downloads. On restart, the launcher picks up the new binary automatically.
+
+**Signature verification**: CI signs release binaries with Ed25519 (`cmd/sign` tool, private key in `SIGNING_KEY` GitHub Actions secret). The updater downloads both `.exe` and `.exe.sig`, verifies the signature against the public key embedded in `internal/updater/signing.go` before proceeding with the rename dance. Verification is skipped for local dev builds (no `SignatureURL`). On startup, `CleanupOldBinary()` sweeps stale `.old`, `.new`, and `.new.sig` files from interrupted updates.
 
 ### Web server middleware stack
 7-layer middleware: RecoveryMiddleware → RequestLogger → CSRFMiddleware → AuthMiddleware → IPAccessControl → RateLimiter → CSP/security headers. Auth uses scrypt password hashing with 24-hour sessions and persistent client tokens (database v6).

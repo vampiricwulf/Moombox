@@ -1,7 +1,3 @@
 ## Features
 
-- Add Ed25519 signature verification for auto-updater — CI signs release binaries, updater verifies signatures before applying, preventing MITM attacks on the update process
-
-## Improvements
-
-- Add stale `.new` and `.new.sig` cleanup on startup for interrupted updates
+- Add "Verify Signature" command — verify the running binary's authenticity by downloading its `.sig` from GitHub and checking it against the embedded Ed25519 public key (Web UI button + TUI `R S` chord)

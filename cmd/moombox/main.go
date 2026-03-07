@@ -45,7 +45,7 @@ import (
 )
 
 var (
-	version = "2.3.14"
+	version = "2.3.15"
 	commit  = ""
 )
 
@@ -1269,6 +1269,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				}
 				triggerRestart("TUI update")
 				return ""
+			}
+			app.OnVerifySignature = func() error {
+				return upd.VerifyCurrentSignature(context.Background())
 			}
 		}
 		app.OnRecheckCookies = func() (bool, bool) {
