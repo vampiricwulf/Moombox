@@ -45,7 +45,7 @@ import (
 )
 
 var (
-	version = "2.3.15"
+	version = "2.3.16"
 	commit  = ""
 )
 
@@ -367,6 +367,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
 		cfgMu.Lock()
 		defer cfgMu.Unlock()
+		// During first-run setup, the config file doesn't exist yet. Don't
+		// create it prematurely — the setup wizard's POST /api/setup/complete
+		// will save everything (including platforms) when the user finishes.
+		if !cfg.ConfigLoaded {
+			return
+		}
 		existing := make(map[string]bool)
 		for _, p := range cfg.Cookies.Platforms {
 			existing[p] = true

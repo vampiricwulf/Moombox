@@ -38,6 +38,16 @@ export class SetupController {
     if (this._listenersAttached) return;
     this._listenersAttached = true;
 
+    // Prevent Escape/overlay-click from closing the cookie dialog without
+    // properly cancelling the setup (which would orphan the browser process).
+    const autoCookieDialog = document.getElementById("auto-cookie-setup-dialog");
+    if (autoCookieDialog) {
+      autoCookieDialog.addEventListener("sl-request-close", (e) => {
+        e.preventDefault();
+        this.cancelCookieSetup();
+      });
+    }
+
     // Mode selection
     document.getElementById("setup-mode-quick")?.addEventListener("click", () => {
       this.mode = "quick";

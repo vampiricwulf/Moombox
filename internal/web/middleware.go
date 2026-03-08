@@ -155,7 +155,7 @@ func IPGateMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler
 					http.Error(w, "Forbidden", http.StatusForbidden)
 					return
 				}
-			default: // "local" or unset
+			default: // "localhost" or unset
 				if !isLoopback(ip) {
 					http.Error(w, "Forbidden", http.StatusForbidden)
 					return
@@ -195,7 +195,7 @@ func isAllowedOrigin(origin, networkAccess string) bool {
 	}
 
 	switch networkAccess {
-	case "local":
+	case "localhost":
 		return isLoopback(hostname) || hostname == "localhost"
 	case "lan":
 		return isLoopback(hostname) || hostname == "localhost" || isPrivateIP(hostname)

@@ -71,25 +71,25 @@ func TestIsAllowedOrigin(t *testing.T) {
 		{
 			name:          "local mode allows localhost",
 			origin:        "http://localhost:3000",
-			networkAccess: "local",
+			networkAccess: "localhost",
 			expected:      true,
 		},
 		{
 			name:          "local mode allows 127.0.0.1",
 			origin:        "http://127.0.0.1:8080",
-			networkAccess: "local",
+			networkAccess: "localhost",
 			expected:      true,
 		},
 		{
 			name:          "local mode rejects LAN IP",
 			origin:        "http://192.168.1.100:3000",
-			networkAccess: "local",
+			networkAccess: "localhost",
 			expected:      false,
 		},
 		{
 			name:          "local mode rejects external",
 			origin:        "http://example.com",
-			networkAccess: "local",
+			networkAccess: "localhost",
 			expected:      false,
 		},
 		{

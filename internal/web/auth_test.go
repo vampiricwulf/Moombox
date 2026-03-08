@@ -305,13 +305,13 @@ func TestIsAuthRequired(t *testing.T) {
 		},
 		{
 			name:          "local with password",
-			networkAccess: "local",
+			networkAccess: "localhost",
 			passwordHash:  "scrypt:abc:def",
 			expected:      false,
 		},
 		{
 			name:          "local without password",
-			networkAccess: "local",
+			networkAccess: "localhost",
 			passwordHash:  "",
 			expected:      false,
 		},

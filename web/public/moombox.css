@@ -9,6 +9,9 @@
     --status-error: #e74c3c;
     --status-cancelled: #6b7280;
     --status-cookies: #d946ef;
+
+    /* Toasts must render above the setup/FFmpeg overlays (z-index 10000) */
+    --sl-z-index-toast: 10100;
 }
 
 * {
@@ -1274,6 +1277,14 @@ sl-progress-bar {
 }
 
 /* ===== Setup Wizard ===== */
+
+/* Setup dialogs must render above the setup overlay (z-index 10000).
+   Shoelace defaults: dialog=800, toast=950 — both hidden behind the overlay. */
+#auto-cookie-setup-dialog,
+#setup-add-channel-dialog {
+    --sl-z-index-dialog: 10001;
+}
+
 #setup-overlay {
     position: fixed;
     inset: 0;

@@ -464,9 +464,11 @@
                             <sl-input
                                 id="cfg-port"
                                 type="number"
+                                min="1"
+                                max="65535"
                                 label="Dashboard Port"
                                 placeholder="774"
-                                help-text="Web dashboard & API port. If in use, nearby ports are tried automatically. Requires restart."
+                                help-text="Web dashboard & API port (1–65535). If in use, nearby ports are tried automatically. Requires restart."
                             ></sl-input>
                             <sl-select
                                 id="cfg-network-access"
@@ -624,16 +626,20 @@
                             <sl-input
                                 id="cfg-log-max-size"
                                 type="number"
+                                min="1024"
+                                max="1073741824"
                                 label="Max Log File Size (bytes)"
                                 placeholder="10485760"
-                                help-text="Maximum log file size before rotation (default: 10MB). Requires restart."
+                                help-text="Maximum log file size before rotation (default: 10MB, range: 1KB–1GB). Requires restart."
                             ></sl-input>
                             <sl-input
                                 id="cfg-log-max-files"
                                 type="number"
+                                min="1"
+                                max="100"
                                 label="Max Log Files"
                                 placeholder="5"
-                                help-text="Number of rotated log files to keep. Requires restart."
+                                help-text="Number of rotated log files to keep (1–100). Requires restart."
                             ></sl-input>
                         </div>
 
@@ -647,37 +653,46 @@
                             <sl-input
                                 id="cfg-max-feed-items"
                                 type="number"
+                                min="1"
+                                max="100"
                                 label="Max Feed Items"
                                 placeholder="15"
-                                help-text="Maximum number of feed items to check per channel"
+                                help-text="Maximum number of feed items to check per channel (1–100)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-feed-check-interval"
                                 type="number"
+                                min="1"
+                                max="1440"
                                 label="Feed Check Interval (minutes)"
                                 placeholder="10"
-                                help-text="How often to check RSS feeds for new streams (default: 10)"
+                                help-text="How often to check RSS feeds for new streams (default: 10, range: 1–1440)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-decapi-check-interval"
                                 type="number"
+                                min="15"
+                                max="3600"
                                 label="DECAPI Check Interval (seconds)"
                                 placeholder="dynamic"
-                                help-text="Seconds between DECAPI live-status checks (range: 15–3600). Leave empty for automatic rate-based timing (default: dynamic)"
+                                help-text="Seconds between DECAPI live-status checks (range: 15–3600). Leave empty for automatic rate-based timing."
                             ></sl-input>
                             <sl-input
                                 id="cfg-twitch-check-interval"
                                 type="number"
+                                min="5"
+                                max="3600"
                                 label="Twitch Check Interval (seconds)"
                                 placeholder="15"
-                                help-text="Seconds between Twitch GQL live-status checks (default: 15, range: 1–3600). Jitter is always applied."
+                                help-text="Seconds between Twitch GQL live-status checks (default: 15, range: 5–3600). Jitter is always applied."
                             ></sl-input>
                             <sl-input
                                 id="cfg-hide-finished-days"
                                 type="number"
+                                min="0"
                                 label="Hide Finished Jobs After (days)"
                                 placeholder="30"
-                                help-text="Hide completed jobs older than this many days"
+                                help-text="Hide completed jobs older than this many days (default: 30, 0 = archive immediately)"
                             ></sl-input>
                         </div>
 
@@ -691,22 +706,26 @@
                             <sl-input
                                 id="cfg-output-template"
                                 label="Output Template"
+                                maxlength="500"
                                 placeholder="${channel}/${start_date} ${title} [${id}]"
-                                help-text="Filename template. Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
+                                help-text="Filename template (max 500 chars). Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
                             ></sl-input>
                             <sl-input
                                 id="cfg-max-resolution"
                                 type="number"
+                                min="1"
                                 label="Max Video Resolution"
                                 placeholder="2160"
-                                help-text="Maximum video resolution in pixels (e.g., 1080, 720, 480)"
+                                help-text="Maximum video resolution in pixels (e.g., 2160, 1080, 720, 480)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-parallel-downloads"
                                 type="number"
+                                min="1"
+                                max="10"
                                 label="Parallel Downloads"
                                 placeholder="2"
-                                help-text="Number of concurrent downloads"
+                                help-text="Number of concurrent downloads (1–10)"
                             ></sl-input>
                             <sl-switch id="cfg-download-chat" checked>
                                 Download Live Chat
@@ -729,16 +748,20 @@
                             <sl-input
                                 id="cfg-retry-delay-cap"
                                 type="number"
+                                min="1"
+                                max="300"
                                 label="Retry Delay Cap (seconds)"
                                 placeholder="60"
-                                help-text="When a live segment isn't available yet, wait time increases by 1s each retry up to this cap (default: 60). Applies to new downloads."
+                                help-text="When a live segment isn't available yet, wait time increases by 1s each retry up to this cap (default: 60, range: 1–300). Applies to new downloads."
                             ></sl-input>
                             <sl-input
                                 id="cfg-live-check-retries"
                                 type="number"
+                                min="1"
+                                max="100"
                                 label="Live Check Retries"
                                 placeholder="16"
-                                help-text="After this many consecutive segment failures, query the YouTube API to check if the stream ended (default: 16). Lower values detect ended/privated streams faster. Applies to new downloads."
+                                help-text="After this many consecutive segment failures, query the YouTube API to check if the stream ended (default: 16, range: 1–100). Lower values detect ended/privated streams faster. Applies to new downloads."
                             ></sl-input>
                         </div>
 
@@ -758,9 +781,10 @@
                             <sl-input
                                 id="cfg-cookie-refresh-interval"
                                 type="number"
+                                min="10"
                                 label="Refresh Interval"
                                 placeholder="360"
-                                help-text="How often to refresh cookies in minutes (default: 360 = 6 hours)"
+                                help-text="How often to refresh cookies in minutes (default: 360 = 6 hours, minimum: 10)"
                             ></sl-input>
 
                             <sl-divider></sl-divider>
@@ -778,8 +802,8 @@
                             <sl-switch id="cfg-auto-cookies-enabled">
                                 Enable automatic cookie acquisition
                                 <span slot="help-text"
-                                    >Detects Firefox/Edge on your system, creates
-                                    an isolated browser profile for Moombox login.
+                                    >Detects a browser on your system (Firefox, Chrome, Brave, Edge, etc.), creates
+                                    an isolated profile for Moombox login.
                                     Cookies refresh automatically on auth failure.</span
                                 >
                             </sl-switch>
@@ -821,16 +845,20 @@
                             <sl-input
                                 id="cfg-disk-warn-percent"
                                 type="number"
+                                min="1"
+                                max="100"
                                 label="Warning Threshold"
                                 placeholder="90"
-                                help-text="Show a warning when disk usage exceeds this percentage (default: 90%)"
+                                help-text="Show a warning when disk usage exceeds this percentage (default: 90%, range: 1–100)"
                             ></sl-input>
                             <sl-input
                                 id="cfg-disk-critical-percent"
                                 type="number"
+                                min="1"
+                                max="100"
                                 label="Critical Threshold"
                                 placeholder="95"
-                                help-text="Pause new downloads when disk usage exceeds this percentage (default: 95%)"
+                                help-text="Pause new downloads when disk usage exceeds this percentage (default: 95%, must be higher than warning)"
                             ></sl-input>
                         </div>
 

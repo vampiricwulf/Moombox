@@ -145,8 +145,8 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			}
 		}
 
-		clearSessionCookie(rw)
-		clearClientCookie(rw)
+		clearSessionCookie(rw, req)
+		clearClientCookie(rw, req)
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
@@ -216,7 +216,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		if deps.DB != nil {
 			deps.DB.DeleteAllClientTokens()
 		}
-		clearClientCookie(rw)
+		clearClientCookie(rw, req)
 
 		if deps.Logger != nil {
 			deps.Logger.Info("[Auth] Password set/changed from " + web.ExtractIP(req))
@@ -264,7 +264,7 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		}
 
 		deps.Cfg.Network.PasswordHash = ""
-		deps.Cfg.Network.NetworkAccess = "local" // Reset to safe default
+		deps.Cfg.Network.NetworkAccess = "localhost" // Reset to safe default
 
 		if deps.SaveConfig != nil {
 			if err := deps.SaveConfig(deps.Cfg); err != nil {
@@ -277,11 +277,11 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		if deps.DB != nil {
 			deps.DB.DeleteAllClientTokens()
 		}
-		clearSessionCookie(rw)
-		clearClientCookie(rw)
+		clearSessionCookie(rw, req)
+		clearClientCookie(rw, req)
 
 		if deps.Logger != nil {
-			deps.Logger.Info("[Auth] Password removed, network_access reset to local from " + web.ExtractIP(req))
+			deps.Logger.Info("[Auth] Password removed, network_access reset to localhost from " + web.ExtractIP(req))
 		}
 
 		jsonResponse(rw, map[string]any{
@@ -366,13 +366,14 @@ func getSessionToken(r *http.Request) string {
 	return cookie.Value
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "moombox_session",
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -389,13 +390,14 @@ func setClientCookie(w http.ResponseWriter, r *http.Request, rawToken string) {
 	})
 }
 
-func clearClientCookie(w http.ResponseWriter) {
+func clearClientCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "moombox_client",
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

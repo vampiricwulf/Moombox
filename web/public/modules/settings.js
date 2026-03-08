@@ -500,73 +500,74 @@ export class SettingsController {
     const autoCheckUpdatesSwitch = document.getElementById("cfg-auto-check-updates");
     const autoCheckUpdates = autoCheckUpdatesSwitch ? autoCheckUpdatesSwitch.checked : true;
 
-    // Build nested config object
-    config.network = {
-      port,
-      network_access: networkAccess,
-      https_enabled: httpsEnabled,
-      ...(tlsCertPath ? { tls_cert_path: tlsCertPath } : {}),
-      ...(tlsKeyPath ? { tls_key_path: tlsKeyPath } : {}),
+    // Build payload with only form-managed sections (don't include channels
+    // to avoid overwriting concurrent changes from TUI).
+    const payload = {
+      network: {
+        port,
+        network_access: networkAccess,
+        https_enabled: httpsEnabled,
+        tls_cert_path: tlsCertPath,
+        tls_key_path: tlsKeyPath,
+      },
+      paths: {
+        database_path: database,
+        log_file_path: logFile,
+        output_directory: outputDir,
+        staging_directory: stagingDir,
+        ffmpeg_path: ffmpegPath,
+      },
+      logs: {
+        log_level: logLevel,
+        log_max_file_size: logMaxSize,
+        log_max_files: logMaxFiles,
+      },
+      monitors: {
+        max_feed_items: maxFeedItems,
+        feed_check_interval: feedCheckInterval,
+        hide_finished_age_days: hideFinishedDays,
+        decapi_check_interval: decapiCheckInterval ?? null,
+        twitch_check_interval: twitchCheckInterval ?? null,
+      },
+      downloader: {
+        output_template: outputTemplate,
+        max_video_resolution: maxResolution,
+        num_parallel_downloads: parallelDownloads,
+        download_chat: downloadChat,
+        prefer_60fps: prefer60fps,
+        segment_retry_delay_cap: retryDelayCap,
+        segment_live_check_retries: liveCheckRetries,
+      },
+      cookies: {
+        cookie_file: cookieFile,
+        active_platforms: activePlatforms,
+        auto_enabled: autoEnabled,
+        browser_profile_dir: autoCookiesProfileDir,
+        refresh_interval: cookieRefreshInterval,
+      },
+      disk: {
+        disk_warn_percent: diskWarnPercent,
+        disk_critical_percent: diskCriticalPercent,
+      },
+      updates: {
+        auto_check_updates: autoCheckUpdates,
+      },
     };
 
-    config.paths = {
-      database_path: database || undefined,
-      log_file_path: logFile || undefined,
-      output_directory: outputDir || undefined,
-      staging_directory: stagingDir || undefined,
-      ffmpeg_path: ffmpegPath || undefined,
-    };
-
-    config.logs = {
-      log_level: logLevel || undefined,
-      log_max_file_size: logMaxSize,
-      log_max_files: logMaxFiles,
-    };
-
-    config.monitors = {
-      max_feed_items: maxFeedItems,
-      feed_check_interval: feedCheckInterval,
-      hide_finished_age_days: hideFinishedDays,
-    };
-    if (decapiCheckInterval) {
-      config.monitors.decapi_check_interval = decapiCheckInterval;
+    // Include notifications — managed entirely via the web UI, so no
+    // concurrent modification risk (unlike channels which the TUI can edit).
+    if (config.notifications) {
+      payload.notifications = config.notifications;
     }
-    if (twitchCheckInterval) {
-      config.monitors.twitch_check_interval = twitchCheckInterval;
-    }
 
-    config.downloader = {
-      output_template: outputTemplate || undefined,
-      max_video_resolution: maxResolution,
-      num_parallel_downloads: parallelDownloads,
-      download_chat: downloadChat,
-      prefer_60fps: prefer60fps,
-      segment_retry_delay_cap: retryDelayCap,
-      segment_live_check_retries: liveCheckRetries,
-    };
-
-    config.cookies = {
-      cookie_file: cookieFile || undefined,
-      active_platforms: activePlatforms,
-      auto_enabled: autoEnabled,
-      browser_profile_dir: autoCookiesProfileDir || undefined,
-      refresh_interval: cookieRefreshInterval,
-    };
-
-    config.disk = {
-      disk_warn_percent: diskWarnPercent,
-      disk_critical_percent: diskCriticalPercent,
-    };
-
-    config.updates = {
-      auto_check_updates: autoCheckUpdates,
-    };
+    // Update local config cache with form values
+    Object.assign(config, payload);
 
     try {
       const response = await fetch("/api/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
+        body: JSON.stringify(payload),
       });
 
       if (response.ok) {

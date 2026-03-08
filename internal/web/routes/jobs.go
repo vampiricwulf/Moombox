@@ -1215,9 +1215,9 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 		if v, ok := net["network_access"].(string); ok {
 			switch v {
-			case "local", "lan", "external", "public":
+			case "localhost", "lan", "external":
 			default:
-				errs["network.network_access"] = "network_access must be local, lan, external, or public"
+				errs["network.network_access"] = "network_access must be localhost, lan, or external"
 			}
 		}
 		if v, ok := net["tls_cert_path"].(string); ok {
@@ -1252,6 +1252,11 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		if v, ok := paths["staging_directory"].(string); ok {
 			if !isSafePath(v) {
 				errs["paths.staging_directory"] = "Path cannot contain .. or be absolute"
+			}
+		}
+		if v, ok := paths["ffmpeg_path"].(string); ok {
+			if !isSafePath(v) {
+				errs["paths.ffmpeg_path"] = "Path cannot contain .. or be absolute"
 			}
 		}
 	}
@@ -1294,6 +1299,16 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["monitors.twitch_check_interval"] = "twitch_check_interval must be between 5 and 3600"
 			}
 		}
+		if v, ok := mon["feed_check_interval"].(float64); ok {
+			if v < 1 || v > 1440 {
+				errs["monitors.feed_check_interval"] = "feed_check_interval must be between 1 and 1440"
+			}
+		}
+		if v, ok := mon["hide_finished_age_days"].(float64); ok {
+			if v < 0 {
+				errs["monitors.hide_finished_age_days"] = "hide_finished_age_days must be at least 0"
+			}
+		}
 	}
 
 	// Downloader sub-fields
@@ -1313,19 +1328,34 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["downloader.max_video_resolution"] = "max_video_resolution must be at least 1"
 			}
 		}
+		if v, ok := dl["segment_retry_delay_cap"].(float64); ok {
+			if v < 1 || v > 300 {
+				errs["downloader.segment_retry_delay_cap"] = "segment_retry_delay_cap must be between 1 and 300"
+			}
+		}
+		if v, ok := dl["segment_live_check_retries"].(float64); ok {
+			if v < 1 || v > 100 {
+				errs["downloader.segment_live_check_retries"] = "segment_live_check_retries must be between 1 and 100"
+			}
+		}
 	}
 
 	// Disk sub-fields
 	if dk, ok := updates["disk"].(map[string]any); ok {
-		if v, ok := dk["disk_warn_percent"].(float64); ok {
-			if v < 1 || v > 100 {
+		warnPct, warnOK := dk["disk_warn_percent"].(float64)
+		critPct, critOK := dk["disk_critical_percent"].(float64)
+		if warnOK {
+			if warnPct < 1 || warnPct > 100 {
 				errs["disk.disk_warn_percent"] = "disk_warn_percent must be between 1 and 100"
 			}
 		}
-		if v, ok := dk["disk_critical_percent"].(float64); ok {
-			if v < 1 || v > 100 {
+		if critOK {
+			if critPct < 1 || critPct > 100 {
 				errs["disk.disk_critical_percent"] = "disk_critical_percent must be between 1 and 100"
 			}
+		}
+		if warnOK && critOK && critPct <= warnPct {
+			errs["disk.disk_critical_percent"] = "critical threshold must be higher than warning threshold"
 		}
 	}
 
@@ -1339,6 +1369,11 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		if v, ok := ck["browser_profile_dir"].(string); ok {
 			if !isSafePath(v) {
 				errs["cookies.browser_profile_dir"] = "Path cannot contain .. or be absolute"
+			}
+		}
+		if v, ok := ck["refresh_interval"].(float64); ok {
+			if v < 10 {
+				errs["cookies.refresh_interval"] = "refresh_interval must be at least 10"
 			}
 		}
 	}
@@ -1411,13 +1446,21 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		} else if vs, ok := mon["feed_check_interval"].(string); ok {
 			cfg.Monitors.FeedCheckInterval = config.ParseFlexDuration(vs, "minutes", cfg.Monitors.FeedCheckInterval.Value)
 		}
-		if v, ok := mon["decapi_check_interval"].(float64); ok {
-			n := int(v)
-			cfg.Monitors.DecapiCheckInterval = &n
+		if val, exists := mon["decapi_check_interval"]; exists {
+			if v, ok := val.(float64); ok {
+				n := int(v)
+				cfg.Monitors.DecapiCheckInterval = &n
+			} else {
+				cfg.Monitors.DecapiCheckInterval = nil
+			}
 		}
-		if v, ok := mon["twitch_check_interval"].(float64); ok {
-			n := int(v)
-			cfg.Monitors.TwitchCheckInterval = &n
+		if val, exists := mon["twitch_check_interval"]; exists {
+			if v, ok := val.(float64); ok {
+				n := int(v)
+				cfg.Monitors.TwitchCheckInterval = &n
+			} else {
+				cfg.Monitors.TwitchCheckInterval = nil
+			}
 		}
 		if v, ok := mon["hide_finished_age_days"].(float64); ok {
 			cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: v}
