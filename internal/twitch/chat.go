@@ -302,8 +302,15 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 
 	cd.logger.Info("joined twitch IRC", "channel", cd.channelLogin)
 
-	saveTicker := time.NewTicker(chatSaveInterval)
-	defer saveTicker.Stop()
+	// Message-triggered flush: idle until a message arrives, then collect
+	// for chatSaveInterval before flushing. No I/O during quiet periods.
+	var flushTimer *time.Timer
+	var flushCh <-chan time.Time // nil channel is never ready in select
+	defer func() {
+		if flushTimer != nil {
+			flushTimer.Stop()
+		}
+	}()
 
 	consecutiveErrors := 0
 
@@ -311,9 +318,24 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-saveTicker.C:
+		case <-flushCh:
 			cd.flush()
+			flushTimer = nil
+			flushCh = nil
 		default:
+		}
+
+		// Start flush timer when the first pending message arrives.
+		// Subsequent messages within chatSaveInterval are batched together.
+		// Placed before conn.Read so error-path `continue` still triggers it.
+		if flushTimer == nil {
+			cd.mu.Lock()
+			hasPending := len(cd.messages) > 0
+			cd.mu.Unlock()
+			if hasPending {
+				flushTimer = time.NewTimer(chatSaveInterval)
+				flushCh = flushTimer.C
+			}
 		}
 
 		_, data, err := conn.Read(ctx)
