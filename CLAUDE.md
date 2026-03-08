@@ -112,7 +112,7 @@ The exe icon and version info are embedded via `.syso` files generated at build 
 
 Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary, all code under `internal/`.
 
-### Process model (cmd/moombox/main.go, ~2028 lines)
+### Process model (cmd/moombox/main.go, ~2,068 lines)
 
 Moombox uses a **launcher/supervisor pattern**. The binary checks `_MOOMBOX_CHILD` env var on startup:
 - **Without it** → launcher mode: spawns itself as a child, waits, respawns on exit code 42
@@ -131,33 +131,33 @@ All services are wired together in main.go via callback closures (OnVideoFound, 
 ### Package dependency graph
 
 ```
-cmd/moombox/main.go               ← launcher + orchestrator (~2,028 lines)
+cmd/moombox/main.go               ← launcher + orchestrator (~2,068 lines)
 cmd/sign/main.go                  ← CI signing tool (Ed25519 key gen + binary signing)
-├── internal/config         ~470   ← TOML config parsing, FlexDuration, channel terms
-├── internal/updater        ~420   ← GitHub release checker + self-updater + Ed25519 signing (4 files)
-├── internal/logger         ~600   ← slog wrapper with file rotation, ring buffer (200), pub/sub
-├── internal/database      ~1,650  ← SQLite with WAL, batch updates (100ms coalesce), pub/sub (2 files)
-├── internal/cookies       ~2,100  ← jar, refresh, auto-cookie with Firefox/Chromium (6 files)
-├── internal/youtube       ~2,030  ← Service, PlayerAPI, Auth, watch page, format selector (7 files)
-├── internal/twitch        ~3,300  ← Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes (9 files)
-├── internal/bgutils       ~2,000  ← PO token: challenge → BotGuard VM (Goja) → integrity token → mint
-├── internal/cipher        ~1,500  ← YouTube signature cipher: AST + regex fallback, 3-VM LRU (4 files)
-├── internal/engine        ~2,895  ← SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer (4 files)
-├── internal/chat           ~700   ← YouTube live chat downloader (polling API with batching)
-├── internal/worker        ~5,000  ← Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality (16 files)
-├── internal/monitor         ~900  ← FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
-├── internal/notifications   ~500  ← Manager + Discord webhook
-├── internal/web           ~4,000  ← chi router, WebSocket hub, auth, middleware, 40+ endpoints
+├── internal/config        ~1,065  ← TOML config parsing, FlexDuration, channel terms (5 files)
+├── internal/updater         ~626  ← GitHub release checker + self-updater + Ed25519 signing (5 files)
+├── internal/logger          ~564  ← slog wrapper with file rotation, ring buffer (200), pub/sub
+├── internal/database      ~2,030  ← SQLite with WAL, batch updates (100ms coalesce), pub/sub (4 files)
+├── internal/cookies       ~2,749  ← jar, refresh, auto-cookie with Firefox/Chromium (6 files)
+├── internal/youtube       ~2,076  ← Service, PlayerAPI, Auth, watch page, format selector (7 files)
+├── internal/twitch        ~3,385  ← Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes (9 files)
+├── internal/bgutils       ~2,441  ← PO token: challenge → BotGuard VM (Goja) → integrity token → mint (8 files)
+├── internal/cipher        ~2,001  ← YouTube signature cipher: AST + regex fallback, 3-VM LRU (9 files)
+├── internal/engine        ~2,937  ← SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer (4 files)
+├── internal/chat          ~1,845  ← YouTube live chat downloader (polling API with batching) (4 files)
+├── internal/worker        ~7,437  ← Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality (16 files)
+├── internal/monitor       ~1,687  ← FeedMonitor (RSS), DecapiMonitor, TwitchMonitor (5 files)
+├── internal/notifications   ~527  ← Manager + Discord webhook (3 files)
+├── internal/web           ~7,233  ← chi router, WebSocket hub, auth, middleware, 40+ endpoints (18 files)
 │   └── internal/web/routes        ← All REST API route handlers
-├── internal/tui           ~7,000  ← 3-panel layout, 8 overlay dialogs, chord system (21 files)
-├── internal/goja           ~500   ← JS runtime shims (minimal DOM, TextEncoder, timers)
-├── internal/disk           ~100   ← Windows-only disk space queries (kernel32 GetDiskFreeSpaceExW)
-├── internal/errors         ~500   ← Typed error hierarchy, 100+ sentinel codes
-├── internal/constants      ~300   ← All hardcoded values (API keys, URLs, timeouts)
-└── internal/utils          ~700   ← HTTP helpers, text/time formatters, YouTube URL parsing
+├── internal/tui          ~12,893  ← 3-panel layout, 8 overlay dialogs, chord system (21 files)
+├── internal/goja          ~1,321  ← JS runtime shims (minimal DOM, TextEncoder, timers) (6 files)
+├── internal/disk             ~57  ← Windows-only disk space queries (kernel32 GetDiskFreeSpaceExW)
+├── internal/errors          ~755  ← Typed error hierarchy, 100+ sentinel codes
+├── internal/constants       ~392  ← All hardcoded values (API keys, URLs, timeouts)
+└── internal/utils         ~2,000  ← HTTP helpers, text/time formatters, YouTube URL parsing (22 files)
 ```
 
-Total codebase: **~35,000+ lines** of Go across 80+ files (excluding tests, web assets, and main.go).
+Total codebase: **~56,000 lines** of Go across 158 files (excluding tests, web assets, and main.go).
 
 ### Key data flow
 
