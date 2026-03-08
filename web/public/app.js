@@ -253,13 +253,23 @@ class MoomboxApp {
       filesDeleteAllBtn.addEventListener("click", () => this.deleteAllOrphanedFiles());
     }
 
-    // Status warnings — delegated click
+    // Status warnings — delegated click (text on desktop)
     const warningsEl = document.getElementById("status-warnings");
     if (warningsEl) {
       warningsEl.addEventListener("click", (e) => {
         const warning = e.target.closest(".status-warning");
         if (!warning) return;
         const action = warning.dataset.action;
+        if (action === "yt-relogin") this.settings.startAutoCookieSetup("youtube");
+        else if (action === "tw-relogin") this.settings.startAutoCookieSetup("twitch");
+      });
+    }
+
+    // Status warnings — collapsed icon click (mobile)
+    const warningsIconEl = document.getElementById("status-warnings-icon");
+    if (warningsIconEl) {
+      warningsIconEl.addEventListener("click", () => {
+        const action = warningsIconEl.dataset.action;
         if (action === "yt-relogin") this.settings.startAutoCookieSetup("youtube");
         else if (action === "tw-relogin") this.settings.startAutoCookieSetup("twitch");
       });
@@ -283,14 +293,6 @@ class MoomboxApp {
       tasksStatusFilter.addEventListener("sl-change", () => {
         this.tasksStatusFilter = tasksStatusFilter.value || "";
         this.renderJobs();
-      });
-    }
-
-    // Theme toggle
-    const themeToggle = document.getElementById("theme-toggle");
-    if (themeToggle) {
-      themeToggle.addEventListener("click", () => {
-        this.setTheme(this.theme === "dark" ? "light" : "dark");
       });
     }
 
@@ -474,15 +476,28 @@ class MoomboxApp {
     const ytActive = this.activePlatforms?.youtube === true;
     const twActive = this.activePlatforms?.twitch === true;
 
-    // 1. Warnings (clickable, to the left) — only for active platforms
+    // 1. Warnings — text on desktop, collapsed icon on mobile
     const warningsEl = document.getElementById("status-warnings");
+    const warningsIcon = document.getElementById("status-warnings-icon");
+    const warningItems = [];
+    if (ytActive && autoCookiesEnabled && this.autoCookieReloginRequired?.youtube)
+      warningItems.push({ action: "yt-relogin", label: "YT: Re-login" });
+    if (twActive && autoCookiesEnabled && this.autoCookieReloginRequired?.twitch)
+      warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
+
     if (warningsEl) {
-      const warnings = [];
-      if (ytActive && autoCookiesEnabled && this.autoCookieReloginRequired?.youtube)
-        warnings.push('<span class="status-warning" data-action="yt-relogin" title="Click to re-login">YT: Re-login</span>');
-      if (twActive && autoCookiesEnabled && this.autoCookieReloginRequired?.twitch)
-        warnings.push('<span class="status-warning" data-action="tw-relogin" title="Click to re-login">TW: Re-login</span>');
-      warningsEl.innerHTML = warnings.join("");
+      warningsEl.innerHTML = warningItems
+        .map(w => `<span class="status-warning" data-action="${w.action}" title="Click to re-login">${w.label}</span>`)
+        .join("");
+    }
+    if (warningsIcon) {
+      const hasWarnings = warningItems.length > 0;
+      warningsIcon.classList.toggle("active", hasWarnings);
+      if (hasWarnings) {
+        warningsIcon.innerHTML = `<sl-icon name="exclamation-triangle"></sl-icon>`;
+        warningsIcon.title = warningItems.map(w => w.label).join(", ");
+        warningsIcon.dataset.action = warningItems[0].action;
+      }
     }
 
     // 2. YT indicator (hidden if platform not active)
@@ -766,11 +781,14 @@ class MoomboxApp {
   updateCheckCountdown() {
     const el = document.getElementById("check-countdown");
     if (!el) return;
+    const narrow = window.innerWidth <= 768;
     const compact = window.innerWidth <= 992;
     const feed = this.formatCountdown(this.nextFeedCheck, compact);
     const decapi = this.formatCountdown(this.nextDecapiCheck, compact);
     const twitch = this.formatCountdown(this.nextTwitchCheck, compact);
-    if (compact) {
+    if (narrow) {
+      el.innerHTML = `<span>F ${this.escapeHtml(feed)}</span><span>D ${this.escapeHtml(decapi)}</span><span>T ${this.escapeHtml(twitch)}</span>`;
+    } else if (compact) {
       el.textContent = `F ${feed} \u00b7 D ${decapi} \u00b7 T ${twitch}`;
     } else {
       el.textContent = `Next: Feed ${feed} \u00b7 DECAPI ${decapi} \u00b7 Twitch ${twitch}`;
@@ -816,7 +834,7 @@ class MoomboxApp {
       emptyState.querySelector("sl-icon").name = "search";
       emptyState.querySelector("p").textContent = "No matching jobs";
       const subtext = emptyState.querySelector(".empty-state-subtext");
-      if (subtext) subtext.textContent = "Try adjusting your search or filter";
+      if (subtext) subtext.textContent = "Search matches titles and channel names";
       const cta = emptyState.querySelector(".empty-state-cta");
       if (cta) cta.style.display = "none";
       return;
@@ -918,10 +936,10 @@ class MoomboxApp {
           <div class="stream-author">${this.escapeHtml(job.channelName)}</div>
         </div>
         <div>
-          <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(job.status)}</sl-badge>
+          <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
         <div class="job-progress">
-          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(progress)}">${this.escapeHtml(progress)}</div>
+          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${this.escapeHtml(progress)}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${percent}"></sl-progress-bar>` : ""}
         </div>
         <div class="job-quick-actions">${actionsHtml}</div>
@@ -941,7 +959,7 @@ class MoomboxApp {
     if (statusBadge) {
       statusBadge.className = `status ${statusClass}`;
       statusBadge.setAttribute("variant", "primary");
-      statusBadge.textContent = job.status;
+      statusBadge.textContent = this.displayStatus(job.status);
     }
 
     // Update progress text
@@ -949,7 +967,7 @@ class MoomboxApp {
     if (progressText) {
       const progress = this.formatProgress(job);
       progressText.textContent = progress;
-      progressText.title = progress;
+      progressText.title = this.formatProgressTooltip(job) || progress;
       if (job.status === "Upcoming" && job.lastRecheckAt) {
         progressText.dataset.timestamp = job.lastRecheckAt;
         progressText.dataset.timestampPrefix = "Last check: ";
@@ -1046,7 +1064,7 @@ class MoomboxApp {
     if (statusBadge) {
       const statusClass = job.status.toLowerCase().replace("?", "");
       statusBadge.className = `status ${statusClass}`;
-      statusBadge.textContent = job.status;
+      statusBadge.textContent = this.displayStatus(job.status);
     }
 
     // Update progress text
@@ -1194,7 +1212,7 @@ class MoomboxApp {
           <div class="details-row">
             <span class="details-label">Status:</span>
             <span class="details-value">
-              <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(job.status)}</sl-badge>
+              <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
             </span>
           </div>
           ${job.chatStatus ? (() => {
@@ -2199,6 +2217,43 @@ class MoomboxApp {
     // Update theme-color meta tag
     const metaTheme = document.querySelector('meta[name="theme-color"]');
     if (metaTheme) metaTheme.content = theme === "light" ? "#ffffff" : "#1C1B22";
+  }
+
+  // ===== Status Display =====
+
+  displayStatus(status) {
+    if (status === "COOKIES?") return "Auth Required";
+    return status;
+  }
+
+  formatProgressTooltip(job) {
+    const p = job.progress || "";
+    // DASH: (A: 123/456 V: 789/1000 C: 50)
+    const dashMatch = p.match(/\(A:\s*(\S+)\s+V:\s*(\S+)(?:\s+C:\s*(\d+))?\)/);
+    if (dashMatch) {
+      let tip = `Audio: ${dashMatch[1]} segments, Video: ${dashMatch[2]} segments`;
+      if (dashMatch[3]) tip += `, Chat: ${parseInt(dashMatch[3]).toLocaleString()} messages`;
+      return tip;
+    }
+    // VOD: V:95.3% C: 456
+    const vodMatch = p.match(/^V:([\d.]+%)(?:\s+C:\s*(\d+))?$/);
+    if (vodMatch) {
+      let tip = `Video: ${vodMatch[1]} downloaded`;
+      if (vodMatch[2]) tip += `, Chat: ${parseInt(vodMatch[2]).toLocaleString()} messages`;
+      return tip;
+    }
+    // HLS: Seq: 123 C: 456
+    const hlsMatch = p.match(/^Seq:\s*(\d+)(?:\s+C:\s*(\d+))?$/);
+    if (hlsMatch) {
+      let tip = `Segments: ${parseInt(hlsMatch[1]).toLocaleString()}`;
+      if (hlsMatch[2]) tip += `, Chat: ${parseInt(hlsMatch[2]).toLocaleString()} messages`;
+      return tip;
+    }
+    // Frontend fallback: V: 123 / A: 456
+    if (job.lastVideoSeq !== undefined) {
+      return `Video: ${job.lastVideoSeq || 0} segments, Audio: ${job.lastAudioSeq || 0} segments`;
+    }
+    return "";
   }
 
   // ===== Utilities =====
