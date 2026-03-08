@@ -1557,15 +1557,17 @@
 
         <!-- Status Bar -->
         <div id="status-bar">
-            <span id="connection-status">
-                <sl-icon name="wifi-off"></sl-icon>
-                Connecting...
-            </span>
-            <span id="disk-indicator" style="display:none"></span>
-            <span id="active-indicator" style="display:none"></span>
-            <span id="check-countdown"></span>
+            <div id="status-bar-left">
+                <span id="connection-status">
+                    <sl-icon name="wifi-off"></sl-icon>
+                    <span class="status-label">Connecting...</span>
+                </span>
+                <span id="disk-indicator" style="display:none"></span>
+                <span id="active-indicator" style="display:none"></span>
+                <span id="check-countdown"></span>
+            </div>
+            <span id="version-indicator" class="version-indicator" style="display:none"></span>
             <div id="status-bar-right">
-                <span id="version-indicator" class="version-indicator" style="display:none"></span>
                 <span id="status-warnings"></span>
                 <span id="status-warnings-icon" title="Warnings"></span>
                 <span id="yt-indicator" title="YouTube">YT</span>

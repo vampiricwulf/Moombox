@@ -639,6 +639,12 @@ body {
     padding-bottom: 40px;
 }
 
+#status-bar-left {
+    display: flex;
+    align-items: center;
+    gap: var(--sl-spacing-small);
+}
+
 #connection-status {
     display: flex;
     align-items: center;
@@ -1932,6 +1938,10 @@ html.sl-theme-light {
         gap: var(--sl-spacing-x-small);
     }
 
+    #status-bar-left {
+        gap: var(--sl-spacing-2x-small);
+    }
+
     #status-bar sl-icon-button::part(base) {
         min-height: 28px;
         min-width: 28px;
@@ -1944,9 +1954,6 @@ html.sl-theme-light {
     /* Collapse warning text into icon on mobile */
     #status-warnings { display: none !important; }
     #status-warnings-icon.active { display: inline-flex; }
-
-    /* Hide version on mobile — available in Settings */
-    .version-indicator { display: none !important; }
 }
 
 /* ========================================================================
