@@ -701,12 +701,7 @@ func (m *SetupWizardModel) finishSimpleSetup() string {
 		}
 	}
 
-	// Trigger restart so all services re-init with new config
-	if m.OnRestart != nil {
-		m.OnRestart()
-	}
-
-	return "complete"
+	return "restart"
 }
 
 // --- Advanced Setup ---
@@ -912,12 +907,7 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	// The auto-cookie service will initialize on restart — no need to
 	// call OnStartAutoCookie here (the restart would kill it immediately).
 
-	// Trigger restart
-	if m.OnRestart != nil {
-		m.OnRestart()
-	}
-
-	return "complete"
+	return "restart"
 }
 
 // Port returns the port value (for backward compatibility).

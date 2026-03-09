@@ -1021,7 +1021,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.taskList.SetHideFinishedAgeDays(int(a.cfg.Monitors.HideFinishedAgeDays.Days()))
 		case "restart":
 			if a.OnRestart != nil {
-				a.OnRestart()
+				onRestart := a.OnRestart
+				return a, func() tea.Msg {
+					onRestart()
+					return tea.QuitMsg{}
+				}
 			}
 		case "resolve_channel":
 			return a, a.resolveChannelCmd(a.settings.GetChannelResolveInput())
@@ -1066,8 +1070,15 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Setup wizard
 	if a.setupWiz.IsVisible() {
 		action := a.setupWiz.HandleKey(key)
-		if action == "complete" {
+		if action == "restart" {
 			a.setupWiz.Close()
+			if a.setupWiz.OnRestart != nil {
+				onRestart := a.setupWiz.OnRestart
+				return a, func() tea.Msg {
+					onRestart()
+					return tea.QuitMsg{}
+				}
+			}
 		}
 		var cmds []tea.Cmd
 		if action == "finish_cookie" {
@@ -1516,7 +1527,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "R P":
 		if a.OnRestart != nil {
-			a.OnRestart()
+			onRestart := a.OnRestart
+			return a, func() tea.Msg {
+				onRestart()
+				return tea.QuitMsg{}
+			}
 		}
 	case "O F":
 		if job != nil && a.OnOpenFolder != nil {

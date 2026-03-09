@@ -260,7 +260,7 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 	}
 
 	if err := VerifySignature(u.exePath, sigPath); err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
+		return err
 	}
 
 	u.logger.Info("[Updater] Current binary signature verified", "version", u.currentVersion)

@@ -41,7 +41,7 @@ func verifySignatureWithKey(pubKey ed25519.PublicKey, binaryPath, sigPath string
 	}
 
 	if !ed25519.Verify(pubKey, binary, sig) {
-		return fmt.Errorf("signature verification failed")
+		return fmt.Errorf("signature mismatch — binary may have been modified")
 	}
 	return nil
 }
