@@ -125,20 +125,17 @@ export class StatsController {
     const el = document.getElementById("disk-indicator");
     if (!el) return;
 
-    if (!disk || !disk.total) {
+    if (!disk || !disk.total || !disk.warnLevel || disk.warnLevel === "ok") {
       el.style.display = "none";
       return;
     }
 
     el.style.display = "";
     const freeGB = (disk.free / (1024 * 1024 * 1024)).toFixed(0);
-    const pct = Math.round(disk.usedPct);
-    el.textContent = `Disk ${pct}% (${freeGB}G free)`;
+    el.innerHTML = `<sl-icon name="hdd"></sl-icon> ${freeGB}G free`;
+    el.title = `Disk ${Math.round(disk.usedPct)}% used`;
 
-    el.className = "";
-    if (disk.warnLevel === "critical") el.className = "disk-indicator-critical";
-    else if (disk.warnLevel === "warn") el.className = "disk-indicator-warn";
-    else el.className = "disk-indicator-ok";
+    el.className = disk.warnLevel === "critical" ? "disk-indicator-critical" : "disk-indicator-warn";
   }
 
   /** Update status bar active download count. */

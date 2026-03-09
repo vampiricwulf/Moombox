@@ -668,6 +668,10 @@ body {
     color: var(--sl-color-success-600);
 }
 
+#connection-status.connected .status-label {
+    display: none;
+}
+
 #connection-status.connected sl-icon {
     animation: pulseGlow 2s ease-in-out infinite;
 }
@@ -1935,9 +1939,6 @@ html.sl-theme-light {
         min-width: 0 !important;
     }
 
-    /* Hide connection status text on mobile — icon alone suffices */
-    #connection-status .status-label { display: none; }
-
     /* Compact status bar on mobile */
     #status-bar {
         padding: 0 var(--sl-spacing-small);
@@ -2049,6 +2050,9 @@ html.sl-theme-light {
 
 /* Status bar disk + active indicators */
 #disk-indicator, #active-indicator {
+    display: flex;
+    align-items: center;
+    gap: 4px;
     font-family: var(--sl-font-mono);
     font-size: 0.7rem;
     font-weight: 600;
@@ -2058,7 +2062,6 @@ html.sl-theme-light {
     letter-spacing: -0.01em;
 }
 
-.disk-indicator-ok       { color: var(--sl-color-neutral-400); }
 .disk-indicator-warn     { color: var(--sl-color-warning-500); background: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
 .disk-indicator-critical { color: var(--sl-color-danger-500); background: color-mix(in srgb, var(--sl-color-danger-600) 15%, transparent); }
 
@@ -2066,13 +2069,10 @@ html.sl-theme-light {
     color: var(--sl-color-success-500);
 }
 
-/* Mobile responsive: stats single-column, hide disk text in status bar */
+/* Mobile responsive: stats single-column */
 @media (max-width: 768px) {
     .stats-grid {
         grid-template-columns: repeat(2, 1fr);
-    }
-    #disk-indicator {
-        display: none !important;
     }
 }
 

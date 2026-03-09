@@ -784,7 +784,7 @@ class MoomboxApp {
     if (window.innerWidth <= 992) {
       el.textContent = `F ${feed} \u00b7 D ${decapi} \u00b7 T ${twitch}`;
     } else {
-      el.textContent = `Next: Feed ${feed} \u00b7 DECAPI ${decapi} \u00b7 Twitch ${twitch}`;
+      el.textContent = `Feed ${feed} \u00b7 DECAPI ${decapi} \u00b7 Twitch ${twitch}`;
     }
   }
 
