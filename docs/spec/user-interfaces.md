@@ -93,33 +93,48 @@ The TUI is built on the [Charmbracelet](https://github.com/charmbracelet) ecosys
 | `huh` | Form builder framework. Used for the Settings dialog and the Setup Wizard. Provides multi-step forms with inputs, selects, confirms, and validation. |
 | `lipgloss` | Styling engine. Colors, borders, padding, margin, alignment, and layout composition. Every visual element in the TUI is styled through lipgloss. |
 
-### Layout: Two-Over-One Panel Design
+### Layout: Two-Over-One Panel Design with Focus Expansion
 
-The TUI uses a split layout with two panels on top and a full-width log panel on the bottom:
+The TUI uses a split layout with two panels on top and a full-width log panel on the bottom. The focused panel expands to take more space:
+
+**Default (unfocused):** 50/50 width split on top, 50/50 height split between top row and bottom.
+
+**Focused:** The focused panel's axis expands to 70%, the unfocused shrinks to 30%.
 
 ```
-┌─────────────────────┬──────────────────────────────────┐
-│  Task List           │      Job Details                  │
-│  (~45% width)        │      (~55% width)                 │
-│                      │                                    │
-│  Arrow keys          │  Full metadata display             │
-│  to navigate         │  Action affordances                │
-│  Enter to select     │  Auto-scrolling content            │
-├──────────────────────┴──────────────────────────────────┤
-│  Logs (full width)                                       │
-│  Real-time log lines, level filter, regex search         │
-├──────────────────────────────────────────────────────────┤
-│  Status Bar                                              │
-└──────────────────────────────────────────────────────────┘
+Example: Task List focused (70% width, 70% height)
+
+┌──────────────────────────────────┬─────────────────────┐
+│  Task List (focused)              │   Job Details        │
+│  70% width                        │   30% width          │
+│                                   │                      │
+│                    70% height     │                      │
+│                                   │                      │
+├──────────────────────────────────┴─────────────────────┤
+│  Logs (full width, 30% height)                          │
+├─────────────────────────────────────────────────────────┤
+│  Status Bar                                             │
+└─────────────────────────────────────────────────────────┘
+
+Example: Logs focused (100% width, 70% height)
+
+┌─────────────────────────┬──────────────────────────────┐
+│  Task List               │   Job Details                 │
+│  50% width, 30% height  │   50% width, 30% height      │
+├─────────────────────────┴──────────────────────────────┤
+│  Logs (focused, full width, 70% height)                 │
+├─────────────────────────────────────────────────────────┤
+│  Status Bar                                             │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**Task List (top left, ~45% width):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility.
+**Task List (top left):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility.
 
-**Job Details (top right, ~55% width):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
+**Job Details (top right):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
 
 **Logs (bottom, full width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and regex search. Auto-scrolls to newest entries unless the user has manually scrolled up.
 
-**Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input and has a visually distinct border.
+**Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input, has a visually distinct border, and expands to 70% on its axis (width for top panels, height for top vs bottom). The unfocused panels shrink to 30%.
 
 ### Source Files
 
