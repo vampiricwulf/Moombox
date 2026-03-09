@@ -744,15 +744,12 @@ class MoomboxApp {
     }
   }
 
-  formatCountdown(epochMs, compact) {
+  formatCountdown(epochMs) {
     if (!epochMs) return "--";
     const remaining = Math.max(0, Math.floor((epochMs - Date.now()) / 1000));
     if (remaining <= 0) return "now";
     const minutes = Math.floor(remaining / 60);
     const seconds = remaining % 60;
-    if (compact) {
-      return minutes > 0 ? `${minutes}:${String(seconds).padStart(2, "0")}` : `${seconds}s`;
-    }
     if (minutes > 0) return `${minutes}m ${seconds}s`;
     return `${seconds}s`;
   }
@@ -781,14 +778,10 @@ class MoomboxApp {
   updateCheckCountdown() {
     const el = document.getElementById("check-countdown");
     if (!el) return;
-    const narrow = window.innerWidth <= 768;
-    const compact = window.innerWidth <= 992;
-    const feed = this.formatCountdown(this.nextFeedCheck, compact);
-    const decapi = this.formatCountdown(this.nextDecapiCheck, compact);
-    const twitch = this.formatCountdown(this.nextTwitchCheck, compact);
-    if (narrow) {
-      el.innerHTML = `<span>F ${this.escapeHtml(feed)}</span><span>D ${this.escapeHtml(decapi)}</span><span>T ${this.escapeHtml(twitch)}</span>`;
-    } else if (compact) {
+    const feed = this.formatCountdown(this.nextFeedCheck);
+    const decapi = this.formatCountdown(this.nextDecapiCheck);
+    const twitch = this.formatCountdown(this.nextTwitchCheck);
+    if (window.innerWidth <= 992) {
       el.textContent = `F ${feed} \u00b7 D ${decapi} \u00b7 T ${twitch}`;
     } else {
       el.textContent = `Next: Feed ${feed} \u00b7 DECAPI ${decapi} \u00b7 Twitch ${twitch}`;

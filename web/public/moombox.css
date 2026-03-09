@@ -625,30 +625,43 @@ sl-badge.status.cookies::part(base) {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: var(--sl-spacing-x-small) var(--sl-spacing-medium);
-    background: linear-gradient(180deg, var(--sl-color-neutral-100), var(--sl-color-neutral-200));
-    border-top: 1px solid var(--sl-color-neutral-300);
-    box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.08);
-    font-size: var(--sl-font-size-small);
-    color: var(--sl-color-neutral-600);
+    height: 28px;
+    padding: 0 var(--sl-spacing-medium);
+    background: var(--sl-color-neutral-100);
+    border-top: 1px solid var(--sl-color-neutral-200);
+    font-size: 0.75rem;
+    color: var(--sl-color-neutral-500);
     z-index: 100;
+    user-select: none;
 }
 
 /* Add padding to body to account for fixed status bar */
 body {
-    padding-bottom: 40px;
+    padding-bottom: 28px;
 }
 
-#status-bar-left {
+#status-bar-left, #status-bar-right {
     display: flex;
     align-items: center;
     gap: var(--sl-spacing-small);
+    height: 100%;
 }
 
+/* Vertical dividers between groups */
+.status-divider {
+    width: 1px;
+    height: 14px;
+    background: var(--sl-color-neutral-300);
+    flex-shrink: 0;
+}
+
+/* Each status section gets inline padding for breathing room */
 #connection-status {
     display: flex;
     align-items: center;
-    gap: var(--sl-spacing-x-small);
+    gap: 5px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
 }
 
 #connection-status.connected {
@@ -664,19 +677,16 @@ body {
 }
 
 #check-countdown {
-    color: var(--sl-color-neutral-500);
+    color: var(--sl-color-neutral-400);
     font-family: var(--sl-font-mono);
-    font-size: var(--sl-font-size-x-small);
+    font-size: 0.7rem;
     white-space: nowrap;
+    letter-spacing: -0.01em;
 }
 
 @media only screen and (max-width: 768px) {
     #check-countdown {
-        display: flex;
-        flex-direction: column;
-        gap: 0;
         font-size: 0.6rem;
-        line-height: 1.3;
     }
 }
 
@@ -904,12 +914,6 @@ sl-progress-bar {
 }
 
 /* Status Bar Right */
-#status-bar-right {
-    display: flex;
-    align-items: center;
-    gap: var(--sl-spacing-small);
-}
-
 #status-warnings {
     display: flex;
     align-items: center;
@@ -924,26 +928,28 @@ sl-progress-bar {
 
 .status-warning {
     cursor: pointer;
-    font-size: var(--sl-font-size-small);
+    font-size: 0.75rem;
     color: var(--sl-color-danger-600);
 }
 .status-warning:hover { text-decoration: underline; }
 
 #yt-indicator, #tw-indicator {
-    font-weight: 600;
-    font-size: var(--sl-font-size-small);
-    padding: 1px 5px;
-    border-radius: var(--sl-border-radius-small);
-    transition: all 0.2s ease;
+    font-weight: 700;
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.04em;
+    transition: color 0.2s, background-color 0.2s;
 }
 
-.indicator-ok    { color: var(--sl-color-success-600); background-color: color-mix(in srgb, var(--sl-color-success-600) 15%, transparent); }
-.indicator-warn  { color: var(--sl-color-warning-600); background-color: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
-.indicator-error { color: var(--sl-color-danger-600); background-color: color-mix(in srgb, var(--sl-color-danger-600) 15%, transparent); }
-.indicator-off   { color: var(--sl-color-neutral-500); }
+.indicator-ok    { color: var(--sl-color-success-500); background: color-mix(in srgb, var(--sl-color-success-600) 18%, transparent); }
+.indicator-warn  { color: var(--sl-color-warning-500); background: color-mix(in srgb, var(--sl-color-warning-600) 18%, transparent); }
+.indicator-error { color: var(--sl-color-danger-500); background: color-mix(in srgb, var(--sl-color-danger-600) 18%, transparent); }
+.indicator-off   { color: var(--sl-color-neutral-500); background: color-mix(in srgb, var(--sl-color-neutral-500) 10%, transparent); }
 
-#btn-refresh-cookies { font-size: var(--sl-font-size-medium); color: var(--sl-color-neutral-600); }
-#btn-refresh-cookies:hover { color: var(--sl-color-neutral-900); }
+#btn-refresh-cookies { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
+#btn-refresh-cookies::part(base) { padding: 0; min-height: auto; min-width: auto; }
+#btn-refresh-cookies:hover { color: var(--sl-color-neutral-700); }
 #btn-refresh-cookies.checking { animation: spin 1s linear infinite; }
 
 @keyframes spin {
@@ -1934,26 +1940,24 @@ html.sl-theme-light {
 
     /* Compact status bar on mobile */
     #status-bar {
-        padding: 2px var(--sl-spacing-small);
-        gap: var(--sl-spacing-x-small);
+        padding: 0 var(--sl-spacing-small);
+        font-size: 0.7rem;
     }
 
-    #status-bar-left {
-        gap: var(--sl-spacing-2x-small);
-    }
+    .status-divider { margin: 0 var(--sl-spacing-2x-small); height: 12px; }
 
-    #status-bar sl-icon-button::part(base) {
+    #status-bar sl-icon-button:not(#btn-refresh-cookies)::part(base) {
         min-height: 28px;
         min-width: 28px;
-    }
-
-    #status-bar-right {
-        gap: var(--sl-spacing-2x-small);
     }
 
     /* Collapse warning text into icon on mobile */
     #status-warnings { display: none !important; }
     #status-warnings-icon.active { display: inline-flex; }
+
+    /* Hide version on mobile — not useful on small screens */
+    #version-indicator { display: none !important; }
+    #status-bar-right > .status-divider:last-of-type { display: none; }
 }
 
 /* ========================================================================
@@ -2046,19 +2050,20 @@ html.sl-theme-light {
 /* Status bar disk + active indicators */
 #disk-indicator, #active-indicator {
     font-family: var(--sl-font-mono);
-    font-size: var(--sl-font-size-x-small);
+    font-size: 0.7rem;
     font-weight: 600;
     padding: 1px 6px;
-    border-radius: var(--sl-border-radius-small);
+    border-radius: 3px;
     white-space: nowrap;
+    letter-spacing: -0.01em;
 }
 
-.disk-indicator-ok       { color: var(--sl-color-success-600); }
-.disk-indicator-warn     { color: var(--sl-color-warning-600); background-color: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
-.disk-indicator-critical { color: var(--sl-color-danger-600); background-color: color-mix(in srgb, var(--sl-color-danger-600) 15%, transparent); }
+.disk-indicator-ok       { color: var(--sl-color-neutral-400); }
+.disk-indicator-warn     { color: var(--sl-color-warning-500); background: color-mix(in srgb, var(--sl-color-warning-600) 15%, transparent); }
+.disk-indicator-critical { color: var(--sl-color-danger-500); background: color-mix(in srgb, var(--sl-color-danger-600) 15%, transparent); }
 
 .active-indicator-on {
-    color: var(--sl-color-success-600);
+    color: var(--sl-color-success-500);
 }
 
 /* Mobile responsive: stats single-column, hide disk text in status bar */
@@ -2077,7 +2082,7 @@ html.sl-theme-light {
 }
 
 /* Version indicator */
-.version-indicator { cursor: default; font-size: 0.85em; color: var(--sl-color-neutral-400); user-select: none; }
+.version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-400); letter-spacing: -0.02em; }
 .version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
 .version-indicator.has-update:hover { text-decoration: underline; }
 #update-release-notes { max-height: 400px; overflow-y: auto; white-space: pre-wrap; font-size: 0.9em; }
