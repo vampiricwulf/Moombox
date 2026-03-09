@@ -30,7 +30,7 @@
 
 | Package | Approx Lines | Files | Description |
 |---------|-------------|-------|-------------|
-| tui/ | ~12,900 | 21 | Largest — 3-panel layout, overlays, chord system |
+| tui/ | ~12,900 | 21 | Largest — 2-over-1 panel layout, overlays, chord system |
 | worker/ | ~6,400 | 13 | Download orchestration, queue, quality monitor |
 | web/ | ~6,400 | 15 | chi router, WebSocket, auth, middleware, routes |
 | twitch/ | ~3,200 | 8 | Twitch GQL API, auth, HLS, IRC chat, emotes |

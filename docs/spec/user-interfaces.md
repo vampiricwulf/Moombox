@@ -93,32 +93,31 @@ The TUI is built on the [Charmbracelet](https://github.com/charmbracelet) ecosys
 | `huh` | Form builder framework. Used for the Settings dialog and the Setup Wizard. Provides multi-step forms with inputs, selects, confirms, and validation. |
 | `lipgloss` | Styling engine. Colors, borders, padding, margin, alignment, and layout composition. Every visual element in the TUI is styled through lipgloss. |
 
-### Layout: Three-Panel Design
+### Layout: Two-Over-One Panel Design
 
-The TUI uses a fixed three-panel horizontal layout:
+The TUI uses a split layout with two panels on top and a full-width log panel on the bottom:
 
 ```
-┌──────────────┬──────────────────────────┬─────────────┐
-│  Task List   │      Job Details          │    Logs     │
-│  (~33%)      │      (~50%)               │   (~17%)    │
-│              │                            │             │
-│  Arrow keys  │  Full metadata display     │  Real-time  │
-│  to navigate │  Action affordances        │  log lines  │
-│  Enter to    │  Auto-scrolling content    │  Level      │
-│  select      │                            │  filter     │
-│              │                            │  Regex      │
-│              │                            │  search     │
-│              │                            │  Auto-scroll│
-├──────────────┴──────────────────────────┴─────────────┤
-│  Status Bar                                            │
-└────────────────────────────────────────────────────────┘
+┌─────────────────────┬──────────────────────────────────┐
+│  Task List           │      Job Details                  │
+│  (~45% width)        │      (~55% width)                 │
+│                      │                                    │
+│  Arrow keys          │  Full metadata display             │
+│  to navigate         │  Action affordances                │
+│  Enter to select     │  Auto-scrolling content            │
+├──────────────────────┴──────────────────────────────────┤
+│  Logs (full width)                                       │
+│  Real-time log lines, level filter, regex search         │
+├──────────────────────────────────────────────────────────┤
+│  Status Bar                                              │
+└──────────────────────────────────────────────────────────┘
 ```
 
-**Panel 1 — Task List (left, ~33% width):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility.
+**Task List (top left, ~45% width):** Displays all jobs as a scrollable list. Arrow keys navigate. Enter selects a job and populates the details panel. Status is shown via icons and colors. Divider row separates active from archived jobs; clicking or pressing Enter on the divider toggles archive visibility.
 
-**Panel 2 — Job Details (center, ~50% width):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
+**Job Details (top right, ~55% width):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
 
-**Panel 3 — Logs (right, ~17% width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and regex search. Auto-scrolls to newest entries unless the user has manually scrolled up.
+**Logs (bottom, full width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and regex search. Auto-scrolls to newest entries unless the user has manually scrolled up.
 
 **Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input and has a visually distinct border.
 
@@ -127,9 +126,9 @@ The TUI uses a fixed three-panel horizontal layout:
 | File | Purpose |
 |------|---------|
 | `app.go` | Main application model. Init, Update, View. Chord state machine. Menu builder. Action dispatcher. Message routing. Tick management. |
-| `task_list.go` | Panel 1 implementation. Job list rendering, selection, filtering, archive toggle, status icons. |
-| `job_details.go` | Panel 2 implementation. Metadata display, description toggle, progress rendering. |
-| `log_viewer.go` | Panel 3 implementation. Log line buffering, level filtering, regex search, auto-scroll logic. |
+| `task_list.go` | Task list panel (top left). Job list rendering, selection, filtering, archive toggle, status icons. |
+| `job_details.go` | Job details panel (top right). Metadata display, description toggle, progress rendering. |
+| `log_viewer.go` | Log viewer panel (bottom). Log line buffering, level filtering, regex search, auto-scroll logic. |
 | `status_bar.go` | Bottom bar. Connection status, disk usage, monitor timers, cookie status, update indicator. |
 | `action_menu.go` | Command palette overlay (M key). Searchable list of all available actions. |
 | `help.go` | Help overlay (? key). Displays all chords grouped by category. |
@@ -237,7 +236,7 @@ The chord system is a three-state finite automaton:
 
 ### Overlays (Modal Dialogs)
 
-Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the three-panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays.
+Overlays are full-screen or near-full-screen modal views that take over keyboard input. When an overlay is active, the panel layout is hidden and all input routes to the overlay. Pressing `Escape` closes most overlays.
 
 | Overlay | Trigger | Description |
 |---------|---------|-------------|

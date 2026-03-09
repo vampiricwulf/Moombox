@@ -147,7 +147,7 @@ internal/
   notifications/   <- Manager + Discord webhook sender
   web/             <- chi server, WebSocket hub, auth, middleware, rate limiter
   web/routes/      <- HTTP route handlers (jobs, auth, config, cookies, update, etc.)
-  tui/             <- 3-panel layout, 8+ overlays, chord system, Charm ecosystem
+  tui/             <- 2-over-1 panel layout, 8+ overlays, chord system, Charm ecosystem
   goja/            <- JS runtime shims (minimal DOM, TextEncoder, timers)
   disk/            <- Windows disk space queries (kernel32 GetDiskFreeSpaceExW)
   errors/          <- Typed error hierarchy with Expected/internal distinction
@@ -444,10 +444,10 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 
 The TUI uses Charmbracelet's full suite: bubbletea for the Elm architecture, bubbles for pre-built components, huh for form/dialog wizards, and lipgloss for styling.
 
-**Layout:** Three panels in a horizontal split:
-- **TaskList** (33% width) — Job list with status icons, channel names, titles. Scrollable, filterable.
-- **JobDetails** (50% width) — Selected job's metadata, progress, segment counts, file info.
-- **Logs** (17% width) — Real-time log output, 250ms batched flush, scrollable viewport.
+**Layout:** Two-over-one split — two panels side-by-side on top, full-width logs on bottom:
+- **TaskList** (top left, ~45%) — Job list with status icons, channel names, titles. Scrollable, filterable.
+- **JobDetails** (top right, ~55%) — Selected job's metadata, progress, segment counts, file info.
+- **Logs** (bottom, full width) — Real-time log output, 250ms batched flush, scrollable viewport.
 
 **Overlays (8+):** Add Video dialog, Settings dialog, Help panel, Filter dialog, Confirm dialogs (cancel, delete, retry), Update dialog, Trim dialog, Import dialog, Orphaned Files dialog, Client Tokens dialog.
 

@@ -187,7 +187,7 @@ internal/worker        (~6,443 lines)  -- Worker, Orchestrator, StreamProcessor,
 internal/monitor       (~1,455 lines)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
 internal/notifications   (~315 lines)  -- Manager + Discord webhook
 internal/web           (~6,437 lines)  -- chi router, WebSocket hub, auth, middleware, routes
-internal/tui          (~12,893 lines)  -- 3-panel layout, overlays, chord system
+internal/tui          (~12,893 lines)  -- 2-over-1 panel layout, overlays, chord system
 internal/goja            (~715 lines)  -- JS runtime shims (minimal DOM, TextEncoder, timers)
 internal/disk             (~57 lines)  -- Windows disk space queries (kernel32)
 internal/errors          (~231 lines)  -- Typed error hierarchy, sentinel codes
