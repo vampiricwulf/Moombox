@@ -95,34 +95,39 @@ The TUI is built on the [Charmbracelet](https://github.com/charmbracelet) ecosys
 
 ### Layout: Two-Over-One Panel Design with Focus Expansion
 
-The TUI uses a split layout with two panels on top and a full-width log panel on the bottom. The focused panel expands to take more space:
+The TUI uses a split layout with two panels on top and a full-width log panel on the bottom. The focused panel's row expands to take more space.
 
-**Default (unfocused):** 50/50 width split on top, 50/50 height split between top row and bottom.
+**Height split (vertical):**
+- Top panel focused (Tasks or Details): top row = 70% height, logs = 30% height
+- Logs focused: top row = 25% height, logs = 75% height
 
-**Focused:** The focused panel's axis expands to 70%, the unfocused shrinks to 30%.
+**Width split (horizontal, top row only):**
+- Tasks focused: tasks = 45%, details = 55%
+- Details focused: tasks = 35%, details = 65%
+- Logs focused (neither top panel focused): tasks = 50%, details = 50%
 
 ```
-Example: Task List focused (70% width, 70% height)
+Example: Task List focused (45% width, 70% height)
 
-┌──────────────────────────────────┬─────────────────────┐
-│  Task List (focused)              │   Job Details        │
-│  70% width                        │   30% width          │
-│                                   │                      │
-│                    70% height     │                      │
-│                                   │                      │
-├──────────────────────────────────┴─────────────────────┤
+┌──────────────────────┬─────────────────────────────────┐
+│  Task List (focused)  │      Job Details                 │
+│  45% width            │      55% width                   │
+│                       │                                   │
+│             70% height                                    │
+│                       │                                   │
+├──────────────────────┴─────────────────────────────────┤
 │  Logs (full width, 30% height)                          │
 ├─────────────────────────────────────────────────────────┤
 │  Status Bar                                             │
 └─────────────────────────────────────────────────────────┘
 
-Example: Logs focused (100% width, 70% height)
+Example: Logs focused (100% width, 75% height)
 
 ┌─────────────────────────┬──────────────────────────────┐
 │  Task List               │   Job Details                 │
-│  50% width, 30% height  │   50% width, 30% height      │
+│  50% width, 25% height  │   50% width, 25% height      │
 ├─────────────────────────┴──────────────────────────────┤
-│  Logs (focused, full width, 70% height)                 │
+│  Logs (focused, full width, 75% height)                 │
 ├─────────────────────────────────────────────────────────┤
 │  Status Bar                                             │
 └─────────────────────────────────────────────────────────┘
@@ -134,7 +139,7 @@ Example: Logs focused (100% width, 70% height)
 
 **Logs (bottom, full width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and regex search. Auto-scrolls to newest entries unless the user has manually scrolled up.
 
-**Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input, has a visually distinct border, and expands to 70% on its axis (width for top panels, height for top vs bottom). The unfocused panels shrink to 30%.
+**Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input and has a visually distinct border.
 
 ### Source Files
 

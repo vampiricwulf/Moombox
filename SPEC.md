@@ -444,7 +444,7 @@ The web UI is a vanilla JavaScript SPA using Shoelace v2.16 (loaded from CDN). S
 
 The TUI uses Charmbracelet's full suite: bubbletea for the Elm architecture, bubbles for pre-built components, huh for form/dialog wizards, and lipgloss for styling.
 
-**Layout:** Two-over-one split — two panels side-by-side on top, full-width logs on bottom. Default 50/50 split; the focused panel expands to 70% on its axis (unfocused shrinks to 30%):
+**Layout:** Two-over-one split — two panels side-by-side on top, full-width logs on bottom. The focused panel's row expands vertically (top focused = 70% height, logs focused = 75% height). Width split depends on focus: tasks focused = 45%/55%, details focused = 35%/65%, logs focused = 50%/50%:
 - **TaskList** (top left) — Job list with status icons, channel names, titles. Scrollable, filterable.
 - **JobDetails** (top right) — Selected job's metadata, progress, segment counts, file info.
 - **Logs** (bottom, full width) — Real-time log output, 250ms batched flush, scrollable viewport.
@@ -560,9 +560,9 @@ The TUI communicates with the web server via HTTP to `localhost:{port}`. A custo
 For real-time updates, the TUI does NOT use WebSocket. Instead, it subscribes directly to database pub/sub callbacks since it runs in the same process. This is more efficient than serializing to JSON and deserializing — the TUI receives typed Go structs directly. Updates are forwarded via buffered channels with non-blocking sends:
 
 ```
-Database.OnJobUpdate()  -> jobUpdateCh (cap 50)  -> tea.Cmd -> TUI model
-Database.OnJobsChange() -> jobsUpdateCh (cap 5)  -> tea.Cmd -> TUI model
-Logger.Subscribe()      -> logCh (cap 100)        -> tea.Cmd -> TUI model (250ms batch)
+Database.OnJobUpdate()  -> jobUpdateCh (cap 100) -> tea.Cmd -> TUI model
+Database.OnJobsChange() -> jobsUpdateCh (cap 10) -> tea.Cmd -> TUI model
+Logger.Subscribe()      -> logCh (cap 200)        -> tea.Cmd -> TUI model (250ms batch)
 CookieRefresh.OnAuthChange -> cookieStatusCh      -> tea.Cmd -> TUI model
 Monitor.OnSchedule      -> checkTimersCh          -> tea.Cmd -> TUI model
 ```
@@ -602,7 +602,7 @@ db.UpdateJobFields(jobID, map[string]any{
     "progress": "V:1234 A:1234 C:5678",
 })
 ```
-Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 35-entry whitelist). Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers after write.
+Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 37-entry whitelist). Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers after write.
 
 **Pub/sub:** `OnJobUpdate(func(*Job))` fires when any field of a single job changes. `OnJobsChange(func([]*Job))` fires when the job list changes (add/delete). Both return an unsubscribe function. Multiple subscribers are supported — the WebSocket hub, TUI, and notification manager all subscribe independently. Callback invocation uses `safeCallJobUpdate`/`safeCallJobsChange` wrappers with panic recovery so one misbehaving subscriber does not affect others. The subscriber list is protected by a separate `subMu` RWMutex to avoid contention with the main database mutex.
 
