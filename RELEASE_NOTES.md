@@ -1,4 +1,11 @@
+### Bug Fixes
+
+- **Fixed TUI restart freeze** — R P P chord, settings restart, and setup wizard completion no longer freeze the program (deadlock on bubbletea's internal message channel)
+- **Fixed signature verification error stutter** — no longer shows "signature verification failed: signature verification failed: signature verification failed"
+
 ### Improvements
 
-- **Status bar layout reworked** — version indicator centered between left (connection, disk, active downloads, check timers) and right (auth indicators, warnings, refresh) groups; cleaner 3-column layout on all screen sizes
-- **Mobile status bar polish** — check countdown timers grouped next to connection icon, version visible and centered, warnings collapsed to icon, tighter spacing
+- **Status bar redesign** — compact 28px bar with vertical dividers for visual grouping, version moved to right side, consistent `Xm Xs` countdown format, tighter typography
+- **Disk indicator as warning only** — moved to right side, only appears when disk usage is at warning or critical level with HDD icon
+- **Cleaner status bar text** — connection shows icon only when connected (text kept for disconnected alert), removed redundant "Next:" prefix from countdown timers
+- **Mobile status bar fixes** — horizontal timers with separators, fixed refresh button spin animation
