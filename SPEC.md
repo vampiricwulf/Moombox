@@ -117,7 +117,7 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 13. **FeedMonitor** — YouTube RSS polling
 14. **DECAPIMonitor** — DECAPI live-check polling for YouTube
 15. **TwitchMonitor** — Twitch GQL stream polling
-16. **CookieRefresh** — Periodic auth validation (6-hour interval)
+16. **CookieRefresh** — Periodic auth validation (30-minute interval)
 17. **AutoCookieService** — Browser cookie extraction (Firefox/Chromium profiles, DPAPI on Windows)
 18. **WebServer** — chi router, middleware stack, route registration, WebSocket hub, static file serving
 19. **TUI** — BubbleTea application (or headless mode blocks on context)
@@ -266,7 +266,7 @@ The worker also runs a 60-second heartbeat poll (`heartbeatInterval`) as a safet
 | TUI logs | Batched flush | 250ms flush interval |
 | BotGuard | Triple cache | Session (6h TTL), minter (dynamic TTL), inflight dedup |
 | Cipher | LRU with mutex | 3-VM cache, mutex-serialized compilation |
-| Cookie refresh | Periodic | 6-hour interval with immediate-check capability |
+| Cookie refresh | Periodic | 30-minute interval with immediate-check capability |
 | Update check | Periodic | 5s initial delay, then 24-hour interval |
 | Disk check | Piggyback on memory ticker | Every 3rd tick of 2-minute memory diagnostic |
 
@@ -337,7 +337,7 @@ YouTube integration reimplements yt-dlp's extraction logic in Go. The core is a 
 4. **WEB_CREATOR** (clientID 62) — fallback for members-only content
 5. **ANDROID_VR** (clientID 28) — fallback for VOD without cookies, no cipher needed
 
-Each client's formats are tagged with an auth level: AuthLevelAndroidVR(0), AuthLevelWatchPage(1), AuthLevelWeb(2), AuthLevelTVAuth(3), AuthLevelWebCreator(5). Formats from different clients are pooled and deduplicated by itag. Format selection priority: resolution > FPS (if prefer60fps enabled) > video codec score (vp9.2=5 > vp9/vp09=4 > av01=3 > avc1=2 > h264=1) > bitrate > auth level (lower = less likely to require cookies for playback). Audio codec priority: opus=4 > mp4a.40.5=3 > mp4a.40.2=2 > mp4a=1.
+Each client's formats are tagged with an auth level: AuthLevelAndroidVR(0), AuthLevelWatchPage(1), AuthLevelTVPublic(2), AuthLevelTVAuth(3), AuthLevelWeb(4), AuthLevelWebCreator(5). Formats from different clients are pooled and deduplicated by itag. Format selection priority: resolution > FPS (if prefer60fps enabled) > video codec score (vp9.2=5 > vp9/vp09=4 > av01=3 > avc1=2 > h264=1) > bitrate > auth level (lower = less likely to require cookies for playback). Audio codec priority: opus=4 > mp4a.40.5=3 > mp4a.40.2=2 > mp4a=1.
 
 **Probe vs. full fetch:** Two distinct code paths serve different needs. `ProbeVideoStatus()` uses ANDROID_VR (lightweight, no cookies, no cipher, no watch page fetch) to quickly classify a video as live/upcoming/VOD/offline/members-only. It is used by monitors for pre-filtering and by the stream processor for polling. `GetVideoInfoAuthenticated()` runs the full multi-client chain: fetches the watch page, extracts ytcfg, tries multiple Innertube clients, decrypts signatures and n-parameters, and returns the merged format pool. It is used when actual download URLs are needed.
 
@@ -449,7 +449,7 @@ The TUI uses Charmbracelet's full suite: bubbletea for the Elm architecture, bub
 - **JobDetails** (top right) — Selected job's metadata, progress, segment counts, file info.
 - **Logs** (bottom, full width) — Real-time log output, 250ms batched flush, scrollable viewport.
 
-**Overlays (8+):** Add Video dialog, Settings dialog, Help panel, Filter dialog, Confirm dialogs (cancel, delete, retry), Update dialog, Trim dialog, Import dialog, Orphaned Files dialog, Client Tokens dialog.
+**Overlays (10):** Action Menu, Help, Add Video, Import, Trim, Orphaned Files, Client Tokens, Settings, Setup Wizard, FFmpeg Check.
 
 ### Chord System
 
@@ -632,7 +632,7 @@ TOML format parsed by `BurntSushi/toml`. Search order: custom path (CLI flag), `
 
 Netscape-format cookie file (`cookies.txt`). The `CookieJar` parses the file into an in-memory map of name-value pairs with domain tracking. Essential YouTube cookies include SAPISID, SID, HSID, __Secure-1PSID, LOGIN_INFO, etc. Essential Twitch cookies: auth-token, twilight-user.
 
-**Cookie refresh service:** Validates auth every 6 hours by making test API calls (YouTube `account/account_menu`, Twitch GQL `UseLive`). Reports auth status changes via `OnAuthChange` callback. Triggers `OnRecoveryNeeded` when auth is lost.
+**Cookie refresh service:** Validates auth every 30 minutes by making test API calls (YouTube `account/account_menu`, Twitch GQL `UseLive`). Reports auth status changes via `OnAuthChange` callback. Triggers `OnRecoveryNeeded` when auth is lost.
 
 **Auto-cookie service:** Extracts cookies from installed browser profiles (Firefox: `cookies.sqlite`, Chromium: `Cookies` file with DPAPI decryption on Windows). Manages a dedicated browser profile directory. Supports setup flow (start/login/finish) and periodic refresh.
 
