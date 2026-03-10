@@ -1088,7 +1088,7 @@ func parseTimeToSeconds(s string) (float64, error) {
 	case 1:
 		return strconv.ParseFloat(parts[0], 64)
 	case 2:
-		mins, err := strconv.ParseFloat(parts[0], 64)
+		mins, err := strconv.Atoi(parts[0])
 		if err != nil {
 			return 0, err
 		}
@@ -1099,13 +1099,13 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if mins < 0 || mins > 59 || secs < 0 || secs > 59 {
 			return 0, fmt.Errorf("minutes and seconds must be 0-59")
 		}
-		return mins*60 + secs, nil
+		return float64(mins)*60 + secs, nil
 	case 3:
-		hours, err := strconv.ParseFloat(parts[0], 64)
+		hours, err := strconv.Atoi(parts[0])
 		if err != nil {
 			return 0, err
 		}
-		mins, err := strconv.ParseFloat(parts[1], 64)
+		mins, err := strconv.Atoi(parts[1])
 		if err != nil {
 			return 0, err
 		}
@@ -1116,7 +1116,7 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if mins < 0 || mins > 59 || secs < 0 || secs > 59 {
 			return 0, fmt.Errorf("minutes and seconds must be 0-59")
 		}
-		return hours*3600 + mins*60 + secs, nil
+		return float64(hours)*3600 + float64(mins)*60 + secs, nil
 	}
 	return 0, fmt.Errorf("invalid time format")
 }

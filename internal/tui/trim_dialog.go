@@ -258,6 +258,7 @@ func (m *TrimDialogModel) handleEscape() string {
 func (m *TrimDialogModel) toggleMode() {
 	if m.mode == TrimModeCreate {
 		m.mode = TrimModeDelete
+		m.textInput.Blur()
 		m.selectedTrimIdx = 0
 		m.deleteConfirmID = ""
 	} else {

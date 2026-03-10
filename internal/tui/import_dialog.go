@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // ImportDialogModel wraps bubbles/filepicker for browsing and selecting .zip
@@ -240,7 +241,7 @@ func (m *ImportDialogModel) View() string {
 			content.WriteString(m.textInput.View())
 		} else {
 			content.WriteString("  " + DimStyle.Render(titleLabel))
-			content.WriteString(renderInactiveInput(m.title, contentW-len(titleLabel)-2, ColorGray))
+			content.WriteString(renderInactiveInput(m.title, contentW-runewidth.StringWidth(titleLabel)-2, ColorGray))
 		}
 		content.WriteString("\n")
 
@@ -251,7 +252,7 @@ func (m *ImportDialogModel) View() string {
 			content.WriteString(m.textInput.View())
 		} else {
 			content.WriteString("  " + DimStyle.Render(channelLabel))
-			content.WriteString(renderInactiveInput(m.channel, contentW-len(channelLabel)-2, ColorGray))
+			content.WriteString(renderInactiveInput(m.channel, contentW-runewidth.StringWidth(channelLabel)-2, ColorGray))
 		}
 		content.WriteString("\n")
 

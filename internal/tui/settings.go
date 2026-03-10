@@ -449,7 +449,7 @@ func (m *SettingsModel) applyValues() {
 		m.cfg.Monitors.DecapiCheckInterval = nil
 	}
 	if v := m.values["twitch_check_interval"]; v != "" {
-		if t, err := strconv.Atoi(v); err == nil && t >= 15 && t <= 3600 {
+		if t, err := strconv.Atoi(v); err == nil && t >= 1 && t <= 3600 {
 			m.cfg.Monitors.TwitchCheckInterval = &t
 		} else {
 			m.cfg.Monitors.TwitchCheckInterval = nil
@@ -602,14 +602,14 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.updateTextInputForField()
 		}
 		return ""
-	case "left":
+	case keyLeft:
 		if field.ftype == fieldToggle {
 			m.toggleField(field)
 		} else if field.ftype == fieldCycle {
 			m.cycleFieldReverse(field)
 		}
 		return ""
-	case "right":
+	case keyRight:
 		if field.ftype == fieldToggle {
 			m.toggleField(field)
 		} else if field.ftype == fieldCycle {
@@ -1024,12 +1024,12 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 			m.updateTextInputForField()
 		}
 		return ""
-	case "left":
+	case keyLeft:
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelOption(field, -1)
 		}
 		return ""
-	case "right":
+	case keyRight:
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelOption(field, 1)
 		}
@@ -1387,6 +1387,7 @@ func (m *SettingsModel) handleRemovePassword() {
 	if networkReset {
 		m.cfg.Network.NetworkAccess = "localhost"
 		m.values["network_access"] = "localhost"
+		m.dirty = true
 	}
 	if m.OnSave != nil {
 		m.OnSave(m.cfg)

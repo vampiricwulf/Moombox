@@ -104,6 +104,8 @@ func (m *FFmpegCheckModel) Open() {
 	m.manualPath = ""
 	m.manualResult = ""
 	m.manualValid = false
+	m.textInput.Blur()
+	m.textInput.SetValue("")
 }
 
 // Close hides the overlay.
@@ -167,7 +169,7 @@ func (m *FFmpegCheckModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			// Only forward scroll-related keys to the viewport
 			switch keyMsg.String() {
-			case keyUp, keyDown, "pgup", "pgdown":
+			case keyUp, keyDown, "pgup", "pgdown", "ctrl+u", "ctrl+d":
 				// Allow scroll keys through
 			default:
 				return nil

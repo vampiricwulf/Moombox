@@ -989,7 +989,7 @@ func (a *App) handleJobUpdate(job *database.Job) tea.Cmd {
 	}
 
 	// Clean up progress for terminal/error statuses (match TS behavior)
-	if isCompletedStatus(job.Status) || job.Status == database.StatusError {
+	if isCompletedStatus(job.Status) || job.Status == database.StatusError || job.Status == database.StatusCookies {
 		a.progressStore.Delete(job.ID)
 	}
 
@@ -2029,7 +2029,7 @@ func addOverlayMessage(content string, width int, msg string) string {
 }
 
 // feedbackColor returns the display color for a feedback message.
-// Order: error (red) > warning (yellow) > neutral (gray) > chord (yellow) > success (green).
+// Order: chord (yellow) > error (red) > neutral (gray) > warning (yellow) > success (green).
 func feedbackColor(msg string) lipgloss.Color {
 	lower := strings.ToLower(msg)
 
@@ -2055,6 +2055,8 @@ func feedbackColor(msg string) lipgloss.Color {
 		strings.HasPrefix(msg, "No update") || strings.HasPrefix(msg, "No stream") ||
 		strings.HasPrefix(msg, "A trim is already") ||
 		strings.Contains(lower, "no cookies acquired") ||
+		strings.Contains(lower, "not authenticated") ||
+		strings.Contains(lower, "no platforms") ||
 		strings.Contains(lower, "already exists") ||
 		strings.HasPrefix(msg, "Already up to date") {
 		return lipgloss.Color("#f1c40f")

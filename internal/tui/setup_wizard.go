@@ -412,7 +412,7 @@ func (m *SetupWizardModel) updateTextInputWidth() {
 	if m.channelEditField < len(fields) {
 		f := fields[m.channelEditField]
 		prefix := "> " // focused field always has "> " prefix
-		m.textInput.Width = contentW - runewidth.StringWidth(prefix+f.label+": ") - 1
+		m.textInput.Width = contentW - runewidth.StringWidth(prefix+f.label+": ")
 	}
 }
 
