@@ -1394,11 +1394,6 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 // processSecondKey handles the second key in a chord sequence.
 // It looks up the chord in buildMenuItems() instead of hardcoding valid keys.
 func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
-	// Special case: Q Q (quit) is not in buildMenuItems the same way
-	if prefix == "q" && key == "q" {
-		return a, tea.Quit, true
-	}
-
 	// Form the full chord string: prefix "a" + key "k" → "A K"
 	chord := strings.ToUpper(prefix) + " " + strings.ToUpper(key)
 	items := a.buildMenuItems()
@@ -2011,14 +2006,16 @@ func (a *App) View() string {
 			strings.HasPrefix(a.feedbackMsg, "Request:") || strings.HasPrefix(a.feedbackMsg, "Open:") ||
 			strings.HasPrefix(a.feedbackMsg, "Quit:") {
 			msgColor = lipgloss.Color("#f1c40f") // yellow for chord feedback
-		} else if strings.HasPrefix(a.feedbackMsg, "Can only") || strings.HasPrefix(a.feedbackMsg, "Trim only") {
-			msgColor = lipgloss.Color("#f1c40f") // yellow for warnings
-		} else if strings.HasPrefix(a.feedbackMsg, "No update") {
-			msgColor = lipgloss.Color("#f1c40f")
+		} else if strings.Contains(a.feedbackMsg, "failed") {
+			msgColor = ColorRed
 		} else if strings.HasPrefix(a.feedbackMsg, "Cancelled:") {
 			msgColor = ColorRed
-		} else if strings.Contains(a.feedbackMsg, "Deleted:") {
+		} else if strings.Contains(a.feedbackMsg, "deleted:") || strings.Contains(a.feedbackMsg, "Deleted:") {
 			msgColor = ColorGray
+		} else if strings.HasPrefix(a.feedbackMsg, "Can only") || strings.HasPrefix(a.feedbackMsg, "Trim only") ||
+			strings.HasPrefix(a.feedbackMsg, "No update") || strings.HasPrefix(a.feedbackMsg, "A trim is already") ||
+			strings.Contains(a.feedbackMsg, "no cookies acquired") {
+			msgColor = lipgloss.Color("#f1c40f") // yellow for warnings
 		}
 		content = addOverlayMessage(content, a.width,
 			lipgloss.NewStyle().Foreground(msgColor).Render(a.feedbackMsg),

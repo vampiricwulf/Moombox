@@ -952,6 +952,9 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 		if len(m.channels) > 0 {
 			m.channelDeleteConf = true
 		}
+	case keyTab:
+		m.switchSection((m.sectionIndex + 1) % len(sections))
+		m.updateTextInputForField()
 	case "shift+left":
 		if m.sectionIndex > 0 {
 			m.switchSection(m.sectionIndex - 1)
@@ -1164,6 +1167,9 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		if len(m.notifications) > 0 {
 			m.notifDeleteConf = true
 		}
+	case keyTab:
+		m.switchSection((m.sectionIndex + 1) % len(sections))
+		m.updateTextInputForField()
 	case "shift+left":
 		if m.sectionIndex > 0 {
 			m.switchSection(m.sectionIndex - 1)

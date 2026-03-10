@@ -205,7 +205,7 @@ func (m *ImportDialogModel) View() string {
 
 	boxW := min(70, m.width-4)
 	boxH := min(m.height-4, 30)
-	contentW := boxW - 4
+	contentW := boxW - 2
 
 	var content strings.Builder
 
@@ -260,7 +260,7 @@ func (m *ImportDialogModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
-		Width(boxW).
+		Width(contentW).
 		Height(boxH).
 		Render(content.String())
 

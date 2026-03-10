@@ -107,8 +107,8 @@ func (d menuJobDelegate) Render(w io.Writer, m list.Model, index int, item list.
 	contentW := m.Width()
 	statusStyle := lipgloss.NewStyle().Foreground(StatusColor(string(j.Status)))
 	icon := StatusIcon(string(j.Status))
-	title := truncateString(j.Title, contentW-12)
-	line := fmt.Sprintf("  %s %s %s", icon, statusStyle.Render(padRight(string(j.Status), 6)), title)
+	title := truncateString(j.Title, contentW-17)
+	line := fmt.Sprintf("  %s %s %s", icon, statusStyle.Render(padRight(string(j.Status), 11)), title)
 	if index == m.Index() {
 		line = lipgloss.NewStyle().Bold(true).Foreground(ColorWhite).Background(lipgloss.Color("#333355")).Render(
 			padToWidth(line, contentW),
@@ -552,16 +552,16 @@ func (m *ActionMenuModel) View() string {
 
 	switch m.mode {
 	case menuMain:
-		return m.renderMain(boxW, contentW)
+		return m.renderMain(contentW)
 	case menuJobSelect:
-		return m.renderJobSelect(boxW, contentW)
+		return m.renderJobSelect(contentW)
 	case menuConfirm:
-		return m.renderConfirm(boxW, contentW)
+		return m.renderConfirm(contentW)
 	}
 	return ""
 }
 
-func (m *ActionMenuModel) renderMain(boxW, contentW int) string {
+func (m *ActionMenuModel) renderMain(contentW int) string {
 	header := TitleStyle.Render("Action Menu") +
 		strings.Repeat(" ", max(0, contentW-28)) +
 		DimStyle.Render("↑↓ navigate | Enter | Esc")
@@ -573,7 +573,7 @@ func (m *ActionMenuModel) renderMain(boxW, contentW int) string {
 	return m.centerOverlay(box)
 }
 
-func (m *ActionMenuModel) renderJobSelect(boxW, contentW int) string {
+func (m *ActionMenuModel) renderJobSelect(contentW int) string {
 	header := TitleStyle.Render(m.pendingLabel) +
 		DimStyle.Render(fmt.Sprintf(" — Select job (%d)", len(m.filtered)))
 
@@ -590,7 +590,7 @@ func (m *ActionMenuModel) renderJobSelect(boxW, contentW int) string {
 	return m.centerOverlay(box)
 }
 
-func (m *ActionMenuModel) renderConfirm(boxW, contentW int) string {
+func (m *ActionMenuModel) renderConfirm(contentW int) string {
 	ch := 3
 	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Bold(true).Render(
 		fmt.Sprintf("Confirm: %s?", m.confirmLabel))

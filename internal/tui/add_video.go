@@ -10,7 +10,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 // AddVideoStep represents steps in the add video dialog.
@@ -847,7 +846,7 @@ func centerBox(box string, screenW, screenH int) string {
 	boxH := len(boxLines)
 	boxW := 0
 	for _, l := range boxLines {
-		if w := runewidth.StringWidth(l); w > boxW {
+		if w := lipgloss.Width(l); w > boxW {
 			boxW = w
 		}
 	}
