@@ -1531,7 +1531,7 @@
                 <kbd>A</kbd> <span>Add video</span>
                 <kbd>?</kbd> <span>Show this help</span>
                 <kbd>Esc</kbd> <span>Close dialog</span>
-                <kbd>1</kbd>-<kbd>6</kbd> <span>Switch tabs</span>
+                <kbd>1</kbd>-<kbd>8</kbd> <span>Switch tabs</span>
                 <kbd>F</kbd> <span>Focus search</span>
                 <kbd>↑</kbd> <kbd>↓</kbd> <span>Navigate job list</span>
                 <kbd>Enter</kbd> <span>Open selected job details</span>
@@ -1553,6 +1553,19 @@
             <div id="update-release-notes"></div>
             <sl-button slot="footer" id="update-now-btn" variant="primary">Update Now</sl-button>
             <sl-button slot="footer" id="update-dismiss-btn" variant="default">Don't ask again</sl-button>
+        </sl-dialog>
+
+        <sl-dialog id="confirm-dialog" label="Confirm" style="--width: 24rem">
+            <p id="confirm-dialog-message" style="white-space: pre-line; word-break: break-word;"></p>
+            <sl-button slot="footer" id="confirm-dialog-cancel" variant="default">Cancel</sl-button>
+            <sl-button slot="footer" id="confirm-dialog-ok" variant="primary">OK</sl-button>
+        </sl-dialog>
+
+        <sl-dialog id="remove-password-dialog" label="Remove Password" style="--width: 24rem">
+            <p>Enter your current password to confirm removal.</p>
+            <sl-input id="remove-password-input" type="password" label="Current Password" placeholder="Enter password" toggle-password style="margin-top: var(--sl-spacing-small)"></sl-input>
+            <sl-button slot="footer" id="remove-password-cancel-btn" variant="default">Cancel</sl-button>
+            <sl-button slot="footer" id="remove-password-confirm-btn" variant="danger">Remove Password</sl-button>
         </sl-dialog>
 
         <!-- Status Bar -->

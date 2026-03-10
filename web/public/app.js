@@ -24,6 +24,7 @@ class MoomboxApp {
     this.nextTwitchCheck = 0;
     this._countdownInterval = null;
     this.logFilter = "all";
+    this._logAutoScroll = true;
     this._logSearchQuery = "";
     this.tasksSearchQuery = "";
     this.tasksStatusFilter = "";
@@ -162,7 +163,9 @@ class MoomboxApp {
     document.getElementById("details-dialog").addEventListener("click", (e) => {
       const copyBtn = e.target.closest("[data-copy]");
       if (copyBtn) {
-        navigator.clipboard.writeText(copyBtn.dataset.copy);
+        navigator.clipboard.writeText(copyBtn.dataset.copy).catch(() => {
+          this.showToast("Failed to copy to clipboard", "warning");
+        });
       }
     });
 
@@ -623,6 +626,7 @@ class MoomboxApp {
     this.ws.onopen = () => {
       console.log("WebSocket connected");
       this.reconnectAttempts = 0;
+      this._lastPong = Date.now();
       this.updateConnectionStatus(true);
       // Refresh status (cookie + Twitch auth) on reconnect
       this.loadStatus();
@@ -630,6 +634,19 @@ class MoomboxApp {
       if (!this._countdownInterval) {
         this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);
       }
+      // Start client-side heartbeat to detect half-open connections
+      if (this._pingInterval) clearInterval(this._pingInterval);
+      this._pingInterval = setInterval(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          // If no pong received within 45s, connection is likely dead
+          if (Date.now() - this._lastPong > 45000) {
+            console.log("WebSocket heartbeat timeout — reconnecting");
+            this.ws.close();
+            return;
+          }
+          this.ws.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 15000);
     };
 
     this.ws.onmessage = (event) => {
@@ -643,6 +660,7 @@ class MoomboxApp {
 
     this.ws.onclose = () => {
       console.log("WebSocket disconnected");
+      if (this._pingInterval) { clearInterval(this._pingInterval); this._pingInterval = null; }
       this.updateConnectionStatus(false);
       this.scheduleReconnect();
     };
@@ -739,7 +757,7 @@ class MoomboxApp {
         break;
 
       case "pong":
-        // Heartbeat response
+        this._lastPong = Date.now();
         break;
     }
   }
@@ -1749,7 +1767,7 @@ class MoomboxApp {
     try {
       const parsed = new URL(url);
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {
-        window.open(url, "_blank");
+        window.open(url, "_blank", "noopener");
       }
     } catch {
       // Invalid URL — ignore
@@ -1791,7 +1809,7 @@ class MoomboxApp {
 
   async cancelJob() {
     if (!this.selectedJobId) return;
-    if (!confirm("Are you sure you want to cancel this job?")) return;
+    if (!await this.showConfirm("Are you sure you want to cancel this job?", { okLabel: "Cancel Job", okVariant: "danger" })) return;
 
     try {
       const response = await fetch(`/api/jobs/${this.selectedJobId}/cancel`, {
@@ -1828,7 +1846,7 @@ class MoomboxApp {
 
   async deleteJob() {
     if (!this.selectedJobId) return;
-    if (!confirm("Are you sure you want to delete this job?")) return;
+    if (!await this.showConfirm("Are you sure you want to delete this job?", { okLabel: "Delete", okVariant: "danger" })) return;
 
     try {
       const response = await fetch(`/api/jobs/${this.selectedJobId}`, {
@@ -1895,7 +1913,7 @@ class MoomboxApp {
   }
 
   async deleteTrim(jobId, trimId) {
-    if (!confirm('Delete this trim? This cannot be undone.')) {
+    if (!await this.showConfirm("Delete this trim? This cannot be undone.", { okLabel: "Delete", okVariant: "danger" })) {
       return;
     }
 
@@ -2078,7 +2096,7 @@ class MoomboxApp {
           document.getElementById("keyboard-help-dialog").show();
           e.preventDefault();
           break;
-        case "1": case "2": case "3": case "4": case "5": case "6":
+        case "1": case "2": case "3": case "4": case "5": case "6": case "7": case "8":
           if (tabGroup) tabGroup.show(panels[parseInt(e.key) - 1]);
           e.preventDefault();
           break;
@@ -2401,6 +2419,46 @@ class MoomboxApp {
       .replace(/'/g, "&#039;");
   }
 
+  /**
+   * Show a themed confirmation dialog. Returns a Promise<boolean>.
+   * @param {string} message — text to display
+   * @param {object} [opts] — { okLabel, okVariant, title }
+   */
+  showConfirm(message, opts = {}) {
+    return new Promise((resolve) => {
+      const dlg = document.getElementById("confirm-dialog");
+      const msg = document.getElementById("confirm-dialog-message");
+      const okBtn = document.getElementById("confirm-dialog-ok");
+      const cancelBtn = document.getElementById("confirm-dialog-cancel");
+
+      dlg.label = opts.title || "Confirm";
+      msg.textContent = message;
+      okBtn.textContent = opts.okLabel || "OK";
+      okBtn.variant = opts.okVariant || "primary";
+
+      const cleanup = (result) => {
+        dlg.removeEventListener("sl-after-hide", onHide);
+        resolve(result);
+      };
+
+      const onOk = () => { dlg.hide(); cleanup(true); };
+      const onCancel = () => { dlg.hide(); cleanup(false); };
+      const onHide = () => { cleanup(false); };
+
+      // Replace listeners to avoid stacking
+      const newOk = okBtn.cloneNode(true);
+      okBtn.replaceWith(newOk);
+      newOk.addEventListener("click", onOk);
+
+      const newCancel = cancelBtn.cloneNode(true);
+      cancelBtn.replaceWith(newCancel);
+      newCancel.addEventListener("click", onCancel);
+
+      dlg.addEventListener("sl-after-hide", onHide, { once: true });
+      dlg.show();
+    });
+  }
+
   showToast(message, variant = "primary") {
     const alert = Object.assign(document.createElement("sl-alert"), {
       variant,
@@ -2484,17 +2542,21 @@ class MoomboxApp {
       const deleteBtn = `<sl-icon-button name="trash" label="Delete" class="files-delete-btn" data-path="${this.escapeHtml(file.path)}"></sl-icon-button>`;
 
       row.innerHTML = typeBadge + pathStr + sizeStr + modStr + jobStr + deleteBtn;
-
-      row.querySelector(".files-delete-btn").addEventListener("click", () => {
-        this.deleteOrphanedFile(file.path);
-      });
-
       table.appendChild(row);
+    }
+
+    // Event delegation for delete buttons — attach once
+    if (!table._filesDelegated) {
+      table._filesDelegated = true;
+      table.addEventListener("click", (e) => {
+        const btn = e.target.closest(".files-delete-btn");
+        if (btn) this.deleteOrphanedFile(btn.dataset.path);
+      });
     }
   }
 
   async deleteOrphanedFile(path) {
-    if (!confirm(`Delete this file?\n\n${path}`)) return;
+    if (!await this.showConfirm(`Delete this file?\n\n${path}`, { okLabel: "Delete", okVariant: "danger" })) return;
 
     try {
       const resp = await fetch("/api/files/orphaned", {
@@ -2517,7 +2579,7 @@ class MoomboxApp {
 
   async deleteAllOrphanedFiles() {
     if (!this._orphanedFiles || this._orphanedFiles.length === 0) return;
-    if (!confirm(`Delete all ${this._orphanedFiles.length} orphaned files?`)) return;
+    if (!await this.showConfirm(`Delete all ${this._orphanedFiles.length} orphaned files?`, { okLabel: "Delete All", okVariant: "danger" })) return;
 
     const paths = this._orphanedFiles.map((f) => f.path);
     try {

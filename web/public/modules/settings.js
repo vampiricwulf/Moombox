@@ -1,6 +1,7 @@
 /**
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
+import { formatRelativeTime as _formatRelativeTime } from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
   {
@@ -594,7 +595,7 @@ export class SettingsController {
    * After a successful save, check if restart-requiring settings changed.
    * If so, prompt the user and call POST /api/restart.
    */
-  _checkRestartRequired(config) {
+  async _checkRestartRequired(config) {
     /** Resolve a dotted path like "network.port" from the config object */
     const resolve = (obj, path) => {
       const parts = path.split(".");
@@ -619,7 +620,11 @@ export class SettingsController {
     // Update snapshot so we don't prompt again
     this._originalRestartValues = { ...current };
 
-    if (!confirm("Some settings require a restart to take effect (port, network access, database path, log settings).\n\nRestart Moombox now?")) {
+    const shouldRestart = await this.app.showConfirm(
+      "Some settings require a restart to take effect (port, network access, database path, log settings).\n\nRestart Moombox now?",
+      { okLabel: "Restart", okVariant: "primary", title: "Restart Required" },
+    );
+    if (!shouldRestart) {
       return;
     }
 
@@ -700,9 +705,9 @@ export class SettingsController {
             </div>
           </div>
           <div class="channel-card-actions">
-            <sl-switch size="small" ${isEnabled ? "checked" : ""} title="${isEnabled ? "Monitoring enabled" : "Monitoring disabled"}" onclick="app.settings.toggleChannel('${this.app.escapeHtml(ch.id)}', this.checked); event.stopPropagation();"></sl-switch>
-            <sl-icon-button name="pencil" label="Edit" onclick="app.settings.editChannel('${this.app.escapeHtml(ch.id)}')"></sl-icon-button>
-            <sl-icon-button name="trash" label="Delete" onclick="app.settings.deleteChannel('${this.app.escapeHtml(ch.id)}')"></sl-icon-button>
+            <sl-switch size="small" ${isEnabled ? "checked" : ""} title="${isEnabled ? "Monitoring enabled" : "Monitoring disabled"}" data-action="toggle" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-switch>
+            <sl-icon-button name="pencil" label="Edit" data-action="edit" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-icon-button>
+            <sl-icon-button name="trash" label="Delete" data-action="delete" data-channel-id="${this.app.escapeHtml(ch.id)}"></sl-icon-button>
           </div>
         </div>
         ${
@@ -717,6 +722,25 @@ export class SettingsController {
         },
       )
       .join("");
+
+    // Event delegation for channel actions — attach once
+    if (!container._channelDelegated) {
+      container._channelDelegated = true;
+      container.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-action]");
+        if (!btn) return;
+        const action = btn.dataset.action;
+        const channelId = btn.dataset.channelId;
+        if (action === "edit") this.editChannel(channelId);
+        else if (action === "delete") this.deleteChannel(channelId);
+      });
+      container.addEventListener("sl-change", (e) => {
+        const toggle = e.target.closest('[data-action="toggle"]');
+        if (!toggle) return;
+        e.stopPropagation();
+        this.toggleChannel(toggle.dataset.channelId, toggle.checked);
+      });
+    }
 
     this.setupChannelDragDrop();
   }
@@ -948,7 +972,7 @@ export class SettingsController {
   }
 
   async deleteChannel(channelId) {
-    if (!confirm(`Are you sure you want to remove this channel?`)) return;
+    if (!await this.app.showConfirm("Are you sure you want to remove this channel?", { okLabel: "Remove", okVariant: "danger" })) return;
 
     try {
       const response = await fetch(
@@ -1015,7 +1039,7 @@ export class SettingsController {
               .map((evt) => {
                 const active = notif.events.includes(evt.id);
                 const variant = active ? 'variant="primary"' : "";
-                return `<sl-tag size="small" ${variant} onclick="app.settings.toggleNotificationEvent(${idx}, '${evt.id}')">${evt.label}</sl-tag>`;
+                return `<sl-tag size="small" ${variant} data-notif-action="toggle-event" data-notif-index="${idx}" data-event-id="${evt.id}">${evt.label}</sl-tag>`;
               })
               .join("");
             return `<div class="notification-event-group"><span class="notification-group-label">${group.name}:</span>${chips}</div>`;
@@ -1024,7 +1048,7 @@ export class SettingsController {
             <div class="notification-events">
               ${grouped}
               <div class="notification-event-group">
-                <sl-tag size="small" variant="neutral" onclick="app.settings.clearNotificationFilter(${idx})">Clear filter</sl-tag>
+                <sl-tag size="small" variant="neutral" data-notif-action="clear-filter" data-notif-index="${idx}">Clear filter</sl-tag>
               </div>
             </div>`;
         } else {
@@ -1033,7 +1057,7 @@ export class SettingsController {
               <div class="notification-event-group">
                 <span class="notification-events-label">Events:</span>
                 <sl-tag size="small" variant="success">All events</sl-tag>
-                <sl-tag size="small" variant="neutral" onclick="app.settings.enableNotificationFilter(${idx})">Filter...</sl-tag>
+                <sl-tag size="small" variant="neutral" data-notif-action="enable-filter" data-notif-index="${idx}">Filter...</sl-tag>
               </div>
             </div>`;
         }
@@ -1042,12 +1066,27 @@ export class SettingsController {
       <div class="notification-card" data-index="${idx}">
         <div class="notification-card-header">
           <div class="notification-card-url">${this.app.escapeHtml(notif.url || "")}</div>
-          <sl-icon-button name="trash" label="Delete" onclick="app.settings.deleteNotification(${idx})"></sl-icon-button>
+          <sl-icon-button name="trash" label="Delete" data-notif-action="delete" data-notif-index="${idx}"></sl-icon-button>
         </div>
         ${eventsHtml}
       </div>`;
       })
       .join("");
+
+    // Event delegation for notification actions — attach once
+    if (!container._notifDelegated) {
+      container._notifDelegated = true;
+      container.addEventListener("click", (e) => {
+        const el = e.target.closest("[data-notif-action]");
+        if (!el) return;
+        const action = el.dataset.notifAction;
+        const idx = parseInt(el.dataset.notifIndex);
+        if (action === "delete") this.deleteNotification(idx);
+        else if (action === "toggle-event") this.toggleNotificationEvent(idx, el.dataset.eventId);
+        else if (action === "clear-filter") this.clearNotificationFilter(idx);
+        else if (action === "enable-filter") this.enableNotificationFilter(idx);
+      });
+    }
   }
 
   addNotification() {
@@ -1079,7 +1118,7 @@ export class SettingsController {
   }
 
   async deleteNotification(index) {
-    if (!confirm("Remove this notification webhook?")) return;
+    if (!await this.app.showConfirm("Remove this notification webhook?", { okLabel: "Remove", okVariant: "danger" })) return;
 
     if (this.app.config.notifications) {
       this.app.config.notifications.splice(index, 1);
@@ -1338,35 +1377,59 @@ export class SettingsController {
     }
   }
 
-  async removePassword() {
-    const currentPassword = prompt("Enter your current password to confirm removal:");
-    if (!currentPassword) return;
+  removePassword() {
+    const dialog = document.getElementById("remove-password-dialog");
+    const input = document.getElementById("remove-password-input");
+    const confirmBtn = document.getElementById("remove-password-confirm-btn");
+    const cancelBtn = document.getElementById("remove-password-cancel-btn");
 
-    const btn = document.getElementById("security-remove-password-btn");
-    btn.loading = true;
+    input.value = "";
 
-    try {
-      const response = await fetch("/api/auth/remove-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ currentPassword }),
-      });
+    const cleanup = () => {
+      dialog.removeEventListener("sl-after-hide", onHide);
+    };
+    const onHide = () => cleanup();
 
-      if (response.ok) {
-        const data = await response.json();
-        this.app.showToast("Password removed. Network access set to Localhost Only.", "success");
-        this.loadSecurityStatus();
-        // Refresh config to pick up changes
-        this.app.loadConfig();
-      } else {
-        const data = await response.json();
-        this.app.showToast(data.error || "Failed to remove password", "danger");
+    const newConfirm = confirmBtn.cloneNode(true);
+    confirmBtn.replaceWith(newConfirm);
+    newConfirm.addEventListener("click", async () => {
+      const currentPassword = input.value;
+      if (!currentPassword) {
+        this.app.showToast("Password is required", "warning");
+        return;
       }
-    } catch (e) {
-      this.app.showToast("Failed to remove password: " + e.message, "danger");
-    } finally {
-      btn.loading = false;
-    }
+
+      newConfirm.loading = true;
+      try {
+        const response = await fetch("/api/auth/remove-password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ currentPassword }),
+        });
+
+        if (response.ok) {
+          dialog.hide();
+          this.app.showToast("Password removed. Network access set to Localhost Only.", "success");
+          this.loadSecurityStatus();
+          this.app.loadConfig();
+        } else {
+          const data = await response.json();
+          this.app.showToast(data.error || "Failed to remove password", "danger");
+        }
+      } catch (e) {
+        this.app.showToast("Failed to remove password: " + e.message, "danger");
+      } finally {
+        newConfirm.loading = false;
+      }
+    });
+
+    const newCancel = cancelBtn.cloneNode(true);
+    cancelBtn.replaceWith(newCancel);
+    newCancel.addEventListener("click", () => dialog.hide());
+
+    dialog.addEventListener("sl-after-hide", onHide, { once: true });
+    dialog.show();
+    setTimeout(() => input.focus(), 100);
   }
 
   // ─── Client Token Methods ────────────────────────────────────
@@ -1437,19 +1500,7 @@ export class SettingsController {
 
   formatRelativeTime(isoDate) {
     if (!isoDate) return "never";
-    const date = new Date(isoDate);
-    const now = new Date();
-    const diffMs = now - date;
-    const diffSec = Math.floor(diffMs / 1000);
-    const diffMin = Math.floor(diffSec / 60);
-    const diffHr = Math.floor(diffMin / 60);
-    const diffDays = Math.floor(diffHr / 24);
-
-    if (diffSec < 60) return "just now";
-    if (diffMin < 60) return `${diffMin}m ago`;
-    if (diffHr < 24) return `${diffHr}h ago`;
-    if (diffDays === 1) return "1d ago";
-    return `${diffDays}d ago`;
+    return _formatRelativeTime(isoDate);
   }
 
   // ─── Auto Cookie Methods ─────────────────────────────────────
