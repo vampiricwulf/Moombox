@@ -55,10 +55,7 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 	if maxLabelW < 10 {
 		maxLabelW = 10
 	}
-	label := ct.Label
-	if len(label) > maxLabelW {
-		label = label[:maxLabelW-1] + "…"
-	}
+	label := truncateString(ct.Label, maxLabelW)
 
 	ipStr := ct.LastIP
 	if ipStr == "" {

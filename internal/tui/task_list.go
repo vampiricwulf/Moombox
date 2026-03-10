@@ -37,7 +37,7 @@ func (f Filter) String() string {
 	case FilterActive:
 		return "Active"
 	case FilterErrors:
-		return "Errors"
+		return "Issues"
 	case FilterFinished:
 		return "Finished"
 	default:

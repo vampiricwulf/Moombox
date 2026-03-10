@@ -4,6 +4,8 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 // Status colors.
@@ -112,42 +114,42 @@ func formatTableStyles() table.Styles {
 
 // StatusColor returns the lipgloss color for a job status.
 func StatusColor(status string) lipgloss.Color {
-	switch status {
-	case "Downloading", "Live":
+	switch database.JobStatus(status) {
+	case database.StatusDownloading, database.StatusLive:
 		return ColorDownloading
-	case "Muxing":
+	case database.StatusMuxing:
 		return ColorMuxing
-	case "Upcoming":
+	case database.StatusUpcoming:
 		return ColorUpcoming
-	case "Finished":
+	case database.StatusFinished:
 		return ColorFinished
-	case "Error":
+	case database.StatusError:
 		return ColorError
-	case "Cancelled":
+	case database.StatusCancelled:
 		return ColorCancelled
-	case "COOKIES?":
+	case database.StatusCookies:
 		return ColorCookies
 	default:
-		return ColorWhite // match TS: white for unknown statuses
+		return ColorWhite
 	}
 }
 
 // StatusIcon returns a display icon for a job status.
 func StatusIcon(status string) string {
-	switch status {
-	case "Live", "Downloading":
+	switch database.JobStatus(status) {
+	case database.StatusLive, database.StatusDownloading:
 		return "▼"
-	case "Muxing":
+	case database.StatusMuxing:
 		return "⎈"
-	case "Finished":
+	case database.StatusFinished:
 		return "✓"
-	case "Error":
+	case database.StatusError:
 		return "✗"
-	case "COOKIES?":
+	case database.StatusCookies:
 		return "⏣"
-	case "Cancelled":
+	case database.StatusCancelled:
 		return "⊘"
-	case "Upcoming":
+	case database.StatusUpcoming:
 		return "○"
 	default:
 		return "○"

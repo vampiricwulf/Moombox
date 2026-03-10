@@ -38,18 +38,18 @@ func (m *Marquee) Reset(text string, maxWidth int) {
 
 	m.needsScroll = true
 
-	// Compute max offset: find the smallest rune offset where the remaining
-	// text fits within maxWidth.
-	m.maxOffset = 0
-	for i := 1; i <= len(m.runes); i++ {
-		remaining := string(m.runes[i:])
-		if runewidth.StringWidth(remaining) <= maxWidth {
+	// Compute max offset: find smallest rune offset where remaining text fits.
+	// Precompute total width, then subtract rune widths from the front until
+	// the remainder fits within maxWidth.
+	totalW := runewidth.StringWidth(text)
+	cumW := 0
+	m.maxOffset = len(m.runes) // fallback
+	for i, r := range m.runes {
+		if totalW-cumW <= maxWidth {
 			m.maxOffset = i
 			break
 		}
-	}
-	if m.maxOffset == 0 {
-		m.maxOffset = len(m.runes)
+		cumW += runewidth.RuneWidth(r)
 	}
 }
 

@@ -629,14 +629,20 @@ func (m *ActionMenuModel) centerOverlay(box string) string {
 		padTop = 0
 	}
 
-	var result strings.Builder
+	lines := make([]string, 0, m.height)
+	pad := strings.Repeat(" ", m.width)
+	leftPad := strings.Repeat(" ", padLeft)
 	for range padTop {
-		result.WriteString(strings.Repeat(" ", m.width) + "\n")
+		lines = append(lines, pad)
 	}
 	for _, line := range boxLines {
-		result.WriteString(strings.Repeat(" ", padLeft) + line + "\n")
+		lines = append(lines, leftPad+line)
 	}
-	return result.String()
+	remaining := m.height - padTop - boxH
+	for range remaining {
+		lines = append(lines, pad)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // padToWidth pads a string with spaces to reach at least width w (by visual width).

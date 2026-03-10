@@ -392,6 +392,7 @@ func (m *JobDetailsModel) buildRows() {
 
 	// === Timestamps (J11 - human-readable with relative suffix, J13 - Scheduled label) — BEFORE Duration to match TS ===
 	now := time.Now()
+	m.rows = append(m.rows, detailRow{kind: rowSeparator})
 	m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Timestamps"})
 	if j.CreatedAt != "" {
 		m.addField("Created", formatDateStrRelative(j.CreatedAt, now))
@@ -782,11 +783,15 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", seconds)
 }
 
-// formatTimeSeconds formats seconds as MM:SS for trim ranges (J5).
+// formatTimeSeconds formats seconds as M:SS or H:MM:SS for trim/time ranges (J5).
 func formatTimeSeconds(seconds float64) string {
 	total := int(math.Floor(seconds))
-	m := total / 60
+	h := total / 3600
+	m := (total % 3600) / 60
 	s := total % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 

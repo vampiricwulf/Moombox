@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 
@@ -862,19 +861,21 @@ func centerBox(box string, screenW, screenH int) string {
 		padLeft = 0
 	}
 
-	var b strings.Builder
+	lines := make([]string, 0, screenH)
+	pad := strings.Repeat(" ", screenW)
 	for range padTop {
-		b.WriteString(strings.Repeat(" ", screenW) + "\n")
+		lines = append(lines, pad)
 	}
+	leftPad := strings.Repeat(" ", padLeft)
 	for _, line := range boxLines {
-		b.WriteString(strings.Repeat(" ", padLeft) + line + "\n")
+		lines = append(lines, leftPad+line)
 	}
 	remaining := screenH - padTop - boxH
 	for range remaining {
-		b.WriteString(strings.Repeat(" ", screenW) + "\n")
+		lines = append(lines, pad)
 	}
 
-	return b.String()
+	return strings.Join(lines, "\n")
 }
 
 // extractMediaID extracts video ID and platform from URL or ID string.
@@ -1116,7 +1117,7 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
-		return math.Floor(mins)*60 + secs, nil
+		return mins*60 + secs, nil
 	case 3:
 		hours, err := strconv.ParseFloat(parts[0], 64)
 		if err != nil {
@@ -1130,7 +1131,7 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
-		return math.Floor(hours)*3600 + math.Floor(mins)*60 + secs, nil
+		return hours*3600 + mins*60 + secs, nil
 	}
 	return 0, fmt.Errorf("invalid time format")
 }

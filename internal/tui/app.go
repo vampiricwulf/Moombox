@@ -59,8 +59,9 @@ type (
 		TagName      string
 		ReleaseNotes string
 	}
-	tickMsg         struct{}
-	progressTickMsg struct{}
+	channelClosedMsg struct{ Name string }
+	tickMsg          struct{}
+	progressTickMsg  struct{}
 	logFlushMsg     struct{} // 250ms log batching flush
 	marqueeTickMsg  struct{} // 150ms marquee scroll tick
 
@@ -431,21 +432,23 @@ func (a *App) listenForUpdates() tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case job, ok := <-a.jobUpdateCh:
-			if ok {
-				return JobUpdateMsg{Job: job}
+			if !ok {
+				return channelClosedMsg{Name: "jobUpdate"}
 			}
+			return JobUpdateMsg{Job: job}
 		case jobs, ok := <-a.jobsUpdateCh:
-			if ok {
-				return JobsUpdateMsg{Jobs: jobs}
+			if !ok {
+				return channelClosedMsg{Name: "jobsUpdate"}
 			}
+			return JobsUpdateMsg{Jobs: jobs}
 		case line, ok := <-a.logCh:
 			if !ok {
-				return nil
+				return channelClosedMsg{Name: "log"}
 			}
 			// Drain all pending log messages into a single batch to avoid
 			// triggering a View() re-render per individual log line.
 			batch := []string{line}
-			for {
+			for len(batch) < 200 {
 				select {
 				case more, ok := <-a.logCh:
 					if !ok {
@@ -456,24 +459,28 @@ func (a *App) listenForUpdates() tea.Cmd {
 					return LogBatchMsg{Lines: batch}
 				}
 			}
+			return LogBatchMsg{Lines: batch}
 		case timers, ok := <-a.checkTimersCh:
-			if ok {
-				return timers
+			if !ok {
+				return channelClosedMsg{Name: "checkTimers"}
 			}
+			return timers
 		case cs, ok := <-a.cookieStatusCh:
-			if ok {
-				return cs
+			if !ok {
+				return channelClosedMsg{Name: "cookieStatus"}
 			}
+			return cs
 		case ds, ok := <-a.diskStatusCh:
-			if ok {
-				return ds
+			if !ok {
+				return channelClosedMsg{Name: "diskStatus"}
 			}
+			return ds
 		case us, ok := <-a.updateStatusCh:
-			if ok {
-				return us
+			if !ok {
+				return channelClosedMsg{Name: "updateStatus"}
 			}
+			return us
 		}
-		return nil
 	}
 }
 
@@ -495,7 +502,7 @@ func (a *App) hasActiveOverlay() bool {
 func (a *App) hasActiveDownloads() bool {
 	for _, s := range a.statusMap {
 		switch s {
-		case database.StatusUpcoming, database.StatusDownloading, database.StatusLive, database.StatusMuxing:
+		case database.StatusDownloading, database.StatusLive, database.StatusMuxing:
 			return true
 		}
 	}
@@ -592,6 +599,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.details.marquee.Tick()
 		return a, a.marqueeTick()
 
+	case channelClosedMsg:
+		switch msg.Name {
+		case "jobUpdate":
+			a.jobUpdateCh = nil
+		case "jobsUpdate":
+			a.jobsUpdateCh = nil
+		case "log":
+			a.logCh = nil
+		case "checkTimers":
+			a.checkTimersCh = nil
+		case "cookieStatus":
+			a.cookieStatusCh = nil
+		case "diskStatus":
+			a.diskStatusCh = nil
+		case "updateStatus":
+			a.updateStatusCh = nil
+		}
+		return a, a.listenForUpdates()
+
 	case JobUpdateMsg:
 		titleCmd := a.handleJobUpdate(msg.Job)
 		return a, tea.Batch(titleCmd, a.listenForUpdates())
@@ -633,6 +659,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case LogBatchMsg:
 		// Batched log messages — single Update/View cycle for all pending logs
 		a.logBuffer = append(a.logBuffer, msg.Lines...)
+		if len(a.logBuffer) > 1000 {
+			a.logBuffer = a.logBuffer[len(a.logBuffer)-1000:]
+		}
 		return a, a.listenForUpdates()
 
 	case CheckTimersMsg:
@@ -740,7 +769,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case fetchFormatsAutoAdvanceMsg:
-		if a.addVideo.IsVisible() && a.addVideo.loading {
+		if a.addVideo.IsVisible() && a.addVideo.errorMsg != "" {
 			// Skip to confirmation with auto settings
 			a.addVideo.step = AddStepConfirm
 			a.addVideo.advancedMode = false
@@ -974,12 +1003,17 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	if a.settings.IsVisible() {
 		return a.settings.UpdateComponents(msg)
 	}
-	if a.setupWiz.IsVisible() {
-		return a.setupWiz.UpdateComponents(msg)
+	// Help overlay viewport (priority matches handleKey order)
+	if a.help.IsVisible() {
+		return a.help.UpdateViewport(msg)
 	}
 	if a.ffmpegCheck.IsVisible() {
 		return a.ffmpegCheck.UpdateComponents(msg)
 	}
+	if a.setupWiz.IsVisible() {
+		return a.setupWiz.UpdateComponents(msg)
+	}
+	// actionMenu has no component routing
 	if a.importDlg.IsVisible() {
 		return a.importDlg.UpdateComponents(msg)
 	}
@@ -994,10 +1028,6 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	if a.clientTokensDlg.IsVisible() {
 		return a.clientTokensDlg.UpdateComponents(msg)
-	}
-	// Help overlay viewport
-	if a.help.IsVisible() {
-		return a.help.UpdateViewport(msg)
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {
@@ -1666,29 +1696,14 @@ func (a *App) openTrimForJob(job *database.Job) {
 			fSize = *job.FileSize
 		}
 		a.trimDlg.SetJobMetadata(lenSec, fSize)
-		var trimInfos []TrimInfo
-		for _, tr := range job.Trims {
-			var fs int64
-			if tr.FileSize != nil {
-				fs = *tr.FileSize
-			}
-			trimInfos = append(trimInfos, TrimInfo{
-				ID:        tr.ID,
-				StartTime: tr.StartTime,
-				EndTime:   tr.EndTime,
-				Duration:  tr.Duration,
-				FileSize:  fs,
-				Filename:  tr.Filename,
-			})
-		}
-		a.trimDlg.SetTrims(trimInfos)
+		a.trimDlg.SetTrims(trimInfosFromJob(job))
 	} else {
 		a.setFeedback("Trim only available for finished jobs with files")
 	}
 }
 
-// refreshTrimList updates the trim dialog's trim list without resetting dialog state.
-func (a *App) refreshTrimList(job *database.Job) {
+// trimInfosFromJob converts a job's trims to TrimInfo slice for the trim dialog.
+func trimInfosFromJob(job *database.Job) []TrimInfo {
 	var trimInfos []TrimInfo
 	for _, tr := range job.Trims {
 		var fs int64
@@ -1704,7 +1719,12 @@ func (a *App) refreshTrimList(job *database.Job) {
 			Filename:  tr.Filename,
 		})
 	}
-	a.trimDlg.SetTrims(trimInfos)
+	return trimInfos
+}
+
+// refreshTrimList updates the trim dialog's trim list without resetting dialog state.
+func (a *App) refreshTrimList(job *database.Job) {
+	a.trimDlg.SetTrims(trimInfosFromJob(job))
 }
 
 // buildMenuItems builds context-sensitive action menu items.
@@ -1820,7 +1840,20 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			dir = -1
 		}
 
-		switch a.focusedPanel {
+		// Scroll the panel under the cursor, not the focused panel
+		var targetPanel FocusPanel
+		switch {
+		case a.taskRegion.Contains(x, y):
+			targetPanel = PanelTasks
+		case a.detailRegion.Contains(x, y):
+			targetPanel = PanelDetails
+		case a.logRegion.Contains(x, y):
+			targetPanel = PanelLogs
+		default:
+			return a, nil
+		}
+
+		switch targetPanel {
 		case PanelTasks:
 			for range 3 {
 				if dir < 0 {
@@ -2006,21 +2039,13 @@ func addOverlayMessage(content string, width int, msg string) string {
 	return strings.Join(lines, "\n")
 }
 
-// apiPort returns the port for local API calls.
-func (a *App) apiPort() int {
-	if a.cfg != nil && a.cfg.Network.Port > 0 {
-		return a.cfg.Network.Port
-	}
-	return 774
-}
-
 // apiBaseURL returns the correct scheme + host for local API calls.
 func (a *App) apiBaseURL() string {
 	scheme := "http"
 	if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
 		scheme = "https"
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.apiPort())
+	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.getPort())
 }
 
 // internalTokenTransport injects the X-Internal-Token header on every request
@@ -2406,7 +2431,7 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		cmd = exec.Command("cmd", "/c", "start", "", url)
 	case "darwin":
 		cmd = exec.Command("open", url)
 	default:
