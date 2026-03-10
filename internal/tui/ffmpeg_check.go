@@ -169,7 +169,7 @@ func (m *FFmpegCheckModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			// Only forward scroll-related keys to the viewport
 			switch keyMsg.String() {
-			case keyUp, keyDown, "pgup", "pgdown", "ctrl+u", "ctrl+d":
+			case keyUp, keyDown, "pgup", "pgdown", "ctrl+u", "ctrl+d", keyHome, keyEnd:
 				// Allow scroll keys through
 			default:
 				return nil
