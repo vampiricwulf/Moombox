@@ -150,7 +150,7 @@ Example: Logs focused (100% width, 75% height)
 | `task_list.go` | Task list panel (top left). Job list rendering, selection, filtering, archive toggle, status icons. |
 | `job_details.go` | Job details panel (top right). Metadata display, description toggle, progress rendering. |
 | `log_viewer.go` | Log viewer panel (bottom). Log line buffering, level filtering, regex search, auto-scroll logic. |
-| `status_bar.go` | Bottom bar. Connection status, disk usage, monitor timers, cookie status, update indicator. |
+| `status_bar.go` | Bottom bar. Chord hints (left), disk usage, active download count, cookie status (right). |
 | `action_menu.go` | Command palette overlay (M key). Searchable list of all available actions. |
 | `help.go` | Help overlay (? key). Displays all chords grouped by category. |
 | `add_video.go` | Add Video overlay. Multi-step flow: URL input, format selection, timestamp configuration, confirmation. |
