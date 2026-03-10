@@ -358,12 +358,17 @@ func statusPriority(status database.JobStatus) int {
 	}
 }
 
-func isTerminalStatus(status database.JobStatus) bool {
+// isCompletedStatus returns true for Finished or Cancelled statuses.
+// This differs from Job.IsTerminal() which also includes Error — here we only
+// check statuses that represent a completed lifecycle (success or user-cancelled).
+func isCompletedStatus(status database.JobStatus) bool {
 	return status == database.StatusFinished || status == database.StatusCancelled
 }
 
 // isJobArchived returns true if a finished job should be in the archive section
 // based on the hide_finished_age_days setting.
+// Only Finished jobs are archived — Cancelled jobs stay in the active list since
+// they may need user attention (retry, investigate, etc.).
 // ageDays == 0: instantly archive all finished jobs.
 // ageDays < 0: never archive (all stay active).
 // ageDays > 0: archive finished jobs older than N days.
@@ -462,7 +467,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 func (m *TaskListModel) passesFilter(j *database.Job) bool {
 	switch m.filter {
 	case FilterActive:
-		return !isTerminalStatus(j.Status) && j.Status != database.StatusError && j.Status != database.StatusCookies
+		return !isCompletedStatus(j.Status) && j.Status != database.StatusError && j.Status != database.StatusCookies
 	case FilterErrors:
 		return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
 	case FilterFinished:
@@ -638,18 +643,19 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 
 	label := fmt.Sprintf("%s Archived (%d)", icon, count)
 
-	ruleLen := (maxW - runewidth.StringWidth(label) - 6) / 2
-	if ruleLen < 1 {
-		ruleLen = 1
+	totalRule := maxW - runewidth.StringWidth(label) - 6
+	if totalRule < 2 {
+		totalRule = 2
 	}
-	rule := strings.Repeat("\u2500", ruleLen)
+	ruleLeft := totalRule / 2
+	ruleRight := totalRule - ruleLeft // absorbs odd-width remainder
 
 	prefix := "> "
 	if !selected {
 		prefix = "  "
 	}
 
-	line := prefix + rule + " " + label + " " + rule
+	line := prefix + strings.Repeat("\u2500", ruleLeft) + " " + label + " " + strings.Repeat("\u2500", ruleRight)
 
 	color := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Bold(true)
 	if selected {
@@ -681,25 +687,12 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	}
 	showProgress := isActive && percent > 0
 	progressText := ""
-	progressTextWidth := 0
 	if showProgress {
 		progressText = fmt.Sprintf("%.0f%% ", percent)
-		progressTextWidth = runewidth.StringWidth(progressText)
 	}
 
-	// Fixed widths for layout (match TS pre-calculation to avoid ANSI measuring)
-	selectorWidth := 2 // "> " or "  "
-	iconWidth := 2     // icon + space
-	platformTagWidth := 0
-	if job.Platform == "twitch" {
-		platformTagWidth = 5 // "[TW] "
-	}
-
-	// Calculate title width with minimum (match TS Math.max(5, ...))
-	titleWidth := maxW - selectorWidth - iconWidth - progressTextWidth - platformTagWidth
-	if titleWidth < 5 {
-		titleWidth = 5
-	}
+	// Reuse centralized title width calculation (matches titleWidth method)
+	titleWidth := m.titleWidth(job)
 
 	// Prepare title
 	title := job.Title

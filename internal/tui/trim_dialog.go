@@ -229,6 +229,9 @@ func (m *TrimDialogModel) handleEscape() string {
 	if m.mode == TrimModeCreate && m.createStep > 0 {
 		m.createStep--
 		m.errorMsg = ""
+		if m.createStep == 0 {
+			m.textInput.Focus()
+		}
 		return ""
 	}
 	// In DELETE mode, Esc returns to CREATE mode (match TS behavior)
@@ -240,6 +243,12 @@ func (m *TrimDialogModel) handleEscape() string {
 		m.mode = TrimModeCreate
 		m.createStep = 0
 		m.errorMsg = ""
+		if m.activeField == 0 {
+			m.textInput.SetValue(m.startTimeInput)
+		} else {
+			m.textInput.SetValue(m.endTimeInput)
+		}
+		m.textInput.Focus()
 		return ""
 	}
 	m.Close()
@@ -363,6 +372,12 @@ func (m *TrimDialogModel) handleDeleteKey(key string) string {
 		m.deleteConfirmID = ""
 		m.errorMsg = "" // clear error on navigate (match TS)
 	case keyEnter:
+		if len(m.trims) == 0 {
+			return ""
+		}
+		if m.selectedTrimIdx >= len(m.trims) {
+			m.selectedTrimIdx = len(m.trims) - 1
+		}
 		trim := m.trims[m.selectedTrimIdx]
 		if m.deleteConfirmID == trim.ID {
 			// Second press: execute delete
@@ -460,34 +475,7 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 		}
 		lines = append(lines, "")
 
-		startLabel := "  Start: "
-		endLabel := "  End:   "
-		if m.activeField == 0 {
-			startLabel = "> Start: "
-		}
-		if m.activeField == 1 {
-			endLabel = "> End:   "
-		}
-
-		startStyle := DimStyle
-		endStyle := DimStyle
-		if m.activeField == 0 {
-			startStyle = lipgloss.NewStyle().Foreground(ColorCyan)
-		}
-		if m.activeField == 1 {
-			endStyle = lipgloss.NewStyle().Foreground(ColorCyan)
-		}
-
-		m.textInput.TextStyle = lipgloss.NewStyle().Foreground(ColorCyan)
-		m.textInput.Cursor.Style = lipgloss.NewStyle().Foreground(ColorCyan)
-		m.textInput.Width = w - 12
-		if m.activeField == 0 {
-			lines = append(lines, startStyle.Render(startLabel)+m.textInput.View())
-			lines = append(lines, endStyle.Render(endLabel)+renderInactiveInput(m.endTimeInput, w-12, ColorCyan))
-		} else {
-			lines = append(lines, startStyle.Render(startLabel)+renderInactiveInput(m.startTimeInput, w-12, ColorCyan))
-			lines = append(lines, endStyle.Render(endLabel)+m.textInput.View())
-		}
+		lines = append(lines, renderTimeInputPair(m.startTimeInput, m.endTimeInput, m.activeField, m.textInput, w, ColorCyan)...)
 		lines = append(lines, "")
 		lines = append(lines, DimStyle.Render("Format: HH:MM:SS, MM:SS, or seconds"))
 

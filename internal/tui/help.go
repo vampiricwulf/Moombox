@@ -189,35 +189,22 @@ func (m *HelpModel) View() string {
 	}
 
 	// Header with scroll percentage
-	headerParts := TitleStyle.Render("Help")
+	leftPart := TitleStyle.Render("Help")
 	if m.viewport.TotalLineCount() > m.viewport.Height {
 		pct := int(m.viewport.ScrollPercent() * 100)
-		headerParts += " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
+		leftPart += " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
 	}
-	headerParts += strings.Repeat(" ", max(0, w-20)) + DimStyle.Render("(press ? or Esc to close)")
+	rightPart := DimStyle.Render("(press ? or Esc to close)")
+	leftW := lipgloss.Width(leftPart)
+	rightW := lipgloss.Width(rightPart)
+	gap := max(1, w-leftW-rightW)
+	header := leftPart + strings.Repeat(" ", gap) + rightPart
 
-	content := headerParts + "\n" + m.viewport.View()
+	content := header + "\n" + m.viewport.View()
 
 	box := FocusedBorder.Width(w).Height(h).Render(content)
 
-	padLeft := (m.width - w - 2) / 2
-	padTop := (m.height - h - 2) / 2
-	if padLeft < 0 {
-		padLeft = 0
-	}
-	if padTop < 0 {
-		padTop = 0
-	}
-
-	var result strings.Builder
-	for range padTop {
-		result.WriteString(strings.Repeat(" ", m.width) + "\n")
-	}
-	for _, line := range strings.Split(box, "\n") {
-		result.WriteString(strings.Repeat(" ", padLeft) + line + "\n")
-	}
-
-	return result.String()
+	return centerBox(box, m.width, m.height)
 }
 
 // sectionsFromMenu generates help sections for Action/Request/Open from menu items.

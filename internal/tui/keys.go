@@ -9,6 +9,8 @@ const (
 	keyRight  = "right"
 	keyPgUp   = "pgup"
 	keyPgDown = "pgdown"
+	keyHome   = "home"
+	keyEnd    = "end"
 	keyEnter  = "enter"
 	keyEsc    = "esc"
 	keyCtrlC  = "ctrl+c"

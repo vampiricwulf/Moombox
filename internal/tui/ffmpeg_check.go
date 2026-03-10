@@ -98,6 +98,12 @@ func (m *FFmpegCheckModel) Open() {
 	m.installOptions = nil
 	m.successDismiss = false
 	m.warning = ""
+	m.reviewScript = ""
+	m.reviewToken = ""
+	m.reviewFocus = 0
+	m.manualPath = ""
+	m.manualResult = ""
+	m.manualValid = false
 }
 
 // Close hides the overlay.
@@ -115,14 +121,32 @@ func (m *FFmpegCheckModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 
-	if m.mode == ffmpegReview {
-		boxW := min(60, w)
-		if boxW < 40 {
-			boxW = 40
-		}
-		contentW := boxW - 4
-		m.reviewViewport.Width = contentW - 4
+	// Update text input width for modes that use it
+	if m.mode == ffmpegCustom || m.mode == ffmpegManual {
+		m.updateTextInputWidth()
 	}
+
+	if m.mode == ffmpegReview {
+		_, contentW := dialogBox(60, w)
+		m.reviewViewport.Width = contentW - 4
+		vpH := h - 20
+		if vpH < 3 {
+			vpH = 3
+		}
+		if vpH > 6 {
+			vpH = 6
+		}
+		m.reviewViewport.Height = vpH
+	}
+}
+
+// updateTextInputWidth sets the text input width based on current dimensions.
+func (m *FFmpegCheckModel) updateTextInputWidth() {
+	if m.width == 0 {
+		return
+	}
+	_, contentW := dialogBox(60, m.width)
+	m.textInput.Width = contentW - 2
 }
 
 // UpdateComponents routes tea.Msg to the embedded textinput, viewport, or spinner and syncs.
@@ -138,8 +162,17 @@ func (m *FFmpegCheckModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		return cmd
 	}
 
-	// Review mode: route to viewport (no textinput active)
+	// Review mode: only forward non-key messages and scroll keys to viewport
 	if m.mode == ffmpegReview {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			// Only forward scroll-related keys to the viewport
+			switch keyMsg.String() {
+			case keyUp, keyDown, "pgup", "pgdown":
+				// Allow scroll keys through
+			default:
+				return nil
+			}
+		}
 		var cmd tea.Cmd
 		m.reviewViewport, cmd = m.reviewViewport.Update(msg)
 		return cmd
@@ -223,6 +256,7 @@ func (m *FFmpegCheckModel) handleMainKey(key string) string {
 			m.customValid = false
 			m.textInput.SetValue("")
 			m.textInput.Focus()
+			m.updateTextInputWidth()
 		case 2: // Quit
 			return "quit"
 		}
@@ -334,11 +368,7 @@ func (m *FFmpegCheckModel) ShowReview(script, token string) {
 	m.textInput.Blur()
 
 	// Initialize review viewport
-	boxW := min(60, m.width)
-	if boxW < 40 {
-		boxW = 40
-	}
-	contentW := boxW - 4
+	_, contentW := dialogBox(60, m.width)
 	m.reviewViewport = viewport.New(contentW-4, 6)
 	m.reviewViewport.SetContent(script)
 }
@@ -356,6 +386,7 @@ func (m *FFmpegCheckModel) ShowManual() {
 	m.manualResult = ""
 	m.textInput.SetValue("")
 	m.textInput.Focus()
+	m.updateTextInputWidth()
 }
 
 func (m *FFmpegCheckModel) handleReviewKey(key string) string {
@@ -404,12 +435,11 @@ func (m *FFmpegCheckModel) View() string {
 	if !m.visible {
 		return ""
 	}
-
-	boxW := min(60, m.width)
-	if boxW < 40 {
-		boxW = 40
+	if m.width == 0 || m.height == 0 {
+		return ""
 	}
-	contentW := boxW - 4
+
+	_, contentW := dialogBox(60, m.width)
 
 	var lines []string
 
@@ -477,7 +507,6 @@ func (m *FFmpegCheckModel) View() string {
 	case ffmpegCustom:
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Enter FFmpeg path:"))
 		lines = append(lines, "")
-		m.textInput.Width = contentW - 2
 		lines = append(lines, m.textInput.View())
 
 		if m.customResult != "" {
@@ -541,7 +570,6 @@ func (m *FFmpegCheckModel) View() string {
 		lines = append(lines, DimStyle.Render("(under \"release builds\")"))
 		lines = append(lines, "")
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Enter FFmpeg path:"))
-		m.textInput.Width = contentW - 2
 		lines = append(lines, m.textInput.View())
 
 		if m.manualResult != "" {

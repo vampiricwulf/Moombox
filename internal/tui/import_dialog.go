@@ -67,7 +67,7 @@ func (m *ImportDialogModel) Open(startDir string) tea.Cmd {
 	m.metaFocus = 0
 	m.errorMsg = ""
 	m.picker.CurrentDirectory = startDir
-	m.picker.SetHeight(m.height - 8)
+	m.picker.SetHeight(max(1, m.height-8))
 	return m.picker.Init()
 }
 
@@ -85,7 +85,7 @@ func (m *ImportDialogModel) IsVisible() bool {
 func (m *ImportDialogModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.picker.SetHeight(h - 8)
+	m.picker.SetHeight(max(1, h-8))
 }
 
 // SetError sets the error and goes back to metadata step.
@@ -205,6 +205,15 @@ func (m *ImportDialogModel) View() string {
 
 	boxW := min(70, m.width-4)
 	boxH := min(m.height-4, 30)
+	if boxW < 40 {
+		boxW = 40
+	}
+	if boxH < 10 {
+		boxH = 10
+	}
+	if boxW > m.width {
+		boxW = m.width
+	}
 	contentW := boxW - 2
 
 	var content strings.Builder

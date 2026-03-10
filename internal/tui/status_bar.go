@@ -9,6 +9,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
+const statusBarCompactThreshold = 100
+
 // Package-level styles for status bar rendering (avoid alloc per render).
 var (
 	statusBarBgStyle  = lipgloss.NewStyle().Background(lipgloss.Color("#1a1a2e")).Foreground(ColorWhite)
@@ -80,6 +82,10 @@ func (m *StatusBarModel) SetDiskStatus(free uint64, usedPct float64, warn string
 
 // View renders the status bar.
 func (m *StatusBarModel) View() string {
+	if m.width <= 0 {
+		return ""
+	}
+
 	bg := statusBarBgStyle
 
 	left := m.renderControls()
@@ -104,7 +110,7 @@ func (m *StatusBarModel) View() string {
 
 // renderControls renders uniform chord hints in the status bar.
 func (m *StatusBarModel) renderControls() string {
-	compact := m.width < 100
+	compact := m.width < statusBarCompactThreshold
 	key := statusBarKeyStyle
 
 	var parts []string
@@ -137,7 +143,7 @@ func (m *StatusBarModel) renderControls() string {
 // renderMetrics renders disk usage and active download count indicators.
 func (m *StatusBarModel) renderMetrics() string {
 	var parts []string
-	compact := m.width < 100
+	compact := m.width < statusBarCompactThreshold
 
 	// Disk indicator (only shown once we have data)
 	if m.diskFree > 0 || m.diskUsedPct > 0 {

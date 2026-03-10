@@ -81,7 +81,6 @@ type (
 	fetchFormatsAutoAdvanceMsg struct{} // timer msg to auto-skip format on error
 	addVideoResultMsg         struct {
 		Feedback string
-		IsError  bool
 	}
 	fetchFormatsResultMsg struct {
 		Formats *FormatsData
@@ -429,6 +428,12 @@ func (a *App) marqueeTick() tea.Cmd {
 }
 
 func (a *App) listenForUpdates() tea.Cmd {
+	// If all channels are nil, don't spawn a blocking goroutine
+	if a.jobUpdateCh == nil && a.jobsUpdateCh == nil && a.logCh == nil &&
+		a.checkTimersCh == nil && a.cookieStatusCh == nil && a.diskStatusCh == nil &&
+		a.updateStatusCh == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		select {
 		case job, ok := <-a.jobUpdateCh:
@@ -984,7 +989,7 @@ func (a *App) handleJobUpdate(job *database.Job) tea.Cmd {
 	}
 
 	// Clean up progress for terminal/error statuses (match TS behavior)
-	if isTerminalStatus(job.Status) || job.Status == database.StatusError {
+	if isCompletedStatus(job.Status) || job.Status == database.StatusError {
 		a.progressStore.Delete(job.ID)
 	}
 
@@ -1114,10 +1119,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if action == "finish_cookie" {
 			// Run cookie extraction async so TUI doesn't freeze
 			platform := a.setupWiz.cookiePlatform
+			finishFn := a.setupWiz.OnFinishAutoCookie
 			cmds = append(cmds, func() tea.Msg {
 				yt, tw := false, false
-				if a.setupWiz.OnFinishAutoCookie != nil {
-					yt, tw = a.setupWiz.OnFinishAutoCookie()
+				if finishFn != nil {
+					yt, tw = finishFn()
 				}
 				return setupCookieFinishMsg{Platform: platform, YTAuth: yt, TWAuth: tw}
 			})
@@ -1264,19 +1270,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.actionMenu.Open(a.buildMenuItems())
 		return a, nil
 	case "?":
-		a.help.SetMenuItems(a.buildMenuItems())
-		a.help.Toggle()
-		return a, nil
+		return a.dispatchAction("?", nil)
 	case "`":
-		if a.cfg != nil {
-			a.settings.SetSize(a.width, a.height)
-			a.settings.OnSave = a.OnSaveConfig
-			a.settings.OnRestart = a.OnRestart
-			a.settings.OnHashPassword = a.OnHashPassword
-			a.settings.OnVerifyPassword = a.OnVerifyPassword
-			a.settings.Open(a.cfg)
-		}
-		return a, nil
+		return a.dispatchAction("`", nil)
 	case keyTab:
 		a.cycleFocus()
 		return a, nil
@@ -1480,6 +1476,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.OnDeleteJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
 			a.taskList.MoveUp()
+			a.updateSelectedJob()
 		}
 	case "A T":
 		if a.trimInProgress {
@@ -1520,8 +1517,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
+			checkFn := a.OnCheckUpdate
 			return a, func() tea.Msg {
-				info, err := a.OnCheckUpdate()
+				info, err := checkFn()
 				if err != nil {
 					return updateCheckResultMsg{Err: err.Error()}
 				}
@@ -1532,8 +1530,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
 			ver := a.updateAvailable.Version
+			applyFn := a.OnApplyUpdate
 			return a, func() tea.Msg {
-				errStr := a.OnApplyUpdate(ver)
+				errStr := applyFn(ver)
 				return updateApplyResultMsg{Err: errStr}
 			}
 		}
@@ -1568,6 +1567,8 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			if url := streamURL(job); url != "" {
 				openBrowser(url)
 				a.setFeedback("Opening: " + url)
+			} else {
+				a.setFeedback("No stream URL available")
 			}
 		}
 	case "O W":
@@ -1672,6 +1673,9 @@ func streamURL(j *database.Job) string {
 		if j.IsVod {
 			vodID := strings.TrimPrefix(j.VideoID, "tw_v")
 			return "https://www.twitch.tv/videos/" + vodID
+		}
+		if j.ChannelName == "" {
+			return ""
 		}
 		return "https://www.twitch.tv/" + j.ChannelName
 	}
@@ -1936,6 +1940,7 @@ func (a *App) recalcLayout() {
 	a.statusBar.SetWidth(a.width)
 	a.help.SetSize(a.width, a.height)
 	a.addVideo.SetSize(a.width, a.height)
+	a.importDlg.SetSize(a.width, a.height)
 	a.trimDlg.SetSize(a.width, a.height)
 	a.filesDlg.SetSize(a.width, a.height)
 	a.clientTokensDlg.SetSize(a.width, a.height)
@@ -2047,8 +2052,10 @@ func feedbackColor(msg string) lipgloss.Color {
 
 	// Warnings (yellow) — inability, conditions, advisory messages
 	if strings.HasPrefix(msg, "Can only") || strings.HasPrefix(msg, "Trim only") ||
-		strings.HasPrefix(msg, "No update") || strings.HasPrefix(msg, "A trim is already") ||
+		strings.HasPrefix(msg, "No update") || strings.HasPrefix(msg, "No stream") ||
+		strings.HasPrefix(msg, "A trim is already") ||
 		strings.Contains(lower, "no cookies acquired") ||
+		strings.Contains(lower, "already exists") ||
 		strings.HasPrefix(msg, "Already up to date") {
 		return lipgloss.Color("#f1c40f")
 	}
@@ -2146,7 +2153,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		url := fmt.Sprintf("%s/api/jobs", baseURL)
 		resp, err := client.Post(url, "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			return addVideoResultMsg{Feedback: "Failed to connect to server", IsError: true}
+			return addVideoResultMsg{Feedback: "Failed to connect to server"}
 		}
 		defer resp.Body.Close()
 
@@ -2160,7 +2167,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 			if msg == "" {
 				msg = fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)
 			}
-			return addVideoResultMsg{Feedback: msg, IsError: true}
+			return addVideoResultMsg{Feedback: msg}
 		}
 
 		label := "Added to queue"

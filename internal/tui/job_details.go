@@ -72,6 +72,15 @@ func NewJobDetailsModel() *JobDetailsModel {
 	return &JobDetailsModel{viewport: vp, progress: pb}
 }
 
+// titleValueWidth computes the available width for the title value column.
+func (m *JobDetailsModel) titleValueWidth() int {
+	valueW := m.width - 2 - labelWidth
+	if valueW < 10 {
+		valueW = 10
+	}
+	return valueW
+}
+
 // SetJob updates the displayed job.
 func (m *JobDetailsModel) SetJob(job *database.Job) {
 	prevID := ""
@@ -89,14 +98,13 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 	if prevID != newID {
 		m.viewport.GotoTop()
 	}
-	// Reset marquee for title field (use m.width - 2 to match renderRow's
-	// maxW = contentW = m.width - 2, minus labelWidth for the value column).
+	// Reset marquee for title field.
 	if job != nil {
-		valueW := m.width - 2 - labelWidth
-		if valueW < 10 {
-			valueW = 10
+		title := job.Title
+		if title == "" {
+			title = job.VideoID
 		}
-		m.marquee.Reset(job.Title, valueW)
+		m.marquee.Reset(title, m.titleValueWidth())
 	} else {
 		m.marquee.Reset("", 0)
 	}
@@ -128,11 +136,11 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	// Recalculate marquee width when panel width changes (e.g. focus change,
 	// or initial WindowSizeMsg arriving after jobs are already loaded).
 	if prevW != w && m.job != nil {
-		valueW := m.width - 2 - labelWidth
-		if valueW < 10 {
-			valueW = 10
+		title := m.job.Title
+		if title == "" {
+			title = m.job.VideoID
 		}
-		m.marquee.Reset(m.job.Title, valueW)
+		m.marquee.Reset(title, m.titleValueWidth())
 	}
 }
 
@@ -195,7 +203,11 @@ func (m *JobDetailsModel) buildRows() {
 	status := string(j.Status)
 
 	// === Basic Info (no header, matching TS) ===
-	m.addField("Title", j.Title)
+	title := j.Title
+	if title == "" {
+		title = j.VideoID
+	}
+	m.addField("Title", title)
 	ch := j.ChannelName
 	if ch == "" {
 		ch = "Unknown"
@@ -294,8 +306,9 @@ func (m *JobDetailsModel) buildRows() {
 		}
 	}
 
-	// === Progress section (J17 - always shown if !isFinished, matching TS unconditional) ===
-	if !isFinished {
+	// === Progress section — shown for active states only, not for Error/Cancelled ===
+	isActiveState := !isFinished && !j.IsTerminal()
+	if isActiveState {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Progress"})
 
@@ -369,7 +382,7 @@ func (m *JobDetailsModel) buildRows() {
 	hasFileSize := j.FileSize != nil && *j.FileSize > 0
 	hasFps := j.VideoFps != nil && *j.VideoFps > 0
 	hasGaps := len(j.Gaps) > 0
-	hasMediaContent := hasVideo || hasHeight || hasFps || hasFileSize || (isFinished && (hasSegs || hasChat || hasGaps))
+	hasMediaContent := (hasVideo && hasHeight) || hasFps || hasFileSize || (isFinished && (hasSegs || hasChat || hasGaps))
 	if hasMediaContent {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Media"})
@@ -390,8 +403,20 @@ func (m *JobDetailsModel) buildRows() {
 		}
 	}
 
-	// === Timestamps (J11 - human-readable with relative suffix, J13 - Scheduled label) — BEFORE Duration to match TS ===
+	// === Parse timestamps once for reuse in Timestamps and Duration sections ===
 	now := time.Now()
+	var parsedStreamStart, parsedCreatedAt, parsedUpdatedAt time.Time
+	if j.StreamStartTime != "" {
+		parsedStreamStart, _ = time.Parse(time.RFC3339, j.StreamStartTime)
+	}
+	if j.CreatedAt != "" {
+		parsedCreatedAt, _ = time.Parse(time.RFC3339, j.CreatedAt)
+	}
+	if j.UpdatedAt != "" {
+		parsedUpdatedAt, _ = time.Parse(time.RFC3339, j.UpdatedAt)
+	}
+
+	// === Timestamps (J11 - human-readable with relative suffix, J13 - Scheduled label) — BEFORE Duration to match TS ===
 	m.rows = append(m.rows, detailRow{kind: rowSeparator})
 	m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Timestamps"})
 	if j.CreatedAt != "" {
@@ -406,10 +431,8 @@ func (m *JobDetailsModel) buildRows() {
 	if j.StreamStartTime != "" {
 		// Show "Scheduled" if upcoming and future (J13)
 		label := "Stream Start"
-		if j.Status == database.StatusUpcoming {
-			if t, err := time.Parse(time.RFC3339, j.StreamStartTime); err == nil && t.After(now) {
-				label = "Scheduled"
-			}
+		if j.Status == database.StatusUpcoming && !parsedStreamStart.IsZero() && parsedStreamStart.After(now) {
+			label = "Scheduled"
 		}
 		m.addField(label, formatDateStrRelative(j.StreamStartTime, now))
 	}
@@ -424,12 +447,9 @@ func (m *JobDetailsModel) buildRows() {
 	switch {
 	case j.Status == database.StatusLive || j.Status == database.StatusDownloading || j.Status == database.StatusMuxing:
 		// Active: show elapsed duration
-		var startMs time.Time
-		if j.StreamStartTime != "" {
-			startMs, _ = time.Parse(time.RFC3339, j.StreamStartTime)
-		}
-		if startMs.IsZero() && j.CreatedAt != "" {
-			startMs, _ = time.Parse(time.RFC3339, j.CreatedAt)
+		startMs := parsedStreamStart
+		if startMs.IsZero() {
+			startMs = parsedCreatedAt
 		}
 		if !startMs.IsZero() {
 			elapsed := now.Sub(startMs)
@@ -438,20 +458,14 @@ func (m *JobDetailsModel) buildRows() {
 	case isFinished:
 		// Finished: show "Job Time" only if no lengthSeconds
 		if j.LengthSeconds == nil || *j.LengthSeconds <= 0 {
-			if j.CreatedAt != "" && j.UpdatedAt != "" {
-				created, err1 := time.Parse(time.RFC3339, j.CreatedAt)
-				updated, err2 := time.Parse(time.RFC3339, j.UpdatedAt)
-				if err1 == nil && err2 == nil {
-					m.addField("Job Time", formatDuration(updated.Sub(created)))
-				}
+			if !parsedCreatedAt.IsZero() && !parsedUpdatedAt.IsZero() {
+				m.addField("Job Time", formatDuration(parsedUpdatedAt.Sub(parsedCreatedAt)))
 			}
 		}
-	case j.Status == database.StatusUpcoming && j.StreamStartTime != "":
+	case j.Status == database.StatusUpcoming && !parsedStreamStart.IsZero():
 		// Upcoming: countdown (J13)
-		if startTime, err := time.Parse(time.RFC3339, j.StreamStartTime); err == nil {
-			if startTime.After(now) {
-				m.addFieldColor("Starts In", formatDuration(startTime.Sub(now)), ColorUpcoming)
-			}
+		if parsedStreamStart.After(now) {
+			m.addFieldColor("Starts In", formatDuration(parsedStreamStart.Sub(now)), ColorUpcoming)
 		}
 	}
 
@@ -694,7 +708,7 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 			percent = m.progressOverlay.Percent
 		}
 		pctLabel := fmt.Sprintf(" %.1f%%", percent)
-		barW := maxW - labelWidth - len(pctLabel)
+		barW := maxW - labelWidth - runewidth.StringWidth(pctLabel)
 		if barW > 30 {
 			barW = 30
 		}

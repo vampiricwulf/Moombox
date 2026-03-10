@@ -230,6 +230,11 @@ func (m *SetupWizardModel) IsVisible() bool {
 func (m *SetupWizardModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+
+	// Update text input width if channel editor is active
+	if m.channelMode == "edit" && m.textInput.Focused() {
+		m.updateTextInputWidth()
+	}
 }
 
 // buildAdvancedForm creates a huh.Form from advancedSetupSteps.
@@ -378,6 +383,7 @@ func (m *SetupWizardModel) updateTextInputForField() {
 				m.textInput.Validate = nil
 				m.textInput.SetValue(m.channelEditValues[field.key])
 				m.textInput.Focus()
+				m.updateTextInputWidth()
 				return
 			}
 		}
@@ -386,6 +392,28 @@ func (m *SetupWizardModel) updateTextInputForField() {
 	}
 
 	m.textInput.Blur()
+}
+
+// updateTextInputWidth sets the text input width based on current dimensions and field context.
+func (m *SetupWizardModel) updateTextInputWidth() {
+	if m.width == 0 {
+		return
+	}
+
+	// Determine box width based on which mode we're in
+	maxW := 65
+	if m.mode == setupModeAdvanced {
+		maxW = 72
+	}
+	_, contentW := dialogBox(maxW, m.width)
+
+	// Calculate label width for the current field
+	fields := m.visibleSetupChannelFields()
+	if m.channelEditField < len(fields) {
+		f := fields[m.channelEditField]
+		prefix := "> " // focused field always has "> " prefix
+		m.textInput.Width = contentW - runewidth.StringWidth(prefix+f.label+": ") - 1
+	}
 }
 
 // HandleKey processes key input. Returns "complete" when setup finishes.
@@ -505,6 +533,15 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 }
 
 func (m *SetupWizardModel) handleSimpleChannelKey(key string) string {
+	return m.handleChannelListKey(key,
+		func() string { m.simpleStage = setupSimpleCookies; return "" },
+		func() string { return m.finishSimpleSetup() },
+	)
+}
+
+// handleChannelListKey is the shared channel list handler used by both simple and advanced flows.
+// onEsc is called when Esc is pressed, onFinish when Tab is pressed.
+func (m *SetupWizardModel) handleChannelListKey(key string, onEsc func() string, onFinish func() string) string {
 	if m.channelMode == "edit" {
 		return m.handleChannelEditKey(key)
 	}
@@ -527,7 +564,7 @@ func (m *SetupWizardModel) handleSimpleChannelKey(key string) string {
 
 	switch key {
 	case keyEsc:
-		m.simpleStage = setupSimpleCookies
+		return onEsc()
 	case keyUp:
 		if m.channelIndex > 0 {
 			m.channelIndex--
@@ -558,27 +595,14 @@ func (m *SetupWizardModel) handleSimpleChannelKey(key string) string {
 			m.channelDeleteConf = true
 		}
 	case keyTab:
-		// Finish simplified setup
-		return m.finishSimpleSetup()
+		return onFinish()
 	}
 	return ""
 }
 
 // visibleSetupChannelFields returns channel fields filtered by platform.
 func (m *SetupWizardModel) visibleSetupChannelFields() []channelFieldDef {
-	platform := "youtube"
-	if m.channelEditValues != nil {
-		if p, ok := m.channelEditValues["platform"]; ok {
-			platform = p
-		}
-	}
-	var fields []channelFieldDef
-	for _, f := range channelFields {
-		if f.platformFilter == "" || f.platformFilter == platform {
-			fields = append(fields, f)
-		}
-	}
-	return fields
+	return filterChannelFieldsByPlatform(channelFields, m.channelEditValues)
 }
 
 func (m *SetupWizardModel) handleChannelEditKey(key string) string {
@@ -641,36 +665,11 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 }
 
 func (m *SetupWizardModel) cycleChannelField(field channelFieldDef) {
-	if field.options == nil {
-		return
-	}
-	cur := m.channelEditValues[field.key]
-	for i, opt := range field.options {
-		if strings.EqualFold(opt, cur) {
-			m.channelEditValues[field.key] = field.options[(i+1)%len(field.options)]
-			return
-		}
-	}
-	if len(field.options) > 0 {
-		m.channelEditValues[field.key] = field.options[0]
-	}
+	cycleFieldOption(m.channelEditValues, field.key, field.options, 1)
 }
 
 func (m *SetupWizardModel) cycleChannelFieldReverse(field channelFieldDef) {
-	if field.options == nil {
-		return
-	}
-	cur := m.channelEditValues[field.key]
-	for i, opt := range field.options {
-		if strings.EqualFold(opt, cur) {
-			idx := (i - 1 + len(field.options)) % len(field.options)
-			m.channelEditValues[field.key] = field.options[idx]
-			return
-		}
-	}
-	if len(field.options) > 0 {
-		m.channelEditValues[field.key] = field.options[len(field.options)-1]
-	}
+	cycleFieldOption(m.channelEditValues, field.key, field.options, -1)
 }
 
 func (m *SetupWizardModel) finishSimpleSetup() string {
@@ -728,63 +727,10 @@ func (m *SetupWizardModel) handleAdvancedKey(key string) string {
 }
 
 func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
-	if m.channelMode == "edit" {
-		return m.handleChannelEditKey(key)
-	}
-
-	if m.channelDeleteConf {
-		if key == "d" || key == "D" {
-			if m.channelIndex < len(m.channels) {
-				m.channels = append(m.channels[:m.channelIndex], m.channels[m.channelIndex+1:]...)
-				if m.channelIndex >= len(m.channels) && m.channelIndex > 0 {
-					m.channelIndex--
-				}
-			}
-			m.channelDeleteConf = false
-		} else {
-			m.channelDeleteConf = false
-		}
-		return ""
-	}
-
-	switch key {
-	case keyEsc:
-		// Back to mode select from channel editor
-		m.advancedFormDone = false
-		m.mode = setupModeSelect
-	case keyUp:
-		if m.channelIndex > 0 {
-			m.channelIndex--
-		}
-	case keyDown:
-		if m.channelIndex < len(m.channels)-1 {
-			m.channelIndex++
-		}
-	case "a", "A":
-		m.channelEditValues = map[string]string{
-			"id": "", "name": "", "platform": "youtube",
-			"enabled": "Yes", "terms": "",
-			"include_non_live": "No", "quality_preference": "best",
-		}
-		m.channelEditField = 0
-		m.channelIndex = len(m.channels)
-		m.channelMode = "edit"
-		m.updateTextInputForField()
-	case keyEnter:
-		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
-			m.channelMode = "edit"
-			m.channelEditValues = channelToValues(m.channels[m.channelIndex])
-			m.channelEditField = 0
-			m.updateTextInputForField()
-		}
-	case "d", "D":
-		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
-			m.channelDeleteConf = true
-		}
-	case keyTab:
-		return m.finishAdvancedSetup()
-	}
-	return ""
+	return m.handleChannelListKey(key,
+		func() string { m.advancedFormDone = false; m.mode = setupModeSelect; return "" },
+		func() string { return m.finishAdvancedSetup() },
+	)
 }
 
 func (m *SetupWizardModel) finishAdvancedSetup() string {
@@ -924,6 +870,9 @@ func (m *SetupWizardModel) View() string {
 	if !m.visible {
 		return ""
 	}
+	if m.width == 0 || m.height == 0 {
+		return ""
+	}
 
 	switch m.mode {
 	case setupModeSelect:
@@ -939,11 +888,7 @@ func (m *SetupWizardModel) View() string {
 // --- Mode Selection View ---
 
 func (m *SetupWizardModel) viewModeSelect() string {
-	boxW := min(60, m.width)
-	if boxW < 40 {
-		boxW = 40
-	}
-	contentW := boxW - 4
+	_, contentW := dialogBox(60, m.width)
 
 	var lines []string
 
@@ -1014,11 +959,7 @@ func (m *SetupWizardModel) viewSimple() string {
 }
 
 func (m *SetupWizardModel) viewSimpleCookies() string {
-	boxW := min(65, m.width)
-	if boxW < 40 {
-		boxW = 40
-	}
-	contentW := boxW - 4
+	_, contentW := dialogBox(65, m.width)
 
 	var lines []string
 
@@ -1123,11 +1064,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 }
 
 func (m *SetupWizardModel) viewSimpleChannels() string {
-	boxW := min(65, m.width)
-	if boxW < 40 {
-		boxW = 40
-	}
-	contentW := boxW - 4
+	_, contentW := dialogBox(65, m.width)
 
 	var lines []string
 
@@ -1194,11 +1131,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 // --- Advanced Setup View ---
 
 func (m *SetupWizardModel) viewAdvanced() string {
-	boxW := min(72, m.width)
-	if boxW < 40 {
-		boxW = 40
-	}
-	contentW := boxW - 4
+	_, contentW := dialogBox(72, m.width)
 
 	h := m.height - 2
 	if h < 10 {
@@ -1344,7 +1277,6 @@ func (m *SetupWizardModel) renderChannelEditor(contentW int) []string {
 			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+
 				renderSetupOptionSelector(f.options, val, isFocused))
 		} else if isFocused {
-			m.textInput.Width = contentW - runewidth.StringWidth(prefix+f.label+": ") - 1
 			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+m.textInput.View())
 		} else {
 			lines = append(lines, labelStyle.Render(prefix+f.label)+": "+renderInactiveInput(val, contentW-runewidth.StringWidth(prefix+f.label+": "), ColorWhite))

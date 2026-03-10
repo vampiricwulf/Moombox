@@ -78,8 +78,6 @@ func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	}
 	relPath := truncateString(f.RelPath, pathW)
 
-	line := prefix + typeStyle.Render(typeTag) + " " + relPath + suffix
-
 	var style lipgloss.Style
 	if d.dialog != nil && d.dialog.deleteConfirmID == f.Path {
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
@@ -89,6 +87,13 @@ func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		style = lipgloss.NewStyle()
 	}
 
+	// Use the outer style for type tag when selected/confirm, otherwise per-type color
+	renderTypeStyle := typeStyle
+	if (d.dialog != nil && d.dialog.deleteConfirmID == f.Path) || index == m.Index() {
+		renderTypeStyle = style
+	}
+
+	line := prefix + renderTypeStyle.Render(typeTag) + " " + relPath + suffix
 	fmt.Fprint(w, style.Render(line))
 }
 
@@ -130,12 +135,12 @@ func (m *FilesDialogModel) newFileList() list.Model {
 
 	// Only use arrow keys for navigation (avoid letter key conflicts)
 	km := l.KeyMap
-	km.CursorUp.SetKeys("up")
-	km.CursorDown.SetKeys("down")
-	km.NextPage.SetKeys("pgdown")
-	km.PrevPage.SetKeys("pgup")
-	km.GoToStart.SetKeys("home")
-	km.GoToEnd.SetKeys("end")
+	km.CursorUp.SetKeys(keyUp)
+	km.CursorDown.SetKeys(keyDown)
+	km.NextPage.SetKeys(keyPgDown)
+	km.PrevPage.SetKeys(keyPgUp)
+	km.GoToStart.SetKeys(keyHome)
+	km.GoToEnd.SetKeys(keyEnd)
 	l.KeyMap = km
 
 	return l

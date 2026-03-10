@@ -454,6 +454,9 @@ func (m *ActionMenuModel) overlayGeometry() (int, int, int, int) {
 	}
 	contentW := boxW - 2
 	ch := m.contentHeight()
+	if m.mode == menuConfirm {
+		ch = 3
+	}
 
 	// Box rendered size: contentW+2 wide (borders), ch+4 tall (borders+header+footer)
 	renderedW := contentW + 2
@@ -563,14 +566,14 @@ func (m *ActionMenuModel) View() string {
 
 func (m *ActionMenuModel) renderMain(contentW int) string {
 	header := TitleStyle.Render("Action Menu") +
-		strings.Repeat(" ", max(0, contentW-28)) +
+		strings.Repeat(" ", max(0, contentW-36)) +
 		DimStyle.Render("↑↓ navigate | Enter | Esc")
 
 	footer := DimStyle.Render("M to close")
 
 	content := header + "\n" + m.mainList.View() + "\n" + footer
 	box := FocusedBorder.Width(contentW).Render(content)
-	return m.centerOverlay(box)
+	return centerBox(box, m.width, m.height)
 }
 
 func (m *ActionMenuModel) renderJobSelect(contentW int) string {
@@ -587,7 +590,7 @@ func (m *ActionMenuModel) renderJobSelect(contentW int) string {
 
 	content := header + "\n" + m.jobList.View() + "\n" + footer
 	box := FocusedBorder.Width(contentW).Render(content)
-	return m.centerOverlay(box)
+	return centerBox(box, m.width, m.height)
 }
 
 func (m *ActionMenuModel) renderConfirm(contentW int) string {
@@ -607,42 +610,7 @@ func (m *ActionMenuModel) renderConfirm(contentW int) string {
 	header := TitleStyle.Render("Confirm")
 	content := header + "\n" + strings.Join(lines, "\n")
 	box := FocusedBorder.Width(contentW).Render(content)
-	return m.centerOverlay(box)
-}
-
-func (m *ActionMenuModel) centerOverlay(box string) string {
-	boxLines := strings.Split(box, "\n")
-	boxH := len(boxLines)
-	boxW := 0
-	for _, l := range boxLines {
-		if w := lipgloss.Width(l); w > boxW {
-			boxW = w
-		}
-	}
-
-	padLeft := (m.width - boxW) / 2
-	padTop := (m.height - boxH) / 2
-	if padLeft < 0 {
-		padLeft = 0
-	}
-	if padTop < 0 {
-		padTop = 0
-	}
-
-	lines := make([]string, 0, m.height)
-	pad := strings.Repeat(" ", m.width)
-	leftPad := strings.Repeat(" ", padLeft)
-	for range padTop {
-		lines = append(lines, pad)
-	}
-	for _, line := range boxLines {
-		lines = append(lines, leftPad+line)
-	}
-	remaining := m.height - padTop - boxH
-	for range remaining {
-		lines = append(lines, pad)
-	}
-	return strings.Join(lines, "\n")
+	return centerBox(box, m.width, m.height)
 }
 
 // padToWidth pads a string with spaces to reach at least width w (by visual width).

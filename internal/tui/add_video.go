@@ -379,6 +379,7 @@ func (m *AddVideoModel) handleEscape() (string, string) {
 		m.step = AddStepVideoFormat
 	case AddStepTimestamps:
 		m.step = AddStepAudioFormat
+		m.textInput.Blur()
 	case AddStepConfirm:
 		m.step = AddStepTimestamps
 		m.syncToTextInput()
@@ -434,6 +435,9 @@ func (m *AddVideoModel) handleURLStep(key string) (string, string) {
 }
 
 func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, string) {
+	if m.loading {
+		return "", ""
+	}
 	switch key {
 	case "a", "A":
 		// Auto selection
@@ -443,6 +447,7 @@ func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, stri
 		} else {
 			m.selectedAudioItag = nil
 			m.step = AddStepTimestamps
+			m.syncToTextInput()
 		}
 		return "", ""
 
@@ -454,6 +459,7 @@ func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, stri
 		} else {
 			m.selectedAudioItag = &none
 			m.step = AddStepTimestamps
+			m.syncToTextInput()
 		}
 		return "", ""
 
@@ -475,6 +481,7 @@ func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, stri
 				itag := m.formats.AudioFormats[idx].Itag
 				m.selectedAudioItag = &itag
 				m.step = AddStepTimestamps
+				m.syncToTextInput()
 			}
 		}
 		return "", ""
@@ -491,6 +498,7 @@ func (m *AddVideoModel) handleFormatStep(key string, isVideo bool) (string, stri
 				itag := m.formats.AudioFormats[idx].Itag
 				m.selectedAudioItag = &itag
 				m.step = AddStepTimestamps
+				m.syncToTextInput()
 			}
 		}
 		// Arrow keys and other navigation are handled by table via UpdateComponents
@@ -714,35 +722,7 @@ func (m *AddVideoModel) renderTimestamps(w, h int) string {
 	lines = append(lines, TitleStyle.Render("Timestamps (Optional)")+" "+DimStyle.Render("(Step 3/4)"))
 	lines = append(lines, "")
 
-	startLabel := "  Start: "
-	endLabel := "  End:   "
-	if m.timeInputFocus == 0 {
-		startLabel = "> Start: "
-	}
-	if m.timeInputFocus == 1 {
-		endLabel = "> End:   "
-	}
-
-	accentColor := ColorCookies
-	startStyle := DimStyle
-	endStyle := DimStyle
-	if m.timeInputFocus == 0 {
-		startStyle = lipgloss.NewStyle().Foreground(accentColor)
-	}
-	if m.timeInputFocus == 1 {
-		endStyle = lipgloss.NewStyle().Foreground(accentColor)
-	}
-
-	m.textInput.TextStyle = lipgloss.NewStyle().Foreground(ColorCyan)
-	m.textInput.Cursor.Style = lipgloss.NewStyle().Foreground(ColorCyan)
-	m.textInput.Width = w - 12
-	if m.timeInputFocus == 0 {
-		lines = append(lines, startStyle.Render(startLabel)+m.textInput.View())
-		lines = append(lines, endStyle.Render(endLabel)+renderInactiveInput(m.endTimeInput, w-12, ColorCyan))
-	} else {
-		lines = append(lines, startStyle.Render(startLabel)+renderInactiveInput(m.startTimeInput, w-12, ColorCyan))
-		lines = append(lines, endStyle.Render(endLabel)+m.textInput.View())
-	}
+	lines = append(lines, renderTimeInputPair(m.startTimeInput, m.endTimeInput, m.timeInputFocus, m.textInput, w, ColorCookies)...)
 	lines = append(lines, "")
 	lines = append(lines, DimStyle.Render("Format: HH:MM:SS, MM:SS, or seconds (blank = default)"))
 
@@ -1116,6 +1096,9 @@ func parseTimeToSeconds(s string) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
+		if mins < 0 || mins > 59 || secs < 0 || secs > 59 {
+			return 0, fmt.Errorf("minutes and seconds must be 0-59")
+		}
 		return mins*60 + secs, nil
 	case 3:
 		hours, err := strconv.ParseFloat(parts[0], 64)
@@ -1129,6 +1112,9 @@ func parseTimeToSeconds(s string) (float64, error) {
 		secs, err := strconv.ParseFloat(parts[2], 64)
 		if err != nil {
 			return 0, err
+		}
+		if mins < 0 || mins > 59 || secs < 0 || secs > 59 {
+			return 0, fmt.Errorf("minutes and seconds must be 0-59")
 		}
 		return hours*3600 + mins*60 + secs, nil
 	}

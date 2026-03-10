@@ -65,17 +65,25 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 	}
 	label := truncateString(ct.Label, maxLabelW)
 
-	line := fmt.Sprintf("%s%s  %s  %s", prefix, label, DimStyle.Render(lastUsed), DimStyle.Render(ipStr))
-
 	var style lipgloss.Style
+	highlighted := false
 	if d.dialog != nil && d.dialog.revokeConfirmID == ct.ID {
 		style = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+		highlighted = true
 	} else if index == m.Index() {
 		style = lipgloss.NewStyle().Foreground(ColorCyan)
+		highlighted = true
 	} else {
 		style = lipgloss.NewStyle()
 	}
 
+	// Use the highlight style for metadata when selected/confirm, otherwise DimStyle
+	metaStyle := DimStyle
+	if highlighted {
+		metaStyle = style
+	}
+
+	line := fmt.Sprintf("%s%s  %s  %s", prefix, label, metaStyle.Render(lastUsed), metaStyle.Render(ipStr))
 	fmt.Fprint(w, style.Render(line))
 }
 
@@ -114,12 +122,12 @@ func (m *ClientTokensDialogModel) newTokenList() list.Model {
 	l.InfiniteScrolling = true
 
 	km := l.KeyMap
-	km.CursorUp.SetKeys("up")
-	km.CursorDown.SetKeys("down")
-	km.NextPage.SetKeys("pgdown")
-	km.PrevPage.SetKeys("pgup")
-	km.GoToStart.SetKeys("home")
-	km.GoToEnd.SetKeys("end")
+	km.CursorUp.SetKeys(keyUp)
+	km.CursorDown.SetKeys(keyDown)
+	km.NextPage.SetKeys(keyPgDown)
+	km.PrevPage.SetKeys(keyPgUp)
+	km.GoToStart.SetKeys(keyHome)
+	km.GoToEnd.SetKeys(keyEnd)
 	l.KeyMap = km
 
 	return l

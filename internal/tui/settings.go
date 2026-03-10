@@ -136,14 +136,11 @@ var sections = []settingsSection{
 	},
 }
 
-const settingsLabelWidth = 22
-
 // saveStatus tracks the save state.
 type saveStatus int
 
 const (
 	saveIdle saveStatus = iota
-	saveSaving
 	saveSaved
 	saveError
 )
@@ -205,7 +202,7 @@ type SettingsModel struct {
 	width   int
 	height  int
 
-	// Current section (0-7)
+	// Current section index
 	sectionIndex int
 
 	// Current field within section
@@ -335,6 +332,7 @@ func (m *SettingsModel) IsVisible() bool {
 func (m *SettingsModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	m.ensureFieldVisible()
 }
 
 func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
@@ -359,18 +357,18 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 
 	// Monitors
 	m.values["max_feed_items"] = strconv.Itoa(cfg.Monitors.MaxFeedItems)
-	m.values["feed_check_interval"] = strconv.Itoa(int(cfg.Monitors.FeedCheckInterval.Minutes()))
-	decapi := 0
+	m.values["feed_check_interval"] = fmt.Sprintf("%.0f", cfg.Monitors.FeedCheckInterval.Minutes())
 	if cfg.Monitors.DecapiCheckInterval != nil {
-		decapi = *cfg.Monitors.DecapiCheckInterval
+		m.values["decapi_check_interval"] = strconv.Itoa(*cfg.Monitors.DecapiCheckInterval)
+	} else {
+		m.values["decapi_check_interval"] = ""
 	}
-	m.values["decapi_check_interval"] = strconv.Itoa(decapi)
-	twitch := 15
 	if cfg.Monitors.TwitchCheckInterval != nil {
-		twitch = *cfg.Monitors.TwitchCheckInterval
+		m.values["twitch_check_interval"] = strconv.Itoa(*cfg.Monitors.TwitchCheckInterval)
+	} else {
+		m.values["twitch_check_interval"] = ""
 	}
-	m.values["twitch_check_interval"] = strconv.Itoa(twitch)
-	m.values["hide_finished_age_days"] = strconv.Itoa(int(cfg.Monitors.HideFinishedAgeDays.Days()))
+	m.values["hide_finished_age_days"] = fmt.Sprintf("%.0f", cfg.Monitors.HideFinishedAgeDays.Days())
 
 	// Downloader
 	m.values["output_template"] = cfg.Downloader.OutputTemplate
@@ -388,7 +386,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["active_twitch"] = boolToDisplay(twActive)
 	m.values["auto_enabled"] = boolToDisplay(cfg.Cookies.AutoEnabled)
 	m.values["browser_profile_dir"] = cfg.Cookies.BrowserProfileDir
-	m.values["refresh_interval"] = strconv.Itoa(int(cfg.Cookies.RefreshInterval.Minutes()))
+	m.values["refresh_interval"] = fmt.Sprintf("%.0f", cfg.Cookies.RefreshInterval.Minutes())
 
 	// Disk
 	m.values["disk_warn_percent"] = strconv.Itoa(cfg.Disk.WarnPercent)
@@ -441,10 +439,24 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Monitors.MaxFeedItems, _ = strconv.Atoi(m.values["max_feed_items"])
 	feedMin, _ := strconv.Atoi(m.values["feed_check_interval"])
 	m.cfg.Monitors.FeedCheckInterval = config.FlexDuration{Value: float64(feedMin)}
-	decapi, _ := strconv.Atoi(m.values["decapi_check_interval"])
-	m.cfg.Monitors.DecapiCheckInterval = &decapi
-	twitchInt, _ := strconv.Atoi(m.values["twitch_check_interval"])
-	m.cfg.Monitors.TwitchCheckInterval = &twitchInt
+	if v := m.values["decapi_check_interval"]; v != "" {
+		if d, err := strconv.Atoi(v); err == nil && d >= 15 && d <= 3600 {
+			m.cfg.Monitors.DecapiCheckInterval = &d
+		} else {
+			m.cfg.Monitors.DecapiCheckInterval = nil
+		}
+	} else {
+		m.cfg.Monitors.DecapiCheckInterval = nil
+	}
+	if v := m.values["twitch_check_interval"]; v != "" {
+		if t, err := strconv.Atoi(v); err == nil && t >= 15 && t <= 3600 {
+			m.cfg.Monitors.TwitchCheckInterval = &t
+		} else {
+			m.cfg.Monitors.TwitchCheckInterval = nil
+		}
+	} else {
+		m.cfg.Monitors.TwitchCheckInterval = nil
+	}
 	hideAge, _ := strconv.Atoi(m.values["hide_finished_age_days"])
 	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
 
@@ -513,10 +525,15 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		return ""
 	}
 
-	// Clear error on input
+	// Clear error on meaningful input (not pure navigation)
 	if m.status == saveError {
-		m.status = saveIdle
-		m.errorMsg = ""
+		switch key {
+		case keyUp, keyDown, keyLeft, keyRight, keyTab, "shift+tab", "shift+left", "shift+right":
+			// Navigation keys — don't clear error
+		default:
+			m.status = saveIdle
+			m.errorMsg = ""
+		}
 	}
 
 	sec := sections[m.sectionIndex]
@@ -532,7 +549,11 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		if m.secMode != securityStatus {
 			return m.handleSecurityKey(key)
 		}
-		// Backtick/tilde for security mode (won't conflict with text fields)
+		// Backtick/tilde for security mode — skip intercept when editing a text/number field
+		field := sec.fields[m.fieldIndex]
+		if (key == "`" || key == "~") && (field.ftype == fieldText || field.ftype == fieldNumber) {
+			return m.handleFieldKey(key)
+		}
 		if key == "`" {
 			m.secMode = securitySet
 			m.secCurrentPw = ""
@@ -626,11 +647,12 @@ func (m *SettingsModel) handleClose() string {
 		}
 		m.status = saveSaved
 		m.dirty = false
+		needsRestart := m.hasRestartChanges()
 		m.originalValues = make(map[string]string)
 		for k, v := range m.values {
 			m.originalValues[k] = v
 		}
-		if m.hasRestartChanges() {
+		if needsRestart {
 			m.showRestartOverlay = true
 			return ""
 		}
@@ -844,19 +866,7 @@ func (m *SettingsModel) syncFromTextInput() {
 // --- Channel sub-editor ---
 
 func (m *SettingsModel) visibleChannelFields() []channelFieldDef {
-	platform := "youtube"
-	if m.channelEditValues != nil {
-		if p, ok := m.channelEditValues["platform"]; ok {
-			platform = p
-		}
-	}
-	var fields []channelFieldDef
-	for _, f := range channelFields {
-		if f.platformFilter == "" || f.platformFilter == platform {
-			fields = append(fields, f)
-		}
-	}
-	return fields
+	return filterChannelFieldsByPlatform(channelFields, m.channelEditValues)
 }
 
 func channelToValues(ch config.ChannelConfig) map[string]string {
@@ -883,8 +893,11 @@ func valuesToChannel(vals map[string]string) config.ChannelConfig {
 		Platform: vals["platform"],
 	}
 	if vals["enabled"] == "No" {
-		f := false
-		ch.Enabled = &f
+		boolFalse := false
+		ch.Enabled = &boolFalse
+	} else if vals["enabled"] == "Yes" {
+		boolTrue := true
+		ch.Enabled = &boolTrue
 	}
 	if vals["terms"] != "" {
 		ch.Terms = config.ChannelTerms{Simple: vals["terms"]}
@@ -1081,22 +1094,7 @@ func (m *SettingsModel) HandleChannelResolved(id, name, platform string, err err
 }
 
 func (m *SettingsModel) cycleChannelOption(field channelFieldDef, direction int) {
-	if field.options == nil {
-		return
-	}
-	cur := m.channelEditValues[field.key]
-	if cur == "" && len(field.options) > 0 {
-		cur = field.options[0]
-	}
-	idx := 0
-	for i, opt := range field.options {
-		if opt == cur {
-			idx = i
-			break
-		}
-	}
-	next := (idx + direction + len(field.options)) % len(field.options)
-	m.channelEditValues[field.key] = field.options[next]
+	cycleFieldOption(m.channelEditValues, field.key, field.options, direction)
 }
 
 // --- Notification sub-editor ---
@@ -1247,8 +1245,6 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 
 func (m *SettingsModel) handleSecurityKey(key string) string {
 	switch m.secMode {
-	case securityStatus:
-		return m.handleSecurityStatusKey(key)
 	case securitySet:
 		return m.handleSecuritySetKey(key)
 	case securityRemove:
@@ -1259,18 +1255,6 @@ func (m *SettingsModel) handleSecurityKey(key string) string {
 
 func (m *SettingsModel) hasPassword() bool {
 	return m.cfg != nil && m.cfg.Network.PasswordHash != ""
-}
-
-func (m *SettingsModel) handleSecurityStatusKey(key string) string {
-	// Security status mode is no longer used as a standalone section.
-	// S/R is handled directly in the Network section's HandleKey.
-	// This function handles Esc from security sub-modes back to field mode.
-	switch key {
-	case keyEsc:
-		m.secMode = securityStatus
-		return ""
-	}
-	return ""
 }
 
 func (m *SettingsModel) handleSecuritySetKey(key string) string {
@@ -1433,6 +1417,9 @@ func (m *SettingsModel) View() string {
 	if boxW < 40 {
 		boxW = 40
 	}
+	if boxW > m.width {
+		boxW = m.width
+	}
 	innerW := boxW - 4
 	h := m.height - 2
 	if h < 10 {
@@ -1458,6 +1445,7 @@ func (m *SettingsModel) View() string {
 		if m.secMode != securityStatus {
 			content.WriteString(m.renderSecurity(innerW))
 		} else {
+			// h-12: extra 4 lines vs default h-8 for the compact security sub-section below
 			content.WriteString(m.renderFields(sec, innerW, h-12))
 			content.WriteString("\n")
 			content.WriteString(m.renderSecurityCompact(innerW))
@@ -1473,8 +1461,6 @@ func (m *SettingsModel) View() string {
 	// Status line
 	content.WriteString("\n")
 	switch m.status {
-	case saveSaving:
-		content.WriteString(lipgloss.NewStyle().Foreground(ColorCyan).Render("Saving..."))
 	case saveSaved:
 		content.WriteString(lipgloss.NewStyle().Foreground(ColorGreen).Render("Saved"))
 	case saveError:
@@ -1524,8 +1510,9 @@ func (m *SettingsModel) renderHeader(w int) string {
 
 	right := DimStyle.Render(fmt.Sprintf("%d/%d", m.sectionIndex+1, len(sections)))
 
-	// Build full header
-	return left + tabs + " " + right
+	// Build full header, truncate to available width
+	header := left + tabs + " " + right
+	return lipgloss.NewStyle().MaxWidth(w).Render(header)
 }
 
 func (m *SettingsModel) renderHintText() string {
@@ -1594,7 +1581,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		var value string
 		switch fd.ftype {
 		case fieldToggle:
-			value = renderToggle(m.values[fd.key], selected)
+			value = renderToggle(m.values[fd.key])
 		case fieldCycle:
 			value = renderCycleOptions(fd.options, m.values[fd.key], selected)
 		default:
@@ -1658,7 +1645,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderToggle(value string, focused bool) string {
+func renderToggle(value string) string {
 	if value == "Yes" {
 		return lipgloss.NewStyle().Foreground(ColorGreen).Render("Yes") + DimStyle.Render(" / No")
 	}
@@ -1701,6 +1688,7 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 		return strings.Join(lines, "\n")
 	}
 
+	channelCount := 0
 	for i, ch := range m.channels {
 		selected := i == m.channelIndex
 
@@ -1749,7 +1737,8 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 		}
 
 		lines = append(lines, line)
-		if len(lines) >= maxH {
+		channelCount++
+		if channelCount >= maxH {
 			break
 		}
 	}
@@ -1803,11 +1792,11 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		var value string
 		switch field.ftype {
 		case fieldToggle:
-			value = renderToggle(val, isFocused)
+			value = renderToggle(val)
 		case fieldCycle:
 			value = renderCycleOptions(field.options, val, isFocused)
 		default:
-			valueMaxW := w - len(prefix) - padW - 2
+			valueMaxW := w - runewidth.StringWidth(prefix) - padW - 2
 			if valueMaxW < 5 {
 				valueMaxW = 5
 			}
@@ -1899,7 +1888,7 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 	if urlFocused {
 		urlLabelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
 	}
-	urlMaxW := w - len(urlPrefix) - 16 - 2
+	urlMaxW := w - runewidth.StringWidth(urlPrefix) - 16 - 2
 	if urlMaxW < 10 {
 		urlMaxW = 10
 	}
@@ -1910,12 +1899,11 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 	} else {
 		urlVal = renderInactiveInput(m.notifEditURL, urlMaxW, ColorWhite)
 	}
-	lines = append(lines, lipgloss.NewStyle().Foreground(func() lipgloss.Color {
-		if urlFocused {
-			return ColorCyan
-		}
-		return ColorWhite
-	}()).Render(urlPrefix)+urlLabelStyle.Render(padRight(urlLabel, 16))+urlVal)
+	prefixColor := ColorWhite
+	if urlFocused {
+		prefixColor = ColorCyan
+	}
+	lines = append(lines, lipgloss.NewStyle().Foreground(prefixColor).Render(urlPrefix)+urlLabelStyle.Render(padRight(urlLabel, 16))+urlVal)
 
 	// Events header
 	lines = append(lines, "")
