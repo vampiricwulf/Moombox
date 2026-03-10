@@ -303,7 +303,7 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 		}
 	}
 	if isActive && percent > 0 {
-		progressTextWidth = len(fmt.Sprintf("%.0f%% ", percent))
+		progressTextWidth = runewidth.StringWidth(fmt.Sprintf("%.0f%% ", percent))
 	}
 	tw := contentW - selectorWidth - iconWidth - progressTextWidth - platformTagWidth
 	if tw < 5 {
@@ -684,7 +684,7 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	progressTextWidth := 0
 	if showProgress {
 		progressText = fmt.Sprintf("%.0f%% ", percent)
-		progressTextWidth = len(progressText)
+		progressTextWidth = runewidth.StringWidth(progressText)
 	}
 
 	// Fixed widths for layout (match TS pre-calculation to avoid ANSI measuring)

@@ -1670,7 +1670,8 @@ func streamURL(j *database.Job) string {
 	}
 	if j.Platform == "twitch" {
 		if j.IsVod {
-			return "https://www.twitch.tv/videos/" + j.VideoID
+			vodID := strings.TrimPrefix(j.VideoID, "tw_v")
+			return "https://www.twitch.tv/videos/" + vodID
 		}
 		return "https://www.twitch.tv/" + j.ChannelName
 	}
@@ -1940,6 +1941,7 @@ func (a *App) recalcLayout() {
 	a.clientTokensDlg.SetSize(a.width, a.height)
 	a.setupWiz.SetSize(a.width, a.height)
 	a.ffmpegCheck.SetSize(a.width, a.height)
+	a.actionMenu.SetSize(a.width, a.height)
 	a.settings.SetSize(a.width, a.height)
 
 	// Store regions for mouse
@@ -2001,22 +2003,7 @@ func (a *App) View() string {
 
 	// Feedback / confirmation messages
 	if a.feedbackMsg != "" {
-		msgColor := ColorGreen
-		if strings.HasPrefix(a.feedbackMsg, "Press ") || strings.HasPrefix(a.feedbackMsg, "Action:") ||
-			strings.HasPrefix(a.feedbackMsg, "Request:") || strings.HasPrefix(a.feedbackMsg, "Open:") ||
-			strings.HasPrefix(a.feedbackMsg, "Quit:") {
-			msgColor = lipgloss.Color("#f1c40f") // yellow for chord feedback
-		} else if strings.Contains(a.feedbackMsg, "failed") {
-			msgColor = ColorRed
-		} else if strings.HasPrefix(a.feedbackMsg, "Cancelled:") {
-			msgColor = ColorRed
-		} else if strings.Contains(a.feedbackMsg, "deleted:") || strings.Contains(a.feedbackMsg, "Deleted:") {
-			msgColor = ColorGray
-		} else if strings.HasPrefix(a.feedbackMsg, "Can only") || strings.HasPrefix(a.feedbackMsg, "Trim only") ||
-			strings.HasPrefix(a.feedbackMsg, "No update") || strings.HasPrefix(a.feedbackMsg, "A trim is already") ||
-			strings.Contains(a.feedbackMsg, "no cookies acquired") {
-			msgColor = lipgloss.Color("#f1c40f") // yellow for warnings
-		}
+		msgColor := feedbackColor(a.feedbackMsg)
 		content = addOverlayMessage(content, a.width,
 			lipgloss.NewStyle().Foreground(msgColor).Render(a.feedbackMsg),
 		)
@@ -2034,6 +2021,40 @@ func addOverlayMessage(content string, width int, msg string) string {
 		lines[idx] = padded + strings.Repeat(" ", max(0, width-paddedW))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// feedbackColor returns the display color for a feedback message.
+// Order: error (red) > warning (yellow) > neutral (gray) > chord (yellow) > success (green).
+func feedbackColor(msg string) lipgloss.Color {
+	lower := strings.ToLower(msg)
+
+	// Chord feedback (yellow) — prefix match on known chord categories
+	if strings.HasPrefix(msg, "Press ") || strings.HasPrefix(msg, "Action:") ||
+		strings.HasPrefix(msg, "Request:") || strings.HasPrefix(msg, "Open:") ||
+		strings.HasPrefix(msg, "Quit:") {
+		return lipgloss.Color("#f1c40f")
+	}
+
+	// Errors (red) — cancelled jobs or any failure
+	if strings.HasPrefix(msg, "Cancelled:") || strings.Contains(lower, "failed") {
+		return ColorRed
+	}
+
+	// Deletions (gray)
+	if strings.Contains(lower, "deleted:") {
+		return ColorGray
+	}
+
+	// Warnings (yellow) — inability, conditions, advisory messages
+	if strings.HasPrefix(msg, "Can only") || strings.HasPrefix(msg, "Trim only") ||
+		strings.HasPrefix(msg, "No update") || strings.HasPrefix(msg, "A trim is already") ||
+		strings.Contains(lower, "no cookies acquired") ||
+		strings.HasPrefix(msg, "Already up to date") {
+		return lipgloss.Color("#f1c40f")
+	}
+
+	// Default: success (green)
+	return ColorGreen
 }
 
 // apiBaseURL returns the correct scheme + host for local API calls.
