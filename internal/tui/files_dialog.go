@@ -65,7 +65,20 @@ func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	}
 
 	sizeStr := formatFileSize(f.Size)
-	line := fmt.Sprintf("%s%s %s (%s)", prefix, typeStyle.Render(fmt.Sprintf("%-9s", typeStr)), f.RelPath, sizeStr)
+	typeTag := fmt.Sprintf("%-9s", typeStr)
+	suffix := " (" + sizeStr + ")"
+
+	// Truncate the variable-width path to fit (truncate plain text BEFORE
+	// assembling with styled type badge — truncateString uses runewidth
+	// which miscounts ANSI escape sequences).
+	fixedW := 2 + 9 + 1 + len(suffix) // prefix + typeTag + space + suffix (all ASCII)
+	pathW := m.Width() - fixedW
+	if pathW < 5 {
+		pathW = 5
+	}
+	relPath := truncateString(f.RelPath, pathW)
+
+	line := prefix + typeStyle.Render(typeTag) + " " + relPath + suffix
 
 	var style lipgloss.Style
 	if d.dialog != nil && d.dialog.deleteConfirmID == f.Path {
@@ -76,7 +89,7 @@ func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		style = lipgloss.NewStyle()
 	}
 
-	fmt.Fprint(w, style.Render(truncateString(line, m.Width())))
+	fmt.Fprint(w, style.Render(line))
 }
 
 // FilesDialogModel manages the orphaned files dialog.

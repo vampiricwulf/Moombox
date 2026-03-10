@@ -656,12 +656,13 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 		color = color.Background(lipgloss.Color("#333399")).Foreground(ColorWhite)
 	}
 
-	rendered := color.Render(line)
+	// Pad line to full width BEFORE styling so the background color
+	// extends to the right edge when selected.
 	lineW := runewidth.StringWidth(line)
 	if lineW < maxW {
-		rendered += strings.Repeat(" ", maxW-lineW)
+		line += strings.Repeat(" ", maxW-lineW)
 	}
-	return rendered
+	return color.Render(line)
 }
 
 func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived bool, maxW int) string {

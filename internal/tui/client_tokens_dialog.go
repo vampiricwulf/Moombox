@@ -50,17 +50,20 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 		}
 	}
 
-	// Truncate label to fit
-	maxLabelW := m.Width() - 30
-	if maxLabelW < 10 {
-		maxLabelW = 10
-	}
-	label := truncateString(ct.Label, maxLabelW)
-
 	ipStr := ct.LastIP
 	if ipStr == "" {
 		ipStr = "—"
 	}
+
+	// Compute label width from actual suffix widths (truncate plain text
+	// BEFORE assembling with styled parts — truncateString uses runewidth
+	// which miscounts ANSI escape sequences from DimStyle.Render).
+	suffixW := 2 + lipgloss.Width(lastUsed) + 2 + lipgloss.Width(ipStr) // "  " + lastUsed + "  " + ipStr
+	maxLabelW := m.Width() - 2 - suffixW // 2 for prefix
+	if maxLabelW < 10 {
+		maxLabelW = 10
+	}
+	label := truncateString(ct.Label, maxLabelW)
 
 	line := fmt.Sprintf("%s%s  %s  %s", prefix, label, DimStyle.Render(lastUsed), DimStyle.Render(ipStr))
 
@@ -73,7 +76,7 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 		style = lipgloss.NewStyle()
 	}
 
-	fmt.Fprint(w, style.Render(truncateString(line, m.Width())))
+	fmt.Fprint(w, style.Render(line))
 }
 
 // ClientTokensDialogModel manages the client tokens dialog.
