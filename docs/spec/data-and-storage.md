@@ -864,7 +864,7 @@ A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent 
 Separate from the database's `jobLogs`, the Logger also maintains per-job buffers:
 
 - `LogForJob(jobID, level, msg, args...)`: logs normally AND appends to the job-specific buffer.
-- Per-job buffers are capped at 500 lines (`maxJobLogLines`). When exceeded, the oldest 100 entries are removed.
+- Per-job buffers are capped at 200 lines. When exceeded, trimmed to the last 100 entries.
 - `PruneJobLogs(activeIDs)` removes buffers for jobs no longer active.
 
 ### Pub/Sub
