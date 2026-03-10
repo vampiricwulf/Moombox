@@ -58,7 +58,7 @@ This is the end-to-end lifecycle of how Moombox archives a stream:
 
 2. **Stream Detection** — When a monitored channel goes live, schedules an upcoming stream, or publishes a new VOD, Moombox creates a job in its SQLite database. For upcoming streams, Moombox waits and begins downloading when the stream actually starts.
 
-3. **Stream Probing** — Before downloading, Moombox probes the stream to determine its status, available qualities, and required authentication. For YouTube, this involves the Innertube Player API across multiple client types (WEB, ANDROID, IOS, TV_EMBEDDED, MWEB, WEB_CREATOR) to find the best available formats. For Twitch, this involves GQL queries to get HLS playlist URLs.
+3. **Stream Probing** — Before downloading, Moombox probes the stream to determine its status, available qualities, and required authentication. For YouTube, this involves the Innertube Player API across multiple client types (TV_DOWNGRADED, WEB, WEB_CREATOR, ANDROID_VR) to find the best available formats. For Twitch, this involves GQL queries to get HLS playlist URLs.
 
 4. **Segment Download** — Moombox downloads the stream as it happens:
    - **YouTube DASH** — Sequential segment download, requesting the next segment as soon as the current one completes. Supports catch-up mode (6 parallel downloads) when falling behind.

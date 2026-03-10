@@ -508,8 +508,11 @@ The `pollForJobs` goroutine runs a safety-net check every 60 seconds to catch an
 
 Rapid job updates (progress, sequence numbers, etc.) are coalesced into batched writes:
 
-1. `UpdateJobFields()` calls write the updated `Job` object to `updateCh` (buffered channel, capacity 100)
-2. Non-blocking send: if channel is full, the update is dropped (acceptable because progress is high-frequency, low-criticality)
+Two update mechanisms serve different needs:
+
+**`UpdateJob()` — batched via channel (full job writes):**
+1. Writes the `Job` object to `updateCh` (buffered channel, capacity 100), non-blocking
+2. If channel is full, falls back to synchronous direct write
 3. `batchUpdateLoop()` goroutine:
    - Blocks on `updateCh` until first item arrives (zero CPU when idle)
    - Starts a 100ms coalesce timer
@@ -517,6 +520,12 @@ Rapid job updates (progress, sequence numbers, etc.) are coalesced into batched 
    - On timer fire: opens a transaction, writes all pending updates, commits
    - Notifies `OnJobUpdate` subscribers for each successfully persisted job
 4. On database close: channel is closed, remaining items are flushed
+
+**`UpdateJobFields()` — synchronous direct writes (partial updates):**
+1. Executes SQL immediately under `db.mu` lock (no channel, no batching)
+2. Builds dynamic SET clause from `fieldToColumn` map
+3. Re-reads the full job row after write (subscribers need all fields)
+4. Notifies `OnJobUpdate` subscribers synchronously
 
 This pattern reduces SQLite write transactions from potentially hundreds per second (during active downloads) to approximately 10 per second.
 

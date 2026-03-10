@@ -664,7 +664,7 @@ The service tracks previous auth state per platform. When a platform transitions
 
 **Timing:**
 
-- Default refresh interval: 30 minutes (overridden by config `cookies.refresh_interval`).
+- Default refresh interval: 30 minutes (hardcoded; the config `cookies.refresh_interval` controls the auto-cookie periodic refresh, not the auth-check refresh service).
 - Auth check timeout: 15 seconds per platform.
 - Initial check runs immediately on `Start()`.
 
@@ -806,11 +806,12 @@ The `messageCount` field in the JSON header is padded to 20 characters with trai
 
 ```go
 type ChatResumeState struct {
-    LastTimestampUsec string `json:"lastTimestampUsec"`
-    MessageCount      int    `json:"messageCount"`
-    Continuation      string `json:"continuation"`
-    Timestamp         int64  `json:"timestamp"`
-    VideoID           string `json:"videoId"`
+    LastTimestampUsec string   `json:"lastTimestampUsec"`
+    MessageCount      int      `json:"messageCount"`
+    Continuation      string   `json:"continuation"`
+    Timestamp         int64    `json:"timestamp"`
+    VideoID           string   `json:"videoId"`
+    RecentIDs         []string `json:"recentIds"`
 }
 ```
 

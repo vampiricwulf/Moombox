@@ -218,7 +218,7 @@ The chord system is a three-state finite automaton:
 | `A C` | Cancel Job | Yes | Yes | Status is not Finished, Cancelled, or Error |
 | `A D` | Delete Job | Yes | Yes | Any job |
 | `A T` | Trim Video | Yes | No | Status is Finished and has output file |
-| `A K` | Manage Client Tokens | No | No | — |
+| `A K` | Manage Client Tokens | No | No | Client tokens callback configured |
 | `A O` | Browse Orphaned Files | No | No | — |
 
 **Request chords (R prefix):**
@@ -352,13 +352,13 @@ This means the TUI has the same API surface as the Web UI — it calls the same 
 
 The status bar occupies the bottom row of the terminal. It displays at-a-glance system health and state:
 
+The left side shows chord hints (key labels for A, R, O, F, M, Tab, backtick, ?) — compact mode when width < 100 chars. The right side shows metrics and status:
+
 | Element | Content | Behavior |
 |---------|---------|----------|
-| Connection | Icon indicating online/offline | Reflects WebSocket-equivalent connection to backend |
-| Disk Usage | Percentage of output drive used | Shows as warning (yellow) above threshold, critical (red) above higher threshold |
-| Monitor Timers | Next check times for Feed, DECAPI, Twitch monitors | Counts down to next scheduled check |
-| Cookie Status | YouTube and Twitch auth status | Shows whether cookies are valid, expired, or missing for each platform |
-| Update Indicator | New version available | Appears when an update has been detected |
+| Disk Usage | Percentage + free space (GB) | Green normally, yellow (warn) above threshold, red (critical) above higher threshold |
+| Active Downloads | Count of downloading/live/muxing jobs | Only shown when > 0 |
+| Cookie Status | YouTube and Twitch auth indicators | Shows whether cookies are valid, expired, or missing for each platform |
 
 ---
 
@@ -374,7 +374,7 @@ The Web UI establishes a WebSocket connection to the server on page load. The se
 
 **Detached context:** The accepted WebSocket connection uses `context.Background()` rather than the HTTP request context. This prevents the connection from being killed by the server's `ReadTimeout`, which would otherwise close long-lived connections.
 
-**Initial state:** Immediately after connection, the server sends an `initial_state` message containing the full current state: all jobs, buffered log lines (up to 200 from the ring buffer), config, and monitor check schedule. This allows the client to hydrate without making separate REST calls.
+**Initial state:** Immediately after connection, the server sends an `initial_state` message containing the full current state: all jobs, buffered log lines (up to 200 from the ring buffer), and monitor check schedule (next check times for Feed, DECAPI, and Twitch monitors). This allows the client to hydrate without making separate REST calls.
 
 ### Message Format
 

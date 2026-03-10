@@ -215,7 +215,7 @@ All monitors share these patterns:
 
 ### Download Pipeline Detail
 
-**StreamProcessor** handles the pre-download phase. For YouTube: probes video status using `ProbeVideoStatus()` (ANDROID_VR client, no cookies needed), classifies the result as live/upcoming/VOD/not-a-stream/members-only. For upcoming streams, enters a `waitForLive` loop: polls every 30 seconds plus random jitter (up to 30s), starts chat download during the wait phase (so chat messages from the "waiting room" are captured), and uses chat surge detection (30 messages within a 15-second window) to trigger early re-probing — a burst of chat messages often indicates the stream just went live. When authenticated, uses `TV_DOWNGRADED` client for members-only upcoming stream polling. The processor tracks consecutive probe errors and gives up after 10 failures. For Twitch: manual adds poll the channel via GQL every 15 seconds (plus 5s jitter) until the channel goes live or context is cancelled. Monitor-discovered Twitch streams skip this phase since the monitor already confirmed live status.
+**StreamProcessor** handles the pre-download phase. For YouTube: probes video status using `ProbeVideoStatus()` (ANDROID_VR client, no cookies needed), classifies the result as live/upcoming/VOD/not-a-stream/members-only. For upcoming streams, enters a `waitForLive` loop: polls at a dynamic interval based on time until scheduled start (10 minutes if >1h away, 5 minutes if ≤1h, 1 minute if ≤5min) plus random jitter (up to 30s), starts chat download during the wait phase (so chat messages from the "waiting room" are captured), and uses chat surge detection (30 messages within a 15-second window) to trigger early re-probing — a burst of chat messages often indicates the stream just went live. When authenticated, uses `TV_DOWNGRADED` client for members-only upcoming stream polling. The processor tracks consecutive probe errors and gives up after 10 failures. For Twitch: manual adds poll the channel via GQL every 15 seconds (plus 5s jitter) until the channel goes live or context is cancelled. Monitor-discovered Twitch streams skip this phase since the monitor already confirmed live status.
 
 **DownloadOrchestrator** manages the full download lifecycle after the stream processor confirms it is ready. It selects a download strategy based on the stream type:
 - **YouTube live DASH** — Sequential segment polling with head-probing
@@ -458,7 +458,7 @@ The TUI uses a chord-based keybinding system with a single source of truth:
 - `buildMenuItems()` in `app.go` defines all chords, their display text, action menu entries, hint bar text, and help text in one place.
 - `dispatchAction(chord, job)` is the unified handler that executes the action for any chord.
 
-**Chord prefixes:** A=Action (AC=Cancel, AD=Delete, AR=Retry, AA=Add), R=Request (RC=Recheck Cookies, RF=Force Refresh), O=Open (OB=Browser, OF=Folder), Q=Quit (QQ=Quit confirm). **Single keys:** F=Filter, M=Action Menu, `=Settings, ?=Help. **Confirm chords** require a third keypress within 3 seconds (e.g., "Q" then "Q" within 3s to quit).
+**Chord prefixes:** A=Action (AC=Cancel, AD=Delete, AR=Retry, AA=Add), R=Request (RC=Recheck Cookies, RF=Force Refresh), O=Open (OF=Folder, OS=Stream Page, OW=Web UI), Q=Quit (QQ=Quit confirm). **Single keys:** F=Filter, M=Action Menu, `=Settings, ?=Help. **Confirm chords** require a third keypress within 3 seconds (e.g., "Q" then "Q" within 3s to quit).
 
 ### WebSocket Protocol
 

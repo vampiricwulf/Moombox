@@ -14,7 +14,7 @@ These are hard rules that govern all platform service integrations:
 - **BotGuard has a triple cache with auto-eviction.** Session cache (6-hour TTL, keyed by contentBinding), minter cache (dynamic TTL from Google's API, keyed by contentBinding, auto-evicted via `time.AfterFunc`), and inflight dedup (concurrent requests for the same key wait on a shared channel). Minters hold live Goja VMs that must be explicitly shut down on eviction.
 - **Cipher has a 3-VM LRU with AST + regex fallback.** Memory cache holds at most 3 compiled solver VMs keyed by SHA256 of the player URL. Disk cache (`~/.cache/yt-cipher/player_cache/`) has a 14-day TTL. Compilation is mutex-serialized to prevent thundering herd. The Goja VM inside each Solvers struct is mutex-protected because Goja is not thread-safe.
 - **All API keys and client configurations live in `internal/constants/`.** No API keys, client IDs, hashes, or endpoint URLs are hardcoded outside that package. Any new platform integration must add its constants there.
-- **Chat dedup uses 5000 recent IDs with deterministic eviction.** Both YouTube (`internal/chat/`) and Twitch (`internal/twitch/chat.go`) maintain a map of seen message IDs plus an ordered slice tracking insertion order. When the set exceeds 5000 entries, the oldest entries (by insertion order) are removed. This matches JavaScript `Set` insertion-order semantics from the original TypeScript codebase.
+- **Chat dedup uses recent IDs with deterministic eviction.** Both YouTube (`internal/chat/`) and Twitch (`internal/twitch/chat.go`) maintain a map of seen message IDs plus an ordered slice tracking insertion order. YouTube prunes aggressively: when the set exceeds 5000 entries, the oldest entries are removed immediately. Twitch uses lazy pruning: the set grows to 10,000 entries (2x the 5000 constant) before culling back to 5000. Both match JavaScript `Set` insertion-order semantics from the original TypeScript codebase.
 - **All HTTP responses are size-limited.** GQL and API responses are capped at 5 MB via `io.LimitReader`. Challenge and integrity token responses are capped at 1 MB. This prevents unbounded memory allocation from malformed responses.
 
 ---
@@ -847,8 +847,8 @@ Identical to Twitch chat: `seenIDs` map + `seenOrder` slice. Cull when exceeding
 
 | Mode | Max Consecutive Errors | Backoff |
 |------|----------------------|---------|
-| Live | 20 | Exponential, 5s * errors, cap 60s |
-| VOD/Replay | 5 | Exponential, 5s * errors, cap 30s |
+| Live | 20 | Linear, 5s × consecutive errors, cap 60s |
+| VOD/Replay | 5 | Linear, 5s × consecutive errors, cap 30s |
 
 ### Resume State
 
