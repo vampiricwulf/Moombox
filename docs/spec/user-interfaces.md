@@ -48,6 +48,7 @@ The file structure:
 | `web/public/modules/imports.js` | ~210 | Zip archive import. Upload a zip file containing video/chat/metadata to create a job from external content. |
 | `web/public/modules/utils.js` | ~70 | Shared formatting helpers (durations, file sizes, dates, etc.). |
 | `web/public/moombox.css` | ~2,090 | All styles. Includes desktop layout, mobile responsive breakpoints, dark/light theme variables, and component-specific styles. |
+| `web/public/favicon.svg` | — | SVG favicon for the web dashboard. |
 
 ### Embedding and Serving
 

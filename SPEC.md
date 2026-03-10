@@ -147,7 +147,7 @@ internal/
   notifications/   <- Manager + Discord webhook sender
   web/             <- chi server, WebSocket hub, auth, middleware, rate limiter
   web/routes/      <- HTTP route handlers (jobs, auth, config, cookies, update, etc.)
-  tui/             <- 2-over-1 panel layout, 8+ overlays, chord system, Charm ecosystem
+  tui/             <- 2-over-1 panel layout, 10 overlays, chord system, Charm ecosystem
   goja/            <- JS runtime shims (minimal DOM, TextEncoder, timers)
   disk/            <- Windows disk space queries (kernel32 GetDiskFreeSpaceExW)
   errors/          <- Typed error hierarchy with Expected/internal distinction
@@ -608,7 +608,7 @@ Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 37-entry 
 
 **Per-job log buffers:** The database maintains in-memory log buffers per job (max 500 lines per job). `RouteLogToJobs(line)` scans each log line for known job IDs and appends matching lines to the corresponding buffer. `TrackJobForLogs(jobID)` registers a job ID for log routing. `PruneJobLogs(activeIDs)` removes buffers for jobs that no longer exist. These per-job logs are served via `GET /api/jobs/{id}/logs` and displayed in the TUI job details panel.
 
-**Job table columns (47 fields):** id, video_id, url, title, channel_name, platform, status, progress, percent, eta, speed, error, created_at, updated_at, last_video_seq, last_audio_seq, total_video_seq, total_audio_seq, is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time, length_seconds, download_started_at, thumbnail_url, description, output_file, filename, output_directory, video_width, video_height, video_fps, file_size, chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file, twitch_quality, twitch_category, channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at, quality_preference.
+**Job table columns (49 fields):** id, video_id, url, title, channel_name, platform, status, progress, percent, eta, speed, error, created_at, updated_at, last_video_seq, last_audio_seq, total_video_seq, total_audio_seq, is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time, length_seconds, download_started_at, thumbnail_url, description, output_file, filename, output_directory, video_width, video_height, video_fps, file_size, chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file, twitch_quality, twitch_category, channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at, quality_preference.
 
 **Additional tables:** `history` (video IDs seen by monitors, prevents re-adding), `segments` (multi-segment recordings, schema v5), `client_tokens` (persistent auth tokens, schema v6), `trims` (clip extractions from finished recordings).
 
