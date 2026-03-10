@@ -46,25 +46,54 @@ func TestFormatBytes(t *testing.T) {
 }
 
 func TestFormatSpeed(t *testing.T) {
-	result := FormatSpeed(1048576)
-	if result != "1.0 MB/s" {
-		t.Errorf("FormatSpeed(1048576) = %q, want %q", result, "1.0 MB/s")
+	tests := []struct {
+		bytesPerSec float64
+		expected    string
+	}{
+		{0, "0 B/s"},
+		{-1, "0 B/s"},
+		{-999, "0 B/s"},
+		{500, "500 B/s"},
+		{1024, "1.0 KB/s"},
+		{1048576, "1.0 MB/s"},
+		{1572864, "1.5 MB/s"},
+		{1073741824, "1.00 GB/s"},
+		{0.5, "0 B/s"}, // float64 < 1 truncates to 0 bytes via int64 cast
 	}
 
-	result = FormatSpeed(0)
-	if result != "0 B/s" {
-		t.Errorf("FormatSpeed(0) = %q, want %q", result, "0 B/s")
+	for _, tt := range tests {
+		result := FormatSpeed(tt.bytesPerSec)
+		if result != tt.expected {
+			t.Errorf("FormatSpeed(%v) = %q, want %q", tt.bytesPerSec, result, tt.expected)
+		}
 	}
 }
 
 func TestFormatETA(t *testing.T) {
-	result := FormatETA(312)
-	if result != "5m 12s" {
-		t.Errorf("FormatETA(312) = %q, want %q", result, "5m 12s")
+	tests := []struct {
+		seconds  float64
+		expected string
+	}{
+		{0, ""},
+		{-1, ""},
+		{-100, ""},
+		{1, "1s"},
+		{59, "59s"},
+		{60, "1m 0s"},
+		{312, "5m 12s"},
+		{3600, "1h 0m"},
+		{3661, "1h 1m"},
+		{86400, "24h 0m"}, // exactly 24h — boundary (> 86400, not >=)
+		{86401, ""},       // over 24h
+		{100000, ""},    // way over 24h
+		{86399, "23h 59m"}, // just under 24h
+		{0.5, "0s"},    // fractional second truncates to 0ms via int64
 	}
 
-	result = FormatETA(0)
-	if result != "" {
-		t.Errorf("FormatETA(0) = %q, want empty", result)
+	for _, tt := range tests {
+		result := FormatETA(tt.seconds)
+		if result != tt.expected {
+			t.Errorf("FormatETA(%v) = %q, want %q", tt.seconds, result, tt.expected)
+		}
 	}
 }

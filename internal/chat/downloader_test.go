@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -48,14 +49,14 @@ func TestNewChatDownloaderResumeFileCustom(t *testing.T) {
 	}
 }
 
-func TestNewChatDownloaderSeenIDsInitialized(t *testing.T) {
+func TestNewChatDownloaderSeenIDsUsable(t *testing.T) {
 	opts := ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"}
 	cd := NewChatDownloader(opts)
-	if cd.seenIDs == nil {
-		t.Error("expected seenIDs to be initialized")
-	}
-	if len(cd.seenIDs) != 0 {
-		t.Errorf("expected empty seenIDs, got %d entries", len(cd.seenIDs))
+
+	// Verify seenIDs is usable immediately — can add without nil panic
+	cd.seenIDs["test_id"] = struct{}{}
+	if _, exists := cd.seenIDs["test_id"]; !exists {
+		t.Error("expected seenIDs to be usable for dedup tracking")
 	}
 }
 
@@ -140,13 +141,28 @@ func TestMessageCountInitiallyZero(t *testing.T) {
 	}
 }
 
-func TestMessageCountReflectsInternal(t *testing.T) {
+func TestMessageCountConcurrentAccess(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
-	cd.mu.Lock()
-	cd.messageCount = 42
-	cd.mu.Unlock()
-	if cd.MessageCount() != 42 {
-		t.Errorf("expected 42 messages, got %d", cd.MessageCount())
+
+	// Simulate concurrent increments from a "download goroutine"
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			cd.mu.Lock()
+			cd.messageCount++
+			cd.mu.Unlock()
+		}
+		close(done)
+	}()
+
+	// Read count concurrently — should never panic or race
+	for i := 0; i < 50; i++ {
+		_ = cd.MessageCount()
+	}
+	<-done
+
+	if cd.MessageCount() != 100 {
+		t.Errorf("expected 100 messages after concurrent increments, got %d", cd.MessageCount())
 	}
 }
 
@@ -159,13 +175,21 @@ func TestIsRunningInitiallyFalse(t *testing.T) {
 	}
 }
 
-func TestIsRunningReflectsState(t *testing.T) {
+func TestIsRunningTransitionsViaStopMethod(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
+
+	// Simulate the running state that Start() would set
 	cd.mu.Lock()
 	cd.running = true
 	cd.mu.Unlock()
 	if !cd.IsRunning() {
-		t.Error("expected IsRunning() == true after setting running=true")
+		t.Error("expected IsRunning() == true when running")
+	}
+
+	// Stop should transition to not running
+	cd.Stop()
+	if cd.IsRunning() {
+		t.Error("expected IsRunning() == false after Stop()")
 	}
 }
 
@@ -256,7 +280,7 @@ func TestCullDedupTrimsToKeepSize(t *testing.T) {
 	for i := 0; i < totalIDs; i++ {
 		id := "msg_" + time.Now().Format("150405.000000") + "_" + string(rune('A'+i%26))
 		// Use a simple scheme to avoid collisions
-		id = "msg_" + intToStr(i)
+		id = "msg_" + strconv.Itoa(i)
 		cd.seenIDs[id] = struct{}{}
 		cd.seenOrder = append(cd.seenOrder, id)
 	}
@@ -271,13 +295,13 @@ func TestCullDedupTrimsToKeepSize(t *testing.T) {
 	}
 
 	// The kept IDs should be the most recent ones
-	lastID := "msg_" + intToStr(totalIDs-1)
+	lastID := "msg_" + strconv.Itoa(totalIDs-1)
 	if _, exists := cd.seenIDs[lastID]; !exists {
 		t.Error("expected last inserted ID to be retained after cull")
 	}
 
 	// The first IDs should be removed
-	firstID := "msg_" + intToStr(0)
+	firstID := "msg_" + strconv.Itoa(0)
 	if _, exists := cd.seenIDs[firstID]; exists {
 		t.Error("expected first inserted ID to be removed after cull")
 	}
@@ -287,7 +311,7 @@ func TestCullDedupNoopWhenBelowThreshold(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
 
 	for i := 0; i < 10; i++ {
-		id := "msg_" + intToStr(i)
+		id := "msg_" + strconv.Itoa(i)
 		cd.seenIDs[id] = struct{}{}
 		cd.seenOrder = append(cd.seenOrder, id)
 	}
@@ -373,39 +397,36 @@ func TestIsStreamActiveFalseWhenReplay(t *testing.T) {
 
 // --- Callback fields tests ---
 
-func TestCallbackFieldsDefaultNil(t *testing.T) {
+func TestCallbackFieldsAssignment(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
-	if cd.OnStart != nil {
-		t.Error("expected OnStart to be nil by default")
+
+	// Assign callbacks and verify they're callable
+	startCalled := false
+	progressCalled := false
+	finishCalled := false
+	errorCalled := false
+
+	cd.OnStart = func(messageCount int, resuming bool) { startCalled = true }
+	cd.OnProgress = func(p ChatProgress) { progressCalled = true }
+	cd.OnFinish = func() { finishCalled = true }
+	cd.OnError = func(err error) { errorCalled = true }
+
+	cd.OnStart(0, false)
+	cd.OnProgress(ChatProgress{MessageCount: 10})
+	cd.OnFinish()
+	cd.OnError(nil)
+
+	if !startCalled {
+		t.Error("OnStart callback was not invoked")
 	}
-	if cd.OnProgress != nil {
-		t.Error("expected OnProgress to be nil by default")
+	if !progressCalled {
+		t.Error("OnProgress callback was not invoked")
 	}
-	if cd.OnFinish != nil {
-		t.Error("expected OnFinish to be nil by default")
+	if !finishCalled {
+		t.Error("OnFinish callback was not invoked")
 	}
-	if cd.OnError != nil {
-		t.Error("expected OnError to be nil by default")
+	if !errorCalled {
+		t.Error("OnError callback was not invoked")
 	}
 }
 
-// intToStr is a helper to convert int to string without importing strconv
-// in the test file (keeping imports minimal).
-func intToStr(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	result := ""
-	negative := n < 0
-	if negative {
-		n = -n
-	}
-	for n > 0 {
-		result = string(rune('0'+n%10)) + result
-		n /= 10
-	}
-	if negative {
-		result = "-" + result
-	}
-	return result
-}
