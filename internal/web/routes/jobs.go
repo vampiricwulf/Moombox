@@ -1760,6 +1760,64 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*con
 		jsonError(rw, "channel not found", http.StatusNotFound)
 	})
 
+	// PUT /api/config/channels/reorder
+	r.Put("/api/config/channels/reorder", func(rw http.ResponseWriter, req *http.Request) {
+		var body struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			jsonError(rw, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(body.IDs) != len(cfg.Channels) {
+			jsonError(rw, "ids count must match channels count", http.StatusBadRequest)
+			return
+		}
+
+		// Reject duplicate IDs
+		seen := make(map[string]bool, len(body.IDs))
+		for _, id := range body.IDs {
+			if seen[id] {
+				jsonError(rw, "duplicate channel ID: "+id, http.StatusBadRequest)
+				return
+			}
+			seen[id] = true
+		}
+
+		// Build lookup of existing channels by ID
+		lookup := make(map[string]config.ChannelConfig, len(cfg.Channels))
+		for _, ch := range cfg.Channels {
+			lookup[ch.ID] = ch
+		}
+
+		// Reorder channels to match the provided ID order
+		reordered := make([]config.ChannelConfig, 0, len(body.IDs))
+		for _, id := range body.IDs {
+			ch, ok := lookup[id]
+			if !ok {
+				jsonError(rw, "unknown channel ID: "+id, http.StatusBadRequest)
+				return
+			}
+			reordered = append(reordered, ch)
+		}
+
+		cfg.Channels = reordered
+
+		if saveConfig != nil {
+			if err := saveConfig(cfg); err != nil {
+				jsonError(rw, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if onChannelChange != nil {
+			onChannelChange()
+		}
+
+		jsonResponse(rw, map[string]any{"success": true})
+	})
+
 	// POST /api/resolve-channel
 	r.Post("/api/resolve-channel", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {

@@ -224,7 +224,7 @@
                     <sl-icon name="inbox"></sl-icon>
                     <p>No jobs yet</p>
                     <p class="empty-state-subtext">Add a YouTube or Twitch URL to start archiving</p>
-                    <sl-button class="empty-state-cta" variant="primary" size="small" onclick="document.getElementById('add-video-btn').click()">
+                    <sl-button class="empty-state-cta" variant="primary" size="small" id="empty-state-add-btn">
                         <sl-icon slot="prefix" name="plus"></sl-icon> Add your first video
                     </sl-button>
                 </div>
@@ -1211,7 +1211,7 @@
         <!-- Add Webhook Dialog -->
         <sl-dialog id="webhook-dialog" label="Add Webhook">
             <sl-input id="webhook-url-input" label="Webhook URL" placeholder="https://..." type="url"></sl-input>
-            <sl-button slot="footer" variant="default" onclick="document.getElementById('webhook-dialog').hide()">Cancel</sl-button>
+            <sl-button slot="footer" variant="default" id="webhook-cancel-btn">Cancel</sl-button>
             <sl-button slot="footer" variant="primary" id="webhook-confirm-btn">Add</sl-button>
         </sl-dialog>
 

@@ -86,12 +86,16 @@ class MoomboxApp {
 
   setupEventListeners() {
     // Add video button
-    document.getElementById("add-video-btn").addEventListener("click", () => {
+    const addVideoBtnClick = () => {
       document.getElementById("add-dialog").show();
       document.getElementById("video-url-input").value = "";
       this.resetAdvancedOptions();
       setTimeout(() => document.getElementById("video-url-input").focus(), 100);
-    });
+    };
+    document.getElementById("add-video-btn").addEventListener("click", addVideoBtnClick);
+
+    // Empty state CTA delegates to the same add-video handler
+    document.getElementById("empty-state-add-btn")?.addEventListener("click", addVideoBtnClick);
 
     // Add video submit
     document
@@ -309,9 +313,10 @@ class MoomboxApp {
     const handleThumbError = (e) => {
       const img = e.target;
       if (img.tagName !== "IMG" || !img.closest(".thumb")) return;
-      img.removeEventListener("error", handleThumbError);
       const fallback = img.dataset.fallback;
-      if (fallback && img.src !== fallback) {
+      if (fallback) {
+        // Remove fallback so we don't loop if it also fails
+        delete img.dataset.fallback;
         img.src = fallback;
         img.classList.add("thumb-avatar");
       } else {
@@ -2073,10 +2078,9 @@ class MoomboxApp {
       if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
       if (e.target.contentEditable === "true") return;
 
-      // If a dialog is open, only handle Escape
-      const openDialog = document.querySelector("sl-dialog[open]");
-      if (openDialog) {
-        if (e.key === "Escape") openDialog.hide();
+      // If a dialog is open, block all shortcuts and let Shoelace
+      // handle Escape natively (respects sl-request-close prevention)
+      if (document.querySelector("sl-dialog[open]")) {
         return;
       }
 

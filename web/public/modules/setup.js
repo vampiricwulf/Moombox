@@ -547,7 +547,8 @@ export class SetupController {
       if (attempts >= maxAttempts) {
         const waiting = document.getElementById("restart-waiting");
         if (waiting) {
-          waiting.innerHTML = '<div style="text-align: center;"><p>Server did not come back within 2 minutes.</p><sl-button variant="primary" onclick="location.reload()">Reload Page</sl-button></div>';
+          waiting.innerHTML = '<div style="text-align: center;"><p>Server did not come back within 2 minutes.</p><sl-button variant="primary" id="restart-reload-btn">Reload Page</sl-button></div>';
+          document.getElementById("restart-reload-btn")?.addEventListener("click", () => location.reload());
         }
         return;
       }

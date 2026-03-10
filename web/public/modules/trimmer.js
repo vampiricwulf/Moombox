@@ -11,10 +11,16 @@ function fmtPrecise(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
+  const intS = Math.floor(s);
+  const intStr = String(intS).padStart(2, "0");
   // Show up to 3 decimal places, strip trailing zeros
-  const sStr = s === Math.floor(s)
-    ? String(Math.floor(s)).padStart(2, "0")
-    : s.toFixed(3).replace(/0+$/, "").padStart(2, "0");
+  let sStr;
+  if (s === intS) {
+    sStr = intStr;
+  } else {
+    const dec = (s - intS).toFixed(3).slice(1).replace(/0+$/, "");
+    sStr = dec.length > 1 ? intStr + dec : intStr;
+  }
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${sStr}`;
   return `${m}:${sStr}`;
 }

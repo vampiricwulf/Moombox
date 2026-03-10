@@ -163,6 +163,14 @@ export class SettingsController {
       addNotifBtn.addEventListener("click", () => this.addNotification());
     }
 
+    // Webhook cancel button
+    const webhookCancelBtn = document.getElementById("webhook-cancel-btn");
+    if (webhookCancelBtn) {
+      webhookCancelBtn.addEventListener("click", () => {
+        document.getElementById("webhook-dialog")?.hide();
+      });
+    }
+
     // yt-dlp plugin install
     const ytdlpInstallBtn = document.getElementById("ytdlp-install-btn");
     if (ytdlpInstallBtn) {
@@ -780,10 +788,9 @@ export class SettingsController {
           const [moved] = channels.splice(draggedIndex, 1);
           channels.splice(targetIndex, 0, moved);
 
-          // Save reordered channels
-          this.saveConfig().then(() => {
+          // Save reordered channels via dedicated endpoint
+          this.saveChannelOrder(channels).then(() => {
             this.renderChannelsList();
-            this.app.showToast("Channel order updated", "success");
           });
         }
       });
@@ -795,6 +802,26 @@ export class SettingsController {
         });
       });
     });
+  }
+
+  async saveChannelOrder(channels) {
+    try {
+      const response = await fetch("/api/config/channels/reorder", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: channels.map((c) => c.id) }),
+      });
+      if (response.ok) {
+        this.app.showToast("Channel order updated", "success");
+      } else {
+        const data = await response.json();
+        this.app.showToast(data.error || "Failed to save channel order", "danger");
+        this.app.loadConfig();
+      }
+    } catch (e) {
+      this.app.showToast("Failed to save channel order: " + e.message, "danger");
+      this.app.loadConfig();
+    }
   }
 
   showAddChannelDialog(channel = null) {
