@@ -80,19 +80,30 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 			"streamStatus", result.StreamStatus)
 	}
 
-	// Try WEB client for DASH manifest
-	webResult, webErr := p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts)
+	// Try web_safari client for DASH manifest (preferred over web)
+	webResult, webErr := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts)
+	webLabel := "web_safari"
+	webAuthLevel := AuthLevelWebSafari // 4 — preferred over standard web (5)
 	if webErr != nil {
-		p.logger.Warn("[PlayerApi] WEB client failed", slog.String("error", webErr.Error()))
-	} else {
-		p.logger.Debug("[PlayerApi] WEB client result",
+		p.logger.Warn("[PlayerApi] web_safari client failed, trying web fallback", slog.String("error", webErr.Error()))
+		// Fall back to standard web client
+		webResult, webErr = p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts)
+		webLabel = "web"
+		webAuthLevel = AuthLevelWeb // 5
+		if webErr != nil {
+			p.logger.Warn("[PlayerApi] WEB fallback also failed", slog.String("error", webErr.Error()))
+		}
+	}
+	if webErr == nil {
+		p.logger.Debug("[PlayerApi] Web client result",
+			"client", webLabel,
 			"formats", len(webResult.Formats),
 			"dashManifestUrl", webResult.DashManifestURL != "",
 			"hlsManifestUrl", webResult.HlsManifestURL != "",
 			"streamStatus", webResult.StreamStatus)
-		collectFormats(&formatPool, webResult.Formats, "web", AuthLevelWeb)
+		collectFormats(&formatPool, webResult.Formats, webLabel, webAuthLevel)
 		if webResult.DashManifestURL != "" && result.DashManifestURL == "" {
-			p.logger.Info("[PlayerApi] Got DASH manifest URL from WEB client", "videoID", videoID)
+			p.logger.Info("[PlayerApi] Got DASH manifest URL from web client", "videoID", videoID)
 			result.DashManifestURL = webResult.DashManifestURL
 		}
 	}
