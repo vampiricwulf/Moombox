@@ -352,6 +352,63 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 	return p.doRetryRequest(ctx, apiURL, body, headers, nil, "ANDROID_VR")
 }
 
+func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int) (*VideoInfo, error) {
+	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.apiKey)
+
+	// Fetch embed page for encryptedHostFlags
+	embedResult, err := FetchEmbedPage(ctx, videoID)
+	if err != nil {
+		p.logger.Warn("[PlayerApi] Failed to fetch embed page", slog.String("error", err.Error()))
+		// Continue without encryptedHostFlags — it may still work
+	}
+
+	headers := p.auth.GenerateAPIHeaders(constants.WebEmbeddedClient, ytcfg)
+	// Embedded requests need Referer from the embed URL
+	headers["Referer"] = fmt.Sprintf("%s/%s", constants.YouTubeURLs.Embed, videoID)
+
+	// Build client context with thirdParty embedUrl
+	clientCtx := make(map[string]interface{})
+	for k, v := range constants.WebEmbeddedClient.Context {
+		clientCtx[k] = v
+	}
+	if ytcfg != nil && ytcfg.VisitorData != "" {
+		clientCtx["visitorData"] = ytcfg.VisitorData
+	}
+
+	postData := map[string]interface{}{
+		"context": map[string]interface{}{
+			"client": clientCtx,
+			"thirdParty": map[string]interface{}{
+				"embedUrl": "https://www.reddit.com/",
+			},
+		},
+		"videoId":        videoID,
+		"contentCheckOk": true,
+		"racyCheckOk":    true,
+	}
+
+	// Build playback context with encryptedHostFlags
+	pbCtx := map[string]interface{}{
+		"html5Preference": "HTML5_PREF_WANTS",
+	}
+	if sts > 0 {
+		pbCtx["signatureTimestamp"] = sts
+	}
+	if embedResult != nil && embedResult.EncryptedHostFlags != "" {
+		pbCtx["encryptedHostFlags"] = embedResult.EncryptedHostFlags
+	}
+	postData["playbackContext"] = map[string]interface{}{
+		"contentPlaybackContext": pbCtx,
+	}
+
+	body, err := json.Marshal(postData)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request body: %w", err)
+	}
+
+	return p.doRetryRequest(ctx, apiURL, body, headers, ytcfg, "WEB_EMBEDDED")
+}
+
 // doRetryRequest performs an HTTP POST with retry logic (up to 4 attempts with
 // exponential backoff on 5xx/429 errors). Parses the player response on success.
 func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []byte, headers map[string]string, ytcfg *YtcfgData, clientLabel string) (*VideoInfo, error) {
