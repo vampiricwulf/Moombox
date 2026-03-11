@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,10 +22,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "A I":
 		a.feedbackMsg = ""
 		a.importDlg.SetSize(a.width, a.height)
-		startDir := "."
-		if a.cfg != nil && a.cfg.Paths.OutputDirectory != "" {
-			startDir = a.cfg.Paths.OutputDirectory
+		startDir := filepath.Join(".", "import")
+		if cwd, err := os.Getwd(); err == nil {
+			startDir = filepath.Join(cwd, "import")
 		}
+		_ = os.MkdirAll(startDir, 0o755)
 		return a, a.importDlg.Open(startDir)
 	case "A R":
 		if job != nil && a.OnRetryJob != nil {

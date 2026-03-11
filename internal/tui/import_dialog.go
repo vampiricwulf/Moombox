@@ -224,7 +224,7 @@ func (m *ImportDialogModel) View() string {
 		content.WriteString(TitleStyle.Render("Import Archive") + "\n")
 		content.WriteString(DimStyle.Render("Select a .zip archive to import") + "\n\n")
 		content.WriteString(m.picker.View() + "\n")
-		content.WriteString(DimStyle.Render("Enter: Select  Esc: Cancel"))
+		content.WriteString(DimStyle.Render("↑↓: Navigate  ←/Backspace: Back  →/Enter: Open/Select  Esc: Cancel"))
 
 	case 1:
 		content.WriteString(TitleStyle.Render("Import Archive — Metadata") + "\n")

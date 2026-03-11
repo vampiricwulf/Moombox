@@ -1,3 +1,3 @@
-### Bug Fixes
+### Improvements
 
-- **Fixed TUI chat count not updating for Upcoming jobs** — the progress overlay was gated behind `hasActiveDownloads()` which excluded Upcoming status, so early chat message counts never appeared in the job details panel
+- **Improved TUI import dialog** — filepicker now starts in a dedicated `import/` subdirectory (auto-created in CWD) instead of the output directory, and the keys hint bar shows all navigation controls (↑↓, ←/Backspace, →/Enter, Esc)
