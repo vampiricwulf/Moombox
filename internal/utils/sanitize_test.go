@@ -77,3 +77,37 @@ func TestSanitizeForFilename(t *testing.T) {
 		})
 	}
 }
+
+func TestSanitizeForFilename_WindowsReservedNames(t *testing.T) {
+	reserved := []string{
+		"CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+		"con", "prn", "aux", "nul", // lowercase variants
+	}
+	for _, name := range reserved {
+		t.Run(name, func(t *testing.T) {
+			got := SanitizeForFilename(name)
+			if got == name || got == strings.ToLower(name) {
+				t.Errorf("SanitizeForFilename(%q) = %q, should have been prefixed", name, got)
+			}
+			if !strings.HasPrefix(got, "_") {
+				t.Errorf("SanitizeForFilename(%q) = %q, expected underscore prefix", name, got)
+			}
+		})
+	}
+
+	// Reserved name with extension should also be guarded
+	got := SanitizeForFilename("con.txt")
+	if !strings.HasPrefix(got, "_") {
+		t.Errorf("SanitizeForFilename(%q) = %q, expected underscore prefix for reserved+ext", "con.txt", got)
+	}
+
+	// Non-reserved names should be untouched
+	for _, safe := range []string{"config", "console", "printer", "null_value"} {
+		got := SanitizeForFilename(safe)
+		if strings.HasPrefix(got, "_") {
+			t.Errorf("SanitizeForFilename(%q) = %q, should not be prefixed", safe, got)
+		}
+	}
+}

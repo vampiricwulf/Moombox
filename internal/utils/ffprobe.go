@@ -63,14 +63,18 @@ func ExtractVideoMetadata(ctx context.Context, ffprobePath, filePath string) (*V
 
 	meta := &VideoMetadata{}
 
-	// Parse duration
+	// Parse duration (non-fatal: zero is a valid fallback for malformed values)
 	if probe.Format.Duration != "" {
-		meta.Duration, _ = strconv.ParseFloat(probe.Format.Duration, 64)
+		if d, err := strconv.ParseFloat(probe.Format.Duration, 64); err == nil {
+			meta.Duration = d
+		}
 	}
 
-	// Parse file size
+	// Parse file size (non-fatal: zero is a valid fallback for malformed values)
 	if probe.Format.Size != "" {
-		meta.FileSize, _ = strconv.ParseInt(probe.Format.Size, 10, 64)
+		if s, err := strconv.ParseInt(probe.Format.Size, 10, 64); err == nil {
+			meta.FileSize = s
+		}
 	}
 
 	// Extract stream info

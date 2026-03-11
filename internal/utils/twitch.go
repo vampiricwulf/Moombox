@@ -46,7 +46,7 @@ func ExtractTwitchTarget(input string) *TwitchTarget {
 	// Try parsing as URL
 	u, err := url.Parse(input)
 	if err == nil {
-		host := strings.ToLower(u.Host)
+		host := strings.ToLower(u.Hostname())
 		if host == "www.twitch.tv" || host == "twitch.tv" || host == "m.twitch.tv" {
 			return parseTwitchURL(u)
 		}

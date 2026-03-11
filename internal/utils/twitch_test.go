@@ -143,6 +143,13 @@ func TestExtractTwitchTarget(t *testing.T) {
 			expected: nil,
 		},
 
+		// URL with port (hostname must strip port)
+		{
+			name:     "URL with port still matches channel",
+			input:    "https://twitch.tv:443/shroud",
+			expected: &TwitchTarget{Type: TwitchChannel, Value: "shroud"},
+		},
+
 		// Empty and invalid inputs
 		{
 			name:     "empty string",
