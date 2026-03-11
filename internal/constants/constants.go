@@ -31,12 +31,14 @@ var YouTubeURLs = struct {
 	Base      string
 	API       string
 	Watch     string
+	Embed     string
 	Feed      string
 	Thumbnail string
 }{
 	Base:      "https://www.youtube.com",
 	API:       "https://www.youtube.com/youtubei/v1",
 	Watch:     "https://www.youtube.com/watch",
+	Embed:     "https://www.youtube.com/embed",
 	Feed:      "https://www.youtube.com/feeds/videos.xml",
 	Thumbnail: "https://i.ytimg.com/vi",
 }
@@ -106,6 +108,20 @@ var WebSafariClient = YouTubeClientConfig{
 	Context: map[string]interface{}{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260120.01.00",
+		"hl":            "en",
+	},
+}
+
+// WebEmbeddedClient is for age-restricted content via embedded player.
+// Uses a non-YouTube embedUrl per yt-dlp requirements.
+var WebEmbeddedClient = YouTubeClientConfig{
+	ClientName:    "WEB_EMBEDDED_PLAYER",
+	ClientVersion: "1.20260115.01.00",
+	ClientID:      "56",
+	UserAgent:     UserAgents.Web,
+	Context: map[string]interface{}{
+		"clientName":    "WEB_EMBEDDED_PLAYER",
+		"clientVersion": "1.20260115.01.00",
 		"hl":            "en",
 	},
 }
