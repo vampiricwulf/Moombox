@@ -233,6 +233,11 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	ttl := time.Until(minter.ExpiresAt)
 	if ttl > 0 {
 		time.AfterFunc(ttl, func() {
+			defer func() {
+				if r := recover(); r != nil {
+					pp.logger.Error("minter eviction panic", "binding", contentBinding[:min(len(contentBinding), 20)], "panic", r)
+				}
+			}()
 			var cleanup func()
 			pp.mu.Lock()
 			evicted := false

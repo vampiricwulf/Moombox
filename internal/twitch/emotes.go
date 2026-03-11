@@ -94,16 +94,31 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 
 	go func() {
 		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				er.logger.Error("BTTV emote fetch panic", "panic", r)
+			}
+		}()
 		bttvResult = er.fetchBTTV(ctx, channelID)
 	}()
 
 	go func() {
 		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				er.logger.Error("FFZ emote fetch panic", "panic", r)
+			}
+		}()
 		ffzResult = er.fetchFFZ(ctx, channelID)
 	}()
 
 	go func() {
 		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				er.logger.Error("7TV emote fetch panic", "panic", r)
+			}
+		}()
 		sevenTVResult = er.fetch7TV(ctx, channelID)
 	}()
 

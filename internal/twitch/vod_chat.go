@@ -130,7 +130,11 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 				return fmt.Errorf("too many VOD chat errors: %w", err)
 			}
 			vcd.logger.Warn("vod chat fetch error", "err", err, "consecutive", consecutiveErrors)
-			time.Sleep(2 * time.Duration(consecutiveErrors) * time.Second)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(2 * time.Duration(consecutiveErrors) * time.Second):
+			}
 			continue
 		}
 		consecutiveErrors = 0

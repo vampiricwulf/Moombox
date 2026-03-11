@@ -75,6 +75,7 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 		err = <-vmDone // wait for RunString to return after interrupt
 	case <-ctx.Done():
 		vm.Interrupt("context cancelled")
+		<-vmDone // wait for RunString to return after interrupt
 		err = ctx.Err()
 	}
 	if err != nil {

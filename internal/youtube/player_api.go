@@ -32,10 +32,11 @@ type PlayerAPI struct {
 	cipherSolver *cipher.Solver
 	// OnVisitorData is called when visitor data is extracted from a watch page.
 	OnVisitorData func(visitorData string)
-	logger        interface {
+	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
+		Error(msg string, args ...any)
 	}
 }
 
@@ -44,6 +45,7 @@ func NewPlayerAPI(auth *Auth, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
 }) *PlayerAPI {
 	return &PlayerAPI{
 		auth:   auth,

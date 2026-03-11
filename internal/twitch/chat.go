@@ -599,13 +599,14 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 
 func (cd *ChatDownloader) flush() {
 	cd.mu.Lock()
-	msgs := make([]TwitchChatMessage, len(cd.messages))
+	snapshotLen := len(cd.messages)
+	msgs := make([]TwitchChatMessage, snapshotLen)
 	copy(msgs, cd.messages)
 	count := cd.totalCount
 	flushed := cd.flushedToDisk
 	cd.mu.Unlock()
 
-	if len(msgs) == 0 || cd.outputPath == "" {
+	if snapshotLen == 0 || cd.outputPath == "" {
 		return
 	}
 
@@ -631,9 +632,10 @@ func (cd *ChatDownloader) flush() {
 		return
 	}
 
-	// Clear messages from memory after successful write
+	// Remove only the messages we successfully wrote, preserving any
+	// that arrived concurrently during the write.
 	cd.mu.Lock()
-	cd.messages = cd.messages[:0]
+	cd.messages = cd.messages[snapshotLen:]
 	cd.flushedToDisk = true
 	cd.mu.Unlock()
 

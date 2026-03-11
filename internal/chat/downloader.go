@@ -482,7 +482,6 @@ func (cd *ChatDownloader) writeChatFile() {
 	tailBuf := make([]byte, tailSize)
 	_, err = f.ReadAt(tailBuf, fileSize-tailSize)
 	if err != nil {
-		f.Close()
 		cd.writeFullChatFile()
 		return
 	}
@@ -496,7 +495,6 @@ func (cd *ChatDownloader) writeChatFile() {
 		}
 	}
 	if bracketOffset == -1 {
-		f.Close()
 		cd.writeFullChatFile()
 		return
 	}
@@ -543,10 +541,11 @@ func (cd *ChatDownloader) writeChatFile() {
 
 	// Truncate at ']' position, then write new content
 	if err := f.Truncate(bracketBytePos); err != nil {
-		f.Close()
 		cd.writeFullChatFile()
 		return
 	}
+	// WriteAt error is non-fatal — the data was already truncated,
+	// so a partial write is the best we can do here.
 	f.WriteAt([]byte(appendStr), bracketBytePos)
 }
 
