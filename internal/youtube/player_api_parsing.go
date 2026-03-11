@@ -342,6 +342,9 @@ func parsePlayabilityStatus(status map[string]interface{}) (PlayabilityError, st
 		if strings.Contains(reasonLower, "member") || strings.Contains(reasonLower, "join") {
 			return PlayabilityMembersOnly, reason
 		}
+		if strings.Contains(reasonLower, "age") {
+			return PlayabilityAgeRestricted, reason
+		}
 		return PlayabilityLoginRequired, reason
 	case "UNPLAYABLE":
 		if strings.Contains(reasonLower, "member") {

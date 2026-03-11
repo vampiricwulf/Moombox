@@ -28,11 +28,22 @@ func TestParsePlayabilityStatus_LoginRequired(t *testing.T) {
 		"reason": "Sign in to confirm your age",
 	}
 	errType, reason := parsePlayabilityStatus(status)
-	if errType != PlayabilityLoginRequired {
-		t.Errorf("expected PlayabilityLoginRequired, got %q", errType)
+	if errType != PlayabilityAgeRestricted {
+		t.Errorf("expected PlayabilityAgeRestricted, got %q", errType)
 	}
 	if reason == "" {
 		t.Error("expected non-empty reason")
+	}
+}
+
+func TestParsePlayabilityStatus_LoginRequiredGeneric(t *testing.T) {
+	status := map[string]interface{}{
+		"status": "LOGIN_REQUIRED",
+		"reason": "Please sign in to continue",
+	}
+	errType, _ := parsePlayabilityStatus(status)
+	if errType != PlayabilityLoginRequired {
+		t.Errorf("expected PlayabilityLoginRequired, got %q", errType)
 	}
 }
 
