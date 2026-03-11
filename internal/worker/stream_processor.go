@@ -50,14 +50,14 @@ type StreamProcessor struct {
 	cfg      *config.MoomboxConfig
 	db       *database.Database
 	notifier *notifications.Manager
-	logger   Logger
+	logger   logger
 
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
 }
 
 // NewStreamProcessor creates a new stream processor.
-func NewStreamProcessor(yt *youtube.Service, tw *twitch.Service, cfg *config.MoomboxConfig, db *database.Database, logger Logger) *StreamProcessor {
+func NewStreamProcessor(yt *youtube.Service, tw *twitch.Service, cfg *config.MoomboxConfig, db *database.Database, logger logger) *StreamProcessor {
 	return &StreamProcessor{yt: yt, tw: tw, cfg: cfg, db: db, logger: logger}
 }
 

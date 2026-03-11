@@ -196,6 +196,12 @@ func (dm *DecapiMonitor) calculateInterval(channelCount int) time.Duration {
 }
 
 func (dm *DecapiMonitor) runCycle(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			dm.logger.Error("decapi monitor runCycle panic", "panic", r)
+		}
+	}()
+
 	dm.mu.Lock()
 	if dm.checking {
 		dm.mu.Unlock()

@@ -47,11 +47,11 @@ type DownloadOrchestrator struct {
 	cipherSolver *cipher.Solver
 	potProvider  *bgutils.PotProvider
 	notifier     *notifications.Manager
-	logger       Logger
+	logger       logger
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.
-func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger Logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager) *DownloadOrchestrator {
+func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager) *DownloadOrchestrator {
 	return &DownloadOrchestrator{
 		muxer:        engine.NewMuxer(ffmpegPath, logger),
 		ffmpegPath:   ffmpegPath,
@@ -501,6 +501,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		// Run segment downloaders in a goroutine so we can also listen for quality changes
 		downloadDone := make(chan error, 1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					downloadDone <- fmt.Errorf("runDownloaders panic: %v", r)
+				}
+			}()
 			downloadDone <- o.runDownloaders(ctx, result)
 		}()
 
@@ -1574,6 +1579,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		// Run HLS downloader in goroutine to listen for quality changes
 		downloadDone := make(chan error, 1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					downloadDone <- fmt.Errorf("twitch download panic: %v", r)
+				}
+			}()
 			downloadDone <- videoDl.Start(ctx)
 		}()
 

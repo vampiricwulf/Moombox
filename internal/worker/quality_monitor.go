@@ -14,11 +14,11 @@ type QualityMonitor struct {
 	mu       sync.Mutex
 	current  QualityInfo
 	probeFn  func(ctx context.Context) (*QualityInfo, error)
-	logger   Logger
+	logger   logger
 }
 
 // NewQualityMonitor creates a quality monitor.
-func NewQualityMonitor(interval time.Duration, current QualityInfo, probeFn func(ctx context.Context) (*QualityInfo, error), logger Logger) *QualityMonitor {
+func NewQualityMonitor(interval time.Duration, current QualityInfo, probeFn func(ctx context.Context) (*QualityInfo, error), logger logger) *QualityMonitor {
 	return &QualityMonitor{
 		interval: interval,
 		current:  current,

@@ -47,7 +47,7 @@ type JobQueue struct {
 	cancelled       map[string]bool // tracks user-initiated cancellations (vs shutdown)
 	notify          chan struct{}
 	dlNotify        chan struct{} // signaling for download slot availability
-	logger          Logger       // optional logger for warnings
+	logger          logger       // optional logger for warnings
 }
 
 // NewJobQueue creates a new job queue.
@@ -68,7 +68,7 @@ func NewJobQueue(maxDownloads int) *JobQueue {
 }
 
 // SetLogger sets an optional logger for queue warnings.
-func (q *JobQueue) SetLogger(l Logger) {
+func (q *JobQueue) SetLogger(l logger) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.logger = l

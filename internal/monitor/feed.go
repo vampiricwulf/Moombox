@@ -165,6 +165,12 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
 }
 
 func (fm *FeedMonitor) runCycle(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			fm.logger.Error("feed monitor runCycle panic", "panic", r)
+		}
+	}()
+
 	fm.mu.Lock()
 	if fm.checking {
 		fm.mu.Unlock()

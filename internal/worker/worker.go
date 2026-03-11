@@ -24,8 +24,9 @@ import (
 // Normal job discovery is signal-driven via NotifyNewJob.
 const heartbeatInterval = 60 * time.Second
 
-// Logger is the interface for logging.
-type Logger interface {
+// logger is the anonymous interface for logging — intentionally not exported.
+// Each struct repeats this inline per CLAUDE.md convention.
+type logger = interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -41,7 +42,7 @@ type JobContext struct {
 	StagingDir string
 	OutputDir  string
 	Filename   string
-	Logger     Logger
+	Logger     logger
 }
 
 // JobConfig holds per-job configuration derived from the global config.
@@ -68,7 +69,7 @@ type DownloadWorker struct {
 	orchestrator *DownloadOrchestrator
 	streamProc   *StreamProcessor
 	notifier     *notifications.Manager
-	logger       Logger
+	logger       logger
 	wg           sync.WaitGroup // tracks in-flight processJob goroutines
 	notifyJob    chan struct{}   // signal to re-check for new jobs (non-blocking send)
 
@@ -90,7 +91,7 @@ func NewDownloadWorker(
 	db *database.Database,
 	yt *youtube.Service,
 	cfg *config.MoomboxConfig,
-	logger Logger,
+	logger logger,
 	deps *DownloadWorkerDeps,
 ) *DownloadWorker {
 	queue := NewJobQueue(cfg.Downloader.NumParallelDownloads)
@@ -378,7 +379,7 @@ func (w *DownloadWorker) handleCancellation(job *database.Job, stagingDir string
 
 func isTerminalStatus(status database.JobStatus) bool {
 	switch status {
-	case database.StatusFinished, database.StatusError, database.StatusCancelled, database.StatusMuxing:
+	case database.StatusFinished, database.StatusError, database.StatusCancelled:
 		return true
 	default:
 		return false
@@ -540,8 +541,10 @@ var filenameReplacer = strings.NewReplacer(
 // sanitizeFilename removes invalid characters from a filename.
 func sanitizeFilename(name string) string {
 	result := filenameReplacer.Replace(name)
-	if len(result) > 200 {
-		result = result[:200]
+	// Truncate by rune count to avoid splitting multi-byte UTF-8 characters
+	runes := []rune(result)
+	if len(runes) > 200 {
+		result = string(runes[:200])
 	}
 	return result
 }

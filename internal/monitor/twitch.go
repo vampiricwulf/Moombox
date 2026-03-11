@@ -165,6 +165,12 @@ func (tm *TwitchMonitor) calculateInterval() time.Duration {
 }
 
 func (tm *TwitchMonitor) runCycle(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			tm.logger.Error("twitch monitor runCycle panic", "panic", r)
+		}
+	}()
+
 	tm.mu.Lock()
 	if tm.checking {
 		tm.mu.Unlock()

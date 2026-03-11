@@ -502,6 +502,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 	}
 
 	buf := make([]byte, 64*1024) // 64KB buffer
+	var lastProgressTime time.Time
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
 			return d.cancelErr(ctx)
@@ -515,7 +516,8 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 			}
 			d.bytesWritten.Add(int64(written))
 
-			if d.OnProgress != nil {
+			if d.OnProgress != nil && time.Since(lastProgressTime) >= ProgressThrottle {
+				lastProgressTime = time.Now()
 				d.OnProgress(DownloadProgress{
 					Bytes: d.bytesWritten.Load(),
 				})
@@ -974,6 +976,11 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil && d.logger != nil {
+					d.logger.Error("VOD parallel download worker panic", "panic", r)
+				}
+			}()
 			for item := range work {
 				if d.isCancelled() || ctx.Err() != nil {
 					continue // drain channel
@@ -987,6 +994,11 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 
 	// Feed work to workers
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.logger != nil {
+				d.logger.Error("VOD feeder goroutine panic", "panic", r)
+			}
+		}()
 		for i, seg := range pl.Segments {
 			if d.isCancelled() || ctx.Err() != nil {
 				break
@@ -1115,6 +1127,11 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil && d.logger != nil {
+					d.logger.Error("catch-up parallel download worker panic", "panic", r)
+				}
+			}()
 			for item := range work {
 				if d.isCancelled() || ctx.Err() != nil {
 					continue // drain channel
@@ -1129,6 +1146,11 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 
 	// Feed work to workers
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.logger != nil {
+				d.logger.Error("catch-up feeder goroutine panic", "panic", r)
+			}
+		}()
 		for seq := d.currentSeq; seq <= targetSeq; seq++ {
 			if d.isCancelled() || ctx.Err() != nil {
 				break
