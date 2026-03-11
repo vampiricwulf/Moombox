@@ -15,7 +15,7 @@ var UserAgents = struct {
 }{
 	Web:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 	Android:   "com.google.android.youtube/19.09.37 (Linux; U; Android 14; en_US) gzip",
-	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 	TV:        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
 	IOS:       "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
 }
@@ -97,16 +97,16 @@ var WebClient = YouTubeClientConfig{
 // AndroidVRClient is for VOD downloads without cookies.
 var AndroidVRClient = YouTubeClientConfig{
 	ClientName:    "ANDROID_VR",
-	ClientVersion: "1.71.26",
+	ClientVersion: "1.65.10",
 	ClientID:      "28",
 	UserAgent:     UserAgents.AndroidVR,
 	Context: map[string]interface{}{
-		"clientName":    "ANDROID_VR",
-		"clientVersion": "1.71.26",
+		"clientName":       "ANDROID_VR",
+		"clientVersion":    "1.65.10",
 		"androidSdkVersion": 32,
-		"osVersion":         "12L",
-		"deviceMake":        "Oculus",
-		"deviceModel":       "Quest 3",
+		"osVersion":        "12L",
+		"deviceMake":       "Oculus",
+		"deviceModel":      "Quest 3",
 	},
 }
 
