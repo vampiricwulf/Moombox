@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp as _formatTimestamp, formatBytes as _formatBytes, formatDurationSeconds as _formatDurationSeconds, formatRelativeTime as _formatRelativeTime } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime } from "./modules/utils.js";
 
 class MoomboxApp {
   constructor() {
@@ -105,7 +105,7 @@ class MoomboxApp {
     // Enter key in input
     document
       .getElementById("video-url-input")
-      .addEventListener("keypress", (e) => {
+      .addEventListener("keydown", (e) => {
         if (e.key === "Enter") this.addVideo();
       });
 
@@ -555,16 +555,18 @@ class MoomboxApp {
     if (!this._version) { el.style.display = "none"; return; }
 
     el.style.display = "";
+    // Remove old listener by replacing with a fresh clone
+    const fresh = el.cloneNode(false);
+    el.replaceWith(fresh);
     if (this._updateAvailable) {
-      el.textContent = `v${this._version} ⬆`;
-      el.className = "version-indicator has-update";
-      el.title = `Update available: v${this._updateAvailable.version}`;
-      el.onclick = () => this.showUpdateDialog();
+      fresh.textContent = `v${this._version} ⬆`;
+      fresh.className = "version-indicator has-update";
+      fresh.title = `Update available: v${this._updateAvailable.version}`;
+      fresh.addEventListener("click", () => this.showUpdateDialog());
     } else {
-      el.textContent = `v${this._version}`;
-      el.className = "version-indicator";
-      el.title = `Moombox v${this._version}`;
-      el.onclick = null;
+      fresh.textContent = `v${this._version}`;
+      fresh.className = "version-indicator";
+      fresh.title = `Moombox v${this._version}`;
     }
   }
 
@@ -1962,11 +1964,11 @@ class MoomboxApp {
   }
 
   formatTimestamp(seconds) {
-    return _formatTimestamp(seconds);
+    return formatTimestamp(seconds);
   }
 
   formatBytes(bytes) {
-    return _formatBytes(bytes);
+    return formatBytes(bytes);
   }
 
   // ===== Log Management =====
@@ -2058,7 +2060,7 @@ class MoomboxApp {
     countEl.textContent = `${filtered.length} log entries${suffix}${searchSuffix}`;
 
     // Auto-scroll to bottom (only when not paused by user scrolling up)
-    if (this._logAutoScroll !== false) {
+    if (this._logAutoScroll) {
       viewer.scrollTop = viewer.scrollHeight;
     }
   }
@@ -2376,11 +2378,11 @@ class MoomboxApp {
   }
 
   formatRelativeTime(isoDate) {
-    return _formatRelativeTime(isoDate);
+    return formatRelativeTime(isoDate);
   }
 
   formatDurationSeconds(totalSeconds) {
-    return _formatDurationSeconds(totalSeconds);
+    return formatDurationSeconds(totalSeconds);
   }
 
   setInputValue(id, value) {

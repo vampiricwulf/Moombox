@@ -2,6 +2,7 @@
  * Trim Controller — interactive video-based trim UI
  */
 import { formatTimestamp } from "./utils.js";
+import { SegmentPlayer } from "./segments.js";
 
 /**
  * Format seconds with sub-second precision: H:MM:SS.ms or M:SS.ms.
@@ -38,11 +39,8 @@ export class TrimController {
     /** @type {Record<string, HTMLElement>} cached DOM refs, populated in open() */
     this._el = {};
 
-    // Multi-segment playback state
-    this._segments = null;
-    this._segOffsets = null;
-    this._segIdx = 0;
-    this._segTimeOffset = 0;
+    // Multi-segment playback
+    this._seg = new SegmentPlayer();
   }
 
   /**
@@ -55,10 +53,7 @@ export class TrimController {
     this.endMarker = this.duration;
 
     // Reset multi-segment state
-    this._segments = null;
-    this._segOffsets = null;
-    this._segIdx = 0;
-    this._segTimeOffset = 0;
+    this._seg.reset();
 
     // Cache all DOM refs once
     this._el = {
@@ -111,7 +106,7 @@ export class TrimController {
 
     // Video metadata — refine duration once the browser knows it (single-file only)
     video.addEventListener("loadedmetadata", () => {
-      if (!this._segments && video.duration && isFinite(video.duration)) {
+      if (!this._seg.active && video.duration && isFinite(video.duration)) {
         this.duration = video.duration;
         this.endMarker = this.duration;
         endInput.value = fmtPrecise(this.duration);
@@ -209,10 +204,7 @@ export class TrimController {
       this._abort = null;
     }
     this._dragging = null;
-    this._segments = null;
-    this._segOffsets = null;
-    this._segIdx = 0;
-    this._segTimeOffset = 0;
+    this._seg.reset();
     this._el = {};
     this.job = null;
   }
@@ -220,80 +212,34 @@ export class TrimController {
   // ===== Multi-segment playback =====
 
   _initMultiSegment(jobId, segments) {
-    this._segments = segments;
-    this._segIdx = 0;
-    this._segTimeOffset = 0;
-
-    let cumulative = 0;
-    this._segOffsets = segments.map((seg) => {
-      const entry = {
-        ...seg,
-        startOffset: cumulative,
-        url: `/api/jobs/${jobId}/segments/${seg.segmentIndex}/video`,
-      };
-      cumulative += seg.durationSeconds || 0;
-      return entry;
-    });
+    this._seg.init(jobId, segments);
 
     // Use total segment duration (more accurate than job.lengthSeconds which is truncated to int)
-    this.duration = cumulative;
+    this.duration = this._seg.totalDuration;
     this.endMarker = this.duration;
 
     // Load first segment
-    this._loadSegment(0);
-  }
-
-  _loadSegment(idx) {
-    if (!this._segOffsets || idx >= this._segOffsets.length) return;
-    this._segIdx = idx;
-    this._segTimeOffset = this._segOffsets[idx].startOffset;
-    this._el.video.src = this._segOffsets[idx].url;
+    this._seg.loadSegment(0, this._el.video);
   }
 
   _onSegmentEnded() {
-    if (!this._segments || this._segments.length === 0) return;
-    if (this._segIdx + 1 < this._segments.length) {
-      this._loadSegment(this._segIdx + 1);
-      this._el.video.play();
-    }
+    this._seg.onSegmentEnded(this._el.video);
   }
 
   /** Get current playback position in global seconds (accounting for segment offset). */
   _getGlobalTime() {
-    const video = this._el.video;
-    if (!video) return 0;
-    if (this._segments && this._segments.length > 0) {
-      return this._segTimeOffset + video.currentTime;
-    }
-    return video.currentTime;
+    return this._seg.getGlobalTime(this._el.video);
   }
 
   /** Seek to a global time (seconds), switching segments if needed. */
   _seekToGlobalTime(globalSeconds) {
     const video = this._el.video;
-    if (!this._segOffsets || this._segOffsets.length === 0) {
+    if (!this._seg.active) {
       // Single-file: seek directly
       video.currentTime = Math.max(0, Math.min(this.duration, globalSeconds));
       return;
     }
-
-    for (let i = 0; i < this._segOffsets.length; i++) {
-      const seg = this._segOffsets[i];
-      const segEnd = seg.startOffset + (seg.durationSeconds || 0);
-      if (globalSeconds < segEnd || i === this._segOffsets.length - 1) {
-        if (i !== this._segIdx) {
-          const wasPlaying = !video.paused;
-          this._loadSegment(i);
-          video.addEventListener("loadeddata", () => {
-            video.currentTime = globalSeconds - seg.startOffset;
-            if (wasPlaying) video.play();
-          }, { once: true });
-        } else {
-          video.currentTime = globalSeconds - seg.startOffset;
-        }
-        return;
-      }
-    }
+    this._seg.seekToGlobalTime(globalSeconds, video);
   }
 
   // ===== Timeline rendering =====

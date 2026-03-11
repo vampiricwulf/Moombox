@@ -1,7 +1,7 @@
 /**
  * Settings Controller — Config UI, channels, notifications, cookies, yt-dlp plugin
  */
-import { formatRelativeTime as _formatRelativeTime } from "./utils.js";
+import { formatRelativeTime } from "./utils.js";
 
 const NOTIFICATION_EVENT_GROUPS = [
   {
@@ -1122,8 +1122,10 @@ export class SettingsController {
     const confirmBtn = document.getElementById("webhook-confirm-btn");
     input.value = "";
 
-    // Wire confirm handler (replace to avoid stacking listeners)
-    confirmBtn.onclick = async () => {
+    // Replace to avoid stacking listeners (consistent with showConfirm/removePassword)
+    const newConfirm = confirmBtn.cloneNode(true);
+    confirmBtn.replaceWith(newConfirm);
+    newConfirm.addEventListener("click", async () => {
       const url = input.value.trim();
       if (!url) {
         this.app.showToast("Please enter a URL", "warning");
@@ -1138,7 +1140,7 @@ export class SettingsController {
       dialog.hide();
       await this.saveConfig();
       this.renderNotificationsList();
-    };
+    });
 
     dialog.show();
     setTimeout(() => input.focus(), 100);
@@ -1481,15 +1483,15 @@ export class SettingsController {
       container.innerHTML = "";
       for (const token of tokens) {
         const row = document.createElement("div");
-        row.style.cssText = "display: flex; align-items: center; gap: 0.5em; margin-bottom: 0.5em;";
+        row.className = "client-token-row";
 
         const label = document.createElement("span");
-        label.style.cssText = "flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85rem;";
+        label.className = "client-token-label";
         label.textContent = token.label || "Unknown";
         label.title = token.label || "";
 
         const meta = document.createElement("span");
-        meta.style.cssText = "color: var(--sl-color-neutral-500); font-size: 0.75rem; white-space: nowrap;";
+        meta.className = "client-token-meta";
         const lastUsed = token.lastUsedAt ? this.formatRelativeTime(token.lastUsedAt) : "never";
         meta.textContent = lastUsed;
 
@@ -1527,7 +1529,7 @@ export class SettingsController {
 
   formatRelativeTime(isoDate) {
     if (!isoDate) return "never";
-    return _formatRelativeTime(isoDate);
+    return formatRelativeTime(isoDate);
   }
 
   // ─── Auto Cookie Methods ─────────────────────────────────────

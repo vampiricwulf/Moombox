@@ -1743,21 +1743,54 @@ sl-progress-bar {
 
 #chat-search {
     width: 100%;
-    font-size: var(--sl-font-size-small);
-    padding: var(--sl-spacing-2x-small) var(--sl-spacing-x-small);
-    border: 1px solid var(--sl-color-neutral-300);
-    border-radius: var(--sl-border-radius-small);
-    background: var(--sl-color-neutral-0);
-    color: var(--sl-color-neutral-900);
-    outline: none;
-}
-
-#chat-search:focus {
-    border-color: var(--sl-color-primary-600);
 }
 
 .chat-msg.search-hidden {
     display: none;
+}
+
+/* Segment indicator bar (multi-segment playback) */
+.segment-indicator {
+    display: flex;
+    height: 20px;
+    margin: 4px 0;
+    border-radius: 4px;
+    overflow: hidden;
+    font-size: 11px;
+}
+
+.segment-indicator-block {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0 4px;
+}
+
+/* Client token rows (settings > network > security) */
+.client-token-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    margin-bottom: 0.5em;
+}
+
+.client-token-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.85rem;
+}
+
+.client-token-meta {
+    color: var(--sl-color-neutral-500);
+    font-size: 0.75rem;
+    white-space: nowrap;
 }
 
 /* Toast animations */

@@ -14,6 +14,8 @@ export class StatsController {
   activate() {
     this._active = true;
     this.loadStats();
+    // Clear any existing interval to prevent leaks on double-activate
+    if (this._refreshInterval) clearInterval(this._refreshInterval);
     // Auto-refresh every 60 seconds while active
     this._refreshInterval = setInterval(() => this.loadStats(), 60000);
   }

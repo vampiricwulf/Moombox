@@ -13,7 +13,7 @@ export class SetupController {
 
   /** Escape HTML entities for safe innerHTML insertion. */
   esc(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    return this.app.escapeHtml(s);
   }
 
   show() {
@@ -151,7 +151,7 @@ export class SetupController {
       window.close();
     });
     // Enter key in custom path input
-    document.getElementById("ffmpeg-custom-path")?.addEventListener("keypress", (e) => {
+    document.getElementById("ffmpeg-custom-path")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result");
     });
 
@@ -159,7 +159,7 @@ export class SetupController {
     document.getElementById("ffmpeg-manual-check-btn")?.addEventListener("click", () => {
       this.checkFFmpegPath("ffmpeg-manual-path", "ffmpeg-manual-result");
     });
-    document.getElementById("ffmpeg-manual-path")?.addEventListener("keypress", (e) => {
+    document.getElementById("ffmpeg-manual-path")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-manual-path", "ffmpeg-manual-result");
     });
     document.getElementById("ffmpeg-manual-back-btn")?.addEventListener("click", () => {
@@ -282,9 +282,8 @@ export class SetupController {
       item.className = "setup-channel-item";
       const platformIcon = ch.platform === "twitch" ? "twitch" : "youtube";
       const platformColor = ch.platform === "twitch" ? "#9146ff" : "#ff0000";
-      const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-      const displayName = esc(ch.name || ch.id);
-      const displayId = esc(ch.id);
+      const displayName = this.esc(ch.name || ch.id);
+      const displayId = this.esc(ch.id);
       item.innerHTML = `
         <div style="display: flex; align-items: center; gap: 0.5em; flex: 1; min-width: 0;">
           <sl-icon name="${platformIcon}" style="color: ${platformColor};"></sl-icon>
@@ -531,6 +530,7 @@ export class SetupController {
           const data = await resp.json();
           if (!data.isFirstRun) {
             // Server is back and config exists
+            this._polling = false;
             document.getElementById("restart-waiting")?.remove();
 
             // Check FFmpeg
@@ -545,6 +545,7 @@ export class SetupController {
       } catch { /* server not ready yet */ }
 
       if (attempts >= maxAttempts) {
+        this._polling = false;
         const waiting = document.getElementById("restart-waiting");
         if (waiting) {
           waiting.innerHTML = '<div style="text-align: center;"><p>Server did not come back within 2 minutes.</p><sl-button variant="primary" id="restart-reload-btn">Reload Page</sl-button></div>';
