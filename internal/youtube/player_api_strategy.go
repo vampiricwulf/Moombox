@@ -108,6 +108,23 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		}
 	}
 
+	// Try web_embedded for age-restricted content
+	if result.PlayabilityError == PlayabilityAgeRestricted {
+		p.logger.Info("[PlayerApi] Age-restricted content detected, trying web_embedded", "videoID", videoID)
+		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, ytcfg, sts)
+		if embErr != nil {
+			p.logger.Warn("[PlayerApi] web_embedded failed", slog.String("error", embErr.Error()))
+		} else if embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
+			p.logger.Info("[PlayerApi] web_embedded succeeded for age-restricted content", "videoID", videoID)
+			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
+			mergeWatchPageMetadata(embResult, wpParsed)
+			embResult.Formats = deduplicateFormats(formatPool)
+			return embResult, nil
+		} else {
+			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
+		}
+	}
+
 	// If TV fails, try WEB_CREATOR
 	if result.PlayabilityError == PlayabilityMembersOnly ||
 		result.PlayabilityError == PlayabilityLoginRequired ||
@@ -209,6 +226,23 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		return nil, err
 	}
 	collectFormats(&formatPool, result.Formats, "tv_public", AuthLevelTVPublic)
+
+	// Try web_embedded for age-restricted content (public path)
+	if result.PlayabilityError == PlayabilityAgeRestricted {
+		p.logger.Info("[PlayerApi] Age-restricted content detected (public), trying web_embedded", "videoID", videoID)
+		embResult, embErr := p.fetchWithEmbedded(ctx, videoID, wp.Ytcfg, stsPublic)
+		if embErr != nil {
+			p.logger.Warn("[PlayerApi] web_embedded failed", slog.String("error", embErr.Error()))
+		} else if embResult.PlayabilityError == PlayabilityOK && hasAdequateFormats(embResult) {
+			p.logger.Info("[PlayerApi] web_embedded succeeded for age-restricted content", "videoID", videoID)
+			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
+			mergeWatchPageMetadata(embResult, wpParsed)
+			embResult.Formats = deduplicateFormats(formatPool)
+			return embResult, nil
+		} else {
+			collectFormats(&formatPool, embResult.Formats, "web_embedded", AuthLevelWebEmbedded)
+		}
+	}
 
 	if result.PlayabilityError == PlayabilityLoginRequired || len(result.Formats) == 0 || !hasAdequateFormats(result) {
 		vrResult, vrErr := p.fetchWithAndroidVR(ctx, videoID, wp.Ytcfg.VisitorData)
