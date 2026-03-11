@@ -193,6 +193,193 @@ func TestSegmentURL(t *testing.T) {
 	}
 }
 
+func TestParseDash_EmptyPeriods(t *testing.T) {
+	mpd := `<?xml version="1.0"?><MPD></MPD>`
+	streams, err := ParseDash(mpd, "")
+	if err != nil {
+		t.Fatalf("ParseDash: %v", err)
+	}
+	if streams != nil {
+		t.Errorf("expected nil streams for empty MPD, got %d", len(streams))
+	}
+}
+
+func TestParseDash_InvalidXML(t *testing.T) {
+	_, err := ParseDash("not xml", "")
+	if err == nil {
+		t.Error("expected error for invalid XML")
+	}
+}
+
+func TestParseDash_SegmentTemplate(t *testing.T) {
+	mpd := `<?xml version="1.0"?>
+<MPD>
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <SegmentTemplate media="seg_$Number$.m4s" initialization="init.m4s" startNumber="1" timescale="90000">
+        <SegmentTimeline>
+          <S d="180000" r="4"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="1" bandwidth="2000000" width="1280" height="720">
+        <BaseURL>https://cdn.example.com/stream/</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+	streams, err := ParseDash(mpd, "")
+	if err != nil {
+		t.Fatalf("ParseDash: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(streams))
+	}
+
+	s := streams[0]
+	if s.StartNumber != 1 {
+		t.Errorf("startNumber: got %d, want 1", s.StartNumber)
+	}
+	if s.Timescale != 90000 {
+		t.Errorf("timescale: got %d, want 90000", s.Timescale)
+	}
+	if len(s.Segments) != 1 {
+		t.Fatalf("expected 1 segment entry (with repeats), got %d", len(s.Segments))
+	}
+	if s.Segments[0].R != 4 {
+		t.Errorf("repeat: got %d, want 4", s.Segments[0].R)
+	}
+	count := TotalSegmentCount(&s)
+	if count != 5 {
+		t.Errorf("total segments: got %d, want 5", count)
+	}
+	dur := TotalDurationSec(&s)
+	if dur != 10.0 { // 5 segments * 180000/90000 = 10s
+		t.Errorf("total duration: got %f, want 10.0", dur)
+	}
+}
+
+func TestParseHls_Discontinuity(t *testing.T) {
+	m3u8 := `#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-DISCONTINUITY-SEQUENCE:5
+#EXTINF:4.0,
+seg0.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4.0,
+seg1.ts`
+
+	result := ParseHls(m3u8, "https://example.com/")
+	if result == nil || result.Playlist == nil {
+		t.Fatal("expected playlist")
+	}
+	pl := result.Playlist
+	if pl.DiscontinuitySequence != 5 {
+		t.Errorf("discontinuity sequence: got %d, want 5", pl.DiscontinuitySequence)
+	}
+	if len(pl.Segments) != 2 {
+		t.Fatalf("expected 2 segments, got %d", len(pl.Segments))
+	}
+	if pl.Segments[0].Discontinuity != 0 {
+		t.Errorf("seg0 discontinuity: got %d, want 0", pl.Segments[0].Discontinuity)
+	}
+	if pl.Segments[1].Discontinuity != 1 {
+		t.Errorf("seg1 discontinuity: got %d, want 1", pl.Segments[1].Discontinuity)
+	}
+}
+
+func TestParseHls_MasterFrameRate(t *testing.T) {
+	m3u8 := `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,FRAME-RATE=59.94
+https://example.com/1080p60.m3u8`
+
+	result := ParseHls(m3u8, "https://example.com/")
+	if result == nil || len(result.Variants) != 1 {
+		t.Fatal("expected 1 variant")
+	}
+	if result.Variants[0].FPS != 60 { // 59.94 rounds to 60
+		t.Errorf("FPS: got %d, want 60", result.Variants[0].FPS)
+	}
+}
+
+func TestParseFrameRate(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"", 0},
+		{"30", 30},
+		{"60", 60},
+		{"30/1", 30},
+		{"30000/1001", 30},
+		{"24000/1001", 24},
+		{"59.94", 60},
+		{"invalid", 0},
+	}
+	for _, tt := range tests {
+		got := parseFrameRate(tt.input)
+		if got != tt.want {
+			t.Errorf("parseFrameRate(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestCalculateSegmentRange_NoSegments(t *testing.T) {
+	stream := &DashStream{
+		StartNumber: 0,
+		Timescale:   1000,
+	}
+	result := CalculateSegmentRange(stream, 5.0, 15.0)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	// Should use estimated 2s segments
+	if result.StartSegment != 2 { // 5.0 / 2.0 = segment 2 (0-indexed)
+		t.Errorf("StartSegment: got %d, want 2", result.StartSegment)
+	}
+}
+
+func TestCalculateSegmentRange_WithTimeline(t *testing.T) {
+	stream := &DashStream{
+		StartNumber: 100,
+		Timescale:   1000,
+		Segments: []DashSegment{
+			{D: 2000, R: 9}, // 10 segments of 2s each = 20s total
+		},
+	}
+	result := CalculateSegmentRange(stream, 5.0, 15.0)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	// Start at 5s: segment at index 2 (5.0/2.0), absolute = 100 + 2 = 102
+	if result.StartSegment != 102 {
+		t.Errorf("StartSegment: got %d, want 102", result.StartSegment)
+	}
+	if result.TrimDuration != 10.0 {
+		t.Errorf("TrimDuration: got %f, want 10.0", result.TrimDuration)
+	}
+}
+
+func TestSegmentDurationSec_Default(t *testing.T) {
+	stream := &DashStream{Timescale: 1000}
+	dur := SegmentDurationSec(stream)
+	if dur != defaultSegmentDuration {
+		t.Errorf("expected default %f, got %f", defaultSegmentDuration, dur)
+	}
+}
+
+func TestEstimateSegmentCount(t *testing.T) {
+	count := EstimateSegmentCount(10.0)
+	if count != 5 { // ceil(10 / 2) = 5
+		t.Errorf("expected 5, got %d", count)
+	}
+	count = EstimateSegmentCount(0)
+	if count != 0 {
+		t.Errorf("expected 0, got %d", count)
+	}
+}
+
 func TestResolveURL(t *testing.T) {
 	tests := []struct {
 		base     string

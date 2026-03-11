@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -140,6 +141,201 @@ func TestMatchTerm(t *testing.T) {
 		})
 	}
 }
+
+func TestMetadataFailureTracker_RecordAndClear(t *testing.T) {
+	tracker := NewMetadataFailureTracker()
+
+	// First failure
+	count, giveUp := tracker.RecordFailure("vid1")
+	if count != 1 || giveUp {
+		t.Errorf("first failure: count=%d giveUp=%v, want 1/false", count, giveUp)
+	}
+
+	// Second failure
+	count, giveUp = tracker.RecordFailure("vid1")
+	if count != 2 || giveUp {
+		t.Errorf("second failure: count=%d giveUp=%v, want 2/false", count, giveUp)
+	}
+
+	// Third failure should trigger give up (maxMetadataFailures=3)
+	count, giveUp = tracker.RecordFailure("vid1")
+	if count != 3 || !giveUp {
+		t.Errorf("third failure: count=%d giveUp=%v, want 3/true", count, giveUp)
+	}
+
+	// After give up, entry should be removed
+	count, giveUp = tracker.RecordFailure("vid1")
+	if count != 1 || giveUp {
+		t.Errorf("after give up, re-record: count=%d giveUp=%v, want 1/false", count, giveUp)
+	}
+
+	// Clear removes entry
+	tracker.ClearFailure("vid1")
+	count, giveUp = tracker.RecordFailure("vid1")
+	if count != 1 {
+		t.Errorf("after clear: count=%d, want 1", count)
+	}
+}
+
+func TestMetadataFailureTracker_Eviction(t *testing.T) {
+	tracker := NewMetadataFailureTracker()
+
+	// Fill up to maxMetadataFailuresMapSize (500)
+	for i := 0; i < maxMetadataFailuresMapSize; i++ {
+		tracker.RecordFailure(fmt.Sprintf("vid_%d", i))
+	}
+
+	// One more should trigger eviction
+	tracker.RecordFailure("overflow_vid")
+
+	tracker.mu.Lock()
+	size := len(tracker.failures)
+	tracker.mu.Unlock()
+
+	// Should be at or below max
+	if size > maxMetadataFailuresMapSize {
+		t.Errorf("map size %d exceeds max %d", size, maxMetadataFailuresMapSize)
+	}
+}
+
+func TestMetadataFailureTracker_ClearNonExistent(t *testing.T) {
+	tracker := NewMetadataFailureTracker()
+	// Should not panic
+	tracker.ClearFailure("nonexistent")
+}
+
+func TestProcessYouTubeVideo_NoProbeFunc(t *testing.T) {
+	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		VideoID:    "test123",
+		Title:      "Test Title",
+		Channel:    &config.ChannelConfig{},
+		ProbeVideo: nil,
+		Tracker:    NewMetadataFailureTracker(),
+		Logger:     &testMonitorLogger{},
+	})
+
+	if !result.ShouldProcess {
+		t.Error("expected ShouldProcess=true when no probe func")
+	}
+	if result.Title != "Test Title" {
+		t.Errorf("title: got %q, want %q", result.Title, "Test Title")
+	}
+}
+
+func TestProcessYouTubeVideo_LiveStream(t *testing.T) {
+	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		VideoID: "live123",
+		Title:   "Feed Title",
+		Channel: &config.ChannelConfig{},
+		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{
+				StreamStatus: "live",
+				Title:        "Better Title",
+				ChannelName:  "TestChannel",
+			}, nil
+		},
+		Tracker: NewMetadataFailureTracker(),
+		Logger:  &testMonitorLogger{},
+	})
+
+	if !result.ShouldProcess {
+		t.Error("expected ShouldProcess=true for live stream")
+	}
+	if result.Title != "Better Title" {
+		t.Errorf("title: got %q, want %q", result.Title, "Better Title")
+	}
+	if result.ChannelName != "TestChannel" {
+		t.Errorf("channelName: got %q, want %q", result.ChannelName, "TestChannel")
+	}
+}
+
+func TestProcessYouTubeVideo_NotAStream(t *testing.T) {
+	historyAdded := false
+	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		VideoID: "vid123",
+		Title:   "Regular Video",
+		Channel: &config.ChannelConfig{},
+		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{StreamStatus: "not_a_stream"}, nil
+		},
+		AddToHistory: func(id string) error {
+			historyAdded = true
+			return nil
+		},
+		Tracker: NewMetadataFailureTracker(),
+		Logger:  &testMonitorLogger{},
+	})
+
+	if result.ShouldProcess {
+		t.Error("expected ShouldProcess=false for not_a_stream")
+	}
+	if !historyAdded {
+		t.Error("expected video to be added to history")
+	}
+}
+
+func TestProcessYouTubeVideo_NotAStreamWithIncludeNonLive(t *testing.T) {
+	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		VideoID: "vid123",
+		Title:   "Regular Video",
+		Channel: &config.ChannelConfig{IncludeNonLiveContent: true},
+		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{StreamStatus: "not_a_stream"}, nil
+		},
+		Tracker: NewMetadataFailureTracker(),
+		Logger:  &testMonitorLogger{},
+	})
+
+	if !result.ShouldProcess {
+		t.Error("expected ShouldProcess=true when include_non_live_content=true")
+	}
+}
+
+func TestProcessYouTubeVideo_ProbeError(t *testing.T) {
+	tracker := NewMetadataFailureTracker()
+
+	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		VideoID: "err123",
+		Title:   "Test",
+		Channel: &config.ChannelConfig{},
+		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+			return nil, fmt.Errorf("network error")
+		},
+		Tracker: tracker,
+		Logger:  &testMonitorLogger{},
+	})
+
+	if result.ShouldProcess {
+		t.Error("expected ShouldProcess=false on probe error")
+	}
+}
+
+func TestProcessYouTubeVideo_UnknownTitleNotOverwrite(t *testing.T) {
+	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		VideoID: "vid123",
+		Title:   "Good Feed Title",
+		Channel: &config.ChannelConfig{},
+		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{
+				StreamStatus: "live",
+				Title:        "Unknown Title", // Should not overwrite
+			}, nil
+		},
+		Tracker: NewMetadataFailureTracker(),
+		Logger:  &testMonitorLogger{},
+	})
+
+	if result.Title != "Good Feed Title" {
+		t.Errorf("title should not be overwritten by 'Unknown Title': got %q", result.Title)
+	}
+}
+
+type testMonitorLogger struct{}
+
+func (l *testMonitorLogger) Debug(msg string, args ...any) {}
+func (l *testMonitorLogger) Info(msg string, args ...any)  {}
+func (l *testMonitorLogger) Warn(msg string, args ...any)  {}
+func (l *testMonitorLogger) Error(msg string, args ...any) {}
 
 func TestMatchesTerms(t *testing.T) {
 	tests := []struct {
