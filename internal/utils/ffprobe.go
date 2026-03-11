@@ -48,7 +48,7 @@ func ExtractVideoMetadata(ctx context.Context, ffprobePath, filePath string) (*V
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
-		filePath,
+		"--", filePath,
 	)
 
 	output, err := cmd.Output()

@@ -31,12 +31,10 @@ func SanitizeForFilename(name string) string {
 	result = invalidFSChars.ReplaceAllString(result, "_")
 	result = strings.Join(strings.Fields(result), " ")
 
-	if len(result) > maxFilenameLength {
-		// Truncate at UTF-8 safe boundary to avoid splitting multi-byte characters
-		result = result[:maxFilenameLength]
-		for !utf8.ValidString(result) && len(result) > 0 {
-			result = result[:len(result)-1]
-		}
+	if utf8.RuneCountInString(result) > maxFilenameLength {
+		// Truncate at rune boundary (200 characters, not bytes)
+		runes := []rune(result)
+		result = string(runes[:maxFilenameLength])
 	}
 
 	result = strings.TrimSpace(result)

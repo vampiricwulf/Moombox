@@ -227,11 +227,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		waitForKeypress()
 		os.Exit(1)
 	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "database close error: %v\n", err)
-		}
-	}()
+	// Database is closed explicitly in the shutdown sequence below (stopService "Database").
+	// No defer db.Close() here to avoid double-close.
 
 	// =========================================================================
 	// 4. Load cookies
@@ -618,7 +615,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			return false, ""
 		}
 		// Fire-and-forget usage update
-		go db.UpdateClientTokenUsage(ct.ID, ip)
+		go func() {
+			defer func() { recover() }()
+			db.UpdateClientTokenUsage(ct.ID, ip)
+		}()
 		return true, sessionToken
 	}
 
@@ -638,7 +638,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			prefix := web.TokenPrefix(cookie.Value)
 			if ct, err := db.GetClientTokenByPrefix(prefix); err == nil && ct != nil {
 				if web.VerifyToken(cookie.Value, ct.TokenHash) {
-					go db.UpdateClientTokenUsage(ct.ID, extractWSIP(r))
+					go func() {
+						defer func() { recover() }()
+						db.UpdateClientTokenUsage(ct.ID, extractWSIP(r))
+					}()
 					return true
 				}
 			}
@@ -676,6 +679,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		log.Warn("Auth lost, attempting auto-cookie recovery", "platform", platform)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("auto-cookie recovery panic", "panic", r)
+				}
+			}()
 			refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer refreshCancel()
 			ok, err := autoCookieSvc.RefreshCookies(refreshCtx)
@@ -904,6 +912,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Logger -> WebSocket: broadcast log lines + route to per-job buffers
 	logSub := log.Subscribe()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("log forwarder panic", "panic", r)
+			}
+		}()
 		for line := range logSub {
 			wsHub.BroadcastLog(line)
 			db.RouteLogToJobs(line) // Route to per-job buffer (matches TS knownJobIds log routing)
@@ -952,6 +965,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Matches TS: exits on web server failure in non-TUI mode.
 	webErrCh := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("web server panic", "panic", r)
+				webErrCh <- fmt.Errorf("web server panic: %v", r)
+			}
+		}()
 		webErrCh <- webServer.Start(ctx)
 	}()
 
@@ -972,6 +991,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	case <-time.After(500 * time.Millisecond):
 		// Server is binding/listening successfully, drain errors in background
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("web error drainer panic", "panic", r)
+				}
+			}()
 			if err := <-webErrCh; err != nil {
 				log.Error("Web server error", slog.String("error", err.Error()))
 			}
@@ -995,6 +1019,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Auto-update check: initial check + daily ticker
 	if upd != nil && cfg.Updates.AutoCheckUpdates {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("auto-update check panic", "panic", r)
+				}
+			}()
 			// Initial check (slight delay to avoid slowing startup)
 			select {
 			case <-time.After(5 * time.Second):
@@ -1019,6 +1048,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Periodic memory + disk usage logging (every 2 minutes) for diagnostics.
 	// Matches TS: process.memoryUsage() logging with heap delta tracking.
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("stats ticker panic", "panic", r)
+			}
+		}()
 		ticker := time.NewTicker(2 * time.Minute)
 		defer ticker.Stop()
 		var prevHeapMB float64
@@ -1422,6 +1456,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Forward log lines to TUI
 		tuiLogSub := log.Subscribe()
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("[Main] Panic in TUI log forwarder", "panic", fmt.Sprint(r))
+				}
+			}()
 			for line := range tuiLogSub {
 				select {
 				case logCh <- line:

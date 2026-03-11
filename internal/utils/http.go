@@ -146,9 +146,11 @@ func Retry(ctx context.Context, cfg RetryConfig, fn func() error) error {
 		if attempt < cfg.MaxRetries {
 			// Add jitter: delay * (0.5 to 1.5)
 			jittered := time.Duration(float64(delay) * (0.5 + rand.Float64()))
+			t := time.NewTimer(jittered)
 			select {
-			case <-time.After(jittered):
+			case <-t.C:
 			case <-ctx.Done():
+				t.Stop()
 				return ctx.Err()
 			}
 
