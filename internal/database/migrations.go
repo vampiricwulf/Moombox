@@ -8,6 +8,11 @@ import (
 
 const schemaVersion = 6
 
+// createSchema defines the full schema for new databases. It includes all tables
+// and indexes from the start. The incremental migrations below handle upgrading
+// existing databases from older schema versions. Tables like "segments" and
+// "client_tokens" appear in both places by design: createSchema for new databases,
+// migrations for upgrades from older versions.
 const createSchema = `
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL UNIQUE

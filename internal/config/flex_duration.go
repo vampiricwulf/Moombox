@@ -31,19 +31,26 @@ var durationMultipliers = map[string]float64{
 // ParseFlexDuration parses a value that can be a number or a duration string.
 // The unit parameter specifies what the numeric value represents ("minutes" or "days").
 // The result is always stored as the numeric value in its natural unit.
+// Negative values are rejected and the default is used instead.
 func ParseFlexDuration(value interface{}, unit string, defaultValue float64) FlexDuration {
+	var result FlexDuration
 	switch v := value.(type) {
 	case int64:
-		return FlexDuration{Value: float64(v)}
+		result = FlexDuration{Value: float64(v)}
 	case float64:
-		return FlexDuration{Value: v}
+		result = FlexDuration{Value: v}
 	case int:
-		return FlexDuration{Value: float64(v)}
+		result = FlexDuration{Value: float64(v)}
 	case string:
-		return parseStringDuration(v, unit, defaultValue)
+		result = parseStringDuration(v, unit, defaultValue)
 	default:
 		return FlexDuration{Value: defaultValue}
 	}
+	// Reject negative values — return default instead
+	if result.Value < 0 {
+		return FlexDuration{Value: defaultValue}
+	}
+	return result
 }
 
 func parseStringDuration(s string, unit string, defaultValue float64) FlexDuration {

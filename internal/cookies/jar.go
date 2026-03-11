@@ -74,7 +74,7 @@ func (j *CookieJar) Load(filePath string) error {
 
 		parts := strings.Split(line, "\t")
 		if len(parts) < 7 {
-			continue
+			continue // Malformed line — Netscape format requires exactly 7 tab-delimited fields
 		}
 
 		rawDomain := strings.TrimSpace(parts[0])
@@ -85,6 +85,11 @@ func (j *CookieJar) Load(filePath string) error {
 
 		name := strings.TrimSpace(parts[5])
 		value := strings.TrimSpace(parts[6])
+
+		// Skip entries with empty domain or name
+		if domain == "" || name == "" {
+			continue
+		}
 
 		// Only include YouTube/Google and Twitch cookies
 		isYouTubeGoogle := strings.Contains(domain, "youtube.com") || strings.Contains(domain, "google.com")

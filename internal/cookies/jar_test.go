@@ -127,3 +127,104 @@ func TestNonExistentFile(t *testing.T) {
 		t.Error("should be empty after loading non-existent file")
 	}
 }
+
+func TestMalformedCookieLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+
+	// Test with malformed lines: too few fields, empty name, empty domain
+	content := `# Netscape HTTP Cookie File
+.youtube.com	TRUE	/	TRUE	0	SAPISID	valid_sapisid
+.youtube.com	TRUE	/	TRUE	0	LOGIN_INFO	valid_login
+short_line	only_two_fields
+	TRUE	/	TRUE	0		empty_name_value
+.youtube.com	TRUE	/	TRUE	0		empty_cookie_name
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+
+	// Valid cookies should be loaded
+	if jar.GetCookie("SAPISID") != "valid_sapisid" {
+		t.Error("expected valid SAPISID cookie")
+	}
+	if jar.GetCookie("LOGIN_INFO") != "valid_login" {
+		t.Error("expected valid LOGIN_INFO cookie")
+	}
+	// Empty name cookie should be skipped
+	if jar.GetCookie("") != "" {
+		t.Error("empty-name cookie should not be loaded")
+	}
+}
+
+func TestReloadCookies(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+
+	initial := `.youtube.com	TRUE	/	TRUE	0	SAPISID	first_value
+.youtube.com	TRUE	/	TRUE	0	LOGIN_INFO	first_login
+`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewCookieJar()
+	jar.Load(path)
+
+	if jar.GetCookie("SAPISID") != "first_value" {
+		t.Error("expected first_value")
+	}
+
+	// Update cookie file
+	updated := `.youtube.com	TRUE	/	TRUE	0	SAPISID	second_value
+.youtube.com	TRUE	/	TRUE	0	LOGIN_INFO	second_login
+`
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := jar.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	if jar.GetCookie("SAPISID") != "second_value" {
+		t.Error("expected second_value after reload")
+	}
+}
+
+func TestSapisidCookieVariants(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+
+	content := `.youtube.com	TRUE	/	TRUE	0	__Secure-1PAPISID	sapisid1p_val
+.youtube.com	TRUE	/	TRUE	0	__Secure-3PAPISID	sapisid3p_val
+.youtube.com	TRUE	/	TRUE	0	LOGIN_INFO	logininfo
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewCookieJar()
+	jar.Load(path)
+
+	// Without SAPISID, GetSapisid should fall back to __Secure-3PAPISID
+	if jar.GetSapisid() != "sapisid3p_val" {
+		t.Errorf("expected sapisid3p_val, got %q", jar.GetSapisid())
+	}
+
+	sapisid, sapisid1p, sapisid3p := jar.GetSapisidCookies()
+	if sapisid != "sapisid3p_val" {
+		t.Errorf("expected sapisid3p_val fallback, got %q", sapisid)
+	}
+	if sapisid1p != "sapisid1p_val" {
+		t.Errorf("expected sapisid1p_val, got %q", sapisid1p)
+	}
+	if sapisid3p != "sapisid3p_val" {
+		t.Errorf("expected sapisid3p_val, got %q", sapisid3p)
+	}
+}

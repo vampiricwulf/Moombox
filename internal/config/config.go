@@ -204,44 +204,54 @@ func migrateOldFormat(cfg *MoomboxConfig, raw map[string]any) {
 		cfg.Monitors.HideFinishedAgeDays = ParseFlexDuration(v, "days", cfg.Monitors.HideFinishedAgeDays.Value)
 	}
 
-	// Migrate old [downloader] keys that moved to [paths] or [cookies]
+	// Migrate old [downloader] keys that moved to [paths] or [cookies].
+	// Per-field checks: only migrate if the target section doesn't already define that field.
 	if dl, ok := raw["downloader"].(map[string]any); ok {
+		pathsRaw, _ := raw["paths"].(map[string]any)
+		cookiesRaw, _ := raw["cookies"].(map[string]any)
 		if v, ok := dl["output_directory"].(string); ok {
-			// Only migrate if [paths] section doesn't exist
-			if _, hasPaths := raw["paths"]; !hasPaths {
+			if pathsRaw == nil || pathsRaw["output_directory"] == nil {
 				cfg.Paths.OutputDirectory = v
 			}
 		}
 		if v, ok := dl["staging_directory"].(string); ok {
-			if _, hasPaths := raw["paths"]; !hasPaths {
+			if pathsRaw == nil || pathsRaw["staging_directory"] == nil {
 				cfg.Paths.StagingDirectory = v
 			}
 		}
 		if v, ok := dl["ffmpeg_path"].(string); ok {
-			if _, hasPaths := raw["paths"]; !hasPaths {
+			if pathsRaw == nil || pathsRaw["ffmpeg_path"] == nil {
 				cfg.Paths.FfmpegPath = v
 			}
 		}
 		if v, ok := dl["cookie_file"].(string); ok {
-			if _, hasCookies := raw["cookies"]; !hasCookies {
+			if cookiesRaw == nil || cookiesRaw["cookie_file"] == nil {
 				cfg.Cookies.CookieFile = v
 			}
 		}
 	}
 
-	// Migrate old [auto_cookies] → [cookies]
+	// Migrate old [auto_cookies] → [cookies].
+	// Per-field checks: only migrate fields that the target [cookies] section doesn't define.
 	if ac, ok := raw["auto_cookies"].(map[string]any); ok {
-		if _, hasCookies := raw["cookies"]; !hasCookies {
-			if v, ok := ac["enabled"].(bool); ok {
+		cookiesRaw, _ := raw["cookies"].(map[string]any)
+		if v, ok := ac["enabled"].(bool); ok {
+			if cookiesRaw == nil || cookiesRaw["auto_enabled"] == nil {
 				cfg.Cookies.AutoEnabled = v
 			}
-			if v, ok := ac["browser_profile_dir"].(string); ok {
+		}
+		if v, ok := ac["browser_profile_dir"].(string); ok {
+			if cookiesRaw == nil || cookiesRaw["browser_profile_dir"] == nil {
 				cfg.Cookies.BrowserProfileDir = v
 			}
-			if v, ok := ac["refresh_interval"]; ok {
+		}
+		if v, ok := ac["refresh_interval"]; ok {
+			if cookiesRaw == nil || cookiesRaw["refresh_interval"] == nil {
 				cfg.Cookies.RefreshInterval = ParseFlexDuration(v, "minutes", cfg.Cookies.RefreshInterval.Value)
 			}
-			if arr, ok := ac["platforms"].([]any); ok {
+		}
+		if arr, ok := ac["platforms"].([]any); ok {
+			if cookiesRaw == nil || cookiesRaw["platforms"] == nil {
 				platforms := make([]string, 0, len(arr))
 				for _, p := range arr {
 					if s, ok := p.(string); ok {

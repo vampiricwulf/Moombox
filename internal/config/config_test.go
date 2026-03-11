@@ -234,6 +234,12 @@ func TestFlexDurationParse(t *testing.T) {
 		{"1h", "minutes", 0, 60},
 		{"7d", "days", 0, 7},
 		{"invalid", "minutes", 15, 15},
+		// Negative values should fall back to default
+		{-5, "minutes", 10, 10},
+		{int64(-3), "days", 7, 7},
+		{-1.5, "minutes", 30, 30},
+		// Zero is allowed
+		{0, "minutes", 10, 0},
 	}
 
 	for _, tt := range tests {
@@ -241,6 +247,93 @@ func TestFlexDurationParse(t *testing.T) {
 		if result.Value != tt.expected {
 			t.Errorf("ParseFlexDuration(%v, %s) = %f, want %f", tt.input, tt.unit, result.Value, tt.expected)
 		}
+	}
+}
+
+func TestMigrationPartialSection(t *testing.T) {
+	// Test that migration works when the new section exists but is partial.
+	// E.g., [paths] has database_path but not output_directory, and [downloader]
+	// has output_directory — the latter should be migrated.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `
+[paths]
+database_path = "./custom.db"
+
+[downloader]
+output_directory = "/from/downloader"
+staging_directory = "/staging/downloader"
+ffmpeg_path = "/usr/bin/ffmpeg"
+cookie_file = "./dl-cookies.txt"
+
+[cookies]
+auto_enabled = true
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// database_path from [paths] should be kept
+	if cfg.Paths.DatabasePath != "./custom.db" {
+		t.Errorf("expected ./custom.db, got %s", cfg.Paths.DatabasePath)
+	}
+	// output_directory should be migrated from [downloader] since [paths] doesn't define it
+	if cfg.Paths.OutputDirectory != "/from/downloader" {
+		t.Errorf("expected /from/downloader, got %s", cfg.Paths.OutputDirectory)
+	}
+	// staging_directory should also migrate
+	if cfg.Paths.StagingDirectory != "/staging/downloader" {
+		t.Errorf("expected /staging/downloader, got %s", cfg.Paths.StagingDirectory)
+	}
+	// ffmpeg_path should also migrate
+	if cfg.Paths.FfmpegPath != "/usr/bin/ffmpeg" {
+		t.Errorf("expected /usr/bin/ffmpeg, got %s", cfg.Paths.FfmpegPath)
+	}
+	// cookie_file should NOT migrate because [cookies] section exists with auto_enabled
+	// but cookie_file is not defined there, so it should migrate
+	if cfg.Cookies.CookieFile != "./dl-cookies.txt" {
+		t.Errorf("expected ./dl-cookies.txt, got %s", cfg.Cookies.CookieFile)
+	}
+}
+
+func TestValidationDiskThresholds(t *testing.T) {
+	cfg := Defaults()
+	// Critical <= Warn should auto-adjust
+	cfg.Disk.WarnPercent = 95
+	cfg.Disk.CriticalPercent = 90
+
+	validate(cfg)
+
+	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
+		t.Errorf("expected critical > warn, got critical=%d, warn=%d",
+			cfg.Disk.CriticalPercent, cfg.Disk.WarnPercent)
+	}
+}
+
+func TestValidationQualityPreference(t *testing.T) {
+	cfg := Defaults()
+	enabled := true
+	cfg.Channels = []ChannelConfig{
+		{ID: "UC123", QualityPreference: "1080p60"},
+		{ID: "UC456", QualityPreference: "invalid_quality"},
+		{ID: "UC789", QualityPreference: "best", Enabled: &enabled},
+	}
+
+	validate(cfg)
+
+	if cfg.Channels[0].QualityPreference != "1080p60" {
+		t.Errorf("expected 1080p60, got %s", cfg.Channels[0].QualityPreference)
+	}
+	if cfg.Channels[1].QualityPreference != "" {
+		t.Errorf("expected empty (invalid cleared), got %s", cfg.Channels[1].QualityPreference)
+	}
+	if cfg.Channels[2].QualityPreference != "best" {
+		t.Errorf("expected best, got %s", cfg.Channels[2].QualityPreference)
 	}
 }
 

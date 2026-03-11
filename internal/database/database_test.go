@@ -518,3 +518,277 @@ func TestOnJobsChangeSubscriber(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+func TestSubscriberSliceTrim(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Register multiple subscribers and unsubscribe them to verify trailing nil trimming
+	unsubs := make([]func(), 5)
+	for i := range unsubs {
+		unsubs[i] = db.OnJobUpdate(func(j *Job) {})
+	}
+
+	// Unsubscribe all in reverse order
+	for i := len(unsubs) - 1; i >= 0; i-- {
+		unsubs[i]()
+	}
+
+	// After unsubscribing all, the internal slice should be trimmed
+	db.subMu.RLock()
+	sliceLen := len(db.onJobUpdate)
+	db.subMu.RUnlock()
+	if sliceLen != 0 {
+		t.Errorf("expected subscriber slice trimmed to 0, got %d", sliceLen)
+	}
+}
+
+func TestUpdateJobSync(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	job := &Job{
+		ID:      "yt_sync1",
+		VideoID: "sync1",
+		URL:     "https://youtube.com/watch?v=sync1",
+		Status:  StatusUpcoming,
+		Title:   "Sync Test",
+	}
+	db.AddJob(job)
+
+	// Update synchronously
+	job.Status = StatusDownloading
+	job.Title = "Updated Sync"
+	err = db.UpdateJobSync(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetJob("yt_sync1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusDownloading {
+		t.Errorf("expected Downloading, got %s", got.Status)
+	}
+	if got.Title != "Updated Sync" {
+		t.Errorf("expected 'Updated Sync', got %q", got.Title)
+	}
+	if got.UpdatedAt == "" {
+		t.Error("expected updated_at to be set after UpdateJobSync")
+	}
+}
+
+func TestSegments(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	job := &Job{
+		ID:      "yt_segtest",
+		VideoID: "segtest",
+		URL:     "https://youtube.com/watch?v=segtest",
+		Status:  StatusDownloading,
+	}
+	db.AddJob(job)
+
+	seg := &Segment{
+		JobID:        "yt_segtest",
+		SegmentIndex: 0,
+		UnixStart:    1000,
+		UnixEnd:      2000,
+		Quality:      "1080p60",
+		Filename:     "seg0.mp4",
+	}
+	if err := db.AddSegment(seg); err != nil {
+		t.Fatal(err)
+	}
+	if seg.ID == 0 {
+		t.Error("expected segment ID to be set after insert")
+	}
+
+	segments, err := db.GetSegments("yt_segtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(segments))
+	}
+	if segments[0].Quality != "1080p60" {
+		t.Errorf("expected 1080p60, got %s", segments[0].Quality)
+	}
+
+	// Segments should also be loaded via GetJob
+	got, err := db.GetJob("yt_segtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Segments) != 1 {
+		t.Errorf("expected 1 segment via GetJob, got %d", len(got.Segments))
+	}
+}
+
+func TestClientTokenCRUD(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ct := &ClientToken{
+		ID:          "tok_1",
+		TokenPrefix: "mbox_abc",
+		TokenHash:   "hash123",
+		Label:       "Test Token",
+		CreatedAt:   "2024-01-01T00:00:00Z",
+		LastUsedAt:  "",
+		LastIP:      "",
+	}
+	if err := db.AddClientToken(ct); err != nil {
+		t.Fatal(err)
+	}
+
+	// Get by prefix
+	got, err := db.GetClientTokenByPrefix("mbox_abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected token, got nil")
+	}
+	if got.Label != "Test Token" {
+		t.Errorf("expected 'Test Token', got %q", got.Label)
+	}
+
+	// Update usage
+	if err := db.UpdateClientTokenUsage("tok_1", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ = db.GetClientTokenByPrefix("mbox_abc")
+	if got.LastIP != "127.0.0.1" {
+		t.Errorf("expected 127.0.0.1, got %q", got.LastIP)
+	}
+
+	// List
+	tokens, err := db.ListClientTokens()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 1 {
+		t.Errorf("expected 1 token, got %d", len(tokens))
+	}
+
+	// Delete
+	if err := db.DeleteClientToken("tok_1"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = db.GetClientTokenByPrefix("mbox_abc")
+	if got != nil {
+		t.Error("expected nil after delete")
+	}
+
+	// Non-existent prefix
+	got, err = db.GetClientTokenByPrefix("nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Error("expected nil for non-existent prefix")
+	}
+}
+
+func TestJobExists(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if db.JobExists("nonexistent") {
+		t.Error("expected false for nonexistent job")
+	}
+
+	job := &Job{
+		ID:      "yt_exists1",
+		VideoID: "exists1",
+		URL:     "https://youtube.com/watch?v=exists1",
+		Status:  StatusUpcoming,
+	}
+	db.AddJob(job)
+
+	if !db.JobExists("yt_exists1") {
+		t.Error("expected true for existing job")
+	}
+}
+
+func TestHasActiveJob(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// No active job initially
+	has, err := db.HasActiveJob("video123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Error("expected no active job")
+	}
+
+	// Add an active job
+	job := &Job{
+		ID:      "yt_active1",
+		VideoID: "video123",
+		URL:     "https://youtube.com/watch?v=video123",
+		Status:  StatusDownloading,
+	}
+	db.AddJob(job)
+
+	has, err = db.HasActiveJob("video123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Error("expected active job")
+	}
+
+	// Mark as finished — should no longer be active
+	db.UpdateJobFields("yt_active1", map[string]any{"status": StatusFinished})
+
+	has, err = db.HasActiveJob("video123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Error("expected no active job after finishing")
+	}
+}

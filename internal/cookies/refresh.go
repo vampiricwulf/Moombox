@@ -21,6 +21,11 @@ const (
 	youtubeGuideURL        = "https://www.youtube.com/youtubei/v1/guide"
 	youtubeGuideRefreshURL = "https://www.youtube.com/youtubei/v1/guide?prettyPrint=false"
 	twitchValidateURL      = "https://id.twitch.tv/oauth2/validate"
+
+	// youtubeClientVersion is the WEB client version sent in Innertube API requests.
+	// Update this when YouTube bumps the client version — it's used in auth check
+	// and session refresh requests. Format: "2.YYYYMMDD.00.00".
+	youtubeClientVersion = "2.20260301.00.00"
 )
 
 // cookieUpdate holds a parsed Set-Cookie value and its expiry timestamp.
@@ -287,7 +292,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()
 
-	body := `{"context":{"client":{"clientName":"WEB","clientVersion":"2.20260101.00.00","hl":"en"}}}`
+	body := `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideURL+"?prettyPrint=false", strings.NewReader(body))
 	if err != nil {
 		return false, err
@@ -372,7 +377,7 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()
 
-	body := `{"context":{"client":{"clientName":"WEB","clientVersion":"2.20260101.00.00","hl":"en"}}}`
+	body := `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideRefreshURL, strings.NewReader(body))
 	if err != nil {
 		return false, err
@@ -466,7 +471,9 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 		name := nameValue[:eqIdx]
 		value := nameValue[eqIdx+1:]
 
-		expiry := time.Now().Unix() + 365*24*60*60
+		now := time.Now().Unix()
+		expiry := now + 365*24*60*60
+		skipCookie := false
 		for _, part := range parts[1:] {
 			trimmed := strings.TrimSpace(strings.ToLower(part))
 			if strings.HasPrefix(trimmed, "expires=") {
@@ -475,12 +482,23 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 					expiry = t.Unix()
 				} else if t, err := time.Parse("Mon, 02-Jan-2006 15:04:05 MST", dateStr); err == nil {
 					expiry = t.Unix()
+				} else if t, err := time.Parse(time.RFC1123Z, dateStr); err == nil {
+					expiry = t.Unix()
 				}
+				// If all date formats fail, keep the default expiry
 			} else if strings.HasPrefix(trimmed, "max-age=") {
 				if maxAge, err := strconv.ParseInt(strings.TrimSpace(trimmed[8:]), 10, 64); err == nil {
-					expiry = time.Now().Unix() + maxAge
+					// Negative or zero max-age means the cookie should be deleted — skip it
+					if maxAge <= 0 {
+						skipCookie = true
+						break
+					}
+					expiry = now + maxAge
 				}
 			}
+		}
+		if skipCookie {
+			continue
 		}
 
 		updates[name] = cookieUpdate{Value: value, Expiry: expiry}
@@ -570,8 +588,14 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 		updated[name] = true
 	}
 
-	if err := os.WriteFile(filePath, []byte(result.String()), 0600); err != nil {
-		return fmt.Errorf("write cookie file: %w", err)
+	// Write via temp file + rename to prevent corruption on partial failure
+	tmpPath := filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(result.String()), 0600); err != nil {
+		return fmt.Errorf("write temp cookie file: %w", err)
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename cookie file: %w", err)
 	}
 
 	if len(updated) > 0 {
