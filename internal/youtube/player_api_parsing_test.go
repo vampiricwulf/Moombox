@@ -262,7 +262,7 @@ func TestDeduplicateFormats(t *testing.T) {
 		t.Fatalf("expected 2 deduplicated formats, got %d", len(result))
 	}
 
-	// itag 137 should prefer lower auth level (VR=0 < Web=4)
+	// itag 137 should prefer lower auth level (VR=0 < Web=5)
 	for _, f := range result {
 		if f.Itag == 137 {
 			if *f.AuthLevel != AuthLevelAndroidVR {
