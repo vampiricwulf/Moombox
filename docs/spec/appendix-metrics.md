@@ -1,6 +1,6 @@
 # Appendix: Project Metrics
 
-> **Last verified:** 2026-03-09
+> **Last verified:** 2026-03-11 (post full audit & refactor)
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 
@@ -28,34 +28,36 @@
 
 ## Package Scale
 
-| Package | Approx Lines | Files | Description |
-|---------|-------------|-------|-------------|
-| tui/ | ~12,900 | 21 | Largest — 2-over-1 panel layout, overlays, chord system |
-| worker/ | ~6,400 | 13 | Download orchestration, queue, quality monitor |
-| web/ | ~6,400 | 15 | chi router, WebSocket, auth, middleware, routes |
-| twitch/ | ~3,200 | 8 | Twitch GQL API, auth, HLS, IRC chat, emotes |
-| engine/ | ~2,700 | 3 | Segment downloader (DASH/HLS/VOD), manifest, muxer |
-| cookies/ | ~2,600 | 5 | Cookie jar, refresh, auto-cookie (Firefox/Chromium) |
-| youtube/ | ~2,000 | 6 | YouTube service, player API, format selector |
-| database/ | ~1,800 | 3 | SQLite/WAL, batch updates, pub/sub |
-| cipher/ | ~1,500 | 7 | YouTube signature cipher: AST + regex, 3-VM LRU |
-| monitor/ | ~1,500 | 4 | Feed (RSS), DECAPI, Twitch monitors |
-| chat/ | ~1,400 | 3 | YouTube live chat downloader (polling + batching) |
-| bgutils/ | ~1,400 | 7 | PO token: challenge, BotGuard VM (Goja), mint |
-| utils/ | ~1,000 | 13 | HTTP helpers, formatters, YouTube URL parsing |
-| config/ | ~800 | 4 | TOML config, FlexDuration, channel terms |
-| goja/ | ~700 | 4 | JS runtime shims (minimal DOM, timers, encoding) |
-| updater/ | ~450 | 3 | GitHub release checker, self-updater, Ed25519 |
-| logger/ | ~450 | 1 | slog wrapper, file rotation, ring buffer, pub/sub |
-| constants/ | ~400 | 1 | Hardcoded values (API keys, URLs, timeouts) |
-| notifications/ | ~300 | 2 | Manager + Discord webhook |
-| errors/ | ~200 | 1 | Typed error hierarchy, sentinel codes |
-| disk/ | ~60 | 1 | Windows disk space queries (kernel32) |
+| Package | Approx Lines | Files | Test Files | Description |
+|---------|-------------|-------|------------|-------------|
+| tui/ | ~13,100 | 33 | 1 | Largest — 2-over-1 panel layout, overlays, chord system |
+| worker/ | ~6,500 | 23 | 9 | Download orchestration, queue, quality monitor |
+| web/ + routes/ | ~6,600 | 21 | 4 | chi router, WebSocket, auth, middleware, routes |
+| twitch/ | ~3,200 | 10 | 3 | Twitch GQL API, auth, HLS, IRC chat, emotes |
+| engine/ | ~2,850 | 12 | 3 | Segment downloader (DASH/HLS/VOD), manifest, muxer |
+| cookies/ | ~2,700 | 9 | 1 | Cookie jar, refresh, auto-cookie (Firefox/Chromium) |
+| youtube/ | ~1,950 | 8 | 2 | YouTube service, player API, format selector |
+| database/ | ~1,850 | 7 | 1 | SQLite/WAL, batch updates, pub/sub |
+| cipher/ | ~1,500 | 9 | 2 | YouTube signature cipher: AST + regex, 3-VM LRU |
+| monitor/ | ~1,450 | 4 | 1 | Feed (RSS), DECAPI, Twitch monitors |
+| bgutils/ | ~1,400 | 7 | 1 | PO token: challenge, BotGuard VM (Goja), mint |
+| chat/ | ~1,400 | 3 | 1 | YouTube live chat downloader (polling + batching) |
+| utils/ | ~1,150 | 14 | 14 | HTTP helpers, formatters, YouTube URL parsing, JSON |
+| config/ | ~850 | 4 | 1 | TOML config, FlexDuration, channel terms |
+| goja/ | ~800 | 4 | 2 | JS runtime shims (minimal DOM, timers, encoding) |
+| logger/ | ~470 | 1 | 1 | slog wrapper, file rotation, ring buffer, pub/sub |
+| updater/ | ~450 | 3 | 2 | GitHub release checker, self-updater, Ed25519 |
+| constants/ | ~400 | 1 | 0 | Hardcoded values (API keys, URLs, timeouts) |
+| notifications/ | ~330 | 2 | 1 | Manager + Discord webhook |
+| errors/ | ~230 | 1 | 1 | Typed error hierarchy, sentinel codes |
+| disk/ | ~60 | 1 | 0 | Windows disk space queries (kernel32) |
 
 ### Totals
 
-- **main.go:** ~2,074 lines
-- **internal/ packages:** ~48,300 lines across 125 files (excluding tests and web assets)
+- **cmd/moombox/:** ~2,170 lines across 5 files (main + adapters + addvideo + helpers + launcher)
+- **internal/ packages:** ~49,400 lines across 179 source files
+- **Test code:** ~12,600 lines across 51 test files
+- **Frontend:** ~10,250 lines across 13 files (~398KB)
 
 ## Entry Points
 

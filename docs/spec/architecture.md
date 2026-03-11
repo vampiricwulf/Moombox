@@ -169,33 +169,33 @@ All monitor `OnVideoFound`/`OnStreamFound` callbacks are wrapped with `defer fun
 ## Package Dependency Graph
 
 ```
-cmd/moombox/main.go                    -- launcher + orchestrator (~2,074 lines)
+cmd/moombox/ (5 files)                 -- launcher + orchestrator (~2,170 lines)
 cmd/sign/main.go                       -- CI signing tool (Ed25519)
 
-internal/config          (~819 lines)  -- TOML config, FlexDuration, channel terms
-internal/updater         (~447 lines)  -- GitHub release checker + self-updater + Ed25519
-internal/logger          (~447 lines)  -- slog wrapper, file rotation, ring buffer, pub/sub
-internal/database      (~1,819 lines)  -- SQLite/WAL, batch updates (100ms coalesce), pub/sub
-internal/cookies       (~2,620 lines)  -- jar, refresh, auto-cookie (Firefox/Chromium)
-internal/youtube       (~1,972 lines)  -- Service, PlayerAPI, Auth, watch page, format selector
-internal/twitch        (~3,179 lines)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
-internal/bgutils       (~1,355 lines)  -- PO token: challenge -> BotGuard VM (Goja) -> mint
-internal/cipher        (~1,475 lines)  -- YouTube signature cipher: AST + regex, 3-VM LRU
-internal/engine        (~2,725 lines)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
-internal/chat          (~1,434 lines)  -- YouTube live chat downloader (polling + batching)
-internal/worker        (~6,443 lines)  -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
-internal/monitor       (~1,455 lines)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
-internal/notifications   (~315 lines)  -- Manager + Discord webhook
-internal/web           (~6,437 lines)  -- chi router, WebSocket hub, auth, middleware, routes
-internal/tui          (~12,893 lines)  -- 2-over-1 panel layout, overlays, chord system
-internal/goja            (~715 lines)  -- JS runtime shims (minimal DOM, TextEncoder, timers)
-internal/disk             (~57 lines)  -- Windows disk space queries (kernel32)
-internal/errors          (~231 lines)  -- Typed error hierarchy, sentinel codes
-internal/constants       (~392 lines)  -- Hardcoded values (API keys, URLs, timeouts)
-internal/utils         (~1,037 lines)  -- HTTP helpers, formatters, YouTube URL parsing
+internal/config     (4 files, ~850)    -- TOML config, FlexDuration, channel terms
+internal/updater    (3 files, ~450)    -- GitHub release checker + self-updater + Ed25519
+internal/logger     (1 file,  ~470)    -- slog wrapper, file rotation, ring buffer, pub/sub
+internal/database   (7 files, ~1,850)  -- SQLite/WAL, batch updates (100ms coalesce), pub/sub
+internal/cookies    (9 files, ~2,700)  -- jar, refresh, auto-cookie (Firefox/Chromium)
+internal/youtube    (8 files, ~1,950)  -- Service, PlayerAPI, Auth, watch page, format selector
+internal/twitch    (10 files, ~3,200)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
+internal/bgutils    (7 files, ~1,400)  -- PO token: challenge -> BotGuard VM (Goja) -> mint
+internal/cipher     (9 files, ~1,500)  -- YouTube signature cipher: AST + regex, 3-VM LRU
+internal/engine    (12 files, ~2,850)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
+internal/chat       (3 files, ~1,400)  -- YouTube live chat downloader (polling + batching)
+internal/worker    (23 files, ~6,500)  -- Worker, Orchestrator, StreamProcessor, Queue, Trim, Quality
+internal/monitor    (4 files, ~1,450)  -- FeedMonitor (RSS), DecapiMonitor, TwitchMonitor
+internal/notif.     (2 files, ~330)    -- Manager + Discord webhook
+internal/web       (21 files, ~6,600)  -- chi router, WebSocket hub, auth, middleware, routes
+internal/tui       (33 files, ~13,100) -- 2-over-1 panel layout, overlays, chord system
+internal/goja       (4 files, ~800)    -- JS runtime shims (minimal DOM, TextEncoder, timers)
+internal/disk       (1 file,  ~60)     -- Windows disk space queries (kernel32)
+internal/errors     (1 file,  ~230)    -- Typed error hierarchy, sentinel codes
+internal/constants  (1 file,  ~400)    -- Hardcoded values (API keys, URLs, timeouts)
+internal/utils     (14 files, ~1,150)  -- HTTP helpers, formatters, YouTube URL parsing
 ```
 
-Total: approximately 48,300 lines of Go across 125 files (excluding tests, web assets, and main.go).
+Total: approximately 49,400 lines of Go across 179 source files (excluding tests, web assets, and cmd/moombox).
 
 ### Dependency Direction
 
