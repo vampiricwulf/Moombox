@@ -195,7 +195,7 @@ func generateIntegrityToken(ctx context.Context, config *BgConfig, botguardRespo
 	}
 	req.Header.Set("User-Agent", UserAgentShort)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := bgHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("POST GenerateIT: %w", err)
 	}

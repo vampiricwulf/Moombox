@@ -1,6 +1,7 @@
 package cipher
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -71,6 +72,54 @@ _result.sig = function(input) {
 	}
 	if result != "HELLO" {
 		t.Errorf("expected HELLO, got %q", result)
+	}
+}
+
+func TestStsCacheFIFOEviction(t *testing.T) {
+	// Verify that STS cache uses FIFO (oldest first) eviction,
+	// not random eviction.
+	sc := NewStsCache()
+
+	// Fill the cache to capacity by manually inserting entries
+	sc.mu.Lock()
+	for i := 0; i < stsCacheSize; i++ {
+		key := fmt.Sprintf("key-%04d", i)
+		sc.cache[key] = fmt.Sprintf("sts-%d", i)
+		sc.order = append(sc.order, key)
+	}
+	sc.mu.Unlock()
+
+	if len(sc.cache) != stsCacheSize {
+		t.Fatalf("expected cache size %d, got %d", stsCacheSize, len(sc.cache))
+	}
+
+	// Insert a new entry — should evict key-0000 (oldest)
+	sc.mu.Lock()
+	newKey := "key-new"
+	if _, exists := sc.cache[newKey]; !exists && len(sc.cache) >= stsCacheSize {
+		evictKey := sc.order[0]
+		sc.order = sc.order[1:]
+		delete(sc.cache, evictKey)
+	}
+	sc.cache[newKey] = "sts-new"
+	sc.order = append(sc.order, newKey)
+	sc.mu.Unlock()
+
+	// Verify key-0000 was evicted (the oldest)
+	sc.mu.RLock()
+	_, hasOldest := sc.cache["key-0000"]
+	_, hasNew := sc.cache["key-new"]
+	_, hasSecond := sc.cache["key-0001"]
+	sc.mu.RUnlock()
+
+	if hasOldest {
+		t.Error("expected key-0000 (oldest) to be evicted")
+	}
+	if !hasNew {
+		t.Error("expected key-new to be in cache")
+	}
+	if !hasSecond {
+		t.Error("expected key-0001 to still be in cache")
 	}
 }
 

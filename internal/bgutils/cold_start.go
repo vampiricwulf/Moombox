@@ -12,6 +12,11 @@ import (
 // Algorithm: build a packet with random keys, timestamp, and XOR-encoded identifier.
 func GenerateColdStartToken(identifier string, clientState int) (string, error) {
 	encodedID := []byte(identifier)
+	// Max identifier length: 118 bytes. The packet format uses a single-byte
+	// length field (max 255) for the payload, which includes an 8-byte header.
+	// With padding overhead and the 2-byte packet header, 118 bytes is the
+	// safe maximum that fits in a single-packet cold-start token and matches
+	// the BgUtils reference implementation's limit.
 	if len(encodedID) > 118 {
 		return "", &BGError{Code: ErrBadConfig, Message: "identifier too long (max 118 bytes)"}
 	}

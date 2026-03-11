@@ -30,14 +30,16 @@ func NewWebPoMinter(itData *IntegrityTokenData, webPoSignalOutput *goja.Object, 
 		return nil, &BGError{Code: ErrIntegrity, Message: "APF:Failed - webPoSignalOutput[0] is not a function"}
 	}
 
-	// Decode the integrity token
+	// Decode the integrity token. YouTube's GenerateIT returns standard base64.
+	// Try standard first, then URL-safe (both padded and unpadded).
 	decodedToken, err := base64.StdEncoding.DecodeString(itData.IntegrityToken)
 	if err != nil {
-		// Try URL-safe or raw
-		decodedToken, err = base64.RawURLEncoding.DecodeString(itData.IntegrityToken)
+		decodedToken, err = base64.URLEncoding.DecodeString(itData.IntegrityToken)
 		if err != nil {
-			// Use raw bytes from the string itself
-			decodedToken = []byte(itData.IntegrityToken)
+			decodedToken, err = base64.RawURLEncoding.DecodeString(itData.IntegrityToken)
+			if err != nil {
+				return nil, &BGError{Code: ErrIntegrity, Message: fmt.Sprintf("failed to decode integrity token: %v", err)}
+			}
 		}
 	}
 

@@ -12,9 +12,11 @@ var stsRegex = regexp.MustCompile(`(?:signatureTimestamp|sts)\s*:\s*(\d+)`)
 const stsCacheSize = 150
 
 // StsCache caches extracted signatureTimestamp values per player URL.
+// Uses insertion-order tracking for FIFO eviction.
 type StsCache struct {
 	mu    sync.RWMutex
 	cache map[string]string
+	order []string // insertion order for LRU eviction
 }
 
 // NewStsCache creates a new STS cache.
@@ -51,15 +53,19 @@ func (sc *StsCache) GetSts(ctx context.Context, playerCache *PlayerCache, player
 
 	sts = m[1]
 
-	// Cache (bounded to stsCacheSize, evict random entry if full)
+	// Cache with FIFO eviction — evict oldest entry when full
 	sc.mu.Lock()
-	if len(sc.cache) >= stsCacheSize {
-		for k := range sc.cache {
-			delete(sc.cache, k)
-			break
-		}
+	_, exists := sc.cache[key]
+	if !exists && len(sc.cache) >= stsCacheSize {
+		// Evict the oldest entry (first in insertion order)
+		evictKey := sc.order[0]
+		sc.order = sc.order[1:]
+		delete(sc.cache, evictKey)
 	}
 	sc.cache[key] = sts
+	if !exists {
+		sc.order = append(sc.order, key)
+	}
 	sc.mu.Unlock()
 
 	return sts, nil
@@ -69,5 +75,6 @@ func (sc *StsCache) GetSts(ctx context.Context, playerCache *PlayerCache, player
 func (sc *StsCache) Invalidate() {
 	sc.mu.Lock()
 	sc.cache = make(map[string]string)
+	sc.order = nil
 	sc.mu.Unlock()
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/dop251/goja"
@@ -66,12 +67,12 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 		_, runErr := vm.RunString(interpreterJS)
 		vmDone <- runErr
 	}()
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(SnapshotTimeout)
 	select {
 	case err = <-vmDone:
 		timer.Stop()
 	case <-timer.C:
-		vm.Interrupt("BotGuard interpreter execution timeout (30s)")
+		vm.Interrupt(fmt.Sprintf("BotGuard interpreter execution timeout (%v)", SnapshotTimeout))
 		err = <-vmDone // wait for RunString to return after interrupt
 	case <-ctx.Done():
 		vm.Interrupt("context cancelled")
@@ -151,6 +152,16 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 		}
 	}
 
+	// Drain any timer callbacks that were enqueued during vm.a() execution.
+	// BotGuard's interpreter sets up timers during initialization; their
+	// callbacks are queued (Goja is single-threaded) and must be drained on
+	// the VM-owning goroutine before we proceed.
+	if tm != nil {
+		if _, drainErr := tm.DrainCallbacks(); drainErr != nil {
+			fmt.Fprintf(os.Stderr, "bgutils: timer callback error during init: %v\n", drainErr)
+		}
+	}
+
 	// Wait for async callback with timeout
 	loadTimer := time.NewTimer(BotGuardLoadTimeout)
 	select {
@@ -215,6 +226,15 @@ func (c *BotGuardClient) Snapshot(timeout time.Duration) (string, *goja.Object, 
 		return "", nil, &BGError{Code: ErrAsyncSnapshot, Message: fmt.Sprintf("async snapshot call: %v", err)}
 	}
 
+	// Drain any timer callbacks enqueued during the snapshot call.
+	// BotGuard may set up monitoring/telemetry timers whose callbacks need
+	// to be executed on the VM thread before we read the result.
+	if c.timerMgr != nil {
+		if _, drainErr := c.timerMgr.DrainCallbacks(); drainErr != nil {
+			fmt.Fprintf(os.Stderr, "bgutils: timer callback error during snapshot: %v\n", drainErr)
+		}
+	}
+
 	// Wait for result
 	snapshotTimer := time.NewTimer(timeout)
 	select {
@@ -270,7 +290,7 @@ func fetchInterpreter(ctx context.Context, interpreterURL string) (string, error
 	}
 	req.Header.Set("User-Agent", UserAgentShort)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := bgHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}

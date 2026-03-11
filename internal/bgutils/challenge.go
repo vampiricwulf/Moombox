@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// bgHTTPClient is a dedicated HTTP client for BotGuard API requests with an
+// explicit timeout. Avoids http.DefaultClient which has no timeout.
+var bgHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // FetchChallenge fetches and descrambles a BotGuard challenge from the WAA API.
 func FetchChallenge(ctx context.Context, config *BgConfig) (*DescrambledChallenge, error) {
 	if config.RequestKey == "" {
@@ -43,7 +47,7 @@ func FetchChallenge(ctx context.Context, config *BgConfig) (*DescrambledChalleng
 	}
 	req.Header.Set("User-Agent", UserAgentShort)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := bgHTTPClient.Do(req)
 	if err != nil {
 		return nil, &BGError{Code: ErrRequestFailed, Message: fmt.Sprintf("fetch challenge: %v", err)}
 	}
@@ -98,6 +102,16 @@ func parseChallengeData(raw []byte) (*DescrambledChallenge, error) {
 	}
 
 	challenge := &DescrambledChallenge{}
+
+	// Challenge array indices (from BgUtils reference implementation):
+	//   0 = messageId (request tracking)
+	//   1 = interpreterScript (inline JS fallback)
+	//   2 = interpreterURL (primary JS source)
+	//   3 = interpreterHash (integrity check)
+	//   4 = program (BotGuard bytecode, required)
+	//   5 = globalName (VM global object name, required)
+	//   6 = (unused/reserved)
+	//   7 = clientExperimentsStateBlob
 
 	// Index 0: messageId
 	if len(challengeArr) > 0 {

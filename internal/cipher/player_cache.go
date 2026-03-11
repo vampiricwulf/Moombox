@@ -17,6 +17,11 @@ const (
 	playerCacheSubdir = "player_cache"
 )
 
+// playerHTTPClient is a dedicated HTTP client for player JS fetches with an
+// explicit timeout. This avoids using http.DefaultClient which has no timeout,
+// preventing potentially unbounded requests.
+var playerHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // PlayerCache manages disk-cached YouTube player JS files.
 type PlayerCache struct {
 	cacheDir string
@@ -140,7 +145,7 @@ func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := playerHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetch player JS: %w", err)
 	}
