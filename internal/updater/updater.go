@@ -319,5 +319,11 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 		return err
 	}
 
+	// Flush to disk before closing to prevent corruption on power loss
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+
 	return f.Close()
 }

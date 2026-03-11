@@ -454,6 +454,21 @@ func (hub *WebSocketHub) ClientCount() int {
 	return len(hub.clients)
 }
 
+// CleanupJob removes all throttle state for a specific job ID.
+// Call when a job is deleted or reaches a terminal state to prevent
+// the throttle maps from growing unbounded over the process lifetime.
+func (hub *WebSocketHub) CleanupJob(jobID string) {
+	hub.throttleMu.Lock()
+	defer hub.throttleMu.Unlock()
+
+	if timer, ok := hub.throttleTimers[jobID]; ok {
+		timer.Stop()
+		delete(hub.throttleTimers, jobID)
+	}
+	delete(hub.throttleTimestamps, jobID)
+	delete(hub.throttlePending, jobID)
+}
+
 // Close disconnects all clients.
 func (hub *WebSocketHub) Close() {
 	hub.mu.Lock()
@@ -470,5 +485,7 @@ func (hub *WebSocketHub) Close() {
 		timer.Stop()
 	}
 	hub.throttleTimers = nil
+	hub.throttleTimestamps = nil
+	hub.throttlePending = nil
 	hub.throttleMu.Unlock()
 }

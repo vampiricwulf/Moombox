@@ -283,8 +283,8 @@ func IsLocalOrPrivateRequest(r *http.Request) bool {
 	return isLocalIP(ExtractIP(r))
 }
 
-// SkipCompression can be used to check if compression should be skipped
-// for certain paths (e.g., video streaming).
+// shouldSkipCompression returns true for paths where compression should be
+// skipped (e.g., video streaming endpoints that use range requests).
 func shouldSkipCompression(p string) bool {
 	return strings.HasPrefix(p, "/api/jobs/") && strings.HasSuffix(p, "/video")
 }

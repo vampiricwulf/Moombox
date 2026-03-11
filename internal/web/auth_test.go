@@ -284,6 +284,81 @@ func TestInvalidateOtherSessionsNonExistentKeep(t *testing.T) {
 	}
 }
 
+func TestTokenPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		token    string
+		expected string
+	}{
+		{"normal token", "abcdef1234567890", "abcdef12"},
+		{"short token", "abc", "abc"},
+		{"exact 8 chars", "12345678", "12345678"},
+		{"empty token", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := TokenPrefix(tt.token)
+			if result != tt.expected {
+				t.Errorf("TokenPrefix(%q) = %q, expected %q", tt.token, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestHashAndVerifyToken(t *testing.T) {
+	token, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if len(token) != 64 {
+		t.Fatalf("token length = %d, expected 64", len(token))
+	}
+
+	hash, err := HashToken(token)
+	if err != nil {
+		t.Fatalf("HashToken: %v", err)
+	}
+
+	// Valid token should verify
+	if !VerifyToken(token, hash) {
+		t.Error("VerifyToken should return true for valid token")
+	}
+
+	// Wrong token should not verify
+	if VerifyToken("wrong_token_value_0000000000000000000000000000000000000000000000000000", hash) {
+		t.Error("VerifyToken should return false for wrong token")
+	}
+
+	// Malformed hash should not verify
+	if VerifyToken(token, "invalid") {
+		t.Error("VerifyToken should return false for malformed hash")
+	}
+}
+
+func TestIsScryptHash(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{"valid scrypt hash", "scrypt:abc:def", true},
+		{"no prefix", "abc:def:ghi", false},
+		{"too few parts", "scrypt:abc", false},
+		{"empty string", "", false},
+		{"just prefix", "scrypt", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsScryptHash(tt.input)
+			if result != tt.expected {
+				t.Errorf("IsScryptHash(%q) = %v, expected %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestIsAuthRequired(t *testing.T) {
 	tests := []struct {
 		name          string

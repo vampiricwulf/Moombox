@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"encoding/json"
 	"net/http"
 	"sync/atomic"
 
@@ -40,8 +39,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 			resp["releaseNotes"] = ui.ReleaseNotes
 			resp["publishedAt"] = ui.PublishedAt
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		jsonResponse(w, resp)
 	})
 
 	// POST /api/update/check — manually trigger an update check
@@ -73,8 +71,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 			resp["publishedAt"] = release.PublishedAt
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		jsonResponse(w, resp)
 	})
 
 	// POST /api/update/apply — download update and restart
@@ -95,8 +92,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"success": true})
+		jsonResponse(w, map[string]any{"success": true})
 
 		// Flush the response before triggering restart to ensure the
 		// client receives the success response.
@@ -122,12 +118,10 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 			return
 		}
 		if err := deps.Updater.VerifyCurrentSignature(r.Context()); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			jsonResponse(w, map[string]any{"error": err.Error()})
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"verified": true})
+		jsonResponse(w, map[string]any{"verified": true})
 	})
 
 	// POST /api/update/dismiss — disable auto-check and clear update info
@@ -140,7 +134,6 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"success": true})
+		jsonResponse(w, map[string]any{"success": true})
 	})
 }

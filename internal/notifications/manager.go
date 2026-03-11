@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -182,10 +183,22 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 	}
 }
 
-// Wait blocks until all in-flight notification goroutines have finished.
+// Wait blocks until all in-flight notification goroutines have finished
+// or a 30-second timeout expires, whichever comes first.
 // Call during graceful shutdown to avoid losing notifications.
 func (m *Manager) Wait() {
-	m.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		if m.logger != nil {
+			m.logger.Warn("notification wait timed out after 30s")
+		}
+	}
 }
 
 // HasTargets returns true if any notification targets are configured.
