@@ -19,6 +19,9 @@ var (
 	sessionIndexRegex      = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
 	delegatedSessionRegex  = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
 	dataSyncIDRegex        = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
+	// Matches encryptedHostFlags in flat JSON objects. May fail if nested objects
+	// precede the field (YouTube's embed page config is typically flat here).
+	encryptedHostFlagsRegex = regexp.MustCompile(`"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":\{[^}]*"encryptedHostFlags":"([^"]+)"`)
 	// Multiple patterns for extracting player response — YouTube occasionally
 	// changes the variable name or assignment format.
 	playerResponsePatterns = []*regexp.Regexp{
@@ -140,4 +143,49 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]interfac
 // DefaultYtcfg creates a default (empty) ytcfg.
 func DefaultYtcfg() *YtcfgData {
 	return &YtcfgData{}
+}
+
+func extractEncryptedHostFlags(html string) string {
+	if m := encryptedHostFlagsRegex.FindStringSubmatch(html); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// EmbedPageResult contains data extracted from a YouTube embed page.
+type EmbedPageResult struct {
+	EncryptedHostFlags string
+	PlayerURL          string
+}
+
+// FetchEmbedPage fetches a YouTube embed page and extracts encryptedHostFlags.
+func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, error) {
+	url := fmt.Sprintf("%s/%s?html5=1", constants.YouTubeURLs.Embed, videoID)
+
+	headers := map[string]string{
+		"User-Agent":      constants.UserAgents.Web,
+		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Accept-Language": "en-US,en;q=0.5",
+	}
+
+	body, err := utils.FetchBody(ctx, url, 30*time.Second, headers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch embed page: %w", err)
+	}
+
+	html := string(body)
+	result := &EmbedPageResult{
+		EncryptedHostFlags: extractEncryptedHostFlags(html),
+	}
+
+	// Also extract player URL from embed page
+	if m := jsURLRegex.FindStringSubmatch(html); m != nil {
+		playerURL := m[1]
+		if strings.HasPrefix(playerURL, "/") {
+			playerURL = constants.YouTubeURLs.Base + playerURL
+		}
+		result.PlayerURL = playerURL
+	}
+
+	return result, nil
 }
