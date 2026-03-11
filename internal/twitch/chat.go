@@ -1,28 +1,18 @@
 package twitch
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
-
-	"nhooyr.io/websocket"
-
-	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
 const (
 	chatMaxConsecutiveErrs = 20
 	chatDedupMax           = 5000
 	chatSaveInterval       = 1 * time.Second
-	messageCountWidth      = 20 // Fixed-width padding for messageCount in JSON header
 )
 
 // ChatDownloader connects to Twitch IRC and records live chat messages.
@@ -58,14 +48,14 @@ type ChatDownloader struct {
 
 // ChatDownloaderOptions configures the chat downloader.
 type ChatDownloaderOptions struct {
-	ChannelLogin     string
-	ChannelDisplay   string
-	ChannelID        string
-	StreamID         string
-	AuthToken        string
-	OutputPath       string
-	StreamStartTime  string
-	EmoteResolver    *EmoteResolver
+	ChannelLogin    string
+	ChannelDisplay  string
+	ChannelID       string
+	StreamID        string
+	AuthToken       string
+	OutputPath      string
+	StreamStartTime string
+	EmoteResolver   *EmoteResolver
 }
 
 // twitchChatResumeState persists IRC chat state for resume after reconnection.
@@ -161,20 +151,26 @@ func (cd *ChatDownloader) saveResumeState() {
 
 	data, err := json.Marshal(state)
 	if err != nil {
+		cd.logger.Warn("marshal chat resume state", "err", err)
 		return
 	}
 
 	resumePath := cd.getResumeFilePath()
 	tmpPath := resumePath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		cd.logger.Warn("write chat resume state", "err", err)
 		return
 	}
-	os.Rename(tmpPath, resumePath)
+	if err := os.Rename(tmpPath, resumePath); err != nil {
+		cd.logger.Warn("rename chat resume state", "err", err)
+	}
 }
 
 // clearResumeState deletes the resume state file on successful completion.
 func (cd *ChatDownloader) clearResumeState() {
-	os.Remove(cd.getResumeFilePath())
+	if err := os.Remove(cd.getResumeFilePath()); err != nil && !os.IsNotExist(err) {
+		cd.logger.Warn("remove chat resume state", "err", err)
+	}
 }
 
 // Start connects to Twitch IRC and begins recording chat messages.
@@ -202,6 +198,10 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	}
 
 	defer func() {
+		if r := recover(); r != nil {
+			cd.logger.Error("chat downloader panic", "panic", r)
+		}
+
 		cd.mu.Lock()
 		cd.running = false
 		cd.mu.Unlock()
@@ -211,7 +211,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.clearResumeState()
 
 		// Inject third-party emotes (7TV, BTTV, FFZ) after final flush.
-		// Use a fresh context — the original ctx may already be cancelled.
+		// Use a fresh context -- the original ctx may already be cancelled.
 		if cd.totalCount > 0 && cd.emoteResolver != nil && cd.channelID != "" {
 			cd.logger.Info("resolving emotes for Twitch chat", "channelID", cd.channelID)
 			emoteCtx, emoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -225,7 +225,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		}
 	}()
 
-	// C1: Reconnect loop — on error limit, save state and reconnect
+	// C1: Reconnect loop -- on error limit, save state and reconnect
 	maxReconnects := 10
 	reconnectAttempts := 0
 
@@ -263,309 +263,6 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	return fmt.Errorf("exceeded max IRC reconnects for %s", cd.channelLogin)
 }
 
-// runIRCSession runs a single IRC connection session.
-func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
-	cd.logger.Info("connecting to twitch IRC", "channel", cd.channelLogin)
-
-	conn, _, err := websocket.Dial(ctx, constants.TwitchURLs.IRCWS, nil)
-	if err != nil {
-		return fmt.Errorf("connect IRC: %w", err)
-	}
-	defer conn.Close(websocket.StatusNormalClosure, "done")
-
-	conn.SetReadLimit(512 * 1024) // 512KB cap on incoming IRC messages
-
-	// Authenticate
-	if cd.authToken != "" {
-		if err := conn.Write(ctx, websocket.MessageText, []byte("PASS oauth:"+cd.authToken)); err != nil {
-			return fmt.Errorf("IRC PASS failed: %w", err)
-		}
-	} else {
-		if err := conn.Write(ctx, websocket.MessageText, []byte("PASS SCHMOOPIIE")); err != nil {
-			return fmt.Errorf("IRC PASS failed: %w", err)
-		}
-	}
-	nick := fmt.Sprintf("justinfan%d", rand.Intn(100000))
-	if err := conn.Write(ctx, websocket.MessageText, []byte("NICK "+nick)); err != nil {
-		return fmt.Errorf("IRC NICK failed: %w", err)
-	}
-
-	// Request capabilities
-	if err := conn.Write(ctx, websocket.MessageText, []byte("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership")); err != nil {
-		return fmt.Errorf("IRC CAP REQ failed: %w", err)
-	}
-
-	// Join channel
-	if err := conn.Write(ctx, websocket.MessageText, []byte("JOIN #" + strings.ToLower(cd.channelLogin))); err != nil {
-		return fmt.Errorf("IRC JOIN failed: %w", err)
-	}
-
-	cd.logger.Info("joined twitch IRC", "channel", cd.channelLogin)
-
-	// Message-triggered flush: idle until a message arrives, then collect
-	// for chatSaveInterval before flushing. No I/O during quiet periods.
-	var flushTimer *time.Timer
-	var flushCh <-chan time.Time // nil channel is never ready in select
-	defer func() {
-		if flushTimer != nil {
-			flushTimer.Stop()
-		}
-	}()
-
-	consecutiveErrors := 0
-
-	for cd.IsRunning() {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-flushCh:
-			cd.flush()
-			flushTimer = nil
-			flushCh = nil
-		default:
-		}
-
-		// Start flush timer when the first pending message arrives.
-		// Subsequent messages within chatSaveInterval are batched together.
-		// Placed before conn.Read so error-path `continue` still triggers it.
-		if flushTimer == nil {
-			cd.mu.Lock()
-			hasPending := len(cd.messages) > 0
-			cd.mu.Unlock()
-			if hasPending {
-				flushTimer = time.NewTimer(chatSaveInterval)
-				flushCh = flushTimer.C
-			}
-		}
-
-		_, data, err := conn.Read(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			consecutiveErrors++
-			if consecutiveErrors >= chatMaxConsecutiveErrs {
-				// Return error to trigger reconnect
-				return fmt.Errorf("too many IRC errors: %w", err)
-			}
-			continue
-		}
-		consecutiveErrors = 0
-
-		lines := strings.Split(string(data), "\r\n")
-		for _, line := range lines {
-			if line == "" {
-				continue
-			}
-
-			// Handle PING
-			if strings.HasPrefix(line, "PING") {
-				if err := conn.Write(ctx, websocket.MessageText, []byte("PONG :tmi.twitch.tv")); err != nil {
-					cd.logger.Warn("IRC PONG write failed", "err", err)
-				}
-				continue
-			}
-
-			msg := cd.parseLine(line)
-			if msg == nil {
-				continue
-			}
-
-			cd.addMessage(msg)
-		}
-	}
-	return nil
-}
-
-func (cd *ChatDownloader) parseLine(line string) *TwitchChatMessage {
-	// Parse IRC tags
-	var tagsStr string
-	rest := line
-
-	if strings.HasPrefix(line, "@") {
-		idx := strings.Index(line, " ")
-		if idx < 0 {
-			return nil
-		}
-		tagsStr = line[1:idx]
-		rest = line[idx+1:]
-	}
-
-	tags := parseIRCTags(tagsStr)
-
-	// Parse command
-	parts := strings.SplitN(rest, " ", 4)
-	if len(parts) < 3 {
-		return nil
-	}
-
-	command := parts[1]
-
-	switch command {
-	case "PRIVMSG":
-		return cd.parsePrivmsg(tags, parts, line)
-	case "USERNOTICE":
-		return cd.parseUsernotice(tags, parts, line)
-	default:
-		return nil
-	}
-}
-
-func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, rawLine string) *TwitchChatMessage {
-	id := tags["id"]
-	if id == "" {
-		return nil
-	}
-
-	tmiSentTs, _ := strconv.ParseInt(tags["tmi-sent-ts"], 10, 64)
-	if tmiSentTs == 0 {
-		tmiSentTs = time.Now().UnixMilli()
-	}
-	bits, _ := strconv.Atoi(tags["bits"])
-
-	msgType := "chat"
-	if bits > 0 {
-		msgType = "bits"
-	}
-
-	// Extract message text (after the last ':')
-	var messageText string
-	if len(parts) >= 4 {
-		messageText = parts[3]
-		if strings.HasPrefix(messageText, ":") {
-			messageText = messageText[1:]
-		}
-	}
-
-	// Author name fallback chain
-	authorName := tags["display-name"]
-	if authorName == "" {
-		authorName = tags["login"]
-	}
-	if authorName == "" {
-		authorName = "Anonymous"
-	}
-
-	baseMs := cd.recordingStartMs
-	if baseMs == 0 {
-		baseMs = cd.streamStartMs
-	}
-	var offsetMs int64
-	if baseMs > 0 {
-		offsetMs = tmiSentTs - baseMs
-		if offsetMs < 0 {
-			offsetMs = 0
-		}
-	}
-
-	msg := &TwitchChatMessage{
-		ID:           id,
-		TimestampMs:  tmiSentTs,
-		OffsetMs:     offsetMs,
-		AuthorName:   authorName,
-		AuthorID:     tags["user-id"],
-		AuthorBadges: parseBadges(tags["badges"]),
-		AuthorColor:  tags["color"],
-		Message:      messageText,
-		Emotes:       parseEmoteTags(tags["emotes"], messageText),
-		Bits:         bits,
-		MessageType:  msgType,
-		Raw:          rawLine,
-	}
-
-	return msg
-}
-
-func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string, rawLine string) *TwitchChatMessage {
-	id := tags["id"]
-	if id == "" {
-		return nil
-	}
-
-	tmiSentTs, _ := strconv.ParseInt(tags["tmi-sent-ts"], 10, 64)
-	if tmiSentTs == 0 {
-		tmiSentTs = time.Now().UnixMilli()
-	}
-	msgID := tags["msg-id"] // "sub", "resub", "subgift", "raid", etc.
-
-	// Normalize message type like TS does
-	normalizedType := "system"
-	switch msgID {
-	case "sub":
-		normalizedType = "sub"
-	case "resub":
-		normalizedType = "resub"
-	case "subgift", "submysterygift":
-		normalizedType = "subgift"
-	case "raid":
-		normalizedType = "raid"
-	}
-
-	// System message (unescape \s to space)
-	systemMsg := strings.ReplaceAll(tags["system-msg"], `\s`, " ")
-
-	var messageText string
-	if len(parts) >= 4 {
-		messageText = parts[3]
-		if strings.HasPrefix(messageText, ":") {
-			messageText = messageText[1:]
-		}
-	}
-	// If no trailing message, fall back to system message
-	if messageText == "" {
-		messageText = systemMsg
-	}
-
-	// Author name fallback chain
-	authorName := tags["display-name"]
-	if authorName == "" {
-		authorName = tags["login"]
-	}
-	if authorName == "" {
-		authorName = "System"
-	}
-
-	baseMs := cd.recordingStartMs
-	if baseMs == 0 {
-		baseMs = cd.streamStartMs
-	}
-	var offsetMs int64
-	if baseMs > 0 {
-		offsetMs = tmiSentTs - baseMs
-		if offsetMs < 0 {
-			offsetMs = 0
-		}
-	}
-
-	msg := &TwitchChatMessage{
-		ID:           id,
-		TimestampMs:  tmiSentTs,
-		OffsetMs:     offsetMs,
-		AuthorName:   authorName,
-		AuthorID:     tags["user-id"],
-		AuthorBadges: parseBadges(tags["badges"]),
-		AuthorColor:  tags["color"],
-		Message:      messageText,
-		Emotes:       parseEmoteTags(tags["emotes"], messageText),
-		MessageType:  normalizedType,
-		SystemMsg:    systemMsg,
-		Raw:          rawLine,
-	}
-
-	// C1: Extract additional USERNOTICE-specific fields
-	if v := tags["msg-param-sub-plan"]; v != "" {
-		msg.SubPlan = v
-	}
-	if v := tags["msg-param-recipient-display-name"]; v != "" {
-		msg.GiftRecipient = v
-	}
-	if v, err := strconv.Atoi(tags["msg-param-viewerCount"]); err == nil && v > 0 {
-		msg.ViewerCount = v
-	}
-
-	return msg
-}
-
 func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
@@ -577,7 +274,7 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 	cd.seenIDs[msg.ID] = struct{}{}
 	cd.seenOrder = append(cd.seenOrder, msg.ID)
 
-	// Prune dedup map — keep most recent chatDedupMax entries by insertion order
+	// Prune dedup map -- keep most recent chatDedupMax entries by insertion order
 	if len(cd.seenOrder) > chatDedupMax*2 {
 		removeIDs := cd.seenOrder[:len(cd.seenOrder)-chatDedupMax]
 		for _, id := range removeIDs {
@@ -595,344 +292,6 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 	if cd.OnProgress != nil {
 		cd.OnProgress(cd.totalCount)
 	}
-}
-
-func (cd *ChatDownloader) flush() {
-	cd.mu.Lock()
-	snapshotLen := len(cd.messages)
-	msgs := make([]TwitchChatMessage, snapshotLen)
-	copy(msgs, cd.messages)
-	count := cd.totalCount
-	flushed := cd.flushedToDisk
-	cd.mu.Unlock()
-
-	if snapshotLen == 0 || cd.outputPath == "" {
-		return
-	}
-
-	dir := filepath.Dir(cd.outputPath)
-	os.MkdirAll(dir, 0o755)
-
-	var writeErr error
-	if !flushed {
-		// First flush: write complete file
-		writeErr = cd.writeFullChatFile(msgs, count)
-	} else {
-		// Subsequent flushes: append new messages to existing file
-		writeErr = cd.appendToFile(msgs)
-		if writeErr != nil {
-			// Fallback to full rewrite on append error
-			cd.logger.Debug("append failed, falling back to full write", "err", writeErr)
-			writeErr = cd.writeFullChatFile(msgs, count)
-		}
-	}
-
-	if writeErr != nil {
-		cd.logger.Error("write chat file", "err", writeErr)
-		return
-	}
-
-	// Remove only the messages we successfully wrote, preserving any
-	// that arrived concurrently during the write.
-	cd.mu.Lock()
-	cd.messages = cd.messages[snapshotLen:]
-	cd.flushedToDisk = true
-	cd.mu.Unlock()
-
-	// Prune dedup set to prevent unbounded memory growth
-	cd.pruneDedup()
-
-	// Save resume state after each flush (matches TS periodicSave → saveResumeState)
-	cd.saveResumeState()
-}
-
-// writeFullChatFile writes all messages as a complete JSON file atomically.
-func (cd *ChatDownloader) writeFullChatFile(msgs []TwitchChatMessage, count int) error {
-	chatData := TwitchChatData{
-		Platform:           "twitch",
-		ChannelLogin:       cd.channelLogin,
-		ChannelDisplayName: cd.channelDisplay,
-		StreamID:           cd.streamID,
-		StreamStartTime:    cd.streamStartTime,
-		DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
-		MessageCount:       count,
-		Messages:           msgs,
-	}
-	if cd.recordingStartMs > 0 {
-		chatData.RecordingStartTime = time.UnixMilli(cd.recordingStartMs).UTC().Format(time.RFC3339)
-	}
-
-	data, err := json.MarshalIndent(chatData, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = padMessageCountJSON(data)
-
-	tmpPath := cd.outputPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, cd.outputPath)
-}
-
-// appendToFile appends new messages to the existing JSON file by finding the
-// closing ']' of the messages array and appending new entries. This avoids
-// re-serializing the entire file on each flush, keeping memory O(new messages).
-func (cd *ChatDownloader) appendToFile(msgs []TwitchChatMessage) error {
-	if len(msgs) == 0 {
-		return nil
-	}
-
-	info, err := os.Stat(cd.outputPath)
-	if err != nil || info.Size() < 10 {
-		return fmt.Errorf("file missing or too small")
-	}
-
-	f, err := os.OpenFile(cd.outputPath, os.O_RDWR, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	fileSize := info.Size()
-
-	// Read last 10 bytes to find ']'
-	tailSize := int64(10)
-	if tailSize > fileSize {
-		tailSize = fileSize
-	}
-	tailBuf := make([]byte, tailSize)
-	if _, err := f.ReadAt(tailBuf, fileSize-tailSize); err != nil {
-		return err
-	}
-
-	tail := string(tailBuf)
-	bracketOffset := -1
-	for i := len(tail) - 1; i >= 0; i-- {
-		if tail[i] == ']' {
-			bracketOffset = i
-			break
-		}
-	}
-	if bracketOffset == -1 {
-		return fmt.Errorf("no closing bracket found")
-	}
-
-	bracketBytePos := fileSize - tailSize + int64(bracketOffset)
-
-	// Check if there are existing messages (look for '}' before ']')
-	hasExisting := false
-	if bracketBytePos > 5 {
-		checkSize := int64(5)
-		if checkSize > bracketBytePos {
-			checkSize = bracketBytePos
-		}
-		checkBuf := make([]byte, checkSize)
-		f.ReadAt(checkBuf, bracketBytePos-checkSize)
-		for i := len(checkBuf) - 1; i >= 0; i-- {
-			if checkBuf[i] == '}' {
-				hasExisting = true
-				break
-			} else if checkBuf[i] != ' ' && checkBuf[i] != '\n' && checkBuf[i] != '\r' && checkBuf[i] != '\t' {
-				break
-			}
-		}
-	}
-
-	// Build append content
-	var sb strings.Builder
-	if hasExisting {
-		sb.WriteString(",\n")
-	}
-	for i, msg := range msgs {
-		msgBytes, err := json.Marshal(msg)
-		if err != nil {
-			continue
-		}
-		sb.WriteString("    ")
-		sb.Write(msgBytes)
-		if i < len(msgs)-1 {
-			sb.WriteString(",\n")
-		}
-	}
-	sb.WriteString("\n  ]\n}")
-	appendStr := sb.String()
-
-	// Truncate at ']' position, then write new content
-	if err := f.Truncate(bracketBytePos); err != nil {
-		return err
-	}
-	_, err = f.WriteAt([]byte(appendStr), bracketBytePos)
-
-	// Update messageCount in file header
-	cd.updateChatFileHeader()
-
-	return err
-}
-
-// updateChatFileHeader updates messageCount and downloadedAt in the JSON header without rewriting.
-func (cd *ChatDownloader) updateChatFileHeader() {
-	info, err := os.Stat(cd.outputPath)
-	if err != nil || info.Size() < 50 {
-		return
-	}
-
-	f, err := os.OpenFile(cd.outputPath, os.O_RDWR, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	headerSize := int64(1024)
-	if headerSize > info.Size() {
-		headerSize = info.Size()
-	}
-
-	headerBuf := make([]byte, headerSize)
-	n, err := f.ReadAt(headerBuf, 0)
-	if err != nil && n == 0 {
-		return
-	}
-	header := string(headerBuf[:n])
-
-	// Replace messageCount value (padded to fixed width)
-	header = replaceMessageCount(header, cd.totalCount)
-
-	// Replace downloadedAt value (matches TS: header.replace(/"downloadedAt": "[^"]*"/, ...))
-	replaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
-
-	// With padded messageCount, the header size should be constant.
-	// Fallback handles legacy files written before padding was added.
-	updatedBytes := []byte(header)
-	if len(updatedBytes) == n {
-		f.WriteAt(updatedBytes, 0)
-	} else if len(updatedBytes) > n {
-		// Header grew — must read rest BEFORE writing header, since the new
-		// header is longer and would overwrite the first byte(s) of the rest data.
-		restSize := info.Size() - int64(n)
-		var restBuf []byte
-		if restSize > 0 {
-			restBuf = make([]byte, restSize)
-			nRest, _ := f.ReadAt(restBuf, int64(n))
-			restBuf = restBuf[:nRest]
-		}
-		f.WriteAt(updatedBytes, 0)
-		if len(restBuf) > 0 {
-			f.WriteAt(restBuf, int64(len(updatedBytes)))
-		}
-		f.Truncate(int64(len(updatedBytes)) + restSize)
-	}
-}
-
-// replaceQuotedField replaces a JSON string value in a header buffer.
-// Finds `"key": "old_value"` and replaces with `"key": "new_value"`.
-func replaceQuotedField(header *string, key, newValue string) {
-	h := *header
-	keyIdx := strings.Index(h, key)
-	if keyIdx < 0 {
-		return
-	}
-	// Find opening quote after key
-	valStart := keyIdx + len(key)
-	for valStart < len(h) && h[valStart] != '"' {
-		valStart++
-	}
-	if valStart >= len(h) {
-		return
-	}
-	valStart++ // skip opening quote
-	// Find closing quote
-	valEnd := valStart
-	for valEnd < len(h) && h[valEnd] != '"' {
-		valEnd++
-	}
-	if valEnd >= len(h) {
-		return
-	}
-	*header = h[:valStart] + newValue + h[valEnd:]
-}
-
-// padMessageCountJSON pads the messageCount numeric value in serialized JSON to
-// messageCountWidth characters with trailing whitespace. This ensures the header
-// byte size stays constant during in-place updates as the count grows.
-func padMessageCountJSON(data []byte) []byte {
-	marker := []byte(`"messageCount":`)
-	idx := bytes.Index(data, marker)
-	if idx < 0 {
-		return data
-	}
-	pos := idx + len(marker)
-	for pos < len(data) && (data[pos] == ' ' || data[pos] == '\t') {
-		pos++
-	}
-	numStart := pos
-	for pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
-		pos++
-	}
-	if pos == numStart {
-		return data
-	}
-
-	padNeeded := messageCountWidth - (pos - numStart)
-	if padNeeded <= 0 {
-		return data
-	}
-
-	result := make([]byte, len(data)+padNeeded)
-	copy(result, data[:pos])
-	for i := range padNeeded {
-		result[pos+i] = ' '
-	}
-	copy(result[pos+padNeeded:], data[pos:])
-	return result
-}
-
-// replaceMessageCount replaces the messageCount value in a JSON header string
-// with the new count padded to fixed width. Handles both legacy (unpadded) and
-// padded files by scanning digits + trailing whitespace as the old value field.
-func replaceMessageCount(header string, count int) string {
-	mcStart := strings.Index(header, `"messageCount":`)
-	if mcStart < 0 {
-		return header
-	}
-
-	pos := mcStart + len(`"messageCount":`)
-	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
-		pos++
-	}
-	numStart := pos
-	for pos < len(header) && header[pos] >= '0' && header[pos] <= '9' {
-		pos++
-	}
-	if pos == numStart {
-		return header
-	}
-	// Also scan trailing whitespace (from previous padding)
-	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
-		pos++
-	}
-
-	oldFieldWidth := pos - numStart
-	newVal := strconv.Itoa(count)
-	targetWidth := max(messageCountWidth, oldFieldWidth)
-	padded := newVal + strings.Repeat(" ", max(0, targetWidth-len(newVal)))
-
-	return header[:numStart] + padded + header[pos:]
-}
-
-// pruneDedup trims the seenIDs set to keep only the most recent entries.
-func (cd *ChatDownloader) pruneDedup() {
-	cd.mu.Lock()
-	defer cd.mu.Unlock()
-	if len(cd.seenOrder) <= chatDedupMax {
-		return
-	}
-	keep := chatDedupMax
-	removeIDs := cd.seenOrder[:len(cd.seenOrder)-keep]
-	for _, id := range removeIDs {
-		delete(cd.seenIDs, id)
-	}
-	cd.seenOrder = cd.seenOrder[len(cd.seenOrder)-keep:]
 }
 
 // MessageCount returns the total number of messages collected.
@@ -959,73 +318,4 @@ func (cd *ChatDownloader) Stop() {
 // MarkStreamEnded signals that the stream has ended.
 func (cd *ChatDownloader) MarkStreamEnded() {
 	cd.Stop()
-}
-
-// parseIRCTags parses IRC tags from a string like "key=value;key2=value2".
-func parseIRCTags(s string) map[string]string {
-	tags := make(map[string]string, 16)
-	if s == "" {
-		return tags
-	}
-	for _, pair := range strings.Split(s, ";") {
-		if idx := strings.IndexByte(pair, '='); idx >= 0 {
-			tags[pair[:idx]] = pair[idx+1:]
-		} else {
-			tags[pair] = ""
-		}
-	}
-	return tags
-}
-
-// parseBadges parses badge strings like "subscriber/12,moderator/1".
-func parseBadges(s string) []string {
-	if s == "" {
-		return nil
-	}
-	return strings.Split(s, ",")
-}
-
-// parseEmoteTags parses IRC emote tags like "id:start-end,start-end/id:start-end".
-func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
-	if emotesStr == "" {
-		return nil
-	}
-
-	var refs []TwitchEmoteRef
-	msgRunes := []rune(message)
-
-	for _, group := range strings.Split(emotesStr, "/") {
-		colonIdx := strings.IndexByte(group, ':')
-		if colonIdx < 0 {
-			continue
-		}
-		emoteID := group[:colonIdx]
-		positions := group[colonIdx+1:]
-
-		for _, pos := range strings.Split(positions, ",") {
-			dashIdx := strings.IndexByte(pos, '-')
-			if dashIdx < 0 {
-				continue
-			}
-			start, err1 := strconv.Atoi(pos[:dashIdx])
-			end, err2 := strconv.Atoi(pos[dashIdx+1:])
-			if err1 != nil || err2 != nil {
-				continue
-			}
-
-			name := ""
-			if start >= 0 && end < len(msgRunes) {
-				name = string(msgRunes[start : end+1])
-			}
-
-			refs = append(refs, TwitchEmoteRef{
-				ID:    emoteID,
-				Name:  name,
-				Start: start,
-				End:   end,
-			})
-		}
-	}
-
-	return refs
 }

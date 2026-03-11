@@ -188,6 +188,7 @@ func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) []Emot
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
+		er.logger.Debug("bttv parse failed", "err", err)
 		return nil
 	}
 
@@ -233,6 +234,7 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) []Emote
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
+		er.logger.Debug("ffz parse failed", "err", err)
 		return nil
 	}
 
@@ -293,6 +295,7 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) []Emote
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
+		er.logger.Debug("7tv parse failed", "err", err)
 		return nil
 	}
 

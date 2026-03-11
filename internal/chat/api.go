@@ -287,8 +287,12 @@ func parseResponse(data map[string]any) (*ChatApiResponse, error) {
 				}
 			}
 			if offsetStr, ok := replayAction["videoOffsetTimeMsec"].(string); ok {
-				replayOffsetMs, _ = strconv.ParseInt(offsetStr, 10, 64)
-				hasReplayOffset = true
+				parsed, err := strconv.ParseInt(offsetStr, 10, 64)
+				if err == nil {
+					replayOffsetMs = parsed
+					hasReplayOffset = true
+				}
+				// Non-numeric offset string: skip setting replay offset
 			}
 		}
 

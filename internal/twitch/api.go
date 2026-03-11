@@ -76,6 +76,12 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 		return nil, fmt.Errorf("read gql response: %w", err)
 	}
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, fmt.Errorf("gql rate limited (429): %s", string(respData))
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("gql auth failure (%d): %s", resp.StatusCode, string(respData))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("gql http %d: %s", resp.StatusCode, string(respData))
 	}

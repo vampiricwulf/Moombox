@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 const (
@@ -20,7 +21,6 @@ const (
 	maxStaleContinuation = 30
 	writeIntervalMs      = 1000 // Flush to disk within 1 second
 	resumeSaveInterval   = 10 * time.Second
-	messageCountWidth    = 20 // Fixed-width padding for messageCount in JSON header
 )
 
 // ChatDownloaderOptions configures a ChatDownloader.
@@ -509,7 +509,10 @@ func (cd *ChatDownloader) writeChatFile() {
 			checkSize = bracketBytePos
 		}
 		checkBuf := make([]byte, checkSize)
-		f.ReadAt(checkBuf, bracketBytePos-checkSize)
+		if _, err := f.ReadAt(checkBuf, bracketBytePos-checkSize); err != nil {
+			cd.writeFullChatFile()
+			return
+		}
 		for i := len(checkBuf) - 1; i >= 0; i-- {
 			if checkBuf[i] == '}' {
 				hasExisting = true
@@ -544,9 +547,12 @@ func (cd *ChatDownloader) writeChatFile() {
 		cd.writeFullChatFile()
 		return
 	}
-	// WriteAt error is non-fatal — the data was already truncated,
-	// so a partial write is the best we can do here.
-	f.WriteAt([]byte(appendStr), bracketBytePos)
+	// WriteAt after truncation — log if it fails since data may be lost.
+	if _, err := f.WriteAt([]byte(appendStr), bracketBytePos); err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("write appended chat messages: %w", err))
+		}
+	}
 }
 
 func (cd *ChatDownloader) writeFullChatFile() {
@@ -562,12 +568,18 @@ func (cd *ChatDownloader) writeFullChatFile() {
 
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("marshal chat data: %w", err))
+		}
 		return
 	}
-	jsonBytes = padMessageCountJSON(jsonBytes)
+	jsonBytes = utils.PadMessageCountJSON(jsonBytes)
 
 	tmpFile := cd.opts.OutputFile + ".tmp"
 	if err := os.WriteFile(tmpFile, jsonBytes, 0o644); err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("write chat file: %w", err))
+		}
 		return
 	}
 	if err := os.Rename(tmpFile, cd.opts.OutputFile); err != nil {
@@ -604,16 +616,18 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	header := string(headerBuf[:n])
 
 	// Replace messageCount value (padded to fixed width)
-	header = replaceMessageCount(header, cd.messageCount)
+	header = utils.ReplaceMessageCount(header, cd.messageCount)
 
 	// Replace downloadedAt value
-	replaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
+	utils.ReplaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
 
 	// With padded messageCount, the header size should be constant.
 	// Fallback handles legacy files written before padding was added.
 	updatedBytes := []byte(header)
 	if len(updatedBytes) == n {
-		f.WriteAt(updatedBytes, 0)
+		if _, err := f.WriteAt(updatedBytes, 0); err != nil && cd.OnError != nil {
+			cd.OnError(fmt.Errorf("update chat header: write: %w", err))
+		}
 	} else if len(updatedBytes) > n {
 		restSize := info.Size() - int64(n)
 		var restBuf []byte
@@ -622,106 +636,24 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 			nRest, _ := f.ReadAt(restBuf, int64(n))
 			restBuf = restBuf[:nRest]
 		}
-		f.WriteAt(updatedBytes, 0)
-		if len(restBuf) > 0 {
-			f.WriteAt(restBuf, int64(len(updatedBytes)))
+		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
+			if cd.OnError != nil {
+				cd.OnError(fmt.Errorf("update chat header: write expanded: %w", err))
+			}
+			return
 		}
-		f.Truncate(int64(len(updatedBytes)) + restSize)
+		if len(restBuf) > 0 {
+			if _, err := f.WriteAt(restBuf, int64(len(updatedBytes))); err != nil {
+				if cd.OnError != nil {
+					cd.OnError(fmt.Errorf("update chat header: write rest: %w", err))
+				}
+				return
+			}
+		}
+		if err := f.Truncate(int64(len(updatedBytes)) + restSize); err != nil && cd.OnError != nil {
+			cd.OnError(fmt.Errorf("update chat header: truncate: %w", err))
+		}
 	}
-}
-
-// padMessageCountJSON pads the messageCount numeric value in serialized JSON to
-// messageCountWidth characters with trailing whitespace. This ensures the header
-// byte size stays constant during in-place updates as the count grows.
-func padMessageCountJSON(data []byte) []byte {
-	marker := []byte(`"messageCount":`)
-	idx := bytes.Index(data, marker)
-	if idx < 0 {
-		return data
-	}
-	pos := idx + len(marker)
-	for pos < len(data) && (data[pos] == ' ' || data[pos] == '\t') {
-		pos++
-	}
-	numStart := pos
-	for pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
-		pos++
-	}
-	if pos == numStart {
-		return data
-	}
-
-	padNeeded := messageCountWidth - (pos - numStart)
-	if padNeeded <= 0 {
-		return data
-	}
-
-	result := make([]byte, len(data)+padNeeded)
-	copy(result, data[:pos])
-	for i := range padNeeded {
-		result[pos+i] = ' '
-	}
-	copy(result[pos+padNeeded:], data[pos:])
-	return result
-}
-
-// replaceMessageCount replaces the messageCount value in a JSON header string
-// with the new count padded to fixed width. Handles both legacy (unpadded) and
-// padded files by scanning digits + trailing whitespace as the old value field.
-func replaceMessageCount(header string, count int) string {
-	mcStart := strings.Index(header, `"messageCount":`)
-	if mcStart < 0 {
-		return header
-	}
-
-	pos := mcStart + len(`"messageCount":`)
-	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
-		pos++
-	}
-	numStart := pos
-	for pos < len(header) && header[pos] >= '0' && header[pos] <= '9' {
-		pos++
-	}
-	if pos == numStart {
-		return header
-	}
-	// Also scan trailing whitespace (from previous padding)
-	for pos < len(header) && (header[pos] == ' ' || header[pos] == '\t') {
-		pos++
-	}
-
-	oldFieldWidth := pos - numStart
-	newVal := strconv.Itoa(count)
-	targetWidth := max(messageCountWidth, oldFieldWidth)
-	padded := newVal + strings.Repeat(" ", max(0, targetWidth-len(newVal)))
-
-	return header[:numStart] + padded + header[pos:]
-}
-
-// replaceQuotedField replaces a JSON string value in a header buffer.
-// Finds `"key": "old_value"` and replaces with `"key": "new_value"`.
-func replaceQuotedField(header *string, key, newValue string) {
-	h := *header
-	keyIdx := strings.Index(h, key)
-	if keyIdx < 0 {
-		return
-	}
-	valStart := keyIdx + len(key)
-	for valStart < len(h) && h[valStart] != '"' {
-		valStart++
-	}
-	if valStart >= len(h) {
-		return
-	}
-	valStart++ // skip opening quote
-	valEnd := valStart
-	for valEnd < len(h) && h[valEnd] != '"' {
-		valEnd++
-	}
-	if valEnd >= len(h) {
-		return
-	}
-	*header = h[:valStart] + newValue + h[valEnd:]
 }
 
 func (cd *ChatDownloader) loadResume() (*ChatResumeState, error) {
@@ -756,13 +688,23 @@ func (cd *ChatDownloader) saveResume() {
 
 	data, err := json.Marshal(state)
 	if err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("marshal resume state: %w", err))
+		}
 		return
 	}
 	tmpFile := cd.opts.ResumeFile + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("write resume state: %w", err))
+		}
 		return
 	}
-	os.Rename(tmpFile, cd.opts.ResumeFile)
+	if err := os.Rename(tmpFile, cd.opts.ResumeFile); err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("rename resume state: %w", err))
+		}
+	}
 }
 
 func (cd *ChatDownloader) clearResume() {

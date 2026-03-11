@@ -32,7 +32,7 @@ func ParseHLSMasterPlaylist(content string) []TwitchHLSVariant {
 
 		variant := TwitchHLSVariant{}
 
-		// Parse attributes
+		// Parse attributes (regex-validated digits; parse errors default to zero)
 		if m := hlsBandwidthRe.FindStringSubmatch(line); m != nil {
 			variant.Bandwidth, _ = strconv.Atoi(m[1])
 		}
