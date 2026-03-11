@@ -563,6 +563,7 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 
 	// Monitor for exit
 	go func() {
+		defer func() { recover() }()
 		cmd.Wait()
 		s.mu.Lock()
 		s.browserExited = true
@@ -845,6 +846,7 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	s.mu.Unlock()
 
 	go func() {
+		defer func() { recover() }()
 		cmd.Wait()
 		s.mu.Lock()
 		s.browserExited = true
@@ -1186,6 +1188,7 @@ func waitForCDP(ctx context.Context, port int, timeout time.Duration) error {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json/version", port), nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
+			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
 				return nil
@@ -1616,7 +1619,10 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		defer func() { recover() }()
+		done <- cmd.Wait()
+	}()
 
 	select {
 	case err := <-done:

@@ -370,7 +370,10 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 		}
 		delete(hub.throttlePending, jobID)
 
-		go hub.Broadcast("job_update", data)
+		go func() {
+			defer func() { recover() }()
+			hub.Broadcast("job_update", data)
+		}()
 	} else {
 		// Trailing edge: schedule/reschedule the final send
 		hub.throttlePending[jobID] = data
@@ -379,6 +382,7 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 			timer.Stop()
 		}
 		hub.throttleTimers[jobID] = time.AfterFunc(wsThrottleWindow, func() {
+			defer func() { recover() }()
 			hub.throttleMu.Lock()
 			pending := hub.throttlePending[jobID]
 			delete(hub.throttlePending, jobID)
@@ -393,6 +397,7 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 			// Clean up the timestamp after the throttle window so the map
 			// doesn't grow unbounded over the process lifetime.
 			time.AfterFunc(wsThrottleWindow, func() {
+				defer func() { recover() }()
 				hub.throttleMu.Lock()
 				// Only delete if no new activity has occurred since our trailing send
 				if t, ok := hub.throttleTimestamps[jobID]; ok && time.Since(t) >= wsThrottleWindow {

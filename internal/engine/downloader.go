@@ -548,16 +548,23 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	// On shutdown (context cancel) or user cancel, keep the resume file
 	// so the download can continue where it left off on restart.
 	defer func() {
+		// Snapshot fields under lock so we don't race with LastSeq() callers
+		d.mu.Lock()
+		seq := d.currentSeq
+		head := d.headSeq
+		ended := d.streamEnded
+		d.mu.Unlock()
+
 		// Emit final progress so the UI reflects the definitive last state
-		if d.OnProgress != nil && d.currentSeq > 0 {
+		if d.OnProgress != nil && seq > 0 {
 			d.OnProgress(DownloadProgress{
-				Seq:     d.currentSeq - 1,
+				Seq:     seq - 1,
 				Bytes:   d.bytesWritten.Load(),
-				HeadSeq: d.headSeq,
+				HeadSeq: head,
 			})
 		}
 		d.saveResume()
-		if d.streamEnded {
+		if ended {
 			d.ClearResume()
 		}
 	}()
@@ -789,7 +796,10 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// Only clear the resume file when the stream ends naturally.
 	defer func() {
 		d.saveResume()
-		if d.streamEnded {
+		d.mu.Lock()
+		ended := d.streamEnded
+		d.mu.Unlock()
+		if ended {
 			d.ClearResume()
 		}
 	}()
@@ -1379,11 +1389,14 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 }
 
 func (d *SegmentDownloader) saveResume() {
-	if d.currentSeq <= 0 {
+	d.mu.Lock()
+	seq := d.currentSeq
+	d.mu.Unlock()
+	if seq <= 0 {
 		return // Nothing downloaded yet (matching TS guard)
 	}
 	state := ResumeState{
-		LastSeq:      d.currentSeq - 1,
+		LastSeq:      seq - 1,
 		BytesWritten: d.bytesWritten.Load(),
 		Timestamp:    time.Now().Unix(),
 		BaseURL:      d.opts.BaseURL,

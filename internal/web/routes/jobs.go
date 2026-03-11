@@ -2515,6 +2515,7 @@ func RestartRoute(r chi.Router, onRestart func()) {
 		jsonResponse(rw, map[string]any{"success": true, "message": "Restarting..."})
 
 		go func() {
+			defer func() { recover() }()
 			time.Sleep(500 * time.Millisecond)
 			if onRestart != nil {
 				onRestart()

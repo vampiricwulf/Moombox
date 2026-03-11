@@ -568,6 +568,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				muxResult := result
 				segmentMuxWg.Add(1)
 				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							o.logger.Error("panic in mux segment goroutine", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
+						}
+					}()
 					defer segmentMuxWg.Done()
 					// Use background context — data is already downloaded, let FFmpeg finish
 					// even during cancellation to avoid orphaned partial output files.
@@ -1478,6 +1483,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// (Twitch live preview URLs 404 after stream ends, so muxFinalize would be too late)
 	if jobCtx.Job.ThumbnailURL != "" {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("panic in thumbnail download", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
+				}
+			}()
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			thumbPath := filepath.Join(jobCtx.StagingDir, "thumbnail.jpg")
@@ -1640,6 +1650,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				muxVideoPath := videoPath
 				segmentMuxWg.Add(1)
 				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							o.logger.Error("panic in Twitch mux segment goroutine", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
+						}
+					}()
 					defer segmentMuxWg.Done()
 					muxResult := &DownloadResult{HasVideo: true, VideoPath: muxVideoPath}
 					// Use background context — data is already downloaded, let FFmpeg finish

@@ -395,7 +395,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func() bool {
-		if !cfg.Cookies.AutoEnabled {
+		cfgMu.Lock()
+		autoEnabled := cfg.Cookies.AutoEnabled
+		cfgMu.Unlock()
+		if !autoEnabled {
 			return false
 		}
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -673,7 +676,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Wire cookie recovery callback
 	// =========================================================================
 	cookieRefresh.OnRecoveryNeeded = func(platform string) {
-		if !cfg.Cookies.AutoEnabled {
+		cfgMu.Lock()
+		autoEnabled := cfg.Cookies.AutoEnabled
+		cfgMu.Unlock()
+		if !autoEnabled {
 			log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
 			return
 		}
