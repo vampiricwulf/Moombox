@@ -514,10 +514,21 @@ export class SetupController {
     const overlay = document.getElementById("setup-overlay");
     if (overlay) overlay.style.display = "none";
 
-    // Show a temporary message
-    document.body.insertAdjacentHTML("beforeend",
-      '<div id="restart-waiting" style="position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--sl-color-neutral-0); z-index: 99999;">' +
-      '<div style="text-align: center;"><sl-spinner style="font-size: 2rem;"></sl-spinner><p style="margin-top: 1em;">Restarting Moombox...</p></div></div>');
+    // Show a temporary message using safe DOM methods
+    const waiting = document.createElement("div");
+    waiting.id = "restart-waiting";
+    waiting.style.cssText = "position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--sl-color-neutral-0); z-index: 99999;";
+    const inner = document.createElement("div");
+    inner.style.textAlign = "center";
+    const spinner = document.createElement("sl-spinner");
+    spinner.style.fontSize = "2rem";
+    const msg = document.createElement("p");
+    msg.style.marginTop = "1em";
+    msg.textContent = "Restarting Moombox...";
+    inner.appendChild(spinner);
+    inner.appendChild(msg);
+    waiting.appendChild(inner);
+    document.body.appendChild(waiting);
 
     let attempts = 0;
     const maxAttempts = 60; // 2 minutes at 2s intervals
@@ -546,10 +557,20 @@ export class SetupController {
 
       if (attempts >= maxAttempts) {
         this._polling = false;
-        const waiting = document.getElementById("restart-waiting");
-        if (waiting) {
-          waiting.innerHTML = '<div style="text-align: center;"><p>Server did not come back within 2 minutes.</p><sl-button variant="primary" id="restart-reload-btn">Reload Page</sl-button></div>';
-          document.getElementById("restart-reload-btn")?.addEventListener("click", () => location.reload());
+        const waitingEl = document.getElementById("restart-waiting");
+        if (waitingEl) {
+          waitingEl.textContent = "";
+          const failInner = document.createElement("div");
+          failInner.style.textAlign = "center";
+          const failMsg = document.createElement("p");
+          failMsg.textContent = "Server did not come back within 2 minutes.";
+          const reloadBtn = document.createElement("sl-button");
+          reloadBtn.variant = "primary";
+          reloadBtn.textContent = "Reload Page";
+          reloadBtn.addEventListener("click", () => location.reload());
+          failInner.appendChild(failMsg);
+          failInner.appendChild(reloadBtn);
+          waitingEl.appendChild(failInner);
         }
         return;
       }

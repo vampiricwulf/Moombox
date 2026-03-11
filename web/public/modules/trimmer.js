@@ -135,6 +135,14 @@ export class TrimController {
     // Timeline seek / handle drag
     this._el.track.addEventListener("pointerdown", (e) => this._onTrackPointerDown(e), { signal: sig });
 
+    // Cancel drag on window blur to avoid stuck drag state
+    window.addEventListener("blur", () => {
+      if (this._dragCleanup) {
+        this._dragCleanup();
+        this._dragCleanup = null;
+      }
+    }, { signal: sig });
+
     // Control buttons
     this._el.playBtn.addEventListener("click", () => this._togglePlay(), { signal: sig });
     this._el.setStartBtn.addEventListener("click", () => this._setStartMarker(), { signal: sig });
@@ -446,6 +454,11 @@ export class TrimController {
 
     if (endTime <= startTime) {
       this.app.showToast("End time must be after start time", "warning");
+      return;
+    }
+
+    if (endTime - startTime < 1) {
+      this.app.showToast("Trim must be at least 1 second long", "warning");
       return;
     }
 

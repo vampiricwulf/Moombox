@@ -482,6 +482,12 @@ export class PlayerController {
     document.getElementById("player-nico-overlay").style.display =
       hasChat && nicoToggle.checked ? "" : "none";
 
+    // Clear chat search on job change
+    const chatSearch = document.getElementById("chat-search");
+    if (chatSearch && chatSearch.value) {
+      chatSearch.value = "";
+    }
+
     // Build sidebar chat
     this.buildSidebarChat();
     this.clearNicoOverlay();
@@ -511,7 +517,7 @@ export class PlayerController {
       // Timestamp
       const timeSpan = document.createElement("span");
       timeSpan.className = "chat-msg-time";
-      timeSpan.textContent = this.formatMsToTime(msg.offsetMs);
+      timeSpan.textContent = formatMsToTime(msg.offsetMs);
       div.appendChild(timeSpan);
 
       // Superchat amount
@@ -536,9 +542,9 @@ export class PlayerController {
       authorSpan.textContent = msg.authorName + ": ";
       div.appendChild(authorSpan);
 
-      // Message content
+      // Message content — use safe DOM builder instead of innerHTML
       const contentSpan = document.createElement("span");
-      contentSpan.innerHTML = this.renderChatMessageParts(msg.message || [], msg.emotes);
+      this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
       div.appendChild(contentSpan);
 
       frag.appendChild(div);
@@ -676,13 +682,11 @@ export class PlayerController {
       if (spawned >= maxPerFrame) break;
 
       const msg = messages[i];
-      const html = this.renderChatMessageParts(msg.message || [], msg.emotes);
-      if (!html) continue;
-
       // Create element off-screen to measure its actual height
       const el = document.createElement("div");
       el.className = "nico-message";
-      el.innerHTML = html;
+      this.appendChatContent(el, msg.message || [], msg.emotes);
+      if (!el.hasChildNodes()) continue;
       el.style.top = "0";
       el.style.left = `${overlayWidth}px`;
       overlay.appendChild(el);
@@ -748,96 +752,119 @@ export class PlayerController {
     this.nicoLastSpawnMs = currentMs;
   }
 
-  renderChatMessageParts(parts, twitchNativeEmotes) {
-    // Twitch chat stores message as a plain string; YouTube uses MessagePart[]
+  /**
+   * Safely append chat message content as DOM nodes (no innerHTML).
+   * Handles both YouTube MessagePart[] and Twitch string messages.
+   * @param {HTMLElement} container — element to append nodes into
+   * @param {Array|string} parts — message parts or Twitch plain string
+   * @param {Array} [twitchNativeEmotes] — native Twitch emotes from IRC tags
+   */
+  appendChatContent(container, parts, twitchNativeEmotes) {
     if (typeof parts === "string") {
-      return this.renderTwitchMessage(parts, twitchNativeEmotes);
+      this._appendTwitchMessage(container, parts, twitchNativeEmotes);
+      return;
     }
-    if (!Array.isArray(parts)) return "";
-    return parts
-      .map((part) => {
-        if (part.type === "emoji" && part.emojiUrl) {
-          const alt = part.text || part.emojiId || "";
-          const url = part.emojiUrl.replace(/=[^/]*$/, "");
-          // Only allow http/https URLs to prevent javascript: injection
-          if (/^https?:\/\//i.test(url)) {
-            return `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(alt)}" loading="lazy" referrerpolicy="no-referrer">`;
-          }
-          return this.app.escapeHtml(alt);
+    if (!Array.isArray(parts)) return;
+
+    for (const part of parts) {
+      if (part.type === "emoji" && part.emojiUrl) {
+        const alt = part.text || part.emojiId || "";
+        const url = part.emojiUrl.replace(/=[^/]*$/, "");
+        if (/^https?:\/\//i.test(url)) {
+          container.appendChild(this._createEmoteImg(url, alt));
+        } else {
+          container.appendChild(document.createTextNode(alt));
         }
-        return this.app.escapeHtml(part.text || "");
-      })
-      .join("");
+      } else {
+        container.appendChild(document.createTextNode(part.text || ""));
+      }
+    }
   }
 
   /**
-   * Render a Twitch message string with native + 3rd-party emote replacement.
-   * Uses native Twitch emote positions (from IRC tags) first, then does
-   * word-by-word lookup against BTTV/FFZ/7TV maps (Chatterino-style).
+   * Create a safe emote <img> element.
+   * @param {string} url — must be http/https
+   * @param {string} alt
+   * @returns {HTMLImageElement}
    */
-  renderTwitchMessage(message, nativeEmotes) {
-    if (!message) return "";
+  _createEmoteImg(url, alt) {
+    const img = document.createElement("img");
+    img.className = "chat-emoji";
+    img.src = url;
+    img.alt = alt;
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    return img;
+  }
+
+  /**
+   * Append Twitch message content as DOM nodes with native + 3rd-party emotes.
+   * @param {HTMLElement} container
+   * @param {string} message
+   * @param {Array} [nativeEmotes]
+   */
+  _appendTwitchMessage(container, message, nativeEmotes) {
+    if (!message) return;
 
     // No emote data at all — fast path
     if ((!nativeEmotes || nativeEmotes.length === 0) && this.twitchEmoteMap.size === 0) {
-      return this.app.escapeHtml(message);
+      container.appendChild(document.createTextNode(message));
+      return;
     }
 
     // If no native emotes, just do word-by-word 3rd-party lookup
     if (!nativeEmotes || nativeEmotes.length === 0) {
-      return this.renderTwitchWords(message);
+      this._appendTwitchWords(container, message);
+      return;
     }
 
     // Sort native emotes by start position
     const sorted = [...nativeEmotes].sort((a, b) => a.start - b.start);
-
-    let result = "";
     let cursor = 0;
 
     for (const emote of sorted) {
       // Text before this emote — check for 3rd-party emotes
       if (emote.start > cursor) {
-        result += this.renderTwitchWords(message.substring(cursor, emote.start));
+        this._appendTwitchWords(container, message.substring(cursor, emote.start));
       }
       // Native Twitch emote
       const url = `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(emote.id)}/default/dark/2.0`;
-      result += `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(emote.name)}" loading="lazy" referrerpolicy="no-referrer">`;
+      container.appendChild(this._createEmoteImg(url, emote.name));
       cursor = emote.end + 1;
     }
 
     // Remaining text after last native emote
     if (cursor < message.length) {
-      result += this.renderTwitchWords(message.substring(cursor));
+      this._appendTwitchWords(container, message.substring(cursor));
     }
-
-    return result;
   }
 
   /**
-   * Render a text segment with word-by-word 3rd-party emote lookup.
-   * Splits on whitespace, checks each word against twitchEmoteMap.
+   * Append a text segment as DOM nodes with word-by-word 3rd-party emote lookup.
+   * @param {HTMLElement} container
+   * @param {string} text
    */
-  renderTwitchWords(text) {
-    if (!text) return "";
+  _appendTwitchWords(container, text) {
+    if (!text) return;
     if (this.twitchEmoteMap.size === 0) {
-      return this.app.escapeHtml(text);
+      container.appendChild(document.createTextNode(text));
+      return;
     }
 
     // Split preserving whitespace tokens
-    return text
-      .split(/(\s+)/)
-      .map((part) => {
-        if (/^\s+$/.test(part)) return part; // preserve whitespace
-        const url = this.twitchEmoteMap.get(part);
-        if (url && /^https?:\/\//i.test(url)) {
-          return `<img class="chat-emoji" src="${this.app.escapeHtml(url)}" alt="${this.app.escapeHtml(part)}" loading="lazy" referrerpolicy="no-referrer">`;
-        }
-        return this.app.escapeHtml(part);
-      })
-      .join("");
+    const tokens = text.split(/(\s+)/);
+    for (const token of tokens) {
+      if (/^\s+$/.test(token)) {
+        container.appendChild(document.createTextNode(token));
+        continue;
+      }
+      const url = this.twitchEmoteMap.get(token);
+      if (url && /^https?:\/\//i.test(url)) {
+        container.appendChild(this._createEmoteImg(url, token));
+      } else {
+        container.appendChild(document.createTextNode(token));
+      }
+    }
   }
 
-  formatMsToTime(ms) {
-    return formatMsToTime(ms);
-  }
 }

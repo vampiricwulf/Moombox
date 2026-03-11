@@ -2119,3 +2119,13 @@ html.sl-theme-light {
 .version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
 .version-indicator.has-update:hover { text-decoration: underline; }
 #update-release-notes { max-height: 400px; overflow-y: auto; white-space: pre-wrap; font-size: 0.9em; }
+
+/* Respect reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+    .nico-message { display: none !important; }
+}

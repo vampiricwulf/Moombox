@@ -9,6 +9,11 @@ import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime } from "./modules/utils.js";
 
+// Status sets for quick action visibility (single source of truth)
+const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"]);
+const RETRY_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
+const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
+
 class MoomboxApp {
   constructor() {
     this.ws = null;
@@ -494,15 +499,24 @@ class MoomboxApp {
       warningItems.push({ action: "tw-relogin", label: "TW: Re-login" });
 
     if (warningsEl) {
-      warningsEl.innerHTML = warningItems
-        .map(w => `<span class="status-warning" data-action="${w.action}" title="Click to re-login">${w.label}</span>`)
-        .join("");
+      warningsEl.textContent = "";
+      for (const w of warningItems) {
+        const span = document.createElement("span");
+        span.className = "status-warning";
+        span.dataset.action = w.action;
+        span.title = "Click to re-login";
+        span.textContent = w.label;
+        warningsEl.appendChild(span);
+      }
     }
     if (warningsIcon) {
       const hasWarnings = warningItems.length > 0;
       warningsIcon.classList.toggle("active", hasWarnings);
       if (hasWarnings) {
-        warningsIcon.innerHTML = `<sl-icon name="exclamation-triangle"></sl-icon>`;
+        warningsIcon.textContent = "";
+        const icon = document.createElement("sl-icon");
+        icon.name = "exclamation-triangle";
+        warningsIcon.appendChild(icon);
         warningsIcon.title = warningItems.map(w => w.label).join(", ");
         warningsIcon.dataset.action = warningItems[0].action;
       }
@@ -691,13 +705,15 @@ class MoomboxApp {
 
   updateConnectionStatus(connected) {
     const statusEl = document.getElementById("connection-status");
-    if (connected) {
-      statusEl.className = "connected";
-      statusEl.innerHTML = '<sl-icon name="wifi"></sl-icon><span class="status-label"> Connected</span>';
-    } else {
-      statusEl.className = "disconnected";
-      statusEl.innerHTML = '<sl-icon name="wifi-off"></sl-icon><span class="status-label"> Disconnected</span>';
-    }
+    statusEl.className = connected ? "connected" : "disconnected";
+    statusEl.textContent = "";
+    const icon = document.createElement("sl-icon");
+    icon.name = connected ? "wifi" : "wifi-off";
+    const label = document.createElement("span");
+    label.className = "status-label";
+    label.textContent = connected ? " Connected" : " Disconnected";
+    statusEl.appendChild(icon);
+    statusEl.appendChild(label);
   }
 
   handleMessage(message) {
@@ -933,9 +949,9 @@ class MoomboxApp {
       : '';
 
     // Quick action button based on status
-    const canCancel = ["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"].includes(job.status);
-    const canRetry = ["Error", "Cancelled", "COOKIES?"].includes(job.status);
-    const canDelete = ["Finished", "Error", "Cancelled", "COOKIES?"].includes(job.status);
+    const canCancel = CANCEL_STATUSES.has(job.status);
+    const canRetry = RETRY_STATUSES.has(job.status);
+    const canDelete = DELETE_STATUSES.has(job.status);
 
     let actionsHtml = "";
     if (canCancel) actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
@@ -1112,13 +1128,22 @@ class MoomboxApp {
     if (job.error && !errorDiv) {
       const logsSection = content.querySelector(".details-section:last-child");
       if (logsSection) {
-        const errorHtml = `<div class="details-error"><strong>Error:</strong> ${this.escapeHtml(job.error)}</div>`;
-        logsSection.insertAdjacentHTML("beforebegin", errorHtml);
+        const newErrorDiv = document.createElement("div");
+        newErrorDiv.className = "details-error";
+        const strong = document.createElement("strong");
+        strong.textContent = "Error:";
+        newErrorDiv.appendChild(strong);
+        newErrorDiv.appendChild(document.createTextNode(" " + job.error));
+        logsSection.parentNode.insertBefore(newErrorDiv, logsSection);
       }
     } else if (!job.error && errorDiv) {
       errorDiv.remove();
     } else if (job.error && errorDiv) {
-      errorDiv.innerHTML = `<strong>Error:</strong> ${this.escapeHtml(job.error)}`;
+      errorDiv.textContent = "";
+      const strong = document.createElement("strong");
+      strong.textContent = "Error:";
+      errorDiv.appendChild(strong);
+      errorDiv.appendChild(document.createTextNode(" " + job.error));
     }
 
     // Update button visibility
@@ -1126,17 +1151,9 @@ class MoomboxApp {
   }
 
   updateDetailsButtons(job) {
-    const canCancel = [
-      "Downloading",
-      "Live",
-      "Upcoming",
-      "Muxing",
-      "COOKIES?",
-    ].includes(job.status);
-    const canRetry = ["Error", "Cancelled", "COOKIES?"].includes(job.status);
-    const canDelete = ["Finished", "Error", "Cancelled", "COOKIES?"].includes(
-      job.status,
-    );
+    const canCancel = CANCEL_STATUSES.has(job.status);
+    const canRetry = RETRY_STATUSES.has(job.status);
+    const canDelete = DELETE_STATUSES.has(job.status);
     const hasFile = job.status === "Finished" && job.filename;
     const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(
       job.status,
@@ -1888,30 +1905,8 @@ class MoomboxApp {
       }
 
       const { trim } = await response.json();
-
-      // Show success notification
       this.showToast('Trim created successfully', 'success');
-
-      // Fetch fresh job data from server (includes updated trims)
-      if (this.selectedJobId === jobId) {
-        const jobResponse = await fetch(`/api/jobs/${jobId}`, {
-          cache: 'no-store' // Bypass browser cache to get fresh trim data
-        });
-        if (jobResponse.ok) {
-          const updatedJob = await jobResponse.json();
-
-          // Update job in the jobs array
-          const jobIndex = this.jobs.findIndex(j => j.id === jobId);
-          if (jobIndex !== -1) {
-            this.jobs[jobIndex] = updatedJob;
-          }
-
-          // Refresh job details and logs with fresh data
-          this.renderJobDetails(updatedJob);
-          this.loadJobLogs(jobId);
-        }
-      }
-
+      await this._refreshJobDetails(jobId);
       return trim;
     } catch (error) {
       this.showToast(error.message, 'danger');
@@ -1934,28 +1929,30 @@ class MoomboxApp {
       }
 
       this.showToast('Trim deleted', 'success');
-
-      // Fetch fresh job data from server (includes updated trims)
-      if (this.selectedJobId === jobId) {
-        const jobResponse = await fetch(`/api/jobs/${jobId}`, {
-          cache: 'no-store' // Bypass browser cache to get fresh trim data
-        });
-        if (jobResponse.ok) {
-          const updatedJob = await jobResponse.json();
-
-          // Update job in the jobs array
-          const jobIndex = this.jobs.findIndex(j => j.id === jobId);
-          if (jobIndex !== -1) {
-            this.jobs[jobIndex] = updatedJob;
-          }
-
-          // Refresh job details and logs with fresh data
-          this.renderJobDetails(updatedJob);
-          this.loadJobLogs(jobId);
-        }
-      }
+      await this._refreshJobDetails(jobId);
     } catch (error) {
       this.showToast(error.message, 'danger');
+    }
+  }
+
+  /** Fetch fresh job data and update the details dialog and jobs array. */
+  async _refreshJobDetails(jobId) {
+    if (this.selectedJobId !== jobId) return;
+    try {
+      const jobResponse = await fetch(`/api/jobs/${jobId}`, {
+        cache: 'no-store',
+      });
+      if (jobResponse.ok) {
+        const updatedJob = await jobResponse.json();
+        const jobIndex = this.jobs.findIndex(j => j.id === jobId);
+        if (jobIndex !== -1) {
+          this.jobs[jobIndex] = updatedJob;
+        }
+        this.renderJobDetails(updatedJob);
+        this.loadJobLogs(jobId);
+      }
+    } catch {
+      // Non-critical — job will sync via WebSocket
     }
   }
 
@@ -1974,13 +1971,67 @@ class MoomboxApp {
   // ===== Log Management =====
 
   addLog(log) {
+    const wasOverflow = this.logs.length >= 500;
     this.logs.push(log);
     if (this.logs.length > 500) {
       this.logs = this.logs.slice(-500);
     }
-    // Debounce renderLogs to avoid rewriting entire textarea on every message
+
+    // Fast path: if no filter/search active and no overflow trim,
+    // append a single DOM node instead of rebuilding everything
+    if (!wasOverflow && this.logFilter === "all" && !this._logSearchQuery) {
+      const viewer = document.getElementById("logs-viewer");
+      const countEl = document.getElementById("log-count");
+      if (viewer) {
+        const div = this._createLogLine(log);
+        viewer.appendChild(div);
+        if (countEl) countEl.textContent = `${this.logs.length} log entries`;
+        if (this._logAutoScroll) {
+          viewer.scrollTop = viewer.scrollHeight;
+        }
+        return;
+      }
+    }
+
+    // Debounce full renderLogs for filtered/overflow cases
     if (this._logRenderTimer) clearTimeout(this._logRenderTimer);
     this._logRenderTimer = setTimeout(() => this.renderLogs(), 100);
+  }
+
+  /** Create a single log line DOM element. */
+  _createLogLine(log, searchQuery) {
+    const div = document.createElement("div");
+    const levelMatch = log.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR)\b/i);
+    const level = levelMatch ? levelMatch[1].toUpperCase() : "INFO";
+    let levelClass = "log-info";
+    if (level === "ERROR") levelClass = "log-error";
+    else if (level === "WARN" || level === "WARNING") levelClass = "log-warn";
+    else if (level === "DEBUG") levelClass = "log-debug";
+    div.className = `log-line ${levelClass}`;
+
+    if (searchQuery) {
+      const regex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+      let lastIndex = 0;
+      let match;
+      while ((match = regex.exec(log)) !== null) {
+        if (match.index > lastIndex) {
+          div.appendChild(document.createTextNode(log.slice(lastIndex, match.index)));
+        }
+        const mark = document.createElement("mark");
+        mark.textContent = match[0];
+        div.appendChild(mark);
+        lastIndex = regex.lastIndex;
+      }
+      if (lastIndex < log.length) {
+        div.appendChild(document.createTextNode(log.slice(lastIndex)));
+      }
+      if (lastIndex === 0) {
+        div.textContent = log;
+      }
+    } else {
+      div.textContent = log;
+    }
+    return div;
   }
 
   getFilteredLogs() {
@@ -2013,41 +2064,7 @@ class MoomboxApp {
 
     const frag = document.createDocumentFragment();
     for (const log of filtered) {
-      const div = document.createElement("div");
-      // Determine log level class
-      const levelMatch = log.match(/\b(DEBUG|INFO|WARN(?:ING)?|ERROR)\b/i);
-      const level = levelMatch ? levelMatch[1].toUpperCase() : "INFO";
-      let levelClass = "log-info";
-      if (level === "ERROR") levelClass = "log-error";
-      else if (level === "WARN" || level === "WARNING") levelClass = "log-warn";
-      else if (level === "DEBUG") levelClass = "log-debug";
-      div.className = `log-line ${levelClass}`;
-
-      if (searchQuery) {
-        // Highlight search matches using DOM text nodes (avoids innerHTML)
-        const regex = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-        let lastIndex = 0;
-        let match;
-        while ((match = regex.exec(log)) !== null) {
-          if (match.index > lastIndex) {
-            div.appendChild(document.createTextNode(log.slice(lastIndex, match.index)));
-          }
-          const mark = document.createElement("mark");
-          mark.textContent = match[0];
-          div.appendChild(mark);
-          lastIndex = regex.lastIndex;
-        }
-        if (lastIndex < log.length) {
-          div.appendChild(document.createTextNode(log.slice(lastIndex)));
-        }
-        if (lastIndex === 0) {
-          div.textContent = log;
-        }
-      } else {
-        div.textContent = log;
-      }
-
-      frag.appendChild(div);
+      frag.appendChild(this._createLogLine(log, searchQuery));
     }
 
     this._logRebuildingDOM = true;
@@ -2068,6 +2085,10 @@ class MoomboxApp {
   clearLogs() {
     this.logs = [];
     this._logAutoScroll = true;
+    if (this._logRenderTimer) {
+      clearTimeout(this._logRenderTimer);
+      this._logRenderTimer = null;
+    }
     this.renderLogs();
   }
 
@@ -2466,13 +2487,22 @@ class MoomboxApp {
   }
 
   showToast(message, variant = "primary") {
-    const alert = Object.assign(document.createElement("sl-alert"), {
-      variant,
-      closable: true,
-      duration: 3000,
-      className: "toast-alert",
-      innerHTML: `<sl-icon slot="icon" name="${this.getIconForVariant(variant)}"></sl-icon>${this.escapeHtml(message)}<div class="toast-countdown"></div>`,
-    });
+    const alert = document.createElement("sl-alert");
+    alert.variant = variant;
+    alert.closable = true;
+    alert.duration = 3000;
+    alert.className = "toast-alert";
+
+    const icon = document.createElement("sl-icon");
+    icon.slot = "icon";
+    icon.name = this.getIconForVariant(variant);
+    alert.appendChild(icon);
+
+    alert.appendChild(document.createTextNode(message));
+
+    const countdown = document.createElement("div");
+    countdown.className = "toast-countdown";
+    alert.appendChild(countdown);
 
     document.body.append(alert);
     alert.toast();
