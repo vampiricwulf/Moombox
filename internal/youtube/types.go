@@ -106,12 +106,14 @@ type YtcfgData struct {
 
 // AuthLevel constants for format deduplication.
 const (
-	AuthLevelAndroidVR  = 0
-	AuthLevelWatchPage  = 1
-	AuthLevelTVPublic   = 2
-	AuthLevelTVAuth     = 3
-	AuthLevelWeb        = 4
-	AuthLevelWebCreator = 5
+	AuthLevelAndroidVR   = 0
+	AuthLevelWatchPage   = 1
+	AuthLevelTVPublic    = 2
+	AuthLevelTVAuth      = 3
+	AuthLevelWebSafari   = 4
+	AuthLevelWeb         = 5
+	AuthLevelWebEmbedded = 6
+	AuthLevelWebCreator  = 7
 )
 
 // CreateEmptyVideoInfo creates a minimal valid VideoInfo for error paths.

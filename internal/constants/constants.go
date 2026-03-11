@@ -8,12 +8,14 @@ package constants
 // UserAgents contains User-Agent strings for different platforms.
 var UserAgents = struct {
 	Web       string
+	WebSafari string
 	Android   string
 	AndroidVR string
 	TV        string
 	IOS       string
 }{
 	Web:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	WebSafari: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
 	Android:   "com.google.android.youtube/19.09.37 (Linux; U; Android 14; en_US) gzip",
 	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 	TV:        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
@@ -87,6 +89,20 @@ var WebClient = YouTubeClientConfig{
 	ClientVersion: "2.20260120.01.00",
 	ClientID:      "1",
 	UserAgent:     UserAgents.Web,
+	Context: map[string]interface{}{
+		"clientName":    "WEB",
+		"clientVersion": "2.20260120.01.00",
+		"hl":            "en",
+	},
+}
+
+// WebSafariClient is the primary WEB client with Safari UA.
+// Returns pre-merged HLS formats; more reliable for unauthenticated use.
+var WebSafariClient = YouTubeClientConfig{
+	ClientName:    "WEB",
+	ClientVersion: "2.20260120.01.00",
+	ClientID:      "1",
+	UserAgent:     UserAgents.WebSafari,
 	Context: map[string]interface{}{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260120.01.00",
