@@ -88,12 +88,15 @@ func RegisterEncoding(vm *goja.Runtime) error {
 				result += String.fromCharCode(b);
 				i++;
 			} else if ((b & 0xe0) === 0xc0) {
+				if (i + 1 >= bytes.length) { result += '\ufffd'; i++; continue; }
 				result += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i+1] & 0x3f));
 				i += 2;
 			} else if ((b & 0xf0) === 0xe0) {
+				if (i + 2 >= bytes.length) { result += '\ufffd'; i++; continue; }
 				result += String.fromCharCode(((b & 0x0f) << 12) | ((bytes[i+1] & 0x3f) << 6) | (bytes[i+2] & 0x3f));
 				i += 3;
 			} else if ((b & 0xf8) === 0xf0) {
+				if (i + 3 >= bytes.length) { result += '\ufffd'; i++; continue; }
 				var cp = ((b & 0x07) << 18) | ((bytes[i+1] & 0x3f) << 12) | ((bytes[i+2] & 0x3f) << 6) | (bytes[i+3] & 0x3f);
 				if (cp > 0xffff) {
 					cp -= 0x10000;

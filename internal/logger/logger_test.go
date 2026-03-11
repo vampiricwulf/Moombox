@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,8 +90,8 @@ func TestJobLogs(t *testing.T) {
 	}
 	defer l.Close()
 
-	l.LogForJob("job-1", 0, "downloading segment", "seq", 1)
-	l.LogForJob("job-1", 0, "downloading segment", "seq", 2)
+	l.LogForJob("job-1", slog.LevelInfo, "downloading segment", "seq", 1)
+	l.LogForJob("job-1", slog.LevelInfo, "downloading segment", "seq", 2)
 
 	logs := l.GetJobLogs("job-1")
 	if len(logs) != 2 {

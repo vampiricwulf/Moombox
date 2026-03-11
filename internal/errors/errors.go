@@ -191,41 +191,39 @@ const (
 )
 
 // IsExpected returns true if the error is user-facing and expected.
+// Traverses the error chain so it works with wrapped errors (fmt.Errorf %w).
+// All Moombox error types satisfy this via the embedded MoomboxError.
 func IsExpected(err error) bool {
-	if e, ok := err.(*MoomboxError); ok {
-		return e.Expected
-	}
-	if e, ok := err.(*YouTubeError); ok {
-		return e.Expected
-	}
-	if e, ok := err.(*DownloadError); ok {
-		return e.Expected
-	}
-	if e, ok := err.(*NetworkError); ok {
-		return e.Expected
-	}
-	if e, ok := err.(*ConfigError); ok {
-		return e.Expected
-	}
-	if e, ok := err.(*MuxingError); ok {
-		return e.Expected
-	}
-	if e, ok := err.(*AuthError); ok {
-		return e.Expected
-	}
-	if e, ok := err.(*VideoPlayabilityError); ok {
-		return e.Expected
+	for err != nil {
+		if e, ok := err.(interface{ isExpected() bool }); ok {
+			return e.isExpected()
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			break
+		}
+		err = u.Unwrap()
 	}
 	return false
 }
 
+func (e *MoomboxError) isExpected() bool { return e.Expected }
+
 // IsLoginRequired returns true if the error indicates login is required.
+// Traverses the error chain so it works with wrapped errors (fmt.Errorf %w).
 func IsLoginRequired(err error) bool {
-	if e, ok := err.(*YouTubeError); ok {
-		return e.Code == ErrLoginRequired
-	}
-	if e, ok := err.(*AuthError); ok {
-		return e.Code == ErrLoginRequired || e.Code == ErrCookiesExpired
+	for err != nil {
+		if e, ok := err.(*YouTubeError); ok {
+			return e.Code == ErrLoginRequired
+		}
+		if e, ok := err.(*AuthError); ok {
+			return e.Code == ErrLoginRequired || e.Code == ErrCookiesExpired
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			break
+		}
+		err = u.Unwrap()
 	}
 	return false
 }

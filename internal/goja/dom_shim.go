@@ -1,6 +1,9 @@
 package goja
 
 import (
+	crand "crypto/rand"
+	"fmt"
+
 	"github.com/dop251/goja"
 )
 
@@ -10,6 +13,30 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	if userAgent == "" {
 		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	}
+
+	// Register CSPRNG byte source for crypto.getRandomValues
+	// (replaces Math.random()-based JS implementation)
+	vm.Set("__cryptoRandBytes", func(call goja.FunctionCall) goja.Value {
+		n := int(call.Argument(0).ToInteger())
+		if n <= 0 {
+			return vm.ToValue([]byte{})
+		}
+		buf := make([]byte, n)
+		crand.Read(buf)
+		return vm.ToValue(buf)
+	})
+
+	// Register randomUUID as Go native function using CSPRNG
+	vm.Set("__cryptoRandomUUID", func(call goja.FunctionCall) goja.Value {
+		b := make([]byte, 16)
+		crand.Read(b)
+		b[6] = (b[6] & 0x0f) | 0x40 // version 4
+		b[8] = (b[8] & 0x3f) | 0x80 // variant 1
+		return vm.ToValue(fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]))
+	})
+
+	// Pass userAgent via Go to avoid JS template literal injection
+	vm.Set("__moomboxUserAgent", userAgent)
 
 	shimCode := `
 (function() {
@@ -149,7 +176,7 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 
 	// Navigator
 	var navigator = {
-		userAgent: ` + "`" + userAgent + "`" + `,
+		userAgent: __moomboxUserAgent,
 		language: 'en-US',
 		languages: ['en-US', 'en'],
 		platform: 'Win32',
@@ -249,16 +276,12 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	globalThis.ResizeObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
 	globalThis.crypto = {
 		getRandomValues: function(arr) {
-			for (var i = 0; i < arr.length; i++) { arr[i] = Math.floor(Math.random() * 256); }
+			var bytes = new Uint8Array(__cryptoRandBytes(arr.length));
+			for (var i = 0; i < arr.length; i++) { arr[i] = bytes[i]; }
 			return arr;
 		},
 		subtle: {},
-		randomUUID: function() {
-			return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-				var r = Math.random() * 16 | 0;
-				return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-			});
-		}
+		randomUUID: __cryptoRandomUUID
 	};
 	globalThis.postMessage = function() {};
 	globalThis.addEventListener = function() {};
@@ -282,12 +305,13 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	// Console stub — BotGuard interpreter calls console.log/warn/error;
 	// without this, ReferenceError aborts execution silently.
 	var __consoleMessages = [];
+	function __consolePush(lvl, args) { if (__consoleMessages.length < 100) __consoleMessages.push([lvl, Array.prototype.slice.call(args)]); }
 	globalThis.console = {
-		log: function() { __consoleMessages.push(['log', Array.prototype.slice.call(arguments)]); },
-		warn: function() { __consoleMessages.push(['warn', Array.prototype.slice.call(arguments)]); },
-		error: function() { __consoleMessages.push(['error', Array.prototype.slice.call(arguments)]); },
-		info: function() { __consoleMessages.push(['info', Array.prototype.slice.call(arguments)]); },
-		debug: function() { __consoleMessages.push(['debug', Array.prototype.slice.call(arguments)]); },
+		log: function() { __consolePush('log', arguments); },
+		warn: function() { __consolePush('warn', arguments); },
+		error: function() { __consolePush('error', arguments); },
+		info: function() { __consolePush('info', arguments); },
+		debug: function() { __consolePush('debug', arguments); },
 		trace: function() {},
 		dir: function() {},
 		table: function() {},
@@ -309,5 +333,11 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 `
 
 	_, err := vm.RunString(shimCode)
+
+	// Clean up temporary globals (crypto functions still referenced via globalThis.crypto)
+	vm.Set("__moomboxUserAgent", goja.Undefined())
+	vm.Set("__cryptoRandBytes", goja.Undefined())
+	vm.Set("__cryptoRandomUUID", goja.Undefined())
+
 	return err
 }

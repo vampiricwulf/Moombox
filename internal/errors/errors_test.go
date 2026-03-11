@@ -40,6 +40,7 @@ func TestMoomboxError_Error(t *testing.T) {
 }
 
 func TestMoomboxError_Unwrap(t *testing.T) {
+	rootCause := fmt.Errorf("root")
 	tests := []struct {
 		name      string
 		err       *MoomboxError
@@ -52,22 +53,16 @@ func TestMoomboxError_Unwrap(t *testing.T) {
 		},
 		{
 			name:      "with cause",
-			err:       &MoomboxError{Code: "X", Message: "x", Cause: fmt.Errorf("root")},
-			wantCause: fmt.Errorf("root"),
+			err:       &MoomboxError{Code: "X", Message: "x", Cause: rootCause},
+			wantCause: rootCause,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.err.Unwrap()
-			if tt.wantCause == nil && got != nil {
-				t.Errorf("expected nil cause, got %v", got)
-			}
-			if tt.wantCause != nil && got == nil {
-				t.Errorf("expected cause %v, got nil", tt.wantCause)
-			}
-			if tt.wantCause != nil && got != nil && got.Error() != tt.wantCause.Error() {
-				t.Errorf("expected cause %q, got %q", tt.wantCause.Error(), got.Error())
+			if got != tt.wantCause {
+				t.Errorf("expected cause %v, got %v", tt.wantCause, got)
 			}
 		})
 	}
@@ -520,5 +515,40 @@ func TestNetworkError_ErrorString(t *testing.T) {
 	got := err.Error()
 	if got != expected {
 		t.Errorf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestIsExpected_WrappedError(t *testing.T) {
+	ytErr := NewYouTubeError(ErrLoginRequired, "login needed", nil)
+	ytErr.Expected = true
+	wrapped := fmt.Errorf("context: %w", ytErr)
+	if !IsExpected(wrapped) {
+		t.Error("expected IsExpected to find wrapped YouTubeError")
+	}
+
+	// Double-wrapped
+	doubleWrapped := fmt.Errorf("outer: %w", wrapped)
+	if !IsExpected(doubleWrapped) {
+		t.Error("expected IsExpected to find double-wrapped YouTubeError")
+	}
+
+	// Non-Moombox wrapped error
+	plainWrapped := fmt.Errorf("context: %w", fmt.Errorf("plain"))
+	if IsExpected(plainWrapped) {
+		t.Error("expected IsExpected to return false for wrapped plain error")
+	}
+}
+
+func TestIsLoginRequired_WrappedError(t *testing.T) {
+	ytErr := NewYouTubeError(ErrLoginRequired, "login needed", nil)
+	wrapped := fmt.Errorf("context: %w", ytErr)
+	if !IsLoginRequired(wrapped) {
+		t.Error("expected IsLoginRequired to find wrapped YouTubeError")
+	}
+
+	authErr := NewAuthError(ErrCookiesExpired, "expired", nil)
+	wrappedAuth := fmt.Errorf("context: %w", authErr)
+	if !IsLoginRequired(wrappedAuth) {
+		t.Error("expected IsLoginRequired to find wrapped AuthError with COOKIES_EXPIRED")
 	}
 }

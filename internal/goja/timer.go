@@ -155,6 +155,9 @@ func (tm *TimerManager) CancelAll() {
 		if entry.ticker != nil {
 			entry.ticker.Stop()
 		}
+		if entry.done != nil {
+			close(entry.done)
+		}
 	}
 	tm.timers = make(map[int64]*timerEntry)
 

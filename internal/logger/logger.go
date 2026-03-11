@@ -59,7 +59,7 @@ type Logger struct {
 	subscribers []chan string
 	subMu       sync.RWMutex
 
-	closed bool
+	closed atomic.Bool
 }
 
 type jobLogBuffer struct {
@@ -198,7 +198,7 @@ func (l *Logger) rotate() {
 }
 
 func (l *Logger) log(level slog.Level, msg string, args ...any) {
-	if l.closed {
+	if l.closed.Load() {
 		return
 	}
 
@@ -230,6 +230,10 @@ func formatLogLine(level slog.Level, msg string, args ...any) string {
 		sb.WriteString(" ")
 		sb.WriteString(fmt.Sprintf("%v=%v", args[i], args[i+1]))
 	}
+	if len(args)%2 == 1 {
+		sb.WriteString(" ")
+		sb.WriteString(fmt.Sprintf("%v=!MISSING", args[len(args)-1]))
+	}
 
 	return sb.String()
 }
@@ -246,7 +250,7 @@ func (l *Logger) addToRingBuffer(line string) {
 }
 
 func (l *Logger) broadcast(line string) {
-	if l.closed {
+	if l.closed.Load() {
 		return
 	}
 
@@ -423,7 +427,7 @@ func (l *Logger) RestoreStdout() {
 
 // Close flushes and closes the logger.
 func (l *Logger) Close() {
-	l.closed = true
+	l.closed.Store(true)
 	l.fileMu.Lock()
 	defer l.fileMu.Unlock()
 
