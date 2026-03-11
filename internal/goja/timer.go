@@ -1,6 +1,8 @@
 package goja
 
 import (
+	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,8 +11,9 @@ import (
 )
 
 // TimerManager tracks setTimeout/setInterval calls for cleanup.
-// Goja is single-threaded per runtime, so timer callbacks must be
-// dispatched carefully via the runtime's event loop or deferred.
+//
+// IMPORTANT: Goja runtimes are NOT goroutine-safe. Timer callbacks are queued
+// and must be drained on the same goroutine that owns the VM via DrainCallbacks().
 type TimerManager struct {
 	vm      *goja.Runtime
 	mu      sync.Mutex
@@ -18,6 +21,11 @@ type TimerManager struct {
 	nextID  atomic.Int64
 	stopped bool
 	done    chan struct{} // closed by CancelAll to unblock interval goroutines
+
+	// Callback queue — timer/interval callbacks are enqueued here instead of
+	// being called directly from goroutines (Goja is single-threaded).
+	callbackMu sync.Mutex
+	callbacks  []goja.Callable
 }
 
 type timerEntry struct {
@@ -37,7 +45,49 @@ func NewTimerManager(vm *goja.Runtime) *TimerManager {
 	}
 }
 
+// enqueueCallback safely queues a callback for later execution on the VM thread.
+func (tm *TimerManager) enqueueCallback(fn goja.Callable) {
+	if fn == nil {
+		return
+	}
+	tm.callbackMu.Lock()
+	tm.callbacks = append(tm.callbacks, fn)
+	tm.callbackMu.Unlock()
+}
+
+// DrainCallbacks executes all queued timer callbacks on the calling goroutine.
+// This MUST be called from the goroutine that owns the Goja runtime.
+// Returns the number of callbacks executed and the first error encountered (if any).
+func (tm *TimerManager) DrainCallbacks() (int, error) {
+	tm.callbackMu.Lock()
+	if len(tm.callbacks) == 0 {
+		tm.callbackMu.Unlock()
+		return 0, nil
+	}
+	// Swap out the queue so we don't hold the lock during execution
+	cbs := tm.callbacks
+	tm.callbacks = nil
+	tm.callbackMu.Unlock()
+
+	var firstErr error
+	for _, fn := range cbs {
+		if _, err := fn(goja.Undefined()); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("timer callback: %w", err)
+		}
+	}
+	return len(cbs), firstErr
+}
+
+// HasPendingCallbacks returns true if there are queued callbacks waiting to be drained.
+func (tm *TimerManager) HasPendingCallbacks() bool {
+	tm.callbackMu.Lock()
+	defer tm.callbackMu.Unlock()
+	return len(tm.callbacks) > 0
+}
+
 // SetTimeout schedules a one-shot timer. Returns timer ID.
+// The callback is queued for execution via DrainCallbacks() — it is NOT called
+// directly from the timer goroutine (Goja is not goroutine-safe).
 func (tm *TimerManager) SetTimeout(fn goja.Callable, delayMs int64) int64 {
 	id := tm.nextID.Add(1)
 
@@ -53,6 +103,14 @@ func (tm *TimerManager) SetTimeout(fn goja.Callable, delayMs int64) int64 {
 	}
 
 	t := time.AfterFunc(delay, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Timer goroutine panic recovery — log to stderr since we
+				// can't safely access the Goja VM from this goroutine.
+				fmt.Fprintf(os.Stderr, "timer: panic in setTimeout cleanup id=%d: %v\n", id, r)
+			}
+		}()
+
 		tm.mu.Lock()
 		_, exists := tm.timers[id]
 		if exists {
@@ -60,10 +118,8 @@ func (tm *TimerManager) SetTimeout(fn goja.Callable, delayMs int64) int64 {
 		}
 		tm.mu.Unlock()
 
-		if exists && fn != nil {
-			// Goja is not goroutine-safe; we invoke via Interrupt-and-resume pattern
-			// For BotGuard use cases, callbacks are typically no-ops or simple assignments
-			fn(goja.Undefined())
+		if exists {
+			tm.enqueueCallback(fn)
 		}
 	})
 
@@ -73,6 +129,8 @@ func (tm *TimerManager) SetTimeout(fn goja.Callable, delayMs int64) int64 {
 }
 
 // SetInterval schedules a repeating timer. Returns timer ID.
+// Callbacks are queued for execution via DrainCallbacks() — they are NOT called
+// directly from the ticker goroutine (Goja is not goroutine-safe).
 func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 	id := tm.nextID.Add(1)
 
@@ -94,6 +152,12 @@ func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 	tm.mu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "timer: panic in setInterval goroutine id=%d: %v\n", id, r)
+			}
+		}()
+
 		for {
 			select {
 			case <-tm.done:
@@ -110,9 +174,7 @@ func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 				if !exists {
 					return
 				}
-				if fn != nil {
-					fn(goja.Undefined())
-				}
+				tm.enqueueCallback(fn)
 			}
 		}
 	}()
@@ -147,6 +209,15 @@ func (tm *TimerManager) CancelAll() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
+	// Signal interval goroutines to exit FIRST — this prevents any in-flight
+	// tick from enqueuing a new callback after we've cleared the timer map.
+	select {
+	case <-tm.done:
+		// Already closed
+	default:
+		close(tm.done)
+	}
+
 	tm.stopped = true
 	for _, entry := range tm.timers {
 		if entry.timer != nil {
@@ -161,13 +232,10 @@ func (tm *TimerManager) CancelAll() {
 	}
 	tm.timers = make(map[int64]*timerEntry)
 
-	// Signal interval goroutines to exit (ticker.Stop doesn't close the channel)
-	select {
-	case <-tm.done:
-		// Already closed
-	default:
-		close(tm.done)
-	}
+	// Clear any pending callbacks that were queued before cancellation
+	tm.callbackMu.Lock()
+	tm.callbacks = nil
+	tm.callbackMu.Unlock()
 }
 
 // ActiveCount returns the number of active timers.

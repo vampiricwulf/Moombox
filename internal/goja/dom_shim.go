@@ -339,5 +339,8 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	vm.Set("__cryptoRandBytes", goja.Undefined())
 	vm.Set("__cryptoRandomUUID", goja.Undefined())
 
-	return err
+	if err != nil {
+		return fmt.Errorf("DOM shim execution failed: %w", err)
+	}
+	return nil
 }

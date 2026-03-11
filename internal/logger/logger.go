@@ -59,6 +59,10 @@ type Logger struct {
 	subscribers []chan string
 	subMu       sync.RWMutex
 
+	// Rate-limiting for broadcast drop warnings (prevents stderr spam
+	// when a subscriber is persistently slow)
+	dropWarnLast atomic.Int64 // unix nanoseconds of last warning
+
 	closed atomic.Bool
 }
 
@@ -261,7 +265,15 @@ func (l *Logger) broadcast(line string) {
 		select {
 		case ch <- line:
 		default:
-			// Drop if subscriber is slow
+			// Drop if subscriber is slow — rate-limit the warning to at most
+			// once per second to avoid flooding stderr under sustained load
+			now := time.Now().UnixNano()
+			last := l.dropWarnLast.Load()
+			if now-last >= int64(time.Second) {
+				if l.dropWarnLast.CompareAndSwap(last, now) {
+					fmt.Fprintf(os.Stderr, "logger: dropped log line for slow subscriber\n")
+				}
+			}
 		}
 	}
 }
@@ -308,9 +320,10 @@ func (l *Logger) LogForJob(jobID string, level slog.Level, msg string, args ...a
 
 	buf.mu.Lock()
 	if len(buf.lines) >= maxJobLogLines {
-		// Remove oldest entries
-		copy(buf.lines, buf.lines[100:])
-		buf.lines = buf.lines[:len(buf.lines)-100]
+		// Remove oldest 20% of entries to amortize pruning cost
+		pruneCount := maxJobLogLines / 5
+		copy(buf.lines, buf.lines[pruneCount:])
+		buf.lines = buf.lines[:len(buf.lines)-pruneCount]
 	}
 	buf.lines = append(buf.lines, line)
 	buf.mu.Unlock()
@@ -398,8 +411,9 @@ func (l *Logger) Unsubscribe(ch chan string) {
 	}
 }
 
-// SetLevel sets the log level dynamically.
-func (l *Logger) SetLevel(level string) {
+// SetLevel sets the log level dynamically. Returns false if the level string
+// was not recognized (falls back to Info).
+func (l *Logger) SetLevel(level string) bool {
 	switch strings.ToUpper(level) {
 	case "DEBUG":
 		l.level.Set(slog.LevelDebug)
@@ -411,7 +425,10 @@ func (l *Logger) SetLevel(level string) {
 		l.level.Set(slog.LevelError)
 	default:
 		l.level.Set(slog.LevelInfo)
+		fmt.Fprintf(os.Stderr, "logger: unrecognized log level %q, falling back to INFO\n", level)
+		return false
 	}
+	return true
 }
 
 // SuppressStdout disables stdout logging. Call this when the TUI starts

@@ -290,12 +290,15 @@ const (
 // =============================================================================
 
 // ThumbnailQualities lists YouTube thumbnail qualities in order of preference.
-var ThumbnailQualities = []string{
-	"maxresdefault",
-	"sddefault",
-	"hqdefault",
-	"mqdefault",
-	"default",
+// This is a function (not a var) to prevent accidental mutation of the shared slice.
+func ThumbnailQualities() []string {
+	return []string{
+		"maxresdefault",
+		"sddefault",
+		"hqdefault",
+		"mqdefault",
+		"default",
+	}
 }
 
 // =============================================================================
@@ -374,19 +377,25 @@ const (
 // CODEC PRIORITY
 // =============================================================================
 
-// VideoCodecPriority maps codec names to priority scores (higher = better).
-var VideoCodecPriority = map[string]int{
-	"vp9.2": 5,
-	"vp09":  5, // alternate name
-	"vp9":   4,
-	"av01":  3,
-	"avc1":  2,
-	"h264":  1,
+// VideoCodecPriority returns codec-to-priority scores (higher = better).
+// This is a function (not a var) to prevent accidental mutation of the shared map.
+func VideoCodecPriority() map[string]int {
+	return map[string]int{
+		"vp9.2": 5,
+		"vp09":  5, // alternate name
+		"vp9":   4,
+		"av01":  3,
+		"avc1":  2,
+		"h264":  1,
+	}
 }
 
-// AudioCodecPriority maps audio codec names to priority scores.
-var AudioCodecPriority = map[string]int{
-	"opus": 3,
-	"mp4a": 2,
-	"mp3":  1,
+// AudioCodecPriority returns audio codec-to-priority scores.
+// This is a function (not a var) to prevent accidental mutation of the shared map.
+func AudioCodecPriority() map[string]int {
+	return map[string]int{
+		"opus": 3,
+		"mp4a": 2,
+		"mp3":  1,
+	}
 }

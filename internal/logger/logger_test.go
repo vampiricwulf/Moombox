@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -57,6 +58,50 @@ func TestRingBuffer(t *testing.T) {
 	}
 }
 
+func TestRingBufferPartialFill(t *testing.T) {
+	l, err := New("", "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Log fewer messages than ring size
+	for i := 0; i < 5; i++ {
+		l.Info("partial", "i", i)
+	}
+
+	lines := l.GetRecentLines()
+	if len(lines) != 5 {
+		t.Errorf("expected 5 lines, got %d", len(lines))
+	}
+}
+
+func TestRingBufferOrder(t *testing.T) {
+	l, err := New("", "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Overfill and check that we get the most recent entries in order
+	for i := 0; i < 210; i++ {
+		l.Info(fmt.Sprintf("msg-%d", i))
+	}
+
+	lines := l.GetRecentLines()
+	if len(lines) != defaultRingSize {
+		t.Errorf("expected %d lines, got %d", defaultRingSize, len(lines))
+	}
+
+	// First line should be msg-10 (oldest retained), last should be msg-209
+	if !strings.Contains(lines[0], "msg-10") {
+		t.Errorf("expected first line to contain 'msg-10', got %q", lines[0])
+	}
+	if !strings.Contains(lines[len(lines)-1], "msg-209") {
+		t.Errorf("expected last line to contain 'msg-209', got %q", lines[len(lines)-1])
+	}
+}
+
 func TestSubscribe(t *testing.T) {
 	l, err := New("", "DEBUG", 1024*1024, 3)
 	if err != nil {
@@ -83,6 +128,18 @@ func TestSubscribe(t *testing.T) {
 	l.Unsubscribe(ch)
 }
 
+func TestUnsubscribeNonExistent(t *testing.T) {
+	l, err := New("", "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Should not panic when unsubscribing a channel that was never subscribed
+	ch := make(chan string, 1)
+	l.Unsubscribe(ch) // no-op, should not panic
+}
+
 func TestJobLogs(t *testing.T) {
 	l, err := New("", "DEBUG", 1024*1024, 3)
 	if err != nil {
@@ -102,6 +159,58 @@ func TestJobLogs(t *testing.T) {
 	logs = l.GetJobLogs("job-1")
 	if logs != nil {
 		t.Error("expected nil after clear")
+	}
+}
+
+func TestJobLogsPruning(t *testing.T) {
+	l, err := New("", "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Fill past maxJobLogLines (500)
+	for i := 0; i < 550; i++ {
+		l.LogForJob("job-prune", slog.LevelInfo, "msg", "i", i)
+	}
+
+	logs := l.GetJobLogs("job-prune")
+	if len(logs) > maxJobLogLines {
+		t.Errorf("expected at most %d job log entries, got %d", maxJobLogLines, len(logs))
+	}
+	// After pruning 20% (100 lines) from 500, then adding remaining 50:
+	// 500 -> prune to 400 -> add 50 -> 450
+	// Then no more pruning needed for the rest
+	if len(logs) < 400 {
+		t.Errorf("expected at least 400 job log entries after pruning, got %d", len(logs))
+	}
+}
+
+func TestJobLogsPruneByActiveIDs(t *testing.T) {
+	l, err := New("", "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	l.LogForJob("keep-1", slog.LevelInfo, "msg")
+	l.LogForJob("keep-2", slog.LevelInfo, "msg")
+	l.LogForJob("remove-1", slog.LevelInfo, "msg")
+
+	activeIDs := map[string]struct{}{
+		"keep-1": {},
+		"keep-2": {},
+	}
+	l.PruneJobLogs(activeIDs)
+
+	if l.GetJobLogs("keep-1") == nil {
+		t.Error("expected keep-1 logs to be retained")
+	}
+	if l.GetJobLogs("keep-2") == nil {
+		t.Error("expected keep-2 logs to be retained")
+	}
+	if l.GetJobLogs("remove-1") != nil {
+		t.Error("expected remove-1 logs to be pruned")
 	}
 }
 
@@ -150,5 +259,146 @@ func TestSetLevel(t *testing.T) {
 	}
 	if !foundError {
 		t.Error("expected 'visible error message' in ring buffer at ERROR level")
+	}
+}
+
+func TestSetLevelValidLevels(t *testing.T) {
+	l, err := New("", "INFO", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	tests := []struct {
+		level string
+		valid bool
+	}{
+		{"DEBUG", true},
+		{"INFO", true},
+		{"WARN", true},
+		{"WARNING", true},
+		{"ERROR", true},
+		{"debug", true},  // case insensitive
+		{"Info", true},   // case insensitive
+		{"INVALID", false},
+		{"", false},
+		{"TRACE", false},
+	}
+
+	for _, tt := range tests {
+		ok := l.SetLevel(tt.level)
+		if ok != tt.valid {
+			t.Errorf("SetLevel(%q) returned %v, expected %v", tt.level, ok, tt.valid)
+		}
+	}
+}
+
+func TestLogRotation(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "rotate.log")
+
+	// Use a very small max size to trigger rotation quickly
+	l, err := New(logPath, "DEBUG", 100, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Write enough to trigger rotation
+	for i := 0; i < 20; i++ {
+		l.Info("rotation test message that is long enough to exceed the limit", "i", i)
+	}
+
+	// Check that rotated files exist
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		t.Error("expected current log file to exist")
+	}
+	if _, err := os.Stat(logPath + ".1"); os.IsNotExist(err) {
+		t.Error("expected rotated log file .1 to exist")
+	}
+}
+
+func TestSuppressRestoreStdout(t *testing.T) {
+	l, err := New("", "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	if !l.stdout.enabled.Load() {
+		t.Error("expected stdout enabled by default")
+	}
+
+	l.SuppressStdout()
+	if l.stdout.enabled.Load() {
+		t.Error("expected stdout disabled after SuppressStdout")
+	}
+
+	l.RestoreStdout()
+	if !l.stdout.enabled.Load() {
+		t.Error("expected stdout enabled after RestoreStdout")
+	}
+}
+
+func TestCloseClosesSubscribers(t *testing.T) {
+	l, err := New("", "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ch := l.Subscribe()
+	l.Close()
+
+	// Channel should be closed after Close
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Error("expected channel to be closed")
+		}
+	case <-time.After(time.Second):
+		t.Error("timeout waiting for channel close")
+	}
+}
+
+func TestFormatLogLineMissingValue(t *testing.T) {
+	// Odd number of args should produce "key=!MISSING"
+	line := formatLogLine(slog.LevelInfo, "test", "orphan_key")
+	if !strings.Contains(line, "orphan_key=!MISSING") {
+		t.Errorf("expected '!MISSING' marker for unpaired key, got %q", line)
+	}
+}
+
+func TestLogAfterClose(t *testing.T) {
+	l, err := New("", "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	l.Close()
+
+	// Should not panic when logging after close
+	l.Info("after close")
+	l.Debug("after close debug")
+	l.Warn("after close warn")
+	l.Error("after close error")
+}
+
+func TestNewLoggerNoFile(t *testing.T) {
+	// Empty path means no file output
+	l, err := New("", "INFO", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	if l.file != nil {
+		t.Error("expected nil file when path is empty")
+	}
+
+	// Should still work for ring buffer and subscribers
+	l.Info("no file test")
+	lines := l.GetRecentLines()
+	if len(lines) != 1 {
+		t.Errorf("expected 1 line in ring buffer, got %d", len(lines))
 	}
 }
