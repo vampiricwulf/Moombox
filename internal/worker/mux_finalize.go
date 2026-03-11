@@ -35,7 +35,8 @@ func DownloadFile(ctx context.Context, url, outputPath string) error {
 		return err
 	}
 
-	_, err = io.Copy(f, resp.Body)
+	// Limit body to 2GB to prevent unbounded memory/disk usage
+	_, err = io.Copy(f, io.LimitReader(resp.Body, 2<<30))
 	f.Close()
 	if err != nil {
 		os.Remove(tmpPath)

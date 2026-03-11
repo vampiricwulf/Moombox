@@ -578,6 +578,11 @@ func (w *DownloadWorker) Stop() {
 	// Wait for in-flight jobs with a timeout
 	done := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("panic waiting for in-flight jobs", "panic", fmt.Sprint(r))
+			}
+		}()
 		w.wg.Wait()
 		close(done)
 	}()

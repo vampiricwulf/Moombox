@@ -20,7 +20,7 @@ const (
 type ProgressTracker struct {
 	mu            sync.Mutex
 	db            *database.Database
-	logger        interface{ Warn(msg string, args ...any) }
+	logger        logger
 	jobID         string
 	videoSeq      int
 	audioSeq      int
@@ -42,7 +42,7 @@ type ProgressTracker struct {
 }
 
 // NewProgressTracker creates a new progress tracker for a job.
-func NewProgressTracker(db *database.Database, jobID string, logger interface{ Warn(msg string, args ...any) }) *ProgressTracker {
+func NewProgressTracker(db *database.Database, jobID string, logger logger) *ProgressTracker {
 	now := time.Now()
 	return &ProgressTracker{
 		db:            db,

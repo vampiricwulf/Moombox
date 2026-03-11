@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -554,11 +555,10 @@ func probeAudioBitrate(ctx context.Context, ffprobePath, filePath string) int {
 		return defaultAudioBitrate
 	}
 
-	// bit_rate is in bps, convert to kbps
-	var bps float64
-	if err := json.Unmarshal([]byte(stream.BitRate), &bps); err != nil {
-		// Try parsing as string number
-		fmt.Sscanf(stream.BitRate, "%f", &bps)
+	// bit_rate is in bps (ffprobe returns it as a string), convert to kbps
+	bps, parseErr := strconv.ParseFloat(stream.BitRate, 64)
+	if parseErr != nil {
+		return defaultAudioBitrate
 	}
 	if bps > 0 {
 		kbps := int(math.Round(bps / 1000))

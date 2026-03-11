@@ -1,0 +1,450 @@
+package worker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
+	"github.com/vampiricwulf/Moombox/internal/twitch"
+)
+
+// TwitchVariantInfo holds info for a Twitch HLS variant to download.
+type TwitchVariantInfo struct {
+	URL           string
+	Name          string
+	Width         int
+	Height        int
+	FPS           float64
+	CheckStreamFn func(ctx context.Context) (bool, error) // Returns true if stream is still live
+
+	// For quality monitoring: re-fetches the master playlist and selects the best variant.
+	// Set by the worker for live streams so the orchestrator can detect quality changes.
+	FetchVariantsFn func(ctx context.Context) ([]twitch.TwitchHLSVariant, error)
+	QualityPref     string // from channel config, e.g. "1080p60" or "best"
+	MaxResolution   int    // from global config
+}
+
+// TwitchChatDownloader is the interface for Twitch chat downloaders (IRC or VOD).
+type TwitchChatDownloader interface {
+	Start(ctx context.Context) error
+	Stop()
+	MarkStreamEnded()
+	MessageCount() int
+	IsRunning() bool
+}
+
+// TwitchRecordingTimeAware is an optional interface for chat downloaders that support recording start time.
+type TwitchRecordingTimeAware interface {
+	SetRecordingStartTime(isoString string)
+}
+
+// ExecuteTwitch runs the Twitch download pipeline (B3).
+// Twitch HLS delivers pre-muxed MPEG-TS, so only one segment downloader is needed.
+func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobContext, variant *TwitchVariantInfo, isVod bool, twitchChatDl TwitchChatDownloader) error {
+	o.logger.Info("starting Twitch download", "jobID", jobCtx.Job.ID, "isVod", isVod)
+
+	// DB listener for cancellation (B6)
+	ctx2, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	unsubscribe := o.db.OnJobUpdate(func(updatedJob *database.Job) {
+		if updatedJob.ID == jobCtx.Job.ID && updatedJob.Status == database.StatusCancelled {
+			cancel()
+		}
+	})
+	defer unsubscribe()
+	ctx = ctx2
+
+	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+		"status":              database.StatusDownloading,
+		"download_started_at": time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Send "Twitch Download Starting" notification
+	if o.notifier != nil {
+		dlType := "Live Stream"
+		if isVod {
+			dlType = "VOD"
+		}
+		qualityLabel := variant.Name
+		if variant.Height > 0 {
+			fpsStr := ""
+			if variant.FPS > 0 {
+				fpsStr = fmt.Sprintf("%g", variant.FPS)
+			}
+			qualityLabel = fmt.Sprintf("%s (%dp%s)", variant.Name, variant.Height, fpsStr)
+		}
+		o.notifier.Send("Twitch Download Starting",
+			fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title),
+			notifications.TypeDownload,
+			[]notifications.Field{
+				{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+				{Name: "Quality", Value: qualityLabel, Inline: true},
+				{Name: "Type", Value: dlType, Inline: true},
+			},
+			notifications.SendOptions{
+				URL:       jobCtx.Job.URL,
+				Thumbnail: jobCtx.Job.ThumbnailURL,
+				Event:     "downloading",
+			},
+		)
+	}
+
+	if err := os.MkdirAll(jobCtx.StagingDir, 0o755); err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
+
+	// Pre-download Twitch thumbnail to staging while stream is still live
+	// (Twitch live preview URLs 404 after stream ends, so muxFinalize would be too late)
+	if jobCtx.Job.ThumbnailURL != "" {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("panic in thumbnail download", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
+				}
+			}()
+			thumbCtx, thumbCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer thumbCancel()
+			thumbPath := filepath.Join(jobCtx.StagingDir, "thumbnail.jpg")
+			if strings.Contains(jobCtx.Job.ThumbnailURL, ".webp") {
+				thumbPath = filepath.Join(jobCtx.StagingDir, "thumbnail.webp")
+			}
+			DownloadFileMinSize(thumbCtx, jobCtx.Job.ThumbnailURL, thumbPath, 1000)
+		}()
+	}
+
+	// Quality monitoring state (live streams only)
+	segmentIndex := 0
+	segmentStartTime := time.Now().Unix()
+	var segmentMuxWg sync.WaitGroup // tracks background segment mux goroutines
+	defer segmentMuxWg.Wait()       // ensure all background muxes finish before returning
+	currentQuality := QualityInfo{
+		Width:  variant.Width,
+		Height: variant.Height,
+		FPS:    int(variant.FPS),
+		Label:  FormatQualityLabel(variant.Height, int(variant.FPS)),
+	}
+	qualityChangeCh := make(chan QualityInfo, 1)
+
+	// Start proactive quality monitor for live streams
+	var monitorCancel context.CancelFunc
+	var twitchMonitor *QualityMonitor
+	if !isVod && variant.FetchVariantsFn != nil {
+		monitorCtx, mc := context.WithCancel(ctx)
+		monitorCancel = mc
+		probeFn := o.buildTwitchProbeFn(variant)
+		twitchMonitor = NewQualityMonitor(qualityMonitorInterval, currentQuality, probeFn, o.logger)
+		go twitchMonitor.Run(monitorCtx, qualityChangeCh)
+	}
+	defer func() {
+		if monitorCancel != nil {
+			monitorCancel()
+		}
+	}()
+
+	// Helper to create HLS downloader for a variant
+	createDownloader := func(variantURL string, stagingDir string) (*engine.SegmentDownloader, string) {
+		videoPath := filepath.Join(stagingDir, "video_stream")
+		dl := engine.NewSegmentDownloader(engine.DownloaderOptions{
+			BaseURL:    variantURL,
+			OutputFile: videoPath,
+			StartSeq:   -1,
+			IsHls:      true,
+			CheckStreamStatus: func(ctx context.Context) (bool, error) {
+				if isVod {
+					return false, nil
+				}
+				info, err := variant.CheckStreamFn(ctx)
+				if err != nil {
+					return false, err
+				}
+				return !info, nil // Returns true when stream ended (NOT live)
+			},
+		})
+		return dl, videoPath
+	}
+
+	videoDl, videoPath := createDownloader(variant.URL, jobCtx.StagingDir)
+
+	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger)
+	tracker.AttachVideoDownloader(videoDl)
+
+	// Start Twitch chat in parallel
+	var chatDone chan struct{}
+	if twitchChatDl != nil {
+		// Set recording start time for IRC chat offset calculation (matches TS)
+		if rta, ok := twitchChatDl.(TwitchRecordingTimeAware); ok {
+			rta.SetRecordingStartTime(time.Now().UTC().Format(time.RFC3339))
+		}
+		// Wire OnProgress for DB updates (matches TS chat progress tracking)
+		if irc, ok := twitchChatDl.(*twitch.ChatDownloader); ok {
+			irc.OnProgress = func(count int) { tracker.SetChatCount(count) }
+		}
+		if vod, ok := twitchChatDl.(*twitch.VodChatDownloader); ok {
+			vod.OnProgress = func(count int) { tracker.SetChatCount(count) }
+		}
+		chatDone = make(chan struct{})
+		go func() {
+			defer close(chatDone)
+			defer func() {
+				if r := recover(); r != nil {
+					o.logger.Error("panic in Twitch chat downloader", "jobID", jobCtx.Job.ID, "panic", fmt.Sprint(r))
+				}
+			}()
+			twitchChatDl.Start(ctx)
+		}()
+	}
+
+	// Quality-aware download loop
+	for {
+		if ctx.Err() != nil {
+			break
+		}
+
+		// Run HLS downloader in goroutine to listen for quality changes
+		downloadDone := make(chan error, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					downloadDone <- fmt.Errorf("twitch download panic: %v", r)
+				}
+			}()
+			downloadDone <- videoDl.Start(ctx)
+		}()
+
+		var dlErr error
+		qualityChanged := false
+
+		if !isVod && variant.FetchVariantsFn != nil {
+		awaitTwitchDownload:
+			for {
+				select {
+				case newQ := <-qualityChangeCh:
+					if time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration {
+						// Too soon — don't split. Reset monitor baseline so it
+						// re-detects the change once we're past minSegmentDuration.
+						o.logger.Debug("quality change ignored (min segment duration)",
+							"from", currentQuality.Label, "to", newQ.Label,
+							"jobID", jobCtx.Job.ID)
+						if twitchMonitor != nil {
+							twitchMonitor.UpdateBaseline(currentQuality)
+						}
+						continue
+					}
+					qualityChanged = true
+					o.logger.Info("proactive quality change detected",
+						"from", currentQuality.Label, "to", newQ.Label,
+						"jobID", jobCtx.Job.ID)
+					videoDl.Cancel()
+					dlErr = <-downloadDone
+					break awaitTwitchDownload
+				case dlErr = <-downloadDone:
+					break awaitTwitchDownload
+				}
+			}
+		} else {
+			dlErr = <-downloadDone
+		}
+
+		if ctx.Err() != nil {
+			break
+		}
+
+		isQualityLost := errors.Is(dlErr, engine.ErrQualityLost)
+
+		if qualityChanged || isQualityLost {
+			segmentEndTime := time.Now().Unix()
+			shortSegment := time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
+
+			// Mux this segment in the background so the new download starts immediately.
+			if !shortSegment {
+				muxIdx := segmentIndex
+				muxStart := segmentStartTime
+				muxEnd := segmentEndTime
+				muxQuality := currentQuality
+				muxVideoPath := videoPath
+				segmentMuxWg.Add(1)
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							o.logger.Error("panic in Twitch mux segment goroutine", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
+						}
+					}()
+					defer segmentMuxWg.Done()
+					muxResult := &DownloadResult{HasVideo: true, VideoPath: muxVideoPath}
+					// Use background context — data is already downloaded, let FFmpeg finish
+					// even during cancellation to avoid orphaned partial output files.
+					seg, muxErr := o.muxSegment(context.Background(), jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
+					if muxErr != nil {
+						o.logger.Error("failed to mux Twitch quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
+					} else if seg != nil {
+						o.logger.Info("Twitch quality segment muxed",
+							"segment", muxIdx, "quality", muxQuality.Label,
+							"file", seg.Filename, "jobID", jobCtx.Job.ID)
+					}
+				}()
+				segmentIndex++
+			} else {
+				o.logger.Debug("skipping short segment mux",
+					"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
+					"jobID", jobCtx.Job.ID)
+			}
+
+			// Re-fetch master playlist and select new best variant
+			variants, fetchErr := variant.FetchVariantsFn(ctx)
+			if fetchErr != nil {
+				o.logger.Error("failed to refresh Twitch variants", "err", fetchErr, "jobID", jobCtx.Job.ID)
+				break
+			}
+
+			newVariant := twitch.SelectBestVariant(variants, variant.QualityPref, variant.MaxResolution)
+			if newVariant == nil {
+				o.logger.Error("no suitable Twitch variant after quality change", "jobID", jobCtx.Job.ID)
+				break
+			}
+
+			newQuality := QualityInfo{
+				Width:  newVariant.Width,
+				Height: newVariant.Height,
+				FPS:    int(newVariant.FPS),
+				Label:  FormatQualityLabel(newVariant.Height, int(newVariant.FPS)),
+			}
+
+			o.logger.Info("Twitch quality split",
+				"from", currentQuality.Label, "to", newQuality.Label,
+				"segment", segmentIndex, "jobID", jobCtx.Job.ID)
+
+			// Create new staging subdirectory
+			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
+			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
+				o.logger.Error("failed to create segment staging dir", "err", err)
+				break
+			}
+
+			currentQuality = newQuality
+			videoDl, videoPath = createDownloader(newVariant.URL, segStagingDir)
+			tracker.AttachVideoDownloader(videoDl)
+			segmentStartTime = time.Now().Unix()
+
+			// Update monitor baseline so it doesn't re-detect the same change
+			if twitchMonitor != nil {
+				select {
+				case <-qualityChangeCh:
+				default:
+				}
+				twitchMonitor.UpdateBaseline(currentQuality)
+			}
+
+			continue
+		}
+
+		// Normal stop — Twitch doesn't need stream-end verification like YouTube
+		if dlErr != nil && ctx.Err() == nil {
+			o.logger.Error("Twitch HLS download error", "err", dlErr, "jobID", jobCtx.Job.ID)
+		}
+		break
+	}
+
+	tracker.Finalize()
+
+	// Wait for any background segment muxes to finish
+	segmentMuxWg.Wait()
+
+	if ctx.Err() != nil {
+		// Shutdown: stop chat but preserve staging dir for resume
+		if twitchChatDl != nil {
+			twitchChatDl.Stop()
+		}
+		return ctx.Err()
+	}
+
+	// If we had quality splits, mux the final segment
+	if segmentIndex > 0 {
+		segmentEndTime := time.Now().Unix()
+		result := &DownloadResult{HasVideo: true, VideoPath: videoPath}
+		seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)
+		if muxErr != nil {
+			o.logger.Error("failed to mux final Twitch quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
+		} else if seg != nil {
+			o.logger.Info("final Twitch quality segment muxed",
+				"segment", segmentIndex, "quality", currentQuality.Label,
+				"file", seg.Filename, "jobID", jobCtx.Job.ID)
+		}
+	}
+
+	// Signal chat to finish
+	if twitchChatDl != nil {
+		twitchChatDl.MarkStreamEnded()
+		if chatDone != nil {
+			chatEndTimer := time.NewTimer(chatWaitTimeout)
+			select {
+			case <-chatDone:
+				chatEndTimer.Stop()
+			case <-chatEndTimer.C:
+				twitchChatDl.Stop()
+			}
+		}
+
+		// Update chat status
+		chatCount := twitchChatDl.MessageCount()
+		chatStatus := "finished"
+		if chatCount == 0 {
+			chatStatus = "unavailable"
+		}
+		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+			"chat_status":         chatStatus,
+			"total_chat_messages": chatCount,
+		})
+	}
+
+	// Set stream end time if not already set
+	if jobCtx.Job.StreamEndTime == "" {
+		endTime := time.Now().UTC().Format(time.RFC3339)
+		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+			"stream_end_time": endTime,
+		})
+	}
+
+	// Release download slot before muxing
+	if o.queue != nil {
+		o.queue.ReleaseDownloadSlot(jobCtx.Job.ID)
+	}
+
+	// Mux Twitch .ts → .mp4
+	dlResult := &DownloadResult{
+		HasVideo:  true,
+		VideoPath: videoPath,
+	}
+	return o.muxAndFinalize(ctx, jobCtx, dlResult)
+}
+
+// buildTwitchProbeFn creates a quality probe function for Twitch streams.
+// The probe re-fetches the master playlist and selects the best variant.
+func (o *DownloadOrchestrator) buildTwitchProbeFn(variant *TwitchVariantInfo) func(context.Context) (*QualityInfo, error) {
+	return func(ctx context.Context) (*QualityInfo, error) {
+		variants, err := variant.FetchVariantsFn(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		best := twitch.SelectBestVariant(variants, variant.QualityPref, variant.MaxResolution)
+		if best == nil {
+			return nil, fmt.Errorf("no variant found")
+		}
+
+		return &QualityInfo{
+			Width:  best.Width,
+			Height: best.Height,
+			FPS:    int(best.FPS),
+			Label:  FormatQualityLabel(best.Height, int(best.FPS)),
+		}, nil
+	}
+}

@@ -1,0 +1,409 @@
+package worker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/engine"
+	"github.com/vampiricwulf/Moombox/internal/utils"
+	"github.com/vampiricwulf/Moombox/internal/youtube"
+)
+
+// runLiveStreamDownload runs downloaders with stream-end verification loop (A2, B4).
+// Supports quality monitoring: when the available quality changes mid-stream,
+// the current download segment is muxed and a new download starts at the new quality.
+func (o *DownloadOrchestrator) runLiveStreamDownload(
+	ctx context.Context,
+	jobCtx *JobContext,
+	videoInfo *youtube.VideoInfo,
+	result *DownloadResult,
+	tracker *ProgressTracker,
+) error {
+	var lastSegmentTime = time.Now()
+	consecutiveLiveChecks := 0
+
+	// Quality monitoring state
+	segmentIndex := 0
+	segmentStartTime := time.Now().Unix()
+	currentQuality := o.extractQualityFromResult(result)
+	qualityChangeCh := make(chan QualityInfo, 1)
+	var segmentMuxWg sync.WaitGroup // tracks background segment mux goroutines
+	defer segmentMuxWg.Wait()       // ensure all background muxes finish before returning
+
+	// Only monitor quality if user hasn't manually selected itags and isn't audio-only
+	monitoringEnabled := jobCtx.Job.SelectedVideoItag == nil && jobCtx.Job.QualityPreference != "audio_only"
+
+	// Start proactive quality monitor (30s timer)
+	var monitorCancel context.CancelFunc
+	var monitor *QualityMonitor
+	if monitoringEnabled {
+		monitorCtx, mc := context.WithCancel(ctx)
+		monitorCancel = mc
+		probeFn := o.buildYouTubeProbeFn(jobCtx)
+		monitor = NewQualityMonitor(qualityMonitorInterval, currentQuality, probeFn, o.logger)
+		go monitor.Run(monitorCtx, qualityChangeCh)
+	}
+	defer func() {
+		if monitorCancel != nil {
+			monitorCancel()
+		}
+	}()
+
+	// Track segment activity via progress callbacks
+	onSegmentProgress := func() {
+		lastSegmentTime = time.Now()
+		consecutiveLiveChecks = 0
+	}
+
+	attachProgress := func(res *DownloadResult) {
+		if res.VideoDownloader != nil {
+			tracker.AttachVideoDownloader(res.VideoDownloader)
+			origOnProgress := res.VideoDownloader.OnProgress
+			res.VideoDownloader.OnProgress = func(p engine.DownloadProgress) {
+				onSegmentProgress()
+				if origOnProgress != nil {
+					origOnProgress(p)
+				}
+			}
+		}
+		if res.AudioDownloader != nil {
+			tracker.AttachAudioDownloader(res.AudioDownloader)
+			origOnProgress := res.AudioDownloader.OnProgress
+			res.AudioDownloader.OnProgress = func(p engine.DownloadProgress) {
+				onSegmentProgress()
+				if origOnProgress != nil {
+					origOnProgress(p)
+				}
+			}
+		}
+	}
+
+	attachProgress(result)
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Run segment downloaders in a goroutine so we can also listen for quality changes
+		downloadDone := make(chan error, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					downloadDone <- fmt.Errorf("runDownloaders panic: %v", r)
+				}
+			}()
+			downloadDone <- o.runDownloaders(ctx, result)
+		}()
+
+		var downloadErr error
+		qualityChanged := false
+
+	awaitYTDownload:
+		for {
+			select {
+			case newQ := <-qualityChangeCh:
+				// Proactive quality change while download is running
+				if time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration {
+					// Too soon — don't split. Reset monitor baseline so it
+					// re-detects the change once we're past minSegmentDuration.
+					o.logger.Debug("quality change ignored (min segment duration)",
+						"from", currentQuality.Label, "to", newQ.Label,
+						"jobID", jobCtx.Job.ID)
+					if monitor != nil {
+						monitor.UpdateBaseline(currentQuality)
+					}
+					continue
+				}
+				qualityChanged = true
+				o.logger.Info("proactive quality change detected, stopping downloaders",
+					"from", currentQuality.Label, "to", newQ.Label,
+					"jobID", jobCtx.Job.ID)
+				// Cancel current downloaders
+				if result.VideoDownloader != nil {
+					result.VideoDownloader.Cancel()
+				}
+				if result.AudioDownloader != nil {
+					result.AudioDownloader.Cancel()
+				}
+				downloadErr = <-downloadDone
+				break awaitYTDownload
+			case downloadErr = <-downloadDone:
+				// Download stopped on its own
+				break awaitYTDownload
+			}
+		}
+
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// Check for reactive quality loss (download loop returned ErrQualityLost)
+		isQualityLost := errors.Is(downloadErr, engine.ErrQualityLost)
+
+		if qualityChanged || isQualityLost {
+			segmentEndTime := time.Now().Unix()
+			shortSegment := time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
+
+			// Mux this segment in the background so the new download starts immediately.
+			// All values are captured by the goroutine — no shared mutable state.
+			if !shortSegment {
+				muxIdx := segmentIndex
+				muxStart := segmentStartTime
+				muxEnd := segmentEndTime
+				muxQuality := currentQuality
+				muxResult := result
+				segmentMuxWg.Add(1)
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							o.logger.Error("panic in mux segment goroutine", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
+						}
+					}()
+					defer segmentMuxWg.Done()
+					// Use background context — data is already downloaded, let FFmpeg finish
+					// even during cancellation to avoid orphaned partial output files.
+					seg, muxErr := o.muxSegment(context.Background(), jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
+					if muxErr != nil {
+						o.logger.Error("failed to mux quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
+					} else if seg != nil {
+						o.logger.Info("quality segment muxed",
+							"segment", muxIdx, "quality", muxQuality.Label,
+							"file", seg.Filename, "jobID", jobCtx.Job.ID)
+					}
+				}()
+				segmentIndex++
+			} else {
+				o.logger.Debug("skipping short segment mux",
+					"duration", time.Since(time.Unix(segmentStartTime, 0)).Round(time.Second),
+					"jobID", jobCtx.Job.ID)
+			}
+
+			// Re-fetch manifest and select new best quality (concurrent with background mux)
+			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+			if err != nil {
+				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
+				return fmt.Errorf("refresh after quality change: %w", err)
+			}
+
+			// Cancel old downloaders
+			if result.VideoDownloader != nil {
+				result.VideoDownloader.Cancel()
+			}
+			if result.AudioDownloader != nil {
+				result.AudioDownloader.Cancel()
+			}
+
+			// Create new staging subdirectory for the new segment
+			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
+			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
+				return fmt.Errorf("create segment staging dir: %w", err)
+			}
+
+			// Create a temporary job context pointing to the new staging dir
+			segJobCtx := *jobCtx
+			segJobCtx.StagingDir = segStagingDir
+
+			var refreshResult *DownloadResult
+			var refreshErr error
+			if result.IsHls {
+				refreshResult, refreshErr = DownloadHls(ctx, &segJobCtx, freshInfo, o.potProvider)
+			} else {
+				refreshResult, refreshErr = DownloadDash(ctx, &segJobCtx, freshInfo, o.cipherSolver, o.potProvider)
+			}
+
+			if refreshErr != nil {
+				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+				return nil // Can't continue, finalize what we have
+			}
+
+			newQuality := o.extractQualityFromResult(refreshResult)
+			o.logger.Info("quality split",
+				"from", currentQuality.Label, "to", newQuality.Label,
+				"segment", segmentIndex, "jobID", jobCtx.Job.ID)
+
+			currentQuality = newQuality
+			result = refreshResult
+			segmentStartTime = time.Now().Unix()
+
+			// Update monitor baseline so it doesn't re-detect the same change
+			if monitor != nil {
+				select {
+				case <-qualityChangeCh:
+				default:
+				}
+				monitor.UpdateBaseline(currentQuality)
+			}
+
+			attachProgress(result)
+			continue
+		}
+
+		// Normal download stop — verify stream ended (existing logic)
+		timeSinceLastSeg := time.Since(lastSegmentTime)
+		o.logger.Info("segment downloaders stopped",
+			"timeSinceLastSeg", timeSinceLastSeg.Round(time.Second),
+			"jobID", jobCtx.Job.ID)
+
+		// Verify stream status with YouTube API
+		freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+		if err != nil {
+			o.logger.Warn("failed to verify stream status", "err", err, "jobID", jobCtx.Job.ID)
+
+			if timeSinceLastSeg >= streamSegmentTimeout {
+				o.logger.Info("no segments for too long and API failed, assuming ended", "jobID", jobCtx.Job.ID)
+				break
+			}
+
+			// Wait and retry
+			utils.Sleep(ctx, streamEndVerifyInterval)
+			continue
+		}
+
+		o.logger.Info("YouTube reports stream status", "status", freshInfo.StreamStatus, "jobID", jobCtx.Job.ID)
+
+		switch freshInfo.StreamStatus {
+		case youtube.StreamPostLive, youtube.StreamVOD, youtube.StreamNotAStream:
+			// Stream confirmed ended
+			o.logger.Info("stream confirmed ended", "status", freshInfo.StreamStatus, "jobID", jobCtx.Job.ID)
+			goto streamEnded
+
+		case youtube.StreamLive:
+			consecutiveLiveChecks++
+			if consecutiveLiveChecks >= maxConsecutiveLiveChecks {
+				o.logger.Warn("YouTube reported live too many times with no segments, forcing end",
+					"checks", consecutiveLiveChecks, "jobID", jobCtx.Job.ID)
+				goto streamEnded
+			}
+
+			o.logger.Info("stream still live, refreshing manifests",
+				"check", consecutiveLiveChecks, "max", maxConsecutiveLiveChecks, "jobID", jobCtx.Job.ID)
+
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+				"progress": "Waiting for stream to end...",
+			})
+
+			utils.Sleep(ctx, streamEndVerifyInterval)
+
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			// Cancel old downloaders before refreshing
+			if result.VideoDownloader != nil {
+				result.VideoDownloader.Cancel()
+			}
+			if result.AudioDownloader != nil {
+				result.AudioDownloader.Cancel()
+			}
+
+			// B4: Refresh manifests and create new downloaders
+			var refreshResult *DownloadResult
+			var refreshErr error
+			if result.IsHls {
+				refreshResult, refreshErr = DownloadHls(ctx, jobCtx, freshInfo, o.potProvider)
+			} else {
+				refreshResult, refreshErr = DownloadDash(ctx, jobCtx, freshInfo, o.cipherSolver, o.potProvider)
+			}
+
+			if refreshErr != nil {
+				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
+				utils.Sleep(ctx, streamEndVerifyInterval)
+				continue
+			}
+
+			// Replace downloaders with refreshed versions
+			result.VideoDownloader = refreshResult.VideoDownloader
+			result.AudioDownloader = refreshResult.AudioDownloader
+
+			attachProgress(result)
+
+		default:
+			// Unexpected status, treat as ended
+			o.logger.Warn("unexpected stream status, treating as ended",
+				"status", freshInfo.StreamStatus, "jobID", jobCtx.Job.ID)
+			goto streamEnded
+		}
+	}
+
+streamEnded:
+	// Wait for background segment muxes to finish before final mux —
+	// their DB records must exist before muxAndFinalize calls GetSegments.
+	segmentMuxWg.Wait()
+
+	// If we had quality splits, mux the final segment
+	if segmentIndex > 0 {
+		segmentEndTime := time.Now().Unix()
+		seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)
+		if muxErr != nil {
+			o.logger.Error("failed to mux final quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
+		} else if seg != nil {
+			o.logger.Info("final quality segment muxed",
+				"segment", segmentIndex, "quality", currentQuality.Label,
+				"file", seg.Filename, "jobID", jobCtx.Job.ID)
+		}
+	}
+
+	return nil
+}
+
+// buildYouTubeProbeFn creates a quality probe function for YouTube streams.
+// The probe re-fetches the DASH manifest and selects the best stream, returning
+// the quality that would be selected under current preferences.
+func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext) func(context.Context) (*QualityInfo, error) {
+	maxRes := jobCtx.Config.MaxVideoResolution
+	videoItag := jobCtx.Config.VideoItag
+	qualityPref := jobCtx.Job.QualityPreference
+
+	return func(ctx context.Context) (*QualityInfo, error) {
+		info, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+		if err != nil {
+			return nil, err
+		}
+
+		if info.DashManifestURL == "" {
+			return nil, fmt.Errorf("no DASH manifest URL")
+		}
+
+		// Fetch and parse DASH manifest (simplified — no cipher/PO token needed for probing)
+		manifestData, _, err := fetchURL(ctx, info.DashManifestURL)
+		if err != nil {
+			return nil, fmt.Errorf("fetch DASH manifest: %w", err)
+		}
+
+		streams, err := engine.ParseDash(string(manifestData), info.DashManifestURL)
+		if err != nil {
+			return nil, fmt.Errorf("parse DASH manifest: %w", err)
+		}
+
+		var streamInfos []DashStreamInfo
+		for _, s := range streams {
+			streamInfos = append(streamInfos, DashStreamInfo{
+				Itag:      s.Itag,
+				MimeType:  s.MimeType,
+				Width:     s.Width,
+				Height:    s.Height,
+				FPS:       s.FPS,
+				Bandwidth: s.Bandwidth,
+			})
+		}
+
+		// Select best video stream using same criteria as the download
+		best := SelectBestDashStream(streamInfos, videoItag, maxRes, true, qualityPref)
+		if best == nil {
+			return nil, fmt.Errorf("no video stream found")
+		}
+
+		return &QualityInfo{
+			Width:  best.Width,
+			Height: best.Height,
+			FPS:    best.FPS,
+			Label:  FormatQualityLabel(best.Height, best.FPS),
+		}, nil
+	}
+}
