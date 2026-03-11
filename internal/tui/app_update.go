@@ -38,11 +38,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.updateTerminalTitle(), a.tick())
 
 	case progressTickMsg:
-		if a.hasActiveDownloads() {
-			if sel := a.taskList.SelectedJob(); sel != nil {
-				if p := a.progressStore.Get(sel.ID); p != nil {
-					a.details.SetProgress(p)
-				}
+		// Refresh progress overlay for the selected job. Active downloads get
+		// 16ms ticks; all other jobs still get 500ms ticks which is enough for
+		// chat count updates on Upcoming jobs with early chat running.
+		if sel := a.taskList.SelectedJob(); sel != nil {
+			if p := a.progressStore.Get(sel.ID); p != nil {
+				a.details.SetProgress(p)
 			}
 		}
 		// Update trim progress overlay if active
