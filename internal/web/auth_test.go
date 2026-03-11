@@ -325,7 +325,7 @@ func TestIsAuthRequired(t *testing.T) {
 			name:          "public with password",
 			networkAccess: "public",
 			passwordHash:  "scrypt:abc:def",
-			expected:      false,
+			expected:      true,
 		},
 		{
 			name:          "empty network access with password",

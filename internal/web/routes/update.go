@@ -106,6 +106,9 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 
 		// Trigger restart after response is flushed
 		go func() {
+			defer func() {
+				recover() // restart panics are non-recoverable; prevent process crash
+			}()
 			if deps.OnRestart != nil {
 				deps.OnRestart()
 			}

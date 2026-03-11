@@ -597,6 +597,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, w
 			jsonError(rw, "end time must be greater than start time", http.StatusBadRequest)
 			return
 		}
+		if body.OutputDirectory != "" && strings.Contains(body.OutputDirectory, "..") {
+			jsonError(rw, "output directory must not contain path traversal", http.StatusBadRequest)
+			return
+		}
 
 		// Detect platform from URL or explicit body field
 		platform := body.Platform
@@ -2171,6 +2175,9 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 		// Trigger a restart so all services re-initialize with new config
 		if deps.OnRestart != nil {
 			go func() {
+				defer func() {
+					recover() // restart panics are non-recoverable; prevent process crash
+				}()
 				time.Sleep(500 * time.Millisecond)
 				deps.OnRestart()
 			}()
@@ -2465,7 +2472,12 @@ func extractZipEntry(f *zip.File, destPath string) error {
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, rc)
+	// Limit to declared size + 1 byte to detect zip bombs that lie about UncompressedSize64
+	limit := int64(f.UncompressedSize64) + 1
+	n, err := io.Copy(out, io.LimitReader(rc, limit))
+	if n >= limit {
+		return fmt.Errorf("zip entry %q exceeds declared size (zip bomb protection)", f.Name)
+	}
 	return err
 }
 

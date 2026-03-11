@@ -324,6 +324,11 @@ func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info("web server starting", "addr", addr, "scheme", scheme)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("shutdown goroutine panic", "panic", r)
+			}
+		}()
 		<-ctx.Done()
 		s.doShutdown()
 	}()

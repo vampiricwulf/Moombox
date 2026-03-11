@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-type logger interface {
+// logger is a type alias for the anonymous logger interface.
+// Per CLAUDE.md convention, this avoids a named exported interface while
+// keeping the repeated anonymous interface DRY within this package.
+type logger = interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)

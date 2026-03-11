@@ -51,6 +51,11 @@ func (as *AuthService) Start() {
 	ticker := time.NewTicker(sessionCleanup)
 	go func() {
 		defer ticker.Stop()
+		defer func() {
+			if r := recover(); r != nil {
+				// No logger available on AuthService — panic recovery is silent
+			}
+		}()
 		for {
 			select {
 			case <-done:
@@ -265,7 +270,7 @@ func IsScryptHash(s string) bool {
 }
 
 // IsAuthRequired returns true if auth is required based on config.
-// Auth is required when network_access is "external" AND a password hash is set.
+// Auth is required when network_access is "external" or "public" AND a password hash is set.
 func IsAuthRequired(networkAccess, passwordHash string) bool {
-	return networkAccess == "external" && passwordHash != ""
+	return (networkAccess == "external" || networkAccess == "public") && passwordHash != ""
 }

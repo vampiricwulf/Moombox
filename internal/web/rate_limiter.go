@@ -99,6 +99,11 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 }
 
 func (rl *RateLimiter) cleanupLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			// Rate limiter cleanup panic — silently recover
+		}
+	}()
 	for {
 		select {
 		case <-rl.done:

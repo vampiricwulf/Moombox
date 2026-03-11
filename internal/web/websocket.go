@@ -209,6 +209,11 @@ func (hub *WebSocketHub) sendInitialState(client *wsClient) {
 
 // pingPump sends periodic pings to keep the connection alive and detect stale clients.
 func (hub *WebSocketHub) pingPump(client *wsClient) {
+	defer func() {
+		if r := recover(); r != nil && hub.logger != nil {
+			hub.logger.Error("websocket pingPump panic", "panic", r)
+		}
+	}()
 	ticker := time.NewTicker(wsPingInterval)
 	defer ticker.Stop()
 
