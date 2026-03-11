@@ -169,6 +169,9 @@ func (db *Database) migrate() error {
 				}
 			}
 			rows.Close()
+			if err := rows.Err(); err != nil && db.logger != nil {
+				db.logger.Warn("migration v2: row iteration error during backfill", "err", err)
+			}
 		}
 
 		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 2)
@@ -219,6 +222,9 @@ func (db *Database) migrate() error {
 				}
 			}
 			rows.Close()
+			if err := rows.Err(); err != nil && db.logger != nil {
+				db.logger.Warn("migration v3: row iteration error during backfill", "err", err)
+			}
 		}
 
 		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 3)

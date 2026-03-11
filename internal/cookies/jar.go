@@ -195,16 +195,18 @@ func (j *CookieJar) GetSapisidCookies() (sapisid, sapisid1p, sapisid3p string) {
 func (j *CookieJar) GenerateAuthorizationHeader(origin string) string {
 	sapisid, sapisid1p, sapisid3p := j.GetSapisidCookies()
 
+	// Capture timestamp once so all SID hashes in the same header share the same time
+	now := time.Now().Unix()
 	var parts []string
 
 	if sapisid != "" {
-		parts = append(parts, makeSidAuthorization("SAPISIDHASH", sapisid, origin))
+		parts = append(parts, makeSidAuthorization("SAPISIDHASH", sapisid, origin, now))
 	}
 	if sapisid1p != "" {
-		parts = append(parts, makeSidAuthorization("SAPISID1PHASH", sapisid1p, origin))
+		parts = append(parts, makeSidAuthorization("SAPISID1PHASH", sapisid1p, origin, now))
 	}
 	if sapisid3p != "" {
-		parts = append(parts, makeSidAuthorization("SAPISID3PHASH", sapisid3p, origin))
+		parts = append(parts, makeSidAuthorization("SAPISID3PHASH", sapisid3p, origin, now))
 	}
 
 	if len(parts) == 0 {
@@ -214,8 +216,8 @@ func (j *CookieJar) GenerateAuthorizationHeader(origin string) string {
 	return strings.Join(parts, " ")
 }
 
-func makeSidAuthorization(scheme, sid, origin string) string {
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+func makeSidAuthorization(scheme, sid, origin string, unixTime int64) string {
+	timestamp := strconv.FormatInt(unixTime, 10)
 	hashInput := timestamp + " " + sid + " " + origin
 	hash := fmt.Sprintf("%x", sha1.Sum([]byte(hashInput)))
 	return fmt.Sprintf("%s %s_%s", scheme, timestamp, hash)

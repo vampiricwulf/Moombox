@@ -67,8 +67,8 @@ type Database struct {
 	db     *sql.DB
 	ctx    context.Context // Optional context for query cancellation
 	mu     sync.RWMutex
-	closed bool
-	logger dbLogger
+	closeOnce sync.Once
+	logger    dbLogger
 
 	// Batch update coalescing
 	updateCh   chan *Job
@@ -161,6 +161,15 @@ func (db *Database) prepareStatements() error {
 // Signal-driven: sleeps until work arrives, then coalesces for 100ms before flushing.
 // Zero IO when idle.
 func (db *Database) batchUpdateLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			if db.logger != nil {
+				db.logger.Error("batchUpdateLoop panic (closing batchDone)", "panic", r)
+			}
+			close(db.batchDone)
+		}
+	}()
+
 	const coalesceDelay = 100 * time.Millisecond
 	pending := make(map[string]*Job)
 	var coalesceTimer *time.Timer
@@ -408,10 +417,28 @@ func (db *Database) UpdateJob(job *Job) {
 	default:
 		// Channel full, do synchronous update
 		db.mu.Lock()
-		if err := updateJobDirect(db.getCtx(), db.db, job); err != nil && db.logger != nil {
-			db.logger.Error("database sync update fallback failed", "jobID", job.ID, "err", err)
-		}
+		err := updateJobDirect(db.getCtx(), db.db, job)
 		db.mu.Unlock()
+
+		if err != nil {
+			if db.logger != nil {
+				db.logger.Error("database sync update fallback failed", "jobID", job.ID, "err", err)
+			}
+		} else {
+			// Notify subscribers (batch path does this in flushUpdates)
+			db.subMu.RLock()
+			subs := make([]func(*Job), 0, len(db.onJobUpdate))
+			for _, fn := range db.onJobUpdate {
+				if fn != nil {
+					subs = append(subs, fn)
+				}
+			}
+			db.subMu.RUnlock()
+
+			for _, fn := range subs {
+				db.safeCallJobUpdate(fn, job)
+			}
+		}
 	}
 }
 
@@ -831,11 +858,17 @@ func (db *Database) notifyJobsChange() {
 	}
 
 	// Use unlocked version since caller already holds db.mu
-	jobs, _ := db.getAllJobsUnlocked()
+	jobs, err := db.getAllJobsUnlocked()
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Error("notifyJobsChange: failed to get jobs", "err", err)
+		}
+		return
+	}
 	go func() {
 		defer func() {
-			if r := recover(); r != nil {
-				// silently recover
+			if r := recover(); r != nil && db.logger != nil {
+				db.logger.Error("notifyJobsChange goroutine panic", "panic", r)
 			}
 		}()
 		for _, fn := range subs {
@@ -969,7 +1002,11 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	// Batch-load all trims in one query.
 	trimRows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size FROM trims`)
-	if err == nil {
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Warn("attachTrimsAndGaps: failed to query trims", "err", err)
+		}
+	} else {
 		trimMap := make(map[string][]TrimRecord, len(jobs))
 		for trimRows.Next() {
 			var tr TrimRecord
@@ -989,7 +1026,11 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	// Batch-load all gaps in one query.
 	gapRows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT id, job_id, gap_from, gap_to, stream FROM gaps`)
-	if err == nil {
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Warn("attachTrimsAndGaps: failed to query gaps", "err", err)
+		}
+	} else {
 		gapMap := make(map[string][]Gap, len(jobs))
 		for gapRows.Next() {
 			var g Gap
@@ -1009,7 +1050,11 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	segRows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds
 		FROM segments ORDER BY segment_index`)
-	if err == nil {
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Warn("attachTrimsAndGaps: failed to query segments", "err", err)
+		}
+	} else {
 		segMap := make(map[string][]Segment, len(jobs))
 		for segRows.Next() {
 			var s Segment
@@ -1254,21 +1299,21 @@ func (db *Database) DeleteAllClientTokens() error {
 }
 
 // Close flushes pending updates and closes the database.
+// Safe to call concurrently — only the first call performs cleanup.
 func (db *Database) Close() error {
-	if db.closed {
-		return nil
-	}
-	db.closed = true
+	var closeErr error
+	db.closeOnce.Do(func() {
+		// Close update channel and wait for batch loop to finish
+		close(db.updateCh)
+		<-db.batchDone
 
-	// Close update channel and wait for batch loop to finish
-	close(db.updateCh)
-	<-db.batchDone
+		if db.stmtGetJob != nil {
+			db.stmtGetJob.Close()
+		}
 
-	if db.stmtGetJob != nil {
-		db.stmtGetJob.Close()
-	}
-
-	return db.db.Close()
+		closeErr = db.db.Close()
+	})
+	return closeErr
 }
 
 // safeCallJobUpdate calls a subscriber callback, recovering from panics so

@@ -41,7 +41,7 @@ type AuthStatus struct {
 
 // RefreshService periodically reloads and validates cookies.
 type RefreshService struct {
-	mu              sync.Mutex
+	mu              sync.RWMutex
 	jar             *CookieJar
 	cancel          context.CancelFunc
 	status          AuthStatus
@@ -119,6 +119,12 @@ func (rs *RefreshService) Start(ctx context.Context) {
 	rs.doRefresh(ctx)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				rs.logger.Error("cookie refresh goroutine panic", "panic", r)
+			}
+		}()
+
 		ticker := time.NewTicker(rs.refreshInterval)
 		defer ticker.Stop()
 
@@ -146,8 +152,8 @@ func (rs *RefreshService) Stop() {
 
 // GetStatus returns the current auth status.
 func (rs *RefreshService) GetStatus() AuthStatus {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
 	return rs.status
 }
 
