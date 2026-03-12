@@ -1414,7 +1414,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			if ffmpegPath == "" {
 				ffmpegPath = "ffmpeg"
 			}
-			checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := exec.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
 				app.ShowFFmpegCheck()
 			}
