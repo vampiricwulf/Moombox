@@ -664,11 +664,15 @@ export class SetupController {
     if (progress) progress.style.display = "flex";
     if (resultEl) resultEl.innerHTML = "";
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 360000); // 6 minutes
+
     try {
       const resp = await fetch("/api/ffmpeg/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ method }),
+        signal: controller.signal,
       });
       const data = await resp.json();
 
@@ -689,11 +693,18 @@ export class SetupController {
         optionsEl.querySelectorAll("sl-button").forEach((b) => { b.disabled = false; });
       }
     } catch (e) {
-      if (resultEl) {
-        resultEl.innerHTML = `<sl-alert variant="danger" open>Install failed: ${this.esc(e.message)}</sl-alert>`;
+      if (e.name === "AbortError") {
+        if (resultEl) {
+          resultEl.innerHTML = '<sl-alert variant="warning" open>Install timed out \u2014 try running \'ffmpeg -version\' in a terminal to check if it succeeded.</sl-alert>';
+        }
+      } else {
+        if (resultEl) {
+          resultEl.innerHTML = `<sl-alert variant="danger" open>Install failed: ${this.esc(e.message)}</sl-alert>`;
+        }
       }
       optionsEl.querySelectorAll("sl-button").forEach((b) => { b.disabled = false; });
     } finally {
+      clearTimeout(timeoutId);
       if (progress) progress.style.display = "none";
     }
   }
@@ -750,32 +761,59 @@ export class SetupController {
     if (progress) progress.style.display = "flex";
     if (resultEl) resultEl.innerHTML = "";
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 360000); // 6 minutes
+
     try {
       const resp = await fetch("/api/ffmpeg/install/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token }),
+        signal: controller.signal,
       });
       const data = await resp.json();
 
       if (data.success) {
         this.showInstallSuccess(resultEl, data);
       } else {
+        // HTTP error response — token was consumed by backend, retry won't work (F10).
+        // Show error with Back button instead of re-enabling Trust.
         if (resultEl) {
           resultEl.innerHTML = `<sl-alert variant="danger" open>${this.esc(data.error || "Install failed")}</sl-alert>`;
         }
-        if (trustBtn) trustBtn.disabled = false;
-        if (distrustBtn) distrustBtn.disabled = false;
+        this.appendBackToInstallButton(resultEl);
       }
     } catch (e) {
-      if (resultEl) {
-        resultEl.innerHTML = `<sl-alert variant="danger" open>Install failed: ${this.esc(e.message)}</sl-alert>`;
-      }
+      // Both timeout and network errors leave token state unknown — re-enable buttons
       if (trustBtn) trustBtn.disabled = false;
       if (distrustBtn) distrustBtn.disabled = false;
+      if (e.name === "AbortError") {
+        if (resultEl) {
+          resultEl.innerHTML = '<sl-alert variant="warning" open>Install timed out \u2014 try running \'ffmpeg -version\' in a terminal to check if it succeeded.</sl-alert>';
+        }
+      } else {
+        if (resultEl) {
+          resultEl.innerHTML = `<sl-alert variant="danger" open>Install failed: ${this.esc(e.message)}</sl-alert>`;
+        }
+      }
     } finally {
+      clearTimeout(timeoutId);
       if (progress) progress.style.display = "none";
     }
+  }
+
+  /** Append a "Back to install options" button to the given result container. */
+  appendBackToInstallButton(resultEl) {
+    if (!resultEl) return;
+    const backBtn = document.createElement("sl-button");
+    backBtn.variant = "text";
+    backBtn.style.cssText = "width: 100%; margin-top: 0.5em;";
+    backBtn.innerHTML = '<sl-icon slot="prefix" name="arrow-left"></sl-icon> Back to install options';
+    backBtn.addEventListener("click", () => {
+      document.getElementById("ffmpeg-script-review").style.display = "none";
+      document.getElementById("ffmpeg-install-view").style.display = "";
+    });
+    resultEl.appendChild(backBtn);
   }
 
   async rejectElevatedInstall(token) {
