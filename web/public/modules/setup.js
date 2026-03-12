@@ -149,6 +149,15 @@ export class SetupController {
     });
     document.getElementById("ffmpeg-quit-btn")?.addEventListener("click", () => {
       window.close();
+      // window.close() only works if the page was opened by script.
+      // Show fallback message after a short delay if still open.
+      setTimeout(() => {
+        const quitBtn = document.getElementById("ffmpeg-quit-btn");
+        if (quitBtn) {
+          quitBtn.disabled = true;
+          quitBtn.textContent = "You can close this tab manually";
+        }
+      }, 300);
     });
     // Enter key in custom path input
     document.getElementById("ffmpeg-custom-path")?.addEventListener("keydown", (e) => {
@@ -687,14 +696,22 @@ export class SetupController {
     let html = `<sl-alert variant="success" open>FFmpeg installed: ${this.esc(data.version)}</sl-alert>`;
     if (data.warning) {
       html += `<sl-alert variant="warning" open style="margin-top: 0.5em;">${this.esc(data.warning)}</sl-alert>`;
+      html += `<sl-button variant="primary" style="width: 100%; margin-top: 0.75em;" id="ffmpeg-success-continue">Continue</sl-button>`;
     }
     if (resultEl) {
       resultEl.innerHTML = html;
     }
-    setTimeout(() => {
-      document.getElementById("ffmpeg-overlay").style.display = "none";
-      this.initializeApp();
-    }, data.warning ? 3000 : 1500);
+    if (data.warning) {
+      document.getElementById("ffmpeg-success-continue")?.addEventListener("click", () => {
+        document.getElementById("ffmpeg-overlay").style.display = "none";
+        this.initializeApp();
+      });
+    } else {
+      setTimeout(() => {
+        document.getElementById("ffmpeg-overlay").style.display = "none";
+        this.initializeApp();
+      }, 1500);
+    }
   }
 
   showScriptReview(script, token) {
@@ -787,12 +804,20 @@ export class SetupController {
         let html = `<sl-alert variant="success" open>Valid: ${this.esc(data.version)}</sl-alert>`;
         if (data.warning) {
           html += `<sl-alert variant="warning" open style="margin-top: 0.5em;">${this.esc(data.warning)}</sl-alert>`;
+          html += `<sl-button variant="primary" style="width: 100%; margin-top: 0.75em;" id="ffmpeg-path-continue">Continue</sl-button>`;
         }
         if (resultEl) resultEl.innerHTML = html;
-        setTimeout(() => {
-          document.getElementById("ffmpeg-overlay").style.display = "none";
-          this.initializeApp();
-        }, data.warning ? 3000 : 1500);
+        if (data.warning) {
+          document.getElementById("ffmpeg-path-continue")?.addEventListener("click", () => {
+            document.getElementById("ffmpeg-overlay").style.display = "none";
+            this.initializeApp();
+          });
+        } else {
+          setTimeout(() => {
+            document.getElementById("ffmpeg-overlay").style.display = "none";
+            this.initializeApp();
+          }, 1500);
+        }
       } else {
         if (resultEl) {
           resultEl.innerHTML = '<sl-alert variant="danger" open>FFmpeg not found at this path</sl-alert>';
