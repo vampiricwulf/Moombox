@@ -331,6 +331,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.ShowReview(msg.Script, msg.Token)
 		} else {
 			// Ran directly (already elevated) — verify
+			a.ffmpegCheck.installing = false
+			a.ffmpegCheck.installResult = "Verifying installation..."
 			return a, a.ffmpegCheckCmd("")
 		}
 		return a, nil
@@ -340,6 +342,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.SetInstallResult(fmt.Sprintf("Install failed: %s", msg.Err), true)
 		} else {
 			// Elevated install succeeded — verify FFmpeg is available
+			a.ffmpegCheck.installing = false
+			a.ffmpegCheck.installResult = "Verifying installation..."
 			return a, a.ffmpegCheckCmd("")
 		}
 		return a, nil
