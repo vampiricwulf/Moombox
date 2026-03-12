@@ -417,7 +417,8 @@ func cleanExpiredPending() {
 	now := time.Now()
 	for token, pi := range pendingInstalls {
 		if now.Sub(pi.createdAt) > pendingInstallTTL {
-			os.Remove(pi.scriptPath)
+			// scriptPath is only written to disk at ConfirmInstall time,
+			// so it doesn't exist for expired pending installs.
 			os.Remove(pi.resultPath)
 			delete(pendingInstalls, token)
 		}
