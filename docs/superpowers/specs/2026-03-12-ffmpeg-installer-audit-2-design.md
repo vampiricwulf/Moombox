@@ -15,6 +15,7 @@
 | `internal/web/routes/ffmpeg.go` | ~692 | API routes, install logic |
 | `web/public/modules/setup.js` | 833 | Web UI FFmpeg overlay |
 | `web/public/index.html` | ~70 lines FFmpeg markup | HTML markup for FFmpeg overlay (lines 1442-1511) |
+| `cmd/moombox/main.go` | ~1660 | Entry point, startup FFmpeg check (line ~1417) |
 
 ## Findings & Fixes
 
@@ -168,11 +169,94 @@ if (cancelBtn) {
 When `PrepareInstall` runs directly (already elevated), the handler dispatches `ffmpegCheckCmd("")` for verification. But `installResult` still shows "Checking permissions..." (from `ffmpeg_check.go:335`) during the entire verification phase. When `ConfirmInstall` succeeds, the stale text is "Installing with administrator privileges..." (from `ffmpeg_check.go:420`). In both cases, the verification phase should have its own message.
 
 **Fix**: Set `installResult` to "Verifying installation..." before dispatching the verify check:
-- In `ffmpegPrepareResultMsg` default branch (`app_update.go:333`): `a.ffmpegCheck.installResult = "Verifying installation..."`
+- In `ffmpegPrepareResultMsg` default branch (before `app_update.go:334`): `a.ffmpegCheck.installResult = "Verifying installation..."`
 - In `ffmpegConfirmResultMsg` success branch (`app_update.go:342`): `a.ffmpegCheck.installResult = "Verifying installation..."`
+
+### Web UI — Error Recovery (2 issues)
+
+**F9. `showFFmpegInstallOptions` fetch error traps user** (`setup.js:606-638`)
+
+When `showFFmpegInstallOptions` is called, it hides `ffmpeg-main-view` (line 606) and shows `ffmpeg-install-view`. It then fetches `GET /api/ffmpeg/install/prepare` to get available methods. If the fetch fails (network error, server error), only error text is rendered into `optionsEl` (lines 637-638). No Cancel/Back button is rendered — the user is stuck on a view with just an error message and no way to navigate back.
+
+**Fix**: In the catch/error branch of `showFFmpegInstallOptions`, append a "Back" button after the error message that navigates back to `ffmpeg-main-view`:
+
+```javascript
+optionsEl.innerHTML = `<sl-alert variant="danger" open>
+    <strong>Error:</strong> ${error.message || "Failed to load install options"}
+</sl-alert>
+<sl-button variant="text" style="margin-top: 0.5rem;"
+    onclick="document.getElementById('ffmpeg-install-view').style.display='none';
+             document.getElementById('ffmpeg-main-view').style.display='';">
+    ← Back
+</sl-button>`;
+```
+
+**F10. Trust button re-enabled after token consumed** (`setup.js:761-762`, `ffmpeg.go:538`)
+
+In `confirmElevatedInstall`, the Trust button is re-enabled in the error-response branch (lines 761-762) and the catch block (lines 768-769). But `ConfirmInstall` on the backend deletes the pending token (`delete(pendingInstalls, token)`) at line 538 *before* attempting the install. If the install fails and the user clicks Trust again, they get a cryptic "install token not found or expired" error instead of a useful message.
+
+**Fix**: On error in `confirmElevatedInstall`, do not re-enable the Trust button. Instead, show a "Back to install options" link alongside the error message. Only re-enable Trust on network/abort errors where the token may not have been consumed:
+
+```javascript
+} catch (err) {
+    if (err.name === "AbortError") {
+        // Timeout — token state unknown, re-enable Trust
+        trustBtn.disabled = false;
+        resultEl.innerHTML = "Install timed out — try running 'ffmpeg -version' in a terminal to check if it succeeded.";
+    } else {
+        // Network error — token state unknown, re-enable Trust
+        trustBtn.disabled = false;
+        resultEl.innerHTML = `Error: ${err.message}`;
+    }
+}
+// On HTTP error response (token was consumed):
+// Don't re-enable Trust — show Back button instead
+if (!resp.ok) {
+    resultEl.innerHTML = `<sl-alert variant="danger" open>${errorMsg}</sl-alert>
+        <sl-button variant="text" onclick="...back to install view...">← Back to install options</sl-button>`;
+    // Trust stays disabled
+}
+```
+
+### Web UI — Timeouts (1 issue)
+
+**F11. `installFFmpeg` direct-install has no client-side timeout** (`setup.js:662`)
+
+The direct-install path (`installFFmpeg`, used when the process is already elevated) calls `POST /api/ffmpeg/install/prepare` with `method` and `confirm: true`. This can block for the full install duration (download + extract + PATH update) with no `AbortController`. Same gap as F6.
+
+**Fix**: Add an `AbortController` with a 6-minute timeout, same pattern as the F6 fix:
+
+```javascript
+const controller = new AbortController();
+const timeoutId = setTimeout(() => controller.abort(), 360000);
+try {
+    const resp = await fetch("/api/ffmpeg/install/prepare", {
+        signal: controller.signal,
+        // ...
+    });
+} finally {
+    clearTimeout(timeoutId);
+}
+```
+
+The abort catch should show the same message as F6: "Install timed out — try running 'ffmpeg -version' in a terminal to check if it succeeded."
+
+### Startup (1 issue)
+
+**F12. Startup FFmpeg check timeout mismatch** (`cmd/moombox/main.go:1417`, `ffmpeg.go:~80`)
+
+The startup FFmpeg check in `main.go` uses a 3-second `context.WithTimeout`, while `checkFFmpeg` in the backend uses a 10-second timeout. If FFmpeg is installed but responds slowly (e.g., antivirus scanning the binary on first launch), the startup check times out and shows the FFmpeg overlay even though FFmpeg works fine. The user sees a "FFmpeg not found" prompt that resolves itself on retry.
+
+**Fix**: Increase the startup timeout to 10 seconds to match the backend:
+
+```go
+checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+```
+
+This is a cold-start check that only runs once — the extra 7 seconds on failure is acceptable.
 
 ### Accepted Risks (1 observation)
 
-**F10. Concurrent custom path checks aren't coalesced on backend** (`ffmpeg.go:147`)
+**F13. Concurrent custom path checks aren't coalesced on backend** (`ffmpeg.go:147`)
 
 `POST /api/ffmpeg/check` calls `checkFFmpeg(path)` directly (uncached). Multiple concurrent requests for the same path each spawn separate processes. Mitigated by: client-side fix F3 (prevents double-clicks) and the optional rate limiter middleware. No backend change needed.
