@@ -45,6 +45,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// FFmpeg check overlay takes priority over all other dialogs
 	if a.ffmpegCheck.IsVisible() {
+		// Allow Ctrl+C even during install/check (HandleKey blocks all input
+		// in those states, so the normal Ctrl+C handler at line 220 is unreachable).
+		if key == keyCtrlC {
+			return a, tea.Quit
+		}
 		action := a.ffmpegCheck.HandleKey(key)
 		switch {
 		case action == "quit":
