@@ -434,16 +434,18 @@ try {
     $exitCode = 1
 }
 $result = @{ exitCode = $exitCode; output = $output } | ConvertTo-Json
-[IO.File]::WriteAllText("` + resultPath + `", $result)
+[IO.File]::WriteAllText('` + resultPath + `', $result)
 `
 	return script, nil
 }
 
 // generateToken creates a random 16-byte hex token for pending install tracking.
-func generateToken() string {
+func generateToken() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate secure token: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // PrepareInstall checks elevation and either runs the install directly or
@@ -469,13 +471,20 @@ func PrepareInstall(method string) (needsElevation bool, script string, token st
 	}
 
 	// Not elevated — generate script for review
-	resultPath := filepath.Join(os.TempDir(), "moombox-ffmpeg-result-"+generateToken()+".json")
+	resultToken, err := generateToken()
+	if err != nil {
+		return false, "", "", err
+	}
+	resultPath := filepath.Join(os.TempDir(), "moombox-ffmpeg-result-"+resultToken+".json")
 	scriptContent, err := generateInstallScript(method, resultPath)
 	if err != nil {
 		return false, "", "", err
 	}
 
-	token = generateToken()
+	token, err = generateToken()
+	if err != nil {
+		return false, "", "", err
+	}
 	scriptPath := filepath.Join(os.TempDir(), "moombox-ffmpeg-install-"+token+".ps1")
 
 	pendingInstallsMu.Lock()
@@ -496,6 +505,9 @@ func PrepareInstall(method string) (needsElevation bool, script string, token st
 // approval. Writes the script to a temp file, launches it via UAC, waits for
 // completion, and reads the result.
 func ConfirmInstall(token string) error {
+	installMu.Lock()
+	defer installMu.Unlock()
+
 	pendingInstallsMu.Lock()
 	cleanExpiredPending()
 	pi, ok := pendingInstalls[token]
