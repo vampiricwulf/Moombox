@@ -319,6 +319,14 @@ func truncateOutput(out []byte, maxBytes int) string {
 
 const installTimeout = 5 * time.Minute
 
+// Install method constants — used in switch statements, API validation, and
+// generateInstallScript. Frontend sends these as the wire format.
+const (
+	MethodChoco        = "choco"
+	MethodChocoInstall = "choco-install"
+	MethodWinget       = "winget"
+)
+
 // InstallFFmpeg runs a package manager to install FFmpeg. Supported methods:
 // "choco" (existing Chocolatey), "choco-install" (install Chocolatey first),
 // "winget". Refreshes the Windows PATH from registry after installation.
@@ -332,13 +340,13 @@ func InstallFFmpeg(method string) error {
 	defer cancel()
 
 	switch method {
-	case "choco":
+	case MethodChoco:
 		cmd := exec.CommandContext(ctx, "choco", "install", "ffmpeg-shared", "-y")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("choco install failed: %s", truncateOutput(out, 500))
 		}
 
-	case "choco-install":
+	case MethodChocoInstall:
 		chocoCmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
 			"Set-ExecutionPolicy Bypass -Scope Process -Force; "+
 				"[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; "+
@@ -352,7 +360,7 @@ func InstallFFmpeg(method string) error {
 			return fmt.Errorf("ffmpeg install via choco failed: %s", truncateOutput(out, 500))
 		}
 
-	case "winget":
+	case MethodWinget:
 		cmd := exec.CommandContext(ctx, "winget", "install", "Gyan.FFmpeg.Shared", "--accept-package-agreements", "--accept-source-agreements")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("winget install failed: %s", truncateOutput(out, 500))
@@ -401,13 +409,13 @@ func cleanExpiredPending() {
 func generateInstallScript(method, resultPath string) (string, error) {
 	var installCmd string
 	switch method {
-	case "choco":
+	case MethodChoco:
 		installCmd = `$output += (& choco install ffmpeg-shared -y 2>&1 | Out-String)`
-	case "choco-install":
+	case MethodChocoInstall:
 		installCmd = `$output += (& powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))" 2>&1 | Out-String)` + "\n" +
 			`$env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')` + "\n" +
 			`$output += (& choco install ffmpeg-shared -y 2>&1 | Out-String)`
-	case "winget":
+	case MethodWinget:
 		installCmd = `$output += (& winget install Gyan.FFmpeg.Shared --accept-package-agreements --accept-source-agreements 2>&1 | Out-String)`
 	default:
 		return "", fmt.Errorf("unknown install method: %s", method)
@@ -447,7 +455,7 @@ func PrepareInstall(method string) (needsElevation bool, script string, token st
 	}
 
 	switch method {
-	case "choco", "choco-install", "winget":
+	case MethodChoco, MethodChocoInstall, MethodWinget:
 	default:
 		return false, "", "", fmt.Errorf("unknown install method: %s", method)
 	}
