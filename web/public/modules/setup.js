@@ -641,7 +641,16 @@ export class SetupController {
       });
       optionsEl.appendChild(cancelBtn);
     } catch (e) {
-      optionsEl.innerHTML = `<p style="color: var(--sl-color-danger-600);">Failed to check install options: ${this.esc(e.message)}</p>`;
+      optionsEl.innerHTML = `<sl-alert variant="danger" open>Failed to check install options: ${this.esc(e.message)}</sl-alert>`;
+      const backBtn = document.createElement("sl-button");
+      backBtn.variant = "text";
+      backBtn.style.cssText = "width: 100%; margin-top: 0.5em;";
+      backBtn.innerHTML = '<sl-icon slot="prefix" name="arrow-left"></sl-icon> Back';
+      backBtn.addEventListener("click", () => {
+        document.getElementById("ffmpeg-install-view").style.display = "none";
+        document.getElementById("ffmpeg-main-view").style.display = "";
+      });
+      optionsEl.appendChild(backBtn);
     }
   }
 
@@ -748,6 +757,24 @@ export class SetupController {
     const newDistrust = distrustBtn.cloneNode(true);
     distrustBtn.replaceWith(newDistrust);
     newDistrust.addEventListener("click", () => this.rejectElevatedInstall(token));
+
+    // Wire cancel button — rejects token and goes back to install options (not manual)
+    const cancelBtn = document.getElementById("ffmpeg-review-cancel-btn");
+    if (cancelBtn) {
+      const newCancel = cancelBtn.cloneNode(true);
+      cancelBtn.replaceWith(newCancel);
+      newCancel.addEventListener("click", async () => {
+        try {
+          await fetch("/api/ffmpeg/install/reject", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token }),
+          });
+        } catch { /* ignore */ }
+        document.getElementById("ffmpeg-script-review").style.display = "none";
+        document.getElementById("ffmpeg-install-view").style.display = "";
+      });
+    }
   }
 
   async confirmElevatedInstall(token) {
