@@ -63,7 +63,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.ShowManual()
 		case strings.HasPrefix(action, "check_custom:"):
 			path := strings.TrimPrefix(action, "check_custom:")
-			return a, a.ffmpegCheckCmd(path)
+			return a, tea.Batch(a.ffmpegCheckCmd(path), a.ffmpegCheck.spinner.Tick)
 		}
 		return a, nil
 	}

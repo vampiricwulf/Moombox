@@ -62,6 +62,9 @@ type FFmpegCheckModel struct {
 	manualResult string
 	manualValid  bool
 
+	// Path check in progress (custom or manual mode)
+	checking bool
+
 	// Loading spinner
 	spinner spinner.Model
 
@@ -104,6 +107,7 @@ func (m *FFmpegCheckModel) Open() {
 	m.manualPath = ""
 	m.manualResult = ""
 	m.manualValid = false
+	m.checking = false
 	m.textInput.Blur()
 	m.textInput.SetValue("")
 }
@@ -157,8 +161,8 @@ func (m *FFmpegCheckModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		return nil
 	}
 
-	// Route spinner when installing
-	if m.installing {
+	// Route spinner when installing or checking a path
+	if m.installing || m.checking {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return cmd
@@ -216,6 +220,9 @@ func (m *FFmpegCheckModel) HandleKey(key string) string {
 	}
 	if m.installing {
 		return "" // Block input while installing
+	}
+	if m.checking {
+		return "" // Block input while checking path
 	}
 
 	switch m.mode {
@@ -337,12 +344,14 @@ func (m *FFmpegCheckModel) SetInstallResult(result string, isError bool) {
 	m.installResult = result
 	m.installError = isError
 	m.installing = false
+	m.checking = false
 }
 
 // SetCustomResult updates the custom path check result. Called by App after async check completes.
 func (m *FFmpegCheckModel) SetCustomResult(result string, valid bool) {
 	m.customResult = result
 	m.customValid = valid
+	m.checking = false
 }
 
 func (m *FFmpegCheckModel) handleCustomKey(key string) string {
@@ -351,9 +360,11 @@ func (m *FFmpegCheckModel) handleCustomKey(key string) string {
 		m.mode = ffmpegMain
 		m.textInput.Blur()
 	case keyEnter:
-		if m.customPath == "" {
+		if m.customPath == "" || m.checking {
 			return ""
 		}
+		m.checking = true
+		m.spinner = newSpinner()
 		return "check_custom:" + m.customPath
 	}
 	return ""
@@ -379,6 +390,7 @@ func (m *FFmpegCheckModel) ShowReview(script, token string) {
 func (m *FFmpegCheckModel) SetManualResult(result string, valid bool) {
 	m.manualResult = result
 	m.manualValid = valid
+	m.checking = false
 }
 
 // ShowManual switches to manual install mode with a fresh text input.
@@ -424,9 +436,11 @@ func (m *FFmpegCheckModel) handleManualKey(key string) string {
 		m.manualResult = ""
 		m.textInput.Blur()
 	case keyEnter:
-		if m.manualPath == "" {
+		if m.manualPath == "" || m.checking {
 			return ""
 		}
+		m.checking = true
+		m.spinner = newSpinner()
 		return "check_custom:" + m.manualPath
 	}
 	return ""
@@ -511,7 +525,10 @@ func (m *FFmpegCheckModel) View() string {
 		lines = append(lines, "")
 		lines = append(lines, m.textInput.View())
 
-		if m.customResult != "" {
+		if m.checking {
+			lines = append(lines, "")
+			lines = append(lines, m.spinner.View()+" Checking path...")
+		} else if m.customResult != "" {
 			lines = append(lines, "")
 			resultColor := ColorGreen
 			if !m.customValid {
@@ -574,7 +591,10 @@ func (m *FFmpegCheckModel) View() string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Enter FFmpeg path:"))
 		lines = append(lines, m.textInput.View())
 
-		if m.manualResult != "" {
+		if m.checking {
+			lines = append(lines, "")
+			lines = append(lines, m.spinner.View()+" Checking path...")
+		} else if m.manualResult != "" {
 			lines = append(lines, "")
 			resultColor := ColorGreen
 			if !m.manualValid {

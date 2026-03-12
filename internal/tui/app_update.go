@@ -346,36 +346,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ffmpegCheckResultMsg:
 		if msg.Valid {
-			if a.ffmpegCheck.mode == ffmpegCustom {
+			switch a.ffmpegCheck.mode {
+			case ffmpegCustom:
 				a.ffmpegCheck.SetCustomResult("Valid: "+msg.Version, true)
-				// Persist the custom FFmpeg path to config
-				if msg.Path != "" && a.cfg != nil {
-					a.cfg.Paths.FfmpegPath = msg.Path
-					if a.OnSaveConfig != nil {
-						a.OnSaveConfig(a.cfg)
-					}
-				}
-			} else if a.ffmpegCheck.mode == ffmpegManual {
+			case ffmpegManual:
 				a.ffmpegCheck.SetManualResult("Valid: "+msg.Version, true)
-				// Persist the custom FFmpeg path to config
-				if msg.Path != "" && a.cfg != nil {
-					a.cfg.Paths.FfmpegPath = msg.Path
-					if a.OnSaveConfig != nil {
-						a.OnSaveConfig(a.cfg)
-					}
-				}
-			} else {
+			default:
 				a.ffmpegCheck.SetInstallResult("FFmpeg installed: "+msg.Version, false)
 			}
+			// Persist custom/manual FFmpeg path to config
+			if (a.ffmpegCheck.mode == ffmpegCustom || a.ffmpegCheck.mode == ffmpegManual) && msg.Path != "" && a.cfg != nil {
+				a.cfg.Paths.FfmpegPath = msg.Path
+				if a.OnSaveConfig != nil {
+					a.OnSaveConfig(a.cfg)
+				}
+			}
 			a.ffmpegCheck.warning = msg.Warning
-			// Show success message — next keypress will dismiss the overlay
 			a.ffmpegCheck.successDismiss = true
 		} else {
-			if a.ffmpegCheck.mode == ffmpegCustom {
+			switch a.ffmpegCheck.mode {
+			case ffmpegCustom:
 				a.ffmpegCheck.SetCustomResult("Invalid: ffmpeg not found at this path", false)
-			} else if a.ffmpegCheck.mode == ffmpegManual {
+			case ffmpegManual:
 				a.ffmpegCheck.SetManualResult("Invalid: ffmpeg not found at this path", false)
-			} else {
+			default:
 				a.ffmpegCheck.SetInstallResult("FFmpeg installed but not found on PATH. Restart may be needed.", true)
 			}
 		}
