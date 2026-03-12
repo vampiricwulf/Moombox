@@ -124,7 +124,7 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 	})
 
 	// Rate-limit mutating ffmpeg endpoints (spawns processes)
-	rl := r.With()
+	rl := r
 	if deps.RateLimit != nil {
 		rl = r.With(deps.RateLimit.Middleware)
 	}
@@ -216,19 +216,7 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 		}
 
 		// Ran directly (already elevated) — verify
-		InvalidateFFmpegCache()
-		valid, version, warning := checkFFmpeg("ffmpeg")
-		if !valid {
-			jsonError(rw, "FFmpeg installed but not found on PATH. You may need to restart.", http.StatusInternalServerError)
-			return
-		}
-
-		deps.Logger.Info("FFmpeg installed successfully", "version", version)
-		jsonResponse(rw, map[string]any{
-			"success": true,
-			"version": version,
-			"warning": warning,
-		})
+		verifyInstallAndRespond(rw, deps.Logger)
 	})
 
 	// POST /api/ffmpeg/install/confirm — execute a previously reviewed install script
@@ -251,19 +239,7 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 			return
 		}
 
-		InvalidateFFmpegCache()
-		valid, version, warning := checkFFmpeg("ffmpeg")
-		if !valid {
-			jsonError(rw, "FFmpeg installed but not found on PATH. You may need to restart.", http.StatusInternalServerError)
-			return
-		}
-
-		deps.Logger.Info("FFmpeg installed successfully via elevation", "version", version)
-		jsonResponse(rw, map[string]any{
-			"success": true,
-			"version": version,
-			"warning": warning,
-		})
+		verifyInstallAndRespond(rw, deps.Logger)
 	})
 
 	// POST /api/ffmpeg/install/reject — decline a pending elevated install
@@ -278,6 +254,23 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 
 		RejectInstall(body.Token)
 		jsonResponse(rw, map[string]any{"success": true})
+	})
+}
+
+// verifyInstallAndRespond checks FFmpeg availability after installation and
+// writes the JSON success or error response. Used by both install and confirm handlers.
+func verifyInstallAndRespond(rw http.ResponseWriter, logger interface{ Info(msg string, args ...any) }) {
+	InvalidateFFmpegCache()
+	valid, version, warning := checkFFmpeg("ffmpeg")
+	if !valid {
+		jsonError(rw, "FFmpeg installed but not found on PATH. You may need to restart.", http.StatusInternalServerError)
+		return
+	}
+	logger.Info("FFmpeg installed successfully", "version", version)
+	jsonResponse(rw, map[string]any{
+		"success": true,
+		"version": version,
+		"warning": warning,
 	})
 }
 
@@ -566,7 +559,7 @@ func ConfirmInstall(token string) error {
 	// Read result JSON
 	resultData, err := os.ReadFile(pi.resultPath)
 	if err != nil {
-		return fmt.Errorf("install may have succeeded but result file not found — restart to check")
+		return fmt.Errorf("install may have succeeded but result file not found — try running 'ffmpeg -version' in a terminal to verify")
 	}
 
 	var result struct {
@@ -589,7 +582,9 @@ func ConfirmInstall(token string) error {
 func RejectInstall(token string) {
 	pendingInstallsMu.Lock()
 	if pi, ok := pendingInstalls[token]; ok {
-		os.Remove(pi.scriptPath)
+		// scriptPath was never written to disk (only written at ConfirmInstall time).
+		// resultPath also doesn't exist yet, but clean up defensively in case a
+		// stale elevated process created it.
 		os.Remove(pi.resultPath)
 		delete(pendingInstalls, token)
 	}
