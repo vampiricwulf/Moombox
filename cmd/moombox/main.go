@@ -1415,10 +1415,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				ffmpegPath = "ffmpeg"
 			}
 			checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer checkCancel()
 			if err := exec.CommandContext(checkCtx, ffmpegPath, "-version").Run(); err != nil {
 				app.ShowFFmpegCheck()
 			}
-			checkCancel()
 		}
 
 		// Create async update channels for TUI

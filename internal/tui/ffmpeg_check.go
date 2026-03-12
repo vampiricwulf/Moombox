@@ -403,6 +403,17 @@ func (m *FFmpegCheckModel) ShowManual() {
 	m.updateTextInputWidth()
 }
 
+// ShowInstallOptions resets state and switches back to the install options view.
+func (m *FFmpegCheckModel) ShowInstallOptions() {
+	m.mode = ffmpegInstall
+	m.installFocus = 0
+	m.installResult = ""
+	m.installError = false
+	m.installing = false
+	m.textInput.Blur()
+	m.buildInstallOptions()
+}
+
 func (m *FFmpegCheckModel) handleReviewKey(key string) string {
 	if m.installing {
 		return "" // Ignore input while installing
@@ -423,7 +434,9 @@ func (m *FFmpegCheckModel) handleReviewKey(key string) string {
 		// Distrust — switch to manual install
 		return "reject:" + m.reviewToken
 	case keyEsc:
-		return "reject:" + m.reviewToken
+		// Cancel — reject the token but go back to install options (not manual).
+		// Distrust (Enter on focus 1) goes to manual install instead.
+		return "cancel:" + m.reviewToken
 	}
 	return ""
 }

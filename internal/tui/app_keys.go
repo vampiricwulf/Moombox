@@ -66,6 +66,12 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.OnRejectInstall(token)
 			}
 			a.ffmpegCheck.ShowManual()
+		case strings.HasPrefix(action, "cancel:"):
+			token := strings.TrimPrefix(action, "cancel:")
+			if a.OnRejectInstall != nil {
+				a.OnRejectInstall(token)
+			}
+			a.ffmpegCheck.ShowInstallOptions()
 		case strings.HasPrefix(action, "check_custom:"):
 			path := strings.TrimPrefix(action, "check_custom:")
 			return a, tea.Batch(a.ffmpegCheckCmd(path), a.ffmpegCheck.spinner.Tick)

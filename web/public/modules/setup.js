@@ -606,6 +606,12 @@ export class SetupController {
       const el = document.getElementById(id);
       if (el) el.innerHTML = "";
     }
+    // Reset quit button (may have been disabled by close-tab fallback)
+    const quitBtn = document.getElementById("ffmpeg-quit-btn");
+    if (quitBtn) {
+      quitBtn.disabled = false;
+      quitBtn.textContent = "Quit Moombox";
+    }
   }
 
   async showFFmpegInstallOptions() {
@@ -869,11 +875,15 @@ export class SetupController {
     if (input) input.disabled = true;
     if (resultEl) resultEl.innerHTML = '<sl-spinner style="font-size: 1rem;"></sl-spinner> Checking...';
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s (backend has 10s timeout)
+
     try {
       const resp = await fetch("/api/ffmpeg/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path }),
+        signal: controller.signal,
       });
       const data = await resp.json();
 
@@ -901,10 +911,17 @@ export class SetupController {
         }
       }
     } catch (e) {
-      if (resultEl) {
-        resultEl.innerHTML = `<sl-alert variant="danger" open>Check failed: ${this.esc(e.message)}</sl-alert>`;
+      if (e.name === "AbortError") {
+        if (resultEl) {
+          resultEl.innerHTML = '<sl-alert variant="warning" open>Check timed out \u2014 try running \'ffmpeg -version\' in a terminal to verify.</sl-alert>';
+        }
+      } else {
+        if (resultEl) {
+          resultEl.innerHTML = `<sl-alert variant="danger" open>Check failed: ${this.esc(e.message)}</sl-alert>`;
+        }
       }
     } finally {
+      clearTimeout(timeoutId);
       if (btn) btn.disabled = false;
       if (input) input.disabled = false;
     }

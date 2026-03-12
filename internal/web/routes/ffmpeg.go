@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -334,7 +335,13 @@ func truncateOutput(out []byte, maxBytes int) string {
 	if len(out) <= maxBytes {
 		return string(out)
 	}
-	return "[...truncated...]\n" + string(out[len(out)-maxBytes:])
+	tail := out[len(out)-maxBytes:]
+	// Skip past any UTF-8 continuation bytes (10xxxxxx) at the start
+	// to avoid cutting in the middle of a multi-byte character.
+	for len(tail) > 0 && tail[0]&0xC0 == 0x80 {
+		tail = tail[1:]
+	}
+	return "[...truncated...]\n" + string(tail)
 }
 
 const installTimeout = 5 * time.Minute
@@ -346,6 +353,29 @@ const (
 	MethodChocoInstall = "choco-install"
 	MethodWinget       = "winget"
 )
+
+// Package identifiers for FFmpeg. Referenced by both InstallFFmpeg (direct
+// exec) and generateInstallScript (elevated PS) — keep in sync.
+const (
+	chocoFFmpegPkg  = "ffmpeg-shared"
+	wingetFFmpegPkg = "Gyan.FFmpeg.Shared"
+)
+
+// exitCodeRebootRequired is the Windows installer exit code for
+// "success, reboot required" (ERROR_SUCCESS_REBOOT_REQUIRED).
+// Both Chocolatey and winget return this when a reboot is needed
+// but the installation itself succeeded.
+const exitCodeRebootRequired = 3010
+
+// isRebootRequired returns true if the error is an *exec.ExitError
+// with exit code 3010 (ERROR_SUCCESS_REBOOT_REQUIRED).
+func isRebootRequired(err error) bool {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode() == exitCodeRebootRequired
+	}
+	return false
+}
 
 // InstallFFmpeg runs a package manager to install FFmpeg. Supported methods:
 // "choco" (existing Chocolatey), "choco-install" (install Chocolatey first),
@@ -361,8 +391,8 @@ func InstallFFmpeg(method string) error {
 
 	switch method {
 	case MethodChoco:
-		cmd := exec.CommandContext(ctx, "choco", "install", "ffmpeg-shared", "-y")
-		if out, err := cmd.CombinedOutput(); err != nil {
+		cmd := exec.CommandContext(ctx, "choco", "install", chocoFFmpegPkg, "-y")
+		if out, err := cmd.CombinedOutput(); err != nil && !isRebootRequired(err) {
 			return fmt.Errorf("choco install failed: %s", truncateOutput(out, 500))
 		}
 
@@ -375,14 +405,14 @@ func InstallFFmpeg(method string) error {
 			return fmt.Errorf("chocolatey install failed: %s", truncateOutput(out, 500))
 		}
 		RefreshWindowsPath()
-		ffmpegCmd := exec.CommandContext(ctx, "choco", "install", "ffmpeg-shared", "-y")
-		if out, err := ffmpegCmd.CombinedOutput(); err != nil {
+		ffmpegCmd := exec.CommandContext(ctx, "choco", "install", chocoFFmpegPkg, "-y")
+		if out, err := ffmpegCmd.CombinedOutput(); err != nil && !isRebootRequired(err) {
 			return fmt.Errorf("ffmpeg install via choco failed: %s", truncateOutput(out, 500))
 		}
 
 	case MethodWinget:
-		cmd := exec.CommandContext(ctx, "winget", "install", "Gyan.FFmpeg.Shared", "--accept-package-agreements", "--accept-source-agreements")
-		if out, err := cmd.CombinedOutput(); err != nil {
+		cmd := exec.CommandContext(ctx, "winget", "install", wingetFFmpegPkg, "--accept-package-agreements", "--accept-source-agreements")
+		if out, err := cmd.CombinedOutput(); err != nil && !isRebootRequired(err) {
 			return fmt.Errorf("winget install failed: %s", truncateOutput(out, 500))
 		}
 
@@ -431,13 +461,13 @@ func generateInstallScript(method, resultPath string) (string, error) {
 	var installCmd string
 	switch method {
 	case MethodChoco:
-		installCmd = `$output += (& choco install ffmpeg-shared -y 2>&1 | Out-String)`
+		installCmd = `$output += (& choco install ` + chocoFFmpegPkg + ` -y 2>&1 | Out-String)`
 	case MethodChocoInstall:
 		installCmd = `$output += (& powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))" 2>&1 | Out-String)` + "\n" +
 			`$env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')` + "\n" +
-			`$output += (& choco install ffmpeg-shared -y 2>&1 | Out-String)`
+			`$output += (& choco install ` + chocoFFmpegPkg + ` -y 2>&1 | Out-String)`
 	case MethodWinget:
-		installCmd = `$output += (& winget install Gyan.FFmpeg.Shared --accept-package-agreements --accept-source-agreements 2>&1 | Out-String)`
+		installCmd = `$output += (& winget install ` + wingetFFmpegPkg + ` --accept-package-agreements --accept-source-agreements 2>&1 | Out-String)`
 	default:
 		return "", fmt.Errorf("unknown install method: %s", method)
 	}
@@ -571,7 +601,7 @@ func ConfirmInstall(token string) error {
 		return fmt.Errorf("failed to parse install result: %w", err)
 	}
 
-	if result.ExitCode != 0 {
+	if result.ExitCode != 0 && result.ExitCode != exitCodeRebootRequired {
 		return fmt.Errorf("install failed (exit %d): %s", result.ExitCode, truncateOutput([]byte(result.Output), 500))
 	}
 
