@@ -145,7 +145,7 @@ export class SetupController {
       this.showFFmpegInstallOptions();
     });
     document.getElementById("ffmpeg-check-btn")?.addEventListener("click", () => {
-      this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result");
+      this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result", "ffmpeg-check-btn");
     });
     document.getElementById("ffmpeg-quit-btn")?.addEventListener("click", () => {
       window.close();
@@ -161,15 +161,15 @@ export class SetupController {
     });
     // Enter key in custom path input
     document.getElementById("ffmpeg-custom-path")?.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result");
+      if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result", "ffmpeg-check-btn");
     });
 
     // Manual install view
     document.getElementById("ffmpeg-manual-check-btn")?.addEventListener("click", () => {
-      this.checkFFmpegPath("ffmpeg-manual-path", "ffmpeg-manual-result");
+      this.checkFFmpegPath("ffmpeg-manual-path", "ffmpeg-manual-result", "ffmpeg-manual-check-btn");
     });
     document.getElementById("ffmpeg-manual-path")?.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-manual-path", "ffmpeg-manual-result");
+      if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-manual-path", "ffmpeg-manual-result", "ffmpeg-manual-check-btn");
     });
     document.getElementById("ffmpeg-manual-back-btn")?.addEventListener("click", () => {
       document.getElementById("ffmpeg-manual-install").style.display = "none";
@@ -600,6 +600,12 @@ export class SetupController {
     document.getElementById("ffmpeg-install-view").style.display = "none";
     document.getElementById("ffmpeg-script-review").style.display = "none";
     document.getElementById("ffmpeg-manual-install").style.display = "none";
+    // Reset stale state from previous overlay opens
+    for (const id of ["ffmpeg-check-result", "ffmpeg-install-result",
+                       "ffmpeg-confirm-result", "ffmpeg-manual-result"]) {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = "";
+    }
   }
 
   async showFFmpegInstallOptions() {
@@ -786,11 +792,17 @@ export class SetupController {
     document.getElementById("ffmpeg-manual-install").style.display = "";
   }
 
-  async checkFFmpegPath(inputId, resultId) {
+  async checkFFmpegPath(inputId, resultId, btnId) {
     const input = document.getElementById(inputId);
     const resultEl = document.getElementById(resultId);
+    const btn = btnId ? document.getElementById(btnId) : null;
     const path = (input?.value || "").trim();
     if (!path) return;
+
+    // Disable controls to prevent concurrent checks (F3)
+    if (btn) btn.disabled = true;
+    if (input) input.disabled = true;
+    if (resultEl) resultEl.innerHTML = '<sl-spinner style="font-size: 1rem;"></sl-spinner> Checking...';
 
     try {
       const resp = await fetch("/api/ffmpeg/check", {
@@ -827,6 +839,9 @@ export class SetupController {
       if (resultEl) {
         resultEl.innerHTML = `<sl-alert variant="danger" open>Check failed: ${this.esc(e.message)}</sl-alert>`;
       }
+    } finally {
+      if (btn) btn.disabled = false;
+      if (input) input.disabled = false;
     }
   }
 
