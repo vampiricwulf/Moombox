@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/web"
@@ -25,8 +27,8 @@ import (
 // installMu prevents concurrent FFmpeg install operations.
 var installMu sync.Mutex
 
-// ffmpegCheckCache caches the result of checkFFmpeg to avoid spawning
-// ffmpeg -version on every request (e.g., during 2s polling in pollForRestart).
+// ffmpegCheckCache uses singleflight to coalesce concurrent checks and a TTL
+// to avoid re-probing ffmpeg on every request (e.g., 2s polling in pollForRestart).
 var (
 	ffmpegCacheMu     sync.Mutex
 	ffmpegCacheValid  bool
@@ -35,29 +37,48 @@ var (
 	ffmpegCacheWarn   string
 	ffmpegCachePath   string
 	ffmpegCacheTime   time.Time
+	ffmpegFlight      singleflight.Group
 )
 
 const ffmpegCacheTTL = 10 * time.Second
 
 // CheckFFmpegCached returns a cached result of checkFFmpeg, refreshing
-// only if the cache is stale or the path has changed.
+// only if the cache is stale or the path has changed. Concurrent callers
+// coalesce into a single ffmpeg probe via singleflight.
 func CheckFFmpegCached(path string) (valid bool, version string, warning string) {
+	// Fast path: return cached result if still fresh.
 	ffmpegCacheMu.Lock()
-	defer ffmpegCacheMu.Unlock()
-
 	now := time.Now()
 	if ffmpegCacheValid && ffmpegCachePath == path && now.Sub(ffmpegCacheTime) < ffmpegCacheTTL {
-		return ffmpegCacheResult, ffmpegCacheVer, ffmpegCacheWarn
+		v, ver, w := ffmpegCacheResult, ffmpegCacheVer, ffmpegCacheWarn
+		ffmpegCacheMu.Unlock()
+		return v, ver, w
 	}
+	ffmpegCacheMu.Unlock()
 
-	valid, version, warning = checkFFmpeg(path)
+	// Slow path: coalesce concurrent probes via singleflight.
+	type cacheResult struct {
+		valid   bool
+		version string
+		warning string
+	}
+	result, _, _ := ffmpegFlight.Do("check:"+path, func() (any, error) {
+		v, ver, w := checkFFmpeg(path)
+		return cacheResult{v, ver, w}, nil
+	})
+	cr := result.(cacheResult)
+
+	// Store result in cache.
+	ffmpegCacheMu.Lock()
 	ffmpegCacheValid = true
-	ffmpegCacheResult = valid
-	ffmpegCacheVer = version
-	ffmpegCacheWarn = warning
+	ffmpegCacheResult = cr.valid
+	ffmpegCacheVer = cr.version
+	ffmpegCacheWarn = cr.warning
 	ffmpegCachePath = path
-	ffmpegCacheTime = now
-	return valid, version, warning
+	ffmpegCacheTime = time.Now()
+	ffmpegCacheMu.Unlock()
+
+	return cr.valid, cr.version, cr.warning
 }
 
 // InvalidateFFmpegCache clears the cached FFmpeg check result, forcing
@@ -270,8 +291,14 @@ func parseFFmpegVersion(versionLine string) (major, minor int, ok bool) {
 	if m == nil {
 		return 0, 0, false
 	}
-	fmt.Sscanf(m[1], "%d", &major)
-	fmt.Sscanf(m[2], "%d", &minor)
+	major, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor, err = strconv.Atoi(m[2])
+	if err != nil {
+		return 0, 0, false
+	}
 	return major, minor, true
 }
 
@@ -654,8 +681,8 @@ func extractRegValue(output string) string {
 // windowsEnvVarRe matches Windows-style %VAR% environment variable references.
 var windowsEnvVarRe = regexp.MustCompile(`%([^%]+)%`)
 
-// expandWindowsEnv expands both Windows-style %VAR% and Unix-style $VAR references.
-// Go's os.ExpandEnv only handles $VAR/${VAR}, so we first convert %VAR% to ${VAR}.
+// expandWindowsEnv expands Windows-style %VAR% environment variable references
+// by looking up each variable via os.Getenv. Unexpanded variables are kept as-is.
 func expandWindowsEnv(s string) string {
 	// Expand %VAR% by looking up each variable
 	s = windowsEnvVarRe.ReplaceAllStringFunc(s, func(match string) string {
