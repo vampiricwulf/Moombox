@@ -9,11 +9,12 @@
 
 | File | Lines | Role |
 |------|-------|------|
-| `internal/tui/app_keys.go` | ~70 | Key dispatch for ffmpeg overlay |
-| `internal/tui/app_update.go` | ~60 | Message handling for ffmpeg async results |
+| `internal/tui/app_keys.go` | 412 | Key dispatch (FFmpeg overlay block: lines 46-68) |
+| `internal/tui/app_update.go` | 504 | Message handling (FFmpeg handlers: lines 326-376) |
+| `internal/tui/ffmpeg_check.go` | 650 | FFmpeg overlay model, views, key handlers |
 | `internal/web/routes/ffmpeg.go` | ~692 | API routes, install logic |
-| `web/public/modules/setup.js` | ~833 | Web UI FFmpeg overlay |
-| `web/public/index.html` | ~68 lines FFmpeg markup | HTML markup for FFmpeg overlay |
+| `web/public/modules/setup.js` | 833 | Web UI FFmpeg overlay |
+| `web/public/index.html` | ~70 lines FFmpeg markup | HTML markup for FFmpeg overlay (lines 1442-1511) |
 
 ## Findings & Fixes
 
@@ -69,7 +70,23 @@ Update all callers to pass the button ID. This applies to:
 - `ffmpeg-manual-check-btn` click handler (line 168-169)
 - `ffmpeg-manual-path` Enter handler (line 171-172)
 
-For Enter key handlers (no button click), disable the input element itself.
+For Enter key handlers (no button click), disable the input element and pass `null` as `btnId`:
+
+```javascript
+document.getElementById("ffmpeg-custom-path")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result", "ffmpeg-check-btn");
+});
+```
+
+The function disables the input as well when it's non-empty:
+
+```javascript
+const input = document.getElementById(inputId);
+if (input) input.disabled = true;
+// ... fetch ...
+// finally:
+if (input) input.disabled = false;
+```
 
 **F4. `showFFmpegOverlay` doesn't reset result elements** (`setup.js:597-603`)
 
@@ -128,15 +145,31 @@ The abort catch should show a specific message: "Install timed out — try runni
 
 From script review, the only options are "Trust & Continue" and "Distrust & Manually Install". No way to go back to install options to try a different method without going Distrust → Manual → Back → Install → pick method.
 
-**Fix**: Add a "Cancel" link/button below Trust/Distrust that rejects the token and returns to the install options view. In HTML, add after the Trust/Distrust flex div. In JS, wire it in `showScriptReview`.
+**Fix**: Add a "Cancel" text button below Trust/Distrust in the HTML (after the flex div, before `ffmpeg-confirm-progress`). In JS, wire it in `showScriptReview` with a dedicated handler that: (a) sends the reject API call to clean up the pending token, and (b) navigates back to `ffmpeg-install-view` (not manual install — `rejectElevatedInstall` goes to manual, which is the wrong destination for cancel).
+
+```javascript
+const cancelBtn = document.getElementById("ffmpeg-review-cancel-btn");
+if (cancelBtn) {
+    const newCancel = cancelBtn.cloneNode(true);
+    cancelBtn.replaceWith(newCancel);
+    newCancel.addEventListener("click", async () => {
+        try { await fetch("/api/ffmpeg/install/reject", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token }),
+        }); } catch { /* ignore */ }
+        document.getElementById("ffmpeg-script-review").style.display = "none";
+        document.getElementById("ffmpeg-install-view").style.display = "";
+    });
+}
+```
 
 **F8. TUI install result text misleading during verification** (`app_update.go:326-344`)
 
-When `PrepareInstall` runs directly (already elevated) or `ConfirmInstall` succeeds, the handler dispatches `ffmpegCheckCmd("")` for verification. But `installResult` still shows "Checking permissions..." (from `handleInstallKey:335`) during the entire verification phase.
+When `PrepareInstall` runs directly (already elevated), the handler dispatches `ffmpegCheckCmd("")` for verification. But `installResult` still shows "Checking permissions..." (from `ffmpeg_check.go:335`) during the entire verification phase. When `ConfirmInstall` succeeds, the stale text is "Installing with administrator privileges..." (from `ffmpeg_check.go:420`). In both cases, the verification phase should have its own message.
 
 **Fix**: Set `installResult` to "Verifying installation..." before dispatching the verify check:
-- In `ffmpegPrepareResultMsg` default branch (line 333): `a.ffmpegCheck.installResult = "Verifying installation..."`
-- In `ffmpegConfirmResultMsg` success branch (line 342): `a.ffmpegCheck.installResult = "Verifying installation..."`
+- In `ffmpegPrepareResultMsg` default branch (`app_update.go:333`): `a.ffmpegCheck.installResult = "Verifying installation..."`
+- In `ffmpegConfirmResultMsg` success branch (`app_update.go:342`): `a.ffmpegCheck.installResult = "Verifying installation..."`
 
 ### Accepted Risks (1 observation)
 
