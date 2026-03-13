@@ -452,10 +452,34 @@ export class PlayerController {
         const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
         if (chatRes.ok) {
           this.playerChatData = await chatRes.json();
+          // Compute chat-to-video timing correction. Chat offsets are relative to
+          // streamStartTime in the chat file, but video playback starts from the
+          // first captured content. If the stream started late (actual > scheduled),
+          // chat offsets will be inflated and need correction.
+          let chatBiasMs = 0;
+          const chatStartMs = this.playerChatData.streamStartTime
+            ? Date.parse(this.playerChatData.streamStartTime)
+            : 0;
+          if (chatStartMs > 0) {
+            if (this.playerJob.segments && this.playerJob.segments.length > 0) {
+              // Multi-segment: use first segment's capture time as video epoch
+              const firstSegStart = this.playerJob.segments[0].unixStart;
+              if (firstSegStart > 0) {
+                chatBiasMs = firstSegStart * 1000 - chatStartMs;
+              }
+            } else if (this.playerJob.streamStartTime) {
+              // Single-file: use job's stream start time (updated to actual on live)
+              const jobStartMs = Date.parse(this.playerJob.streamStartTime);
+              if (jobStartMs > 0 && jobStartMs !== chatStartMs) {
+                chatBiasMs = jobStartMs - chatStartMs;
+              }
+            }
+          }
+
           this.playerChatMessages = (this.playerChatData.messages || [])
             .map((m) => ({
               ...m,
-              offsetMs: m.offsetMs || 0,
+              offsetMs: (m.offsetMs || 0) - chatBiasMs,
             }))
             .sort((a, b) => a.offsetMs - b.offsetMs);
 
