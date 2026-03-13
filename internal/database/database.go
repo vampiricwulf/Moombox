@@ -338,3 +338,30 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 	j.AllowNonStream = allowNonStream != 0
 	return &j, nil
 }
+
+// GetPlayerPref returns the chat_offset for a video, or 0 if not set.
+func (db *Database) GetPlayerPref(videoID string) (float64, bool) {
+	var offset float64
+	err := db.db.QueryRowContext(db.getCtx(),
+		"SELECT chat_offset FROM player_prefs WHERE video_id = ?", videoID).Scan(&offset)
+	if err != nil {
+		return 0, false
+	}
+	return offset, true
+}
+
+// SetPlayerPref upserts the chat_offset for a video.
+func (db *Database) SetPlayerPref(videoID string, chatOffset float64) error {
+	_, err := db.db.ExecContext(db.getCtx(),
+		`INSERT INTO player_prefs (video_id, chat_offset) VALUES (?, ?)
+		 ON CONFLICT(video_id) DO UPDATE SET chat_offset = excluded.chat_offset`,
+		videoID, chatOffset)
+	return err
+}
+
+// DeletePlayerPref removes the player preferences for a video.
+func (db *Database) DeletePlayerPref(videoID string) error {
+	_, err := db.db.ExecContext(db.getCtx(),
+		"DELETE FROM player_prefs WHERE video_id = ?", videoID)
+	return err
+}
