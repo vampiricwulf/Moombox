@@ -194,6 +194,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			CookieHeader:     dashCookieHeader,
 			RetryDelayCap:    job.Config.SegmentRetryDelayCap,
 			LiveCheckRetries: job.Config.SegmentLiveCheckRetries,
+			Logger:           job.Logger,
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				if err != nil {
@@ -216,6 +217,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			CookieHeader:     dashCookieHeader,
 			RetryDelayCap:    job.Config.SegmentRetryDelayCap,
 			LiveCheckRetries: job.Config.SegmentLiveCheckRetries,
+			Logger:           job.Logger,
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				if err != nil {

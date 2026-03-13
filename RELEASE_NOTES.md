@@ -1,9 +1,8 @@
 ### Bug Fixes
 
-- **Downgraded android_vr client to v1.65.10** — newer versions may return SABR-only streams that Moombox can't handle
-- **Fixed age-restricted detection** — `LOGIN_REQUIRED` with age-related reasons now correctly maps to age-restricted instead of generic login-required
+- **Fixed DASH segment 403 errors** — YouTube renamed the n-param URL class (`g.fb` → `g.sB`); cipher extractor now dynamically detects the class name instead of hardcoding it
+- **Fixed infinite retry loop on failed downloads** — deferred progress events and catch-up bookend events no longer falsely reset the safety counters (`consecutiveLiveChecks`, `lastSegmentTime`), so stalled downloads now properly time out
 
-### Features
+### Improvements
 
-- **Added web_safari client** — now the primary web client (more reliable for unauthenticated use), with standard web as fallback
-- **Added web_embedded client for age-restricted content** — fetches embed page for `encryptedHostFlags`, uses non-YouTube `embedUrl` and `thirdParty` context to bypass age gates
+- **Added Logger to all segment downloaders** — DASH, HLS, and Twitch segment download errors are now visible in the log (previously went to a no-op logger)

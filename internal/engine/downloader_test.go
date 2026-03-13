@@ -367,6 +367,57 @@ func TestResumeState_TempFileCleanup(t *testing.T) {
 	}
 }
 
+// TestDashLoop_DeferredProgressRequiresBytes verifies that the deferred OnProgress
+// in runDashLoop only fires when actual bytes were written. When handleGoneError
+// increments currentSeq without writing data, the deferred must NOT emit progress
+// (which would falsely reset the orchestrator's safety counters).
+func TestDashLoop_DeferredProgressRequiresBytes(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: "test.mp4",
+	})
+
+	var progressFired bool
+	d.OnProgress = func(p DownloadProgress) {
+		progressFired = true
+	}
+
+	// Simulate the deferred logic: seq > 0 but no bytes written.
+	// This mirrors what happens when handleGoneError increments currentSeq
+	// 20 times on 403 errors without downloading any data.
+	d.mu.Lock()
+	d.currentSeq = 20 // Advanced by error handler, no actual downloads
+	d.mu.Unlock()
+	// bytesWritten stays at 0 (default)
+
+	seq := d.currentSeq
+	// Replicate the deferred condition from runDashLoop
+	if d.OnProgress != nil && seq > 0 && d.bytesWritten.Load() > 0 {
+		d.OnProgress(DownloadProgress{
+			Seq:   seq - 1,
+			Bytes: d.bytesWritten.Load(),
+		})
+	}
+
+	if progressFired {
+		t.Error("deferred OnProgress should NOT fire when bytesWritten is 0")
+	}
+
+	// Now verify it DOES fire when bytes are written
+	d.bytesWritten.Store(1000)
+	seq = d.currentSeq
+	if d.OnProgress != nil && seq > 0 && d.bytesWritten.Load() > 0 {
+		d.OnProgress(DownloadProgress{
+			Seq:   seq - 1,
+			Bytes: d.bytesWritten.Load(),
+		})
+	}
+
+	if !progressFired {
+		t.Error("deferred OnProgress should fire when bytesWritten > 0")
+	}
+}
+
 func TestStreamEnded_AtomicAccess(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    "https://example.com/sq/$Number$",

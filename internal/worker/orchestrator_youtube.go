@@ -54,10 +54,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		}
 	}()
 
-	// Track segment activity via progress callbacks
-	onSegmentProgress := func() {
-		lastSegmentTime = time.Now()
-		consecutiveLiveChecks = 0
+	// Track segment activity via progress callbacks.
+	// Only reset safety counters when actual bytes are written — catch-up
+	// bookend events and deferred progress from failed downloads report
+	// Bytes=0, which must NOT reset consecutiveLiveChecks or lastSegmentTime.
+	onSegmentProgress := func(p engine.DownloadProgress) {
+		if p.Bytes > 0 {
+			lastSegmentTime = time.Now()
+			consecutiveLiveChecks = 0
+		}
 	}
 
 	attachProgress := func(res *DownloadResult) {
@@ -65,7 +70,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			tracker.AttachVideoDownloader(res.VideoDownloader)
 			origOnProgress := res.VideoDownloader.OnProgress
 			res.VideoDownloader.OnProgress = func(p engine.DownloadProgress) {
-				onSegmentProgress()
+				onSegmentProgress(p)
 				if origOnProgress != nil {
 					origOnProgress(p)
 				}
@@ -75,7 +80,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			tracker.AttachAudioDownloader(res.AudioDownloader)
 			origOnProgress := res.AudioDownloader.OnProgress
 			res.AudioDownloader.OnProgress = func(p engine.DownloadProgress) {
-				onSegmentProgress()
+				onSegmentProgress(p)
 				if origOnProgress != nil {
 					origOnProgress(p)
 				}

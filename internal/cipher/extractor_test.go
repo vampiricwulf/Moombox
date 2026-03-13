@@ -408,6 +408,60 @@ func TestPreprocessPlayerFullRealPlayer(t *testing.T) {
 	}
 }
 
+func TestPreprocessPlayer74edf1a3(t *testing.T) {
+	data, err := os.ReadFile("testdata/player_74edf1a3.js")
+	if err != nil {
+		t.Skip("player_74edf1a3.js not available")
+	}
+
+	playerJS := string(data)
+	t.Logf("Player size: %d bytes", len(data))
+
+	// Check candidate finding
+	nFuncs := findNArrayCandidates(playerJS)
+	t.Logf("N-param array candidates: %d %v", len(nFuncs), nFuncs)
+
+	sigCands := findSigCandidates(playerJS)
+	t.Logf("Sig old candidates: %d %v", len(sigCands), sigCands)
+
+	alrChain := findAlrTransformChain(playerJS)
+	t.Logf("ALR sig chain found: %v (len=%d)", alrChain != "", len(alrChain))
+
+	// Full preprocessing
+	code, err := preprocessPlayerFull(playerJS)
+	if err != nil {
+		t.Fatalf("preprocessPlayerFull: %v", err)
+	}
+	t.Logf("Preprocessed code: %d bytes", len(code))
+
+	// Execute in Goja
+	solvers, err := getFromPrepared(code)
+	if err != nil {
+		t.Fatalf("getFromPrepared: %v", err)
+	}
+
+	if solvers.Sig != nil {
+		t.Log("Sig solver: OK")
+	} else {
+		t.Error("Sig solver is nil")
+	}
+
+	if solvers.N != nil {
+		t.Log("N solver: OK")
+		result, err := solvers.N("abc123def456")
+		if err != nil {
+			t.Logf("N solver error: %v", err)
+		} else {
+			t.Logf("N result: %q (input was abc123def456)", result)
+			if result == "abc123def456" {
+				t.Error("N solver returned input unchanged — not actually transforming")
+			}
+		}
+	} else {
+		t.Error("N solver is nil — this is the bug causing 403 on all DASH segments")
+	}
+}
+
 func TestCacheKey(t *testing.T) {
 	key1 := CacheKey("https://www.youtube.com/s/player/abc123/base.js")
 	key2 := CacheKey("https://www.youtube.com/s/player/abc123/base.js")

@@ -158,6 +158,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			OutputFile: videoPath,
 			StartSeq:   -1,
 			IsHls:      true,
+			Logger:     o.logger,
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				if isVod {
 					return false, nil

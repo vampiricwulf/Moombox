@@ -23,6 +23,23 @@ var nArrayPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?:^|[;\n])\s*(?:var\s+)?([a-zA-Z_$][\w$]*)\s*=\s*\[([a-zA-Z_$][\w$]*)\]\s*;`),
 }
 
+// urlClassPattern matches the n-param URL class by finding the pattern:
+//   new g.XXXX(url, !0)).get("n")
+// This identifies the URL builder class used to transform n-parameters.
+// The class name changes across player versions (e.g., g.fb → g.sB).
+var urlClassPattern = regexp.MustCompile(`new\s+(g\.[a-zA-Z_$][\w$]*)\([^,]+,\s*!0\)\)\.get\("n"\)`)
+
+// findURLClassName extracts the URL builder class name (e.g., "g.sB", "g.fb")
+// from the player JS by finding the n-param resolver pattern:
+//   new g.XXXX(url, !0)).get("n")
+func findURLClassName(playerJS string) string {
+	m := urlClassPattern.FindStringSubmatch(playerJS)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
 func findNArrayCandidates(playerJS string) []string {
 	seen := make(map[string]bool)
 	var names []string
@@ -141,6 +158,10 @@ done:
 // inserted inside the IIFE. This is the robust approach that handles YouTube's
 // modern obfuscation (string tables, combined multipurpose functions, etc.).
 func preprocessPlayerFull(playerJS string) (string, error) {
+	// Find the URL builder class name (e.g., "g.sB", "g.fb") for n-param resolution.
+	// The class name changes across player versions; we detect it dynamically.
+	urlClassName := findURLClassName(playerJS)
+
 	// Build n-param generator expressions.
 	// Array candidates (older players: ;X=[func];)
 	var nGenerators []string
@@ -161,7 +182,7 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 		sigGenerators = append(sigGenerators, fmt.Sprintf("function(sig){return %s}", sigChain))
 	}
 
-	if len(nGenerators) == 0 && len(sigGenerators) == 0 {
+	if len(nGenerators) == 0 && len(sigGenerators) == 0 && urlClassName == "" {
 		return "", fmt.Errorf("no n-param or sig candidates found in player JS (size=%d)", len(playerJS))
 	}
 
@@ -178,7 +199,7 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 	}
 
 	// Build solver binding code
-	bindingCode := buildSolverBindings(nGenerators, sigGenerators)
+	bindingCode := buildSolverBindings(nGenerators, sigGenerators, urlClassName)
 
 	// Insert bindings inside the IIFE, just before the closing })
 	modified := playerJS[:closeIdx] + "\n" + bindingCode + "\n" + playerJS[closeIdx:]
@@ -193,17 +214,24 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 
 // buildSolverBindings generates JS code that assigns solver functions to _result.
 // nGenerators and sigGenerators are pre-built JS function expressions.
-func buildSolverBindings(nGenerators, sigGenerators []string) string {
+// urlClassName is the dynamically-detected URL builder class (e.g., "g.sB").
+func buildSolverBindings(nGenerators, sigGenerators []string, urlClassName string) string {
 	var parts []string
 
 	// N-param: single IIFE that tries URL builder first (newer players where
-	// n-param transform is embedded in g.fb serialization), then falls back to
-	// validated array candidates (older players with standalone n-param functions).
+	// n-param transform is embedded in URL class serialization), then falls back
+	// to validated array candidates (older players with standalone n-param functions).
 	nCandidatesJS := "[]"
 	if len(nGenerators) > 0 {
 		nCandidatesJS = "[" + strings.Join(nGenerators, ",") + "]"
 	}
-	parts = append(parts, fmt.Sprintf(nBindingTemplate, nCandidatesJS))
+	// The URL class name changes across player versions (g.fb, g.sB, etc.)
+	// We detect it from the player JS and inject it; empty means not found.
+	urlClassJS := "null"
+	if urlClassName != "" {
+		urlClassJS = urlClassName
+	}
+	parts = append(parts, fmt.Sprintf(nBindingTemplate, urlClassJS, nCandidatesJS))
 
 	if len(sigGenerators) > 0 {
 		parts = append(parts, fmt.Sprintf(
@@ -217,26 +245,34 @@ func buildSolverBindings(nGenerators, sigGenerators []string) string {
 
 // nBindingTemplate is a JS IIFE that finds the n-param transform function.
 // It tries two strategies:
-//  1. URL builder serialization (newer players): creates a g.fb instance with a
-//     known n-param, serializes it, and checks if the value was transformed.
+//  1. URL builder class (newer players): uses the dynamically-detected URL class
+//     (e.g., g.sB) which internally transforms n-params when constructed with the
+//     second arg = true. The class name is injected as the first %s placeholder.
 //  2. Validated array candidates (older players): tests each candidate with a
 //     dummy value and only accepts candidates that produce a different string.
 //
 // Falls back to null (passthrough) if neither strategy works.
-// The %s placeholder receives the array of candidate function expressions.
+// First %s = URL class reference (e.g., g.sB), second %s = array of candidates.
 const nBindingTemplate = `
 _result.n = (function() {
   try {
-    var fb = g && g.fb;
-    if (fb) {
+    var _urlClass = %s;
+    if (_urlClass) {
       var testN = "AAAAAA_TESTN_VAL";
-      var u = new fb("https://rr1---sn-a.googlevideo.com/videoplayback?n=" + testN, true);
-      var s = (typeof u.A_ === "function") ? u.A_() : "" + u;
-      if (typeof s === "string") {
+      var u = new _urlClass("https://rr1---sn-a.googlevideo.com/videoplayback?n=" + testN, true);
+      var s = u.get ? u.get("n") : ((typeof u.A_ === "function") ? u.A_() : "" + u);
+      if (u.get) {
+        if (typeof s === "string" && s.length > 0 && s !== testN) {
+          return function(input) {
+            var url = new _urlClass("https://rr1---sn-a.googlevideo.com/videoplayback?n=" + input, true);
+            return url.get("n") || input;
+          };
+        }
+      } else if (typeof s === "string") {
         var m = s.match(/[?&]n=([^&]+)/);
         if (m && m[1] && m[1] !== testN) {
           return function(input) {
-            var url = new fb("https://rr1---sn-a.googlevideo.com/videoplayback?n=" + input, true);
+            var url = new _urlClass("https://rr1---sn-a.googlevideo.com/videoplayback?n=" + input, true);
             var result = (typeof url.A_ === "function") ? url.A_() : "" + url;
             var match = result.match(/[?&]n=([^&]+)/);
             return (match && match[1]) ? match[1] : input;

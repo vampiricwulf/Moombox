@@ -23,8 +23,11 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		head := d.headSeq
 		d.mu.Unlock()
 
-		// Emit final progress so the UI reflects the definitive last state
-		if d.OnProgress != nil && seq > 0 {
+		// Emit final progress so the UI reflects the definitive last state.
+		// Only emit when actual data was written — handleGoneError increments
+		// currentSeq on 403/410 failures without writing bytes, so seq > 0 alone
+		// is insufficient and would trigger false progress signals.
+		if d.OnProgress != nil && seq > 0 && d.bytesWritten.Load() > 0 {
 			d.OnProgress(DownloadProgress{
 				Seq:     seq - 1,
 				Bytes:   d.bytesWritten.Load(),
