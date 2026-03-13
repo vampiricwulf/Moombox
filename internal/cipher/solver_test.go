@@ -144,3 +144,65 @@ func TestStsRegex(t *testing.T) {
 		}
 	}
 }
+
+type testLogger struct{}
+
+func (testLogger) Debug(string, ...any) {}
+func (testLogger) Info(string, ...any)  {}
+func (testLogger) Warn(string, ...any)  {}
+func (testLogger) Error(string, ...any) {}
+
+func TestInvalidateSolver(t *testing.T) {
+	dir := t.TempDir()
+	logger := &testLogger{}
+	s, err := NewSolver(dir, logger)
+	if err != nil {
+		t.Fatalf("NewSolver: %v", err)
+	}
+
+	// Manually cache a player file and solver
+	playerURL := "https://www.youtube.com/s/player/test123/base.js"
+	key := CacheKey(playerURL)
+
+	// Put a fake player JS in the disk cache
+	if err := s.playerCache.Put(playerURL, "fake player js"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Verify disk cache has the file
+	cached, err := s.playerCache.Get(playerURL)
+	if err != nil || cached == "" {
+		t.Fatal("expected cached player JS")
+	}
+
+	// Put a fake solver in memory
+	s.cacheSolvers(key, &Solvers{})
+
+	// Verify in-memory cache has it
+	s.solverMu.RLock()
+	_, ok := s.solverData[key]
+	s.solverMu.RUnlock()
+	if !ok {
+		t.Fatal("expected solver in memory cache")
+	}
+
+	// Invalidate
+	s.InvalidateSolver(playerURL)
+
+	// Verify in-memory cache is cleared
+	s.solverMu.RLock()
+	_, ok = s.solverData[key]
+	s.solverMu.RUnlock()
+	if ok {
+		t.Error("expected solver evicted from memory cache")
+	}
+
+	// Verify disk cache is cleared
+	cached, err = s.playerCache.Get(playerURL)
+	if err != nil {
+		t.Fatalf("Get after invalidate: %v", err)
+	}
+	if cached != "" {
+		t.Error("expected disk cache evicted")
+	}
+}

@@ -134,6 +134,28 @@ func (s *Solver) InvalidateCache() {
 	s.solverMu.Unlock()
 }
 
+// InvalidateSolver evicts a specific player's solver from both the in-memory
+// cache and the disk player cache. Called when a solver is known to be broken
+// (e.g., producing 403 errors at runtime).
+func (s *Solver) InvalidateSolver(playerURL string) {
+	key := CacheKey(playerURL)
+
+	s.solverMu.Lock()
+	if _, ok := s.solverData[key]; ok {
+		delete(s.solverData, key)
+		for i, k := range s.solverOrder {
+			if k == key {
+				s.solverOrder = append(s.solverOrder[:i], s.solverOrder[i+1:]...)
+				break
+			}
+		}
+	}
+	s.solverMu.Unlock()
+
+	s.playerCache.Remove(playerURL)
+	s.logger.Info("cipher: invalidated solver", "playerID", PlayerIDFromURL(playerURL))
+}
+
 func (s *Solver) cacheSolvers(key string, solvers *Solvers) {
 	s.solverMu.Lock()
 	defer s.solverMu.Unlock()

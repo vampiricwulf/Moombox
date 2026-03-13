@@ -191,3 +191,15 @@ func (pc *PlayerCache) Evict() error {
 	}
 	return nil
 }
+
+// Remove deletes the cached player JS for a specific URL.
+// Errors are logged but not returned — removal is best-effort
+// (file may be held by another reader on Windows).
+func (pc *PlayerCache) Remove(playerURL string) {
+	path := pc.FilePath(playerURL)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if pc.logger != nil {
+			pc.logger.Debug("cipher: failed to remove cached player", "path", path, "err", err)
+		}
+	}
+}
