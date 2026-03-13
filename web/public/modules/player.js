@@ -17,6 +17,7 @@ export class PlayerController {
     this.nicoLaneCount = 15;
     this.nicoLaneAvail = [];
     this.nicoLastSpawnMs = -1;
+    this.playerCustomOffsetMs = 0;
     this.playerInitialized = false;
     /** @type {Map<string, string>} code → URL for 3rd-party Twitch emotes */
     this.twitchEmoteMap = new Map();
@@ -139,6 +140,49 @@ export class PlayerController {
       chatSearch.addEventListener("sl-input", () => {
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(() => this.filterChat(chatSearch.value), 200);
+      });
+    }
+
+    // Custom chat offset — live apply on input, persist on blur/Enter
+    const offsetInput = document.getElementById("player-chat-offset");
+    if (offsetInput) {
+      // Filter to valid numeric characters (digits, decimal point, minus sign)
+      offsetInput.addEventListener("input", () => {
+        offsetInput.value = offsetInput.value.replace(/[^0-9.\-]/g, "");
+        const val = parseFloat(offsetInput.value);
+        this.playerCustomOffsetMs = isNaN(val) ? 0 : val * 1000;
+        // Re-sync chat to current time with new offset
+        const currentMs = this.getGlobalTimeMs();
+        this.resetSidebarToTime(currentMs);
+        this.clearNicoOverlay();
+        this.nicoLastSpawnMs = currentMs;
+        if (this.playerAutoScroll && !this.playerScrollLock) {
+          this.syncSidebarToTime();
+        }
+      });
+
+      const persistOffset = () => {
+        if (!this.playerJob) return;
+        const val = parseFloat(offsetInput.value);
+        const videoID = this.playerJob.videoId;
+        if (isNaN(val) || val === 0) {
+          // Remove custom offset
+          this.playerCustomOffsetMs = 0;
+          fetch(`/api/player-prefs/${encodeURIComponent(videoID)}`, { method: "DELETE" }).catch(() => {});
+        } else {
+          fetch(`/api/player-prefs/${encodeURIComponent(videoID)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chatOffset: val }),
+          }).catch(() => {});
+        }
+      };
+
+      offsetInput.addEventListener("blur", persistOffset);
+      offsetInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          offsetInput.blur();
+        }
       });
     }
 
@@ -277,6 +321,9 @@ export class PlayerController {
     this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
     this.nicoLastSpawnMs = -1;
+    this.playerCustomOffsetMs = 0;
+    const offsetInput = document.getElementById("player-chat-offset");
+    if (offsetInput) offsetInput.value = "";
 
     // Reset multi-segment state
     this._seg.reset();
@@ -517,8 +564,29 @@ export class PlayerController {
     this.clearNicoOverlay();
 
     // Update sidebar header
-    document.getElementById("player-sidebar-header").textContent =
+    document.getElementById("player-sidebar-msg-count").textContent =
       `${this.playerChatMessages.length} messages`;
+
+    // Load saved custom chat offset
+    const offsetInput = document.getElementById("player-chat-offset");
+    if (offsetInput) {
+      offsetInput.value = "";
+      this.playerCustomOffsetMs = 0;
+      if (this.playerJob.videoId) {
+        try {
+          const prefRes = await fetch(`/api/player-prefs/${encodeURIComponent(this.playerJob.videoId)}`);
+          if (prefRes.ok) {
+            const pref = await prefRes.json();
+            if (pref.chatOffset && pref.chatOffset !== 0) {
+              offsetInput.value = pref.chatOffset;
+              this.playerCustomOffsetMs = pref.chatOffset * 1000;
+            }
+          }
+        } catch (e) {
+          // Ignore — no saved offset
+        }
+      }
+    }
   }
 
   buildSidebarChat() {
@@ -605,7 +673,7 @@ export class PlayerController {
     // Walk forward from current index
     while (
       this.playerActiveChatIndex < this.playerChatMessages.length &&
-      this.playerChatMessages[this.playerActiveChatIndex].offsetMs <= currentMs
+      this.playerChatMessages[this.playerActiveChatIndex].offsetMs <= currentMs + this.playerCustomOffsetMs
     ) {
       const child = children[this.playerActiveChatIndex];
       if (child) {
@@ -644,7 +712,7 @@ export class PlayerController {
       const child = children[i];
       if (!child) continue;
 
-      if (this.playerChatMessages[i].offsetMs <= currentMs) {
+      if (this.playerChatMessages[i].offsetMs <= currentMs + this.playerCustomOffsetMs) {
         child.classList.remove("future");
         child.classList.add("active");
         this.playerActiveChatIndex = i + 1;
@@ -702,7 +770,7 @@ export class PlayerController {
     // No limit on first spawn so all offsetMs=0 pre-stream messages deploy at once
     const maxPerFrame = firstSpawn ? Infinity : 10;
 
-    for (let i = lo; i < messages.length && messages[i].offsetMs <= currentMs; i++) {
+    for (let i = lo; i < messages.length && messages[i].offsetMs <= currentMs + this.playerCustomOffsetMs; i++) {
       if (spawned >= maxPerFrame) break;
 
       const msg = messages[i];
