@@ -743,7 +743,10 @@ export class PlayerController {
     const messages = this.playerChatMessages;
     if (!messages.length) return;
 
-    // Binary search for start of window (nicoLastSpawnMs, currentMs]
+    // Use offset-adjusted time consistently for binary search, loop, and cursor
+    const effectiveMs = currentMs + this.playerCustomOffsetMs;
+
+    // Binary search for start of window (nicoLastSpawnMs, effectiveMs]
     let lo = 0;
     let hi = messages.length;
     while (lo < hi) {
@@ -770,7 +773,7 @@ export class PlayerController {
     // No limit on first spawn so all offsetMs=0 pre-stream messages deploy at once
     const maxPerFrame = firstSpawn ? Infinity : 10;
 
-    for (let i = lo; i < messages.length && messages[i].offsetMs <= currentMs + this.playerCustomOffsetMs; i++) {
+    for (let i = lo; i < messages.length && messages[i].offsetMs <= effectiveMs; i++) {
       if (spawned >= maxPerFrame) break;
 
       const msg = messages[i];
@@ -841,7 +844,7 @@ export class PlayerController {
       spawned++;
     }
 
-    this.nicoLastSpawnMs = currentMs;
+    this.nicoLastSpawnMs = effectiveMs;
   }
 
   /**
