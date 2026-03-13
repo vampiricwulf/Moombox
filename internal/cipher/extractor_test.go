@@ -528,7 +528,23 @@ func TestPreprocessPlayer74edf1a3(t *testing.T) {
 	alrChains := findAlrTransformChains(playerJS)
 	t.Logf("ALR sig chains found: %d", len(alrChains))
 	for i, chain := range alrChains {
-		t.Logf("  chain[%d]: %q", i, chain)
+		t.Logf("  ALR chain %d (len=%d): %s", i, len(chain), chain)
+	}
+
+	// The ALR chain must be substantive (not garbage like "Z.U")
+	if len(alrChains) > 0 {
+		for _, chain := range alrChains {
+			if len(chain) < 10 {
+				t.Errorf("ALR chain too short (likely false match): %q", chain)
+			}
+		}
+	}
+
+	// URL class detection
+	urlClass := findURLClassName(playerJS)
+	t.Logf("URL class: %q", urlClass)
+	if urlClass == "" {
+		t.Error("expected URL class to be detected (e.g., g.sB)")
 	}
 
 	// Full preprocessing
@@ -544,25 +560,37 @@ func TestPreprocessPlayer74edf1a3(t *testing.T) {
 		t.Fatalf("getFromPrepared: %v", err)
 	}
 
-	if solvers.Sig != nil {
-		t.Log("Sig solver: OK")
-	} else {
-		t.Error("Sig solver is nil")
+	// N solver must work and transform the input
+	if solvers.N == nil {
+		t.Fatal("N solver is nil — this causes 403 on all DASH segments")
+	}
+	nResult, err := solvers.N("abc123def456")
+	if err != nil {
+		t.Fatalf("N solver error: %v", err)
+	}
+	t.Logf("N result: %q (input was abc123def456)", nResult)
+	if nResult == "abc123def456" {
+		t.Error("N solver returned input unchanged — not actually transforming")
+	}
+	if nResult == "" {
+		t.Error("N solver returned empty string")
 	}
 
-	if solvers.N != nil {
-		t.Log("N solver: OK")
-		result, err := solvers.N("abc123def456")
-		if err != nil {
-			t.Logf("N solver error: %v", err)
-		} else {
-			t.Logf("N result: %q (input was abc123def456)", result)
-			if result == "abc123def456" {
-				t.Error("N solver returned input unchanged — not actually transforming")
-			}
-		}
-	} else {
-		t.Error("N solver is nil — this is the bug causing 403 on all DASH segments")
+	// Sig solver must work and transform the input
+	if solvers.Sig == nil {
+		t.Fatal("Sig solver is nil — this causes 403 on streams requiring signature decryption")
+	}
+	sigInput := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	sigResult, err := solvers.Sig(sigInput)
+	if err != nil {
+		t.Fatalf("Sig solver error: %v", err)
+	}
+	t.Logf("Sig result: %q (input len=%d, output len=%d)", sigResult, len(sigInput), len(sigResult))
+	if sigResult == sigInput {
+		t.Error("Sig solver returned input unchanged — not actually transforming")
+	}
+	if sigResult == "" {
+		t.Error("Sig solver returned empty string")
 	}
 }
 
