@@ -1197,6 +1197,30 @@ sl-progress-bar {
     color: var(--sl-color-neutral-600);
     border-bottom: 1px solid var(--sl-color-neutral-200);
     flex-shrink: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#player-chat-offset {
+    width: 100px;
+    padding: 2px 6px;
+    font-size: var(--sl-font-size-x-small);
+    font-family: var(--sl-font-mono);
+    color: var(--sl-color-neutral-800);
+    background: var(--sl-color-neutral-100);
+    border: 1px solid var(--sl-color-neutral-300);
+    border-radius: var(--sl-border-radius-small);
+    outline: none;
+    text-align: right;
+}
+
+#player-chat-offset:focus {
+    border-color: var(--sl-color-primary-500);
+}
+
+#player-chat-offset::placeholder {
+    color: var(--sl-color-neutral-400);
 }
 
 #player-sidebar-messages {
