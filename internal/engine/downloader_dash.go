@@ -162,6 +162,14 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	delayCap, liveCheckThreshold int) error {
 
 	if statusCode == 403 || statusCode == 410 {
+		// 403 before any bytes written = likely cipher failure (wrong n-param or sig).
+		// 410 = stream ended (not cipher). Only fire on 403.
+		if statusCode == 403 && !d.cipherFailureFired && d.bytesWritten.Load() == 0 {
+			d.cipherFailureFired = true
+			if d.OnCipherFailure != nil {
+				d.OnCipherFailure()
+			}
+		}
 		return d.handleGoneError(ctx, consecutiveGoneErrors, hasStartedDownloading)
 	}
 

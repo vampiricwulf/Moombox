@@ -103,14 +103,16 @@ type SegmentDownloader struct {
 	currentSeq        int
 	headSeq           int
 	lastSegTime       time.Time
-	lastHeadProbeTime time.Time
-	logger            DownloaderLogger
+	lastHeadProbeTime  time.Time
+	logger             DownloaderLogger
+	cipherFailureFired bool
 
 	// Callbacks
-	OnStart    func(seq int, resuming bool)
-	OnProgress func(p DownloadProgress)
-	OnGap      func(g DownloadGap)
-	OnFinish   func()
+	OnStart          func(seq int, resuming bool)
+	OnProgress       func(p DownloadProgress)
+	OnGap            func(g DownloadGap)
+	OnFinish         func()
+	OnCipherFailure  func() // Called once on first 403 before any bytes written (likely cipher issue)
 }
 
 // NewSegmentDownloader creates a new segment downloader.

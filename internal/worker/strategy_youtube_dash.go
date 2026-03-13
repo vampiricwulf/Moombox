@@ -203,6 +203,12 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 				return info.StreamStatus != youtube.StreamLive, nil
 			},
 		})
+		if cipherSolver != nil && videoInfo.PlayerURL != "" {
+			result.VideoDownloader.OnCipherFailure = func() {
+				job.Logger.Warn("[Cipher] 403 before any data — invalidating solver", "playerURL", videoInfo.PlayerURL)
+				cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
+			}
+		}
 	}
 
 	if audioStream != nil {
@@ -226,6 +232,12 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 				return info.StreamStatus != youtube.StreamLive, nil
 			},
 		})
+		if cipherSolver != nil && videoInfo.PlayerURL != "" {
+			result.AudioDownloader.OnCipherFailure = func() {
+				job.Logger.Warn("[Cipher] 403 before any data — invalidating solver", "playerURL", videoInfo.PlayerURL)
+				cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
+			}
+		}
 	}
 
 	return result, nil
