@@ -162,8 +162,8 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 			}
 		}
 		if v, ok := dl["num_parallel_downloads"].(float64); ok {
-			if v < 1 || v > 10 {
-				errs["downloader.num_parallel_downloads"] = "num_parallel_downloads must be between 1 and 10"
+			if v < 1 {
+				errs["downloader.num_parallel_downloads"] = "num_parallel_downloads must be at least 1"
 			}
 		}
 		if v, ok := dl["max_video_resolution"].(float64); ok {
