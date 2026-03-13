@@ -1,3 +1,3 @@
-### Improvements
+### Features
 
-- **TUI invalid chord feedback** — pressing an unrecognized key or wrong key during a chord sequence now shows "Invalid Chord: ..." in red for 1 second instead of silently ignoring the input
+- **Player custom chat offset** — the player sidebar header now has an input field where you can specify a custom offset (in seconds) to shift chat timing forward or backward; non-zero values are saved per-video in a new `player_prefs` database table and restored automatically on replay
