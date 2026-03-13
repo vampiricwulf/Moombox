@@ -268,7 +268,10 @@
                             <div class="player-controls-hint">Space: Play · ←→: Seek · ↑↓: Vol · F: Full · M: Mute</div>
                         </div>
                         <div id="player-sidebar" style="display: none">
-                            <div id="player-sidebar-header">0 messages</div>
+                            <div id="player-sidebar-header">
+                                <span id="player-sidebar-msg-count">0 messages</span>
+                                <input type="text" id="player-chat-offset" inputmode="decimal" placeholder="-0.0s offset" />
+                            </div>
                             <div id="chat-search-container">
                                 <sl-input type="text" id="chat-search" placeholder="Search chat..." size="small" clearable></sl-input>
                             </div>
