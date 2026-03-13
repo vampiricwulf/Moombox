@@ -173,6 +173,8 @@ func findAlrTransformChains(playerJS string) []string {
 				}
 				pos++
 			}
+			// Loop exhausted without finding terminator — unbalanced expression
+			continue
 		done:
 			if pos <= exprStart {
 				continue
