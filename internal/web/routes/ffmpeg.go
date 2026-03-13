@@ -472,8 +472,11 @@ func generateInstallScript(method, resultPath string) (string, error) {
 		return "", fmt.Errorf("unknown install method: %s", method)
 	}
 
-	// PowerShell double-quoted strings treat backslashes literally (not as
-	// escape characters), so no escaping needed for Windows paths.
+	// PowerShell single-quoted strings treat backslashes literally, but
+	// single quotes must be doubled to escape ('').  This handles temp
+	// paths containing apostrophes (e.g. C:\Users\O'Brien\...).
+	escapedPath := strings.ReplaceAll(resultPath, "'", "''")
+
 	script := `$ErrorActionPreference = 'Continue'
 $output = ""
 try {
@@ -485,7 +488,7 @@ try {
     $exitCode = 1
 }
 $result = @{ exitCode = $exitCode; output = $output } | ConvertTo-Json
-[IO.File]::WriteAllText('` + resultPath + `', $result)
+[IO.File]::WriteAllText('` + escapedPath + `', $result)
 `
 	return script, nil
 }

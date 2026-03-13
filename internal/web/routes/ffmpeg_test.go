@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseFFmpegVersion(t *testing.T) {
@@ -177,6 +178,143 @@ func TestExpandWindowsEnv(t *testing.T) {
 			t.Errorf("expandWindowsEnv() = %q, want %q", got, want)
 		}
 	})
+}
+
+func TestGenerateInstallScript(t *testing.T) {
+	resultPath := `C:\Temp\moombox-ffmpeg-result-abc123.json`
+
+	tests := []struct {
+		name     string
+		method   string
+		wantErr  bool
+		contains []string // substrings the script must contain
+	}{
+		{
+			"choco",
+			MethodChoco,
+			false,
+			[]string{"choco install " + chocoFFmpegPkg, "$ErrorActionPreference", resultPath, "ConvertTo-Json"},
+		},
+		{
+			"choco_install",
+			MethodChocoInstall,
+			false,
+			[]string{
+				"chocolatey.org/install.ps1",
+				"choco install " + chocoFFmpegPkg,
+				resultPath,
+			},
+		},
+		{
+			"winget",
+			MethodWinget,
+			false,
+			[]string{"winget install " + wingetFFmpegPkg, "--accept-package-agreements", resultPath},
+		},
+		{
+			"unknown_method",
+			"apt-get",
+			true,
+			nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			script, err := generateInstallScript(tt.method, resultPath)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, sub := range tt.contains {
+				if !strings.Contains(script, sub) {
+					t.Errorf("script missing expected substring %q\nscript:\n%s", sub, script)
+				}
+			}
+		})
+	}
+
+	// Verify single-quote escaping in result path
+	t.Run("single_quote_in_path", func(t *testing.T) {
+		pathWithQuote := `C:\Users\O'Brien\AppData\Local\Temp\result.json`
+		script, err := generateInstallScript(MethodChoco, pathWithQuote)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// PowerShell escapes single quotes by doubling them
+		if !strings.Contains(script, "O''Brien") {
+			t.Errorf("expected escaped single quote (O''Brien) in script, got:\n%s", script)
+		}
+		if strings.Contains(script, "O'B") && !strings.Contains(script, "O''B") {
+			t.Errorf("unescaped single quote found in script:\n%s", script)
+		}
+	})
+}
+
+func TestGenerateToken(t *testing.T) {
+	token, err := generateToken()
+	if err != nil {
+		t.Fatalf("generateToken() error: %v", err)
+	}
+	// 16 bytes → 32 hex characters
+	if len(token) != 32 {
+		t.Errorf("token length = %d, want 32", len(token))
+	}
+	// Must be valid hex
+	for _, c := range token {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("token contains non-hex character %q: %s", c, token)
+			break
+		}
+	}
+	// Two tokens must differ
+	token2, err := generateToken()
+	if err != nil {
+		t.Fatalf("generateToken() error: %v", err)
+	}
+	if token == token2 {
+		t.Error("two consecutive tokens are identical")
+	}
+}
+
+func TestCleanExpiredPending(t *testing.T) {
+	// Reset global state
+	pendingInstallsMu.Lock()
+	orig := pendingInstalls
+	pendingInstalls = make(map[string]*pendingInstall)
+	pendingInstallsMu.Unlock()
+	defer func() {
+		pendingInstallsMu.Lock()
+		pendingInstalls = orig
+		pendingInstallsMu.Unlock()
+	}()
+
+	// Add an expired and a fresh entry
+	pendingInstallsMu.Lock()
+	pendingInstalls["expired-token"] = &pendingInstall{
+		method:    MethodChoco,
+		createdAt: time.Now().Add(-10 * time.Minute), // well past TTL
+	}
+	pendingInstalls["fresh-token"] = &pendingInstall{
+		method:    MethodWinget,
+		createdAt: time.Now(),
+	}
+	cleanExpiredPending()
+	_, expiredExists := pendingInstalls["expired-token"]
+	_, freshExists := pendingInstalls["fresh-token"]
+	pendingInstallsMu.Unlock()
+
+	if expiredExists {
+		t.Error("expired pending install was not cleaned")
+	}
+	if !freshExists {
+		t.Error("fresh pending install was incorrectly removed")
+	}
 }
 
 func TestIsRebootRequired(t *testing.T) {

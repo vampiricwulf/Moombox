@@ -380,9 +380,16 @@ func (m *FFmpegCheckModel) ShowReview(script, token string) {
 	m.installResult = ""
 	m.textInput.Blur()
 
-	// Initialize review viewport
-	_, contentW := dialogBox(60, m.width)
-	m.reviewViewport = viewport.New(contentW-4, 6)
+	// Initialize review viewport — guard against zero width before first SetSize.
+	vpW := 0
+	if m.width > 0 {
+		_, contentW := dialogBox(60, m.width)
+		vpW = contentW - 4
+	}
+	if vpW < 0 {
+		vpW = 0
+	}
+	m.reviewViewport = viewport.New(vpW, 6)
 	m.reviewViewport.SetContent(script)
 }
 
@@ -417,6 +424,13 @@ func (m *FFmpegCheckModel) ShowInstallOptions() {
 func (m *FFmpegCheckModel) handleReviewKey(key string) string {
 	if m.installing {
 		return "" // Ignore input while installing
+	}
+	// After a failed install the token is consumed — only allow Esc to go back.
+	if m.installError {
+		if key == keyEsc {
+			return "cancel:" + m.reviewToken
+		}
+		return ""
 	}
 	switch key {
 	case keyLeft:
@@ -577,6 +591,9 @@ func (m *FFmpegCheckModel) View() string {
 				resultColor = ColorError
 			}
 			lines = append(lines, lipgloss.NewStyle().Foreground(resultColor).Render(m.installResult))
+			if m.installError {
+				lines = append(lines, DimStyle.Render("Press Esc to go back"))
+			}
 		} else {
 			// Two options: Trust / Distrust
 			trustPrefix, distrustPrefix := "  ", "  "

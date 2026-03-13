@@ -75,6 +75,8 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case strings.HasPrefix(action, "check_custom:"):
 			path := strings.TrimPrefix(action, "check_custom:")
 			return a, tea.Batch(a.ffmpegCheckCmd(path), a.ffmpegCheck.spinner.Tick)
+		case action == "dismiss":
+			// Overlay already closed by HandleKey — nothing else to do.
 		}
 		return a, nil
 	}
