@@ -180,31 +180,70 @@ func TestFindSigCandidates(t *testing.T) {
 	}
 }
 
-func TestFindAlrTransformChain(t *testing.T) {
-	// Simulates YouTube's newer player.js pattern where the set("alr","yes")
-	// URL builder contains the signature decipher chain
-	js := `LC=function(D,X="",B=""){D=new g.pQ(D,!0);D.set("alr","yes");B&&(B=fQ(84,4692,fQ(16,4852,B)),D[h[3]](X,RD(10,4164,B)));return D};`
+func TestFindAlrTransformChains(t *testing.T) {
+	// Multiple ALR markers — only the last one has the transform pattern nearby.
+	// The first ALR has a decoy N&&(N= pattern, but it's 250+ chars away (outside
+	// the 200-char proximity window). The second ALR has no transform pattern nearby.
+	// The third ALR is the correct sig function with the transform within 15 chars.
+	js := `g.ba=function(Z,k,N){` +
+		`var a=new dv(k);a.get("alr")||a.set("alr","yes");` +
+		strings.Repeat("x", 250) + // spacer pushes decoy outside 200-char proximity
+		`N&&(N=Z.U,a=k.U);return a};` +
+		strings.Repeat("x", 300) + // spacer
+		`this.rV.set("alr","yes");w3R(this.A1,N,Z);` + // no transform pattern nearby
+		strings.Repeat("x", 300) + // spacer
+		`n8=function(Z,k,N){k=k===void 0?"":k;N=N===void 0?"":N;` +
+		`Z=new g.sB(Z,!0);Z.set("alr","yes");` +
+		`N&&(N=JI(49,1919,f1(33,6560,N)),Z.set(k,UE(65,3973,N)));return Z};`
 
-	result := findAlrTransformChain(js)
-	if result == "" {
-		t.Fatal("expected non-empty transform chain")
+	chains := findAlrTransformChains(js)
+	if len(chains) == 0 {
+		t.Fatal("expected at least one ALR transform chain")
 	}
-	// The parameter B should be replaced with "sig"
-	if !strings.Contains(result, "fQ(84,4692,fQ(16,4852,sig))") {
-		t.Errorf("expected fQ(84,4692,fQ(16,4852,sig)), got %q", result)
+
+	// Should find JI(49,1919,f1(33,6560,sig)) from the last ALR marker
+	found := false
+	for _, chain := range chains {
+		if strings.Contains(chain, "JI(49,1919,f1(33,6560,sig))") {
+			found = true
+			break
+		}
 	}
-	// Should NOT contain the original parameter
-	if strings.Contains(result, "B") {
-		t.Errorf("expected parameter B to be replaced with sig, got %q", result)
+	if !found {
+		t.Errorf("expected chain containing JI(49,1919,f1(33,6560,sig)), got %v", chains)
+	}
+
+	// Should NOT contain garbage like "Z.U" from the decoy (it's outside proximity)
+	for _, chain := range chains {
+		if chain == "Z.U" {
+			t.Errorf("false match: got garbage chain %q from decoy ALR marker", chain)
+		}
+	}
+
+	// Exactly one chain should be found (the correct one)
+	if len(chains) != 1 {
+		t.Errorf("expected exactly 1 chain, got %d: %v", len(chains), chains)
 	}
 }
 
-func TestFindAlrTransformChain_NotFound(t *testing.T) {
-	// No set("alr","yes") marker
+func TestFindAlrTransformChains_NotFound(t *testing.T) {
 	js := `var foo=function(a){return a+1};`
-	result := findAlrTransformChain(js)
-	if result != "" {
-		t.Errorf("expected empty string, got %q", result)
+	chains := findAlrTransformChains(js)
+	if len(chains) != 0 {
+		t.Errorf("expected no chains, got %v", chains)
+	}
+}
+
+func TestFindAlrTransformChains_SingleQuote(t *testing.T) {
+	// Single-quote variant of the ALR marker
+	js := `eg=function(r,p,I){r=new g.pQ(r,!0);r.set('alr','yes');` +
+		`I&&(I=fQ(84,4692,fQ(16,4852,I)),r.set(p,RD(10,4164,I)));return r};`
+	chains := findAlrTransformChains(js)
+	if len(chains) == 0 {
+		t.Fatal("expected chain from single-quote ALR marker")
+	}
+	if !strings.Contains(chains[0], "fQ(84,4692,fQ(16,4852,sig))") {
+		t.Errorf("expected fQ(84,4692,fQ(16,4852,sig)), got %q", chains[0])
 	}
 }
 
@@ -361,11 +400,11 @@ func TestPreprocessPlayerFullRealPlayer(t *testing.T) {
 	sigCands := findSigCandidates(playerJS)
 	t.Logf("Sig old candidates: %d %v", len(sigCands), sigCands)
 
-	alrChain := findAlrTransformChain(playerJS)
-	t.Logf("ALR sig chain found: %v", alrChain != "")
+	alrChains := findAlrTransformChains(playerJS)
+	t.Logf("ALR sig chains found: %d", len(alrChains))
 
 	// At least one sig strategy must work
-	if len(sigCands) == 0 && alrChain == "" {
+	if len(sigCands) == 0 && len(alrChains) == 0 {
 		t.Error("expected at least one sig strategy (old candidates or ALR chain)")
 	}
 
@@ -424,8 +463,11 @@ func TestPreprocessPlayer74edf1a3(t *testing.T) {
 	sigCands := findSigCandidates(playerJS)
 	t.Logf("Sig old candidates: %d %v", len(sigCands), sigCands)
 
-	alrChain := findAlrTransformChain(playerJS)
-	t.Logf("ALR sig chain found: %v (len=%d)", alrChain != "", len(alrChain))
+	alrChains := findAlrTransformChains(playerJS)
+	t.Logf("ALR sig chains found: %d", len(alrChains))
+	for i, chain := range alrChains {
+		t.Logf("  chain[%d]: %q", i, chain)
+	}
 
 	// Full preprocessing
 	code, err := preprocessPlayerFull(playerJS)

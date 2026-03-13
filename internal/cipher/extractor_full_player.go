@@ -80,78 +80,102 @@ func findSigCandidates(playerJS string) []sigCandidate {
 	return candidates
 }
 
+// alrMarkers are the string markers used to identify URL builder functions
+// that contain the signature decipher chain. Both quote styles are checked.
+var alrMarkers = []string{
+	`set("alr","yes");`,
+	`set('alr','yes');`,
+}
+
 // alrTransformHeadPattern matches the start of a transform chain after set("alr","yes").
 // Captures the parameter name and the start of the assignment.
 var alrTransformHeadPattern = regexp.MustCompile(`(\w+)&&\((\w+)=`)
 
-// findAlrTransformChain finds the signature decipher chain in YouTube's newer
+// alrProximity is the maximum number of characters after an ALR marker to search
+// for the transform head pattern. The correct match is typically within 15 chars;
+// 200 gives ample room for formatting variations without matching unrelated code.
+const alrProximity = 200
+
+// findAlrTransformChains finds signature decipher chains in YouTube's newer
 // player.js format. The URL builder function is identified by its set("alr","yes")
-// marker. The transform chain after it applies signature decryption:
+// marker. The transform chain after it applies signature decryption.
 //
-//	eg=function(r,p="",I=""){r=new g.fb(r,!0);r.set("alr","yes");
-//	  I&&(I=OF(24,6183,XF(82,6137,I)),r[O[8]](p,XF(2,8431,I)));return D};
-//
-// The chain is: OF(24,6183,XF(82,6137,I)) = decipher(decodeURIComponent(sig)).
-// Returns the expression with the parameter replaced by "sig", or empty string if not found.
-func findAlrTransformChain(playerJS string) string {
-	// Find the URL builder function by its unique marker: set("alr","yes")
-	alrIdx := strings.Index(playerJS, `set("alr","yes");`)
-	if alrIdx < 0 {
-		return ""
-	}
+// Returns all valid transform chains found (one per ALR marker with a nearby
+// transform pattern). Each chain has the parameter replaced with "sig".
+func findAlrTransformChains(playerJS string) []string {
+	var chains []string
 
-	rest := playerJS[alrIdx+len(`set("alr","yes");`):]
-
-	// Match: PARAM&&(PARAM=
-	m := alrTransformHeadPattern.FindStringSubmatchIndex(rest)
-	if m == nil {
-		return ""
-	}
-
-	param := rest[m[2]:m[3]]
-	assignParam := rest[m[4]:m[5]]
-	if param != assignParam {
-		return ""
-	}
-
-	// Extract the transform expression by tracking parenthesis depth.
-	// We're inside the outer ( from &&(, so depth starts at 1.
-	// The expression ends at a comma at depth 1 or a closing paren at depth 0.
-	exprStart := m[1] // position right after the full match "PARAM&&(PARAM="
-	depth := 1
-	pos := exprStart
-	for pos < len(rest) {
-		ch := rest[pos]
-		switch ch {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				// Reached the end without finding a comma — expression is the whole thing
-				goto done
+	for _, marker := range alrMarkers {
+		offset := 0
+		for {
+			idx := strings.Index(playerJS[offset:], marker)
+			if idx < 0 {
+				break
 			}
-		case ',':
-			if depth == 1 {
-				goto done
+			absIdx := offset + idx
+			afterMarker := absIdx + len(marker)
+			offset = afterMarker // advance for next iteration
+
+			// Only search within alrProximity chars of the marker
+			searchEnd := afterMarker + alrProximity
+			if searchEnd > len(playerJS) {
+				searchEnd = len(playerJS)
 			}
-		case '\'', '"':
-			// Skip string literals to avoid matching parentheses/commas inside strings
-			pos = skipStringLiteral(rest, pos)
-			continue
+			nearby := playerJS[afterMarker:searchEnd]
+
+			m := alrTransformHeadPattern.FindStringSubmatchIndex(nearby)
+			if m == nil {
+				continue
+			}
+
+			param := nearby[m[2]:m[3]]
+			assignParam := nearby[m[4]:m[5]]
+			if param != assignParam {
+				continue
+			}
+
+			// Extract the transform expression by tracking parenthesis depth.
+			// Use the full remaining text (not just nearby) since the expression
+			// itself can be longer than alrProximity.
+			fullRest := playerJS[afterMarker:]
+			exprStart := m[1] // right after "PARAM&&(PARAM="
+			depth := 1
+			pos := exprStart
+			for pos < len(fullRest) {
+				ch := fullRest[pos]
+				switch ch {
+				case '(':
+					depth++
+				case ')':
+					depth--
+					if depth == 0 {
+						goto done
+					}
+				case ',':
+					if depth == 1 {
+						goto done
+					}
+				case '\'', '"':
+					pos = skipStringLiteral(fullRest, pos)
+					continue
+				}
+				pos++
+			}
+		done:
+			if pos <= exprStart {
+				continue
+			}
+
+			transform := fullRest[exprStart:pos]
+
+			// Replace the parameter name with "sig" using word-boundary matching
+			paramRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(param) + `\b`)
+			chain := paramRe.ReplaceAllString(transform, "sig")
+			chains = append(chains, chain)
 		}
-		pos++
-	}
-done:
-	if pos <= exprStart {
-		return ""
 	}
 
-	transform := rest[exprStart:pos]
-
-	// Replace the parameter name with "sig" using word-boundary matching
-	paramRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(param) + `\b`)
-	return paramRe.ReplaceAllString(transform, "sig")
+	return chains
 }
 
 // preprocessPlayerFull includes the entire player.js with solver bindings
@@ -177,8 +201,8 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 			"function(sig){return %s(%s,sig)}", c.funcName, c.literal,
 		))
 	}
-	// New: transform chain from set("alr","yes") marker (this IS the sig function)
-	if sigChain := findAlrTransformChain(playerJS); sigChain != "" {
+	// New: transform chains from set("alr","yes") markers
+	for _, sigChain := range findAlrTransformChains(playerJS) {
 		sigGenerators = append(sigGenerators, fmt.Sprintf("function(sig){return %s}", sigChain))
 	}
 

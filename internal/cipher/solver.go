@@ -108,10 +108,10 @@ func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) 
 
 	nArrayCands := findNArrayCandidates(playerJS)
 	sigOldCands := findSigCandidates(playerJS)
-	alrSigChain := findAlrTransformChain(playerJS)
+	alrSigChains := findAlrTransformChains(playerJS)
 	s.logger.Debug("cipher: preprocessing player JS", "playerID", playerID, "size", len(playerJS),
 		"nArrayCandidates", len(nArrayCands), "sigOldCandidates", len(sigOldCands),
-		"hasAlrSigChain", alrSigChain != "")
+		"alrSigChains", len(alrSigChains))
 	preprocessed, err := preprocessPlayer(playerJS)
 	if err != nil {
 		return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
