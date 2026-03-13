@@ -765,7 +765,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		db.AddToHistory(videoID)
 		dlWorker.EnqueueJob(videoID)
-		wsHub.BroadcastJobsUpdate(getAllJobsSafe(db))
+		wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(db), cfg))
 		if notifyMgr.HasTargets() {
 			notifyMgr.Send("Stream Found",
 				fmt.Sprintf("Found matching stream: %s", title),
@@ -851,7 +851,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		db.AddToHistory(jobID)
 		dlWorker.EnqueueJob(jobID)
-		wsHub.BroadcastJobsUpdate(getAllJobsSafe(db))
+		wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(db), cfg))
 		if notifyMgr.HasTargets() {
 			twitchFields := []notifications.Field{
 				{Name: "Channel", Value: info.ChannelDisplayName, Inline: true},
@@ -897,6 +897,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Database -> WebSocket: broadcast job updates
 	unsubWSJobUpdate := db.OnJobUpdate(func(job *database.Job) {
+		// Skip broadcasting updates for archived (old finished) jobs
+		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
+			ageDays := int(cfg.Monitors.HideFinishedAgeDays.Value)
+			cutoff := time.Now().AddDate(0, 0, -ageDays)
+			if t, err := time.Parse(time.RFC3339, job.UpdatedAt); err == nil && t.Before(cutoff) {
+				return
+			}
+		}
 		wsHub.BroadcastJobUpdate(job.ID, job)
 	})
 	unsubWSJobsChange := db.OnJobsChange(func(jobs []*database.Job) {
