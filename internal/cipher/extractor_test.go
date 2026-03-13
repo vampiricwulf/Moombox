@@ -324,6 +324,18 @@ func TestPreprocessPlayerFull(t *testing.T) {
 	}
 }
 
+func TestPreprocessPlayerFull_WindowStripping(t *testing.T) {
+	// Whitespace variation in "var window=this;"
+	playerJS := `var _yt_player={};(function(g){ var  window = this ;'use strict';var jVV=function(k){return k+"_done"};var eiz;eiz=[jVV];})(_yt_player);`
+	code, err := preprocessPlayerFull(playerJS)
+	if err != nil {
+		t.Fatalf("preprocessPlayerFull: %v", err)
+	}
+	if strings.Contains(code, "var  window = this ;") {
+		t.Error("whitespace-variant 'var window=this;' should have been stripped")
+	}
+}
+
 func TestPreprocessPlayerFullAlrSig(t *testing.T) {
 	// Tests the newer YouTube player pattern where the sig decipher is in
 	// the URL builder function identified by set("alr","yes").

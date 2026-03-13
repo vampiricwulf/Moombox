@@ -11,6 +11,9 @@ import (
 // we include the ENTIRE player.js with solver bindings inserted.
 // This mirrors the TS approach: parse full player -> find candidates -> append bindings.
 
+// windowThisPattern matches "var window=this;" with flexible whitespace.
+var windowThisPattern = regexp.MustCompile(`var\s+window\s*=\s*this\s*;`)
+
 // findNArrayCandidates finds n-parameter function candidates by searching for
 // single-element array assignments: varName=[funcName];
 // This matches the TypeScript AST pattern: ArrayExpression with 1 Identifier element.
@@ -223,9 +226,16 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 	// Main variant: var _yt_player={};(function(g){...})(_yt_player);
 	// TV variant: 'use strict';(function(){var window=this;...}).call(this);
 	closeIdx := strings.LastIndex(playerJS, "})(")
+	if closeIdx >= 0 && len(playerJS)-closeIdx > 200 {
+		// Match is too far from EOF — likely inside a string or nested function
+		closeIdx = -1
+	}
 	if closeIdx < 0 {
 		// TV/ES6 variant uses }).call(this) instead of })(arg)
 		closeIdx = strings.LastIndex(playerJS, "}).call(")
+		if closeIdx >= 0 && len(playerJS)-closeIdx > 200 {
+			closeIdx = -1
+		}
 	}
 	if closeIdx < 0 {
 		return "", fmt.Errorf("could not find IIFE closing bracket")
@@ -237,9 +247,8 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 	// Insert bindings inside the IIFE, just before the closing })
 	modified := playerJS[:closeIdx] + "\n" + bindingCode + "\n" + playerJS[closeIdx:]
 
-	// Strip "var window=this;" to avoid overriding our setup stubs.
-	// The TS version does the same (removes this line from the IIFE body).
-	modified = strings.Replace(modified, "var window=this;", "", 1)
+	// Strip "var window=this;" (with flexible whitespace) to avoid overriding our setup stubs.
+	modified = windowThisPattern.ReplaceAllLiteralString(modified, "")
 
 	// Prepend setup stubs
 	return fullPlayerSetupCode + "\n" + modified, nil
