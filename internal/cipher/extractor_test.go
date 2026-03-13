@@ -336,6 +336,33 @@ func TestPreprocessPlayerFull_WindowStripping(t *testing.T) {
 	}
 }
 
+func TestMultiTryRejectsIdentity(t *testing.T) {
+	// _multiTry should reject candidates that return the input unchanged
+	code := fullPlayerSetupCode + `
+_result.sig = _multiTry([
+  function(x) { return x; },
+  function(x) { return x + "_transformed"; }
+]);
+`
+	solvers, err := getFromPrepared(code)
+	if err != nil {
+		t.Fatalf("getFromPrepared: %v", err)
+	}
+	if solvers.Sig == nil {
+		t.Fatal("expected non-nil sig solver")
+	}
+	result, err := solvers.Sig("testinput")
+	if err != nil {
+		t.Fatalf("sig solver: %v", err)
+	}
+	if result == "testinput" {
+		t.Error("_multiTry should reject identity function, but got input back unchanged")
+	}
+	if result != "testinput_transformed" {
+		t.Errorf("expected 'testinput_transformed', got %q", result)
+	}
+}
+
 func TestPreprocessPlayerFullAlrSig(t *testing.T) {
 	// Tests the newer YouTube player pattern where the sig decipher is in
 	// the URL builder function identified by set("alr","yes").

@@ -346,7 +346,7 @@ var _multiTry = function(_generators) {
         for (var _i = 0; _i < _generators.length; _i++) {
             try {
                 var _r = _generators[_i](_input);
-                if (typeof _r === "string" && _r.length > 0) return _r;
+                if (typeof _r === "string" && _r.length > 0 && _r !== _input) return _r;
                 _errors.push("candidate " + _i + ": returned " + (typeof _r) + " " + JSON.stringify(_r));
             } catch(_e) {
                 _errors.push("candidate " + _i + ": " + (_e.message || _e));
