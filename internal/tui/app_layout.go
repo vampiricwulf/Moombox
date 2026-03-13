@@ -139,8 +139,9 @@ func feedbackColor(msg string) lipgloss.Color {
 		return lipgloss.Color("#f1c40f")
 	}
 
-	// Errors (red) — cancelled jobs or any failure
-	if strings.HasPrefix(msg, "Cancelled:") || strings.Contains(lower, "failed") {
+	// Errors (red) — cancelled jobs, invalid chords, or any failure
+	if strings.HasPrefix(msg, "Cancelled:") || strings.HasPrefix(msg, "Invalid Chord:") ||
+		strings.Contains(lower, "failed") {
 		return ColorRed
 	}
 

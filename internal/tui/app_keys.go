@@ -257,6 +257,12 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// Unrecognized single-character key — show invalid chord feedback
+	if len(key) == 1 {
+		a.setFeedbackWithDuration("Invalid Chord: "+strings.ToUpper(key), time.Second)
+		return a, nil
+	}
+
 	// Panel navigation
 	switch a.focusedPanel {
 	case PanelTasks:
@@ -341,8 +347,11 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 			m, cmd := a.dispatchAction(chord, job)
 			return m, cmd, true
 		}
-		// Wrong key — reset and fall through to check if key starts a new chord
+		// Wrong key — show invalid chord and consume
+		typed := strings.ToUpper(a.chord.prefix) + " " + strings.ToUpper(a.chord.action) + " " + strings.ToUpper(key)
+		a.setFeedbackWithDuration("Invalid Chord: "+typed, time.Second)
 		a.chord = chordState{}
+		return a, nil, true
 	}
 
 	// Active prefix, waiting for second key
@@ -351,8 +360,11 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 		if handled {
 			return m, cmd, true
 		}
-		// Not a valid second key — reset and fall through to check if key starts a new chord
+		// Not a valid second key — show invalid chord and consume
+		typed := strings.ToUpper(a.chord.prefix) + " " + strings.ToUpper(key)
+		a.setFeedbackWithDuration("Invalid Chord: "+typed, time.Second)
 		a.chord = chordState{}
+		return a, nil, true
 	}
 
 	// No active chord — check if key is a prefix

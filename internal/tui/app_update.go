@@ -423,6 +423,11 @@ func (a *App) setFeedback(msg string) {
 	a.feedbackTimer = time.Now().Add(3 * time.Second)
 }
 
+func (a *App) setFeedbackWithDuration(msg string, d time.Duration) {
+	a.feedbackMsg = msg
+	a.feedbackTimer = time.Now().Add(d)
+}
+
 func (a *App) handleJobUpdate(job *database.Job) tea.Cmd {
 	// Always update progress store (zero-cost)
 	a.progressStore.Set(job.ID, &ProgressData{

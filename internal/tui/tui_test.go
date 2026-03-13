@@ -158,6 +158,7 @@ func TestFeedbackColor(t *testing.T) {
 		// Error (red)
 		{"Cancelled: Some Job", string(ColorRed)},
 		{"Update check failed: timeout", string(ColorRed)},
+		{"Invalid Chord: A X", string(ColorRed)},
 		// Warning (yellow)
 		{"Already up to date", "#f1c40f"},
 		{"No stream URL available", "#f1c40f"},
