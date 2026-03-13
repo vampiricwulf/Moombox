@@ -180,6 +180,29 @@ func TestFindSigCandidates(t *testing.T) {
 	}
 }
 
+func TestFindURLClassName(t *testing.T) {
+	tests := []struct {
+		name     string
+		js       string
+		expected string
+	}{
+		{"current g.XX", `(new g.sB(Z,!0)).get("n")`, "g.sB"},
+		{"different namespace", `(new h.Foo(Z,!0)).get("n")`, "h.Foo"},
+		{"underscore namespace", `(new _yt.xY(Z,!0)).get("n")`, "_yt.xY"},
+		{"with true keyword", `(new g.sB(Z,true)).get("n")`, "g.sB"},
+		{"bare identifier", `(new UrlBuilder(Z,!0)).get("n")`, "UrlBuilder"},
+		{"not found", `var x = 42;`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := findURLClassName(tt.js)
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
 func TestFindAlrTransformChains(t *testing.T) {
 	// Multiple ALR markers — only the last one has the transform pattern nearby.
 	// The first ALR has a decoy N&&(N= pattern, but it's 250+ chars away (outside

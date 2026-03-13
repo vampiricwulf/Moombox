@@ -23,21 +23,30 @@ var nArrayPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?:^|[;\n])\s*(?:var\s+)?([a-zA-Z_$][\w$]*)\s*=\s*\[([a-zA-Z_$][\w$]*)\]\s*;`),
 }
 
-// urlClassPattern matches the n-param URL class by finding the pattern:
-//   new g.XXXX(url, !0)).get("n")
-// This identifies the URL builder class used to transform n-parameters.
+// urlClassPatterns match the n-param URL class by finding the pattern:
+//   new XXXX(url, !0)).get("n")  or  new XXXX(url, true)).get("n")
 // The class name changes across player versions (e.g., g.fb → g.sB).
-var urlClassPattern = regexp.MustCompile(`new\s+(g\.[a-zA-Z_$][\w$]*)\([^,]+,\s*!0\)\)\.get\("n"\)`)
+// Patterns are tried in priority order: dotted (!0), dotted (true), bare.
+var urlClassPatterns = []*regexp.Regexp{
+	// Dotted identifier with !0: new g.sB(Z, !0)).get("n")
+	regexp.MustCompile(`new\s+([a-zA-Z_$][\w$]*\.[a-zA-Z_$][\w$]*)\([^,]+,\s*!0\)\)\.get\("n"\)`),
+	// Dotted identifier with true: new g.sB(Z, true)).get("n")
+	regexp.MustCompile(`new\s+([a-zA-Z_$][\w$]*\.[a-zA-Z_$][\w$]*)\([^,]+,\s*true\)\)\.get\("n"\)`),
+	// Bare identifier: new UrlBuilder(Z, !0)).get("n") or true
+	regexp.MustCompile(`new\s+([a-zA-Z_$][\w$]*)\([^,]+,\s*(?:!0|true)\)\)\.get\("n"\)`),
+}
 
-// findURLClassName extracts the URL builder class name (e.g., "g.sB", "g.fb")
-// from the player JS by finding the n-param resolver pattern:
-//   new g.XXXX(url, !0)).get("n")
+// findURLClassName extracts the URL builder class name (e.g., "g.sB", "h.Foo")
+// from the player JS by finding the n-param resolver pattern.
+// Tries dotted identifiers first, then bare identifiers.
 func findURLClassName(playerJS string) string {
-	m := urlClassPattern.FindStringSubmatch(playerJS)
-	if m == nil {
-		return ""
+	for _, pattern := range urlClassPatterns {
+		m := pattern.FindStringSubmatch(playerJS)
+		if m != nil {
+			return m[1]
+		}
 	}
-	return m[1]
+	return ""
 }
 
 func findNArrayCandidates(playerJS string) []string {
