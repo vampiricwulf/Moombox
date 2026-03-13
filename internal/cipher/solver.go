@@ -106,12 +106,27 @@ func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) 
 		return nil, fmt.Errorf("fetch player JS for %s: %w", playerID, err)
 	}
 
+	// Log extraction strategy results for debugging
+	urlClassName := findURLClassName(playerJS)
 	nArrayCands := findNArrayCandidates(playerJS)
 	sigOldCands := findSigCandidates(playerJS)
 	alrSigChains := findAlrTransformChains(playerJS)
-	s.logger.Debug("cipher: preprocessing player JS", "playerID", playerID, "size", len(playerJS),
-		"nArrayCandidates", len(nArrayCands), "sigOldCandidates", len(sigOldCands),
+
+	s.logger.Debug("cipher: extraction results", "playerID", playerID, "size", len(playerJS),
+		"urlClassName", urlClassName,
+		"nArrayCandidates", len(nArrayCands),
+		"sigOldCandidates", len(sigOldCands),
 		"alrSigChains", len(alrSigChains))
+
+	if urlClassName == "" && len(nArrayCands) == 0 {
+		s.logger.Warn("cipher: no n-param strategy succeeded (URL class + array candidates)",
+			"playerID", playerID)
+	}
+	if len(sigOldCands) == 0 && len(alrSigChains) == 0 {
+		s.logger.Warn("cipher: no sig strategy succeeded (ALR chains + old candidates)",
+			"playerID", playerID)
+	}
+
 	preprocessed, err := preprocessPlayer(playerJS)
 	if err != nil {
 		return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
