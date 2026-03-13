@@ -16,7 +16,7 @@ export class PlayerController {
     this.nicoEnabled = true;
     this.nicoLaneCount = 15;
     this.nicoLaneAvail = [];
-    this.nicoLastSpawnMs = -1;
+    this.nicoLastSpawnMs = null;
     this.playerCustomOffsetMs = 0;
     this.playerInitialized = false;
     /** @type {Map<string, string>} code → URL for 3rd-party Twitch emotes */
@@ -90,7 +90,7 @@ export class PlayerController {
       const currentMs = this.getGlobalTimeMs();
       this.resetSidebarToTime(currentMs);
       this.clearNicoOverlay();
-      this.nicoLastSpawnMs = currentMs;
+      this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
     });
 
     // Pause/play nico animations
@@ -155,7 +155,7 @@ export class PlayerController {
         const currentMs = this.getGlobalTimeMs();
         this.resetSidebarToTime(currentMs);
         this.clearNicoOverlay();
-        this.nicoLastSpawnMs = currentMs;
+        this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
@@ -320,7 +320,7 @@ export class PlayerController {
     this.playerChatMessages = [];
     this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
-    this.nicoLastSpawnMs = -1;
+    this.nicoLastSpawnMs = null;
     this.playerCustomOffsetMs = 0;
     const offsetInput = document.getElementById("player-chat-offset");
     if (offsetInput) offsetInput.value = "";
@@ -492,7 +492,7 @@ export class PlayerController {
     this.playerChatData = null;
     this.twitchEmoteMap = new Map();
     this.playerActiveChatIndex = 0;
-    this.nicoLastSpawnMs = -1;
+    this.nicoLastSpawnMs = null;
 
     if (this.playerJob.chatFilename) {
       try {
@@ -735,16 +735,18 @@ export class PlayerController {
     // On first call, set cursor to -5001 so messages within 5s before stream
     // start (offsetMs >= -5000) deploy instantly. Older pre-stream messages
     // are permanently skipped from the overlay (still visible in sidebar).
-    const firstSpawn = this.nicoLastSpawnMs < 0;
-    if (firstSpawn) {
-      this.nicoLastSpawnMs = -5001;
-    }
-
     const messages = this.playerChatMessages;
     if (!messages.length) return;
 
     // Use offset-adjusted time consistently for binary search, loop, and cursor
     const effectiveMs = currentMs + this.playerCustomOffsetMs;
+
+    // First-spawn: deploy pre-stream messages within 5s of effective start.
+    // Use null sentinel so negative effectiveMs doesn't re-trigger every frame.
+    const firstSpawn = this.nicoLastSpawnMs === null;
+    if (firstSpawn) {
+      this.nicoLastSpawnMs = effectiveMs - 5001;
+    }
 
     // Binary search for start of window (nicoLastSpawnMs, effectiveMs]
     let lo = 0;
