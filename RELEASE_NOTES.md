@@ -1,3 +1,3 @@
-### Features
+### Bug Fixes
 
-- **Player custom chat offset** — the player sidebar header now has an input field where you can specify a custom offset (in seconds) to shift chat timing forward or backward; non-zero values are saved per-video in a new `player_prefs` database table and restored automatically on replay
+- **Player nico overlay spam with negative chat offset** — fixed nico overlay repeatedly spawning the same messages when using a negative custom chat offset; root cause was the first-spawn sentinel colliding with negative offset-adjusted timestamps
