@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 // createSchema defines the full schema for new databases. It includes all tables
 // and indexes from the start. The incremental migrations below handle upgrading
@@ -131,6 +131,11 @@ CREATE INDEX IF NOT EXISTS idx_gaps_job_id ON gaps(job_id);
 CREATE INDEX IF NOT EXISTS idx_trims_job_id ON trims(job_id);
 CREATE INDEX IF NOT EXISTS idx_segments_job_id ON segments(job_id);
 CREATE INDEX IF NOT EXISTS idx_client_tokens_prefix ON client_tokens(token_prefix);
+
+CREATE TABLE IF NOT EXISTS player_prefs (
+    video_id TEXT PRIMARY KEY,
+    chat_offset REAL NOT NULL DEFAULT 0
+);
 `
 
 func (db *Database) migrate() error {
@@ -303,6 +308,20 @@ func (db *Database) migrate() error {
 		}
 
 		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 6)
+		if err != nil {
+			return err
+		}
+	}
+
+	if version < 7 {
+		if _, err := db.db.ExecContext(db.getCtx(), `CREATE TABLE IF NOT EXISTS player_prefs (
+			video_id TEXT PRIMARY KEY,
+			chat_offset REAL NOT NULL DEFAULT 0
+		)`); err != nil {
+			return err
+		}
+
+		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 7)
 		if err != nil {
 			return err
 		}
