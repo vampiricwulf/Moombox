@@ -26,9 +26,7 @@ func FormatFileSize(bytes int64) string {
 
 // FormatDurationHuman formats a time.Duration into a human-readable string (e.g. "1h 23m", "5m 30s").
 func FormatDurationHuman(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
+	d = max(d, 0)
 	totalSeconds := int(d.Seconds())
 	hours := totalSeconds / 3600
 	minutes := (totalSeconds % 3600) / 60

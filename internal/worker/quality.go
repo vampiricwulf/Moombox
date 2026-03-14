@@ -48,9 +48,7 @@ func ParseQualityPreference(pref string) (height int, fps int) {
 	}
 
 	// Try "NNNpNN" format
-	if idx := strings.Index(pref, "p"); idx > 0 {
-		heightStr := pref[:idx]
-		fpsStr := pref[idx+1:]
+	if heightStr, fpsStr, ok := strings.Cut(pref, "p"); ok && heightStr != "" {
 		h, err := strconv.Atoi(heightStr)
 		if err == nil && h > 0 {
 			height = h

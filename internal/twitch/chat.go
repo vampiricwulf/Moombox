@@ -244,10 +244,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		if reconnectAttempts > 0 {
 			// Exponential backoff: 1000 * 2^attempts, capped at 30s (matches TypeScript)
 			shift := min(reconnectAttempts, 15) // cap shift to prevent overflow
-			delayMs := 1000 * (1 << shift)
-			if delayMs > 30000 {
-				delayMs = 30000
-			}
+			delayMs := min(1000*(1<<shift), 30000)
 			delay := time.Duration(delayMs) * time.Millisecond
 			cd.logger.Info("reconnecting to twitch IRC",
 				"channel", cd.channelLogin, "attempt", reconnectAttempts, "max", maxReconnects, "delay", delay)

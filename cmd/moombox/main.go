@@ -619,7 +619,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		// Fire-and-forget usage update
 		go func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("client token usage update panic", "panic", r)
+				}
+			}()
 			db.UpdateClientTokenUsage(ct.ID, ip)
 		}()
 		return true, sessionToken
@@ -646,7 +650,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			if ct, err := db.GetClientTokenByPrefix(prefix); err == nil && ct != nil {
 				if web.VerifyToken(cookie.Value, ct.TokenHash) {
 					go func() {
-						defer func() { recover() }()
+						defer func() {
+							if r := recover(); r != nil {
+								log.Error("client token usage update panic", "panic", r)
+							}
+						}()
 						db.UpdateClientTokenUsage(ct.ID, extractWSIP(r))
 					}()
 					return true

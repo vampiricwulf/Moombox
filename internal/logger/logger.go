@@ -231,12 +231,10 @@ func formatLogLine(level slog.Level, msg string, args ...any) string {
 	sb.WriteString(msg)
 
 	for i := 0; i < len(args)-1; i += 2 {
-		sb.WriteString(" ")
-		sb.WriteString(fmt.Sprintf("%v=%v", args[i], args[i+1]))
+		fmt.Fprintf(&sb, " %v=%v", args[i], args[i+1])
 	}
 	if len(args)%2 == 1 {
-		sb.WriteString(" ")
-		sb.WriteString(fmt.Sprintf("%v=!MISSING", args[len(args)-1]))
+		fmt.Fprintf(&sb, " %v=!MISSING", args[len(args)-1])
 	}
 
 	return sb.String()
@@ -373,12 +371,12 @@ func (l *Logger) GetRecentLines() []string {
 	result := make([]string, 0, l.ringCount)
 	if l.ringCount < l.ringSize {
 		// Buffer not full yet
-		for i := 0; i < l.ringCount; i++ {
+		for i := range l.ringCount {
 			result = append(result, l.ringBuffer[i])
 		}
 	} else {
 		// Buffer is full, start from ringIndex (oldest)
-		for i := 0; i < l.ringSize; i++ {
+		for i := range l.ringSize {
 			idx := (l.ringIndex + i) % l.ringSize
 			result = append(result, l.ringBuffer[idx])
 		}

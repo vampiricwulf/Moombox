@@ -260,38 +260,21 @@ func (vcd *VodChatDownloader) flush() {
 
 	if isFirstFlush {
 		// First flush: write complete file
-		chatData := TwitchChatData{
-			Platform:           "twitch",
-			ChannelLogin:       vcd.channelLogin,
-			ChannelDisplayName: vcd.channelName,
-			StreamID:           vcd.vodID,
-			DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
-			MessageCount:       int(vcd.totalCount.Load()),
-			Messages:           vcd.messages,
-		}
-
-		data, err := json.MarshalIndent(chatData, "", "  ")
-		if err != nil {
-			vcd.logger.Error("marshal vod chat data", "err", err)
-			return
-		}
-		data = utils.PadMessageCountJSON(data)
-
-		tmpPath := vcd.outputPath + ".tmp"
-		if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		if err := vcd.writeFullFile(); err != nil {
 			vcd.logger.Error("write vod chat file", "err", err)
-			return
-		}
-		if err := os.Rename(tmpPath, vcd.outputPath); err != nil {
-			vcd.logger.Error("rename vod chat file", "err", err)
 			return
 		}
 	} else {
 		// Subsequent flushes: append new messages to existing file
-		if err := vcd.appendToFile(vcd.messages); err != nil {
+		count := int(vcd.totalCount.Load())
+		if err := appendChatMessages(vcd.outputPath, vcd.messages, vcd.logger); err != nil {
 			vcd.logger.Error("append vod chat file", "err", err)
 			// Fallback: full rewrite
-			vcd.writeFullFile()
+			if err2 := vcd.writeFullFile(); err2 != nil {
+				vcd.logger.Error("fallback full write failed", "err", err2)
+			}
+		} else {
+			updateChatFileHeaderFields(vcd.outputPath, count, vcd.logger)
 		}
 	}
 
@@ -299,171 +282,8 @@ func (vcd *VodChatDownloader) flush() {
 	vcd.messages = vcd.messages[:0]
 }
 
-// appendToFile appends new messages to the existing JSON file incrementally.
-func (vcd *VodChatDownloader) appendToFile(msgs []TwitchChatMessage) error {
-	if len(msgs) == 0 {
-		return nil
-	}
-
-	info, err := os.Stat(vcd.outputPath)
-	if err != nil || info.Size() < 10 {
-		return fmt.Errorf("file missing or too small")
-	}
-
-	f, err := os.OpenFile(vcd.outputPath, os.O_RDWR, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	fileSize := info.Size()
-
-	// Read last 10 bytes to find ']'
-	tailSize := int64(10)
-	if tailSize > fileSize {
-		tailSize = fileSize
-	}
-	tailBuf := make([]byte, tailSize)
-	if _, err := f.ReadAt(tailBuf, fileSize-tailSize); err != nil {
-		return err
-	}
-
-	tail := string(tailBuf)
-	bracketOffset := -1
-	for i := len(tail) - 1; i >= 0; i-- {
-		if tail[i] == ']' {
-			bracketOffset = i
-			break
-		}
-	}
-	if bracketOffset == -1 {
-		return fmt.Errorf("no closing bracket found")
-	}
-
-	bracketBytePos := fileSize - tailSize + int64(bracketOffset)
-
-	// Check if there are existing messages
-	hasExisting := false
-	if bracketBytePos > 5 {
-		checkSize := int64(5)
-		if checkSize > bracketBytePos {
-			checkSize = bracketBytePos
-		}
-		checkBuf := make([]byte, checkSize)
-		if _, err := f.ReadAt(checkBuf, bracketBytePos-checkSize); err != nil {
-			return fmt.Errorf("check existing messages: %w", err)
-		}
-		for i := len(checkBuf) - 1; i >= 0; i-- {
-			if checkBuf[i] == '}' {
-				hasExisting = true
-				break
-			} else if checkBuf[i] != ' ' && checkBuf[i] != '\n' && checkBuf[i] != '\r' && checkBuf[i] != '\t' {
-				break
-			}
-		}
-	}
-
-	var sb strings.Builder
-	if hasExisting {
-		sb.WriteString(",\n")
-	}
-	for i, msg := range msgs {
-		msgBytes, err := json.Marshal(msg)
-		if err != nil {
-			vcd.logger.Warn("marshal vod chat message failed", "err", err, "id", msg.ID)
-			continue
-		}
-		sb.WriteString("    ")
-		sb.Write(msgBytes)
-		if i < len(msgs)-1 {
-			sb.WriteString(",\n")
-		}
-	}
-	sb.WriteString("\n  ]\n}")
-
-	if err := f.Truncate(bracketBytePos); err != nil {
-		return err
-	}
-	if _, err := f.WriteAt([]byte(sb.String()), bracketBytePos); err != nil {
-		return fmt.Errorf("write appended messages: %w", err)
-	}
-
-	// Update messageCount and downloadedAt in file header (matches TS appendToFile)
-	vcd.updateVodChatFileHeader()
-
-	return nil
-}
-
-// updateVodChatFileHeader updates messageCount and downloadedAt in the JSON header without rewriting.
-func (vcd *VodChatDownloader) updateVodChatFileHeader() {
-	info, err := os.Stat(vcd.outputPath)
-	if err != nil || info.Size() < 50 {
-		return
-	}
-
-	f, err := os.OpenFile(vcd.outputPath, os.O_RDWR, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	headerSize := int64(1024)
-	if headerSize > info.Size() {
-		headerSize = info.Size()
-	}
-
-	headerBuf := make([]byte, headerSize)
-	n, err := f.ReadAt(headerBuf, 0)
-	if err != nil && n == 0 {
-		return
-	}
-	header := string(headerBuf[:n])
-
-	// Replace messageCount value (padded to fixed width)
-	header = utils.ReplaceMessageCount(header, int(vcd.totalCount.Load()))
-
-	// Replace downloadedAt value (matches TS appendToFile header updates)
-	utils.ReplaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
-
-	// With padded messageCount, the header size should be constant.
-	// Fallback handles legacy files written before padding was added.
-	updatedBytes := []byte(header)
-	if len(updatedBytes) < n {
-		vcd.logger.Warn("chat header shrank during update, file may have stale bytes",
-			"expected", n, "actual", len(updatedBytes))
-	}
-	if len(updatedBytes) == n {
-		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
-			vcd.logger.Warn("update vod chat header: write", "err", err)
-		}
-	} else if len(updatedBytes) > n {
-		// Header grew — must read rest BEFORE writing header, since the new
-		// header is longer and would overwrite the first byte(s) of the rest data.
-		restSize := info.Size() - int64(n)
-		var restBuf []byte
-		if restSize > 0 {
-			restBuf = make([]byte, restSize)
-			nRest, _ := f.ReadAt(restBuf, int64(n))
-			restBuf = restBuf[:nRest]
-		}
-		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
-			vcd.logger.Warn("update vod chat header: write expanded", "err", err)
-			return
-		}
-		if len(restBuf) > 0 {
-			if _, err := f.WriteAt(restBuf, int64(len(updatedBytes))); err != nil {
-				vcd.logger.Warn("update vod chat header: write rest", "err", err)
-				return
-			}
-		}
-		if err := f.Truncate(int64(len(updatedBytes)) + restSize); err != nil {
-			vcd.logger.Warn("update vod chat header: truncate", "err", err)
-		}
-	}
-}
-
-// writeFullFile writes the complete file as fallback (e.g., after append failure).
-func (vcd *VodChatDownloader) writeFullFile() {
+// writeFullFile writes the complete file atomically using the shared helper.
+func (vcd *VodChatDownloader) writeFullFile() error {
 	chatData := TwitchChatData{
 		Platform:           "twitch",
 		ChannelLogin:       vcd.channelLogin,
@@ -473,22 +293,7 @@ func (vcd *VodChatDownloader) writeFullFile() {
 		MessageCount:       int(vcd.totalCount.Load()),
 		Messages:           vcd.messages,
 	}
-
-	data, err := json.MarshalIndent(chatData, "", "  ")
-	if err != nil {
-		vcd.logger.Error("marshal vod chat data for full write", "err", err)
-		return
-	}
-	data = utils.PadMessageCountJSON(data)
-
-	tmpPath := vcd.outputPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		vcd.logger.Error("write vod chat tmp file", "err", err)
-		return
-	}
-	if err := os.Rename(tmpPath, vcd.outputPath); err != nil {
-		vcd.logger.Error("rename vod chat file", "err", err)
-	}
+	return writeChatFileAtomic(vcd.outputPath, &chatData)
 }
 
 // reportProgress calls OnProgress and logs percentage if vodDuration is known.
@@ -498,10 +303,7 @@ func (vcd *VodChatDownloader) reportProgress(contentOffset float64) {
 		vcd.OnProgress(count)
 	}
 	if vcd.vodDuration > 0 {
-		pct := contentOffset / float64(vcd.vodDuration) * 100
-		if pct > 100 {
-			pct = 100
-		}
+		pct := min(contentOffset/float64(vcd.vodDuration)*100, 100)
 		vcd.logger.Info("VOD chat progress",
 			"messages", count,
 			"percent", fmt.Sprintf("%.1f%%", pct),

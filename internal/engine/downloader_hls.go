@@ -200,7 +200,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	var wg sync.WaitGroup
 
 	// Spawn fixed worker pool
-	for w := 0; w < ParallelDownloads; w++ {
+	for range ParallelDownloads {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

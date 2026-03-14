@@ -72,10 +72,7 @@ func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	// assembling with styled type badge — truncateString uses runewidth
 	// which miscounts ANSI escape sequences).
 	fixedW := 2 + 9 + 1 + len(suffix) // prefix + typeTag + space + suffix (all ASCII)
-	pathW := m.Width() - fixedW
-	if pathW < 5 {
-		pathW = 5
-	}
+	pathW := max(m.Width()-fixedW, 5)
 	relPath := truncateString(f.RelPath, pathW)
 
 	var style lipgloss.Style
@@ -172,18 +169,9 @@ func (m *FilesDialogModel) IsVisible() bool {
 func (m *FilesDialogModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	boxW := min(80, w-4)
-	boxH := min(24, h-4)
-	if boxW < 40 {
-		boxW = 40
-	}
-	if boxH < 10 {
-		boxH = 10
-	}
-	listH := boxH - 6
-	if listH < 1 {
-		listH = 1
-	}
+	boxW := max(min(80, w-4), 40)
+	boxH := max(min(24, h-4), 10)
+	listH := max(boxH-6, 1)
 	m.list.SetSize(boxW-2, listH)
 }
 
@@ -306,14 +294,8 @@ func (m *FilesDialogModel) View() string {
 		return ""
 	}
 
-	boxW := min(80, m.width-4)
-	boxH := min(24, m.height-4)
-	if boxW < 40 {
-		boxW = 40
-	}
-	if boxH < 10 {
-		boxH = 10
-	}
+	boxW := max(min(80, m.width-4), 40)
+	boxH := max(min(24, m.height-4), 10)
 
 	contentW := boxW - 2
 	fileCount := len(m.list.Items())

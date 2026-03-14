@@ -121,13 +121,7 @@ func cycleFieldOption(vals map[string]string, key string, options []string, dire
 // dialogBox computes standard dialog box and content widths from a maximum
 // width and the current screen width.
 func dialogBox(maxW, screenW int) (boxW, contentW int) {
-	boxW = min(maxW, screenW-4)
-	if boxW < 40 {
-		boxW = 40
-	}
-	if boxW > screenW {
-		boxW = screenW
-	}
+	boxW = min(max(min(maxW, screenW-4), 40), screenW)
 	contentW = max(0, boxW-4)
 	return
 }

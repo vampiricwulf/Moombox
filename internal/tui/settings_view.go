@@ -21,18 +21,9 @@ func (m *SettingsModel) View() string {
 		return m.renderRestartOverlay()
 	}
 
-	boxW := m.width - 4
-	if boxW < 40 {
-		boxW = 40
-	}
-	if boxW > m.width {
-		boxW = m.width
-	}
+	boxW := min(max(m.width-4, 40), m.width)
 	innerW := boxW - 4
-	h := m.height - 2
-	if h < 10 {
-		h = 10
-	}
+	h := max(m.height-2, 10)
 
 	var content strings.Builder
 
@@ -84,9 +75,7 @@ func (m *SettingsModel) View() string {
 	hintLeft := DimStyle.Render("Esc: Close")
 	hintRight := m.renderHintText()
 	hintGap := innerW - runewidth.StringWidth("Esc: Close") - runewidth.StringWidth(hintRight)
-	if hintGap < 1 {
-		hintGap = 1
-	}
+	hintGap = max(hintGap, 1)
 	content.WriteString(hintLeft + strings.Repeat(" ", hintGap) + DimStyle.Render(hintRight))
 
 	box := lipgloss.NewStyle().
@@ -161,10 +150,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 	padWidth := maxLabel + 2
 
 	var lines []string
-	end := m.scrollOffset + maxH
-	if end > len(sec.fields) {
-		end = len(sec.fields)
-	}
+	end := min(m.scrollOffset+maxH, len(sec.fields))
 
 	for i := m.scrollOffset; i < end; i++ {
 		fd := sec.fields[i]
@@ -197,10 +183,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 			if isChanged || needsRestart {
 				indicatorW = 2 // " *"
 			}
-			valueMaxW := w - len(prefix) - padWidth - indicatorW
-			if valueMaxW < 5 {
-				valueMaxW = 5
-			}
+			valueMaxW := max(w-len(prefix)-padWidth-indicatorW, 5)
 			if selected {
 				m.textInput.Width = valueMaxW
 				value = m.textInput.View()
@@ -404,10 +387,7 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		case fieldCycle:
 			value = renderCycleOptions(field.options, val, isFocused)
 		default:
-			valueMaxW := w - runewidth.StringWidth(prefix) - padW - 2
-			if valueMaxW < 5 {
-				valueMaxW = 5
-			}
+			valueMaxW := max(w-runewidth.StringWidth(prefix)-padW-2, 5)
 			if isFocused {
 				m.textInput.Width = valueMaxW
 				value = m.textInput.View()
@@ -496,10 +476,7 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 	if urlFocused {
 		urlLabelStyle = lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
 	}
-	urlMaxW := w - runewidth.StringWidth(urlPrefix) - 16 - 2
-	if urlMaxW < 10 {
-		urlMaxW = 10
-	}
+	urlMaxW := max(w-runewidth.StringWidth(urlPrefix)-16-2, 10)
 	var urlVal string
 	if urlFocused {
 		m.textInput.Width = urlMaxW
@@ -668,10 +645,7 @@ func (m *SettingsModel) renderSecuritySet(w int) string {
 
 		var val string
 		if isFocused {
-			pwMaxW := w - len(prefix) - padW - 2
-			if pwMaxW < 10 {
-				pwMaxW = 10
-			}
+			pwMaxW := max(w-len(prefix)-padW-2, 10)
 			m.textInput.Width = pwMaxW
 			val = m.textInput.View()
 		} else {
@@ -713,10 +687,7 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 
 	// Password field
 	labelStyle := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
-	pwMaxW := w - 2 - 20 - 2
-	if pwMaxW < 10 {
-		pwMaxW = 10
-	}
+	pwMaxW := max(w-2-20-2, 10)
 	m.textInput.Width = pwMaxW
 	lines = append(lines, "> "+labelStyle.Render(padRight("Current password", 20))+m.textInput.View())
 

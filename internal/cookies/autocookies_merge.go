@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -109,11 +110,11 @@ func mergeCookieFiles(existing, newCookies string) string {
 	parseCookies := func(content string) ([]cookieKey, map[cookieKey]string) {
 		keys := make([]cookieKey, 0)
 		m := make(map[cookieKey]string)
-		for _, line := range strings.Split(content, "\n") {
+		for line := range strings.SplitSeq(content, "\n") {
 			trimmed := line
 			// Handle #HttpOnly_ prefix
-			if strings.HasPrefix(trimmed, "#HttpOnly_") {
-				trimmed = strings.TrimPrefix(trimmed, "#HttpOnly_")
+			if after, ok := strings.CutPrefix(trimmed, "#HttpOnly_"); ok {
+				trimmed = after
 			} else if strings.HasPrefix(trimmed, "#") || strings.TrimSpace(trimmed) == "" {
 				continue
 			}
@@ -136,10 +137,8 @@ func mergeCookieFiles(existing, newCookies string) string {
 	_, newMap := parseCookies(newCookies)
 
 	// Start with existing cookies, overwrite with new ones
-	merged := make(map[cookieKey]string)
-	for k, v := range existingMap {
-		merged[k] = v
-	}
+	merged := make(map[cookieKey]string, len(existingMap))
+	maps.Copy(merged, existingMap)
 	allKeys := make([]cookieKey, 0, len(existingKeys))
 	allKeys = append(allKeys, existingKeys...)
 

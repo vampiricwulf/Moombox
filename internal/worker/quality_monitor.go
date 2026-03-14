@@ -31,6 +31,11 @@ func NewQualityMonitor(interval time.Duration, current QualityInfo, probeFn func
 // When a change is detected, the new quality is sent to changeCh.
 // Probe errors are logged and skipped (never trigger false positives).
 func (m *QualityMonitor) Run(ctx context.Context, changeCh chan<- QualityInfo) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("panic in quality monitor", "panic", r)
+		}
+	}()
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 

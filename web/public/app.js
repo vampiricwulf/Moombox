@@ -1032,9 +1032,9 @@ class MoomboxApp {
     // Update quick actions
     const actionsContainer = card.querySelector(".job-quick-actions");
     if (actionsContainer) {
-      const canCancel = ["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"].includes(job.status);
-      const canRetry = ["Error", "Cancelled", "COOKIES?"].includes(job.status);
-      const canDelete = ["Finished", "Error", "Cancelled", "COOKIES?"].includes(job.status);
+      const canCancel = CANCEL_STATUSES.has(job.status);
+      const canRetry = RETRY_STATUSES.has(job.status);
+      const canDelete = DELETE_STATUSES.has(job.status);
 
       const safeId = this.escapeHtml(job.id);
       let actionsHtml = "";

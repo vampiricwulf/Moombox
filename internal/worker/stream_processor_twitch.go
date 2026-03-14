@@ -349,8 +349,7 @@ func extractTwitchLoginFromJob(job *database.Job) string {
 
 	// Try videoID (tw_manual_{login}_{timestamp}, tw_{login}, or tw_v{vodId})
 	id := job.VideoID
-	if strings.HasPrefix(id, "tw_manual_") {
-		remainder := strings.TrimPrefix(id, "tw_manual_")
+	if remainder, ok := strings.CutPrefix(id, "tw_manual_"); ok {
 		if idx := strings.LastIndex(remainder, "_"); idx > 0 {
 			return strings.ToLower(remainder[:idx])
 		}
@@ -359,8 +358,8 @@ func extractTwitchLoginFromJob(job *database.Job) string {
 	if strings.HasPrefix(id, "tw_v") {
 		return "" // VOD ID, not a login
 	}
-	if strings.HasPrefix(id, "tw_") {
-		return strings.TrimPrefix(id, "tw_")
+	if after, ok := strings.CutPrefix(id, "tw_"); ok {
+		return after
 	}
 
 	return ""

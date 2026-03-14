@@ -133,12 +133,11 @@ func (cd *ChatDownloader) parseLine(line string) *TwitchChatMessage {
 	rest := line
 
 	if strings.HasPrefix(line, "@") {
-		idx := strings.Index(line, " ")
-		if idx < 0 {
+		var ok bool
+		tagsStr, rest, ok = strings.Cut(line[1:], " ")
+		if !ok {
 			return nil
 		}
-		tagsStr = line[1:idx]
-		rest = line[idx+1:]
 	}
 
 	tags := parseIRCTags(tagsStr)
@@ -182,9 +181,7 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 	var messageText string
 	if len(parts) >= 4 {
 		messageText = parts[3]
-		if strings.HasPrefix(messageText, ":") {
-			messageText = messageText[1:]
-		}
+		messageText = strings.TrimPrefix(messageText, ":")
 	}
 
 	// Author name fallback chain
@@ -202,10 +199,7 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 	}
 	var offsetMs int64
 	if baseMs > 0 {
-		offsetMs = tmiSentTs - baseMs
-		if offsetMs < 0 {
-			offsetMs = 0
-		}
+		offsetMs = max(tmiSentTs-baseMs, 0)
 	}
 
 	msg := &TwitchChatMessage{
@@ -257,9 +251,7 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 	var messageText string
 	if len(parts) >= 4 {
 		messageText = parts[3]
-		if strings.HasPrefix(messageText, ":") {
-			messageText = messageText[1:]
-		}
+		messageText = strings.TrimPrefix(messageText, ":")
 	}
 	// If no trailing message, fall back to system message
 	if messageText == "" {
@@ -281,10 +273,7 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 	}
 	var offsetMs int64
 	if baseMs > 0 {
-		offsetMs = tmiSentTs - baseMs
-		if offsetMs < 0 {
-			offsetMs = 0
-		}
+		offsetMs = max(tmiSentTs-baseMs, 0)
 	}
 
 	msg := &TwitchChatMessage{
@@ -322,9 +311,10 @@ func parseIRCTags(s string) map[string]string {
 	if s == "" {
 		return tags
 	}
-	for _, pair := range strings.Split(s, ";") {
-		if idx := strings.IndexByte(pair, '='); idx >= 0 {
-			tags[pair[:idx]] = pair[idx+1:]
+	for pair := range strings.SplitSeq(s, ";") {
+		key, value, ok := strings.Cut(pair, "=")
+		if ok {
+			tags[key] = value
 		} else {
 			tags[pair] = ""
 		}
@@ -349,21 +339,19 @@ func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 	var refs []TwitchEmoteRef
 	msgRunes := []rune(message)
 
-	for _, group := range strings.Split(emotesStr, "/") {
-		colonIdx := strings.IndexByte(group, ':')
-		if colonIdx < 0 {
+	for group := range strings.SplitSeq(emotesStr, "/") {
+		emoteID, positions, ok := strings.Cut(group, ":")
+		if !ok {
 			continue
 		}
-		emoteID := group[:colonIdx]
-		positions := group[colonIdx+1:]
 
-		for _, pos := range strings.Split(positions, ",") {
-			dashIdx := strings.IndexByte(pos, '-')
-			if dashIdx < 0 {
+		for pos := range strings.SplitSeq(positions, ",") {
+			startStr, endStr, ok := strings.Cut(pos, "-")
+			if !ok {
 				continue
 			}
-			start, err1 := strconv.Atoi(pos[:dashIdx])
-			end, err2 := strconv.Atoi(pos[dashIdx+1:])
+			start, err1 := strconv.Atoi(startStr)
+			end, err2 := strconv.Atoi(endStr)
 			if err1 != nil || err2 != nil {
 				continue
 			}

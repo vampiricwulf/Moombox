@@ -135,14 +135,7 @@ func (m *FFmpegCheckModel) SetSize(w, h int) {
 	if m.mode == ffmpegReview {
 		_, contentW := dialogBox(60, w)
 		m.reviewViewport.Width = contentW - 4
-		vpH := h - 20
-		if vpH < 3 {
-			vpH = 3
-		}
-		if vpH > 6 {
-			vpH = 6
-		}
-		m.reviewViewport.Height = vpH
+		m.reviewViewport.Height = max(min(h-20, 6), 3)
 	}
 }
 
@@ -386,9 +379,7 @@ func (m *FFmpegCheckModel) ShowReview(script, token string) {
 		_, contentW := dialogBox(60, m.width)
 		vpW = contentW - 4
 	}
-	if vpW < 0 {
-		vpW = 0
-	}
+	vpW = max(vpW, 0)
 	m.reviewViewport = viewport.New(vpW, 6)
 	m.reviewViewport.SetContent(script)
 }
@@ -575,7 +566,7 @@ func (m *FFmpegCheckModel) View() string {
 		// Scrollable script display via viewport
 		m.reviewViewport.Width = contentW - 4
 		scriptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-		for _, sl := range strings.Split(m.reviewViewport.View(), "\n") {
+		for sl := range strings.SplitSeq(m.reviewViewport.View(), "\n") {
 			lines = append(lines, scriptStyle.Render("  "+sl))
 		}
 		if m.reviewViewport.ScrollPercent() < 1.0 {
@@ -664,10 +655,7 @@ func (m *FFmpegCheckModel) View() string {
 
 	content := strings.Join(lines, "\n")
 
-	h := m.height - 2
-	if h < 10 {
-		h = 10
-	}
+	h := max(m.height-2, 10)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

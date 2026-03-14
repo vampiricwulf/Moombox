@@ -158,14 +158,8 @@ func (m *HelpModel) buildContent() {
 		}
 	}
 
-	w := m.width - 4
-	h := m.height - 4
-	if w < 20 {
-		w = 20
-	}
-	if h < 5 {
-		h = 5
-	}
+	w := max(m.width-4, 20)
+	h := max(m.height-4, 5)
 
 	m.viewport.Width = w
 	m.viewport.Height = h - 1 // -1 for header line
@@ -179,14 +173,8 @@ func (m *HelpModel) View() string {
 		return ""
 	}
 
-	w := m.width - 4
-	h := m.height - 4
-	if w < 20 {
-		w = 20
-	}
-	if h < 5 {
-		h = 5
-	}
+	w := max(m.width-4, 20)
+	h := max(m.height-4, 5)
 
 	// Header with scroll percentage
 	leftPart := TitleStyle.Render("Help")

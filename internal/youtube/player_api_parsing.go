@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]interface{}, playerURL string, ytcfg *YtcfgData) (*VideoInfo, error) {
-	videoDetails, _ := data["videoDetails"].(map[string]interface{})
-	streamingData, _ := data["streamingData"].(map[string]interface{})
-	playabilityStatus, _ := data["playabilityStatus"].(map[string]interface{})
+func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any, playerURL string, ytcfg *YtcfgData) (*VideoInfo, error) {
+	videoDetails, _ := data["videoDetails"].(map[string]any)
+	streamingData, _ := data["streamingData"].(map[string]any)
+	playabilityStatus, _ := data["playabilityStatus"].(map[string]any)
 	microformat, _ := getNestedMap(data, "microformat", "playerMicroformatRenderer")
 
 	// Parse playability
@@ -56,7 +56,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]int
 		thumbnailURL = ytcfg.ThumbnailURL
 	}
 	if thumbs, ok := getNestedSlice(videoDetails, "thumbnail", "thumbnails"); ok && len(thumbs) > 0 {
-		if last, ok := thumbs[len(thumbs)-1].(map[string]interface{}); ok {
+		if last, ok := thumbs[len(thumbs)-1].(map[string]any); ok {
 			if u, ok := last["url"].(string); ok {
 				thumbnailURL = u
 			}
@@ -103,7 +103,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]int
 }
 
 // extractScheduledStartTime tries multiple sources for the scheduled start time.
-func extractScheduledStartTime(microformat, playabilityStatus map[string]interface{}) string {
+func extractScheduledStartTime(microformat, playabilityStatus map[string]any) string {
 	// liveBroadcastDetails.startTimestamp
 	if lbd, ok := getNestedMap(microformat, "liveBroadcastDetails"); ok {
 		if ts := getStr(lbd, "startTimestamp"); ts != "" {
@@ -131,19 +131,19 @@ func extractScheduledStartTime(microformat, playabilityStatus map[string]interfa
 
 // parseFormatsWithCipher parses formats from streaming data, decrypting signatures and
 // n-parameters using the cipher solver when available.
-func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData map[string]interface{}, playerURL string) []Format {
+func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData map[string]any, playerURL string) []Format {
 	if streamingData == nil {
 		return nil
 	}
 
 	var formats []Format
 	for _, key := range []string{"formats", "adaptiveFormats"} {
-		arr, ok := streamingData[key].([]interface{})
+		arr, ok := streamingData[key].([]any)
 		if !ok {
 			continue
 		}
 		for _, item := range arr {
-			f, ok := item.(map[string]interface{})
+			f, ok := item.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -319,7 +319,7 @@ func (p *PlayerAPI) DecryptNParamInUrl(ctx context.Context, rawURL, playerURL st
 	return p.decryptNParam(ctx, rawURL, playerURL)
 }
 
-func parsePlayabilityStatus(status map[string]interface{}) (PlayabilityError, string) {
+func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 	if status == nil {
 		return PlayabilityUnknown, ""
 	}
@@ -327,7 +327,7 @@ func parsePlayabilityStatus(status map[string]interface{}) (PlayabilityError, st
 	statusCode := getStr(status, "status")
 	reason := getStr(status, "reason")
 	if reason == "" {
-		if msgs, ok := status["messages"].([]interface{}); ok && len(msgs) > 0 {
+		if msgs, ok := status["messages"].([]any); ok && len(msgs) > 0 {
 			reason, _ = msgs[0].(string)
 		}
 	}
@@ -377,14 +377,14 @@ func parsePlayabilityStatus(status map[string]interface{}) (PlayabilityError, st
 	}
 }
 
-func classifyStream(videoDetails, playabilityStatus, microformat map[string]interface{}, hasFormats bool) (StreamStatus, bool, bool, bool) {
+func classifyStream(videoDetails, playabilityStatus, microformat map[string]any, hasFormats bool) (StreamStatus, bool, bool, bool) {
 	isLiveContent, _ := videoDetails["isLiveContent"].(bool)
 	isLiveNow, _ := videoDetails["isLive"].(bool)
 	isUpcomingVD, _ := videoDetails["isUpcoming"].(bool)
 
-	var lbd map[string]interface{}
+	var lbd map[string]any
 	if microformat != nil {
-		lbd, _ = microformat["liveBroadcastDetails"].(map[string]interface{})
+		lbd, _ = microformat["liveBroadcastDetails"].(map[string]any)
 	}
 
 	if lbd != nil {
@@ -467,7 +467,7 @@ func deduplicateFormats(pool []Format) []Format {
 
 // --- JSON helper functions ---
 
-func getStr(m map[string]interface{}, key string) string {
+func getStr(m map[string]any, key string) string {
 	if m == nil {
 		return ""
 	}
@@ -482,7 +482,7 @@ func getStr(m map[string]interface{}, key string) string {
 	return s
 }
 
-func getInt(m map[string]interface{}, key string) int {
+func getInt(m map[string]any, key string) int {
 	if m == nil {
 		return 0
 	}
@@ -502,13 +502,13 @@ func getInt(m map[string]interface{}, key string) int {
 	}
 }
 
-func getNestedMap(m map[string]interface{}, keys ...string) (map[string]interface{}, bool) {
+func getNestedMap(m map[string]any, keys ...string) (map[string]any, bool) {
 	current := m
 	for _, key := range keys {
 		if current == nil {
 			return nil, false
 		}
-		next, ok := current[key].(map[string]interface{})
+		next, ok := current[key].(map[string]any)
 		if !ok {
 			return nil, false
 		}
@@ -517,30 +517,30 @@ func getNestedMap(m map[string]interface{}, keys ...string) (map[string]interfac
 	return current, true
 }
 
-func getNestedSlice(m map[string]interface{}, keys ...string) ([]interface{}, bool) {
+func getNestedSlice(m map[string]any, keys ...string) ([]any, bool) {
 	if len(keys) == 0 {
 		return nil, false
 	}
 	// Navigate to parent
 	parent := m
 	for _, key := range keys[:len(keys)-1] {
-		next, ok := parent[key].(map[string]interface{})
+		next, ok := parent[key].(map[string]any)
 		if !ok {
 			return nil, false
 		}
 		parent = next
 	}
-	arr, ok := parent[keys[len(keys)-1]].([]interface{})
+	arr, ok := parent[keys[len(keys)-1]].([]any)
 	return arr, ok
 }
 
-func getDeepStr(m map[string]interface{}, keys ...string) string {
+func getDeepStr(m map[string]any, keys ...string) string {
 	if len(keys) == 0 {
 		return ""
 	}
 	parent := m
 	for _, key := range keys[:len(keys)-1] {
-		next, ok := parent[key].(map[string]interface{})
+		next, ok := parent[key].(map[string]any)
 		if !ok {
 			return ""
 		}

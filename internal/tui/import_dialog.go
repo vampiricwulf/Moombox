@@ -204,17 +204,8 @@ func (m *ImportDialogModel) View() string {
 		return ""
 	}
 
-	boxW := min(70, m.width-4)
-	boxH := min(m.height-4, 30)
-	if boxW < 40 {
-		boxW = 40
-	}
-	if boxH < 10 {
-		boxH = 10
-	}
-	if boxW > m.width {
-		boxW = m.width
-	}
+	boxW := min(max(min(70, m.width-4), 40), m.width)
+	boxH := max(min(m.height-4, 30), 10)
 	contentW := boxW - 2
 
 	var content strings.Builder

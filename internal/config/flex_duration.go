@@ -32,7 +32,7 @@ var durationMultipliers = map[string]float64{
 // The unit parameter specifies what the numeric value represents ("minutes" or "days").
 // The result is always stored as the numeric value in its natural unit.
 // Negative values are rejected and the default is used instead.
-func ParseFlexDuration(value interface{}, unit string, defaultValue float64) FlexDuration {
+func ParseFlexDuration(value any, unit string, defaultValue float64) FlexDuration {
 	var result FlexDuration
 	switch v := value.(type) {
 	case int64:
@@ -113,7 +113,7 @@ func (d FlexDuration) Days() float64 {
 // using a best-effort heuristic: if the suffix is d/w, store as days; else as minutes.
 // Also handles map input from TOML tables (e.g. when a previously-saved config wrote
 // FlexDuration as {Value = 5.0}).
-func (d *FlexDuration) UnmarshalTOML(data interface{}) error {
+func (d *FlexDuration) UnmarshalTOML(data any) error {
 	switch v := data.(type) {
 	case int64:
 		d.Value = float64(v)
@@ -139,7 +139,7 @@ func (d *FlexDuration) UnmarshalTOML(data interface{}) error {
 			return nil
 		}
 		return fmt.Errorf("invalid duration %q: expected number or duration string (e.g. \"10m\", \"7d\")", s)
-	case map[string]interface{}:
+	case map[string]any:
 		// Handle TOML table form: {Value = 5.0} (written by toml.Encoder for struct)
 		if val, ok := v["Value"]; ok {
 			return d.UnmarshalTOML(val)

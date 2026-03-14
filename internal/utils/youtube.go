@@ -76,12 +76,9 @@ func ExtractVideoID(input string) string {
 	// /live/ID, /shorts/ID, /embed/ID, /v/ID
 	prefixes := []string{"/live/", "/shorts/", "/embed/", "/v/"}
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(path, prefix) {
-			id := strings.TrimPrefix(path, prefix)
+		if id, ok := strings.CutPrefix(path, prefix); ok {
 			// Remove trailing path segments
-			if idx := strings.Index(id, "/"); idx >= 0 {
-				id = id[:idx]
-			}
+			id, _, _ = strings.Cut(id, "/")
 			if videoIDRegex.MatchString(id) {
 				return id
 			}
@@ -131,11 +128,8 @@ func ParseYouTubeChannelURL(input string) *YouTubeChannelInput {
 	path := u.Path
 
 	// /channel/UCxxxxxxxx → extract directly
-	if strings.HasPrefix(path, "/channel/") {
-		id := strings.TrimPrefix(path, "/channel/")
-		if idx := strings.Index(id, "/"); idx >= 0 {
-			id = id[:idx]
-		}
+	if id, ok := strings.CutPrefix(path, "/channel/"); ok {
+		id, _, _ = strings.Cut(id, "/")
 		if channelIDRegex.MatchString(id) {
 			return &YouTubeChannelInput{ChannelID: id}
 		}
@@ -145,9 +139,7 @@ func ParseYouTubeChannelURL(input string) *YouTubeChannelInput {
 	// /@Handle → needs resolution
 	if strings.HasPrefix(path, "/@") {
 		handle := strings.TrimPrefix(path, "/")
-		if idx := strings.Index(handle, "/"); idx >= 0 {
-			handle = handle[:idx]
-		}
+		handle, _, _ = strings.Cut(handle, "/")
 		if len(handle) > 1 { // at least "@X"
 			return &YouTubeChannelInput{Path: "/" + handle}
 		}
@@ -155,11 +147,8 @@ func ParseYouTubeChannelURL(input string) *YouTubeChannelInput {
 	}
 
 	// /c/CustomName → needs resolution
-	if strings.HasPrefix(path, "/c/") {
-		name := strings.TrimPrefix(path, "/c/")
-		if idx := strings.Index(name, "/"); idx >= 0 {
-			name = name[:idx]
-		}
+	if name, ok := strings.CutPrefix(path, "/c/"); ok {
+		name, _, _ = strings.Cut(name, "/")
 		if name != "" {
 			return &YouTubeChannelInput{Path: "/c/" + name}
 		}
@@ -167,11 +156,8 @@ func ParseYouTubeChannelURL(input string) *YouTubeChannelInput {
 	}
 
 	// /user/Username → needs resolution
-	if strings.HasPrefix(path, "/user/") {
-		name := strings.TrimPrefix(path, "/user/")
-		if idx := strings.Index(name, "/"); idx >= 0 {
-			name = name[:idx]
-		}
+	if name, ok := strings.CutPrefix(path, "/user/"); ok {
+		name, _, _ = strings.Cut(name, "/")
 		if name != "" {
 			return &YouTubeChannelInput{Path: "/user/" + name}
 		}

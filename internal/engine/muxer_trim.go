@@ -154,7 +154,7 @@ func buildConcatList(paths []string) string {
 	for _, p := range paths {
 		escaped := strings.ReplaceAll(p, "\\", "/")
 		escaped = strings.ReplaceAll(escaped, "'", "\\'")
-		b.WriteString(fmt.Sprintf("file '%s'\n", escaped))
+		fmt.Fprintf(&b, "file '%s'\n", escaped)
 	}
 	return b.String()
 }

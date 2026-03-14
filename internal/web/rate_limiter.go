@@ -65,10 +65,7 @@ func (rl *RateLimiter) AllowWithRetry(ip string) (bool, int) {
 	if len(valid) >= rl.limit {
 		rl.requests[ip] = valid
 		// Calculate remaining time until oldest request expires (matching TS: resetTime - now)
-		retryAfter := int(valid[0].Add(rl.window).Sub(now).Seconds()) + 1
-		if retryAfter < 1 {
-			retryAfter = 1
-		}
+		retryAfter := max(int(valid[0].Add(rl.window).Sub(now).Seconds())+1, 1)
 		return false, retryAfter
 	}
 

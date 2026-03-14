@@ -36,7 +36,7 @@ type WatchPageResult struct {
 	HTML           string
 	Ytcfg          *YtcfgData
 	IsLoggedIn     bool
-	PlayerResponse map[string]interface{}
+	PlayerResponse map[string]any
 }
 
 // FetchWatchPage fetches and parses a YouTube watch page.
@@ -70,7 +70,7 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	}, nil
 }
 
-func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]interface{}) {
+func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
 	ytcfg := &YtcfgData{}
 
 	// Extract player URL
@@ -104,12 +104,12 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]interfac
 	}
 
 	// Extract ytInitialPlayerResponse (try multiple patterns)
-	var playerResponse map[string]interface{}
+	var playerResponse map[string]any
 	for _, re := range playerResponsePatterns {
 		if m := re.FindStringSubmatch(html); m != nil {
 			if err := json.Unmarshal([]byte(m[1]), &playerResponse); err == nil {
 				// Extract video metadata from response
-				if vd, ok := playerResponse["videoDetails"].(map[string]interface{}); ok {
+				if vd, ok := playerResponse["videoDetails"].(map[string]any); ok {
 					if title, ok := vd["title"].(string); ok {
 						ytcfg.Title = title
 					}
@@ -122,9 +122,9 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]interfac
 					if desc, ok := vd["shortDescription"].(string); ok {
 						ytcfg.Description = desc
 					}
-					if thumb, ok := vd["thumbnail"].(map[string]interface{}); ok {
-						if thumbs, ok := thumb["thumbnails"].([]interface{}); ok && len(thumbs) > 0 {
-							if last, ok := thumbs[len(thumbs)-1].(map[string]interface{}); ok {
+					if thumb, ok := vd["thumbnail"].(map[string]any); ok {
+						if thumbs, ok := thumb["thumbnails"].([]any); ok && len(thumbs) > 0 {
+							if last, ok := thumbs[len(thumbs)-1].(map[string]any); ok {
 								if url, ok := last["url"].(string); ok {
 									ytcfg.ThumbnailURL = url
 								}

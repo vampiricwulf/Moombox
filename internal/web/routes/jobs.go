@@ -281,21 +281,12 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		// Path traversal guard: resolve symlinks before prefix check
-		resolvedOutputDir, err := filepath.Abs(outputDir)
-		if err != nil {
-			jsonError(rw, "invalid output directory", http.StatusBadRequest)
-			return
-		}
-		if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
-			resolvedOutputDir = real
-		}
-		if real, err := filepath.EvalSymlinks(filePath); err == nil {
-			filePath = real
-		}
-		if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
+		resolvedPath, ok := validatePathTraversal(filePath, outputDir)
+		if !ok {
 			jsonError(rw, "access denied", http.StatusForbidden)
 			return
 		}
+		filePath = resolvedPath
 
 		// Check file existence before serving (match TS: 404 if file not present)
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -413,21 +404,12 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		if outputDir == "" {
 			outputDir = "./output"
 		}
-		resolvedOutputDir, err := filepath.Abs(outputDir)
-		if err != nil {
-			jsonError(rw, "invalid output directory", http.StatusBadRequest)
-			return
-		}
-		if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
-			resolvedOutputDir = real
-		}
-		if real, err := filepath.EvalSymlinks(filePath); err == nil {
-			filePath = real
-		}
-		if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
+		resolvedPath, ok := validatePathTraversal(filePath, outputDir)
+		if !ok {
 			jsonError(rw, "access denied", http.StatusForbidden)
 			return
 		}
+		filePath = resolvedPath
 
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			jsonError(rw, "segment file not found", http.StatusNotFound)
@@ -490,21 +472,12 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		// Path traversal guard: resolve symlinks before prefix check
-		resolvedOutputDir, err := filepath.Abs(outputDir)
-		if err != nil {
-			jsonError(rw, "invalid output directory", http.StatusBadRequest)
-			return
-		}
-		if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
-			resolvedOutputDir = real
-		}
-		if real, err := filepath.EvalSymlinks(chatPath); err == nil {
-			chatPath = real
-		}
-		if !strings.HasPrefix(chatPath, resolvedOutputDir+string(filepath.Separator)) {
+		resolvedChat, ok := validatePathTraversal(chatPath, outputDir)
+		if !ok {
 			jsonError(rw, "access denied", http.StatusForbidden)
 			return
 		}
+		chatPath = resolvedChat
 
 		// Check file existence before serving (match TS: 404 for missing file)
 		if _, err := os.Stat(chatPath); os.IsNotExist(err) {
@@ -966,23 +939,13 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			}
 
 			// Path traversal guard: resolve symlinks before prefix check
-			resolvedOutputDir, err := filepath.Abs(outputDir)
-			if err != nil {
-				jsonError(rw, "invalid output directory", http.StatusInternalServerError)
-				return
-			}
-			if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
-				resolvedOutputDir = real
-			}
-			if real, err := filepath.EvalSymlinks(filePath); err == nil {
-				filePath = real
-			}
-			if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
-				jsonError(rw, "Access denied", http.StatusForbidden)
+			resolvedPath, ok := validatePathTraversal(filePath, outputDir)
+			if !ok {
+				jsonError(rw, "access denied", http.StatusForbidden)
 				return
 			}
 
-			dir = filepath.Dir(filePath)
+			dir = filepath.Dir(resolvedPath)
 			if _, err := os.Stat(dir); err != nil {
 				jsonError(rw, "Output folder not found", http.StatusNotFound)
 				return
@@ -1096,6 +1059,26 @@ func FormatRoutes(r chi.Router, deps *FormatRoutesDeps) {
 
 // Helper functions
 
+// validatePathTraversal resolves symlinks on both filePath and outputDir, then
+// checks that filePath is inside outputDir. Returns the resolved file path on
+// success, or an empty string and false if the check fails.
+func validatePathTraversal(filePath, outputDir string) (string, bool) {
+	resolvedOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		return "", false
+	}
+	if real, err := filepath.EvalSymlinks(resolvedOutputDir); err == nil {
+		resolvedOutputDir = real
+	}
+	if real, err := filepath.EvalSymlinks(filePath); err == nil {
+		filePath = real
+	}
+	if !strings.HasPrefix(filePath, resolvedOutputDir+string(filepath.Separator)) {
+		return "", false
+	}
+	return filePath, true
+}
+
 func jsonResponse(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(data)
@@ -1203,7 +1186,11 @@ func RestartRoute(r chi.Router, onRestart func()) {
 		jsonResponse(rw, map[string]any{"success": true, "message": "Restarting..."})
 
 		go func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "panic in restart handler: %v\n", r)
+				}
+			}()
 			time.Sleep(500 * time.Millisecond)
 			if onRestart != nil {
 				onRestart()

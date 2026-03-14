@@ -127,11 +127,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if action != "" {
 			a.actionMenu.Close()
 			// Parse "CHORD" or "CHORD:jobID"
-			chord := action
+			chord, jobID, hasJob := strings.Cut(action, ":")
 			var job *database.Job
-			if idx := strings.Index(action, ":"); idx >= 0 {
-				chord = action[:idx]
-				jobID := action[idx+1:]
+			if hasJob {
 				for _, j := range a.actionMenu.jobs {
 					if j.ID == jobID {
 						job = j

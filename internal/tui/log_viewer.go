@@ -93,10 +93,7 @@ func (m *LogViewerModel) AddLines(batch []string) {
 func (m *LogViewerModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	contentH := h - 3
-	if contentH < 1 {
-		contentH = 1
-	}
+	contentH := max(h-3, 1)
 	m.viewport.Width = w - 2 // account for borders
 	m.viewport.Height = contentH
 	m.updateViewportContent()
@@ -173,10 +170,7 @@ func (m *LogViewerModel) rebuildFiltered() {
 }
 
 func (m *LogViewerModel) updateViewportContent() {
-	contentW := m.width - 2
-	if contentW < 1 {
-		contentW = 1
-	}
+	contentW := max(m.width-2, 1)
 
 	if len(m.filtered) == 0 {
 		m.viewport.SetContent(DimStyle.Render("No logs yet."))
@@ -261,10 +255,7 @@ func logLineColor(line string) lipgloss.Color {
 
 // View renders the log viewer panel.
 func (m *LogViewerModel) View() string {
-	contentW := m.width - 2
-	if contentW < 1 {
-		contentW = 1
-	}
+	contentW := max(m.width-2, 1)
 
 	// Title color: cyan when focused, white when not (match TS titleColor)
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)

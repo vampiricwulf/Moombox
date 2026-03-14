@@ -64,17 +64,3 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 	return result, nil
 }
 
-// appendPotQuery appends a GVS PO token to a URL as a query parameter (?pot=token).
-// Used for format URLs, DASH segment BaseURLs, and HLS segment URLs.
-// Uses naive string append to avoid re-encoding existing query parameters
-// (re-encoding can change parameter order/encoding and break URL signatures).
-func appendPotQuery(rawURL, poToken string) string {
-	if poToken == "" {
-		return rawURL
-	}
-	sep := "&"
-	if !strings.Contains(rawURL, "?") {
-		sep = "?"
-	}
-	return rawURL + sep + "pot=" + url.QueryEscape(poToken)
-}

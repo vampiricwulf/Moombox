@@ -34,10 +34,7 @@ func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalD
 	for scanner.Scan() {
 		line := scanner.Text()
 		if t := parseFFmpegTime(line); t > 0 && totalDuration > 0 {
-			pct := (t / totalDuration) * 100
-			if pct > 100 {
-				pct = 100
-			}
+			pct := min((t/totalDuration)*100, 100)
 			progressFn(pct)
 		}
 		// Keep tail of stderr for error reporting
@@ -78,11 +75,10 @@ func scanFFmpegLines(data []byte, atEOF bool) (advance int, token []byte, err er
 // parseFFmpegTime extracts the time in seconds from an FFmpeg progress line.
 // Looks for "time=HH:MM:SS.xx" or "time=SS.xx" patterns.
 func parseFFmpegTime(line string) float64 {
-	idx := strings.Index(line, "time=")
-	if idx < 0 {
+	_, rest, ok := strings.Cut(line, "time=")
+	if !ok {
 		return 0
 	}
-	rest := line[idx+5:]
 	// Find end of time value (space or end of string)
 	end := strings.IndexByte(rest, ' ')
 	if end < 0 {

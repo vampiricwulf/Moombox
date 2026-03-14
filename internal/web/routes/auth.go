@@ -409,8 +409,8 @@ func buildTokenLabel(r *http.Request) string {
 		label = label[:60]
 	}
 	// Extract just the browser/device portion if possible
-	if idx := strings.Index(label, "("); idx > 0 {
-		label = strings.TrimSpace(label[:idx])
+	if before, _, ok := strings.Cut(label, "("); ok {
+		label = strings.TrimSpace(before)
 	}
 	if label == "" {
 		label = "Unknown"

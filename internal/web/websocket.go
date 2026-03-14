@@ -17,7 +17,6 @@ const (
 	wsPingInterval   = 30 * time.Second
 	wsThrottleWindow = 100 * time.Millisecond
 	wsMaxMessageSize = 1024 * 1024 // 1MB (match TS maxPayload)
-	wsBackpressure   = 256 * 1024  // 256KB
 	maxLogBuffer     = 200         // Trim log ring buffer to this size
 )
 
@@ -250,6 +249,9 @@ func (hub *WebSocketHub) pingPump(client *wsClient) {
 
 func (hub *WebSocketHub) readPump(client *wsClient) {
 	defer func() {
+		if r := recover(); r != nil {
+			hub.logger.Error("panic in WebSocket readPump", "panic", r)
+		}
 		client.cancel() // Cancel the detached context to stop pingPump
 		hub.mu.Lock()
 		if !hub.closed {
@@ -372,7 +374,11 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 		delete(hub.throttlePending, jobID)
 
 		go func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					hub.logger.Error("panic in job update broadcast", "panic", r)
+				}
+			}()
 			hub.Broadcast("job_update", data)
 		}()
 	} else {
@@ -383,7 +389,11 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 			timer.Stop()
 		}
 		hub.throttleTimers[jobID] = time.AfterFunc(wsThrottleWindow, func() {
-			defer func() { recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					hub.logger.Error("panic in throttle trailing edge", "panic", r)
+				}
+			}()
 			hub.throttleMu.Lock()
 			pending := hub.throttlePending[jobID]
 			delete(hub.throttlePending, jobID)
@@ -398,7 +408,11 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 			// Clean up the timestamp after the throttle window so the map
 			// doesn't grow unbounded over the process lifetime.
 			time.AfterFunc(wsThrottleWindow, func() {
-				defer func() { recover() }()
+				defer func() {
+					if r := recover(); r != nil {
+						hub.logger.Error("panic in throttle cleanup", "panic", r)
+					}
+				}()
 				hub.throttleMu.Lock()
 				// Only delete if no new activity has occurred since our trailing send
 				if t, ok := hub.throttleTimestamps[jobID]; ok && time.Since(t) >= wsThrottleWindow {

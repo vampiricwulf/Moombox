@@ -37,12 +37,10 @@ func (a *App) apiBaseURL() string {
 	if a.cfg != nil {
 		if a.cfgMu != nil {
 			a.cfgMu.RLock()
+			defer a.cfgMu.RUnlock()
 		}
 		if a.cfg.Network.HTTPSEnabled {
 			scheme = "https"
-		}
-		if a.cfgMu != nil {
-			a.cfgMu.RUnlock()
 		}
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.getPort())
@@ -75,11 +73,9 @@ func (a *App) apiClient() *http.Client {
 	if a.cfg != nil {
 		if a.cfgMu != nil {
 			a.cfgMu.RLock()
+			defer a.cfgMu.RUnlock()
 		}
 		httpsEnabled = a.cfg.Network.HTTPSEnabled
-		if a.cfgMu != nil {
-			a.cfgMu.RUnlock()
-		}
 	}
 	if httpsEnabled {
 		base = &http.Transport{
@@ -114,9 +110,9 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		if platform == "twitch" {
 			body["platform"] = "twitch"
 			// Detect VOD vs channel
-			if strings.HasPrefix(input, "tw_v") {
+			if vodID, ok := strings.CutPrefix(input, "tw_v"); ok {
 				body["twitchType"] = "vod"
-				body["videoId"] = strings.TrimPrefix(input, "tw_v")
+				body["videoId"] = vodID
 			} else {
 				body["twitchType"] = "channel"
 			}

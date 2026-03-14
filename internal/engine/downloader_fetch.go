@@ -56,7 +56,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 // fetchSegmentWithRetry attempts to fetch a segment with retries and exponential backoff.
 // Returns the data on success, or nil if all retries failed or the segment is permanently gone.
 func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string) []byte {
-	for attempt := 0; attempt < MaxSegmentRetries; attempt++ {
+	for attempt := range MaxSegmentRetries {
 		if d.isCancelled() || ctx.Err() != nil {
 			return nil
 		}
@@ -152,7 +152,7 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 
 // fetchChunkWithRetry downloads a byte range with exponential backoff retry.
 func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end int64) ([]byte, int, error) {
-	for attempt := 0; attempt < MaxChunkRetries; attempt++ {
+	for attempt := range MaxChunkRetries {
 		if d.isCancelled() || ctx.Err() != nil {
 			return nil, 0, d.cancelErr(ctx)
 		}
@@ -169,9 +169,7 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 		// Retry on 5xx or network errors with exponential backoff (capped at 60s)
 		if status >= 500 || status == 0 {
 			delay := time.Duration(1<<uint(attempt)) * time.Second
-			if delay > 60*time.Second {
-				delay = 60 * time.Second
-			}
+			delay = min(delay, 60*time.Second)
 			sleepCtx(ctx, delay)
 			continue
 		}

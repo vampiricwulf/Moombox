@@ -1,6 +1,9 @@
 package tui
 
-import "strings"
+import (
+	"maps"
+	"strings"
+)
 
 // HandleKey processes key input in the settings panel.
 func (m *SettingsModel) HandleKey(key string) (action string) {
@@ -141,10 +144,8 @@ func (m *SettingsModel) handleClose() string {
 		m.status = saveSaved
 		m.dirty = false
 		needsRestart := m.hasRestartChanges()
-		m.originalValues = make(map[string]string)
-		for k, v := range m.values {
-			m.originalValues[k] = v
-		}
+		m.originalValues = make(map[string]string, len(m.values))
+		maps.Copy(m.originalValues, m.values)
 		if needsRestart {
 			m.showRestartOverlay = true
 			return ""
@@ -219,9 +220,5 @@ func (m *SettingsModel) ensureFieldVisible() {
 }
 
 func (m *SettingsModel) settingsContentHeight() int {
-	h := m.height - 10 // borders, header, tabs, status, footer
-	if h < 5 {
-		h = 5
-	}
-	return h
+	return max(m.height-10, 5) // borders, header, tabs, status, footer
 }

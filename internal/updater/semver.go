@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"cmp"
 	"fmt"
 	"strconv"
 	"strings"
@@ -41,20 +42,10 @@ func CompareVersions(a, b string) int {
 		return strings.Compare(a, b)
 	}
 	if aMaj != bMaj {
-		return cmpInt(aMaj, bMaj)
+		return cmp.Compare(aMaj, bMaj)
 	}
 	if aMin != bMin {
-		return cmpInt(aMin, bMin)
+		return cmp.Compare(aMin, bMin)
 	}
-	return cmpInt(aPat, bPat)
-}
-
-func cmpInt(a, b int) int {
-	if a < b {
-		return -1
-	}
-	if a > b {
-		return 1
-	}
-	return 0
+	return cmp.Compare(aPat, bPat)
 }

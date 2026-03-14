@@ -265,20 +265,20 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 	if len(updates) > 0 {
 		sp.db.UpdateJobFields(job.ID, updates)
 		// Apply updates to local job object
-		if v, ok := updates["title"]; ok {
-			job.Title = v.(string)
+		if v, ok := updates["title"].(string); ok {
+			job.Title = v
 		}
-		if v, ok := updates["channel_name"]; ok {
-			job.ChannelName = v.(string)
+		if v, ok := updates["channel_name"].(string); ok {
+			job.ChannelName = v
 		}
-		if v, ok := updates["thumbnail_url"]; ok {
-			job.ThumbnailURL = v.(string)
+		if v, ok := updates["thumbnail_url"].(string); ok {
+			job.ThumbnailURL = v
 		}
-		if v, ok := updates["stream_start_time"]; ok {
-			job.StreamStartTime = v.(string)
+		if v, ok := updates["stream_start_time"].(string); ok {
+			job.StreamStartTime = v
 		}
-		if v, ok := updates["stream_end_time"]; ok {
-			job.StreamEndTime = v.(string)
+		if v, ok := updates["stream_end_time"].(string); ok {
+			job.StreamEndTime = v
 		}
 	}
 

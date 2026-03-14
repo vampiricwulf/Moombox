@@ -11,12 +11,7 @@ type SmoothValue struct {
 // NewSmoothValue creates a new EMA smoother with the given alpha.
 // Alpha should be between 0 and 1. Higher alpha = more responsive to new data.
 func NewSmoothValue(alpha float64) *SmoothValue {
-	if alpha < 0 {
-		alpha = 0
-	}
-	if alpha > 1 {
-		alpha = 1
-	}
+	alpha = min(max(alpha, 0), 1)
 	return &SmoothValue{alpha: alpha}
 }
 

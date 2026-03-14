@@ -19,8 +19,7 @@ const (
 	maxConsecErrorsLive  = 20
 	maxConsecErrorsVod   = 5
 	maxStaleContinuation = 30
-	writeIntervalMs      = 1000 // Flush to disk within 1 second
-	resumeSaveInterval   = 10 * time.Second
+	writeIntervalMs = 1000 // Flush to disk within 1 second
 )
 
 // ChatDownloaderOptions configures a ChatDownloader.
@@ -486,7 +485,7 @@ func (cd *ChatDownloader) writeChatFile() {
 		// File missing or too small — fall back to full write
 		if cd.OnError != nil {
 			if err != nil {
-				cd.OnError(fmt.Errorf("chat file stat failed, rewriting: %v", err))
+				cd.OnError(fmt.Errorf("chat file stat failed, rewriting: %w", err))
 			} else {
 				cd.OnError(fmt.Errorf("chat file too small (%d bytes), rewriting", info.Size()))
 			}
@@ -499,7 +498,7 @@ func (cd *ChatDownloader) writeChatFile() {
 	f, err := os.OpenFile(outputFile, os.O_RDWR, 0o644)
 	if err != nil {
 		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("chat file open failed, rewriting: %v", err))
+			cd.OnError(fmt.Errorf("chat file open failed, rewriting: %w", err))
 		}
 		cd.prependExistingMessages(outputFile)
 		cd.writeFullChatFile()
@@ -510,15 +509,12 @@ func (cd *ChatDownloader) writeChatFile() {
 	fileSize := info.Size()
 
 	// Read last 10 bytes to find ']'
-	tailSize := int64(10)
-	if tailSize > fileSize {
-		tailSize = fileSize
-	}
+	tailSize := min(int64(10), fileSize)
 	tailBuf := make([]byte, tailSize)
 	_, err = f.ReadAt(tailBuf, fileSize-tailSize)
 	if err != nil {
 		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("chat file read failed, rewriting: %v", err))
+			cd.OnError(fmt.Errorf("chat file read failed, rewriting: %w", err))
 		}
 		f.Close()
 		cd.prependExistingMessages(outputFile)
@@ -549,14 +545,11 @@ func (cd *ChatDownloader) writeChatFile() {
 	// Check if there are existing messages (look for '}' before ']')
 	hasExisting := false
 	if bracketBytePos > 5 {
-		checkSize := int64(5)
-		if checkSize > bracketBytePos {
-			checkSize = bracketBytePos
-		}
+		checkSize := min(int64(5), bracketBytePos)
 		checkBuf := make([]byte, checkSize)
 		if _, err := f.ReadAt(checkBuf, bracketBytePos-checkSize); err != nil {
 			if cd.OnError != nil {
-				cd.OnError(fmt.Errorf("chat file check-read failed, rewriting: %v", err))
+				cd.OnError(fmt.Errorf("chat file check-read failed, rewriting: %w", err))
 			}
 			f.Close()
 			cd.prependExistingMessages(outputFile)
@@ -595,7 +588,7 @@ func (cd *ChatDownloader) writeChatFile() {
 	// Truncate at ']' position, then write new content
 	if err := f.Truncate(bracketBytePos); err != nil {
 		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("chat file truncate failed, rewriting: %v", err))
+			cd.OnError(fmt.Errorf("chat file truncate failed, rewriting: %w", err))
 		}
 		f.Close()
 		cd.prependExistingMessages(outputFile)
@@ -697,10 +690,7 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	}
 	defer f.Close()
 
-	headerSize := int64(1024)
-	if headerSize > info.Size() {
-		headerSize = info.Size()
-	}
+	headerSize := min(int64(1024), info.Size())
 
 	headerBuf := make([]byte, headerSize)
 	n, err := f.ReadAt(headerBuf, 0)

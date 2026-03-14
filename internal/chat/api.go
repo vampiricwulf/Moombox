@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,8 +21,7 @@ const (
 	liveChatEndpoint   = "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat"
 	replayChatEndpoint = "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat_replay"
 	youtubeBase        = "https://www.youtube.com"
-	defaultTimeoutMs   = 5000
-	chatHTTPTimeout    = 30 * time.Second // Matches TS fetchWithTimeout default (30s)
+	chatHTTPTimeout = 30 * time.Second // Matches TS fetchWithTimeout default (30s)
 )
 
 var ytInitialDataRegex = regexp.MustCompile(`(?s)var ytInitialData = ({.+?});</script>`)
@@ -505,7 +505,7 @@ func extractBadges(renderer map[string]any) []string {
 		// Check tooltip for member badge
 		if tooltip, ok := badgeRenderer["tooltip"].(string); ok {
 			if strings.Contains(strings.ToLower(tooltip), "member") {
-				if !containsString(badges, "member") {
+				if !slices.Contains(badges, "member") {
 					badges = append(badges, "member")
 				}
 			}
@@ -513,7 +513,7 @@ func extractBadges(renderer map[string]any) []string {
 
 		// Custom thumbnail = membership badge
 		if _, ok := badgeRenderer["customThumbnail"]; ok {
-			if !containsString(badges, "member") {
+			if !slices.Contains(badges, "member") {
 				badges = append(badges, "member")
 			}
 		}
@@ -573,11 +573,3 @@ func randomAlphaNum(n int) string {
 	return string(b)
 }
 
-func containsString(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 
@@ -319,10 +320,8 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.secRemovePw = ""
 	m.secFieldIndex = 0
 
-	m.originalValues = make(map[string]string)
-	for k, v := range m.values {
-		m.originalValues[k] = v
-	}
+	m.originalValues = make(map[string]string, len(m.values))
+	maps.Copy(m.originalValues, m.values)
 
 	m.updateTextInputForField()
 }

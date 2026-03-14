@@ -45,7 +45,11 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 
 	// Monitor for exit
 	go func() {
-		defer func() { recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("panic in browser wait goroutine", "panic", r)
+			}
+		}()
 		cmd.Wait()
 		s.mu.Lock()
 		s.browserExited = true
@@ -145,7 +149,7 @@ func readFirefoxCookies(profileDir string) (string, error) {
 	var lines []string
 	var lastErr error
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		if attempt > 0 {
 			time.Sleep(retryBackoff)
 		}
@@ -248,7 +252,11 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration, logger interface {
 
 	done := make(chan error, 1)
 	go func() {
-		defer func() { recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Warn("panic in firefox wait goroutine", "panic", r)
+			}
+		}()
 		done <- cmd.Wait()
 	}()
 

@@ -472,12 +472,10 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 			continue
 		}
 		nameValue := strings.TrimSpace(parts[0])
-		eqIdx := strings.IndexByte(nameValue, '=')
-		if eqIdx <= 0 {
+		name, value, ok := strings.Cut(nameValue, "=")
+		if !ok || name == "" {
 			continue
 		}
-		name := nameValue[:eqIdx]
-		value := nameValue[eqIdx+1:]
 
 		now := time.Now().Unix()
 		expiry := now + 365*24*60*60
@@ -485,7 +483,8 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 		for _, part := range parts[1:] {
 			trimmed := strings.TrimSpace(strings.ToLower(part))
 			if strings.HasPrefix(trimmed, "expires=") {
-				dateStr := strings.TrimSpace(part[strings.Index(part, "=")+1:])
+				_, dateStr, _ := strings.Cut(part, "=")
+			dateStr = strings.TrimSpace(dateStr)
 				if t, err := time.Parse(time.RFC1123, dateStr); err == nil {
 					expiry = t.Unix()
 				} else if t, err := time.Parse("Mon, 02-Jan-2006 15:04:05 MST", dateStr); err == nil {
@@ -590,8 +589,8 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 			secure = "TRUE"
 		}
 		// Netscape format: domain, include_subdomains, path, secure, expiry, name, value
-		result.WriteString(fmt.Sprintf("%s\tTRUE\t/\t%s\t%d\t%s\t%s\n",
-			domain, secure, cu.Expiry, name, cu.Value))
+		fmt.Fprintf(&result, "%s\tTRUE\t/\t%s\t%d\t%s\t%s\n",
+			domain, secure, cu.Expiry, name, cu.Value)
 		rs.logger.Debug("added new cookie to file", "name", name)
 		updated[name] = true
 	}

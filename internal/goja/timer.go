@@ -97,10 +97,7 @@ func (tm *TimerManager) SetTimeout(fn goja.Callable, delayMs int64) int64 {
 		return id
 	}
 
-	delay := time.Duration(delayMs) * time.Millisecond
-	if delay < 0 {
-		delay = 0
-	}
+	delay := max(time.Duration(delayMs)*time.Millisecond, 0)
 
 	t := time.AfterFunc(delay, func() {
 		defer func() {

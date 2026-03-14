@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -282,7 +283,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			return
 		}
 		if result.Error != "" {
-			w.setJobError(job, fmt.Errorf("%s", result.Error))
+			w.setJobError(job, errors.New(result.Error))
 		}
 		return
 	}

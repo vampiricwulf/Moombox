@@ -426,14 +426,8 @@ func (m *TrimDialogModel) View() string {
 		return ""
 	}
 
-	boxW := min(60, m.width-4)
-	boxH := min(18, m.height-4)
-	if boxW < 30 {
-		boxW = 30
-	}
-	if boxH < 8 {
-		boxH = 8
-	}
+	boxW := max(min(60, m.width-4), 30)
+	boxH := max(min(18, m.height-4), 8)
 
 	contentW := boxW - 2
 
@@ -513,10 +507,7 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 		lines = append(lines, "")
 
 		// Progress bar
-		barWidth := w - 4
-		if barWidth < 10 {
-			barWidth = 10
-		}
+		barWidth := max(w-4, 10)
 		m.progressBar.Width = barWidth
 		// Mux gradient: green (encoding) → yellow (muxing)
 		progress.WithGradient(string(ColorDownloading), string(ColorMuxing))(&m.progressBar)

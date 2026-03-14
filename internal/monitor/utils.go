@@ -305,7 +305,7 @@ func fuzzyMatch(text, needle string) bool {
 func normalizeText(s string) string {
 	// Fast path: ASCII-only strings don't need NFD decomposition or diacritic stripping
 	isASCII := true
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] >= 0x80 {
 			isASCII = false
 			break

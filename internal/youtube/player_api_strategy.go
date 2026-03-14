@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strconv"
 	"time"
@@ -306,16 +307,14 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 	headers := p.auth.GenerateAPIHeaders(client, ytcfg)
 
 	// Build client context with optional visitorData
-	clientCtx := make(map[string]interface{})
-	for k, v := range client.Context {
-		clientCtx[k] = v
-	}
+	clientCtx := make(map[string]any, len(client.Context))
+	maps.Copy(clientCtx, client.Context)
 	if ytcfg != nil && ytcfg.VisitorData != "" {
 		clientCtx["visitorData"] = ytcfg.VisitorData
 	}
 
-	postData := map[string]interface{}{
-		"context": map[string]interface{}{
+	postData := map[string]any{
+		"context": map[string]any{
 			"client": clientCtx,
 		},
 		"videoId":        videoID,
@@ -324,13 +323,13 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 	}
 
 	// Always include playbackContext with STS when available
-	pbCtx := map[string]interface{}{
+	pbCtx := map[string]any{
 		"html5Preference": "HTML5_PREF_WANTS",
 	}
 	if sts > 0 {
 		pbCtx["signatureTimestamp"] = sts
 	}
-	postData["playbackContext"] = map[string]interface{}{
+	postData["playbackContext"] = map[string]any{
 		"contentPlaybackContext": pbCtx,
 	}
 
@@ -345,23 +344,21 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visitorData string) (*VideoInfo, error) {
 	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.apiKey)
 
-	clientCtx := make(map[string]interface{})
-	for k, v := range constants.AndroidVRClient.Context {
-		clientCtx[k] = v
-	}
+	clientCtx := make(map[string]any, len(constants.AndroidVRClient.Context))
+	maps.Copy(clientCtx, constants.AndroidVRClient.Context)
 	if visitorData != "" {
 		clientCtx["visitorData"] = visitorData
 	}
 
-	postData := map[string]interface{}{
-		"context": map[string]interface{}{
+	postData := map[string]any{
+		"context": map[string]any{
 			"client": clientCtx,
 		},
 		"videoId":        videoID,
 		"contentCheckOk": true,
 		"racyCheckOk":    true,
-		"playbackContext": map[string]interface{}{
-			"contentPlaybackContext": map[string]interface{}{
+		"playbackContext": map[string]any{
+			"contentPlaybackContext": map[string]any{
 				"html5Preference": "HTML5_PREF_WANTS",
 			},
 		},
@@ -401,18 +398,16 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	headers["Referer"] = fmt.Sprintf("%s/%s", constants.YouTubeURLs.Embed, videoID)
 
 	// Build client context with thirdParty embedUrl
-	clientCtx := make(map[string]interface{})
-	for k, v := range constants.WebEmbeddedClient.Context {
-		clientCtx[k] = v
-	}
+	clientCtx := make(map[string]any, len(constants.WebEmbeddedClient.Context))
+	maps.Copy(clientCtx, constants.WebEmbeddedClient.Context)
 	if ytcfg != nil && ytcfg.VisitorData != "" {
 		clientCtx["visitorData"] = ytcfg.VisitorData
 	}
 
-	postData := map[string]interface{}{
-		"context": map[string]interface{}{
+	postData := map[string]any{
+		"context": map[string]any{
 			"client": clientCtx,
-			"thirdParty": map[string]interface{}{
+			"thirdParty": map[string]any{
 				"embedUrl": "https://www.reddit.com/",
 			},
 		},
@@ -422,7 +417,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	}
 
 	// Build playback context with encryptedHostFlags
-	pbCtx := map[string]interface{}{
+	pbCtx := map[string]any{
 		"html5Preference": "HTML5_PREF_WANTS",
 	}
 	if sts > 0 {
@@ -431,7 +426,7 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	if embedResult != nil && embedResult.EncryptedHostFlags != "" {
 		pbCtx["encryptedHostFlags"] = embedResult.EncryptedHostFlags
 	}
-	postData["playbackContext"] = map[string]interface{}{
+	postData["playbackContext"] = map[string]any{
 		"contentPlaybackContext": pbCtx,
 	}
 
@@ -452,7 +447,7 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := range 4 {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -493,7 +488,7 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 			return nil, fmt.Errorf("%s API error: HTTP %d", clientLabel, resp.StatusCode)
 		}
 
-		var data map[string]interface{}
+		var data map[string]any
 		if err := json.Unmarshal(respBody, &data); err != nil {
 			return nil, fmt.Errorf("failed to parse response: %w", err)
 		}

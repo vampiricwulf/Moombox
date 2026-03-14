@@ -237,13 +237,7 @@ func (m *ActionMenuModel) SetSize(w, h int) {
 }
 
 func (m *ActionMenuModel) updateListSizes() {
-	boxW := m.width - 8
-	if boxW > 60 {
-		boxW = 60
-	}
-	if boxW < 30 {
-		boxW = 30
-	}
+	boxW := max(min(m.width-8, 60), 30)
 	contentW := boxW - 2
 	ch := m.contentHeight()
 	m.mainList.SetSize(contentW, ch)
@@ -257,11 +251,7 @@ func (m *ActionMenuModel) SetJobs(jobs []*database.Job) {
 
 // contentHeight returns the visible list height inside the box.
 func (m *ActionMenuModel) contentHeight() int {
-	h := m.height - 8 // borders + header + footer
-	if h < 3 {
-		h = 3
-	}
-	return h
+	return max(m.height-8, 3) // borders + header + footer
 }
 
 // isSelectable returns true if the item at the given index is an action (not header/blank).
@@ -445,13 +435,7 @@ func (m *ActionMenuModel) filterJobs(filter func(*database.Job) bool) []*databas
 // overlayGeometry returns the overlay box position and content dimensions.
 // Returns (padLeft, padTop, boxW, contentH).
 func (m *ActionMenuModel) overlayGeometry() (int, int, int, int) {
-	boxW := m.width - 8
-	if boxW > 60 {
-		boxW = 60
-	}
-	if boxW < 30 {
-		boxW = 30
-	}
+	boxW := max(min(m.width-8, 60), 30)
 	contentW := boxW - 2
 	ch := m.contentHeight()
 	if m.mode == menuConfirm {
@@ -462,14 +446,8 @@ func (m *ActionMenuModel) overlayGeometry() (int, int, int, int) {
 	renderedW := contentW + 2
 	renderedH := ch + 4
 
-	padLeft := (m.width - renderedW) / 2
-	padTop := (m.height - renderedH) / 2
-	if padLeft < 0 {
-		padLeft = 0
-	}
-	if padTop < 0 {
-		padTop = 0
-	}
+	padLeft := max((m.width-renderedW)/2, 0)
+	padTop := max((m.height-renderedH)/2, 0)
 	return padLeft, padTop, renderedW, ch
 }
 
@@ -544,13 +522,7 @@ func (m *ActionMenuModel) View() string {
 		return ""
 	}
 
-	boxW := m.width - 8
-	if boxW > 60 {
-		boxW = 60
-	}
-	if boxW < 30 {
-		boxW = 30
-	}
+	boxW := max(min(m.width-8, 60), 30)
 	contentW := boxW - 2
 
 	switch m.mode {

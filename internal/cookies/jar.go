@@ -79,8 +79,8 @@ func (j *CookieJar) Load(filePath string) error {
 
 		rawDomain := strings.TrimSpace(parts[0])
 		domain := rawDomain
-		if strings.HasPrefix(domain, "#HttpOnly_") {
-			domain = domain[len("#HttpOnly_"):]
+		if after, ok := strings.CutPrefix(domain, "#HttpOnly_"); ok {
+			domain = after
 		}
 
 		name := strings.TrimSpace(parts[5])

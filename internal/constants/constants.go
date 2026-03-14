@@ -56,7 +56,7 @@ type YouTubeClientConfig struct {
 	ClientVersion string
 	ClientID      string
 	UserAgent     string
-	Context       map[string]interface{}
+	Context       map[string]any
 }
 
 // TVDowngradedClient is the primary authenticated client (TVHTML5).
@@ -65,7 +65,7 @@ var TVDowngradedClient = YouTubeClientConfig{
 	ClientVersion: "5.20260114",
 	ClientID:      "7",
 	UserAgent:     UserAgents.TV,
-	Context: map[string]interface{}{
+	Context: map[string]any{
 		"clientName":    "TVHTML5",
 		"clientVersion": "5.20260114",
 		"hl":            "en",
@@ -78,7 +78,7 @@ var WebCreatorClient = YouTubeClientConfig{
 	ClientVersion: "1.20260120.01.00",
 	ClientID:      "62",
 	UserAgent:     UserAgents.Web,
-	Context: map[string]interface{}{
+	Context: map[string]any{
 		"clientName":    "WEB_CREATOR",
 		"clientVersion": "1.20260120.01.00",
 		"hl":            "en",
@@ -91,7 +91,7 @@ var WebClient = YouTubeClientConfig{
 	ClientVersion: "2.20260120.01.00",
 	ClientID:      "1",
 	UserAgent:     UserAgents.Web,
-	Context: map[string]interface{}{
+	Context: map[string]any{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260120.01.00",
 		"hl":            "en",
@@ -105,7 +105,7 @@ var WebSafariClient = YouTubeClientConfig{
 	ClientVersion: "2.20260120.01.00",
 	ClientID:      "1",
 	UserAgent:     UserAgents.WebSafari,
-	Context: map[string]interface{}{
+	Context: map[string]any{
 		"clientName":    "WEB",
 		"clientVersion": "2.20260120.01.00",
 		"hl":            "en",
@@ -119,7 +119,7 @@ var WebEmbeddedClient = YouTubeClientConfig{
 	ClientVersion: "1.20260115.01.00",
 	ClientID:      "56",
 	UserAgent:     UserAgents.Web,
-	Context: map[string]interface{}{
+	Context: map[string]any{
 		"clientName":    "WEB_EMBEDDED_PLAYER",
 		"clientVersion": "1.20260115.01.00",
 		"hl":            "en",
@@ -132,7 +132,7 @@ var AndroidVRClient = YouTubeClientConfig{
 	ClientVersion: "1.65.10",
 	ClientID:      "28",
 	UserAgent:     UserAgents.AndroidVR,
-	Context: map[string]interface{}{
+	Context: map[string]any{
 		"clientName":       "ANDROID_VR",
 		"clientVersion":    "1.65.10",
 		"androidSdkVersion": 32,

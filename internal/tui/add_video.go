@@ -576,14 +576,8 @@ func (m *AddVideoModel) View() string {
 		return ""
 	}
 
-	boxW := min(80, m.width-4)  // match TS: min(width, 80)
-	boxH := min(30, m.height-4) // match TS: min(height-4, 30)
-	if boxW < 30 {
-		boxW = 30
-	}
-	if boxH < 8 {
-		boxH = 8
-	}
+	boxW := max(min(80, m.width-4), 30)  // match TS: min(width, 80)
+	boxH := max(min(30, m.height-4), 8) // match TS: min(height-4, 30)
 
 	contentW := boxW - 2
 
@@ -697,10 +691,7 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 
 	if m.formats != nil {
 		// Adjust table height to fit available space
-		tableH := h - 10
-		if tableH < 3 {
-			tableH = 3
-		}
+		tableH := max(h-10, 3)
 		if isVideo {
 			m.videoTable.SetHeight(min(tableH, len(m.formats.VideoFormats)))
 			lines = append(lines, m.videoTable.View())
@@ -831,14 +822,8 @@ func centerBox(box string, screenW, screenH int) string {
 		}
 	}
 
-	padTop := (screenH - boxH) / 2
-	padLeft := (screenW - boxW) / 2
-	if padTop < 0 {
-		padTop = 0
-	}
-	if padLeft < 0 {
-		padLeft = 0
-	}
+	padTop := max((screenH-boxH)/2, 0)
+	padLeft := max((screenW-boxW)/2, 0)
 
 	lines := make([]string, 0, screenH)
 	pad := strings.Repeat(" ", screenW)
@@ -898,11 +883,8 @@ func extractYouTubeVideoID(input string) string {
 	}
 
 	// v= parameter (most common)
-	if idx := strings.Index(input, "v="); idx >= 0 {
-		vid := input[idx+2:]
-		if ampIdx := strings.Index(vid, "&"); ampIdx >= 0 {
-			vid = vid[:ampIdx]
-		}
+	if _, after, ok := strings.Cut(input, "v="); ok {
+		vid, _, _ := strings.Cut(after, "&")
 		vid = strings.TrimRight(vid, "/")
 		if len(vid) == 11 && isVideoIDChar(vid) {
 			return vid
@@ -912,11 +894,8 @@ func extractYouTubeVideoID(input string) string {
 	// Path-based patterns: youtu.be/, /live/, /shorts/, /embed/, /v/
 	pathPatterns := []string{"youtu.be/", "/live/", "/shorts/", "/embed/", "/v/"}
 	for _, pat := range pathPatterns {
-		if idx := strings.Index(input, pat); idx >= 0 {
-			vid := input[idx+len(pat):]
-			if qIdx := strings.Index(vid, "?"); qIdx >= 0 {
-				vid = vid[:qIdx]
-			}
+		if _, after, ok := strings.Cut(input, pat); ok {
+			vid, _, _ := strings.Cut(after, "?")
 			vid = strings.TrimRight(vid, "/")
 			if len(vid) == 11 && isVideoIDChar(vid) {
 				return vid
@@ -952,20 +931,16 @@ func extractTwitchTarget(input string) (string, string) {
 	if strings.HasPrefix(urlStr, "http") {
 		// Extract host and path
 		rest := urlStr
-		if idx := strings.Index(rest, "://"); idx >= 0 {
-			rest = rest[idx+3:]
+		if _, after, ok := strings.Cut(rest, "://"); ok {
+			rest = after
 		}
-		host := rest
-		pathStr := ""
-		if idx := strings.Index(rest, "/"); idx >= 0 {
-			host = rest[:idx]
-			pathStr = rest[idx:]
+		host, pathStr, _ := strings.Cut(rest, "/")
+		if pathStr != "" {
+			pathStr = "/" + pathStr
 		}
 		host = strings.TrimPrefix(host, "www.")
 		// Remove port if present
-		if idx := strings.Index(host, ":"); idx >= 0 {
-			host = host[:idx]
-		}
+		host, _, _ = strings.Cut(host, ":")
 
 		// clips.twitch.tv/{slug}
 		if host == "clips.twitch.tv" {
@@ -1055,20 +1030,14 @@ func isNumeric(s string) bool {
 
 func firstPathSegment(path string) string {
 	path = strings.TrimPrefix(path, "/")
-	if idx := strings.Index(path, "/"); idx >= 0 {
-		path = path[:idx]
-	}
-	if idx := strings.Index(path, "?"); idx >= 0 {
-		path = path[:idx]
-	}
+	path, _, _ = strings.Cut(path, "/")
+	path, _, _ = strings.Cut(path, "?")
 	return path
 }
 
 func splitPathSegments(path string) []string {
 	path = strings.TrimPrefix(path, "/")
-	if qIdx := strings.Index(path, "?"); qIdx >= 0 {
-		path = path[:qIdx]
-	}
+	path, _, _ = strings.Cut(path, "?")
 	path = strings.TrimRight(path, "/")
 	if path == "" {
 		return nil

@@ -230,15 +230,15 @@ func HashToken(token string) (string, error) {
 
 // VerifyToken checks a raw token against a stored hash ("salt_hex:hash_hex").
 func VerifyToken(token, storedHash string) bool {
-	parts := strings.SplitN(storedHash, ":", 2)
-	if len(parts) != 2 {
+	saltHex, hashHex, ok := strings.Cut(storedHash, ":")
+	if !ok {
 		return false
 	}
-	salt, err := hex.DecodeString(parts[0])
+	salt, err := hex.DecodeString(saltHex)
 	if err != nil || len(salt) != saltLen {
 		return false
 	}
-	expectedHash, err := hex.DecodeString(parts[1])
+	expectedHash, err := hex.DecodeString(hashHex)
 	if err != nil || len(expectedHash) != scryptKeyLen {
 		return false
 	}

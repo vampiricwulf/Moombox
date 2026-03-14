@@ -59,10 +59,7 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 	// BEFORE assembling with styled parts — truncateString uses runewidth
 	// which miscounts ANSI escape sequences from DimStyle.Render).
 	suffixW := 2 + lipgloss.Width(lastUsed) + 2 + lipgloss.Width(ipStr) // "  " + lastUsed + "  " + ipStr
-	maxLabelW := m.Width() - 2 - suffixW // 2 for prefix
-	if maxLabelW < 10 {
-		maxLabelW = 10
-	}
+	maxLabelW := max(m.Width()-2-suffixW, 10) // 2 for prefix
 	label := truncateString(ct.Label, maxLabelW)
 
 	var style lipgloss.Style
@@ -159,18 +156,9 @@ func (m *ClientTokensDialogModel) IsVisible() bool {
 func (m *ClientTokensDialogModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	boxW := min(80, w-4)
-	boxH := min(24, h-4)
-	if boxW < 40 {
-		boxW = 40
-	}
-	if boxH < 10 {
-		boxH = 10
-	}
-	listH := boxH - 6
-	if listH < 1 {
-		listH = 1
-	}
+	boxW := max(min(80, w-4), 40)
+	boxH := max(min(24, h-4), 10)
+	listH := max(boxH-6, 1)
 	m.list.SetSize(boxW-2, listH)
 }
 
@@ -290,14 +278,8 @@ func (m *ClientTokensDialogModel) View() string {
 		return ""
 	}
 
-	boxW := min(80, m.width-4)
-	boxH := min(24, m.height-4)
-	if boxW < 40 {
-		boxW = 40
-	}
-	if boxH < 10 {
-		boxH = 10
-	}
+	boxW := max(min(80, m.width-4), 40)
+	boxH := max(min(24, m.height-4), 10)
 
 	contentW := boxW - 2
 	tokenCount := len(m.list.Items())

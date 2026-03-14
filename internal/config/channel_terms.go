@@ -60,12 +60,12 @@ func (ct ChannelTerms) MarshalTOML() ([]byte, error) {
 }
 
 // UnmarshalTOML implements the TOML unmarshaler interface.
-func (t *ChannelTerms) UnmarshalTOML(data interface{}) error {
+func (t *ChannelTerms) UnmarshalTOML(data any) error {
 	switch v := data.(type) {
 	case string:
 		t.Simple = v
 		t.IsMap = false
-	case map[string]interface{}:
+	case map[string]any:
 		t.Named = make(map[string]string, len(v))
 		t.IsMap = true
 		for k, val := range v {

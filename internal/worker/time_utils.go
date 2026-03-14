@@ -59,9 +59,7 @@ func ParseTimeToSeconds(input string) (float64, error) {
 
 // FormatSecondsToTimestamp formats seconds to "H:MM:SS" or "MM:SS".
 func FormatSecondsToTimestamp(seconds float64) string {
-	if seconds < 0 {
-		seconds = 0
-	}
+	seconds = max(seconds, 0)
 	totalSecs := int(seconds)
 	h := totalSecs / 3600
 	m := (totalSecs % 3600) / 60

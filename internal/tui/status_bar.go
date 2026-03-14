@@ -93,10 +93,7 @@ func (m *StatusBarModel) View() string {
 
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
-	padding := m.width - leftW - rightW
-	if padding < 1 {
-		padding = 1
-	}
+	padding := max(m.width-leftW-rightW, 1)
 
 	bar := left + strings.Repeat(" ", padding) + right
 

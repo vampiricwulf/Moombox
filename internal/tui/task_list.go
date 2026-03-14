@@ -223,10 +223,7 @@ func (m *TaskListModel) SetSize(w, h int) {
 	prevW := m.width
 	m.width = w
 	m.height = h
-	contentW := w - 2
-	if contentW < 1 {
-		contentW = 1
-	}
+	contentW := max(w-2, 1)
 	contentH := m.contentHeight()
 	m.list.SetSize(contentW, contentH)
 	// Recalculate marquee width when panel width changes.
@@ -283,10 +280,7 @@ func (m *TaskListModel) resetMarquee() {
 
 // titleWidth computes the available title width for a job in the list.
 func (m *TaskListModel) titleWidth(job *database.Job) int {
-	contentW := m.width - 2
-	if contentW < 1 {
-		contentW = 1
-	}
+	contentW := max(m.width-2, 1)
 	selectorWidth := 2
 	iconWidth := 2
 	platformTagWidth := 0
@@ -305,10 +299,7 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 	if isActive && percent > 0 {
 		progressTextWidth = runewidth.StringWidth(fmt.Sprintf("%.0f%% ", percent))
 	}
-	tw := contentW - selectorWidth - iconWidth - progressTextWidth - platformTagWidth
-	if tw < 5 {
-		tw = 5
-	}
+	tw := max(contentW-selectorWidth-iconWidth-progressTextWidth-platformTagWidth, 5)
 	return tw
 }
 
@@ -328,11 +319,7 @@ func (m *TaskListModel) ToggleArchive() {
 }
 
 func (m *TaskListModel) contentHeight() int {
-	h := m.height - 3
-	if h < 1 {
-		h = 1
-	}
-	return h
+	return max(m.height-3, 1)
 }
 
 func statusPriority(status database.JobStatus) int {
@@ -479,10 +466,7 @@ func (m *TaskListModel) passesFilter(j *database.Job) bool {
 
 // View renders the task list panel.
 func (m *TaskListModel) View() string {
-	contentW := m.width - 2
-	if contentW < 1 {
-		contentW = 1
-	}
+	contentW := max(m.width-2, 1)
 
 	header := m.renderHeader(contentW)
 
@@ -563,10 +547,7 @@ func (m *TaskListModel) renderHeader(w int) string {
 			perPage = contentH
 		}
 		start := m.list.Paginator.Page*perPage + 1
-		end := start + perPage - 1
-		if end > total {
-			end = total
-		}
+		end := min(start+perPage-1, total)
 		scrollInfo := fmt.Sprintf("[%d-%d/%d]", start, end, total)
 		if right != "" {
 			right += " "
@@ -584,10 +565,7 @@ func (m *TaskListModel) renderHeader(w int) string {
 		rightW = 0
 	}
 
-	padding := w - leftW - rightW
-	if padding < 1 {
-		padding = 1
-	}
+	padding := max(w-leftW-rightW, 1)
 
 	return TitleStyle.Render(left) + strings.Repeat(" ", padding) + DimStyle.Render(right)
 }
@@ -643,10 +621,7 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 
 	label := fmt.Sprintf("%s Archived (%d)", icon, count)
 
-	totalRule := maxW - runewidth.StringWidth(label) - 6
-	if totalRule < 2 {
-		totalRule = 2
-	}
+	totalRule := max(maxW-runewidth.StringWidth(label)-6, 2)
 	ruleLeft := totalRule / 2
 	ruleRight := totalRule - ruleLeft // absorbs odd-width remainder
 

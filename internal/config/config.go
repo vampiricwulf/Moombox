@@ -397,10 +397,7 @@ func validate(cfg *MoomboxConfig) {
 		cfg.Disk.CriticalPercent = defaults.Disk.CriticalPercent
 	}
 	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
-		cfg.Disk.CriticalPercent = cfg.Disk.WarnPercent + 5
-		if cfg.Disk.CriticalPercent > 99 {
-			cfg.Disk.CriticalPercent = 99
-		}
+		cfg.Disk.CriticalPercent = min(cfg.Disk.WarnPercent+5, 99)
 	}
 
 	// Validate channel-level quality_preference (applies to both YouTube and Twitch)

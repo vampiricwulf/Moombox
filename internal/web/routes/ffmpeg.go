@@ -647,7 +647,7 @@ func RefreshWindowsPath() {
 	var registryParts []string
 
 	addParts := func(raw string) {
-		for _, p := range strings.Split(raw, ";") {
+		for p := range strings.SplitSeq(raw, ";") {
 			p = strings.TrimSpace(p)
 			if p == "" {
 				continue
@@ -682,7 +682,7 @@ func RefreshWindowsPath() {
 	}
 
 	// Append any process-specific PATH entries not already in the registry set.
-	for _, p := range strings.Split(os.Getenv("PATH"), ";") {
+	for p := range strings.SplitSeq(os.Getenv("PATH"), ";") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
@@ -700,7 +700,7 @@ func RefreshWindowsPath() {
 // extractRegValue extracts the value from a "reg query" output line.
 // Format: "    Path    REG_SZ    C:\Windows;..."  or  "    Path    REG_EXPAND_SZ    %SystemRoot%..."
 func extractRegValue(output string) string {
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(strings.ToLower(line), "path") {
 			// Split on REG_SZ or REG_EXPAND_SZ

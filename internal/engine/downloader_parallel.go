@@ -13,9 +13,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	curSeq := int(d.currentSeq.Load())
 	head := int(d.headSeq.Load())
 	targetSeq := head - stayBehindSegments
-	if targetSeq < curSeq+1 {
-		targetSeq = curSeq + 1 // At least catch up 1 segment
-	}
+	targetSeq = max(targetSeq, curSeq+1) // At least catch up 1 segment
 	// Respect endSeq limit (for timestamp-based trimming)
 	if d.opts.EndSeq >= 0 && targetSeq > d.opts.EndSeq+1 {
 		targetSeq = d.opts.EndSeq + 1
@@ -47,7 +45,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	var wg sync.WaitGroup
 
 	// Spawn fixed worker pool
-	for w := 0; w < ParallelDownloads; w++ {
+	for range ParallelDownloads {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

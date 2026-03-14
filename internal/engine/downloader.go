@@ -308,7 +308,7 @@ func (d *SegmentDownloader) buildSegmentURL(seq int) string {
 func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
 	data, status, err := d.fetchSegment(ctx, d.opts.InitURL)
 	if err != nil || status >= 400 {
-		return fmt.Errorf("init segment: status=%d err=%v", status, err)
+		return fmt.Errorf("init segment: status=%d: %w", status, err)
 	}
 	n, err := d.outputFile.Write(data)
 	if err != nil {

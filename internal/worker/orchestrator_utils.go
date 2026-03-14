@@ -102,13 +102,13 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 
 // parseFpsString parses ffprobe's r_frame_rate format (e.g. "30/1" or "30000/1001").
 func parseFpsString(fps string) int {
-	parts := strings.SplitN(fps, "/", 2)
-	if len(parts) != 2 {
+	numStr, denStr, ok := strings.Cut(fps, "/")
+	if !ok {
 		v, _ := strconv.Atoi(fps)
 		return v
 	}
-	num, _ := strconv.ParseFloat(parts[0], 64)
-	den, _ := strconv.ParseFloat(parts[1], 64)
+	num, _ := strconv.ParseFloat(numStr, 64)
+	den, _ := strconv.ParseFloat(denStr, 64)
 	if den == 0 {
 		return 0
 	}

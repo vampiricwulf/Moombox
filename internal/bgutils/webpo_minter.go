@@ -116,7 +116,7 @@ func gojaValueToBytes(val goja.Value, vm *goja.Runtime) ([]byte, error) {
 
 	length := int(lengthVal.ToInteger())
 	result := make([]byte, length)
-	for i := 0; i < length; i++ {
+	for i := range length {
 		elem := obj.Get(strconv.Itoa(i))
 		if elem != nil && !goja.IsUndefined(elem) {
 			result[i] = byte(elem.ToInteger())

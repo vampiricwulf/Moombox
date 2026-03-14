@@ -188,9 +188,7 @@ func (dm *DecapiMonitor) calculateInterval(channelCount int) time.Duration {
 	}
 
 	// Floor
-	if interval < decapiMinInterval {
-		interval = decapiMinInterval
-	}
+	interval = max(interval, decapiMinInterval)
 
 	return interval
 }

@@ -328,7 +328,7 @@ func CalculateSegmentRange(stream *DashStream, startTimeSec, endTimeSec float64)
 		for _, seg := range stream.Segments {
 			dur := float64(seg.D) / timescale
 			count := seg.R + 1 // R=0 means 1 occurrence
-			for i := 0; i < count; i++ {
+			for range count {
 				expanded = append(expanded, expandedSeg{duration: dur})
 				if len(expanded) > 100000 {
 					return nil // Safety limit
@@ -448,10 +448,9 @@ func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 			case "BANDWIDTH":
 				variant.Bandwidth, _ = strconv.Atoi(attr.value)
 			case "RESOLUTION":
-				parts := strings.SplitN(attr.value, "x", 2)
-				if len(parts) == 2 {
-					variant.Width, _ = strconv.Atoi(parts[0])
-					variant.Height, _ = strconv.Atoi(parts[1])
+				if w, h, ok := strings.Cut(attr.value, "x"); ok {
+					variant.Width, _ = strconv.Atoi(w)
+					variant.Height, _ = strconv.Atoi(h)
 				}
 			case "FRAME-RATE":
 				if v, err := strconv.ParseFloat(attr.value, 64); err == nil {
@@ -486,8 +485,8 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 	discontinuity := 0
 	var currentDuration float64
 
-	for i := 0; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
 
 		switch {
 		case strings.HasPrefix(line, "#EXT-X-TARGETDURATION:"):
@@ -501,9 +500,7 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 
 		case strings.HasPrefix(line, "#EXTINF:"):
 			durationStr := line[len("#EXTINF:"):]
-			if idx := strings.Index(durationStr, ","); idx >= 0 {
-				durationStr = durationStr[:idx]
-			}
+			durationStr, _, _ = strings.Cut(durationStr, ",")
 			currentDuration, _ = strconv.ParseFloat(durationStr, 64)
 
 		case line == "#EXT-X-DISCONTINUITY":
@@ -538,33 +535,24 @@ func parseAttributes(s string) []attribute {
 	var attrs []attribute
 	for len(s) > 0 {
 		s = strings.TrimSpace(s)
-		eqIdx := strings.Index(s, "=")
-		if eqIdx < 0 {
+		key, rest, ok := strings.Cut(s, "=")
+		if !ok {
 			break
 		}
-		key := s[:eqIdx]
-		s = s[eqIdx+1:]
+		s = rest
 
 		var value string
 		if len(s) > 0 && s[0] == '"' {
 			// Quoted value
-			endQuote := strings.Index(s[1:], "\"")
-			if endQuote < 0 {
+			if inner, after, ok := strings.Cut(s[1:], "\""); ok {
+				value = inner
+				s = after
+			} else {
 				value = s[1:]
 				s = ""
-			} else {
-				value = s[1 : endQuote+1]
-				s = s[endQuote+2:]
 			}
 		} else {
-			commaIdx := strings.Index(s, ",")
-			if commaIdx < 0 {
-				value = s
-				s = ""
-			} else {
-				value = s[:commaIdx]
-				s = s[commaIdx:]
-			}
+			value, s, _ = strings.Cut(s, ",")
 		}
 
 		if len(s) > 0 && s[0] == ',' {

@@ -16,10 +16,7 @@ import (
 	"nhooyr.io/websocket"
 )
 
-const (
-	cdpPollInterval = 500 * time.Millisecond
-	cdpPollTimeout  = 15 * time.Second
-)
+const cdpPollTimeout = 15 * time.Second
 
 // Chromium lock files that prevent headless launch when a headed session was killed.
 var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"}
@@ -52,7 +49,11 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	s.mu.Unlock()
 
 	go func() {
-		defer func() { recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("panic in browser wait goroutine", "panic", r)
+			}
+		}()
 		cmd.Wait()
 		s.mu.Lock()
 		s.browserExited = true
@@ -149,7 +150,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 
 func waitForCDP(ctx context.Context, port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	delay := 200 * time.Millisecond // Start with shorter delay, backoff to cdpPollInterval
+	delay := 200 * time.Millisecond
 	const maxDelay = 2 * time.Second
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
@@ -166,10 +167,7 @@ func waitForCDP(ctx context.Context, port int, timeout time.Duration) error {
 		}
 		time.Sleep(delay)
 		// Exponential backoff: 200ms -> 400ms -> 800ms -> 1600ms -> 2000ms (capped)
-		delay = delay * 2
-		if delay > maxDelay {
-			delay = maxDelay
-		}
+		delay = min(delay*2, maxDelay)
 	}
 	return fmt.Errorf("timeout waiting for CDP endpoint on port %d", port)
 }
@@ -316,7 +314,7 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 		if err != nil {
 			for _, t := range targets {
 				if t.Type == "page" && t.WebSocketDebuggerURL != "" {
-					params := map[string]interface{}{
+					params := map[string]any{
 						"urls": []string{
 							"https://www.youtube.com",
 							"https://youtube.com",
@@ -348,10 +346,7 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 	// Convert to extractedCookie for filtering/deduplication (matching TS cdpCookiesToNetscape)
 	var collected []extractedCookie
 	for _, c := range cookieResult.Cookies {
-		expiry := int64(c.Expires)
-		if expiry < 0 {
-			expiry = 0
-		}
+		expiry := max(int64(c.Expires), 0)
 		collected = append(collected, extractedCookie{
 			domain:   c.Domain,
 			httpOnly: c.HTTPOnly,

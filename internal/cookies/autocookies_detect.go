@@ -146,7 +146,7 @@ func detectDefaultBrowserWindows() string {
 		return ""
 	}
 	// Output: "    ProgId    REG_SZ    ChromeHTML\r\n"
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "ProgId") {
 			continue

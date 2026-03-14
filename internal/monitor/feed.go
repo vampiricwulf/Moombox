@@ -388,13 +388,13 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 func filterUniqueDescriptionLines(description string, olderEntries []atomEntry) string {
 	olderLines := make(map[string]struct{})
 	for _, older := range olderEntries {
-		for _, line := range strings.Split(older.MediaGroup.Description, "\n") {
+		for line := range strings.SplitSeq(older.MediaGroup.Description, "\n") {
 			olderLines[strings.TrimSpace(line)] = struct{}{}
 		}
 	}
 
 	var unique []string
-	for _, line := range strings.Split(description, "\n") {
+	for line := range strings.SplitSeq(description, "\n") {
 		if _, found := olderLines[strings.TrimSpace(line)]; !found {
 			unique = append(unique, line)
 		}

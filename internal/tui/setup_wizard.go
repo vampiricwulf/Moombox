@@ -931,10 +931,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 
 	content := strings.Join(lines, "\n")
 
-	h := m.height - 2
-	if h < 10 {
-		h = 10
-	}
+	h := max(m.height-2, 10)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -966,10 +963,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	// Header
 	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
 	stepRendered := DimStyle.Render("Step 1/2")
-	titlePad := contentW - runewidth.StringWidth("Quick Setup") - runewidth.StringWidth("Step 1/2")
-	if titlePad < 1 {
-		titlePad = 1
-	}
+	titlePad := max(contentW-runewidth.StringWidth("Quick Setup")-runewidth.StringWidth("Step 1/2"), 1)
 	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
 
 	// Step indicator
@@ -1048,10 +1042,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 
 	content := strings.Join(lines, "\n")
 
-	h := m.height - 2
-	if h < 10 {
-		h = 10
-	}
+	h := max(m.height-2, 10)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1071,10 +1062,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	// Header
 	titleRendered := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Quick Setup")
 	stepRendered := DimStyle.Render("Step 2/2")
-	titlePad := contentW - runewidth.StringWidth("Quick Setup") - runewidth.StringWidth("Step 2/2")
-	if titlePad < 1 {
-		titlePad = 1
-	}
+	titlePad := max(contentW-runewidth.StringWidth("Quick Setup")-runewidth.StringWidth("Step 2/2"), 1)
 	lines = append(lines, titleRendered+strings.Repeat(" ", titlePad)+stepRendered)
 
 	// Step indicator
@@ -1113,10 +1101,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 
 	content := strings.Join(lines, "\n")
 
-	h := m.height - 2
-	if h < 10 {
-		h = 10
-	}
+	h := max(m.height-2, 10)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1133,10 +1118,7 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 func (m *SetupWizardModel) viewAdvanced() string {
 	_, contentW := dialogBox(72, m.width)
 
-	h := m.height - 2
-	if h < 10 {
-		h = 10
-	}
+	h := max(m.height-2, 10)
 
 	if m.advancedForm != nil {
 		// Render huh form

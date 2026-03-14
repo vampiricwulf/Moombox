@@ -74,10 +74,7 @@ func NewJobDetailsModel() *JobDetailsModel {
 
 // titleValueWidth computes the available width for the title value column.
 func (m *JobDetailsModel) titleValueWidth() int {
-	valueW := m.width - 2 - labelWidth
-	if valueW < 10 {
-		valueW = 10
-	}
+	valueW := max(m.width-2-labelWidth, 10)
 	return valueW
 }
 
@@ -126,10 +123,7 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	prevW := m.width
 	m.width = w
 	m.height = h
-	contentH := h - 3
-	if contentH < 1 {
-		contentH = 1
-	}
+	contentH := max(h-3, 1)
 	m.viewport.Width = w - 2
 	m.viewport.Height = contentH
 	m.updateViewportContent()
@@ -176,10 +170,7 @@ func (m *JobDetailsModel) UpdateViewport(msg tea.Msg) tea.Cmd {
 
 // updateViewportContent rebuilds the viewport's string content from m.rows.
 func (m *JobDetailsModel) updateViewportContent() {
-	contentW := m.width - 2
-	if contentW < 1 {
-		contentW = 1
-	}
+	contentW := max(m.width-2, 1)
 	if m.job == nil {
 		m.viewport.SetContent(DimStyle.Render("Select a job to view details"))
 		return
@@ -473,10 +464,7 @@ func (m *JobDetailsModel) buildRows() {
 	if j.Error != "" {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Error"})
-		contentW := m.width - 2
-		if contentW < 20 {
-			contentW = 20
-		}
+		contentW := max(m.width-2, 20)
 		valueW := contentW - labelWidth
 		if valueW < 10 {
 			valueW = contentW
@@ -497,10 +485,7 @@ func (m *JobDetailsModel) buildRows() {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
 		m.rows = append(m.rows, detailRow{kind: rowHeader, label: "Description"})
 		// Match TS: wrap to value column width (contentWidth - 14), not full width
-		descW := m.width - 2 - labelWidth
-		if descW < 20 {
-			descW = 20
-		}
+		descW := max(m.width-2-labelWidth, 20)
 		for _, line := range wrapText(j.Description, descW) {
 			m.rows = append(m.rows, detailRow{kind: rowField, value: line})
 		}
@@ -625,10 +610,7 @@ func (m *JobDetailsModel) addFieldColor(label, value string, color lipgloss.Colo
 
 // View renders the job details panel.
 func (m *JobDetailsModel) View() string {
-	contentW := m.width - 2
-	if contentW < 1 {
-		contentW = 1
-	}
+	contentW := max(m.width-2, 1)
 
 	// Title and border color: status-colored when focused + job selected (match TS)
 	titleColor := ColorCyan
@@ -695,10 +677,7 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 
 	case rowSeparator:
 		// Cap separator at 40 chars (match TS Math.min(contentWidth, 40))
-		sepW := maxW
-		if sepW > 40 {
-			sepW = 40
-		}
+		sepW := min(maxW, 40)
 		return SeparatorStyle.Render(strings.Repeat("─", sepW))
 
 	case rowProgressBar:
@@ -708,10 +687,7 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 			percent = m.progressOverlay.Percent
 		}
 		pctLabel := fmt.Sprintf(" %.1f%%", percent)
-		barW := maxW - labelWidth - runewidth.StringWidth(pctLabel)
-		if barW > 30 {
-			barW = 30
-		}
+		barW := min(maxW-labelWidth-runewidth.StringWidth(pctLabel), 30)
 		if barW < 5 {
 			// Narrow fallback: plain text percentage
 			label := padRight("", labelWidth)
@@ -737,10 +713,7 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 			padRight(r.label, labelWidth),
 		)
 		// Truncate value to fit available width
-		valueW := maxW - labelWidth
-		if valueW < 10 {
-			valueW = 10
-		}
+		valueW := max(maxW-labelWidth, 10)
 		val := r.value
 		if r.label == "Title" && m.marquee.NeedsScroll() {
 			val = m.marquee.View()
@@ -809,16 +782,6 @@ func formatTimeSeconds(seconds float64) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// formatDateStr converts an ISO 8601 date string to human-readable LOCAL time (J11).
-// Match TS: new Date(dateStr) + getFullYear/getHours etc. which returns local time.
-func formatDateStr(dateStr string) string {
-	t, err := time.Parse(time.RFC3339, dateStr)
-	if err != nil {
-		return dateStr // fallback to raw
-	}
-	return t.Local().Format("2006-01-02 15:04:05")
-}
-
 // formatDateStrRelative formats a date with a relative suffix, e.g. "2025-01-02 15:04:05 (2h ago)".
 func formatDateStrRelative(dateStr string, now time.Time) string {
 	t, err := time.Parse(time.RFC3339, dateStr)
@@ -866,7 +829,7 @@ func wrapText(text string, maxW int) []string {
 		return []string{text}
 	}
 	var lines []string
-	for _, paragraph := range strings.Split(text, "\n") {
+	for paragraph := range strings.SplitSeq(text, "\n") {
 		if paragraph == "" {
 			lines = append(lines, "")
 			continue
