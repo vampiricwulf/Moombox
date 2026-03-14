@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 
@@ -439,18 +440,22 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 }
 
 // ConfigRoutes registers config-related API routes.
-func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*config.MoomboxConfig) error, callbacks *ConfigRoutesCallbacks) {
+// cfgMu protects concurrent reads/writes to the shared cfg struct.
+func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, saveConfig func(*config.MoomboxConfig) error, callbacks *ConfigRoutesCallbacks) {
 	// GET /api/config
 	r.Get("/api/config", func(rw http.ResponseWriter, req *http.Request) {
 		// Clone config and return with hasPassword injected.
 		// PasswordHash has json:"-" tag so it's already excluded from marshaling.
-		jsonResponse(rw, struct {
+		cfgMu.RLock()
+		defer cfgMu.RUnlock()
+		resp := struct {
 			*config.MoomboxConfig
 			HasPassword bool `json:"hasPassword"`
 		}{
 			MoomboxConfig: cfg,
 			HasPassword:   cfg.Network.PasswordHash != "",
-		})
+		}
+		jsonResponse(rw, resp)
 	})
 
 	// PUT /api/config
@@ -472,10 +477,13 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 			return
 		}
 
+		cfgMu.Lock()
+
 		// Prevent enabling external access without a password
 		if net, ok := updates["network"].(map[string]any); ok {
 			if v, ok := net["network_access"].(string); ok && v == "external" {
 				if cfg.Network.PasswordHash == "" {
+					cfgMu.Unlock()
 					jsonError(rw, "A password must be set before enabling external access. Go to Settings \u2192 Security.", http.StatusBadRequest)
 					return
 				}
@@ -493,20 +501,28 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, saveConfig func(*conf
 		// Persist to disk
 		if saveConfig != nil {
 			if err := saveConfig(cfg); err != nil {
-				jsonError(rw, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+				cfgMu.Unlock()
+				jsonError(rw, "failed to save config", http.StatusInternalServerError)
 				return
 			}
 		}
 
-		// Hot-reload runtime-reloadable settings
+		// Read new values while still holding the lock
+		newLogLevel := cfg.Logs.LogLevel
+		newNumParallel := cfg.Downloader.NumParallelDownloads
+		newHideAge := cfg.Monitors.HideFinishedAgeDays.Value
+
+		cfgMu.Unlock()
+
+		// Hot-reload runtime-reloadable settings (outside the lock to avoid deadlocks in callbacks)
 		if callbacks != nil {
-			if cfg.Logs.LogLevel != oldLogLevel && callbacks.OnLogLevelChange != nil {
-				callbacks.OnLogLevelChange(cfg.Logs.LogLevel)
+			if newLogLevel != oldLogLevel && callbacks.OnLogLevelChange != nil {
+				callbacks.OnLogLevelChange(newLogLevel)
 			}
-			if cfg.Downloader.NumParallelDownloads != oldNumParallel && callbacks.OnMaxParallelChange != nil {
-				callbacks.OnMaxParallelChange(cfg.Downloader.NumParallelDownloads)
+			if newNumParallel != oldNumParallel && callbacks.OnMaxParallelChange != nil {
+				callbacks.OnMaxParallelChange(newNumParallel)
 			}
-			if cfg.Monitors.HideFinishedAgeDays.Value != oldHideAge && callbacks.OnHideFinishedAgeChanged != nil {
+			if newHideAge != oldHideAge && callbacks.OnHideFinishedAgeChanged != nil {
 				callbacks.OnHideFinishedAgeChanged()
 			}
 			if _, hasChannels := updates["channels"]; hasChannels && callbacks.OnChannelChange != nil {

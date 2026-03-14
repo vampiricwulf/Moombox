@@ -30,8 +30,8 @@ func TestNewSegmentDownloader_Defaults(t *testing.T) {
 	if d.opts.ResumeFile != "test.mp4.resume.json" {
 		t.Errorf("ResumeFile: got %q, want %q", d.opts.ResumeFile, "test.mp4.resume.json")
 	}
-	if d.headSeq != -1 {
-		t.Errorf("headSeq: got %d, want -1", d.headSeq)
+	if d.headSeq.Load() != -1 {
+		t.Errorf("headSeq: got %d, want -1", d.headSeq.Load())
 	}
 }
 
@@ -175,6 +175,7 @@ func TestSegmentDownloader_DoubleStart(t *testing.T) {
 	d.running = true
 	d.mu.Unlock()
 
+
 	err := d.Start(context.Background())
 	if err == nil || err.Error() != "already running" {
 		t.Errorf("expected 'already running' error, got %v", err)
@@ -264,9 +265,7 @@ func TestResumeState_LoadSave(t *testing.T) {
 	}
 
 	// Save a state
-	d.mu.Lock()
-	d.currentSeq = 50
-	d.mu.Unlock()
+	d.currentSeq.Store(50)
 	d.bytesWritten.Store(1000)
 	d.saveResume()
 
@@ -344,9 +343,7 @@ func TestResumeState_TempFileCleanup(t *testing.T) {
 		ResumeFile: resumeFile,
 	})
 
-	d.mu.Lock()
-	d.currentSeq = 10
-	d.mu.Unlock()
+	d.currentSeq.Store(10)
 	d.bytesWritten.Store(500)
 	d.saveResume()
 
@@ -385,12 +382,10 @@ func TestDashLoop_DeferredProgressRequiresBytes(t *testing.T) {
 	// Simulate the deferred logic: seq > 0 but no bytes written.
 	// This mirrors what happens when handleGoneError increments currentSeq
 	// 20 times on 403 errors without downloading any data.
-	d.mu.Lock()
-	d.currentSeq = 20 // Advanced by error handler, no actual downloads
-	d.mu.Unlock()
+	d.currentSeq.Store(20) // Advanced by error handler, no actual downloads
 	// bytesWritten stays at 0 (default)
 
-	seq := d.currentSeq
+	seq := int(d.currentSeq.Load())
 	// Replicate the deferred condition from runDashLoop
 	if d.OnProgress != nil && seq > 0 && d.bytesWritten.Load() > 0 {
 		d.OnProgress(DownloadProgress{
@@ -405,7 +400,7 @@ func TestDashLoop_DeferredProgressRequiresBytes(t *testing.T) {
 
 	// Now verify it DOES fire when bytes are written
 	d.bytesWritten.Store(1000)
-	seq = d.currentSeq
+	seq = int(d.currentSeq.Load())
 	if d.OnProgress != nil && seq > 0 && d.bytesWritten.Load() > 0 {
 		d.OnProgress(DownloadProgress{
 			Seq:   seq - 1,

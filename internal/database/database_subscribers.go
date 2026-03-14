@@ -1,20 +1,34 @@
 package database
 
+// jobUpdateSub pairs a subscriber ID with its callback function.
+type jobUpdateSub struct {
+	id uint64
+	fn func(*Job)
+}
+
+// jobsChangeSub pairs a subscriber ID with its callback function.
+type jobsChangeSub struct {
+	id uint64
+	fn func([]*Job)
+}
+
 // OnJobUpdate registers a callback for job update events.
 // Returns an unsubscribe function that removes the callback.
 func (db *Database) OnJobUpdate(fn func(*Job)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
-	id := len(db.onJobUpdate)
-	db.onJobUpdate = append(db.onJobUpdate, fn)
+	id := db.nextSubID
+	db.nextSubID++
+	db.onJobUpdate = append(db.onJobUpdate, jobUpdateSub{id: id, fn: fn})
 	return func() {
 		db.subMu.Lock()
 		defer db.subMu.Unlock()
-		if id < len(db.onJobUpdate) {
-			db.onJobUpdate[id] = nil
+		for i, sub := range db.onJobUpdate {
+			if sub.id == id {
+				db.onJobUpdate = append(db.onJobUpdate[:i], db.onJobUpdate[i+1:]...)
+				break
+			}
 		}
-		// Trim trailing nils to reclaim memory without invalidating other indices
-		db.onJobUpdate = trimTrailingNilFuncs(db.onJobUpdate)
 	}
 }
 
@@ -23,46 +37,27 @@ func (db *Database) OnJobUpdate(fn func(*Job)) func() {
 func (db *Database) OnJobsChange(fn func([]*Job)) func() {
 	db.subMu.Lock()
 	defer db.subMu.Unlock()
-	id := len(db.onJobsChange)
-	db.onJobsChange = append(db.onJobsChange, fn)
+	id := db.nextSubID
+	db.nextSubID++
+	db.onJobsChange = append(db.onJobsChange, jobsChangeSub{id: id, fn: fn})
 	return func() {
 		db.subMu.Lock()
 		defer db.subMu.Unlock()
-		if id < len(db.onJobsChange) {
-			db.onJobsChange[id] = nil
+		for i, sub := range db.onJobsChange {
+			if sub.id == id {
+				db.onJobsChange = append(db.onJobsChange[:i], db.onJobsChange[i+1:]...)
+				break
+			}
 		}
-		// Trim trailing nils to reclaim memory without invalidating other indices
-		db.onJobsChange = trimTrailingNilJobsFuncs(db.onJobsChange)
 	}
-}
-
-// trimTrailingNilFuncs removes trailing nil entries from the subscriber slice.
-// This is safe because it doesn't reorder existing entries — earlier indices remain valid.
-func trimTrailingNilFuncs(fns []func(*Job)) []func(*Job) {
-	i := len(fns)
-	for i > 0 && fns[i-1] == nil {
-		i--
-	}
-	return fns[:i]
-}
-
-// trimTrailingNilJobsFuncs removes trailing nil entries from the jobs-change subscriber slice.
-func trimTrailingNilJobsFuncs(fns []func([]*Job)) []func([]*Job) {
-	i := len(fns)
-	for i > 0 && fns[i-1] == nil {
-		i--
-	}
-	return fns[:i]
 }
 
 // notifyJobUpdate snapshots subscribers and notifies them of a single job update.
 func (db *Database) notifyJobUpdate(job *Job) {
 	db.subMu.RLock()
 	subs := make([]func(*Job), 0, len(db.onJobUpdate))
-	for _, fn := range db.onJobUpdate {
-		if fn != nil {
-			subs = append(subs, fn)
-		}
+	for _, sub := range db.onJobUpdate {
+		subs = append(subs, sub.fn)
 	}
 	db.subMu.RUnlock()
 
@@ -76,10 +71,8 @@ func (db *Database) notifyJobUpdate(job *Job) {
 func (db *Database) notifyJobsChange() {
 	db.subMu.RLock()
 	subs := make([]func([]*Job), 0, len(db.onJobsChange))
-	for _, fn := range db.onJobsChange {
-		if fn != nil {
-			subs = append(subs, fn)
-		}
+	for _, sub := range db.onJobsChange {
+		subs = append(subs, sub.fn)
 	}
 	db.subMu.RUnlock()
 

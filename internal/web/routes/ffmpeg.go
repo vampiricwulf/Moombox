@@ -93,6 +93,7 @@ func InvalidateFFmpegCache() {
 // FFmpegDeps holds dependencies for FFmpeg validation routes.
 type FFmpegDeps struct {
 	Cfg        *config.MoomboxConfig
+	CfgMu     *sync.RWMutex
 	SaveConfig func(*config.MoomboxConfig) error
 	RateLimit  *web.RateLimiter
 	Logger     interface {
@@ -103,9 +104,12 @@ type FFmpegDeps struct {
 
 // FFmpegRoutes registers FFmpeg validation and installation endpoints.
 func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
+	cfgMu := deps.CfgMu
 	// GET /api/ffmpeg/check — check if ffmpeg is available on PATH or configured path
 	r.Get("/api/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
+		cfgMu.RLock()
 		path := deps.Cfg.Paths.FfmpegPath
+		cfgMu.RUnlock()
 		if path == "" {
 			path = "ffmpeg"
 		}
@@ -147,10 +151,12 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 
 		valid, version, warning := checkFFmpeg(path)
 		if valid && deps.SaveConfig != nil {
+			cfgMu.Lock()
 			deps.Cfg.Paths.FfmpegPath = path
 			if err := deps.SaveConfig(deps.Cfg); err != nil {
 				deps.Logger.Error("Failed to save ffmpeg path to config", "error", err.Error())
 			}
+			cfgMu.Unlock()
 		}
 
 		jsonResponse(rw, map[string]any{
@@ -203,7 +209,8 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 
 		needsElevation, script, token, err := PrepareInstall(body.Method)
 		if err != nil {
-			jsonError(rw, err.Error(), http.StatusInternalServerError)
+			deps.Logger.Error("ffmpeg install failed", "method", body.Method, "error", err)
+			jsonError(rw, "FFmpeg installation failed", http.StatusInternalServerError)
 			return
 		}
 
@@ -236,7 +243,8 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 		}
 		deps.Logger.Info("Confirming elevated FFmpeg install", "token", tokenPreview)
 		if err := ConfirmInstall(body.Token); err != nil {
-			jsonError(rw, err.Error(), http.StatusInternalServerError)
+			deps.Logger.Error("ffmpeg install confirm failed", "error", err)
+			jsonError(rw, "FFmpeg installation failed", http.StatusInternalServerError)
 			return
 		}
 

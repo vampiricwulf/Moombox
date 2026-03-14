@@ -29,9 +29,7 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 // saveResume writes the current download state to a temp file and atomically
 // renames it over the resume file to avoid corruption from crashes.
 func (d *SegmentDownloader) saveResume() {
-	d.mu.Lock()
-	seq := d.currentSeq
-	d.mu.Unlock()
+	seq := int(d.currentSeq.Load())
 	if seq <= 0 {
 		return // Nothing downloaded yet (matching TS guard)
 	}

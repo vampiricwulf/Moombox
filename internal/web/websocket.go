@@ -344,6 +344,7 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 			hub.mu.Lock()
 			delete(hub.clients, client)
 			hub.mu.Unlock()
+			client.cancel()
 			client.conn.Close(websocket.StatusInternalError, "write failed")
 		}
 	}

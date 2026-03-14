@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 )
 
 const discordTimeout = 15 * time.Second
+
+// discordHTTPClient is a shared HTTP client with a timeout for Discord webhook requests.
+var discordHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // DiscordWebhook sends notifications via Discord webhook.
 type DiscordWebhook struct {
@@ -104,7 +108,7 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := discordHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("discord webhook request: %w", err)
 	}
@@ -112,6 +116,32 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
+
+	// Handle Discord rate limiting (429) with retry-after
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter := resp.Header.Get("Retry-After")
+		if secs, parseErr := strconv.ParseFloat(retryAfter, 64); parseErr == nil && secs > 0 && secs <= 30 {
+			time.Sleep(time.Duration(secs * float64(time.Second)))
+			// Retry once with a fresh context and request (original body/context were consumed)
+			retryCtx, retryCancel := context.WithTimeout(context.Background(), discordTimeout)
+			defer retryCancel()
+			retryReq, retryErr := http.NewRequestWithContext(retryCtx, http.MethodPost, d.URL, bytes.NewReader(body))
+			if retryErr == nil {
+				retryReq.Header.Set("Content-Type", "application/json")
+				resp2, doErr := discordHTTPClient.Do(retryReq)
+				if doErr == nil {
+					defer func() {
+						io.Copy(io.Discard, resp2.Body)
+						resp2.Body.Close()
+					}()
+					if resp2.StatusCode < 400 {
+						return nil
+					}
+				}
+			}
+		}
+		return fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
+	}
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("discord webhook returned %d", resp.StatusCode)

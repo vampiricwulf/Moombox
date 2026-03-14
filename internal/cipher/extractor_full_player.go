@@ -183,7 +183,10 @@ func findAlrTransformChains(playerJS string) []string {
 			transform := fullRest[exprStart:pos]
 
 			// Replace the parameter name with "sig" using word-boundary matching
-			paramRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(param) + `\b`)
+			paramRe, err := regexp.Compile(`\b` + regexp.QuoteMeta(param) + `\b`)
+			if err != nil {
+				continue
+			}
 			chain := paramRe.ReplaceAllString(transform, "sig")
 			chains = append(chains, chain)
 		}

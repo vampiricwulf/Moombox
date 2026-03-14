@@ -357,7 +357,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms)
-	var cfgMu sync.Mutex
+	var cfgMu sync.RWMutex
+	dlWorker.SetCfgMu(&cfgMu)
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
 		cfgMu.Lock()
 		defer cfgMu.Unlock()
@@ -392,9 +393,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func() bool {
-		cfgMu.Lock()
+		cfgMu.RLock()
 		autoEnabled := cfg.Cookies.AutoEnabled
-		cfgMu.Unlock()
+		cfgMu.RUnlock()
 		if !autoEnabled {
 			return false
 		}
@@ -412,7 +413,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// 16. Web server
 	// =========================================================================
 	startTime := time.Now()
-	webServer := web.NewServer(cfg, log)
+	webServer := web.NewServer(cfg, &cfgMu, log)
 	webServer.SetCommit(commit)
 	wsHub := webServer.WebSocket()
 	r := webServer.Router()
@@ -440,8 +441,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Shared closure: determines which platforms are active for cookie status display.
 	getActivePlatforms := func() map[string]bool {
-		cfgMu.Lock()
-		defer cfgMu.Unlock()
+		cfgMu.RLock()
+		defer cfgMu.RUnlock()
 		yt, tw := config.GetActivePlatforms(cfg)
 		return map[string]bool{"youtube": yt, "twitch": tw}
 	}
@@ -455,7 +456,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	}
 
 	// Register all routes
-	routes.JobRoutes(r, db, cfg, dlWorker, apiRL, &twitchMetadataAdapter{svc: twService}, &youtubeMetadataAdapter{svc: ytService}, notifyMgr)
+	routes.JobRoutes(r, db, cfg, webServer.CfgMu(), dlWorker, apiRL, &twitchMetadataAdapter{svc: twService}, &youtubeMetadataAdapter{svc: ytService}, notifyMgr)
 	routes.FormatRoutes(r, &routes.FormatRoutesDeps{
 		DB:  db,
 		Cfg: cfg,
@@ -489,7 +490,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		GetNextDecapiCheck: decapiMon.GetNextCheckAt,
 		GetNextTwitchCheck: twitchMon.GetNextCheckAt,
 	})
-	routes.ConfigRoutes(r, cfg, func(c *config.MoomboxConfig) error {
+	routes.ConfigRoutes(r, cfg, webServer.CfgMu(), func(c *config.MoomboxConfig) error {
 		return config.Save(c, configPath)
 	}, &routes.ConfigRoutesCallbacks{
 		OnLogLevelChange: func(level string) {
@@ -501,11 +502,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		OnHideFinishedAgeChanged: func() {
 			// Re-broadcast job list with updated archive threshold
 			jobs, _ := db.GetAllJobs()
-			wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg))
+			wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg, webServer.CfgMu()))
 		},
 		OnChannelChange: kickMonitors,
 	})
-	routes.ChannelRoutes(r, cfg, func(c *config.MoomboxConfig) error {
+	routes.ChannelRoutes(r, cfg, webServer.CfgMu(), func(c *config.MoomboxConfig) error {
 		return config.Save(c, configPath)
 	}, kickMonitors)
 	routes.FileRoutes(r, &routes.FileRoutesDeps{
@@ -547,9 +548,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		},
 		OnChannelChange: kickMonitors,
 		OnRestart:       func() { triggerRestart("setup") },
-	})
+	}, webServer.CfgMu())
 	routes.FFmpegRoutes(r, &routes.FFmpegDeps{
-		Cfg: cfg,
+		Cfg:   cfg,
+		CfgMu: webServer.CfgMu(),
 		SaveConfig: func(c *config.MoomboxConfig) error {
 			return config.Save(c, configPath)
 		},
@@ -557,7 +559,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		Logger:    log,
 	})
 	routes.LogRoutes(r, log.GetRecentLines)
-	importCleanup := routes.ImportRoutes(r, db, cfg, apiRL)
+	importCleanup := routes.ImportRoutes(r, db, cfg, webServer.CfgMu(), apiRL)
 	defer importCleanup()
 	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc, getActivePlatforms)
 	routes.YtdlpRoutes(r, cfg.Network.Port, cfg.Network.HTTPSEnabled)
@@ -581,7 +583,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			default:
 			}
 		},
-	})
+	}, webServer.CfgMu())
 	authDeps := &routes.AuthRoutesDeps{
 		Cfg:        cfg,
 		Auth:       authSvc,
@@ -593,7 +595,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		},
 		Logger: log,
 	}
-	routes.AuthRoutes(r, authDeps)
+	routes.AuthRoutes(r, authDeps, webServer.CfgMu())
 	routes.ClientTokenRoutes(r, authDeps)
 	routes.PlayerPrefsRoutes(r, db)
 
@@ -625,7 +627,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Wire WebSocket auth check for external connections
 	wsHub.AuthCheck = func(r *http.Request) bool {
-		if !web.IsAuthRequired(cfg.Network.NetworkAccess, cfg.Network.PasswordHash) {
+		cfgMu.RLock()
+		networkAccess := cfg.Network.NetworkAccess
+		passwordHash := cfg.Network.PasswordHash
+		cfgMu.RUnlock()
+		if !web.IsAuthRequired(networkAccess, passwordHash) {
 			return true
 		}
 		// Check session cookie
@@ -653,7 +659,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Wire initial state provider for WebSocket connections
 	wsHub.InitialState = func() map[string]any {
 		jobs, _ := db.GetAllJobs()
-		jobs = filterJobsByAge(jobs, cfg)
+		jobs = filterJobsByAge(jobs, cfg, webServer.CfgMu())
 		return map[string]any{
 			"jobs":             jobs,
 			"logs":             log.GetRecentLines(),
@@ -674,9 +680,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Wire cookie recovery callback
 	// =========================================================================
 	cookieRefresh.OnRecoveryNeeded = func(platform string) {
-		cfgMu.Lock()
+		cfgMu.RLock()
 		autoEnabled := cfg.Cookies.AutoEnabled
-		cfgMu.Unlock()
+		cfgMu.RUnlock()
 		if !autoEnabled {
 			log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
 			return
@@ -734,7 +740,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Determine output directory (channel-specific > global > default)
 		outputDir := ch.OutputDirectory
 		if outputDir == "" {
+			cfgMu.RLock()
 			outputDir = cfg.Paths.OutputDirectory
+			cfgMu.RUnlock()
 		}
 
 		thumbnailURL := fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", videoID)
@@ -766,7 +774,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		db.AddToHistory(videoID)
 		dlWorker.EnqueueJob(videoID)
-		wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(db), cfg))
+		wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(db), cfg, webServer.CfgMu()))
 		if notifyMgr.HasTargets() {
 			notifyMgr.Send("Stream Found",
 				fmt.Sprintf("Found matching stream: %s", title),
@@ -815,7 +823,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Determine output directory
 		outputDir := ch.OutputDirectory
 		if outputDir == "" {
+			cfgMu.RLock()
 			outputDir = cfg.Paths.OutputDirectory
+			cfgMu.RUnlock()
 		}
 
 		now := time.Now().UTC().Format(time.RFC3339)
@@ -852,7 +862,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		db.AddToHistory(jobID)
 		dlWorker.EnqueueJob(jobID)
-		wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(db), cfg))
+		wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(db), cfg, webServer.CfgMu()))
 		if notifyMgr.HasTargets() {
 			twitchFields := []notifications.Field{
 				{Name: "Channel", Value: info.ChannelDisplayName, Inline: true},
@@ -900,7 +910,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	unsubWSJobUpdate := db.OnJobUpdate(func(job *database.Job) {
 		// Skip broadcasting updates for archived (old finished) jobs
 		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
+			cfgMu.RLock()
 			ageDays := int(cfg.Monitors.HideFinishedAgeDays.Value)
+			cfgMu.RUnlock()
 			cutoff := time.Now().AddDate(0, 0, -ageDays)
 			if t, err := time.Parse(time.RFC3339, job.UpdatedAt); err == nil && t.Before(cutoff) {
 				return
@@ -918,7 +930,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		db.PruneJobLogs(activeIDs)
 		log.PruneJobLogs(activeIDs)
 
-		wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg))
+		wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg, webServer.CfgMu()))
 	})
 
 	// Logger -> WebSocket: broadcast log lines + route to per-job buffers
@@ -950,7 +962,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	twitchMon.Start(ctx)
 
 	// Start download worker (runs in goroutine — Start() blocks on job queue)
-	go dlWorker.Start(ctx)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("download worker panic", "panic", r)
+			}
+		}()
+		dlWorker.Start(ctx)
+	}()
 
 	// Start cookie refresh (only if a cookie file is configured, like TS)
 	if cfg.Cookies.CookieFile != "" {
@@ -1016,11 +1035,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Expose actual bound port for TUI and other components (matches TS: process.env.MOOMBOX_PORT)
 	if actualPort := webServer.ActualPort; actualPort > 0 {
+		cfgMu.Lock()
 		cfg.Network.Port = actualPort
+		cfgMu.Unlock()
 	}
 
 	// Initial disk space check (populate immediately so status bar has data).
-	routes.UpdateDiskStatus(cfg.Paths.OutputDirectory, cfg)
+	cfgMu.RLock()
+	initialOutputDir := cfg.Paths.OutputDirectory
+	cfgMu.RUnlock()
+	routes.UpdateDiskStatus(initialOutputDir, cfg, webServer.CfgMu())
 
 	// TUI disk status channel (created early so the goroutine can reference it;
 	// only receives messages when TUI mode is active).
@@ -1102,7 +1126,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				// close enough to the 5-min target while reusing the existing ticker).
 				diskCheckCounter++
 				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
-					if ds := routes.UpdateDiskStatus(cfg.Paths.OutputDirectory, cfg); ds != nil {
+					cfgMu.RLock()
+					diskOutputDir := cfg.Paths.OutputDirectory
+					cfgMu.RUnlock()
+					if ds := routes.UpdateDiskStatus(diskOutputDir, cfg, webServer.CfgMu()); ds != nil {
 						// Broadcast to web clients
 						wsHub.Broadcast("disk_status", map[string]any{
 							"free":      ds.Free,
@@ -1163,8 +1190,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		app := tui.NewApp()
 		quitTUI = app.QuitTUI // allow API restart to exit TUI
 
-		// Pass config reference and version for settings panel
+		// Pass config reference, config mutex, and version for settings panel
 		app.SetConfig(cfg)
+		app.SetCfgMu(&cfgMu)
 		app.SetVersion(version)
 		app.SetInternalToken(webServer.InternalToken())
 		app.IsFirstRun = !cfg.ConfigLoaded
@@ -1201,7 +1229,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				dir = filepath.Dir(job.OutputFile)
 			} else {
 				// Fall back to staging directory for active jobs
+				cfgMu.RLock()
 				stagingBase := cfg.Paths.StagingDirectory
+				cfgMu.RUnlock()
 				if stagingBase == "" {
 					stagingBase = "./staging"
 				}
@@ -1549,7 +1579,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					tw = tui.CookieStatusRelogin
 				}
 			}
+			cfgMu.RLock()
 			ytActive, twActive := config.GetActivePlatforms(cfg)
+			cfgMu.RUnlock()
 			select {
 			case cookieStatusCh <- tui.CookieStatusMsg{YT: yt, TW: tw, YTActive: ytActive, TWActive: twActive}:
 			default:

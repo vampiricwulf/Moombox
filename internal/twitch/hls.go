@@ -253,7 +253,7 @@ func FetchHLSMasterPlaylist(ctx context.Context, url string) ([]TwitchHLSVariant
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
 	req.Header.Set("Client-ID", constants.TwitchGQLClientID)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := twitchHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch hls playlist: %w", err)
 	}

@@ -16,7 +16,7 @@ const stsCacheSize = 150
 type StsCache struct {
 	mu    sync.RWMutex
 	cache map[string]string
-	order []string // insertion order for LRU eviction
+	order []string // insertion order for FIFO eviction
 }
 
 // NewStsCache creates a new STS cache.

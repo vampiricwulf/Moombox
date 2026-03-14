@@ -277,10 +277,15 @@ func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string)
 		return rawURL
 	}
 
-	// Replace n= value directly in the raw URL to preserve parameter order.
-	// The n-param value is base64url (alphanumeric + _ + -), so it doesn't
-	// require URL encoding and appears literally in the URL.
-	return strings.Replace(rawURL, "n="+nParam, "n="+decryptedN, 1)
+	// Replace the first occurrence of n=<value> that is a proper query parameter
+	// to avoid false-matching within other parameter values.
+	for _, prefix := range []string{"?", "&"} {
+		old := prefix + "n=" + nParam
+		if strings.Contains(rawURL, old) {
+			return strings.Replace(rawURL, old, prefix+"n="+decryptedN, 1)
+		}
+	}
+	return rawURL
 }
 
 // DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.

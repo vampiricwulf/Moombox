@@ -13,7 +13,17 @@ func (m *SettingsModel) handleSecurityKey(key string) string {
 }
 
 func (m *SettingsModel) hasPassword() bool {
-	return m.cfg != nil && m.cfg.Network.PasswordHash != ""
+	if m.cfg == nil {
+		return false
+	}
+	if m.cfgMu != nil {
+		m.cfgMu.RLock()
+	}
+	hash := m.cfg.Network.PasswordHash
+	if m.cfgMu != nil {
+		m.cfgMu.RUnlock()
+	}
+	return hash != ""
 }
 
 func (m *SettingsModel) handleSecuritySetKey(key string) string {
@@ -75,7 +85,14 @@ func (m *SettingsModel) handleSetPassword() {
 			m.secMessageColor = ColorRed
 			return
 		}
-		if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secCurrentPw, m.cfg.Network.PasswordHash) {
+		if m.cfgMu != nil {
+			m.cfgMu.RLock()
+		}
+		currentHash := m.cfg.Network.PasswordHash
+		if m.cfgMu != nil {
+			m.cfgMu.RUnlock()
+		}
+		if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secCurrentPw, currentHash) {
 			m.secMessage = "Current password is incorrect"
 			m.secMessageColor = ColorRed
 			return
@@ -101,7 +118,13 @@ func (m *SettingsModel) handleSetPassword() {
 			m.secMessageColor = ColorRed
 			return
 		}
+		if m.cfgMu != nil {
+			m.cfgMu.Lock()
+		}
 		m.cfg.Network.PasswordHash = hash
+		if m.cfgMu != nil {
+			m.cfgMu.Unlock()
+		}
 		if m.OnSave != nil {
 			m.OnSave(m.cfg)
 		}
@@ -134,17 +157,32 @@ func (m *SettingsModel) handleRemovePassword() {
 		return
 	}
 
-	if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secRemovePw, m.cfg.Network.PasswordHash) {
+	if m.cfgMu != nil {
+		m.cfgMu.RLock()
+	}
+	pwHash := m.cfg.Network.PasswordHash
+	if m.cfgMu != nil {
+		m.cfgMu.RUnlock()
+	}
+	if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secRemovePw, pwHash) {
 		m.secMessage = "Current password is incorrect"
 		m.secMessageColor = ColorRed
 		return
 	}
 
 	// Remove password
+	if m.cfgMu != nil {
+		m.cfgMu.Lock()
+	}
 	networkReset := m.cfg.Network.NetworkAccess == "external"
 	m.cfg.Network.PasswordHash = ""
 	if networkReset {
 		m.cfg.Network.NetworkAccess = "localhost"
+	}
+	if m.cfgMu != nil {
+		m.cfgMu.Unlock()
+	}
+	if networkReset {
 		m.values["network_access"] = "localhost"
 		m.dirty = true
 	}

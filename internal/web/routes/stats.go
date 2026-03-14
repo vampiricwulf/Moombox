@@ -2,6 +2,7 @@ package routes
 
 import (
 	"net/http"
+	"sync"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -26,27 +27,33 @@ var SharedDiskStatus atomic.Pointer[DiskStatus]
 
 // ComputeWarnLevel returns "ok", "warn", or "critical" for a given usage percent.
 func ComputeWarnLevel(usedPct float64, cfg *config.MoomboxConfig) string {
-	if usedPct >= float64(cfg.Disk.CriticalPercent) {
+	if cfg.Disk.CriticalPercent > 0 && usedPct >= float64(cfg.Disk.CriticalPercent) {
 		return "critical"
 	}
-	if usedPct >= float64(cfg.Disk.WarnPercent) {
+	if cfg.Disk.WarnPercent > 0 && usedPct >= float64(cfg.Disk.WarnPercent) {
 		return "warn"
 	}
 	return "ok"
 }
 
 // UpdateDiskStatus queries disk space and stores the result in SharedDiskStatus.
+// cfgMu protects concurrent reads of the disk threshold config fields.
 // Returns the DiskStatus and warn level, or nil on error.
-func UpdateDiskStatus(outputDir string, cfg *config.MoomboxConfig) *DiskStatus {
+func UpdateDiskStatus(outputDir string, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) *DiskStatus {
 	ds, err := disk.GetDiskSpace(outputDir)
 	if err != nil {
 		return nil
 	}
+
+	cfgMu.RLock()
+	warnLevel := ComputeWarnLevel(ds.UsedPct, cfg)
+	cfgMu.RUnlock()
+
 	status := &DiskStatus{
 		Free:      ds.Free,
 		Total:     ds.Total,
 		UsedPct:   ds.UsedPct,
-		WarnLevel: ComputeWarnLevel(ds.UsedPct, cfg),
+		WarnLevel: warnLevel,
 	}
 	SharedDiskStatus.Store(status)
 	return status

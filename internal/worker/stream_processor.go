@@ -43,6 +43,7 @@ type StreamProcessor struct {
 	yt       *youtube.Service
 	tw       *twitch.Service
 	cfg      *config.MoomboxConfig
+	cfgMu    *sync.RWMutex // shared config mutex (set via SetCfgMu)
 	db       *database.Database
 	notifier *notifications.Manager
 	logger   logger
@@ -54,6 +55,11 @@ type StreamProcessor struct {
 // NewStreamProcessor creates a new stream processor.
 func NewStreamProcessor(yt *youtube.Service, tw *twitch.Service, cfg *config.MoomboxConfig, db *database.Database, logger logger) *StreamProcessor {
 	return &StreamProcessor{yt: yt, tw: tw, cfg: cfg, db: db, logger: logger}
+}
+
+// SetCfgMu sets the shared config mutex for synchronized config access.
+func (sp *StreamProcessor) SetCfgMu(mu *sync.RWMutex) {
+	sp.cfgMu = mu
 }
 
 // SetNotifier sets the notification manager for the stream processor.

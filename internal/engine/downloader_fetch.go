@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// engineHTTPClient is a shared HTTP client for segment and chunk downloads.
+// Uses a long timeout as a safety net — context-based cancellation handles
+// normal timeouts. Segments on slow connections can take several minutes.
+var engineHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+
 // fetchSegment downloads a single segment (or playlist) by URL.
 func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
@@ -30,7 +35,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 	}
 	d.setCommonHeaders(req, uaWeb)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -40,7 +45,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20)) // 100MB max segment
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -88,7 +93,7 @@ func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) 
 	}
 	d.setCommonHeaders(req, uaWeb)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		return -1, err
 	}
@@ -121,7 +126,7 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", "bytes=0-0")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		return 0
 	}
@@ -189,7 +194,7 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 	d.setCommonHeaders(req, uaAndroid)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -199,8 +204,8 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 		return nil, resp.StatusCode, fmt.Errorf("range not satisfiable")
 	}
 	if resp.StatusCode == http.StatusOK {
-		// Server ignored Range header -- read entire response
-		data, err := io.ReadAll(resp.Body)
+		// Server ignored Range header -- cap read to avoid unbounded memory usage
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB cap for ignored-range fallback
 		return data, resp.StatusCode, err
 	}
 	if resp.StatusCode != http.StatusPartialContent {

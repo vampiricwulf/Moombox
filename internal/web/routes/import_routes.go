@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -26,8 +27,9 @@ var unsafeFilenameRe = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
 
 // ImportRoutes registers import-related API routes.
 // Uses its own 5/min rate limiter per the spec.
+// cfgMu protects concurrent reads/writes to the shared cfg struct.
 // Returns a cleanup function that stops the rate limiter's background goroutine.
-func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, rl *web.RateLimiter) func() {
+func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, rl *web.RateLimiter) func() {
 	importRL := web.NewRateLimiter(5, time.Minute)
 	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
 		// Max 500MB upload
@@ -61,7 +63,7 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		_, err = copyWithLimit(tmpFile, req.Body, 500*1024*1024)
 		if err != nil {
 			tmpFile.Close()
-			jsonError(rw, "failed to read upload: "+err.Error(), http.StatusBadRequest)
+			jsonError(rw, "failed to read upload", http.StatusBadRequest)
 			return
 		}
 		tmpFile.Close()
@@ -229,7 +231,9 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		}
 
 		// Output paths
+		cfgMu.RLock()
 		outputDir := cfg.Paths.OutputDirectory
+		cfgMu.RUnlock()
 		if outputDir == "" {
 			outputDir = "./output"
 		}
@@ -242,7 +246,7 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 
 		// Extract video file
 		if err := extractZipEntry(videoFile, videoOutPath); err != nil {
-			jsonError(rw, "failed to extract video: "+err.Error(), http.StatusInternalServerError)
+			jsonError(rw, "failed to extract video", http.StatusInternalServerError)
 			return
 		}
 
@@ -277,7 +281,7 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		}
 
 		if _, err := db.AddJob(job); err != nil {
-			jsonError(rw, "failed to create job: "+err.Error(), http.StatusInternalServerError)
+			jsonError(rw, "failed to create job", http.StatusInternalServerError)
 			return
 		}
 

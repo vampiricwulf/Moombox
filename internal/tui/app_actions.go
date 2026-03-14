@@ -67,62 +67,62 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		if a.OnRecheckCookies != nil {
 			a.setFeedback("Rechecking cookies...")
 			recheckFn := a.OnRecheckCookies
-			return a, func() tea.Msg {
+			return a, safeCmd(func() tea.Msg {
 				ytAuth, twAuth := recheckFn()
 				return cookieRecheckResultMsg{YouTubeAuth: ytAuth, TwitchAuth: twAuth}
-			}
+			})
 		}
 	case "R F":
 		if a.OnForceRefreshCookies != nil {
 			a.setFeedback("Running browser cookie refresh...")
 			refreshFn := a.OnForceRefreshCookies
-			return a, func() tea.Msg {
+			return a, safeCmd(func() tea.Msg {
 				ok, err := refreshFn()
 				return cookieForceRefreshResultMsg{Success: ok, Err: err}
-			}
+			})
 		}
 	case "R V":
 		if a.OnCheckUpdate != nil {
 			a.setFeedback("Checking for updates...")
 			checkFn := a.OnCheckUpdate
-			return a, func() tea.Msg {
+			return a, safeCmd(func() tea.Msg {
 				info, err := checkFn()
 				if err != nil {
 					return updateCheckResultMsg{Err: err.Error()}
 				}
 				return updateCheckResultMsg{Info: info}
-			}
+			})
 		}
 	case "R U":
 		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
 			ver := a.updateAvailable.Version
 			applyFn := a.OnApplyUpdate
-			return a, func() tea.Msg {
+			return a, safeCmd(func() tea.Msg {
 				errStr := applyFn(ver)
 				return updateApplyResultMsg{Err: errStr}
-			}
+			})
 		}
 		a.setFeedback("No update available — use R V to check")
 	case "R S":
 		if a.OnVerifySignature != nil {
 			a.setFeedback("Verifying signature...")
 			verifyFn := a.OnVerifySignature
-			return a, func() tea.Msg {
+			return a, safeCmd(func() tea.Msg {
 				err := verifyFn()
 				if err != nil {
 					return signatureVerifyResultMsg{Err: err.Error()}
 				}
 				return signatureVerifyResultMsg{}
-			}
+			})
 		}
 	case "R P":
 		if a.OnRestart != nil {
 			onRestart := a.OnRestart
-			return a, func() tea.Msg {
+			return a, safeCmd(func() tea.Msg {
 				onRestart()
 				return tea.QuitMsg{}
-			}
+			})
 		}
 	case "O F":
 		if job != nil && a.OnOpenFolder != nil {
@@ -140,8 +140,16 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "O W":
 		scheme := "http"
-		if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
-			scheme = "https"
+		if a.cfg != nil {
+			if a.cfgMu != nil {
+				a.cfgMu.RLock()
+			}
+			if a.cfg.Network.HTTPSEnabled {
+				scheme = "https"
+			}
+			if a.cfgMu != nil {
+				a.cfgMu.RUnlock()
+			}
 		}
 		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
 		a.setFeedback(fmt.Sprintf("Opening: %s", url))

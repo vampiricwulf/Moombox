@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/engine"
@@ -24,8 +25,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	result *DownloadResult,
 	tracker *ProgressTracker,
 ) error {
-	var lastSegmentTime = time.Now()
-	consecutiveLiveChecks := 0
+	var lastSegTime atomic.Int64
+	lastSegTime.Store(time.Now().UnixNano())
+	var consecutiveLiveChecks atomic.Int32
 
 	// Quality monitoring state
 	segmentIndex := 0
@@ -57,11 +59,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	// Track segment activity via progress callbacks.
 	// Only reset safety counters when actual bytes are written — catch-up
 	// bookend events and deferred progress from failed downloads report
-	// Bytes=0, which must NOT reset consecutiveLiveChecks or lastSegmentTime.
+	// Bytes=0, which must NOT reset consecutiveLiveChecks or lastSegTime.
 	onSegmentProgress := func(p engine.DownloadProgress) {
 		if p.Bytes > 0 {
-			lastSegmentTime = time.Now()
-			consecutiveLiveChecks = 0
+			lastSegTime.Store(time.Now().UnixNano())
+			consecutiveLiveChecks.Store(0)
 		}
 	}
 
@@ -250,7 +252,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 		}
 
 		// Normal download stop — verify stream ended (existing logic)
-		timeSinceLastSeg := time.Since(lastSegmentTime)
+		timeSinceLastSeg := time.Since(time.Unix(0, lastSegTime.Load()))
 		o.logger.Info("segment downloaders stopped",
 			"timeSinceLastSeg", timeSinceLastSeg.Round(time.Second),
 			"jobID", jobCtx.Job.ID)
@@ -279,15 +281,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			goto streamEnded
 
 		case youtube.StreamLive:
-			consecutiveLiveChecks++
-			if consecutiveLiveChecks >= maxConsecutiveLiveChecks {
+			checks := consecutiveLiveChecks.Add(1)
+			if checks >= maxConsecutiveLiveChecks {
 				o.logger.Warn("YouTube reported live too many times with no segments, forcing end",
-					"checks", consecutiveLiveChecks, "jobID", jobCtx.Job.ID)
+					"checks", checks, "jobID", jobCtx.Job.ID)
 				goto streamEnded
 			}
 
 			o.logger.Info("stream still live, refreshing manifests",
-				"check", consecutiveLiveChecks, "max", maxConsecutiveLiveChecks, "jobID", jobCtx.Job.ID)
+				"check", checks, "max", maxConsecutiveLiveChecks, "jobID", jobCtx.Job.ID)
 
 			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 				"progress": "Waiting for stream to end...",

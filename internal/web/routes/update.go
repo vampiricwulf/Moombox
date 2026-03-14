@@ -2,6 +2,7 @@ package routes
 
 import (
 	"net/http"
+	"sync"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -25,7 +26,7 @@ type UpdateRouteDeps struct {
 }
 
 // UpdateRoutes registers the update check/apply/dismiss API endpoints.
-func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
+func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, cfgMu *sync.RWMutex) {
 	// GET /api/update/status — current update status
 	r.Get("/api/update/status", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
@@ -51,7 +52,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 
 		release, err := deps.Updater.CheckForUpdate(r.Context())
 		if err != nil {
-			jsonError(w, "check failed: "+err.Error(), http.StatusInternalServerError)
+			jsonError(w, "check failed", http.StatusInternalServerError)
 			return
 		}
 
@@ -88,7 +89,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 		}
 
 		if err := deps.Updater.ApplyUpdate(r.Context(), release); err != nil {
-			jsonError(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+			jsonError(w, "update failed", http.StatusInternalServerError)
 			return
 		}
 
@@ -118,7 +119,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 			return
 		}
 		if err := deps.Updater.VerifyCurrentSignature(r.Context()); err != nil {
-			jsonResponse(w, map[string]any{"error": err.Error()})
+			jsonResponse(w, map[string]any{"error": "signature verification failed"})
 			return
 		}
 		jsonResponse(w, map[string]any{"verified": true})
@@ -126,13 +127,17 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps) {
 
 	// POST /api/update/dismiss — disable auto-check and clear update info
 	r.Post("/api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
+		cfgMu.Lock()
+		oldVal := deps.Cfg.Updates.AutoCheckUpdates
 		deps.Cfg.Updates.AutoCheckUpdates = false
-		SharedUpdateInfo.Store(nil)
-
 		if err := config.Save(deps.Cfg, deps.ConfigPath); err != nil {
-			jsonError(w, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+			deps.Cfg.Updates.AutoCheckUpdates = oldVal
+			cfgMu.Unlock()
+			jsonError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
+		cfgMu.Unlock()
+		SharedUpdateInfo.Store(nil)
 
 		jsonResponse(w, map[string]any{"success": true})
 	})

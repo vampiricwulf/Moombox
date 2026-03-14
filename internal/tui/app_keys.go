@@ -23,10 +23,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "restart":
 			if a.OnRestart != nil {
 				onRestart := a.OnRestart
-				return a, func() tea.Msg {
+				return a, safeCmd(func() tea.Msg {
 					onRestart()
 					return tea.QuitMsg{}
-				}
+				})
 			}
 		case "resolve_channel":
 			return a, a.resolveChannelCmd(a.settings.GetChannelResolveInput())
@@ -88,10 +88,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.setupWiz.Close()
 			if a.setupWiz.OnRestart != nil {
 				onRestart := a.setupWiz.OnRestart
-				return a, func() tea.Msg {
+				return a, safeCmd(func() tea.Msg {
 					onRestart()
 					return tea.QuitMsg{}
-				}
+				})
 			}
 		}
 		var cmds []tea.Cmd
@@ -99,13 +99,13 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Run cookie extraction async so TUI doesn't freeze
 			platform := a.setupWiz.cookiePlatform
 			finishFn := a.setupWiz.OnFinishAutoCookie
-			cmds = append(cmds, func() tea.Msg {
+			cmds = append(cmds, safeCmd(func() tea.Msg {
 				yt, tw := false, false
 				if finishFn != nil {
 					yt, tw = finishFn()
 				}
 				return setupCookieFinishMsg{Platform: platform, YTAuth: yt, TWAuth: tw}
-			})
+			}))
 		}
 		if a.setupWiz.cookieActive {
 			cmds = append(cmds, a.setupWiz.spinner.Tick)

@@ -11,6 +11,25 @@ import (
 	"time"
 )
 
+// utilsHTTPClient is a shared HTTP client with a long safety-net timeout.
+// FetchWithTimeout creates its own timeout via context.WithTimeout, so the
+// client timeout only guards against truly stuck connections.
+var utilsHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+
+// cancelOnCloseBody wraps a response body so that the context cancel function
+// is called when the body is closed. This ensures the timeout context lives
+// as long as the caller is reading the body.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
 // DrainBody reads and discards the remaining response body, then closes it.
 // This ensures the underlying TCP connection can be reused by the HTTP client pool.
 func DrainBody(resp *http.Response) {
@@ -37,7 +56,7 @@ func FetchWithTimeout(ctx context.Context, url string, timeout time.Duration, he
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := utilsHTTPClient.Do(req)
 	if err != nil {
 		cancel()
 		return nil, nil, err
@@ -85,10 +104,10 @@ func FetchWithRetry(ctx context.Context, url string, timeout time.Duration, head
 		}
 		return nil, err
 	}
-	// Note: caller must close resp.Body; lastCancel will fire when the timeout expires
-	// or when the response body is fully consumed and closed.
-	// We can't defer lastCancel here because the caller needs to read the body.
-	// The timeout context will self-cancel after the timeout duration.
+	// Wrap the response body so that the cancel function is called when the
+	// caller closes the body. This ensures the timeout context lives as long
+	// as the body is being read, preventing "context canceled" errors.
+	lastResp.Body = &cancelOnCloseBody{ReadCloser: lastResp.Body, cancel: lastCancel}
 	return lastResp, nil
 }
 

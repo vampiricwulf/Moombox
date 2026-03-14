@@ -6,19 +6,24 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // CORSMiddleware validates Origin headers based on network_access config.
-func CORSMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
+func CORSMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
+			cfgMu.RLock()
+			networkAccess := cfg.Network.NetworkAccess
+			cfgMu.RUnlock()
+
 			if origin != "" {
 				// Validate origin based on network_access
-				if isAllowedOrigin(origin, cfg.Network.NetworkAccess) {
+				if isAllowedOrigin(origin, networkAccess) {
 					w.Header().Set("Access-Control-Allow-Origin", origin)
 					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
@@ -28,7 +33,7 @@ func CORSMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
 			}
 
 			if r.Method == http.MethodOptions {
-				if origin != "" && isAllowedOrigin(origin, cfg.Network.NetworkAccess) {
+				if origin != "" && isAllowedOrigin(origin, networkAccess) {
 					w.WriteHeader(http.StatusNoContent)
 				} else {
 					w.WriteHeader(http.StatusForbidden)
@@ -79,7 +84,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 
 // CSRFMiddleware validates Origin/Referer headers on mutating requests.
 // Same-process clients (TUI) bypass CSRF by sending the internal token.
-func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.Handler) http.Handler {
+func CSRFMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, internalToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Only check mutating methods
@@ -107,6 +112,11 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.H
 				return
 			}
 
+			cfgMu.RLock()
+			networkAccess := cfg.Network.NetworkAccess
+			passwordHash := cfg.Network.PasswordHash
+			cfgMu.RUnlock()
+
 			origin := r.Header.Get("Origin")
 			if origin == "" {
 				origin = r.Header.Get("Referer")
@@ -114,7 +124,7 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.H
 
 			// If Origin/Referer present, validate it
 			if origin != "" {
-				if !isAllowedOrigin(origin, cfg.Network.NetworkAccess) {
+				if !isAllowedOrigin(origin, networkAccess) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusForbidden)
 					w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))
@@ -128,7 +138,7 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.H
 			// access with auth is enabled (prevents CSRF from form submissions
 			// that omit Origin). Local/LAN access is safe since IP gate +
 			// auth middleware provide sufficient protection.
-			if (cfg.Network.NetworkAccess == "external" || cfg.Network.NetworkAccess == "public") && cfg.Network.PasswordHash != "" {
+			if (networkAccess == "external" || networkAccess == "public") && passwordHash != "" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"Forbidden: missing origin"}`))
@@ -141,12 +151,16 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, internalToken string) func(http.H
 }
 
 // IPGateMiddleware restricts access based on network_access config.
-func IPGateMiddleware(cfg *config.MoomboxConfig) func(http.Handler) http.Handler {
+func IPGateMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := ExtractIP(r)
 
-			switch cfg.Network.NetworkAccess {
+			cfgMu.RLock()
+			networkAccess := cfg.Network.NetworkAccess
+			cfgMu.RUnlock()
+
+			switch networkAccess {
 			case "external", "public":
 				// Allow all
 			case "lan":

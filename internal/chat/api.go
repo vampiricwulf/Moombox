@@ -64,7 +64,7 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 	if err != nil {
 		return "", false, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", constants.UserAgents.Web)
 	if api.cookieHeader != "" {
 		req.Header.Set("Cookie", api.cookieHeader)
 	}
@@ -132,7 +132,7 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", constants.UserAgents.Web)
 	req.Header.Set("Origin", youtubeBase)
 	req.Header.Set("Referer", youtubeBase)
 	if api.cookieHeader != "" {

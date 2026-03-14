@@ -360,9 +360,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Persist custom/manual FFmpeg path to config
 			if (a.ffmpegCheck.mode == ffmpegCustom || a.ffmpegCheck.mode == ffmpegManual) && msg.Path != "" && a.cfg != nil {
+				if a.cfgMu != nil {
+					a.cfgMu.Lock()
+				}
 				a.cfg.Paths.FfmpegPath = msg.Path
 				if a.OnSaveConfig != nil {
 					a.OnSaveConfig(a.cfg)
+				}
+				if a.cfgMu != nil {
+					a.cfgMu.Unlock()
 				}
 			}
 			a.ffmpegCheck.warning = msg.Warning
@@ -392,6 +398,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setupWiz.cookieActive = false
 		a.setupWiz.cookieFinishing = false
 		a.setupWiz.cookiePlatform = ""
+		return a, nil
+
+	case panicRecoveryMsg:
+		a.setFeedback(msg.Text)
 		return a, nil
 
 	case tea.KeyMsg:

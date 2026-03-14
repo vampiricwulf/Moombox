@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+
+	"github.com/BurntSushi/toml"
 )
 
 // ChannelTerms represents channel filter terms, which can be either a simple
@@ -36,6 +39,24 @@ func (t ChannelTerms) Patterns() []string {
 		return nil
 	}
 	return []string{t.Simple}
+}
+
+// MarshalTOML serializes ChannelTerms back to its original TOML format.
+// Simple terms are serialized as a quoted string, named terms as a TOML table.
+func (ct ChannelTerms) MarshalTOML() ([]byte, error) {
+	if ct.IsMap {
+		var buf bytes.Buffer
+		if err := toml.NewEncoder(&buf).Encode(ct.Named); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	}
+	// Use the TOML encoder to properly escape backslashes, quotes, etc.
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(ct.Simple); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(buf.Bytes()), nil
 }
 
 // UnmarshalTOML implements the TOML unmarshaler interface.

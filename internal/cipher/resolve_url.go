@@ -58,7 +58,14 @@ func (s *Solver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*Resolv
 		if err != nil {
 			return nil, fmt.Errorf("decrypt n-parameter: %w", err)
 		}
-		result = strings.Replace(result, "n="+nParam, "n="+decryptedN, 1)
+		// Replace the first occurrence of n=<value> that is a proper query parameter
+		for _, prefix := range []string{"?", "&"} {
+			old := prefix + "n=" + nParam
+			if strings.Contains(result, old) {
+				result = strings.Replace(result, old, prefix+"n="+decryptedN, 1)
+				break
+			}
+		}
 	}
 
 	return &ResolveURLResponse{URL: result}, nil

@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// workerHTTPClient is a shared HTTP client for file downloads in the worker package.
+// Uses a generous timeout since files can be up to 2GB (thumbnails, VODs, assets).
+var workerHTTPClient = &http.Client{Timeout: 10 * time.Minute}
+
 // DownloadFile downloads a file from a URL to the output path.
 // Used for VOD direct downloads and thumbnail/asset fetching.
 func DownloadFile(ctx context.Context, url, outputPath string) error {
@@ -19,7 +23,7 @@ func DownloadFile(ctx context.Context, url, outputPath string) error {
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := workerHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -54,7 +58,7 @@ func DownloadFileMinSize(ctx context.Context, url, outputPath string, minSize in
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := workerHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -70,7 +74,7 @@ func DownloadFileMinSize(ctx context.Context, url, outputPath string, minSize in
 		return err
 	}
 
-	n, err := io.Copy(f, resp.Body)
+	n, err := io.Copy(f, io.LimitReader(resp.Body, 50<<20)) // 50MB limit
 	f.Close()
 	if err != nil {
 		os.Remove(tmpPath)

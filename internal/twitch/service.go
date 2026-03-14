@@ -96,8 +96,8 @@ func (s *Service) GetAuthState() map[string]any {
 }
 
 // ResolveEmotes fetches third-party emotes for a channel.
-func (s *Service) ResolveEmotes(ctx context.Context, channelID string) *TwitchEmoteData {
-	return s.Emotes.Resolve(ctx, channelID)
+func (s *Service) ResolveEmotes(ctx context.Context, channelID string, channelLogin ...string) *TwitchEmoteData {
+	return s.Emotes.Resolve(ctx, channelID, channelLogin...)
 }
 
 // ReloadAuth reloads auth cookies from disk.

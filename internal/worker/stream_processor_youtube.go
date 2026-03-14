@@ -30,8 +30,15 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	membersOnly := false
 
 	// B2: Start early chat downloader (only if chat download is enabled)
+	if sp.cfgMu != nil {
+		sp.cfgMu.RLock()
+	}
+	downloadChat := sp.cfg.Downloader.DownloadChat
+	if sp.cfgMu != nil {
+		sp.cfgMu.RUnlock()
+	}
 	var chatDl *chat.ChatDownloader
-	if sp.cfg.Downloader.DownloadChat {
+	if downloadChat {
 		chatDl = sp.tryStartEarlyChat(ctx, job, initialInfo)
 	}
 
@@ -148,7 +155,14 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		}
 
 		// B2: Try starting chat if not yet available
-		if chatDl == nil && sp.cfg.Downloader.DownloadChat {
+		if sp.cfgMu != nil {
+			sp.cfgMu.RLock()
+		}
+		downloadChatRetry := sp.cfg.Downloader.DownloadChat
+		if sp.cfgMu != nil {
+			sp.cfgMu.RUnlock()
+		}
+		if chatDl == nil && downloadChatRetry {
 			chatDl = sp.tryStartEarlyChat(ctx, job, probeInfo)
 			if chatDl != nil {
 				chatDl.OnProgress = chatProgressFn
@@ -288,7 +302,13 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	}
 
 	// Create staging dir for early chat output (matches TypeScript behavior)
+	if sp.cfgMu != nil {
+		sp.cfgMu.RLock()
+	}
 	stagingBase := sp.cfg.Paths.StagingDirectory
+	if sp.cfgMu != nil {
+		sp.cfgMu.RUnlock()
+	}
 	if stagingBase == "" {
 		stagingBase = "./staging"
 	}

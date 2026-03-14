@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,15 +24,21 @@ type SetupDeps struct {
 }
 
 // SetupRoutes registers setup wizard endpoints.
-func SetupRoutes(r chi.Router, deps *SetupDeps) {
+// cfgMu protects concurrent reads/writes to the shared cfg struct.
+func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 	r.Get("/api/setup/status", func(rw http.ResponseWriter, req *http.Request) {
 		// isFirstRun matches TypeScript: !configManager.hasConfig()
+		cfgMu.RLock()
+		configLoaded := deps.Cfg.ConfigLoaded
+		ffmpegPath := deps.Cfg.Paths.FfmpegPath
+		cfgMu.RUnlock()
+
 		resp := map[string]any{
-			"isFirstRun": !deps.Cfg.ConfigLoaded,
+			"isFirstRun": !configLoaded,
 		}
 		// Include FFmpeg status when config exists (post-setup check)
-		if deps.Cfg.ConfigLoaded {
-			path := deps.Cfg.Paths.FfmpegPath
+		if configLoaded {
+			path := ffmpegPath
 			if path == "" {
 				path = "ffmpeg"
 			}
@@ -70,6 +77,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 		}
 
 		// Hash password if provided (needed before external access check)
+		var passwordHash string
 		if password != "" {
 			if len(password) < 8 {
 				jsonError(rw, "password must be at least 8 characters", http.StatusBadRequest)
@@ -81,14 +89,21 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 					jsonError(rw, "failed to hash password", http.StatusInternalServerError)
 					return
 				}
-				cfg.Network.PasswordHash = hash
+				passwordHash = hash
 			}
+		}
+
+		cfgMu.Lock()
+
+		if passwordHash != "" {
+			cfg.Network.PasswordHash = passwordHash
 		}
 
 		// Validate external access requires password (match TS)
 		if net, ok := updates["network"].(map[string]any); ok {
 			if v, ok := net["network_access"].(string); ok && v == "external" {
 				if cfg.Network.PasswordHash == "" {
+					cfgMu.Unlock()
 					jsonError(rw, "A password (min 8 characters) is required for external access.", http.StatusBadRequest)
 					return
 				}
@@ -98,20 +113,31 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 		// Apply config updates (same schema as PUT /config)
 		applyConfigUpdates(cfg, updates)
 
-		// Create directories if specified
-		if cfg.Paths.OutputDirectory != "" {
-			os.MkdirAll(cfg.Paths.OutputDirectory, 0o755)
-		}
-		if cfg.Paths.StagingDirectory != "" {
-			os.MkdirAll(cfg.Paths.StagingDirectory, 0o755)
-		}
+		// Snapshot directories for mkdir after unlock
+		outputDir := cfg.Paths.OutputDirectory
+		stagingDir := cfg.Paths.StagingDirectory
+
+		// Snapshot values needed after unlock
+		port := cfg.Network.Port
+		httpsEnabled := cfg.Network.HTTPSEnabled
 
 		// Save config
 		if deps.SaveConfig != nil {
 			if err := deps.SaveConfig(cfg); err != nil {
-				jsonError(rw, "failed to save config: "+err.Error(), http.StatusInternalServerError)
+				cfgMu.Unlock()
+				jsonError(rw, "failed to save config", http.StatusInternalServerError)
 				return
 			}
+		}
+
+		cfgMu.Unlock()
+
+		// Create directories if specified (outside lock — I/O)
+		if outputDir != "" {
+			os.MkdirAll(outputDir, 0o755)
+		}
+		if stagingDir != "" {
+			os.MkdirAll(stagingDir, 0o755)
 		}
 
 		// Kick monitors to pick up any channels added during setup
@@ -121,7 +147,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps) {
 
 		// Install yt-dlp plugin if requested (before restart so it uses the new config values)
 		if installYtdlp && deps.OnInstallYtdlp != nil {
-			deps.OnInstallYtdlp(cfg.Network.Port, cfg.Network.HTTPSEnabled)
+			deps.OnInstallYtdlp(port, httpsEnabled)
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})

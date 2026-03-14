@@ -139,69 +139,107 @@ func migrateOldFormat(cfg *MoomboxConfig, raw map[string]any) {
 		}
 	}
 
-	// Migrate old flat top-level keys → new sub-structs
+	// Migrate old flat top-level keys → new sub-structs.
 	// Only migrate if the key exists at the top level (not inside a table)
+	// AND the corresponding structured section doesn't already define that field.
+	networkRaw, _ := raw["network"].(map[string]any)
+	logsRaw, _ := raw["logs"].(map[string]any)
+	pathsRawFlat, _ := raw["paths"].(map[string]any)
+	monitorsRaw, _ := raw["monitors"].(map[string]any)
+
 	if v, ok := raw["port"]; ok {
-		if n, ok := toFloat64(v); ok {
-			cfg.Network.Port = int(n)
+		if networkRaw == nil || networkRaw["port"] == nil {
+			if n, ok := toFloat64(v); ok {
+				cfg.Network.Port = int(n)
+			}
 		}
 	}
 	if v, ok := raw["network_access"].(string); ok {
-		cfg.Network.NetworkAccess = v
+		if networkRaw == nil || networkRaw["network_access"] == nil {
+			cfg.Network.NetworkAccess = v
+		}
 	}
 	if v, ok := raw["https_enabled"].(bool); ok {
-		cfg.Network.HTTPSEnabled = v
+		if networkRaw == nil || networkRaw["https_enabled"] == nil {
+			cfg.Network.HTTPSEnabled = v
+		}
 	}
 	if v, ok := raw["tls_cert_path"].(string); ok {
-		cfg.Network.TLSCertPath = v
+		if networkRaw == nil || networkRaw["tls_cert_path"] == nil {
+			cfg.Network.TLSCertPath = v
+		}
 	}
 	if v, ok := raw["tls_key_path"].(string); ok {
-		cfg.Network.TLSKeyPath = v
+		if networkRaw == nil || networkRaw["tls_key_path"] == nil {
+			cfg.Network.TLSKeyPath = v
+		}
 	}
 	if v, ok := raw["password_hash"].(string); ok {
-		cfg.Network.PasswordHash = v
+		if networkRaw == nil || networkRaw["password_hash"] == nil {
+			cfg.Network.PasswordHash = v
+		}
 	}
 	if v, ok := raw["log_level"].(string); ok {
-		cfg.Logs.LogLevel = v
+		if logsRaw == nil || logsRaw["log_level"] == nil {
+			cfg.Logs.LogLevel = v
+		}
 	}
 	if v, ok := raw["log_file_path"].(string); ok {
-		cfg.Paths.LogFilePath = v
+		if pathsRawFlat == nil || pathsRawFlat["log_file_path"] == nil {
+			cfg.Paths.LogFilePath = v
+		}
 	}
 	if v, ok := raw["log_max_file_size"]; ok {
-		if n, ok := toFloat64(v); ok {
-			cfg.Logs.LogMaxFileSize = int(n)
+		if logsRaw == nil || logsRaw["log_max_file_size"] == nil {
+			if n, ok := toFloat64(v); ok {
+				cfg.Logs.LogMaxFileSize = int(n)
+			}
 		}
 	}
 	if v, ok := raw["log_max_files"]; ok {
-		if n, ok := toFloat64(v); ok {
-			cfg.Logs.LogMaxFiles = int(n)
+		if logsRaw == nil || logsRaw["log_max_files"] == nil {
+			if n, ok := toFloat64(v); ok {
+				cfg.Logs.LogMaxFiles = int(n)
+			}
 		}
 	}
 	if v, ok := raw["database_path"].(string); ok {
-		cfg.Paths.DatabasePath = v
+		if pathsRawFlat == nil || pathsRawFlat["database_path"] == nil {
+			cfg.Paths.DatabasePath = v
+		}
 	}
 	if v, ok := raw["max_feed_items"]; ok {
-		if n, ok := toFloat64(v); ok {
-			cfg.Monitors.MaxFeedItems = int(n)
+		if monitorsRaw == nil || monitorsRaw["max_feed_items"] == nil {
+			if n, ok := toFloat64(v); ok {
+				cfg.Monitors.MaxFeedItems = int(n)
+			}
 		}
 	}
 	if v, ok := raw["feed_check_interval"]; ok {
-		cfg.Monitors.FeedCheckInterval = ParseFlexDuration(v, "minutes", cfg.Monitors.FeedCheckInterval.Value)
+		if monitorsRaw == nil || monitorsRaw["feed_check_interval"] == nil {
+			cfg.Monitors.FeedCheckInterval = ParseFlexDuration(v, "minutes", cfg.Monitors.FeedCheckInterval.Value)
+		}
 	}
 	if v, ok := raw["decapi_check_interval"]; ok {
-		if n, ok := toFloat64(v); ok {
-			val := int(n)
-			cfg.Monitors.DecapiCheckInterval = &val
+		if monitorsRaw == nil || monitorsRaw["decapi_check_interval"] == nil {
+			if n, ok := toFloat64(v); ok {
+				val := int(n)
+				cfg.Monitors.DecapiCheckInterval = &val
+			}
 		}
 	}
 	if v, ok := raw["twitch_check_interval"]; ok {
-		if n, ok := toFloat64(v); ok {
-			val := int(n)
-			cfg.Monitors.TwitchCheckInterval = &val
+		if monitorsRaw == nil || monitorsRaw["twitch_check_interval"] == nil {
+			if n, ok := toFloat64(v); ok {
+				val := int(n)
+				cfg.Monitors.TwitchCheckInterval = &val
+			}
 		}
 	}
 	if v, ok := raw["hide_finished_age_days"]; ok {
-		cfg.Monitors.HideFinishedAgeDays = ParseFlexDuration(v, "days", cfg.Monitors.HideFinishedAgeDays.Value)
+		if monitorsRaw == nil || monitorsRaw["hide_finished_age_days"] == nil {
+			cfg.Monitors.HideFinishedAgeDays = ParseFlexDuration(v, "days", cfg.Monitors.HideFinishedAgeDays.Value)
+		}
 	}
 
 	// Migrate old [downloader] keys that moved to [paths] or [cookies].
@@ -386,22 +424,32 @@ func Save(cfg *MoomboxConfig, path string) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	f, err := os.OpenFile(path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	tmpPath := path + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 
 	validate(cfg)
-
 	enc := toml.NewEncoder(f)
 	if err := enc.Encode(cfg); err != nil {
 		f.Close()
-		os.Remove(path + ".tmp")
+		os.Remove(tmpPath)
 		return fmt.Errorf("failed to encode config: %w", err)
 	}
-	f.Close()
 
-	if err := os.Rename(path+".tmp", path); err != nil {
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("sync config file: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close config file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 

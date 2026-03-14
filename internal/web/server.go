@@ -41,6 +41,7 @@ const maxCompressBodySize = 1 << 20 // 1MB
 // Server is the Moombox HTTP server.
 type Server struct {
 	cfg           *config.MoomboxConfig
+	cfgMu         *sync.RWMutex    // Protects concurrent access to cfg fields (external, shared with main)
 	router        chi.Router
 	server        *http.Server
 	ws            *WebSocketHub
@@ -67,7 +68,8 @@ type Server struct {
 }
 
 // NewServer creates a new HTTP server.
-func NewServer(cfg *config.MoomboxConfig, logger interface {
+// cfgMu is the shared config mutex — all components that read/write cfg must use the same one.
+func NewServer(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -82,6 +84,7 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 
 	s := &Server{
 		cfg:           cfg,
+		cfgMu:         cfgMu,
 		router:        r,
 		ws:            NewWebSocketHub(logger),
 		internalToken: token,
@@ -90,10 +93,10 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 
 	// Apply middleware (order matters)
 	r.Use(RecoveryMiddleware(logger))
-	r.Use(CORSMiddleware(cfg))
+	r.Use(CORSMiddleware(cfg, s.cfgMu))
 	r.Use(SecurityHeaders)
-	r.Use(CSRFMiddleware(cfg, token))
-	r.Use(IPGateMiddleware(cfg))
+	r.Use(CSRFMiddleware(cfg, s.cfgMu, token))
+	r.Use(IPGateMiddleware(cfg, s.cfgMu))
 	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
 
@@ -104,6 +107,12 @@ func NewServer(cfg *config.MoomboxConfig, logger interface {
 // send in the X-Internal-Token header to bypass CSRF checks.
 func (s *Server) InternalToken() string {
 	return s.internalToken
+}
+
+// CfgMu returns a pointer to the config read-write mutex for use by route
+// handlers that need synchronized access to the shared config struct.
+func (s *Server) CfgMu() *sync.RWMutex {
+	return s.cfgMu
 }
 
 // SetCommit sets the build commit hash used for cache-busting static asset URLs.
@@ -130,7 +139,11 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		// No auth required if not configured
-		if !IsAuthRequired(s.cfg.Network.NetworkAccess, s.cfg.Network.PasswordHash) {
+		s.cfgMu.RLock()
+		networkAccess := s.cfg.Network.NetworkAccess
+		passwordHash := s.cfg.Network.PasswordHash
+		s.cfgMu.RUnlock()
+		if !IsAuthRequired(networkAccess, passwordHash) {
 			next.ServeHTTP(w, r)
 			return
 		}

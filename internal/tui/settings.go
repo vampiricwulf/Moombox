@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strconv"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
@@ -216,7 +217,8 @@ type SettingsModel struct {
 	errorMsg string
 
 	// Config reference
-	cfg *config.MoomboxConfig
+	cfg   *config.MoomboxConfig
+	cfgMu *sync.RWMutex // shared config mutex
 
 	// Callbacks
 	OnSave           func(cfg *config.MoomboxConfig)
@@ -282,6 +284,11 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.errorMsg = ""
 	m.showRestartOverlay = false
 
+	// Snapshot config under read lock
+	if m.cfgMu != nil {
+		m.cfgMu.RLock()
+	}
+
 	// Channel editor
 	m.channelIndex = 0
 	m.channelMode = "list"
@@ -296,6 +303,13 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.notifications = make([]config.NotificationConfig, len(cfg.Notifications))
 	copy(m.notifications, cfg.Notifications)
 
+	// Load values
+	m.loadValues(cfg)
+
+	if m.cfgMu != nil {
+		m.cfgMu.RUnlock()
+	}
+
 	// Security
 	m.secMode = securityStatus
 	m.secMessage = ""
@@ -305,8 +319,6 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.secRemovePw = ""
 	m.secFieldIndex = 0
 
-	// Load values
-	m.loadValues(cfg)
 	m.originalValues = make(map[string]string)
 	for k, v := range m.values {
 		m.originalValues[k] = v
@@ -406,11 +418,23 @@ func (m *SettingsModel) applyValues() {
 		return
 	}
 
-	// Validate external access requires password
-	if m.values["network_access"] == "external" && m.cfg.Network.PasswordHash == "" {
+	// Validate external access requires password (snapshot under RLock)
+	if m.cfgMu != nil {
+		m.cfgMu.RLock()
+	}
+	passwordHash := m.cfg.Network.PasswordHash
+	if m.cfgMu != nil {
+		m.cfgMu.RUnlock()
+	}
+	if m.values["network_access"] == "external" && passwordHash == "" {
 		m.errorMsg = "Password required for external access. Set password in Network section."
 		m.status = saveError
 		return
+	}
+
+	// Lock for all config writes
+	if m.cfgMu != nil {
+		m.cfgMu.Lock()
 	}
 
 	// Network
@@ -491,6 +515,10 @@ func (m *SettingsModel) applyValues() {
 	// Apply channels and notifications
 	m.cfg.Channels = m.channels
 	m.cfg.Notifications = m.notifications
+
+	if m.cfgMu != nil {
+		m.cfgMu.Unlock()
+	}
 }
 
 func (m *SettingsModel) hasRestartChanges() bool {

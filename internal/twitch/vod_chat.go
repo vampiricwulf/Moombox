@@ -33,7 +33,7 @@ type VodChatDownloader struct {
 	messages      []TwitchChatMessage
 	seenIDs       map[string]struct{}
 	seenOrder     []string // Insertion-order tracking for deterministic pruning
-	totalCount    int
+	totalCount    atomic.Int64
 	running       atomic.Bool
 	emoteResolver *EmoteResolver
 
@@ -102,7 +102,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 	if state, err := vcd.loadResumeState(); err == nil && state != nil {
 		if state.StreamID == vcd.vodID {
 			contentOffset = state.LastOffsetSeconds
-			vcd.totalCount = state.MessageCount
+			vcd.totalCount.Store(int64(state.MessageCount))
 			vcd.seenIDs = make(map[string]struct{}, len(state.RecentIDs))
 			vcd.seenOrder = make([]string, 0, len(state.RecentIDs))
 			for _, id := range state.RecentIDs {
@@ -112,7 +112,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			vcd.logger.Info("resumed VOD chat download",
 				"vodID", vcd.vodID,
 				"offset", contentOffset,
-				"previousMessages", vcd.totalCount,
+				"previousMessages", vcd.totalCount.Load(),
 			)
 		}
 	}
@@ -179,7 +179,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			}
 
 			vcd.messages = append(vcd.messages, msg)
-			vcd.totalCount++
+			vcd.totalCount.Add(1)
 			newCount++
 
 			vcd.reportProgress(contentOffset)
@@ -226,7 +226,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 
 	// Resolve and inject third-party emotes (7TV, BTTV, FFZ).
 	// Use a fresh context — the original ctx may already be cancelled.
-	if vcd.totalCount > 0 && vcd.emoteResolver != nil && vcd.channelID != "" {
+	if vcd.totalCount.Load() > 0 && vcd.emoteResolver != nil && vcd.channelID != "" {
 		vcd.logger.Info("resolving emotes for VOD chat", "channelID", vcd.channelID)
 		emoteCtx, emoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		emoteData := vcd.emoteResolver.Resolve(emoteCtx, vcd.channelID, vcd.channelLogin)
@@ -239,7 +239,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 	}
 
 	vcd.removeResumeState()
-	vcd.logger.Info("VOD chat download complete", "vodID", vcd.vodID, "messages", vcd.totalCount)
+	vcd.logger.Info("VOD chat download complete", "vodID", vcd.vodID, "messages", vcd.totalCount.Load())
 	return nil
 }
 
@@ -266,7 +266,7 @@ func (vcd *VodChatDownloader) flush() {
 			ChannelDisplayName: vcd.channelName,
 			StreamID:           vcd.vodID,
 			DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
-			MessageCount:       vcd.totalCount,
+			MessageCount:       int(vcd.totalCount.Load()),
 			Messages:           vcd.messages,
 		}
 
@@ -420,7 +420,7 @@ func (vcd *VodChatDownloader) updateVodChatFileHeader() {
 	header := string(headerBuf[:n])
 
 	// Replace messageCount value (padded to fixed width)
-	header = utils.ReplaceMessageCount(header, vcd.totalCount)
+	header = utils.ReplaceMessageCount(header, int(vcd.totalCount.Load()))
 
 	// Replace downloadedAt value (matches TS appendToFile header updates)
 	utils.ReplaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
@@ -428,6 +428,10 @@ func (vcd *VodChatDownloader) updateVodChatFileHeader() {
 	// With padded messageCount, the header size should be constant.
 	// Fallback handles legacy files written before padding was added.
 	updatedBytes := []byte(header)
+	if len(updatedBytes) < n {
+		vcd.logger.Warn("chat header shrank during update, file may have stale bytes",
+			"expected", n, "actual", len(updatedBytes))
+	}
 	if len(updatedBytes) == n {
 		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
 			vcd.logger.Warn("update vod chat header: write", "err", err)
@@ -466,7 +470,7 @@ func (vcd *VodChatDownloader) writeFullFile() {
 		ChannelDisplayName: vcd.channelName,
 		StreamID:           vcd.vodID,
 		DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
-		MessageCount:       vcd.totalCount,
+		MessageCount:       int(vcd.totalCount.Load()),
 		Messages:           vcd.messages,
 	}
 
@@ -489,8 +493,9 @@ func (vcd *VodChatDownloader) writeFullFile() {
 
 // reportProgress calls OnProgress and logs percentage if vodDuration is known.
 func (vcd *VodChatDownloader) reportProgress(contentOffset float64) {
+	count := int(vcd.totalCount.Load())
 	if vcd.OnProgress != nil {
-		vcd.OnProgress(vcd.totalCount)
+		vcd.OnProgress(count)
 	}
 	if vcd.vodDuration > 0 {
 		pct := contentOffset / float64(vcd.vodDuration) * 100
@@ -498,7 +503,7 @@ func (vcd *VodChatDownloader) reportProgress(contentOffset float64) {
 			pct = 100
 		}
 		vcd.logger.Info("VOD chat progress",
-			"messages", vcd.totalCount,
+			"messages", count,
 			"percent", fmt.Sprintf("%.1f%%", pct),
 			"offsetSeconds", fmt.Sprintf("%.0f", contentOffset),
 			"durationSeconds", vcd.vodDuration,
@@ -543,7 +548,7 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 	recentIDs = recentIDsCopy
 
 	state := ChatResumeState{
-		MessageCount:      vcd.totalCount,
+		MessageCount:      int(vcd.totalCount.Load()),
 		LastOffsetSeconds: contentOffset,
 		Timestamp:         time.Now().Unix(),
 		StreamID:          vcd.vodID,
@@ -579,7 +584,7 @@ func (vcd *VodChatDownloader) removeResumeState() {
 
 // MessageCount returns the total number of messages collected.
 func (vcd *VodChatDownloader) MessageCount() int {
-	return vcd.totalCount
+	return int(vcd.totalCount.Load())
 }
 
 // IsRunning returns whether the downloader is currently running.

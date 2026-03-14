@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// cookiesHTTPClient is a shared HTTP client with a timeout for cookie refresh requests.
+var cookiesHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 const (
 	defaultRefreshInterval = 30 * time.Minute
 	authCheckTimeout       = 15 * time.Second
@@ -118,7 +121,9 @@ func (rs *RefreshService) SetExpectedPlatforms(platforms []string) {
 // Start begins the cookie refresh loop.
 func (rs *RefreshService) Start(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
+	rs.mu.Lock()
 	rs.cancel = cancel
+	rs.mu.Unlock()
 
 	// Initial check
 	rs.doRefresh(ctx)
@@ -149,8 +154,11 @@ func (rs *RefreshService) Start(ctx context.Context) {
 
 // Stop stops the cookie refresh service.
 func (rs *RefreshService) Stop() {
-	if rs.cancel != nil {
-		rs.cancel()
+	rs.mu.Lock()
+	cancel := rs.cancel
+	rs.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	rs.logger.Info("cookie refresh service stopped")
 }
@@ -300,7 +308,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 
 	setYouTubeHeaders(req, cookieHeader, origin, authHeader)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cookiesHTTPClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("youtube auth check: %w", err)
 	}
@@ -327,7 +335,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 		} `json:"responseContext"`
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return false, fmt.Errorf("read YouTube auth response: %w", err)
 	}
@@ -385,7 +393,7 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 
 	setYouTubeHeaders(req, cookieHeader, origin, authHeader)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cookiesHTTPClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("youtube auth check: %w", err)
 	}
@@ -397,7 +405,7 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 	}
 
 	// Read body for auth check
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return false, fmt.Errorf("read YouTube auth response: %w", err)
 	}
@@ -620,7 +628,7 @@ func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
 	}
 	req.Header.Set("Authorization", "OAuth "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cookiesHTTPClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("twitch auth check: %w", err)
 	}

@@ -18,11 +18,32 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
+// safeCmd wraps a tea.Cmd closure with panic recovery. If the closure panics,
+// the recovery converts it into a panicRecoveryMsg that displays feedback.
+func safeCmd(fn func() tea.Msg) tea.Cmd {
+	return func() (msg tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				msg = panicRecoveryMsg{Text: fmt.Sprintf("unexpected error: %v", r)}
+			}
+		}()
+		return fn()
+	}
+}
+
 // apiBaseURL returns the correct scheme + host for local API calls.
 func (a *App) apiBaseURL() string {
 	scheme := "http"
-	if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
-		scheme = "https"
+	if a.cfg != nil {
+		if a.cfgMu != nil {
+			a.cfgMu.RLock()
+		}
+		if a.cfg.Network.HTTPSEnabled {
+			scheme = "https"
+		}
+		if a.cfgMu != nil {
+			a.cfgMu.RUnlock()
+		}
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.getPort())
 }
@@ -50,7 +71,17 @@ func (a *App) apiClient() *http.Client {
 		return a.cachedClient
 	}
 	base := http.DefaultTransport
-	if a.cfg != nil && a.cfg.Network.HTTPSEnabled {
+	httpsEnabled := false
+	if a.cfg != nil {
+		if a.cfgMu != nil {
+			a.cfgMu.RLock()
+		}
+		httpsEnabled = a.cfg.Network.HTTPSEnabled
+		if a.cfgMu != nil {
+			a.cfgMu.RUnlock()
+		}
+	}
+	if httpsEnabled {
 		base = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
@@ -76,7 +107,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 		a.OnAddVideo(input)
 	}
 
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		body := map[string]any{
 			"videoId": input,
 		}
@@ -135,7 +166,7 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 			}
 		}
 		return addVideoResultMsg{Feedback: label}
-	}
+	})
 }
 
 // fetchFormatsCmd fetches format options from the local API for advanced mode.
@@ -146,16 +177,16 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 	// If a callback is provided, use it directly (avoids HTTP round-trip)
 	if a.OnFetchFormats != nil {
 		cb := a.OnFetchFormats
-		return func() tea.Msg {
+		return safeCmd(func() tea.Msg {
 			data, err := cb(videoID)
 			if err != nil {
 				return fetchFormatsResultMsg{Err: "Failed to fetch formats. Proceeding with auto selection."}
 			}
 			return fetchFormatsResultMsg{Formats: data}
-		}
+		})
 	}
 
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		url := fmt.Sprintf("%s/api/formats/%s", baseURL, videoID)
 		resp, err := client.Get(url)
 		if err != nil {
@@ -172,7 +203,7 @@ func (a *App) fetchFormatsCmd(videoID string) tea.Cmd {
 			return fetchFormatsResultMsg{Err: "Failed to parse format data. Proceeding with auto selection."}
 		}
 		return fetchFormatsResultMsg{Formats: &data}
-	}
+	})
 }
 
 // importFileCmd reads a ZIP file and uploads it to the import API.
@@ -185,16 +216,16 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 	// If a callback is provided, use it directly
 	if a.OnImportFile != nil {
 		cb := a.OnImportFile
-		return func() tea.Msg {
+		return safeCmd(func() tea.Msg {
 			importedTitle, err := cb(path, title, channel)
 			if err != nil {
 				return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
 			}
 			return importResultMsg{Title: importedTitle}
-		}
+		})
 	}
 
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		f, err := os.Open(path)
 		if err != nil {
 			return importResultMsg{Err: fmt.Sprintf("Import failed: %s", err)}
@@ -221,7 +252,7 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 		defer resp.Body.Close()
 
 		if resp.StatusCode >= 400 {
-			body, _ := io.ReadAll(resp.Body)
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			var errResp struct{ Error string `json:"error"` }
 			if unmarshalErr := json.Unmarshal(body, &errResp); unmarshalErr != nil {
 				return importResultMsg{Err: fmt.Sprintf("Import failed (HTTP %d)", resp.StatusCode)}
@@ -246,14 +277,14 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			importedTitle = "archive"
 		}
 		return importResultMsg{Title: importedTitle}
-	}
+	})
 }
 
 func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 	createFn := a.OnCreateTrim
 	progressMu := &a.trimProgressMu
 	progressPct := &a.trimProgressPct
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if createFn == nil {
 			return createTrimResultMsg{Err: "Create trim not available"}
 		}
@@ -267,7 +298,7 @@ func (a *App) createTrimCmd(jobID string, startSec, endSec float64) tea.Cmd {
 			return createTrimResultMsg{Err: errMsg}
 		}
 		return createTrimResultMsg{Filename: filename}
-	}
+	})
 }
 
 func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
@@ -280,7 +311,7 @@ func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
 			break
 		}
 	}
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if deleteFn == nil {
 			return deleteTrimResultMsg{Err: "Delete trim not available"}
 		}
@@ -288,12 +319,12 @@ func (a *App) deleteTrimCmd(jobID, trimID string) tea.Cmd {
 			return deleteTrimResultMsg{Err: err.Error()}
 		}
 		return deleteTrimResultMsg{TrimID: trimID, Filename: filename}
-	}
+	})
 }
 
 func (a *App) fetchOrphansCmd() tea.Cmd {
 	listFn := a.OnListOrphans
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if listFn == nil {
 			return fetchOrphansResultMsg{Err: "Not available"}
 		}
@@ -302,12 +333,12 @@ func (a *App) fetchOrphansCmd() tea.Cmd {
 			return fetchOrphansResultMsg{Err: err.Error()}
 		}
 		return fetchOrphansResultMsg{Files: files}
-	}
+	})
 }
 
 func (a *App) fetchClientTokensCmd() tea.Cmd {
 	listFn := a.OnListClientTokens
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if listFn == nil {
 			return fetchClientTokensResultMsg{Err: "Not available"}
 		}
@@ -316,12 +347,12 @@ func (a *App) fetchClientTokensCmd() tea.Cmd {
 			return fetchClientTokensResultMsg{Err: err.Error()}
 		}
 		return fetchClientTokensResultMsg{Tokens: tokens}
-	}
+	})
 }
 
 func (a *App) deleteClientTokenCmd(id string) tea.Cmd {
 	deleteFn := a.OnDeleteClientToken
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if deleteFn == nil {
 			return deleteClientTokenResultMsg{ID: id, Err: "Not available"}
 		}
@@ -329,12 +360,12 @@ func (a *App) deleteClientTokenCmd(id string) tea.Cmd {
 			return deleteClientTokenResultMsg{ID: id, Err: err.Error()}
 		}
 		return deleteClientTokenResultMsg{ID: id}
-	}
+	})
 }
 
 func (a *App) deleteOrphanCmd(path string) tea.Cmd {
 	deleteFn := a.OnDeleteOrphan
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if deleteFn == nil {
 			return deleteOrphanResultMsg{Path: path, Err: "Not available"}
 		}
@@ -342,13 +373,13 @@ func (a *App) deleteOrphanCmd(path string) tea.Cmd {
 			return deleteOrphanResultMsg{Path: path, Err: err.Error()}
 		}
 		return deleteOrphanResultMsg{Path: path}
-	}
+	})
 }
 
 // ffmpegCheckCmd runs FFmpeg path validation asynchronously via tea.Cmd.
 func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 	checkFn := a.OnCheckFFmpeg
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if checkFn == nil {
 			return ffmpegCheckResultMsg{Valid: false, Path: path}
 		}
@@ -357,14 +388,14 @@ func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 		}
 		valid, ver, warn := checkFn(path)
 		return ffmpegCheckResultMsg{Valid: valid, Version: ver, Warning: warn, Path: path}
-	}
+	})
 }
 
 // ffmpegPrepareCmd checks elevation and either installs directly or returns
 // a script for review.
 func (a *App) ffmpegPrepareCmd(method string) tea.Cmd {
 	prepareFn := a.OnPrepareInstall
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if prepareFn == nil {
 			return ffmpegPrepareResultMsg{Err: "install not available"}
 		}
@@ -377,13 +408,13 @@ func (a *App) ffmpegPrepareCmd(method string) tea.Cmd {
 			Script:         script,
 			Token:          token,
 		}
-	}
+	})
 }
 
 // ffmpegConfirmCmd executes a reviewed elevated install.
 func (a *App) ffmpegConfirmCmd(token string) tea.Cmd {
 	confirmFn := a.OnConfirmInstall
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		if confirmFn == nil {
 			return ffmpegConfirmResultMsg{Err: "confirm not available"}
 		}
@@ -391,12 +422,12 @@ func (a *App) ffmpegConfirmCmd(token string) tea.Cmd {
 			return ffmpegConfirmResultMsg{Err: err.Error()}
 		}
 		return ffmpegConfirmResultMsg{}
-	}
+	})
 }
 
 // resolveChannelCmd resolves a channel URL asynchronously via tea.Cmd.
 func (a *App) resolveChannelCmd(input string) tea.Cmd {
-	return func() tea.Msg {
+	return safeCmd(func() tea.Msg {
 		resolved, err := utils.ResolveChannelInput(context.Background(), input)
 		if err != nil {
 			return channelResolvedMsg{Err: err}
@@ -410,7 +441,7 @@ func (a *App) resolveChannelCmd(input string) tea.Cmd {
 			Name:     resolved.Name,
 			Platform: resolved.Platform,
 		}
-	}
+	})
 }
 
 func openBrowser(url string) {

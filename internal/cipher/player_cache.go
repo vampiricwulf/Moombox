@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,7 @@ var playerHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // PlayerCache manages disk-cached YouTube player JS files.
 type PlayerCache struct {
+	mu       sync.RWMutex
 	cacheDir string
 	logger   interface {
 		Debug(msg string, args ...any)
@@ -89,6 +91,9 @@ func (pc *PlayerCache) FilePath(playerURL string) string {
 
 // Get returns the cached player JS for the given URL, or empty string if not cached/expired.
 func (pc *PlayerCache) Get(playerURL string) (string, error) {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+
 	path := pc.FilePath(playerURL)
 
 	info, err := os.Stat(path)
@@ -115,6 +120,9 @@ func (pc *PlayerCache) Get(playerURL string) (string, error) {
 
 // Put caches player JS for the given URL. Uses atomic write (tmp + rename).
 func (pc *PlayerCache) Put(playerURL string, js string) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
 	path := pc.FilePath(playerURL)
 	tmpPath := path + ".tmp"
 
@@ -155,7 +163,7 @@ func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, err
 		return "", fmt.Errorf("fetch player JS: status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB max player JS
 	if err != nil {
 		return "", fmt.Errorf("read player JS: %w", err)
 	}
@@ -196,6 +204,9 @@ func (pc *PlayerCache) Evict() error {
 // Errors are logged but not returned — removal is best-effort
 // (file may be held by another reader on Windows).
 func (pc *PlayerCache) Remove(playerURL string) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
 	path := pc.FilePath(playerURL)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		if pc.logger != nil {

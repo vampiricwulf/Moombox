@@ -148,6 +148,11 @@ type (
 		YTAuth   bool
 		TWAuth   bool
 	}
+
+	// panicRecoveryMsg is sent when a tea.Cmd closure recovers from a panic.
+	panicRecoveryMsg struct {
+		Text string
+	}
 )
 
 // chordState tracks the two-key chord system state machine.
@@ -224,7 +229,8 @@ type App struct {
 	program *tea.Program
 
 	// Config reference for settings panel
-	cfg *config.MoomboxConfig
+	cfg   *config.MoomboxConfig
+	cfgMu *sync.RWMutex // shared config mutex (set via SetCfgMu)
 
 	// Internal token for CSRF bypass on local API calls
 	internalToken string
@@ -329,6 +335,13 @@ func (a *App) SetInternalToken(token string) {
 func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.cfg = cfg
 	a.taskList.SetHideFinishedAgeDays(int(cfg.Monitors.HideFinishedAgeDays.Days()))
+}
+
+// SetCfgMu sets the shared config mutex for synchronized config access.
+// Propagates to sub-models that write config (settings).
+func (a *App) SetCfgMu(mu *sync.RWMutex) {
+	a.cfgMu = mu
+	a.settings.cfgMu = mu
 }
 
 // SetSetupCallbacks wires callback functions for the TUI setup wizard.
@@ -529,8 +542,14 @@ func (a *App) updateTerminalTitle() tea.Cmd {
 
 // getPort returns the configured port or default 774.
 func (a *App) getPort() int {
-	if a.cfg != nil && a.cfg.Network.Port > 0 {
-		return a.cfg.Network.Port
+	if a.cfg != nil {
+		if a.cfgMu != nil {
+			a.cfgMu.RLock()
+			defer a.cfgMu.RUnlock()
+		}
+		if a.cfg.Network.Port > 0 {
+			return a.cfg.Network.Port
+		}
 	}
 	return 774
 }

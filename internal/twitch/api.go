@@ -12,10 +12,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )
+
+// twitchHTTPClient is a shared HTTP client with a timeout for all Twitch API requests.
+var twitchHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 var (
 	safeLoginRe   = regexp.MustCompile(`[^a-zA-Z0-9_]`)
@@ -65,7 +69,7 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 		req.Header.Set("Authorization", "OAuth "+authToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := twitchHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("gql request: %w", err)
 	}

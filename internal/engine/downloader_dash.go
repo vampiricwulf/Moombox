@@ -17,11 +17,9 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	// On shutdown (context cancel) or user cancel, keep the resume file
 	// so the download can continue where it left off on restart.
 	defer func() {
-		// Snapshot fields under lock so we don't race with LastSeq() callers
-		d.mu.Lock()
-		seq := d.currentSeq
-		head := d.headSeq
-		d.mu.Unlock()
+		// Atomic loads — no mutex needed for currentSeq/headSeq.
+		seq := int(d.currentSeq.Load())
+		head := int(d.headSeq.Load())
 
 		// Emit final progress so the UI reflects the definitive last state.
 		// Only emit when actual data was written — handleGoneError increments
@@ -66,35 +64,39 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		}
 
 		// Check end sequence
-		if d.opts.EndSeq >= 0 && d.currentSeq > d.opts.EndSeq {
+		curSeq := int(d.currentSeq.Load())
+		if d.opts.EndSeq >= 0 && curSeq > d.opts.EndSeq {
 			return nil
 		}
 
 		// Probe head sequence (use dedicated timer, not lastSegTime -- matches TS lastHeadProbeTime)
-		if d.headSeq < 0 || time.Since(d.lastHeadProbeTime) > HeadProbeInterval {
+		if d.headSeq.Load() < 0 || time.Since(d.lastHeadProbeTime) > HeadProbeInterval {
 			if headSeq, err := d.probeHeadSequence(ctx); err == nil {
-				d.headSeq = headSeq
+				d.headSeq.Store(int64(headSeq))
 			}
 			d.lastHeadProbeTime = time.Now()
 		}
 
 		// Parallel catch-up if far behind
-		if d.headSeq > 0 {
-			segsBehind := d.headSeq - d.currentSeq
+		head := int(d.headSeq.Load())
+		if head > 0 {
+			segsBehind := head - curSeq
 			if segsBehind >= CatchupThreshold {
 				nextSeq, err := d.runParallelCatchUp(ctx)
 				if err != nil {
 					return err
 				}
-				d.currentSeq = nextSeq
+				d.currentSeq.Store(int64(nextSeq))
 				hasStartedDownloading = true
 				// Re-probe head after catch-up (matches TS behavior)
 				if headSeq, err := d.probeHeadSequence(ctx); err == nil {
-					d.headSeq = headSeq
+					d.headSeq.Store(int64(headSeq))
 				}
 				d.lastHeadProbeTime = time.Now()
 				// Only re-enter loop if catch-up closed the gap (TS: returns false if stillFarBehind)
-				stillFarBehind := d.headSeq > 0 && (d.headSeq-d.currentSeq) >= CatchupThreshold
+				curHead := int(d.headSeq.Load())
+				curSeqNow := int(d.currentSeq.Load())
+				stillFarBehind := curHead > 0 && (curHead-curSeqNow) >= CatchupThreshold
 				if !stillFarBehind {
 					continue
 				}
@@ -103,7 +105,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		}
 
 		// Download single segment
-		segURL := d.buildSegmentURL(d.currentSeq)
+		segURL := d.buildSegmentURL(int(d.currentSeq.Load()))
 		data, statusCode, err := d.fetchSegment(ctx, segURL)
 
 		if err != nil || statusCode >= 400 {
@@ -119,9 +121,10 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		}
 
 		// Write segment
+		writeSeq := int(d.currentSeq.Load())
 		n, writeErr := d.outputFile.Write(data)
 		if writeErr != nil {
-			return fmt.Errorf("write segment %d: %w", d.currentSeq, writeErr)
+			return fmt.Errorf("write segment %d: %w", writeSeq, writeErr)
 		}
 		d.bytesWritten.Add(int64(n))
 		d.lastSegTime = time.Now()
@@ -133,13 +136,13 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		// Emit progress
 		if d.OnProgress != nil {
 			d.OnProgress(DownloadProgress{
-				Seq:     d.currentSeq,
+				Seq:     writeSeq,
 				Bytes:   d.bytesWritten.Load(),
-				HeadSeq: d.headSeq,
+				HeadSeq: int(d.headSeq.Load()),
 			})
 		}
 
-		d.currentSeq++
+		d.currentSeq.Add(1)
 		segsSinceResume++
 
 		// Save resume state periodically
@@ -205,7 +208,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 		return errStreamDone
 	}
 	if !hasStartedDownloading && *consecutiveGoneErrors <= 20 {
-		d.currentSeq++
+		d.currentSeq.Add(1)
 		sleepCtx(ctx, 100*time.Millisecond)
 		return nil // Continue loop
 	}
@@ -223,7 +226,7 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 		*sameHeadRetryDelay = delayCap
 	}
 	backoff := time.Duration(*sameHeadRetryDelay*2) * time.Second
-	d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq, "delay", backoff)
+	d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq.Load(), "delay", backoff)
 	sleepCtx(ctx, backoff)
 	return nil // Continue loop
 }
@@ -233,19 +236,21 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	sameHeadRetryDelay *int, lastConfirmedHead *int,
 	delayCap, liveCheckThreshold int) error {
 
-	if d.currentSeq == *lastRetrySeq {
+	curSeq := int(d.currentSeq.Load())
+	if curSeq == *lastRetrySeq {
 		*sameSegRetries++
 	} else {
 		*sameSegRetries = 1
-		*lastRetrySeq = d.currentSeq
+		*lastRetrySeq = curSeq
 	}
 
 	// Re-probe head
 	if headSeq, probeErr := d.probeHeadSequence(ctx); probeErr == nil {
-		d.headSeq = headSeq
+		d.headSeq.Store(int64(headSeq))
 	}
 
-	behindHead := d.headSeq > 0 && d.currentSeq < d.headSeq
+	head := int(d.headSeq.Load())
+	behindHead := head > 0 && curSeq < head
 	stuckOnSegment := *sameSegRetries >= MaxSegmentRetries
 
 	if behindHead && !stuckOnSegment {
@@ -257,8 +262,8 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	// At/past live edge or stuck -- backoff with status checks
 
 	// Reset backoff if head moved
-	if d.headSeq > 0 && d.headSeq != *lastConfirmedHead {
-		*lastConfirmedHead = d.headSeq
+	if head > 0 && head != *lastConfirmedHead {
+		*lastConfirmedHead = head
 		*sameHeadRetryDelay = 0
 	}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -31,16 +32,22 @@ type AuthRoutesDeps struct {
 }
 
 // AuthRoutes registers authentication endpoints.
-func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
+// cfgMu protects concurrent reads/writes to the shared cfg struct.
+func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, cfgMu *sync.RWMutex) {
 	// GET /api/auth/status - public, returns auth state
 	r.Get("/api/auth/status", func(rw http.ResponseWriter, req *http.Request) {
 		sessionToken := getSessionToken(req)
 		authenticated := deps.Auth.ValidateSession(sessionToken)
 
+		cfgMu.RLock()
+		networkAccess := deps.Cfg.Network.NetworkAccess
+		passwordHash := deps.Cfg.Network.PasswordHash
+		cfgMu.RUnlock()
+
 		jsonResponse(rw, map[string]any{
-			"authRequired":  web.IsAuthRequired(deps.Cfg.Network.NetworkAccess, deps.Cfg.Network.PasswordHash),
+			"authRequired":  web.IsAuthRequired(networkAccess, passwordHash),
 			"authenticated": authenticated,
-			"hasPassword":   deps.Cfg.Network.PasswordHash != "",
+			"hasPassword":   passwordHash != "",
 		})
 	})
 
@@ -63,12 +70,16 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			return
 		}
 
-		if deps.Cfg.Network.PasswordHash == "" {
+		cfgMu.RLock()
+		passwordHash := deps.Cfg.Network.PasswordHash
+		cfgMu.RUnlock()
+
+		if passwordHash == "" {
 			jsonError(rw, "No password is set", http.StatusBadRequest)
 			return
 		}
 
-		if !deps.Auth.VerifyPassword(body.Password, deps.Cfg.Network.PasswordHash) {
+		if !deps.Auth.VerifyPassword(body.Password, passwordHash) {
 			if deps.Logger != nil {
 				deps.Logger.Warn("[Auth] Failed login attempt from " + web.ExtractIP(req))
 			}
@@ -180,30 +191,34 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			return
 		}
 
-		// If password exists, verify current password
-		if deps.Cfg.Network.PasswordHash != "" {
-			if !deps.Auth.VerifyPassword(body.CurrentPassword, deps.Cfg.Network.PasswordHash) {
-				jsonError(rw, "Current password is incorrect", http.StatusUnauthorized)
-				return
-			}
-		}
-
-		// Hash new password
+		// Hash new password (CPU-intensive, done outside lock)
 		hash, err := deps.Auth.HashPassword(body.NewPassword)
 		if err != nil {
 			jsonError(rw, "failed to hash password", http.StatusInternalServerError)
 			return
 		}
 
+		// Verify current password and write new hash under the same lock
+		// to prevent TOCTOU (hash could change between read and write)
+		cfgMu.Lock()
+		oldHash := deps.Cfg.Network.PasswordHash
+		if oldHash != "" {
+			if !deps.Auth.VerifyPassword(body.CurrentPassword, oldHash) {
+				cfgMu.Unlock()
+				jsonError(rw, "Current password is incorrect", http.StatusUnauthorized)
+				return
+			}
+		}
 		deps.Cfg.Network.PasswordHash = hash
-
-		// Save config
 		if deps.SaveConfig != nil {
 			if err := deps.SaveConfig(deps.Cfg); err != nil {
+				deps.Cfg.Network.PasswordHash = oldHash
+				cfgMu.Unlock()
 				jsonError(rw, "failed to save config", http.StatusInternalServerError)
 				return
 			}
 		}
+		cfgMu.Unlock()
 
 		// Invalidate other sessions (keep current if authenticated)
 		if isAuthenticated && token != "" {
@@ -253,25 +268,34 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			return
 		}
 
-		if deps.Cfg.Network.PasswordHash == "" {
+		// Verify and remove under the same lock to prevent TOCTOU
+		cfgMu.Lock()
+		oldHash := deps.Cfg.Network.PasswordHash
+		oldAccess := deps.Cfg.Network.NetworkAccess
+
+		if oldHash == "" {
+			cfgMu.Unlock()
 			jsonError(rw, "No password is set", http.StatusBadRequest)
 			return
 		}
 
-		if !deps.Auth.VerifyPassword(body.CurrentPassword, deps.Cfg.Network.PasswordHash) {
+		if !deps.Auth.VerifyPassword(body.CurrentPassword, oldHash) {
+			cfgMu.Unlock()
 			jsonError(rw, "Current password is incorrect", http.StatusUnauthorized)
 			return
 		}
-
 		deps.Cfg.Network.PasswordHash = ""
 		deps.Cfg.Network.NetworkAccess = "localhost" // Reset to safe default
-
 		if deps.SaveConfig != nil {
 			if err := deps.SaveConfig(deps.Cfg); err != nil {
+				deps.Cfg.Network.PasswordHash = oldHash
+				deps.Cfg.Network.NetworkAccess = oldAccess
+				cfgMu.Unlock()
 				jsonError(rw, "failed to save config", http.StatusInternalServerError)
 				return
 			}
 		}
+		cfgMu.Unlock()
 
 		deps.Auth.InvalidateAllSessions()
 		if deps.DB != nil {
@@ -327,34 +351,6 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 		}
 		jsonResponse(rw, map[string]any{"success": true})
 	})
-}
-
-// AuthMiddleware returns middleware that requires authentication when enabled.
-func AuthMiddleware(cfg *config.MoomboxConfig, auth *web.AuthService) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-			// Skip auth check if not required
-			if !web.IsAuthRequired(cfg.Network.NetworkAccess, cfg.Network.PasswordHash) {
-				next.ServeHTTP(rw, req)
-				return
-			}
-
-			// Allow loopback always
-			if web.IsLoopbackRequest(req) {
-				next.ServeHTTP(rw, req)
-				return
-			}
-
-			// Check session
-			token := getSessionToken(req)
-			if auth.ValidateSession(token) {
-				next.ServeHTTP(rw, req)
-				return
-			}
-
-			jsonError(rw, "authentication required", http.StatusUnauthorized)
-		})
-	}
 }
 
 

@@ -86,7 +86,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 	}
 	d.setCommonHeaders(req, uaAndroid)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}

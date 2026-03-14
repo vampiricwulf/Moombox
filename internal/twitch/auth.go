@@ -58,7 +58,7 @@ func (a *Auth) ValidateToken(ctx context.Context) (bool, error) {
 	}
 	req.Header.Set("Authorization", "OAuth "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := twitchHTTPClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("validate token: %w", err)
 	}
@@ -70,7 +70,7 @@ func (a *Auth) ValidateToken(ctx context.Context) (bool, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return false, fmt.Errorf("validate unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 

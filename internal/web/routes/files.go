@@ -60,7 +60,7 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 			if err := worker.DeleteOrphanedFile(path, deps.Cfg); err != nil {
 				errors = append(errors, map[string]string{
 					"path":  path,
-					"error": err.Error(),
+					"error": "failed to delete file",
 				})
 				deps.Logger.Warn("failed to delete orphaned file", "path", path, "err", err)
 			} else {

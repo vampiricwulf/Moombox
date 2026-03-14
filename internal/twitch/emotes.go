@@ -351,7 +351,7 @@ func fetchJSON(ctx context.Context, url string) ([]byte, error) {
 	}
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := twitchHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

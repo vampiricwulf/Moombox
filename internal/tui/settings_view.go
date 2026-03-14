@@ -696,7 +696,17 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 		DimStyle.Render(" (Enter: confirm, Esc: cancel)"))
 	lines = append(lines, "")
 
-	if m.cfg != nil && m.cfg.Network.NetworkAccess == "external" {
+	isExternal := false
+	if m.cfg != nil {
+		if m.cfgMu != nil {
+			m.cfgMu.RLock()
+		}
+		isExternal = m.cfg.Network.NetworkAccess == "external"
+		if m.cfgMu != nil {
+			m.cfgMu.RUnlock()
+		}
+	}
+	if isExternal {
 		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
 			"Warning: Network access will be reset to localhost"))
 	}

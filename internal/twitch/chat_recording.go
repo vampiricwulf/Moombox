@@ -226,6 +226,10 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	// With padded messageCount, the header size should be constant.
 	// Fallback handles legacy files written before padding was added.
 	updatedBytes := []byte(header)
+	if len(updatedBytes) < n {
+		cd.logger.Warn("chat header shrank during update, file may have stale bytes",
+			"expected", n, "actual", len(updatedBytes))
+	}
 	if len(updatedBytes) == n {
 		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
 			cd.logger.Warn("update chat header: write", "err", err)

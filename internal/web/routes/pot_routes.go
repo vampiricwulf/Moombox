@@ -85,7 +85,10 @@ func PotRoutes(r chi.Router, deps *PotRoutesDeps) {
 
 		poToken, actualBinding, err := deps.PotProvider.GeneratePoTokenSession(req.Context(), body.ContentBinding, body.BypassCache)
 		if err != nil {
-			jsonError(rw, "failed to generate PO token: "+err.Error(), http.StatusInternalServerError)
+			if deps.Logger != nil {
+				deps.Logger.Warn("failed to generate PO token", "error", err)
+			}
+			jsonError(rw, "failed to generate PO token", http.StatusInternalServerError)
 			return
 		}
 

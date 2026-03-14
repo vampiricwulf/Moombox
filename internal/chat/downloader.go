@@ -103,6 +103,17 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Unlock()
 
 	defer func() {
+		if r := recover(); r != nil {
+			if cd.OnError != nil {
+				cd.OnError(fmt.Errorf("chat downloader panic: %v", r))
+			}
+			cd.mu.Lock()
+			cd.running = false
+			cd.mu.Unlock()
+		}
+	}()
+
+	defer func() {
 		cd.mu.Lock()
 		cd.running = false
 		cd.cancelCtx = nil
@@ -431,6 +442,17 @@ func (cd *ChatDownloader) SetOutputFile(path string) {
 	}
 }
 
+// getOutputPaths copies the output and resume file paths under lock.
+// Callers running outside the main loop (or after SetOutputFile may be called)
+// should use these copies instead of reading cd.opts directly.
+func (cd *ChatDownloader) getOutputPaths() (outputFile, resumeFile string) {
+	cd.mu.Lock()
+	outputFile = cd.opts.OutputFile
+	resumeFile = cd.opts.ResumeFile
+	cd.mu.Unlock()
+	return
+}
+
 // writeChatFile writes chat data to the output file.
 // Two paths:
 // - Not flushed: all messages are in memory, write complete JSON atomically.
@@ -438,10 +460,11 @@ func (cd *ChatDownloader) SetOutputFile(path string) {
 //   read only the last bytes to locate ']', truncate there, then append new
 //   messages + closing structure. Memory cost: O(new messages) not O(file size).
 func (cd *ChatDownloader) writeChatFile() {
-	if cd.opts.OutputFile == "" {
+	outputFile, _ := cd.getOutputPaths()
+	if outputFile == "" {
 		return // No output file set yet (early chat), buffer in memory
 	}
-	if err := os.MkdirAll(filepath.Dir(cd.opts.OutputFile), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outputFile), 0o755); err != nil {
 		return
 	}
 
@@ -458,15 +481,27 @@ func (cd *ChatDownloader) writeChatFile() {
 	}
 
 	// Check if output file exists
-	info, err := os.Stat(cd.opts.OutputFile)
+	info, err := os.Stat(outputFile)
 	if err != nil || info.Size() < 10 {
 		// File missing or too small — fall back to full write
+		if cd.OnError != nil {
+			if err != nil {
+				cd.OnError(fmt.Errorf("chat file stat failed, rewriting: %v", err))
+			} else {
+				cd.OnError(fmt.Errorf("chat file too small (%d bytes), rewriting", info.Size()))
+			}
+		}
+		cd.prependExistingMessages(outputFile)
 		cd.writeFullChatFile()
 		return
 	}
 
-	f, err := os.OpenFile(cd.opts.OutputFile, os.O_RDWR, 0o644)
+	f, err := os.OpenFile(outputFile, os.O_RDWR, 0o644)
 	if err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("chat file open failed, rewriting: %v", err))
+		}
+		cd.prependExistingMessages(outputFile)
 		cd.writeFullChatFile()
 		return
 	}
@@ -482,6 +517,11 @@ func (cd *ChatDownloader) writeChatFile() {
 	tailBuf := make([]byte, tailSize)
 	_, err = f.ReadAt(tailBuf, fileSize-tailSize)
 	if err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("chat file read failed, rewriting: %v", err))
+		}
+		f.Close()
+		cd.prependExistingMessages(outputFile)
 		cd.writeFullChatFile()
 		return
 	}
@@ -495,6 +535,11 @@ func (cd *ChatDownloader) writeChatFile() {
 		}
 	}
 	if bracketOffset == -1 {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("chat file missing closing bracket, rewriting"))
+		}
+		f.Close()
+		cd.prependExistingMessages(outputFile)
 		cd.writeFullChatFile()
 		return
 	}
@@ -510,6 +555,11 @@ func (cd *ChatDownloader) writeChatFile() {
 		}
 		checkBuf := make([]byte, checkSize)
 		if _, err := f.ReadAt(checkBuf, bracketBytePos-checkSize); err != nil {
+			if cd.OnError != nil {
+				cd.OnError(fmt.Errorf("chat file check-read failed, rewriting: %v", err))
+			}
+			f.Close()
+			cd.prependExistingMessages(outputFile)
 			cd.writeFullChatFile()
 			return
 		}
@@ -544,6 +594,11 @@ func (cd *ChatDownloader) writeChatFile() {
 
 	// Truncate at ']' position, then write new content
 	if err := f.Truncate(bracketBytePos); err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("chat file truncate failed, rewriting: %v", err))
+		}
+		f.Close()
+		cd.prependExistingMessages(outputFile)
 		cd.writeFullChatFile()
 		return
 	}
@@ -556,6 +611,8 @@ func (cd *ChatDownloader) writeChatFile() {
 }
 
 func (cd *ChatDownloader) writeFullChatFile() {
+	outputFile, _ := cd.getOutputPaths()
+
 	data := ChatData{
 		VideoID:         cd.opts.VideoID,
 		VideoTitle:      cd.opts.VideoTitle,
@@ -575,16 +632,51 @@ func (cd *ChatDownloader) writeFullChatFile() {
 	}
 	jsonBytes = utils.PadMessageCountJSON(jsonBytes)
 
-	tmpFile := cd.opts.OutputFile + ".tmp"
+	tmpFile := outputFile + ".tmp"
 	if err := os.WriteFile(tmpFile, jsonBytes, 0o644); err != nil {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("write chat file: %w", err))
 		}
 		return
 	}
-	if err := os.Rename(tmpFile, cd.opts.OutputFile); err != nil {
+	if err := os.Rename(tmpFile, outputFile); err != nil {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("rename chat file: %w", err))
+		}
+	}
+}
+
+// readExistingMessages attempts to read previously-flushed messages from the
+// chat file on disk. Returns nil on any error (caller should log a warning).
+func (cd *ChatDownloader) readExistingMessages(path string) []ChatMessage {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var chatData ChatData
+	if err := json.Unmarshal(data, &chatData); err != nil {
+		return nil
+	}
+	return chatData.Messages
+}
+
+// prependExistingMessages reads previously-flushed messages from disk and prepends
+// them to cd.messages. It also registers their IDs in seenIDs to prevent duplicates
+// on subsequent API responses that may overlap with the recovered messages.
+func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
+	existing := cd.readExistingMessages(outputFile)
+	if existing == nil {
+		return
+	}
+	cd.messages = append(existing, cd.messages...)
+	cd.messageCount = len(cd.messages)
+	// Register recovered message IDs in dedup maps to prevent duplicates
+	for _, msg := range existing {
+		if msg.ID != "" {
+			if _, seen := cd.seenIDs[msg.ID]; !seen {
+				cd.seenIDs[msg.ID] = struct{}{}
+				cd.seenOrder = append(cd.seenOrder, msg.ID)
+			}
 		}
 	}
 }
@@ -592,12 +684,14 @@ func (cd *ChatDownloader) writeFullChatFile() {
 // updateChatFileHeader updates messageCount and downloadedAt in the JSON header
 // without rewriting the entire file. Reads only the first 1KB.
 func (cd *ChatDownloader) updateChatFileHeader() {
-	info, err := os.Stat(cd.opts.OutputFile)
+	outputFile, _ := cd.getOutputPaths()
+
+	info, err := os.Stat(outputFile)
 	if err != nil || info.Size() < 50 {
 		return
 	}
 
-	f, err := os.OpenFile(cd.opts.OutputFile, os.O_RDWR, 0o644)
+	f, err := os.OpenFile(outputFile, os.O_RDWR, 0o644)
 	if err != nil {
 		return
 	}
@@ -669,7 +763,8 @@ func (cd *ChatDownloader) loadResume() (*ChatResumeState, error) {
 }
 
 func (cd *ChatDownloader) saveResume() {
-	if cd.opts.ResumeFile == "" || cd.opts.OutputFile == "" {
+	outputFile, resumeFile := cd.getOutputPaths()
+	if resumeFile == "" || outputFile == "" {
 		return // No output path yet (early chat)
 	}
 	// Use seenOrder (insertion order) for deterministic resume state,
@@ -693,14 +788,14 @@ func (cd *ChatDownloader) saveResume() {
 		}
 		return
 	}
-	tmpFile := cd.opts.ResumeFile + ".tmp"
+	tmpFile := resumeFile + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("write resume state: %w", err))
 		}
 		return
 	}
-	if err := os.Rename(tmpFile, cd.opts.ResumeFile); err != nil {
+	if err := os.Rename(tmpFile, resumeFile); err != nil {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("rename resume state: %w", err))
 		}
@@ -708,7 +803,8 @@ func (cd *ChatDownloader) saveResume() {
 }
 
 func (cd *ChatDownloader) clearResume() {
-	os.Remove(cd.opts.ResumeFile)
+	_, resumeFile := cd.getOutputPaths()
+	os.Remove(resumeFile)
 }
 
 // sleep waits for the given duration, but returns early if the context is cancelled

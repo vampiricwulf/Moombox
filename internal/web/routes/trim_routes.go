@@ -69,7 +69,7 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 		trimID := chi.URLParam(req, "trimId")
 
 		if err := trimSvc.DeleteTrim(jobID, trimID); err != nil {
-			jsonError(rw, err.Error(), http.StatusBadRequest)
+			jsonError(rw, "failed to delete trim", http.StatusBadRequest)
 			return
 		}
 

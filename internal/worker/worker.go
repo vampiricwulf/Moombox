@@ -65,6 +65,7 @@ type DownloadWorker struct {
 	yt           *youtube.Service
 	tw           *twitch.Service
 	cfg          *config.MoomboxConfig
+	cfgMu        *sync.RWMutex // shared config mutex (set via SetCfgMu)
 	queue        *JobQueue
 	orchestrator *DownloadOrchestrator
 	streamProc   *StreamProcessor
@@ -201,32 +202,46 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 
 // pollForJobs is signal-driven: wakes on NotifyNewJob signals or a 60s safety heartbeat.
 // Most job discovery happens via explicit EnqueueJob calls; this is a catch-all.
+// Wraps the ticker loop in a restart-on-panic pattern so a single panic doesn't
+// permanently kill the heartbeat poller.
 func (w *DownloadWorker) pollForJobs(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			w.logger.Error("panic in pollForJobs", "panic", fmt.Sprint(r))
-		}
-	}()
-
-	ticker := time.NewTicker(heartbeatInterval)
-	defer ticker.Stop()
-
 	for {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					w.logger.Error("pollForJobs panic, restarting", "panic", fmt.Sprint(r))
+				}
+			}()
+
+			ticker := time.NewTicker(heartbeatInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-w.notifyJob:
+				case <-ticker.C:
+				}
+
+				jobs, err := w.db.GetAllJobs()
+				if err != nil {
+					continue
+				}
+				for _, job := range jobs {
+					if ShouldProcess(job) && !w.queue.IsProcessing(job.ID) {
+						w.queue.Enqueue(job.ID, job.Status)
+					}
+				}
+			}
+		}()
+
+		// Check if context is done before restarting
 		select {
 		case <-ctx.Done():
 			return
-		case <-w.notifyJob:
-		case <-ticker.C:
-		}
-
-		jobs, err := w.db.GetAllJobs()
-		if err != nil {
-			continue
-		}
-		for _, job := range jobs {
-			if ShouldProcess(job) && !w.queue.IsProcessing(job.ID) {
-				w.queue.Enqueue(job.ID, job.Status)
-			}
+		default:
+			time.Sleep(time.Second) // Brief pause before restart
 		}
 	}
 }
@@ -291,6 +306,13 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	jobCtx := w.buildJobContext(job)
 
 	// Route to platform-specific orchestrator
+	if w.cfgMu != nil {
+		w.cfgMu.RLock()
+	}
+	maxRes := w.cfg.Downloader.MaxVideoResolution
+	if w.cfgMu != nil {
+		w.cfgMu.RUnlock()
+	}
 	var dlErr error
 	if job.Platform == "twitch" && result.TwitchVariant != nil {
 		variant := &TwitchVariantInfo{
@@ -300,7 +322,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			Height:        result.TwitchVariant.Height,
 			FPS:           result.TwitchVariant.FPS,
 			QualityPref:   job.QualityPreference,
-			MaxResolution: w.cfg.Downloader.MaxVideoResolution,
+			MaxResolution: maxRes,
 		}
 		// For live streams, provide a stream-end check function and quality probe
 		if !result.IsVod && result.TwitchStreamInfo != nil && w.tw != nil {
@@ -387,7 +409,23 @@ func isTerminalStatus(status database.JobStatus) bool {
 }
 
 func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
-	outputDir := w.cfg.Paths.OutputDirectory
+	// Snapshot all config fields under lock
+	if w.cfgMu != nil {
+		w.cfgMu.RLock()
+	}
+	cfgOutputDir := w.cfg.Paths.OutputDirectory
+	cfgStagingDir := w.cfg.Paths.StagingDirectory
+	cfgTemplate := w.cfg.Downloader.OutputTemplate
+	cfgMaxRes := w.cfg.Downloader.MaxVideoResolution
+	cfgPrefer60 := w.cfg.Downloader.Prefer60fps
+	cfgChat := w.cfg.Downloader.DownloadChat
+	cfgRetryCap := w.cfg.Downloader.SegmentRetryDelayCap
+	cfgLiveRetries := w.cfg.Downloader.SegmentLiveCheckRetries
+	if w.cfgMu != nil {
+		w.cfgMu.RUnlock()
+	}
+
+	outputDir := cfgOutputDir
 	if job.OutputDirectory != "" {
 		outputDir = job.OutputDirectory
 	}
@@ -396,14 +434,14 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	}
 
 	// Use config staging directory, falling back to ./staging/{jobID}
-	stagingBase := w.cfg.Paths.StagingDirectory
+	stagingBase := cfgStagingDir
 	if stagingBase == "" {
 		stagingBase = "./staging"
 	}
 	stagingDir := filepath.Join(stagingBase, job.ID)
 
 	// Resolve filename from output_template config
-	template := w.cfg.Downloader.OutputTemplate
+	template := cfgTemplate
 	if template == "" {
 		template = "${title} [${id}]"
 	}
@@ -432,14 +470,14 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		Job: job,
 		DB:  w.db,
 		Config: &JobConfig{
-			MaxVideoResolution:      w.cfg.Downloader.MaxVideoResolution,
-			Prefer60fps:             w.cfg.Downloader.Prefer60fps,
+			MaxVideoResolution:      cfgMaxRes,
+			Prefer60fps:             cfgPrefer60,
 			OutputDirectory:         outputDir,
 			StagingDirectory:        stagingDir,
 			FilenameTemplate:        template,
-			DownloadChat:            w.cfg.Downloader.DownloadChat,
-			SegmentRetryDelayCap:    w.cfg.Downloader.SegmentRetryDelayCap,
-			SegmentLiveCheckRetries: w.cfg.Downloader.SegmentLiveCheckRetries,
+			DownloadChat:            cfgChat,
+			SegmentRetryDelayCap:    cfgRetryCap,
+			SegmentLiveCheckRetries: cfgLiveRetries,
 		},
 		YT:         w.yt,
 		StagingDir: stagingDir,
@@ -557,7 +595,7 @@ func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := workerHTTPClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -592,6 +630,12 @@ func (w *DownloadWorker) Stop() {
 	case <-time.After(10 * time.Second):
 		w.logger.Warn("download worker: timed out waiting for in-flight jobs")
 	}
+}
+
+// SetCfgMu sets the shared config mutex for synchronized config access.
+func (w *DownloadWorker) SetCfgMu(mu *sync.RWMutex) {
+	w.cfgMu = mu
+	w.streamProc.SetCfgMu(mu)
 }
 
 // SetParallelDownloads updates the max parallel downloads at runtime.

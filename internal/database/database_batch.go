@@ -84,10 +84,8 @@ func (db *Database) flushUpdates(pending map[string]*Job) {
 	// Snapshot subscribers, then notify outside lock to avoid blocking
 	db.subMu.RLock()
 	subs := make([]func(*Job), 0, len(db.onJobUpdate))
-	for _, fn := range db.onJobUpdate {
-		if fn != nil {
-			subs = append(subs, fn)
-		}
+	for _, sub := range db.onJobUpdate {
+		subs = append(subs, sub.fn)
 	}
 	db.subMu.RUnlock()
 

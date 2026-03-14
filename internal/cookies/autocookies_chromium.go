@@ -156,7 +156,7 @@ func waitForCDP(ctx context.Context, port int, timeout time.Duration) error {
 			return ctx.Err()
 		}
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json/version", port), nil)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := cookiesHTTPClient.Do(req)
 		if err == nil {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -177,7 +177,7 @@ func waitForCDP(ctx context.Context, port int, timeout time.Duration) error {
 func cdpNavigate(ctx context.Context, port int, url string) error {
 	// Get available pages
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json", port), nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cookiesHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -264,7 +264,7 @@ type cdpCookieResult struct {
 func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 	// Get version info for the browser websocket URL
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json/version", port), nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cookiesHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -289,7 +289,7 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 	if err != nil {
 		// Fall back to page-level Network.getAllCookies
 		fallbackReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json", port), nil)
-		pagesResp, err2 := http.DefaultClient.Do(fallbackReq)
+		pagesResp, err2 := cookiesHTTPClient.Do(fallbackReq)
 		if err2 != nil {
 			return "", fmt.Errorf("CDP Storage.getCookies failed: %v, fallback failed: %v", err, err2)
 		}
@@ -376,7 +376,7 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 
 func cdpCloseBrowser(ctx context.Context, port int) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json/version", port), nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cookiesHTTPClient.Do(req)
 	if err != nil {
 		return
 	}

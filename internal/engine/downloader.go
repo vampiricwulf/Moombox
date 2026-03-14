@@ -100,8 +100,8 @@ type SegmentDownloader struct {
 	streamEnded       atomic.Bool
 	outputFile        *os.File
 	bytesWritten      atomic.Int64
-	currentSeq        int
-	headSeq           int
+	currentSeq        atomic.Int64
+	headSeq           atomic.Int64
 	lastSegTime       time.Time
 	lastHeadProbeTime  time.Time
 	logger             DownloaderLogger
@@ -138,12 +138,13 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 		logger = nopLogger{}
 	}
 
-	return &SegmentDownloader{
-		opts:       opts,
-		currentSeq: opts.StartSeq,
-		headSeq:    -1,
-		logger:     logger,
+	d := &SegmentDownloader{
+		opts:   opts,
+		logger: logger,
 	}
+	d.currentSeq.Store(int64(opts.StartSeq))
+	d.headSeq.Store(-1)
+	return d
 }
 
 // Start begins the download process.
@@ -185,7 +186,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 			}
 		}
 		if state != nil {
-			d.currentSeq = state.LastSeq + 1
+			d.currentSeq.Store(int64(state.LastSeq + 1))
 			d.bytesWritten.Store(state.BytesWritten)
 			resuming = true
 		}
@@ -195,17 +196,17 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	// a last-downloaded sequence from a previous session. Use the output file's
 	// current size as the byte position. This is a best-effort recovery for cases
 	// where the resume file was lost (e.g., crash without graceful shutdown).
-	if !resuming && d.currentSeq > 0 && !d.opts.IsHls {
+	if !resuming && d.currentSeq.Load() > 0 && !d.opts.IsHls {
 		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
 			d.bytesWritten.Store(info.Size())
-			d.currentSeq++ // StartSeq is the last downloaded; advance to the next
+			d.currentSeq.Add(1) // StartSeq is the last downloaded; advance to the next
 			resuming = true
 			d.logger.Info("[Downloader] Resuming from database state (no resume file)",
-				"seq", d.currentSeq, "fileSize", info.Size())
+				"seq", d.currentSeq.Load(), "fileSize", info.Size())
 		} else {
 			// Output file missing -- can't resume, start fresh from segment 0
 			d.logger.Info("[Downloader] No output file for resume, starting fresh")
-			d.currentSeq = 0
+			d.currentSeq.Store(0)
 		}
 	}
 
@@ -242,7 +243,7 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	}
 
 	if d.OnStart != nil {
-		d.OnStart(d.currentSeq, resuming)
+		d.OnStart(int(d.currentSeq.Load()), resuming)
 	}
 
 	// Run download loop
@@ -262,9 +263,7 @@ func (d *SegmentDownloader) Cancel() {
 
 // LastSeq returns the last successfully downloaded sequence number.
 func (d *SegmentDownloader) LastSeq() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.currentSeq - 1
+	return int(d.currentSeq.Load()) - 1
 }
 
 // BytesWritten returns total bytes written (lock-free).

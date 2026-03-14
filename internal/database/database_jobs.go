@@ -598,11 +598,17 @@ func (db *Database) AddJobLog(jobID, line string) {
 	db.jobLogs[jobID] = logs
 }
 
-// GetJobLogs returns the in-memory log lines for a job.
+// GetJobLogs returns a copy of the in-memory log lines for a job.
 func (db *Database) GetJobLogs(jobID string) []string {
 	db.jobLogsMu.RLock()
 	defer db.jobLogsMu.RUnlock()
-	return db.jobLogs[jobID]
+	src := db.jobLogs[jobID]
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]string, len(src))
+	copy(dst, src)
+	return dst
 }
 
 // ClearJobLogs removes the per-job log buffer.

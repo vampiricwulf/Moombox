@@ -198,8 +198,10 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	}
 
 	defer func() {
+		panicked := false
 		if r := recover(); r != nil {
 			cd.logger.Error("chat downloader panic", "panic", r)
+			panicked = true
 		}
 
 		cd.mu.Lock()
@@ -207,7 +209,12 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.mu.Unlock()
 		cd.flush()
 
-		// Clear resume state on successful completion (matches TS clearResumeState)
+		if panicked {
+			// Don't clear resume state on panic — allow resume on restart
+			return
+		}
+
+		// Clean exit: clear resume state
 		cd.clearResumeState()
 
 		// Inject third-party emotes (7TV, BTTV, FFZ) after final flush.

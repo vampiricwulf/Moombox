@@ -86,7 +86,7 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 		// Create plugin directory structure (matches TypeScript layout)
 		targetDir := filepath.Join(pluginDir, "moombox", "yt_dlp_plugins", "extractor")
 		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			jsonError(rw, "failed to create plugin directory: "+err.Error(), http.StatusInternalServerError)
+			jsonError(rw, "failed to create plugin directory", http.StatusInternalServerError)
 			return
 		}
 
@@ -114,7 +114,7 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 		// Write the plugin file with the current port
 		pluginContent := generateYtdlpPlugin(currentPort, httpsEnabled)
 		if err := os.WriteFile(pluginPath, []byte(pluginContent), 0o644); err != nil {
-			jsonError(rw, "failed to write plugin: "+err.Error(), http.StatusInternalServerError)
+			jsonError(rw, "failed to write plugin", http.StatusInternalServerError)
 			return
 		}
 

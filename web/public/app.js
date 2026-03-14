@@ -2642,13 +2642,15 @@ class MoomboxApp {
 
 // Intercept fetch to detect 401 (session expired) and redirect to login
 const _originalFetch = window.fetch;
+let _reloading = false;
 window.fetch = async function (...args) {
   const response = await _originalFetch.apply(this, args);
-  if (response.status === 401) {
+  if (response.status === 401 && !_reloading) {
     // Don't redirect for auth endpoints themselves
     const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
     if (!url.includes("/api/auth/")) {
       // Session expired — reload to get login page
+      _reloading = true;
       window.location.reload();
     }
   }

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -84,8 +85,10 @@ func extractWSIP(r *http.Request) string {
 // the slice. When ageDays is 0, the cutoff is "now" so all finished jobs are
 // hidden (any finished job's updated_at will be before the current moment).
 // Returns the original slice unchanged when no jobs are filtered out.
-func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig) []*database.Job {
+func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) []*database.Job {
+	cfgMu.RLock()
 	ageDays := int(cfg.Monitors.HideFinishedAgeDays.Value)
+	cfgMu.RUnlock()
 	cutoff := time.Now().AddDate(0, 0, -ageDays)
 	anyFiltered := false
 	for _, j := range jobs {

@@ -301,7 +301,7 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	}
 	req.Header.Set("User-Agent", "Moombox/1.0")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := monitorHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("decapi request: %w", err)
 	}

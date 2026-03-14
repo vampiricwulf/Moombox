@@ -148,8 +148,11 @@ export class PlayerController {
     if (offsetInput) {
       // Filter to valid numeric characters (digits, decimal point, minus sign)
       offsetInput.addEventListener("input", () => {
-        offsetInput.value = offsetInput.value.replace(/[^0-9.\-]/g, "");
-        const val = parseFloat(offsetInput.value);
+        let v = offsetInput.value.replace(/[^0-9.\-]/g, "");
+        // Allow only one minus (at start) and one decimal point
+        v = v.replace(/(?!^)-/g, "").replace(/(\..*)\./g, "$1");
+        offsetInput.value = v;
+        const val = parseFloat(v);
         this.playerCustomOffsetMs = isNaN(val) ? 0 : val * 1000;
         // Re-sync chat to current time with new offset
         const currentMs = this.getGlobalTimeMs();

@@ -71,23 +71,26 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		pl := result.Playlist
 
 		// Initialize currentSeq if needed
-		if d.currentSeq < 0 {
-			d.currentSeq = pl.MediaSequence
+		curSeq := int(d.currentSeq.Load())
+		if curSeq < 0 {
+			d.currentSeq.Store(int64(pl.MediaSequence))
+			curSeq = pl.MediaSequence
 		}
 
 		// Handle gap: if currentSeq < mediaSequence, segments expired from CDN
-		if d.currentSeq < pl.MediaSequence {
+		if curSeq < pl.MediaSequence {
 			if d.OnGap != nil {
-				d.OnGap(DownloadGap{From: d.currentSeq, To: pl.MediaSequence - 1})
+				d.OnGap(DownloadGap{From: curSeq, To: pl.MediaSequence - 1})
 			}
-			d.currentSeq = pl.MediaSequence
+			d.currentSeq.Store(int64(pl.MediaSequence))
+			curSeq = pl.MediaSequence
 		}
 
 		// Identify new segments (only those >= currentSeq)
 		var newSegments []HlsSegment
 		for i, seg := range pl.Segments {
 			segSeq := pl.MediaSequence + i
-			if segSeq >= d.currentSeq {
+			if segSeq >= curSeq {
 				newSegments = append(newSegments, seg)
 			}
 		}
@@ -96,7 +99,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		if pl.EndList && len(newSegments) > 0 {
 			filteredPl := &HlsPlaylist{
 				Segments:       newSegments,
-				MediaSequence:  d.currentSeq,
+				MediaSequence:  curSeq,
 				EndList:        pl.EndList,
 				TargetDuration: pl.TargetDuration,
 			}
@@ -115,22 +118,23 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				// Don't skip -- break to re-fetch playlist and retry.
 				// If CDN purged it, gap detection handles it next iteration.
 				d.logger.Debug("[Downloader] HLS segment failed, will retry after playlist refresh",
-					"seq", d.currentSeq, "error", segErr)
+					"seq", d.currentSeq.Load(), "error", segErr)
 				sleepCtx(ctx, 2*time.Second)
 				segFailed = true
 				break
 			}
+			hlsSeq := int(d.currentSeq.Load())
 			n, writeErr := d.outputFile.Write(segData)
 			if writeErr != nil {
-				return fmt.Errorf("write HLS segment %d: %w", d.currentSeq, writeErr)
+				return fmt.Errorf("write HLS segment %d: %w", hlsSeq, writeErr)
 			}
 			d.bytesWritten.Add(int64(n))
-			d.currentSeq++
+			d.currentSeq.Add(1)
 			d.lastSegTime = time.Now()
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
-					Seq:   d.currentSeq,
+					Seq:   int(d.currentSeq.Load()),
 					Bytes: d.bytesWritten.Load(),
 				})
 			}
@@ -260,19 +264,19 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				return fmt.Errorf("write HLS VOD segment %d: %w", nextIdx, err)
 			}
 			d.bytesWritten.Add(int64(n))
-			d.currentSeq++
+			d.currentSeq.Add(1)
 			nextIdx++
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
-					Seq:   d.currentSeq,
+					Seq:   int(d.currentSeq.Load()),
 					Bytes: d.bytesWritten.Load(),
 					Total: totalSegs,
 				})
 			}
 
 			// Save resume state periodically (matching TS: every 50 segments)
-			if d.currentSeq%50 == 0 {
+			if d.currentSeq.Load()%50 == 0 {
 				d.saveResume()
 			}
 		}
@@ -292,7 +296,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				return fmt.Errorf("write error during HLS VOD gap flush (segment %d): %w", nextIdx, writeErr)
 			}
 			d.bytesWritten.Add(int64(n))
-			d.currentSeq++
+			d.currentSeq.Add(1)
 			delete(buffer, nextIdx)
 		} else {
 			if gapStart < 0 {

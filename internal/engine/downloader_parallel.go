@@ -10,23 +10,25 @@ import (
 // runParallelCatchUp downloads segments in parallel to catch up to the live edge.
 // Stays stayBehindSegments behind the live edge to avoid downloading in-flight segments.
 func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error) {
-	targetSeq := d.headSeq - stayBehindSegments
-	if targetSeq < d.currentSeq+1 {
-		targetSeq = d.currentSeq + 1 // At least catch up 1 segment
+	curSeq := int(d.currentSeq.Load())
+	head := int(d.headSeq.Load())
+	targetSeq := head - stayBehindSegments
+	if targetSeq < curSeq+1 {
+		targetSeq = curSeq + 1 // At least catch up 1 segment
 	}
 	// Respect endSeq limit (for timestamp-based trimming)
 	if d.opts.EndSeq >= 0 && targetSeq > d.opts.EndSeq+1 {
 		targetSeq = d.opts.EndSeq + 1
 	}
-	if targetSeq <= d.currentSeq {
-		return d.currentSeq, nil
+	if targetSeq <= curSeq {
+		return curSeq, nil
 	}
 
 	if d.OnProgress != nil {
 		d.OnProgress(DownloadProgress{
-			Seq:        d.currentSeq,
+			Seq:        curSeq,
 			Bytes:      d.bytesWritten.Load(),
-			HeadSeq:    d.headSeq,
+			HeadSeq:    head,
 			CatchingUp: true,
 		})
 	}
@@ -73,7 +75,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				d.logger.Error("catch-up feeder goroutine panic", "panic", r)
 			}
 		}()
-		for seq := d.currentSeq; seq <= targetSeq; seq++ {
+		for seq := curSeq; seq <= targetSeq; seq++ {
 			if d.isCancelled() || ctx.Err() != nil {
 				break
 			}
@@ -90,7 +92,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 
 	// Stream write: buffer out-of-order segments, write in order as they arrive
 	buffer := make(map[int][]byte)
-	nextSeq := d.currentSeq
+	nextSeq := curSeq
 	segsSinceResume := 0
 	for r := range results {
 		buffer[r.seq] = r.data
@@ -114,7 +116,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				d.OnProgress(DownloadProgress{
 					Seq:        nextSeq,
 					Bytes:      d.bytesWritten.Load(),
-					HeadSeq:    d.headSeq,
+					HeadSeq:    int(d.headSeq.Load()),
 					CatchingUp: true,
 				})
 			}
@@ -122,7 +124,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			nextSeq++
 			segsSinceResume++
 			if segsSinceResume >= ResumeCatchupInterval {
-				d.currentSeq = nextSeq
+				d.currentSeq.Store(int64(nextSeq))
 				d.saveResume()
 				segsSinceResume = 0
 			}
@@ -134,7 +136,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		d.OnProgress(DownloadProgress{
 			Seq:        nextSeq - 1,
 			Bytes:      d.bytesWritten.Load(),
-			HeadSeq:    d.headSeq,
+			HeadSeq:    int(d.headSeq.Load()),
 			CatchingUp: false,
 		})
 	}

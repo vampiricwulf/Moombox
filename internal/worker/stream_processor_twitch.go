@@ -59,7 +59,17 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: fmt.Sprintf("twitch VOD HLS error: %v", err)}, nil
 	}
 
-	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, sp.cfg.Downloader.MaxVideoResolution)
+	if sp.cfgMu != nil {
+		sp.cfgMu.RLock()
+	}
+	vodMaxRes := sp.cfg.Downloader.MaxVideoResolution
+	vodDownloadChat := sp.cfg.Downloader.DownloadChat
+	vodStagingDir := sp.cfg.Paths.StagingDirectory
+	if sp.cfgMu != nil {
+		sp.cfgMu.RUnlock()
+	}
+
+	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, vodMaxRes)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: "no suitable HLS quality found for VOD"}, nil
 	}
@@ -73,9 +83,9 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 	}
 
 	// Create VOD chat downloader if chat download is enabled
-	if sp.cfg.Downloader.DownloadChat {
-		stagingDir := filepath.Join(sp.cfg.Paths.StagingDirectory, job.ID)
-		if sp.cfg.Paths.StagingDirectory == "" {
+	if vodDownloadChat {
+		stagingDir := filepath.Join(vodStagingDir, job.ID)
+		if vodStagingDir == "" {
 			stagingDir = filepath.Join("staging", job.ID)
 		}
 		if err := os.MkdirAll(stagingDir, 0o755); err != nil {
@@ -173,7 +183,17 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		return nil, fmt.Errorf("twitch HLS: %w", err)
 	}
 
-	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, sp.cfg.Downloader.MaxVideoResolution)
+	if sp.cfgMu != nil {
+		sp.cfgMu.RLock()
+	}
+	liveMaxRes := sp.cfg.Downloader.MaxVideoResolution
+	liveDownloadChat := sp.cfg.Downloader.DownloadChat
+	liveStagingBase := sp.cfg.Paths.StagingDirectory
+	if sp.cfgMu != nil {
+		sp.cfgMu.RUnlock()
+	}
+
+	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, liveMaxRes)
 	if variant == nil {
 		return &StreamProcessResult{ShouldDownload: false, Error: "no suitable HLS quality found"}, nil
 	}
@@ -215,8 +235,8 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 
 	// Start Twitch IRC chat downloader if chat recording is enabled
 	var twitchChatDl *twitch.ChatDownloader
-	if sp.cfg.Downloader.DownloadChat && sp.tw != nil {
-		stagingBase := sp.cfg.Paths.StagingDirectory
+	if liveDownloadChat && sp.tw != nil {
+		stagingBase := liveStagingBase
 		if stagingBase == "" {
 			stagingBase = "./staging"
 		}

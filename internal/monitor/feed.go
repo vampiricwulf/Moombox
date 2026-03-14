@@ -17,8 +17,12 @@ import (
 
 const (
 	feedFetchTimeout    = 15 * time.Second
+	feedProcessTimeout  = 60 * time.Second
 	defaultMaxFeedItems = 15
 )
+
+// monitorHTTPClient is a shared HTTP client with a timeout for monitor HTTP requests.
+var monitorHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // FeedMonitor polls YouTube RSS feeds for new videos from monitored channels.
 type FeedMonitor struct {
@@ -214,16 +218,17 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfig) error {
 	feedURL := fmt.Sprintf("https://www.youtube.com/feeds/videos.xml?channel_id=%s", ch.ID)
 
-	ctx, cancel := context.WithTimeout(ctx, feedFetchTimeout)
-	defer cancel()
+	// Use a short timeout for the feed HTTP fetch itself
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, feedFetchTimeout)
+	defer fetchCancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, feedURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := monitorHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("fetch feed: %w", err)
 	}
@@ -239,7 +244,11 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 		return err
 	}
 
-	return fm.processFeed(ctx, ch, data)
+	// Use a longer timeout for video processing (ProbeVideo can be slow)
+	processCtx, processCancel := context.WithTimeout(ctx, feedProcessTimeout)
+	defer processCancel()
+
+	return fm.processFeed(processCtx, ch, data)
 }
 
 // atomFeed represents the Atom XML feed structure.

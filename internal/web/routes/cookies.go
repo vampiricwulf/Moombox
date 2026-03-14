@@ -46,7 +46,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		ok, err := autoCookieSvc.RefreshCookies(req.Context())
 		if err != nil {
-			jsonResponse(rw, map[string]any{"success": false, "error": err.Error()})
+			jsonResponse(rw, map[string]any{"success": false, "error": "cookie refresh failed"})
 			return
 		}
 
@@ -90,7 +90,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		}
 
 		if err := autoCookieSvc.StartSetup(body.Platform); err != nil {
-			jsonResponse(rw, map[string]any{"success": false, "error": err.Error()})
+			jsonResponse(rw, map[string]any{"success": false, "error": "failed to start setup"})
 			return
 		}
 		jsonResponse(rw, map[string]any{"success": true})
@@ -109,7 +109,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 				"success":              false,
 				"authenticated":        false,
 				"twitchAuthenticated":  false,
-				"error":               err.Error(),
+				"error":               "failed to finish setup",
 			})
 			return
 		}

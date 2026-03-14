@@ -79,8 +79,9 @@ type Database struct {
 	batchDone chan struct{}
 
 	// Pub/sub
-	onJobUpdate  []func(*Job)
-	onJobsChange []func([]*Job)
+	onJobUpdate  []jobUpdateSub
+	onJobsChange []jobsChangeSub
+	nextSubID    uint64
 	subMu        sync.RWMutex
 
 	// Prepared statements
