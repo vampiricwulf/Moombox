@@ -221,7 +221,10 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 					"from", info.Size(), "to", state.BytesWritten)
 			}
 			if truncErr := os.Truncate(d.opts.OutputFile, state.BytesWritten); truncErr != nil {
-				d.logger.Warn("[Downloader] Failed to truncate for resume", "err", truncErr)
+				d.logger.Warn("[Downloader] Failed to truncate for resume, starting fresh", "err", truncErr)
+				resuming = false
+				flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+				state = nil
 			}
 		}
 	} else {

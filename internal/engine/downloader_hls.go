@@ -288,7 +288,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 		if data, ok := buffer[nextIdx]; ok {
 			// Close any open gap
 			if gapStart >= 0 && d.OnGap != nil {
-				d.OnGap(DownloadGap{From: gapStart, To: nextIdx})
+				d.OnGap(DownloadGap{From: gapStart, To: nextIdx - 1})
 				gapStart = -1
 			}
 			n, writeErr := d.outputFile.Write(data)
@@ -307,7 +307,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	}
 	// Close final gap
 	if gapStart >= 0 && d.OnGap != nil {
-		d.OnGap(DownloadGap{From: gapStart, To: totalSegs})
+		d.OnGap(DownloadGap{From: gapStart, To: totalSegs - 1})
 	}
 
 	d.saveResume()

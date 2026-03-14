@@ -145,7 +145,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		if _, ok := buffer[nextSeq]; ok {
 			// Close any open gap
 			if catchupGapStart >= 0 && d.OnGap != nil {
-				d.OnGap(DownloadGap{From: catchupGapStart, To: nextSeq})
+				d.OnGap(DownloadGap{From: catchupGapStart, To: nextSeq - 1})
 				catchupGapStart = -1
 			}
 			n, writeErr := d.outputFile.Write(buffer[nextSeq])
@@ -163,7 +163,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	}
 	// Close final gap range
 	if catchupGapStart >= 0 && d.OnGap != nil {
-		d.OnGap(DownloadGap{From: catchupGapStart, To: nextSeq})
+		d.OnGap(DownloadGap{From: catchupGapStart, To: nextSeq - 1})
 	}
 
 	return nextSeq, nil

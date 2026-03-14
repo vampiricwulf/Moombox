@@ -303,9 +303,11 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 				}
 			}
 
-			// Dedup by ID
-			if _, seen := cd.seenIDs[msg.ID]; seen {
-				continue
+			// Dedup by ID (skip empty IDs to avoid silent dedup of malformed messages)
+			if msg.ID != "" {
+				if _, seen := cd.seenIDs[msg.ID]; seen {
+					continue
+				}
 			}
 
 			cd.seenIDs[msg.ID] = struct{}{}

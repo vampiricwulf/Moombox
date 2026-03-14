@@ -449,7 +449,14 @@ func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 					variant.Height, _ = strconv.Atoi(h)
 				}
 			case "FRAME-RATE":
-				if v, err := strconv.ParseFloat(attr.value, 64); err == nil {
+				// Handle both decimal (29.97) and fractional (30000/1001) formats
+				if num, den, ok := strings.Cut(attr.value, "/"); ok {
+					n, err1 := strconv.ParseFloat(num, 64)
+					d, err2 := strconv.ParseFloat(den, 64)
+					if err1 == nil && err2 == nil && d > 0 {
+						variant.FPS = int(math.Round(n / d))
+					}
+				} else if v, err := strconv.ParseFloat(attr.value, 64); err == nil {
 					variant.FPS = int(math.Round(v))
 				}
 			case "CODECS":
