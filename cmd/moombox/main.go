@@ -15,7 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -382,7 +382,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		for p := range existing {
 			platforms = append(platforms, p)
 		}
-		sort.Strings(platforms)
+		slices.Sort(platforms)
 		cfg.Cookies.Platforms = platforms
 		if err := config.Save(cfg, configPath); err != nil {
 			log.Warn("Failed to persist auto-cookie platforms", slog.String("error", err.Error()))

@@ -1,8 +1,9 @@
 package main
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -37,24 +38,23 @@ func (a *ytFormatAdapter) GetFormats(ctx context.Context, videoID string) (map[s
 	}
 
 	// Sort video: resolution desc -> fps desc -> bitrate asc (match TypeScript)
-	sort.SliceStable(videoFormats, func(i, j int) bool {
-		a, b := videoFormats[i], videoFormats[j]
+	slices.SortStableFunc(videoFormats, func(a, b youtube.Format) int {
 		aRes := maxDim(a.Width, a.Height)
 		bRes := maxDim(b.Width, b.Height)
 		if aRes != bRes {
-			return aRes > bRes
+			return cmp.Compare(bRes, aRes)
 		}
 		aFps := derefInt(a.Fps)
 		bFps := derefInt(b.Fps)
 		if aFps != bFps {
-			return aFps > bFps
+			return cmp.Compare(bFps, aFps)
 		}
-		return a.Bitrate < b.Bitrate
+		return cmp.Compare(a.Bitrate, b.Bitrate)
 	})
 
 	// Sort audio: bitrate desc (match TypeScript)
-	sort.SliceStable(audioFormats, func(i, j int) bool {
-		return audioFormats[i].Bitrate > audioFormats[j].Bitrate
+	slices.SortStableFunc(audioFormats, func(a, b youtube.Format) int {
+		return cmp.Compare(b.Bitrate, a.Bitrate)
 	})
 
 	// Build bestItags matching TypeScript format: bestWebmVideo, bestMp4Video, bestOpusAudio, bestAacAudio

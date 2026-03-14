@@ -1,10 +1,11 @@
 package youtube
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -459,8 +460,8 @@ func deduplicateFormats(pool []Format) []Format {
 	for _, f := range byItag {
 		result = append(result, f)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Itag < result[j].Itag
+	slices.SortFunc(result, func(a, b Format) int {
+		return cmp.Compare(a.Itag, b.Itag)
 	})
 	return result
 }
