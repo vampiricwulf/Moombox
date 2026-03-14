@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/huh v0.8.0
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/coder/websocket v1.8.14
 	github.com/dop251/goja v0.0.0-20260219130522-0ba9a5494a59
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/mattn/go-isatty v0.0.20
@@ -16,7 +17,6 @@ require (
 	golang.org/x/sync v0.19.0
 	golang.org/x/text v0.34.0
 	modernc.org/sqlite v1.46.1
-	nhooyr.io/websocket v1.8.17
 )
 
 require (

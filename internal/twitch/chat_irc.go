@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 const cdpPollTimeout = 15 * time.Second
