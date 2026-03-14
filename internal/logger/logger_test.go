@@ -368,6 +368,32 @@ func TestFormatLogLineMissingValue(t *testing.T) {
 	}
 }
 
+func TestFormatLogLineSlogAttr(t *testing.T) {
+	// slog.Attr values should be handled as self-contained key=value pairs
+	line := formatLogLine(slog.LevelInfo, "test", slog.String("key1", "val1"), slog.Int("key2", 42))
+	if !strings.Contains(line, "key1=val1") {
+		t.Errorf("expected 'key1=val1', got %q", line)
+	}
+	if !strings.Contains(line, "key2=42") {
+		t.Errorf("expected 'key2=42', got %q", line)
+	}
+	if strings.Contains(line, "!MISSING") {
+		t.Errorf("unexpected '!MISSING' marker for slog.Attr args, got %q", line)
+	}
+
+	// Mixed: slog.Attr + plain key-value pairs
+	line2 := formatLogLine(slog.LevelWarn, "mixed", slog.String("attr", "val"), "plain_key", "plain_val")
+	if !strings.Contains(line2, "attr=val") {
+		t.Errorf("expected 'attr=val', got %q", line2)
+	}
+	if !strings.Contains(line2, "plain_key=plain_val") {
+		t.Errorf("expected 'plain_key=plain_val', got %q", line2)
+	}
+	if strings.Contains(line2, "!MISSING") {
+		t.Errorf("unexpected '!MISSING' in mixed args, got %q", line2)
+	}
+}
+
 func TestLogAfterClose(t *testing.T) {
 	l, err := New("", "DEBUG", 1024*1024, 3)
 	if err != nil {

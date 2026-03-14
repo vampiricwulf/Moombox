@@ -231,11 +231,21 @@ func formatLogLine(level slog.Level, msg string, args ...any) string {
 	sb.WriteString(" ")
 	sb.WriteString(msg)
 
-	for i := 0; i < len(args)-1; i += 2 {
-		fmt.Fprintf(&sb, " %v=%v", args[i], args[i+1])
-	}
-	if len(args)%2 == 1 {
-		fmt.Fprintf(&sb, " %v=!MISSING", args[len(args)-1])
+	// Process args as key=value pairs. slog.Attr values (from slog.String,
+	// slog.Any, etc.) are self-contained key=value pairs and count as one arg
+	// but should not trigger the "!MISSING" marker.
+	i := 0
+	for i < len(args) {
+		if attr, ok := args[i].(slog.Attr); ok {
+			fmt.Fprintf(&sb, " %s=%v", attr.Key, attr.Value)
+			i++
+		} else if i+1 < len(args) {
+			fmt.Fprintf(&sb, " %v=%v", args[i], args[i+1])
+			i += 2
+		} else {
+			fmt.Fprintf(&sb, " %v=!MISSING", args[i])
+			i++
+		}
 	}
 
 	return sb.String()
