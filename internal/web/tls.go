@@ -76,9 +76,7 @@ func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger inte
 
 	// Add LAN IPs when listening beyond localhost
 	if networkAccess == "lan" || networkAccess == "external" || networkAccess == "public" {
-		for _, ip := range getLANIPs() {
-			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
-		}
+		tmpl.IPAddresses = append(tmpl.IPAddresses, getLANIPs()...)
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)

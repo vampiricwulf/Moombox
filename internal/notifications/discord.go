@@ -82,11 +82,7 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	if len(fields) > 0 {
 		embed.Fields = make([]discordField, len(fields))
 		for i, f := range fields {
-			embed.Fields[i] = discordField{
-				Name:   f.Name,
-				Value:  f.Value,
-				Inline: f.Inline,
-			}
+			embed.Fields[i] = discordField(f)
 		}
 	}
 

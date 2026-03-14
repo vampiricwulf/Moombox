@@ -80,11 +80,8 @@ func parseFFmpegTime(line string) float64 {
 		return 0
 	}
 	// Find end of time value (space or end of string)
-	end := strings.IndexByte(rest, ' ')
-	if end < 0 {
-		end = len(rest)
-	}
-	timeStr := strings.TrimSpace(rest[:end])
+	timeStr, _, _ := strings.Cut(rest, " ")
+	timeStr = strings.TrimSpace(timeStr)
 	if timeStr == "" || timeStr == "N/A" {
 		return 0
 	}

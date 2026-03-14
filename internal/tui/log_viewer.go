@@ -109,25 +109,25 @@ func (m *LogViewerModel) SetFocused(f bool) {
 
 // ScrollUp scrolls up by one line via the viewport.
 func (m *LogViewerModel) ScrollUp() {
-	m.viewport.LineUp(1)
+	m.viewport.ScrollUp(1)
 	m.autoScroll = m.viewport.AtBottom()
 }
 
 // ScrollDown scrolls down by one line via the viewport.
 func (m *LogViewerModel) ScrollDown() {
-	m.viewport.LineDown(1)
+	m.viewport.ScrollDown(1)
 	m.autoScroll = m.viewport.AtBottom()
 }
 
 // PageUp scrolls up by a page via the viewport.
 func (m *LogViewerModel) PageUp() {
-	m.viewport.HalfViewUp()
+	m.viewport.HalfPageUp()
 	m.autoScroll = m.viewport.AtBottom()
 }
 
 // PageDown scrolls down by a page via the viewport.
 func (m *LogViewerModel) PageDown() {
-	m.viewport.HalfViewDown()
+	m.viewport.HalfPageDown()
 	m.autoScroll = m.viewport.AtBottom()
 }
 

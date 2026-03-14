@@ -2,6 +2,7 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -207,11 +208,11 @@ func (l *Logger) log(level slog.Level, msg string, args ...any) {
 	}
 
 	// Check level before doing any work
-	if !l.slog.Enabled(nil, level) {
+	if !l.slog.Enabled(context.Background(), level) {
 		return
 	}
 
-	l.slog.Log(nil, level, msg, args...)
+	l.slog.Log(context.Background(), level, msg, args...)
 
 	// Format for ring buffer and subscribers
 	line := formatLogLine(level, msg, args...)

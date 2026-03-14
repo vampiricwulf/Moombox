@@ -278,9 +278,7 @@ func TestCullDedupTrimsToKeepSize(t *testing.T) {
 	// Fill seenIDs beyond dedupKeepSize
 	totalIDs := dedupKeepSize + 100
 	for i := 0; i < totalIDs; i++ {
-		id := "msg_" + time.Now().Format("150405.000000") + "_" + string(rune('A'+i%26))
-		// Use a simple scheme to avoid collisions
-		id = "msg_" + strconv.Itoa(i)
+		id := "msg_" + strconv.Itoa(i)
 		cd.seenIDs[id] = struct{}{}
 		cd.seenOrder = append(cd.seenOrder, id)
 	}

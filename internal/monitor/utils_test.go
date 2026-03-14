@@ -171,7 +171,7 @@ func TestMetadataFailureTracker_RecordAndClear(t *testing.T) {
 
 	// Clear removes entry
 	tracker.ClearFailure("vid1")
-	count, giveUp = tracker.RecordFailure("vid1")
+	count, _ = tracker.RecordFailure("vid1")
 	if count != 1 {
 		t.Errorf("after clear: count=%d, want 1", count)
 	}

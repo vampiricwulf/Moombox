@@ -57,7 +57,6 @@ type setupStepDef struct {
 	title    string
 	subtitle string
 	fields   []setupFieldDef
-	footer   string
 }
 
 // Advanced setup steps — 8 sections matching settings.go

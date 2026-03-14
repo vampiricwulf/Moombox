@@ -139,7 +139,7 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 func readFirefoxCookies(profileDir string) (string, error) {
 	dbPath := filepath.Join(profileDir, "cookies.sqlite")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("Firefox cookies.sqlite not found")
+		return "", fmt.Errorf("firefox cookies.sqlite not found")
 	}
 
 	// Retry loop for SQLite WAL lock contention (Firefox may not have fully released the lock)

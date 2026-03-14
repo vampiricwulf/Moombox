@@ -14,20 +14,6 @@ import (
 // client timeout only guards against truly stuck connections.
 var utilsHTTPClient = &http.Client{Timeout: 5 * time.Minute}
 
-// cancelOnCloseBody wraps a response body so that the context cancel function
-// is called when the body is closed. This ensures the timeout context lives
-// as long as the caller is reading the body.
-type cancelOnCloseBody struct {
-	io.ReadCloser
-	cancel context.CancelFunc
-}
-
-func (b *cancelOnCloseBody) Close() error {
-	err := b.ReadCloser.Close()
-	b.cancel()
-	return err
-}
-
 // FetchWithTimeout performs an HTTP GET with a timeout.
 // IMPORTANT: The caller receives a cancel function that MUST be called after
 // the response body has been fully read. The timeout context is kept alive

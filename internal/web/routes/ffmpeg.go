@@ -329,9 +329,7 @@ func checkFFmpeg(path string) (valid bool, version string, warning string) {
 	}
 	// Extract first line which contains version info
 	output := string(out)
-	if idx := strings.IndexByte(output, '\n'); idx > 0 {
-		output = output[:idx]
-	}
+	output, _, _ = strings.Cut(output, "\n")
 	version = strings.TrimSpace(output)
 	return true, version, ffmpegVersionWarning(version)
 }
@@ -705,9 +703,8 @@ func extractRegValue(output string) string {
 		if strings.HasPrefix(strings.ToLower(line), "path") {
 			// Split on REG_SZ or REG_EXPAND_SZ
 			for _, regType := range []string{"REG_EXPAND_SZ", "REG_SZ"} {
-				if idx := strings.Index(line, regType); idx >= 0 {
-					val := strings.TrimSpace(line[idx+len(regType):])
-					return expandWindowsEnv(val)
+				if _, after, ok := strings.Cut(line, regType); ok {
+					return expandWindowsEnv(strings.TrimSpace(after))
 				}
 			}
 		}

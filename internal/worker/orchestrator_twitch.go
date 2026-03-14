@@ -205,10 +205,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	}
 
 	// Quality-aware download loop
-	for {
-		if ctx.Err() != nil {
-			break
-		}
+	for ctx.Err() == nil {
 
 		// Run HLS downloader in goroutine to listen for quality changes
 		downloadDone := make(chan error, 1)
