@@ -238,6 +238,11 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 
 	// Close results when all workers done
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.logger != nil {
+				d.logger.Error("panic in HLS VOD results closer", "panic", r)
+			}
+		}()
 		wg.Wait()
 		close(results)
 	}()

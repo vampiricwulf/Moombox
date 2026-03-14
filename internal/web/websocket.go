@@ -310,8 +310,11 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 			pong := WSMessage{Type: "pong"}
 			pongBytes, _ := json.Marshal(pong)
 			ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
-			client.conn.Write(ctx, websocket.MessageText, pongBytes)
+			err := client.conn.Write(ctx, websocket.MessageText, pongBytes)
 			cancel()
+			if err != nil {
+				return // Connection broken; readPump cleanup will handle removal
+			}
 		}
 	}
 }

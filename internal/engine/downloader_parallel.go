@@ -84,6 +84,11 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 
 	// Close results when all workers complete
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.logger != nil {
+				d.logger.Error("panic in parallel results closer", "panic", r)
+			}
+		}()
 		wg.Wait()
 		close(results)
 	}()

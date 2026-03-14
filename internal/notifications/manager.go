@@ -189,6 +189,11 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 func (m *Manager) Wait() {
 	done := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && m.logger != nil {
+				m.logger.Error("panic in notification wait", "panic", r)
+			}
+		}()
 		m.wg.Wait()
 		close(done)
 	}()
