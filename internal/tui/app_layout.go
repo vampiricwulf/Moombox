@@ -22,16 +22,15 @@ func (a *App) recalcLayout() {
 
 	// Task list vs details width split (A5 - match TypeScript)
 	var taskW, detailW int
-	if a.focusedPanel == PanelTasks {
+	switch a.focusedPanel {
+	case PanelTasks:
 		taskW = a.width * 45 / 100 // TS: 45% for tasks when focused
-		detailW = a.width - taskW
-	} else if a.focusedPanel == PanelDetails {
+	case PanelDetails:
 		taskW = a.width * 35 / 100
-		detailW = a.width - taskW
-	} else {
+	default:
 		taskW = a.width / 2
-		detailW = a.width - taskW
 	}
+	detailW = a.width - taskW
 
 	a.taskList.SetSize(taskW, topH)
 	a.details.SetSize(detailW, topH)

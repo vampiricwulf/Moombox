@@ -564,9 +564,10 @@ func (m *JobDetailsModel) addSegmentRowsCommon(j *database.Job, lastVideoSeq, la
 		videoGaps := 0
 		audioGaps := 0
 		for _, g := range j.Gaps {
-			if g.Stream == "video" {
+			switch g.Stream {
+			case "video":
 				videoGaps++
-			} else if g.Stream == "audio" {
+			case "audio":
 				audioGaps++
 			}
 		}

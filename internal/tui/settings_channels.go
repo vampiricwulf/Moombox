@@ -35,10 +35,11 @@ func valuesToChannel(vals map[string]string) config.ChannelConfig {
 		Name:     vals["name"],
 		Platform: vals["platform"],
 	}
-	if vals["enabled"] == "No" {
+	switch vals["enabled"] {
+	case "No":
 		boolFalse := false
 		ch.Enabled = &boolFalse
-	} else if vals["enabled"] == "Yes" {
+	case "Yes":
 		boolTrue := true
 		ch.Enabled = &boolTrue
 	}

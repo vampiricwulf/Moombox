@@ -99,16 +99,18 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 		}
 		return ""
 	case keyLeft:
-		if field.ftype == fieldToggle {
+		switch field.ftype {
+		case fieldToggle:
 			m.toggleField(field)
-		} else if field.ftype == fieldCycle {
+		case fieldCycle:
 			m.cycleFieldReverse(field)
 		}
 		return ""
 	case keyRight:
-		if field.ftype == fieldToggle {
+		switch field.ftype {
+		case fieldToggle:
 			m.toggleField(field)
-		} else if field.ftype == fieldCycle {
+		case fieldCycle:
 			m.cycleFieldForward(field)
 		}
 		return ""

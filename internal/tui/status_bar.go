@@ -221,12 +221,12 @@ func (m *StatusBarModel) renderCookieStatus() string {
 
 	// Twitch status (only if active)
 	if m.twActive {
-		switch {
-		case m.twCookie == CookieStatusRelogin:
+		switch m.twCookie {
+		case CookieStatusRelogin:
 			parts = append(parts, statusBarRedStyle.Render("TW: Re-login"))
-		case m.twCookie == CookieStatusCookiesOnly:
+		case CookieStatusCookiesOnly:
 			parts = append(parts, statusBarRedStyle.Render("TW"))
-		case m.twCookie == CookieStatusOK:
+		case CookieStatusOK:
 			parts = append(parts, statusBarGrnStyle.Render("TW"))
 		default:
 			parts = append(parts, DimStyle.Render("TW"))
