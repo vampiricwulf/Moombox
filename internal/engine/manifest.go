@@ -629,9 +629,9 @@ func parseFrameRate(s string) int {
 		return 0
 	}
 	// Try fractional "num/den"
-	if idx := strings.Index(s, "/"); idx > 0 {
-		num, err1 := strconv.Atoi(s[:idx])
-		den, err2 := strconv.Atoi(s[idx+1:])
+	if numStr, denStr, ok := strings.Cut(s, "/"); ok {
+		num, err1 := strconv.Atoi(numStr)
+		den, err2 := strconv.Atoi(denStr)
 		if err1 == nil && err2 == nil && den > 0 {
 			return int(math.Round(float64(num) / float64(den)))
 		}

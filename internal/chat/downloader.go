@@ -310,8 +310,10 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 				}
 			}
 
-			cd.seenIDs[msg.ID] = struct{}{}
-			cd.seenOrder = append(cd.seenOrder, msg.ID)
+			if msg.ID != "" {
+				cd.seenIDs[msg.ID] = struct{}{}
+				cd.seenOrder = append(cd.seenOrder, msg.ID)
+			}
 			cd.messages = append(cd.messages, *msg)
 			cd.messageCount++
 			cd.lastTimestamp = msg.TimestampUsec
@@ -761,8 +763,13 @@ func (cd *ChatDownloader) saveResume() {
 	}
 	// Use seenOrder (insertion order) for deterministic resume state,
 	// not map iteration which is non-deterministic in Go.
-	recentIDs := make([]string, len(cd.seenOrder))
-	copy(recentIDs, cd.seenOrder)
+	// Cap to dedupKeepSize to prevent resume files from growing unbounded.
+	src := cd.seenOrder
+	if len(src) > dedupKeepSize {
+		src = src[len(src)-dedupKeepSize:]
+	}
+	recentIDs := make([]string, len(src))
+	copy(recentIDs, src)
 
 	state := ChatResumeState{
 		MessageCount:      cd.messageCount,
