@@ -484,7 +484,7 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 			trimmed := strings.TrimSpace(strings.ToLower(part))
 			if strings.HasPrefix(trimmed, "expires=") {
 				_, dateStr, _ := strings.Cut(part, "=")
-			dateStr = strings.TrimSpace(dateStr)
+				dateStr = strings.TrimSpace(dateStr)
 				if t, err := time.Parse(time.RFC1123, dateStr); err == nil {
 					expiry = t.Unix()
 				} else if t, err := time.Parse("Mon, 02-Jan-2006 15:04:05 MST", dateStr); err == nil {
