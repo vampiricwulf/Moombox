@@ -116,8 +116,12 @@ var advancedSetupSteps = []setupStepDef{
 		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
 			{"cookieFile", "Cookie file (manual)", "./cookies.txt", "Netscape-format cookie file", setupFieldText, nil},
-			{"autoCookies", "Auto cookie login", "No", "Opens browser for login, grabs cookies automatically", setupFieldToggle, []string{"No", "Yes"}},
 		},
+	},
+	{
+		title:    "Cookie Login",
+		subtitle: "Log in via browser",
+		fields:   nil, // Interactive cookie browser login
 	},
 	{
 		title:    "Channels",
@@ -169,10 +173,19 @@ type SetupWizardModel struct {
 	// Esc confirmation state for advanced mode (prevents accidental data loss)
 	escConfirm bool
 
+	// Advanced mode: interactive cookie step (between form and channels)
+	advancedCookieDone bool
+
+	// FFmpeg status (checked on open)
+	ffmpegStatus string // "found: v7.1", "not found", or "" if not checked
+
+	// Saving state (async save in progress)
+	saving bool
+
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
 
-	// Loading spinner (shown during cookie extraction)
+	// Loading spinner (shown during cookie extraction or saving)
 	spinner spinner.Model
 
 	// Callbacks for finishing setup
@@ -182,6 +195,7 @@ type SetupWizardModel struct {
 	OnFinishAutoCookie func() (bool, bool, error)
 	OnCancelAutoCookie func()
 	OnRestart          func()
+	OnCheckFFmpeg      func() (valid bool, version string) // returns FFmpeg status
 }
 
 // NewSetupWizardModel creates a new setup wizard model.
@@ -218,6 +232,18 @@ func (m *SetupWizardModel) Open() {
 	m.channelEditField = 0
 	m.channelDeleteConf = false
 	m.escConfirm = false
+	m.advancedCookieDone = false
+	m.saving = false
+
+	// Check FFmpeg availability
+	if m.OnCheckFFmpeg != nil {
+		valid, version := m.OnCheckFFmpeg()
+		if valid {
+			m.ffmpegStatus = "\u2713 " + version
+		} else {
+			m.ffmpegStatus = "\u2717 not found"
+		}
+	}
 }
 
 // Close hides the wizard.
@@ -326,18 +352,17 @@ func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 			model, cmd := m.advancedForm.Update(msg)
 			m.advancedForm = model.(*huh.Form)
 			if m.advancedForm.State == huh.StateCompleted {
-				// Transition to channel editing
+				// Transition to interactive cookie step
 				m.advancedForm = nil
 				m.advancedFormDone = true
+				m.advancedCookieDone = false
 				m.escConfirm = false
-				m.channelMode = "list"
-				m.channels = nil
-				m.channelIndex = 0
+				m.cookieFocus = 0
 			}
 			return cmd
 		}
-		// Channel editing mode — route to textinput
-		if m.advancedFormDone && m.channelMode == "edit" && m.textInput.Focused() {
+		// Channel editing mode — route to textinput (only after cookies are done)
+		if m.advancedFormDone && m.advancedCookieDone && m.channelMode == "edit" && m.textInput.Focused() {
 			prev := m.textInput.Value()
 			var cmd tea.Cmd
 			m.textInput, cmd = m.textInput.Update(msg)
@@ -447,20 +472,38 @@ func (m *SetupWizardModel) handleModeSelectKey(key string) string {
 			m.modeChoice--
 		}
 	case keyDown:
-		if m.modeChoice < 1 {
+		if m.modeChoice < 2 {
 			m.modeChoice++
 		}
 	case keyEnter, keyTab:
-		if m.modeChoice == 0 {
+		switch m.modeChoice {
+		case 0: // Quick Setup
 			m.mode = setupModeSimple
 			m.simpleStage = setupSimpleCookies
 			m.cookieFocus = 0
-		} else {
+		case 1: // Advanced Setup
 			m.mode = setupModeAdvanced
 			m.buildAdvancedForm()
+		case 2: // Use Defaults (skip)
+			return m.finishWithDefaults()
 		}
 	}
 	return ""
+}
+
+// finishWithDefaults saves a default config and triggers restart.
+func (m *SetupWizardModel) finishWithDefaults() string {
+	m.errorMsg = ""
+	m.saving = true
+	cfg := config.Defaults()
+	if m.OnComplete != nil {
+		if err := m.OnComplete(cfg); err != nil {
+			m.saving = false
+			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
+			return ""
+		}
+	}
+	return "restart"
 }
 
 // --- Simplified Setup ---
@@ -687,6 +730,7 @@ func (m *SetupWizardModel) cycleChannelFieldReverse(field channelFieldDef) {
 
 func (m *SetupWizardModel) finishSimpleSetup() string {
 	m.errorMsg = ""
+	m.saving = true
 
 	cfg := config.Defaults()
 
@@ -708,6 +752,7 @@ func (m *SetupWizardModel) finishSimpleSetup() string {
 
 	if m.OnComplete != nil {
 		if err := m.OnComplete(cfg); err != nil {
+			m.saving = false
 			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
 			return ""
 		}
@@ -741,25 +786,96 @@ func (m *SetupWizardModel) handleAdvancedKey(key string) string {
 		return ""
 	}
 
-	// Channel editing mode (after form completes)
-	if m.advancedFormDone {
+	// Interactive cookie step (after form, before channels)
+	if m.advancedFormDone && !m.advancedCookieDone {
+		return m.handleAdvancedCookieKey(key)
+	}
+
+	// Channel editing mode (after cookies)
+	if m.advancedFormDone && m.advancedCookieDone {
 		return m.handleAdvancedChannelKey(key)
 	}
 
 	return ""
 }
 
+func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
+	// Reuse the simple cookie key handler with custom Esc/Next behavior
+	if m.cookieActive {
+		if m.cookieFinishing {
+			return "" // extraction in progress, ignore keys
+		}
+		switch key {
+		case keyEnter:
+			m.cookieFinishing = true
+			return "finish_cookie"
+		case keyEsc:
+			if m.OnCancelAutoCookie != nil {
+				m.OnCancelAutoCookie()
+			}
+			m.cookieActive = false
+			m.cookiePlatform = ""
+		}
+		return ""
+	}
+
+	switch key {
+	case keyEsc:
+		// Double-Esc to go back to mode select
+		if m.escConfirm {
+			m.advancedFormDone = false
+			m.mode = setupModeSelect
+			m.escConfirm = false
+			return ""
+		}
+		m.escConfirm = true
+		return ""
+	case keyUp:
+		if m.cookieFocus > 0 {
+			m.cookieFocus--
+		}
+	case keyDown:
+		if m.cookieFocus < 2 {
+			m.cookieFocus++
+		}
+	case keyEnter, keyTab:
+		switch m.cookieFocus {
+		case 0: // YouTube
+			if m.OnStartAutoCookie != nil {
+				if err := m.OnStartAutoCookie("youtube"); err != nil {
+					m.errorMsg = fmt.Sprintf("YouTube cookies: %v", err)
+				} else {
+					m.cookieActive = true
+					m.cookiePlatform = "youtube"
+					m.spinner = newSpinner()
+				}
+			}
+		case 1: // Twitch
+			if m.OnStartAutoCookie != nil {
+				if err := m.OnStartAutoCookie("twitch"); err != nil {
+					m.errorMsg = fmt.Sprintf("Twitch cookies: %v", err)
+				} else {
+					m.cookieActive = true
+					m.cookiePlatform = "twitch"
+					m.spinner = newSpinner()
+				}
+			}
+		case 2: // Skip / Next → advance to channels
+			m.advancedCookieDone = true
+			m.channelMode = "list"
+			m.channels = nil
+			m.channelIndex = 0
+		}
+	}
+	return ""
+}
+
 func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
 	return m.handleChannelListKey(key,
 		func() string {
-			// Double-Esc to abandon channel step (loses all form + channel data)
-			if m.escConfirm {
-				m.advancedFormDone = false
-				m.mode = setupModeSelect
-				m.escConfirm = false
-				return ""
-			}
-			m.escConfirm = true
+			// Go back to cookie step (not destructive — channels are preserved)
+			m.advancedCookieDone = false
+			m.cookieFocus = 0
 			return ""
 		},
 		func() string { return m.finishAdvancedSetup() },
@@ -768,6 +884,7 @@ func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
 
 func (m *SetupWizardModel) finishAdvancedSetup() string {
 	m.errorMsg = ""
+	m.saving = true
 
 	v := func(key string) string {
 		return strings.TrimSpace(m.values[key])
@@ -801,6 +918,7 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	// External access requires a password (min 8 chars)
 	password := v("password")
 	if networkAccess == "external" && len(password) < 8 {
+		m.saving = false
 		m.errorMsg = "A password (min 8 characters) is required for external access"
 		return ""
 	}
@@ -876,13 +994,25 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	if s := v("cookieFile"); s != "" {
 		cfg.Cookies.CookieFile = s
 	}
-	cfg.Cookies.AutoEnabled = vBool("autoCookies", false)
+	// Enable auto-cookies if any platform was set up via browser login
+	if m.cookieYTDone || m.cookieTWDone {
+		cfg.Cookies.AutoEnabled = true
+		var platforms []string
+		if m.cookieYTDone {
+			platforms = append(platforms, "youtube")
+		}
+		if m.cookieTWDone {
+			platforms = append(platforms, "twitch")
+		}
+		cfg.Cookies.Platforms = platforms
+	}
 
 	// Channels
 	cfg.Channels = m.channels
 
 	if m.OnComplete != nil {
 		if err := m.OnComplete(cfg); err != nil {
+			m.saving = false
 			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
 			return ""
 		}
@@ -916,6 +1046,21 @@ func (m *SetupWizardModel) View() string {
 	}
 	if m.width == 0 || m.height == 0 {
 		return ""
+	}
+
+	// Show saving indicator overlay
+	if m.saving {
+		_, contentW := dialogBox(40, m.width)
+		h := max(m.height-2, 10)
+		content := "\n\n" + lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).
+			Render("  Saving configuration...")
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(ColorCyan).
+			Width(contentW).
+			Height(h).
+			Render(content)
+		return centerBox(box, m.width, m.height)
 	}
 
 	switch m.mode {
@@ -970,6 +1115,28 @@ func (m *SetupWizardModel) viewModeSelect() string {
 	lines = append(lines, advStyle.Render(advPrefix+"Advanced Setup"))
 	lines = append(lines, DimStyle.Render("   Walk through all configuration sections."))
 	lines = append(lines, "")
+
+	// Use Defaults card
+	defPrefix := "  "
+	defColor := ColorWhite
+	if m.modeChoice == 2 {
+		defPrefix = "> "
+		defColor = ColorCyan
+	}
+	defStyle := lipgloss.NewStyle().Foreground(defColor)
+	if m.modeChoice == 2 {
+		defStyle = defStyle.Bold(true)
+	}
+	lines = append(lines, defStyle.Render(defPrefix+"Use Defaults"))
+	lines = append(lines, DimStyle.Render("   Save default config and start. Configure later in settings."))
+	lines = append(lines, "")
+
+	// FFmpeg status
+	if m.ffmpegStatus != "" {
+		lines = append(lines, DimStyle.Render("FFmpeg: "+m.ffmpegStatus))
+		lines = append(lines, "")
+	}
+
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 	lines = append(lines, DimStyle.Render("\u2191/\u2193: Select  Enter: Continue"))
 
@@ -1195,8 +1362,13 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		return centerBox(box, m.width, m.height)
 	}
 
-	if m.advancedFormDone {
-		// Render channel editor
+	// Interactive cookie step (after form, before channels)
+	if m.advancedFormDone && !m.advancedCookieDone {
+		return m.viewAdvancedCookies(contentW, h)
+	}
+
+	// Channel editor (after cookies)
+	if m.advancedFormDone && m.advancedCookieDone {
 		var lines []string
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Advanced Setup \u2014 Channels"))
 		lines = append(lines, DimStyle.Render("Add channels to monitor for live streams"))
@@ -1210,12 +1382,6 @@ func (m *SetupWizardModel) viewAdvanced() string {
 
 		if m.errorMsg != "" {
 			lines = append(lines, ErrorStyle.Render(m.errorMsg))
-		}
-
-		// Esc confirmation warning
-		if m.escConfirm && m.channelMode != "edit" {
-			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
-				"Press Esc again to abandon setup"))
 		}
 
 		// Navigation hints
@@ -1245,6 +1411,92 @@ func (m *SetupWizardModel) viewAdvanced() string {
 	}
 
 	return ""
+}
+
+func (m *SetupWizardModel) viewAdvancedCookies(contentW, h int) string {
+	var lines []string
+
+	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Advanced Setup \u2014 Cookie Login"))
+	lines = append(lines, DimStyle.Render("Log in to platforms to enable cookie-based access"))
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+
+	if m.cookieActive {
+		platformName := "YouTube"
+		if m.cookiePlatform == "twitch" {
+			platformName = "Twitch"
+		}
+		if m.cookieFinishing {
+			lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
+				fmt.Sprintf("Extracting %s cookies...", platformName)))
+		} else {
+			lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
+				fmt.Sprintf("Browser opened for %s login.", platformName)))
+			lines = append(lines, "")
+			lines = append(lines, "Sign in, then press "+
+				lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Enter")+" to extract cookies.")
+			lines = append(lines, DimStyle.Render("Press Esc to cancel."))
+		}
+	} else {
+		options := []struct {
+			label string
+			done  bool
+		}{
+			{"YouTube", m.cookieYTDone},
+			{"Twitch", m.cookieTWDone},
+			{"Skip / Next", false},
+		}
+
+		for i, opt := range options {
+			prefix := "  "
+			color := ColorWhite
+			if i == m.cookieFocus {
+				prefix = "> "
+				color = ColorCyan
+			}
+			label := opt.label
+			if opt.done {
+				label += " " + lipgloss.NewStyle().Foreground(ColorGreen).Render("\u2713")
+			}
+			style := lipgloss.NewStyle().Foreground(color)
+			if i == m.cookieFocus {
+				style = style.Bold(true)
+			}
+			lines = append(lines, style.Render(prefix+label))
+			if i < len(options)-1 {
+				lines = append(lines, "")
+			}
+		}
+	}
+
+	if m.errorMsg != "" {
+		lines = append(lines, "")
+		lines = append(lines, ErrorStyle.Render(m.errorMsg))
+	}
+
+	// Esc confirmation warning
+	if m.escConfirm && !m.cookieActive {
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+			"Press Esc again to abandon setup"))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
+	hintLeft := DimStyle.Render("Esc: Back")
+	hintRight := DimStyle.Render("Enter: Select")
+	gap := max(1, contentW-runewidth.StringWidth("Esc: Back")-runewidth.StringWidth("Enter: Select"))
+	lines = append(lines, hintLeft+strings.Repeat(" ", gap)+hintRight)
+
+	content := strings.Join(lines, "\n")
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorCyan).
+		Width(contentW).
+		Height(h).
+		Render(content)
+
+	return centerBox(box, m.width, m.height)
 }
 
 // --- Shared Channel Rendering ---

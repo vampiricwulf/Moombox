@@ -36,14 +36,15 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 		resp := map[string]any{
 			"isFirstRun": !configLoaded,
 		}
-		// Include FFmpeg status when config exists (post-setup check)
-		if configLoaded {
-			path := ffmpegPath
-			if path == "" {
-				path = "ffmpeg"
-			}
-			valid, _, _ := CheckFFmpegCached(path)
-			resp["ffmpegValid"] = valid
+		// Always include FFmpeg status (helps user during setup and post-setup)
+		path := ffmpegPath
+		if path == "" {
+			path = "ffmpeg"
+		}
+		valid, version, _ := CheckFFmpegCached(path)
+		resp["ffmpegValid"] = valid
+		if valid {
+			resp["ffmpegVersion"] = version
 		}
 		jsonResponse(rw, resp)
 	})

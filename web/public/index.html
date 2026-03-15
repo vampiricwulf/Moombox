@@ -1240,6 +1240,8 @@
                             <p>Walk through all configuration sections step by step.</p>
                         </button>
                     </div>
+                    <sl-button id="setup-mode-defaults" variant="text" size="small" style="margin-top: 0.5em; width: 100%;">Use Defaults &amp; Skip Setup</sl-button>
+                    <div id="setup-ffmpeg-status" style="margin-top: 0.75em; text-align: center; font-size: var(--sl-font-size-small);"></div>
                 </div>
 
                 <!-- Simplified: Step 1 - Cookie Setup -->
@@ -1400,9 +1402,26 @@
                 <!-- Advanced: Step 6 - Cookies -->
                 <div class="setup-page" id="setup-adv-step-6" style="display: none">
                     <h2>Cookies</h2>
-                    <p class="setup-help">Configure cookie-based authentication.</p>
-                    <sl-switch id="setup-auto-cookies">Enable automatic cookie login</sl-switch>
-                    <sl-input id="setup-cookie-file" label="Cookie File (manual)" placeholder="./cookies.txt" help-text="Netscape-format cookie file"></sl-input>
+                    <p class="setup-help">Log in to platforms so Moombox can access members-only and age-gated content. You can skip this and set it up later.</p>
+                    <div class="cookie-platform-cards">
+                        <div class="cookie-platform-card">
+                            <div style="display: flex; align-items: center; gap: 0.5em;">
+                                <sl-icon name="youtube" style="font-size: 1.5rem; color: #ff0000;"></sl-icon>
+                                <strong>YouTube</strong>
+                                <sl-badge id="setup-adv-yt-badge" variant="neutral" style="display: none;">Done</sl-badge>
+                            </div>
+                            <sl-button id="setup-adv-cookie-yt" size="small" variant="primary">Set up YouTube</sl-button>
+                        </div>
+                        <div class="cookie-platform-card">
+                            <div style="display: flex; align-items: center; gap: 0.5em;">
+                                <sl-icon name="twitch" style="font-size: 1.5rem; color: #9146ff;"></sl-icon>
+                                <strong>Twitch</strong>
+                                <sl-badge id="setup-adv-tw-badge" variant="neutral" style="display: none;">Done</sl-badge>
+                            </div>
+                            <sl-button id="setup-adv-cookie-tw" size="small" variant="primary">Set up Twitch</sl-button>
+                        </div>
+                    </div>
+                    <sl-input id="setup-cookie-file" label="Cookie File (manual)" placeholder="./cookies.txt" help-text="Netscape-format cookie file. Leave empty to use default." style="margin-top: 1em;"></sl-input>
                     <div class="setup-nav">
                         <sl-button variant="default" id="setup-adv-back-6"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
                         <sl-button variant="primary" id="setup-adv-next-6">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>

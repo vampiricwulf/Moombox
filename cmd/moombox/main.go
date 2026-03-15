@@ -1438,6 +1438,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			func() { triggerRestart("TUI setup wizard") },
 		)
 
+		// Wire setup wizard FFmpeg status check
+		app.SetupWizFFmpegCheck(func() (bool, string) {
+			path := cfg.Paths.FfmpegPath
+			if path == "" {
+				path = "ffmpeg"
+			}
+			valid, version, _ := routes.CheckFFmpegCached(path)
+			return valid, version
+		})
+
 		// Wire FFmpeg check callbacks for TUI
 		app.OnCheckFFmpeg = func(path string) (bool, string, string) {
 			if path == "" {

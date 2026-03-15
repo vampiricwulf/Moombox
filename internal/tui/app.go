@@ -362,6 +362,11 @@ func (a *App) SetSetupCallbacks(
 	a.setupWiz.OnRestart = onRestart
 }
 
+// SetupWizFFmpegCheck sets the FFmpeg check callback for the setup wizard.
+func (a *App) SetupWizFFmpegCheck(fn func() (bool, string)) {
+	a.setupWiz.OnCheckFFmpeg = fn
+}
+
 // SetUpdateChannels configures the async update channels.
 func (a *App) SetUpdateChannels(
 	jobUpdate <-chan *database.Job,

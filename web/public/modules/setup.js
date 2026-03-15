@@ -20,6 +20,22 @@ export class SetupController {
     document.getElementById("setup-overlay").style.display = "flex";
     this.showPage("setup-mode-select");
     this.setupListeners();
+    this.checkFFmpegStatus();
+  }
+
+  /** Check FFmpeg availability and display on mode selection screen. */
+  async checkFFmpegStatus() {
+    const el = document.getElementById("setup-ffmpeg-status");
+    if (!el) return;
+    try {
+      const resp = await fetch("/api/setup/status");
+      const data = await resp.json();
+      if (data.ffmpegValid) {
+        el.innerHTML = `<sl-icon name="check-circle" style="color: var(--sl-color-success-600);"></sl-icon> FFmpeg: ${this.esc(data.ffmpegVersion || "found")}`;
+      } else {
+        el.innerHTML = `<sl-icon name="exclamation-triangle" style="color: var(--sl-color-warning-600);"></sl-icon> FFmpeg not found — you'll be prompted to install it after setup`;
+      }
+    } catch { /* ignore */ }
   }
 
   hide() {
@@ -58,13 +74,16 @@ export class SetupController {
       this.advStep = 1;
       this.showAdvancedStep(1);
     });
+    document.getElementById("setup-mode-defaults")?.addEventListener("click", () => {
+      this.finishWithDefaults();
+    });
 
     // --- Simplified flow ---
     document.getElementById("setup-cookie-yt")?.addEventListener("click", () => {
-      this.startCookieSetup("youtube");
+      this.startCookieSetup("youtube", "setup-yt-badge");
     });
     document.getElementById("setup-cookie-tw")?.addEventListener("click", () => {
-      this.startCookieSetup("twitch");
+      this.startCookieSetup("twitch", "setup-tw-badge");
     });
     document.getElementById("setup-simple-cookies-back")?.addEventListener("click", () => {
       this.showPage("setup-mode-select");
@@ -81,6 +100,14 @@ export class SetupController {
     });
     document.getElementById("setup-simple-finish")?.addEventListener("click", () => {
       this.finishSimpleSetup();
+    });
+
+    // --- Advanced flow cookie buttons ---
+    document.getElementById("setup-adv-cookie-yt")?.addEventListener("click", () => {
+      this.startCookieSetup("youtube", "setup-adv-yt-badge");
+    });
+    document.getElementById("setup-adv-cookie-tw")?.addEventListener("click", () => {
+      this.startCookieSetup("twitch", "setup-adv-tw-badge");
     });
 
     // --- Advanced flow ---
@@ -186,7 +213,8 @@ export class SetupController {
 
   // --- Cookie Setup ---
 
-  async startCookieSetup(platform) {
+  async startCookieSetup(platform, badgeId) {
+    this._cookieBadgeId = badgeId || (platform === "youtube" ? "setup-yt-badge" : "setup-tw-badge");
     try {
       const response = await fetch("/api/cookies/auto-setup/start", {
         method: "POST",
@@ -248,16 +276,20 @@ export class SetupController {
       if (ytOk || twOk) {
         if (resultEl) resultEl.textContent = "";
         document.getElementById("auto-cookie-setup-dialog")?.hide();
-        // Track completion in state and update badges
+        // Track completion in state and update badges (both simple and advanced)
         if (ytOk) {
           this.cookieYTDone = true;
-          const badge = document.getElementById("setup-yt-badge");
-          if (badge) { badge.style.display = ""; badge.variant = "success"; }
+          for (const id of ["setup-yt-badge", "setup-adv-yt-badge"]) {
+            const badge = document.getElementById(id);
+            if (badge) { badge.style.display = ""; badge.variant = "success"; }
+          }
         }
         if (twOk) {
           this.cookieTWDone = true;
-          const badge = document.getElementById("setup-tw-badge");
-          if (badge) { badge.style.display = ""; badge.variant = "success"; }
+          for (const id of ["setup-tw-badge", "setup-adv-tw-badge"]) {
+            const badge = document.getElementById(id);
+            if (badge) { badge.style.display = ""; badge.variant = "success"; }
+          }
         }
         this.app.showToast("Cookie setup complete!", "success");
       } else {
@@ -320,10 +352,19 @@ export class SetupController {
           <strong style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayName}</strong>
           <span style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small);">${displayId}</span>
         </div>
-        <sl-icon-button name="x-lg" data-index="${i}" class="setup-ch-remove" label="Remove"></sl-icon-button>
+        <div style="display: flex; gap: 0.25em;">
+          <sl-icon-button name="pencil" data-index="${i}" class="setup-ch-edit" label="Edit"></sl-icon-button>
+          <sl-icon-button name="x-lg" data-index="${i}" class="setup-ch-remove" label="Remove"></sl-icon-button>
+        </div>
       `;
       container.appendChild(item);
     }
+    container.querySelectorAll(".setup-ch-edit").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idx = parseInt(btn.dataset.index);
+        this.openEditChannelDialog(containerId, idx);
+      });
+    });
     container.querySelectorAll(".setup-ch-remove").forEach((btn) => {
       btn.addEventListener("click", () => {
         const idx = parseInt(btn.dataset.index);
@@ -335,6 +376,7 @@ export class SetupController {
 
   openAddChannelDialog(targetListId) {
     this._channelTargetList = targetListId;
+    this._editingIndex = -1; // -1 = adding new
     const dialog = document.getElementById("setup-add-channel-dialog");
     // Reset fields
     ["setup-ch-id", "setup-ch-name", "setup-ch-terms"].forEach((id) => {
@@ -345,6 +387,30 @@ export class SetupController {
     if (platformSel) platformSel.value = "youtube";
     const nlCb = document.getElementById("setup-ch-include-non-live");
     if (nlCb) nlCb.checked = false;
+    const saveBtn = document.getElementById("setup-ch-save");
+    if (saveBtn) saveBtn.textContent = "Add Channel";
+    this.updateChannelDialogFields();
+    if (dialog) dialog.show();
+  }
+
+  openEditChannelDialog(targetListId, index) {
+    this._channelTargetList = targetListId;
+    this._editingIndex = index;
+    const ch = this.channels[index];
+    if (!ch) return;
+    const dialog = document.getElementById("setup-add-channel-dialog");
+    const idEl = document.getElementById("setup-ch-id");
+    const nameEl = document.getElementById("setup-ch-name");
+    const termsEl = document.getElementById("setup-ch-terms");
+    const platformSel = document.getElementById("setup-ch-platform");
+    const nlCb = document.getElementById("setup-ch-include-non-live");
+    if (idEl) idEl.value = ch.id || "";
+    if (nameEl) nameEl.value = ch.name || "";
+    if (termsEl) termsEl.value = ch.terms || "";
+    if (platformSel) platformSel.value = ch.platform || "youtube";
+    if (nlCb) nlCb.checked = !!ch.include_non_live_content;
+    const saveBtn = document.getElementById("setup-ch-save");
+    if (saveBtn) saveBtn.textContent = "Save Channel";
     this.updateChannelDialogFields();
     if (dialog) dialog.show();
   }
@@ -386,8 +452,9 @@ export class SetupController {
       }
     }
 
-    // Check for duplicate channel ID
-    if (this.channels.some((c) => c.id.toLowerCase() === id.toLowerCase())) {
+    // Check for duplicate channel ID (skip self when editing)
+    const editIdx = this._editingIndex ?? -1;
+    if (this.channels.some((c, i) => c.id.toLowerCase() === id.toLowerCase() && i !== editIdx)) {
       this.app.showToast(`Channel "${id}" already added`, "warning");
       return;
     }
@@ -399,7 +466,11 @@ export class SetupController {
       terms: (document.getElementById("setup-ch-terms")?.value || "").trim() || undefined,
       include_non_live_content: platform === "youtube" ? (document.getElementById("setup-ch-include-non-live")?.checked || undefined) : undefined,
     };
-    this.channels.push(ch);
+    if (editIdx >= 0 && editIdx < this.channels.length) {
+      this.channels[editIdx] = ch; // Edit existing
+    } else {
+      this.channels.push(ch); // Add new
+    }
     document.getElementById("setup-add-channel-dialog")?.hide();
     this.renderChannelList(this._channelTargetList || "setup-channel-list");
   }
@@ -430,6 +501,12 @@ export class SetupController {
   }
 
   // --- Finish Setup ---
+
+  async finishWithDefaults() {
+    const btn = document.getElementById("setup-mode-defaults");
+    if (btn) { btn.loading = true; btn.disabled = true; }
+    await this.submitSetup({}, btn);
+  }
 
   async finishSimpleSetup() {
     const finishBtn = document.getElementById("setup-simple-finish");
@@ -500,7 +577,13 @@ export class SetupController {
       },
       cookies: {
         cookie_file: val("setup-cookie-file") || undefined,
-        auto_enabled: document.getElementById("setup-auto-cookies")?.checked || false,
+        ...(this.cookieYTDone || this.cookieTWDone ? {
+          auto_enabled: true,
+          platforms: [
+            ...(this.cookieYTDone ? ["youtube"] : []),
+            ...(this.cookieTWDone ? ["twitch"] : []),
+          ],
+        } : {}),
       },
     };
 
