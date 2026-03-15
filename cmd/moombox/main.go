@@ -1438,6 +1438,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			func() { triggerRestart("TUI setup wizard") },
 		)
 
+		// Wire setup wizard password hashing
+		app.SetupWizHashPassword(func(password string) (string, error) {
+			return authSvc.HashPassword(password)
+		})
+
 		// Wire setup wizard FFmpeg status check
 		app.SetupWizFFmpegCheck(func() (bool, string) {
 			path := cfg.Paths.FfmpegPath

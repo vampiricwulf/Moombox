@@ -150,6 +150,11 @@ type (
 		Err      string // error message from extraction (empty on success)
 	}
 
+	// Async result for setup wizard config save
+	setupSaveResultMsg struct {
+		Err string
+	}
+
 	// panicRecoveryMsg is sent when a tea.Cmd closure recovers from a panic.
 	panicRecoveryMsg struct {
 		Text string
@@ -365,6 +370,11 @@ func (a *App) SetSetupCallbacks(
 // SetupWizFFmpegCheck sets the FFmpeg check callback for the setup wizard.
 func (a *App) SetupWizFFmpegCheck(fn func() (bool, string)) {
 	a.setupWiz.OnCheckFFmpeg = fn
+}
+
+// SetupWizHashPassword sets the password hashing callback for the setup wizard.
+func (a *App) SetupWizHashPassword(fn func(string) (string, error)) {
+	a.setupWiz.OnHashPassword = fn
 }
 
 // SetUpdateChannels configures the async update channels.

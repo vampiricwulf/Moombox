@@ -389,6 +389,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.settings.HandleChannelResolved(msg.ID, msg.Name, msg.Platform, msg.Err)
 		return a, nil
 
+	case setupSaveResultMsg:
+		if msg.Err != "" {
+			a.setupWiz.saving = false
+			a.setupWiz.pendingConfig = nil
+			a.setupWiz.errorMsg = fmt.Sprintf("Failed to save: %v", msg.Err)
+			return a, nil
+		}
+		// Save succeeded — trigger restart
+		a.setupWiz.Close()
+		if a.setupWiz.OnRestart != nil {
+			onRestart := a.setupWiz.OnRestart
+			return a, safeCmd(func() tea.Msg {
+				onRestart()
+				return tea.QuitMsg{}
+			})
+		}
+		return a, nil
+
 	case setupCookieFinishMsg:
 		if msg.Platform == "youtube" {
 			a.setupWiz.cookieYTDone = msg.YTAuth

@@ -92,15 +92,24 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		}
 		action := a.setupWiz.HandleKey(key)
-		if action == "restart" {
-			a.setupWiz.Close()
-			if a.setupWiz.OnRestart != nil {
-				onRestart := a.setupWiz.OnRestart
-				return a, safeCmd(func() tea.Msg {
-					onRestart()
-					return tea.QuitMsg{}
-				})
-			}
+		if action == "save" {
+			// Dispatch async config save so the "Saving..." overlay is rendered
+			cfg := a.setupWiz.pendingConfig
+			installYtdlp := a.setupWiz.pendingYtdlp
+			onComplete := a.setupWiz.OnComplete
+			onInstall := a.setupWiz.OnInstallYtdlp
+			return a, safeCmd(func() tea.Msg {
+				if onComplete != nil && cfg != nil {
+					if err := onComplete(cfg); err != nil {
+						return setupSaveResultMsg{Err: err.Error()}
+					}
+				}
+				// Post-save: install yt-dlp plugin if requested
+				if installYtdlp && onInstall != nil && cfg != nil {
+					onInstall(cfg.Network.Port, cfg.Network.HTTPSEnabled)
+				}
+				return setupSaveResultMsg{}
+			})
 		}
 		var cmds []tea.Cmd
 		if action == "finish_cookie" {

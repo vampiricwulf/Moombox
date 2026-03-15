@@ -36,10 +36,11 @@ const (
 type setupFieldType int
 
 const (
-	setupFieldText   setupFieldType = iota
+	setupFieldText     setupFieldType = iota
 	setupFieldNumber
 	setupFieldToggle
 	setupFieldCycle
+	setupFieldPassword
 )
 
 // setupFieldDef defines a field in a setup wizard step.
@@ -67,7 +68,7 @@ var advancedSetupSteps = []setupStepDef{
 		fields: []setupFieldDef{
 			{"port", "Dashboard port", "774", "Web dashboard & API port (tries nearby if busy)", setupFieldNumber, nil},
 			{"networkAccess", "Network access", "Localhost", "Who can access the dashboard", setupFieldCycle, []string{"Localhost", "LAN", "External"}},
-			{"password", "Password", "", "Required for external access (min 8 chars, stored hashed)", setupFieldText, nil},
+			{"password", "Password", "", "Required for external access (min 8 chars, stored hashed)", setupFieldPassword, nil},
 			{"httpsEnabled", "HTTPS enabled", "No", "Enable HTTPS for the dashboard", setupFieldToggle, []string{"No", "Yes"}},
 		},
 	},
@@ -180,7 +181,9 @@ type SetupWizardModel struct {
 	ffmpegStatus string // "found: v7.1", "not found", or "" if not checked
 
 	// Saving state (async save in progress)
-	saving bool
+	saving        bool
+	pendingConfig *config.MoomboxConfig // config to save asynchronously
+	pendingYtdlp  bool                 // install yt-dlp plugin after save
 
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
@@ -196,6 +199,7 @@ type SetupWizardModel struct {
 	OnCancelAutoCookie func()
 	OnRestart          func()
 	OnCheckFFmpeg      func() (valid bool, version string) // returns FFmpeg status
+	OnHashPassword     func(password string) (string, error)
 }
 
 // NewSetupWizardModel creates a new setup wizard model.
@@ -305,6 +309,16 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 						Description(f.help).
 						Placeholder(f.defaultDisplay).
 						Validate(func(s string) error { return validateDigitsOnly(s) }).
+						Accessor(&MapAccessor{M: m.values, Key: f.key}),
+				)
+			case setupFieldPassword:
+				fields = append(fields,
+					huh.NewInput().
+						Key(f.key).
+						Title(f.label).
+						Description(f.help).
+						Placeholder(f.defaultDisplay).
+						EchoMode(huh.EchoModePassword).
 						Accessor(&MapAccessor{M: m.values, Key: f.key}),
 				)
 			case setupFieldToggle, setupFieldCycle:
@@ -495,15 +509,9 @@ func (m *SetupWizardModel) handleModeSelectKey(key string) string {
 func (m *SetupWizardModel) finishWithDefaults() string {
 	m.errorMsg = ""
 	m.saving = true
-	cfg := config.Defaults()
-	if m.OnComplete != nil {
-		if err := m.OnComplete(cfg); err != nil {
-			m.saving = false
-			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
-			return ""
-		}
-	}
-	return "restart"
+	m.pendingConfig = config.Defaults()
+	m.pendingYtdlp = false
+	return "save"
 }
 
 // --- Simplified Setup ---
@@ -730,7 +738,6 @@ func (m *SetupWizardModel) cycleChannelFieldReverse(field channelFieldDef) {
 
 func (m *SetupWizardModel) finishSimpleSetup() string {
 	m.errorMsg = ""
-	m.saving = true
 
 	cfg := config.Defaults()
 
@@ -750,15 +757,10 @@ func (m *SetupWizardModel) finishSimpleSetup() string {
 	// Channels
 	cfg.Channels = m.channels
 
-	if m.OnComplete != nil {
-		if err := m.OnComplete(cfg); err != nil {
-			m.saving = false
-			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
-			return ""
-		}
-	}
-
-	return "restart"
+	m.saving = true
+	m.pendingConfig = cfg
+	m.pendingYtdlp = false
+	return "save"
 }
 
 // --- Advanced Setup ---
@@ -863,8 +865,7 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 		case 2: // Skip / Next → advance to channels
 			m.advancedCookieDone = true
 			m.channelMode = "list"
-			m.channels = nil
-			m.channelIndex = 0
+			// Don't reset m.channels — preserve channels if user went back from channels to cookies
 		}
 	}
 	return ""
@@ -884,7 +885,6 @@ func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
 
 func (m *SetupWizardModel) finishAdvancedSetup() string {
 	m.errorMsg = ""
-	m.saving = true
 
 	v := func(key string) string {
 		return strings.TrimSpace(m.values[key])
@@ -907,7 +907,7 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 
 	netAccessMap := map[string]string{
 		"Localhost": "localhost",
-		"LAN":      "lan",
+		"LAN":       "lan",
 		"External":  "external",
 	}
 	networkAccess := netAccessMap[m.values["networkAccess"]]
@@ -918,7 +918,6 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	// External access requires a password (min 8 chars)
 	password := v("password")
 	if networkAccess == "external" && len(password) < 8 {
-		m.saving = false
 		m.errorMsg = "A password (min 8 characters) is required for external access"
 		return ""
 	}
@@ -932,7 +931,18 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	}
 	cfg.Network.HTTPSEnabled = vBool("httpsEnabled", false)
 	if password != "" {
-		cfg.Network.PasswordHash = password // Stored as plaintext; auto-hashed on next startup
+		// Hash password before saving if callback is available
+		if m.OnHashPassword != nil {
+			hash, err := m.OnHashPassword(password)
+			if err != nil {
+				m.saving = false
+				m.errorMsg = fmt.Sprintf("Failed to hash password: %v", err)
+				return ""
+			}
+			cfg.Network.PasswordHash = hash
+		} else {
+			cfg.Network.PasswordHash = password // Fallback: auto-hashed on next startup
+		}
 	}
 
 	// Paths
@@ -1010,24 +1020,10 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	// Channels
 	cfg.Channels = m.channels
 
-	if m.OnComplete != nil {
-		if err := m.OnComplete(cfg); err != nil {
-			m.saving = false
-			m.errorMsg = fmt.Sprintf("Failed to save: %v", err)
-			return ""
-		}
-	}
-
-	// Post-save actions (run before restart since they're fast and synchronous)
-	if vBool("installYtdlpPlugin", false) && m.OnInstallYtdlp != nil {
-		m.OnInstallYtdlp(cfg.Network.Port, cfg.Network.HTTPSEnabled)
-	}
-
-	// Note: auto-cookies are enabled via config (auto_enabled: true).
-	// The auto-cookie service will initialize on restart — no need to
-	// call OnStartAutoCookie here (the restart would kill it immediately).
-
-	return "restart"
+	m.saving = true
+	m.pendingConfig = cfg
+	m.pendingYtdlp = vBool("installYtdlpPlugin", false)
+	return "save"
 }
 
 // Port returns the port value (for backward compatibility).

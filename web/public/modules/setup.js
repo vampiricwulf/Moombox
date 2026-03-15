@@ -80,10 +80,10 @@ export class SetupController {
 
     // --- Simplified flow ---
     document.getElementById("setup-cookie-yt")?.addEventListener("click", () => {
-      this.startCookieSetup("youtube", "setup-yt-badge");
+      this.startCookieSetup("youtube");
     });
     document.getElementById("setup-cookie-tw")?.addEventListener("click", () => {
-      this.startCookieSetup("twitch", "setup-tw-badge");
+      this.startCookieSetup("twitch");
     });
     document.getElementById("setup-simple-cookies-back")?.addEventListener("click", () => {
       this.showPage("setup-mode-select");
@@ -104,10 +104,10 @@ export class SetupController {
 
     // --- Advanced flow cookie buttons ---
     document.getElementById("setup-adv-cookie-yt")?.addEventListener("click", () => {
-      this.startCookieSetup("youtube", "setup-adv-yt-badge");
+      this.startCookieSetup("youtube");
     });
     document.getElementById("setup-adv-cookie-tw")?.addEventListener("click", () => {
-      this.startCookieSetup("twitch", "setup-adv-tw-badge");
+      this.startCookieSetup("twitch");
     });
 
     // --- Advanced flow ---
@@ -213,8 +213,7 @@ export class SetupController {
 
   // --- Cookie Setup ---
 
-  async startCookieSetup(platform, badgeId) {
-    this._cookieBadgeId = badgeId || (platform === "youtube" ? "setup-yt-badge" : "setup-tw-badge");
+  async startCookieSetup(platform) {
     try {
       const response = await fetch("/api/cookies/auto-setup/start", {
         method: "POST",
