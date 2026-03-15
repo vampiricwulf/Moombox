@@ -1411,6 +1411,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				}
 			},
 			func(platform string) error {
+				if autoCookieSvc == nil {
+					return fmt.Errorf("auto-cookie service not available")
+				}
 				if err := autoCookieSvc.StartSetup(platform); err != nil {
 					log.Error("Failed to start auto-cookie setup", slog.String("platform", platform), slog.String("error", err.Error()))
 					return err

@@ -386,6 +386,10 @@ export class SetupController {
     if (platformSel) platformSel.value = "youtube";
     const nlCb = document.getElementById("setup-ch-include-non-live");
     if (nlCb) nlCb.checked = false;
+    const qualitySel = document.getElementById("setup-ch-quality");
+    if (qualitySel) qualitySel.value = "best";
+    const enabledCb = document.getElementById("setup-ch-enabled");
+    if (enabledCb) enabledCb.checked = true;
     const saveBtn = document.getElementById("setup-ch-save");
     if (saveBtn) saveBtn.textContent = "Add Channel";
     this.updateChannelDialogFields();
@@ -408,6 +412,10 @@ export class SetupController {
     if (termsEl) termsEl.value = ch.terms || "";
     if (platformSel) platformSel.value = ch.platform || "youtube";
     if (nlCb) nlCb.checked = !!ch.include_non_live_content;
+    const qualitySel = document.getElementById("setup-ch-quality");
+    if (qualitySel) qualitySel.value = ch.quality_preference || "best";
+    const enabledCb = document.getElementById("setup-ch-enabled");
+    if (enabledCb) enabledCb.checked = ch.enabled !== false;
     const saveBtn = document.getElementById("setup-ch-save");
     if (saveBtn) saveBtn.textContent = "Save Channel";
     this.updateChannelDialogFields();
@@ -458,12 +466,16 @@ export class SetupController {
       return;
     }
 
+    const quality = document.getElementById("setup-ch-quality")?.value || "best";
+    const enabled = document.getElementById("setup-ch-enabled")?.checked ?? true;
     const ch = {
       id,
       name: name || undefined,
       platform,
       terms: (document.getElementById("setup-ch-terms")?.value || "").trim() || undefined,
       include_non_live_content: platform === "youtube" ? (document.getElementById("setup-ch-include-non-live")?.checked || undefined) : undefined,
+      quality_preference: quality !== "best" ? quality : undefined,
+      enabled: enabled ? undefined : false, // only set when disabled (default is enabled)
     };
     if (editIdx >= 0 && editIdx < this.channels.length) {
       this.channels[editIdx] = ch; // Edit existing

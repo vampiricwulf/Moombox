@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -103,6 +104,13 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					if err := onComplete(cfg); err != nil {
 						return setupSaveResultMsg{Err: err.Error()}
 					}
+				}
+				// Create output/staging directories (matches web API behavior)
+				if cfg.Paths.OutputDirectory != "" {
+					os.MkdirAll(cfg.Paths.OutputDirectory, 0o755)
+				}
+				if cfg.Paths.StagingDirectory != "" {
+					os.MkdirAll(cfg.Paths.StagingDirectory, 0o755)
 				}
 				// Post-save: install yt-dlp plugin if requested
 				if installYtdlp && onInstall != nil && cfg != nil {

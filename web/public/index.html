@@ -1544,6 +1544,21 @@
             </sl-select>
             <sl-input id="setup-ch-terms" label="Filter Regex" placeholder="(?i)karaoke" help-text="Only archive streams matching this pattern. Leave empty for all."></sl-input>
             <sl-checkbox id="setup-ch-include-non-live">Include non-live content</sl-checkbox>
+            <sl-select id="setup-ch-quality" label="Quality Preference" value="best">
+                <sl-option value="best">Best available</sl-option>
+                <sl-option value="2160p60">2160p60</sl-option>
+                <sl-option value="2160p">2160p</sl-option>
+                <sl-option value="1440p60">1440p60</sl-option>
+                <sl-option value="1440p">1440p</sl-option>
+                <sl-option value="1080p60">1080p60</sl-option>
+                <sl-option value="1080p">1080p</sl-option>
+                <sl-option value="720p60">720p60</sl-option>
+                <sl-option value="720p">720p</sl-option>
+                <sl-option value="480p">480p</sl-option>
+                <sl-option value="360p">360p</sl-option>
+                <sl-option value="audio_only">Audio only</sl-option>
+            </sl-select>
+            <sl-checkbox id="setup-ch-enabled" checked>Enabled</sl-checkbox>
             <sl-button slot="footer" variant="default" id="setup-ch-cancel">Cancel</sl-button>
             <sl-button slot="footer" variant="primary" id="setup-ch-save">Add Channel</sl-button>
         </sl-dialog>

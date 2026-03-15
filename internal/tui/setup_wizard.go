@@ -110,6 +110,8 @@ var advancedSetupSteps = []setupStepDef{
 			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
 			{"numParallel", "Parallel downloads", "2", "How many streams to download simultaneously", setupFieldNumber, nil},
 			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
+			{"segmentRetryDelayCap", "Retry delay cap (sec)", "60", "Max seconds between segment retry attempts", setupFieldNumber, nil},
+			{"segmentLiveCheckRetries", "Live check retries", "16", "Retries before declaring stream ended", setupFieldNumber, nil},
 		},
 	},
 	{
@@ -460,7 +462,8 @@ func (m *SetupWizardModel) updateTextInputWidth() {
 	}
 }
 
-// HandleKey processes key input. Returns "complete" when setup finishes.
+// HandleKey processes key input. Returns "save" to trigger async config save,
+// "finish_cookie" for async cookie extraction, or "" for no action.
 func (m *SetupWizardModel) HandleKey(key string) string {
 	// Block all input during async save (prevents duplicate saves and error clearing)
 	if m.saving {
@@ -945,7 +948,8 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 			}
 			cfg.Network.PasswordHash = hash
 		} else {
-			cfg.Network.PasswordHash = password // Fallback: auto-hashed on next startup
+			m.errorMsg = "Password hashing unavailable"
+			return ""
 		}
 	}
 
@@ -1003,6 +1007,12 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	}
 	cfg.Downloader.Prefer60fps = vBool("prefer60fps", true)
 	cfg.Downloader.DownloadChat = vBool("downloadChat", true)
+	if n := vNum("segmentRetryDelayCap"); n > 0 {
+		cfg.Downloader.SegmentRetryDelayCap = n
+	}
+	if n := vNum("segmentLiveCheckRetries"); n > 0 {
+		cfg.Downloader.SegmentLiveCheckRetries = n
+	}
 
 	// Cookies
 	if s := v("cookieFile"); s != "" {
@@ -1029,15 +1039,6 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	m.pendingYtdlp = vBool("installYtdlpPlugin", false)
 	return "save"
 }
-
-// Port returns the port value (for backward compatibility).
-func (m *SetupWizardModel) Port() string { return m.values["port"] }
-
-// Directory returns the output directory value.
-func (m *SetupWizardModel) Directory() string { return m.values["outputDir"] }
-
-// CookiePath returns the cookie file path value.
-func (m *SetupWizardModel) CookiePath() string { return m.values["cookieFile"] }
 
 // View renders the setup wizard.
 func (m *SetupWizardModel) View() string {
