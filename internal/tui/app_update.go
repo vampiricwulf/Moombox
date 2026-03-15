@@ -398,6 +398,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setupWiz.cookieActive = false
 		a.setupWiz.cookieFinishing = false
 		a.setupWiz.cookiePlatform = ""
+		// Show error or "no login detected" feedback
+		if msg.Err != "" {
+			a.setupWiz.errorMsg = msg.Err
+		} else if !msg.YTAuth && !msg.TWAuth {
+			a.setupWiz.errorMsg = "No login detected — try signing in again"
+		}
 		return a, nil
 
 	case panicRecoveryMsg:

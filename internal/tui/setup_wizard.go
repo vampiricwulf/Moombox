@@ -66,7 +66,8 @@ var advancedSetupSteps = []setupStepDef{
 		subtitle: "Leave fields empty to use defaults",
 		fields: []setupFieldDef{
 			{"port", "Dashboard port", "774", "Web dashboard & API port (tries nearby if busy)", setupFieldNumber, nil},
-			{"networkAccess", "Network access", "Localhost", "Who can access the dashboard", setupFieldCycle, []string{"Localhost", "LAN"}},
+			{"networkAccess", "Network access", "Localhost", "Who can access the dashboard", setupFieldCycle, []string{"Localhost", "LAN", "External"}},
+			{"password", "Password", "", "Required for external access (min 8 chars, stored hashed)", setupFieldText, nil},
 			{"httpsEnabled", "HTTPS enabled", "No", "Enable HTTPS for the dashboard", setupFieldToggle, []string{"No", "Yes"}},
 		},
 	},
@@ -165,6 +166,9 @@ type SetupWizardModel struct {
 	channelEditField  int
 	channelDeleteConf bool
 
+	// Esc confirmation state for advanced mode (prevents accidental data loss)
+	escConfirm bool
+
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
 
@@ -175,7 +179,7 @@ type SetupWizardModel struct {
 	OnComplete         func(cfg *config.MoomboxConfig) error
 	OnInstallYtdlp     func(port int, httpsEnabled bool)
 	OnStartAutoCookie  func(platform string) error
-	OnFinishAutoCookie func() (bool, bool)
+	OnFinishAutoCookie func() (bool, bool, error)
 	OnCancelAutoCookie func()
 	OnRestart          func()
 }
@@ -213,6 +217,7 @@ func (m *SetupWizardModel) Open() {
 	m.channelEditValues = nil
 	m.channelEditField = 0
 	m.channelDeleteConf = false
+	m.escConfirm = false
 }
 
 // Close hides the wizard.
@@ -324,6 +329,7 @@ func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 				// Transition to channel editing
 				m.advancedForm = nil
 				m.advancedFormDone = true
+				m.escConfirm = false
 				m.channelMode = "list"
 				m.channels = nil
 				m.channelIndex = 0
@@ -625,8 +631,16 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 		m.textInput.Blur()
 		return ""
 	case keyEnter:
-		if id := strings.TrimSpace(m.channelEditValues["id"]); id == "" {
+		id := strings.TrimSpace(m.channelEditValues["id"])
+		if id == "" {
 			return ""
+		}
+		// Check for duplicate channel ID
+		for i, existing := range m.channels {
+			if strings.EqualFold(existing.ID, id) && i != m.channelIndex {
+				m.errorMsg = fmt.Sprintf("Channel %q already added", id)
+				return ""
+			}
 		}
 		ch := valuesToChannel(m.channelEditValues)
 		if m.channelIndex < len(m.channels) {
@@ -705,13 +719,23 @@ func (m *SetupWizardModel) finishSimpleSetup() string {
 // --- Advanced Setup ---
 
 func (m *SetupWizardModel) handleAdvancedKey(key string) string {
+	// Clear Esc confirmation on any non-Esc key
+	if key != keyEsc && m.escConfirm {
+		m.escConfirm = false
+	}
+
 	if m.advancedForm != nil {
-		// Form is active — only handle Esc for back navigation.
+		// Form is active — double-Esc to abandon (prevents accidental data loss).
 		// All other keys are handled by the form via UpdateComponents.
 		if key == keyEsc {
-			m.advancedForm = nil
-			m.advancedInitCmd = nil
-			m.mode = setupModeSelect
+			if m.escConfirm {
+				m.advancedForm = nil
+				m.advancedInitCmd = nil
+				m.mode = setupModeSelect
+				m.escConfirm = false
+				return ""
+			}
+			m.escConfirm = true
 			return ""
 		}
 		return ""
@@ -727,7 +751,17 @@ func (m *SetupWizardModel) handleAdvancedKey(key string) string {
 
 func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
 	return m.handleChannelListKey(key,
-		func() string { m.advancedFormDone = false; m.mode = setupModeSelect; return "" },
+		func() string {
+			// Double-Esc to abandon channel step (loses all form + channel data)
+			if m.escConfirm {
+				m.advancedFormDone = false
+				m.mode = setupModeSelect
+				m.escConfirm = false
+				return ""
+			}
+			m.escConfirm = true
+			return ""
+		},
 		func() string { return m.finishAdvancedSetup() },
 	)
 }
@@ -757,10 +791,18 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	netAccessMap := map[string]string{
 		"Localhost": "localhost",
 		"LAN":      "lan",
+		"External":  "external",
 	}
 	networkAccess := netAccessMap[m.values["networkAccess"]]
 	if networkAccess == "" {
 		networkAccess = "localhost"
+	}
+
+	// External access requires a password (min 8 chars)
+	password := v("password")
+	if networkAccess == "external" && len(password) < 8 {
+		m.errorMsg = "A password (min 8 characters) is required for external access"
+		return ""
 	}
 
 	cfg := config.Defaults()
@@ -771,6 +813,9 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		cfg.Network.Port = port
 	}
 	cfg.Network.HTTPSEnabled = vBool("httpsEnabled", false)
+	if password != "" {
+		cfg.Network.PasswordHash = password // Stored as plaintext; auto-hashed on next startup
+	}
 
 	// Paths
 	if s := v("logFilePath"); s != "" {
@@ -1131,7 +1176,12 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		if m.errorMsg != "" {
 			lines = append(lines, ErrorStyle.Render(m.errorMsg))
 		}
-		lines = append(lines, DimStyle.Render("Esc: Back to mode select"))
+		if m.escConfirm {
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+				"Press Esc again to abandon setup"))
+		} else {
+			lines = append(lines, DimStyle.Render("Esc: Back to mode select"))
+		}
 
 		content := strings.Join(lines, "\n")
 
@@ -1160,6 +1210,12 @@ func (m *SetupWizardModel) viewAdvanced() string {
 
 		if m.errorMsg != "" {
 			lines = append(lines, ErrorStyle.Render(m.errorMsg))
+		}
+
+		// Esc confirmation warning
+		if m.escConfirm && m.channelMode != "edit" {
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+				"Press Esc again to abandon setup"))
 		}
 
 		// Navigation hints

@@ -83,6 +83,14 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Setup wizard
 	if a.setupWiz.IsVisible() {
+		// Allow Ctrl+C to quit even during setup wizard
+		if key == keyCtrlC {
+			// Cancel any in-progress cookie setup before quitting
+			if a.setupWiz.cookieActive && a.setupWiz.OnCancelAutoCookie != nil {
+				a.setupWiz.OnCancelAutoCookie()
+			}
+			return a, tea.Quit
+		}
 		action := a.setupWiz.HandleKey(key)
 		if action == "restart" {
 			a.setupWiz.Close()
@@ -101,10 +109,15 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			finishFn := a.setupWiz.OnFinishAutoCookie
 			cmds = append(cmds, safeCmd(func() tea.Msg {
 				yt, tw := false, false
+				var errStr string
 				if finishFn != nil {
-					yt, tw = finishFn()
+					var err error
+					yt, tw, err = finishFn()
+					if err != nil {
+						errStr = err.Error()
+					}
 				}
-				return setupCookieFinishMsg{Platform: platform, YTAuth: yt, TWAuth: tw}
+				return setupCookieFinishMsg{Platform: platform, YTAuth: yt, TWAuth: tw, Err: errStr}
 			}))
 		}
 		if a.setupWiz.cookieActive {

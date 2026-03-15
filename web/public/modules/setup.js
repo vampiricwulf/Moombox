@@ -137,7 +137,14 @@ export class SetupController {
         } else if (val.includes("twitch.tv")) {
           if (platformSel.value !== "twitch") platformSel.value = "twitch";
         }
+        this.updateChannelDialogFields();
       });
+    }
+
+    // Hide YouTube-only fields when Twitch is selected
+    const setupChPlatform = document.getElementById("setup-ch-platform");
+    if (setupChPlatform) {
+      setupChPlatform.addEventListener("sl-change", () => this.updateChannelDialogFields());
     }
 
     // --- FFmpeg overlay ---
@@ -229,8 +236,11 @@ export class SetupController {
       resultEl.style.color = "";
     }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
     try {
-      const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST" });
+      const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
       const data = await response.json();
       const ytOk = data.authenticated;
       const twOk = data.twitchAuthenticated;
@@ -258,10 +268,13 @@ export class SetupController {
       }
     } catch (e) {
       if (resultEl) {
-        resultEl.textContent = "Error: " + e.message;
+        resultEl.textContent = e.name === "AbortError"
+          ? "Cookie extraction timed out. Try again."
+          : "Error: " + e.message;
         resultEl.style.color = "var(--sl-color-danger-600)";
       }
     } finally {
+      clearTimeout(timeoutId);
       if (doneBtn) doneBtn.loading = false;
     }
   }
@@ -273,6 +286,14 @@ export class SetupController {
     document.getElementById("auto-cookie-setup-dialog")?.hide();
     const resultEl = document.getElementById("auto-cookie-setup-result");
     if (resultEl) { resultEl.textContent = ""; resultEl.style.color = ""; }
+  }
+
+  /** Show/hide YouTube-only fields in the channel dialog based on platform. */
+  updateChannelDialogFields() {
+    const platform = document.getElementById("setup-ch-platform")?.value || "youtube";
+    const nonLive = document.getElementById("setup-ch-include-non-live");
+    // include_non_live is YouTube-only
+    if (nonLive) nonLive.style.display = platform === "youtube" ? "" : "none";
   }
 
   // --- Channel Management ---
@@ -324,6 +345,7 @@ export class SetupController {
     if (platformSel) platformSel.value = "youtube";
     const nlCb = document.getElementById("setup-ch-include-non-live");
     if (nlCb) nlCb.checked = false;
+    this.updateChannelDialogFields();
     if (dialog) dialog.show();
   }
 
@@ -364,12 +386,18 @@ export class SetupController {
       }
     }
 
+    // Check for duplicate channel ID
+    if (this.channels.some((c) => c.id.toLowerCase() === id.toLowerCase())) {
+      this.app.showToast(`Channel "${id}" already added`, "warning");
+      return;
+    }
+
     const ch = {
       id,
       name: name || undefined,
       platform,
       terms: (document.getElementById("setup-ch-terms")?.value || "").trim() || undefined,
-      include_non_live_content: document.getElementById("setup-ch-include-non-live")?.checked || undefined,
+      include_non_live_content: platform === "youtube" ? (document.getElementById("setup-ch-include-non-live")?.checked || undefined) : undefined,
     };
     this.channels.push(ch);
     document.getElementById("setup-add-channel-dialog")?.hide();

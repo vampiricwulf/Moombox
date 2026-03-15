@@ -95,14 +95,17 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 
 		cfgMu.Lock()
 
+		// Work on a copy so the live config isn't modified if save fails
+		cfgCopy := *cfg
+
 		if passwordHash != "" {
-			cfg.Network.PasswordHash = passwordHash
+			cfgCopy.Network.PasswordHash = passwordHash
 		}
 
 		// Validate external access requires password (match TS)
 		if net, ok := updates["network"].(map[string]any); ok {
 			if v, ok := net["network_access"].(string); ok && v == "external" {
-				if cfg.Network.PasswordHash == "" {
+				if cfgCopy.Network.PasswordHash == "" {
 					cfgMu.Unlock()
 					jsonError(rw, "A password (min 8 characters) is required for external access.", http.StatusBadRequest)
 					return
@@ -110,8 +113,20 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 			}
 		}
 
-		// Apply config updates (same schema as PUT /config)
-		applyConfigUpdates(cfg, updates)
+		// Apply config updates to copy (same schema as PUT /config)
+		applyConfigUpdates(&cfgCopy, updates)
+
+		// Save the copy
+		if deps.SaveConfig != nil {
+			if err := deps.SaveConfig(&cfgCopy); err != nil {
+				cfgMu.Unlock()
+				jsonError(rw, "failed to save config", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Save succeeded — apply to live config
+		*cfg = cfgCopy
 
 		// Snapshot directories for mkdir after unlock
 		outputDir := cfg.Paths.OutputDirectory
@@ -120,15 +135,6 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 		// Snapshot values needed after unlock
 		port := cfg.Network.Port
 		httpsEnabled := cfg.Network.HTTPSEnabled
-
-		// Save config
-		if deps.SaveConfig != nil {
-			if err := deps.SaveConfig(cfg); err != nil {
-				cfgMu.Unlock()
-				jsonError(rw, "failed to save config", http.StatusInternalServerError)
-				return
-			}
-		}
 
 		cfgMu.Unlock()
 

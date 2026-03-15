@@ -1399,6 +1399,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Wire setup wizard callbacks (OnComplete saves config, OnInstallYtdlp writes plugin)
 		app.SetSetupCallbacks(
 			func(updatedCfg *config.MoomboxConfig) error {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
 				return config.Save(updatedCfg, configPath)
 			},
 			func(port int, httpsEnabled bool) {
@@ -1415,15 +1417,18 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				}
 				return nil
 			},
-			func() (bool, bool) {
+			func() (bool, bool, error) {
 				if autoCookieSvc != nil {
-					yt, tw, err := autoCookieSvc.FinishSetup(context.Background())
+					finishCtx, finishCancel := context.WithTimeout(ctx, 60*time.Second)
+					defer finishCancel()
+					yt, tw, err := autoCookieSvc.FinishSetup(finishCtx)
 					if err != nil {
 						log.Error("Failed to finish auto-cookie setup", slog.String("error", err.Error()))
+						return yt, tw, err
 					}
-					return yt, tw
+					return yt, tw, nil
 				}
-				return false, false
+				return false, false, fmt.Errorf("auto-cookie service not available")
 			},
 			func() {
 				if autoCookieSvc != nil {

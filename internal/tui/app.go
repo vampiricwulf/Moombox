@@ -147,6 +147,7 @@ type (
 		Platform string // "youtube" or "twitch"
 		YTAuth   bool
 		TWAuth   bool
+		Err      string // error message from extraction (empty on success)
 	}
 
 	// panicRecoveryMsg is sent when a tea.Cmd closure recovers from a panic.
@@ -349,7 +350,7 @@ func (a *App) SetSetupCallbacks(
 	onComplete func(cfg *config.MoomboxConfig) error,
 	onInstallYtdlp func(port int, httpsEnabled bool),
 	onStartAutoCookie func(platform string) error,
-	onFinishAutoCookie func() (bool, bool),
+	onFinishAutoCookie func() (bool, bool, error),
 	onCancelAutoCookie func(),
 	onRestart func(),
 ) {
