@@ -462,6 +462,11 @@ func (m *SetupWizardModel) updateTextInputWidth() {
 
 // HandleKey processes key input. Returns "complete" when setup finishes.
 func (m *SetupWizardModel) HandleKey(key string) string {
+	// Block all input during async save (prevents duplicate saves and error clearing)
+	if m.saving {
+		return ""
+	}
+
 	if m.errorMsg != "" {
 		m.errorMsg = ""
 	}
@@ -935,7 +940,6 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		if m.OnHashPassword != nil {
 			hash, err := m.OnHashPassword(password)
 			if err != nil {
-				m.saving = false
 				m.errorMsg = fmt.Sprintf("Failed to hash password: %v", err)
 				return ""
 			}
