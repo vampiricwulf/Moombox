@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"cmp"
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -25,7 +26,7 @@ func channelToValues(ch config.ChannelConfig) map[string]string {
 		"enabled":            enabled,
 		"terms":              terms,
 		"include_non_live":   boolToDisplay(ch.IncludeNonLiveContent),
-		"quality_preference": ch.QualityPreference,
+		"quality_preference": cmp.Or(ch.QualityPreference, "best"),
 	}
 }
 
