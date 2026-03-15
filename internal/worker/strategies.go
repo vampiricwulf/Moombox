@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -53,11 +54,18 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 	if err != nil {
 		return result, err
 	}
-	nParam := parsed.Query().Get("n")
-	if nParam != "" {
+	// Extract raw (percent-encoded) n-param for accurate string matching.
+	rawN, nParam := cipher.RawQueryParam(parsed.RawQuery, "n")
+	if rawN != "" && nParam != "" {
 		decrypted, err := nDecrypt(nParam)
 		if err == nil && decrypted != nParam {
-			result = strings.Replace(result, "n="+nParam, "n="+decrypted, 1)
+			for _, prefix := range []string{"?", "&"} {
+				old := prefix + "n=" + rawN
+				if strings.Contains(result, old) {
+					result = strings.Replace(result, old, prefix+"n="+url.QueryEscape(decrypted), 1)
+					break
+				}
+			}
 		}
 	}
 

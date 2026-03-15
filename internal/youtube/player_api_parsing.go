@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/cipher"
 )
 
 func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any, playerURL string, ytcfg *YtcfgData) (*VideoInfo, error) {
@@ -261,8 +263,9 @@ func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string)
 		return rawURL
 	}
 
-	nParam := u.Query().Get("n")
-	if nParam == "" {
+	// Extract the raw (percent-encoded) n-param for accurate string matching.
+	rawN, nParam := cipher.RawQueryParam(u.RawQuery, "n")
+	if rawN == "" || nParam == "" {
 		return rawURL
 	}
 
@@ -281,9 +284,9 @@ func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string)
 	// Replace the first occurrence of n=<value> that is a proper query parameter
 	// to avoid false-matching within other parameter values.
 	for _, prefix := range []string{"?", "&"} {
-		old := prefix + "n=" + nParam
+		old := prefix + "n=" + rawN
 		if strings.Contains(rawURL, old) {
-			return strings.Replace(rawURL, old, prefix+"n="+decryptedN, 1)
+			return strings.Replace(rawURL, old, prefix+"n="+url.QueryEscape(decryptedN), 1)
 		}
 	}
 	return rawURL

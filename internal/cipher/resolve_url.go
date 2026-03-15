@@ -49,24 +49,51 @@ func (s *Solver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*Resolv
 	if err != nil {
 		return nil, fmt.Errorf("parse stream URL: %w", err)
 	}
+	// Extract the raw (percent-encoded) n-param from the URL for accurate string
+	// matching. Using Query().Get() returns the decoded value, which won't match
+	// the raw URL if the value contains percent-encoded characters (e.g., %2F, %3D).
+	rawN, decodedN := RawQueryParam(parsed.RawQuery, "n")
 	nParam := req.NParam
-	if nParam == "" {
-		nParam = parsed.Query().Get("n")
+	if nParam != "" {
+		// Caller provided a pre-decoded n-param value for the solver. We still
+		// use the raw form extracted from the URL for string matching, so the
+		// replacement targets the correct (possibly percent-encoded) substring.
+		decodedN = nParam
+		if rawN == "" {
+			rawN = url.QueryEscape(nParam)
+		}
+	} else {
+		nParam = decodedN
 	}
-	if nParam != "" && solvers.N != nil {
+	if nParam != "" && rawN != "" && solvers.N != nil {
 		decryptedN, err := solvers.DecryptN(nParam)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt n-parameter: %w", err)
 		}
 		// Replace the first occurrence of n=<value> that is a proper query parameter
 		for _, prefix := range []string{"?", "&"} {
-			old := prefix + "n=" + nParam
+			old := prefix + "n=" + rawN
 			if strings.Contains(result, old) {
-				result = strings.Replace(result, old, prefix+"n="+decryptedN, 1)
+				result = strings.Replace(result, old, prefix+"n="+url.QueryEscape(decryptedN), 1)
 				break
 			}
 		}
 	}
 
 	return &ResolveURLResponse{URL: result}, nil
+}
+
+// RawQueryParam extracts a query parameter's raw (percent-encoded) and decoded
+// values from a raw query string. This is needed for accurate string replacement
+// in URLs — url.Values.Get() returns only the decoded value, which may not match
+// the raw URL when the value contains percent-encoded characters.
+func RawQueryParam(rawQuery, key string) (raw, decoded string) {
+	for _, part := range strings.Split(rawQuery, "&") {
+		k, v, ok := strings.Cut(part, "=")
+		if ok && k == key {
+			decoded, _ = url.QueryUnescape(v)
+			return v, decoded
+		}
+	}
+	return "", ""
 }
