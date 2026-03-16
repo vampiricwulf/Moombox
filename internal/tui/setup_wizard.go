@@ -973,8 +973,8 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		cfg.Network.Port = port
 	}
 	cfg.Network.HTTPSEnabled = vBool("httpsEnabled", false)
-	if password != "" {
-		// Hash password before saving if callback is available
+	if networkAccess == "external" && password != "" {
+		// Hash password before saving (only relevant for external access)
 		if m.OnHashPassword != nil {
 			hash, err := m.OnHashPassword(password)
 			if err != nil {
