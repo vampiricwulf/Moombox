@@ -1888,9 +1888,10 @@ class MoomboxApp {
 
   async cancelJob(jobId) {
     const id = jobId || this.selectedJobId;
-    if (!id) return;
+    if (!id || this._jobActionsInFlight.has(id)) return;
     if (!await this.showConfirm("Are you sure you want to cancel this job?", { okLabel: "Cancel Job", okVariant: "danger" })) return;
 
+    this._jobActionsInFlight.add(id);
     try {
       const response = await fetch(`/api/jobs/${id}/cancel`, {
         method: "POST",
@@ -1903,13 +1904,16 @@ class MoomboxApp {
       }
     } catch (e) {
       this.showToast("Failed to cancel job: " + e.message, "danger");
+    } finally {
+      this._jobActionsInFlight.delete(id);
     }
   }
 
   async retryJob(jobId) {
     const id = jobId || this.selectedJobId;
-    if (!id) return;
+    if (!id || this._jobActionsInFlight.has(id)) return;
 
+    this._jobActionsInFlight.add(id);
     try {
       const response = await fetch(`/api/jobs/${id}/retry`, {
         method: "POST",
@@ -1922,14 +1926,17 @@ class MoomboxApp {
       }
     } catch (e) {
       this.showToast("Failed to retry job: " + e.message, "danger");
+    } finally {
+      this._jobActionsInFlight.delete(id);
     }
   }
 
   async deleteJob(jobId) {
     const id = jobId || this.selectedJobId;
-    if (!id) return;
+    if (!id || this._jobActionsInFlight.has(id)) return;
     if (!await this.showConfirm("Are you sure you want to delete this job?", { okLabel: "Delete", okVariant: "danger" })) return;
 
+    this._jobActionsInFlight.add(id);
     try {
       const response = await fetch(`/api/jobs/${id}`, {
         method: "DELETE",
@@ -1945,6 +1952,8 @@ class MoomboxApp {
       }
     } catch (e) {
       this.showToast("Failed to delete job: " + e.message, "danger");
+    } finally {
+      this._jobActionsInFlight.delete(id);
     }
   }
 
@@ -2289,7 +2298,11 @@ class MoomboxApp {
 
   // ===== Quick Actions =====
 
+  /** Set of job IDs currently being acted on — prevents concurrent operations */
+  _jobActionsInFlight = new Set();
+
   quickAction(action, jobId) {
+    if (this._jobActionsInFlight.has(jobId)) return; // prevent double-click race
     switch (action) {
       case "cancel": this.cancelJob(jobId); break;
       case "retry": this.retryJob(jobId); break;
@@ -2458,8 +2471,8 @@ class MoomboxApp {
     if (/^\d{7,12}$/.test(trimmed)) {
       return { platform: "twitch", type: "vod", id: trimmed };
     }
-    // Raw username
-    if (/^[a-zA-Z][a-zA-Z0-9_]{0,24}$/.test(trimmed)) {
+    // Raw username (exclude reserved Twitch path segments)
+    if (/^[a-zA-Z][a-zA-Z0-9_]{0,24}$/.test(trimmed) && !reserved.has(trimmed.toLowerCase())) {
       return { platform: "twitch", type: "channel", id: trimmed.toLowerCase() };
     }
     return null;
