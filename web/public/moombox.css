@@ -1675,7 +1675,8 @@ sl-progress-bar {
     background-color: var(--sl-color-warning-500);
 }
 
-.trim-handle:hover {
+.trim-handle:hover,
+.trim-handle:active {
     filter: brightness(1.2);
 }
 
@@ -1871,7 +1872,8 @@ sl-progress-bar {
     opacity: 0.6;
     transition: opacity 0.15s ease;
 }
-.video-item:hover .job-quick-actions { opacity: 1; }
+.video-item:hover .job-quick-actions,
+.video-item[data-focused] .job-quick-actions { opacity: 1; }
 .job-quick-actions sl-icon-button[data-quick-action="delete"]:hover { color: var(--sl-color-danger-500); }
 .job-quick-actions sl-icon-button[data-quick-action="cancel"]:hover { color: var(--sl-color-warning-600); }
 .job-quick-actions sl-icon-button[data-quick-action="retry"]:hover { color: var(--sl-color-success-600); }
