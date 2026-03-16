@@ -31,6 +31,7 @@ export class SetupController {
     if (!el) return;
     try {
       const resp = await fetch("/api/setup/status");
+      if (!resp.ok) return;
       const data = await resp.json();
       if (data.ffmpegValid) {
         el.innerHTML = `<sl-icon name="check-circle" style="color: var(--sl-color-success-600);"></sl-icon> FFmpeg: ${this.esc(data.ffmpegVersion || "found")}`;
@@ -822,6 +823,7 @@ export class SetupController {
 
     try {
       const resp = await fetch("/api/ffmpeg/install-options");
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
 
       optionsEl.innerHTML = "";
@@ -1087,6 +1089,7 @@ export class SetupController {
         body: JSON.stringify({ path }),
         signal: controller.signal,
       });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
 
       if (data.valid) {
