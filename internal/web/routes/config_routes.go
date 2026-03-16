@@ -495,17 +495,21 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, 
 		oldNumParallel := cfg.Downloader.NumParallelDownloads
 		oldHideAge := cfg.Monitors.HideFinishedAgeDays.Value
 
-		// Apply allowlisted updates — matches TypeScript updateConfigSchema (snake_case)
-		applyConfigUpdates(cfg, updates)
+		// Work on a copy so the live config isn't modified if save fails
+		cfgCopy := *cfg
+		applyConfigUpdates(&cfgCopy, updates)
 
 		// Persist to disk
 		if saveConfig != nil {
-			if err := saveConfig(cfg); err != nil {
+			if err := saveConfig(&cfgCopy); err != nil {
 				cfgMu.Unlock()
 				jsonError(rw, "failed to save config", http.StatusInternalServerError)
 				return
 			}
 		}
+
+		// Save succeeded — apply to live config
+		*cfg = cfgCopy
 
 		// Read new values while still holding the lock
 		newLogLevel := cfg.Logs.LogLevel
