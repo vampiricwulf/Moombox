@@ -9,6 +9,7 @@ export class SetupController {
     this.advStep = 1;
     this.cookieYTDone = false;
     this.cookieTWDone = false;
+    this._redirectUrl = null; // Set when port/HTTPS changes require redirect after restart
   }
 
   /** Escape HTML entities for safe innerHTML insertion. */
@@ -19,6 +20,7 @@ export class SetupController {
   show() {
     document.getElementById("setup-overlay").style.display = "flex";
     this.showPage("setup-mode-select");
+    this._redirectUrl = null;
     this.setupListeners();
     this.checkFFmpegStatus();
   }
@@ -612,15 +614,31 @@ export class SetupController {
       config.install_ytdlp_plugin = true;
     }
 
+    // Detect if dashboard URL will change (port or HTTPS toggle).
+    // After restart the old URL is dead, so we redirect instead of polling.
+    const newPort = port || 774;
+    const currentPort = parseInt(location.port) || (location.protocol === "https:" ? 443 : 80);
+    const currentHttps = location.protocol === "https:";
+    if (newPort !== currentPort || httpsEnabled !== currentHttps) {
+      const protocol = httpsEnabled ? "https" : "http";
+      this._redirectUrl = `${protocol}://${location.hostname}:${newPort}`;
+    } else {
+      this._redirectUrl = null;
+    }
+
     await this.submitSetup(config, finishBtn);
   }
 
   async submitSetup(config, finishBtn) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+
     try {
       const response = await fetch("/api/setup/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
+        signal: controller.signal,
       });
 
       if (response.ok) {
@@ -640,8 +658,12 @@ export class SetupController {
         this.app.showToast(msg, "danger");
       }
     } catch (e) {
-      this.app.showToast("Failed to save configuration: " + e.message, "danger");
+      const msg = e.name === "AbortError"
+        ? "Setup save timed out — please try again"
+        : "Failed to save configuration: " + e.message;
+      this.app.showToast(msg, "danger");
     } finally {
+      clearTimeout(timeoutId);
       if (finishBtn) { finishBtn.loading = false; finishBtn.disabled = false; }
     }
     return false;
@@ -655,6 +677,43 @@ export class SetupController {
 
     const overlay = document.getElementById("setup-overlay");
     if (overlay) overlay.style.display = "none";
+
+    // If port or HTTPS changed, the old URL is dead after restart.
+    // Cross-origin restrictions prevent polling the new URL, so redirect directly.
+    if (this._redirectUrl) {
+      const waiting = document.createElement("div");
+      waiting.id = "restart-waiting";
+      waiting.style.cssText = "position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--sl-color-neutral-0); z-index: 99999;";
+      const inner = document.createElement("div");
+      inner.style.textAlign = "center";
+      const icon = document.createElement("sl-icon");
+      icon.name = "arrow-right-circle";
+      icon.style.cssText = "font-size: 2rem; color: var(--sl-color-primary-600);";
+      const heading = document.createElement("p");
+      heading.style.cssText = "margin-top: 0.75em; font-weight: 600;";
+      heading.textContent = "Dashboard address has changed";
+      const urlText = document.createElement("p");
+      urlText.style.cssText = "margin-top: 0.25em; font-family: monospace; color: var(--sl-color-neutral-600); word-break: break-all;";
+      urlText.textContent = this._redirectUrl;
+      const note = document.createElement("p");
+      note.style.cssText = "margin-top: 0.5em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-500);";
+      note.textContent = "Redirecting in a few seconds...";
+      const btn = document.createElement("sl-button");
+      btn.variant = "primary";
+      btn.style.marginTop = "1em";
+      btn.textContent = "Open New Dashboard";
+      const redirectUrl = this._redirectUrl;
+      btn.addEventListener("click", () => { window.location.href = redirectUrl; });
+      inner.append(icon, heading, urlText, note, btn);
+      waiting.appendChild(inner);
+      document.body.appendChild(waiting);
+
+      // Auto-redirect after a brief delay to let the server restart
+      setTimeout(() => { window.location.href = redirectUrl; }, 3000);
+      this._polling = false;
+      this._redirectUrl = null;
+      return;
+    }
 
     // Show a temporary message using safe DOM methods
     const waiting = document.createElement("div");
