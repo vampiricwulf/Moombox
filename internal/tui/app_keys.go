@@ -100,7 +100,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			onComplete := a.setupWiz.OnComplete
 			onInstall := a.setupWiz.OnInstallYtdlp
 			return a, safeCmd(func() tea.Msg {
-				if onComplete != nil && cfg != nil {
+				if cfg == nil {
+					return setupSaveResultMsg{Err: "no config to save"}
+				}
+				if onComplete != nil {
 					if err := onComplete(cfg); err != nil {
 						return setupSaveResultMsg{Err: err.Error()}
 					}
@@ -113,7 +116,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					os.MkdirAll(cfg.Paths.StagingDirectory, 0o755)
 				}
 				// Post-save: install yt-dlp plugin if requested
-				if installYtdlp && onInstall != nil && cfg != nil {
+				if installYtdlp && onInstall != nil {
 					onInstall(cfg.Network.Port, cfg.Network.HTTPSEnabled)
 				}
 				return setupSaveResultMsg{}

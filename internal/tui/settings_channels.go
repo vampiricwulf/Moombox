@@ -149,6 +149,7 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 		}
 		id := strings.TrimSpace(m.channelEditValues["id"])
 		if id == "" {
+			m.errorMsg = "Channel ID is required"
 			return ""
 		}
 		if strings.Contains(id, "youtube.com/") || strings.Contains(id, "youtu.be/") || strings.Contains(id, "twitch.tv/") {

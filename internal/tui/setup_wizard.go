@@ -692,6 +692,7 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 	case keyEnter:
 		id := strings.TrimSpace(m.channelEditValues["id"])
 		if id == "" {
+			m.errorMsg = "Channel ID is required"
 			return ""
 		}
 		// Check for duplicate channel ID
@@ -831,14 +832,10 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 
 	switch key {
 	case keyEsc:
-		// Double-Esc to go back to mode select
-		if m.escConfirm {
-			m.advancedFormDone = false
-			m.mode = setupModeSelect
-			m.escConfirm = false
-			return ""
-		}
-		m.escConfirm = true
+		// Go back to the form (rebuild with current values preserved)
+		m.advancedFormDone = false
+		m.buildAdvancedForm()
+		m.escConfirm = false
 		return ""
 	case keyUp:
 		if m.cookieFocus > 0 {
@@ -1472,13 +1469,6 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, h int) string {
 	if m.errorMsg != "" {
 		lines = append(lines, "")
 		lines = append(lines, ErrorStyle.Render(m.errorMsg))
-	}
-
-	// Esc confirmation warning
-	if m.escConfirm && !m.cookieActive {
-		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
-			"Press Esc again to abandon setup"))
 	}
 
 	lines = append(lines, "")

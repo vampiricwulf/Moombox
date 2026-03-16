@@ -46,6 +46,9 @@ export class SetupController {
     document.querySelectorAll("#setup-overlay .setup-page").forEach((p) => {
       p.style.display = "none";
     });
+    // Hide advanced step indicators when navigating away from advanced steps
+    const advSteps = document.getElementById("setup-adv-steps");
+    if (advSteps) advSteps.style.display = "none";
     const el = document.getElementById(id);
     if (el) el.style.display = "";
   }
@@ -497,8 +500,10 @@ export class SetupController {
     const el = document.getElementById(`setup-adv-step-${step}`);
     if (el) el.style.display = "";
 
-    // Update step indicators
-    document.querySelectorAll("#setup-adv-steps .setup-step, #setup-adv-step-1 .setup-steps .setup-step").forEach((s) => {
+    // Show and update step indicators
+    const advSteps = document.getElementById("setup-adv-steps");
+    if (advSteps) advSteps.style.display = "";
+    document.querySelectorAll("#setup-adv-steps .setup-step").forEach((s) => {
       const sn = parseInt(s.dataset.step);
       s.classList.remove("active", "completed");
       if (sn === step) s.classList.add("active");

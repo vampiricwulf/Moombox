@@ -425,7 +425,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case panicRecoveryMsg:
-		a.setFeedback(msg.Text)
+		// Clear setup wizard async state if a panic occurred during save or cookie extraction
+		if a.setupWiz.IsVisible() && (a.setupWiz.saving || a.setupWiz.cookieFinishing) {
+			a.setupWiz.saving = false
+			a.setupWiz.pendingConfig = nil
+			a.setupWiz.cookieActive = false
+			a.setupWiz.cookieFinishing = false
+			a.setupWiz.cookiePlatform = ""
+			a.setupWiz.errorMsg = msg.Text
+		} else {
+			a.setFeedback(msg.Text)
+		}
 		return a, nil
 
 	case tea.KeyMsg:
