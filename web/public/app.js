@@ -642,11 +642,8 @@ class MoomboxApp {
   // ===== WebSocket Management =====
 
   connectWebSocket() {
-    // Clear timers to prevent duplicates on reconnect
-    if (this._countdownInterval) {
-      clearInterval(this._countdownInterval);
-      this._countdownInterval = null;
-    }
+    // Only clear the ping interval — countdown/timestamp timer runs
+    // independently of WebSocket and should keep ticking during reconnection.
     if (this._pingInterval) {
       clearInterval(this._pingInterval);
       this._pingInterval = null;
@@ -675,10 +672,6 @@ class MoomboxApp {
       // (e.g., config saved via TUI, or restart-required settings that were applied).
       // Skip if user has unsaved changes to avoid silently overwriting their edits.
       if (isReconnect && !this.settings._dirty) this.loadConfig();
-      // Restart countdown interval (cleared above to prevent duplicates)
-      if (!this._countdownInterval) {
-        this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);
-      }
       // Start client-side heartbeat to detect half-open connections
       if (this._pingInterval) clearInterval(this._pingInterval);
       this._pingInterval = setInterval(() => {
