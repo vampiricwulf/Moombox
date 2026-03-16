@@ -110,6 +110,14 @@ export class PlayerController {
     // Multi-segment: auto-advance to next segment when current one ends
     video.addEventListener("ended", () => this.onSegmentEnded());
 
+    // Surface video load errors to user (e.g. segment 404s)
+    video.addEventListener("error", () => {
+      if (video.error && video.src) {
+        console.error("Video load error:", video.error.message);
+        this.app.showToast("Video failed to load — segment may be missing", "danger");
+      }
+    });
+
     // Sidebar scroll locking
     sidebarMessages.addEventListener("mouseenter", () => {
       this.playerScrollLock = true;

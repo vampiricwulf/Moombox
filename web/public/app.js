@@ -1155,8 +1155,16 @@ class MoomboxApp {
     const content = document.getElementById("job-details-content");
     if (!content) return;
 
-    // Update status badge
+    // If status changed, rebuild the details to refresh structural elements
+    // (segment rows, embed, buttons) that depend on status.
     const statusBadge = content.querySelector(".status");
+    const currentStatus = statusBadge?.textContent;
+    if (currentStatus && currentStatus !== this.displayStatus(job.status)) {
+      this.renderJobDetails(job);
+      return;
+    }
+
+    // Update status badge
     if (statusBadge) {
       const statusClass = job.status.toLowerCase().replace("?", "");
       statusBadge.className = `status ${statusClass}`;

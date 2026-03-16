@@ -99,6 +99,9 @@ export class SegmentPlayer {
   seekToGlobalTime(globalSeconds, video) {
     if (!this.segOffsets || this.segOffsets.length === 0) return;
 
+    // Clamp to valid range to prevent out-of-bounds seeks
+    globalSeconds = Math.max(0, Math.min(this.totalDuration, globalSeconds));
+
     // Cancel any pending cross-segment seek listener from a previous call
     if (this._seekAbort) this._seekAbort.abort();
 

@@ -191,6 +191,7 @@ export class SettingsController {
       result.textContent = "";
       try {
         const resp = await fetch("/api/update/check", { method: "POST" });
+        if (!resp.ok) throw new Error(resp.statusText);
         const data = await resp.json();
         if (data.available) {
           result.textContent = `v${data.version} available!`;
@@ -218,6 +219,7 @@ export class SettingsController {
         result.textContent = "";
         try {
           const resp = await fetch("/api/update/verify", { method: "POST" });
+          if (!resp.ok) throw new Error(resp.statusText);
           const data = await resp.json();
           if (data.verified) {
             result.textContent = "Signature valid";
@@ -1153,9 +1155,14 @@ export class SettingsController {
       }
 
       this.app.config.notifications.push({ url });
-      dialog.hide();
-      await this._saveNotificationsOnly();
-      this.renderNotificationsList();
+      try {
+        await this._saveNotificationsOnly();
+        dialog.hide();
+        this.renderNotificationsList();
+      } catch {
+        // Revert local change if save failed
+        this.app.config.notifications.pop();
+      }
     });
 
     dialog.show();

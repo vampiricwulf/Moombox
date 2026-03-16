@@ -72,10 +72,12 @@ export class SetupController {
     // Mode selection
     document.getElementById("setup-mode-quick")?.addEventListener("click", () => {
       this.mode = "quick";
+      this.channels = [];
       this.showPage("setup-simple-cookies");
     });
     document.getElementById("setup-mode-advanced")?.addEventListener("click", () => {
       this.mode = "advanced";
+      this.channels = [];
       this.advStep = 1;
       this.showAdvancedStep(1);
     });
@@ -885,6 +887,10 @@ export class SetupController {
         body: JSON.stringify({ method }),
         signal: controller.signal,
       });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${resp.status}`);
+      }
       const data = await resp.json();
 
       if (data.needsElevation) {

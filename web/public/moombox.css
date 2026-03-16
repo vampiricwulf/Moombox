@@ -1667,6 +1667,12 @@ sl-progress-bar {
     transform: translateX(-4px);
 }
 
+/* Wider touch target for trim handles on touch devices */
+@media (hover: none) {
+    .trim-handle { width: 16px; transform: translateX(-8px); }
+    #trim-timeline-track { height: 2.5rem; }
+}
+
 #trim-handle-start {
     background-color: var(--sl-color-success-500);
 }
