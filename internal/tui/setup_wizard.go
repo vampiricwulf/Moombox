@@ -726,15 +726,27 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 	case "left":
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelFieldReverse(field)
+			m.clampChannelEditField()
 		}
 		return ""
 	case "right":
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelField(field)
+			m.clampChannelEditField()
 		}
 		return ""
 	}
 	return ""
+}
+
+// clampChannelEditField adjusts channelEditField when cycling platform may
+// have changed the visible field count (e.g., youtube→twitch drops include_non_live).
+func (m *SetupWizardModel) clampChannelEditField() {
+	fields := m.visibleSetupChannelFields()
+	if m.channelEditField >= len(fields) && len(fields) > 0 {
+		m.channelEditField = len(fields) - 1
+		m.updateTextInputForField()
+	}
 }
 
 func (m *SetupWizardModel) cycleChannelField(field channelFieldDef) {
