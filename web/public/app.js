@@ -1913,8 +1913,9 @@ class MoomboxApp {
         method: "DELETE",
       });
       if (response.ok) {
-        document.getElementById("details-dialog").hide();
-        this.selectedJobId = null;
+        const dlg = document.getElementById("details-dialog");
+        if (dlg?.open) dlg.hide();
+        if (this.selectedJobId === id) this.selectedJobId = null;
         this.showToast("Job deleted", "success");
       } else {
         const data = await response.json();
@@ -2564,6 +2565,8 @@ class MoomboxApp {
   // --- Files tab ---
 
   async fetchOrphanedFiles() {
+    const refreshBtn = document.getElementById("files-refresh-btn");
+    if (refreshBtn) refreshBtn.loading = true;
     try {
       const resp = await fetch("/api/files/orphaned");
       if (!resp.ok) throw new Error("Failed to fetch");
@@ -2572,6 +2575,8 @@ class MoomboxApp {
       this.renderOrphanedFiles(data);
     } catch (err) {
       console.error("Failed to fetch orphaned files:", err);
+    } finally {
+      if (refreshBtn) refreshBtn.loading = false;
     }
   }
 
@@ -2657,6 +2662,9 @@ class MoomboxApp {
     if (!this._orphanedFiles || this._orphanedFiles.length === 0) return;
     if (!await this.showConfirm(`Delete all ${this._orphanedFiles.length} orphaned files?`, { okLabel: "Delete All", okVariant: "danger" })) return;
 
+    const deleteAllBtn = document.getElementById("files-delete-all-btn");
+    if (deleteAllBtn) { deleteAllBtn.loading = true; deleteAllBtn.disabled = true; }
+
     const paths = this._orphanedFiles.map((f) => f.path);
     try {
       const resp = await fetch("/api/files/orphaned", {
@@ -2676,6 +2684,8 @@ class MoomboxApp {
       this.fetchOrphanedFiles();
     } catch (err) {
       this.showToast("Failed to delete files", "danger");
+    } finally {
+      if (deleteAllBtn) { deleteAllBtn.loading = false; deleteAllBtn.disabled = false; }
     }
   }
 }

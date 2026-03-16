@@ -451,6 +451,9 @@ export class SettingsController {
   }
 
   async saveConfig() {
+    const saveBtn = document.getElementById("save-config-btn");
+    if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
+
     if (!this.app.config) {
       this.app.config = {};
     }
@@ -595,6 +598,8 @@ export class SettingsController {
       }
     } catch (e) {
       this.app.showToast("Failed to save settings: " + e.message, "danger");
+    } finally {
+      if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
     }
   }
 
@@ -1098,7 +1103,7 @@ export class SettingsController {
         return `
       <div class="notification-card" data-index="${idx}">
         <div class="notification-card-header">
-          <div class="notification-card-url">${this.app.escapeHtml(notif.url || "")}</div>
+          <div class="notification-card-url" title="${this.app.escapeHtml(notif.url || "")}">${this.app.escapeHtml(notif.url || "")}</div>
           <sl-icon-button name="trash" label="Delete" data-notif-action="delete" data-notif-index="${idx}"></sl-icon-button>
         </div>
         ${eventsHtml}

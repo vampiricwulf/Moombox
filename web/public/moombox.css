@@ -1868,7 +1868,13 @@ sl-progress-bar {
     display: flex;
     align-items: center;
     gap: 2px;
+    opacity: 0.6;
+    transition: opacity 0.15s ease;
 }
+.video-item:hover .job-quick-actions { opacity: 1; }
+.job-quick-actions sl-icon-button[data-quick-action="delete"]:hover { color: var(--sl-color-danger-500); }
+.job-quick-actions sl-icon-button[data-quick-action="cancel"]:hover { color: var(--sl-color-warning-600); }
+.job-quick-actions sl-icon-button[data-quick-action="retry"]:hover { color: var(--sl-color-success-600); }
 
 /* Keyboard focus indicator */
 .video-item[data-focused] {
