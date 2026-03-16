@@ -173,7 +173,7 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 
 // JobRoutes registers job-related API routes.
 // cfgMu protects concurrent reads/writes to the shared cfg struct.
-func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager) {
+func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager, wsHub *web.WebSocketHub) {
 	// GET /api/jobs
 	r.Get("/api/jobs", func(rw http.ResponseWriter, req *http.Request) {
 		jobs, err := db.GetAllJobs()
@@ -1002,6 +1002,11 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 
 		// Clean up per-job logs (match TS: ctx.jobLogs.delete(job.id))
 		db.ClearJobLogs(jobID)
+
+		// Clean up WebSocket throttle state for deleted job
+		if wsHub != nil {
+			wsHub.CleanupJob(jobID)
+		}
 
 		jsonResponse(rw, map[string]any{"success": true})
 	})

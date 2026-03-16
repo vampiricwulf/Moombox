@@ -456,7 +456,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	}
 
 	// Register all routes
-	routes.JobRoutes(r, db, cfg, webServer.CfgMu(), dlWorker, apiRL, &twitchMetadataAdapter{svc: twService}, &youtubeMetadataAdapter{svc: ytService}, notifyMgr)
+	routes.JobRoutes(r, db, cfg, webServer.CfgMu(), dlWorker, apiRL, &twitchMetadataAdapter{svc: twService}, &youtubeMetadataAdapter{svc: ytService}, notifyMgr, wsHub)
 	routes.FormatRoutes(r, &routes.FormatRoutesDeps{
 		DB:  db,
 		Cfg: cfg,

@@ -51,6 +51,15 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 	// POST /api/setup/complete — uses same updateConfigSchema as PUT /config (snake_case, nested)
 	// plus an additional "password" field for first-run password setup.
 	r.Post("/api/setup/complete", func(rw http.ResponseWriter, req *http.Request) {
+		// Guard: only allow setup on first run (before config is loaded/saved)
+		cfgMu.RLock()
+		alreadyConfigured := deps.Cfg.ConfigLoaded
+		cfgMu.RUnlock()
+		if alreadyConfigured {
+			jsonError(rw, "setup already completed", http.StatusBadRequest)
+			return
+		}
+
 		var updates map[string]any
 		if err := json.NewDecoder(req.Body).Decode(&updates); err != nil {
 			jsonError(rw, "invalid request body", http.StatusBadRequest)
