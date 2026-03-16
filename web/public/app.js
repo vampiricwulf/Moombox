@@ -958,11 +958,14 @@ class MoomboxApp {
       const response = await fetch("/api/jobs/archived");
       if (response.ok) {
         this.archivedJobs = await response.json();
-        this.renderArchivedJobs();
+      } else {
+        this.archivedJobs = [];
       }
     } catch (e) {
       console.error("Failed to fetch archived jobs:", e);
+      this.archivedJobs = [];
     }
+    this.renderArchivedJobs();
   }
 
   renderArchivedJobs() {
@@ -2665,6 +2668,8 @@ class MoomboxApp {
       this.renderOrphanedFiles(data);
     } catch (err) {
       console.error("Failed to fetch orphaned files:", err);
+      // Show empty state so the panel isn't blank on failure
+      this.renderOrphanedFiles([]);
     } finally {
       if (refreshBtn) refreshBtn.loading = false;
     }
