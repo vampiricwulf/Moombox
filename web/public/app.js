@@ -227,7 +227,10 @@ class MoomboxApp {
           if (!this.player.playerInitialized) {
             this.player.initPlayer();
           }
-          this.player.loadPlayerJobList();
+          // Skip if openInPlayer is handling the load (prevents race condition)
+          if (!this._playerOpeningFromDetails) {
+            this.player.loadPlayerJobList();
+          }
         } else if (e.detail.name === "imports") {
           if (!this.imports.importInitialized) {
             this.imports.initImports();
@@ -1904,9 +1907,15 @@ class MoomboxApp {
     // Close the details dialog
     document.getElementById("details-dialog").hide();
 
+    // Flag prevents the sl-tab-show handler from calling loadPlayerJobList
+    // (which would race with our call and potentially overwrite the selection)
+    this._playerOpeningFromDetails = true;
+
     // Switch to the Player tab
     const tabGroup = document.querySelector("sl-tab-group");
     tabGroup.show("player");
+
+    this._playerOpeningFromDetails = false;
 
     // Initialize player if needed, then select the job
     if (!this.player.playerInitialized) {

@@ -1252,11 +1252,17 @@ export class SettingsController {
    * settings. The server-side PUT /api/config merges — omitted sections are untouched.
    */
   async _saveNotificationsOnly() {
-    const response = await fetch("/api/config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ notifications: this.app.config.notifications || [] }),
-    });
+    let response;
+    try {
+      response = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notifications: this.app.config.notifications || [] }),
+      });
+    } catch (e) {
+      this.app.showToast("Failed to save notifications: " + e.message, "danger");
+      throw e;
+    }
     if (response.ok) {
       this.app.showToast("Notifications updated", "success");
     } else {
