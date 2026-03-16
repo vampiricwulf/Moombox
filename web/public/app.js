@@ -882,8 +882,10 @@ class MoomboxApp {
     if (filtered.length === 0 && isFiltered) {
       container.innerHTML = "";
       emptyState.style.display = "flex";
-      emptyState.querySelector("sl-icon").name = "search";
-      emptyState.querySelector("p").textContent = "No matching jobs";
+      const icon = emptyState.querySelector("sl-icon");
+      if (icon) icon.name = "search";
+      const msg = emptyState.querySelector("p");
+      if (msg) msg.textContent = "No matching jobs";
       const subtext = emptyState.querySelector(".empty-state-subtext");
       if (subtext) subtext.textContent = "Search matches titles and channel names";
       const cta = emptyState.querySelector(".empty-state-cta");
@@ -895,8 +897,10 @@ class MoomboxApp {
       container.innerHTML = "";
       emptyState.style.display = "flex";
       // Reset empty state to default
-      emptyState.querySelector("sl-icon").name = "inbox";
-      emptyState.querySelector("p").textContent = "No jobs yet";
+      const icon = emptyState.querySelector("sl-icon");
+      if (icon) icon.name = "inbox";
+      const msg = emptyState.querySelector("p");
+      if (msg) msg.textContent = "No jobs yet";
       const subtext = emptyState.querySelector(".empty-state-subtext");
       if (subtext) subtext.textContent = "Add a YouTube or Twitch URL to start archiving";
       const cta = emptyState.querySelector(".empty-state-cta");
@@ -1002,6 +1006,13 @@ class MoomboxApp {
   updateJobCard(job) {
     const card = document.querySelector(`.video-item[data-job-id="${job.id}"]`);
     if (!card) return;
+
+    // Update thumbnail (can change for Twitch: avatar → live thumbnail)
+    const thumbImg = card.querySelector(".thumb img");
+    if (thumbImg && job.thumbnailUrl && thumbImg.src !== job.thumbnailUrl) {
+      thumbImg.src = job.thumbnailUrl;
+      thumbImg.classList.remove("thumb-avatar");
+    }
 
     // Update title and channel (can change for live streams)
     const titleEl = card.querySelector(".stream-title");
@@ -1426,7 +1437,7 @@ class MoomboxApp {
             const duration = `${Math.floor(trim.duration)}s`;
             const size = trim.fileSize ? this.formatBytes(trim.fileSize) : '?';
             return `
-              <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #eee;">
+              <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--sl-color-neutral-200);">
                 <span>
                   <strong>${range}</strong> (${duration}, ${size})
                 </span>
@@ -1633,7 +1644,7 @@ class MoomboxApp {
         document.getElementById("add-dialog").hide();
         this.showToast("Video added successfully", "success");
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.showToast(data.error || "Failed to add video", "danger");
       }
     } catch (e) {
@@ -1876,7 +1887,7 @@ class MoomboxApp {
       if (response.ok) {
         this.showToast("Job cancelled", "success");
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.showToast(data.error || "Failed to cancel job", "danger");
       }
     } catch (e) {
@@ -1895,7 +1906,7 @@ class MoomboxApp {
       if (response.ok) {
         this.showToast("Job queued for retry", "success");
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.showToast(data.error || "Failed to retry job", "danger");
       }
     } catch (e) {
@@ -1918,7 +1929,7 @@ class MoomboxApp {
         if (this.selectedJobId === id) this.selectedJobId = null;
         this.showToast("Job deleted", "success");
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.showToast(data.error || "Failed to delete job", "danger");
       }
     } catch (e) {
@@ -1937,7 +1948,7 @@ class MoomboxApp {
       });
 
       if (!response.ok) {
-        const error = await response.json();
+        const error = await response.json().catch(() => ({}));
         throw new Error(error.error || 'Failed to create trim');
       }
 
@@ -2013,18 +2024,22 @@ class MoomboxApp {
   // ===== Log Management =====
 
   addLog(log) {
-    const wasOverflow = this.logs.length >= 500;
     this.logs.push(log);
-    if (this.logs.length > 500) {
+    const overflowed = this.logs.length > 500;
+    if (overflowed) {
       this.logs = this.logs.slice(-500);
     }
 
-    // Fast path: if no filter/search active and no overflow trim,
-    // append a single DOM node instead of rebuilding everything
-    if (!wasOverflow && this.logFilter === "all" && !this._logSearchQuery) {
+    // Fast path: if no filter/search active, append/trim a single DOM
+    // node instead of rebuilding all 500 lines
+    if (this.logFilter === "all" && !this._logSearchQuery) {
       const viewer = document.getElementById("logs-viewer");
       const countEl = document.getElementById("log-count");
       if (viewer) {
+        // Remove oldest DOM child if we overflowed
+        if (overflowed && viewer.firstChild) {
+          viewer.removeChild(viewer.firstChild);
+        }
         const div = this._createLogLine(log);
         viewer.appendChild(div);
         if (countEl) countEl.textContent = `${this.logs.length} log entries`;
@@ -2035,7 +2050,7 @@ class MoomboxApp {
       }
     }
 
-    // Debounce full renderLogs for filtered/overflow cases
+    // Debounce full renderLogs for filtered/search cases
     if (this._logRenderTimer) clearTimeout(this._logRenderTimer);
     this._logRenderTimer = setTimeout(() => this.renderLogs(), 100);
   }

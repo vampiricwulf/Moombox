@@ -588,7 +588,7 @@ export class SettingsController {
         // Check if any restart-required settings changed
         this._checkRestartRequired(config);
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         let msg = data.error || "Failed to save settings";
         if (data.details) {
           const fields = Object.entries(data.details).map(([k, v]) => `${k}: ${v}`).join(", ");
@@ -825,7 +825,7 @@ export class SettingsController {
       if (response.ok) {
         this.app.showToast("Channel order updated", "success");
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.app.showToast(data.error || "Failed to save channel order", "danger");
         this.app.loadConfig();
       }
@@ -956,7 +956,7 @@ export class SettingsController {
             }
           }
         } else {
-          const data = await resp.json();
+          const data = await resp.json().catch(() => ({}));
           this.app.showToast(data.error || "Failed to resolve channel URL", "danger");
           return;
         }
@@ -1001,7 +1001,7 @@ export class SettingsController {
         );
         this.app.loadConfig();
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.app.showToast(data.error || "Failed to save channel", "danger");
       }
     } catch (e) {
@@ -1024,7 +1024,7 @@ export class SettingsController {
         this.app.showToast("Channel removed", "success");
         this.app.loadConfig();
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.app.showToast(data.error || "Failed to remove channel", "danger");
       }
     } catch (e) {
@@ -1046,7 +1046,7 @@ export class SettingsController {
       if (response.ok) {
         this.app.loadConfig();
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.app.showToast(data.error || "Failed to update channel", "danger");
       }
     } catch (e) {
@@ -1219,7 +1219,7 @@ export class SettingsController {
       if (response.ok) {
         this.app.showToast("Notifications updated", "success");
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.app.showToast(data.error || "Failed to save notifications", "danger");
       }
     } catch (e) {
@@ -1429,7 +1429,7 @@ export class SettingsController {
         // Refresh config to pick up hasPassword change
         this.app.loadConfig();
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.app.showToast(data.error || "Failed to set password", "danger");
       }
     } catch (e) {
@@ -1475,7 +1475,7 @@ export class SettingsController {
           this.loadSecurityStatus();
           this.app.loadConfig();
         } else {
-          const data = await response.json();
+          const data = await response.json().catch(() => ({}));
           this.app.showToast(data.error || "Failed to remove password", "danger");
         }
       } catch (e) {
@@ -1552,7 +1552,7 @@ export class SettingsController {
         this.app.showToast("Client token revoked", "success");
         this.loadClientTokens();
       } else {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         this.app.showToast(data.error || "Failed to revoke token", "danger");
       }
     } catch (e) {

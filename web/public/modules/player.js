@@ -737,7 +737,13 @@ export class PlayerController {
 
   clearNicoOverlay() {
     const overlay = document.getElementById("player-nico-overlay");
-    if (overlay) overlay.innerHTML = "";
+    if (overlay) {
+      // Cancel running animations to free CPU/memory before detaching elements
+      overlay.querySelectorAll(".nico-message").forEach((el) => {
+        if (el._nicoAnim) { el._nicoAnim.cancel(); el._nicoAnim = null; }
+      });
+      overlay.innerHTML = "";
+    }
     this.nicoLaneAvail = new Array(this.nicoLaneCount).fill(0);
   }
 
