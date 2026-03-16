@@ -469,7 +469,7 @@ export class PlayerController {
         }
       };
       if (select.updateComplete) {
-        select.updateComplete.then(restoreAndUpdateEmpty);
+        select.updateComplete.then(restoreAndUpdateEmpty).catch(() => {});
       } else {
         requestAnimationFrame(restoreAndUpdateEmpty);
       }

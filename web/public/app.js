@@ -1908,7 +1908,7 @@ class MoomboxApp {
       const select = document.getElementById("player-job-select");
       select.value = this.selectedJobId;
       this.player.onPlayerJobSelect(this.selectedJobId);
-    });
+    }).catch(() => {});
   }
 
   async cancelJob(jobId) {

@@ -806,7 +806,7 @@ export class SettingsController {
 
         this.saveChannelOrder(channels).then(() => {
           this.renderChannelsList();
-        });
+        }).catch(() => {});
       }
     });
 
