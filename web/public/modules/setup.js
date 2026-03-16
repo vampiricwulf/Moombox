@@ -454,7 +454,7 @@ export class SetupController {
           if (resolved.name && !name) name = resolved.name;
           if (resolved.platform) platform = resolved.platform;
         } else {
-          const data = await resp.json().catch(() => ({}));
+          const data = await resp.json().catch(() => ({ error: resp.statusText }));
           this.app.showToast(data.error || "Failed to resolve channel URL", "danger");
           return;
         }
@@ -652,7 +652,7 @@ export class SetupController {
         this.pollForRestart();
         return true;
       } else {
-        const data = await response.json().catch(() => ({}));
+        const data = await response.json().catch(() => ({ error: response.statusText }));
         // Show specific field validation errors if available
         let msg = data.error || "Failed to save configuration";
         if (data.details && typeof data.details === "object") {
