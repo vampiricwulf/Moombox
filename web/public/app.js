@@ -2497,10 +2497,13 @@ class MoomboxApp {
     const val = el.value;
     // Shoelace number inputs may return number directly
     if (typeof val === "number") {
-      return val;
+      return isNaN(val) ? undefined : val;
     }
     const str = typeof val === "string" ? val.trim() : "";
-    return str ? parseInt(str, 10) : undefined;
+    if (!str) return undefined;
+    // Use Number() instead of parseInt() to reject partial numbers like "123abc"
+    const num = Number(str);
+    return isNaN(num) ? undefined : Math.trunc(num);
   }
 
   escapeHtml(text) {

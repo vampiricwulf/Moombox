@@ -64,9 +64,9 @@ export class ImportController {
       this._activeXhr = null;
       this.importUploading = false;
       const submitBtn = document.getElementById("import-submit-btn");
-      submitBtn.disabled = false;
-      submitBtn.loading = false;
-      document.getElementById("import-status-text").textContent = "Upload cancelled";
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.loading = false; }
+      const statusText = document.getElementById("import-status-text");
+      if (statusText) statusText.textContent = "Upload cancelled";
       this._hideCancelButton();
       this.app.showToast("Upload cancelled", "primary");
     }
@@ -204,6 +204,12 @@ export class ImportController {
       this._hideCancelButton();
       statusText.textContent = "Upload failed (network error)";
       this.app.showToast("Upload failed: network error", "danger");
+    });
+
+    // Ensure state resets on abort (triggered by cancelUpload)
+    xhr.addEventListener("abort", () => {
+      this._activeXhr = null;
+      this.importUploading = false;
     });
 
     xhr.send(this.importFile);
