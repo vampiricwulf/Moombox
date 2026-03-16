@@ -1565,7 +1565,7 @@ sl-progress-bar {
     }
 
     .step-label {
-        font-size: var(--sl-font-size-x-small);
+        display: none; /* Hide labels on small screens; step numbers suffice */
     }
 
     .setup-mode-cards {
