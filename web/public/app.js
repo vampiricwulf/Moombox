@@ -738,20 +738,22 @@ class MoomboxApp {
   }
 
   handleMessage(message) {
+    const p = message.payload;
     switch (message.type) {
       case "initial_state":
-        this.jobs = message.payload.jobs || [];
-        this.logs = message.payload.logs || [];
-        this.nextFeedCheck = message.payload.nextFeedCheck || 0;
-        this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
-        this.nextTwitchCheck = message.payload.nextTwitchCheck || 0;
+        if (!p) break;
+        this.jobs = p.jobs || [];
+        this.logs = p.logs || [];
+        this.nextFeedCheck = p.nextFeedCheck || 0;
+        this.nextDecapiCheck = p.nextDecapiCheck || 0;
+        this.nextTwitchCheck = p.nextTwitchCheck || 0;
         this.renderJobs();
         this.renderLogs();
         this.updateCheckCountdown();
         break;
 
       case "jobs_update":
-        this.jobs = message.payload || [];
+        this.jobs = p || [];
         this.renderJobs();
         // Update details dialog if open (but don't reload logs)
         if (this.selectedJobId) {
@@ -762,7 +764,8 @@ class MoomboxApp {
 
       case "job_update": {
         // Single job update - update in place without full re-render
-        const updatedJob = message.payload;
+        const updatedJob = p;
+        if (!updatedJob?.id) break;
         const jobIndex = this.jobs.findIndex((j) => j.id === updatedJob.id);
         if (jobIndex !== -1) {
           this.jobs[jobIndex] = updatedJob;
@@ -781,22 +784,23 @@ class MoomboxApp {
       }
 
       case "log":
-        this.addLog(message.payload);
+        if (p) this.addLog(p);
         break;
 
       case "check_timers":
-        this.nextFeedCheck = message.payload.nextFeedCheck || 0;
-        this.nextDecapiCheck = message.payload.nextDecapiCheck || 0;
-        this.nextTwitchCheck = message.payload.nextTwitchCheck || 0;
+        if (!p) break;
+        this.nextFeedCheck = p.nextFeedCheck || 0;
+        this.nextDecapiCheck = p.nextDecapiCheck || 0;
+        this.nextTwitchCheck = p.nextTwitchCheck || 0;
         this.updateCheckCountdown();
         break;
 
       case "disk_status":
-        this.stats.updateDiskIndicator(message.payload);
+        this.stats.updateDiskIndicator(p);
         break;
 
       case "update_available":
-        this._updateAvailable = message.payload;
+        this._updateAvailable = p;
         this.updateVersionIndicator();
         break;
 
