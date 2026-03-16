@@ -1631,6 +1631,7 @@ export class SettingsController {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ platform }),
       });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
 
       if (data.success) {
@@ -1668,6 +1669,7 @@ export class SettingsController {
 
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
 
       const ytOk = data.authenticated;

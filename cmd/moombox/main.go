@@ -665,7 +665,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Wire initial state provider for WebSocket connections
 	wsHub.InitialState = func() map[string]any {
-		jobs, _ := db.GetAllJobs()
+		jobs, err := db.GetAllJobs()
+		if err != nil {
+			jobs = []*database.Job{} // Send empty array, not null
+		}
 		jobs = filterJobsByAge(jobs, cfg, webServer.CfgMu())
 		return map[string]any{
 			"jobs":             jobs,
