@@ -34,6 +34,7 @@ func safeCmd(fn func() tea.Msg) tea.Cmd {
 // apiBaseURL returns the correct scheme + host for local API calls.
 func (a *App) apiBaseURL() string {
 	scheme := "http"
+	port := 774
 	if a.cfg != nil {
 		if a.cfgMu != nil {
 			a.cfgMu.RLock()
@@ -42,8 +43,11 @@ func (a *App) apiBaseURL() string {
 		if a.cfg.Network.HTTPSEnabled {
 			scheme = "https"
 		}
+		if a.cfg.Network.Port > 0 {
+			port = a.cfg.Network.Port
+		}
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, a.getPort())
+	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port)
 }
 
 // internalTokenTransport injects the X-Internal-Token header on every request

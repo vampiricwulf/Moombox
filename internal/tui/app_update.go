@@ -364,11 +364,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.cfgMu.Lock()
 				}
 				a.cfg.Paths.FfmpegPath = msg.Path
-				if a.OnSaveConfig != nil {
-					a.OnSaveConfig(a.cfg)
-				}
 				if a.cfgMu != nil {
 					a.cfgMu.Unlock()
+				}
+				if a.OnSaveConfig != nil {
+					a.OnSaveConfig(a.cfg)
 				}
 			}
 			a.ffmpegCheck.warning = msg.Warning

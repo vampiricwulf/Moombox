@@ -338,6 +338,7 @@ func (a *App) handleFilter() {
 	switch a.focusedPanel {
 	case PanelTasks:
 		a.taskList.CycleFilter()
+		a.updateSelectedJob()
 	case PanelDetails:
 		a.details.ToggleDescription()
 	case PanelLogs:
