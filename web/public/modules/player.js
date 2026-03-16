@@ -440,19 +440,26 @@ export class PlayerController {
         select.appendChild(opt);
       });
 
-      // Restore selection if still valid
-      if (currentValue && all.some((j) => j.id === currentValue)) {
-        select.value = currentValue;
-      }
+      // Restore selection if still valid — defer to let Shoelace register new options
+      const restoreAndUpdateEmpty = () => {
+        if (currentValue && all.some((j) => j.id === currentValue)) {
+          select.value = currentValue;
+        }
 
-      // Show/hide empty state
-      const emptyState = document.getElementById("player-empty-state");
-      if (all.length === 0) {
-        emptyState.style.display = "";
-        emptyState.querySelector("p").textContent = "No finished videos available.";
-      } else if (!select.value) {
-        emptyState.style.display = "";
-        emptyState.querySelector("p").textContent = "Select a finished video to play.";
+        // Show/hide empty state
+        const emptyState = document.getElementById("player-empty-state");
+        if (all.length === 0) {
+          emptyState.style.display = "";
+          emptyState.querySelector("p").textContent = "No finished videos available.";
+        } else if (!select.value) {
+          emptyState.style.display = "";
+          emptyState.querySelector("p").textContent = "Select a finished video to play.";
+        }
+      };
+      if (select.updateComplete) {
+        select.updateComplete.then(restoreAndUpdateEmpty);
+      } else {
+        requestAnimationFrame(restoreAndUpdateEmpty);
       }
     } catch (e) {
       console.error("Failed to load player job list:", e);

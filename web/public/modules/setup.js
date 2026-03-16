@@ -225,6 +225,7 @@ export class SetupController {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ platform }),
       });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       if (data.success) {
         const dialog = document.getElementById("auto-cookie-setup-dialog");
@@ -273,6 +274,7 @@ export class SetupController {
 
     try {
       const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       const ytOk = data.authenticated;
       const twOk = data.twitchAuthenticated;

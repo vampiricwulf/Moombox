@@ -43,6 +43,7 @@ export class SegmentPlayer {
 
   /** Reset all state. */
   reset() {
+    if (this._seekAbort) { this._seekAbort.abort(); this._seekAbort = null; }
     this.segments = null;
     this.segOffsets = null;
     this.segIdx = 0;
@@ -98,6 +99,9 @@ export class SegmentPlayer {
   seekToGlobalTime(globalSeconds, video) {
     if (!this.segOffsets || this.segOffsets.length === 0) return;
 
+    // Cancel any pending cross-segment seek listener from a previous call
+    if (this._seekAbort) this._seekAbort.abort();
+
     for (let i = 0; i < this.segOffsets.length; i++) {
       const seg = this.segOffsets[i];
       const segEnd = seg.startOffset + (seg.durationSeconds || 0);
@@ -105,10 +109,12 @@ export class SegmentPlayer {
         if (i !== this.segIdx) {
           const wasPlaying = !video.paused;
           this.loadSegment(i, video);
+          this._seekAbort = new AbortController();
           video.addEventListener("loadeddata", () => {
+            this._seekAbort = null;
             video.currentTime = globalSeconds - seg.startOffset;
             if (wasPlaying) video.play();
-          }, { once: true });
+          }, { once: true, signal: this._seekAbort.signal });
         } else {
           video.currentTime = globalSeconds - seg.startOffset;
         }

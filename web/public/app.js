@@ -309,6 +309,14 @@ class MoomboxApp {
       });
     }
 
+    // Theme toggle
+    const themeToggle = document.getElementById("theme-toggle");
+    if (themeToggle) {
+      themeToggle.addEventListener("click", () => {
+        this.setTheme(this.theme === "dark" ? "light" : "dark");
+      });
+    }
+
     // Update dialog buttons
     const updateNowBtn = document.getElementById("update-now-btn");
     if (updateNowBtn) updateNowBtn.addEventListener("click", () => this.applyUpdate());
@@ -657,8 +665,9 @@ class MoomboxApp {
       // Refresh status (cookie + Twitch auth) on reconnect
       this.loadStatus();
       // Reload config on reconnect so the form reflects any server-side changes
-      // (e.g., config saved via TUI, or restart-required settings that were applied)
-      if (isReconnect) this.loadConfig();
+      // (e.g., config saved via TUI, or restart-required settings that were applied).
+      // Skip if user has unsaved changes to avoid silently overwriting their edits.
+      if (isReconnect && !this.settings._dirty) this.loadConfig();
       // Restart countdown interval (cleared above to prevent duplicates)
       if (!this._countdownInterval) {
         this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);
@@ -993,6 +1002,19 @@ class MoomboxApp {
   updateJobCard(job) {
     const card = document.querySelector(`.video-item[data-job-id="${job.id}"]`);
     if (!card) return;
+
+    // Update title and channel (can change for live streams)
+    const titleEl = card.querySelector(".stream-title");
+    if (titleEl) {
+      const isTwitch = job.platform === "twitch";
+      const platformBadge = isTwitch
+        ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
+        : '';
+      titleEl.innerHTML = platformBadge + this.escapeHtml(job.title);
+      titleEl.title = job.title;
+    }
+    const authorEl = card.querySelector(".stream-author");
+    if (authorEl) authorEl.textContent = job.channelName;
 
     // Update status badge and data-status
     const statusClass = job.status.toLowerCase().replace("?", "");
@@ -1523,14 +1545,17 @@ class MoomboxApp {
   async loadJobLogs(jobId) {
     try {
       const response = await fetch(`/api/jobs/${jobId}/logs`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const logs = await response.json();
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) {
         logsEl.textContent =
-          logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
+          Array.isArray(logs) && logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
       }
     } catch (e) {
       console.error("Failed to load job logs:", e);
+      const logsEl = document.getElementById("job-logs-content");
+      if (logsEl) logsEl.textContent = "Failed to load logs.";
     }
   }
 
@@ -1839,12 +1864,13 @@ class MoomboxApp {
     });
   }
 
-  async cancelJob() {
-    if (!this.selectedJobId) return;
+  async cancelJob(jobId) {
+    const id = jobId || this.selectedJobId;
+    if (!id) return;
     if (!await this.showConfirm("Are you sure you want to cancel this job?", { okLabel: "Cancel Job", okVariant: "danger" })) return;
 
     try {
-      const response = await fetch(`/api/jobs/${this.selectedJobId}/cancel`, {
+      const response = await fetch(`/api/jobs/${id}/cancel`, {
         method: "POST",
       });
       if (response.ok) {
@@ -1858,11 +1884,12 @@ class MoomboxApp {
     }
   }
 
-  async retryJob() {
-    if (!this.selectedJobId) return;
+  async retryJob(jobId) {
+    const id = jobId || this.selectedJobId;
+    if (!id) return;
 
     try {
-      const response = await fetch(`/api/jobs/${this.selectedJobId}/retry`, {
+      const response = await fetch(`/api/jobs/${id}/retry`, {
         method: "POST",
       });
       if (response.ok) {
@@ -1876,12 +1903,13 @@ class MoomboxApp {
     }
   }
 
-  async deleteJob() {
-    if (!this.selectedJobId) return;
+  async deleteJob(jobId) {
+    const id = jobId || this.selectedJobId;
+    if (!id) return;
     if (!await this.showConfirm("Are you sure you want to delete this job?", { okLabel: "Delete", okVariant: "danger" })) return;
 
     try {
-      const response = await fetch(`/api/jobs/${this.selectedJobId}`, {
+      const response = await fetch(`/api/jobs/${id}`, {
         method: "DELETE",
       });
       if (response.ok) {
@@ -2235,11 +2263,10 @@ class MoomboxApp {
   // ===== Quick Actions =====
 
   quickAction(action, jobId) {
-    this.selectedJobId = jobId;
     switch (action) {
-      case "cancel": this.cancelJob(); break;
-      case "retry": this.retryJob(); break;
-      case "delete": this.deleteJob(); break;
+      case "cancel": this.cancelJob(jobId); break;
+      case "retry": this.retryJob(jobId); break;
+      case "delete": this.deleteJob(jobId); break;
     }
   }
 

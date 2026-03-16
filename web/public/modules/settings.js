@@ -569,9 +569,6 @@ export class SettingsController {
       payload.notifications = config.notifications;
     }
 
-    // Update local config cache with form values
-    Object.assign(config, payload);
-
     try {
       const response = await fetch("/api/config", {
         method: "PUT",
@@ -580,6 +577,8 @@ export class SettingsController {
       });
 
       if (response.ok) {
+        // Update local config cache only after successful save
+        Object.assign(config, payload);
         this._dirty = false;
         this._updateUnsavedIndicator();
         this.app.showToast("Settings saved successfully", "success");
@@ -757,49 +756,56 @@ export class SettingsController {
     const container = document.getElementById("channels-list");
     if (!container) return;
 
+    // Use event delegation to avoid per-card listeners that leak on re-render
+    if (container._dragDelegated) return;
+    container._dragDelegated = true;
+
     let draggedIndex = null;
 
-    container.querySelectorAll(".channel-card[draggable]").forEach((card) => {
-      card.addEventListener("dragstart", (e) => {
-        draggedIndex = parseInt(card.dataset.index);
-        card.classList.add("dragging");
-        e.dataTransfer.effectAllowed = "move";
-      });
+    container.addEventListener("dragstart", (e) => {
+      const card = e.target.closest(".channel-card[draggable]");
+      if (!card) return;
+      draggedIndex = parseInt(card.dataset.index);
+      card.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+    });
 
-      card.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        // Remove previous drag-over indicators
-        container.querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
-        card.classList.add("drag-over");
-      });
+    container.addEventListener("dragover", (e) => {
+      const card = e.target.closest(".channel-card[draggable]");
+      if (!card) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      container.querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
+      card.classList.add("drag-over");
+    });
 
-      card.addEventListener("dragleave", () => {
-        card.classList.remove("drag-over");
-      });
+    container.addEventListener("dragleave", (e) => {
+      const card = e.target.closest(".channel-card[draggable]");
+      if (card) card.classList.remove("drag-over");
+    });
 
-      card.addEventListener("drop", (e) => {
-        e.preventDefault();
-        const targetIndex = parseInt(card.dataset.index);
-        card.classList.remove("drag-over");
+    container.addEventListener("drop", (e) => {
+      const card = e.target.closest(".channel-card[draggable]");
+      if (!card) return;
+      e.preventDefault();
+      const targetIndex = parseInt(card.dataset.index);
+      card.classList.remove("drag-over");
 
-        if (draggedIndex !== null && draggedIndex !== targetIndex && this.app.config?.channels) {
-          const channels = this.app.config.channels;
-          const [moved] = channels.splice(draggedIndex, 1);
-          channels.splice(targetIndex, 0, moved);
+      if (draggedIndex !== null && draggedIndex !== targetIndex && this.app.config?.channels) {
+        const channels = this.app.config.channels;
+        const [moved] = channels.splice(draggedIndex, 1);
+        channels.splice(targetIndex, 0, moved);
 
-          // Save reordered channels via dedicated endpoint
-          this.saveChannelOrder(channels).then(() => {
-            this.renderChannelsList();
-          });
-        }
-      });
-
-      card.addEventListener("dragend", () => {
-        draggedIndex = null;
-        container.querySelectorAll(".dragging, .drag-over").forEach((el) => {
-          el.classList.remove("dragging", "drag-over");
+        this.saveChannelOrder(channels).then(() => {
+          this.renderChannelsList();
         });
+      }
+    });
+
+    container.addEventListener("dragend", () => {
+      draggedIndex = null;
+      container.querySelectorAll(".dragging, .drag-over").forEach((el) => {
+        el.classList.remove("dragging", "drag-over");
       });
     });
   }

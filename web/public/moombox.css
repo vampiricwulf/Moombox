@@ -2142,6 +2142,9 @@ html.sl-theme-light {
 .version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-400); letter-spacing: -0.02em; }
 .version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
 .version-indicator.has-update:hover { text-decoration: underline; }
+#theme-toggle { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
+#theme-toggle::part(base) { padding: 0; min-height: auto; min-width: auto; }
+#theme-toggle:hover { color: var(--sl-color-neutral-700); }
 #update-release-notes { max-height: 400px; overflow-y: auto; white-space: pre-wrap; font-size: 0.9em; }
 
 /* Respect reduced motion preferences */
