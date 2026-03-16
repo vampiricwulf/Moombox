@@ -1274,15 +1274,15 @@ sl-progress-bar {
 }
 
 .chat-msg-author.owner {
-    color: #facc15;
+    color: var(--sl-color-warning-600);
 }
 
 .chat-msg-author.moderator {
-    color: #60a5fa;
+    color: var(--sl-color-primary-600);
 }
 
 .chat-msg-author.member {
-    color: #4ade80;
+    color: var(--sl-color-success-600);
 }
 
 .chat-msg.superchat {
@@ -1649,7 +1649,7 @@ sl-progress-bar {
     top: 0;
     bottom: 0;
     width: 2px;
-    background-color: #fff;
+    background-color: var(--sl-color-neutral-1000);
     box-shadow: 0 0 3px rgba(0, 0, 0, 0.6);
     pointer-events: none;
     z-index: 3;

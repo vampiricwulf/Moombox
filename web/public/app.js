@@ -639,10 +639,14 @@ class MoomboxApp {
   // ===== WebSocket Management =====
 
   connectWebSocket() {
-    // Clear countdown interval to prevent duplicates on reconnect
+    // Clear timers to prevent duplicates on reconnect
     if (this._countdownInterval) {
       clearInterval(this._countdownInterval);
       this._countdownInterval = null;
+    }
+    if (this._pingInterval) {
+      clearInterval(this._pingInterval);
+      this._pingInterval = null;
     }
 
     // Close any existing connection to prevent zombie sockets
@@ -682,7 +686,7 @@ class MoomboxApp {
             this.ws.close();
             return;
           }
-          this.ws.send(JSON.stringify({ type: "ping" }));
+          try { this.ws.send(JSON.stringify({ type: "ping" })); } catch { /* connection closed between check and send */ }
         }
       }, 15000);
     };
@@ -1554,16 +1558,23 @@ class MoomboxApp {
   }
 
   async loadJobLogs(jobId) {
+    // Abort any in-flight log fetch (e.g. user switched to a different job)
+    if (this._jobLogsAbort) this._jobLogsAbort.abort();
+    this._jobLogsAbort = new AbortController();
+
     try {
-      const response = await fetch(`/api/jobs/${jobId}/logs`);
+      const response = await fetch(`/api/jobs/${jobId}/logs`, { signal: this._jobLogsAbort.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const logs = await response.json();
+      // Only update if this job is still selected
+      if (this.selectedJobId !== jobId) return;
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) {
         logsEl.textContent =
           Array.isArray(logs) && logs.length > 0 ? logs.join("\n") : "No logs for this job yet.";
       }
     } catch (e) {
+      if (e.name === "AbortError") return; // Superseded by a new fetch
       console.error("Failed to load job logs:", e);
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) logsEl.textContent = "Failed to load logs.";
