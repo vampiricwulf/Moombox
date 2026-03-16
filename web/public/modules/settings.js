@@ -588,7 +588,7 @@ export class SettingsController {
         // Check if any restart-required settings changed
         this._checkRestartRequired(config);
       } else {
-        const data = await response.json().catch(() => ({}));
+        const data = await response.json().catch(() => ({ error: response.statusText }));
         let msg = data.error || "Failed to save settings";
         if (data.details) {
           const fields = Object.entries(data.details).map(([k, v]) => `${k}: ${v}`).join(", ");

@@ -424,6 +424,9 @@ export class PlayerController {
       ]);
       const jobs = jobsRes.ok ? await jobsRes.json() : [];
       const archived = archivedRes.ok ? await archivedRes.json() : [];
+      if (!jobsRes.ok && !archivedRes.ok) {
+        this.app.showToast("Failed to load video list", "warning");
+      }
 
       const all = [...jobs, ...archived]
         .filter((j) => j.status === "Finished" && j.filename)

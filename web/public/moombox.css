@@ -3,7 +3,7 @@
 :root {
     --status-upcoming: #9333ea;
     --status-live: #2ecc71;
-    --status-downloading: #2ecc71;
+    --status-downloading: #3498db;
     --status-muxing: #f1c40f;
     --status-finished: #1abc9c;
     --status-error: #e74c3c;
@@ -1956,7 +1956,7 @@ sl-progress-bar {
 html.sl-theme-light {
     --status-upcoming: #7c3aed;
     --status-live: #229954;
-    --status-downloading: #229954;
+    --status-downloading: #2471a3;
     --status-muxing: #d4ac0d;
     --status-finished: #16a085;
     --status-error: #c0392b;
@@ -2162,5 +2162,16 @@ html.sl-theme-light {
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
     }
-    .nico-message { display: none !important; }
+    /* Show nico messages as static stacked text instead of hiding them */
+    #player-nico-overlay {
+        display: flex !important;
+        flex-direction: column;
+        overflow: hidden;
+        pointer-events: none;
+    }
+    .nico-message {
+        position: static !important;
+        transform: none !important;
+        opacity: 0.7;
+    }
 }

@@ -465,13 +465,16 @@ export class TrimController {
     this._el.submitBtn.loading = true;
     try {
       await this.app.createTrim(this.job.id, startTime, endTime);
+      // Save ref before hide — destroy() clears _el on sl-after-hide,
+      // which fires before the timeout under prefers-reduced-motion.
+      const detailsDlg = this._el.details;
       this._el.dialog.hide();
       // Reopen details dialog to show updated trims
-      setTimeout(() => this._el.details.show(), 100);
+      setTimeout(() => detailsDlg?.show(), 100);
     } catch (error) {
       // Error already shown by createTrim()
     } finally {
-      this._el.submitBtn.loading = false;
+      if (this._el.submitBtn) this._el.submitBtn.loading = false;
     }
   }
 }

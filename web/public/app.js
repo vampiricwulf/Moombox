@@ -614,7 +614,7 @@ class MoomboxApp {
         this.showToast("Update applied. Restarting...", "success");
         document.getElementById("update-dialog")?.hide();
       } else {
-        const data = await resp.json().catch(() => ({}));
+        const data = await resp.json().catch(() => ({ error: resp.statusText }));
         this.showToast("Update failed: " + (data.error || "Unknown error"), "danger");
       }
     } catch (e) {
@@ -1655,7 +1655,7 @@ class MoomboxApp {
         document.getElementById("add-dialog").hide();
         this.showToast("Video added successfully", "success");
       } else {
-        const data = await response.json().catch(() => ({}));
+        const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to add video", "danger");
       }
     } catch (e) {
@@ -1899,7 +1899,7 @@ class MoomboxApp {
       if (response.ok) {
         this.showToast("Job cancelled", "success");
       } else {
-        const data = await response.json().catch(() => ({}));
+        const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to cancel job", "danger");
       }
     } catch (e) {
@@ -1921,7 +1921,7 @@ class MoomboxApp {
       if (response.ok) {
         this.showToast("Job queued for retry", "success");
       } else {
-        const data = await response.json().catch(() => ({}));
+        const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to retry job", "danger");
       }
     } catch (e) {
@@ -1947,7 +1947,7 @@ class MoomboxApp {
         if (this.selectedJobId === id) this.selectedJobId = null;
         this.showToast("Job deleted", "success");
       } else {
-        const data = await response.json().catch(() => ({}));
+        const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to delete job", "danger");
       }
     } catch (e) {
@@ -1968,7 +1968,7 @@ class MoomboxApp {
       });
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
+        const error = await response.json().catch(() => ({ error: response.statusText }));
         throw new Error(error.error || 'Failed to create trim');
       }
 
