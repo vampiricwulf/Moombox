@@ -382,19 +382,20 @@ export class SettingsController {
     this.app.setInputValue("cfg-cookie-file", config.cookies?.cookie_file);
     this.app.setInputValue("cfg-cookie-refresh-interval", config.cookies?.refresh_interval);
 
-    // Active platform toggles — use explicit override or infer from activePlatforms status
+    // Active platform toggles — use config value if present (even empty array),
+    // fall back to live status only when config field is missing (pre-migration).
     const activePlats = config.cookies?.active_platforms;
     const activeYtSwitch = document.getElementById("cfg-active-youtube");
     const activeTwSwitch = document.getElementById("cfg-active-twitch");
     if (activeYtSwitch) {
-      if (activePlats && activePlats.length > 0) {
+      if (Array.isArray(activePlats)) {
         activeYtSwitch.checked = activePlats.includes("youtube");
       } else {
         activeYtSwitch.checked = this.app.activePlatforms?.youtube === true;
       }
     }
     if (activeTwSwitch) {
-      if (activePlats && activePlats.length > 0) {
+      if (Array.isArray(activePlats)) {
         activeTwSwitch.checked = activePlats.includes("twitch");
       } else {
         activeTwSwitch.checked = this.app.activePlatforms?.twitch === true;

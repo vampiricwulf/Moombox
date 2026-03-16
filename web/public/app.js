@@ -920,12 +920,25 @@ class MoomboxApp {
 
     const sortedJobs = this._sortJobs(filtered);
 
+    // Preserve focused job across re-renders
+    const focusedCard = container.querySelector(".video-item[data-focused]");
+    const focusedJobId = focusedCard?.dataset.jobId;
+
     container.innerHTML = sortedJobs
       .map((job) => this.renderJobItem(job))
       .join("");
 
-    // Reset focused index
-    this.focusedJobIndex = -1;
+    // Restore focused index if the job still exists, otherwise reset
+    if (focusedJobId) {
+      const newIndex = sortedJobs.findIndex(j => j.id === focusedJobId);
+      this.focusedJobIndex = newIndex >= 0 ? newIndex : -1;
+      if (newIndex >= 0) {
+        const card = container.querySelector(`.video-item[data-job-id="${focusedJobId}"]`);
+        if (card) card.setAttribute("data-focused", "");
+      }
+    } else {
+      this.focusedJobIndex = -1;
+    }
   }
 
   async fetchArchivedJobs() {
@@ -1682,7 +1695,7 @@ class MoomboxApp {
       const parts = trimmed.split(":");
       if (parts.length < 2 || parts.length > 3) return null;
       const nums = parts.map(Number);
-      if (nums.some(isNaN)) return null;
+      if (nums.some(n => isNaN(n) || n < 0)) return null;
       if (parts.length === 3) return nums[0] * 3600 + nums[1] * 60 + nums[2];
       return nums[0] * 60 + nums[1];
     }

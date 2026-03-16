@@ -27,6 +27,7 @@ export class PlayerController {
   }
 
   initPlayer() {
+    if (this.playerInitialized) return;
     this.playerInitialized = true;
 
     const jobSelect = document.getElementById("player-job-select");
@@ -554,6 +555,7 @@ export class PlayerController {
         }
       } catch (e) {
         console.error("Failed to load chat:", e);
+        this.app.showToast("Failed to load chat replay", "warning");
       }
     }
 

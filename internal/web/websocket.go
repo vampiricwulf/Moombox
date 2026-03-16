@@ -448,7 +448,7 @@ func (hub *WebSocketHub) BroadcastLog(line string) {
 	// Add to ring buffer
 	hub.logBufMu.Lock()
 	hub.logBuf = append(hub.logBuf, line)
-	if len(hub.logBuf) > 400 {
+	if len(hub.logBuf) > maxLogBuffer*2 {
 		hub.logBuf = append([]string{}, hub.logBuf[len(hub.logBuf)-maxLogBuffer:]...)
 	}
 	hub.logBufMu.Unlock()

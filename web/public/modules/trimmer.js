@@ -397,8 +397,9 @@ export class TrimController {
 
   /** @param {HTMLElement} btn */
   _flashButton(btn) {
+    if (!btn) return;
     btn.classList.add("trim-btn-flash");
-    setTimeout(() => btn.classList.remove("trim-btn-flash"), 300);
+    setTimeout(() => btn?.classList.remove("trim-btn-flash"), 300);
   }
 
   // ===== Keyboard shortcuts =====
@@ -474,7 +475,7 @@ export class TrimController {
     } catch (error) {
       // Error already shown by createTrim()
     } finally {
-      if (this._el.submitBtn) this._el.submitBtn.loading = false;
+      if (this._el?.submitBtn) this._el.submitBtn.loading = false;
     }
   }
 }

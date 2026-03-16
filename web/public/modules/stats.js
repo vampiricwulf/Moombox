@@ -50,7 +50,8 @@ export class StatsController {
     const el = document.getElementById("stats-disk");
     if (!el) return;
 
-    const pct = disk.usedPct?.toFixed(1) ?? "0.0";
+    const usedPct = isFinite(disk.usedPct) ? disk.usedPct : 0;
+    const pct = usedPct.toFixed(1);
     const freeStr = formatBytes(disk.free || 0);
     const totalStr = formatBytes(disk.total || 0);
     const usedStr = formatBytes((disk.total || 0) - (disk.free || 0));
@@ -63,7 +64,7 @@ export class StatsController {
     el.innerHTML = `
       <div class="disk-bar-container">
         <div class="disk-bar">
-          <div class="${barClass}" style="width: ${Math.min(disk.usedPct || 0, 100)}%"></div>
+          <div class="${barClass}" style="width: ${Math.min(usedPct, 100)}%"></div>
         </div>
         <div class="disk-bar-labels">
           <span>${usedStr} used of ${totalStr}</span>
@@ -138,13 +139,13 @@ export class StatsController {
     }
 
     el.style.display = "";
-    const freeGB = (disk.free / (1024 * 1024 * 1024)).toFixed(0);
+    const freeGB = ((disk.free || 0) / (1024 * 1024 * 1024)).toFixed(0);
     el.textContent = "";
     const hddIcon = document.createElement("sl-icon");
     hddIcon.name = "hdd";
     el.appendChild(hddIcon);
     el.appendChild(document.createTextNode(` ${freeGB}G free`));
-    el.title = `Disk ${Math.round(disk.usedPct)}% used`;
+    el.title = `Disk ${Math.round(isFinite(disk.usedPct) ? disk.usedPct : 0)}% used`;
 
     el.className = disk.warnLevel === "critical" ? "disk-indicator-critical" : "disk-indicator-warn";
   }
