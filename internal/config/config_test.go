@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -312,6 +313,85 @@ func TestValidationDiskThresholds(t *testing.T) {
 	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
 		t.Errorf("expected critical > warn, got critical=%d, warn=%d",
 			cfg.Disk.CriticalPercent, cfg.Disk.WarnPercent)
+	}
+}
+
+func TestChannelTermsJSON(t *testing.T) {
+	// Simple terms round-trip: the Web UI sends terms as a plain string
+	ch := ChannelConfig{
+		ID:    "UC123",
+		Name:  "Test",
+		Terms: ChannelTerms{Simple: "(?i)karaoke"},
+	}
+
+	data, err := json.Marshal(ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify JSON contains terms as a string, not a struct
+	if !strings.Contains(string(data), `"terms":"(?i)karaoke"`) {
+		t.Errorf("expected terms as plain string in JSON, got: %s", data)
+	}
+
+	var decoded ChannelConfig
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Terms.Simple != "(?i)karaoke" {
+		t.Errorf("expected simple terms '(?i)karaoke', got %q", decoded.Terms.Simple)
+	}
+	if decoded.Terms.IsMap {
+		t.Error("expected IsMap=false for simple terms")
+	}
+
+	// Named terms round-trip
+	namedCh := ChannelConfig{
+		ID:    "UC456",
+		Terms: ChannelTerms{Named: map[string]string{"stream": "live"}, IsMap: true},
+	}
+	data, err = json.Marshal(namedCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var namedDecoded ChannelConfig
+	if err := json.Unmarshal(data, &namedDecoded); err != nil {
+		t.Fatal(err)
+	}
+	if !namedDecoded.Terms.IsMap {
+		t.Error("expected IsMap=true for named terms")
+	}
+	if namedDecoded.Terms.Named["stream"] != "live" {
+		t.Errorf("expected named term 'live', got %q", namedDecoded.Terms.Named["stream"])
+	}
+
+	// Empty terms: marshals as "" (Go's omitempty doesn't suppress struct types)
+	emptyCh := ChannelConfig{ID: "UC789"}
+	data, err = json.Marshal(emptyCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var emptyDecoded ChannelConfig
+	if err := json.Unmarshal(data, &emptyDecoded); err != nil {
+		t.Fatalf("failed to unmarshal empty terms channel: %v", err)
+	}
+	if !emptyDecoded.Terms.IsEmpty() {
+		t.Error("expected empty terms after round-trip")
+	}
+
+	// Web UI sends channels as array with string terms — the critical setup wizard path
+	webPayload := `[{"id":"UC999","terms":"(?i)karaoke","platform":"youtube"},{"id":"UC000"}]`
+	var channels []ChannelConfig
+	if err := json.Unmarshal([]byte(webPayload), &channels); err != nil {
+		t.Fatalf("failed to unmarshal web UI channel payload: %v", err)
+	}
+	if len(channels) != 2 {
+		t.Fatalf("expected 2 channels, got %d", len(channels))
+	}
+	if channels[0].Terms.Simple != "(?i)karaoke" {
+		t.Errorf("expected first channel terms '(?i)karaoke', got %q", channels[0].Terms.Simple)
+	}
+	if !channels[1].Terms.IsEmpty() {
+		t.Error("expected second channel to have empty terms")
 	}
 }
 

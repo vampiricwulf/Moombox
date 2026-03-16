@@ -546,8 +546,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				log.Info("yt-dlp plugin installed from setup wizard", slog.Int("port", port))
 			}
 		},
-		OnChannelChange: kickMonitors,
-		OnRestart:       func() { triggerRestart("setup") },
+		OnRestart: func() { triggerRestart("setup") },
 	}, webServer.CfgMu())
 	routes.FFmpegRoutes(r, &routes.FFmpegDeps{
 		Cfg:   cfg,

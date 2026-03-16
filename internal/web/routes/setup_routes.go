@@ -15,12 +15,11 @@ import (
 
 // SetupDeps holds dependencies for setup wizard routes.
 type SetupDeps struct {
-	Cfg             *config.MoomboxConfig
-	Auth            *web.AuthService
-	SaveConfig      func(*config.MoomboxConfig) error
-	OnInstallYtdlp  func(port int, httpsEnabled bool)
-	OnChannelChange func()
-	OnRestart       func()
+	Cfg            *config.MoomboxConfig
+	Auth           *web.AuthService
+	SaveConfig     func(*config.MoomboxConfig) error
+	OnInstallYtdlp func(port int, httpsEnabled bool)
+	OnRestart      func()
 }
 
 // SetupRoutes registers setup wizard endpoints.

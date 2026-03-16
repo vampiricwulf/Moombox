@@ -555,10 +555,12 @@ export class SetupController {
     const networkAccess = document.getElementById("setup-network-access")?.value || "localhost";
     const externalPassword = val("setup-external-password");
 
-    // Validate password for external access
+    // Validate password for external access — navigate to Network step where the field lives
     if (networkAccess === "external" && (!externalPassword || externalPassword.length < 8)) {
       this.app.showToast("Password (min 8 characters) is required for external access", "warning");
       if (finishBtn) { finishBtn.loading = false; finishBtn.disabled = false; }
+      this.showAdvancedStep(1);
+      document.getElementById("setup-external-password")?.focus();
       return;
     }
 
