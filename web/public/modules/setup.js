@@ -352,7 +352,7 @@ export class SetupController {
         <div style="display: flex; align-items: center; gap: 0.5em; flex: 1; min-width: 0;">
           <sl-icon name="${platformIcon}" style="color: ${platformColor};"></sl-icon>
           <strong style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayName}</strong>
-          <span style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small);">${displayId}</span>
+          <span style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayId}</span>
         </div>
         <div style="display: flex; gap: 0.25em;">
           <sl-icon-button name="pencil" data-index="${i}" class="setup-ch-edit" label="Edit"></sl-icon-button>
@@ -631,7 +631,13 @@ export class SetupController {
         return true;
       } else {
         const data = await response.json();
-        this.app.showToast(data.error || "Failed to save configuration", "danger");
+        // Show specific field validation errors if available
+        let msg = data.error || "Failed to save configuration";
+        if (data.details && typeof data.details === "object") {
+          const fieldErrors = Object.values(data.details);
+          if (fieldErrors.length > 0) msg = fieldErrors.join("; ");
+        }
+        this.app.showToast(msg, "danger");
       }
     } catch (e) {
       this.app.showToast("Failed to save configuration: " + e.message, "danger");

@@ -927,6 +927,28 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		return ""
 	}
 
+	// Validate numeric ranges before building config
+	if port := vNum("port"); port != 0 && (port < 1 || port > 65535) {
+		m.errorMsg = "Port must be between 1 and 65535"
+		return ""
+	}
+	if n := vNum("numParallel"); n != 0 && n < 1 {
+		m.errorMsg = "Parallel downloads must be at least 1"
+		return ""
+	}
+	if n := vNum("maxRes"); n != 0 && n < 1 {
+		m.errorMsg = "Max resolution must be at least 1"
+		return ""
+	}
+	if n := vNum("logMaxSize"); n != 0 && (n < 1024 || n > 1073741824) {
+		m.errorMsg = "Log max file size must be between 1024 and 1073741824 bytes"
+		return ""
+	}
+	if n := vNum("logMaxFiles"); n != 0 && (n < 1 || n > 100) {
+		m.errorMsg = "Log max files must be between 1 and 100"
+		return ""
+	}
+
 	cfg := config.Defaults()
 
 	// Network
