@@ -1138,7 +1138,7 @@ export class SettingsController {
 
       this.app.config.notifications.push({ url });
       dialog.hide();
-      await this.saveConfig();
+      await this._saveNotificationsOnly();
       this.renderNotificationsList();
     });
 
@@ -1151,7 +1151,7 @@ export class SettingsController {
 
     if (this.app.config.notifications) {
       this.app.config.notifications.splice(index, 1);
-      await this.saveConfig();
+      await this._saveNotificationsOnly();
       this.renderNotificationsList();
     }
   }
@@ -1172,7 +1172,7 @@ export class SettingsController {
       delete notif.events;
     }
 
-    await this.saveConfig();
+    await this._saveNotificationsOnly();
     this.renderNotificationsList();
   }
 
@@ -1181,7 +1181,7 @@ export class SettingsController {
     if (!notif) return;
 
     notif.events = [...ALL_EVENT_IDS];
-    await this.saveConfig();
+    await this._saveNotificationsOnly();
     this.renderNotificationsList();
   }
 
@@ -1190,8 +1190,30 @@ export class SettingsController {
     if (!notif) return;
 
     delete notif.events;
-    await this.saveConfig();
+    await this._saveNotificationsOnly();
     this.renderNotificationsList();
+  }
+
+  /**
+   * Save only the notifications section to avoid side-effects on other unsaved
+   * settings. The server-side PUT /api/config merges — omitted sections are untouched.
+   */
+  async _saveNotificationsOnly() {
+    try {
+      const response = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notifications: this.app.config.notifications || [] }),
+      });
+      if (response.ok) {
+        this.app.showToast("Notifications updated", "success");
+      } else {
+        const data = await response.json();
+        this.app.showToast(data.error || "Failed to save notifications", "danger");
+      }
+    } catch (e) {
+      this.app.showToast("Failed to save notifications: " + e.message, "danger");
+    }
   }
 
   // ===== yt-dlp Plugin Methods =====

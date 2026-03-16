@@ -105,7 +105,10 @@ export class StatsController {
     el.appendChild(this._createCard("Twitch Jobs", (byPlat.twitch || 0).toLocaleString()));
 
     if (this.app._uptimeSeconds) {
-      el.appendChild(this._createCard("Uptime", formatDurationSeconds(Math.floor(this.app._uptimeSeconds))));
+      const elapsed = this.app._uptimeCapturedAt
+        ? Math.floor((Date.now() - this.app._uptimeCapturedAt) / 1000)
+        : 0;
+      el.appendChild(this._createCard("Uptime", formatDurationSeconds(this.app._uptimeSeconds + elapsed)));
     }
   }
 

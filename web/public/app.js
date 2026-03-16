@@ -150,7 +150,8 @@ class MoomboxApp {
     document
       .getElementById("details-trim-btn")
       .addEventListener("click", () => {
-        const job = this.jobs.find(j => j.id === this.selectedJobId);
+        const job = this.jobs.find(j => j.id === this.selectedJobId)
+          || this.archivedJobs.find(j => j.id === this.selectedJobId);
         if (job) this.openTrimDialog(job);
       });
     document
@@ -415,7 +416,10 @@ class MoomboxApp {
         this.activePlatforms = status.activePlatforms || {};
         if (status.version) this._version = status.version;
         if (status.updateAvailable) this._updateAvailable = status.updateAvailable;
-        if (status.uptime) this._uptimeSeconds = status.uptime;
+        if (status.uptime) {
+          this._uptimeSeconds = status.uptime;
+          this._uptimeCapturedAt = Date.now();
+        }
         if (status.disk) this.stats.updateDiskIndicator(status.disk);
         this.updateVersionIndicator();
         this.updateStatusBar();
@@ -1947,6 +1951,11 @@ class MoomboxApp {
         const jobIndex = this.jobs.findIndex(j => j.id === jobId);
         if (jobIndex !== -1) {
           this.jobs[jobIndex] = updatedJob;
+        } else {
+          const archivedIndex = this.archivedJobs.findIndex(j => j.id === jobId);
+          if (archivedIndex !== -1) {
+            this.archivedJobs[archivedIndex] = updatedJob;
+          }
         }
         this.renderJobDetails(updatedJob);
         this.loadJobLogs(jobId);
