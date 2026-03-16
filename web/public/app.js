@@ -650,11 +650,15 @@ class MoomboxApp {
 
     this.ws.onopen = () => {
       console.log("WebSocket connected");
+      const isReconnect = this.reconnectAttempts > 0;
       this.reconnectAttempts = 0;
       this._lastPong = Date.now();
       this.updateConnectionStatus(true);
       // Refresh status (cookie + Twitch auth) on reconnect
       this.loadStatus();
+      // Reload config on reconnect so the form reflects any server-side changes
+      // (e.g., config saved via TUI, or restart-required settings that were applied)
+      if (isReconnect) this.loadConfig();
       // Restart countdown interval (cleared above to prevent duplicates)
       if (!this._countdownInterval) {
         this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);

@@ -580,7 +580,7 @@ sl-badge.status.cookies::part(base) {
     border-radius: var(--sl-border-radius-medium);
     padding: var(--sl-spacing-small);
     overflow-y: auto;
-    white-space: pre;
+    white-space: pre-wrap;
     word-break: break-all;
 }
 

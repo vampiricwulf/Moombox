@@ -1057,17 +1057,6 @@ export class SetupController {
     document.getElementById("ffmpeg-manual-install").style.display = "";
   }
 
-  /** Persist a validated FFmpeg path to config so it survives restart. */
-  async saveFFmpegPath(path) {
-    try {
-      await fetch("/api/config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths: { ffmpeg_path: path } }),
-      });
-    } catch { /* best-effort — FFmpeg is already validated */ }
-  }
-
   async checkFFmpegPath(inputId, resultId, btnId) {
     const input = document.getElementById(inputId);
     const resultEl = document.getElementById(resultId);
@@ -1093,8 +1082,7 @@ export class SetupController {
       const data = await resp.json();
 
       if (data.valid) {
-        // Save the custom FFmpeg path to config (parity with TUI behavior)
-        this.saveFFmpegPath(path);
+        // POST /api/ffmpeg/check already saves the path to config on the server side
 
         let html = `<sl-alert variant="success" open>Valid: ${this.esc(data.version)}</sl-alert>`;
         if (data.warning) {
