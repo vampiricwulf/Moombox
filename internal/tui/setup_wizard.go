@@ -881,7 +881,7 @@ func (m *SetupWizardModel) handleAdvancedChannelKey(key string) string {
 		func() string {
 			// Go back to cookie step (not destructive — channels are preserved)
 			m.advancedCookieDone = false
-			m.cookieFocus = 0
+			m.cookieFocus = 2 // Focus "Skip / Next" since user already passed cookies
 			return ""
 		},
 		func() string { return m.finishAdvancedSetup() },

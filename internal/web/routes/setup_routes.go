@@ -147,27 +147,23 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 			os.MkdirAll(stagingDir, 0o755)
 		}
 
-		// Kick monitors to pick up any channels added during setup
-		if deps.OnChannelChange != nil {
-			deps.OnChannelChange()
-		}
-
-		// Install yt-dlp plugin if requested (before restart so it uses the new config values)
-		if installYtdlp && deps.OnInstallYtdlp != nil {
-			deps.OnInstallYtdlp(port, httpsEnabled)
-		}
-
+		// Send response before yt-dlp install / restart to avoid client timeout
 		jsonResponse(rw, map[string]any{"success": true})
 
-		// Trigger a restart so all services re-initialize with new config
-		if deps.OnRestart != nil {
-			go func() {
-				defer func() {
-					recover() // restart panics are non-recoverable; prevent process crash
-				}()
-				time.Sleep(500 * time.Millisecond)
-				deps.OnRestart()
+		// Trigger yt-dlp install (if requested) and restart in background.
+		// OnChannelChange is intentionally NOT called here — the restart
+		// re-initializes all services with the new config, including monitors.
+		go func() {
+			defer func() {
+				recover() // restart panics are non-recoverable; prevent process crash
 			}()
-		}
+			if installYtdlp && deps.OnInstallYtdlp != nil {
+				deps.OnInstallYtdlp(port, httpsEnabled)
+			}
+			time.Sleep(500 * time.Millisecond)
+			if deps.OnRestart != nil {
+				deps.OnRestart()
+			}
+		}()
 	})
 }

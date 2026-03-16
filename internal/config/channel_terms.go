@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 
 	"github.com/BurntSushi/toml"
@@ -57,6 +58,36 @@ func (ct ChannelTerms) MarshalTOML() ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSpace(buf.Bytes()), nil
+}
+
+// MarshalJSON serializes ChannelTerms as a JSON string (simple) or object (named).
+// This ensures the Web UI receives terms in a natural format rather than
+// the internal struct layout.
+func (ct ChannelTerms) MarshalJSON() ([]byte, error) {
+	if ct.IsMap {
+		return json.Marshal(ct.Named)
+	}
+	return json.Marshal(ct.Simple)
+}
+
+// UnmarshalJSON deserializes ChannelTerms from a JSON string or object.
+// Accepts both "regex" (simple) and {"key": "regex"} (named) formats.
+func (t *ChannelTerms) UnmarshalJSON(data []byte) error {
+	// Try string first (simple terms)
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		t.Simple = s
+		t.IsMap = false
+		return nil
+	}
+	// Try object (named terms)
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err == nil {
+		t.Named = m
+		t.IsMap = true
+		return nil
+	}
+	return fmt.Errorf("ChannelTerms must be a string or object, got: %s", string(data))
 }
 
 // UnmarshalTOML implements the TOML unmarshaler interface.
