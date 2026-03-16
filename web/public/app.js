@@ -406,9 +406,17 @@ class MoomboxApp {
       const response = await fetch("/api/config");
       if (response.ok) {
         this.config = await response.json();
-        this.settings.populateConfigForm();
-        this.settings.renderChannelsList();
-        this.settings.renderNotificationsList();
+        if (this.settings._dirty) {
+          // User has unsaved form changes — only update lists and status bar
+          // without overwriting form fields (channel/notification operations
+          // trigger loadConfig but shouldn't discard unsaved edits)
+          this.settings.renderChannelsList();
+          this.settings.renderNotificationsList();
+        } else {
+          this.settings.populateConfigForm();
+          this.settings.renderChannelsList();
+          this.settings.renderNotificationsList();
+        }
         this.updateStatusBar();
       }
     } catch (e) {
