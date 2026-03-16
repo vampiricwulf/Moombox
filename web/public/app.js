@@ -473,7 +473,7 @@ class MoomboxApp {
 
     try {
       const response = await fetch("/api/cookies/auto-refresh", { method: "POST" });
-      const data = await response.json().catch(() => ({}));
+      const data = await response.json().catch(() => ({ error: response.statusText }));
       if (response.ok && !data.error) {
         if (data.cookieStatus) this.cookieStatus = data.cookieStatus;
         if (data.twitchAuthStatus) this.twitchAuthStatus = data.twitchAuthStatus;
