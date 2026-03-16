@@ -240,6 +240,7 @@ func (m *SetupWizardModel) Open() {
 	m.escConfirm = false
 	m.advancedCookieDone = false
 	m.saving = false
+	m.textInput.Blur()
 
 	// Check FFmpeg availability
 	if m.OnCheckFFmpeg != nil {

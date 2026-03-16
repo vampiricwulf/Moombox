@@ -396,7 +396,7 @@ export class SetupController {
     const enabledCb = document.getElementById("setup-ch-enabled");
     if (enabledCb) enabledCb.checked = true;
     const saveBtn = document.getElementById("setup-ch-save");
-    if (saveBtn) saveBtn.textContent = "Add Channel";
+    if (saveBtn) { saveBtn.textContent = "Add Channel"; saveBtn.loading = false; }
     this.updateChannelDialogFields();
     if (dialog) dialog.show();
   }

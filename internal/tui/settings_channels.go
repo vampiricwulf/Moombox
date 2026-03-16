@@ -32,8 +32,8 @@ func channelToValues(ch config.ChannelConfig) map[string]string {
 
 func valuesToChannel(vals map[string]string) config.ChannelConfig {
 	ch := config.ChannelConfig{
-		ID:       vals["id"],
-		Name:     vals["name"],
+		ID:       strings.TrimSpace(vals["id"]),
+		Name:     strings.TrimSpace(vals["name"]),
 		Platform: vals["platform"],
 	}
 	switch vals["enabled"] {
