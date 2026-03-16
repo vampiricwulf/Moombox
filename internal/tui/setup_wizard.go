@@ -927,25 +927,41 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		return ""
 	}
 
-	// Validate numeric ranges before building config
+	// Validate numeric ranges before building config (must match API validateConfigUpdates)
 	if port := vNum("port"); port != 0 && (port < 1 || port > 65535) {
-		m.errorMsg = "Port must be between 1 and 65535"
-		return ""
-	}
-	if n := vNum("numParallel"); n != 0 && n < 1 {
-		m.errorMsg = "Parallel downloads must be at least 1"
-		return ""
-	}
-	if n := vNum("maxRes"); n != 0 && n < 1 {
-		m.errorMsg = "Max resolution must be at least 1"
+		m.errorMsg = "Network: Port must be between 1 and 65535"
 		return ""
 	}
 	if n := vNum("logMaxSize"); n != 0 && (n < 1024 || n > 1073741824) {
-		m.errorMsg = "Log max file size must be between 1024 and 1073741824 bytes"
+		m.errorMsg = "Logs: Max file size must be between 1024 and 1073741824 bytes"
 		return ""
 	}
 	if n := vNum("logMaxFiles"); n != 0 && (n < 1 || n > 100) {
-		m.errorMsg = "Log max files must be between 1 and 100"
+		m.errorMsg = "Logs: Max files must be between 1 and 100"
+		return ""
+	}
+	if n := vNum("maxFeedItems"); n != 0 && (n < 1 || n > 100) {
+		m.errorMsg = "Monitors: Max feed items must be between 1 and 100"
+		return ""
+	}
+	if n := vNum("feedCheckInterval"); n != 0 && (n < 1 || n > 1440) {
+		m.errorMsg = "Monitors: Feed check interval must be between 1 and 1440 minutes"
+		return ""
+	}
+	if n := vNum("numParallel"); n != 0 && n < 1 {
+		m.errorMsg = "Downloader: Parallel downloads must be at least 1"
+		return ""
+	}
+	if n := vNum("maxRes"); n != 0 && n < 1 {
+		m.errorMsg = "Downloader: Max resolution must be at least 1"
+		return ""
+	}
+	if n := vNum("segmentRetryDelayCap"); n != 0 && (n < 1 || n > 300) {
+		m.errorMsg = "Downloader: Retry delay cap must be between 1 and 300 seconds"
+		return ""
+	}
+	if n := vNum("segmentLiveCheckRetries"); n != 0 && (n < 1 || n > 100) {
+		m.errorMsg = "Downloader: Live check retries must be between 1 and 100"
 		return ""
 	}
 

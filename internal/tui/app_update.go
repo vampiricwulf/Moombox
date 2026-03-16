@@ -408,10 +408,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case setupCookieFinishMsg:
-		if msg.Platform == "youtube" {
-			a.setupWiz.cookieYTDone = msg.YTAuth
-		} else {
-			a.setupWiz.cookieTWDone = msg.TWAuth
+		// Update both platform flags — extraction may detect cookies for either
+		// platform regardless of which was targeted (matches Web UI behavior).
+		if msg.YTAuth {
+			a.setupWiz.cookieYTDone = true
+		}
+		if msg.TWAuth {
+			a.setupWiz.cookieTWDone = true
 		}
 		a.setupWiz.cookieActive = false
 		a.setupWiz.cookieFinishing = false

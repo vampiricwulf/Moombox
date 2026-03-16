@@ -1318,7 +1318,7 @@
                 <div class="setup-page" id="setup-adv-step-1" style="display: none">
                     <h2>Network</h2>
                     <p class="setup-help">Leave fields empty to use defaults.</p>
-                    <sl-input id="setup-port" type="number" label="Dashboard Port" placeholder="774" help-text="Web dashboard & API port (default: 774)"></sl-input>
+                    <sl-input id="setup-port" type="number" label="Dashboard Port" placeholder="774" min="1" max="65535" help-text="Web dashboard & API port (default: 774)"></sl-input>
                     <sl-switch id="setup-https-enabled" style="margin-bottom: 1em;">Enable HTTPS</sl-switch>
                     <sl-select id="setup-network-access" label="Network Access" value="localhost" help-text="Controls who can access the dashboard">
                         <sl-option value="localhost">Localhost Only</sl-option>
@@ -1362,8 +1362,8 @@
                         <sl-option value="ERROR">ERROR</sl-option>
                     </sl-select>
                     <sl-input id="setup-log-file" label="Log File Path" placeholder="./moombox.log"></sl-input>
-                    <sl-input id="setup-log-max-size" type="number" label="Max Log File Size (bytes)" placeholder="10485760"></sl-input>
-                    <sl-input id="setup-log-max-files" type="number" label="Max Log Files" placeholder="5"></sl-input>
+                    <sl-input id="setup-log-max-size" type="number" label="Max Log File Size (bytes)" placeholder="10485760" min="1024" max="1073741824"></sl-input>
+                    <sl-input id="setup-log-max-files" type="number" label="Max Log Files" placeholder="5" min="1" max="100"></sl-input>
                     <div class="setup-nav">
                         <sl-button variant="default" id="setup-adv-back-3"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
                         <sl-button variant="primary" id="setup-adv-next-3">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
@@ -1374,9 +1374,9 @@
                 <div class="setup-page" id="setup-adv-step-4" style="display: none">
                     <h2>Monitors</h2>
                     <p class="setup-help">Leave fields empty to use defaults.</p>
-                    <sl-input id="setup-hide-age" type="number" label="Hide Finished After (days)" placeholder="30"></sl-input>
-                    <sl-input id="setup-max-feed-items" type="number" label="Max Feed Items" placeholder="15"></sl-input>
-                    <sl-input id="setup-feed-check-interval" type="number" label="Feed Check Interval (minutes)" placeholder="10"></sl-input>
+                    <sl-input id="setup-hide-age" type="number" label="Hide Finished After (days)" placeholder="30" min="0"></sl-input>
+                    <sl-input id="setup-max-feed-items" type="number" label="Max Feed Items" placeholder="15" min="1" max="100"></sl-input>
+                    <sl-input id="setup-feed-check-interval" type="number" label="Feed Check Interval (minutes)" placeholder="10" min="1" max="1440"></sl-input>
                     <div class="setup-nav">
                         <sl-button variant="default" id="setup-adv-back-4"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
                         <sl-button variant="primary" id="setup-adv-next-4">Next <sl-icon slot="suffix" name="arrow-right"></sl-icon></sl-button>
@@ -1387,13 +1387,13 @@
                 <div class="setup-page" id="setup-adv-step-5" style="display: none">
                     <h2>Download Preferences</h2>
                     <p class="setup-help">Leave fields empty to use defaults.</p>
-                    <sl-input id="setup-max-resolution" type="number" label="Max Resolution" placeholder="2160"></sl-input>
+                    <sl-input id="setup-max-resolution" type="number" label="Max Resolution" placeholder="2160" min="1"></sl-input>
                     <sl-switch id="setup-prefer-60fps" checked>Prefer 60fps</sl-switch>
-                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2"></sl-input>
+                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1"></sl-input>
                     <sl-switch id="setup-download-chat" checked>Download Live Chat</sl-switch>
                     <sl-details summary="Advanced retry settings">
-                        <sl-input id="setup-retry-delay-cap" type="number" label="Retry Delay Cap (seconds)" placeholder="60"></sl-input>
-                        <sl-input id="setup-live-check-retries" type="number" label="Live Check Retries" placeholder="16"></sl-input>
+                        <sl-input id="setup-retry-delay-cap" type="number" label="Retry Delay Cap (seconds)" placeholder="60" min="1" max="300"></sl-input>
+                        <sl-input id="setup-live-check-retries" type="number" label="Live Check Retries" placeholder="16" min="1" max="100"></sl-input>
                     </sl-details>
                     <div class="setup-nav">
                         <sl-button variant="default" id="setup-adv-back-5"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>
