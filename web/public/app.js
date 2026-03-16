@@ -870,6 +870,15 @@ class MoomboxApp {
     if (this.jobs.length === 0) {
       container.innerHTML = "";
       emptyState.style.display = "flex";
+      // Reset empty state to default content (may have been changed by a filter)
+      const icon = emptyState.querySelector("sl-icon");
+      if (icon) icon.name = "inbox";
+      const msg = emptyState.querySelector("p");
+      if (msg) msg.textContent = "No jobs yet";
+      const subtext = emptyState.querySelector(".empty-state-subtext");
+      if (subtext) subtext.textContent = "Add a YouTube or Twitch URL to start archiving";
+      const cta = emptyState.querySelector(".empty-state-cta");
+      if (cta) cta.style.display = "";
       if (filterCount) { filterCount.style.display = "none"; }
       return;
     }
@@ -2081,6 +2090,9 @@ class MoomboxApp {
       const viewer = document.getElementById("logs-viewer");
       const countEl = document.getElementById("log-count");
       if (viewer) {
+        // Suppress scroll-tracking during DOM mutation so that the
+        // appendChild + scrollTop assignment don't disable auto-scroll
+        this._logRebuildingDOM = true;
         // Remove oldest DOM child if we overflowed
         if (overflowed && viewer.firstChild) {
           viewer.removeChild(viewer.firstChild);
@@ -2091,6 +2103,8 @@ class MoomboxApp {
         if (this._logAutoScroll) {
           viewer.scrollTop = viewer.scrollHeight;
         }
+        // Reset after next frame so any deferred scroll events are still suppressed
+        requestAnimationFrame(() => { this._logRebuildingDOM = false; });
         return;
       }
     }

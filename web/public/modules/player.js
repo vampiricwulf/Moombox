@@ -211,6 +211,7 @@ export class PlayerController {
       // Skip when typing in inputs
       const tag = e.target.tagName;
       if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
+      if (e.target.contentEditable === "true") return;
 
       const video = document.getElementById("player-video");
       if (!video || !video.src) return;

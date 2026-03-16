@@ -627,9 +627,16 @@ export class SettingsController {
       current[path] = resolve(config, path);
     }
 
-    const changed = RESTART_REQUIRED_FIELDS.some(
-      ({ path }) => String(current[path] ?? "") !== String(this._originalRestartValues[path] ?? ""),
-    );
+    const changed = RESTART_REQUIRED_FIELDS.some(({ path }) => {
+      const a = current[path];
+      const b = this._originalRestartValues[path];
+      // For booleans: treat null/undefined as false to avoid false positives
+      // when the server omits a field that defaults to false
+      if (typeof a === "boolean" || typeof b === "boolean") {
+        return !!a !== !!b;
+      }
+      return String(a ?? "") !== String(b ?? "");
+    });
     if (!changed) return;
 
     // Update snapshot so we don't prompt again
@@ -1173,8 +1180,13 @@ export class SettingsController {
     if (!await this.app.showConfirm("Remove this notification webhook?", { okLabel: "Remove", okVariant: "danger" })) return;
 
     if (this.app.config.notifications) {
-      this.app.config.notifications.splice(index, 1);
-      await this._saveNotificationsOnly();
+      const [removed] = this.app.config.notifications.splice(index, 1);
+      try {
+        await this._saveNotificationsOnly();
+      } catch {
+        // Revert on failure
+        this.app.config.notifications.splice(index, 0, removed);
+      }
       this.renderNotificationsList();
     }
   }
@@ -1182,6 +1194,9 @@ export class SettingsController {
   async toggleNotificationEvent(index, eventId) {
     const notif = this.app.config.notifications?.[index];
     if (!notif || !Array.isArray(notif.events)) return;
+
+    // Save a copy in case the save fails
+    const previousEvents = [...notif.events];
 
     const idx = notif.events.indexOf(eventId);
     if (idx >= 0) {
@@ -1195,7 +1210,12 @@ export class SettingsController {
       delete notif.events;
     }
 
-    await this._saveNotificationsOnly();
+    try {
+      await this._saveNotificationsOnly();
+    } catch {
+      // Revert on failure
+      notif.events = previousEvents;
+    }
     this.renderNotificationsList();
   }
 
@@ -1203,8 +1223,13 @@ export class SettingsController {
     const notif = this.app.config.notifications?.[index];
     if (!notif) return;
 
+    const previousEvents = notif.events;
     notif.events = [...ALL_EVENT_IDS];
-    await this._saveNotificationsOnly();
+    try {
+      await this._saveNotificationsOnly();
+    } catch {
+      notif.events = previousEvents;
+    }
     this.renderNotificationsList();
   }
 
@@ -1212,8 +1237,13 @@ export class SettingsController {
     const notif = this.app.config.notifications?.[index];
     if (!notif) return;
 
+    const previousEvents = notif.events;
     delete notif.events;
-    await this._saveNotificationsOnly();
+    try {
+      await this._saveNotificationsOnly();
+    } catch {
+      notif.events = previousEvents;
+    }
     this.renderNotificationsList();
   }
 
@@ -1222,20 +1252,17 @@ export class SettingsController {
    * settings. The server-side PUT /api/config merges — omitted sections are untouched.
    */
   async _saveNotificationsOnly() {
-    try {
-      const response = await fetch("/api/config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notifications: this.app.config.notifications || [] }),
-      });
-      if (response.ok) {
-        this.app.showToast("Notifications updated", "success");
-      } else {
-        const data = await response.json().catch(() => ({ error: response.statusText }));
-        this.app.showToast(data.error || "Failed to save notifications", "danger");
-      }
-    } catch (e) {
-      this.app.showToast("Failed to save notifications: " + e.message, "danger");
+    const response = await fetch("/api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notifications: this.app.config.notifications || [] }),
+    });
+    if (response.ok) {
+      this.app.showToast("Notifications updated", "success");
+    } else {
+      const data = await response.json().catch(() => ({ error: response.statusText }));
+      this.app.showToast(data.error || "Failed to save notifications", "danger");
+      throw new Error(data.error || "Failed to save notifications");
     }
   }
 
