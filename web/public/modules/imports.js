@@ -10,6 +10,7 @@ export class ImportController {
     this.importUploading = false;
     this.importInitialized = false;
     this._activeXhr = null;
+    this._clearTimeout = null;
   }
 
   initImports() {
@@ -101,17 +102,27 @@ export class ImportController {
   setImportFile(file) {
     this.importFile = file;
 
+    // Cancel any pending clear timeout from a previous completed upload
+    // to prevent it from wiping this new selection
+    if (this._clearTimeout) {
+      clearTimeout(this._clearTimeout);
+      this._clearTimeout = null;
+    }
+
     const dropzone = document.getElementById("import-dropzone");
     const fileInfo = document.getElementById("import-file-info");
     const fileName = document.getElementById("import-file-name");
     const options = document.getElementById("import-options");
     const submitBtn = document.getElementById("import-submit-btn");
+    const progress = document.getElementById("import-progress");
 
     dropzone.classList.add("has-file");
     fileInfo.style.display = "";
     fileName.textContent = `${file.name} (${formatBytes(file.size)})`;
     options.style.display = "";
     submitBtn.style.display = "";
+    // Hide stale progress from a previous upload
+    if (progress) progress.style.display = "none";
   }
 
   clearImportFile() {
@@ -184,7 +195,10 @@ export class ImportController {
         this.app.showToast("Archive imported successfully", "success");
 
         // Reset form after delay
-        setTimeout(() => this.clearImportFile(), 1500);
+        this._clearTimeout = setTimeout(() => {
+          this._clearTimeout = null;
+          this.clearImportFile();
+        }, 1500);
 
         // Refresh player job list if initialized
         if (this.app.player.playerInitialized) {

@@ -761,6 +761,12 @@ class MoomboxApp {
         this.renderJobs();
         this.renderLogs();
         this.updateCheckCountdown();
+        // Close details dialog if selected job no longer exists (e.g. deleted while disconnected)
+        if (this.selectedJobId && !this.jobs.some(j => j.id === this.selectedJobId)) {
+          const dlg = document.getElementById("details-dialog");
+          if (dlg?.open) dlg.hide();
+          this.selectedJobId = null;
+        }
         break;
 
       case "jobs_update":
@@ -769,7 +775,14 @@ class MoomboxApp {
         // Update details dialog if open (but don't reload logs)
         if (this.selectedJobId) {
           const job = this.jobs.find((j) => j.id === this.selectedJobId);
-          if (job) this.updateJobDetails(job);
+          if (job) {
+            this.updateJobDetails(job);
+          } else {
+            // Job was deleted externally (TUI, another client) — close stale dialog
+            const dlg = document.getElementById("details-dialog");
+            if (dlg?.open) dlg.hide();
+            this.selectedJobId = null;
+          }
         }
         break;
 
@@ -2045,6 +2058,13 @@ class MoomboxApp {
           this.selectedJobId = null;
         }
         this.showToast("Job deleted", "success");
+        // Optimistically remove from active jobs so the card disappears
+        // immediately (instead of waiting for the next WebSocket update)
+        const activeIdx = this.jobs.findIndex(j => j.id === id);
+        if (activeIdx !== -1) {
+          this.jobs.splice(activeIdx, 1);
+          this.renderJobs();
+        }
         // Remove from archived jobs if present (no WebSocket update for archived jobs)
         const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
         if (archivedIdx !== -1) {
