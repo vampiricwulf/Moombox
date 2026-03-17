@@ -128,6 +128,12 @@ export class ImportController {
   clearImportFile() {
     this.importFile = null;
 
+    // Cancel any pending auto-clear timeout (e.g. from completed upload)
+    if (this._clearTimeout) {
+      clearTimeout(this._clearTimeout);
+      this._clearTimeout = null;
+    }
+
     const dropzone = document.getElementById("import-dropzone");
     const fileInput = document.getElementById("import-file-input");
     const fileInfo = document.getElementById("import-file-info");
