@@ -1791,12 +1791,19 @@ class MoomboxApp {
         throw new Error("Failed to fetch formats");
       }
 
+      // Discard stale response if user changed the URL during fetch
+      if (this._lastFormatVideoId !== videoId) return;
+
       const data = await response.json();
       this.populateFormatSelects(data);
 
       formatSkeleton.style.display = "none";
       formatSection.style.display = "block";
     } catch (e) {
+      // Clear cache so the user can retry (toggling advanced off/on)
+      if (this._lastFormatVideoId === videoId) {
+        this._lastFormatVideoId = null;
+      }
       formatSkeleton.style.display = "none";
       formatSection.style.display = "block";
       console.error("Failed to fetch formats:", e);
