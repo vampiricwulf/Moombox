@@ -331,6 +331,9 @@ export class PlayerController {
   }
 
   clearPlayer() {
+    // Invalidate any in-flight fetches from a previous selection
+    this._selectionSeq++;
+
     this.playerJob = null;
     this.playerChatData = null;
     this.playerChatMessages = [];
