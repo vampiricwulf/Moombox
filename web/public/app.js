@@ -1634,6 +1634,7 @@ class MoomboxApp {
   async addVideo() {
     const input = document.getElementById("video-url-input");
     const submitBtn = document.getElementById("add-submit-btn");
+    if (submitBtn.disabled) return; // Prevent double-submit (Enter key bypasses disabled button)
     const value = input.value.trim();
 
     if (!value) return;
@@ -2778,7 +2779,7 @@ class MoomboxApp {
       } else if (result.errors && result.errors.length > 0) {
         this.showToast(`Failed: ${result.errors[0].error}`, "danger");
       }
-      this.fetchOrphanedFiles();
+      await this.fetchOrphanedFiles();
     } catch (err) {
       this.showToast("Failed to delete file", "danger");
     }
@@ -2807,7 +2808,7 @@ class MoomboxApp {
       } else {
         this.showToast(`Deleted ${count} files`, "success");
       }
-      this.fetchOrphanedFiles();
+      await this.fetchOrphanedFiles();
     } catch (err) {
       this.showToast("Failed to delete files", "danger");
     } finally {

@@ -338,6 +338,8 @@ export class PlayerController {
     this.playerChatData = null;
     this.playerChatMessages = [];
     this.twitchEmoteMap = new Map();
+    this.playerAutoScroll = true;
+    this.playerScrollLock = false;
     this.playerActiveChatIndex = 0;
     this.nicoLastSpawnMs = null;
     this.playerCustomOffsetMs = 0;
@@ -501,6 +503,10 @@ export class PlayerController {
       console.error("Failed to fetch job:", e);
       return;
     }
+
+    // Reset scroll state for new video
+    this.playerAutoScroll = true;
+    this.playerScrollLock = false;
 
     // Show viewport, hide empty state
     document.getElementById("player-viewport").style.display = "";

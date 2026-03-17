@@ -1594,7 +1594,7 @@ export class SettingsController {
 
         const meta = document.createElement("span");
         meta.className = "client-token-meta";
-        const lastUsed = token.lastUsedAt ? this.formatRelativeTime(token.lastUsedAt) : "never";
+        const lastUsed = token.lastUsedAt ? formatRelativeTime(token.lastUsedAt) : "never";
         meta.textContent = lastUsed;
 
         const revokeBtn = document.createElement("sl-icon-button");
