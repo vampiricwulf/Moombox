@@ -543,6 +543,7 @@ sl-badge.status.cookies::part(base) {
     background-color: var(--sl-color-danger-100);
     padding: var(--sl-spacing-small);
     border-radius: var(--sl-border-radius-medium);
+    word-break: break-word;
 }
 
 /* Logs panel */
@@ -1243,6 +1244,7 @@ sl-progress-bar {
     font-size: var(--sl-font-size-small);
     line-height: 1.4;
     transition: opacity 0.15s ease;
+    word-break: break-word;
 }
 
 .chat-msg:nth-child(odd) {
@@ -2159,7 +2161,7 @@ html.sl-theme-light {
 #theme-toggle { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
 #theme-toggle::part(base) { padding: 0; min-height: auto; min-width: auto; }
 #theme-toggle:hover { color: var(--sl-color-neutral-700); }
-#update-release-notes { max-height: 400px; overflow-y: auto; white-space: pre-wrap; font-size: 0.9em; }
+#update-release-notes { max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; font-size: 0.9em; }
 
 /* Respect reduced motion preferences */
 @media (prefers-reduced-motion: reduce) {
