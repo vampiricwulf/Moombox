@@ -208,6 +208,9 @@ export class PlayerController {
       const playerPanel = document.querySelector('sl-tab-panel[name="player"]');
       if (!playerPanel || !playerPanel.hasAttribute("active")) return;
 
+      // Block shortcuts when a dialog is open (e.g. trim dialog)
+      if (document.querySelector("sl-dialog[open]")) return;
+
       // Skip when typing in inputs
       const tag = e.target.tagName;
       if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
@@ -337,6 +340,8 @@ export class PlayerController {
     this.playerCustomOffsetMs = 0;
     const offsetInput = document.getElementById("player-chat-offset");
     if (offsetInput) offsetInput.value = "";
+    const chatSearch = document.getElementById("chat-search");
+    if (chatSearch && chatSearch.value) chatSearch.value = "";
 
     // Reset multi-segment state
     this._seg.reset();

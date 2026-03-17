@@ -488,7 +488,7 @@ class MoomboxApp {
       if (response.ok && !data.error) {
         if (data.cookieStatus) this.cookieStatus = data.cookieStatus;
         if (data.twitchAuthStatus) this.twitchAuthStatus = data.twitchAuthStatus;
-        if (data.autoCookieReloginRequired) this.autoCookieReloginRequired = data.autoCookieReloginRequired;
+        this.autoCookieReloginRequired = data.autoCookieReloginRequired || null;
         if (data.activePlatforms) this.activePlatforms = data.activePlatforms;
         this.updateStatusBar();
         this.showToast(
@@ -1177,6 +1177,7 @@ class MoomboxApp {
     const currentStatus = statusBadge?.textContent;
     if (currentStatus && currentStatus !== this.displayStatus(job.status)) {
       this.renderJobDetails(job);
+      this.loadJobLogs(job.id);
       return;
     }
 
@@ -2197,9 +2198,12 @@ class MoomboxApp {
     }
 
     this._logRebuildingDOM = true;
-    viewer.innerHTML = "";
-    viewer.appendChild(frag);
-    this._logRebuildingDOM = false;
+    try {
+      viewer.innerHTML = "";
+      viewer.appendChild(frag);
+    } finally {
+      this._logRebuildingDOM = false;
+    }
 
     const suffix = this.logFilter !== "all" ? ` (${this.logFilter}+)` : "";
     const searchSuffix = searchQuery ? `, matching "${searchQuery}"` : "";
