@@ -24,6 +24,8 @@ export class PlayerController {
 
     // Multi-segment playback
     this._seg = new SegmentPlayer();
+    /** Monotonic counter to detect stale responses from rapid job switching */
+    this._selectionSeq = 0;
   }
 
   initPlayer() {
@@ -487,10 +489,13 @@ export class PlayerController {
     const nicoToggle = document.getElementById("player-nico-toggle");
     const sidebarToggle = document.getElementById("player-sidebar-toggle");
 
+    // Track selection to detect stale responses from rapid switching
+    const selectionId = ++this._selectionSeq;
+
     // Fetch job details
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
-      if (!res.ok) return;
+      if (!res.ok || this._selectionSeq !== selectionId) return;
       this.playerJob = await res.json();
     } catch (e) {
       console.error("Failed to fetch job:", e);
@@ -523,6 +528,7 @@ export class PlayerController {
     if (this.playerJob.chatFilename) {
       try {
         const chatRes = await fetch(`/api/jobs/${jobId}/chat`);
+        if (this._selectionSeq !== selectionId) return; // Selection changed during fetch
         if (chatRes.ok) {
           this.playerChatData = await chatRes.json();
           // Compute chat-to-video timing correction. Chat offsets are relative to
@@ -602,6 +608,7 @@ export class PlayerController {
       if (this.playerJob.videoId) {
         try {
           const prefRes = await fetch(`/api/player-prefs/${encodeURIComponent(this.playerJob.videoId)}`);
+          if (this._selectionSeq !== selectionId) return; // Selection changed
           if (prefRes.ok) {
             const pref = await prefRes.json();
             if (pref.chatOffset && pref.chatOffset !== 0) {

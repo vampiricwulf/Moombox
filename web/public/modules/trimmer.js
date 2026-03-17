@@ -463,6 +463,7 @@ export class TrimController {
     }
 
     this._el.submitBtn.loading = true;
+    this._el.submitBtn.disabled = true;
     try {
       await this.app.createTrim(this.job.id, startTime, endTime);
       // Save ref before hide — destroy() clears _el on sl-after-hide,
@@ -474,7 +475,10 @@ export class TrimController {
     } catch (error) {
       // Error already shown by createTrim()
     } finally {
-      if (this._el?.submitBtn) this._el.submitBtn.loading = false;
+      if (this._el?.submitBtn) {
+        this._el.submitBtn.loading = false;
+        this._el.submitBtn.disabled = false;
+      }
     }
   }
 }

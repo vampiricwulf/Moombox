@@ -1639,8 +1639,9 @@ class MoomboxApp {
       return;
     }
 
-    // Show loading state immediately
+    // Show loading state and prevent double-submit
     submitBtn.loading = true;
+    submitBtn.disabled = true;
 
     try {
       let body;
@@ -1650,6 +1651,7 @@ class MoomboxApp {
         if (target.type === "clip") {
           this.showToast("Twitch clips are not supported. Use a channel or VOD URL.", "warning");
           submitBtn.loading = false;
+          submitBtn.disabled = false;
           return;
         }
         // Twitch job
@@ -1704,6 +1706,7 @@ class MoomboxApp {
       this.showToast("Failed to add video: " + e.message, "danger");
     } finally {
       submitBtn.loading = false;
+      submitBtn.disabled = false;
     }
   }
 
