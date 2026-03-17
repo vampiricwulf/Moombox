@@ -444,7 +444,7 @@ export class SetupController {
     // Resolve channel URL if it looks like a URL
     if (id.includes("youtube.com") || id.includes("youtu.be") || id.includes("twitch.tv")) {
       const saveBtn = document.getElementById("setup-ch-save");
-      if (saveBtn) saveBtn.loading = true;
+      if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
       try {
         const resp = await fetch("/api/resolve-channel", {
           method: "POST",
@@ -465,7 +465,7 @@ export class SetupController {
         this.app.showToast("Failed to resolve channel URL: " + e.message, "danger");
         return;
       } finally {
-        if (saveBtn) saveBtn.loading = false;
+        if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
       }
     }
 
