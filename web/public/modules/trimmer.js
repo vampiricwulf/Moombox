@@ -276,7 +276,7 @@ export class TrimController {
 
   _updatePlayhead() {
     if (!this._el.video || !this.duration) return;
-    const pct = (this._getGlobalTime() / this.duration) * 100;
+    const pct = Math.max(0, Math.min(100, (this._getGlobalTime() / this.duration) * 100));
     this._el.playhead.style.left = `${pct}%`;
   }
 

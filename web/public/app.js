@@ -1369,9 +1369,9 @@ class MoomboxApp {
     const content = document.getElementById("job-details-content");
     const statusClass = job.status.toLowerCase().replace("?", "");
 
-    // Show segment counts for Downloading/Muxing/Finished status
+    // Show segment counts for Live/Downloading/Muxing/Finished status
     const showSegments =
-      ["Downloading", "Muxing", "Finished"].includes(job.status) &&
+      ["Live", "Downloading", "Muxing", "Finished"].includes(job.status) &&
       (job.lastVideoSeq || job.lastAudioSeq);
     let segmentInfo = "";
     if (showSegments) {
@@ -1395,7 +1395,7 @@ class MoomboxApp {
     const isTwitch = job.platform === "twitch";
     // Extract Twitch login from URL or channelName for embed
     const twitchLogin = isTwitch
-      ? (job.url ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0] : job.channelName || "").toLowerCase()
+      ? (job.url ? job.url.replace(/.*twitch\.tv\//, "").split("/")[0].split("?")[0] : job.channelName || "").toLowerCase()
       : "";
     const twitchVodId = isTwitch && job.videoId.startsWith("tw_v") ? job.videoId.slice(4) : "";
 
@@ -1783,6 +1783,14 @@ class MoomboxApp {
           const endTime = this.parseTimeInput(endInput.value);
           if (endTime !== null && endTime > 0) {
             body.endTime = endTime;
+          }
+
+          // Validate time range if both are provided
+          if (body.startTime != null && body.endTime != null && body.endTime <= body.startTime) {
+            this.showToast("End time must be after start time", "warning");
+            submitBtn.loading = false;
+            submitBtn.disabled = false;
+            return;
           }
         }
       }

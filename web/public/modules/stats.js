@@ -57,21 +57,30 @@ export class StatsController {
     const usedStr = formatBytes((disk.total || 0) - (disk.free || 0));
     const level = disk.warnLevel || "ok";
 
-    let barClass = "disk-bar-fill";
-    if (level === "critical") barClass += " disk-critical";
-    else if (level === "warn") barClass += " disk-warn";
+    el.textContent = "";
 
-    el.innerHTML = `
-      <div class="disk-bar-container">
-        <div class="disk-bar">
-          <div class="${barClass}" style="width: ${Math.min(usedPct, 100)}%"></div>
-        </div>
-        <div class="disk-bar-labels">
-          <span>${usedStr} used of ${totalStr}</span>
-          <span>${freeStr} free (${pct}% used)</span>
-        </div>
-      </div>
-    `;
+    const container = document.createElement("div");
+    container.className = "disk-bar-container";
+
+    const bar = document.createElement("div");
+    bar.className = "disk-bar";
+    const fill = document.createElement("div");
+    fill.className = "disk-bar-fill" + (level === "critical" ? " disk-critical" : level === "warn" ? " disk-warn" : "");
+    fill.style.width = `${Math.min(usedPct, 100)}%`;
+    bar.appendChild(fill);
+    container.appendChild(bar);
+
+    const labels = document.createElement("div");
+    labels.className = "disk-bar-labels";
+    const usedLabel = document.createElement("span");
+    usedLabel.textContent = `${usedStr} used of ${totalStr}`;
+    const freeLabel = document.createElement("span");
+    freeLabel.textContent = `${freeStr} free (${pct}% used)`;
+    labels.appendChild(usedLabel);
+    labels.appendChild(freeLabel);
+    container.appendChild(labels);
+
+    el.appendChild(container);
   }
 
   renderStorage(disk, storage) {
