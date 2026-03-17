@@ -676,16 +676,26 @@ export class SettingsController {
 
     this.app.showToast("Restarting Moombox...", "primary");
 
-    fetch("/api/restart", { method: "POST" }).catch(() => {
-      // Connection will drop during restart — expected
-    });
+    let redirectTimeoutId = null;
+
+    fetch("/api/restart", { method: "POST" })
+      .then(resp => {
+        if (!resp.ok) {
+          // Restart failed — cancel any pending redirect and notify user
+          if (redirectTimeoutId) clearTimeout(redirectTimeoutId);
+          this.app.showToast("Failed to restart: " + resp.statusText, "danger");
+        }
+      })
+      .catch(() => {
+        // Connection will drop during restart — expected
+      });
 
     if (portChanged || httpsChanged) {
       const proto = newHttps ? "https:" : "http:";
       const host = window.location.hostname;
       const redirectUrl = `${proto}//${host}:${newPort}/`;
       this.app.showToast(`Redirecting to ${redirectUrl} in a few seconds...`, "primary");
-      setTimeout(() => { window.location.href = redirectUrl; }, 3500);
+      redirectTimeoutId = setTimeout(() => { window.location.href = redirectUrl; }, 3500);
     }
   }
 

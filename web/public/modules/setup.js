@@ -558,7 +558,10 @@ export class SetupController {
     if (finishBtn) { finishBtn.loading = true; finishBtn.disabled = true; }
 
     const val = (id) => (document.getElementById(id)?.value || "").trim();
-    const num = (id) => { const s = val(id); if (s === "") return undefined; const n = parseInt(s, 10); return isNaN(n) ? undefined : n; };
+    // Use Number() instead of parseInt() to preserve decimals for FlexDuration
+    // fields (e.g. feed_check_interval accepts 2.5 minutes). Integer fields
+    // are truncated server-side by Go's int() conversion.
+    const num = (id) => { const s = val(id); if (s === "") return undefined; const n = Number(s); return isNaN(n) ? undefined : n; };
 
     const port = num("setup-port");
     const networkAccess = document.getElementById("setup-network-access")?.value || "localhost";
