@@ -408,6 +408,11 @@ export class TrimController {
     // Ignore if focus is inside a text input (composedPath handles Shoelace shadow DOM)
     if (isTypingInInput(e)) return;
 
+    // Don't intercept Space/Enter on buttons — let them activate normally
+    if ((e.key === " " || e.key === "Enter") && e.composedPath().some(el =>
+      el instanceof HTMLElement && (el.tagName === "SL-BUTTON" || el.tagName === "SL-ICON-BUTTON" || el.tagName === "BUTTON")
+    )) return;
+
     switch (e.key) {
       case " ":
         e.preventDefault();

@@ -540,10 +540,10 @@ export class SetupController {
       config.channels = this.channels;
     }
     if (this.cookieYTDone || this.cookieTWDone) {
-      const platforms = [];
-      if (this.cookieYTDone) platforms.push("youtube");
-      if (this.cookieTWDone) platforms.push("twitch");
-      config.cookies = { auto_enabled: true, platforms };
+      const active_platforms = [];
+      if (this.cookieYTDone) active_platforms.push("youtube");
+      if (this.cookieTWDone) active_platforms.push("twitch");
+      config.cookies = { auto_enabled: true, active_platforms };
     }
 
     await this.submitSetup(config, finishBtn);
@@ -604,7 +604,7 @@ export class SetupController {
         cookie_file: val("setup-cookie-file") || undefined,
         ...(this.cookieYTDone || this.cookieTWDone ? {
           auto_enabled: true,
-          platforms: [
+          active_platforms: [
             ...(this.cookieYTDone ? ["youtube"] : []),
             ...(this.cookieTWDone ? ["twitch"] : []),
           ],
