@@ -762,13 +762,12 @@ class MoomboxApp {
         this.renderLogs();
         this.updateCheckCountdown();
         // Close details dialog if selected job no longer exists (e.g. deleted while disconnected)
-        // Check both active and archived lists — archived jobs are valid but not in this.jobs
+        // Check both active and archived lists — archived jobs are valid but not in this.jobs.
+        // If not in either cache, verify via API (archivedJobs may not have been fetched yet).
         if (this.selectedJobId
             && !this.jobs.some(j => j.id === this.selectedJobId)
             && !this.archivedJobs.some(j => j.id === this.selectedJobId)) {
-          const dlg = document.getElementById("details-dialog");
-          if (dlg?.open) dlg.hide();
-          this.selectedJobId = null;
+          this._verifyJobExists(this.selectedJobId);
         }
         break;
 
@@ -781,10 +780,9 @@ class MoomboxApp {
           if (job) {
             this.updateJobDetails(job);
           } else if (!this.archivedJobs.some(j => j.id === this.selectedJobId)) {
-            // Job not in active or archived lists — deleted externally (TUI, another client)
-            const dlg = document.getElementById("details-dialog");
-            if (dlg?.open) dlg.hide();
-            this.selectedJobId = null;
+            // Job not in active or cached archived lists — may have been archived or deleted.
+            // Verify via API to avoid closing the dialog when a job simply transitions to archived.
+            this._verifyJobExists(this.selectedJobId);
           }
         }
         break;
@@ -840,6 +838,42 @@ class MoomboxApp {
       case "pong":
         this._lastPong = Date.now();
         break;
+    }
+  }
+
+  /**
+   * Verify whether a job still exists on the server (e.g. it was archived, not deleted).
+   * Used when a job disappears from the active jobs list while the details dialog is open.
+   * If the job exists, cache it in archivedJobs and update the dialog.
+   * If the job is truly gone (404), close the dialog.
+   */
+  async _verifyJobExists(jobId) {
+    // Prevent duplicate concurrent fetches for the same job
+    if (this._verifyingJobId === jobId) return;
+    this._verifyingJobId = jobId;
+    try {
+      const resp = await fetch(`/api/jobs/${jobId}`);
+      if (this.selectedJobId !== jobId) return; // Selection changed during fetch
+      if (resp.ok) {
+        const job = await resp.json();
+        // Cache in archivedJobs so subsequent jobs_update messages skip the API check
+        const existingIdx = this.archivedJobs.findIndex(j => j.id === job.id);
+        if (existingIdx !== -1) {
+          this.archivedJobs[existingIdx] = job;
+        } else {
+          this.archivedJobs.push(job);
+        }
+        this.updateJobDetails(job);
+      } else {
+        // Job truly deleted — close dialog
+        const dlg = document.getElementById("details-dialog");
+        if (dlg?.open) dlg.hide();
+        this.selectedJobId = null;
+      }
+    } catch {
+      // Network error — leave dialog open with last known data
+    } finally {
+      if (this._verifyingJobId === jobId) this._verifyingJobId = null;
     }
   }
 
@@ -960,7 +994,7 @@ class MoomboxApp {
       const newIndex = sortedJobs.findIndex(j => j.id === focusedJobId);
       this.focusedJobIndex = newIndex >= 0 ? newIndex : -1;
       if (newIndex >= 0) {
-        const card = container.querySelector(`.video-item[data-job-id="${focusedJobId}"]`);
+        const card = container.querySelector(`.video-item[data-job-id="${CSS.escape(focusedJobId)}"]`);
         if (card) card.setAttribute("data-focused", "");
       }
     } else {
@@ -1055,7 +1089,7 @@ class MoomboxApp {
 
   // Update a single job card in the list without full re-render
   updateJobCard(job) {
-    const card = document.querySelector(`.video-item[data-job-id="${job.id}"]`);
+    const card = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`);
     if (!card) return;
 
     // Update thumbnail (can change for Twitch: avatar → live thumbnail)
@@ -1225,6 +1259,38 @@ class MoomboxApp {
       progressRow.textContent = this.formatProgress(job);
     }
 
+    // Update segment counts
+    const segField = content.querySelector('[data-field="segments"]');
+    if (segField && (job.lastVideoSeq || job.lastAudioSeq)) {
+      const isTwitchSeg = job.platform === "twitch";
+      const vCurrent = job.lastVideoSeq || 0;
+      const aCurrent = job.lastAudioSeq || 0;
+      const vTotal = job.totalVideoSeq;
+      const aTotal = job.totalAudioSeq;
+      const vDisplay = vTotal ? `${vCurrent}/${vTotal}` : vCurrent;
+      const aDisplay = aTotal ? `${aCurrent}/${aTotal}` : aCurrent;
+      segField.textContent = isTwitchSeg ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
+    }
+
+    // Update chat status
+    const chatField = content.querySelector('[data-field="chat"]');
+    if (chatField && job.chatStatus) {
+      const chatVariantMap = { downloading: "primary", finished: "success", error: "danger", unavailable: "neutral", pending: "neutral" };
+      const badge = chatField.querySelector("sl-badge");
+      if (badge) {
+        badge.variant = chatVariantMap[job.chatStatus] || "neutral";
+        badge.textContent = job.chatStatus;
+      }
+      // Update message count — text node after the badge
+      const existingText = Array.from(chatField.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+      const countText = job.totalChatMessages ? ` (${job.totalChatMessages.toLocaleString()} messages)` : "";
+      if (existingText) {
+        existingText.textContent = countText;
+      } else if (countText) {
+        chatField.appendChild(document.createTextNode(countText));
+      }
+    }
+
     // Update speed if present
     const speedRow = document.getElementById("speed-row");
     const speedValue = content.querySelector('[data-field="speed"]');
@@ -1374,7 +1440,7 @@ class MoomboxApp {
             return `
           <div class="details-row">
             <span class="details-label">Chat:</span>
-            <span class="details-value">
+            <span class="details-value" data-field="chat">
               <sl-badge variant="${chatVariant}">${this.escapeHtml(job.chatStatus)}</sl-badge>
               ${job.totalChatMessages ? ` (${job.totalChatMessages.toLocaleString()} messages)` : ""}
             </span>
@@ -2381,7 +2447,7 @@ class MoomboxApp {
 
     const job = sorted[this.focusedJobIndex];
     if (job) {
-      const card = document.querySelector(`.video-item[data-job-id="${job.id}"]`);
+      const card = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`);
       if (card) {
         card.setAttribute("data-focused", "");
         card.scrollIntoView({ block: "nearest" });

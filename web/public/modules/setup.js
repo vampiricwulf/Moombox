@@ -62,9 +62,13 @@ export class SetupController {
 
     // Prevent Escape/overlay-click from closing the cookie dialog without
     // properly cancelling the setup (which would orphan the browser process).
+    // Only handle during setup wizard — SettingsController registers its own
+    // handler for the same dialog, so skip when setup is complete to avoid
+    // double cancel API calls.
     const autoCookieDialog = document.getElementById("auto-cookie-setup-dialog");
     if (autoCookieDialog) {
       autoCookieDialog.addEventListener("sl-request-close", (e) => {
+        if (document.getElementById("setup-overlay").style.display === "none") return;
         e.preventDefault();
         this.cancelCookieSetup();
       });
