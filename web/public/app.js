@@ -2198,12 +2198,8 @@ class MoomboxApp {
     }
 
     this._logRebuildingDOM = true;
-    try {
-      viewer.innerHTML = "";
-      viewer.appendChild(frag);
-    } finally {
-      this._logRebuildingDOM = false;
-    }
+    viewer.innerHTML = "";
+    viewer.appendChild(frag);
 
     const suffix = this.logFilter !== "all" ? ` (${this.logFilter}+)` : "";
     const searchSuffix = searchQuery ? `, matching "${searchQuery}"` : "";
@@ -2213,11 +2209,16 @@ class MoomboxApp {
     if (this._logAutoScroll) {
       viewer.scrollTop = viewer.scrollHeight;
     }
+    // Reset after next frame so scroll events from DOM rebuild are suppressed
+    requestAnimationFrame(() => { this._logRebuildingDOM = false; });
   }
 
   clearLogs() {
     this.logs = [];
     this._logAutoScroll = true;
+    this._logSearchQuery = "";
+    const logSearchInput = document.getElementById("log-search");
+    if (logSearchInput) logSearchInput.value = "";
     if (this._logRenderTimer) {
       clearTimeout(this._logRenderTimer);
       this._logRenderTimer = null;
@@ -2243,6 +2244,8 @@ class MoomboxApp {
       const activePanel = document.querySelector("sl-tab-panel[active]");
       const isPlayerActive = activePanel?.getAttribute("name") === "player";
 
+      const isTasksActive = activePanel?.getAttribute("name") === "tasks";
+
       switch (e.key) {
         case "a":
           if (!isPlayerActive) {
@@ -2260,13 +2263,13 @@ class MoomboxApp {
           break;
         case "ArrowUp":
         case "ArrowDown":
-          if (!isPlayerActive) {
+          if (isTasksActive) {
             this.navigateJobList(e.key === "ArrowUp" ? -1 : 1);
             e.preventDefault();
           }
           break;
         case "Enter":
-          if (!isPlayerActive && this.focusedJobIndex >= 0) {
+          if (isTasksActive && this.focusedJobIndex >= 0) {
             const filtered = this.getFilteredJobs();
             const sorted = this._sortJobs(filtered);
             const job = sorted[this.focusedJobIndex];
@@ -2274,7 +2277,7 @@ class MoomboxApp {
           }
           break;
         case "f": {
-          if (!isPlayerActive) {
+          if (isTasksActive) {
             const searchInput = document.getElementById("tasks-search");
             if (searchInput) { searchInput.focus(); e.preventDefault(); }
           }
@@ -2671,8 +2674,8 @@ class MoomboxApp {
       this.renderOrphanedFiles(data);
     } catch (err) {
       console.error("Failed to fetch orphaned files:", err);
-      // Show empty state so the panel isn't blank on failure
-      this.renderOrphanedFiles([]);
+      this._orphanedFiles = [];
+      this.renderOrphanedFiles(null); // null signals error vs empty
     } finally {
       if (refreshBtn) refreshBtn.loading = false;
     }
@@ -2683,8 +2686,14 @@ class MoomboxApp {
     const tableWrapper = document.getElementById("files-table-wrapper");
     const deleteAllBtn = document.getElementById("files-delete-all-btn");
 
-    if (!files || files.length === 0) {
-      if (emptyEl) emptyEl.style.display = "";
+    if (files === null || (Array.isArray(files) && files.length === 0)) {
+      if (emptyEl) {
+        emptyEl.style.display = "";
+        const msg = emptyEl.querySelector("p");
+        if (msg) msg.textContent = files === null
+          ? "Failed to load orphaned files. Try refreshing."
+          : "No orphaned files found.";
+      }
       if (tableWrapper) tableWrapper.style.display = "none";
       if (deleteAllBtn) deleteAllBtn.disabled = true;
       return;

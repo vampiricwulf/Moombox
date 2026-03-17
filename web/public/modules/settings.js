@@ -592,6 +592,8 @@ export class SettingsController {
         this._dirty = false;
         this._updateUnsavedIndicator();
         this.app.showToast("Settings saved successfully", "success");
+        // Refresh status bar (platform indicators, cookie status, etc.)
+        this.app.loadStatus();
         // Check if any restart-required settings changed
         this._checkRestartRequired(config);
       } else {
