@@ -1093,9 +1093,11 @@ export class SettingsController {
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.app.showToast(data.error || "Failed to update channel", "danger");
+        this.renderChannelsList(); // Revert toggle to match local config state
       }
     } catch (e) {
       this.app.showToast("Failed to update channel: " + e.message, "danger");
+      this.renderChannelsList(); // Revert toggle to match local config state
     }
   }
 

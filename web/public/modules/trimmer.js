@@ -469,6 +469,9 @@ export class TrimController {
 
     this._el.submitBtn.loading = true;
     this._el.submitBtn.disabled = true;
+    // Restore selectedJobId so _refreshJobDetails can update the details content.
+    // It was cleared when the details dialog was hidden to open the trim dialog.
+    this.app.selectedJobId = this.job.id;
     try {
       await this.app.createTrim(this.job.id, startTime, endTime);
       // Save ref before hide — destroy() clears _el on sl-after-hide,

@@ -1911,7 +1911,14 @@ class MoomboxApp {
     const job = this.jobs.find((j) => j.id === this.selectedJobId)
       || this.archivedJobs.find((j) => j.id === this.selectedJobId);
     if (!job) return;
-    const url = job.url || `https://www.youtube.com/watch?v=${job.videoId}`;
+    let url = job.url;
+    if (!url) {
+      if (job.platform === "twitch") {
+        url = `https://www.twitch.tv/${job.channelName || job.videoId}`;
+      } else {
+        url = `https://www.youtube.com/watch?v=${job.videoId}`;
+      }
+    }
     try {
       const parsed = new URL(url);
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {
