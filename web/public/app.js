@@ -2691,9 +2691,10 @@ class MoomboxApp {
 
   setInputValue(id, value) {
     const el = document.getElementById(id);
-    if (el && value !== undefined && value !== null) {
-      el.value = value;
-    }
+    if (!el) return;
+    // Default to empty string for undefined/null so fields are cleared
+    // when a config value is removed (e.g. omitempty field reset server-side)
+    el.value = value ?? "";
   }
 
   getInputValue(id) {

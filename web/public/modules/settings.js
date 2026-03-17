@@ -652,12 +652,9 @@ export class SettingsController {
     });
     if (!changed) return;
 
-    // Capture old network values before updating snapshot (for redirect detection)
+    // Capture old network values for redirect detection
     const oldPort = this._originalRestartValues["network.port"] || 774;
     const oldHttps = !!this._originalRestartValues["network.https_enabled"];
-
-    // Update snapshot so we don't prompt again
-    this._originalRestartValues = { ...current };
 
     const shouldRestart = await this.app.showConfirm(
       "Some settings require a restart to take effect (port, network access, database path, log settings).\n\nRestart Moombox now?",
@@ -666,6 +663,10 @@ export class SettingsController {
     if (!shouldRestart) {
       return;
     }
+
+    // Update snapshot only after user confirms (otherwise declining would
+    // suppress the prompt on subsequent saves until page reload)
+    this._originalRestartValues = { ...current };
 
     // Check if network address changed — browser needs redirect after restart
     const newPort = current["network.port"] || 774;
@@ -1011,20 +1012,40 @@ export class SettingsController {
 
     const isTwitch = platform === "twitch";
 
+    // When editing, start from the existing channel to preserve fields
+    // the UI doesn't expose (num_desc_lookbehind, output_directory, max_feed_items).
+    const existingChannel = this.editingChannelId
+      ? this.app.config?.channels?.find(c => c.id === this.editingChannelId)
+      : null;
+
     const channel = {
+      ...(existingChannel || {}),
       id,
       name: name || undefined,
-      terms: termsValue || undefined,
       enabled,
       ...(isTwitch ? { platform: "twitch" } : {}),
       ...(!isTwitch ? { include_non_live_content: includeVods || undefined } : {}),
     };
+
+    // Preserve terms structure: if existing terms was a named map (e.g. {stream, vod}),
+    // only update the "stream" key and keep other keys intact.
+    if (termsValue) {
+      if (existingChannel?.terms && typeof existingChannel.terms === "object" && !Array.isArray(existingChannel.terms) && existingChannel.terms.stream !== undefined) {
+        channel.terms = { ...existingChannel.terms, stream: termsValue };
+      } else {
+        channel.terms = termsValue;
+      }
+    } else {
+      channel.terms = undefined;
+    }
 
     // Add quality preference (both platforms)
     const qualitySelect = document.getElementById("channel-quality-select");
     const quality = qualitySelect ? qualitySelect.value : "best";
     if (quality !== "best") {
       channel.quality_preference = quality;
+    } else {
+      delete channel.quality_preference;
     }
 
     const saveBtn = document.getElementById("channel-save-btn");
