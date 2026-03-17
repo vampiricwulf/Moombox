@@ -110,6 +110,7 @@
                 const errorText = document.getElementById("login-error-text");
 
                 async function doLogin() {
+                    if (submitBtn.disabled) return;
                     const password = passwordInput.value;
                     if (!password) {
                         passwordInput.focus();
