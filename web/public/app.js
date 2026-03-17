@@ -772,9 +772,15 @@ class MoomboxApp {
         if (!updatedJob?.id) break;
         const jobIndex = this.jobs.findIndex((j) => j.id === updatedJob.id);
         if (jobIndex !== -1) {
+          const oldStatus = this.jobs[jobIndex].status;
           this.jobs[jobIndex] = updatedJob;
-          this.updateJobCard(updatedJob);
-          this.stats.updateActiveIndicator(this.jobs);
+          // Status change affects sort order — do full re-render
+          if (oldStatus !== updatedJob.status) {
+            this.renderJobs();
+          } else {
+            this.updateJobCard(updatedJob);
+            this.stats.updateActiveIndicator(this.jobs);
+          }
           // Update details dialog if this job is selected
           if (this.selectedJobId === updatedJob.id) {
             this.updateJobDetails(updatedJob);
@@ -1993,9 +1999,11 @@ class MoomboxApp {
         method: "DELETE",
       });
       if (response.ok) {
-        const dlg = document.getElementById("details-dialog");
-        if (dlg?.open) dlg.hide();
-        if (this.selectedJobId === id) this.selectedJobId = null;
+        if (this.selectedJobId === id) {
+          const dlg = document.getElementById("details-dialog");
+          if (dlg?.open) dlg.hide();
+          this.selectedJobId = null;
+        }
         this.showToast("Job deleted", "success");
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
@@ -2647,6 +2655,8 @@ class MoomboxApp {
     countdown.className = "toast-countdown";
     alert.appendChild(countdown);
 
+    // Remove from DOM after hide to prevent leak over long sessions
+    alert.addEventListener("sl-after-hide", () => alert.remove());
     document.body.append(alert);
     alert.toast();
   }

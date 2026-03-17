@@ -26,7 +26,12 @@ export class ImportController {
     // File input change
     fileInput.addEventListener("change", () => {
       if (fileInput.files.length > 0) {
-        this.setImportFile(fileInput.files[0]);
+        if (fileInput.files[0].name.toLowerCase().endsWith(".zip")) {
+          this.setImportFile(fileInput.files[0]);
+        } else {
+          this.app.showToast("Please select a .zip file", "warning");
+          fileInput.value = "";
+        }
       }
     });
 
