@@ -2209,8 +2209,7 @@ class MoomboxApp {
     }
 
     this._logRebuildingDOM = true;
-    viewer.innerHTML = "";
-    viewer.appendChild(frag);
+    viewer.replaceChildren(frag);
 
     const suffix = this.logFilter !== "all" ? ` (${this.logFilter}+)` : "";
     const searchSuffix = searchQuery ? `, matching "${searchQuery}"` : "";

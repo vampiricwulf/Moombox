@@ -739,22 +739,36 @@ export class PlayerController {
   resetSidebarToTime(currentMs) {
     const container = document.getElementById("player-sidebar-messages");
     const children = container.children;
+    const messages = this.playerChatMessages;
+    const effectiveMs = currentMs + this.playerCustomOffsetMs;
 
-    this.playerActiveChatIndex = 0;
-
-    for (let i = 0; i < this.playerChatMessages.length; i++) {
-      const child = children[i];
-      if (!child) continue;
-
-      if (this.playerChatMessages[i].offsetMs <= currentMs + this.playerCustomOffsetMs) {
-        child.classList.remove("future");
-        child.classList.add("active");
-        this.playerActiveChatIndex = i + 1;
+    // Binary search for the split point (first message after effectiveMs)
+    let lo = 0;
+    let hi = messages.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (messages[mid].offsetMs <= effectiveMs) {
+        lo = mid + 1;
       } else {
-        child.classList.remove("active");
-        child.classList.add("future");
+        hi = mid;
       }
     }
+    // lo = number of active messages (all with offsetMs <= effectiveMs)
+    const newActiveIndex = lo;
+
+    // Only update DOM for children that changed state
+    // Previously active but now should be future (seeked backwards)
+    for (let i = newActiveIndex; i < this.playerActiveChatIndex && i < children.length; i++) {
+      children[i].classList.remove("active");
+      children[i].classList.add("future");
+    }
+    // Previously future but now should be active (seeked forwards)
+    for (let i = this.playerActiveChatIndex; i < newActiveIndex && i < children.length; i++) {
+      children[i].classList.remove("future");
+      children[i].classList.add("active");
+    }
+
+    this.playerActiveChatIndex = newActiveIndex;
   }
 
   // Niconico overlay engine

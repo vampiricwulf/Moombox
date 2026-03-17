@@ -645,6 +645,10 @@ export class SettingsController {
     });
     if (!changed) return;
 
+    // Capture old network values before updating snapshot (for redirect detection)
+    const oldPort = this._originalRestartValues["network.port"] || 774;
+    const oldHttps = !!this._originalRestartValues["network.https_enabled"];
+
     // Update snapshot so we don't prompt again
     this._originalRestartValues = { ...current };
 
@@ -656,11 +660,25 @@ export class SettingsController {
       return;
     }
 
+    // Check if network address changed — browser needs redirect after restart
+    const newPort = current["network.port"] || 774;
+    const newHttps = !!current["network.https_enabled"];
+    const portChanged = String(newPort) !== String(oldPort);
+    const httpsChanged = newHttps !== oldHttps;
+
     this.app.showToast("Restarting Moombox...", "primary");
 
     fetch("/api/restart", { method: "POST" }).catch(() => {
       // Connection will drop during restart — expected
     });
+
+    if (portChanged || httpsChanged) {
+      const proto = newHttps ? "https:" : "http:";
+      const host = window.location.hostname;
+      const redirectUrl = `${proto}//${host}:${newPort}/`;
+      this.app.showToast(`Redirecting to ${redirectUrl} in a few seconds...`, "primary");
+      setTimeout(() => { window.location.href = redirectUrl; }, 3500);
+    }
   }
 
   _markDirty() {
@@ -947,7 +965,7 @@ export class SettingsController {
     // Resolve channel URL if it looks like a URL (only for new channels)
     if (!this.editingChannelId && (id.includes("youtube.com") || id.includes("youtu.be") || id.includes("twitch.tv"))) {
       const saveBtn = document.getElementById("channel-save-btn");
-      if (saveBtn) saveBtn.loading = true;
+      if (saveBtn) { saveBtn.loading = true; saveBtn.disabled = true; }
       try {
         const resp = await fetch("/api/resolve-channel", {
           method: "POST",
@@ -980,7 +998,7 @@ export class SettingsController {
         this.app.showToast("Failed to resolve channel URL: " + e.message, "danger");
         return;
       } finally {
-        if (saveBtn) saveBtn.loading = false;
+        if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
       }
     }
 
