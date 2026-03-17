@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
-
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
@@ -554,7 +552,10 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 		var emotes []TwitchEmoteRef
 		charOffset := 0
 		for _, f := range node.Message.Fragments {
-			runeLen := utf8.RuneCountInString(f.Text)
+			// Use UTF-16 code unit length (not rune count) because the frontend's
+			// JS substring() operates on UTF-16. Non-BMP characters (U+10000+) are
+			// 2 UTF-16 code units but only 1 rune.
+			runeLen := utf16Len(f.Text)
 			if f.Emote != nil && f.Emote.EmoteID != "" {
 				emotes = append(emotes, TwitchEmoteRef{
 					ID:    f.Emote.EmoteID,
@@ -595,4 +596,19 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 	}
 
 	return result, hasNext, nil
+}
+
+// utf16Len returns the number of UTF-16 code units needed to represent s.
+// This matches JavaScript's string indexing (String.prototype.substring)
+// where characters outside the BMP (U+10000+) count as 2 code units.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x10000 {
+			n += 2 // surrogate pair
+		} else {
+			n++
+		}
+	}
+	return n
 }

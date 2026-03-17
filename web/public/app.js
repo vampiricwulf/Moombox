@@ -2719,8 +2719,10 @@ class MoomboxApp {
     const str = typeof val === "string" ? val.trim() : "";
     if (!str) return undefined;
     // Use Number() instead of parseInt() to reject partial numbers like "123abc"
+    // Don't truncate — FlexDuration fields accept fractional values (e.g. 2.5 minutes).
+    // Integer fields are truncated server-side by Go's int() conversion.
     const num = Number(str);
-    return isNaN(num) ? undefined : Math.trunc(num);
+    return isNaN(num) ? undefined : num;
   }
 
   escapeHtml(text) {
