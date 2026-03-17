@@ -920,21 +920,6 @@ class MoomboxApp {
       return;
     }
 
-    if (filtered.length === 0) {
-      container.innerHTML = "";
-      emptyState.style.display = "flex";
-      // Reset empty state to default
-      const icon = emptyState.querySelector("sl-icon");
-      if (icon) icon.name = "inbox";
-      const msg = emptyState.querySelector("p");
-      if (msg) msg.textContent = "No jobs yet";
-      const subtext = emptyState.querySelector(".empty-state-subtext");
-      if (subtext) subtext.textContent = "Add a YouTube or Twitch URL to start archiving";
-      const cta = emptyState.querySelector(".empty-state-cta");
-      if (cta) cta.style.display = "";
-      return;
-    }
-
     emptyState.style.display = "none";
 
     const sortedJobs = this._sortJobs(filtered);
@@ -1963,6 +1948,12 @@ class MoomboxApp {
       });
       if (response.ok) {
         this.showToast("Job cancelled", "success");
+        // Update archived job status if present (no WebSocket update for archived jobs)
+        const archivedJob = this.archivedJobs.find(j => j.id === id);
+        if (archivedJob) {
+          archivedJob.status = "Cancelled";
+          this.renderArchivedJobs();
+        }
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to cancel job", "danger");
@@ -1985,6 +1976,12 @@ class MoomboxApp {
       });
       if (response.ok) {
         this.showToast("Job queued for retry", "success");
+        // Remove from archived jobs if present (job moves to active queue)
+        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
+        if (archivedIdx !== -1) {
+          this.archivedJobs.splice(archivedIdx, 1);
+          this.renderArchivedJobs();
+        }
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to retry job", "danger");
@@ -2013,6 +2010,12 @@ class MoomboxApp {
           this.selectedJobId = null;
         }
         this.showToast("Job deleted", "success");
+        // Remove from archived jobs if present (no WebSocket update for archived jobs)
+        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
+        if (archivedIdx !== -1) {
+          this.archivedJobs.splice(archivedIdx, 1);
+          this.renderArchivedJobs();
+        }
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
         this.showToast(data.error || "Failed to delete job", "danger");
@@ -2086,6 +2089,7 @@ class MoomboxApp {
           const archivedIndex = this.archivedJobs.findIndex(j => j.id === jobId);
           if (archivedIndex !== -1) {
             this.archivedJobs[archivedIndex] = updatedJob;
+            this.renderArchivedJobs();
           }
         }
         this.renderJobDetails(updatedJob);
