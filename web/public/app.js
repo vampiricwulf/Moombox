@@ -1010,9 +1010,9 @@ class MoomboxApp {
     return `
       <div class="video-item" data-job-id="${this.escapeHtml(job.id)}" data-status="${statusClass}">
         <div class="thumb">
-          <img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+          ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
-               ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}>
+               ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}>` : ""}
         </div>
         <div class="stream-info">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>
@@ -2622,8 +2622,6 @@ class MoomboxApp {
 
       dlg.label = opts.title || "Confirm";
       msg.textContent = message;
-      okBtn.textContent = opts.okLabel || "OK";
-      okBtn.variant = opts.okVariant || "primary";
 
       const cleanup = (result) => {
         dlg.removeEventListener("sl-after-hide", onHide);
@@ -2634,9 +2632,14 @@ class MoomboxApp {
       const onCancel = () => { dlg.hide(); cleanup(false); };
       const onHide = () => { cleanup(false); };
 
-      // Replace listeners to avoid stacking
+      // Replace listeners to avoid stacking.
+      // Set properties on the CLONE (not the original) — Lit reactive properties
+      // like `variant` aren't reflected to DOM attributes until the next render
+      // cycle, so cloneNode would copy the stale attribute from the original.
       const newOk = okBtn.cloneNode(true);
       okBtn.replaceWith(newOk);
+      newOk.textContent = opts.okLabel || "OK";
+      newOk.variant = opts.okVariant || "primary";
       newOk.addEventListener("click", onOk);
 
       const newCancel = cancelBtn.cloneNode(true);

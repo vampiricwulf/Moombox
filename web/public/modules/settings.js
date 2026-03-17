@@ -1694,6 +1694,11 @@ export class SettingsController {
       resultEl.style.color = "";
     }
 
+    // Show loading on the platform-specific setup button
+    const btnId = platform === "twitch" ? "btn-auto-cookie-setup-tw" : "btn-auto-cookie-setup-yt";
+    const setupBtn = document.getElementById(btnId);
+    if (setupBtn) { setupBtn.loading = true; setupBtn.disabled = true; }
+
     try {
       const response = await fetch("/api/cookies/auto-setup/start", {
         method: "POST",
@@ -1724,6 +1729,8 @@ export class SettingsController {
       }
     } catch (e) {
       this.app.showToast("Failed to start auto-cookie setup: " + e.message, "danger");
+    } finally {
+      if (setupBtn) { setupBtn.loading = false; setupBtn.disabled = false; }
     }
   }
 
@@ -1736,8 +1743,11 @@ export class SettingsController {
       resultEl.style.color = "";
     }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
     try {
-      const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST" });
+      const response = await fetch("/api/cookies/auto-setup/finish", { method: "POST", signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
 
@@ -1761,10 +1771,13 @@ export class SettingsController {
       }
     } catch (e) {
       if (resultEl) {
-        resultEl.textContent = "Error: " + e.message;
+        resultEl.textContent = e.name === "AbortError"
+          ? "Cookie extraction timed out. Try again."
+          : "Error: " + e.message;
         resultEl.style.color = "var(--sl-color-danger-600)";
       }
     } finally {
+      clearTimeout(timeoutId);
       if (doneBtn) doneBtn.loading = false;
     }
   }
