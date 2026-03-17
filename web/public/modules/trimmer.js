@@ -406,8 +406,9 @@ export class TrimController {
 
   _onKeyDown(e) {
     // Ignore if focus is inside a text input
-    const tag = e.target.tagName.toLowerCase();
-    if (tag === "sl-input" || tag === "input" || tag === "textarea") return;
+    const tag = e.target.tagName;
+    if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
+    if (e.target.contentEditable === "true") return;
 
     switch (e.key) {
       case " ":
