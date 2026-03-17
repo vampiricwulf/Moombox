@@ -169,6 +169,13 @@ class MoomboxApp {
       this.trimmer.destroy();
     });
 
+    // Clear selected job when details dialog is dismissed (Escape, overlay click,
+    // or close button) to stop unnecessary updateJobDetails calls on every
+    // WebSocket update while the dialog is hidden.
+    document.getElementById("details-dialog").addEventListener("sl-after-hide", () => {
+      this.selectedJobId = null;
+    });
+
     // Copy buttons in details dialog (event delegation via data-copy attribute)
     document.getElementById("details-dialog").addEventListener("click", (e) => {
       const copyBtn = e.target.closest("[data-copy]");

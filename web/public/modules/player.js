@@ -844,6 +844,10 @@ export class PlayerController {
       el.className = "nico-message";
       this.appendChatContent(el, msg.message || [], msg.emotes);
       if (!el.hasChildNodes()) continue;
+      // Nico emotes must load immediately — override the default lazy loading
+      // set by _createEmoteImg (which is appropriate for the sidebar's thousands
+      // of off-screen messages, but not for emotes animating across screen in 8s).
+      el.querySelectorAll(".chat-emoji").forEach(img => { img.loading = "eager"; });
       el.style.top = "0";
       el.style.left = `${overlayWidth}px`;
       overlay.appendChild(el);

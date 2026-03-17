@@ -901,6 +901,11 @@ sl-progress-bar {
 
 .notification-events sl-tag::part(base) {
     cursor: pointer;
+    transition: opacity 0.15s ease;
+}
+
+.notification-events sl-tag:hover::part(base) {
+    opacity: 0.75;
 }
 
 /* Integration Card */
