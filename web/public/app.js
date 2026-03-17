@@ -762,7 +762,10 @@ class MoomboxApp {
         this.renderLogs();
         this.updateCheckCountdown();
         // Close details dialog if selected job no longer exists (e.g. deleted while disconnected)
-        if (this.selectedJobId && !this.jobs.some(j => j.id === this.selectedJobId)) {
+        // Check both active and archived lists — archived jobs are valid but not in this.jobs
+        if (this.selectedJobId
+            && !this.jobs.some(j => j.id === this.selectedJobId)
+            && !this.archivedJobs.some(j => j.id === this.selectedJobId)) {
           const dlg = document.getElementById("details-dialog");
           if (dlg?.open) dlg.hide();
           this.selectedJobId = null;
@@ -777,8 +780,8 @@ class MoomboxApp {
           const job = this.jobs.find((j) => j.id === this.selectedJobId);
           if (job) {
             this.updateJobDetails(job);
-          } else {
-            // Job was deleted externally (TUI, another client) — close stale dialog
+          } else if (!this.archivedJobs.some(j => j.id === this.selectedJobId)) {
+            // Job not in active or archived lists — deleted externally (TUI, another client)
             const dlg = document.getElementById("details-dialog");
             if (dlg?.open) dlg.hide();
             this.selectedJobId = null;
