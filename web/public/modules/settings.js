@@ -587,8 +587,15 @@ export class SettingsController {
       });
 
       if (response.ok) {
-        // Update local config cache only after successful save
-        Object.assign(config, payload);
+        // Deep-merge payload into local config cache to preserve server-only
+        // nested fields (Object.assign would replace entire sub-objects)
+        for (const [key, val] of Object.entries(payload)) {
+          if (val && typeof val === "object" && !Array.isArray(val) && config[key] && typeof config[key] === "object") {
+            Object.assign(config[key], val);
+          } else {
+            config[key] = val;
+          }
+        }
         this._dirty = false;
         this._updateUnsavedIndicator();
         this.app.showToast("Settings saved successfully", "success");

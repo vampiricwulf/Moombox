@@ -1179,6 +1179,23 @@ class MoomboxApp {
       statusBadge.textContent = this.displayStatus(job.status);
     }
 
+    // Update title and channel (can change for live streams mid-broadcast)
+    const rows = content.querySelectorAll(".details-row");
+    for (const row of rows) {
+      const label = row.querySelector(".details-label");
+      if (!label) continue;
+      const labelText = label.textContent;
+      const valueEl = row.querySelector(".details-value");
+      if (!valueEl) continue;
+      if (labelText === "Title:") {
+        valueEl.textContent = job.title;
+      } else if (labelText === "Channel:") {
+        valueEl.textContent = job.channelName;
+      } else if (labelText === "Category:" && job.twitchCategory) {
+        valueEl.textContent = job.twitchCategory;
+      }
+    }
+
     // Update progress text
     const progressRow = content.querySelector('[data-field="progress"]');
     if (progressRow) {
@@ -1791,7 +1808,8 @@ class MoomboxApp {
         this._lastFormatVideoId = null;
       }
       formatSkeleton.style.display = "none";
-      formatSection.style.display = "block";
+      // Keep format section hidden on error — empty selects are confusing
+      formatSection.style.display = "none";
       console.error("Failed to fetch formats:", e);
       this.showToast("Could not load format options: " + e.message, "warning");
     }
@@ -1910,19 +1928,20 @@ class MoomboxApp {
 
   openInPlayer() {
     if (!this.selectedJobId) return;
+    const jobId = this.selectedJobId;
 
     // Close the details dialog
     document.getElementById("details-dialog").hide();
 
     // Flag prevents the sl-tab-show handler from calling loadPlayerJobList
-    // (which would race with our call and potentially overwrite the selection)
+    // (which would race with our call and potentially overwrite the selection).
+    // Cleared after our own loadPlayerJobList finishes, not synchronously,
+    // because Shoelace may fire sl-tab-show asynchronously after show().
     this._playerOpeningFromDetails = true;
 
     // Switch to the Player tab
     const tabGroup = document.querySelector("sl-tab-group");
     tabGroup.show("player");
-
-    this._playerOpeningFromDetails = false;
 
     // Initialize player if needed, then select the job
     if (!this.player.playerInitialized) {
@@ -1931,9 +1950,11 @@ class MoomboxApp {
 
     this.player.loadPlayerJobList().then(() => {
       const select = document.getElementById("player-job-select");
-      select.value = this.selectedJobId;
-      this.player.onPlayerJobSelect(this.selectedJobId);
-    }).catch(() => {});
+      select.value = jobId;
+      this.player.onPlayerJobSelect(jobId);
+    }).catch(() => {}).finally(() => {
+      this._playerOpeningFromDetails = false;
+    });
   }
 
   async cancelJob(jobId) {
