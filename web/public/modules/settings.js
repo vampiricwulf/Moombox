@@ -1731,6 +1731,21 @@ export class SettingsController {
 
         if (dialog) {
           dialog.label = platform === "twitch" ? "Setup: Twitch" : "Setup: YouTube";
+          // Clone done/cancel buttons to clear any stale handlers (e.g., from
+          // setup wizard's startCookieSetup which clones with its own handlers —
+          // without re-cloning here, both setup and settings handlers would fire)
+          const doneBtn = document.getElementById("btn-auto-cookie-done");
+          if (doneBtn) {
+            const newDone = doneBtn.cloneNode(true);
+            doneBtn.replaceWith(newDone);
+            newDone.addEventListener("click", () => this.finishAutoCookieSetup());
+          }
+          const cancelBtn = document.getElementById("btn-auto-cookie-cancel");
+          if (cancelBtn) {
+            const newCancel = cancelBtn.cloneNode(true);
+            cancelBtn.replaceWith(newCancel);
+            newCancel.addEventListener("click", () => this.cancelAutoCookieSetup());
+          }
           dialog.show();
         }
       } else {
