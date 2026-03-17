@@ -1238,8 +1238,9 @@ export class SettingsController {
       notif.events.push(eventId);
     }
 
-    // If all events are selected, clear the filter
-    if (ALL_EVENT_IDS.every((id) => notif.events.includes(id))) {
+    // If all events are selected or none remain, clear the filter
+    // (empty array is ambiguous — treat as "all events" by removing the filter)
+    if (notif.events.length === 0 || ALL_EVENT_IDS.every((id) => notif.events.includes(id))) {
       delete notif.events;
     }
 
@@ -1624,6 +1625,7 @@ export class SettingsController {
   }
 
   async revokeClientToken(id) {
+    if (!await this.app.showConfirm("Revoke this client token? The client will need to re-authenticate.", { okLabel: "Revoke", okVariant: "danger" })) return;
     try {
       const response = await fetch(`/api/client-tokens/${id}`, { method: "DELETE" });
       if (response.ok) {

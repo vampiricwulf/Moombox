@@ -297,12 +297,15 @@ export class PlayerController {
     const needle = query.trim().toLowerCase();
 
     if (!needle) {
-      // Clear search — restore all messages
+      // Clear search — restore all messages and fix active/future state
+      // (messages may have stale active/future classes from during the search)
       for (let i = 0; i < children.length; i++) {
         children[i].classList.remove("search-hidden");
       }
+      this.resetSidebarToTime(this.getGlobalTimeMs());
       this.playerAutoScroll = true;
       this.playerScrollLock = false;
+      if (this.playerAutoScroll) this.syncSidebarToTime();
       return;
     }
 
@@ -451,6 +454,18 @@ export class PlayerController {
       const all = [...jobs, ...archived]
         .filter((j) => j.status === "Finished" && j.filename)
         .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+
+      // If a video is actively playing, only update the selection state
+      // without rebuilding options (removing options triggers sl-change which
+      // can interrupt playback via clearPlayer).
+      const isPlaying = this.playerJob && document.getElementById("player-video")?.src;
+      if (isPlaying) {
+        // Ensure current job still exists; if not, clear the player
+        if (currentValue && !all.some((j) => j.id === currentValue)) {
+          this.clearPlayer();
+        }
+        return;
+      }
 
       // Remove existing options
       select.querySelectorAll("sl-option").forEach((o) => o.remove());
@@ -834,6 +849,7 @@ export class PlayerController {
     let spawned = 0;
     // No limit on first spawn so all offsetMs=0 pre-stream messages deploy at once
     const maxPerFrame = firstSpawn ? Infinity : 10;
+    let lastProcessedMs = this.nicoLastSpawnMs;
 
     for (let i = lo; i < messages.length && messages[i].offsetMs <= effectiveMs; i++) {
       if (spawned >= maxPerFrame) break;
@@ -907,10 +923,13 @@ export class PlayerController {
         this.nicoLaneAvail[lane + k] = availAt;
       }
 
+      lastProcessedMs = msg.offsetMs;
       spawned++;
     }
 
-    this.nicoLastSpawnMs = effectiveMs;
+    // Only advance the cursor to the last message we actually processed.
+    // If maxPerFrame was hit, un-spawned messages remain eligible for the next frame.
+    this.nicoLastSpawnMs = spawned > 0 ? lastProcessedMs : effectiveMs;
   }
 
   /**

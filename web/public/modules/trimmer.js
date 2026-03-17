@@ -301,6 +301,7 @@ export class TrimController {
   // ===== Track pointer handling =====
 
   _onTrackPointerDown(e) {
+    if (!this.duration) return;
     const track = this._el.track;
     const rect = track.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -348,6 +349,7 @@ export class TrimController {
       this._dragCleanup = null;
       track.removeEventListener("pointermove", onMove);
       track.removeEventListener("pointerup", onUp);
+      track.removeEventListener("pointercancel", onUp);
     };
 
     // Store cleanup so destroy() can remove listeners mid-drag
@@ -355,6 +357,7 @@ export class TrimController {
 
     track.addEventListener("pointermove", onMove);
     track.addEventListener("pointerup", onUp);
+    track.addEventListener("pointercancel", onUp);
   }
 
   // ===== Transport controls =====
@@ -389,6 +392,8 @@ export class TrimController {
   }
 
   _frameStep(direction) {
+    const video = this._el.video;
+    if (video && !video.paused) video.pause();
     // Approximate frame duration at ~30fps
     const step = 1 / 30;
     const target = this._getGlobalTime() + step * direction;

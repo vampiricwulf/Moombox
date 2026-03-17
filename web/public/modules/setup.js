@@ -558,7 +558,7 @@ export class SetupController {
     if (finishBtn) { finishBtn.loading = true; finishBtn.disabled = true; }
 
     const val = (id) => (document.getElementById(id)?.value || "").trim();
-    const num = (id) => { const s = val(id); return s !== "" ? parseInt(s, 10) : undefined; };
+    const num = (id) => { const s = val(id); if (s === "") return undefined; const n = parseInt(s, 10); return isNaN(n) ? undefined : n; };
 
     const port = num("setup-port");
     const networkAccess = document.getElementById("setup-network-access")?.value || "localhost";
