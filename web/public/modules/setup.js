@@ -987,6 +987,10 @@ export class SetupController {
         } catch { /* ignore */ }
         document.getElementById("ffmpeg-script-review").style.display = "none";
         document.getElementById("ffmpeg-install-view").style.display = "";
+        // Re-enable install buttons (disabled by installFFmpeg before entering review)
+        document.getElementById("ffmpeg-install-options")
+          ?.querySelectorAll("sl-button")
+          .forEach((b) => { b.disabled = false; });
       });
     }
   }
@@ -1053,6 +1057,10 @@ export class SetupController {
     backBtn.addEventListener("click", () => {
       document.getElementById("ffmpeg-script-review").style.display = "none";
       document.getElementById("ffmpeg-install-view").style.display = "";
+      // Re-enable install buttons (disabled by installFFmpeg before entering review)
+      document.getElementById("ffmpeg-install-options")
+        ?.querySelectorAll("sl-button")
+        .forEach((b) => { b.disabled = false; });
     });
     resultEl.appendChild(backBtn);
   }

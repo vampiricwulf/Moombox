@@ -104,6 +104,10 @@ export class PlayerController {
     });
 
     video.addEventListener("play", () => {
+      // Skip stale messages accumulated during pause — advance the nico cursor
+      // to the current time so only new messages appear after unpausing
+      const currentMs = this.getGlobalTimeMs();
+      this.nicoLastSpawnMs = currentMs + this.playerCustomOffsetMs;
       document.querySelectorAll(".nico-message").forEach((el) => {
         if (el._nicoAnim) el._nicoAnim.play();
       });
@@ -974,6 +978,8 @@ export class PlayerController {
     img.alt = alt;
     img.loading = "lazy";
     img.referrerPolicy = "no-referrer";
+    // Fall back to alt text if the emote CDN returns 404 or is unreachable
+    img.onerror = () => { img.replaceWith(document.createTextNode(alt || "")); };
     return img;
   }
 
