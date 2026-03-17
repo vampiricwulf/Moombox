@@ -100,10 +100,14 @@ export class SettingsController {
       saveBtn.addEventListener("click", () => this.saveConfig());
     }
 
-    // Reload config
+    // Reload config — clear dirty flag so loadConfig repopulates the form
     const reloadBtn = document.getElementById("reload-config-btn");
     if (reloadBtn) {
-      reloadBtn.addEventListener("click", () => this.app.loadConfig());
+      reloadBtn.addEventListener("click", () => {
+        this._dirty = false;
+        this._updateUnsavedIndicator();
+        this.app.loadConfig();
+      });
     }
 
     // Add channel

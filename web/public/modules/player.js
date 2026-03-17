@@ -1,7 +1,7 @@
 /**
  * Player Controller — Video player + chat replay
  */
-import { formatMsToTime } from "./utils.js";
+import { formatMsToTime, isTypingInInput } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 
 export class PlayerController {
@@ -211,10 +211,8 @@ export class PlayerController {
       // Block shortcuts when a dialog is open (e.g. trim dialog)
       if (document.querySelector("sl-dialog[open]")) return;
 
-      // Skip when typing in inputs
-      const tag = e.target.tagName;
-      if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
-      if (e.target.contentEditable === "true") return;
+      // Skip when typing in inputs (composedPath handles Shoelace shadow DOM)
+      if (isTypingInInput(e)) return;
 
       const video = document.getElementById("player-video");
       if (!video || !video.src) return;

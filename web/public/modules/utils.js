@@ -61,6 +61,22 @@ export function formatRelativeTime(isoDate) {
 }
 
 /**
+ * Check if a keyboard event originates from inside an input-like element.
+ * Uses composedPath() to traverse shadow DOM boundaries (Shoelace components
+ * render native <input> elements inside their shadow roots).
+ */
+export function isTypingInInput(e) {
+  for (const el of e.composedPath()) {
+    if (!(el instanceof HTMLElement)) continue;
+    const tag = el.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" ||
+        tag === "SL-INPUT" || tag === "SL-TEXTAREA" || tag === "SL-SELECT") return true;
+    if (el.contentEditable === "true") return true;
+  }
+  return false;
+}
+
+/**
  * Format milliseconds to H:MM:SS or M:SS (used in player chat timestamps).
  * Supports negative offsets.
  */

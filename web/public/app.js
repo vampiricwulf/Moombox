@@ -7,7 +7,7 @@ import { PlayerController } from "./modules/player.js";
 import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
-import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime } from "./modules/utils.js";
+import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput } from "./modules/utils.js";
 
 // Status sets for quick action visibility (single source of truth)
 const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"]);
@@ -2229,10 +2229,8 @@ class MoomboxApp {
 
   setupKeyboardShortcuts() {
     document.addEventListener("keydown", (e) => {
-      // Skip when typing in input fields
-      const tag = e.target.tagName;
-      if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
-      if (e.target.contentEditable === "true") return;
+      // Skip when typing in input fields (composedPath handles Shoelace shadow DOM)
+      if (isTypingInInput(e)) return;
 
       // If a dialog is open, block all shortcuts and let Shoelace
       // handle Escape natively (respects sl-request-close prevention)

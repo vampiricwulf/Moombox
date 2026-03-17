@@ -1,7 +1,7 @@
 /**
  * Trim Controller — interactive video-based trim UI
  */
-import { formatTimestamp } from "./utils.js";
+import { formatTimestamp, isTypingInInput } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 
 /**
@@ -405,10 +405,8 @@ export class TrimController {
   // ===== Keyboard shortcuts =====
 
   _onKeyDown(e) {
-    // Ignore if focus is inside a text input
-    const tag = e.target.tagName;
-    if (["INPUT", "TEXTAREA", "SL-INPUT", "SL-TEXTAREA", "SL-SELECT"].includes(tag)) return;
-    if (e.target.contentEditable === "true") return;
+    // Ignore if focus is inside a text input (composedPath handles Shoelace shadow DOM)
+    if (isTypingInInput(e)) return;
 
     switch (e.key) {
       case " ":
