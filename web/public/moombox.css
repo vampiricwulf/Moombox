@@ -147,6 +147,18 @@ sl-tab::part(base) {
 /* Thumbnail */
 .thumb {
     width: 100%;
+    position: relative;
+}
+
+.thumb .job-checkbox {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 2;
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    margin: 0;
 }
 
 .thumb img {
@@ -2265,5 +2277,45 @@ html.sl-theme-light {
         position: static !important;
         transform: none !important;
         opacity: 0.7;
+    }
+}
+
+/* ===== Batch Selection ===== */
+#batch-action-bar {
+    position: sticky;
+    bottom: 0;
+    background: var(--sl-color-neutral-100);
+    border-top: 1px solid var(--sl-color-neutral-300);
+    padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+    display: flex;
+    align-items: center;
+    gap: var(--sl-spacing-medium);
+    z-index: 10;
+}
+
+.batch-actions {
+    display: flex;
+    gap: var(--sl-spacing-x-small);
+}
+
+.video-item .job-checkbox {
+    opacity: 0;
+    transition: opacity 0.15s;
+    flex-shrink: 0;
+}
+
+.video-item:hover .job-checkbox,
+.video-item .job-checkbox:checked,
+.video-item.selected .job-checkbox {
+    opacity: 1;
+}
+
+.video-item.selected {
+    background: var(--sl-color-primary-50);
+}
+
+@media (max-width: 768px) {
+    .video-item .job-checkbox {
+        opacity: 1;
     }
 }

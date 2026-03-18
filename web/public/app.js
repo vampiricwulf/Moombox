@@ -22,6 +22,7 @@ class MoomboxApp {
     this.logs = [];
     this.config = null;
     this.selectedJobId = null;
+    this._selectedJobs = new Set();
     this.reconnectAttempts = 0;
     this.autoCookieReloginRequired = null;
     this.nextFeedCheck = 0;
@@ -400,6 +401,20 @@ class MoomboxApp {
     const jobsContainer = document.getElementById("jobs-container");
     if (jobsContainer) {
       jobsContainer.addEventListener("click", (e) => {
+        // Batch selection checkbox
+        const checkbox = e.target.closest(".job-checkbox");
+        if (checkbox) {
+          e.stopPropagation();
+          const jobId = checkbox.dataset.jobId;
+          if (checkbox.checked) {
+            this._selectedJobs.add(jobId);
+          } else {
+            this._selectedJobs.delete(jobId);
+          }
+          checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
+          this.updateBatchActionBar();
+          return;
+        }
         // Expandable error text
         const errorText = e.target.closest(".job-error-text");
         if (errorText) {
@@ -430,6 +445,20 @@ class MoomboxApp {
     const archivedContainer = document.getElementById("archived-container");
     if (archivedContainer) {
       archivedContainer.addEventListener("click", (e) => {
+        // Batch selection checkbox
+        const checkbox = e.target.closest(".job-checkbox");
+        if (checkbox) {
+          e.stopPropagation();
+          const jobId = checkbox.dataset.jobId;
+          if (checkbox.checked) {
+            this._selectedJobs.add(jobId);
+          } else {
+            this._selectedJobs.delete(jobId);
+          }
+          checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
+          this.updateBatchActionBar();
+          return;
+        }
         // Expandable error text
         const errorText = e.target.closest(".job-error-text");
         if (errorText) {
@@ -1179,9 +1208,11 @@ class MoomboxApp {
     if (canRetry) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
     if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
 
+    const isSelected = this._selectedJobs.has(job.id);
     return `
-      <div class="video-item" data-job-id="${this.escapeHtml(job.id)}" data-status="${this.escapeHtml(statusClass)}">
+      <div class="video-item${isSelected ? " selected" : ""}" data-job-id="${this.escapeHtml(job.id)}" data-status="${this.escapeHtml(statusClass)}">
         <div class="thumb">
+          <input type="checkbox" class="job-checkbox" data-job-id="${this.escapeHtml(job.id)}" ${isSelected ? "checked" : ""}>
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
                ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}>` : ""}
@@ -3103,6 +3134,14 @@ class MoomboxApp {
         deleteAllBtn.disabled = !hasFiles;
       }
     }
+  }
+
+  updateBatchActionBar() {
+    const bar = document.getElementById("batch-action-bar");
+    if (!bar) return;
+    const count = this._selectedJobs.size;
+    bar.style.display = count === 0 ? "none" : "";
+    document.getElementById("batch-count").textContent = `${count} selected`;
   }
 }
 

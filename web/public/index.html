@@ -220,6 +220,22 @@
                     </div>
                 </div>
 
+                <div id="batch-action-bar" style="display: none;">
+                    <span id="batch-count"></span>
+                    <div class="batch-actions">
+                        <sl-button id="batch-cancel" variant="warning" size="small">
+                            <sl-icon slot="prefix" name="x-circle"></sl-icon> Cancel
+                        </sl-button>
+                        <sl-button id="batch-retry" variant="primary" size="small">
+                            <sl-icon slot="prefix" name="arrow-repeat"></sl-icon> Retry
+                        </sl-button>
+                        <sl-button id="batch-delete" variant="danger" size="small">
+                            <sl-icon slot="prefix" name="trash"></sl-icon> Delete
+                        </sl-button>
+                    </div>
+                    <sl-icon-button id="batch-clear" name="x-lg" label="Clear selection"></sl-icon-button>
+                </div>
+
                 <div id="empty-state" style="display: none">
                     <sl-icon name="inbox"></sl-icon>
                     <p>No jobs yet</p>
