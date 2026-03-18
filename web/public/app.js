@@ -173,6 +173,10 @@ class MoomboxApp {
     // dismissed (Escape, overlay click, or close button) to stop unnecessary
     // updateJobDetails calls and prevent background iframe resource usage.
     document.getElementById("details-dialog").addEventListener("sl-after-hide", () => {
+      // Guard: if showJobDetails() was called between the hide start and this
+      // callback, the dialog is already re-opening for a new job. Don't clear.
+      const dlg = document.getElementById("details-dialog");
+      if (dlg.open) return;
       this.selectedJobId = null;
       // Clear content to stop YouTube/Twitch iframe embeds from running in background
       const content = document.getElementById("job-details-content");
@@ -1513,7 +1517,7 @@ class MoomboxApp {
           ${isScheduled ? `
           <div class="details-row">
             <span class="details-label">Starts In:</span>
-            <span class="details-value" data-timestamp-countdown="${this.escapeHtml(job.streamStartTime)}">${this.formatDurationSeconds(Math.floor((new Date(job.streamStartTime).getTime() - Date.now()) / 1000))}</span>
+            <span class="details-value" data-timestamp-countdown="${this.escapeHtml(job.streamStartTime)}">${(() => { const diff = Math.floor((new Date(job.streamStartTime).getTime() - Date.now()) / 1000); return diff > 0 ? this.formatDurationSeconds(diff) : "Now"; })()}</span>
           </div>` : ""}`;
           })() : ""}
           ${job.streamEndTime ? `
