@@ -376,10 +376,15 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 			}
 			cfg.Cookies.ActivePlatforms = activePlatforms
 		}
-		if v, ok := ck["refresh_interval"].(float64); ok {
-			cfg.Cookies.RefreshInterval = config.FlexDuration{Value: v}
-		} else if vs, ok := ck["refresh_interval"].(string); ok {
-			cfg.Cookies.RefreshInterval = config.ParseFlexDuration(vs, "minutes", cfg.Cookies.RefreshInterval.Value)
+		if val, exists := ck["refresh_interval"]; exists {
+			if v, ok := val.(float64); ok {
+				cfg.Cookies.RefreshInterval = config.FlexDuration{Value: v}
+			} else if vs, ok := val.(string); ok {
+				cfg.Cookies.RefreshInterval = config.ParseFlexDuration(vs, "minutes", cfg.Cookies.RefreshInterval.Value)
+			} else {
+				// null — reset to zero; RefreshService defaults to 30min at runtime
+				cfg.Cookies.RefreshInterval = config.FlexDuration{}
+			}
 		}
 	}
 

@@ -20,7 +20,7 @@ export function formatTimestamp(seconds) {
  */
 export function formatBytes(bytes) {
   if (bytes == null || !isFinite(bytes) || bytes < 0) bytes = 0;
-  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024) return `${Math.round(bytes)}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;

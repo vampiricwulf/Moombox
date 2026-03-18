@@ -801,7 +801,7 @@ class MoomboxApp {
         break;
 
       case "job_update": {
-        // Single job update - update in place without full re-render
+        // Single job update - update in place, or full re-render if status changed
         const updatedJob = p;
         if (!updatedJob?.id) break;
         const jobIndex = this.jobs.findIndex((j) => j.id === updatedJob.id);
@@ -877,12 +877,13 @@ class MoomboxApp {
           this.archivedJobs.push(job);
         }
         this.updateJobDetails(job);
-      } else {
+      } else if (resp.status === 404) {
         // Job truly deleted — close dialog
         const dlg = document.getElementById("details-dialog");
         if (dlg?.open) dlg.hide();
         this.selectedJobId = null;
       }
+      // Other errors (500, 401, etc.) — leave dialog open with last known data
     } catch {
       // Network error — leave dialog open with last known data
     } finally {
@@ -1372,10 +1373,11 @@ class MoomboxApp {
     const content = document.getElementById("job-details-content");
     const statusClass = job.status.toLowerCase().replace("?", "");
 
-    // Show segment counts for Live/Downloading/Muxing/Finished status
-    const showSegments =
-      ["Live", "Downloading", "Muxing", "Finished"].includes(job.status) &&
-      (job.lastVideoSeq || job.lastAudioSeq);
+    // Show segment counts for Live/Downloading/Muxing/Finished status.
+    // Always create the row for eligible statuses so updateJobDetails can
+    // update it when the first segments arrive (avoids silent no-op when
+    // the dialog was opened before any segments were recorded).
+    const showSegments = ["Live", "Downloading", "Muxing", "Finished"].includes(job.status);
     let segmentInfo = "";
     if (showSegments) {
       const vCurrent = job.lastVideoSeq || 0;

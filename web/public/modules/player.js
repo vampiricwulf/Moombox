@@ -560,6 +560,7 @@ export class PlayerController {
         if (this._selectionSeq !== selectionId) return; // Selection changed during fetch
         if (chatRes.ok) {
           this.playerChatData = await chatRes.json();
+          if (this._selectionSeq !== selectionId) return; // Selection changed during parse
           // Compute chat-to-video timing correction. Chat offsets are relative to
           // streamStartTime in the chat file, but video playback starts from the
           // first captured content. If the stream started late (actual > scheduled),

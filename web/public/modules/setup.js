@@ -278,7 +278,7 @@ export class SetupController {
   async finishCookieSetup(platform) {
     const doneBtn = document.getElementById("btn-auto-cookie-done");
     const resultEl = document.getElementById("auto-cookie-setup-result");
-    if (doneBtn) doneBtn.loading = true;
+    if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
     if (resultEl) {
       resultEl.textContent = "Extracting cookies...";
       resultEl.style.color = "";
@@ -328,7 +328,7 @@ export class SetupController {
       }
     } finally {
       clearTimeout(timeoutId);
-      if (doneBtn) doneBtn.loading = false;
+      if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
     }
   }
 

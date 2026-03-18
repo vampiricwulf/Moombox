@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"sync"
@@ -163,7 +164,9 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 		// re-initializes all services with the new config, including monitors.
 		go func() {
 			defer func() {
-				recover() // restart panics are non-recoverable; prevent process crash
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "panic in setup post-save handler: %v\n", r)
+				}
 			}()
 			if installYtdlp && deps.OnInstallYtdlp != nil {
 				deps.OnInstallYtdlp(port, httpsEnabled)

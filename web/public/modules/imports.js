@@ -50,7 +50,8 @@ export class ImportController {
       e.preventDefault();
       dropzone.classList.remove("drag-over");
       const files = e.dataTransfer.files;
-      if (files.length > 0 && files[0].name.toLowerCase().endsWith(".zip")) {
+      if (files.length === 0) return; // Non-file drop (text, image, etc.)
+      if (files[0].name.toLowerCase().endsWith(".zip")) {
         this.setImportFile(files[0]);
       } else {
         this.app.showToast("Please drop a .zip file", "warning");

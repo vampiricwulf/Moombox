@@ -773,7 +773,7 @@ func (m *SetupWizardModel) finishSimpleSetup() string {
 		if m.cookieTWDone {
 			platforms = append(platforms, "twitch")
 		}
-		cfg.Cookies.Platforms = platforms
+		cfg.Cookies.ActivePlatforms = platforms
 	}
 
 	// Channels
@@ -848,7 +848,6 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 		// Go back to the form (rebuild with current values preserved)
 		m.advancedFormDone = false
 		m.buildAdvancedForm()
-		m.escConfirm = false
 		return ""
 	case keyUp:
 		if m.cookieFocus > 0 {
@@ -1076,7 +1075,7 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		if m.cookieTWDone {
 			platforms = append(platforms, "twitch")
 		}
-		cfg.Cookies.Platforms = platforms
+		cfg.Cookies.ActivePlatforms = platforms
 	}
 
 	// Channels

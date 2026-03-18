@@ -454,8 +454,16 @@ export class SettingsController {
     };
 
     // Network is the default visible section, so load security status now.
-    // Reset flag so the form fields are cleared on a full config repopulate.
-    this._securityStatusLoaded = false;
+    // Reset flag so the form fields are cleared on a full config repopulate —
+    // but only if the user isn't mid-entry in a password field (channel/notification
+    // operations trigger loadConfig → populateConfigForm, which would clear their input).
+    const hasPasswordInput =
+      document.getElementById("security-new-password")?.value ||
+      document.getElementById("security-confirm-password")?.value ||
+      document.getElementById("security-current-password")?.value;
+    if (!hasPasswordInput) {
+      this._securityStatusLoaded = false;
+    }
     this.loadSecurityStatus();
   }
 
@@ -1815,7 +1823,7 @@ export class SettingsController {
   async finishAutoCookieSetup() {
     const resultEl = document.getElementById("auto-cookie-setup-result");
     const doneBtn = document.getElementById("btn-auto-cookie-done");
-    if (doneBtn) doneBtn.loading = true;
+    if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
     if (resultEl) {
       resultEl.textContent = "Extracting cookies...";
       resultEl.style.color = "";
@@ -1856,7 +1864,7 @@ export class SettingsController {
       }
     } finally {
       clearTimeout(timeoutId);
-      if (doneBtn) doneBtn.loading = false;
+      if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
     }
   }
 

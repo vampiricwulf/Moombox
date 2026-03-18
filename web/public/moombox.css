@@ -2038,7 +2038,7 @@ html.sl-theme-light {
 
     .status-divider { margin: 0 var(--sl-spacing-2x-small); height: 12px; }
 
-    #status-bar sl-icon-button:not(#btn-refresh-cookies)::part(base) {
+    #status-bar sl-icon-button:not(#btn-refresh-cookies):not(#theme-toggle)::part(base) {
         min-height: 28px;
         min-width: 28px;
     }

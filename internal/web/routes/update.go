@@ -1,7 +1,9 @@
 package routes
 
 import (
+	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -104,7 +106,9 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, cfgMu *sync.RWMutex) {
 		// Trigger restart after response is flushed
 		go func() {
 			defer func() {
-				recover() // restart panics are non-recoverable; prevent process crash
+				if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "panic in update restart handler: %v\n", r)
+			}
 			}()
 			if deps.OnRestart != nil {
 				deps.OnRestart()
