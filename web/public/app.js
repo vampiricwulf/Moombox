@@ -1099,9 +1099,9 @@ class MoomboxApp {
       thumbImg.classList.remove("thumb-avatar");
     }
 
-    // Update title and channel (can change for live streams)
+    // Update title only when changed (avoids recreating sl-tag shadow DOM for TW badge)
     const titleEl = card.querySelector(".stream-title");
-    if (titleEl) {
+    if (titleEl && titleEl.title !== job.title) {
       const isTwitch = job.platform === "twitch";
       const platformBadge = isTwitch
         ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
@@ -1110,17 +1110,12 @@ class MoomboxApp {
       titleEl.title = job.title;
     }
     const authorEl = card.querySelector(".stream-author");
-    if (authorEl) authorEl.textContent = job.channelName;
-
-    // Update status badge and data-status
-    const statusClass = job.status.toLowerCase().replace("?", "");
-    card.dataset.status = statusClass;
-    const statusBadge = card.querySelector(".status");
-    if (statusBadge) {
-      statusBadge.className = `status ${statusClass}`;
-      statusBadge.setAttribute("variant", "primary");
-      statusBadge.textContent = this.displayStatus(job.status);
+    if (authorEl && authorEl.textContent !== job.channelName) {
+      authorEl.textContent = job.channelName;
     }
+
+    // Status badge and data-status are NOT updated here — updateJobCard is
+    // only called when status hasn't changed, so these are already correct.
 
     // Update progress text
     const progressText = card.querySelector(".job-progress-text");
