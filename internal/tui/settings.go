@@ -112,7 +112,7 @@ var sections = []settingsSection{
 				},
 			},
 			{"max_video_resolution", "Max resolution", fieldNumber, nil, "pixels (e.g. 1080, 2160)", nil},
-			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "concurrent download jobs", nil},
+			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "2-4 recommended, higher uses more CPU/network", nil},
 			{"download_chat", "Download chat", fieldToggle, nil, "save live chat as JSON alongside video", nil},
 			{"prefer_60fps", "Prefer 60fps", fieldToggle, nil, "prefer 60fps when same resolution available", nil},
 			{"segment_retry_delay_cap", "Segment retry cap", fieldNumber, nil, "max retry backoff in seconds (default: 60)", nil},

@@ -119,7 +119,7 @@ var advancedSetupSteps = []setupStepDef{
 		fields: []setupFieldDef{
 			{"maxRes", "Max resolution", "2160", "Maximum video dimension (width or height)", setupFieldNumber, nil},
 			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
-			{"numParallel", "Parallel downloads", "2", "How many streams to download simultaneously", setupFieldNumber, nil},
+			{"numParallel", "Parallel downloads", "2", "2-4 recommended, higher uses more CPU/network", setupFieldNumber, nil},
 			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
 			{"segmentRetryDelayCap", "Retry delay cap (sec)", "60", "Max seconds between segment retry attempts", setupFieldNumber, nil},
 			{"segmentLiveCheckRetries", "Live check retries", "16", "Retries before declaring stream ended", setupFieldNumber, nil},

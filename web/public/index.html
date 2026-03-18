@@ -746,7 +746,7 @@
                                 min="1"
                                 label="Parallel Downloads"
                                 placeholder="2"
-                                help-text="Number of concurrent downloads"
+                                help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."
                             ></sl-input>
                             <sl-switch id="cfg-download-chat" checked>
                                 Download Live Chat
@@ -1411,7 +1411,7 @@
                     <p class="setup-help">Leave fields empty to use defaults.</p>
                     <sl-input id="setup-max-resolution" type="number" label="Max Resolution" placeholder="2160" min="1"></sl-input>
                     <sl-switch id="setup-prefer-60fps" checked>Prefer 60fps</sl-switch>
-                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1"></sl-input>
+                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1" help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."></sl-input>
                     <sl-switch id="setup-download-chat" checked>Download Live Chat</sl-switch>
                     <sl-details summary="Advanced retry settings">
                         <sl-input id="setup-retry-delay-cap" type="number" label="Retry Delay Cap (seconds)" placeholder="60" min="1" max="300"></sl-input>
