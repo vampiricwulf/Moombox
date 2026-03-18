@@ -810,8 +810,24 @@ export class SetupController {
     const msg = document.createElement("p");
     msg.style.marginTop = "1em";
     msg.textContent = "Restarting Moombox...";
+
+    const startTime = Date.now();
+    const phaseEl = document.createElement("p");
+    phaseEl.style.cssText = "margin-top: 0.75em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-500);";
+    phaseEl.textContent = "Saving configuration...";
+
+    const elapsedEl = document.createElement("p");
+    elapsedEl.style.cssText = "font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-400); margin-top: 0.25em;";
+
+    const elapsedInterval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      elapsedEl.textContent = `${elapsed}s elapsed`;
+    }, 1000);
+
     inner.appendChild(spinner);
     inner.appendChild(msg);
+    inner.appendChild(phaseEl);
+    inner.appendChild(elapsedEl);
     waiting.appendChild(inner);
     document.body.appendChild(waiting);
 
@@ -820,6 +836,20 @@ export class SetupController {
 
     const poll = async () => {
       attempts++;
+
+      // Update phase text based on attempt count and elapsed time
+      if (attempts === 1) {
+        phaseEl.textContent = "Restarting server...";
+      } else if (attempts >= 2) {
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= 15000 && !phaseEl.dataset.longWarn) {
+          phaseEl.dataset.longWarn = "1";
+          phaseEl.textContent = "Reconnecting... This is taking longer than usual. The server may be installing plugins.";
+        } else if (!phaseEl.dataset.longWarn) {
+          phaseEl.textContent = "Reconnecting...";
+        }
+      }
+
       try {
         const resp = await fetch("/api/setup/status");
         if (resp.ok) {
@@ -827,6 +857,8 @@ export class SetupController {
           if (!data.isFirstRun) {
             // Server is back and config exists
             this._polling = false;
+            phaseEl.textContent = "Connected!";
+            clearInterval(elapsedInterval);
             document.getElementById("restart-waiting")?.remove();
 
             // Check FFmpeg
@@ -842,6 +874,7 @@ export class SetupController {
 
       if (attempts >= maxAttempts) {
         this._polling = false;
+        clearInterval(elapsedInterval);
         const waitingEl = document.getElementById("restart-waiting");
         if (waitingEl) {
           waitingEl.textContent = "";
