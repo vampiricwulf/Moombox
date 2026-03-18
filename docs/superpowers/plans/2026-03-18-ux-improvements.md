@@ -1876,3 +1876,102 @@ Start Moombox and verify:
 git add -A
 git commit -m "ux: final fixes from smoke testing"
 ```
+
+---
+
+### Task 21: Audit & Fix Loop
+
+**Purpose:** Comprehensive review of ALL changes from Tasks 1-20. Read every modified file, cross-reference against the spec, identify inconsistencies, bugs, half-implemented features, and style violations. Fix issues and repeat until clean.
+
+- [ ] **Step 1: Read all modified Go files and check for compile errors**
+
+```bash
+go build ./...
+go vet ./...
+```
+
+If errors found, fix them immediately before proceeding.
+
+- [ ] **Step 2: Run all tests**
+
+```bash
+go test ./...
+```
+
+Fix any test failures.
+
+- [ ] **Step 3: Audit Phase 1 — Setup & Onboarding**
+
+Read the following files and verify each Phase 1 change is complete and correct:
+- `web/public/index.html` — setup mode cards (badges, subtext), cookie countdown element, FFmpeg skip button
+- `web/public/modules/setup.js` — cookie countdown logic, retry/skip on timeout, restart progress phases, sessionStorage flag
+- `web/public/modules/settings.js` — cookie countdown in settings, FFmpeg install button handler
+- `internal/tui/setup_wizard.go` — mode selection labels, cookie countdown (tea.Tick), timeout handling, cookie success messages
+- `internal/tui/ffmpeg_check.go` — skip option, new menu item
+- `internal/tui/app.go` — justCompletedSetup flag, FFmpeg skip handling
+- `internal/tui/task_list.go` — onboarding nudge empty state
+
+Cross-reference against spec items 1.1–1.6. Check: Are all string literals correct? Are both UIs consistent? Any dead code or half-wired handlers?
+
+- [ ] **Step 4: Audit Phase 2 — Feedback & Indicators**
+
+Read and verify:
+- `internal/tui/log_viewer.go` — auto-scroll indicator rendering, End key handler
+- `web/public/app.js` — log auto-scroll pill toggle, pill click handler, error text expand/collapse, batch action bar, settings dirty interception
+- `web/public/index.html` — log pill element, settings banner element, batch action bar element
+- `web/public/moombox.css` — pill styling, banner styling, error text styling, batch selection styling
+- `internal/tui/action_menu.go` — DisabledReason field, rendering with reason text
+- `internal/tui/app_actions.go` — DisabledReason strings on each filtered action
+- `web/public/modules/settings.js` — dirty banner show/hide, discard = loadConfig(), save from banner
+
+Cross-reference against spec items 2.1–2.5. Check: Does the log pill use `position: sticky` (not `fixed`)? Does the error expand use delegated handler only (no inline onclick)? Does the tab interception use capture phase (not `sl-tab-show`)?
+
+- [ ] **Step 5: Audit Phase 3 — Discoverability & Labels**
+
+Read and verify:
+- `internal/tui/status_bar.go` — chord hint rendering, ShowChordHint flag
+- `internal/tui/app_keys.go` — seenChordHint dismissal on chord use
+- `internal/tui/settings.go` — fieldDef struct (previewFn added), ALL ~30 initializers have trailing nil, channel field label updated, parallel downloads help text
+- `internal/tui/settings_view.go` — renderFields preview rendering
+- `internal/tui/setup_wizard.go` — template preview, label changes, parallel downloads help
+- `web/public/index.html` — label changes (non-live → uploads & premieres), template preview divs, parallel downloads help-text
+- `web/public/modules/settings.js` — template preview listener
+- `web/public/modules/setup.js` — template preview listener
+
+Cross-reference against spec items 3.1–3.5. Check: Are all ~30 fieldDef initializers updated with nil? Does the template preview use the correct sample data? Is the "(YouTube only)" suffix present on the renamed label?
+
+- [ ] **Step 6: Audit Phase 4 — Power User Features**
+
+Read and verify:
+- `web/public/app.js` — _selectedJobs Set, checkbox rendering in job cards, event delegation for checkboxes, updateBatchActionBar(), batchAction(), Esc clear, re-render selection persistence
+- `web/public/index.html` — batch action bar HTML, chat offset reset button
+- `web/public/moombox.css` — checkbox opacity transitions, selected state, action bar positioning
+- `web/public/modules/player.js` — offset reset handler, reset button visibility toggle
+- `internal/tui/task_list.go` — selected map, Space handler, selection markers, SelectedIDs/ClearSelection helpers
+- `internal/tui/app_keys.go` — batch chord dispatch (checks selection count), Esc clear selection
+- `internal/tui/app.go` — batch action callbacks
+
+Cross-reference against spec items 4.1–4.3. Check: Does batch use Promise.allSettled (not a new API endpoint)? Does TUI Space handler go in task_list.go (not app_keys.go)? Is chat offset reset button hidden when offset is 0?
+
+- [ ] **Step 7: Fix all issues found**
+
+For each issue found in steps 3-6, fix it immediately. Document what was fixed.
+
+- [ ] **Step 8: Re-run full build and tests**
+
+```bash
+go build ./...
+go vet ./...
+go test ./...
+```
+
+- [ ] **Step 9: Repeat audit if fixes were made**
+
+If Step 7 produced any fixes, go back to Step 3 and re-audit the affected phases. Repeat until a full audit pass produces zero issues.
+
+- [ ] **Step 10: Final commit**
+
+```bash
+git add -A
+git commit -m "ux: audit fixes — all phases verified against spec"
+```
