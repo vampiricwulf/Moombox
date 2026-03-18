@@ -377,6 +377,14 @@ class MoomboxApp {
     const jobsContainer = document.getElementById("jobs-container");
     if (jobsContainer) {
       jobsContainer.addEventListener("click", (e) => {
+        // Expandable error text
+        const errorText = e.target.closest(".job-error-text");
+        if (errorText) {
+          e.stopPropagation();
+          const isExpanded = errorText.classList.toggle("expanded");
+          errorText.textContent = isExpanded ? errorText.dataset.full : errorText.dataset.short;
+          return;
+        }
         // Quick action buttons
         const quickBtn = e.target.closest("[data-quick-action]");
         if (quickBtn) {
@@ -399,6 +407,14 @@ class MoomboxApp {
     const archivedContainer = document.getElementById("archived-container");
     if (archivedContainer) {
       archivedContainer.addEventListener("click", (e) => {
+        // Expandable error text
+        const errorText = e.target.closest(".job-error-text");
+        if (errorText) {
+          e.stopPropagation();
+          const isExpanded = errorText.classList.toggle("expanded");
+          errorText.textContent = isExpanded ? errorText.dataset.full : errorText.dataset.short;
+          return;
+        }
         const quickBtn = e.target.closest("[data-quick-action]");
         if (quickBtn) {
           e.stopPropagation();
@@ -1124,6 +1140,7 @@ class MoomboxApp {
     const fallbackThumb = isTwitch ? twitchAvatarFallback : ytThumb;
     const isAvatarThumb = isTwitch && (!job.thumbnailUrl || thumbnailUrl === twitchAvatarFallback);
     const progress = this.formatProgress(job);
+    const progressHtml = this.formatProgressHtml(job);
     const percent = job.percent || 0;
     const platformBadge = isTwitch
       ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
@@ -1154,7 +1171,7 @@ class MoomboxApp {
           <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
         <div class="job-progress">
-          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${this.escapeHtml(progress)}</div>
+          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${progressHtml}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${this.escapeHtml(percent)}"></sl-progress-bar>` : ""}
         </div>
         <div class="job-quick-actions">${actionsHtml}</div>
@@ -1196,7 +1213,7 @@ class MoomboxApp {
     const progressText = card.querySelector(".job-progress-text");
     if (progressText) {
       const progress = this.formatProgress(job);
-      progressText.textContent = progress;
+      progressText.innerHTML = this.formatProgressHtml(job);
       progressText.title = this.formatProgressTooltip(job) || progress;
       if (job.status === "Upcoming" && job.lastRecheckAt) {
         progressText.dataset.timestamp = job.lastRecheckAt;
@@ -1255,7 +1272,7 @@ class MoomboxApp {
     }
 
     if (job.status === "Error") {
-      return job.error ? job.error.substring(0, 50) : "Error";
+      return job.error || "Error";
     }
 
     if (job.status === "COOKIES?") {
@@ -1263,6 +1280,17 @@ class MoomboxApp {
     }
 
     return job.progress || "-";
+  }
+
+  // Returns progress as safe HTML — identical to formatProgress for most statuses,
+  // but wraps error text in an expandable span for the Error status.
+  formatProgressHtml(job) {
+    if (job.status === "Error") {
+      const errorText = job.error || "Error";
+      const truncated = errorText.length > 50 ? errorText.substring(0, 50) + "…" : errorText;
+      return `<span class="job-error-text" title="${this.escapeHtml(errorText)}" data-full="${this.escapeHtml(errorText)}" data-short="${this.escapeHtml(truncated)}">${this.escapeHtml(truncated)}</span>`;
+    }
+    return this.escapeHtml(this.formatProgress(job));
   }
 
   // ===== Job Details =====

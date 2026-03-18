@@ -266,6 +266,27 @@ sl-badge.status.cookies::part(base) {
     text-overflow: ellipsis;
 }
 
+.job-error-text {
+    cursor: pointer;
+    text-decoration-style: dotted;
+    text-decoration-line: underline;
+    text-underline-offset: 2px;
+}
+
+.job-error-text.expanded {
+    white-space: normal;
+    word-break: break-word;
+}
+
+@media (max-width: 768px) {
+    .job-error-text {
+        white-space: normal;
+        word-break: break-word;
+        cursor: default;
+        text-decoration: none;
+    }
+}
+
 .job-progress-bar {
     --height: 4px;
     --indicator-transition-duration: 0.3s;
