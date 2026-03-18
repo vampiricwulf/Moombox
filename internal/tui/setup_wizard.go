@@ -373,7 +373,7 @@ func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 
 	// Handle cookie countdown tick
 	if _, ok := msg.(cookieCountdownTickMsg); ok {
-		if m.cookieActive && m.cookieCountdown > 0 {
+		if m.cookieActive && !m.cookieFinishing && m.cookieCountdown > 0 {
 			m.cookieCountdown--
 			if m.cookieCountdown <= 0 {
 				m.cookieTimedOut = true

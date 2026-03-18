@@ -509,7 +509,6 @@ func (m *TaskListModel) View() string {
 	var listContent string
 	if len(m.list.Items()) == 0 {
 		if m.JustCompletedSetup {
-			m.JustCompletedSetup = false
 			listContent = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ecc71")).Render("Setup complete!") + "\n\n" +
 				DimStyle.Render("Press ` to open Settings and add channels,") + "\n" +
 				DimStyle.Render("or A A to add a video.")

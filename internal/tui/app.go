@@ -247,9 +247,6 @@ type App struct {
 	// First-run flag: triggers setup wizard
 	IsFirstRun bool
 
-	// Transient flag: set when setup wizard completes, shown once in empty state
-	justCompletedSetup bool
-
 	// seenChordHint is set once the user first presses any chord key, dismissing
 	// the newcomer hint in the status bar (session-only, not persisted).
 	seenChordHint bool

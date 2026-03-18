@@ -397,7 +397,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		// Save succeeded — mark setup complete for onboarding nudge, then trigger restart
-		a.justCompletedSetup = true
 		a.taskList.JustCompletedSetup = true
 		a.setupWiz.Close()
 		if a.setupWiz.OnRestart != nil {

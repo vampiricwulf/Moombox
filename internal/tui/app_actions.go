@@ -29,7 +29,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		_ = os.MkdirAll(startDir, 0o755)
 		return a, a.importDlg.Open(startDir)
 	case "A R":
-		if a.taskList.SelectedCount() > 0 && a.OnRetryJob != nil {
+		if job == nil && a.taskList.SelectedCount() > 0 && a.OnRetryJob != nil {
 			count := 0
 			for _, id := range a.taskList.SelectedIDs() {
 				a.OnRetryJob(id)
@@ -42,7 +42,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
 		}
 	case "A C":
-		if a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
+		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
 			count := 0
 			for _, id := range a.taskList.SelectedIDs() {
 				a.OnCancelJob(id)
@@ -55,7 +55,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
 		}
 	case "A D":
-		if a.taskList.SelectedCount() > 0 && a.OnDeleteJob != nil {
+		if job == nil && a.taskList.SelectedCount() > 0 && a.OnDeleteJob != nil {
 			count := 0
 			for _, id := range a.taskList.SelectedIDs() {
 				a.OnDeleteJob(id)

@@ -607,6 +607,7 @@ sl-badge.status.cookies::part(base) {
 }
 
 #logs-container {
+    position: relative;
     height: calc(100vh - 12rem);
 }
 
@@ -626,8 +627,10 @@ sl-badge.status.cookies::part(base) {
 }
 
 #log-autoscroll-pill {
-    position: sticky;
+    position: absolute;
     bottom: 0.5em;
+    left: 50%;
+    transform: translateX(-50%);
     margin: 0 auto;
     width: fit-content;
     padding: 0.25em 0.75em;
