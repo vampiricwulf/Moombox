@@ -556,6 +556,11 @@ class MoomboxApp {
         warningsIcon.appendChild(icon);
         warningsIcon.title = warningItems.map(w => w.label).join(", ");
         warningsIcon.dataset.action = warningItems[0].action;
+      } else {
+        // Clear stale children, title, and dataset from previous warnings
+        warningsIcon.textContent = "";
+        warningsIcon.title = "";
+        delete warningsIcon.dataset.action;
       }
     }
 
@@ -1871,7 +1876,13 @@ class MoomboxApp {
     if (!value) return;
 
     const videoId = this.extractVideoId(value);
-    if (!videoId) return;
+    if (!videoId) {
+      // Non-YouTube URL (e.g. Twitch) — hide stale format options
+      document.getElementById("format-skeleton").style.display = "none";
+      document.getElementById("format-selection").style.display = "none";
+      this._lastFormatVideoId = null;
+      return;
+    }
 
     // Don't re-fetch if same video
     if (this._lastFormatVideoId === videoId) return;

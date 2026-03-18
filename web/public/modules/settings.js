@@ -1382,13 +1382,15 @@ export class SettingsController {
 
       // Update button text
       if (status.installed) {
-        const icon = installBtn.querySelector("sl-icon");
+        let icon = installBtn.querySelector("sl-icon");
+        if (!icon) { icon = document.createElement("sl-icon"); icon.slot = "prefix"; }
         icon.name = "arrow-clockwise";
         installBtn.textContent = "";
         installBtn.prepend(icon);
         installBtn.append(status.portMismatch ? "Update" : "Reinstall");
       } else {
-        const icon = installBtn.querySelector("sl-icon");
+        let icon = installBtn.querySelector("sl-icon");
+        if (!icon) { icon = document.createElement("sl-icon"); icon.slot = "prefix"; }
         icon.name = "download";
         installBtn.textContent = "";
         installBtn.prepend(icon);
