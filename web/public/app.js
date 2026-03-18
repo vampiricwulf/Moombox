@@ -2093,6 +2093,10 @@ class MoomboxApp {
         if (archivedJob) {
           archivedJob.status = "Cancelled";
           this.renderArchivedJobs();
+          // Update the open details dialog so buttons/status reflect the new state
+          if (this.selectedJobId === id) {
+            this.updateJobDetails(archivedJob);
+          }
         }
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
@@ -2116,6 +2120,14 @@ class MoomboxApp {
       });
       if (response.ok) {
         this.showToast("Job queued for retry", "success");
+        // Close the details dialog — the job is moving to the active queue
+        // and WebSocket will deliver it as a new active job. Keeping the dialog
+        // open would show stale archived data with incorrect buttons.
+        if (this.selectedJobId === id) {
+          const dlg = document.getElementById("details-dialog");
+          if (dlg?.open) dlg.hide();
+          this.selectedJobId = null;
+        }
         // Remove from archived jobs if present (job moves to active queue)
         const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
         if (archivedIdx !== -1) {
