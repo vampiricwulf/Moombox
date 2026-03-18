@@ -275,6 +275,29 @@ class MoomboxApp {
       });
     }
 
+    // Intercept tab switches when settings has unsaved changes
+    document.querySelectorAll("sl-tab[slot='nav']").forEach(tab => {
+      tab.addEventListener("click", (e) => {
+        if (tab.panel !== "settings" && this.settings?._dirty) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          this.showConfirm("You have unsaved settings changes. Discard and leave?", {
+            title: "Unsaved Changes",
+            okLabel: "Leave Without Saving",
+            okVariant: "warning"
+          }).then(confirmed => {
+            if (confirmed) {
+              this.settings._dirty = false;
+              this.settings._updateUnsavedIndicator();
+              document.getElementById("settings-unsaved-banner").style.display = "none";
+              this.settings.app.loadConfig();
+              tab.click();
+            }
+          });
+        }
+      }, true); // capture phase — intercept before Shoelace switches the tab
+    });
+
     // Refresh cookies button (shift+click triggers auto-cookie browser refresh)
     const refreshBtn = document.getElementById("btn-refresh-cookies");
     if (refreshBtn) {

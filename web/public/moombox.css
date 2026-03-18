@@ -1816,6 +1816,20 @@ sl-progress-bar {
     font-weight: var(--sl-font-weight-semibold);
 }
 
+#settings-unsaved-banner {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: var(--sl-spacing-small);
+    padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+    background: var(--sl-color-warning-100);
+    border-bottom: 1px solid var(--sl-color-warning-300);
+    color: var(--sl-color-warning-700);
+    font-size: var(--sl-font-size-small);
+}
+
 /* Video duration display in add dialog */
 #video-duration-display {
     font-size: var(--sl-font-size-small);

@@ -464,6 +464,14 @@
                     </div>
 
                     <div class="settings-content">
+                        <div id="settings-unsaved-banner" style="display: none;">
+                            <sl-icon name="exclamation-triangle"></sl-icon>
+                            <span>You have unsaved changes</span>
+                            <div style="margin-left: auto; display: flex; gap: 0.5em;">
+                                <sl-button id="settings-banner-discard" variant="default" size="small">Discard</sl-button>
+                                <sl-button id="settings-banner-save" variant="primary" size="small">Save</sl-button>
+                            </div>
+                        </div>
                         <!-- General Settings -->
                         <!-- Network Settings -->
                         <div id="settings-network" class="settings-section">

@@ -106,9 +106,21 @@ export class SettingsController {
       reloadBtn.addEventListener("click", () => {
         this._dirty = false;
         this._updateUnsavedIndicator();
+        document.getElementById("settings-unsaved-banner").style.display = "none";
         this.app.loadConfig();
       });
     }
+
+    // Unsaved changes banner buttons
+    document.getElementById("settings-banner-discard")?.addEventListener("click", () => {
+      this._dirty = false;
+      this._updateUnsavedIndicator();
+      document.getElementById("settings-unsaved-banner").style.display = "none";
+      this.app.loadConfig();
+    });
+    document.getElementById("settings-banner-save")?.addEventListener("click", () => {
+      this.saveConfig();
+    });
 
     // Add channel
     const addChannelBtn = document.getElementById("add-channel-btn");
@@ -433,6 +445,7 @@ export class SettingsController {
     // Track dirty state
     this._dirty = false;
     this._updateUnsavedIndicator();
+    document.getElementById("settings-unsaved-banner")?.style.setProperty("display", "none");
     if (!this._dirtyListenersAdded) {
       this._dirtyListenersAdded = true;
       const settingsContent = document.querySelector(".settings-content");
@@ -613,6 +626,7 @@ export class SettingsController {
         }
         this._dirty = false;
         this._updateUnsavedIndicator();
+        document.getElementById("settings-unsaved-banner").style.display = "none";
         this.app.showToast("Settings saved successfully", "success");
         // Refresh status bar (platform indicators, cookie status, etc.)
         this.app.loadStatus();
@@ -717,6 +731,8 @@ export class SettingsController {
   _markDirty() {
     this._dirty = true;
     this._updateUnsavedIndicator();
+    const banner = document.getElementById("settings-unsaved-banner");
+    if (banner) banner.style.display = "";
   }
 
   _updateUnsavedIndicator() {
