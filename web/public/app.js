@@ -1093,7 +1093,7 @@ class MoomboxApp {
         </div>
         <div class="job-progress">
           <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${this.escapeHtml(progress)}</div>
-          ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${percent}"></sl-progress-bar>` : ""}
+          ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${this.escapeHtml(percent)}"></sl-progress-bar>` : ""}
         </div>
         <div class="job-quick-actions">${actionsHtml}</div>
       </div>
@@ -1384,9 +1384,10 @@ class MoomboxApp {
 
       // Twitch has single muxed HLS stream (no separate audio)
       const isTwitchSegments = job.platform === "twitch";
+      const segDisplayValue = isTwitchSegments ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
       segmentInfo = `<div class="details-row" id="segments-row">
           <span class="details-label">Segments:</span>
-          <span class="details-value" data-field="segments">${isTwitchSegments ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`}</span>
+          <span class="details-value" data-field="segments">${this.escapeHtml(segDisplayValue)}</span>
         </div>`;
     }
 
@@ -1440,7 +1441,7 @@ class MoomboxApp {
             <span class="details-label">Chat:</span>
             <span class="details-value" data-field="chat">
               <sl-badge variant="${chatVariant}">${this.escapeHtml(job.chatStatus)}</sl-badge>
-              ${job.totalChatMessages ? ` (${job.totalChatMessages.toLocaleString()} messages)` : ""}
+              ${job.totalChatMessages ? ` (${this.escapeHtml(job.totalChatMessages.toLocaleString())} messages)` : ""}
             </span>
           </div>`;
           })() : ""}
@@ -1453,7 +1454,7 @@ class MoomboxApp {
           </div>
           <div class="details-row" style="${this.formatProgress(job) !== "Complete" ? "" : "display:none"}">
             <span class="details-label">Progress:</span>
-            <span class="details-value" data-field="progress">${this.formatProgress(job)}</span>
+            <span class="details-value" data-field="progress">${this.escapeHtml(this.formatProgress(job))}</span>
           </div>
           `
               : `
@@ -1466,7 +1467,7 @@ class MoomboxApp {
           }
           <div class="details-row" id="speed-row" style="${job.speed ? "" : "display:none"}">
             <span class="details-label">Speed:</span>
-            <span class="details-value" data-field="speed">${job.speed || ""}</span>
+            <span class="details-value" data-field="speed">${this.escapeHtml(job.speed || "")}</span>
           </div>
           ${
             job.filename
@@ -1480,17 +1481,17 @@ class MoomboxApp {
           }
           <div class="details-row">
             <span class="details-label">Created:</span>
-            <span class="details-value" data-timestamp="${this.escapeHtml(job.createdAt)}" title="${new Date(job.createdAt).toLocaleString()}">${this.formatRelativeTime(job.createdAt)}</span>
+            <span class="details-value" data-timestamp="${this.escapeHtml(job.createdAt)}" title="${new Date(job.createdAt).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(job.createdAt))}</span>
           </div>
           ${job.downloadStartedAt ? `
           <div class="details-row">
             <span class="details-label">DL Started:</span>
-            <span class="details-value" data-timestamp="${this.escapeHtml(job.downloadStartedAt)}" title="${new Date(job.downloadStartedAt).toLocaleString()}">${this.formatRelativeTime(job.downloadStartedAt)}</span>
+            <span class="details-value" data-timestamp="${this.escapeHtml(job.downloadStartedAt)}" title="${new Date(job.downloadStartedAt).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(job.downloadStartedAt))}</span>
           </div>
           ` : ""}
           <div class="details-row">
             <span class="details-label">Updated:</span>
-            <span class="details-value" data-field="updated" data-timestamp="${this.escapeHtml(job.updatedAt)}" title="${new Date(job.updatedAt).toLocaleString()}">${this.formatRelativeTime(job.updatedAt)}</span>
+            <span class="details-value" data-field="updated" data-timestamp="${this.escapeHtml(job.updatedAt)}" title="${new Date(job.updatedAt).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(job.updatedAt))}</span>
           </div>
           ${isTwitch && job.twitchCategory ? `
           <div class="details-row">
@@ -1517,19 +1518,19 @@ class MoomboxApp {
           ${isScheduled ? `
           <div class="details-row">
             <span class="details-label">Starts In:</span>
-            <span class="details-value" data-timestamp-countdown="${this.escapeHtml(job.streamStartTime)}">${(() => { const diff = Math.floor((new Date(job.streamStartTime).getTime() - Date.now()) / 1000); return diff > 0 ? this.formatDurationSeconds(diff) : "Now"; })()}</span>
+            <span class="details-value" data-timestamp-countdown="${this.escapeHtml(job.streamStartTime)}">${this.escapeHtml((() => { const diff = Math.floor((new Date(job.streamStartTime).getTime() - Date.now()) / 1000); return diff > 0 ? this.formatDurationSeconds(diff) : "Now"; })())}</span>
           </div>` : ""}`;
           })() : ""}
           ${job.streamEndTime ? `
           <div class="details-row">
             <span class="details-label">Stream End:</span>
-            <span class="details-value" data-timestamp="${this.escapeHtml(job.streamEndTime)}" title="${new Date(job.streamEndTime).toLocaleString()}">${this.formatRelativeTime(job.streamEndTime)}</span>
+            <span class="details-value" data-timestamp="${this.escapeHtml(job.streamEndTime)}" title="${new Date(job.streamEndTime).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(job.streamEndTime))}</span>
           </div>
           ` : ""}
           ${job.lengthSeconds && job.lengthSeconds > 0 ? `
           <div class="details-row">
             <span class="details-label">Duration:</span>
-            <span class="details-value">${this.formatDurationSeconds(job.lengthSeconds)}</span>
+            <span class="details-value">${this.escapeHtml(this.formatDurationSeconds(job.lengthSeconds))}</span>
           </div>
           ` : ""}
         </div>
@@ -1544,7 +1545,7 @@ class MoomboxApp {
           <span class="details-value">${
             job.selectedVideoItag === -1
               ? "None (audio only)"
-              : `itag ${job.selectedVideoItag}`
+              : `itag ${this.escapeHtml(job.selectedVideoItag)}`
           }</span>
         </div>
         ` : ""}
@@ -1554,7 +1555,7 @@ class MoomboxApp {
           <span class="details-value">${
             job.selectedAudioItag === -1
               ? "None (video only)"
-              : `itag ${job.selectedAudioItag}`
+              : `itag ${this.escapeHtml(job.selectedAudioItag)}`
           }</span>
         </div>
         ` : ""}
@@ -1562,8 +1563,8 @@ class MoomboxApp {
         <div class="details-row">
           <span class="details-label">Time Range:</span>
           <span class="details-value">
-            ${this.formatTimestamp(job.startTime || 0)} - ${job.endTime != null ? this.formatTimestamp(job.endTime) : "end"}
-            ${job.endTime != null && job.startTime != null ? ` (${this.formatTimestamp(job.endTime - job.startTime)})` : ""}
+            ${this.escapeHtml(this.formatTimestamp(job.startTime || 0))} - ${job.endTime != null ? this.escapeHtml(this.formatTimestamp(job.endTime)) : "end"}
+            ${job.endTime != null && job.startTime != null ? ` (${this.escapeHtml(this.formatTimestamp(job.endTime - job.startTime))})` : ""}
           </span>
         </div>
         ` : ""}
@@ -1571,12 +1572,12 @@ class MoomboxApp {
       ` : ""}
 
       ${job.trims && job.trims.length > 0 ? `
-      <sl-details summary="Trims (${job.trims.length})" open class="details-section">
+      <sl-details summary="Trims (${this.escapeHtml(job.trims.length)})" open class="details-section">
         <div class="trim-list">
           ${job.trims.map(trim => {
-            const range = `${this.formatTimestamp(trim.startTime)} - ${this.formatTimestamp(trim.endTime)}`;
-            const duration = `${Math.floor(trim.duration)}s`;
-            const size = trim.fileSize ? this.formatBytes(trim.fileSize) : '?';
+            const range = `${this.escapeHtml(this.formatTimestamp(trim.startTime))} - ${this.escapeHtml(this.formatTimestamp(trim.endTime))}`;
+            const duration = `${this.escapeHtml(Math.floor(trim.duration))}s`;
+            const size = trim.fileSize ? this.escapeHtml(this.formatBytes(trim.fileSize)) : '?';
             return `
               <div class="trim-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid var(--sl-color-neutral-200);">
                 <span>
@@ -1615,19 +1616,19 @@ class MoomboxApp {
         if (hasResolution) {
           rows += `<div class="details-row">
             <span class="details-label">Resolution:</span>
-            <span class="details-value">${job.videoWidth}x${job.videoHeight}</span>
+            <span class="details-value">${this.escapeHtml(job.videoWidth)}x${this.escapeHtml(job.videoHeight)}</span>
           </div>`;
         }
         if (hasFps) {
           rows += `<div class="details-row">
             <span class="details-label">FPS:</span>
-            <span class="details-value">${job.videoFps}</span>
+            <span class="details-value">${this.escapeHtml(job.videoFps)}</span>
           </div>`;
         }
         if (hasFileSize) {
           rows += `<div class="details-row">
             <span class="details-label">File Size:</span>
-            <span class="details-value">${this.formatBytes(job.fileSize)}</span>
+            <span class="details-value">${this.escapeHtml(this.formatBytes(job.fileSize))}</span>
           </div>`;
         }
         if (hasFinishedSegs) {
@@ -1641,7 +1642,7 @@ class MoomboxApp {
           const segValue = isTwitchSeg ? vDisplay : `V: ${vDisplay} | A: ${aDisplay}`;
           rows += `<div class="details-row">
             <span class="details-label">Segments:</span>
-            <span class="details-value">${segValue}</span>
+            <span class="details-value">${this.escapeHtml(segValue)}</span>
           </div>`;
         }
         if (hasGaps) {
@@ -1656,7 +1657,7 @@ class MoomboxApp {
           const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
           rows += `<div class="details-row">
             <span class="details-label">Gaps:</span>
-            <span class="details-value" style="color: var(--sl-color-warning-600)">${job.gaps.length} segments${detail}</span>
+            <span class="details-value" style="color: var(--sl-color-warning-600)">${this.escapeHtml(job.gaps.length)} segments${this.escapeHtml(detail)}</span>
           </div>`;
         }
         return `<div class="details-section"><strong>Media:</strong>${rows}</div>`;
@@ -1668,10 +1669,10 @@ class MoomboxApp {
         job.segments.forEach((seg, i) => {
           const dur = seg.durationSeconds ? `${Math.round(seg.durationSeconds)}s` : "—";
           const size = seg.fileSize ? this.formatBytes(seg.fileSize) : "—";
-          const res = seg.videoWidth && seg.videoHeight ? `${seg.videoWidth}x${seg.videoHeight}` : "";
+          const res = seg.videoWidth && seg.videoHeight ? `${this.escapeHtml(seg.videoWidth)}x${this.escapeHtml(seg.videoHeight)}` : "";
           segRows += `<div class="details-row" style="padding-left:8px;">
-            <span class="details-label">Segment ${i}:</span>
-            <span class="details-value">${this.escapeHtml(seg.quality)} — ${dur} — ${size}${res ? ` — ${res}` : ""}</span>
+            <span class="details-label">Segment ${this.escapeHtml(i)}:</span>
+            <span class="details-value">${this.escapeHtml(seg.quality)} — ${this.escapeHtml(dur)} — ${this.escapeHtml(size)}${res ? ` — ${res}` : ""}</span>
           </div>`;
         });
         return `<div class="details-section"><strong>Quality Segments:</strong>${segRows}</div>`;
@@ -2885,8 +2886,8 @@ class MoomboxApp {
 
       const typeBadge = `<span class="files-type-badge ${this.escapeHtml(file.type)}">${this.escapeHtml(file.type)}</span>`;
       const pathStr = `<span class="files-path" title="${this.escapeHtml(file.path)}">${this.escapeHtml(file.relPath)}</span>`;
-      const sizeStr = `<span>${this.formatBytes(file.size)}</span>`;
-      const modStr = `<span data-timestamp="${this.escapeHtml(file.modified)}" title="${new Date(file.modified).toLocaleString()}">${this.formatRelativeTime(file.modified)}</span>`;
+      const sizeStr = `<span>${this.escapeHtml(this.formatBytes(file.size))}</span>`;
+      const modStr = `<span data-timestamp="${this.escapeHtml(file.modified)}" title="${new Date(file.modified).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(file.modified))}</span>`;
 
       let jobStr = "";
       if (file.jobTitle) {
