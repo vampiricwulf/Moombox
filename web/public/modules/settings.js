@@ -453,7 +453,9 @@ export class SettingsController {
       "logs.log_max_files": config.logs?.log_max_files,
     };
 
-    // Network is the default visible section, so load security status now
+    // Network is the default visible section, so load security status now.
+    // Reset flag so the form fields are cleared on a full config repopulate.
+    this._securityStatusLoaded = false;
     this.loadSecurityStatus();
   }
 
@@ -1493,10 +1495,15 @@ export class SettingsController {
       console.error("Failed to load security status:", e);
     }
 
-    // Clear form fields
-    if (currentPasswordInput) currentPasswordInput.value = "";
-    document.getElementById("security-new-password").value = "";
-    document.getElementById("security-confirm-password").value = "";
+    // Only clear form fields on the initial load (not when re-navigating to Network
+    // section), so partially-entered passwords aren't lost. The fields are cleared
+    // explicitly after successful setPassword/removePassword via their own loadSecurityStatus calls.
+    if (!this._securityStatusLoaded) {
+      this._securityStatusLoaded = true;
+      if (currentPasswordInput) currentPasswordInput.value = "";
+      document.getElementById("security-new-password").value = "";
+      document.getElementById("security-confirm-password").value = "";
+    }
 
     // Load connected clients
     this.loadClientTokens();
@@ -1542,6 +1549,8 @@ export class SettingsController {
 
       if (response.ok) {
         this.app.showToast("Password updated successfully", "success");
+        // Reset flag so loadSecurityStatus clears the form fields
+        this._securityStatusLoaded = false;
         this.loadSecurityStatus();
         // Refresh config to pick up hasPassword change
         this.app.loadConfig();
@@ -1591,6 +1600,8 @@ export class SettingsController {
         if (response.ok) {
           dialog.hide();
           this.app.showToast("Password removed. Network access set to Localhost Only.", "success");
+          // Reset flag so loadSecurityStatus clears the form fields
+          this._securityStatusLoaded = false;
           this.loadSecurityStatus();
           this.app.loadConfig();
         } else {

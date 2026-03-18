@@ -474,10 +474,12 @@ export class TrimController {
 
     this._el.submitBtn.loading = true;
     this._el.submitBtn.disabled = true;
-    // Restore selectedJobId so _refreshJobDetails can update the details content.
-    // It was cleared when the details dialog was hidden to open the trim dialog.
-    this.app.selectedJobId = this.job.id;
     try {
+      // Restore selectedJobId so _refreshJobDetails can update the details content.
+      // It was cleared when the details dialog was hidden to open the trim dialog.
+      // Set it only during the async operation — if createTrim fails, clear it to
+      // avoid stale selectedJobId pointing at a job whose details dialog is closed.
+      this.app.selectedJobId = this.job.id;
       await this.app.createTrim(this.job.id, startTime, endTime);
       // Save ref before hide — destroy() clears _el on sl-after-hide,
       // which fires before the timeout under prefers-reduced-motion.
@@ -486,7 +488,10 @@ export class TrimController {
       // Reopen details dialog to show updated trims
       setTimeout(() => detailsDlg?.show(), 100);
     } catch (error) {
-      // Error already shown by createTrim()
+      // Error already shown by createTrim(). Clear selectedJobId since the details
+      // dialog is still closed — leaving it set would cause jobs_update WebSocket
+      // messages to call updateJobDetails() on empty content.
+      this.app.selectedJobId = null;
     } finally {
       if (this._el?.submitBtn) {
         this._el.submitBtn.loading = false;

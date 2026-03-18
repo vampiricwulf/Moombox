@@ -380,19 +380,24 @@ export class SetupController {
       `;
       container.appendChild(item);
     }
-    container.querySelectorAll(".setup-ch-edit").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const idx = parseInt(btn.dataset.index);
-        this.openEditChannelDialog(containerId, idx);
+    // Event delegation — attach once per container to avoid listener leaks on re-render
+    if (!container._setupChDelegated) {
+      container._setupChDelegated = true;
+      container.addEventListener("click", (e) => {
+        const editBtn = e.target.closest(".setup-ch-edit");
+        if (editBtn) {
+          const idx = parseInt(editBtn.dataset.index);
+          this.openEditChannelDialog(container.id, idx);
+          return;
+        }
+        const removeBtn = e.target.closest(".setup-ch-remove");
+        if (removeBtn) {
+          const idx = parseInt(removeBtn.dataset.index);
+          this.channels.splice(idx, 1);
+          this.renderChannelList(container.id);
+        }
       });
-    });
-    container.querySelectorAll(".setup-ch-remove").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const idx = parseInt(btn.dataset.index);
-        this.channels.splice(idx, 1);
-        this.renderChannelList(containerId);
-      });
-    });
+    }
   }
 
   openAddChannelDialog(targetListId) {
