@@ -336,8 +336,12 @@ func (a *App) handleDetailKey(_ string) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-func (a *App) handleLogKey(_ string) (tea.Model, tea.Cmd) {
-	// Scroll handled by viewport in routeComponentMsg
+func (a *App) handleLogKey(key string) (tea.Model, tea.Cmd) {
+	// Scroll handled by viewport in routeComponentMsg.
+	// End key re-enables auto-scroll (not in helpViewportKeyMap, so handled here).
+	if key == keyEnd {
+		a.logs.ReEnableAutoScroll()
+	}
 	return a, nil
 }
 
