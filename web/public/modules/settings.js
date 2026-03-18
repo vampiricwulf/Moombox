@@ -1823,11 +1823,30 @@ export class SettingsController {
   async finishAutoCookieSetup() {
     const resultEl = document.getElementById("auto-cookie-setup-result");
     const doneBtn = document.getElementById("btn-auto-cookie-done");
+    const countdownEl = document.getElementById("auto-cookie-countdown");
+    const timeoutResultEl = document.getElementById("auto-cookie-result");
     if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
     if (resultEl) {
       resultEl.textContent = "Extracting cookies...";
       resultEl.style.color = "";
     }
+    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
+
+    let remaining = 60;
+    if (countdownEl) {
+      countdownEl.textContent = `${remaining}s remaining`;
+      countdownEl.style.color = "";
+    }
+    const countdownInterval = setInterval(() => {
+      remaining--;
+      if (countdownEl) {
+        countdownEl.textContent = `${remaining}s remaining`;
+        if (remaining <= 10) {
+          countdownEl.style.color = "var(--sl-color-warning-600)";
+        }
+      }
+      if (remaining <= 0) clearInterval(countdownInterval);
+    }, 1000);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
@@ -1856,14 +1875,42 @@ export class SettingsController {
         }
       }
     } catch (e) {
+      if (e.name === "AbortError") {
+        if (resultEl) resultEl.textContent = "";
+        if (timeoutResultEl) {
+          // Determine platform from the dialog label set during startAutoCookieSetup
+          const dialogLabel = document.getElementById("auto-cookie-setup-dialog")?.label || "";
+          const platform = dialogLabel.includes("Twitch") ? "twitch" : "youtube";
+          timeoutResultEl.innerHTML = `
+            <sl-alert variant="warning" open>
+              <sl-icon slot="icon" name="clock"></sl-icon>
+              Cookie extraction timed out. The browser window may still be open.
+            </sl-alert>
+            <div style="display: flex; gap: 0.5em; margin-top: 0.75em;">
+              <sl-button variant="primary" size="small" id="cookie-retry-btn">Try Again</sl-button>
+              <sl-button variant="default" size="small" id="cookie-skip-btn">Skip</sl-button>
+            </div>`;
+          document.getElementById("cookie-retry-btn")?.addEventListener("click", () => {
+            timeoutResultEl.innerHTML = "";
+            if (countdownEl) countdownEl.textContent = "";
+            this.startAutoCookieSetup(platform);
+          });
+          document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {
+            document.getElementById("auto-cookie-setup-dialog")?.hide();
+            if (countdownEl) countdownEl.textContent = "";
+            timeoutResultEl.innerHTML = "";
+          });
+        }
+        return;
+      }
       if (resultEl) {
-        resultEl.textContent = e.name === "AbortError"
-          ? "Cookie extraction timed out. Try again."
-          : "Error: " + e.message;
+        resultEl.textContent = "Error: " + e.message;
         resultEl.style.color = "var(--sl-color-danger-600)";
       }
     } finally {
+      clearInterval(countdownInterval);
       clearTimeout(timeoutId);
+      if (countdownEl) countdownEl.textContent = "";
       if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
     }
   }
@@ -1881,5 +1928,9 @@ export class SettingsController {
       resultEl.textContent = "";
       resultEl.style.color = "";
     }
+    const countdownEl = document.getElementById("auto-cookie-countdown");
+    if (countdownEl) countdownEl.textContent = "";
+    const timeoutResultEl = document.getElementById("auto-cookie-result");
+    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
   }
 }
