@@ -406,6 +406,9 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 			// Look up the item to check if it needs a job, re-validate filter
 			for _, item := range a.buildMenuItems() {
 				if item.Chord == chord && item.NeedsJob {
+					if a.taskList.SelectedCount() > 0 {
+						break // batch mode — pass nil job so dispatchAction takes batch path
+					}
 					job = a.taskList.SelectedJob()
 					if job != nil && item.JobFilter != nil && !item.JobFilter(job) {
 						job = nil // job status changed during confirm window
