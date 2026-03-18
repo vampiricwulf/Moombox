@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-18
 **Scope:** TUI + Web UI + Setup — strict parity, additive + light restructuring
-**Approach:** Theme-based phases (4 phases, 20 improvements consolidated to 19)
+**Approach:** Theme-based phases (4 phases, 18 improvements)
 
 ---
 
@@ -35,19 +35,20 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 
 ### 1.2 Cookie Timeout Countdown
 
-**Problem:** Auto-cookie browser login has a silent 60s timeout. Users get a vague "No login detected" error with no warning.
+**Problem:** Auto-cookie browser login has a silent 60s timeout (client-side `setTimeout` in setup.js/settings.js). Users get a vague "No login detected" error with no warning.
 
 **Solution:**
 - Show visible countdown timer in the cookie dialog (both UIs)
 - At 10s remaining, show amber warning text
 - On timeout, offer "Try Again" and "Skip" buttons instead of a vague failure message
-- 60s timeout value unchanged (server-side)
+- 60s timeout value unchanged
 - Track both YouTube and Twitch independently — each platform gets its own countdown when active
 
-**Web UI:** Countdown text in the auto-cookie dialog, updated via `setInterval`. Warning styling at ≤10s.
-**TUI:** Countdown in spinner text: "Waiting for login... (45s remaining)". Amber at ≤10s.
+**Web UI implementation:** Add a `setInterval` (1s tick) alongside the existing `setTimeout`. Countdown text element in the auto-cookie dialog updates each tick. At ≤10s, apply `color: var(--sl-color-warning-600)`. On timeout, replace dialog content with "Try Again" / "Skip" buttons. Clear interval on success, cancel, or timeout.
 
-**Files:** `web/public/modules/setup.js` + `web/public/modules/settings.js` (shared cookie dialog logic), `internal/tui/setup_wizard.go` (cookie extraction flow)
+**TUI implementation:** The TUI cookie flow currently waits indefinitely (no timeout). Add a `tea.Tick` command that fires every second, decrementing a `cookieCountdown int` field on `SetupWizardModel`. Spinner text updates: "Waiting for login... (45s remaining)". At ≤10s, render countdown in amber via `lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))`. On expiry (countdown reaches 0), cancel the cookie operation and show "Try Again" / "Skip" options. This adds a new timeout to the TUI that didn't previously exist — matching Web UI behavior.
+
+**Files:** `web/public/modules/setup.js` + `web/public/modules/settings.js` (cookie dialog logic), `internal/tui/setup_wizard.go` (new `tea.Tick` timer, countdown state, cookie flow)
 
 ### 1.3 Cookie Success Confirmation (Per-Platform)
 
@@ -77,8 +78,8 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 **Part B: Re-accessible installer**
 - Add "Install FFmpeg" button/action in Settings → Paths, next to the FFmpeg path input
 - Clicking opens the same guided installer overlay (Choco/Winget/manual)
-- **Web UI:** Button next to FFmpeg path input in settings
-- **TUI:** Action keybinding (I for Install) when FFmpeg path field is focused in settings
+- **Web UI:** Button next to FFmpeg path input in settings. Reuses the existing `#ffmpeg-overlay` / `#ffmpeg-install-view` elements — show them as a dialog rather than full-page overlay when triggered from settings.
+- **TUI:** Action keybinding (I for Install) when FFmpeg path field is focused in settings. Opens the `FFmpegCheckModel` overlay.
 
 **Files:** `internal/tui/ffmpeg_check.go`, `internal/tui/settings.go` + `settings_view.go`, `web/public/index.html`, `web/public/modules/settings.js`, `web/public/modules/setup.js`
 
@@ -87,18 +88,19 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 **Problem:** After setup completes, Web UI shows static "Restarting Moombox..." for up to 2 minutes with no progress.
 
 **Solution:**
-- Replace static message with phased progress display:
-  1. "Saving configuration..." (immediately)
-  2. "Restarting server..." (after POST completes)
-  3. "Reconnecting..." (during poll phase)
-  4. "Connected" (on success)
-- Show elapsed seconds
-- After 15s, add hint: "This is taking longer than usual. The server may be installing plugins."
-- If port/HTTPS changed, show redirect notice with new URL
+- Replace the static message with phased progress display, mapping to the existing setup completion flow in `setup.js`:
+  1. "Saving configuration..." — shown immediately when user clicks Finish, before the `POST /api/setup/complete` call
+  2. "Restarting server..." — shown after the POST returns 200 (server accepted config, will restart)
+  3. "Reconnecting..." — shown when polling begins (`GET /api/setup/status` every 2s)
+  4. "Connected" — shown when poll returns `isFirstRun: false` (server has restarted with new config)
+- Show elapsed seconds via a `setInterval` timer started at phase 1
+- After 15s in phase 3, add hint: "This is taking longer than usual. The server may be installing plugins."
+- If the POST itself fails (phase 1), show error with "Try Again" button — don't advance to polling
+- If port/HTTPS changed, show redirect notice with new URL (existing behavior, just integrate with new progress display)
 
 **TUI equivalent:** Not needed — TUI restart is a full process exit/relaunch (exit code 42), handled by the launcher.
 
-**Files:** `web/public/modules/setup.js` (restart polling logic)
+**Files:** `web/public/modules/setup.js` (restart polling logic — wraps existing `waitForRestart()` flow)
 
 ### 1.6 Post-Setup Onboarding Nudge
 
@@ -109,11 +111,12 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 - Shows welcome message with two paths:
   1. "Add channels to auto-monitor streams" → links to Settings → Channels tab
   2. "Add a video URL to start archiving now" → opens Add Video dialog
-- **Web UI:** Modified empty state in `#empty-state` div. Detects `isFirstRun` flag passed from setup completion. Two CTA buttons.
-- **TUI:** Modified empty task list message. Shows "Setup complete!" header with action hints: "Press ` to open Settings and add channels, or A A to add a video."
-- Nudge appears only on first load after setup. Not persisted — transient flag cleared after first job list render.
 
-**Files:** `web/public/app.js` (renderJobs empty state), `web/public/modules/setup.js` (pass flag), `internal/tui/task_list.go` (empty view), `internal/tui/app.go` (first-run flag)
+**Web UI implementation:** After setup completes and the app reinitializes, set `sessionStorage.setItem("justCompletedSetup", "1")`. In `renderJobs()`, when jobs array is empty and `sessionStorage.getItem("justCompletedSetup")` is truthy, show the welcome variant of the empty state instead of the generic one. Clear the flag after rendering. This survives the page reload during restart but doesn't persist across browser sessions.
+
+**TUI implementation:** The `App` struct already has `IsFirstRun bool`. After setup wizard closes (which sets `IsFirstRun` back to false via restart), we instead keep a transient `justCompletedSetup bool` flag set during the setup completion handler. `task_list.go` checks this flag to show "Setup complete!" header with action hints: "Press \` to open Settings and add channels, or A A to add a video." Flag cleared after first job arrives or user navigates away.
+
+**Files:** `web/public/app.js` (renderJobs empty state), `web/public/modules/setup.js` (set sessionStorage flag), `internal/tui/task_list.go` (empty view), `internal/tui/app.go` (justCompletedSetup flag)
 
 ---
 
@@ -125,11 +128,11 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 
 **Solution:**
 - When `autoScroll` is false, render a dim indicator at the bottom of the log viewport: "↓ Auto-scroll paused (End to resume)"
-- Press End or G to re-enable auto-scroll
+- Press End to re-enable auto-scroll (no "G" shortcut — would conflict with chord system since log panel keys go through `helpViewportKeyMap()` which blocks letter keys)
 - Tab away also re-enables (existing behavior preserved)
-- Indicator styled as dim/gray text, doesn't count as a log line
+- Indicator styled as dim/gray text, rendered as the last line of the viewport content (not a separate element)
 
-**Files:** `internal/tui/log_viewer.go` (View method, key handling)
+**Files:** `internal/tui/log_viewer.go` (View method, End key handling)
 
 ### 2.2 Log Auto-Scroll Indicator (Web UI)
 
@@ -139,25 +142,26 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 - When auto-scroll is paused, show a floating pill/badge at the bottom of the log panel: "↓ Resume auto-scroll"
 - Clicking the pill re-enables auto-scroll and scrolls to bottom
 - Pill has subtle animation (fade-in) to draw attention
-- Position: fixed at bottom of log container, centered, z-index above log content
+- Position: `position: sticky; bottom: 0` within the log viewer's scrollable container (not `position: fixed`, which would be relative to viewport). The log viewer container (`#logs-viewer`) needs `position: relative` if not already set.
 - Hidden when auto-scroll is active
 
-**Files:** `web/public/index.html` (log panel), `web/public/app.js` (log scroll handling), `web/public/moombox.css` (pill styling)
+**Files:** `web/public/index.html` (log panel — add pill element), `web/public/app.js` (log scroll handling — toggle pill visibility), `web/public/moombox.css` (pill styling with sticky positioning)
 
 ### 2.3 Action Menu Disabled Explanations (TUI)
 
 **Problem:** Unavailable actions in the action menu show "(none)" with no explanation of why they're disabled.
 
 **Solution:**
-- Replace "(none)" with context-specific reason text:
-  - "Retry · no failed jobs"
-  - "Cancel · no active jobs"
-  - "Trim · no finished jobs with files"
-  - "Delete · no deletable jobs"
-- Gray/dim styling, non-selectable
-- Reason text derived from the action's `JobFilter` function name/description
+- Add a `DisabledReason string` field to `ActionMenuItem` struct in `action_menu.go`
+- Each action that uses `NeedsJob` + `JobFilter` gets a corresponding `DisabledReason`:
+  - Retry: "no failed jobs"
+  - Cancel: "no active jobs"
+  - Trim: "no finished jobs with files"
+  - Delete: "no deletable jobs"
+- When rendering and no jobs match the filter, display: "Retry · no failed jobs" in gray/dim styling, non-selectable
+- The `DisabledReason` is set in `buildMenuItems()` alongside the existing `JobFilter`
 
-**Files:** `internal/tui/action_menu.go` (render logic for filtered actions)
+**Files:** `internal/tui/action_menu.go` (ActionMenuItem struct, render logic), `internal/tui/app.go` (`buildMenuItems()` — add DisabledReason to each filtered action)
 
 ### 2.4 Error Message Truncation Fix (Web UI)
 
@@ -177,42 +181,32 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 **Solution:**
 - Sticky warning bar at top of settings content area (below tab header, above settings sections)
 - Text: "You have unsaved changes" with inline Save and Discard buttons
+- "Discard" calls the existing `loadConfig()` method (re-fetches from server) and sets `_dirty = false`
 - Appears on first field change, hides on save or discard
 - If user tries to switch to a different main tab (Tasks, Player, etc.) while dirty, show confirmation dialog: "You have unsaved settings changes. Save before leaving?"
 - Does NOT block switching between settings sections (those are internal navigation)
 - **TUI parity:** TUI already handles this — pressing Esc in settings with changes prompts discard confirmation
 
-**Files:** `web/public/modules/settings.js` (dirty tracking, banner rendering), `web/public/index.html` (banner element), `web/public/moombox.css` (sticky banner styling), `web/public/app.js` (tab switch interception)
+**Files:** `web/public/modules/settings.js` (dirty tracking, banner rendering, discard = loadConfig()), `web/public/index.html` (banner element), `web/public/moombox.css` (sticky banner styling), `web/public/app.js` (tab switch interception)
 
 ---
 
-## Phase 3: Discoverability & Labels (6 items)
+## Phase 3: Discoverability & Labels (5 items)
 
 ### 3.1 Chord System Hints (TUI)
 
 **Problem:** New users don't know the chord system exists. Must discover by accident or read help.
 
 **Solution:**
-- On first launch (and until dismissed), show a persistent hint in the status bar area: "Press ? for help · M for menu · A for actions"
+- On first launch (and until dismissed), show a persistent hint: "Press ? for help · M for menu · A for actions"
 - Auto-dismisses after user presses any chord prefix (A, R, O, Q), M, or ?
-- Tracked via `seenChordHint` flag in app state
+- Tracked via `seenChordHint bool` flag in App state
 - Not persisted to config — resets each session until user demonstrates familiarity
-- Styled as dim text, positioned in the hint area (above status bar)
+- Rendered in the status bar model (`status_bar.go`) as an additional dim text section, appended to the right side of the existing status bar content. The status bar already has flexible layout — this adds a trailing hint section.
 
-**Files:** `internal/tui/app.go` (hint state), `internal/tui/app_layout.go` (hint rendering), `internal/tui/app_keys.go` (dismiss on chord use)
+**Files:** `internal/tui/app.go` (hint state flag), `internal/tui/status_bar.go` (render hint in status bar), `internal/tui/app_keys.go` (dismiss on chord use)
 
-### 3.2 Settings Tab Navigation Hint (TUI)
-
-**Problem:** Shift+Left/Right switches settings tabs, but this key combination isn't shown in the contextual hints.
-
-**Solution:**
-- Add "Shift+←/→: Switch section" to the settings hint bar
-- The hint bar already renders contextual keys — this fills a gap
-- One-line addition to the hint rendering logic
-
-**Files:** `internal/tui/settings_view.go` (hint bar rendering)
-
-### 3.3 "Include Non-Live Content" Label Clarity
+### 3.2 "Include Non-Live Content" Label Clarity
 
 **Problem:** Label "Include non-live content" is ambiguous. "Non-live" could mean anything.
 
@@ -225,21 +219,21 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 **Web UI files:** `web/public/index.html` (channel dialog), `web/public/modules/settings.js` (channel form)
 **TUI files:** `internal/tui/settings.go` (channel editor fields), `internal/tui/setup_wizard.go` (channel addition in setup)
 
-### 3.4 Platform-Specific Field Indicators
+### 3.3 Platform-Specific Field Indicators
 
-**Problem:** Channel editor hides/shows fields per platform silently. Users don't know why fields appear or disappear.
+**Problem:** Channel editor hides/shows fields per platform silently. Users don't know why fields appear or disappear when switching platforms.
 
 **Solution:**
-- Append "(YouTube only)" or "(Twitch only)" to platform-specific field labels
-- Fields still hide when the irrelevant platform is selected (existing behavior)
-- When visible, the suffix clarifies why the field exists
+- Append "(YouTube only)" to platform-specific field labels
+- The primary value is helping users understand why a field disappears when they switch from YouTube to Twitch — the suffix provides that context while the field is still visible, before it hides
 - Currently applicable: "Also archive uploads & premieres (YouTube only)"
+- Fields still hide when the irrelevant platform is selected (existing behavior)
 - Future-proofed for any new platform-specific fields
 
 **Web UI files:** `web/public/index.html` (channel dialog labels)
 **TUI files:** `internal/tui/settings.go` (channel field labels), `internal/tui/setup_wizard.go` (channel field labels)
 
-### 3.5 Output Template Live Preview
+### 3.4 Output Template Live Preview
 
 **Problem:** Template field shows variable names (`${channel}/${start_date} ${title} [${id}]`) but no preview of what the output will look like.
 
@@ -253,13 +247,15 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 - Preview text: "Example: Miko Ch/2026-03-18 Singing Stream [dQw4w9WgXcQ].mkv"
 - Updates on each keystroke as user types
 - Applied in both setup wizard and settings
-- **Web UI:** `<div>` below input with live JS string replacement
-- **TUI:** Preview line below the field, updated on each character via `textinput` model
+
+**Web UI implementation:** Add a `<div class="template-preview">` below the template `<sl-input>`. Attach an `sl-input` event listener that performs `String.replace()` for each variable and updates the div text. Debounce at 100ms.
+
+**TUI implementation:** The settings template field is rendered via the generic `renderFields()` in `settings_view.go`. To add a preview below this specific field, add a `previewFn func(value string) string` field to the `fieldDef` struct (in `settings.go`). When set, `renderFields()` calls it and appends the result as a dim line below the field. Only the output template field gets this callback. Same approach in `setup_wizard.go` for the setup template field — add preview rendering after the field in the advanced step view.
 
 **Web UI files:** `web/public/index.html` (template input areas), `web/public/modules/settings.js`, `web/public/modules/setup.js`
-**TUI files:** `internal/tui/settings.go` or `settings_view.go` (template field view), `internal/tui/setup_wizard.go` (template field view)
+**TUI files:** `internal/tui/settings.go` (settingsFieldDef + previewFn), `internal/tui/settings_view.go` (renderFields preview), `internal/tui/setup_wizard.go` (setup template preview)
 
-### 3.6 Parallel Downloads Guidance
+### 3.5 Parallel Downloads Guidance
 
 **Problem:** Parallel downloads number input has no context about implications.
 
@@ -291,12 +287,14 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 - Selection state:
   - Clears on successful batch action
   - Clears on Esc
-  - Persists across re-renders (tracked by job ID set)
+  - Persists across re-renders (tracked by job ID `Set`)
   - "Select All" / "Select None" in the action bar
 - Job cards show selected state (subtle highlight/border)
 - Keyboard: Shift+Click to select range (Web UI convention)
 
-**Files:** `web/public/app.js` (selection state, renderJobs checkbox, action bar, batch API calls), `web/public/index.html` (action bar element), `web/public/moombox.css` (checkbox, action bar, selection highlight styling)
+**Batch API strategy:** Use existing per-job endpoints (`POST /api/jobs/{id}/cancel`, `DELETE /api/jobs/{id}`, `POST /api/jobs/{id}/retry`) called via `Promise.allSettled()`. No new batch API endpoint needed. On completion, show toast: "Deleted 3 of 5 jobs" (handles partial failures). Failed individual operations reported in toast detail.
+
+**Files:** `web/public/app.js` (selection state via `Set`, renderJobs checkbox, action bar, batch API calls via Promise.allSettled), `web/public/index.html` (action bar element), `web/public/moombox.css` (checkbox, action bar, selection highlight styling)
 
 ### 4.2 Batch Job Operations (TUI)
 
@@ -316,7 +314,9 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 - Selection persists across list navigation (arrow keys)
 - Selection state stored as `map[string]bool` keyed by job ID
 
-**Files:** `internal/tui/task_list.go` (selection state, Space handler, render markers), `internal/tui/app_keys.go` (chord dispatch for batch), `internal/tui/app.go` (batch action callbacks)
+**Space key handling:** The task list (`task_list.go`) uses `bubbles/list` with a custom delegate, but Space is not bound by default in `bubbles/list` for standard usage, and the task list's delegate returns nil for all messages — so Space won't conflict. The Space handler goes in `task_list.go`'s `Update()`, not in `app_keys.go`, to keep selection logic co-located with the task list model.
+
+**Files:** `internal/tui/task_list.go` (selection state map, Space handler, render markers), `internal/tui/app_keys.go` (chord dispatch checks selection for batch), `internal/tui/app.go` (batch action callbacks)
 
 ### 4.3 Player Chat Offset Reset (Web UI only)
 
@@ -343,14 +343,14 @@ All changes maintain strict parity between Web UI and TUI where both interfaces 
 
 ### Backward Compatibility
 - No config field renames — all changes are display-label only
-- No API changes except batch action endpoints (POST /api/jobs/batch/{action})
+- No new API endpoints — batch operations use existing per-job endpoints via `Promise.allSettled` (Web UI) / sequential calls (TUI)
 - No database schema changes
 - WebSocket message format unchanged
 
 ### Performance
-- Batch operations: use Promise.allSettled for concurrent API calls (Web UI)
+- Batch operations: `Promise.allSettled` for concurrent per-job API calls (Web UI), sequential loop with error collection (TUI)
 - Template preview: debounce keystroke handler at 100ms to avoid excessive re-renders
-- Selection state: O(1) lookups via Set (Web UI) / map (TUI)
+- Selection state: O(1) lookups via `Set` (Web UI) / `map[string]bool` (TUI)
 
 ### Accessibility
 - Batch checkboxes: proper `aria-label` and keyboard focus
