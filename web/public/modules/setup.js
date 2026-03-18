@@ -331,7 +331,12 @@ export class SetupController {
             if (badge) { badge.style.display = ""; badge.variant = "success"; }
           }
         }
-        this.app.showToast("Cookie setup complete!", "success");
+        if (ytOk) {
+          this.app.showToast("YouTube cookies configured", "success");
+        }
+        if (twOk) {
+          this.app.showToast("Twitch cookies configured", "success");
+        }
       } else {
         if (resultEl) {
           resultEl.textContent = data.error || "No login detected. Try again.";

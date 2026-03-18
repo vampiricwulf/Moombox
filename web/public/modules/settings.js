@@ -1863,10 +1863,12 @@ export class SettingsController {
         if (resultEl) resultEl.textContent = "";
         const dialog = document.getElementById("auto-cookie-setup-dialog");
         if (dialog) dialog.hide();
-        const parts = [];
-        if (ytOk) parts.push("YouTube: \u2713");
-        if (twOk) parts.push("Twitch: \u2713");
-        this.app.showToast(`Setup complete \u2014 ${parts.join(", ")}`, "success");
+        if (ytOk) {
+          this.app.showToast("YouTube cookies configured", "success");
+        }
+        if (twOk) {
+          this.app.showToast("Twitch cookies configured", "success");
+        }
         this.app.loadStatus();
       } else {
         if (resultEl) {

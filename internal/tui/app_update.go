@@ -420,11 +420,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setupWiz.cookieFinishing = false
 		a.setupWiz.cookiePlatform = ""
 		a.setupWiz.cookieCountdown = 0
-		// Show error or "no login detected" feedback
+		// Show per-platform success feedback, or error/no-login feedback
 		if msg.Err != "" {
 			a.setupWiz.errorMsg = msg.Err
 		} else if !msg.YTAuth && !msg.TWAuth {
 			a.setupWiz.errorMsg = "No login detected — try signing in again"
+		} else {
+			if msg.YTAuth {
+				a.setFeedback("YouTube cookies configured")
+			}
+			if msg.TWAuth {
+				a.setFeedback("Twitch cookies configured")
+			}
 		}
 		return a, nil
 
