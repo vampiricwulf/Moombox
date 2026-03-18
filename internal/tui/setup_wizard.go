@@ -1145,8 +1145,8 @@ func (m *SetupWizardModel) viewModeSelect() string {
 	if m.modeChoice == 0 {
 		quickStyle = quickStyle.Bold(true)
 	}
-	lines = append(lines, quickStyle.Render(quickPrefix+"Quick Setup"))
-	lines = append(lines, DimStyle.Render("   Defaults for everything. Set up cookies and channels."))
+	lines = append(lines, quickStyle.Render(quickPrefix+"Quick Setup (recommended)"))
+	lines = append(lines, DimStyle.Render("   Best for most users — takes ~2 minutes"))
 	lines = append(lines, "")
 
 	// Advanced Setup card
@@ -1161,7 +1161,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 		advStyle = advStyle.Bold(true)
 	}
 	lines = append(lines, advStyle.Render(advPrefix+"Advanced Setup"))
-	lines = append(lines, DimStyle.Render("   Walk through all configuration sections."))
+	lines = append(lines, DimStyle.Render("   Full control over every setting"))
 	lines = append(lines, "")
 
 	// Use Defaults card
