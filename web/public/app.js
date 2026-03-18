@@ -215,8 +215,22 @@ class MoomboxApp {
       logsViewer.addEventListener("scroll", () => {
         if (this._logRebuildingDOM) return;
         this._logAutoScroll = logsViewer.scrollTop + logsViewer.clientHeight >= logsViewer.scrollHeight - 30;
+        const pill = document.getElementById("log-autoscroll-pill");
+        if (pill) {
+          pill.style.display = this._logAutoScroll ? "none" : "";
+        }
       });
     }
+
+    // Resume auto-scroll pill click handler
+    document.getElementById("log-autoscroll-pill")?.addEventListener("click", () => {
+      const viewer = document.getElementById("logs-viewer");
+      if (viewer) {
+        viewer.scrollTop = viewer.scrollHeight;
+        this._logAutoScroll = true;
+      }
+      document.getElementById("log-autoscroll-pill").style.display = "none";
+    });
 
     // Log search
     let logSearchTimeout = null;

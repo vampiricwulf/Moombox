@@ -592,6 +592,29 @@ sl-badge.status.cookies::part(base) {
     word-break: break-all;
 }
 
+#log-autoscroll-pill {
+    position: sticky;
+    bottom: 0.5em;
+    margin: 0 auto;
+    width: fit-content;
+    padding: 0.25em 0.75em;
+    background: var(--sl-color-primary-600);
+    color: white;
+    border-radius: var(--sl-border-radius-pill);
+    font-size: var(--sl-font-size-small);
+    cursor: pointer;
+    opacity: 0;
+    animation: fadeIn 0.2s ease forwards;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 0.25em;
+}
+
+@keyframes fadeIn {
+    to { opacity: 1; }
+}
+
 .log-line {
     padding: 1px 0;
 }
