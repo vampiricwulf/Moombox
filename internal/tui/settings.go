@@ -191,7 +191,7 @@ var channelFields = []channelFieldDef{
 	{"platform", "Platform", fieldCycle, []string{"youtube", "twitch"}, "", ""},
 	{"enabled", "Enabled", fieldToggle, []string{"Yes", "No"}, "", ""},
 	{"terms", "Filter regex", fieldText, nil, "e.g. (?i)karaoke", ""},
-	{"include_non_live", "Include non-live", fieldToggle, []string{"No", "Yes"}, "", "youtube"},
+	{"include_non_live", "Archive uploads & premieres (YouTube only)", fieldToggle, []string{"No", "Yes"}, "also capture uploads and premieres, not just live streams", "youtube"},
 	{"quality_preference", "Quality preference", fieldCycle, []string{"best", "2160p60", "2160p", "1440p60", "1440p", "1080p60", "1080p", "900p60", "900p", "720p60", "720p", "480p", "360p", "160p", "audio_only"}, "", ""},
 }
 
