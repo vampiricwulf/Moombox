@@ -110,6 +110,9 @@ type TaskListModel struct {
 	NextFeedCheck   time.Time
 	NextDecapiCheck time.Time
 	NextTwitchCheck time.Time
+
+	// Transient flag: set when setup wizard completes, shown once in empty state.
+	JustCompletedSetup bool
 }
 
 // NewTaskListModel creates a new task list model.
@@ -472,7 +475,14 @@ func (m *TaskListModel) View() string {
 
 	var listContent string
 	if len(m.list.Items()) == 0 {
-		listContent = DimStyle.Render("No tasks. Press A to add, or use Web UI.")
+		if m.JustCompletedSetup {
+			m.JustCompletedSetup = false
+			listContent = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ecc71")).Render("Setup complete!") + "\n\n" +
+				DimStyle.Render("Press ` to open Settings and add channels,") + "\n" +
+				DimStyle.Render("or A A to add a video.")
+		} else {
+			listContent = DimStyle.Render("No tasks. Press A to add, or use Web UI.")
+		}
 	} else {
 		listContent = m.list.View()
 	}

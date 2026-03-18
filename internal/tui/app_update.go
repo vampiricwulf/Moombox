@@ -396,7 +396,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setupWiz.errorMsg = fmt.Sprintf("Failed to save: %v", msg.Err)
 			return a, nil
 		}
-		// Save succeeded — trigger restart
+		// Save succeeded — mark setup complete for onboarding nudge, then trigger restart
+		a.justCompletedSetup = true
+		a.taskList.JustCompletedSetup = true
 		a.setupWiz.Close()
 		if a.setupWiz.OnRestart != nil {
 			onRestart := a.setupWiz.OnRestart

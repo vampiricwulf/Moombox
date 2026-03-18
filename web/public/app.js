@@ -951,15 +951,57 @@ class MoomboxApp {
     if (this.jobs.length === 0) {
       container.innerHTML = "";
       emptyState.style.display = "flex";
-      // Reset empty state to default content (may have been changed by a filter)
-      const icon = emptyState.querySelector("sl-icon");
-      if (icon) icon.name = "inbox";
-      const msg = emptyState.querySelector("p");
-      if (msg) msg.textContent = "No jobs yet";
-      const subtext = emptyState.querySelector(".empty-state-subtext");
-      if (subtext) subtext.textContent = "Add a YouTube or Twitch URL to start archiving";
-      const cta = emptyState.querySelector(".empty-state-cta");
-      if (cta) cta.style.display = "";
+      const justSetup = sessionStorage.getItem("justCompletedSetup");
+      if (justSetup) {
+        sessionStorage.removeItem("justCompletedSetup");
+        const icon = emptyState.querySelector("sl-icon");
+        if (icon) icon.name = "check-circle";
+        const msg = emptyState.querySelector("p");
+        if (msg) msg.textContent = "Setup complete!";
+        const subtext = emptyState.querySelector(".empty-state-subtext");
+        if (subtext) subtext.textContent = "Add channels to auto-monitor streams, or add a video URL to start archiving now.";
+        const cta = emptyState.querySelector(".empty-state-cta");
+        if (cta) cta.style.display = "none";
+        // Remove any leftover setup CTA wrapper from a previous render
+        emptyState.querySelector("#empty-state-setup-cta")?.remove();
+        // Inject two-button CTA
+        const setupCta = document.createElement("div");
+        setupCta.id = "empty-state-setup-cta";
+        setupCta.style.cssText = "display:flex;gap:0.5rem;flex-wrap:wrap;justify-content:center;";
+        const addChannelsBtn = document.createElement("sl-button");
+        addChannelsBtn.setAttribute("variant", "default");
+        addChannelsBtn.setAttribute("size", "small");
+        addChannelsBtn.textContent = "Add Channels";
+        addChannelsBtn.addEventListener("click", () => {
+          document.querySelector('sl-tab[panel="settings"]')?.click();
+          setTimeout(() => document.querySelector('[data-section="channels"]')?.click(), 100);
+        });
+        const addVideoBtn = document.createElement("sl-button");
+        addVideoBtn.setAttribute("variant", "primary");
+        addVideoBtn.setAttribute("size", "small");
+        addVideoBtn.textContent = "Add Video";
+        addVideoBtn.addEventListener("click", () => {
+          document.getElementById("add-dialog").show();
+          document.getElementById("video-url-input").value = "";
+          this.resetAdvancedOptions();
+          setTimeout(() => document.getElementById("video-url-input").focus(), 100);
+        });
+        setupCta.appendChild(addChannelsBtn);
+        setupCta.appendChild(addVideoBtn);
+        if (cta) cta.insertAdjacentElement("afterend", setupCta);
+        else emptyState.appendChild(setupCta);
+      } else {
+        // Reset empty state to default content (may have been changed by a filter or setup state)
+        emptyState.querySelector("#empty-state-setup-cta")?.remove();
+        const icon = emptyState.querySelector("sl-icon");
+        if (icon) icon.name = "inbox";
+        const msg = emptyState.querySelector("p");
+        if (msg) msg.textContent = "No jobs yet";
+        const subtext = emptyState.querySelector(".empty-state-subtext");
+        if (subtext) subtext.textContent = "Add a YouTube or Twitch URL to start archiving";
+        const cta = emptyState.querySelector(".empty-state-cta");
+        if (cta) cta.style.display = "";
+      }
       if (filterCount) { filterCount.style.display = "none"; }
       return;
     }

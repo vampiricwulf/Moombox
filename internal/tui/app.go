@@ -247,6 +247,9 @@ type App struct {
 	// First-run flag: triggers setup wizard
 	IsFirstRun bool
 
+	// Transient flag: set when setup wizard completes, shown once in empty state
+	justCompletedSetup bool
+
 	// Callbacks for actions
 	OnAddVideo   func(url string)
 	OnCancelJob  func(jobID string)

@@ -865,6 +865,7 @@ export class SetupController {
             if (data.ffmpegValid === false) {
               this.showFFmpegOverlay();
             } else {
+              sessionStorage.setItem("justCompletedSetup", "1");
               this.initializeApp();
             }
             return;
