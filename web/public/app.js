@@ -495,6 +495,17 @@ class MoomboxApp {
         }
       });
     }
+
+    // Batch action bar buttons
+    document.getElementById("batch-cancel")?.addEventListener("click", () => this.batchAction("cancel"));
+    document.getElementById("batch-retry")?.addEventListener("click", () => this.batchAction("retry"));
+    document.getElementById("batch-delete")?.addEventListener("click", () => this.batchAction("delete"));
+    document.getElementById("batch-clear")?.addEventListener("click", () => {
+      this._selectedJobs.clear();
+      document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
+      document.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+      this.updateBatchActionBar();
+    });
   }
 
   async loadConfig() {
@@ -1138,6 +1149,23 @@ class MoomboxApp {
     } else {
       this.focusedJobIndex = -1;
     }
+
+    // Remove stale selected IDs (jobs that no longer exist in the list)
+    const currentJobIds = new Set(this.jobs.map(j => j.id));
+    this._selectedJobs.forEach(id => {
+      if (!currentJobIds.has(id)) this._selectedJobs.delete(id);
+    });
+
+    // Re-apply selection state and sync the batch bar
+    this._selectedJobs.forEach(id => {
+      const card = container.querySelector(`[data-job-id="${CSS.escape(id)}"]`);
+      if (card) {
+        card.classList.add("selected");
+        const cb = card.querySelector(".job-checkbox");
+        if (cb) cb.checked = true;
+      }
+    });
+    this.updateBatchActionBar();
   }
 
   async fetchArchivedJobs() {
@@ -2568,6 +2596,15 @@ class MoomboxApp {
       const isTasksActive = activePanel?.getAttribute("name") === "tasks";
 
       switch (e.key) {
+        case "Escape":
+          if (this._selectedJobs.size > 0) {
+            this._selectedJobs.clear();
+            this.updateBatchActionBar();
+            document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
+            document.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+            return;
+          }
+          break;
         case "a":
           if (!isPlayerActive) {
             document.getElementById("add-video-btn").click();
@@ -3139,9 +3176,69 @@ class MoomboxApp {
   updateBatchActionBar() {
     const bar = document.getElementById("batch-action-bar");
     if (!bar) return;
+
     const count = this._selectedJobs.size;
-    bar.style.display = count === 0 ? "none" : "";
+    if (count === 0) {
+      bar.style.display = "none";
+      return;
+    }
+    bar.style.display = "";
     document.getElementById("batch-count").textContent = `${count} selected`;
+
+    const selectedJobs = this.jobs.filter(j => this._selectedJobs.has(j.id));
+    const canCancel = selectedJobs.some(j => CANCEL_STATUSES.has(j.status));
+    const canRetry = selectedJobs.some(j => RETRY_STATUSES.has(j.status));
+    const canDelete = selectedJobs.some(j => DELETE_STATUSES.has(j.status));
+
+    document.getElementById("batch-cancel").style.display = canCancel ? "" : "none";
+    document.getElementById("batch-retry").style.display = canRetry ? "" : "none";
+    document.getElementById("batch-delete").style.display = canDelete ? "" : "none";
+  }
+
+  async batchAction(action) {
+    const selectedJobs = this.jobs.filter(j => this._selectedJobs.has(j.id));
+    let targets, confirmMsg, apiCall;
+
+    switch (action) {
+      case "cancel":
+        targets = selectedJobs.filter(j => CANCEL_STATUSES.has(j.status));
+        confirmMsg = `Cancel ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        apiCall = (id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+        break;
+      case "retry":
+        targets = selectedJobs.filter(j => RETRY_STATUSES.has(j.status));
+        confirmMsg = `Retry ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        apiCall = (id) => fetch(`/api/jobs/${id}/retry`, { method: "POST" });
+        break;
+      case "delete":
+        targets = selectedJobs.filter(j => DELETE_STATUSES.has(j.status));
+        confirmMsg = `Delete ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        apiCall = (id) => fetch(`/api/jobs/${id}`, { method: "DELETE" });
+        break;
+    }
+
+    if (!targets || targets.length === 0) return;
+
+    const confirmed = await this.showConfirm(confirmMsg, {
+      title: "Batch " + action.charAt(0).toUpperCase() + action.slice(1),
+      okLabel: action.charAt(0).toUpperCase() + action.slice(1),
+      okVariant: action === "delete" ? "danger" : action === "cancel" ? "warning" : "primary"
+    });
+    if (!confirmed) return;
+
+    const results = await Promise.allSettled(targets.map(j => apiCall(j.id)));
+    const succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
+    const failed = targets.length - succeeded;
+
+    this._selectedJobs.clear();
+    this.updateBatchActionBar();
+
+    if (failed === 0) {
+      const verb = action === "delete" ? "Deleted" : action === "cancel" ? "Cancelled" : "Retried";
+      this.showToast(`${verb} ${succeeded} job${succeeded !== 1 ? "s" : ""}`, "success");
+    } else {
+      this.showToast(`${succeeded} of ${targets.length} succeeded. ${failed} failed.`, "warning");
+    }
   }
 }
 
