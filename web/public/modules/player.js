@@ -309,7 +309,7 @@ export class PlayerController {
       this.resetSidebarToTime(this.getGlobalTimeMs());
       this.playerAutoScroll = true;
       this.playerScrollLock = false;
-      if (this.playerAutoScroll) this.syncSidebarToTime();
+      this.syncSidebarToTime();
       return;
     }
 
@@ -359,6 +359,7 @@ export class PlayerController {
     this._seg.reset();
 
     const video = document.getElementById("player-video");
+    video.pause();
     video.removeAttribute("src");
     video.load();
 

@@ -442,7 +442,7 @@ class MoomboxApp {
         this.activePlatforms = status.activePlatforms || {};
         if (status.version) this._version = status.version;
         if (status.updateAvailable) this._updateAvailable = status.updateAvailable;
-        if (status.uptime) {
+        if (status.uptime != null) {
           this._uptimeSeconds = status.uptime;
           this._uptimeCapturedAt = Date.now();
         }
@@ -1042,8 +1042,8 @@ class MoomboxApp {
   renderJobItem(job) {
     const statusClass = job.status.toLowerCase().replace("?", "");
     const isTwitch = job.platform === "twitch";
-    const safeVideoId = this.escapeHtml(job.videoId || job.id);
-    const ytThumb = `https://i.ytimg.com/vi/${safeVideoId}/mqdefault.jpg`;
+    const rawVideoId = job.videoId || job.id;
+    const ytThumb = `https://i.ytimg.com/vi/${encodeURIComponent(rawVideoId)}/mqdefault.jpg`;
     const twitchAvatarFallback = isTwitch && job.channelAvatarUrl ? job.channelAvatarUrl : "";
     const thumbnailUrl = job.thumbnailUrl || (isTwitch ? twitchAvatarFallback : ytThumb);
     const fallbackThumb = isTwitch ? twitchAvatarFallback : ytThumb;
@@ -2749,8 +2749,8 @@ class MoomboxApp {
         resolve(result);
       };
 
-      const onOk = () => { dlg.hide(); cleanup(true); };
-      const onCancel = () => { dlg.hide(); cleanup(false); };
+      const onOk = () => { cleanup(true); dlg.hide(); };
+      const onCancel = () => { cleanup(false); dlg.hide(); };
       const onHide = () => { cleanup(false); };
 
       // Replace listeners to avoid stacking.

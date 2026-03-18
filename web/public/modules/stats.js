@@ -41,9 +41,9 @@ export class StatsController {
   }
 
   render(data) {
-    this.renderDisk(data.disk);
-    this.renderStorage(data.disk, data.storage);
-    this.renderActivity(data.activity);
+    if (data.disk) this.renderDisk(data.disk);
+    if (data.storage) this.renderStorage(data.storage);
+    if (data.activity) this.renderActivity(data.activity);
   }
 
   renderDisk(disk) {
@@ -83,7 +83,7 @@ export class StatsController {
     el.appendChild(container);
   }
 
-  renderStorage(disk, storage) {
+  renderStorage(storage) {
     const el = document.getElementById("stats-storage");
     if (!el) return;
     el.innerHTML = "";
