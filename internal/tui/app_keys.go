@@ -141,7 +141,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}))
 		}
 		if a.setupWiz.cookieActive {
-			cmds = append(cmds, a.setupWiz.spinner.Tick)
+			cmds = append(cmds, a.setupWiz.spinner.Tick, cookieCountdownTick())
 		}
 		// Deliver pending huh form init cmd immediately (cursor blink, focus)
 		if a.setupWiz.advancedInitCmd != nil {
