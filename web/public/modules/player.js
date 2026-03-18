@@ -177,6 +177,10 @@ export class PlayerController {
         if (this.playerAutoScroll && !this.playerScrollLock) {
           this.syncSidebarToTime();
         }
+        const resetBtn = document.getElementById("player-chat-offset-reset");
+        if (resetBtn) {
+          resetBtn.style.display = this.playerCustomOffsetMs !== 0 ? "" : "none";
+        }
       });
 
       const persistOffset = () => {
@@ -201,6 +205,24 @@ export class PlayerController {
         if (e.key === "Enter") {
           offsetInput.blur();
         }
+      });
+
+      document.getElementById("player-chat-offset-reset")?.addEventListener("click", () => {
+        offsetInput.value = "";
+        this.playerCustomOffsetMs = 0;
+        const currentMs = this.getGlobalTimeMs();
+        this.resetSidebarToTime(currentMs);
+        this.clearNicoOverlay();
+        this.nicoLastSpawnMs = currentMs;
+        if (this.playerAutoScroll && !this.playerScrollLock) {
+          this.syncSidebarToTime();
+        }
+        // Persist the cleared offset
+        if (this.playerJob) {
+          fetch(`/api/player-prefs/${encodeURIComponent(this.playerJob.videoId)}`, { method: "DELETE" }).catch(() => {});
+        }
+        const resetBtn = document.getElementById("player-chat-offset-reset");
+        if (resetBtn) resetBtn.style.display = "none";
       });
     }
 
