@@ -175,6 +175,11 @@ export class SettingsController {
       });
     }
 
+    // FFmpeg install from settings
+    document.getElementById("cfg-ffmpeg-install-btn")?.addEventListener("click", () => {
+      this.app.setup.showFFmpegOverlay();
+    });
+
     // yt-dlp plugin install
     const ytdlpInstallBtn = document.getElementById("ytdlp-install-btn");
     if (ytdlpInstallBtn) {

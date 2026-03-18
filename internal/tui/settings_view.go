@@ -130,6 +130,9 @@ func (m *SettingsModel) renderHintText() string {
 				hint += "  `: Set pw"
 			}
 		}
+		if sec.name == "Paths" && field.key == "ffmpeg_path" {
+			hint += "  I: Install FFmpeg"
+		}
 		return hint
 	}
 	return "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete"

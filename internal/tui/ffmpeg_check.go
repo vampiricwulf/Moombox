@@ -28,7 +28,7 @@ type FFmpegCheckModel struct {
 	height  int
 
 	mode         ffmpegMode
-	mainFocus    int // 0=Install, 1=Custom path, 2=Quit
+	mainFocus    int // 0=Install, 1=Custom path, 2=Skip for now, 3=Quit
 	installFocus int
 
 	// Shared text input component
@@ -240,7 +240,7 @@ func (m *FFmpegCheckModel) handleMainKey(key string) string {
 			m.mainFocus--
 		}
 	case keyDown:
-		if m.mainFocus < 2 {
+		if m.mainFocus < 3 {
 			m.mainFocus++
 		}
 	case keyEnter:
@@ -259,7 +259,9 @@ func (m *FFmpegCheckModel) handleMainKey(key string) string {
 			m.textInput.SetValue("")
 			m.textInput.Focus()
 			m.updateTextInputWidth()
-		case 2: // Quit
+		case 2: // Skip for now
+			return "skip"
+		case 3: // Quit
 			return "quit"
 		}
 	}
@@ -488,7 +490,7 @@ func (m *FFmpegCheckModel) View() string {
 
 	switch m.mode {
 	case ffmpegMain:
-		options := []string{"Install FFmpeg", "Custom FFmpeg path", "Quit"}
+		options := []string{"Install FFmpeg", "Custom FFmpeg path", "Skip for now", "Quit"}
 		for i, opt := range options {
 			prefix := "  "
 			color := ColorWhite
@@ -504,6 +506,12 @@ func (m *FFmpegCheckModel) View() string {
 			if i < len(options)-1 {
 				lines = append(lines, "")
 			}
+		}
+		// Warning when "Skip for now" is focused
+		if m.mainFocus == 2 {
+			lines = append(lines, "")
+			lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render("\u26a0 Muxing will fail until FFmpeg is installed."))
+			lines = append(lines, DimStyle.Render("You can install it later from Settings \u2192 Paths."))
 		}
 
 	case ffmpegInstall:

@@ -201,6 +201,10 @@ export class SetupController {
     document.getElementById("ffmpeg-check-btn")?.addEventListener("click", () => {
       this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result", "ffmpeg-check-btn");
     });
+    document.getElementById("ffmpeg-skip-btn")?.addEventListener("click", () => {
+      document.getElementById("ffmpeg-overlay").style.display = "none";
+      this.initializeApp();
+    });
     document.getElementById("ffmpeg-quit-btn")?.addEventListener("click", () => {
       window.close();
       // window.close() only works if the page was opened by script.

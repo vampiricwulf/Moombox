@@ -31,6 +31,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "resolve_channel":
 			return a, a.resolveChannelCmd(a.settings.GetChannelResolveInput())
+		case "open_ffmpeg":
+			a.settings.Close()
+			a.ffmpegCheck.OnCheckPrereqs = a.OnCheckPrereqs
+			a.ffmpegCheck.Open()
+			a.ffmpegCheck.SetSize(a.width, a.height)
 		}
 		return a, nil
 	}
@@ -53,6 +58,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		action := a.ffmpegCheck.HandleKey(key)
 		switch {
+		case action == "skip":
+			a.ffmpegCheck.Close()
+			return a, nil
 		case action == "quit":
 			return a, tea.Quit
 		case strings.HasPrefix(action, "prepare:"):

@@ -593,12 +593,18 @@
                                 placeholder="./staging"
                                 help-text="Temporary directory for downloads in progress"
                             ></sl-input>
-                            <sl-input
-                                id="cfg-ffmpeg-path"
-                                label="FFmpeg Path"
-                                placeholder="ffmpeg"
-                                help-text="Path to ffmpeg executable (leave empty for system default)"
-                            ></sl-input>
+                            <div style="display: flex; gap: 0.5em; align-items: flex-end;">
+                                <sl-input
+                                    id="cfg-ffmpeg-path"
+                                    label="FFmpeg Path"
+                                    placeholder="ffmpeg"
+                                    help-text="Path to ffmpeg executable (leave empty for system default)"
+                                    style="flex: 1;"
+                                ></sl-input>
+                                <sl-button id="cfg-ffmpeg-install-btn" variant="default" size="medium">
+                                    <sl-icon slot="prefix" name="download"></sl-icon> Install
+                                </sl-button>
+                            </div>
                         </div>
 
                         <!-- Logs Settings -->
@@ -1482,6 +1488,7 @@
                     </div>
                     <div id="ffmpeg-check-result" style="margin-top: 0.5em;"></div>
                     <sl-divider></sl-divider>
+                    <sl-button id="ffmpeg-skip-btn" variant="default" style="width: 100%; margin-bottom: 0.5em;">Skip for now</sl-button>
                     <sl-button id="ffmpeg-quit-btn" variant="text" style="width: 100%;">Quit Moombox</sl-button>
                 </div>
                 <div id="ffmpeg-install-view" style="display: none">
