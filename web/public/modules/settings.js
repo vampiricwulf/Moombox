@@ -1580,6 +1580,7 @@ export class SettingsController {
       }
 
       newConfirm.loading = true;
+      newConfirm.disabled = true;
       try {
         const response = await fetch("/api/auth/remove-password", {
           method: "POST",
@@ -1600,6 +1601,7 @@ export class SettingsController {
         this.app.showToast("Failed to remove password: " + e.message, "danger");
       } finally {
         newConfirm.loading = false;
+        newConfirm.disabled = false;
       }
     });
 
