@@ -46,6 +46,8 @@ type StatusBarModel struct {
 	diskWarn    string // "ok", "warn", "critical"
 	// ShowChordHint shows a newcomer hint instead of the full chord reference.
 	ShowChordHint bool
+	// SelectedCount tracks batch-selected jobs for status bar display.
+	SelectedCount int
 }
 
 // NewStatusBarModel creates a new status bar model.
@@ -147,6 +149,12 @@ func (m *StatusBarModel) renderControls() string {
 func (m *StatusBarModel) renderMetrics() string {
 	var parts []string
 	compact := m.width < statusBarCompactThreshold
+
+	// Batch selection count
+	if m.SelectedCount > 0 {
+		selText := fmt.Sprintf("%d selected", m.SelectedCount)
+		parts = append(parts, statusBarYelStyle.Render(selText))
+	}
 
 	// Disk indicator (only shown once we have data)
 	if m.diskFree > 0 || m.diskUsedPct > 0 {

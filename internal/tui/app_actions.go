@@ -29,17 +29,42 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		_ = os.MkdirAll(startDir, 0o755)
 		return a, a.importDlg.Open(startDir)
 	case "A R":
-		if job != nil && a.OnRetryJob != nil {
+		if a.taskList.SelectedCount() > 0 && a.OnRetryJob != nil {
+			count := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				a.OnRetryJob(id)
+				count++
+			}
+			a.taskList.ClearSelection()
+			a.setFeedback(fmt.Sprintf("Retrying %d jobs", count))
+		} else if job != nil && a.OnRetryJob != nil {
 			a.OnRetryJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
 		}
 	case "A C":
-		if job != nil && a.OnCancelJob != nil {
+		if a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
+			count := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				a.OnCancelJob(id)
+				count++
+			}
+			a.taskList.ClearSelection()
+			a.setFeedback(fmt.Sprintf("Cancelled %d jobs", count))
+		} else if job != nil && a.OnCancelJob != nil {
 			a.OnCancelJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
 		}
 	case "A D":
-		if job != nil && a.OnDeleteJob != nil {
+		if a.taskList.SelectedCount() > 0 && a.OnDeleteJob != nil {
+			count := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				a.OnDeleteJob(id)
+				count++
+			}
+			a.taskList.ClearSelection()
+			a.setFeedback(fmt.Sprintf("Deleted %d jobs", count))
+			a.updateSelectedJob()
+		} else if job != nil && a.OnDeleteJob != nil {
 			a.OnDeleteJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
 			a.taskList.MoveUp()

@@ -19,6 +19,7 @@ import (
 // Package-level styles for task list rendering (avoid alloc per render).
 var (
 	taskSelectedBgStyle = lipgloss.NewStyle().Background(lipgloss.Color("4")).Foreground(ColorWhite)
+	taskBatchCheckStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ecc71")) // green ✓ for batch selection
 	taskTwitchTagStyle  = lipgloss.NewStyle().Foreground(ColorTwitch)
 )
 
@@ -100,6 +101,9 @@ type TaskListModel struct {
 	archiveExpanded     bool
 	hideFinishedAgeDays int // from config, default 30
 
+	// Batch selection state (Space to toggle, mirrors Web UI batch operations).
+	selected map[string]bool // selected job IDs for batch operations
+
 	// Marquee for scrolling selected item title.
 	marquee Marquee
 
@@ -120,6 +124,7 @@ func NewTaskListModel() *TaskListModel {
 	m := &TaskListModel{
 		hideFinishedAgeDays: 30,
 		progressStore:       NewProgressStore(),
+		selected:            make(map[string]bool),
 	}
 	m.list = m.newTaskList()
 	return m
@@ -219,6 +224,34 @@ func (m *TaskListModel) SelectedIsDivider() bool {
 	}
 	ti, ok := sel.(taskItem)
 	return ok && ti.divider
+}
+
+// ToggleSelection toggles the batch selection state for a job ID.
+func (m *TaskListModel) ToggleSelection(jobID string) {
+	if m.selected[jobID] {
+		delete(m.selected, jobID)
+	} else {
+		m.selected[jobID] = true
+	}
+}
+
+// ClearSelection clears all batch selections.
+func (m *TaskListModel) ClearSelection() {
+	m.selected = make(map[string]bool)
+}
+
+// SelectedCount returns the number of batch-selected jobs.
+func (m *TaskListModel) SelectedCount() int {
+	return len(m.selected)
+}
+
+// SelectedIDs returns the IDs of all batch-selected jobs.
+func (m *TaskListModel) SelectedIDs() []string {
+	ids := make([]string, 0, len(m.selected))
+	for id := range m.selected {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // SetSize updates the panel dimensions.
@@ -698,9 +731,14 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	// Build styled output - order: selector | icon | progress | [TW] | title (match TS)
 	var parts []string
 
-	// Selector
-	if selected {
+	// Selector (with batch selection marker)
+	batchSelected := m.selected[job.ID]
+	if selected && batchSelected {
+		parts = append(parts, taskSelectedBgStyle.Render("\u2713 ")) // ✓ with cursor highlight
+	} else if selected {
 		parts = append(parts, taskSelectedBgStyle.Render("> "))
+	} else if batchSelected {
+		parts = append(parts, taskBatchCheckStyle.Render("\u2713 ")) // ✓ green
 	} else {
 		parts = append(parts, "  ")
 	}
