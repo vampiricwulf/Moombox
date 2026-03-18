@@ -169,11 +169,14 @@ class MoomboxApp {
       this.trimmer.destroy();
     });
 
-    // Clear selected job when details dialog is dismissed (Escape, overlay click,
-    // or close button) to stop unnecessary updateJobDetails calls on every
-    // WebSocket update while the dialog is hidden.
+    // Clear selected job and release embedded iframes when details dialog is
+    // dismissed (Escape, overlay click, or close button) to stop unnecessary
+    // updateJobDetails calls and prevent background iframe resource usage.
     document.getElementById("details-dialog").addEventListener("sl-after-hide", () => {
       this.selectedJobId = null;
+      // Clear content to stop YouTube/Twitch iframe embeds from running in background
+      const content = document.getElementById("job-details-content");
+      if (content) content.innerHTML = "";
     });
 
     // Copy buttons in details dialog (event delegation via data-copy attribute)
@@ -1033,7 +1036,12 @@ class MoomboxApp {
     table.style.display = "";
     emptyState.style.display = "none";
 
-    container.innerHTML = this.archivedJobs
+    // Sort archived jobs by updatedAt descending (most recent first)
+    const sorted = [...this.archivedJobs].sort(
+      (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
+    );
+
+    container.innerHTML = sorted
       .map((job) => this.renderJobItem(job))
       .join("");
 
@@ -1899,7 +1907,7 @@ class MoomboxApp {
   /**
    * Populate video and audio format select dropdowns
    */
-  populateFormatSelects(data) {
+  async populateFormatSelects(data) {
     const videoSelect = document.getElementById("video-format-select");
     const audioSelect = document.getElementById("audio-format-select");
 
@@ -1949,6 +1957,13 @@ class MoomboxApp {
       opt.textContent = `${bitrate}${sampleRate} ${codec}${badges}`;
       audioSelect.appendChild(opt);
     }
+
+    // Wait for Shoelace to register the new options before setting values.
+    // Without this, the select's internal state may not recognize the options yet.
+    await Promise.all([
+      videoSelect.updateComplete?.catch(() => {}),
+      audioSelect.updateComplete?.catch(() => {}),
+    ]);
 
     // Auto-select best formats
     if (bestItags.bestWebmVideo) videoSelect.value = String(bestItags.bestWebmVideo);
@@ -2916,7 +2931,8 @@ class MoomboxApp {
 
   async deleteAllOrphanedFiles() {
     if (!this._orphanedFiles || this._orphanedFiles.length === 0) return;
-    if (!await this.showConfirm(`Delete all ${this._orphanedFiles.length} orphaned files?`, { okLabel: "Delete All", okVariant: "danger" })) return;
+    const fileCount = this._orphanedFiles.length;
+    if (!await this.showConfirm(`Delete ${fileCount === 1 ? "this" : `all ${fileCount}`} orphaned file${fileCount === 1 ? "" : "s"}?`, { okLabel: "Delete All", okVariant: "danger" })) return;
 
     const deleteAllBtn = document.getElementById("files-delete-all-btn");
     if (deleteAllBtn) { deleteAllBtn.loading = true; deleteAllBtn.disabled = true; }

@@ -121,6 +121,7 @@
                     submitBtn.disabled = true;
                     errorAlert.style.display = "none";
 
+                    let success = false;
                     try {
                         const response = await fetch("/api/auth/login", {
                             method: "POST",
@@ -129,7 +130,9 @@
                         });
 
                         if (response.ok) {
-                            // Redirect to dashboard
+                            // Redirect to dashboard — keep button in loading state
+                            // to avoid a flicker before navigation completes
+                            success = true;
                             window.location.href = "/";
                         } else {
                             const data = await response.json().catch(() => ({ error: response.statusText }));
@@ -142,8 +145,10 @@
                         errorText.textContent = "Connection error: " + e.message;
                         errorAlert.style.display = "";
                     } finally {
-                        submitBtn.loading = false;
-                        submitBtn.disabled = false;
+                        if (!success) {
+                            submitBtn.loading = false;
+                            submitBtn.disabled = false;
+                        }
                     }
                 }
 

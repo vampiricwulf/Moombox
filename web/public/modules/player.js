@@ -854,6 +854,14 @@ export class PlayerController {
     const now = performance.now();
     const duration = 8000;
 
+    // Quick check: if all lanes are occupied, skip the entire loop to avoid
+    // creating/measuring/removing DOM elements for messages that can't be placed.
+    // This prevents layout thrashing during fast chat when all lanes are busy.
+    if (!firstSpawn && this.nicoLaneAvail.every(t => t > now)) {
+      this.nicoLastSpawnMs = effectiveMs;
+      return;
+    }
+
     let spawned = 0;
     // No limit on first spawn so all offsetMs=0 pre-stream messages deploy at once
     const maxPerFrame = firstSpawn ? Infinity : 10;
