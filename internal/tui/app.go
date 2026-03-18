@@ -250,6 +250,10 @@ type App struct {
 	// Transient flag: set when setup wizard completes, shown once in empty state
 	justCompletedSetup bool
 
+	// seenChordHint is set once the user first presses any chord key, dismissing
+	// the newcomer hint in the status bar (session-only, not persisted).
+	seenChordHint bool
+
 	// Callbacks for actions
 	OnAddVideo   func(url string)
 	OnCancelJob  func(jobID string)

@@ -284,12 +284,15 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.handleFilter()
 		return a, nil
 	case "m":
+		a.seenChordHint = true
 		a.actionMenu.SetSize(a.width, a.height)
 		a.actionMenu.Open(a.buildMenuItems())
 		return a, nil
 	case "?":
+		a.seenChordHint = true
 		return a.dispatchAction("?", nil)
 	case "`":
+		a.seenChordHint = true
 		return a.dispatchAction("`", nil)
 	case keyTab:
 		a.cycleFocus()
@@ -414,6 +417,7 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 	// No active chord — check if key is a prefix
 	switch key {
 	case "a", "r", "o", "q":
+		a.seenChordHint = true
 		a.chord = chordState{prefix: key, prefixTime: now}
 		a.setFeedback(a.chordFeedback(key))
 		return a, nil, true

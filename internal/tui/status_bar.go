@@ -44,6 +44,8 @@ type StatusBarModel struct {
 	diskFree    uint64
 	diskUsedPct float64
 	diskWarn    string // "ok", "warn", "critical"
+	// ShowChordHint shows a newcomer hint instead of the full chord reference.
+	ShowChordHint bool
 }
 
 // NewStatusBarModel creates a new status bar model.
@@ -107,6 +109,10 @@ func (m *StatusBarModel) View() string {
 
 // renderControls renders uniform chord hints in the status bar.
 func (m *StatusBarModel) renderControls() string {
+	if m.ShowChordHint {
+		return " " + DimStyle.Render("Press ? for help · M for menu · A for actions")
+	}
+
 	compact := m.width < statusBarCompactThreshold
 	key := statusBarKeyStyle
 
