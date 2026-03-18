@@ -309,15 +309,19 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action"},
 		{Chord: "A I", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
 		{Chord: "A R", Label: "Retry Job", HintLabel: "Retry", Category: "Action", NeedsJob: true,
+			DisabledReason: "no failed jobs",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
 			}},
 		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+			DisabledReason: "no active jobs",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status != database.StatusFinished && j.Status != database.StatusCancelled && j.Status != database.StatusError
 			}},
-		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true},
+		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+			DisabledReason: "no deletable jobs"},
 		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
+			DisabledReason: "no finished jobs with files",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusFinished && j.OutputFile != ""
 			}},
