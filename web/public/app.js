@@ -2985,7 +2985,14 @@ class MoomboxApp {
     } catch (err) {
       this.showToast("Failed to delete files", "danger");
     } finally {
-      if (deleteAllBtn) { deleteAllBtn.loading = false; deleteAllBtn.disabled = false; }
+      if (deleteAllBtn) {
+        deleteAllBtn.loading = false;
+        // Let renderOrphanedFiles control disabled state — it disables the
+        // button when the list is empty. Only force-enable here if the
+        // fetch/render didn't run (e.g. DELETE request failed).
+        const hasFiles = this._orphanedFiles && this._orphanedFiles.length > 0;
+        deleteAllBtn.disabled = !hasFiles;
+      }
     }
   }
 }
