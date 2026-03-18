@@ -1155,20 +1155,10 @@ class MoomboxApp {
       progressBar.remove();
     }
 
-    // Update quick actions
-    const actionsContainer = card.querySelector(".job-quick-actions");
-    if (actionsContainer) {
-      const canCancel = CANCEL_STATUSES.has(job.status);
-      const canRetry = RETRY_STATUSES.has(job.status);
-      const canDelete = DELETE_STATUSES.has(job.status);
-
-      const safeId = this.escapeHtml(job.id);
-      let actionsHtml = "";
-      if (canCancel) actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${safeId}"></sl-icon-button>`;
-      if (canRetry) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${safeId}"></sl-icon-button>`;
-      if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${safeId}"></sl-icon-button>`;
-      actionsContainer.innerHTML = actionsHtml;
-    }
+    // Quick actions are NOT rebuilt here — updateJobCard is only called when
+    // status hasn't changed (status changes trigger full renderJobs instead),
+    // so the available actions are identical. Skipping avoids destroying and
+    // recreating sl-icon-button shadow DOM elements on every progress update.
   }
 
   formatProgress(job) {
@@ -2554,6 +2544,9 @@ class MoomboxApp {
   }
 
   formatProgressTooltip(job) {
+    // Show full error in tooltip (card truncates to 50 chars)
+    if (job.status === "Error" && job.error) return job.error;
+
     const p = job.progress || "";
     // DASH: (A: 123/456 V: 789/1000 C: 50)
     const dashMatch = p.match(/\(A:\s*(\S+)\s+V:\s*(\S+)(?:\s+C:\s*(\d+))?\)/);

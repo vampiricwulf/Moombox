@@ -423,7 +423,7 @@ export class SetupController {
     const nlCb = document.getElementById("setup-ch-include-non-live");
     if (idEl) idEl.value = ch.id || "";
     if (nameEl) nameEl.value = ch.name || "";
-    if (termsEl) termsEl.value = ch.terms || "";
+    if (termsEl) termsEl.value = typeof ch.terms === "object" && ch.terms !== null ? (ch.terms.stream || "") : (ch.terms || "");
     if (platformSel) platformSel.value = ch.platform || "youtube";
     if (nlCb) nlCb.checked = !!ch.include_non_live_content;
     const qualitySel = document.getElementById("setup-ch-quality");

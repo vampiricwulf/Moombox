@@ -724,17 +724,15 @@ export class SettingsController {
     for (const { id } of RESTART_REQUIRED_FIELDS) {
       const el = document.getElementById(id);
       if (!el) continue;
-      // Avoid duplicate badges
-      const parent = el.parentElement;
-      if (parent && !parent.querySelector(".restart-badge")) {
-        const badge = document.createElement("sl-tag");
-        badge.size = "small";
-        badge.variant = "warning";
-        badge.className = "restart-badge";
-        badge.textContent = "Restart";
-        // Insert after the element's label (next sibling or append to parent)
-        el.insertAdjacentElement("afterend", badge);
-      }
+      // Avoid duplicate badges — check this specific element's next sibling,
+      // not the parent (multiple restart fields can share the same parent container)
+      if (el.nextElementSibling?.classList.contains("restart-badge")) continue;
+      const badge = document.createElement("sl-tag");
+      badge.size = "small";
+      badge.variant = "warning";
+      badge.className = "restart-badge";
+      badge.textContent = "Restart";
+      el.insertAdjacentElement("afterend", badge);
     }
   }
 
