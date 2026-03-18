@@ -876,11 +876,14 @@ export class SetupController {
             clearInterval(elapsedInterval);
             document.getElementById("restart-waiting")?.remove();
 
+            // Set onboarding flag before FFmpeg check — both paths eventually
+            // call initializeApp(), so the flag must be set regardless.
+            sessionStorage.setItem("justCompletedSetup", "1");
+
             // Check FFmpeg
             if (data.ffmpegValid === false) {
               this.showFFmpegOverlay();
             } else {
-              sessionStorage.setItem("justCompletedSetup", "1");
               this.initializeApp();
             }
             return;

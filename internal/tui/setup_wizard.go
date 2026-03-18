@@ -1499,9 +1499,18 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		lines = append(lines, "")
 		lines = append(lines, m.advancedForm.View())
 
-		// Template preview for the output template field
-		if preview := templatePreview(m.values["outputTemplate"]); preview != "" {
-			lines = append(lines, DimStyle.Render(preview))
+		// Template preview — only when the Paths group is visible
+		if focused := m.advancedForm.GetFocusedField(); focused != nil {
+			switch focused.GetKey() {
+			case "outputDir", "outputTemplate", "stagingDir", "databasePath", "ffmpegPath":
+				val := m.values["outputTemplate"]
+				if val == "" {
+					val = "${channel}/${start_date} ${title} [${id}]"
+				}
+				if preview := templatePreview(val); preview != "" {
+					lines = append(lines, DimStyle.Render(preview))
+				}
+			}
 		}
 
 		if m.errorMsg != "" {

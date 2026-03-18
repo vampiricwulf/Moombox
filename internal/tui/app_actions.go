@@ -380,9 +380,11 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// Open
 	items = append(items,
 		ActionMenuItem{Chord: "O F", Label: "Open Folder", HintLabel: "Folder", Category: "Open", NeedsJob: true,
-			JobFilter: func(j *database.Job) bool { return canOpenFolder(j) }},
+			DisabledReason: "no jobs with folders",
+			JobFilter:      func(j *database.Job) bool { return canOpenFolder(j) }},
 		ActionMenuItem{Chord: "O S", Label: "Open Stream Page", HintLabel: "Stream", Category: "Open", NeedsJob: true,
-			JobFilter: func(j *database.Job) bool { return canOpenStream(j) }},
+			DisabledReason: "no jobs with stream URLs",
+			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 		ActionMenuItem{Chord: "O W", Label: "Open Web UI", HintLabel: "Web", Category: "Open"},
 	)
 

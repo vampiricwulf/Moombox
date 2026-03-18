@@ -23,6 +23,7 @@ class MoomboxApp {
     this.config = null;
     this.selectedJobId = null;
     this._selectedJobs = new Set();
+    this._lastCheckedJobId = null;
     this.reconnectAttempts = 0;
     this.autoCookieReloginRequired = null;
     this.nextFeedCheck = 0;
@@ -406,11 +407,27 @@ class MoomboxApp {
         if (checkbox) {
           e.stopPropagation();
           const jobId = checkbox.dataset.jobId;
-          if (checkbox.checked) {
+          // Shift+Click: select range between last checked and current
+          if (e.shiftKey && this._lastCheckedJobId && checkbox.checked) {
+            const allCards = [...jobsContainer.querySelectorAll(".video-item")];
+            const lastIdx = allCards.findIndex(c => c.dataset.jobId === this._lastCheckedJobId);
+            const curIdx = allCards.findIndex(c => c.dataset.jobId === jobId);
+            if (lastIdx !== -1 && curIdx !== -1) {
+              const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+              for (let i = start; i <= end; i++) {
+                const id = allCards[i].dataset.jobId;
+                this._selectedJobs.add(id);
+                allCards[i].classList.add("selected");
+                const cb = allCards[i].querySelector(".job-checkbox");
+                if (cb) cb.checked = true;
+              }
+            }
+          } else if (checkbox.checked) {
             this._selectedJobs.add(jobId);
           } else {
             this._selectedJobs.delete(jobId);
           }
+          this._lastCheckedJobId = jobId;
           checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
           this.updateBatchActionBar();
           return;
@@ -450,11 +467,26 @@ class MoomboxApp {
         if (checkbox) {
           e.stopPropagation();
           const jobId = checkbox.dataset.jobId;
-          if (checkbox.checked) {
+          if (e.shiftKey && this._lastCheckedJobId && checkbox.checked) {
+            const allCards = [...archivedContainer.querySelectorAll(".video-item")];
+            const lastIdx = allCards.findIndex(c => c.dataset.jobId === this._lastCheckedJobId);
+            const curIdx = allCards.findIndex(c => c.dataset.jobId === jobId);
+            if (lastIdx !== -1 && curIdx !== -1) {
+              const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+              for (let i = start; i <= end; i++) {
+                const id = allCards[i].dataset.jobId;
+                this._selectedJobs.add(id);
+                allCards[i].classList.add("selected");
+                const cb = allCards[i].querySelector(".job-checkbox");
+                if (cb) cb.checked = true;
+              }
+            }
+          } else if (checkbox.checked) {
             this._selectedJobs.add(jobId);
           } else {
             this._selectedJobs.delete(jobId);
           }
+          this._lastCheckedJobId = jobId;
           checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
           this.updateBatchActionBar();
           return;
@@ -500,6 +532,12 @@ class MoomboxApp {
     document.getElementById("batch-cancel")?.addEventListener("click", () => this.batchAction("cancel"));
     document.getElementById("batch-retry")?.addEventListener("click", () => this.batchAction("retry"));
     document.getElementById("batch-delete")?.addEventListener("click", () => this.batchAction("delete"));
+    document.getElementById("batch-select-all")?.addEventListener("click", () => {
+      this.jobs.forEach(j => this._selectedJobs.add(j.id));
+      document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = true; });
+      document.querySelectorAll(".video-item").forEach(el => el.classList.add("selected"));
+      this.updateBatchActionBar();
+    });
     document.getElementById("batch-clear")?.addEventListener("click", () => {
       this._selectedJobs.clear();
       document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
