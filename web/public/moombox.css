@@ -1894,9 +1894,15 @@ sl-progress-bar {
 }
 .video-item:hover .job-quick-actions,
 .video-item[data-focused] .job-quick-actions { opacity: 1; }
-.job-quick-actions sl-icon-button[data-quick-action="delete"]:hover { color: var(--sl-color-danger-500); }
-.job-quick-actions sl-icon-button[data-quick-action="cancel"]:hover { color: var(--sl-color-warning-600); }
-.job-quick-actions sl-icon-button[data-quick-action="retry"]:hover { color: var(--sl-color-success-600); }
+.job-quick-actions sl-icon-button[data-quick-action="delete"]:hover,
+.job-quick-actions sl-icon-button[data-quick-action="delete"]:active,
+.job-quick-actions sl-icon-button[data-quick-action="delete"]:focus-visible { color: var(--sl-color-danger-500); }
+.job-quick-actions sl-icon-button[data-quick-action="cancel"]:hover,
+.job-quick-actions sl-icon-button[data-quick-action="cancel"]:active,
+.job-quick-actions sl-icon-button[data-quick-action="cancel"]:focus-visible { color: var(--sl-color-warning-600); }
+.job-quick-actions sl-icon-button[data-quick-action="retry"]:hover,
+.job-quick-actions sl-icon-button[data-quick-action="retry"]:active,
+.job-quick-actions sl-icon-button[data-quick-action="retry"]:focus-visible { color: var(--sl-color-success-600); }
 
 /* Keyboard focus indicator */
 .video-item[data-focused] {

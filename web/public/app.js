@@ -1748,8 +1748,6 @@ class MoomboxApp {
         // Reject clips client-side (not supported)
         if (target.type === "clip") {
           this.showToast("Twitch clips are not supported. Use a channel or VOD URL.", "warning");
-          submitBtn.loading = false;
-          submitBtn.disabled = false;
           return;
         }
         // Twitch job

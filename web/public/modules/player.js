@@ -465,10 +465,13 @@ export class PlayerController {
       const isPlaying = this.playerJob && document.getElementById("player-video")?.src;
       if (isPlaying) {
         // Ensure current job still exists; if not, clear the player
+        // and fall through to rebuild options (clearPlayer is idempotent
+        // so any sl-change from option removal is harmless).
         if (currentValue && !all.some((j) => j.id === currentValue)) {
           this.clearPlayer();
+        } else {
+          return;
         }
-        return;
       }
 
       // Remove existing options
