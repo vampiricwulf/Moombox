@@ -1074,7 +1074,7 @@ class MoomboxApp {
     if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
 
     return `
-      <div class="video-item" data-job-id="${this.escapeHtml(job.id)}" data-status="${statusClass}">
+      <div class="video-item" data-job-id="${this.escapeHtml(job.id)}" data-status="${this.escapeHtml(statusClass)}">
         <div class="thumb">
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
@@ -1085,7 +1085,7 @@ class MoomboxApp {
           <div class="stream-author">${this.escapeHtml(job.channelName)}</div>
         </div>
         <div>
-          <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
+          <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
         <div class="job-progress">
           <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${this.escapeHtml(progress)}</div>
@@ -1425,7 +1425,7 @@ class MoomboxApp {
           <div class="details-row">
             <span class="details-label">Status:</span>
             <span class="details-value">
-              <sl-badge class="status ${statusClass}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
+              <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
             </span>
           </div>
           ${job.chatStatus ? (() => {
