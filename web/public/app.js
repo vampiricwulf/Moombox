@@ -1887,7 +1887,7 @@ class MoomboxApp {
       if (this._lastFormatVideoId !== videoId) return;
 
       const data = await response.json();
-      this.populateFormatSelects(data);
+      await this.populateFormatSelects(data);
 
       formatSkeleton.style.display = "none";
       formatSection.style.display = "block";
