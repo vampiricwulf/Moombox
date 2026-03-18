@@ -761,13 +761,14 @@ class MoomboxApp {
         this.renderJobs();
         this.renderLogs();
         this.updateCheckCountdown();
-        // Close details dialog if selected job no longer exists (e.g. deleted while disconnected)
-        // Check both active and archived lists — archived jobs are valid but not in this.jobs.
-        // If not in either cache, verify via API (archivedJobs may not have been fetched yet).
-        if (this.selectedJobId
-            && !this.jobs.some(j => j.id === this.selectedJobId)
-            && !this.archivedJobs.some(j => j.id === this.selectedJobId)) {
-          this._verifyJobExists(this.selectedJobId);
+        // Refresh details dialog if open — data may have changed during disconnect
+        if (this.selectedJobId) {
+          const job = this.jobs.find((j) => j.id === this.selectedJobId);
+          if (job) {
+            this.updateJobDetails(job);
+          } else if (!this.archivedJobs.some(j => j.id === this.selectedJobId)) {
+            this._verifyJobExists(this.selectedJobId);
+          }
         }
         break;
 
