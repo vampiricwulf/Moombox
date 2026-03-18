@@ -1219,6 +1219,9 @@ export class SettingsController {
         return;
       }
 
+      newConfirm.loading = true;
+      newConfirm.disabled = true;
+
       if (!this.app.config.notifications) {
         this.app.config.notifications = [];
       }
@@ -1231,6 +1234,9 @@ export class SettingsController {
       } catch {
         // Revert local change if save failed
         this.app.config.notifications.pop();
+      } finally {
+        newConfirm.loading = false;
+        newConfirm.disabled = false;
       }
     });
 
@@ -1526,6 +1532,7 @@ export class SettingsController {
     }
 
     btn.loading = true;
+    btn.disabled = true;
     try {
       const response = await fetch("/api/auth/set-password", {
         method: "POST",
@@ -1546,6 +1553,7 @@ export class SettingsController {
       this.app.showToast("Failed to set password: " + e.message, "danger");
     } finally {
       btn.loading = false;
+      btn.disabled = false;
     }
   }
 
