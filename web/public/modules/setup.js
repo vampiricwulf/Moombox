@@ -1,6 +1,8 @@
 /**
  * Setup Wizard Controller — Mode selection, simplified + advanced flows, FFmpeg check
  */
+import { renderTemplatePreview } from "./settings.js";
+
 export class SetupController {
   constructor(app) {
     this.app = app;
@@ -186,6 +188,19 @@ export class SetupController {
       setupChPlatform.addEventListener("sl-change", () => this.updateChannelDialogFields());
     }
 
+    // Template preview for setup output template
+    const setupTemplateInput = document.getElementById("setup-output-template");
+    const setupTemplatePreview = document.getElementById("setup-template-preview");
+    if (setupTemplateInput && setupTemplatePreview) {
+      const updateSetupPreview = () => {
+        const val = setupTemplateInput.value || setupTemplateInput.placeholder;
+        setupTemplatePreview.textContent = renderTemplatePreview(val);
+        setupTemplatePreview.style.display = val ? "" : "none";
+      };
+      setupTemplateInput.addEventListener("sl-input", updateSetupPreview);
+      updateSetupPreview();
+    }
+
     // FFmpeg overlay listeners (also called from showFFmpegOverlay for non-first-run)
     this.setupFFmpegListeners();
   }
@@ -200,6 +215,10 @@ export class SetupController {
     });
     document.getElementById("ffmpeg-check-btn")?.addEventListener("click", () => {
       this.checkFFmpegPath("ffmpeg-custom-path", "ffmpeg-check-result", "ffmpeg-check-btn");
+    });
+    document.getElementById("ffmpeg-skip-btn")?.addEventListener("click", () => {
+      document.getElementById("ffmpeg-overlay").style.display = "none";
+      this.initializeApp();
     });
     document.getElementById("ffmpeg-quit-btn")?.addEventListener("click", () => {
       window.close();
@@ -278,11 +297,30 @@ export class SetupController {
   async finishCookieSetup(platform) {
     const doneBtn = document.getElementById("btn-auto-cookie-done");
     const resultEl = document.getElementById("auto-cookie-setup-result");
+    const countdownEl = document.getElementById("auto-cookie-countdown");
+    const timeoutResultEl = document.getElementById("auto-cookie-result");
     if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
     if (resultEl) {
       resultEl.textContent = "Extracting cookies...";
       resultEl.style.color = "";
     }
+    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
+
+    let remaining = 60;
+    if (countdownEl) {
+      countdownEl.textContent = `${remaining}s remaining`;
+      countdownEl.style.color = "";
+    }
+    const countdownInterval = setInterval(() => {
+      remaining--;
+      if (countdownEl) {
+        countdownEl.textContent = `${remaining}s remaining`;
+        if (remaining <= 10) {
+          countdownEl.style.color = "var(--sl-color-warning-600)";
+        }
+      }
+      if (remaining <= 0) clearInterval(countdownInterval);
+    }, 1000);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
@@ -312,7 +350,12 @@ export class SetupController {
             if (badge) { badge.style.display = ""; badge.variant = "success"; }
           }
         }
-        this.app.showToast("Cookie setup complete!", "success");
+        if (ytOk) {
+          this.app.showToast("YouTube cookies configured", "success");
+        }
+        if (twOk) {
+          this.app.showToast("Twitch cookies configured", "success");
+        }
       } else {
         if (resultEl) {
           resultEl.textContent = data.error || "No login detected. Try again.";
@@ -320,14 +363,39 @@ export class SetupController {
         }
       }
     } catch (e) {
+      if (e.name === "AbortError") {
+        if (resultEl) resultEl.textContent = "";
+        if (timeoutResultEl) {
+          timeoutResultEl.innerHTML = `
+            <sl-alert variant="warning" open>
+              <sl-icon slot="icon" name="clock"></sl-icon>
+              Cookie extraction timed out. The browser window may still be open.
+            </sl-alert>
+            <div style="display: flex; gap: 0.5em; margin-top: 0.75em;">
+              <sl-button variant="primary" size="small" id="cookie-retry-btn">Try Again</sl-button>
+              <sl-button variant="default" size="small" id="cookie-skip-btn">Skip</sl-button>
+            </div>`;
+          document.getElementById("cookie-retry-btn")?.addEventListener("click", () => {
+            timeoutResultEl.innerHTML = "";
+            if (countdownEl) countdownEl.textContent = "";
+            this.startCookieSetup(platform);
+          });
+          document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {
+            document.getElementById("auto-cookie-setup-dialog")?.hide();
+            if (countdownEl) countdownEl.textContent = "";
+            timeoutResultEl.innerHTML = "";
+          });
+        }
+        return;
+      }
       if (resultEl) {
-        resultEl.textContent = e.name === "AbortError"
-          ? "Cookie extraction timed out. Try again."
-          : "Error: " + e.message;
+        resultEl.textContent = "Error: " + e.message;
         resultEl.style.color = "var(--sl-color-danger-600)";
       }
     } finally {
+      clearInterval(countdownInterval);
       clearTimeout(timeoutId);
+      if (countdownEl) countdownEl.textContent = "";
       if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
     }
   }
@@ -339,6 +407,10 @@ export class SetupController {
     document.getElementById("auto-cookie-setup-dialog")?.hide();
     const resultEl = document.getElementById("auto-cookie-setup-result");
     if (resultEl) { resultEl.textContent = ""; resultEl.style.color = ""; }
+    const countdownEl = document.getElementById("auto-cookie-countdown");
+    if (countdownEl) countdownEl.textContent = "";
+    const timeoutResultEl = document.getElementById("auto-cookie-result");
+    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
   }
 
   /** Show/hide YouTube-only fields in the channel dialog based on platform. */
@@ -753,8 +825,24 @@ export class SetupController {
     const msg = document.createElement("p");
     msg.style.marginTop = "1em";
     msg.textContent = "Restarting Moombox...";
+
+    const startTime = Date.now();
+    const phaseEl = document.createElement("p");
+    phaseEl.style.cssText = "margin-top: 0.75em; font-size: var(--sl-font-size-small); color: var(--sl-color-neutral-500);";
+    phaseEl.textContent = "Saving configuration...";
+
+    const elapsedEl = document.createElement("p");
+    elapsedEl.style.cssText = "font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-400); margin-top: 0.25em;";
+
+    const elapsedInterval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      elapsedEl.textContent = `${elapsed}s elapsed`;
+    }, 1000);
+
     inner.appendChild(spinner);
     inner.appendChild(msg);
+    inner.appendChild(phaseEl);
+    inner.appendChild(elapsedEl);
     waiting.appendChild(inner);
     document.body.appendChild(waiting);
 
@@ -763,6 +851,20 @@ export class SetupController {
 
     const poll = async () => {
       attempts++;
+
+      // Update phase text based on attempt count and elapsed time
+      if (attempts === 1) {
+        phaseEl.textContent = "Restarting server...";
+      } else if (attempts >= 2) {
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= 15000 && !phaseEl.dataset.longWarn) {
+          phaseEl.dataset.longWarn = "1";
+          phaseEl.textContent = "Reconnecting... This is taking longer than usual. The server may be installing plugins.";
+        } else if (!phaseEl.dataset.longWarn) {
+          phaseEl.textContent = "Reconnecting...";
+        }
+      }
+
       try {
         const resp = await fetch("/api/setup/status");
         if (resp.ok) {
@@ -770,7 +872,13 @@ export class SetupController {
           if (!data.isFirstRun) {
             // Server is back and config exists
             this._polling = false;
+            phaseEl.textContent = "Connected!";
+            clearInterval(elapsedInterval);
             document.getElementById("restart-waiting")?.remove();
+
+            // Set onboarding flag before FFmpeg check — both paths eventually
+            // call initializeApp(), so the flag must be set regardless.
+            sessionStorage.setItem("justCompletedSetup", "1");
 
             // Check FFmpeg
             if (data.ffmpegValid === false) {
@@ -785,6 +893,7 @@ export class SetupController {
 
       if (attempts >= maxAttempts) {
         this._polling = false;
+        clearInterval(elapsedInterval);
         const waitingEl = document.getElementById("restart-waiting");
         if (waitingEl) {
           waitingEl.textContent = "";

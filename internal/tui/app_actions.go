@@ -29,17 +29,42 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		_ = os.MkdirAll(startDir, 0o755)
 		return a, a.importDlg.Open(startDir)
 	case "A R":
-		if job != nil && a.OnRetryJob != nil {
+		if job == nil && a.taskList.SelectedCount() > 0 && a.OnRetryJob != nil {
+			count := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				a.OnRetryJob(id)
+				count++
+			}
+			a.taskList.ClearSelection()
+			a.setFeedback(fmt.Sprintf("Retrying %d jobs", count))
+		} else if job != nil && a.OnRetryJob != nil {
 			a.OnRetryJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
 		}
 	case "A C":
-		if job != nil && a.OnCancelJob != nil {
+		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
+			count := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				a.OnCancelJob(id)
+				count++
+			}
+			a.taskList.ClearSelection()
+			a.setFeedback(fmt.Sprintf("Cancelled %d jobs", count))
+		} else if job != nil && a.OnCancelJob != nil {
 			a.OnCancelJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
 		}
 	case "A D":
-		if job != nil && a.OnDeleteJob != nil {
+		if job == nil && a.taskList.SelectedCount() > 0 && a.OnDeleteJob != nil {
+			count := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				a.OnDeleteJob(id)
+				count++
+			}
+			a.taskList.ClearSelection()
+			a.setFeedback(fmt.Sprintf("Deleted %d jobs", count))
+			a.updateSelectedJob()
+		} else if job != nil && a.OnDeleteJob != nil {
 			a.OnDeleteJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
 			a.taskList.MoveUp()
@@ -309,15 +334,19 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action"},
 		{Chord: "A I", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
 		{Chord: "A R", Label: "Retry Job", HintLabel: "Retry", Category: "Action", NeedsJob: true,
+			DisabledReason: "no failed jobs",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
 			}},
 		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+			DisabledReason: "no active jobs",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status != database.StatusFinished && j.Status != database.StatusCancelled && j.Status != database.StatusError
 			}},
-		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true},
+		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+			DisabledReason: "no deletable jobs"},
 		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
+			DisabledReason: "no finished jobs with files",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusFinished && j.OutputFile != ""
 			}},
@@ -351,9 +380,11 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	// Open
 	items = append(items,
 		ActionMenuItem{Chord: "O F", Label: "Open Folder", HintLabel: "Folder", Category: "Open", NeedsJob: true,
-			JobFilter: func(j *database.Job) bool { return canOpenFolder(j) }},
+			DisabledReason: "no jobs with folders",
+			JobFilter:      func(j *database.Job) bool { return canOpenFolder(j) }},
 		ActionMenuItem{Chord: "O S", Label: "Open Stream Page", HintLabel: "Stream", Category: "Open", NeedsJob: true,
-			JobFilter: func(j *database.Job) bool { return canOpenStream(j) }},
+			DisabledReason: "no jobs with stream URLs",
+			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 		ActionMenuItem{Chord: "O W", Label: "Open Web UI", HintLabel: "Web", Category: "Open"},
 	)
 

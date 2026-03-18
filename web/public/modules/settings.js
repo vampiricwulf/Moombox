@@ -52,6 +52,23 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "logs.log_max_files", id: "cfg-log-max-files" },
 ];
 
+/** Render a template preview string using sample data. */
+export function renderTemplatePreview(template) {
+  const now = new Date();
+  const vars = {
+    channel: "Miko Ch",
+    title: "Singing Stream",
+    id: "dQw4w9WgXcQ",
+    start_date: now.toISOString().split("T")[0],
+    start_time: "20-00-00",
+  };
+  let result = template || "";
+  for (const [key, val] of Object.entries(vars)) {
+    result = result.replaceAll("${" + key + "}", val);
+  }
+  return result ? "Example: " + result + ".mkv" : "";
+}
+
 export class SettingsController {
   constructor(app) {
     this.app = app;
@@ -106,9 +123,21 @@ export class SettingsController {
       reloadBtn.addEventListener("click", () => {
         this._dirty = false;
         this._updateUnsavedIndicator();
+        document.getElementById("settings-unsaved-banner").style.display = "none";
         this.app.loadConfig();
       });
     }
+
+    // Unsaved changes banner buttons
+    document.getElementById("settings-banner-discard")?.addEventListener("click", () => {
+      this._dirty = false;
+      this._updateUnsavedIndicator();
+      document.getElementById("settings-unsaved-banner").style.display = "none";
+      this.app.loadConfig();
+    });
+    document.getElementById("settings-banner-save")?.addEventListener("click", () => {
+      this.saveConfig();
+    });
 
     // Add channel
     const addChannelBtn = document.getElementById("add-channel-btn");
@@ -174,6 +203,11 @@ export class SettingsController {
         document.getElementById("webhook-dialog")?.hide();
       });
     }
+
+    // FFmpeg install from settings
+    document.getElementById("cfg-ffmpeg-install-btn")?.addEventListener("click", () => {
+      this.app.setup.showFFmpegOverlay();
+    });
 
     // yt-dlp plugin install
     const ytdlpInstallBtn = document.getElementById("ytdlp-install-btn");
@@ -369,6 +403,7 @@ export class SettingsController {
 
     // Downloader settings
     this.app.setInputValue("cfg-output-template", config.downloader?.output_template);
+    this._wireTemplatePreview();
     this.app.setInputValue("cfg-max-resolution", config.downloader?.max_video_resolution);
     this.app.setInputValue("cfg-parallel-downloads", config.downloader?.num_parallel_downloads);
     // Download chat switch
@@ -428,6 +463,7 @@ export class SettingsController {
     // Track dirty state
     this._dirty = false;
     this._updateUnsavedIndicator();
+    document.getElementById("settings-unsaved-banner")?.style.setProperty("display", "none");
     if (!this._dirtyListenersAdded) {
       this._dirtyListenersAdded = true;
       const settingsContent = document.querySelector(".settings-content");
@@ -465,6 +501,24 @@ export class SettingsController {
       this._securityStatusLoaded = false;
     }
     this.loadSecurityStatus();
+  }
+
+  /** Wire up the live template preview below the output template input. */
+  _wireTemplatePreview() {
+    const templateInput = document.getElementById("cfg-output-template");
+    const templatePreview = document.getElementById("cfg-template-preview");
+    if (templateInput && templatePreview) {
+      const updatePreview = () => {
+        const val = templateInput.value || templateInput.placeholder;
+        templatePreview.textContent = renderTemplatePreview(val);
+        templatePreview.style.display = val ? "" : "none";
+      };
+      if (!this._templatePreviewWired) {
+        this._templatePreviewWired = true;
+        templateInput.addEventListener("sl-input", updatePreview);
+      }
+      updatePreview();
+    }
   }
 
   async saveConfig() {
@@ -608,6 +662,7 @@ export class SettingsController {
         }
         this._dirty = false;
         this._updateUnsavedIndicator();
+        document.getElementById("settings-unsaved-banner").style.display = "none";
         this.app.showToast("Settings saved successfully", "success");
         // Refresh status bar (platform indicators, cookie status, etc.)
         this.app.loadStatus();
@@ -712,6 +767,8 @@ export class SettingsController {
   _markDirty() {
     this._dirty = true;
     this._updateUnsavedIndicator();
+    const banner = document.getElementById("settings-unsaved-banner");
+    if (banner) banner.style.display = "";
   }
 
   _updateUnsavedIndicator() {
@@ -1823,11 +1880,30 @@ export class SettingsController {
   async finishAutoCookieSetup() {
     const resultEl = document.getElementById("auto-cookie-setup-result");
     const doneBtn = document.getElementById("btn-auto-cookie-done");
+    const countdownEl = document.getElementById("auto-cookie-countdown");
+    const timeoutResultEl = document.getElementById("auto-cookie-result");
     if (doneBtn) { doneBtn.loading = true; doneBtn.disabled = true; }
     if (resultEl) {
       resultEl.textContent = "Extracting cookies...";
       resultEl.style.color = "";
     }
+    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
+
+    let remaining = 60;
+    if (countdownEl) {
+      countdownEl.textContent = `${remaining}s remaining`;
+      countdownEl.style.color = "";
+    }
+    const countdownInterval = setInterval(() => {
+      remaining--;
+      if (countdownEl) {
+        countdownEl.textContent = `${remaining}s remaining`;
+        if (remaining <= 10) {
+          countdownEl.style.color = "var(--sl-color-warning-600)";
+        }
+      }
+      if (remaining <= 0) clearInterval(countdownInterval);
+    }, 1000);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
@@ -1844,10 +1920,12 @@ export class SettingsController {
         if (resultEl) resultEl.textContent = "";
         const dialog = document.getElementById("auto-cookie-setup-dialog");
         if (dialog) dialog.hide();
-        const parts = [];
-        if (ytOk) parts.push("YouTube: \u2713");
-        if (twOk) parts.push("Twitch: \u2713");
-        this.app.showToast(`Setup complete \u2014 ${parts.join(", ")}`, "success");
+        if (ytOk) {
+          this.app.showToast("YouTube cookies configured", "success");
+        }
+        if (twOk) {
+          this.app.showToast("Twitch cookies configured", "success");
+        }
         this.app.loadStatus();
       } else {
         if (resultEl) {
@@ -1856,14 +1934,42 @@ export class SettingsController {
         }
       }
     } catch (e) {
+      if (e.name === "AbortError") {
+        if (resultEl) resultEl.textContent = "";
+        if (timeoutResultEl) {
+          // Determine platform from the dialog label set during startAutoCookieSetup
+          const dialogLabel = document.getElementById("auto-cookie-setup-dialog")?.label || "";
+          const platform = dialogLabel.includes("Twitch") ? "twitch" : "youtube";
+          timeoutResultEl.innerHTML = `
+            <sl-alert variant="warning" open>
+              <sl-icon slot="icon" name="clock"></sl-icon>
+              Cookie extraction timed out. The browser window may still be open.
+            </sl-alert>
+            <div style="display: flex; gap: 0.5em; margin-top: 0.75em;">
+              <sl-button variant="primary" size="small" id="cookie-retry-btn">Try Again</sl-button>
+              <sl-button variant="default" size="small" id="cookie-skip-btn">Skip</sl-button>
+            </div>`;
+          document.getElementById("cookie-retry-btn")?.addEventListener("click", () => {
+            timeoutResultEl.innerHTML = "";
+            if (countdownEl) countdownEl.textContent = "";
+            this.startAutoCookieSetup(platform);
+          });
+          document.getElementById("cookie-skip-btn")?.addEventListener("click", () => {
+            document.getElementById("auto-cookie-setup-dialog")?.hide();
+            if (countdownEl) countdownEl.textContent = "";
+            timeoutResultEl.innerHTML = "";
+          });
+        }
+        return;
+      }
       if (resultEl) {
-        resultEl.textContent = e.name === "AbortError"
-          ? "Cookie extraction timed out. Try again."
-          : "Error: " + e.message;
+        resultEl.textContent = "Error: " + e.message;
         resultEl.style.color = "var(--sl-color-danger-600)";
       }
     } finally {
+      clearInterval(countdownInterval);
       clearTimeout(timeoutId);
+      if (countdownEl) countdownEl.textContent = "";
       if (doneBtn) { doneBtn.loading = false; doneBtn.disabled = false; }
     }
   }
@@ -1881,5 +1987,9 @@ export class SettingsController {
       resultEl.textContent = "";
       resultEl.style.color = "";
     }
+    const countdownEl = document.getElementById("auto-cookie-countdown");
+    if (countdownEl) countdownEl.textContent = "";
+    const timeoutResultEl = document.getElementById("auto-cookie-result");
+    if (timeoutResultEl) timeoutResultEl.innerHTML = "";
   }
 }

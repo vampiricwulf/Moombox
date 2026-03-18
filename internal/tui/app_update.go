@@ -396,7 +396,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.setupWiz.errorMsg = fmt.Sprintf("Failed to save: %v", msg.Err)
 			return a, nil
 		}
-		// Save succeeded — trigger restart
+		// Save succeeded — mark setup complete for onboarding nudge, then trigger restart
+		a.taskList.JustCompletedSetup = true
 		a.setupWiz.Close()
 		if a.setupWiz.OnRestart != nil {
 			onRestart := a.setupWiz.OnRestart
@@ -419,11 +420,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setupWiz.cookieActive = false
 		a.setupWiz.cookieFinishing = false
 		a.setupWiz.cookiePlatform = ""
-		// Show error or "no login detected" feedback
+		a.setupWiz.cookieCountdown = 0
+		// Show per-platform success feedback, or error/no-login feedback
 		if msg.Err != "" {
 			a.setupWiz.errorMsg = msg.Err
 		} else if !msg.YTAuth && !msg.TWAuth {
 			a.setupWiz.errorMsg = "No login detected — try signing in again"
+		} else {
+			if msg.YTAuth {
+				a.setFeedback("YouTube cookies configured")
+			}
+			if msg.TWAuth {
+				a.setFeedback("Twitch cookies configured")
+			}
 		}
 		return a, nil
 

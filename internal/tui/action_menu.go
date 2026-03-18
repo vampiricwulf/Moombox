@@ -26,9 +26,10 @@ type ActionMenuItem struct {
 	Label        string                   // e.g. "Add Video"
 	HintLabel    string                   // short label for chord feedback, e.g. "Add", "Retry", "Tokens"
 	Category     string                   // "Action", "Request", "Open", "Filter", "Other"
-	NeedsJob     bool                     // true → transitions to job selector
-	NeedsConfirm bool                     // true → transitions to confirm prompt
-	JobFilter    func(*database.Job) bool // filter for job selector (nil = show all)
+	NeedsJob       bool                     // true → transitions to job selector
+	NeedsConfirm   bool                     // true → transitions to confirm prompt
+	JobFilter      func(*database.Job) bool // filter for job selector (nil = show all)
+	DisabledReason string                   // shown when NeedsJob && no matching jobs
 }
 
 // menuActionItem is a list.Item for the main action menu.
@@ -80,7 +81,11 @@ func (d menuActionDelegate) Render(w io.Writer, m list.Model, index int, item li
 	chord := lipgloss.NewStyle().Foreground(ColorCyan).Width(6).Render(mi.action.Chord)
 	label := mi.action.Label
 	if mi.noJobs {
-		label += DimStyle.Render(" (none)")
+		reason := " (none)"
+		if mi.action.DisabledReason != "" {
+			reason = " · " + mi.action.DisabledReason
+		}
+		label += DimStyle.Render(reason)
 	}
 	text := "  " + chord + " " + label
 	if index == m.Index() {

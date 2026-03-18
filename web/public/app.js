@@ -22,6 +22,8 @@ class MoomboxApp {
     this.logs = [];
     this.config = null;
     this.selectedJobId = null;
+    this._selectedJobs = new Set();
+    this._lastCheckedJobId = null;
     this.reconnectAttempts = 0;
     this.autoCookieReloginRequired = null;
     this.nextFeedCheck = 0;
@@ -215,8 +217,22 @@ class MoomboxApp {
       logsViewer.addEventListener("scroll", () => {
         if (this._logRebuildingDOM) return;
         this._logAutoScroll = logsViewer.scrollTop + logsViewer.clientHeight >= logsViewer.scrollHeight - 30;
+        const pill = document.getElementById("log-autoscroll-pill");
+        if (pill) {
+          pill.style.display = this._logAutoScroll ? "none" : "";
+        }
       });
     }
+
+    // Resume auto-scroll pill click handler
+    document.getElementById("log-autoscroll-pill")?.addEventListener("click", () => {
+      const viewer = document.getElementById("logs-viewer");
+      if (viewer) {
+        viewer.scrollTop = viewer.scrollHeight;
+        this._logAutoScroll = true;
+      }
+      document.getElementById("log-autoscroll-pill").style.display = "none";
+    });
 
     // Log search
     let logSearchTimeout = null;
@@ -260,6 +276,29 @@ class MoomboxApp {
         }
       });
     }
+
+    // Intercept tab switches when settings has unsaved changes
+    document.querySelectorAll("sl-tab[slot='nav']").forEach(tab => {
+      tab.addEventListener("click", (e) => {
+        if (tab.panel !== "settings" && this.settings?._dirty) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          this.showConfirm("You have unsaved settings changes. Discard and leave?", {
+            title: "Unsaved Changes",
+            okLabel: "Leave Without Saving",
+            okVariant: "warning"
+          }).then(confirmed => {
+            if (confirmed) {
+              this.settings._dirty = false;
+              this.settings._updateUnsavedIndicator();
+              document.getElementById("settings-unsaved-banner").style.display = "none";
+              this.settings.app.loadConfig();
+              tab.click();
+            }
+          });
+        }
+      }, true); // capture phase — intercept before Shoelace switches the tab
+    });
 
     // Refresh cookies button (shift+click triggers auto-cookie browser refresh)
     const refreshBtn = document.getElementById("btn-refresh-cookies");
@@ -363,6 +402,44 @@ class MoomboxApp {
     const jobsContainer = document.getElementById("jobs-container");
     if (jobsContainer) {
       jobsContainer.addEventListener("click", (e) => {
+        // Batch selection checkbox
+        const checkbox = e.target.closest(".job-checkbox");
+        if (checkbox) {
+          e.stopPropagation();
+          const jobId = checkbox.dataset.jobId;
+          // Shift+Click: select range between last checked and current
+          if (e.shiftKey && this._lastCheckedJobId && checkbox.checked) {
+            const allCards = [...jobsContainer.querySelectorAll(".video-item")];
+            const lastIdx = allCards.findIndex(c => c.dataset.jobId === this._lastCheckedJobId);
+            const curIdx = allCards.findIndex(c => c.dataset.jobId === jobId);
+            if (lastIdx !== -1 && curIdx !== -1) {
+              const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+              for (let i = start; i <= end; i++) {
+                const id = allCards[i].dataset.jobId;
+                this._selectedJobs.add(id);
+                allCards[i].classList.add("selected");
+                const cb = allCards[i].querySelector(".job-checkbox");
+                if (cb) cb.checked = true;
+              }
+            }
+          } else if (checkbox.checked) {
+            this._selectedJobs.add(jobId);
+          } else {
+            this._selectedJobs.delete(jobId);
+          }
+          this._lastCheckedJobId = jobId;
+          checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
+          this.updateBatchActionBar();
+          return;
+        }
+        // Expandable error text
+        const errorText = e.target.closest(".job-error-text");
+        if (errorText) {
+          e.stopPropagation();
+          const isExpanded = errorText.classList.toggle("expanded");
+          errorText.textContent = isExpanded ? errorText.dataset.full : errorText.dataset.short;
+          return;
+        }
         // Quick action buttons
         const quickBtn = e.target.closest("[data-quick-action]");
         if (quickBtn) {
@@ -385,6 +462,43 @@ class MoomboxApp {
     const archivedContainer = document.getElementById("archived-container");
     if (archivedContainer) {
       archivedContainer.addEventListener("click", (e) => {
+        // Batch selection checkbox
+        const checkbox = e.target.closest(".job-checkbox");
+        if (checkbox) {
+          e.stopPropagation();
+          const jobId = checkbox.dataset.jobId;
+          if (e.shiftKey && this._lastCheckedJobId && checkbox.checked) {
+            const allCards = [...archivedContainer.querySelectorAll(".video-item")];
+            const lastIdx = allCards.findIndex(c => c.dataset.jobId === this._lastCheckedJobId);
+            const curIdx = allCards.findIndex(c => c.dataset.jobId === jobId);
+            if (lastIdx !== -1 && curIdx !== -1) {
+              const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+              for (let i = start; i <= end; i++) {
+                const id = allCards[i].dataset.jobId;
+                this._selectedJobs.add(id);
+                allCards[i].classList.add("selected");
+                const cb = allCards[i].querySelector(".job-checkbox");
+                if (cb) cb.checked = true;
+              }
+            }
+          } else if (checkbox.checked) {
+            this._selectedJobs.add(jobId);
+          } else {
+            this._selectedJobs.delete(jobId);
+          }
+          this._lastCheckedJobId = jobId;
+          checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
+          this.updateBatchActionBar();
+          return;
+        }
+        // Expandable error text
+        const errorText = e.target.closest(".job-error-text");
+        if (errorText) {
+          e.stopPropagation();
+          const isExpanded = errorText.classList.toggle("expanded");
+          errorText.textContent = isExpanded ? errorText.dataset.full : errorText.dataset.short;
+          return;
+        }
         const quickBtn = e.target.closest("[data-quick-action]");
         if (quickBtn) {
           e.stopPropagation();
@@ -413,6 +527,23 @@ class MoomboxApp {
         }
       });
     }
+
+    // Batch action bar buttons
+    document.getElementById("batch-cancel")?.addEventListener("click", () => this.batchAction("cancel"));
+    document.getElementById("batch-retry")?.addEventListener("click", () => this.batchAction("retry"));
+    document.getElementById("batch-delete")?.addEventListener("click", () => this.batchAction("delete"));
+    document.getElementById("batch-select-all")?.addEventListener("click", () => {
+      this.jobs.forEach(j => this._selectedJobs.add(j.id));
+      document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = true; });
+      document.querySelectorAll(".video-item").forEach(el => el.classList.add("selected"));
+      this.updateBatchActionBar();
+    });
+    document.getElementById("batch-clear")?.addEventListener("click", () => {
+      this._selectedJobs.clear();
+      document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
+      document.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+      this.updateBatchActionBar();
+    });
   }
 
   async loadConfig() {
@@ -951,15 +1082,57 @@ class MoomboxApp {
     if (this.jobs.length === 0) {
       container.innerHTML = "";
       emptyState.style.display = "flex";
-      // Reset empty state to default content (may have been changed by a filter)
-      const icon = emptyState.querySelector("sl-icon");
-      if (icon) icon.name = "inbox";
-      const msg = emptyState.querySelector("p");
-      if (msg) msg.textContent = "No jobs yet";
-      const subtext = emptyState.querySelector(".empty-state-subtext");
-      if (subtext) subtext.textContent = "Add a YouTube or Twitch URL to start archiving";
-      const cta = emptyState.querySelector(".empty-state-cta");
-      if (cta) cta.style.display = "";
+      const justSetup = sessionStorage.getItem("justCompletedSetup");
+      if (justSetup) {
+        sessionStorage.removeItem("justCompletedSetup");
+        const icon = emptyState.querySelector("sl-icon");
+        if (icon) icon.name = "check-circle";
+        const msg = emptyState.querySelector("p");
+        if (msg) msg.textContent = "Setup complete!";
+        const subtext = emptyState.querySelector(".empty-state-subtext");
+        if (subtext) subtext.textContent = "Add channels to auto-monitor streams, or add a video URL to start archiving now.";
+        const cta = emptyState.querySelector(".empty-state-cta");
+        if (cta) cta.style.display = "none";
+        // Remove any leftover setup CTA wrapper from a previous render
+        emptyState.querySelector("#empty-state-setup-cta")?.remove();
+        // Inject two-button CTA
+        const setupCta = document.createElement("div");
+        setupCta.id = "empty-state-setup-cta";
+        setupCta.style.cssText = "display:flex;gap:0.5rem;flex-wrap:wrap;justify-content:center;";
+        const addChannelsBtn = document.createElement("sl-button");
+        addChannelsBtn.setAttribute("variant", "default");
+        addChannelsBtn.setAttribute("size", "small");
+        addChannelsBtn.textContent = "Add Channels";
+        addChannelsBtn.addEventListener("click", () => {
+          document.querySelector('sl-tab[panel="settings"]')?.click();
+          setTimeout(() => document.querySelector('[data-section="channels"]')?.click(), 100);
+        });
+        const addVideoBtn = document.createElement("sl-button");
+        addVideoBtn.setAttribute("variant", "primary");
+        addVideoBtn.setAttribute("size", "small");
+        addVideoBtn.textContent = "Add Video";
+        addVideoBtn.addEventListener("click", () => {
+          document.getElementById("add-dialog").show();
+          document.getElementById("video-url-input").value = "";
+          this.resetAdvancedOptions();
+          setTimeout(() => document.getElementById("video-url-input").focus(), 100);
+        });
+        setupCta.appendChild(addChannelsBtn);
+        setupCta.appendChild(addVideoBtn);
+        if (cta) cta.insertAdjacentElement("afterend", setupCta);
+        else emptyState.appendChild(setupCta);
+      } else {
+        // Reset empty state to default content (may have been changed by a filter or setup state)
+        emptyState.querySelector("#empty-state-setup-cta")?.remove();
+        const icon = emptyState.querySelector("sl-icon");
+        if (icon) icon.name = "inbox";
+        const msg = emptyState.querySelector("p");
+        if (msg) msg.textContent = "No jobs yet";
+        const subtext = emptyState.querySelector(".empty-state-subtext");
+        if (subtext) subtext.textContent = "Add a YouTube or Twitch URL to start archiving";
+        const cta = emptyState.querySelector(".empty-state-cta");
+        if (cta) cta.style.display = "";
+      }
       if (filterCount) { filterCount.style.display = "none"; }
       return;
     }
@@ -1014,6 +1187,23 @@ class MoomboxApp {
     } else {
       this.focusedJobIndex = -1;
     }
+
+    // Remove stale selected IDs (jobs that no longer exist in the list)
+    const currentJobIds = new Set(this.jobs.map(j => j.id));
+    this._selectedJobs.forEach(id => {
+      if (!currentJobIds.has(id)) this._selectedJobs.delete(id);
+    });
+
+    // Re-apply selection state and sync the batch bar
+    this._selectedJobs.forEach(id => {
+      const card = container.querySelector(`[data-job-id="${CSS.escape(id)}"]`);
+      if (card) {
+        card.classList.add("selected");
+        const cb = card.querySelector(".job-checkbox");
+        if (cb) cb.checked = true;
+      }
+    });
+    this.updateBatchActionBar();
   }
 
   async fetchArchivedJobs() {
@@ -1068,6 +1258,7 @@ class MoomboxApp {
     const fallbackThumb = isTwitch ? twitchAvatarFallback : ytThumb;
     const isAvatarThumb = isTwitch && (!job.thumbnailUrl || thumbnailUrl === twitchAvatarFallback);
     const progress = this.formatProgress(job);
+    const progressHtml = this.formatProgressHtml(job);
     const percent = job.percent || 0;
     const platformBadge = isTwitch
       ? '<sl-tag size="small" variant="primary" style="margin-right:4px;font-size:0.7em">TW</sl-tag>'
@@ -1083,9 +1274,11 @@ class MoomboxApp {
     if (canRetry) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
     if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
 
+    const isSelected = this._selectedJobs.has(job.id);
     return `
-      <div class="video-item" data-job-id="${this.escapeHtml(job.id)}" data-status="${this.escapeHtml(statusClass)}">
+      <div class="video-item${isSelected ? " selected" : ""}" data-job-id="${this.escapeHtml(job.id)}" data-status="${this.escapeHtml(statusClass)}">
         <div class="thumb">
+          <input type="checkbox" class="job-checkbox" data-job-id="${this.escapeHtml(job.id)}" ${isSelected ? "checked" : ""}>
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
                ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}>` : ""}
@@ -1098,7 +1291,7 @@ class MoomboxApp {
           <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
         <div class="job-progress">
-          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${this.escapeHtml(progress)}</div>
+          <div class="job-progress-text" ${job.status === "Upcoming" && job.lastRecheckAt ? `data-timestamp="${this.escapeHtml(job.lastRecheckAt)}" data-timestamp-prefix="Last check: "` : ""} title="${this.escapeHtml(this.formatProgressTooltip(job) || progress)}">${progressHtml}</div>
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${this.escapeHtml(percent)}"></sl-progress-bar>` : ""}
         </div>
         <div class="job-quick-actions">${actionsHtml}</div>
@@ -1140,7 +1333,7 @@ class MoomboxApp {
     const progressText = card.querySelector(".job-progress-text");
     if (progressText) {
       const progress = this.formatProgress(job);
-      progressText.textContent = progress;
+      progressText.innerHTML = this.formatProgressHtml(job);
       progressText.title = this.formatProgressTooltip(job) || progress;
       if (job.status === "Upcoming" && job.lastRecheckAt) {
         progressText.dataset.timestamp = job.lastRecheckAt;
@@ -1199,7 +1392,7 @@ class MoomboxApp {
     }
 
     if (job.status === "Error") {
-      return job.error ? job.error.substring(0, 50) : "Error";
+      return job.error || "Error";
     }
 
     if (job.status === "COOKIES?") {
@@ -1207,6 +1400,17 @@ class MoomboxApp {
     }
 
     return job.progress || "-";
+  }
+
+  // Returns progress as safe HTML — identical to formatProgress for most statuses,
+  // but wraps error text in an expandable span for the Error status.
+  formatProgressHtml(job) {
+    if (job.status === "Error") {
+      const errorText = job.error || "Error";
+      const truncated = errorText.length > 50 ? errorText.substring(0, 50) + "…" : errorText;
+      return `<span class="job-error-text" title="${this.escapeHtml(errorText)}" data-full="${this.escapeHtml(errorText)}" data-short="${this.escapeHtml(truncated)}">${this.escapeHtml(truncated)}</span>`;
+    }
+    return this.escapeHtml(this.formatProgress(job));
   }
 
   // ===== Job Details =====
@@ -2430,6 +2634,15 @@ class MoomboxApp {
       const isTasksActive = activePanel?.getAttribute("name") === "tasks";
 
       switch (e.key) {
+        case "Escape":
+          if (this._selectedJobs.size > 0) {
+            this._selectedJobs.clear();
+            this.updateBatchActionBar();
+            document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
+            document.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+            return;
+          }
+          break;
         case "a":
           if (!isPlayerActive) {
             document.getElementById("add-video-btn").click();
@@ -2995,6 +3208,74 @@ class MoomboxApp {
         const hasFiles = this._orphanedFiles && this._orphanedFiles.length > 0;
         deleteAllBtn.disabled = !hasFiles;
       }
+    }
+  }
+
+  updateBatchActionBar() {
+    const bar = document.getElementById("batch-action-bar");
+    if (!bar) return;
+
+    const count = this._selectedJobs.size;
+    if (count === 0) {
+      bar.style.display = "none";
+      return;
+    }
+    bar.style.display = "";
+    document.getElementById("batch-count").textContent = `${count} selected`;
+
+    const selectedJobs = this.jobs.filter(j => this._selectedJobs.has(j.id));
+    const canCancel = selectedJobs.some(j => CANCEL_STATUSES.has(j.status));
+    const canRetry = selectedJobs.some(j => RETRY_STATUSES.has(j.status));
+    const canDelete = selectedJobs.some(j => DELETE_STATUSES.has(j.status));
+
+    document.getElementById("batch-cancel").style.display = canCancel ? "" : "none";
+    document.getElementById("batch-retry").style.display = canRetry ? "" : "none";
+    document.getElementById("batch-delete").style.display = canDelete ? "" : "none";
+  }
+
+  async batchAction(action) {
+    const selectedJobs = this.jobs.filter(j => this._selectedJobs.has(j.id));
+    let targets, confirmMsg, apiCall;
+
+    switch (action) {
+      case "cancel":
+        targets = selectedJobs.filter(j => CANCEL_STATUSES.has(j.status));
+        confirmMsg = `Cancel ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        apiCall = (id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+        break;
+      case "retry":
+        targets = selectedJobs.filter(j => RETRY_STATUSES.has(j.status));
+        confirmMsg = `Retry ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        apiCall = (id) => fetch(`/api/jobs/${id}/retry`, { method: "POST" });
+        break;
+      case "delete":
+        targets = selectedJobs.filter(j => DELETE_STATUSES.has(j.status));
+        confirmMsg = `Delete ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        apiCall = (id) => fetch(`/api/jobs/${id}`, { method: "DELETE" });
+        break;
+    }
+
+    if (!targets || targets.length === 0) return;
+
+    const confirmed = await this.showConfirm(confirmMsg, {
+      title: "Batch " + action.charAt(0).toUpperCase() + action.slice(1),
+      okLabel: action.charAt(0).toUpperCase() + action.slice(1),
+      okVariant: action === "delete" ? "danger" : action === "cancel" ? "warning" : "primary"
+    });
+    if (!confirmed) return;
+
+    const results = await Promise.allSettled(targets.map(j => apiCall(j.id)));
+    const succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
+    const failed = targets.length - succeeded;
+
+    this._selectedJobs.clear();
+    this.updateBatchActionBar();
+
+    if (failed === 0) {
+      const verb = action === "delete" ? "Deleted" : action === "cancel" ? "Cancelled" : "Retried";
+      this.showToast(`${verb} ${succeeded} job${succeeded !== 1 ? "s" : ""}`, "success");
+    } else {
+      this.showToast(`${succeeded} of ${targets.length} succeeded. ${failed} failed.`, "warning");
     }
   }
 }

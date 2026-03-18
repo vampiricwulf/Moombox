@@ -91,6 +91,10 @@ func (a *App) View() string {
 		return a.clientTokensDlg.View()
 	}
 
+	// Sync status bar state before rendering
+	a.statusBar.ShowChordHint = !a.seenChordHint
+	a.statusBar.SelectedCount = a.taskList.SelectedCount()
+
 	// Top row: task list + details
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top,
 		a.taskList.View(),

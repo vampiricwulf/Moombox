@@ -220,6 +220,23 @@
                     </div>
                 </div>
 
+                <div id="batch-action-bar" style="display: none;">
+                    <span id="batch-count"></span>
+                    <sl-button id="batch-select-all" variant="text" size="small">Select All</sl-button>
+                    <div class="batch-actions">
+                        <sl-button id="batch-cancel" variant="warning" size="small">
+                            <sl-icon slot="prefix" name="x-circle"></sl-icon> Cancel
+                        </sl-button>
+                        <sl-button id="batch-retry" variant="primary" size="small">
+                            <sl-icon slot="prefix" name="arrow-repeat"></sl-icon> Retry
+                        </sl-button>
+                        <sl-button id="batch-delete" variant="danger" size="small">
+                            <sl-icon slot="prefix" name="trash"></sl-icon> Delete
+                        </sl-button>
+                    </div>
+                    <sl-icon-button id="batch-clear" name="x-lg" label="Clear selection"></sl-icon-button>
+                </div>
+
                 <div id="empty-state" style="display: none">
                     <sl-icon name="inbox"></sl-icon>
                     <p>No jobs yet</p>
@@ -271,6 +288,7 @@
                             <div id="player-sidebar-header">
                                 <span id="player-sidebar-msg-count">0 messages</span>
                                 <input type="text" id="player-chat-offset" inputmode="decimal" placeholder="-0.0s offset" />
+                                <sl-icon-button id="player-chat-offset-reset" name="x-circle" label="Reset offset" style="display: none; font-size: 1rem;"></sl-icon-button>
                             </div>
                             <div id="chat-search-container">
                                 <sl-input type="text" id="chat-search" placeholder="Search chat..." size="small" clearable></sl-input>
@@ -395,6 +413,9 @@
                     >
                 </div>
                 <div id="logs-container">
+                    <div id="log-autoscroll-pill" style="display: none;">
+                        <sl-icon name="arrow-down"></sl-icon> Resume auto-scroll
+                    </div>
                     <div id="logs-viewer"></div>
                 </div>
             </sl-tab-panel>
@@ -460,6 +481,14 @@
                     </div>
 
                     <div class="settings-content">
+                        <div id="settings-unsaved-banner" style="display: none;">
+                            <sl-icon name="exclamation-triangle"></sl-icon>
+                            <span>You have unsaved changes</span>
+                            <div style="margin-left: auto; display: flex; gap: 0.5em;">
+                                <sl-button id="settings-banner-discard" variant="default" size="small">Discard</sl-button>
+                                <sl-button id="settings-banner-save" variant="primary" size="small">Save</sl-button>
+                            </div>
+                        </div>
                         <!-- General Settings -->
                         <!-- Network Settings -->
                         <div id="settings-network" class="settings-section">
@@ -593,12 +622,18 @@
                                 placeholder="./staging"
                                 help-text="Temporary directory for downloads in progress"
                             ></sl-input>
-                            <sl-input
-                                id="cfg-ffmpeg-path"
-                                label="FFmpeg Path"
-                                placeholder="ffmpeg"
-                                help-text="Path to ffmpeg executable (leave empty for system default)"
-                            ></sl-input>
+                            <div style="display: flex; gap: 0.5em; align-items: flex-end;">
+                                <sl-input
+                                    id="cfg-ffmpeg-path"
+                                    label="FFmpeg Path"
+                                    placeholder="ffmpeg"
+                                    help-text="Path to ffmpeg executable (leave empty for system default)"
+                                    style="flex: 1;"
+                                ></sl-input>
+                                <sl-button id="cfg-ffmpeg-install-btn" variant="default" size="medium">
+                                    <sl-icon slot="prefix" name="download"></sl-icon> Install
+                                </sl-button>
+                            </div>
                         </div>
 
                         <!-- Logs Settings -->
@@ -713,6 +748,7 @@
                                 placeholder="${channel}/${start_date} ${title} [${id}]"
                                 help-text="Filename template (max 500 chars). Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
                             ></sl-input>
+                            <div id="cfg-template-preview" class="template-preview"></div>
                             <sl-input
                                 id="cfg-max-resolution"
                                 type="number"
@@ -727,7 +763,7 @@
                                 min="1"
                                 label="Parallel Downloads"
                                 placeholder="2"
-                                help-text="Number of concurrent downloads"
+                                help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."
                             ></sl-input>
                             <sl-switch id="cfg-download-chat" checked>
                                 Download Live Chat
@@ -1161,7 +1197,7 @@
             </sl-details>
             <div id="channel-include-vods-row">
                 <sl-checkbox id="channel-include-vods"
-                    >Include non-live content (VODs, premieres)</sl-checkbox
+                    >Also archive uploads &amp; premieres (YouTube only)</sl-checkbox
                 >
             </div>
             <div id="channel-quality-row">
@@ -1208,6 +1244,8 @@
                 <sl-button id="btn-auto-cookie-cancel" variant="neutral" size="small">Cancel</sl-button>
             </div>
             <span id="auto-cookie-setup-result" style="display: block; margin-top: 0.5em;"></span>
+            <p id="auto-cookie-countdown" style="text-align: center; font-size: var(--sl-font-size-small); margin-top: 0.5em;"></p>
+            <div id="auto-cookie-result"></div>
         </sl-dialog>
 
         <!-- Add Webhook Dialog -->
@@ -1231,13 +1269,13 @@
                     <div class="setup-mode-cards">
                         <button class="setup-mode-card" id="setup-mode-quick" tabindex="0">
                             <sl-icon name="lightning-charge" style="font-size: 2rem; color: var(--sl-color-primary-600);"></sl-icon>
-                            <h3>Quick Setup</h3>
-                            <p>Use defaults for everything. Set up cookies and add channels.</p>
+                            <h3>Quick Setup <sl-badge variant="primary" pill>Recommended</sl-badge></h3>
+                            <p>Best for most users — takes ~2 minutes. Set up cookies and add channels.</p>
                         </button>
                         <button class="setup-mode-card" id="setup-mode-advanced" tabindex="0">
                             <sl-icon name="gear" style="font-size: 2rem; color: var(--sl-color-neutral-500);"></sl-icon>
                             <h3>Advanced Setup</h3>
-                            <p>Walk through all configuration sections step by step.</p>
+                            <p>Full control over every setting — network, paths, downloads, and more.</p>
                         </button>
                     </div>
                     <sl-button id="setup-mode-defaults" variant="text" size="small" style="margin-top: 0.5em; width: 100%;">Use Defaults &amp; Skip Setup</sl-button>
@@ -1342,6 +1380,7 @@
                     <p class="setup-help">Leave fields empty to use defaults.</p>
                     <sl-input id="setup-output-dir" label="Output Directory" placeholder="./output" help-text="Where finished downloads are saved"></sl-input>
                     <sl-input id="setup-output-template" label="Filename Template" placeholder="${channel}/${start_date} ${title} [${id}]" help-text="Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"></sl-input>
+                    <div id="setup-template-preview" class="template-preview"></div>
                     <sl-input id="setup-staging-dir" label="Staging Directory" placeholder="./staging" help-text="Temporary directory for segments during download"></sl-input>
                     <sl-input id="setup-database-path" label="Database Path" placeholder="./moombox.db" help-text="Job database file location"></sl-input>
                     <sl-input id="setup-ffmpeg-path" label="FFmpeg Path" placeholder="(system PATH)" help-text="Leave empty to use system ffmpeg"></sl-input>
@@ -1389,7 +1428,7 @@
                     <p class="setup-help">Leave fields empty to use defaults.</p>
                     <sl-input id="setup-max-resolution" type="number" label="Max Resolution" placeholder="2160" min="1"></sl-input>
                     <sl-switch id="setup-prefer-60fps" checked>Prefer 60fps</sl-switch>
-                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1"></sl-input>
+                    <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1" help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."></sl-input>
                     <sl-switch id="setup-download-chat" checked>Download Live Chat</sl-switch>
                     <sl-details summary="Advanced retry settings">
                         <sl-input id="setup-retry-delay-cap" type="number" label="Retry Delay Cap (seconds)" placeholder="60" min="1" max="300"></sl-input>
@@ -1480,6 +1519,7 @@
                     </div>
                     <div id="ffmpeg-check-result" style="margin-top: 0.5em;"></div>
                     <sl-divider></sl-divider>
+                    <sl-button id="ffmpeg-skip-btn" variant="default" style="width: 100%; margin-bottom: 0.5em;">Skip for now</sl-button>
                     <sl-button id="ffmpeg-quit-btn" variant="text" style="width: 100%;">Quit Moombox</sl-button>
                 </div>
                 <div id="ffmpeg-install-view" style="display: none">
@@ -1545,7 +1585,7 @@
                 <sl-option value="twitch">Twitch</sl-option>
             </sl-select>
             <sl-input id="setup-ch-terms" label="Filter Regex" placeholder="(?i)karaoke" help-text="Only archive streams matching this pattern. Leave empty for all."></sl-input>
-            <sl-checkbox id="setup-ch-include-non-live">Include non-live content</sl-checkbox>
+            <sl-checkbox id="setup-ch-include-non-live">Also archive uploads &amp; premieres (YouTube only)</sl-checkbox>
             <sl-select id="setup-ch-quality" label="Quality Preference" value="best">
                 <sl-option value="best">Best available</sl-option>
                 <sl-option value="2160p60">2160p60</sl-option>

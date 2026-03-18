@@ -291,6 +291,10 @@ func (m *LogViewerModel) View() string {
 	}
 
 	content := header + "\n" + m.viewport.View()
+	if m.focused && !m.autoScroll {
+		pauseHint := DimStyle.Render("↓ Auto-scroll paused (End to resume)")
+		content += "\n" + pauseHint
+	}
 
 	style := UnfocusedBorder
 	if m.focused {

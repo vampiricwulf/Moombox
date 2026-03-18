@@ -44,6 +44,10 @@ type StatusBarModel struct {
 	diskFree    uint64
 	diskUsedPct float64
 	diskWarn    string // "ok", "warn", "critical"
+	// ShowChordHint shows a newcomer hint instead of the full chord reference.
+	ShowChordHint bool
+	// SelectedCount tracks batch-selected jobs for status bar display.
+	SelectedCount int
 }
 
 // NewStatusBarModel creates a new status bar model.
@@ -107,6 +111,10 @@ func (m *StatusBarModel) View() string {
 
 // renderControls renders uniform chord hints in the status bar.
 func (m *StatusBarModel) renderControls() string {
+	if m.ShowChordHint {
+		return " " + DimStyle.Render("Press ? for help · M for menu · A for actions")
+	}
+
 	compact := m.width < statusBarCompactThreshold
 	key := statusBarKeyStyle
 
@@ -141,6 +149,12 @@ func (m *StatusBarModel) renderControls() string {
 func (m *StatusBarModel) renderMetrics() string {
 	var parts []string
 	compact := m.width < statusBarCompactThreshold
+
+	// Batch selection count
+	if m.SelectedCount > 0 {
+		selText := fmt.Sprintf("%d selected", m.SelectedCount)
+		parts = append(parts, statusBarYelStyle.Render(selText))
+	}
 
 	// Disk indicator (only shown once we have data)
 	if m.diskFree > 0 || m.diskUsedPct > 0 {

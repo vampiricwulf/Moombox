@@ -147,6 +147,18 @@ sl-tab::part(base) {
 /* Thumbnail */
 .thumb {
     width: 100%;
+    position: relative;
+}
+
+.thumb .job-checkbox {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 2;
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    margin: 0;
 }
 
 .thumb img {
@@ -264,6 +276,27 @@ sl-badge.status.cookies::part(base) {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.job-error-text {
+    cursor: pointer;
+    text-decoration-style: dotted;
+    text-decoration-line: underline;
+    text-underline-offset: 2px;
+}
+
+.job-error-text.expanded {
+    white-space: normal;
+    word-break: break-word;
+}
+
+@media (max-width: 768px) {
+    .job-error-text {
+        white-space: normal;
+        word-break: break-word;
+        cursor: default;
+        text-decoration: none;
+    }
 }
 
 .job-progress-bar {
@@ -574,6 +607,7 @@ sl-badge.status.cookies::part(base) {
 }
 
 #logs-container {
+    position: relative;
     height: calc(100vh - 12rem);
 }
 
@@ -590,6 +624,31 @@ sl-badge.status.cookies::part(base) {
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: break-all;
+}
+
+#log-autoscroll-pill {
+    position: absolute;
+    bottom: 0.5em;
+    left: 50%;
+    transform: translateX(-50%);
+    margin: 0 auto;
+    width: fit-content;
+    padding: 0.25em 0.75em;
+    background: var(--sl-color-primary-600);
+    color: white;
+    border-radius: var(--sl-border-radius-pill);
+    font-size: var(--sl-font-size-small);
+    cursor: pointer;
+    opacity: 0;
+    animation: fadeIn 0.2s ease forwards;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 0.25em;
+}
+
+@keyframes fadeIn {
+    to { opacity: 1; }
 }
 
 .log-line {
@@ -784,6 +843,14 @@ sl-progress-bar {
 .settings-content {
     flex: 1;
     max-width: 600px;
+}
+
+.template-preview {
+    font-size: var(--sl-font-size-small);
+    color: var(--sl-color-neutral-500);
+    font-family: var(--sl-font-mono);
+    padding: 0.25em 0;
+    word-break: break-all;
 }
 
 .settings-section {
@@ -1772,6 +1839,20 @@ sl-progress-bar {
     font-weight: var(--sl-font-weight-semibold);
 }
 
+#settings-unsaved-banner {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: var(--sl-spacing-small);
+    padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+    background: var(--sl-color-warning-100);
+    border-bottom: 1px solid var(--sl-color-warning-300);
+    color: var(--sl-color-warning-700);
+    font-size: var(--sl-font-size-small);
+}
+
 /* Video duration display in add dialog */
 #video-duration-display {
     font-size: var(--sl-font-size-small);
@@ -2199,5 +2280,45 @@ html.sl-theme-light {
         position: static !important;
         transform: none !important;
         opacity: 0.7;
+    }
+}
+
+/* ===== Batch Selection ===== */
+#batch-action-bar {
+    position: sticky;
+    bottom: 0;
+    background: var(--sl-color-neutral-100);
+    border-top: 1px solid var(--sl-color-neutral-300);
+    padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+    display: flex;
+    align-items: center;
+    gap: var(--sl-spacing-medium);
+    z-index: 10;
+}
+
+.batch-actions {
+    display: flex;
+    gap: var(--sl-spacing-x-small);
+}
+
+.video-item .job-checkbox {
+    opacity: 0;
+    transition: opacity 0.15s;
+    flex-shrink: 0;
+}
+
+.video-item:hover .job-checkbox,
+.video-item .job-checkbox:checked,
+.video-item.selected .job-checkbox {
+    opacity: 1;
+}
+
+.video-item.selected {
+    background: var(--sl-color-primary-50);
+}
+
+@media (max-width: 768px) {
+    .video-item .job-checkbox {
+        opacity: 1;
     }
 }

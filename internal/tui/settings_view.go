@@ -130,6 +130,9 @@ func (m *SettingsModel) renderHintText() string {
 				hint += "  `: Set pw"
 			}
 		}
+		if sec.name == "Paths" && field.key == "ffmpeg_path" {
+			hint += "  I: Install FFmpeg"
+		}
 		return hint
 	}
 	return "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete"
@@ -207,6 +210,13 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 
 		line := prefixStyle.Render(prefix) + labelStyle.Render(labelStr) + value + indicator
 		lines = append(lines, line)
+
+		if fd.previewFn != nil {
+			preview := fd.previewFn(m.values[fd.key])
+			if preview != "" {
+				lines = append(lines, "  "+DimStyle.Render(preview))
+			}
+		}
 	}
 
 	// Info area: divider + help text for focused field

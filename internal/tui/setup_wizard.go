@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -14,6 +15,16 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
+
+// cookieCountdownTickMsg is sent every second to decrement the cookie timeout countdown.
+type cookieCountdownTickMsg struct{}
+
+// cookieCountdownTick returns a tea.Cmd that fires cookieCountdownTickMsg after 1 second.
+func cookieCountdownTick() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return cookieCountdownTickMsg{}
+	})
+}
 
 // setupMode identifies which wizard flow is active.
 type setupMode int
@@ -108,7 +119,7 @@ var advancedSetupSteps = []setupStepDef{
 		fields: []setupFieldDef{
 			{"maxRes", "Max resolution", "2160", "Maximum video dimension (width or height)", setupFieldNumber, nil},
 			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
-			{"numParallel", "Parallel downloads", "2", "How many streams to download simultaneously", setupFieldNumber, nil},
+			{"numParallel", "Parallel downloads", "2", "2-4 recommended, higher uses more CPU/network", setupFieldNumber, nil},
 			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
 			{"segmentRetryDelayCap", "Retry delay cap (sec)", "60", "Max seconds between segment retry attempts", setupFieldNumber, nil},
 			{"segmentLiveCheckRetries", "Live check retries", "16", "Retries before declaring stream ended", setupFieldNumber, nil},
@@ -164,6 +175,8 @@ type SetupWizardModel struct {
 	cookiePlatform  string
 	cookieYTDone    bool
 	cookieTWDone    bool
+	cookieCountdown int  // seconds remaining for cookie timeout
+	cookieTimedOut  bool // true when countdown reaches 0
 
 	// Channel sub-editor (shared by simple and advanced)
 	channels          []config.ChannelConfig
@@ -231,6 +244,8 @@ func (m *SetupWizardModel) Open() {
 	m.cookiePlatform = ""
 	m.cookieYTDone = false
 	m.cookieTWDone = false
+	m.cookieCountdown = 0
+	m.cookieTimedOut = false
 	m.channels = nil
 	m.channelIndex = 0
 	m.channelMode = "list"
@@ -353,6 +368,23 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 // UpdateComponents routes tea.Msg to the embedded textinput, huh form, or spinner and syncs.
 func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	if !m.visible {
+		return nil
+	}
+
+	// Handle cookie countdown tick
+	if _, ok := msg.(cookieCountdownTickMsg); ok {
+		if m.cookieActive && !m.cookieFinishing && m.cookieCountdown > 0 {
+			m.cookieCountdown--
+			if m.cookieCountdown <= 0 {
+				m.cookieTimedOut = true
+				m.cookieActive = false
+				if m.OnCancelAutoCookie != nil {
+					m.OnCancelAutoCookie()
+				}
+				return nil
+			}
+			return cookieCountdownTick()
+		}
 		return nil
 	}
 
@@ -555,6 +587,28 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 		return ""
 	}
 
+	if m.cookieTimedOut {
+		switch key {
+		case "r", "R":
+			m.cookieTimedOut = false
+			if m.OnStartAutoCookie != nil {
+				if err := m.OnStartAutoCookie(m.cookiePlatform); err != nil {
+					m.errorMsg = fmt.Sprintf("Cookie retry: %v", err)
+					return ""
+				}
+				m.cookieActive = true
+				m.cookieCountdown = 60
+				m.spinner = newSpinner()
+			}
+			return ""
+		case "s", "S":
+			m.cookieTimedOut = false
+			m.cookiePlatform = ""
+			return ""
+		}
+		return ""
+	}
+
 	switch key {
 	case keyEsc:
 		m.mode = setupModeSelect
@@ -575,6 +629,8 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 				} else {
 					m.cookieActive = true
 					m.cookiePlatform = "youtube"
+					m.cookieCountdown = 60
+					m.cookieTimedOut = false
 					m.spinner = newSpinner()
 				}
 			}
@@ -585,6 +641,8 @@ func (m *SetupWizardModel) handleSimpleCookieKey(key string) string {
 				} else {
 					m.cookieActive = true
 					m.cookiePlatform = "twitch"
+					m.cookieCountdown = 60
+					m.cookieTimedOut = false
 					m.spinner = newSpinner()
 				}
 			}
@@ -843,6 +901,28 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 		return ""
 	}
 
+	if m.cookieTimedOut {
+		switch key {
+		case "r", "R":
+			m.cookieTimedOut = false
+			if m.OnStartAutoCookie != nil {
+				if err := m.OnStartAutoCookie(m.cookiePlatform); err != nil {
+					m.errorMsg = fmt.Sprintf("Cookie retry: %v", err)
+					return ""
+				}
+				m.cookieActive = true
+				m.cookieCountdown = 60
+				m.spinner = newSpinner()
+			}
+			return ""
+		case "s", "S":
+			m.cookieTimedOut = false
+			m.cookiePlatform = ""
+			return ""
+		}
+		return ""
+	}
+
 	switch key {
 	case keyEsc:
 		// Go back to the form (rebuild with current values preserved)
@@ -866,6 +946,8 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 				} else {
 					m.cookieActive = true
 					m.cookiePlatform = "youtube"
+					m.cookieCountdown = 60
+					m.cookieTimedOut = false
 					m.spinner = newSpinner()
 				}
 			}
@@ -876,6 +958,8 @@ func (m *SetupWizardModel) handleAdvancedCookieKey(key string) string {
 				} else {
 					m.cookieActive = true
 					m.cookiePlatform = "twitch"
+					m.cookieCountdown = 60
+					m.cookieTimedOut = false
 					m.spinner = newSpinner()
 				}
 			}
@@ -1145,8 +1229,8 @@ func (m *SetupWizardModel) viewModeSelect() string {
 	if m.modeChoice == 0 {
 		quickStyle = quickStyle.Bold(true)
 	}
-	lines = append(lines, quickStyle.Render(quickPrefix+"Quick Setup"))
-	lines = append(lines, DimStyle.Render("   Defaults for everything. Set up cookies and channels."))
+	lines = append(lines, quickStyle.Render(quickPrefix+"Quick Setup (recommended)"))
+	lines = append(lines, DimStyle.Render("   Best for most users — takes ~2 minutes"))
 	lines = append(lines, "")
 
 	// Advanced Setup card
@@ -1161,7 +1245,7 @@ func (m *SetupWizardModel) viewModeSelect() string {
 		advStyle = advStyle.Bold(true)
 	}
 	lines = append(lines, advStyle.Render(advPrefix+"Advanced Setup"))
-	lines = append(lines, DimStyle.Render("   Walk through all configuration sections."))
+	lines = append(lines, DimStyle.Render("   Full control over every setting"))
 	lines = append(lines, "")
 
 	// Use Defaults card
@@ -1234,7 +1318,14 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	lines = append(lines, DimStyle.Render("Log in to platforms to enable cookie-based access"))
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 
-	if m.cookieActive {
+	if m.cookieTimedOut {
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+			"Cookie extraction timed out."))
+		lines = append(lines, "")
+		lines = append(lines, "  R  Try Again")
+		lines = append(lines, "  S  Skip")
+	} else if m.cookieActive {
 		platformName := "YouTube"
 		if m.cookiePlatform == "twitch" {
 			platformName = "Twitch"
@@ -1244,9 +1335,13 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 			lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
 				fmt.Sprintf("Extracting %s cookies...", platformName)))
 		} else {
-			// Browser is open, waiting for login
-			lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
-				fmt.Sprintf("Browser opened for %s login.", platformName)))
+			// Browser is open, waiting for login — show countdown
+			countdownText := fmt.Sprintf("Waiting for %s login... (%ds remaining)", platformName, m.cookieCountdown)
+			if m.cookieCountdown <= 10 {
+				lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(countdownText))
+			} else {
+				lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(countdownText))
+			}
 			lines = append(lines, "")
 			lines = append(lines, "Sign in, then press "+
 				lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Enter")+" to extract cookies.")
@@ -1372,6 +1467,22 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	return centerBox(box, m.width, m.height)
 }
 
+// templatePreview renders a sample output path from a template string.
+func templatePreview(value string) string {
+	if value == "" {
+		return ""
+	}
+	now := time.Now().Format("2006-01-02")
+	r := strings.NewReplacer(
+		"${channel}", "Miko Ch",
+		"${title}", "Singing Stream",
+		"${id}", "dQw4w9WgXcQ",
+		"${start_date}", now,
+		"${start_time}", "20-00-00",
+	)
+	return "Example: " + r.Replace(value) + ".mkv"
+}
+
 // --- Advanced Setup View ---
 
 func (m *SetupWizardModel) viewAdvanced() string {
@@ -1387,6 +1498,20 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Advanced Setup"))
 		lines = append(lines, "")
 		lines = append(lines, m.advancedForm.View())
+
+		// Template preview — only when the Paths group is visible
+		if focused := m.advancedForm.GetFocusedField(); focused != nil {
+			switch focused.GetKey() {
+			case "outputDir", "outputTemplate", "stagingDir", "databasePath", "ffmpegPath":
+				val := m.values["outputTemplate"]
+				if val == "" {
+					val = "${channel}/${start_date} ${title} [${id}]"
+				}
+				if preview := templatePreview(val); preview != "" {
+					lines = append(lines, DimStyle.Render(preview))
+				}
+			}
+		}
 
 		if m.errorMsg != "" {
 			lines = append(lines, ErrorStyle.Render(m.errorMsg))
@@ -1468,7 +1593,14 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, h int) string {
 	lines = append(lines, DimStyle.Render("Log in to platforms to enable cookie-based access"))
 	lines = append(lines, DimStyle.Render(strings.Repeat("\u2500", contentW)))
 
-	if m.cookieActive {
+	if m.cookieTimedOut {
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+			"Cookie extraction timed out."))
+		lines = append(lines, "")
+		lines = append(lines, "  R  Try Again")
+		lines = append(lines, "  S  Skip")
+	} else if m.cookieActive {
 		platformName := "YouTube"
 		if m.cookiePlatform == "twitch" {
 			platformName = "Twitch"
@@ -1477,8 +1609,13 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, h int) string {
 			lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
 				fmt.Sprintf("Extracting %s cookies...", platformName)))
 		} else {
-			lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(
-				fmt.Sprintf("Browser opened for %s login.", platformName)))
+			// Browser is open, waiting for login — show countdown
+			countdownText := fmt.Sprintf("Waiting for %s login... (%ds remaining)", platformName, m.cookieCountdown)
+			if m.cookieCountdown <= 10 {
+				lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(countdownText))
+			} else {
+				lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(countdownText))
+			}
 			lines = append(lines, "")
 			lines = append(lines, "Sign in, then press "+
 				lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Enter")+" to extract cookies.")

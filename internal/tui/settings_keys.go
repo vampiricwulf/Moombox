@@ -70,6 +70,18 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		return m.handleFieldKey(key)
 	}
 
+	// Paths section: "I" shortcut to open FFmpeg installer (only on ffmpeg_path field)
+	if sec.name == "Paths" && sec.fields[m.fieldIndex].key == "ffmpeg_path" && key == "i" {
+		// Undo the "i" that was typed into the text input by UpdateComponents
+		val := m.textInput.Value()
+		if len(val) > 0 && val[len(val)-1] == 'i' {
+			restored := val[:len(val)-1]
+			m.textInput.SetValue(restored)
+			m.values["ffmpeg_path"] = restored
+		}
+		return "open_ffmpeg"
+	}
+
 	// Field section handling (inline editing - no separate edit mode)
 	return m.handleFieldKey(key)
 }

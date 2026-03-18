@@ -31,6 +31,11 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "resolve_channel":
 			return a, a.resolveChannelCmd(a.settings.GetChannelResolveInput())
+		case "open_ffmpeg":
+			a.settings.Close()
+			a.ffmpegCheck.OnCheckPrereqs = a.OnCheckPrereqs
+			a.ffmpegCheck.Open()
+			a.ffmpegCheck.SetSize(a.width, a.height)
 		}
 		return a, nil
 	}
@@ -53,6 +58,9 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		action := a.ffmpegCheck.HandleKey(key)
 		switch {
+		case action == "skip":
+			a.ffmpegCheck.Close()
+			return a, nil
 		case action == "quit":
 			return a, tea.Quit
 		case strings.HasPrefix(action, "prepare:"):
@@ -141,7 +149,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}))
 		}
 		if a.setupWiz.cookieActive {
-			cmds = append(cmds, a.setupWiz.spinner.Tick)
+			cmds = append(cmds, a.setupWiz.spinner.Tick, cookieCountdownTick())
 		}
 		// Deliver pending huh form init cmd immediately (cursor blink, focus)
 		if a.setupWiz.advancedInitCmd != nil {
@@ -265,6 +273,21 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 
+	// Esc: clear batch selection if any (takes priority over chord reset)
+	if key == keyEsc {
+		if a.taskList.SelectedCount() > 0 {
+			a.taskList.ClearSelection()
+			return a, nil // consume the Esc, don't propagate
+		}
+		// Also clear any active chord prefix on Esc
+		if a.chord.prefix != "" {
+			a.chord = chordState{}
+			a.feedbackMsg = ""
+			return a, nil
+		}
+		return a, nil
+	}
+
 	// Chord system
 	if model, cmd, handled := a.handleChord(key); handled {
 		return model, cmd
@@ -276,15 +299,26 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.handleFilter()
 		return a, nil
 	case "m":
+		a.seenChordHint = true
 		a.actionMenu.SetSize(a.width, a.height)
 		a.actionMenu.Open(a.buildMenuItems())
 		return a, nil
 	case "?":
+		a.seenChordHint = true
 		return a.dispatchAction("?", nil)
 	case "`":
+		a.seenChordHint = true
 		return a.dispatchAction("`", nil)
 	case keyTab:
 		a.cycleFocus()
+		return a, nil
+	case " ":
+		// Space: toggle batch selection on focused task (only when task panel focused)
+		if a.focusedPanel == PanelTasks {
+			if job := a.taskList.SelectedJob(); job != nil {
+				a.taskList.ToggleSelection(job.ID)
+			}
+		}
 		return a, nil
 	}
 
@@ -328,8 +362,12 @@ func (a *App) handleDetailKey(_ string) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-func (a *App) handleLogKey(_ string) (tea.Model, tea.Cmd) {
-	// Scroll handled by viewport in routeComponentMsg
+func (a *App) handleLogKey(key string) (tea.Model, tea.Cmd) {
+	// Scroll handled by viewport in routeComponentMsg.
+	// End key re-enables auto-scroll (not in helpViewportKeyMap, so handled here).
+	if key == keyEnd {
+		a.logs.ReEnableAutoScroll()
+	}
 	return a, nil
 }
 
@@ -402,6 +440,7 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 	// No active chord — check if key is a prefix
 	switch key {
 	case "a", "r", "o", "q":
+		a.seenChordHint = true
 		a.chord = chordState{prefix: key, prefixTime: now}
 		a.setFeedback(a.chordFeedback(key))
 		return a, nil, true
@@ -431,6 +470,14 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 
 	// NeedsConfirm + NeedsJob: check job first, then enter confirm step
 	if item.NeedsConfirm && item.NeedsJob {
+		// Batch mode: if jobs are selected, confirm with count instead of single job
+		if a.taskList.SelectedCount() > 0 {
+			a.chord.action = key
+			a.chord.actionTime = time.Now()
+			a.setFeedback(fmt.Sprintf("Press %s to confirm %s %d jobs (3s)",
+				strings.ToUpper(key), strings.ToLower(item.HintLabel), a.taskList.SelectedCount()))
+			return a, nil, true
+		}
 		job := a.taskList.SelectedJob()
 		if job == nil || (item.JobFilter != nil && !item.JobFilter(job)) {
 			return a, nil, true // no valid job — consume key but do nothing
@@ -452,7 +499,13 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	}
 
 	// NeedsJob (no confirm): use selected job, check filter
+	// Batch mode: if jobs are selected, dispatch directly (batch handled in dispatchAction)
 	if item.NeedsJob {
+		if a.taskList.SelectedCount() > 0 {
+			a.chord = chordState{}
+			m, cmd := a.dispatchAction(chord, nil)
+			return m, cmd, true
+		}
 		job := a.taskList.SelectedJob()
 		if job == nil || (item.JobFilter != nil && !item.JobFilter(job)) {
 			return a, nil, true // no valid job — consume key but do nothing
