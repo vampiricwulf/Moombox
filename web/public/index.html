@@ -731,6 +731,7 @@
                                 placeholder="${channel}/${start_date} ${title} [${id}]"
                                 help-text="Filename template (max 500 chars). Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"
                             ></sl-input>
+                            <div id="cfg-template-preview" class="template-preview"></div>
                             <sl-input
                                 id="cfg-max-resolution"
                                 type="number"
@@ -1362,6 +1363,7 @@
                     <p class="setup-help">Leave fields empty to use defaults.</p>
                     <sl-input id="setup-output-dir" label="Output Directory" placeholder="./output" help-text="Where finished downloads are saved"></sl-input>
                     <sl-input id="setup-output-template" label="Filename Template" placeholder="${channel}/${start_date} ${title} [${id}]" help-text="Variables: ${title}, ${id}, ${channel}, ${start_date}, ${start_time}"></sl-input>
+                    <div id="setup-template-preview" class="template-preview"></div>
                     <sl-input id="setup-staging-dir" label="Staging Directory" placeholder="./staging" help-text="Temporary directory for segments during download"></sl-input>
                     <sl-input id="setup-database-path" label="Database Path" placeholder="./moombox.db" help-text="Job database file location"></sl-input>
                     <sl-input id="setup-ffmpeg-path" label="FFmpeg Path" placeholder="(system PATH)" help-text="Leave empty to use system ffmpeg"></sl-input>

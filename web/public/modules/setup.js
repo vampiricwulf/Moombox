@@ -1,6 +1,8 @@
 /**
  * Setup Wizard Controller — Mode selection, simplified + advanced flows, FFmpeg check
  */
+import { renderTemplatePreview } from "./settings.js";
+
 export class SetupController {
   constructor(app) {
     this.app = app;
@@ -184,6 +186,19 @@ export class SetupController {
     const setupChPlatform = document.getElementById("setup-ch-platform");
     if (setupChPlatform) {
       setupChPlatform.addEventListener("sl-change", () => this.updateChannelDialogFields());
+    }
+
+    // Template preview for setup output template
+    const setupTemplateInput = document.getElementById("setup-output-template");
+    const setupTemplatePreview = document.getElementById("setup-template-preview");
+    if (setupTemplateInput && setupTemplatePreview) {
+      const updateSetupPreview = () => {
+        const val = setupTemplateInput.value || setupTemplateInput.placeholder;
+        setupTemplatePreview.textContent = renderTemplatePreview(val);
+        setupTemplatePreview.style.display = val ? "" : "none";
+      };
+      setupTemplateInput.addEventListener("sl-input", updateSetupPreview);
+      updateSetupPreview();
     }
 
     // FFmpeg overlay listeners (also called from showFFmpegOverlay for non-first-run)

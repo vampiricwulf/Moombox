@@ -52,6 +52,23 @@ const RESTART_REQUIRED_FIELDS = [
   { path: "logs.log_max_files", id: "cfg-log-max-files" },
 ];
 
+/** Render a template preview string using sample data. */
+export function renderTemplatePreview(template) {
+  const now = new Date();
+  const vars = {
+    channel: "Miko Ch",
+    title: "Singing Stream",
+    id: "dQw4w9WgXcQ",
+    start_date: now.toISOString().split("T")[0],
+    start_time: "20-00-00",
+  };
+  let result = template || "";
+  for (const [key, val] of Object.entries(vars)) {
+    result = result.replaceAll("${" + key + "}", val);
+  }
+  return result ? "Example: " + result + ".mkv" : "";
+}
+
 export class SettingsController {
   constructor(app) {
     this.app = app;
@@ -386,6 +403,7 @@ export class SettingsController {
 
     // Downloader settings
     this.app.setInputValue("cfg-output-template", config.downloader?.output_template);
+    this._wireTemplatePreview();
     this.app.setInputValue("cfg-max-resolution", config.downloader?.max_video_resolution);
     this.app.setInputValue("cfg-parallel-downloads", config.downloader?.num_parallel_downloads);
     // Download chat switch
@@ -483,6 +501,24 @@ export class SettingsController {
       this._securityStatusLoaded = false;
     }
     this.loadSecurityStatus();
+  }
+
+  /** Wire up the live template preview below the output template input. */
+  _wireTemplatePreview() {
+    const templateInput = document.getElementById("cfg-output-template");
+    const templatePreview = document.getElementById("cfg-template-preview");
+    if (templateInput && templatePreview) {
+      const updatePreview = () => {
+        const val = templateInput.value || templateInput.placeholder;
+        templatePreview.textContent = renderTemplatePreview(val);
+        templatePreview.style.display = val ? "" : "none";
+      };
+      if (!this._templatePreviewWired) {
+        this._templatePreviewWired = true;
+        templateInput.addEventListener("sl-input", updatePreview);
+      }
+      updatePreview();
+    }
   }
 
   async saveConfig() {

@@ -1467,6 +1467,22 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	return centerBox(box, m.width, m.height)
 }
 
+// templatePreview renders a sample output path from a template string.
+func templatePreview(value string) string {
+	if value == "" {
+		return ""
+	}
+	now := time.Now().Format("2006-01-02")
+	r := strings.NewReplacer(
+		"${channel}", "Miko Ch",
+		"${title}", "Singing Stream",
+		"${id}", "dQw4w9WgXcQ",
+		"${start_date}", now,
+		"${start_time}", "20-00-00",
+	)
+	return "Example: " + r.Replace(value) + ".mkv"
+}
+
 // --- Advanced Setup View ---
 
 func (m *SetupWizardModel) viewAdvanced() string {
@@ -1482,6 +1498,11 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Advanced Setup"))
 		lines = append(lines, "")
 		lines = append(lines, m.advancedForm.View())
+
+		// Template preview for the output template field
+		if preview := templatePreview(m.values["outputTemplate"]); preview != "" {
+			lines = append(lines, DimStyle.Render(preview))
+		}
 
 		if m.errorMsg != "" {
 			lines = append(lines, ErrorStyle.Render(m.errorMsg))

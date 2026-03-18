@@ -210,6 +210,13 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 
 		line := prefixStyle.Render(prefix) + labelStyle.Render(labelStr) + value + indicator
 		lines = append(lines, line)
+
+		if fd.previewFn != nil {
+			preview := fd.previewFn(m.values[fd.key])
+			if preview != "" {
+				lines = append(lines, "  "+DimStyle.Render(preview))
+			}
+		}
 	}
 
 	// Info area: divider + help text for focused field

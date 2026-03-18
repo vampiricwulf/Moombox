@@ -830,6 +830,14 @@ sl-progress-bar {
     max-width: 600px;
 }
 
+.template-preview {
+    font-size: var(--sl-font-size-small);
+    color: var(--sl-color-neutral-500);
+    font-family: var(--sl-font-mono);
+    padding: 0.25em 0;
+    word-break: break-all;
+}
+
 .settings-section {
     display: flex;
     flex-direction: column;
