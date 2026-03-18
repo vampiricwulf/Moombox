@@ -186,7 +186,15 @@ export class SetupController {
       setupChPlatform.addEventListener("sl-change", () => this.updateChannelDialogFields());
     }
 
-    // --- FFmpeg overlay ---
+    // FFmpeg overlay listeners (also called from showFFmpegOverlay for non-first-run)
+    this.setupFFmpegListeners();
+  }
+
+  /** Wire up FFmpeg overlay button listeners. Idempotent — safe to call multiple times. */
+  setupFFmpegListeners() {
+    if (this._ffmpegListenersAdded) return;
+    this._ffmpegListenersAdded = true;
+
     document.getElementById("ffmpeg-install-btn")?.addEventListener("click", () => {
       this.showFFmpegInstallOptions();
     });
@@ -801,6 +809,10 @@ export class SetupController {
   // --- FFmpeg Overlay ---
 
   showFFmpegOverlay() {
+    // Ensure FFmpeg button listeners are wired up (may not have been if
+    // setupListeners wasn't called — e.g. non-first-run with missing FFmpeg)
+    this.setupFFmpegListeners();
+
     document.getElementById("ffmpeg-overlay").style.display = "flex";
     document.getElementById("ffmpeg-main-view").style.display = "";
     document.getElementById("ffmpeg-install-view").style.display = "none";
