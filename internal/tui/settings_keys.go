@@ -21,6 +21,21 @@ func (m *SettingsModel) HandleKey(key string) (action string) {
 		return ""
 	}
 
+	// Close confirmation prompt
+	if m.closeConfirm {
+		switch key {
+		case "y", "Y":
+			m.closeConfirm = false
+			return m.saveAndClose()
+		case "n", "N":
+			m.closeConfirm = false
+			return m.discardAndClose()
+		case keyEsc:
+			m.closeConfirm = false
+		}
+		return ""
+	}
+
 	// Clear error on meaningful input (not pure navigation)
 	if m.status == saveError {
 		switch key {
@@ -85,6 +100,12 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 	if sec.fields == nil {
 		return ""
 	}
+
+	// Button focus mode
+	if m.buttonFocus >= 0 {
+		return m.handleButtonKey(key)
+	}
+
 	field := sec.fields[m.fieldIndex]
 
 	switch key {
@@ -102,6 +123,13 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 			m.fieldIndex++
 			m.ensureFieldVisible()
 			m.updateTextInputForField()
+		}
+		return ""
+	case "shift+down":
+		// Move to buttons when at last field
+		if m.fieldIndex == len(sec.fields)-1 {
+			m.buttonFocus = 0
+			m.textInput.Blur()
 		}
 		return ""
 	case keyLeft:
@@ -140,7 +168,74 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 	return ""
 }
 
+// handleButtonKey processes key input when action buttons are focused.
+func (m *SettingsModel) handleButtonKey(key string) string {
+	switch key {
+	case keyEsc:
+		return m.handleClose()
+	case "shift+up":
+		// Return to fields
+		m.buttonFocus = -1
+		m.updateTextInputForField()
+		return ""
+	case keyUp:
+		// Return to fields
+		m.buttonFocus = -1
+		m.updateTextInputForField()
+		return ""
+	case keyLeft:
+		if m.dirty && m.buttonFocus > 0 {
+			m.buttonFocus--
+		}
+		return ""
+	case keyRight:
+		if m.dirty && m.buttonFocus < 1 {
+			m.buttonFocus++
+		}
+		return ""
+	case keyEnter:
+		if !m.dirty {
+			// Single "Return" button — just close
+			return m.discardAndClose()
+		}
+		if m.buttonFocus == 0 {
+			return m.saveAndClose()
+		}
+		return m.discardAndClose()
+	case keyTab:
+		m.buttonFocus = -1
+		m.switchSection((m.sectionIndex + 1) % len(sections))
+		m.updateTextInputForField()
+		return ""
+	case "shift+left":
+		m.buttonFocus = -1
+		if m.sectionIndex > 0 {
+			m.switchSection(m.sectionIndex - 1)
+			m.updateTextInputForField()
+		}
+		return ""
+	case "shift+right":
+		m.buttonFocus = -1
+		if m.sectionIndex < len(sections)-1 {
+			m.switchSection(m.sectionIndex + 1)
+			m.updateTextInputForField()
+		}
+		return ""
+	}
+	return ""
+}
+
 func (m *SettingsModel) handleClose() string {
+	if m.dirty && m.status != saveError {
+		m.closeConfirm = true
+		return ""
+	}
+	m.Close()
+	return "close"
+}
+
+// saveAndClose applies changes, saves config, and closes.
+func (m *SettingsModel) saveAndClose() string {
 	if m.dirty && m.status != saveError {
 		m.applyValues()
 		if m.status == saveError {
@@ -163,11 +258,20 @@ func (m *SettingsModel) handleClose() string {
 	return "close"
 }
 
+// discardAndClose resets values to originals and closes without saving.
+func (m *SettingsModel) discardAndClose() string {
+	maps.Copy(m.values, m.originalValues)
+	m.dirty = false
+	m.Close()
+	return "close"
+}
+
 func (m *SettingsModel) switchSection(idx int) {
 	if idx >= 0 && idx < len(sections) {
 		m.sectionIndex = idx
 		m.fieldIndex = 0
 		m.scrollOffset = 0
+		m.buttonFocus = -1
 	}
 }
 
@@ -178,7 +282,7 @@ func (m *SettingsModel) toggleField(fd fieldDef) {
 	} else {
 		m.values[fd.key] = "Yes"
 	}
-	m.dirty = true
+	m.recheckDirty()
 	m.status = saveIdle
 }
 
@@ -187,14 +291,14 @@ func (m *SettingsModel) cycleFieldForward(fd fieldDef) {
 	for i, opt := range fd.options {
 		if strings.EqualFold(opt, cur) {
 			m.values[fd.key] = fd.options[(i+1)%len(fd.options)]
-			m.dirty = true
+			m.recheckDirty()
 			m.status = saveIdle
 			return
 		}
 	}
 	if len(fd.options) > 0 {
 		m.values[fd.key] = fd.options[0]
-		m.dirty = true
+		m.recheckDirty()
 		m.status = saveIdle
 	}
 }
@@ -205,14 +309,14 @@ func (m *SettingsModel) cycleFieldReverse(fd fieldDef) {
 		if strings.EqualFold(opt, cur) {
 			idx := (i - 1 + len(fd.options)) % len(fd.options)
 			m.values[fd.key] = fd.options[idx]
-			m.dirty = true
+			m.recheckDirty()
 			m.status = saveIdle
 			return
 		}
 	}
 	if len(fd.options) > 0 {
 		m.values[fd.key] = fd.options[len(fd.options)-1]
-		m.dirty = true
+		m.recheckDirty()
 		m.status = saveIdle
 	}
 }

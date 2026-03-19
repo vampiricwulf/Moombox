@@ -1,6 +1,10 @@
 package tui
 
-import tea "charm.land/bubbletea/v2"
+import (
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+)
 
 // HandleMouse processes a mouse event in the settings panel.
 func (m *SettingsModel) HandleMouse(msg tea.MouseMsg) {
@@ -10,6 +14,11 @@ func (m *SettingsModel) HandleMouse(msg tea.MouseMsg) {
 
 	// Restart overlay ignores mouse
 	if m.showRestartOverlay {
+		return
+	}
+
+	// Close confirmation ignores mouse
+	if m.closeConfirm {
 		return
 	}
 
@@ -57,7 +66,7 @@ func (m *SettingsModel) HandleMouse(msg tea.MouseMsg) {
 
 	// Click in content area (relY >= 2, after header + divider)
 	if relY >= 2 {
-		m.handleMouseContentClick(relY - 2)
+		m.handleMouseContentClick(relX, relY-2)
 	}
 }
 
@@ -160,8 +169,8 @@ func (m *SettingsModel) handleMouseTabClick(relX int) {
 }
 
 // handleMouseContentClick handles a click in the content area below the header.
-// contentY is 0-based from the start of content (after header + divider).
-func (m *SettingsModel) handleMouseContentClick(contentY int) {
+// relX is X relative to inner content, contentY is 0-based from start of content.
+func (m *SettingsModel) handleMouseContentClick(relX, contentY int) {
 	sec := sections[m.sectionIndex]
 
 	switch sec.name {
@@ -173,16 +182,23 @@ func (m *SettingsModel) handleMouseContentClick(contentY int) {
 		if m.secMode != securityStatus {
 			return // Security sub-editor doesn't support mouse clicking
 		}
-		m.handleMouseFieldClick(contentY, sec)
+		m.handleMouseFieldClick(relX, contentY, sec)
 	default:
 		if sec.fields != nil {
-			m.handleMouseFieldClick(contentY, sec)
+			m.handleMouseFieldClick(relX, contentY, sec)
 		}
 	}
 }
 
 // handleMouseFieldClick handles clicking on a field row.
-func (m *SettingsModel) handleMouseFieldClick(contentY int, sec settingsSection) {
+func (m *SettingsModel) handleMouseFieldClick(relX, contentY int, sec settingsSection) {
+	// Check if click is on action buttons area (always present)
+	buttonY := m.buttonContentY(sec)
+	if contentY == buttonY {
+		m.handleMouseButtonClick(relX)
+		return
+	}
+
 	// Each field is 1 line. Fields with previewFn have an extra preview line.
 	// Map contentY to field index accounting for scroll offset and preview lines.
 	fieldIdx := m.contentYToFieldIndex(contentY, sec)
@@ -191,16 +207,134 @@ func (m *SettingsModel) handleMouseFieldClick(contentY int, sec settingsSection)
 	}
 
 	m.fieldIndex = fieldIdx
+	m.buttonFocus = -1
 	m.ensureFieldVisible()
 	m.updateTextInputForField()
 
-	// For toggle/cycle fields, clicking toggles/cycles the value
+	// For toggle/cycle fields, determine which option was clicked
 	fd := sec.fields[fieldIdx]
+	labelWidth := m.maxLabelWidth(sec)
 	switch fd.ftype {
 	case fieldToggle:
-		m.toggleField(fd)
+		m.handleToggleClick(fd, relX, labelWidth)
 	case fieldCycle:
-		m.cycleFieldForward(fd)
+		m.handleCycleClick(fd, relX, labelWidth)
+	}
+}
+
+// buttonContentY returns the contentY line where buttons are rendered.
+func (m *SettingsModel) buttonContentY(sec settingsSection) int {
+	// Buttons appear after fields + info area.
+	// The fields section renders: field lines + preview lines + empty + divider + help.
+	// We calculate the line count from the renderFields output.
+	// Buttons row is always present (buttonLine = 1)
+	adjustedH := 0
+	if sec.name == "Network" {
+		adjustedH = max(m.height-2, 10) - 12 - 1
+	} else {
+		adjustedH = max(m.height-2, 10) - 8 - 1
+	}
+
+	end := min(m.scrollOffset+adjustedH, len(sec.fields))
+	lineCount := 0
+	for i := m.scrollOffset; i < end; i++ {
+		lineCount++ // field line
+		if sec.fields[i].previewFn != nil {
+			preview := sec.fields[i].previewFn(m.values[sec.fields[i].key])
+			if preview != "" {
+				lineCount++
+			}
+		}
+	}
+
+	// After fields: info area (empty line + divider + help text) = 3 lines
+	lineCount += 3
+
+	// For Network section, add security compact section lines
+	if sec.name == "Network" {
+		lineCount += 4 // "\n" + divider + password status + action line
+	}
+
+	return lineCount
+}
+
+// maxLabelWidth returns the max label width for a section's fields.
+func (m *SettingsModel) maxLabelWidth(sec settingsSection) int {
+	maxLabel := 0
+	for _, fd := range sec.fields {
+		if len(fd.label) > maxLabel {
+			maxLabel = len(fd.label)
+		}
+	}
+	return maxLabel
+}
+
+// handleCycleClick determines which cycle option was clicked and sets it directly.
+func (m *SettingsModel) handleCycleClick(fd fieldDef, relX int, labelWidth int) {
+	// Prefix is 2 chars ("  " or "> "), then label padded to labelWidth+2, then value
+	valueX := relX - 2 - labelWidth - 2
+	if valueX < 0 {
+		return
+	}
+
+	currentVal := m.values[fd.key]
+	pos := 0
+	for _, opt := range fd.options {
+		// Calculate this option's visual width
+		optW := len(opt) // ASCII option names
+		if strings.EqualFold(opt, currentVal) {
+			optW += 2 // brackets [...]
+		}
+		if valueX >= pos && valueX < pos+optW {
+			m.values[fd.key] = opt
+			m.recheckDirty()
+			m.status = saveIdle
+			return
+		}
+		pos += optW + 3 // " / " separator
+	}
+}
+
+// handleToggleClick determines if Yes or No was clicked and sets it directly.
+func (m *SettingsModel) handleToggleClick(fd fieldDef, relX int, labelWidth int) {
+	// Prefix is 2 chars, label padded to labelWidth+2, then "Yes / No"
+	valueX := relX - 2 - labelWidth - 2
+	if valueX < 0 {
+		return
+	}
+	// "Yes" is 3 chars, " / " is 3 chars, "No" is 2 chars
+	if valueX < 3 {
+		m.values[fd.key] = "Yes"
+	} else if valueX >= 6 {
+		m.values[fd.key] = "No"
+	}
+	m.recheckDirty()
+	m.status = saveIdle
+}
+
+// handleMouseButtonClick handles clicking on action buttons.
+func (m *SettingsModel) handleMouseButtonClick(relX int) {
+	if m.dirty {
+		// Layout: "[ Save & Return ]  [ Return Without Saving ]"
+		saveLen := 17 // len("[ Save & Return ]")
+		gapLen := 2
+		discardLen := 25 // len("[ Return Without Saving ]")
+
+		if relX >= 0 && relX < saveLen {
+			m.saveAndClose()
+			return
+		}
+		if relX >= saveLen+gapLen && relX < saveLen+gapLen+discardLen {
+			m.discardAndClose()
+			return
+		}
+	} else {
+		// Layout: "[ Return ]"
+		returnLen := 10 // len("[ Return ]")
+		if relX >= 0 && relX < returnLen {
+			m.discardAndClose()
+			return
+		}
 	}
 }
 
@@ -332,4 +466,3 @@ func (m *SettingsModel) clickNotifEvent(eventLine int) {
 		}
 	}
 }
-

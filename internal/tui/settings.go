@@ -266,6 +266,13 @@ type SettingsModel struct {
 	// Restart overlay
 	showRestartOverlay bool
 
+	// Close confirmation
+	closeConfirm bool
+
+	// Action buttons (bottom of settings panel when dirty)
+	// -1 = fields focused, 0 = Save button, 1 = Return button
+	buttonFocus int
+
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
 }
@@ -292,6 +299,8 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.status = saveIdle
 	m.errorMsg = ""
 	m.showRestartOverlay = false
+	m.closeConfirm = false
+	m.buttonFocus = -1
 
 	// Snapshot config under read lock
 	if m.cfgMu != nil {
@@ -526,6 +535,18 @@ func (m *SettingsModel) applyValues() {
 	if m.cfgMu != nil {
 		m.cfgMu.Unlock()
 	}
+}
+
+// recheckDirty recalculates dirty state by comparing values against originalValues.
+// Only covers value-map changes — channel/notification/security edits set dirty directly.
+func (m *SettingsModel) recheckDirty() {
+	for k, v := range m.values {
+		if v != m.originalValues[k] {
+			m.dirty = true
+			return
+		}
+	}
+	m.dirty = false
 }
 
 func (m *SettingsModel) hasRestartChanges() bool {

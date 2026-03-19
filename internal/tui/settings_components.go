@@ -138,7 +138,7 @@ func (m *SettingsModel) syncFromTextInput() {
 		field := sec.fields[m.fieldIndex]
 		if field.ftype == fieldText || field.ftype == fieldNumber {
 			m.values[field.key] = val
-			m.dirty = true
+			m.recheckDirty()
 			m.status = saveIdle
 		}
 	}

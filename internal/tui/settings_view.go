@@ -38,6 +38,9 @@ func (m *SettingsModel) View() string {
 
 	sec := sections[m.sectionIndex]
 
+	// Buttons row is always present — subtract 1 line from content area
+	buttonLine := 1
+
 	// Section content
 	switch sec.name {
 	case "Network":
@@ -46,28 +49,37 @@ func (m *SettingsModel) View() string {
 			content.WriteString(m.renderSecurity(innerW))
 		} else {
 			// h-12: extra 4 lines vs default h-8 for the compact security sub-section below
-			content.WriteString(m.renderFields(sec, innerW, h-12))
+			content.WriteString(m.renderFields(sec, innerW, h-12-buttonLine))
 			content.WriteString("\n")
 			content.WriteString(m.renderSecurityCompact(innerW))
 		}
 	case "Channels":
-		content.WriteString(m.renderChannels(innerW, h-8))
+		content.WriteString(m.renderChannels(innerW, h-8-buttonLine))
 	case "Integrations":
-		content.WriteString(m.renderNotifications(innerW, h-8))
+		content.WriteString(m.renderNotifications(innerW, h-8-buttonLine))
 	default:
-		content.WriteString(m.renderFields(sec, innerW, h-8))
+		content.WriteString(m.renderFields(sec, innerW, h-8-buttonLine))
 	}
+
+	// Action buttons (always visible)
+	content.WriteString("\n")
+	content.WriteString(m.renderActionButtons())
 
 	// Status line
 	content.WriteString("\n")
-	switch m.status {
-	case saveSaved:
-		content.WriteString(lipgloss.NewStyle().Foreground(ColorGreen).Render("Saved"))
-	case saveError:
-		content.WriteString(lipgloss.NewStyle().Foreground(ColorRed).Render(m.errorMsg))
-	default:
-		if m.dirty {
-			content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Faint(true).Render("Unsaved changes"))
+	if m.closeConfirm {
+		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+			"Save changes? [Y]es / [N]o / [Esc] Cancel"))
+	} else {
+		switch m.status {
+		case saveSaved:
+			content.WriteString(lipgloss.NewStyle().Foreground(ColorGreen).Render("Saved"))
+		case saveError:
+			content.WriteString(lipgloss.NewStyle().Foreground(ColorRed).Render(m.errorMsg))
+		default:
+			if m.dirty {
+				content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Faint(true).Render("Unsaved changes"))
+			}
 		}
 	}
 
@@ -119,6 +131,10 @@ func (m *SettingsModel) renderHintText() string {
 		return "Esc: Back  \u2191/\u2193/Tab: Navigate  Enter: Save"
 	}
 	if m.isFieldSection() {
+		// Button focus mode
+		if m.buttonFocus >= 0 {
+			return "\u2190/\u2192: Switch button  \u2191: Back to fields  Enter: Activate"
+		}
 		field := sec.fields[m.fieldIndex]
 		hint := "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate"
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
@@ -137,6 +153,42 @@ func (m *SettingsModel) renderHintText() string {
 		return hint
 	}
 	return "Shift+\u2190/\u2192: Section  \u2191/\u2193: Navigate  A: Add  Enter: Edit  D: Delete"
+}
+
+// renderActionButtons renders action buttons at the bottom of the settings panel.
+// Always shows "Return" button. Shows "Save & Return" only when dirty.
+func (m *SettingsModel) renderActionButtons() string {
+	focusedStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("0")).
+		Background(ColorCyan).
+		Bold(true)
+	blurredStyle := lipgloss.NewStyle().
+		Foreground(ColorGray)
+
+	if m.dirty {
+		saveLabel := "[ Save & Return ]"
+		discardLabel := "[ Return Without Saving ]"
+
+		var saveStr, discardStr string
+		if m.buttonFocus == 0 {
+			saveStr = focusedStyle.Render(saveLabel)
+		} else {
+			saveStr = blurredStyle.Render(saveLabel)
+		}
+		if m.buttonFocus == 1 {
+			discardStr = focusedStyle.Render(discardLabel)
+		} else {
+			discardStr = blurredStyle.Render(discardLabel)
+		}
+		return saveStr + "  " + discardStr
+	}
+
+	// Not dirty — just show Return button
+	returnLabel := "[ Return ]"
+	if m.buttonFocus == 0 {
+		return focusedStyle.Render(returnLabel)
+	}
+	return blurredStyle.Render(returnLabel)
 }
 
 func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
