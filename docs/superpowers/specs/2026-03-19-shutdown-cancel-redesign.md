@@ -10,6 +10,8 @@ Shutdown and user-cancel share the same code path, causing bugs (e.g., the chat 
 
 Not a cancellation. Active jobs preserve their current status (`Downloading`, `Live`, `Upcoming`) and auto-resume on next startup. No new status introduced. The existing behavior is correct — shutdown-interrupted jobs re-enter the processing pipeline via `ShouldProcess()` and resume from saved state (DB seq numbers, chat resume files).
 
+**Muxing jobs on shutdown:** `ShouldProcess()` only accepts `Upcoming`, `Live`, and `Downloading` — a job interrupted during muxing is not re-enqueued on startup, creating a permanent dead state. Fix: on startup, scan for jobs in `Muxing` status and reset them to `Downloading`. The worker then re-enters the pipeline, re-probes, discovers the download is complete (segments already exist), and proceeds to mux again. This is safe because muxing is idempotent — partial mux output is overwritten.
+
 ### User Cancel
 
 A deliberate user action. Sets status to `Cancelled` (terminal). The job stops and staging files are preserved. The user gets granular follow-up actions instead of a single "Retry":
@@ -42,7 +44,7 @@ When the user triggers Resume on a cancelled, errored, or COOKIES? YouTube job:
 2. Clear the `error` field. Preserve `progress` string, `percent`, and `download_started_at` so the user sees where it picks up and the download timer reflects the original start.
 3. Re-enqueue via `EnqueueJob()`.
 4. Stream processor re-probes the stream with a full `GetVideoInfo` call. This fetches fresh signed URLs and checks current stream state (live, VOD, post-live, ended).
-5. Orchestrator starts normally. It must skip overwriting `download_started_at` when it is already set (currently it unconditionally sets it — this needs a guard). The DASH/HLS/VOD downloaders detect existing segment files in staging and resume from the last sequence number (already works via DB-saved seq state and downloader resume files).
+5. Orchestrator starts normally. `ExecuteWithChat` (YouTube orchestrator) must skip overwriting `download_started_at` when it is already set (currently at `orchestrator.go:86-90` it unconditionally sets it — add a guard). The Twitch orchestrator does not need this guard since Twitch has no Resume. The DASH/HLS/VOD downloaders detect existing segment files in staging and resume from the last sequence number (already works via DB-saved seq state and downloader resume files).
 6. Chat resumes via the existing resume file mechanism (continuation token + dedup IDs).
 
 If the stream ended while the job was cancelled, the re-probe detects it as VOD/post-live, and the download strategy adapts accordingly.
@@ -56,7 +58,14 @@ Reinitialize resets status to `Upcoming`, clears all progress/percent/error/seq 
 When the user triggers Reinitialize:
 
 1. Set status to `Upcoming`.
-2. Clear: `error`, `progress`, `percent`, all seq counters (`last_video_seq`, `last_audio_seq`, `total_video_seq`, `total_audio_seq`), `chat_status`, `total_chat_messages`, `download_started_at`.
+2. Clear all non-input fields to ensure a truly fresh start:
+   - Progress: `error`, `progress`, `percent`, `speed`, `eta`
+   - Seq counters: `last_video_seq`, `last_audio_seq`, `total_video_seq`, `total_audio_seq`
+   - Chat: `chat_status`, `total_chat_messages`
+   - Timestamps: `download_started_at`, `stream_end_time`
+   - Output: `output_file`, `filename`, `file_size`, `chat_file`, `chat_filename`, `description_file`, `thumbnail_file`
+   - Media metadata: `video_width`, `video_height`, `video_fps`, `length_seconds`
+   - Selection: `selected_video_itag`, `selected_audio_itag` (re-selected during download)
 3. Delete the staging directory and its contents (fresh start).
 4. Re-enqueue via `EnqueueJob()`.
 
@@ -86,7 +95,7 @@ If no segment files are found (staging cleaned up or never created), the Mux act
 The existing `muxAndFinalize()` requires a `*DownloadResult` with `VideoPath`, `AudioPath`, and format metadata. For the Mux flow, there is no download pipeline — only files on disk. A new `muxFromStaging()` wrapper is needed:
 
 1. Scan the staging directory for video/audio files using the known filename patterns above.
-2. Construct a minimal `DownloadResult` with the discovered file paths. Format metadata (codec, resolution) can be probed via `ffprobe` on the discovered files, or left empty (muxAndFinalize already handles missing metadata gracefully for the output filename and container selection).
+2. Construct a minimal `DownloadResult` with the discovered file paths. Leave format metadata (codec, resolution) empty — `muxAndFinalize` already runs `ffprobe` on the output file after muxing to populate metadata fields, so pre-populating is unnecessary.
 3. Pass this synthetic `DownloadResult` to `muxAndFinalize()`.
 
 This wrapper lives in the worker package alongside the existing orchestrator code.
@@ -241,4 +250,4 @@ These are computed in the job serialization layer by checking `filepath.Join(sta
 
 1. The `/retry` endpoint continues to work during a transition period, mapped to Reinitialize logic. Remove after one release cycle.
 2. The `A R` chord changes from Retry to Resume. For Error/COOKIES? jobs with staging, `A R` now resumes instead of restarting — this is strictly better behavior. For Error/COOKIES? jobs without staging (or Twitch jobs), `A R` is disabled and `A I` (Reinitialize) is the correct action. The disabled reason message guides the user.
-3. WebSocket event names update: `job_retried` → `job_resumed` / `job_reinitialized`. During the transition period, the deprecated `/retry` endpoint emits `job_reinitialized` (not the old name).
+3. WebSocket event names update: `job_retried` → `job_resumed` / `job_reinitialized` / `job_mux_started`. During the transition period, the deprecated `/retry` endpoint emits `job_reinitialized` (not the old name). All three events are emitted from their respective API endpoint handlers (not the worker) and carry the same payload as the existing `job_retried`: `{ type: "<event>", job: <full job object> }`. The frontend handles them by refreshing the job in the active/archived lists — same as current `job_retried` handling.
