@@ -9,6 +9,12 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// Route mouse to settings when visible
+	if a.settings.IsVisible() {
+		a.settings.HandleMouse(msg)
+		return a, nil
+	}
+
 	if a.hasActiveOverlay() {
 		return a, nil
 	}

@@ -1,3 +1,3 @@
-### Bug Fixes
+### Features
 
-- Fix lipgloss V2 border Width/Height semantics — V2 sets total dimensions including borders, not inner content dimensions; fixes header text wrapping and mouse click coordinate offsets
+- Add full mouse support to TUI settings panel — click section tabs, click fields to select, click toggles/cycles to change values, scroll through fields, click channel/notification list items
