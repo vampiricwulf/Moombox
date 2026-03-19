@@ -1,6 +1,9 @@
 package chat
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -425,6 +428,166 @@ func TestCallbackFieldsAssignment(t *testing.T) {
 	}
 	if !errorCalled {
 		t.Error("OnError callback was not invoked")
+	}
+}
+
+// --- messageCount header accuracy tests ---
+
+// makeTestMessage returns a minimal ChatMessage with the given ID.
+func makeTestMessage(id string) ChatMessage {
+	return ChatMessage{
+		ID:            id,
+		TimestampUsec: "1700000000000000",
+		AuthorName:    "Test User",
+		Message:       []MessagePart{{Type: "text", Text: "hello"}},
+	}
+}
+
+// readChatFileHeader reads the chat.json at path and returns the parsed header fields.
+func readChatFileHeader(t *testing.T, path string) ChatData {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("readChatFileHeader: read file: %v", err)
+	}
+	var cd ChatData
+	if err := json.Unmarshal(data, &cd); err != nil {
+		t.Fatalf("readChatFileHeader: unmarshal: %v", err)
+	}
+	return cd
+}
+
+// TestMessageCountHeaderAccurateAfterIncrementalFlushes verifies that the
+// messageCount field in the JSON header matches the actual number of messages
+// after each incremental flush, simulating what runChatLoop does every ~1s.
+//
+// This is the regression test for the bug where messageCount was only updated
+// on clean completion — leaving it stale after an interruption.
+func TestMessageCountHeaderAccurateAfterIncrementalFlushes(t *testing.T) {
+	dir := t.TempDir()
+	outputFile := filepath.Join(dir, "chat.json")
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:    "testVid",
+		VideoTitle: "Test Stream",
+		OutputFile: outputFile,
+	})
+
+	// --- Flush 1: first batch of 3 messages (not yet flushed to disk) ---
+	batch1 := []ChatMessage{
+		makeTestMessage("msg1"),
+		makeTestMessage("msg2"),
+		makeTestMessage("msg3"),
+	}
+	cd.messages = append(cd.messages, batch1...)
+	cd.messageCount = len(batch1)
+
+	cd.writeChatFile() // full write (flushedToDisk == false)
+	cd.flushedToDisk = true
+	cd.messages = nil
+
+	// After the first full write updateChatFileHeader is called (mirrors runChatLoop)
+	cd.updateChatFileHeader()
+
+	got := readChatFileHeader(t, outputFile)
+	if got.MessageCount != 3 {
+		t.Errorf("after flush 1: want messageCount=3 in header, got %d", got.MessageCount)
+	}
+	if len(got.Messages) != 3 {
+		t.Errorf("after flush 1: want 3 messages in array, got %d", len(got.Messages))
+	}
+
+	// --- Flush 2: incremental append of 2 more messages ---
+	batch2 := []ChatMessage{
+		makeTestMessage("msg4"),
+		makeTestMessage("msg5"),
+	}
+	cd.messages = append(cd.messages, batch2...)
+	cd.messageCount += len(batch2) // now 5
+
+	cd.writeChatFile() // incremental append (flushedToDisk == true)
+	cd.messages = nil
+
+	// This is the call added by the fix — must update header after incremental flush
+	cd.updateChatFileHeader()
+
+	got = readChatFileHeader(t, outputFile)
+	if got.MessageCount != 5 {
+		t.Errorf("after flush 2: want messageCount=5 in header, got %d", got.MessageCount)
+	}
+	if len(got.Messages) != 5 {
+		t.Errorf("after flush 2: want 5 messages in array, got %d", len(got.Messages))
+	}
+
+	// --- Flush 3: one more incremental append ---
+	batch3 := []ChatMessage{
+		makeTestMessage("msg6"),
+	}
+	cd.messages = append(cd.messages, batch3...)
+	cd.messageCount += len(batch3) // now 6
+
+	cd.writeChatFile()
+	cd.messages = nil
+	cd.updateChatFileHeader()
+
+	got = readChatFileHeader(t, outputFile)
+	if got.MessageCount != 6 {
+		t.Errorf("after flush 3: want messageCount=6 in header, got %d", got.MessageCount)
+	}
+	if len(got.Messages) != 6 {
+		t.Errorf("after flush 3: want 6 messages in array, got %d", len(got.Messages))
+	}
+
+	// Final invariant: header count always equals actual array length
+	if got.MessageCount != len(got.Messages) {
+		t.Errorf("header messageCount (%d) does not match actual message array length (%d)",
+			got.MessageCount, len(got.Messages))
+	}
+}
+
+// TestMessageCountHeaderStaleWithoutHeaderUpdate demonstrates the original bug:
+// if updateChatFileHeader is NOT called after an incremental flush, the header
+// count is left at its previous value while the array has grown.
+func TestMessageCountHeaderStaleWithoutHeaderUpdate(t *testing.T) {
+	dir := t.TempDir()
+	outputFile := filepath.Join(dir, "chat.json")
+
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		VideoID:    "testVid",
+		VideoTitle: "Test Stream",
+		OutputFile: outputFile,
+	})
+
+	// First full write with 2 messages + header update (clean initial state)
+	cd.messages = []ChatMessage{makeTestMessage("m1"), makeTestMessage("m2")}
+	cd.messageCount = 2
+	cd.writeChatFile()
+	cd.flushedToDisk = true
+	cd.messages = nil
+	cd.updateChatFileHeader()
+
+	// Incremental flush of 3 more messages — deliberately skip updateChatFileHeader
+	cd.messages = []ChatMessage{
+		makeTestMessage("m3"),
+		makeTestMessage("m4"),
+		makeTestMessage("m5"),
+	}
+	cd.messageCount += 3 // now 5
+	cd.writeChatFile()   // appends to file
+	cd.messages = nil
+	// NOTE: updateChatFileHeader intentionally NOT called here
+
+	got := readChatFileHeader(t, outputFile)
+	// Header should still say 2 (stale) while array has 5 — demonstrating the bug
+	if got.MessageCount != 2 {
+		t.Errorf("expected stale header count=2 without header update, got %d", got.MessageCount)
+	}
+	if len(got.Messages) != 5 {
+		t.Errorf("expected 5 messages in array, got %d", len(got.Messages))
+	}
+	// The mismatch is the bug
+	if got.MessageCount == len(got.Messages) {
+		t.Error("expected mismatch between header count and array length (demonstrating bug), but they were equal")
 	}
 }
 

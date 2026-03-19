@@ -57,6 +57,7 @@ type ChatDownloader struct {
 	lastWriteMs   int64
 	lastTimestamp  string
 	cancelCtx     context.CancelFunc // for aborting sleep on stop/markStreamEnded
+	done          chan struct{}       // closed when Start() completes; nil if never started
 
 	OnStart    func(messageCount int, resuming bool)
 	OnProgress func(p ChatProgress)
@@ -90,15 +91,26 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 }
 
 // Start begins the chat download process.
+// If the downloader is already running (e.g., early chat handed to the orchestrator),
+// Start blocks until the existing run completes or ctx is cancelled.
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
 	if cd.running {
+		done := cd.done
 		cd.mu.Unlock()
+		// Already running — wait for completion or context cancellation
+		if done != nil {
+			select {
+			case <-done:
+			case <-ctx.Done():
+			}
+		}
 		return nil
 	}
 	cd.running = true
 	cd.cancelFlag = false
 	cd.streamEnded = false
+	cd.done = make(chan struct{})
 	cd.mu.Unlock()
 
 	defer func() {
@@ -116,7 +128,11 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.mu.Lock()
 		cd.running = false
 		cd.cancelCtx = nil
+		done := cd.done
 		cd.mu.Unlock()
+		if done != nil {
+			close(done)
+		}
 	}()
 
 	// Create a cancellable context for aborting sleep on stop/markStreamEnded
@@ -162,10 +178,18 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.updateChatFileHeader()
 	}
 
-	// Clear resume state on clean completion (not cancelled)
+	// Clear resume state on clean completion (not cancelled).
+	// Context cancellation without Stop() is still a shutdown — the parent context
+	// was cancelled but Stop() hasn't been called yet due to a race. Treat it as
+	// cancellation to preserve the resume file. MarkStreamEnded sets streamEnded
+	// (clean completion) so we distinguish it from external context cancellation.
 	cd.mu.Lock()
 	wasCancelled := cd.cancelFlag
+	streamEnded := cd.streamEnded
 	cd.mu.Unlock()
+	if !wasCancelled && !streamEnded && ctx.Err() != nil {
+		wasCancelled = true
+	}
 	if !wasCancelled {
 		cd.clearResume()
 	}
@@ -341,6 +365,9 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 				cd.messages = nil // All written to disk, free memory
 				cd.flushedToDisk = true
 
+				// Update header to keep messageCount accurate after incremental flushes
+				cd.updateChatFileHeader()
+
 				// Bound seenIDs to prevent unbounded growth
 				if len(cd.seenIDs) > dedupKeepSize {
 					cd.cullDedup()
@@ -408,10 +435,14 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		}
 	}
 
-	// Save resume state only when cancelled (resume needed)
+	// Save resume state when cancelled or context cancelled (shutdown race)
 	cd.mu.Lock()
 	wasCancelled := cd.cancelFlag
+	streamEnded := cd.streamEnded
 	cd.mu.Unlock()
+	if !wasCancelled && !streamEnded && ctx.Err() != nil {
+		wasCancelled = true
+	}
 	if len(cd.messages) > 0 && wasCancelled {
 		cd.saveResume()
 	}
