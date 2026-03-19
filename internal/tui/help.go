@@ -192,7 +192,7 @@ func (m *HelpModel) View() string {
 
 	content := header + "\n" + m.viewport.View()
 
-	box := FocusedBorder.Width(w).Height(h).Render(content)
+	box := FocusedBorder.Width(w + 2).Height(h + 2).Render(content)
 
 	return centerBox(box, m.width, m.height)
 }

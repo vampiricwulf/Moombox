@@ -533,7 +533,7 @@ func (m *TaskListModel) View() string {
 		style = FocusedBorder
 	}
 
-	return style.Width(contentW).Height(m.height - 2).Render(content)
+	return style.Width(m.width).Height(m.height).Render(content)
 }
 
 func (m *TaskListModel) renderHeader(w int) string {

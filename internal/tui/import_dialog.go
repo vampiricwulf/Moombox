@@ -263,8 +263,8 @@ func (m *ImportDialogModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
-		Width(contentW).
-		Height(boxH).
+		Width(boxW).
+		Height(boxH + 2).
 		Render(content.String())
 
 	return centerBox(box, m.width, m.height)

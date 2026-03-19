@@ -533,16 +533,16 @@ func (m *ActionMenuModel) View() string {
 
 	switch m.mode {
 	case menuMain:
-		return m.renderMain(contentW)
+		return m.renderMain(contentW, boxW)
 	case menuJobSelect:
-		return m.renderJobSelect(contentW)
+		return m.renderJobSelect(contentW, boxW)
 	case menuConfirm:
-		return m.renderConfirm(contentW)
+		return m.renderConfirm(contentW, boxW)
 	}
 	return ""
 }
 
-func (m *ActionMenuModel) renderMain(contentW int) string {
+func (m *ActionMenuModel) renderMain(contentW, boxW int) string {
 	header := TitleStyle.Render("Action Menu") +
 		strings.Repeat(" ", max(0, contentW-36)) +
 		DimStyle.Render("↑↓ navigate | Enter | Esc")
@@ -550,11 +550,11 @@ func (m *ActionMenuModel) renderMain(contentW int) string {
 	footer := DimStyle.Render("M to close")
 
 	content := header + "\n" + m.mainList.View() + "\n" + footer
-	box := FocusedBorder.Width(contentW).Render(content)
+	box := FocusedBorder.Width(boxW).Render(content)
 	return centerBox(box, m.width, m.height)
 }
 
-func (m *ActionMenuModel) renderJobSelect(contentW int) string {
+func (m *ActionMenuModel) renderJobSelect(contentW, boxW int) string {
 	header := TitleStyle.Render(m.pendingLabel) +
 		DimStyle.Render(fmt.Sprintf(" — Select job (%d)", len(m.filtered)))
 
@@ -567,11 +567,11 @@ func (m *ActionMenuModel) renderJobSelect(contentW int) string {
 	}
 
 	content := header + "\n" + m.jobList.View() + "\n" + footer
-	box := FocusedBorder.Width(contentW).Render(content)
+	box := FocusedBorder.Width(boxW).Render(content)
 	return centerBox(box, m.width, m.height)
 }
 
-func (m *ActionMenuModel) renderConfirm(contentW int) string {
+func (m *ActionMenuModel) renderConfirm(contentW, boxW int) string {
 	ch := 3
 	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Bold(true).Render(
 		fmt.Sprintf("Confirm: %s?", m.confirmLabel))
@@ -587,7 +587,7 @@ func (m *ActionMenuModel) renderConfirm(contentW int) string {
 
 	header := TitleStyle.Render("Confirm")
 	content := header + "\n" + strings.Join(lines, "\n")
-	box := FocusedBorder.Width(contentW).Render(content)
+	box := FocusedBorder.Width(boxW).Render(content)
 	return centerBox(box, m.width, m.height)
 }
 

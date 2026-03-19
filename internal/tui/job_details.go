@@ -684,7 +684,7 @@ func (m *JobDetailsModel) View() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor)
 
-	return style.Width(contentW).Height(m.height - 2).Render(content)
+	return style.Width(m.width).Height(m.height).Render(content)
 }
 
 func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {

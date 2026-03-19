@@ -82,8 +82,8 @@ func (m *SettingsModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
-		Width(innerW).
-		Height(h).
+		Width(boxW - 2).
+		Height(h + 2).
 		Render(content.String())
 
 	return centerBox(box, m.width, m.height)

@@ -1183,15 +1183,15 @@ func (m *SetupWizardModel) View() string {
 
 	// Show saving indicator overlay
 	if m.saving {
-		_, contentW := dialogBox(40, m.width)
+		boxW, _ := dialogBox(40, m.width)
 		h := max(m.height-2, 10)
 		content := "\n\n" + lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).
 			Render("  Saving configuration...")
 		box := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorCyan).
-			Width(contentW).
-			Height(h).
+			Width(boxW).
+			Height(h + 2).
 			Render(content)
 		return centerBox(box, m.width, m.height)
 	}
@@ -1210,7 +1210,7 @@ func (m *SetupWizardModel) View() string {
 // --- Mode Selection View ---
 
 func (m *SetupWizardModel) viewModeSelect() string {
-	_, contentW := dialogBox(60, m.width)
+	boxW, contentW := dialogBox(60, m.width)
 
 	var lines []string
 
@@ -1280,8 +1280,8 @@ func (m *SetupWizardModel) viewModeSelect() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
-		Width(contentW).
-		Height(h).
+		Width(boxW).
+		Height(h + 2).
 		Render(content)
 
 	return centerBox(box, m.width, m.height)
@@ -1300,7 +1300,7 @@ func (m *SetupWizardModel) viewSimple() string {
 }
 
 func (m *SetupWizardModel) viewSimpleCookies() string {
-	_, contentW := dialogBox(65, m.width)
+	boxW, contentW := dialogBox(65, m.width)
 
 	var lines []string
 
@@ -1402,15 +1402,15 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
-		Width(contentW).
-		Height(h).
+		Width(boxW).
+		Height(h + 2).
 		Render(content)
 
 	return centerBox(box, m.width, m.height)
 }
 
 func (m *SetupWizardModel) viewSimpleChannels() string {
-	_, contentW := dialogBox(65, m.width)
+	boxW, contentW := dialogBox(65, m.width)
 
 	var lines []string
 
@@ -1461,8 +1461,8 @@ func (m *SetupWizardModel) viewSimpleChannels() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
-		Width(contentW).
-		Height(h).
+		Width(boxW).
+		Height(h + 2).
 		Render(content)
 
 	return centerBox(box, m.width, m.height)
@@ -1487,7 +1487,7 @@ func templatePreview(value string) string {
 // --- Advanced Setup View ---
 
 func (m *SetupWizardModel) viewAdvanced() string {
-	_, contentW := dialogBox(72, m.width)
+	boxW, contentW := dialogBox(72, m.width)
 
 	h := max(m.height-2, 10)
 
@@ -1529,8 +1529,8 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		box := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorCyan).
-			Width(contentW).
-			Height(h).
+			Width(boxW).
+			Height(h + 2).
 			Render(content)
 
 		return centerBox(box, m.width, m.height)
@@ -1538,7 +1538,7 @@ func (m *SetupWizardModel) viewAdvanced() string {
 
 	// Interactive cookie step (after form, before channels)
 	if m.advancedFormDone && !m.advancedCookieDone {
-		return m.viewAdvancedCookies(contentW, h)
+		return m.viewAdvancedCookies(contentW, boxW, h)
 	}
 
 	// Channel editor (after cookies)
@@ -1577,8 +1577,8 @@ func (m *SetupWizardModel) viewAdvanced() string {
 		box := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorCyan).
-			Width(contentW).
-			Height(h).
+			Width(boxW).
+			Height(h + 2).
 			Render(content)
 
 		return centerBox(box, m.width, m.height)
@@ -1587,7 +1587,7 @@ func (m *SetupWizardModel) viewAdvanced() string {
 	return ""
 }
 
-func (m *SetupWizardModel) viewAdvancedCookies(contentW, h int) string {
+func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 	var lines []string
 
 	lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("Advanced Setup \u2014 Cookie Login"))
@@ -1671,8 +1671,8 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, h int) string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
-		Width(contentW).
-		Height(h).
+		Width(boxW).
+		Height(h + 2).
 		Render(content)
 
 	return centerBox(box, m.width, m.height)

@@ -299,7 +299,6 @@ func (m *FilesDialogModel) View() string {
 	boxW := max(min(80, m.width-4), 40)
 	boxH := max(min(24, m.height-4), 10)
 
-	contentW := boxW - 2
 	fileCount := len(m.list.Items())
 
 	var lines []string
@@ -330,8 +329,8 @@ func (m *FilesDialogModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorCyan).
-		Width(contentW).
-		Height(boxH).
+		Width(boxW).
+		Height(boxH + 2).
 		Render(content)
 
 	return centerBox(box, m.width, m.height)

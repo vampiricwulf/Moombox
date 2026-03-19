@@ -475,7 +475,7 @@ func (m *FFmpegCheckModel) View() string {
 		return ""
 	}
 
-	_, contentW := dialogBox(60, m.width)
+	boxW, contentW := dialogBox(60, m.width)
 
 	var lines []string
 
@@ -668,8 +668,8 @@ func (m *FFmpegCheckModel) View() string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorWarning).
-		Width(contentW).
-		Height(h).
+		Width(boxW).
+		Height(h + 2).
 		Render(content)
 
 	return centerBox(box, m.width, m.height)
