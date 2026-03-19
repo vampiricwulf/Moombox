@@ -622,7 +622,7 @@
                                 placeholder="./staging"
                                 help-text="Temporary directory for downloads in progress"
                             ></sl-input>
-                            <div style="display: flex; gap: 0.5em; align-items: flex-end;">
+                            <div style="display: flex; gap: 0.5em; align-items: flex-start;">
                                 <sl-input
                                     id="cfg-ffmpeg-path"
                                     label="FFmpeg Path"
@@ -630,7 +630,7 @@
                                     help-text="Path to ffmpeg executable (leave empty for system default)"
                                     style="flex: 1;"
                                 ></sl-input>
-                                <sl-button id="cfg-ffmpeg-install-btn" variant="default" size="medium">
+                                <sl-button id="cfg-ffmpeg-install-btn" variant="default" size="medium" style="margin-top: 1.55em;">
                                     <sl-icon slot="prefix" name="download"></sl-icon> Install
                                 </sl-button>
                             </div>
