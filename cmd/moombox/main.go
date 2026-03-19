@@ -1221,12 +1221,32 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				log.Error("Failed to delete job", slog.String("error", err.Error()))
 			}
 		}
+		app.OnResumeJob = func(jobID string) {
+			dlWorker.ResumeJob(jobID)
+		}
 		app.OnReinitializeJob = func(jobID string) {
-			db.UpdateJobFields(jobID, map[string]any{
-				"status": string(database.StatusUpcoming),
-				"error":  "",
-			})
-			dlWorker.EnqueueJob(jobID)
+			dlWorker.ReinitializeJob(jobID)
+		}
+		app.OnMuxJob = func(jobID string) error {
+			return dlWorker.MuxJob(jobID)
+		}
+		app.HasStagingFiles = func(jobID string) bool {
+			cfgMu.RLock()
+			base := cfg.Paths.StagingDirectory
+			cfgMu.RUnlock()
+			if base == "" {
+				base = "./staging"
+			}
+			return worker.HasStagingFiles(base, jobID)
+		}
+		app.HasSegmentFiles = func(jobID string) bool {
+			cfgMu.RLock()
+			base := cfg.Paths.StagingDirectory
+			cfgMu.RUnlock()
+			if base == "" {
+				base = "./staging"
+			}
+			return worker.HasSegmentFiles(base, jobID)
 		}
 		app.OnOpenFolder = func(jobID string) {
 			job, err := db.GetJob(jobID)
