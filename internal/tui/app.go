@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -234,6 +234,10 @@ type App struct {
 	// BubbleTea program reference (set by Run, used by QuitTUI)
 	program *tea.Program
 
+	// windowTitle holds the current terminal window title, set by updateTerminalTitle()
+	// and applied via View()'s tea.View return value.
+	windowTitle string
+
 	// Config reference for settings panel
 	cfg   *config.MoomboxConfig
 	cfgMu *sync.RWMutex // shared config mutex (set via SetCfgMu)
@@ -243,6 +247,9 @@ type App struct {
 
 	// Cached HTTP client for local API calls (avoids re-creating per request)
 	cachedClient *http.Client
+
+	// Terminal background detection (updated from BackgroundColorMsg)
+	isDark bool
 
 	// First-run flag: triggers setup wizard
 	IsFirstRun bool
@@ -320,6 +327,7 @@ func NewApp() *App {
 		actionMenu:      NewActionMenuModel(),
 		progressStore:   ps,
 		statusMap:       make(map[string]database.JobStatus),
+		isDark:          true, // default to dark; updated by BackgroundColorMsg
 	}
 }
 
@@ -420,7 +428,7 @@ func (a *App) Init() tea.Cmd {
 		a.ffmpegCheck.Open()
 	}
 
-	return tea.Batch(a.tick(), a.progressTick(), a.logFlushTick(), a.marqueeTick(), a.listenForUpdates())
+	return tea.Batch(a.tick(), a.progressTick(), a.logFlushTick(), a.marqueeTick(), a.listenForUpdates(), tea.RequestBackgroundColor)
 }
 
 func (a *App) tick() tea.Cmd {
@@ -540,9 +548,9 @@ func (a *App) hasActiveDownloads() bool {
 	return false
 }
 
-// updateTerminalTitle returns a tea.Cmd that sets the terminal title with
-// active/upcoming counts via BubbleTea's render pipeline (not direct stdout).
-func (a *App) updateTerminalTitle() tea.Cmd {
+// updateTerminalTitle updates a.windowTitle with the current active/upcoming counts.
+// The title is applied to the terminal via the View() return value.
+func (a *App) updateTerminalTitle() {
 	var activeCount, upcomingCount int
 	for _, s := range a.statusMap {
 		switch s {
@@ -561,7 +569,7 @@ func (a *App) updateTerminalTitle() tea.Cmd {
 		title += fmt.Sprintf(" — %d upcoming", upcomingCount)
 	}
 
-	return tea.SetWindowTitle(title)
+	a.windowTitle = title
 }
 
 // getPort returns the configured port or default 774.

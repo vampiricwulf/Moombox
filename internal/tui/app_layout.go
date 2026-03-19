@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func (a *App) recalcLayout() {
@@ -53,42 +55,51 @@ func (a *App) recalcLayout() {
 	a.logRegion = PanelRegion{X: 0, Y: topH, Width: a.width, Height: logH}
 }
 
+// viewWithMode wraps content in a tea.View with standard terminal mode settings.
+func (a *App) viewWithMode(content string) tea.View {
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	v.WindowTitle = a.windowTitle
+	return v
+}
+
 // View implements tea.Model.
-func (a *App) View() string {
+func (a *App) View() tea.View {
 	if a.width == 0 || a.height == 0 {
-		return "Initializing..."
+		return a.viewWithMode("Initializing...")
 	}
 
 	// Render overlays on top (priority matches handleKey order)
 	if a.settings.IsVisible() {
-		return a.settings.View()
+		return a.viewWithMode(a.settings.View())
 	}
 	if a.help.IsVisible() {
-		return a.help.View()
+		return a.viewWithMode(a.help.View())
 	}
 	if a.ffmpegCheck.IsVisible() {
-		return a.ffmpegCheck.View()
+		return a.viewWithMode(a.ffmpegCheck.View())
 	}
 	if a.setupWiz.IsVisible() {
-		return a.setupWiz.View()
+		return a.viewWithMode(a.setupWiz.View())
 	}
 	if a.actionMenu.IsVisible() {
-		return a.actionMenu.View()
+		return a.viewWithMode(a.actionMenu.View())
 	}
 	if a.importDlg.IsVisible() {
-		return a.importDlg.View()
+		return a.viewWithMode(a.importDlg.View())
 	}
 	if a.addVideo.IsVisible() {
-		return a.addVideo.View()
+		return a.viewWithMode(a.addVideo.View())
 	}
 	if a.trimDlg.IsVisible() {
-		return a.trimDlg.View()
+		return a.viewWithMode(a.trimDlg.View())
 	}
 	if a.filesDlg.IsVisible() {
-		return a.filesDlg.View()
+		return a.viewWithMode(a.filesDlg.View())
 	}
 	if a.clientTokensDlg.IsVisible() {
-		return a.clientTokensDlg.View()
+		return a.viewWithMode(a.clientTokensDlg.View())
 	}
 
 	// Sync status bar state before rendering
@@ -116,7 +127,7 @@ func (a *App) View() string {
 		)
 	}
 
-	return content
+	return a.viewWithMode(content)
 }
 
 func addOverlayMessage(content string, width int, msg string) string {
@@ -132,7 +143,7 @@ func addOverlayMessage(content string, width int, msg string) string {
 
 // feedbackColor returns the display color for a feedback message.
 // Order: chord (yellow) > error (red) > neutral (gray) > warning (yellow) > success (green).
-func feedbackColor(msg string) lipgloss.Color {
+func feedbackColor(msg string) color.Color {
 	lower := strings.ToLower(msg)
 
 	// Chord feedback (yellow) — prefix match on known chord categories

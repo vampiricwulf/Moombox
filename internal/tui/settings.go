@@ -2,12 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"maps"
 	"strconv"
 	"sync"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -256,7 +256,7 @@ type SettingsModel struct {
 	// Security sub-editor state
 	secMode          securityMode
 	secMessage       string
-	secMessageColor  lipgloss.Color
+	secMessageColor  color.Color
 	secCurrentPw     string
 	secNewPw         string
 	secConfirmPw     string

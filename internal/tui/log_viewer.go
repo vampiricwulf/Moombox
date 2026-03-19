@@ -2,11 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
+	"regexp"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 const maxLogLines = 1000
@@ -49,19 +52,50 @@ type LogViewerModel struct {
 	height     int
 	focused    bool
 	level      LogLevel
+
+	// Search state
+	searching   bool            // true when search input is visible
+	searchInput textinput.Model // the search text input
+	searchQuery string          // current active search query (empty = no highlights)
+	searchRegex *regexp.Regexp  // compiled search pattern (cached, recompiled only on query change)
+	matchCount  int             // number of matches for the current query
 }
 
 // NewLogViewerModel creates a new log viewer model.
 func NewLogViewerModel() *LogViewerModel {
-	vp := viewport.New(0, 1)
+	vp := viewport.New(viewport.WithWidth(0), viewport.WithHeight(1))
 	// Use helpViewportKeyMap to prevent letter keys (j/k/d/u/f/b) from
 	// conflicting with app chord bindings. Mouse scroll is handled
 	// explicitly in app.go handleMouse.
 	vp.KeyMap = helpViewportKeyMap()
-	return &LogViewerModel{
-		autoScroll: true,
-		viewport:   vp,
+	vp.SoftWrap = true
+
+	// Highlight styles for search matches
+	vp.HighlightStyle = lipgloss.NewStyle().
+		Background(lipgloss.Color("#555500")).
+		Foreground(lipgloss.Color("#ffffff"))
+	vp.SelectedHighlightStyle = lipgloss.NewStyle().
+		Background(lipgloss.Color("#aaaa00")).
+		Foreground(lipgloss.Color("#000000")).
+		Bold(true)
+
+	ti := newTextInput()
+	ti.Prompt = "/"
+	ti.Placeholder = ""
+	ti.CharLimit = 200
+
+	m := &LogViewerModel{
+		autoScroll:  true,
+		viewport:    vp,
+		searchInput: ti,
 	}
+
+	// Use StyleLineFunc instead of pre-rendered ANSI to keep viewport
+	// content as plain text. This allows SetHighlights to work correctly
+	// (its byte-offset parser operates on ANSI-stripped content).
+	m.viewport.StyleLineFunc = m.styleLogLine
+
+	return m
 }
 
 // AddLine appends a single log line.
@@ -93,9 +127,8 @@ func (m *LogViewerModel) AddLines(batch []string) {
 func (m *LogViewerModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	contentH := max(h-3, 1)
-	m.viewport.Width = w - 2 // account for borders
-	m.viewport.Height = contentH
+	m.viewport.SetWidth(w - 2) // account for borders
+	m.resizeViewport()
 	m.updateViewportContent()
 	if m.autoScroll {
 		m.viewport.GotoBottom()
@@ -105,6 +138,12 @@ func (m *LogViewerModel) SetSize(w, h int) {
 // SetFocused sets the focus state.
 func (m *LogViewerModel) SetFocused(f bool) {
 	m.focused = f
+	// Cancel search input when losing focus (keep existing results)
+	if !f && m.searching {
+		m.searching = false
+		m.searchInput.SetValue("")
+		m.resizeViewport()
+	}
 }
 
 // ScrollUp scrolls up by one line via the viewport.
@@ -170,20 +209,30 @@ func (m *LogViewerModel) rebuildFiltered() {
 }
 
 func (m *LogViewerModel) updateViewportContent() {
-	contentW := max(m.width-2, 1)
-
 	if len(m.filtered) == 0 {
-		m.viewport.SetContent(DimStyle.Render("No logs yet."))
+		m.viewport.SetContent("No logs yet.")
 		return
 	}
 
-	var rendered []string
-	for _, line := range m.filtered {
-		display := truncateString(line, contentW)
-		color := logLineColor(line)
-		rendered = append(rendered, lipgloss.NewStyle().Foreground(color).Render(display))
+	// Set plain text content — coloring is handled by StyleLineFunc.
+	// This keeps the viewport content free of ANSI codes so that
+	// SetHighlights byte offsets work correctly.
+	m.viewport.SetContent(strings.Join(m.filtered, "\n"))
+
+	// Re-apply search highlights if a query is active (SetContent clears them).
+	if m.searchQuery != "" {
+		m.applySearchHighlights()
 	}
-	m.viewport.SetContent(strings.Join(rendered, "\n"))
+}
+
+// styleLogLine returns the lipgloss style for a given viewport line index.
+// Used as viewport.StyleLineFunc to color log lines without embedding ANSI
+// in the content (which would break SetHighlights byte offset parsing).
+func (m *LogViewerModel) styleLogLine(idx int) lipgloss.Style {
+	if idx < 0 || idx >= len(m.filtered) {
+		return lipgloss.NewStyle()
+	}
+	return lipgloss.NewStyle().Foreground(logLineColor(m.filtered[idx]))
 }
 
 func (m *LogViewerModel) matchLevel(line string) bool {
@@ -239,7 +288,129 @@ func extractLogLevel(line string) string {
 	return "" // no level marker found
 }
 
-func logLineColor(line string) lipgloss.Color {
+// IsSearching returns true when the search input is visible.
+func (m *LogViewerModel) IsSearching() bool {
+	return m.searching
+}
+
+// HandleSearchKey processes a key press during search mode or with active
+// search results. Returns a tea.Cmd if the textinput produced one.
+// The second return value indicates whether the key was consumed.
+func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
+	key := msg.String()
+
+	// When the search input is visible (typing mode)
+	if m.searching {
+		switch key {
+		case keyCtrlC:
+			// Let Ctrl+C pass through to the app for quit handling
+			return nil, false
+
+		case keyEnter:
+			query := m.searchInput.Value()
+			m.searching = false
+			if query == "" {
+				// Empty query — clear search
+				m.searchQuery = ""
+				m.searchRegex = nil
+				m.matchCount = 0
+				m.viewport.ClearHighlights()
+				m.resizeViewport()
+				return nil, true
+			}
+			m.searchQuery = query
+			m.searchRegex, _ = regexp.Compile("(?i)" + regexp.QuoteMeta(query))
+			m.applySearchHighlights()
+			m.resizeViewport()
+			// Jump to first match
+			m.viewport.HighlightNext()
+			m.autoScroll = m.viewport.AtBottom()
+			return nil, true
+
+		case keyEsc:
+			// Cancel search input without clearing existing results
+			m.searching = false
+			m.searchInput.SetValue("")
+			m.resizeViewport()
+			return nil, true
+
+		default:
+			// Consume the key so it doesn't reach the chord system.
+			// The textinput is updated via UpdateSearchInput in routeComponentMsg.
+			return nil, true
+		}
+	}
+
+	// When search results are active (not typing)
+	if m.searchQuery != "" {
+		// n/N for next/previous — intercept before chord normalization
+		// to distinguish lowercase n from uppercase N.
+		switch key {
+		case keyEsc:
+			m.searchQuery = ""
+			m.searchRegex = nil
+			m.matchCount = 0
+			m.viewport.ClearHighlights()
+			return nil, true
+		case "n":
+			m.viewport.HighlightNext()
+			m.autoScroll = m.viewport.AtBottom()
+			return nil, true
+		case "N":
+			m.viewport.HighlightPrevious()
+			m.autoScroll = m.viewport.AtBottom()
+			return nil, true
+		}
+	}
+
+	return nil, false
+}
+
+// StartSearch activates the search input. Returns a tea.Cmd for the textinput focus.
+func (m *LogViewerModel) StartSearch() tea.Cmd {
+	m.searching = true
+	m.searchInput.SetValue("")
+	m.resizeViewport()
+	return m.searchInput.Focus()
+}
+
+// applySearchHighlights runs the search regex against the viewport content
+// and sets highlight ranges.
+func (m *LogViewerModel) applySearchHighlights() {
+	if m.searchRegex == nil {
+		m.matchCount = 0
+		return
+	}
+	content := m.viewport.GetContent()
+	matches := m.searchRegex.FindAllStringIndex(content, -1)
+	m.matchCount = len(matches)
+	if len(matches) > 0 {
+		m.viewport.SetHighlights(matches)
+	} else {
+		m.viewport.ClearHighlights()
+	}
+}
+
+// resizeViewport recalculates viewport height accounting for the search bar.
+func (m *LogViewerModel) resizeViewport() {
+	contentH := max(m.height-3, 1)
+	if m.searching {
+		contentH = max(contentH-1, 1) // search bar takes 1 line
+	}
+	m.viewport.SetHeight(contentH)
+}
+
+// UpdateSearchInput delegates a tea.Msg to the search textinput when searching.
+func (m *LogViewerModel) UpdateSearchInput(msg tea.Msg) tea.Cmd {
+	if !m.searching {
+		return nil
+	}
+	var cmd tea.Cmd
+	m.searchInput, cmd = m.searchInput.Update(msg)
+	return cmd
+}
+
+func logLineColor(line string) color.Color {
 	level := extractLogLevel(line)
 	switch level {
 	case "ERROR":
@@ -267,6 +438,18 @@ func (m *LogViewerModel) View() string {
 	// Suffixes are only appended if they fit within contentW to prevent
 	// header wrapping (which adds an extra line and causes vertical shifting).
 	header := titleStyle.Render(fmt.Sprintf("Logs (%d)", len(m.filtered)))
+	// Search query indicator (when search is active but not typing)
+	if !m.searching && m.searchQuery != "" {
+		queryDisplay := m.searchQuery
+		if len(queryDisplay) > 20 {
+			queryDisplay = queryDisplay[:20] + "..."
+		}
+		matchSuffix := fmt.Sprintf(" [/%s] (%d matches)", queryDisplay, m.matchCount)
+		suffix := " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaa00")).Render(matchSuffix)
+		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
+			header += suffix
+		}
+	}
 	// Level filter suffix (L3)
 	if m.level != LogLevelAll {
 		suffix := " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("["+m.level.String()+"+]")
@@ -282,7 +465,7 @@ func (m *LogViewerModel) View() string {
 		}
 	}
 	// Scroll percentage with brackets (L1 - match TS format [XX%])
-	if len(m.filtered) > m.viewport.Height {
+	if len(m.filtered) > m.viewport.Height() {
 		pct := int(m.viewport.ScrollPercent() * 100)
 		suffix := " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
 		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
@@ -290,7 +473,16 @@ func (m *LogViewerModel) View() string {
 		}
 	}
 
-	content := header + "\n" + m.viewport.View()
+	content := header + "\n"
+
+	// Search bar (when actively typing)
+	if m.searching {
+		m.searchInput.SetWidth(contentW - 1) // -1 for "/" prompt
+		content += m.searchInput.View() + "\n"
+	}
+
+	content += m.viewport.View()
+
 	if m.focused && !m.autoScroll {
 		pauseHint := DimStyle.Render("↓ Auto-scroll paused (End to resume)")
 		content += "\n" + pauseHint

@@ -4,11 +4,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/filepicker"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/filepicker"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -186,7 +186,9 @@ func (m *ImportDialogModel) HandleKey(key string) (string, string) {
 }
 
 // SpinnerInit returns the spinner's initial tick command when importing.
-func (m *ImportDialogModel) SpinnerInit() tea.Cmd { return m.spinner.Tick }
+func (m *ImportDialogModel) SpinnerInit() tea.Cmd {
+	return func() tea.Msg { return m.spinner.Tick() }
+}
 
 // GetImportTitle returns the optional title metadata.
 func (m *ImportDialogModel) GetImportTitle() string {

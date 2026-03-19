@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 type helpSection struct {
@@ -39,6 +39,8 @@ var navigationKeys = helpSection{
 		{"↑/↓", "Select / Scroll"},
 		{"PgUp/PgDn", "Page scroll (Logs)"},
 		{"Enter", "Expand/collapse archives"},
+		{"/", "Search logs (when Logs focused)"},
+		{"n / N", "Next / previous search match"},
 	},
 }
 
@@ -99,7 +101,7 @@ type HelpModel struct {
 
 // NewHelpModel creates a new help model.
 func NewHelpModel() *HelpModel {
-	vp := viewport.New(0, 0)
+	vp := viewport.New(viewport.WithWidth(0), viewport.WithHeight(0))
 	vp.KeyMap = helpViewportKeyMap()
 	return &HelpModel{
 		viewport: vp,
@@ -161,8 +163,8 @@ func (m *HelpModel) buildContent() {
 	w := max(m.width-4, 20)
 	h := max(m.height-4, 5)
 
-	m.viewport.Width = w
-	m.viewport.Height = h - 1 // -1 for header line
+	m.viewport.SetWidth(w)
+	m.viewport.SetHeight(h - 1) // -1 for header line
 	m.viewport.SetContent(strings.Join(allLines, "\n"))
 	m.viewport.GotoTop()
 }
@@ -178,7 +180,7 @@ func (m *HelpModel) View() string {
 
 	// Header with scroll percentage
 	leftPart := TitleStyle.Render("Help")
-	if m.viewport.TotalLineCount() > m.viewport.Height {
+	if m.viewport.TotalLineCount() > m.viewport.Height() {
 		pct := int(m.viewport.ScrollPercent() * 100)
 		leftPart += " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
 	}

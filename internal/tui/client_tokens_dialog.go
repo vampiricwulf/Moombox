@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -218,10 +218,12 @@ func (m *ClientTokensDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 }
 
 // SpinnerInit returns the spinner's initial tick command.
-func (m *ClientTokensDialogModel) SpinnerInit() tea.Cmd { return m.spinner.Tick }
+func (m *ClientTokensDialogModel) SpinnerInit() tea.Cmd {
+	return func() tea.Msg { return m.spinner.Tick() }
+}
 
 // HandleKey processes key input. Returns action string and optional command.
-func (m *ClientTokensDialogModel) HandleKey(msg tea.KeyMsg) (string, tea.Cmd) {
+func (m *ClientTokensDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 	// Confirmation timeout
 	if m.revokeConfirmID != "" && !m.confirmTimer.IsZero() && time.Now().After(m.confirmTimer) {
 		m.revokeConfirmID = ""

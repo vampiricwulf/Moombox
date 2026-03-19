@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -752,6 +752,12 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 
 	// Status icon (retains status color even when selected, per TS)
 	iconStyle := lipgloss.NewStyle().Foreground(color)
+	switch job.Status {
+	case database.StatusError:
+		iconStyle = iconStyle.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorError)
+	case database.StatusCookies:
+		iconStyle = iconStyle.UnderlineStyle(lipgloss.UnderlineCurly).UnderlineColor(ColorCookies)
+	}
 	if dimmed {
 		iconStyle = iconStyle.Faint(true)
 	}

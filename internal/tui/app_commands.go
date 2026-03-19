@@ -13,7 +13,7 @@ import (
 	"runtime"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
@@ -459,10 +459,7 @@ func openBrowser(url string) {
 
 // Run starts the TUI program.
 func Run(app *App) error {
-	p := tea.NewProgram(app,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+	p := tea.NewProgram(app)
 	app.program = p
 	_, err := p.Run()
 	return err

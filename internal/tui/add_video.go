@@ -2,14 +2,15 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/table"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/table"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // AddVideoStep represents steps in the add video dialog.
@@ -565,7 +566,9 @@ func (m *AddVideoModel) GetStartTime() string { return m.startTimeInput }
 func (m *AddVideoModel) GetEndTime() string { return m.endTimeInput }
 
 // SpinnerInit returns the spinner's initial tick command when loading.
-func (m *AddVideoModel) SpinnerInit() tea.Cmd { return m.spinner.Tick }
+func (m *AddVideoModel) SpinnerInit() tea.Cmd {
+	return func() tea.Msg { return m.spinner.Tick() }
+}
 
 // GetPlatform returns the detected platform.
 func (m *AddVideoModel) GetPlatform() string { return m.platform }
@@ -581,7 +584,7 @@ func (m *AddVideoModel) View() string {
 
 	contentW := boxW - 2
 
-	var borderColor lipgloss.Color
+	var borderColor color.Color
 	if m.advancedMode || m.advancedEnabled {
 		borderColor = ColorCookies // magenta
 	} else {
@@ -627,9 +630,12 @@ func (m *AddVideoModel) renderURLStep(w, h int) string {
 	if m.advancedEnabled {
 		color = ColorCookies
 	}
-	m.textInput.TextStyle = lipgloss.NewStyle().Foreground(color)
-	m.textInput.Cursor.Style = lipgloss.NewStyle().Foreground(color)
-	m.textInput.Width = w - 2
+	tiStyles := m.textInput.Styles()
+	tiStyles.Focused.Text = lipgloss.NewStyle().Foreground(color)
+	tiStyles.Blurred.Text = lipgloss.NewStyle().Foreground(color)
+	tiStyles.Cursor.Color = color
+	m.textInput.SetStyles(tiStyles)
+	m.textInput.SetWidth(w - 2)
 	lines = append(lines, m.textInput.View())
 	lines = append(lines, "")
 

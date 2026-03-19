@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	// Settings panel intercepts all keys (before normalization to preserve case for text input)
@@ -65,10 +65,10 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		case strings.HasPrefix(action, "prepare:"):
 			method := strings.TrimPrefix(action, "prepare:")
-			return a, tea.Batch(a.ffmpegPrepareCmd(method), a.ffmpegCheck.spinner.Tick)
+			return a, tea.Batch(a.ffmpegPrepareCmd(method), func() tea.Msg { return a.ffmpegCheck.spinner.Tick() })
 		case strings.HasPrefix(action, "confirm:"):
 			token := strings.TrimPrefix(action, "confirm:")
-			return a, tea.Batch(a.ffmpegConfirmCmd(token), a.ffmpegCheck.spinner.Tick)
+			return a, tea.Batch(a.ffmpegConfirmCmd(token), func() tea.Msg { return a.ffmpegCheck.spinner.Tick() })
 		case strings.HasPrefix(action, "reject:"):
 			token := strings.TrimPrefix(action, "reject:")
 			if a.OnRejectInstall != nil {
@@ -83,7 +83,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.ShowInstallOptions()
 		case strings.HasPrefix(action, "check_custom:"):
 			path := strings.TrimPrefix(action, "check_custom:")
-			return a, tea.Batch(a.ffmpegCheckCmd(path), a.ffmpegCheck.spinner.Tick)
+			return a, tea.Batch(a.ffmpegCheckCmd(path), func() tea.Msg { return a.ffmpegCheck.spinner.Tick() })
 		case action == "dismiss":
 			// Overlay already closed by HandleKey — nothing else to do.
 		}
@@ -149,7 +149,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}))
 		}
 		if a.setupWiz.cookieActive {
-			cmds = append(cmds, a.setupWiz.spinner.Tick, cookieCountdownTick())
+			cmds = append(cmds, func() tea.Msg { return a.setupWiz.spinner.Tick() }, cookieCountdownTick())
 		}
 		// Deliver pending huh form init cmd immediately (cursor blink, focus)
 		if a.setupWiz.advancedInitCmd != nil {
@@ -215,7 +215,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				jobID := a.trimDlg.JobID()
 				startSec := a.trimDlg.ParsedStartSeconds()
 				endSec := a.trimDlg.ParsedEndSeconds()
-				return a, tea.Batch(a.createTrimCmd(jobID, startSec, endSec), a.trimDlg.spinner.Tick)
+				return a, tea.Batch(a.createTrimCmd(jobID, startSec, endSec), func() tea.Msg { return a.trimDlg.spinner.Tick() })
 			}
 		case "background":
 			a.setFeedback("Trim encoding in background...")
@@ -225,7 +225,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if trimID != "" {
 					a.trimDlg.SetLoading(true)
 					jobID := a.trimDlg.JobID()
-					return a, tea.Batch(a.deleteTrimCmd(jobID, trimID), a.trimDlg.spinner.Tick)
+					return a, tea.Batch(a.deleteTrimCmd(jobID, trimID), func() tea.Msg { return a.trimDlg.spinner.Tick() })
 				}
 			}
 		}
@@ -260,6 +260,18 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 		return a, nil
+	}
+
+	// Log search intercept — must be before key normalization to preserve
+	// case for N (shift+n) and before chord system to capture / and n/N.
+	if a.focusedPanel == PanelLogs {
+		if cmd, consumed := a.logs.HandleSearchKey(msg); consumed {
+			return a, cmd
+		}
+		// "/" starts search (not in chord system, not during active search input)
+		if key == "/" && !a.logs.IsSearching() {
+			return a, a.logs.StartSearch()
+		}
 	}
 
 	// Normalize single-character keys to lowercase (match TS: accepts both d/D, c/C, etc.)

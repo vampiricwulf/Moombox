@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 )
 
 // updateTextInputForField configures the textInput based on the current state.
@@ -80,7 +80,7 @@ func (m *SettingsModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	}
 	// Suppress "i" key on ffmpeg_path field — it opens the FFmpeg installer
 	// and must not be typed into the text input.
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "i" {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "i" {
 		sec := sections[m.sectionIndex]
 		if sec.name == "Paths" && sec.fields != nil && m.fieldIndex < len(sec.fields) &&
 			sec.fields[m.fieldIndex].key == "ffmpeg_path" {

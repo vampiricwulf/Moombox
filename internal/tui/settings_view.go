@@ -2,9 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -188,7 +189,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 			}
 			valueMaxW := max(w-len(prefix)-padWidth-indicatorW, 5)
 			if selected {
-				m.textInput.Width = valueMaxW
+				m.textInput.SetWidth(valueMaxW)
 				value = m.textInput.View()
 			} else {
 				value = renderInactiveInput(m.values[fd.key], valueMaxW, ColorWhite)
@@ -399,7 +400,7 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 		default:
 			valueMaxW := max(w-runewidth.StringWidth(prefix)-padW-2, 5)
 			if isFocused {
-				m.textInput.Width = valueMaxW
+				m.textInput.SetWidth(valueMaxW)
 				value = m.textInput.View()
 			} else {
 				value = renderInactiveInput(val, valueMaxW, ColorWhite)
@@ -489,7 +490,7 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 	urlMaxW := max(w-runewidth.StringWidth(urlPrefix)-16-2, 10)
 	var urlVal string
 	if urlFocused {
-		m.textInput.Width = urlMaxW
+		m.textInput.SetWidth(urlMaxW)
 		urlVal = m.textInput.View()
 	} else {
 		urlVal = renderInactiveInput(m.notifEditURL, urlMaxW, ColorWhite)
@@ -530,7 +531,7 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 				eventStyle = lipgloss.NewStyle().Foreground(ColorCyan)
 			}
 
-			lines = append(lines, lipgloss.NewStyle().Foreground(func() lipgloss.Color {
+			lines = append(lines, lipgloss.NewStyle().Foreground(func() color.Color {
 				if isFocused {
 					return ColorCyan
 				}
@@ -656,7 +657,7 @@ func (m *SettingsModel) renderSecuritySet(w int) string {
 		var val string
 		if isFocused {
 			pwMaxW := max(w-len(prefix)-padW-2, 10)
-			m.textInput.Width = pwMaxW
+			m.textInput.SetWidth(pwMaxW)
 			val = m.textInput.View()
 		} else {
 			val = renderPasswordDots(f.value)
@@ -698,7 +699,7 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 	// Password field
 	labelStyle := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
 	pwMaxW := max(w-2-20-2, 10)
-	m.textInput.Width = pwMaxW
+	m.textInput.SetWidth(pwMaxW)
 	lines = append(lines, "> "+labelStyle.Render(padRight("Current password", 20))+m.textInput.View())
 
 	if m.secMessage != "" {

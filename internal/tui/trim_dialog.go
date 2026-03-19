@@ -5,11 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // TrimMode represents create vs delete mode.
@@ -76,7 +76,7 @@ func NewTrimDialogModel() *TrimDialogModel {
 	pb := progress.New(progress.WithoutPercentage())
 	pb.Full = '\u2588'  // █
 	pb.Empty = '\u2591' // ░
-	pb.EmptyColor = string(ColorGray)
+	pb.EmptyColor = ColorGray
 	return &TrimDialogModel{
 		textInput:   newTextInput(),
 		spinner:     newSpinner(),
@@ -508,9 +508,9 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 
 		// Progress bar
 		barWidth := max(w-4, 10)
-		m.progressBar.Width = barWidth
+		m.progressBar.SetWidth(barWidth)
 		// Mux gradient: green (encoding) → yellow (muxing)
-		progress.WithGradient(string(ColorDownloading), string(ColorMuxing))(&m.progressBar)
+		progress.WithColors(ColorDownloading, ColorMuxing)(&m.progressBar)
 		lines = append(lines, "  "+m.progressBar.ViewAs(m.progressPercent/100))
 		lines = append(lines, "")
 

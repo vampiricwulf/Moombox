@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"image/color"
 	"testing"
 
+	lipgloss "charm.land/lipgloss/v2"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -148,31 +150,32 @@ func TestParseTimeToSeconds(t *testing.T) {
 // --- feedbackColor ---
 
 func TestFeedbackColor(t *testing.T) {
+	yellow := lipgloss.Color("#f1c40f")
 	tests := []struct {
 		msg       string
-		wantColor string
+		wantColor color.Color
 	}{
 		// Chord feedback (yellow)
-		{"Press D to confirm delete", "#f1c40f"},
-		{"Action: A Add | I Import", "#f1c40f"},
+		{"Press D to confirm delete", yellow},
+		{"Action: A Add | I Import", yellow},
 		// Error (red)
-		{"Cancelled: Some Job", string(ColorRed)},
-		{"Update check failed: timeout", string(ColorRed)},
-		{"Invalid Chord: A X", string(ColorRed)},
+		{"Cancelled: Some Job", ColorRed},
+		{"Update check failed: timeout", ColorRed},
+		{"Invalid Chord: A X", ColorRed},
 		// Warning (yellow)
-		{"Already up to date", "#f1c40f"},
-		{"No stream URL available", "#f1c40f"},
+		{"Already up to date", yellow},
+		{"No stream URL available", yellow},
 		// Deletion (gray)
-		{"Deleted: Some Job", string(ColorGray)},
+		{"Deleted: Some Job", ColorGray},
 		// Success (green, default)
-		{"Imported: archive", string(ColorGreen)},
-		{"Added to queue", string(ColorGreen)},
+		{"Imported: archive", ColorGreen},
+		{"Added to queue", ColorGreen},
 	}
 
 	for _, tc := range tests {
 		got := feedbackColor(tc.msg)
-		if string(got) != tc.wantColor {
-			t.Errorf("feedbackColor(%q) = %q, want %q", tc.msg, string(got), tc.wantColor)
+		if got != tc.wantColor {
+			t.Errorf("feedbackColor(%q) = %v, want %v", tc.msg, got, tc.wantColor)
 		}
 	}
 }

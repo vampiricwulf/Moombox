@@ -3,11 +3,11 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // ffmpegMode identifies which view the FFmpeg check overlay is in.
@@ -134,8 +134,8 @@ func (m *FFmpegCheckModel) SetSize(w, h int) {
 
 	if m.mode == ffmpegReview {
 		_, contentW := dialogBox(60, w)
-		m.reviewViewport.Width = contentW - 4
-		m.reviewViewport.Height = max(min(h-20, 6), 3)
+		m.reviewViewport.SetWidth(contentW - 4)
+		m.reviewViewport.SetHeight(max(min(h-20, 6), 3))
 	}
 }
 
@@ -145,7 +145,7 @@ func (m *FFmpegCheckModel) updateTextInputWidth() {
 		return
 	}
 	_, contentW := dialogBox(60, m.width)
-	m.textInput.Width = contentW - 2
+	m.textInput.SetWidth(contentW - 2)
 }
 
 // UpdateComponents routes tea.Msg to the embedded textinput, viewport, or spinner and syncs.
@@ -163,7 +163,7 @@ func (m *FFmpegCheckModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 
 	// Review mode: only forward non-key messages and scroll keys to viewport
 	if m.mode == ffmpegReview {
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 			// Only forward scroll-related keys to the viewport
 			switch keyMsg.String() {
 			case keyUp, keyDown, "pgup", "pgdown", "ctrl+u", "ctrl+d", keyHome, keyEnd:
@@ -382,7 +382,7 @@ func (m *FFmpegCheckModel) ShowReview(script, token string) {
 		vpW = contentW - 4
 	}
 	vpW = max(vpW, 0)
-	m.reviewViewport = viewport.New(vpW, 6)
+	m.reviewViewport = viewport.New(viewport.WithWidth(vpW), viewport.WithHeight(6))
 	m.reviewViewport.SetContent(script)
 }
 
@@ -572,7 +572,7 @@ func (m *FFmpegCheckModel) View() string {
 		lines = append(lines, "")
 
 		// Scrollable script display via viewport
-		m.reviewViewport.Width = contentW - 4
+		m.reviewViewport.SetWidth(contentW - 4)
 		scriptStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 		for sl := range strings.SplitSeq(m.reviewViewport.View(), "\n") {
 			lines = append(lines, scriptStyle.Render("  "+sl))

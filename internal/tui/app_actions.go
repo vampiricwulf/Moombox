@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -215,6 +215,14 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			} else {
 				a.setFeedback("No stream URL available")
 			}
+		}
+	case "O C":
+		if job != nil {
+			if url := streamURL(job); url != "" {
+				a.setFeedback("Copied: " + url)
+				return a, tea.SetClipboard(url)
+			}
+			a.setFeedback("No URL to copy")
 		}
 	case "O W":
 		scheme := "http"
@@ -458,6 +466,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			DisabledReason: "no jobs with stream URLs",
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 		ActionMenuItem{Chord: "O W", Label: "Open Web UI", HintLabel: "Web", Category: "Open"},
+		ActionMenuItem{Chord: "O C", Label: "Copy Stream URL", HintLabel: "Copy URL", Category: "Open", NeedsJob: true,
+			DisabledReason: "no jobs with stream URLs",
+			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
 	)
 
 	// Filter + Other

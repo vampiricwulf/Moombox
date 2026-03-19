@@ -1,6 +1,6 @@
 package tui
 
-import tea "github.com/charmbracelet/bubbletea"
+import tea "charm.land/bubbletea/v2"
 
 // PanelRegion stores the screen coordinates of a panel for mouse hit-testing.
 type PanelRegion struct {
@@ -21,15 +21,24 @@ func (r PanelRegion) ContentY(mouseY int) int {
 
 // isScrollUp returns true if the mouse event is a scroll up.
 func isScrollUp(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonWheelUp
+	if wm, ok := msg.(tea.MouseWheelMsg); ok {
+		return wm.Button == tea.MouseWheelUp
+	}
+	return false
 }
 
 // isScrollDown returns true if the mouse event is a scroll down.
 func isScrollDown(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonWheelDown
+	if wm, ok := msg.(tea.MouseWheelMsg); ok {
+		return wm.Button == tea.MouseWheelDown
+	}
+	return false
 }
 
 // isLeftClick returns true if the mouse event is a left click.
 func isLeftClick(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress
+	if cm, ok := msg.(tea.MouseClickMsg); ok {
+		return cm.Button == tea.MouseLeft
+	}
+	return false
 }

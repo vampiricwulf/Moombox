@@ -5,9 +5,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -464,7 +464,8 @@ func (m *ActionMenuModel) HandleMouse(msg tea.MouseMsg) {
 	}
 
 	padLeft, padTop, renderedW, ch := m.overlayGeometry()
-	x, y := msg.X, msg.Y
+	mo := msg.Mouse()
+	x, y := mo.X, mo.Y
 
 	// Check X bounds (within the overlay box)
 	inBox := x >= padLeft && x < padLeft+renderedW

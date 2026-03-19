@@ -2,13 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/bubbles/cursor"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -20,13 +20,15 @@ func newSpinner() spinner.Model {
 	return s
 }
 
-// newTextInput creates a text input with Moombox styling and a static cursor.
+// newTextInput creates a text input with Moombox styling.
 func newTextInput() textinput.Model {
 	ti := textinput.New()
 	ti.Prompt = ""
-	ti.Cursor.SetMode(cursor.CursorStatic)
-	ti.Cursor.Style = lipgloss.NewStyle().Foreground(ColorCyan)
-	ti.TextStyle = lipgloss.NewStyle().Foreground(ColorCyan)
+	s := ti.Styles()
+	s.Focused.Text = lipgloss.NewStyle().Foreground(ColorCyan)
+	s.Blurred.Text = lipgloss.NewStyle().Foreground(ColorCyan)
+	s.Cursor.Color = ColorCyan
+	ti.SetStyles(s)
 	return ti
 }
 
@@ -59,12 +61,12 @@ func validateDigitsOnly(s string) error {
 }
 
 // renderInactiveInput renders a text value styled but without a cursor.
-func renderInactiveInput(value string, w int, color lipgloss.Color) string {
+func renderInactiveInput(value string, w int, c color.Color) string {
 	display := value
 	if runewidth.StringWidth(display) > w {
 		display = truncateString(display, w)
 	}
-	return lipgloss.NewStyle().Foreground(color).Render(display)
+	return lipgloss.NewStyle().Foreground(c).Render(display)
 }
 
 // renderPasswordDots renders a masked password string (dots).
@@ -134,7 +136,7 @@ func renderTimeInputPair(
 	activeField int,
 	ti textinput.Model,
 	w int,
-	accentColor lipgloss.Color,
+	accentColor color.Color,
 ) []string {
 	startLabel := "  Start: "
 	endLabel := "  End:   "
@@ -154,9 +156,12 @@ func renderTimeInputPair(
 		endStyle = lipgloss.NewStyle().Foreground(accentColor)
 	}
 
-	ti.TextStyle = lipgloss.NewStyle().Foreground(ColorCyan)
-	ti.Cursor.Style = lipgloss.NewStyle().Foreground(ColorCyan)
-	ti.Width = w - 12
+	s := ti.Styles()
+	s.Focused.Text = lipgloss.NewStyle().Foreground(ColorCyan)
+	s.Blurred.Text = lipgloss.NewStyle().Foreground(ColorCyan)
+	s.Cursor.Color = ColorCyan
+	ti.SetStyles(s)
+	ti.SetWidth(w - 12)
 
 	var lines []string
 	if activeField == 0 {

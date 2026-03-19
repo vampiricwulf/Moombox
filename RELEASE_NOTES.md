@@ -1,17 +1,10 @@
-### Bug Fixes
+### Features
 
-- Fix Resume/Mux buttons disappearing in Web UI details dialog during WebSocket updates
-- Fix batch operations ignoring archived jobs in Web UI
-- Fix TUI batch cancel not filtering by cancellable status (could cancel finished/errored jobs)
-- Fix FFmpeg "i" shortcut in TUI settings typing into the path field before opening installer
-- Fix "Cancelled 0 jobs" feedback when no jobs in selection match cancellable status
-
-### Improvements
-
-- Extract `EffectiveStagingDir()` config helper — eliminates 6+ repeated "./staging" fallbacks
-- Consolidate template preview logic — settings delegates to shared `templatePreview()` function
-- Extract shared job container click handler in Web UI — deduplicates checkbox/expand/action logic
-- Per-container shift-click tracking — prevents cross-container range selection bugs
-- Extract `wasCancelledOrShutdown()` in chat downloader — deduplicates cancellation detection
-- Close chat downloader `done` channel safely under lock
-- Consistent struct field alignment across TUI panel declarations
+- **Charm V2 migration** — upgrade to bubbletea v2, bubbles v2, lipgloss v2, huh v2 (charm.land modules)
+- **Log search** — press `/` in the log panel for vim-style search with `n`/`N` navigation and match highlighting
+- **Clickable hyperlinks** — stream URLs and file paths in job details are now clickable (OSC 8)
+- **Clipboard copy** — `O C` chord copies the selected job's stream URL to clipboard (OSC 52)
+- **Curly underlines** — Error and COOKIES? status icons show curly underline indicators
+- **Soft-wrapped logs** — long log lines wrap instead of being truncated
+- **Native cursor** — text inputs use the terminal's native blinking cursor
+- **Dark/light detection** — detects terminal background color for component theming

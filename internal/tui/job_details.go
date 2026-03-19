@@ -2,14 +2,17 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"math"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -53,12 +56,13 @@ type detailRow struct {
 	kind  rowKind
 	label string
 	value string
-	color lipgloss.Color
+	color color.Color
+	link  string // OSC 8 hyperlink URL; empty means no hyperlink
 }
 
 // NewJobDetailsModel creates a new job details model.
 func NewJobDetailsModel() *JobDetailsModel {
-	vp := viewport.New(0, 1)
+	vp := viewport.New(viewport.WithWidth(0), viewport.WithHeight(1))
 	// Use helpViewportKeyMap so arrow keys work but letter keys (j/k/d/u/f/b)
 	// don't conflict with app chord bindings. Mouse scroll is handled
 	// explicitly in app.go handleMouse.
@@ -67,7 +71,7 @@ func NewJobDetailsModel() *JobDetailsModel {
 	pb := progress.New(progress.WithoutPercentage())
 	pb.Full = '█'
 	pb.Empty = '░'
-	pb.EmptyColor = string(ColorGray)
+	pb.EmptyColor = ColorGray
 
 	return &JobDetailsModel{viewport: vp, progress: pb}
 }
@@ -112,7 +116,7 @@ func (m *JobDetailsModel) SetJob(job *database.Job) {
 // are recomputed from live data every 100ms (matches TS re-render behavior).
 func (m *JobDetailsModel) SetProgress(p *ProgressData) {
 	m.progressOverlay = p
-	yOffset := m.viewport.YOffset
+	yOffset := m.viewport.YOffset()
 	m.buildRows()
 	m.updateViewportContent()
 	m.viewport.SetYOffset(yOffset)
@@ -124,8 +128,8 @@ func (m *JobDetailsModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 	contentH := max(h-3, 1)
-	m.viewport.Width = w - 2
-	m.viewport.Height = contentH
+	m.viewport.SetWidth(w - 2)
+	m.viewport.SetHeight(contentH)
 	m.updateViewportContent()
 	// Recalculate marquee width when panel width changes (e.g. focus change,
 	// or initial WindowSizeMsg arriving after jobs are already loaded).
@@ -216,7 +220,7 @@ func (m *JobDetailsModel) buildRows() {
 	m.addField(vidIDLabel, vidID)
 	// URL only shown if present
 	if j.URL != "" {
-		m.addField("URL", j.URL)
+		m.addFieldLink("URL", j.URL, j.URL)
 	}
 	m.addFieldColor("Status", status, StatusColor(status))
 	// VOD/Live type indicator (matching Web UI)
@@ -477,7 +481,15 @@ func (m *JobDetailsModel) buildRows() {
 	// === File (J15 - label "File", truncate, gate on Filename to match TS) ===
 	if j.Filename != "" {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})
-		m.addField("File", j.Filename)
+		// Build file:/// hyperlink from the full path (OutputFile) or OutputDirectory+Filename.
+		fileLink := ""
+		if fullPath := j.OutputFile; fullPath != "" {
+			fileLink = (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(fullPath)}).String()
+		} else if j.OutputDirectory != "" {
+			fullPath = filepath.Join(j.OutputDirectory, j.Filename)
+			fileLink = (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(fullPath)}).String()
+		}
+		m.addFieldLink("File", j.Filename, fileLink)
 	}
 
 	// === Description ===
@@ -587,7 +599,7 @@ func (m *JobDetailsModel) addSegmentRowsCommon(j *database.Job, lastVideoSeq, la
 }
 
 // chatStatusColor returns appropriate color for chat status (J7).
-func (m *JobDetailsModel) chatStatusColor(status string) lipgloss.Color {
+func (m *JobDetailsModel) chatStatusColor(status string) color.Color {
 	lower := strings.ToLower(status)
 	if strings.Contains(lower, "downloading") || strings.Contains(lower, "running") {
 		return ColorGreen
@@ -605,8 +617,12 @@ func (m *JobDetailsModel) addField(label, value string) {
 	m.rows = append(m.rows, detailRow{kind: rowField, label: label, value: value})
 }
 
-func (m *JobDetailsModel) addFieldColor(label, value string, color lipgloss.Color) {
-	m.rows = append(m.rows, detailRow{kind: rowField, label: label, value: value, color: color})
+func (m *JobDetailsModel) addFieldColor(label, value string, c color.Color) {
+	m.rows = append(m.rows, detailRow{kind: rowField, label: label, value: value, color: c})
+}
+
+func (m *JobDetailsModel) addFieldLink(label, value, link string) {
+	m.rows = append(m.rows, detailRow{kind: rowField, label: label, value: value, link: link})
 }
 
 // View renders the job details panel.
@@ -634,7 +650,7 @@ func (m *JobDetailsModel) View() string {
 		}
 		// Scroll percentage indicator (match TS [XX%])
 		// Only append if it fits within contentW to prevent header wrapping
-		if m.viewport.TotalLineCount() > m.viewport.Height {
+		if m.viewport.TotalLineCount() > m.viewport.Height() {
 			pct := int(math.Round(m.viewport.ScrollPercent() * 100))
 			suffix := " " + DimStyle.Render(fmt.Sprintf("[%d%%]", pct))
 			if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
@@ -694,17 +710,17 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 			label := padRight("", labelWidth)
 			return label + lipgloss.NewStyle().Foreground(r.color).Render(strings.TrimSpace(pctLabel))
 		}
-		m.progress.Width = barW
+		m.progress.SetWidth(barW)
 		// Gradient: blend from the previous phase's color into the current status color
 		colorA, colorB := progressGradient(r.value)
-		progress.WithGradient(colorA, colorB)(&m.progress)
+		progress.WithColors(colorA, colorB)(&m.progress)
 		label := padRight("", labelWidth)
 		return label + m.progress.ViewAs(percent/100) + lipgloss.NewStyle().Foreground(r.color).Render(pctLabel)
 
 	case rowField:
 		if r.label == "" {
 			// Description/error line (no label)
-			if r.color != "" {
+			if r.color != nil {
 				return lipgloss.NewStyle().Foreground(r.color).Render(r.value)
 			}
 			return r.value
@@ -721,8 +737,15 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 		} else {
 			val = truncateString(val, valueW)
 		}
-		if r.color != "" {
-			val = lipgloss.NewStyle().Foreground(r.color).Render(val)
+		valStyle := lipgloss.NewStyle()
+		if r.color != nil {
+			valStyle = valStyle.Foreground(r.color)
+		}
+		if r.link != "" {
+			valStyle = valStyle.Hyperlink(r.link)
+		}
+		if r.color != nil || r.link != "" {
+			val = valStyle.Render(val)
 		}
 		return label + val
 	}
@@ -732,15 +755,15 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 
 // progressGradient returns gradient start/end colors for a progress bar based on job status.
 // The bar blends from the previous phase color into the current status color.
-func progressGradient(status string) (string, string) {
+func progressGradient(status string) (color.Color, color.Color) {
 	switch status {
 	case "Downloading", "Live":
-		return string(ColorUpcoming), string(ColorDownloading)
+		return ColorUpcoming, ColorDownloading
 	case "Muxing":
-		return string(ColorDownloading), string(ColorMuxing)
+		return ColorDownloading, ColorMuxing
 	default:
-		color := string(StatusColor(status))
-		return color, color
+		c := StatusColor(status)
+		return c, c
 	}
 }
 

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -17,6 +17,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.recalcLayout()
+		return a, nil
+
+	case tea.BackgroundColorMsg:
+		a.isDark = msg.IsDark()
+		a.setupWiz.isDark = a.isDark
 		return a, nil
 
 	case tickMsg:
@@ -35,7 +40,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.feedbackTimer = time.Time{}
 		}
 		// Update terminal title
-		return a, tea.Batch(a.updateTerminalTitle(), a.tick())
+		a.updateTerminalTitle()
+		return a, a.tick()
 
 	case progressTickMsg:
 		// Refresh progress overlay for the selected job. Active downloads get
@@ -89,8 +95,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.listenForUpdates()
 
 	case JobUpdateMsg:
-		titleCmd := a.handleJobUpdate(msg.Job)
-		return a, tea.Batch(titleCmd, a.listenForUpdates())
+		a.handleJobUpdate(msg.Job)
+		return a, a.listenForUpdates()
 
 	case JobsUpdateMsg:
 		// Structural change: clear and rebuild progress store + status map (match TS onJobsChange)
@@ -124,7 +130,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		return a, tea.Batch(a.updateTerminalTitle(), a.listenForUpdates())
+		a.updateTerminalTitle()
+		return a, a.listenForUpdates()
 
 	case LogBatchMsg:
 		// Batched log messages — single Update/View cycle for all pending logs
@@ -450,7 +457,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		var cmds []tea.Cmd
 		if cmd := a.routeComponentMsg(msg); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -484,7 +491,7 @@ func (a *App) setFeedbackWithDuration(msg string, d time.Duration) {
 	a.feedbackTimer = time.Now().Add(d)
 }
 
-func (a *App) handleJobUpdate(job *database.Job) tea.Cmd {
+func (a *App) handleJobUpdate(job *database.Job) {
 	// Always update progress store (zero-cost)
 	a.progressStore.Set(job.ID, &ProgressData{
 		Progress:          job.Progress,
@@ -502,7 +509,7 @@ func (a *App) handleJobUpdate(job *database.Job) tea.Cmd {
 	// Only re-sort/re-render if status changed
 	prevStatus, exists := a.statusMap[job.ID]
 	if exists && prevStatus == job.Status {
-		return nil
+		return
 	}
 
 	a.statusMap[job.ID] = job.Status
@@ -517,8 +524,8 @@ func (a *App) handleJobUpdate(job *database.Job) tea.Cmd {
 		a.progressStore.Delete(job.ID)
 	}
 
-	// Update terminal title on status change (via BubbleTea render pipeline)
-	return a.updateTerminalTitle()
+	// Update terminal title on status change
+	a.updateTerminalTitle()
 }
 
 func (a *App) updateSelectedJob() {
@@ -561,6 +568,9 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {
 	case PanelLogs:
+		if a.logs.IsSearching() {
+			return a.logs.UpdateSearchInput(msg)
+		}
 		return a.logs.UpdateViewport(msg)
 	case PanelDetails:
 		return a.details.UpdateViewport(msg)

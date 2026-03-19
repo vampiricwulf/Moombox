@@ -1,9 +1,11 @@
 package tui
 
 import (
-	"github.com/charmbracelet/bubbles/table"
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
+	"image/color"
+
+	"charm.land/bubbles/v2/table"
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -58,41 +60,46 @@ var (
 )
 
 // moomboxTheme returns a huh theme matching the Moombox TUI color scheme.
-func moomboxTheme() *huh.Theme {
-	t := huh.ThemeBase()
+// isDark should reflect the terminal background; Moombox styles are dark-optimized
+// but passing the detected value allows huh.ThemeBase to set correct base defaults.
+// Returns huh.ThemeFunc which implements huh.Theme for use with WithTheme().
+func moomboxTheme(isDark bool) huh.ThemeFunc {
+	return huh.ThemeFunc(func(_ bool) *huh.Styles {
+		t := huh.ThemeBase(isDark)
 
-	// Focused field styles
-	t.Focused.Base = lipgloss.NewStyle().PaddingLeft(1).
-		BorderStyle(lipgloss.ThickBorder()).BorderLeft(true).
-		BorderForeground(ColorCyan)
-	t.Focused.Title = lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
-	t.Focused.Description = DimStyle
-	t.Focused.ErrorIndicator = lipgloss.NewStyle().SetString(" *").Foreground(ColorError)
-	t.Focused.ErrorMessage = lipgloss.NewStyle().Foreground(ColorError)
-	t.Focused.SelectSelector = lipgloss.NewStyle().SetString("> ").Foreground(ColorCyan)
-	t.Focused.Option = lipgloss.NewStyle().Foreground(ColorWhite)
-	t.Focused.TextInput.Cursor = lipgloss.NewStyle().Foreground(ColorCyan)
-	t.Focused.TextInput.CursorText = lipgloss.NewStyle().Foreground(ColorCyan)
-	t.Focused.TextInput.Placeholder = lipgloss.NewStyle().Foreground(ColorGray)
-	t.Focused.TextInput.Text = lipgloss.NewStyle().Foreground(ColorCyan)
-	t.Focused.FocusedButton = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("0")).Background(ColorCyan).
-		Padding(0, 2).MarginRight(1)
-	t.Focused.BlurredButton = lipgloss.NewStyle().
-		Foreground(ColorGray).Background(lipgloss.Color("0")).
-		Padding(0, 2).MarginRight(1)
+		// Focused field styles
+		t.Focused.Base = lipgloss.NewStyle().PaddingLeft(1).
+			BorderStyle(lipgloss.ThickBorder()).BorderLeft(true).
+			BorderForeground(ColorCyan)
+		t.Focused.Title = lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
+		t.Focused.Description = DimStyle
+		t.Focused.ErrorIndicator = lipgloss.NewStyle().SetString(" *").Foreground(ColorError)
+		t.Focused.ErrorMessage = lipgloss.NewStyle().Foreground(ColorError)
+		t.Focused.SelectSelector = lipgloss.NewStyle().SetString("> ").Foreground(ColorCyan)
+		t.Focused.Option = lipgloss.NewStyle().Foreground(ColorWhite)
+		t.Focused.TextInput.Cursor = lipgloss.NewStyle().Foreground(ColorCyan)
+		t.Focused.TextInput.CursorText = lipgloss.NewStyle().Foreground(ColorCyan)
+		t.Focused.TextInput.Placeholder = lipgloss.NewStyle().Foreground(ColorGray)
+		t.Focused.TextInput.Text = lipgloss.NewStyle().Foreground(ColorCyan)
+		t.Focused.FocusedButton = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("0")).Background(ColorCyan).
+			Padding(0, 2).MarginRight(1)
+		t.Focused.BlurredButton = lipgloss.NewStyle().
+			Foreground(ColorGray).Background(lipgloss.Color("0")).
+			Padding(0, 2).MarginRight(1)
 
-	// Blurred field styles
-	t.Blurred = t.Focused
-	t.Blurred.Base = t.Blurred.Base.BorderStyle(lipgloss.HiddenBorder())
-	t.Blurred.Title = lipgloss.NewStyle().Foreground(ColorGray)
-	t.Blurred.TextInput.Text = lipgloss.NewStyle().Foreground(ColorGray)
+		// Blurred field styles
+		t.Blurred = t.Focused
+		t.Blurred.Base = t.Blurred.Base.BorderStyle(lipgloss.HiddenBorder())
+		t.Blurred.Title = lipgloss.NewStyle().Foreground(ColorGray)
+		t.Blurred.TextInput.Text = lipgloss.NewStyle().Foreground(ColorGray)
 
-	// Group styles
-	t.Group.Title = lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
-	t.Group.Description = DimStyle
+		// Group styles
+		t.Group.Title = lipgloss.NewStyle().Bold(true).Foreground(ColorCyan)
+		t.Group.Description = DimStyle
 
-	return t
+		return t
+	})
 }
 
 // formatTableStyles returns table styles matching the Moombox TUI color scheme.
@@ -113,7 +120,7 @@ func formatTableStyles() table.Styles {
 }
 
 // StatusColor returns the lipgloss color for a job status.
-func StatusColor(status string) lipgloss.Color {
+func StatusColor(status string) color.Color {
 	switch database.JobStatus(status) {
 	case database.StatusDownloading, database.StatusLive:
 		return ColorDownloading

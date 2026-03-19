@@ -1,6 +1,6 @@
 package tui
 
-import tea "github.com/charmbracelet/bubbletea"
+import tea "charm.land/bubbletea/v2"
 
 func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Route mouse to action menu when visible
@@ -13,7 +13,8 @@ func (a *App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	x, y := msg.X, msg.Y
+	m := msg.Mouse()
+	x, y := m.X, m.Y
 
 	if isLeftClick(msg) {
 		prevPanel := a.focusedPanel

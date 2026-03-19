@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -156,6 +156,7 @@ type SetupWizardModel struct {
 	visible bool
 	width   int
 	height  int
+	isDark  bool // mirrors App.isDark for theme construction
 
 	mode       setupMode
 	modeChoice int // 0=Quick, 1=Advanced on mode selection screen
@@ -359,7 +360,7 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 	}
 
 	m.advancedForm = huh.NewForm(groups...).
-		WithTheme(moomboxTheme()).
+		WithTheme(moomboxTheme(m.isDark)).
 		WithShowHelp(false)
 	m.advancedForm.SubmitCmd = nil // Don't quit on submit
 	m.advancedInitCmd = m.advancedForm.Init()
@@ -491,7 +492,7 @@ func (m *SetupWizardModel) updateTextInputWidth() {
 	if m.channelEditField < len(fields) {
 		f := fields[m.channelEditField]
 		prefix := "> " // focused field always has "> " prefix
-		m.textInput.Width = contentW - runewidth.StringWidth(prefix+f.label+": ")
+		m.textInput.SetWidth(contentW - runewidth.StringWidth(prefix+f.label+": "))
 	}
 }
 
