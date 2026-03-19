@@ -652,3 +652,124 @@ func (w *DownloadWorker) SetCfgMu(mu *sync.RWMutex) {
 func (w *DownloadWorker) SetParallelDownloads(n int) {
 	w.queue.SetMaxParallel(n)
 }
+
+// ResumeJob resumes a cancelled/errored YouTube job from its saved state.
+// Preserves staging files, progress, and seq numbers.
+func (w *DownloadWorker) ResumeJob(jobID string) {
+	w.db.UpdateJobFields(jobID, map[string]any{
+		"status": database.StatusDownloading,
+		"error":  "",
+	})
+	w.EnqueueJob(jobID)
+}
+
+// ReinitializeJob resets a job to a fresh state and re-enqueues it.
+// Clears all progress fields and deletes the staging directory.
+func (w *DownloadWorker) ReinitializeJob(jobID string) {
+	// Read config for staging path
+	if w.cfgMu != nil {
+		w.cfgMu.RLock()
+	}
+	stagingBase := w.cfg.Paths.StagingDirectory
+	if w.cfgMu != nil {
+		w.cfgMu.RUnlock()
+	}
+	if stagingBase == "" {
+		stagingBase = "./staging"
+	}
+
+	// Delete staging directory
+	stagingDir := filepath.Join(stagingBase, jobID)
+	if err := os.RemoveAll(stagingDir); err != nil {
+		w.logger.Warn("failed to remove staging directory on reinitialize", "path", stagingDir, "err", err)
+	}
+
+	// Clear all non-input fields
+	w.db.UpdateJobFields(jobID, map[string]any{
+		"status":              database.StatusUpcoming,
+		"error":               "",
+		"progress":            "",
+		"percent":             0,
+		"speed":               "",
+		"eta":                 "",
+		"last_video_seq":      nil,
+		"last_audio_seq":      nil,
+		"total_video_seq":     nil,
+		"total_audio_seq":     nil,
+		"chat_status":         "",
+		"total_chat_messages": nil,
+		"download_started_at": "",
+		"stream_end_time":     "",
+		"output_file":         "",
+		"filename":            "",
+		"file_size":           nil,
+		"chat_file":           "",
+		"chat_filename":       "",
+		"description_file":    "",
+		"thumbnail_file":      "",
+		"video_width":         nil,
+		"video_height":        nil,
+		"video_fps":           nil,
+		"length_seconds":      nil,
+		"selected_video_itag": nil,
+		"selected_audio_itag": nil,
+	})
+	w.EnqueueJob(jobID)
+}
+
+// MuxJob force-muxes a cancelled/errored job's staging files.
+// Bypasses the download queue — runs directly in a wg-tracked goroutine.
+func (w *DownloadWorker) MuxJob(jobID string) error {
+	// Read config for staging check
+	if w.cfgMu != nil {
+		w.cfgMu.RLock()
+	}
+	stagingBase := w.cfg.Paths.StagingDirectory
+	if w.cfgMu != nil {
+		w.cfgMu.RUnlock()
+	}
+	if stagingBase == "" {
+		stagingBase = "./staging"
+	}
+
+	if !HasSegmentFiles(stagingBase, jobID) {
+		return fmt.Errorf("no segment files found in staging")
+	}
+
+	w.db.UpdateJobFields(jobID, map[string]any{
+		"status": database.StatusMuxing,
+	})
+
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("panic in MuxJob", "jobID", jobID, "panic", fmt.Sprint(r))
+				w.db.UpdateJobFields(jobID, map[string]any{
+					"status": database.StatusError,
+					"error":  fmt.Sprintf("internal panic: %v", r),
+				})
+			}
+		}()
+
+		job, err := w.db.GetJob(jobID)
+		if err != nil {
+			w.logger.Error("MuxJob: get job failed", "jobID", jobID, "err", err)
+			return
+		}
+
+		jobCtx := w.buildJobContext(job)
+		ctx := context.Background()
+
+		if err := w.orchestrator.muxFromStaging(ctx, jobCtx); err != nil {
+			w.logger.Error("MuxJob failed", "jobID", jobID, "err", err)
+			w.db.UpdateJobFields(jobID, map[string]any{
+				"status": database.StatusError,
+				"error":  err.Error(),
+			})
+		}
+	}()
+
+	return nil
+}

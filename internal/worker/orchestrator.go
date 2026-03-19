@@ -83,11 +83,13 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	ctx = jobCtx2
 
 	// Update status
-	downloadStartedAt := time.Now().UTC().Format(time.RFC3339)
-	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-		"status":              database.StatusDownloading,
-		"download_started_at": downloadStartedAt,
-	})
+	updates := map[string]any{
+		"status": database.StatusDownloading,
+	}
+	if jobCtx.Job.DownloadStartedAt == "" {
+		updates["download_started_at"] = time.Now().UTC().Format(time.RFC3339)
+	}
+	o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
 	// Send "Download Starting" notification
 	if o.notifier != nil {

@@ -539,3 +539,51 @@ func (o *DownloadOrchestrator) muxSegment(
 
 	return seg, nil
 }
+
+// muxFromStaging discovers segment files in the staging directory and runs
+// the full mux pipeline. Used for the "Mux" action on cancelled/errored jobs
+// where no DownloadResult exists from the download pipeline.
+func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobContext) error {
+	stagingDir := jobCtx.StagingDir
+
+	// Discover segment files in priority order (DASH > HLS > VOD)
+	result := &DownloadResult{}
+
+	// DASH segments
+	if fileExists(filepath.Join(stagingDir, "video_stream")) {
+		result.VideoPath = filepath.Join(stagingDir, "video_stream")
+		result.HasVideo = true
+	}
+	if fileExists(filepath.Join(stagingDir, "audio_stream")) {
+		result.AudioPath = filepath.Join(stagingDir, "audio_stream")
+		result.HasAudio = true
+	}
+
+	// HLS (single muxed stream)
+	if !result.HasVideo && fileExists(filepath.Join(stagingDir, "video.ts")) {
+		result.VideoPath = filepath.Join(stagingDir, "video.ts")
+		result.HasVideo = true
+		result.IsHls = true
+	}
+
+	// VOD
+	if !result.HasVideo && fileExists(filepath.Join(stagingDir, "video.mp4")) {
+		result.VideoPath = filepath.Join(stagingDir, "video.mp4")
+		result.HasVideo = true
+	}
+	if !result.HasAudio && fileExists(filepath.Join(stagingDir, "audio.m4a")) {
+		result.AudioPath = filepath.Join(stagingDir, "audio.m4a")
+		result.HasAudio = true
+	}
+
+	if !result.HasVideo && !result.HasAudio {
+		return fmt.Errorf("no segment files found in staging directory")
+	}
+
+	return o.muxAndFinalize(ctx, jobCtx, result)
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
