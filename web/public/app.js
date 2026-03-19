@@ -1490,7 +1490,8 @@ class MoomboxApp {
         badge.textContent = job.chatStatus;
       }
       // Update message count — text node after the badge
-      const existingText = Array.from(chatField.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
+      const existingText = badge && badge.nextSibling && badge.nextSibling.nodeType === Node.TEXT_NODE
+        ? badge.nextSibling : null;
       const countText = job.totalChatMessages ? ` (${job.totalChatMessages.toLocaleString()} messages)` : "";
       if (existingText) {
         existingText.textContent = countText;
