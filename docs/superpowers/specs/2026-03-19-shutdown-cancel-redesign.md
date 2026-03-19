@@ -2,7 +2,7 @@
 
 ## Problem
 
-Shutdown and user-cancel share the same code path, causing bugs (e.g., the chat resume race condition where context cancellation deletes the resume file before `Stop()` is called). The current single "Retry" action is too coarse — it always starts fresh, discarding hours of downloaded segments when the user may just want to continue.
+Shutdown and user-cancel share the same code path, causing bugs (e.g., the chat resume race condition where context cancellation deletes the resume file before `Stop()` is called). The current single "Retry" action is too coarse — it always starts fresh, discarding hours of downloaded segments when the user may just want to continue. Additionally, the `messageCount` in the chat.json header only updates on clean completion — after interruptions it is stale and mismatches the actual message array length.
 
 ## Core Semantics
 
@@ -52,6 +52,14 @@ If the stream ended while the job was cancelled, the re-probe detects it as VOD/
 ### Difference from Reinitialize
 
 Reinitialize resets status to `Upcoming`, clears all progress/percent/error/seq counters, deletes staging, and starts the processing pipeline from scratch. Resume preserves staging files, progress, and sequence numbers — it re-enters the processing pipeline which naturally resumes from saved state.
+
+## Chat Header Accuracy Fix
+
+Currently, `messageCount` in the chat.json header is only accurate at two points: the initial full write and the final `updateChatFileHeader()` call when the chat download completes cleanly. During incremental appends (every ~1 second), the header is not updated. After an interruption, the header shows a stale count that mismatches the actual message array.
+
+**Fix:** Call `updateChatFileHeader()` after each incremental append in `writeChatFile()`. This adds a small overhead (reads and patches the first ~1KB of the file) but ensures the header `messageCount` and `downloadedAt` are always current. This also means the header is correct after interruptions — no fixup needed on resume.
+
+The existing `updateChatFileHeader()` at the end of `Start()` becomes redundant but is kept as a safety net for edge cases where the last flush didn't include a header update.
 
 ## Reinitialize Flow
 
