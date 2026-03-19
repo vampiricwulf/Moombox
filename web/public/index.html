@@ -227,8 +227,11 @@
                         <sl-button id="batch-cancel" variant="warning" size="small">
                             <sl-icon slot="prefix" name="x-circle"></sl-icon> Cancel
                         </sl-button>
-                        <sl-button id="batch-retry" variant="primary" size="small">
-                            <sl-icon slot="prefix" name="arrow-repeat"></sl-icon> Retry
+                        <sl-button id="batch-resume" variant="success" size="small">
+                            <sl-icon slot="prefix" name="play-fill"></sl-icon> Resume
+                        </sl-button>
+                        <sl-button id="batch-reinit" variant="primary" size="small">
+                            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon> Reinitialize
                         </sl-button>
                         <sl-button id="batch-delete" variant="danger" size="small">
                             <sl-icon slot="prefix" name="trash"></sl-icon> Delete
@@ -1128,17 +1131,17 @@
                     <sl-icon slot="prefix" name="x-octagon"></sl-icon>
                     Cancel
                 </sl-button>
-                <sl-button
-                    variant="warning"
-                    id="details-retry-btn"
-                    style="display: none"
-                    outline
-                >
-                    <sl-icon
-                        slot="prefix"
-                        name="arrow-clockwise"
-                    ></sl-icon>
-                    Retry
+                <sl-button variant="success" id="details-resume-btn" style="display: none" outline>
+                    <sl-icon slot="prefix" name="play-fill"></sl-icon>
+                    Resume
+                </sl-button>
+                <sl-button variant="warning" id="details-reinit-btn" style="display: none" outline>
+                    <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                    Reinitialize
+                </sl-button>
+                <sl-button variant="primary" id="details-mux-btn" style="display: none" outline>
+                    <sl-icon slot="prefix" name="film"></sl-icon>
+                    Mux
                 </sl-button>
                 <sl-button
                     variant="danger"

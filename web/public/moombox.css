@@ -1981,9 +1981,9 @@ sl-progress-bar {
 .job-quick-actions sl-icon-button[data-quick-action="cancel"]:hover,
 .job-quick-actions sl-icon-button[data-quick-action="cancel"]:active,
 .job-quick-actions sl-icon-button[data-quick-action="cancel"]:focus-visible { color: var(--sl-color-warning-600); }
-.job-quick-actions sl-icon-button[data-quick-action="retry"]:hover,
-.job-quick-actions sl-icon-button[data-quick-action="retry"]:active,
-.job-quick-actions sl-icon-button[data-quick-action="retry"]:focus-visible { color: var(--sl-color-success-600); }
+.job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:hover,
+.job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:active,
+.job-quick-actions sl-icon-button[data-quick-action="reinitialize"]:focus-visible { color: var(--sl-color-success-600); }
 
 /* Keyboard focus indicator */
 .video-item[data-focused] {

@@ -11,7 +11,9 @@ import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime
 
 // Status sets for quick action visibility (single source of truth)
 const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"]);
-const RETRY_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
+const RESUME_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
+const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
+const MUX_STATUSES = new Set(["Cancelled", "Error"]);
 const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
 
 class MoomboxApp {
@@ -160,8 +162,14 @@ class MoomboxApp {
       .getElementById("details-cancel-btn")
       .addEventListener("click", () => this.cancelJob());
     document
-      .getElementById("details-retry-btn")
-      .addEventListener("click", () => this.retryJob());
+      .getElementById("details-resume-btn")
+      .addEventListener("click", () => this.resumeJob());
+    document
+      .getElementById("details-reinit-btn")
+      .addEventListener("click", () => this.reinitializeJob());
+    document
+      .getElementById("details-mux-btn")
+      .addEventListener("click", () => this.muxJob());
     document
       .getElementById("details-delete-btn")
       .addEventListener("click", () => this.deleteJob());
@@ -530,7 +538,8 @@ class MoomboxApp {
 
     // Batch action bar buttons
     document.getElementById("batch-cancel")?.addEventListener("click", () => this.batchAction("cancel"));
-    document.getElementById("batch-retry")?.addEventListener("click", () => this.batchAction("retry"));
+    document.getElementById("batch-resume")?.addEventListener("click", () => this.batchAction("resume"));
+    document.getElementById("batch-reinit")?.addEventListener("click", () => this.batchAction("reinitialize"));
     document.getElementById("batch-delete")?.addEventListener("click", () => this.batchAction("delete"));
     document.getElementById("batch-select-all")?.addEventListener("click", () => {
       this.jobs.forEach(j => this._selectedJobs.add(j.id));
@@ -1266,12 +1275,12 @@ class MoomboxApp {
 
     // Quick action button based on status
     const canCancel = CANCEL_STATUSES.has(job.status);
-    const canRetry = RETRY_STATUSES.has(job.status);
+    const canReinit = REINIT_STATUSES.has(job.status);
     const canDelete = DELETE_STATUSES.has(job.status);
 
     let actionsHtml = "";
     if (canCancel) actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
-    if (canRetry) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Retry" data-quick-action="retry" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
+    if (canReinit) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Reinitialize" data-quick-action="reinitialize" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
     if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
 
     const isSelected = this._selectedJobs.has(job.id);
@@ -1545,7 +1554,9 @@ class MoomboxApp {
 
   updateDetailsButtons(job) {
     const canCancel = CANCEL_STATUSES.has(job.status);
-    const canRetry = RETRY_STATUSES.has(job.status);
+    const canResume = RESUME_STATUSES.has(job.status) && job.platform === "youtube" && job.hasStaging;
+    const canReinit = REINIT_STATUSES.has(job.status);
+    const canMux = MUX_STATUSES.has(job.status) && job.hasSegments;
     const canDelete = DELETE_STATUSES.has(job.status);
     const hasFile = job.status === "Finished" && job.filename;
     const isActive = ["Upcoming", "Live", "Downloading", "Muxing"].includes(
@@ -1555,7 +1566,13 @@ class MoomboxApp {
     document.getElementById("details-cancel-btn").style.display = canCancel
       ? ""
       : "none";
-    document.getElementById("details-retry-btn").style.display = canRetry
+    document.getElementById("details-resume-btn").style.display = canResume
+      ? ""
+      : "none";
+    document.getElementById("details-reinit-btn").style.display = canReinit
+      ? ""
+      : "none";
+    document.getElementById("details-mux-btn").style.display = canMux
       ? ""
       : "none";
     document.getElementById("details-delete-btn").style.display = canDelete
@@ -2316,26 +2333,22 @@ class MoomboxApp {
     }
   }
 
-  async retryJob(jobId) {
+  async resumeJob(jobId) {
     const id = jobId || this.selectedJobId;
     if (!id || this._jobActionsInFlight.has(id)) return;
 
     this._jobActionsInFlight.add(id);
     try {
-      const response = await fetch(`/api/jobs/${id}/retry`, {
+      const response = await fetch(`/api/jobs/${id}/resume`, {
         method: "POST",
       });
       if (response.ok) {
-        this.showToast("Job queued for retry", "success");
-        // Close the details dialog — the job is moving to the active queue
-        // and WebSocket will deliver it as a new active job. Keeping the dialog
-        // open would show stale archived data with incorrect buttons.
+        this.showToast("Job resumed", "success");
         if (this.selectedJobId === id) {
           const dlg = document.getElementById("details-dialog");
           if (dlg?.open) dlg.hide();
           this.selectedJobId = null;
         }
-        // Remove from archived jobs if present (job moves to active queue)
         const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
         if (archivedIdx !== -1) {
           this.archivedJobs.splice(archivedIdx, 1);
@@ -2343,10 +2356,65 @@ class MoomboxApp {
         }
       } else {
         const data = await response.json().catch(() => ({ error: response.statusText }));
-        this.showToast(data.error || "Failed to retry job", "danger");
+        this.showToast(data.error || "Failed to resume job", "danger");
       }
     } catch (e) {
-      this.showToast("Failed to retry job: " + e.message, "danger");
+      this.showToast("Failed to resume job: " + e.message, "danger");
+    } finally {
+      this._jobActionsInFlight.delete(id);
+    }
+  }
+
+  async reinitializeJob(jobId) {
+    const id = jobId || this.selectedJobId;
+    if (!id || this._jobActionsInFlight.has(id)) return;
+
+    this._jobActionsInFlight.add(id);
+    try {
+      const response = await fetch(`/api/jobs/${id}/reinitialize`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        this.showToast("Job reinitialized", "success");
+        if (this.selectedJobId === id) {
+          const dlg = document.getElementById("details-dialog");
+          if (dlg?.open) dlg.hide();
+          this.selectedJobId = null;
+        }
+        const archivedIdx = this.archivedJobs.findIndex(j => j.id === id);
+        if (archivedIdx !== -1) {
+          this.archivedJobs.splice(archivedIdx, 1);
+          this.renderArchivedJobs();
+        }
+      } else {
+        const data = await response.json().catch(() => ({ error: response.statusText }));
+        this.showToast(data.error || "Failed to reinitialize job", "danger");
+      }
+    } catch (e) {
+      this.showToast("Failed to reinitialize job: " + e.message, "danger");
+    } finally {
+      this._jobActionsInFlight.delete(id);
+    }
+  }
+
+  async muxJob(jobId) {
+    const id = jobId || this.selectedJobId;
+    if (!id || this._jobActionsInFlight.has(id)) return;
+
+    this._jobActionsInFlight.add(id);
+    try {
+      const response = await fetch(`/api/jobs/${id}/mux`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        this.showToast("Muxing started", "success");
+        // Do NOT close dialog — job stays visible during mux
+      } else {
+        const data = await response.json().catch(() => ({ error: response.statusText }));
+        this.showToast(data.error || "Failed to mux job", "danger");
+      }
+    } catch (e) {
+      this.showToast("Failed to mux job: " + e.message, "danger");
     } finally {
       this._jobActionsInFlight.delete(id);
     }
@@ -2759,7 +2827,9 @@ class MoomboxApp {
     if (this._jobActionsInFlight.has(jobId)) return; // prevent double-click race
     switch (action) {
       case "cancel": this.cancelJob(jobId); break;
-      case "retry": this.retryJob(jobId); break;
+      case "reinitialize": this.reinitializeJob(jobId); break;
+      case "resume": this.resumeJob(jobId); break;
+      case "mux": this.muxJob(jobId); break;
       case "delete": this.deleteJob(jobId); break;
     }
   }
@@ -3226,11 +3296,13 @@ class MoomboxApp {
 
     const selectedJobs = this.jobs.filter(j => this._selectedJobs.has(j.id));
     const canCancel = selectedJobs.some(j => CANCEL_STATUSES.has(j.status));
-    const canRetry = selectedJobs.some(j => RETRY_STATUSES.has(j.status));
+    const canResume = selectedJobs.some(j => RESUME_STATUSES.has(j.status));
+    const canReinit = selectedJobs.some(j => REINIT_STATUSES.has(j.status));
     const canDelete = selectedJobs.some(j => DELETE_STATUSES.has(j.status));
 
     document.getElementById("batch-cancel").style.display = canCancel ? "" : "none";
-    document.getElementById("batch-retry").style.display = canRetry ? "" : "none";
+    document.getElementById("batch-resume").style.display = canResume ? "" : "none";
+    document.getElementById("batch-reinit").style.display = canReinit ? "" : "none";
     document.getElementById("batch-delete").style.display = canDelete ? "" : "none";
   }
 
@@ -3244,10 +3316,15 @@ class MoomboxApp {
         confirmMsg = `Cancel ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
         break;
-      case "retry":
-        targets = selectedJobs.filter(j => RETRY_STATUSES.has(j.status));
-        confirmMsg = `Retry ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
-        apiCall = (id) => fetch(`/api/jobs/${id}/retry`, { method: "POST" });
+      case "resume":
+        targets = selectedJobs.filter(j => RESUME_STATUSES.has(j.status));
+        confirmMsg = `Resume ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        apiCall = (id) => fetch(`/api/jobs/${id}/resume`, { method: "POST" });
+        break;
+      case "reinitialize":
+        targets = selectedJobs.filter(j => REINIT_STATUSES.has(j.status));
+        confirmMsg = `Reinitialize ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
+        apiCall = (id) => fetch(`/api/jobs/${id}/reinitialize`, { method: "POST" });
         break;
       case "delete":
         targets = selectedJobs.filter(j => DELETE_STATUSES.has(j.status));
@@ -3273,7 +3350,8 @@ class MoomboxApp {
     this.updateBatchActionBar();
 
     if (failed === 0) {
-      const verb = action === "delete" ? "Deleted" : action === "cancel" ? "Cancelled" : "Retried";
+      const verbs = { delete: "Deleted", cancel: "Cancelled", resume: "Resumed", reinitialize: "Reinitialized" };
+      const verb = verbs[action] || action;
       this.showToast(`${verb} ${succeeded} job${succeeded !== 1 ? "s" : ""}`, "success");
     } else {
       this.showToast(`${succeeded} of ${targets.length} succeeded. ${failed} failed.`, "warning");

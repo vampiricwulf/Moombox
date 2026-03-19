@@ -27,6 +27,22 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
+// jobWithStaging wraps a Job with computed staging/segment file presence.
+type jobWithStaging struct {
+	*database.Job
+	HasStaging  bool `json:"hasStaging"`
+	HasSegments bool `json:"hasSegments"`
+}
+
+// enrichJob adds computed staging fields to a job response.
+func enrichJob(job *database.Job, stagingBase string) jobWithStaging {
+	return jobWithStaging{
+		Job:         job,
+		HasStaging:  worker.HasStagingFiles(stagingBase, job.ID),
+		HasSegments: worker.HasSegmentFiles(stagingBase, job.ID),
+	}
+}
+
 // YouTubeMetadataFetcher provides YouTube metadata for job creation.
 type YouTubeMetadataFetcher interface {
 	// FetchMetadata returns basic metadata (title, channel, thumbnail) for a video ID.
@@ -229,7 +245,14 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		}
 
-		jsonResponse(rw, job)
+		cfgMu.RLock()
+		stagingBase := cfg.Paths.StagingDirectory
+		cfgMu.RUnlock()
+		if stagingBase == "" {
+			stagingBase = "./staging"
+		}
+
+		jsonResponse(rw, enrichJob(job, stagingBase))
 	})
 
 	// GET /api/jobs/:id/video — range-request video streaming
@@ -879,7 +902,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
-	// POST /api/jobs/:id/retry
+	// POST /api/jobs/:id/retry — backward compat, delegates to ReinitializeJob
 	r.Post("/api/jobs/{id}/retry", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
 		job, err := db.GetJob(jobID)
@@ -897,15 +920,112 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			return
 		}
 
-		db.UpdateJobFields(jobID, map[string]any{
-			"status":   database.StatusUpcoming,
-			"error":    "",
-			"progress": "",
-			"percent":  0,
-		})
+		if w != nil {
+			w.ReinitializeJob(jobID)
+		}
+
+		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// POST /api/jobs/:id/resume — resume a YouTube job preserving staging files
+	r.Post("/api/jobs/{id}/resume", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+
+		switch job.Status {
+		case database.StatusError, database.StatusCancelled, database.StatusCookies:
+			// OK
+		default:
+			jsonError(rw, "Job cannot be resumed in current state", http.StatusBadRequest)
+			return
+		}
+
+		if job.Platform != "youtube" {
+			jsonError(rw, "Resume is only supported for YouTube jobs", http.StatusBadRequest)
+			return
+		}
+
+		cfgMu.RLock()
+		stagingBase := cfg.Paths.StagingDirectory
+		cfgMu.RUnlock()
+		if stagingBase == "" {
+			stagingBase = "./staging"
+		}
+
+		if !worker.HasStagingFiles(stagingBase, jobID) {
+			jsonError(rw, "No staging files found — use Reinitialize instead", http.StatusBadRequest)
+			return
+		}
 
 		if w != nil {
-			w.EnqueueJob(jobID)
+			w.ResumeJob(jobID)
+		}
+
+		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// POST /api/jobs/:id/reinitialize — reset job to fresh state and re-enqueue
+	r.Post("/api/jobs/{id}/reinitialize", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+
+		switch job.Status {
+		case database.StatusError, database.StatusCancelled, database.StatusCookies:
+			// OK
+		default:
+			jsonError(rw, "Job cannot be reinitialized in current state", http.StatusBadRequest)
+			return
+		}
+
+		if w != nil {
+			w.ReinitializeJob(jobID)
+		}
+
+		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// POST /api/jobs/:id/mux — force-mux from staging files
+	r.Post("/api/jobs/{id}/mux", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+
+		switch job.Status {
+		case database.StatusError, database.StatusCancelled:
+			// OK
+		default:
+			jsonError(rw, "Job cannot be muxed in current state", http.StatusBadRequest)
+			return
+		}
+
+		cfgMu.RLock()
+		stagingBase := cfg.Paths.StagingDirectory
+		cfgMu.RUnlock()
+		if stagingBase == "" {
+			stagingBase = "./staging"
+		}
+
+		if !worker.HasSegmentFiles(stagingBase, jobID) {
+			jsonError(rw, "No segment files found in staging", http.StatusBadRequest)
+			return
+		}
+
+		if w != nil {
+			if err := w.MuxJob(jobID); err != nil {
+				jsonError(rw, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		jsonResponse(rw, map[string]any{"success": true})
