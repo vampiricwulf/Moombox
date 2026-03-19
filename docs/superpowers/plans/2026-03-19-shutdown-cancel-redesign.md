@@ -1006,3 +1006,40 @@ Start the binary, verify:
 git add -A
 git commit -m "fix: address integration test findings"
 ```
+
+---
+
+### Task 9: Code review, release, and push
+
+- [ ] **Step 1: Dispatch code reviewer**
+
+Use the `superpowers:code-reviewer` agent to review all changes since the last release tag against the spec and plan. Fix any issues found.
+
+- [ ] **Step 2: Commit any review fixes**
+
+```bash
+git add -A
+git commit -m "fix: address code review findings"
+```
+
+- [ ] **Step 3: Generate RELEASE_NOTES.md**
+
+Run `git log --oneline <prev-tag>..HEAD` and group changes by Features/Improvements/Bug Fixes. Write to `RELEASE_NOTES.md` (no heading, per CLAUDE.md release process).
+
+- [ ] **Step 4: Bump version to 2.3.40**
+
+In `cmd/moombox/main.go`, update `version = "2.3.40"`.
+
+- [ ] **Step 5: Commit version bump**
+
+```bash
+git add RELEASE_NOTES.md cmd/moombox/main.go
+git commit -m "chore: bump version to 2.3.40 — shutdown vs cancel redesign"
+```
+
+- [ ] **Step 6: Tag and push**
+
+```bash
+git tag v2.3.40
+git push && git push origin v2.3.40
+```
