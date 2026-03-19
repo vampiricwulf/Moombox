@@ -38,6 +38,14 @@ type PathsConfig struct {
 	FfmpegPath       string `toml:"ffmpeg_path,omitempty" json:"ffmpeg_path,omitempty"`
 }
 
+// EffectiveStagingDir returns the staging directory, falling back to "./staging".
+func (p PathsConfig) EffectiveStagingDir() string {
+	if p.StagingDirectory != "" {
+		return p.StagingDirectory
+	}
+	return "./staging"
+}
+
 // LogsConfig holds logging settings.
 type LogsConfig struct {
 	LogLevel       string `toml:"log_level" json:"log_level"`

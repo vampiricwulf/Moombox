@@ -25,7 +25,7 @@ class MoomboxApp {
     this.config = null;
     this.selectedJobId = null;
     this._selectedJobs = new Set();
-    this._lastCheckedJobId = null;
+    this._lastCheckedJobIds = { jobs: null, archived: null };
     this.reconnectAttempts = 0;
     this.autoCookieReloginRequired = null;
     this.nextFeedCheck = 0;
@@ -407,18 +407,20 @@ class MoomboxApp {
     }
 
     // Event delegation for job items (prevents memory leaks from per-item listeners)
-    const jobsContainer = document.getElementById("jobs-container");
-    if (jobsContainer) {
-      jobsContainer.addEventListener("click", (e) => {
+    // Shared click handler for job containers (active + archived)
+    const setupJobContainer = (container, containerKey, jobSource) => {
+      if (!container) return;
+      container.addEventListener("click", (e) => {
         // Batch selection checkbox
         const checkbox = e.target.closest(".job-checkbox");
         if (checkbox) {
           e.stopPropagation();
           const jobId = checkbox.dataset.jobId;
-          // Shift+Click: select range between last checked and current
-          if (e.shiftKey && this._lastCheckedJobId && checkbox.checked) {
-            const allCards = [...jobsContainer.querySelectorAll(".video-item")];
-            const lastIdx = allCards.findIndex(c => c.dataset.jobId === this._lastCheckedJobId);
+          // Shift+Click: select range between last checked and current (within same container)
+          const lastId = this._lastCheckedJobIds[containerKey];
+          if (e.shiftKey && lastId && checkbox.checked) {
+            const allCards = [...container.querySelectorAll(".video-item")];
+            const lastIdx = allCards.findIndex(c => c.dataset.jobId === lastId);
             const curIdx = allCards.findIndex(c => c.dataset.jobId === jobId);
             if (lastIdx !== -1 && curIdx !== -1) {
               const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
@@ -435,7 +437,7 @@ class MoomboxApp {
           } else {
             this._selectedJobs.delete(jobId);
           }
-          this._lastCheckedJobId = jobId;
+          this._lastCheckedJobIds[containerKey] = jobId;
           checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
           this.updateBatchActionBar();
           return;
@@ -460,69 +462,14 @@ class MoomboxApp {
         const videoItem = e.target.closest(".video-item");
         if (videoItem) {
           const jobId = videoItem.dataset.jobId;
-          const job = this.jobs.find((j) => j.id === jobId);
+          const job = jobSource().find((j) => j.id === jobId);
           if (job) this.showJobDetails(job);
         }
       });
-    }
+    };
 
-    // Event delegation for archived jobs
-    const archivedContainer = document.getElementById("archived-container");
-    if (archivedContainer) {
-      archivedContainer.addEventListener("click", (e) => {
-        // Batch selection checkbox
-        const checkbox = e.target.closest(".job-checkbox");
-        if (checkbox) {
-          e.stopPropagation();
-          const jobId = checkbox.dataset.jobId;
-          if (e.shiftKey && this._lastCheckedJobId && checkbox.checked) {
-            const allCards = [...archivedContainer.querySelectorAll(".video-item")];
-            const lastIdx = allCards.findIndex(c => c.dataset.jobId === this._lastCheckedJobId);
-            const curIdx = allCards.findIndex(c => c.dataset.jobId === jobId);
-            if (lastIdx !== -1 && curIdx !== -1) {
-              const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
-              for (let i = start; i <= end; i++) {
-                const id = allCards[i].dataset.jobId;
-                this._selectedJobs.add(id);
-                allCards[i].classList.add("selected");
-                const cb = allCards[i].querySelector(".job-checkbox");
-                if (cb) cb.checked = true;
-              }
-            }
-          } else if (checkbox.checked) {
-            this._selectedJobs.add(jobId);
-          } else {
-            this._selectedJobs.delete(jobId);
-          }
-          this._lastCheckedJobId = jobId;
-          checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
-          this.updateBatchActionBar();
-          return;
-        }
-        // Expandable error text
-        const errorText = e.target.closest(".job-error-text");
-        if (errorText) {
-          e.stopPropagation();
-          const isExpanded = errorText.classList.toggle("expanded");
-          errorText.textContent = isExpanded ? errorText.dataset.full : errorText.dataset.short;
-          return;
-        }
-        const quickBtn = e.target.closest("[data-quick-action]");
-        if (quickBtn) {
-          e.stopPropagation();
-          const action = quickBtn.dataset.quickAction;
-          const jobId = quickBtn.dataset.jobId;
-          this.quickAction(action, jobId);
-          return;
-        }
-        const videoItem = e.target.closest(".video-item");
-        if (videoItem) {
-          const jobId = videoItem.dataset.jobId;
-          const job = this.archivedJobs.find((j) => j.id === jobId);
-          if (job) this.showJobDetails(job);
-        }
-      });
-    }
+    setupJobContainer(document.getElementById("jobs-container"), "jobs", () => this.jobs);
+    setupJobContainer(document.getElementById("archived-container"), "archived", () => this.archivedJobs);
 
     // Event delegation for trim delete buttons (avoids inline onclick)
     const detailsContent = document.getElementById("job-details-content");
@@ -543,6 +490,7 @@ class MoomboxApp {
     document.getElementById("batch-delete")?.addEventListener("click", () => this.batchAction("delete"));
     document.getElementById("batch-select-all")?.addEventListener("click", () => {
       this.jobs.forEach(j => this._selectedJobs.add(j.id));
+      this.archivedJobs.forEach(j => this._selectedJobs.add(j.id));
       document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = true; });
       document.querySelectorAll(".video-item").forEach(el => el.classList.add("selected"));
       this.updateBatchActionBar();
@@ -925,6 +873,7 @@ class MoomboxApp {
         break;
 
       case "jobs_update":
+        this._preserveStagingFields(this.jobs, p || []);
         this.jobs = p || [];
         this.renderJobs();
         // Update details dialog if open (but don't reload logs)
@@ -946,7 +895,16 @@ class MoomboxApp {
         if (!updatedJob?.id) break;
         const jobIndex = this.jobs.findIndex((j) => j.id === updatedJob.id);
         if (jobIndex !== -1) {
-          const oldStatus = this.jobs[jobIndex].status;
+          const oldJob = this.jobs[jobIndex];
+          const oldStatus = oldJob.status;
+          // Preserve computed staging fields from prior enriched state — WS
+          // delivers raw DB objects without these fields.
+          if (updatedJob.hasStaging === undefined && oldJob.hasStaging !== undefined) {
+            updatedJob.hasStaging = oldJob.hasStaging;
+          }
+          if (updatedJob.hasSegments === undefined && oldJob.hasSegments !== undefined) {
+            updatedJob.hasSegments = oldJob.hasSegments;
+          }
           this.jobs[jobIndex] = updatedJob;
           // Status change affects sort order — do full re-render
           if (oldStatus !== updatedJob.status) {
@@ -1197,8 +1155,8 @@ class MoomboxApp {
       this.focusedJobIndex = -1;
     }
 
-    // Remove stale selected IDs (jobs that no longer exist in the list)
-    const currentJobIds = new Set(this.jobs.map(j => j.id));
+    // Remove stale selected IDs (jobs that no longer exist in either list)
+    const currentJobIds = new Set([...this.jobs, ...this.archivedJobs].map(j => j.id));
     this._selectedJobs.forEach(id => {
       if (!currentJobIds.has(id)) this._selectedJobs.delete(id);
     });
@@ -3282,6 +3240,12 @@ class MoomboxApp {
     }
   }
 
+  /** Return all selected jobs from both active and archived lists. */
+  _getSelectedJobs() {
+    const allJobs = [...this.jobs, ...this.archivedJobs];
+    return allJobs.filter(j => this._selectedJobs.has(j.id));
+  }
+
   updateBatchActionBar() {
     const bar = document.getElementById("batch-action-bar");
     if (!bar) return;
@@ -3294,7 +3258,7 @@ class MoomboxApp {
     bar.style.display = "";
     document.getElementById("batch-count").textContent = `${count} selected`;
 
-    const selectedJobs = this.jobs.filter(j => this._selectedJobs.has(j.id));
+    const selectedJobs = this._getSelectedJobs();
     const canCancel = selectedJobs.some(j => CANCEL_STATUSES.has(j.status));
     const canResume = selectedJobs.some(j => RESUME_STATUSES.has(j.status));
     const canReinit = selectedJobs.some(j => REINIT_STATUSES.has(j.status));
@@ -3307,7 +3271,7 @@ class MoomboxApp {
   }
 
   async batchAction(action) {
-    const selectedJobs = this.jobs.filter(j => this._selectedJobs.has(j.id));
+    const selectedJobs = this._getSelectedJobs();
     let targets, confirmMsg, apiCall;
 
     switch (action) {
@@ -3355,6 +3319,26 @@ class MoomboxApp {
       this.showToast(`${verb} ${succeeded} job${succeeded !== 1 ? "s" : ""}`, "success");
     } else {
       this.showToast(`${succeeded} of ${targets.length} succeeded. ${failed} failed.`, "warning");
+    }
+  }
+
+  /**
+   * Preserve computed hasStaging/hasSegments fields from oldJobs onto newJobs.
+   * WebSocket bulk updates deliver raw DB objects without these enriched fields;
+   * carrying them forward avoids Resume/Mux buttons flickering out in the details dialog.
+   */
+  _preserveStagingFields(oldJobs, newJobs) {
+    if (!oldJobs?.length || !newJobs?.length) return;
+    const oldMap = new Map(oldJobs.map(j => [j.id, j]));
+    for (const job of newJobs) {
+      const old = oldMap.get(job.id);
+      if (!old) continue;
+      if (job.hasStaging === undefined && old.hasStaging !== undefined) {
+        job.hasStaging = old.hasStaging;
+      }
+      if (job.hasSegments === undefined && old.hasSegments !== undefined) {
+        job.hasSegments = old.hasSegments;
+      }
     }
   }
 }

@@ -246,11 +246,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		cfgMu.RLock()
-		stagingBase := cfg.Paths.StagingDirectory
+		stagingBase := cfg.Paths.EffectiveStagingDir()
 		cfgMu.RUnlock()
-		if stagingBase == "" {
-			stagingBase = "./staging"
-		}
 
 		jsonResponse(rw, enrichJob(job, stagingBase))
 	})
@@ -950,11 +947,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		cfgMu.RLock()
-		stagingBase := cfg.Paths.StagingDirectory
+		stagingBase := cfg.Paths.EffectiveStagingDir()
 		cfgMu.RUnlock()
-		if stagingBase == "" {
-			stagingBase = "./staging"
-		}
 
 		if !worker.HasStagingFiles(stagingBase, jobID) {
 			jsonError(rw, "No staging files found — use Reinitialize instead", http.StatusBadRequest)
@@ -1010,11 +1004,8 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		cfgMu.RLock()
-		stagingBase := cfg.Paths.StagingDirectory
+		stagingBase := cfg.Paths.EffectiveStagingDir()
 		cfgMu.RUnlock()
-		if stagingBase == "" {
-			stagingBase = "./staging"
-		}
 
 		if !worker.HasSegmentFiles(stagingBase, jobID) {
 			jsonError(rw, "No segment files found in staging", http.StatusBadRequest)
@@ -1042,7 +1033,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 
 		cfgMu.RLock()
 		openCfgOutputDir := cfg.Paths.OutputDirectory
-		openCfgStagingDir := cfg.Paths.StagingDirectory
+		openCfgStagingDir := cfg.Paths.EffectiveStagingDir()
 		cfgMu.RUnlock()
 
 		var dir string
@@ -1072,11 +1063,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			}
 		} else {
 			// Fall back to staging directory for active jobs
-			stagingBase := openCfgStagingDir
-			if stagingBase == "" {
-				stagingBase = "./staging"
-			}
-			stagingDir, err := filepath.Abs(filepath.Join(stagingBase, job.ID))
+			stagingDir, err := filepath.Abs(filepath.Join(openCfgStagingDir, job.ID))
 			if err != nil {
 				jsonError(rw, "invalid staging path", http.StatusBadRequest)
 				return

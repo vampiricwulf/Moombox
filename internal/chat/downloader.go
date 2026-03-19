@@ -129,6 +129,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.running = false
 		cd.cancelCtx = nil
 		done := cd.done
+		cd.done = nil
 		cd.mu.Unlock()
 		if done != nil {
 			close(done)
@@ -179,18 +180,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	}
 
 	// Clear resume state on clean completion (not cancelled).
-	// Context cancellation without Stop() is still a shutdown — the parent context
-	// was cancelled but Stop() hasn't been called yet due to a race. Treat it as
-	// cancellation to preserve the resume file. MarkStreamEnded sets streamEnded
-	// (clean completion) so we distinguish it from external context cancellation.
-	cd.mu.Lock()
-	wasCancelled := cd.cancelFlag
-	streamEnded := cd.streamEnded
-	cd.mu.Unlock()
-	if !wasCancelled && !streamEnded && ctx.Err() != nil {
-		wasCancelled = true
-	}
-	if !wasCancelled {
+	if !cd.wasCancelledOrShutdown(ctx) {
 		cd.clearResume()
 	}
 
@@ -250,6 +240,22 @@ func (cd *ChatDownloader) shouldStop() bool {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
 	return !cd.running || cd.cancelFlag || cd.streamEnded
+}
+
+// wasCancelledOrShutdown returns true if the download was stopped by user
+// cancellation or application shutdown. Context cancellation without Stop()
+// is a shutdown race — the parent context was cancelled but Stop() hasn't
+// been called yet. MarkStreamEnded sets streamEnded (clean completion) so
+// we distinguish it from external context cancellation.
+func (cd *ChatDownloader) wasCancelledOrShutdown(ctx context.Context) bool {
+	cd.mu.Lock()
+	cancelled := cd.cancelFlag
+	ended := cd.streamEnded
+	cd.mu.Unlock()
+	if !cancelled && !ended && ctx.Err() != nil {
+		return true
+	}
+	return cancelled
 }
 
 func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
@@ -436,14 +442,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 	}
 
 	// Save resume state when cancelled or context cancelled (shutdown race)
-	cd.mu.Lock()
-	wasCancelled := cd.cancelFlag
-	streamEnded := cd.streamEnded
-	cd.mu.Unlock()
-	if !wasCancelled && !streamEnded && ctx.Err() != nil {
-		wasCancelled = true
-	}
-	if len(cd.messages) > 0 && wasCancelled {
+	if len(cd.messages) > 0 && cd.wasCancelledOrShutdown(ctx) {
 		cd.saveResume()
 	}
 }

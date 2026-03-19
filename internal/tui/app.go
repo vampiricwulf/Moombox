@@ -172,18 +172,18 @@ type chordState struct {
 // App is the root BubbleTea model.
 type App struct {
 	// Panels
-	taskList  *TaskListModel
-	details   *JobDetailsModel
-	logs      *LogViewerModel
-	statusBar *StatusBarModel
-	help      *HelpModel
-	addVideo  *AddVideoModel
-	importDlg *ImportDialogModel
-	trimDlg   *TrimDialogModel
-	filesDlg       *FilesDialogModel
+	taskList        *TaskListModel
+	details         *JobDetailsModel
+	logs            *LogViewerModel
+	statusBar       *StatusBarModel
+	help            *HelpModel
+	addVideo        *AddVideoModel
+	importDlg       *ImportDialogModel
+	trimDlg         *TrimDialogModel
+	filesDlg        *FilesDialogModel
 	clientTokensDlg *ClientTokensDialogModel
-	setupWiz       *SetupWizardModel
-	settings  *SettingsModel
+	setupWiz        *SetupWizardModel
+	settings        *SettingsModel
 
 	// Trim progress (async encoding)
 	trimInProgress  bool
@@ -258,8 +258,8 @@ type App struct {
 	OnResumeJob       func(jobID string)
 	OnReinitializeJob func(jobID string)
 	OnMuxJob          func(jobID string) error
-	HasStagingFiles   func(jobID string) bool  // checks if staging dir has files
-	HasSegmentFiles   func(jobID string) bool  // checks if staging dir has segment files
+	HasStagingFiles   func(jobID string) bool // checks if staging dir has files
+	HasSegmentFiles   func(jobID string) bool // checks if staging dir has segment files
 	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
 	OnDeleteTrim func(jobID, trimID string) error
 	OnOpenFolder func(jobID string)
@@ -304,22 +304,22 @@ func NewApp() *App {
 	tl.progressStore = ps
 
 	return &App{
-		taskList:      tl,
-		details:       NewJobDetailsModel(),
-		logs:          NewLogViewerModel(),
-		statusBar:     NewStatusBarModel(),
-		help:          NewHelpModel(),
-		addVideo:      NewAddVideoModel(),
-		importDlg:     NewImportDialogModel(),
-		trimDlg:       NewTrimDialogModel(),
+		taskList:        tl,
+		details:         NewJobDetailsModel(),
+		logs:            NewLogViewerModel(),
+		statusBar:       NewStatusBarModel(),
+		help:            NewHelpModel(),
+		addVideo:        NewAddVideoModel(),
+		importDlg:       NewImportDialogModel(),
+		trimDlg:         NewTrimDialogModel(),
 		filesDlg:        NewFilesDialogModel(),
 		clientTokensDlg: NewClientTokensDialogModel(),
 		setupWiz:        NewSetupWizardModel(),
-		settings:      NewSettingsModel(),
-		ffmpegCheck:   NewFFmpegCheckModel(),
-		actionMenu:    NewActionMenuModel(),
-		progressStore: ps,
-		statusMap:     make(map[string]database.JobStatus),
+		settings:        NewSettingsModel(),
+		ffmpegCheck:     NewFFmpegCheckModel(),
+		actionMenu:      NewActionMenuModel(),
+		progressStore:   ps,
+		statusMap:       make(map[string]database.JobStatus),
 	}
 }
 

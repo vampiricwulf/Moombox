@@ -1,15 +1,17 @@
-### Features
-
-- **Shutdown vs Cancel redesign** — shutdown-interrupted jobs auto-resume on restart; user-cancelled jobs get granular follow-up actions instead of a single Retry
-- **Resume action** (A R) — continue a cancelled/errored YouTube download from where it left off, preserving progress and staging files
-- **Reinitialize action** (A I) — fresh restart that clears all progress and deletes staging (replaces old Retry)
-- **Mux action** (A M) — force-mux whatever segment files exist in staging for cancelled/errored jobs
-- New API endpoints: `POST /resume`, `/reinitialize`, `/mux` with staging file detection
-- Import chord moved from A I to A Z
-
 ### Bug Fixes
 
-- Fix chat `messageCount` header being stale after interruptions — now updates on every flush
-- Fix jobs stuck in Muxing status after shutdown — reset to Downloading on startup
-- Fix MuxJob leaving job stuck in Muxing if DB lookup fails
-- Guard `download_started_at` to preserve original timestamp on resume
+- Fix Resume/Mux buttons disappearing in Web UI details dialog during WebSocket updates
+- Fix batch operations ignoring archived jobs in Web UI
+- Fix TUI batch cancel not filtering by cancellable status (could cancel finished/errored jobs)
+- Fix FFmpeg "i" shortcut in TUI settings typing into the path field before opening installer
+- Fix "Cancelled 0 jobs" feedback when no jobs in selection match cancellable status
+
+### Improvements
+
+- Extract `EffectiveStagingDir()` config helper — eliminates 6+ repeated "./staging" fallbacks
+- Consolidate template preview logic — settings delegates to shared `templatePreview()` function
+- Extract shared job container click handler in Web UI — deduplicates checkbox/expand/action logic
+- Per-container shift-click tracking — prevents cross-container range selection bugs
+- Extract `wasCancelledOrShutdown()` in chat downloader — deduplicates cancellation detection
+- Close chat downloader `done` channel safely under lock
+- Consistent struct field alignment across TUI panel declarations

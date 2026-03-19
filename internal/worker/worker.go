@@ -424,7 +424,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		w.cfgMu.RLock()
 	}
 	cfgOutputDir := w.cfg.Paths.OutputDirectory
-	cfgStagingDir := w.cfg.Paths.StagingDirectory
+	cfgStagingDir := w.cfg.Paths.EffectiveStagingDir()
 	cfgTemplate := w.cfg.Downloader.OutputTemplate
 	cfgMaxRes := w.cfg.Downloader.MaxVideoResolution
 	cfgPrefer60 := w.cfg.Downloader.Prefer60fps
@@ -443,11 +443,8 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		outputDir = "./output"
 	}
 
-	// Use config staging directory, falling back to ./staging/{jobID}
+	// Use config staging directory (defaults to ./staging)
 	stagingBase := cfgStagingDir
-	if stagingBase == "" {
-		stagingBase = "./staging"
-	}
 	stagingDir := filepath.Join(stagingBase, job.ID)
 
 	// Resolve filename from output_template config
@@ -670,12 +667,9 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 	if w.cfgMu != nil {
 		w.cfgMu.RLock()
 	}
-	stagingBase := w.cfg.Paths.StagingDirectory
+	stagingBase := w.cfg.Paths.EffectiveStagingDir()
 	if w.cfgMu != nil {
 		w.cfgMu.RUnlock()
-	}
-	if stagingBase == "" {
-		stagingBase = "./staging"
 	}
 
 	// Delete staging directory
@@ -724,12 +718,9 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 	if w.cfgMu != nil {
 		w.cfgMu.RLock()
 	}
-	stagingBase := w.cfg.Paths.StagingDirectory
+	stagingBase := w.cfg.Paths.EffectiveStagingDir()
 	if w.cfgMu != nil {
 		w.cfgMu.RUnlock()
-	}
-	if stagingBase == "" {
-		stagingBase = "./staging"
 	}
 
 	if !HasSegmentFiles(stagingBase, jobID) {

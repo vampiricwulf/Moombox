@@ -83,11 +83,26 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
 			count := 0
 			for _, id := range a.taskList.SelectedIDs() {
+				j := a.taskList.GetJobByID(id)
+				if j == nil {
+					continue
+				}
+				// Filter by cancellable statuses (matches Web UI CANCEL_STATUSES)
+				switch j.Status {
+				case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing, database.StatusCookies:
+					// OK
+				default:
+					continue
+				}
 				a.OnCancelJob(id)
 				count++
 			}
 			a.taskList.ClearSelection()
-			a.setFeedback(fmt.Sprintf("Cancelled %d jobs", count))
+			if count > 0 {
+				a.setFeedback(fmt.Sprintf("Cancelled %d jobs", count))
+			} else {
+				a.setFeedback("No cancellable jobs in selection")
+			}
 		} else if job != nil && a.OnCancelJob != nil {
 			a.OnCancelJob(job.ID)
 			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))

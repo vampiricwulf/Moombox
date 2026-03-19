@@ -42,7 +42,7 @@ import (
 )
 
 var (
-	version = "2.3.40"
+	version = "2.3.41"
 	commit  = ""
 )
 
@@ -1232,20 +1232,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		app.HasStagingFiles = func(jobID string) bool {
 			cfgMu.RLock()
-			base := cfg.Paths.StagingDirectory
+			base := cfg.Paths.EffectiveStagingDir()
 			cfgMu.RUnlock()
-			if base == "" {
-				base = "./staging"
-			}
 			return worker.HasStagingFiles(base, jobID)
 		}
 		app.HasSegmentFiles = func(jobID string) bool {
 			cfgMu.RLock()
-			base := cfg.Paths.StagingDirectory
+			base := cfg.Paths.EffectiveStagingDir()
 			cfgMu.RUnlock()
-			if base == "" {
-				base = "./staging"
-			}
 			return worker.HasSegmentFiles(base, jobID)
 		}
 		app.OnOpenFolder = func(jobID string) {
@@ -1260,11 +1254,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			} else {
 				// Fall back to staging directory for active jobs
 				cfgMu.RLock()
-				stagingBase := cfg.Paths.StagingDirectory
+				stagingBase := cfg.Paths.EffectiveStagingDir()
 				cfgMu.RUnlock()
-				if stagingBase == "" {
-					stagingBase = "./staging"
-				}
 				dir = filepath.Join(stagingBase, job.ID)
 				if _, err := os.Stat(dir); err != nil {
 					return // staging dir doesn't exist yet

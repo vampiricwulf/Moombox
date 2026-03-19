@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
@@ -100,15 +98,7 @@ var sections = []settingsSection{
 					if value == "" {
 						value = "${channel}/${start_date} ${title} [${id}]"
 					}
-					now := time.Now().Format("2006-01-02")
-					r := strings.NewReplacer(
-						"${channel}", "Miko Ch",
-						"${title}", "Singing Stream",
-						"${id}", "dQw4w9WgXcQ",
-						"${start_date}", now,
-						"${start_time}", "20-00-00",
-					)
-					return "Example: " + r.Replace(value) + ".mkv"
+					return templatePreview(value)
 				},
 			},
 			{"max_video_resolution", "Max resolution", fieldNumber, nil, "pixels (e.g. 1080, 2160)", nil},
