@@ -19,7 +19,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		a.feedbackMsg = ""
 		a.addVideo.SetSize(a.width, a.height)
 		a.addVideo.Open()
-	case "A I":
+	case "A Z":
 		a.feedbackMsg = ""
 		a.importDlg.SetSize(a.width, a.height)
 		startDir := filepath.Join(".", "import")
@@ -29,17 +29,55 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		_ = os.MkdirAll(startDir, 0o755)
 		return a, a.importDlg.Open(startDir)
 	case "A R":
-		if job == nil && a.taskList.SelectedCount() > 0 && a.OnRetryJob != nil {
+		if job == nil && a.taskList.SelectedCount() > 0 && a.OnResumeJob != nil {
 			count := 0
 			for _, id := range a.taskList.SelectedIDs() {
-				a.OnRetryJob(id)
+				j := a.taskList.GetJobByID(id)
+				if j == nil || j.Platform != "youtube" {
+					continue
+				}
+				if a.HasStagingFiles != nil && !a.HasStagingFiles(id) {
+					continue
+				}
+				if j.Status != database.StatusCancelled && j.Status != database.StatusError && j.Status != database.StatusCookies {
+					continue
+				}
+				a.OnResumeJob(id)
 				count++
 			}
 			a.taskList.ClearSelection()
-			a.setFeedback(fmt.Sprintf("Retrying %d jobs", count))
-		} else if job != nil && a.OnRetryJob != nil {
-			a.OnRetryJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Retrying: %s", job.Title))
+			a.setFeedback(fmt.Sprintf("Resumed %d jobs", count))
+		} else if job != nil && a.OnResumeJob != nil {
+			a.OnResumeJob(job.ID)
+			a.setFeedback(fmt.Sprintf("Resuming: %s", job.Title))
+		}
+	case "A I":
+		if job == nil && a.taskList.SelectedCount() > 0 && a.OnReinitializeJob != nil {
+			count := 0
+			for _, id := range a.taskList.SelectedIDs() {
+				j := a.taskList.GetJobByID(id)
+				if j == nil {
+					continue
+				}
+				if j.Status != database.StatusError && j.Status != database.StatusCancelled && j.Status != database.StatusCookies {
+					continue
+				}
+				a.OnReinitializeJob(id)
+				count++
+			}
+			a.taskList.ClearSelection()
+			a.setFeedback(fmt.Sprintf("Reinitialized %d jobs", count))
+		} else if job != nil && a.OnReinitializeJob != nil {
+			a.OnReinitializeJob(job.ID)
+			a.setFeedback(fmt.Sprintf("Reinitializing: %s", job.Title))
+		}
+	case "A M":
+		if job != nil && a.OnMuxJob != nil {
+			if err := a.OnMuxJob(job.ID); err != nil {
+				a.setFeedback(fmt.Sprintf("Mux failed: %s", err))
+			} else {
+				a.setFeedback(fmt.Sprintf("Muxing: %s", job.Title))
+			}
 		}
 	case "A C":
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnCancelJob != nil {
@@ -332,11 +370,30 @@ func (a *App) refreshTrimList(job *database.Job) {
 func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
 		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action"},
-		{Chord: "A I", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
-		{Chord: "A R", Label: "Retry Job", HintLabel: "Retry", Category: "Action", NeedsJob: true,
-			DisabledReason: "no failed jobs",
+		{Chord: "A Z", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
+		{Chord: "A R", Label: "Resume Job", HintLabel: "Resume", Category: "Action", NeedsJob: true,
+			DisabledReason: "no resumable jobs",
+			JobFilter: func(j *database.Job) bool {
+				canResume := (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies) &&
+					j.Platform == "youtube"
+				if canResume && a.HasStagingFiles != nil {
+					return a.HasStagingFiles(j.ID)
+				}
+				return false
+			}},
+		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true,
+			DisabledReason: "no retriable jobs",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
+			}},
+		{Chord: "A M", Label: "Mux Job", HintLabel: "Mux", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+			DisabledReason: "no muxable jobs",
+			JobFilter: func(j *database.Job) bool {
+				canMux := j.Status == database.StatusCancelled || j.Status == database.StatusError
+				if canMux && a.HasSegmentFiles != nil {
+					return a.HasSegmentFiles(j.ID)
+				}
+				return false
 			}},
 		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true,
 			DisabledReason: "no active jobs",

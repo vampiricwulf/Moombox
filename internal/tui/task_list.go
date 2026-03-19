@@ -203,6 +203,14 @@ func (m *TaskListModel) rebuildJobIndex() {
 	}
 }
 
+// GetJobByID returns a job by ID, or nil if not found.
+func (m *TaskListModel) GetJobByID(id string) *database.Job {
+	if idx, ok := m.jobIndex[id]; ok && idx < len(m.jobs) {
+		return m.jobs[idx]
+	}
+	return nil
+}
+
 // SelectedJob returns the currently selected job, or nil.
 func (m *TaskListModel) SelectedJob() *database.Job {
 	sel := m.list.SelectedItem()

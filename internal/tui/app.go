@@ -255,7 +255,11 @@ type App struct {
 	OnAddVideo   func(url string)
 	OnCancelJob  func(jobID string)
 	OnDeleteJob  func(jobID string)
-	OnRetryJob   func(jobID string)
+	OnResumeJob       func(jobID string)
+	OnReinitializeJob func(jobID string)
+	OnMuxJob          func(jobID string) error
+	HasStagingFiles   func(jobID string) bool  // checks if staging dir has files
+	HasSegmentFiles   func(jobID string) bool  // checks if staging dir has segment files
 	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
 	OnDeleteTrim func(jobID, trimID string) error
 	OnOpenFolder func(jobID string)

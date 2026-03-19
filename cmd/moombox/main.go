@@ -1221,7 +1221,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				log.Error("Failed to delete job", slog.String("error", err.Error()))
 			}
 		}
-		app.OnRetryJob = func(jobID string) {
+		app.OnReinitializeJob = func(jobID string) {
 			db.UpdateJobFields(jobID, map[string]any{
 				"status": string(database.StatusUpcoming),
 				"error":  "",
