@@ -756,6 +756,10 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		job, err := w.db.GetJob(jobID)
 		if err != nil {
 			w.logger.Error("MuxJob: get job failed", "jobID", jobID, "err", err)
+			w.db.UpdateJobFields(jobID, map[string]any{
+				"status": database.StatusError,
+				"error":  fmt.Sprintf("mux setup failed: %v", err),
+			})
 			return
 		}
 
