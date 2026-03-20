@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 )
 
@@ -27,9 +28,7 @@ type FFmpegCheckModel struct {
 	width   int
 	height  int
 
-	mode         ffmpegMode
-	mainFocus    int // 0=Install, 1=Custom path, 2=Skip for now, 3=Quit
-	installFocus int
+	mode ffmpegMode
 
 	// Shared text input component
 	textInput textinput.Model
@@ -68,6 +67,12 @@ type FFmpegCheckModel struct {
 	// Loading spinner
 	spinner spinner.Model
 
+	// Huh form for main/install menu selection
+	form     *huh.Form
+	formInit tea.Cmd // pending Init cmd from form creation
+	values   map[string]string
+	isDark   bool
+
 	// Callbacks — only OnCheckPrereqs runs synchronously (fast LookPath),
 	// the others are dispatched as tea.Cmd by App.
 	OnCheckPrereqs func() (bool, bool)
@@ -90,8 +95,6 @@ func NewFFmpegCheckModel() *FFmpegCheckModel {
 func (m *FFmpegCheckModel) Open() {
 	m.visible = true
 	m.mode = ffmpegMain
-	m.mainFocus = 0
-	m.installFocus = 0
 	m.customPath = ""
 	m.customResult = ""
 	m.customValid = false
@@ -110,6 +113,8 @@ func (m *FFmpegCheckModel) Open() {
 	m.checking = false
 	m.textInput.Blur()
 	m.textInput.SetValue("")
+	m.values = make(map[string]string)
+	m.formInit = m.buildMainForm()
 }
 
 // Close hides the overlay.
@@ -159,6 +164,24 @@ func (m *FFmpegCheckModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return cmd
+	}
+
+	// Route huh form in main/install modes.
+	// Uses the same pattern as setup_wizard.go: Update returns (tea.Model, tea.Cmd),
+	// type-assert back to *huh.Form.
+	if m.mode == ffmpegMain || m.mode == ffmpegInstall {
+		// Deliver pending Init cmd from form creation (cursor blink, focus setup)
+		if m.formInit != nil {
+			cmd := m.formInit
+			m.formInit = nil
+			return cmd
+		}
+		if m.form != nil {
+			model, cmd := m.form.Update(msg)
+			m.form = model.(*huh.Form)
+			return cmd
+		}
+		return nil
 	}
 
 	// Review mode: only forward non-key messages and scroll keys to viewport
@@ -234,24 +257,20 @@ func (m *FFmpegCheckModel) HandleKey(key string) string {
 }
 
 func (m *FFmpegCheckModel) handleMainKey(key string) string {
-	switch key {
-	case keyUp:
-		if m.mainFocus > 0 {
-			m.mainFocus--
-		}
-	case keyDown:
-		if m.mainFocus < 3 {
-			m.mainFocus++
-		}
-	case keyEnter:
-		switch m.mainFocus {
-		case 0: // Install FFmpeg
+	if key == keyEsc {
+		return "quit"
+	}
+	// Check if huh form completed (state set by UpdateComponents on same cycle)
+	if m.form != nil && m.form.State == huh.StateCompleted {
+		action := m.values["action"]
+		m.form = nil
+		switch action {
+		case "install":
 			m.mode = ffmpegInstall
-			m.installFocus = 0
 			m.installResult = ""
 			m.installError = false
-			m.buildInstallOptions()
-		case 1: // Custom path
+			m.formInit = m.buildInstallForm()
+		case "custom":
 			m.mode = ffmpegCustom
 			m.customPath = ""
 			m.customResult = ""
@@ -259,9 +278,9 @@ func (m *FFmpegCheckModel) handleMainKey(key string) string {
 			m.textInput.SetValue("")
 			m.textInput.Focus()
 			m.updateTextInputWidth()
-		case 2: // Skip for now
+		case "skip":
 			return "skip"
-		case 3: // Quit
+		case "quit":
 			return "quit"
 		}
 	}
@@ -301,35 +320,75 @@ func (m *FFmpegCheckModel) buildInstallOptions() {
 	})
 }
 
-func (m *FFmpegCheckModel) handleInstallKey(key string) string {
-	switch key {
-	case keyEsc:
-		m.mode = ffmpegMain
-	case keyUp:
-		if m.installFocus > 0 {
-			m.installFocus--
-		}
-	case keyDown:
-		if m.installFocus < len(m.installOptions)-1 {
-			m.installFocus++
-		}
-	case keyEnter:
-		if m.installFocus >= len(m.installOptions) {
-			return ""
-		}
-		opt := m.installOptions[m.installFocus]
-		if opt.method == "" {
-			// Cancel
-			m.mode = ffmpegMain
-			return ""
-		}
+// buildMainForm creates the huh Select form for the main menu.
+// Returns a tea.Cmd from Init() that must be delivered to bubbletea.
+func (m *FFmpegCheckModel) buildMainForm() tea.Cmd {
+	m.values["action"] = ""
+	f := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Choose an option:").
+				Options(
+					huh.NewOption("Install FFmpeg", "install"),
+					huh.NewOption("Custom FFmpeg path", "custom"),
+					huh.NewOption("Skip for now", "skip"),
+					huh.NewOption("Quit Moombox", "quit"),
+				).
+				Accessor(&MapAccessor{M: m.values, Key: "action"}),
+		),
+	).WithTheme(moomboxTheme(m.isDark)).WithShowHelp(false)
+	f.SubmitCmd = nil
+	m.form = f
+	return m.form.Init()
+}
 
+// buildInstallForm creates the huh Select form for install method selection.
+// Returns a tea.Cmd from Init() that must be delivered to bubbletea.
+func (m *FFmpegCheckModel) buildInstallForm() tea.Cmd {
+	m.values["method"] = ""
+	m.buildInstallOptions()
+
+	var opts []huh.Option[string]
+	for _, opt := range m.installOptions {
+		opts = append(opts, huh.NewOption(opt.label, opt.method))
+	}
+
+	f := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Choose install method:").
+				Options(opts...).
+				Accessor(&MapAccessor{M: m.values, Key: "method"}),
+		),
+	).WithTheme(moomboxTheme(m.isDark)).WithShowHelp(false)
+	f.SubmitCmd = nil
+	m.form = f
+	return m.form.Init()
+}
+
+func (m *FFmpegCheckModel) handleInstallKey(key string) string {
+	if key == keyEsc {
+		m.mode = ffmpegMain
+		m.form = nil
+		m.formInit = m.buildMainForm()
+		return ""
+	}
+	// Check if huh form completed (state set by UpdateComponents on same cycle)
+	if m.form != nil && m.form.State == huh.StateCompleted {
+		method := m.values["method"]
+		m.form = nil
+		if method == "" {
+			// Cancel option
+			m.mode = ffmpegMain
+			m.formInit = m.buildMainForm()
+			return ""
+		}
 		// Signal the install to run async — App handles via tea.Cmd
 		m.installing = true
 		m.spinner = newSpinner()
 		m.installResult = "Checking permissions..."
 		m.installError = false
-		return "prepare:" + opt.method
+		return "prepare:" + method
 	}
 	return ""
 }
@@ -406,12 +465,12 @@ func (m *FFmpegCheckModel) ShowManual() {
 // ShowInstallOptions resets state and switches back to the install options view.
 func (m *FFmpegCheckModel) ShowInstallOptions() {
 	m.mode = ffmpegInstall
-	m.installFocus = 0
 	m.installResult = ""
 	m.installError = false
 	m.installing = false
 	m.textInput.Blur()
-	m.buildInstallOptions()
+	m.form = nil
+	m.formInit = m.buildInstallForm()
 }
 
 func (m *FFmpegCheckModel) handleReviewKey(key string) string {
@@ -490,46 +549,19 @@ func (m *FFmpegCheckModel) View() string {
 
 	switch m.mode {
 	case ffmpegMain:
-		options := []string{"Install FFmpeg", "Custom FFmpeg path", "Skip for now", "Quit"}
-		for i, opt := range options {
-			prefix := "  "
-			color := ColorWhite
-			if i == m.mainFocus {
-				prefix = "> "
-				color = ColorCyan
-			}
-			style := lipgloss.NewStyle().Foreground(color)
-			if i == m.mainFocus {
-				style = style.Bold(true)
-			}
-			lines = append(lines, style.Render(prefix+opt))
-			if i < len(options)-1 {
-				lines = append(lines, "")
-			}
+		if m.form != nil {
+			lines = append(lines, m.form.View())
 		}
-		// Warning when "Skip for now" is focused
-		if m.mainFocus == 2 {
+		// Warning when skip is selected
+		if m.values["action"] == "skip" {
 			lines = append(lines, "")
 			lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render("\u26a0 Muxing will fail until FFmpeg is installed."))
 			lines = append(lines, DimStyle.Render("You can install it later from Settings \u2192 Paths."))
 		}
 
 	case ffmpegInstall:
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Choose install method:"))
-		lines = append(lines, "")
-
-		for i, opt := range m.installOptions {
-			prefix := "  "
-			color := ColorWhite
-			if i == m.installFocus {
-				prefix = "> "
-				color = ColorCyan
-			}
-			style := lipgloss.NewStyle().Foreground(color)
-			if i == m.installFocus {
-				style = style.Bold(true)
-			}
-			lines = append(lines, style.Render(prefix+opt.label))
+		if m.form != nil {
+			lines = append(lines, m.form.View())
 		}
 
 		if m.installResult != "" {
@@ -647,9 +679,9 @@ func (m *FFmpegCheckModel) View() string {
 	} else {
 		switch m.mode {
 		case ffmpegMain:
-			lines = append(lines, DimStyle.Render("\u2191/\u2193: Select  Enter: Choose"))
+			lines = append(lines, DimStyle.Render("Enter: Choose  Esc: Quit"))
 		case ffmpegInstall:
-			lines = append(lines, DimStyle.Render("Esc: Back  \u2191/\u2193: Select  Enter: Install"))
+			lines = append(lines, DimStyle.Render("Enter: Choose  Esc: Back"))
 		case ffmpegCustom:
 			lines = append(lines, DimStyle.Render("Esc: Back  Enter: Check path"))
 		case ffmpegReview:

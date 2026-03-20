@@ -22,6 +22,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		a.isDark = msg.IsDark()
 		a.setupWiz.isDark = a.isDark
+		a.ffmpegCheck.isDark = a.isDark
 		return a, nil
 
 	case tickMsg:
