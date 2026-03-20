@@ -25,6 +25,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.ffmpegCheck.isDark = a.isDark
 		return a, nil
 
+	case tea.ColorProfileMsg:
+		a.colorProfile = msg.Profile
+		return a, nil
+
 	case tickMsg:
 		// Chord timeout
 		if a.chord.prefix != "" {

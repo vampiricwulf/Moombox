@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -251,6 +252,9 @@ type App struct {
 	// Terminal background detection (updated from BackgroundColorMsg)
 	isDark bool
 
+	// Terminal color capability (updated from ColorProfileMsg on startup)
+	colorProfile colorprofile.Profile
+
 	// First-run flag: triggers setup wizard
 	IsFirstRun bool
 
@@ -327,7 +331,8 @@ func NewApp() *App {
 		actionMenu:      NewActionMenuModel(),
 		progressStore:   ps,
 		statusMap:       make(map[string]database.JobStatus),
-		isDark:          true, // default to dark; updated by BackgroundColorMsg
+		isDark:          true,                      // default to dark; updated by BackgroundColorMsg
+		colorProfile:    colorprofile.TrueColor,    // default; updated by ColorProfileMsg
 	}
 }
 
