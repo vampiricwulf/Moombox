@@ -185,6 +185,7 @@ func (m *SettingsModel) handleRemovePassword() {
 	if networkReset {
 		m.values["network_access"] = "localhost"
 		m.dirty = true
+		m.structDirty = true
 	}
 	if m.OnSave != nil {
 		m.OnSave(m.cfg)

@@ -70,6 +70,7 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 					m.channelIndex--
 				}
 				m.dirty = true
+				m.structDirty = true
 			}
 			m.channelDeleteConf = false
 		} else {

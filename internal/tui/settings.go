@@ -219,7 +219,8 @@ type SettingsModel struct {
 	// Values
 	values         map[string]string
 	originalValues map[string]string
-	dirty          bool
+	dirty       bool
+	structDirty bool // set by channel/notification/security edits (not clearable by recheckDirty)
 
 	// Save status
 	status   saveStatus
@@ -296,6 +297,7 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.fieldIndex = 0
 	m.scrollOffset = 0
 	m.dirty = false
+	m.structDirty = false
 	m.status = saveIdle
 	m.errorMsg = ""
 	m.showRestartOverlay = false
@@ -538,8 +540,12 @@ func (m *SettingsModel) applyValues() {
 }
 
 // recheckDirty recalculates dirty state by comparing values against originalValues.
-// Only covers value-map changes — channel/notification/security edits set dirty directly.
+// Preserves dirty if structDirty is set (channel/notification/security changes).
 func (m *SettingsModel) recheckDirty() {
+	if m.structDirty {
+		m.dirty = true
+		return
+	}
 	for k, v := range m.values {
 		if v != m.originalValues[k] {
 			m.dirty = true

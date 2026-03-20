@@ -22,6 +22,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 					m.notifIndex--
 				}
 				m.dirty = true
+				m.structDirty = true
 			}
 			m.notifDeleteConf = false
 		} else {
@@ -121,6 +122,7 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 			m.notifications = append(m.notifications, n)
 		}
 		m.dirty = true
+		m.structDirty = true
 		m.status = saveIdle
 		m.notifMode = "list"
 		m.textInput.Blur()

@@ -126,11 +126,9 @@ func (m *SettingsModel) handleFieldKey(key string) string {
 		}
 		return ""
 	case "shift+down":
-		// Move to buttons when at last field
-		if m.fieldIndex == len(sec.fields)-1 {
-			m.buttonFocus = 0
-			m.textInput.Blur()
-		}
+		// Jump to action buttons from any field
+		m.buttonFocus = 0
+		m.textInput.Blur()
 		return ""
 	case keyLeft:
 		switch field.ftype {
@@ -246,6 +244,7 @@ func (m *SettingsModel) saveAndClose() string {
 		}
 		m.status = saveSaved
 		m.dirty = false
+		m.structDirty = false
 		needsRestart := m.hasRestartChanges()
 		m.originalValues = make(map[string]string, len(m.values))
 		maps.Copy(m.originalValues, m.values)
