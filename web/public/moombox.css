@@ -1303,6 +1303,15 @@ sl-progress-bar {
     color: var(--sl-color-neutral-400);
 }
 
+#player-chat-offset-reset {
+    font-size: 1rem;
+    margin: -4px 0;
+}
+
+#player-chat-offset-reset::part(base) {
+    padding: 0;
+}
+
 #player-sidebar-messages {
     flex: 1;
     overflow-y: auto;
