@@ -173,11 +173,8 @@ func (m *SettingsModel) handleMouseTabClick(relX int) {
 func (m *SettingsModel) handleMouseContentClick(relX, contentY int) {
 	sec := sections[m.sectionIndex]
 
-	// Check for button clicks first — buttons are rendered on all sections.
-	// Inner layout (relY): header(0) + divider(1) + content + buttons(h-3) + status(h-2) + hints(h-1)
-	// contentY = relY - 2, so buttons at contentY = h-3-2 = h-5.
-	h := max(m.height-2, 10)
-	buttonY := h - 5
+	// Check for button clicks — position recorded during View() rendering.
+	buttonY := m.lastButtonContentY
 	if contentY == buttonY {
 		m.handleMouseButtonClick(relX)
 		return

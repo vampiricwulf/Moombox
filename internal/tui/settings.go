@@ -222,6 +222,9 @@ type SettingsModel struct {
 	dirty       bool
 	structDirty bool // set by channel/notification/security edits (not clearable by recheckDirty)
 
+	// Layout state (set during View, read by mouse handler)
+	lastButtonContentY int // contentY where buttons were rendered (-1 = not rendered)
+
 	// Save status
 	status   saveStatus
 	errorMsg string

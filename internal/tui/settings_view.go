@@ -61,7 +61,10 @@ func (m *SettingsModel) View() string {
 		content.WriteString(m.renderFields(sec, innerW, h-8-buttonLine))
 	}
 
-	// Action buttons (always visible)
+	// Action buttons (always visible).
+	// Record the contentY for mouse hit-testing: count newlines so far,
+	// subtract 2 for header+divider (which contentY already excludes).
+	m.lastButtonContentY = strings.Count(content.String(), "\n") - 2 + 1 // +1 for the \n we're about to add
 	content.WriteString("\n")
 	content.WriteString(m.renderActionButtons())
 
@@ -214,10 +217,31 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		isChanged := m.values[fd.key] != m.originalValues[fd.key]
 		needsRestart := isChanged && restartRequiredKeys[fd.key]
 
-		// Prefix
-		prefix := "  "
-		if selected {
+		// Prefix: 2-char slot combining selection cursor and change indicator.
+		// "  " = normal, "> " = selected, "* " = modified, "*>" = modified+selected
+		var prefix string
+		var prefixStyle lipgloss.Style
+		switch {
+		case isChanged && selected:
+			prefix = "*>"
+			if needsRestart {
+				prefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+			} else {
+				prefixStyle = lipgloss.NewStyle().Foreground(ColorCyan)
+			}
+		case isChanged:
+			prefix = "* "
+			if needsRestart {
+				prefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Faint(true)
+			} else {
+				prefixStyle = lipgloss.NewStyle().Foreground(ColorGreen).Faint(true)
+			}
+		case selected:
 			prefix = "> "
+			prefixStyle = lipgloss.NewStyle().Foreground(ColorCyan)
+		default:
+			prefix = "  "
+			prefixStyle = lipgloss.NewStyle()
 		}
 
 		// Label
@@ -235,33 +259,16 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		case fieldCycle:
 			value = renderCycleOptions(fd.options, m.values[fd.key], selected)
 		default:
-			indicatorW := 0
-			if isChanged || needsRestart {
-				indicatorW = 2 // " *"
-			}
-			valueMaxW := max(w-len(prefix)-padWidth-indicatorW, 5)
+			valueMaxW := max(w-len(prefix)-padWidth, 5)
 			if selected {
-				m.textInput.SetWidth(valueMaxW)
+				m.textInput.SetWidth(valueMaxW - 1) // V2 textinput renders width+1 (cursor block)
 				value = m.textInput.View()
 			} else {
 				value = renderInactiveInput(m.values[fd.key], valueMaxW, ColorWhite)
 			}
 		}
 
-		// Change indicator
-		indicator := ""
-		if needsRestart {
-			indicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Faint(true).Render(" *")
-		} else if isChanged {
-			indicator = lipgloss.NewStyle().Foreground(ColorGreen).Faint(true).Render(" *")
-		}
-
-		prefixStyle := lipgloss.NewStyle()
-		if selected {
-			prefixStyle = lipgloss.NewStyle().Foreground(ColorCyan)
-		}
-
-		line := prefixStyle.Render(prefix) + labelStyle.Render(labelStr) + value + indicator
+		line := prefixStyle.Render(prefix) + labelStyle.Render(labelStr) + value
 		lines = append(lines, line)
 
 		if fd.previewFn != nil {
