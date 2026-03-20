@@ -103,6 +103,7 @@ type HelpModel struct {
 func NewHelpModel() *HelpModel {
 	vp := viewport.New(viewport.WithWidth(0), viewport.WithHeight(0))
 	vp.KeyMap = helpViewportKeyMap()
+	vp.FillHeight = true
 	return &HelpModel{
 		viewport: vp,
 	}

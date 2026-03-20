@@ -67,6 +67,7 @@ func NewJobDetailsModel() *JobDetailsModel {
 	// don't conflict with app chord bindings. Mouse scroll is handled
 	// explicitly in app.go handleMouse.
 	vp.KeyMap = helpViewportKeyMap()
+	vp.FillHeight = true
 
 	pb := progress.New(progress.WithoutPercentage())
 	pb.Full = '█'
@@ -183,7 +184,7 @@ func (m *JobDetailsModel) updateViewportContent() {
 	for _, r := range m.rows {
 		lines = append(lines, m.renderRow(r, contentW))
 	}
-	m.viewport.SetContent(strings.Join(lines, "\n"))
+	m.viewport.SetContentLines(lines)
 }
 
 func (m *JobDetailsModel) buildRows() {

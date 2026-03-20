@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"regexp"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -69,6 +70,7 @@ func NewLogViewerModel() *LogViewerModel {
 	// explicitly in app.go handleMouse.
 	vp.KeyMap = helpViewportKeyMap()
 	vp.SoftWrap = true
+	vp.FillHeight = true
 
 	// Highlight styles for search matches
 	vp.HighlightStyle = lipgloss.NewStyle().
@@ -217,7 +219,9 @@ func (m *LogViewerModel) updateViewportContent() {
 	// Set plain text content — coloring is handled by StyleLineFunc.
 	// This keeps the viewport content free of ANSI codes so that
 	// SetHighlights byte offsets work correctly.
-	m.viewport.SetContent(strings.Join(m.filtered, "\n"))
+	// Clone to avoid shared backing array — SetContentLines stores the
+	// slice reference, and m.filtered may be mutated by rebuildFiltered().
+	m.viewport.SetContentLines(slices.Clone(m.filtered))
 
 	// Re-apply search highlights if a query is active (SetContent clears them).
 	if m.searchQuery != "" {
