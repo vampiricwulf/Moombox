@@ -1,3 +1,3 @@
 ### Bug Fixes
 
-- Fix action buttons only clickable on field sections — buttons are now clickable on all settings sections (Channels, Integrations, etc.)
+- Fix settings action button click detection — buttonY was off by 2 due to header/divider offset not accounted for in contentY coordinates

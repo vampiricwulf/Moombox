@@ -174,10 +174,10 @@ func (m *SettingsModel) handleMouseContentClick(relX, contentY int) {
 	sec := sections[m.sectionIndex]
 
 	// Check for button clicks first — buttons are rendered on all sections.
-	// Layout from bottom: hints (1) + status (1) + buttons (1) = 3 lines before inner bottom.
+	// Inner layout (relY): header(0) + divider(1) + content + buttons(h-3) + status(h-2) + hints(h-1)
+	// contentY = relY - 2, so buttons at contentY = h-3-2 = h-5.
 	h := max(m.height-2, 10)
-	innerH := h
-	buttonY := innerH - 3
+	buttonY := h - 5
 	if contentY == buttonY {
 		m.handleMouseButtonClick(relX)
 		return
