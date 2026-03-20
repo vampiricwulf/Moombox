@@ -173,6 +173,16 @@ func (m *SettingsModel) handleMouseTabClick(relX int) {
 func (m *SettingsModel) handleMouseContentClick(relX, contentY int) {
 	sec := sections[m.sectionIndex]
 
+	// Check for button clicks first — buttons are rendered on all sections.
+	// Layout from bottom: hints (1) + status (1) + buttons (1) = 3 lines before inner bottom.
+	h := max(m.height-2, 10)
+	innerH := h
+	buttonY := innerH - 3
+	if contentY == buttonY {
+		m.handleMouseButtonClick(relX)
+		return
+	}
+
 	switch sec.name {
 	case "Channels":
 		m.handleMouseChannelClick(contentY)
@@ -180,7 +190,7 @@ func (m *SettingsModel) handleMouseContentClick(relX, contentY int) {
 		m.handleMouseNotifClick(contentY)
 	case "Network":
 		if m.secMode != securityStatus {
-			return // Security sub-editor doesn't support mouse clicking
+			return
 		}
 		m.handleMouseFieldClick(relX, contentY, sec)
 	default:
@@ -192,13 +202,6 @@ func (m *SettingsModel) handleMouseContentClick(relX, contentY int) {
 
 // handleMouseFieldClick handles clicking on a field row.
 func (m *SettingsModel) handleMouseFieldClick(relX, contentY int, sec settingsSection) {
-	// Check if click is on action buttons area (always present)
-	buttonY := m.buttonContentY(sec)
-	if contentY == buttonY {
-		m.handleMouseButtonClick(relX)
-		return
-	}
-
 	// Each field is 1 line. Fields with previewFn have an extra preview line.
 	// Map contentY to field index accounting for scroll offset and preview lines.
 	fieldIdx := m.contentYToFieldIndex(contentY, sec)
@@ -220,42 +223,6 @@ func (m *SettingsModel) handleMouseFieldClick(relX, contentY int, sec settingsSe
 	case fieldCycle:
 		m.handleCycleClick(fd, relX, labelWidth)
 	}
-}
-
-// buttonContentY returns the contentY line where buttons are rendered.
-func (m *SettingsModel) buttonContentY(sec settingsSection) int {
-	// Buttons appear after fields + info area.
-	// The fields section renders: field lines + preview lines + empty + divider + help.
-	// We calculate the line count from the renderFields output.
-	// Buttons row is always present (buttonLine = 1)
-	adjustedH := 0
-	if sec.name == "Network" {
-		adjustedH = max(m.height-2, 10) - 12 - 1
-	} else {
-		adjustedH = max(m.height-2, 10) - 8 - 1
-	}
-
-	end := min(m.scrollOffset+adjustedH, len(sec.fields))
-	lineCount := 0
-	for i := m.scrollOffset; i < end; i++ {
-		lineCount++ // field line
-		if sec.fields[i].previewFn != nil {
-			preview := sec.fields[i].previewFn(m.values[sec.fields[i].key])
-			if preview != "" {
-				lineCount++
-			}
-		}
-	}
-
-	// After fields: info area (empty line + divider + help text) = 3 lines
-	lineCount += 3
-
-	// For Network section, add security compact section lines
-	if sec.name == "Network" {
-		lineCount += 4 // "\n" + divider + password status + action line
-	}
-
-	return lineCount
 }
 
 // maxLabelWidth returns the max label width for a section's fields.
