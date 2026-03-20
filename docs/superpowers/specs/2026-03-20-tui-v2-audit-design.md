@@ -58,7 +58,7 @@ Update the skill to reflect actual V2 APIs and codebase patterns:
 - `job_details.go:updateViewportContent()` — lines are built in a `[]string` slice then joined. Change to `m.viewport.SetContentLines(lines)`.
 - `log_viewer.go:updateViewportContent()` — `m.filtered` is already `[]string`. Change to `m.viewport.SetContentLines(slices.Clone(m.filtered))` (clone to avoid shared backing array — `SetContentLines` stores the slice reference, and `m.filtered` may be mutated by `rebuildFiltered()`).
 
-**Not changed:** `help.go` builds content as a single string with `strings.Builder`, so `SetContent` remains appropriate there.
+**Not changed:** `help.go` also builds content as `[]string` + `strings.Join`, but `allLines` is a local variable with no shared-slice concern, and `buildContent()` is called infrequently. The join+SetContent pattern is acceptable here — converting to `SetContentLines` is optional.
 
 ### 3. ColorProfileMsg Detection
 
@@ -74,7 +74,7 @@ case tea.ColorProfileMsg:
 
 This provides the plumbing for future adaptive color decisions. No immediate visual changes — the profile is stored and available for style functions that may later need it.
 
-**Import:** `github.com/charmbracelet/colorprofile` v0.4.2 (already an indirect dependency). Profile constants: `colorprofile.TrueColor`, `colorprofile.ANSI256`, `colorprofile.ANSI`, `colorprofile.Ascii`, `colorprofile.NoTTY`.
+**Import:** `github.com/charmbracelet/colorprofile` v0.4.2 (already an indirect dependency). Profile constants: `colorprofile.TrueColor`, `colorprofile.ANSI256`, `colorprofile.ANSI`, `colorprofile.ASCII`, `colorprofile.NoTTY`.
 
 ### 4. FFmpeg Huh Selects
 
@@ -82,7 +82,7 @@ This provides the plumbing for future adaptive color decisions. No immediate vis
 
 Replace manual keyboard-driven mode selection with huh select forms for cleaner UX:
 
-**Main menu** (currently modes `main` with keybinds I/C/S/Q):
+**Main menu** (currently mode `main` with arrow-key selection via `mainFocus` index + Enter):
 ```go
 huh.NewSelect[string]().
     Title("FFmpeg Setup").
@@ -95,7 +95,7 @@ huh.NewSelect[string]().
     Accessor(&MapAccessor{M: m.values, Key: "action"})
 ```
 
-**Install submenu** (currently mode `install` with keybinds C/W):
+**Install submenu** (currently mode `install` with arrow-key selection via `installFocus` index + Enter). Note: the current interaction model is already arrow-key-driven, so this is replacing a custom arrow-key menu with a huh Select (gaining consistent styling, focus indicators, and theme integration):
 ```go
 huh.NewSelect[string]().
     Title("Install Method").
@@ -113,7 +113,7 @@ huh.NewSelect[string]().
 - Spinner during installation — unchanged
 
 **State machine changes:**
-- Remove `mode` string field, replace with huh form state
+- Keep `mode ffmpegMode` field (it's `int`, not `string`) for tracking which screen to show — huh forms only replace the selection UI within `main` and `install` modes, not the overall mode tracking
 - Add `values map[string]string` field to `FFmpegCheckModel` for form-backed storage
 - Form initialization: create and call `.Init()` on each form when entering `main` or `install` mode (same pattern as `setup_wizard.go` line 366)
 - Form update routing: delegate messages to `m.form.Update(msg)` in `UpdateComponents()`, same as setup wizard routes to `m.advancedForm`
@@ -121,7 +121,9 @@ huh.NewSelect[string]().
 - Esc from form returns to previous step (or closes dialog)
 - **Dynamic install options:** `buildInstallOptions()` currently checks choco/winget availability. Build huh Select options dynamically at form creation time, only including available package managers.
 
-**Theme:** Use `moomboxTheme(m.isDark)` for consistent styling. Requires propagating `isDark` to FFmpegCheckModel (currently available on App).
+**Theme:** Use `moomboxTheme(m.isDark)` for consistent styling. Requires:
+- Adding `isDark bool` field to `FFmpegCheckModel`
+- Updating `tea.BackgroundColorMsg` handler in `app_update.go` to propagate: `a.ffmpegCheck.isDark = a.isDark` (currently only propagates to `setupWiz`)
 
 ## Non-Goals
 
