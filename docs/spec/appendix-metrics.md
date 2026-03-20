@@ -1,6 +1,6 @@
 # Appendix: Project Metrics
 
-> **Last verified:** 2026-03-11 (post full audit & refactor)
+> **Last verified:** 2026-03-19 (post full audit & refactor)
 >
 > These metrics are volatile — they drift as development continues. Update this file periodically.
 
@@ -8,7 +8,7 @@
 
 - **Go version:** 1.25.5
 - **Module path:** github.com/vampiricwulf/Moombox
-- **Current app version:** 2.3.22
+- **Current app version:** 2.3.49
 - **Database schema version:** 6
 - **Default port:** 774
 
@@ -17,10 +17,10 @@
 | Library | Version | Purpose |
 |---------|---------|---------|
 | go-chi/chi/v5 | v5.2.5 | HTTP router |
-| charmbracelet/bubbletea | v1.3.10 | TUI framework |
-| charmbracelet/bubbles | v1.0.0 | TUI components |
-| charmbracelet/huh | v0.8.0 | TUI forms |
-| charmbracelet/lipgloss | v1.1.0 | TUI styling |
+| charm.land/bubbletea/v2 | v2.0.2 | TUI framework |
+| charm.land/bubbles/v2 | v2.0.0 | TUI components |
+| charm.land/huh/v2 | v2.0.3 | TUI forms |
+| charm.land/lipgloss/v2 | v2.0.2 | TUI styling |
 | dop251/goja | v0.0.0-20260219 | JS engine |
 | modernc.org/sqlite | v1.46.1 | SQLite driver |
 | nhooyr.io/websocket | v1.8.17 | WebSocket |

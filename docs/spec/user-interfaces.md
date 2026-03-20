@@ -8,7 +8,7 @@ This document specifies the two user interfaces provided by Moombox — a Web UI
 
 - **Both UIs are first-class.** Neither the Web UI nor the TUI is a secondary or degraded experience. Feature parity is required. Every user-facing capability must exist in both.
 - **Parity respects platform strengths.** The TUI emphasizes real-time feedback, keyboard-driven workflows, and dense information display. The Web UI emphasizes rich media playback, dashboards, and accessibility from any device on the network. The same operation may have different UX in each UI, but the capability itself must be present in both.
-- **The TUI uses the Charm ecosystem.** Specifically: `bubbletea` (core Elm architecture), `bubbles` (pre-built components), `huh` (form framework), and `lipgloss` (styling/layout). Before building any custom TUI component, always check [Charm's repositories](https://github.com/charmbracelet) for an existing solution. Prefer extending Charm's building blocks over rolling custom implementations. This applies to lists, text inputs, forms, file pickers, tables, progress bars, viewports, spinners, and any other UI primitive.
+- **The TUI uses the Charm ecosystem.** Specifically: `charm.land/bubbletea/v2` (core Elm architecture), `charm.land/bubbles/v2` (pre-built components), `charm.land/huh/v2` (form framework), and `charm.land/lipgloss/v2` (styling/layout). Before building any custom TUI component, always check [Charm's repositories](https://github.com/charmbracelet) for an existing solution. Prefer extending Charm's building blocks over rolling custom implementations. This applies to lists, text inputs, forms, file pickers, tables, progress bars, viewports, spinners, and any other UI primitive.
 - **The Web UI uses Shoelace v2.16 via CDN.** It is a vanilla JavaScript SPA — no framework (no React, Vue, Svelte, Angular, or similar). Shoelace provides the component library. Do not introduce a JavaScript framework.
 - **WebSocket is the real-time sync mechanism for both UIs.** The Web UI connects directly. The TUI receives updates via Go channels fed from database subscribers that mirror what WebSocket broadcasts to web clients.
 - **The TUI communicates with the backend via HTTP.** It makes HTTP requests to `localhost` (the same server the Web UI uses) with a custom `RoundTripper` that injects the `X-Internal-Token` header. This header bypasses CSRF validation. The TUI adjusts the base URL for custom ports and TLS configuration.
@@ -89,10 +89,10 @@ The TUI is built on the [Charmbracelet](https://github.com/charmbracelet) ecosys
 
 | Package | Usage |
 |---------|-------|
-| `bubbletea` | Core framework. Elm architecture: `Model` (state), `View` (render), `Update` (message dispatch). All state transitions happen through message passing. |
-| `bubbles` | Pre-built components: `list` (task list), `viewport` (log viewer, detail scrolling), `spinner` (loading indicators), `paginator` (page navigation), `key` (key binding definitions). |
-| `huh` | Form builder framework. Used for the Settings dialog and the Setup Wizard. Provides multi-step forms with inputs, selects, confirms, and validation. |
-| `lipgloss` | Styling engine. Colors, borders, padding, margin, alignment, and layout composition. Every visual element in the TUI is styled through lipgloss. |
+| `charm.land/bubbletea/v2` | Core framework. Elm architecture: `Model` (state), `View` (render), `Update` (message dispatch). All state transitions happen through message passing. |
+| `charm.land/bubbles/v2` | Pre-built components: `list` (task list), `viewport` (log viewer, detail scrolling), `spinner` (loading indicators), `paginator` (page navigation), `key` (key binding definitions). |
+| `charm.land/huh/v2` | Form builder framework. Used for the Settings dialog and the Setup Wizard. Provides multi-step forms with inputs, selects, confirms, and validation. |
+| `charm.land/lipgloss/v2` | Styling engine. Colors, borders, padding, margin, alignment, and layout composition. Every visual element in the TUI is styled through lipgloss. |
 
 ### Layout: Two-Over-One Panel Design with Focus Expansion
 
@@ -138,7 +138,7 @@ Example: Logs focused (100% width, 75% height)
 
 **Job Details (top right):** Shows full metadata for the selected job: title, channel, platform, status, timestamps, progress, output file, quality, and available actions. Content auto-scrolls to accommodate long descriptions.
 
-**Logs (bottom, full width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and regex search. Auto-scrolls to newest entries unless the user has manually scrolled up.
+**Logs (bottom, full width):** Real-time log viewer. Lines arrive via batched messages (250ms flush window). Supports level filtering (debug/info/warn/error) and vim-style regex search (`/` to enter search, `n`/`N` to navigate matches, `Esc` to clear). Matched lines are highlighted in the viewport. Long lines soft-wrap within the available width. Auto-scrolls to newest entries unless the user has manually scrolled up.
 
 **Focus navigation:** `Tab` / `Shift-Tab` cycles focus between panels. Mouse click on a panel changes focus. The focused panel receives keyboard input and has a visually distinct border.
 
@@ -159,6 +159,7 @@ Example: Logs focused (100% width, 75% height)
 | `files_dialog.go` | Orphaned files overlay. Browse and delete files that have no corresponding job. |
 | `client_tokens_dialog.go` | Client token management overlay. List and delete persistent auth tokens. |
 | `settings.go` | Settings overlay. Built with `huh` form framework. Full config editing. |
+| `settings_mouse.go` | Mouse support for the Settings overlay: click tabs, fields, toggles/cycles, and action buttons. |
 | `setup_wizard.go` | First-run setup overlay. Built with `huh`. Config, FFmpeg, yt-dlp plugin, cookies. |
 | `ffmpeg_check.go` | FFmpeg validation/installation overlay. |
 | `styles.go` | Lipgloss style definitions. Colors, borders, padding for all visual elements. |
@@ -240,14 +241,17 @@ The chord system is a three-state finite automaton:
 | `O F` | Open Folder (explorer) | Yes | Job has an openable folder |
 | `O S` | Open Stream Page (browser) | Yes | Job has a stream URL |
 | `O W` | Open Web UI (browser) | No | — |
+| `O C` | Copy Stream URL to clipboard (OSC 52) | Yes | Job has a stream URL |
 
 **Single-key shortcuts:**
 
 | Key | Action |
 |-----|--------|
 | `F` | Cycle filter mode (All / Downloading / Finished / Error / etc.) |
+| `M` | Open Action Menu (command palette) |
 | `` ` `` | Open Settings dialog |
 | `?` | Open Help overlay |
+| `/` | Enter log search mode (log panel focused only). `n`/`N` navigate to next/previous match. `Esc` clears search and returns to normal scroll. |
 
 **Quit chord:**
 
@@ -268,7 +272,7 @@ Overlays are full-screen or near-full-screen modal views that take over keyboard
 | Trim | `A T` | Clip creation. Enter start/end seconds. Encoding runs asynchronously with a progress callback that updates the UI. |
 | Orphaned Files | `A O` | File browser showing files in the output directory that have no corresponding database job. Delete with confirmation. |
 | Client Tokens | `A K` | List of persistent client authentication tokens. Delete individual tokens. |
-| Settings | `` ` `` | Full config editor built with the `huh` form framework. |
+| Settings | `` ` `` | Full config editor built with the `huh` form framework. Supports full mouse interaction (click tabs, fields, toggles, cycle options, and action buttons). Action buttons at the bottom: `[ Save & Return ]` / `[ Return Without Saving ]` (when dirty), or `[ Return ]` (when clean). Presents a close confirmation when there are unsaved changes and the user attempts to dismiss. Smart dirty tracking: reverting a field back to its original value clears the dirty flag. Job detail panel renders clickable hyperlinks (OSC 8) for stream URLs and output paths. |
 | Setup Wizard | First run | Multi-step initial setup: configuration, FFmpeg check/install, yt-dlp plugin, cookie capture. Built with `huh`. |
 | FFmpeg Check | Setup flow | Validates FFmpeg is on PATH. Offers installation options if missing. |
 

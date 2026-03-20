@@ -27,7 +27,7 @@ The application listens on port 774 by default. Configuration lives in `config.t
 | Library | Purpose |
 |---------|---------|
 | `go-chi/chi/v5` | HTTP router with middleware chaining |
-| `charmbracelet/bubbletea` + `bubbles` + `huh` + `lipgloss` | TUI framework (Charm ecosystem) |
+| `charm.land/bubbletea/v2` + `bubbles/v2` + `huh/v2` + `lipgloss/v2` | TUI framework (Charm ecosystem) |
 | `dop251/goja` | Pure-Go JavaScript engine (BotGuard VM, cipher solving) |
 | `modernc.org/sqlite` | Pure-Go SQLite driver (no CGo) |
 | `nhooyr.io/websocket` | WebSocket (RFC 6455 compliant) |
@@ -80,7 +80,7 @@ Never crash. Degrade gracefully. Always inform the user. Silent failures are bug
 
 ### TUI Design Rule
 
-Always check Charm's ecosystem (bubbletea, bubbles, huh, lipgloss) for existing components before building custom ones. Prefer extending their building blocks over rolling custom implementations.
+Always check Charm's ecosystem (`charm.land/bubbletea/v2`, `bubbles/v2`, `huh/v2`, `lipgloss/v2`) for existing components before building custom ones. Prefer extending their building blocks over rolling custom implementations.
 
 **Deep-dive:** [docs/spec/design-philosophy.md](docs/spec/design-philosophy.md)
 
