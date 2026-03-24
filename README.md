@@ -8,6 +8,17 @@ Written in Go. Single binary, no runtime dependencies beyond FFmpeg.
 
 I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a different name related to a certain orca in time, but for now, it's just Moombox.
 
+## Screenshots
+
+### Web Dashboard
+![Web Dashboard](screenshots/GUI.png)
+
+### Video Player with Chat Replay
+![Video Player](screenshots/player.png)
+
+### Terminal UI
+![Terminal UI](screenshots/TUI.png)
+
 ## Features
 
 ### Core
