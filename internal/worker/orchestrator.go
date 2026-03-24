@@ -319,7 +319,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Set streamEndTime fallback if not already set
 	if jobCtx.Job.StreamEndTime == "" {
-		endTime := time.Now().UTC().Format(time.RFC3339)
+		endTime := computeStreamEndFallback(jobCtx.Job)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 			"stream_end_time": endTime,
 		})

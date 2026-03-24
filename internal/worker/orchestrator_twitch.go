@@ -405,7 +405,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 
 	// Set stream end time if not already set
 	if jobCtx.Job.StreamEndTime == "" {
-		endTime := time.Now().UTC().Format(time.RFC3339)
+		endTime := computeStreamEndFallback(jobCtx.Job)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 			"stream_end_time": endTime,
 		})

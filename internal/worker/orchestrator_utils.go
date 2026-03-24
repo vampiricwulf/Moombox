@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -166,6 +167,18 @@ func (o *DownloadOrchestrator) extractQualityFromResult(result *DownloadResult) 
 		qi.Label = FormatQualityLabel(qi.Height, qi.FPS)
 	}
 	return qi
+}
+
+// computeStreamEndFallback computes a stream end time when YouTube/Twitch didn't
+// provide one. Prefers start_time + length_seconds (accurate for VODs/premieres),
+// falling back to time.Now() for live streams where neither is available.
+func computeStreamEndFallback(job *database.Job) string {
+	if job.StreamStartTime != "" && job.LengthSeconds != nil && *job.LengthSeconds > 0 {
+		if start, err := time.Parse(time.RFC3339, job.StreamStartTime); err == nil {
+			return start.Add(time.Duration(*job.LengthSeconds) * time.Second).UTC().Format(time.RFC3339)
+		}
+	}
+	return time.Now().UTC().Format(time.RFC3339)
 }
 
 // formatFileSize formats bytes into human-readable string.
