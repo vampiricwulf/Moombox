@@ -231,25 +231,24 @@ if (typeof globalThis.XMLHttpRequest === "undefined") {
     globalThis.XMLHttpRequest = function() {};
     globalThis.XMLHttpRequest.prototype = {};
 }
-if (typeof window === "undefined") {
-    var window = Object.create(null);
-    window.location = {
+if (typeof globalThis.location === "undefined") {
+    globalThis.location = {
         hash: "", host: "www.youtube.com", hostname: "www.youtube.com",
         href: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         origin: "https://www.youtube.com", pathname: "/watch",
         port: "", protocol: "https:", search: "?v=dQw4w9WgXcQ"
     };
 }
-if (typeof document === "undefined") {
-    var document = Object.create(null);
+if (typeof globalThis.document === "undefined") {
+    globalThis.document = Object.create(null);
 }
-if (typeof navigator === "undefined") {
-    var navigator = Object.create(null);
+if (typeof globalThis.navigator === "undefined") {
+    globalThis.navigator = Object.create(null);
 }
-if (typeof self === "undefined") {
-    var self = globalThis;
+if (typeof globalThis.self === "undefined") {
+    globalThis.self = globalThis;
 }
-if (typeof location === "undefined") {
-    var location = window.location || {};
+if (typeof globalThis.window === "undefined") {
+    globalThis.window = globalThis;
 }
 `

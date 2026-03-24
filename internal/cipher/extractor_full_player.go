@@ -364,33 +364,30 @@ if (typeof globalThis.XMLHttpRequest === "undefined") {
     globalThis.XMLHttpRequest = function() {};
     globalThis.XMLHttpRequest.prototype = {open:function(){},send:function(){},setRequestHeader:function(){}};
 }
-if (typeof window === "undefined") {
-    var window = Object.create(null);
-}
-window.location = {
+globalThis.location = {
     hash: "", host: "www.youtube.com", hostname: "www.youtube.com",
     href: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     origin: "https://www.youtube.com", pathname: "/watch",
     port: "", protocol: "https:", search: "?v=dQw4w9WgXcQ",
     password: "", username: "", toString: function() { return this.href; }
 };
-if (typeof document === "undefined") {
-    var document = Object.create(null);
-    document.addEventListener = function(){};
-    document.createElement = function(t){ return {tagName:t,style:{}}; };
-    document.getElementById = function(){ return null; };
-    document.querySelector = function(){ return null; };
-    document.querySelectorAll = function(){ return []; };
+if (typeof globalThis.document === "undefined") {
+    globalThis.document = Object.create(null);
+    globalThis.document.addEventListener = function(){};
+    globalThis.document.createElement = function(t){ return {tagName:t,style:{}}; };
+    globalThis.document.getElementById = function(){ return null; };
+    globalThis.document.querySelector = function(){ return null; };
+    globalThis.document.querySelectorAll = function(){ return []; };
 }
-if (typeof navigator === "undefined") {
-    var navigator = Object.create(null);
-    navigator.userAgent = "Mozilla/5.0";
+if (typeof globalThis.navigator === "undefined") {
+    globalThis.navigator = Object.create(null);
+    globalThis.navigator.userAgent = "Mozilla/5.0";
 }
-if (typeof self === "undefined") {
-    var self = globalThis;
+if (typeof globalThis.self === "undefined") {
+    globalThis.self = globalThis;
 }
-if (typeof location === "undefined") {
-    var location = window.location;
+if (typeof globalThis.window === "undefined") {
+    globalThis.window = globalThis;
 }
 if (typeof fetch === "undefined") {
     var fetch = function() { return Promise.reject("no fetch"); };
