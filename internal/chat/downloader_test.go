@@ -150,7 +150,7 @@ func TestMessageCountConcurrentAccess(t *testing.T) {
 	// Simulate concurrent increments from a "download goroutine"
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			cd.mu.Lock()
 			cd.messageCount++
 			cd.mu.Unlock()
@@ -159,7 +159,7 @@ func TestMessageCountConcurrentAccess(t *testing.T) {
 	}()
 
 	// Read count concurrently — should never panic or race
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		_ = cd.MessageCount()
 	}
 	<-done
@@ -280,7 +280,7 @@ func TestCullDedupTrimsToKeepSize(t *testing.T) {
 
 	// Fill seenIDs beyond dedupKeepSize
 	totalIDs := dedupKeepSize + 100
-	for i := 0; i < totalIDs; i++ {
+	for i := range totalIDs {
 		id := "msg_" + strconv.Itoa(i)
 		cd.seenIDs[id] = struct{}{}
 		cd.seenOrder = append(cd.seenOrder, id)
@@ -311,7 +311,7 @@ func TestCullDedupTrimsToKeepSize(t *testing.T) {
 func TestCullDedupNoopWhenBelowThreshold(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		id := "msg_" + strconv.Itoa(i)
 		cd.seenIDs[id] = struct{}{}
 		cd.seenOrder = append(cd.seenOrder, id)
@@ -590,4 +590,3 @@ func TestMessageCountHeaderStaleWithoutHeaderUpdate(t *testing.T) {
 		t.Error("expected mismatch between header count and array length (demonstrating bug), but they were equal")
 	}
 }
-

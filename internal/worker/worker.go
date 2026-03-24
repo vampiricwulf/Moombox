@@ -73,7 +73,7 @@ type DownloadWorker struct {
 	notifier     *notifications.Manager
 	logger       logger
 	wg           sync.WaitGroup // tracks in-flight processJob goroutines
-	notifyJob    chan struct{}   // signal to re-check for new jobs (non-blocking send)
+	notifyJob    chan struct{}  // signal to re-check for new jobs (non-blocking send)
 
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should be attempted.
 	// Returns true if cookies were refreshed successfully.
@@ -146,9 +146,7 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 			return // Context cancelled
 		}
 
-		w.wg.Add(1)
-		go func() {
-			defer w.wg.Done()
+		w.wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil {
 					w.logger.Error("panic in processJob", "jobID", jobID, "panic", fmt.Sprint(r))
@@ -159,7 +157,7 @@ func (w *DownloadWorker) Start(ctx context.Context) {
 				}
 			}()
 			w.processJob(jobCtx, jobID)
-		}()
+		})
 	}
 }
 
@@ -731,9 +729,7 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 		"status": database.StatusMuxing,
 	})
 
-	w.wg.Add(1)
-	go func() {
-		defer w.wg.Done()
+	w.wg.Go(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				w.logger.Error("panic in MuxJob", "jobID", jobID, "panic", fmt.Sprint(r))
@@ -764,7 +760,7 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 				"error":  err.Error(),
 			})
 		}
-	}()
+	})
 
 	return nil
 }

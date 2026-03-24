@@ -46,9 +46,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 
 	// Spawn fixed worker pool
 	for range ParallelDownloads {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil && d.logger != nil {
 					d.logger.Error("catch-up parallel download worker panic", "panic", r)
@@ -63,7 +61,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 					results <- segResult{seq: item.seq, data: data}
 				}
 			}
-		}()
+		})
 	}
 
 	// Feed work to workers

@@ -82,7 +82,7 @@ func TestStsCacheFIFOEviction(t *testing.T) {
 
 	// Fill the cache to capacity by manually inserting entries
 	sc.mu.Lock()
-	for i := 0; i < stsCacheSize; i++ {
+	for i := range stsCacheSize {
 		key := fmt.Sprintf("key-%04d", i)
 		sc.cache[key] = fmt.Sprintf("sts-%d", i)
 		sc.order = append(sc.order, key)

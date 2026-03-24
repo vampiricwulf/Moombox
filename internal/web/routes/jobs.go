@@ -68,14 +68,14 @@ type TwitchMetadataFetcher interface {
 
 // TwitchJobMetadata holds metadata needed for creating a Twitch job.
 type TwitchJobMetadata struct {
-	StreamID        string
-	Title           string
-	ChannelName     string
-	ThumbnailURL    string
-	AvatarURL       string
-	StartedAt       string
-	GameCategory    string
-	IsLive          bool
+	StreamID     string
+	Title        string
+	ChannelName  string
+	ThumbnailURL string
+	AvatarURL    string
+	StartedAt    string
+	GameCategory string
+	IsLive       bool
 }
 
 // filterJobsByAge splits jobs into active vs archived based on the
@@ -161,10 +161,7 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 	if offset > len(items) {
 		offset = len(items)
 	}
-	end := offset + limit
-	if end > len(items) {
-		end = len(items)
-	}
+	end := min(offset+limit, len(items))
 	paged := items[offset:end]
 
 	// Ensure non-nil slice so JSON serializes as [] not null
@@ -670,24 +667,24 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			}
 
 			job := &database.Job{
-				ID:               jobID,
-				VideoID:          jobID,
-				URL:              url,
-				Title:            title,
-				ChannelName:      channelName,
-				Platform:         "twitch",
-				Status:           database.StatusUpcoming,
-				ThumbnailURL:     thumbnailURL,
-				ChannelAvatarURL: avatarURL,
-				StreamStartTime:  streamStartTime,
-				TwitchCategory:   twitchCategory,
+				ID:                jobID,
+				VideoID:           jobID,
+				URL:               url,
+				Title:             title,
+				ChannelName:       channelName,
+				Platform:          "twitch",
+				Status:            database.StatusUpcoming,
+				ThumbnailURL:      thumbnailURL,
+				ChannelAvatarURL:  avatarURL,
+				StreamStartTime:   streamStartTime,
+				TwitchCategory:    twitchCategory,
 				TwitchQuality:     body.QualityPreference,
 				QualityPreference: body.QualityPreference,
 				IsVod:             isVod,
 				ManuallyAdded:     true,
-				OutputDirectory:  body.OutputDirectory,
-				CreatedAt:        now,
-				UpdatedAt:        now,
+				OutputDirectory:   body.OutputDirectory,
+				CreatedAt:         now,
+				UpdatedAt:         now,
 			}
 
 			added, err := db.AddJob(job)
@@ -1121,9 +1118,9 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 }
 
 var (
-	youtubeURLRe  = regexp.MustCompile(`(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/live/)([a-zA-Z0-9_-]{11})`)
-	twitchURLRe   = regexp.MustCompile(`(?:twitch\.tv/)([a-zA-Z0-9_]+)`)
-	bracketIDRe   = regexp.MustCompile(`\[([a-zA-Z0-9_-]{11})\]`)
+	youtubeURLRe = regexp.MustCompile(`(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/live/)([a-zA-Z0-9_-]{11})`)
+	twitchURLRe  = regexp.MustCompile(`(?:twitch\.tv/)([a-zA-Z0-9_]+)`)
+	bracketIDRe  = regexp.MustCompile(`\[([a-zA-Z0-9_-]{11})\]`)
 )
 
 func extractVideoIDFromURL(url string) string {
@@ -1227,10 +1224,10 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 			"uptime":    time.Since(deps.StartTime).Seconds(),
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 			"memory": map[string]any{
-				"rss":       mem.Sys / 1048576,
-				"heapUsed":  mem.HeapAlloc / 1048576,
-				"heapTotal": mem.HeapSys / 1048576,
-				"external":  mem.MSpanSys / 1048576,
+				"rss":        mem.Sys / 1048576,
+				"heapUsed":   mem.HeapAlloc / 1048576,
+				"heapTotal":  mem.HeapSys / 1048576,
+				"external":   mem.MSpanSys / 1048576,
 				"goroutines": runtime.NumGoroutine(),
 			},
 			"version": deps.Version,

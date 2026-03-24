@@ -121,10 +121,7 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 	if maxResolution > 0 {
 		var withinCap []TwitchHLSVariant
 		for _, v := range filtered {
-			maxDim := v.Width
-			if v.Height > maxDim {
-				maxDim = v.Height
-			}
+			maxDim := max(v.Height, v.Width)
 			if maxDim <= maxResolution {
 				withinCap = append(withinCap, v)
 			}

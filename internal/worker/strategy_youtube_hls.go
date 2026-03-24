@@ -60,10 +60,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	var filtered []*engine.HlsVariant
 	for i := range parsed.Variants {
 		v := &parsed.Variants[i]
-		varMaxDim := v.Width
-		if v.Height > varMaxDim {
-			varMaxDim = v.Height
-		}
+		varMaxDim := max(v.Height, v.Width)
 		if varMaxDim <= maxRes {
 			filtered = append(filtered, v)
 		}

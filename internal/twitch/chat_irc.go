@@ -102,8 +102,8 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		}
 		consecutiveErrors = 0
 
-		lines := strings.Split(string(data), "\r\n")
-		for _, line := range lines {
+		lines := strings.SplitSeq(string(data), "\r\n")
+		for line := range lines {
 			if line == "" {
 				continue
 			}

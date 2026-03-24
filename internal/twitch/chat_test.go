@@ -250,7 +250,7 @@ func TestChatDedupAddMessage(t *testing.T) {
 	}, &testLogger{})
 
 	// Add unique messages
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		cd.addMessage(&TwitchChatMessage{
 			ID:          "msg_" + strconv.Itoa(i),
 			TimestampMs: int64(i * 1000),
@@ -282,7 +282,7 @@ func TestChatDedupPruning(t *testing.T) {
 	// After pruning, new messages continue to arrive. So add exactly
 	// chatDedupMax*2+1 to trigger one pruning pass, then verify.
 	totalMsgs := chatDedupMax*2 + 1
-	for i := 0; i < totalMsgs; i++ {
+	for i := range totalMsgs {
 		cd.addMessage(&TwitchChatMessage{
 			ID:          "msg_" + strconv.Itoa(i),
 			TimestampMs: int64(i * 1000),

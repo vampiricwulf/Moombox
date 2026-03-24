@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -113,13 +114,14 @@ func generateSelfSignedCert(certPath, keyPath, networkAccess string, logger inte
 	logger.Info("[TLS] Generated self-signed certificate", "cert", certPath, "key", keyPath)
 
 	// Log SANs for debugging
-	sans := "localhost, 127.0.0.1, ::1"
+	var sans strings.Builder
+	sans.WriteString("localhost, 127.0.0.1, ::1")
 	for _, ip := range tmpl.IPAddresses {
 		if !ip.IsLoopback() {
-			sans += ", " + ip.String()
+			sans.WriteString(", " + ip.String())
 		}
 	}
-	logger.Info("[TLS] Certificate SANs: " + sans)
+	logger.Info("[TLS] Certificate SANs: " + sans.String())
 
 	return nil
 }

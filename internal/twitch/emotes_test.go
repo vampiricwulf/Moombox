@@ -38,7 +38,7 @@ func TestEmoteResolverLRUEviction(t *testing.T) {
 	er := NewEmoteResolver(&testLogger{})
 
 	// Fill cache to capacity
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		key := "channel_" + string(rune('a'+i%26)) + string(rune('a'+i/26))
 		er.cache[key] = &TwitchEmoteData{}
 		er.cacheOrder = append(er.cacheOrder, key)

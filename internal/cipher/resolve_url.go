@@ -88,7 +88,7 @@ func (s *Solver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*Resolv
 // in URLs — url.Values.Get() returns only the decoded value, which may not match
 // the raw URL when the value contains percent-encoded characters.
 func RawQueryParam(rawQuery, key string) (raw, decoded string) {
-	for _, part := range strings.Split(rawQuery, "&") {
+	for part := range strings.SplitSeq(rawQuery, "&") {
 		k, v, ok := strings.Cut(part, "=")
 		if ok && k == key {
 			decoded, _ = url.QueryUnescape(v)

@@ -129,10 +129,7 @@ func findAlrTransformChains(playerJS string) []string {
 			offset = afterMarker // advance for next iteration
 
 			// Only search within alrProximity chars of the marker
-			searchEnd := afterMarker + alrProximity
-			if searchEnd > len(playerJS) {
-				searchEnd = len(playerJS)
-			}
+			searchEnd := min(afterMarker+alrProximity, len(playerJS))
 			nearby := playerJS[afterMarker:searchEnd]
 
 			m := alrTransformHeadPattern.FindStringSubmatchIndex(nearby)

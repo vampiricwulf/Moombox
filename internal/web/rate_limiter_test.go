@@ -9,7 +9,7 @@ func TestRateLimiterUnderLimit(t *testing.T) {
 	rl := NewRateLimiter(5, time.Minute)
 	defer rl.Close()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if !rl.Allow("192.168.1.1") {
 			t.Errorf("request %d should be allowed (under limit)", i+1)
 		}
@@ -20,7 +20,7 @@ func TestRateLimiterAtLimit(t *testing.T) {
 	rl := NewRateLimiter(3, time.Minute)
 	defer rl.Close()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if !rl.Allow("10.0.0.1") {
 			t.Fatalf("request %d should be allowed", i+1)
 		}

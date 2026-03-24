@@ -445,7 +445,7 @@ func TestTimerConcurrentCreateAndCancel(t *testing.T) {
 				t.Errorf("panic in concurrent timer creation: %v", r)
 			}
 		}()
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			tm.SetTimeout(callable, 1000)
 			tm.SetInterval(callable, 1000)
 		}

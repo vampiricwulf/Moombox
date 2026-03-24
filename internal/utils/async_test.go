@@ -39,7 +39,7 @@ func TestJitter(t *testing.T) {
 
 	// Positive max returns value in range [0, max)
 	maxJ := 100 * time.Millisecond
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		j := Jitter(maxJ)
 		if j < 0 || j >= maxJ {
 			t.Errorf("Jitter(%v) = %v, out of range", maxJ, j)

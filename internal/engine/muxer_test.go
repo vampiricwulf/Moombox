@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -232,10 +233,8 @@ func (l *testLogger) Error(msg string, args ...any) {}
 
 func checkContains(t *testing.T, args []string, want string) {
 	t.Helper()
-	for _, a := range args {
-		if a == want {
-			return
-		}
+	if slices.Contains(args, want) {
+		return
 	}
 	t.Errorf("args %v does not contain %q", args, want)
 }

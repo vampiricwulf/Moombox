@@ -181,7 +181,7 @@ func TestMetadataFailureTracker_Eviction(t *testing.T) {
 	tracker := NewMetadataFailureTracker()
 
 	// Fill up to maxMetadataFailuresMapSize (500)
-	for i := 0; i < maxMetadataFailuresMapSize; i++ {
+	for i := range maxMetadataFailuresMapSize {
 		tracker.RecordFailure(fmt.Sprintf("vid_%d", i))
 	}
 

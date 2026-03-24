@@ -4,14 +4,15 @@ import (
 	"testing"
 )
 
-func intPtr(n int) *int { return &n }
+//go:fix inline
+func intPtr(n int) *int { return new(n) }
 
 func TestSelectBestFormats(t *testing.T) {
 	formats := []Format{
-		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(30), URL: "https://example.com/v1"},
-		{Itag: 298, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4500000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(60), URL: "https://example.com/v2"},
-		{Itag: 248, MimeType: "video/webm; codecs=\"vp9\"", Bitrate: 3500000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(30), URL: "https://example.com/v3"},
-		{Itag: 136, MimeType: "video/mp4; codecs=\"avc1.4d401f\"", Bitrate: 2500000, Width: intPtr(1280), Height: intPtr(720), Fps: intPtr(30), URL: "https://example.com/v4"},
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v1"},
+		{Itag: 298, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4500000, Width: new(1920), Height: new(1080), Fps: new(60), URL: "https://example.com/v2"},
+		{Itag: 248, MimeType: "video/webm; codecs=\"vp9\"", Bitrate: 3500000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v3"},
+		{Itag: 136, MimeType: "video/mp4; codecs=\"avc1.4d401f\"", Bitrate: 2500000, Width: new(1280), Height: new(720), Fps: new(30), URL: "https://example.com/v4"},
 		{Itag: 140, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Bitrate: 128000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a1"},
 		{Itag: 251, MimeType: "audio/webm; codecs=\"opus\"", Bitrate: 160000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a2"},
 	}
@@ -38,9 +39,9 @@ func TestSelectBestFormats(t *testing.T) {
 
 func TestSelectBestFormatsResolutionLimit(t *testing.T) {
 	formats := []Format{
-		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(30), URL: "https://example.com/v1"},
-		{Itag: 136, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 2500000, Width: intPtr(1280), Height: intPtr(720), Fps: intPtr(30), URL: "https://example.com/v2"},
-		{Itag: 135, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 1500000, Width: intPtr(854), Height: intPtr(480), Fps: intPtr(30), URL: "https://example.com/v3"},
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v1"},
+		{Itag: 136, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 2500000, Width: new(1280), Height: new(720), Fps: new(30), URL: "https://example.com/v2"},
+		{Itag: 135, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 1500000, Width: new(854), Height: new(480), Fps: new(30), URL: "https://example.com/v3"},
 	}
 
 	// max dimension 1280 allows up to 720p
@@ -55,8 +56,8 @@ func TestSelectBestFormatsResolutionLimit(t *testing.T) {
 
 func TestSelectWithManualItag(t *testing.T) {
 	formats := []Format{
-		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), URL: "https://example.com/v1"},
-		{Itag: 136, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 2500000, Width: intPtr(1280), Height: intPtr(720), URL: "https://example.com/v2"},
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), URL: "https://example.com/v1"},
+		{Itag: 136, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 2500000, Width: new(1280), Height: new(720), URL: "https://example.com/v2"},
 		{Itag: 140, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Bitrate: 128000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a1"},
 	}
 
@@ -69,7 +70,7 @@ func TestSelectWithManualItag(t *testing.T) {
 
 func TestSelectSkipStream(t *testing.T) {
 	formats := []Format{
-		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), URL: "https://example.com/v1"},
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), URL: "https://example.com/v1"},
 		{Itag: 140, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Bitrate: 128000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a1"},
 	}
 
@@ -110,8 +111,8 @@ func TestSelectBestFormats_AuthLevelTiebreaker(t *testing.T) {
 	webAuth := AuthLevelWeb
 
 	formats := []Format{
-		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(30), URL: "https://example.com/v1", AuthLevel: &webAuth},
-		{Itag: 138, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(30), URL: "https://example.com/v2", AuthLevel: &vrAuth},
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v1", AuthLevel: &webAuth},
+		{Itag: 138, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v2", AuthLevel: &vrAuth},
 		{Itag: 140, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Bitrate: 128000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a1", AuthLevel: &webAuth},
 		{Itag: 141, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Bitrate: 128000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a2", AuthLevel: &vrAuth},
 	}
@@ -153,8 +154,8 @@ func TestSelectBestFormats_NilFormats(t *testing.T) {
 
 func TestSelectBestFormats_Prefer30fps(t *testing.T) {
 	formats := []Format{
-		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(30), URL: "https://example.com/v1"},
-		{Itag: 298, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4500000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(60), URL: "https://example.com/v2"},
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v1"},
+		{Itag: 298, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4500000, Width: new(1920), Height: new(1080), Fps: new(60), URL: "https://example.com/v2"},
 	}
 
 	// prefer60fps=false should pick 30fps
@@ -169,8 +170,8 @@ func TestSelectBestFormats_Prefer30fps(t *testing.T) {
 
 func TestSelectBestFormats_NoURLSkipped(t *testing.T) {
 	formats := []Format{
-		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), URL: ""},
-		{Itag: 136, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 2500000, Width: intPtr(1280), Height: intPtr(720), URL: "https://example.com/v2"},
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), URL: ""},
+		{Itag: 136, MimeType: "video/mp4; codecs=\"avc1\"", Bitrate: 2500000, Width: new(1280), Height: new(720), URL: "https://example.com/v2"},
 		{Itag: 140, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", Bitrate: 128000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: ""},
 		{Itag: 251, MimeType: "audio/webm; codecs=\"opus\"", Bitrate: 160000, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com/a2"},
 	}
@@ -193,8 +194,8 @@ func TestSelectBestFormats_NoURLSkipped(t *testing.T) {
 func TestSelectBestFormats_CodecTiebreaker(t *testing.T) {
 	// Same resolution, same fps — vp9 should beat avc1 (higher codec score)
 	formats := []Format{
-		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(30), URL: "https://example.com/v1"},
-		{Itag: 248, MimeType: "video/webm; codecs=\"vp9\"", Bitrate: 3500000, Width: intPtr(1920), Height: intPtr(1080), Fps: intPtr(30), URL: "https://example.com/v2"},
+		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v1"},
+		{Itag: 248, MimeType: "video/webm; codecs=\"vp9\"", Bitrate: 3500000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v2"},
 	}
 
 	result := SelectBestFormats(formats, 1920, true)

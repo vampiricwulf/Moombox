@@ -224,7 +224,7 @@ func TestResolveTemplate(t *testing.T) {
 
 func TestFlexDurationParse(t *testing.T) {
 	tests := []struct {
-		input    interface{}
+		input    any
 		unit     string
 		def      float64
 		expected float64
@@ -416,4 +416,3 @@ func TestValidationQualityPreference(t *testing.T) {
 		t.Errorf("expected best, got %s", cfg.Channels[2].QualityPreference)
 	}
 }
-

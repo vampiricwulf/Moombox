@@ -90,10 +90,7 @@ func (m *Marquee) View() string {
 	}
 
 	// Slice from offset, take as many runes as fit within maxWidth
-	start := m.offset
-	if start > len(m.runes) {
-		start = len(m.runes)
-	}
+	start := min(m.offset, len(m.runes))
 
 	var result []rune
 	w := 0

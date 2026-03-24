@@ -139,7 +139,7 @@ func TestSmoothValue_MultipleUpdatesConverge(t *testing.T) {
 
 	// Push toward 100 many times; should converge
 	var result float64
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		result = sv.Update(100.0)
 	}
 

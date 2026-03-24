@@ -103,7 +103,7 @@ type ChannelConfig struct {
 	Name                  string       `toml:"name,omitempty" json:"name,omitempty"`
 	Platform              string       `toml:"platform,omitempty" json:"platform,omitempty"`
 	Enabled               *bool        `toml:"enabled,omitempty" json:"enabled,omitempty"`
-	Terms                 ChannelTerms `toml:"terms,omitempty" json:"terms,omitempty"`
+	Terms                 ChannelTerms `toml:"terms,omitempty" json:"terms"`
 	NumDescLookbehind     *int         `toml:"num_desc_lookbehind,omitempty" json:"num_desc_lookbehind,omitempty"`
 	OutputDirectory       string       `toml:"output_directory,omitempty" json:"output_directory,omitempty"`
 	IncludeNonLiveContent bool         `toml:"include_non_live_content,omitempty" json:"include_non_live_content,omitempty"`

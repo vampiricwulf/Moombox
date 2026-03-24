@@ -61,8 +61,8 @@ func (j *CookieJar) Load(filePath string) error {
 		return fmt.Errorf("failed to read cookie file: %w", err)
 	}
 
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(data), "\n")
+	for line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

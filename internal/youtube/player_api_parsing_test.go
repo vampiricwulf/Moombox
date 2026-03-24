@@ -15,7 +15,7 @@ func TestParsePlayabilityStatus_NilStatus(t *testing.T) {
 }
 
 func TestParsePlayabilityStatus_OK(t *testing.T) {
-	status := map[string]interface{}{"status": "OK"}
+	status := map[string]any{"status": "OK"}
 	errType, _ := parsePlayabilityStatus(status)
 	if errType != PlayabilityOK {
 		t.Errorf("expected PlayabilityOK, got %q", errType)
@@ -23,7 +23,7 @@ func TestParsePlayabilityStatus_OK(t *testing.T) {
 }
 
 func TestParsePlayabilityStatus_LoginRequired(t *testing.T) {
-	status := map[string]interface{}{
+	status := map[string]any{
 		"status": "LOGIN_REQUIRED",
 		"reason": "Sign in to confirm your age",
 	}
@@ -37,7 +37,7 @@ func TestParsePlayabilityStatus_LoginRequired(t *testing.T) {
 }
 
 func TestParsePlayabilityStatus_LoginRequiredGeneric(t *testing.T) {
-	status := map[string]interface{}{
+	status := map[string]any{
 		"status": "LOGIN_REQUIRED",
 		"reason": "Please sign in to continue",
 	}
@@ -50,18 +50,18 @@ func TestParsePlayabilityStatus_LoginRequiredGeneric(t *testing.T) {
 func TestParsePlayabilityStatus_MembersOnly(t *testing.T) {
 	tests := []struct {
 		name   string
-		status map[string]interface{}
+		status map[string]any
 	}{
 		{
 			"login_required_members",
-			map[string]interface{}{
+			map[string]any{
 				"status": "LOGIN_REQUIRED",
 				"reason": "Join this channel to get access to members-only content",
 			},
 		},
 		{
 			"unplayable_members",
-			map[string]interface{}{
+			map[string]any{
 				"status": "UNPLAYABLE",
 				"reason": "This video is available to members only",
 			},
@@ -81,15 +81,15 @@ func TestParsePlayabilityStatus_MembersOnly(t *testing.T) {
 func TestParsePlayabilityStatus_Upcoming(t *testing.T) {
 	tests := []struct {
 		name   string
-		status map[string]interface{}
+		status map[string]any
 	}{
 		{
 			"live_stream_offline",
-			map[string]interface{}{"status": "LIVE_STREAM_OFFLINE"},
+			map[string]any{"status": "LIVE_STREAM_OFFLINE"},
 		},
 		{
 			"unplayable_live_event",
-			map[string]interface{}{
+			map[string]any{
 				"status": "UNPLAYABLE",
 				"reason": "This live event will begin in a few moments",
 			},
@@ -107,7 +107,7 @@ func TestParsePlayabilityStatus_Upcoming(t *testing.T) {
 }
 
 func TestParsePlayabilityStatus_Private(t *testing.T) {
-	status := map[string]interface{}{
+	status := map[string]any{
 		"status": "UNPLAYABLE",
 		"reason": "This video is private",
 	}
@@ -118,7 +118,7 @@ func TestParsePlayabilityStatus_Private(t *testing.T) {
 }
 
 func TestParsePlayabilityStatus_RegionBlocked(t *testing.T) {
-	status := map[string]interface{}{
+	status := map[string]any{
 		"status": "UNPLAYABLE",
 		"reason": "This video is not available in your country",
 	}
@@ -129,7 +129,7 @@ func TestParsePlayabilityStatus_RegionBlocked(t *testing.T) {
 }
 
 func TestParsePlayabilityStatus_AgeRestricted(t *testing.T) {
-	status := map[string]interface{}{
+	status := map[string]any{
 		"status": "AGE_VERIFICATION_REQUIRED",
 		"reason": "Age-restricted",
 	}
@@ -141,9 +141,9 @@ func TestParsePlayabilityStatus_AgeRestricted(t *testing.T) {
 
 func TestParsePlayabilityStatus_FallbackMessages(t *testing.T) {
 	// When reason is empty, should fall back to messages array
-	status := map[string]interface{}{
+	status := map[string]any{
 		"status":   "UNPLAYABLE",
-		"messages": []interface{}{"Video is unavailable"},
+		"messages": []any{"Video is unavailable"},
 	}
 	errType, reason := parsePlayabilityStatus(status)
 	if errType != PlayabilityUnavailable {
@@ -155,7 +155,7 @@ func TestParsePlayabilityStatus_FallbackMessages(t *testing.T) {
 }
 
 func TestClassifyStream_NotAStream(t *testing.T) {
-	vd := map[string]interface{}{"isLiveContent": false}
+	vd := map[string]any{"isLiveContent": false}
 	status, isLive, isUpcoming, isPostLiveDVR := classifyStream(vd, nil, nil, true)
 	if status != StreamNotAStream {
 		t.Errorf("expected StreamNotAStream, got %q", status)
@@ -166,7 +166,7 @@ func TestClassifyStream_NotAStream(t *testing.T) {
 }
 
 func TestClassifyStream_Live(t *testing.T) {
-	vd := map[string]interface{}{
+	vd := map[string]any{
 		"isLiveContent": true,
 		"isLive":        true,
 	}
@@ -183,8 +183,8 @@ func TestClassifyStream_Live(t *testing.T) {
 }
 
 func TestClassifyStream_Upcoming(t *testing.T) {
-	vd := map[string]interface{}{"isLiveContent": true}
-	ps := map[string]interface{}{"status": "LIVE_STREAM_OFFLINE"}
+	vd := map[string]any{"isLiveContent": true}
+	ps := map[string]any{"status": "LIVE_STREAM_OFFLINE"}
 	status, _, isUpcoming, _ := classifyStream(vd, ps, nil, false)
 	if status != StreamUpcoming {
 		t.Errorf("expected StreamUpcoming, got %q", status)
@@ -195,9 +195,9 @@ func TestClassifyStream_Upcoming(t *testing.T) {
 }
 
 func TestClassifyStream_VOD(t *testing.T) {
-	vd := map[string]interface{}{"isLiveContent": true}
-	mf := map[string]interface{}{
-		"liveBroadcastDetails": map[string]interface{}{
+	vd := map[string]any{"isLiveContent": true}
+	mf := map[string]any{
+		"liveBroadcastDetails": map[string]any{
 			"startTimestamp": "2025-01-01T00:00:00Z",
 		},
 	}
@@ -208,9 +208,9 @@ func TestClassifyStream_VOD(t *testing.T) {
 }
 
 func TestClassifyStream_PostLiveDVR(t *testing.T) {
-	vd := map[string]interface{}{"isLiveContent": true}
-	mf := map[string]interface{}{
-		"liveBroadcastDetails": map[string]interface{}{
+	vd := map[string]any{"isLiveContent": true}
+	mf := map[string]any{
+		"liveBroadcastDetails": map[string]any{
 			"startTimestamp": "2025-01-01T00:00:00Z",
 			"endTimestamp":   "2025-01-01T02:00:00Z",
 		},
@@ -288,7 +288,7 @@ func TestHasAdequateFormats(t *testing.T) {
 
 	// Only video
 	info = &VideoInfo{Formats: []Format{
-		{Itag: 137, MimeType: "video/mp4", Width: intPtr(1920), Height: intPtr(1080), URL: "https://example.com"},
+		{Itag: 137, MimeType: "video/mp4", Width: new(1920), Height: new(1080), URL: "https://example.com"},
 	}}
 	if hasAdequateFormats(info) {
 		t.Error("expected false for video-only formats")
@@ -296,7 +296,7 @@ func TestHasAdequateFormats(t *testing.T) {
 
 	// Video + audio
 	info = &VideoInfo{Formats: []Format{
-		{Itag: 137, MimeType: "video/mp4", Width: intPtr(1920), Height: intPtr(1080), URL: "https://example.com"},
+		{Itag: 137, MimeType: "video/mp4", Width: new(1920), Height: new(1080), URL: "https://example.com"},
 		{Itag: 140, MimeType: "audio/mp4", AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://example.com"},
 	}}
 	if !hasAdequateFormats(info) {
@@ -372,7 +372,7 @@ func TestMergeWatchPageMetadata_DoNotOverwrite(t *testing.T) {
 // --- JSON helper tests ---
 
 func TestGetStr(t *testing.T) {
-	m := map[string]interface{}{"key": "value", "num": 42}
+	m := map[string]any{"key": "value", "num": 42}
 	if getStr(m, "key") != "value" {
 		t.Error("expected 'value'")
 	}
@@ -388,7 +388,7 @@ func TestGetStr(t *testing.T) {
 }
 
 func TestGetInt(t *testing.T) {
-	m := map[string]interface{}{"f64": float64(42), "i": 7, "s": "text"}
+	m := map[string]any{"f64": float64(42), "i": 7, "s": "text"}
 	if getInt(m, "f64") != 42 {
 		t.Error("expected 42 from float64")
 	}
@@ -404,9 +404,9 @@ func TestGetInt(t *testing.T) {
 }
 
 func TestGetNestedMap(t *testing.T) {
-	m := map[string]interface{}{
-		"a": map[string]interface{}{
-			"b": map[string]interface{}{
+	m := map[string]any{
+		"a": map[string]any{
+			"b": map[string]any{
 				"c": "deep",
 			},
 		},
@@ -428,9 +428,9 @@ func TestGetNestedMap(t *testing.T) {
 }
 
 func TestGetDeepStr(t *testing.T) {
-	m := map[string]interface{}{
-		"a": map[string]interface{}{
-			"b": map[string]interface{}{
+	m := map[string]any{
+		"a": map[string]any{
+			"b": map[string]any{
 				"c": "found",
 			},
 		},
@@ -448,8 +448,8 @@ func TestGetDeepStr(t *testing.T) {
 
 func TestExtractScheduledStartTime(t *testing.T) {
 	// From liveBroadcastDetails
-	mf := map[string]interface{}{
-		"liveBroadcastDetails": map[string]interface{}{
+	mf := map[string]any{
+		"liveBroadcastDetails": map[string]any{
 			"startTimestamp": "2025-01-01T00:00:00Z",
 		},
 	}
@@ -459,7 +459,7 @@ func TestExtractScheduledStartTime(t *testing.T) {
 	}
 
 	// From uploadDate fallback
-	mf2 := map[string]interface{}{
+	mf2 := map[string]any{
 		"uploadDate": "2025-06-15",
 	}
 	result2 := extractScheduledStartTime(mf2, nil)

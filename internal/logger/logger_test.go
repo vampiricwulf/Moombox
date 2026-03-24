@@ -48,7 +48,7 @@ func TestRingBuffer(t *testing.T) {
 	defer l.Close()
 
 	// Fill ring buffer past capacity
-	for i := 0; i < 250; i++ {
+	for i := range 250 {
 		l.Info("message", "i", i)
 	}
 
@@ -66,7 +66,7 @@ func TestRingBufferPartialFill(t *testing.T) {
 	defer l.Close()
 
 	// Log fewer messages than ring size
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		l.Info("partial", "i", i)
 	}
 
@@ -84,7 +84,7 @@ func TestRingBufferOrder(t *testing.T) {
 	defer l.Close()
 
 	// Overfill and check that we get the most recent entries in order
-	for i := 0; i < 210; i++ {
+	for i := range 210 {
 		l.Info(fmt.Sprintf("msg-%d", i))
 	}
 
@@ -170,7 +170,7 @@ func TestJobLogsPruning(t *testing.T) {
 	defer l.Close()
 
 	// Fill past maxJobLogLines (500)
-	for i := 0; i < 550; i++ {
+	for i := range 550 {
 		l.LogForJob("job-prune", slog.LevelInfo, "msg", "i", i)
 	}
 
@@ -278,8 +278,8 @@ func TestSetLevelValidLevels(t *testing.T) {
 		{"WARN", true},
 		{"WARNING", true},
 		{"ERROR", true},
-		{"debug", true},  // case insensitive
-		{"Info", true},   // case insensitive
+		{"debug", true}, // case insensitive
+		{"Info", true},  // case insensitive
 		{"INVALID", false},
 		{"", false},
 		{"TRACE", false},
@@ -305,7 +305,7 @@ func TestLogRotation(t *testing.T) {
 	defer l.Close()
 
 	// Write enough to trigger rotation
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		l.Info("rotation test message that is long enough to exceed the limit", "i", i)
 	}
 

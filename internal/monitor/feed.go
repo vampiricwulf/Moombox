@@ -329,10 +329,7 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 		// Description dedup: filter lines that appear in older entries
 		description := entry.MediaGroup.Description
 		if lookbehind > 0 && i+1 < len(entries) {
-			end := i + 1 + lookbehind
-			if end > len(entries) {
-				end = len(entries)
-			}
+			end := min(i+1+lookbehind, len(entries))
 			description = filterUniqueDescriptionLines(description, entries[i+1:end])
 		}
 

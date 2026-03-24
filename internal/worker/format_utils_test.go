@@ -6,7 +6,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-func intPtr(v int) *int { return &v }
+//go:fix inline
+func intPtr(v int) *int { return new(v) }
 
 func TestIsProgressiveFormat(t *testing.T) {
 	tests := []struct {
@@ -18,8 +19,8 @@ func TestIsProgressiveFormat(t *testing.T) {
 			name: "progressive format with audio and video dimensions",
 			format: youtube.Format{
 				AudioQuality: "AUDIO_QUALITY_MEDIUM",
-				Width:        intPtr(1920),
-				Height:       intPtr(1080),
+				Width:        new(1920),
+				Height:       new(1080),
 			},
 			expected: true,
 		},
@@ -33,8 +34,8 @@ func TestIsProgressiveFormat(t *testing.T) {
 		{
 			name: "video only - no audio quality",
 			format: youtube.Format{
-				Width:  intPtr(1920),
-				Height: intPtr(1080),
+				Width:  new(1920),
+				Height: new(1080),
 			},
 			expected: false,
 		},
@@ -47,7 +48,7 @@ func TestIsProgressiveFormat(t *testing.T) {
 			name: "audio quality set but only width",
 			format: youtube.Format{
 				AudioQuality: "AUDIO_QUALITY_LOW",
-				Width:        intPtr(640),
+				Width:        new(640),
 			},
 			expected: false,
 		},
@@ -55,7 +56,7 @@ func TestIsProgressiveFormat(t *testing.T) {
 			name: "audio quality set but only height",
 			format: youtube.Format{
 				AudioQuality: "AUDIO_QUALITY_LOW",
-				Height:       intPtr(480),
+				Height:       new(480),
 			},
 			expected: false,
 		},

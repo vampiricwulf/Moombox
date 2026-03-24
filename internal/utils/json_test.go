@@ -41,8 +41,8 @@ func TestPadMessageCountJSON(t *testing.T) {
 			}
 
 			// Find the count value + padding
-			idx := strings.Index(resultStr, `"messageCount":`)
-			if idx < 0 {
+			found := strings.Contains(resultStr, `"messageCount":`)
+			if !found {
 				t.Fatal("messageCount field not found in result")
 			}
 			// The padded field should make the total length increase

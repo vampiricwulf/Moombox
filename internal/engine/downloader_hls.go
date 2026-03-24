@@ -201,9 +201,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 
 	// Spawn fixed worker pool
 	for range ParallelDownloads {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				if r := recover(); r != nil && d.logger != nil {
 					d.logger.Error("VOD parallel download worker panic", "panic", r)
@@ -217,7 +215,7 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 					results <- segResult{idx: item.idx, data: data}
 				}
 			}
-		}()
+		})
 	}
 
 	// Feed work to workers

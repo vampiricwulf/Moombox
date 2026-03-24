@@ -1,6 +1,7 @@
 package web
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -100,7 +101,7 @@ func TestWebSocketHubLogBuffer(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
 
 	// Add some log lines
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		hub.BroadcastLog("line")
 	}
 
@@ -115,7 +116,7 @@ func TestWebSocketHubLogBufferTruncation(t *testing.T) {
 
 	// The buffer trims when it exceeds 400 entries, keeping the last 200.
 	// Adding 500 lines: at 401 it trims to 200, then 99 more are added = 299.
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		hub.BroadcastLog("line")
 	}
 
@@ -125,7 +126,7 @@ func TestWebSocketHubLogBufferTruncation(t *testing.T) {
 	}
 
 	// Adding enough to trigger a second trim
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		hub.BroadcastLog("line")
 	}
 
@@ -140,11 +141,11 @@ func TestWebSocketHubLogLineTruncation(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
 
 	// Add a very long log line (over 4096 chars)
-	longLine := ""
-	for i := 0; i < 5000; i++ {
-		longLine += "x"
+	var longLine strings.Builder
+	for range 5000 {
+		longLine.WriteString("x")
 	}
-	hub.BroadcastLog(longLine)
+	hub.BroadcastLog(longLine.String())
 
 	buf := hub.GetLogBuffer()
 	if len(buf) != 1 {

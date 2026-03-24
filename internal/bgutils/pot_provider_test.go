@@ -59,12 +59,12 @@ func TestGenerateColdStartToken(t *testing.T) {
 
 func TestGenerateColdStartToken_TooLong(t *testing.T) {
 	// Create identifier > 118 bytes
-	longID := ""
-	for i := 0; i < 120; i++ {
-		longID += "x"
+	var longID strings.Builder
+	for range 120 {
+		longID.WriteString("x")
 	}
 
-	_, err := GenerateColdStartToken(longID, 1)
+	_, err := GenerateColdStartToken(longID.String(), 1)
 	if err == nil {
 		t.Fatal("expected error for too-long identifier")
 	}
@@ -272,12 +272,12 @@ func TestParseChallengeData_DirectArray(t *testing.T) {
 	// the raw array directly as the challenge data.
 	// Indices: 0=messageID, 1=null (no scramble), 2=url, 3=hash, 4=program, 5=globalName
 	raw, _ := json.Marshal([]any{
-		"msg-123",                 // 0 messageID
-		nil,                       // 1 null — skips descrambling
-		"https://example.com/bg",  // 2 interpreter URL
-		"hash-abc",                // 3 interpreter hash
-		"program-data",            // 4 program (required)
-		"vmGlobalName",            // 5 globalName (required)
+		"msg-123",                // 0 messageID
+		nil,                      // 1 null — skips descrambling
+		"https://example.com/bg", // 2 interpreter URL
+		"hash-abc",               // 3 interpreter hash
+		"program-data",           // 4 program (required)
+		"vmGlobalName",           // 5 globalName (required)
 	})
 
 	ch, err := parseChallengeData(raw)
@@ -305,12 +305,12 @@ func TestParseChallengeData_FallbackInlineScript(t *testing.T) {
 	// Test via descrambled format: inner array has script at index 1 but no URL at index 2.
 	// After descrambling, the parser should fall back to inline script.
 	innerArr := []any{
-		"msg-456",       // 0 messageID
-		"inline-js",     // 1 interpreter script (fallback)
-		"",              // 2 empty URL
-		"hash-def",      // 3
-		"my-program",    // 4
-		"myGlobal",      // 5
+		"msg-456",    // 0 messageID
+		"inline-js",  // 1 interpreter script (fallback)
+		"",           // 2 empty URL
+		"hash-def",   // 3
+		"my-program", // 4
+		"myGlobal",   // 5
 	}
 	innerJSON, _ := json.Marshal(innerArr)
 	scrambled := scrambleString(string(innerJSON))
@@ -332,12 +332,12 @@ func TestParseChallengeData_FallbackInlineScript(t *testing.T) {
 func TestParseChallengeData_WithDescrambling(t *testing.T) {
 	// Build the inner challenge data, scramble it, and wrap in outer array
 	innerArr := []any{
-		"descrambled-msg",   // 0
-		"descrambled-js",    // 1
-		"https://desc.url",  // 2
-		"desc-hash",         // 3
-		"desc-program",      // 4
-		"descGlobal",        // 5
+		"descrambled-msg",  // 0
+		"descrambled-js",   // 1
+		"https://desc.url", // 2
+		"desc-hash",        // 3
+		"desc-program",     // 4
+		"descGlobal",       // 5
 	}
 	innerJSON, _ := json.Marshal(innerArr)
 	scrambled := scrambleString(string(innerJSON))
@@ -394,8 +394,8 @@ func TestParseChallengeData_ClientExperimentsBlob(t *testing.T) {
 	// Use scrambled format so the inner array fields are parsed correctly
 	innerArr := []any{
 		"msg", "script", "https://url.com", "hash", "program", "global",
-		nil,          // 6 (unused)
-		"blob-data",  // 7 clientExperimentsBlob
+		nil,         // 6 (unused)
+		"blob-data", // 7 clientExperimentsBlob
 	}
 	innerJSON, _ := json.Marshal(innerArr)
 	scrambled := scrambleString(string(innerJSON))
@@ -807,7 +807,7 @@ func TestPotProvider_InflightDedup(t *testing.T) {
 	errs := make([]error, 3)
 
 	// Launch 3 concurrent requests for the same binding
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()

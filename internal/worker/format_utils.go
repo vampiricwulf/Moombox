@@ -46,10 +46,7 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 
 		// Resolution cap for video
 		if isVideo && maxRes > 0 {
-			maxDim := s.Width
-			if s.Height > maxDim {
-				maxDim = s.Height
-			}
+			maxDim := max(s.Height, s.Width)
 			if maxDim > maxRes {
 				continue
 			}
@@ -156,7 +153,7 @@ type DashStreamInfo struct {
 	Codecs         string
 	Width          int
 	Height         int
-	FPS            int    // From DASH frameRate attribute (0 if not present)
+	FPS            int // From DASH frameRate attribute (0 if not present)
 	Bandwidth      int
 	BaseURL        string
 	Initialization string // Init segment URL
