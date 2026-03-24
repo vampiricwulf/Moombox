@@ -317,8 +317,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		return ctx.Err()
 	}
 
-	// Set streamEndTime fallback if not already set
-	if jobCtx.Job.StreamEndTime == "" {
+	// Set streamEndTime fallback for live streams only — VODs/premieres that were never
+	// live don't have a meaningful stream end time, so leave it empty.
+	if !isVod && jobCtx.Job.StreamEndTime == "" {
 		endTime := computeStreamEndFallback(jobCtx.Job)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 			"stream_end_time": endTime,

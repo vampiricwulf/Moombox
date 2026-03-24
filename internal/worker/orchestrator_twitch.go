@@ -403,8 +403,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		})
 	}
 
-	// Set stream end time if not already set
-	if jobCtx.Job.StreamEndTime == "" {
+	// Set stream end time for live streams only — Twitch VODs don't have a meaningful
+	// stream end time from our perspective, so leave it empty.
+	if !isVod && jobCtx.Job.StreamEndTime == "" {
 		endTime := computeStreamEndFallback(jobCtx.Job)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 			"stream_end_time": endTime,
