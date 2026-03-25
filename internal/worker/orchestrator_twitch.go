@@ -325,6 +325,24 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				"from", currentQuality.Label, "to", newQuality.Label,
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
+			if o.notifier != nil {
+				o.notifier.Send("Quality Split",
+					fmt.Sprintf("Stream quality changed during download: %s", jobCtx.Job.Title),
+					notifications.TypeDownload,
+					[]notifications.Field{
+						{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+						{Name: "From", Value: currentQuality.Label, Inline: true},
+						{Name: "To", Value: newQuality.Label, Inline: true},
+						{Name: "Segment", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true},
+					},
+					notifications.SendOptions{
+						URL:       jobCtx.Job.URL,
+						Thumbnail: jobCtx.Job.ThumbnailURL,
+						Event:     "quality_split",
+					},
+				)
+			}
+
 			// Mux the old segment in the background (unless too short)
 			if !shortSegment {
 				muxIdx := segmentIndex

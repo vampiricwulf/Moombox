@@ -1,3 +1,3 @@
-### Bug Fixes
+### Improvements
 
-- Fix quality-split segment files being incorrectly flagged as orphaned — the orphan scanner now includes segment file paths from the database when building the known-files map
+- Add Discord webhook notification when a quality split occurs during a live stream download — shows channel, from/to quality, and segment number (fires only for real quality changes, not transient error recovery)
