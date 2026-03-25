@@ -262,7 +262,70 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			segmentEndTime := time.Now().Unix()
 			shortSegment := time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
 
-			// Mux this segment in the background so the new download starts immediately.
+			// Re-fetch master playlist FIRST to determine if quality actually changed.
+			variants, fetchErr := variant.FetchVariantsFn(ctx)
+			if fetchErr != nil {
+				o.logger.Error("failed to refresh Twitch variants", "err", fetchErr, "jobID", jobCtx.Job.ID)
+				break
+			}
+
+			newVariant := twitch.SelectBestVariant(variants, variant.QualityPref, variant.MaxResolution)
+			if newVariant == nil {
+				o.logger.Error("no suitable Twitch variant after quality change", "jobID", jobCtx.Job.ID)
+				break
+			}
+
+			newQuality := QualityInfo{
+				Width:  newVariant.Width,
+				Height: newVariant.Height,
+				FPS:    int(newVariant.FPS),
+				Label:  FormatQualityLabel(newVariant.Height, int(newVariant.FPS)),
+			}
+
+			if !newQuality.Changed(currentQuality) {
+				// Same quality — transient error, create fresh downloader in same staging dir.
+				// ForceStartSeq ensures it appends to the existing file.
+				o.logger.Info("Twitch quality unchanged after re-fetch, continuing download",
+					"quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
+
+				oldSeq := videoDl.CurrentSeq()
+				videoPath = filepath.Join(jobCtx.StagingDir, "video_stream")
+				videoDl = engine.NewSegmentDownloader(engine.DownloaderOptions{
+					BaseURL:       newVariant.URL,
+					OutputFile:    videoPath,
+					StartSeq:      oldSeq,
+					ForceStartSeq: true,
+					IsHls:         true,
+					Logger:        o.logger,
+					CheckStreamStatus: func(ctx context.Context) (bool, error) {
+						if isVod {
+							return false, nil
+						}
+						info, err := variant.CheckStreamFn(ctx)
+						if err != nil {
+							return false, err
+						}
+						return !info, nil
+					},
+				})
+				tracker.AttachVideoDownloader(videoDl)
+
+				if twitchMonitor != nil {
+					select {
+					case <-qualityChangeCh:
+					default:
+					}
+					twitchMonitor.UpdateBaseline(currentQuality)
+				}
+				continue
+			}
+
+			// Quality actually changed — split into a new segment.
+			o.logger.Info("Twitch quality split",
+				"from", currentQuality.Label, "to", newQuality.Label,
+				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
+
+			// Mux the old segment in the background (unless too short)
 			if !shortSegment {
 				muxIdx := segmentIndex
 				muxStart := segmentStartTime
@@ -296,31 +359,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 					"jobID", jobCtx.Job.ID)
 			}
 
-			// Re-fetch master playlist and select new best variant
-			variants, fetchErr := variant.FetchVariantsFn(ctx)
-			if fetchErr != nil {
-				o.logger.Error("failed to refresh Twitch variants", "err", fetchErr, "jobID", jobCtx.Job.ID)
-				break
-			}
-
-			newVariant := twitch.SelectBestVariant(variants, variant.QualityPref, variant.MaxResolution)
-			if newVariant == nil {
-				o.logger.Error("no suitable Twitch variant after quality change", "jobID", jobCtx.Job.ID)
-				break
-			}
-
-			newQuality := QualityInfo{
-				Width:  newVariant.Width,
-				Height: newVariant.Height,
-				FPS:    int(newVariant.FPS),
-				Label:  FormatQualityLabel(newVariant.Height, int(newVariant.FPS)),
-			}
-
-			o.logger.Info("Twitch quality split",
-				"from", currentQuality.Label, "to", newQuality.Label,
-				"segment", segmentIndex, "jobID", jobCtx.Job.ID)
-
-			// Create new staging subdirectory
+			// Create new staging subdirectory for the different-quality segment
 			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
 			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
 				o.logger.Error("failed to create segment staging dir", "err", err)
@@ -332,7 +371,6 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			tracker.AttachVideoDownloader(videoDl)
 			segmentStartTime = time.Now().Unix()
 
-			// Update monitor baseline so it doesn't re-detect the same change
 			if twitchMonitor != nil {
 				select {
 				case <-qualityChangeCh:

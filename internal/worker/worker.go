@@ -36,14 +36,16 @@ type logger = interface {
 
 // JobContext holds the context needed to process a single job.
 type JobContext struct {
-	Job        *database.Job
-	Config     *JobConfig
-	YT         *youtube.Service
-	DB         *database.Database
-	StagingDir string
-	OutputDir  string
-	Filename   string
-	Logger     logger
+	Job           *database.Job
+	Config        *JobConfig
+	YT            *youtube.Service
+	DB            *database.Database
+	StagingDir    string
+	OutputDir     string
+	Filename      string
+	VideoStartSeq int // Orchestrator-set: exact next video seq to download (0 = use DB fallback)
+	AudioStartSeq int // Orchestrator-set: exact next audio seq to download (0 = use DB fallback)
+	Logger        logger
 }
 
 // JobConfig holds per-job configuration derived from the global config.

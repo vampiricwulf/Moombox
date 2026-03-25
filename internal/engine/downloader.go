@@ -51,6 +51,7 @@ type DownloaderOptions struct {
 	IsDirectURL        bool // Direct URL download (not segmented)
 	MaxRetries         int
 	InitURL            string
+	ForceStartSeq      bool   // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
 	ResumeFile         string
 	RetryDelayCap      int // seconds
 	LiveCheckRetries   int
@@ -192,11 +193,21 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		}
 	}
 
-	// DB-level fallback: no resume file but StartSeq > 0 means the database has
-	// a last-downloaded sequence from a previous session. Use the output file's
-	// current size as the byte position. This is a best-effort recovery for cases
-	// where the resume file was lost (e.g., crash without graceful shutdown).
-	if !resuming && d.currentSeq.Load() > 0 && !d.opts.IsHls {
+	// Orchestrator-provided StartSeq: exact starting position for quality recovery/split.
+	// Takes priority over DB-fallback — the orchestrator captured this from the old downloader.
+	if !resuming && d.opts.ForceStartSeq && d.currentSeq.Load() > 0 {
+		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
+			// Same-quality recovery: append to existing file
+			d.bytesWritten.Store(info.Size())
+			resuming = true
+			d.logger.Info("[Downloader] Continuing from orchestrator-provided seq (append)",
+				"seq", d.currentSeq.Load(), "fileSize", info.Size())
+		} else {
+			// Different-quality split or new file: start from provided seq
+			d.logger.Info("[Downloader] Starting from orchestrator-provided seq (fresh file)",
+				"seq", d.currentSeq.Load())
+		}
+	} else if !resuming && d.currentSeq.Load() > 0 && !d.opts.IsHls {
 		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
 			d.bytesWritten.Store(info.Size())
 			d.currentSeq.Add(1) // StartSeq is the last downloaded; advance to the next
@@ -267,6 +278,12 @@ func (d *SegmentDownloader) Cancel() {
 // LastSeq returns the last successfully downloaded sequence number.
 func (d *SegmentDownloader) LastSeq() int {
 	return int(d.currentSeq.Load()) - 1
+}
+
+// CurrentSeq returns the next sequence number to be downloaded.
+// Use this to capture the exact download position for replacement downloaders.
+func (d *SegmentDownloader) CurrentSeq() int {
+	return int(d.currentSeq.Load())
 }
 
 // BytesWritten returns total bytes written (lock-free).

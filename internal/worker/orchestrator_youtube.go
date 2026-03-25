@@ -157,8 +157,81 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			segmentEndTime := time.Now().Unix()
 			shortSegment := time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
 
-			// Mux this segment in the background so the new download starts immediately.
-			// All values are captured by the goroutine — no shared mutable state.
+			// Re-fetch manifest FIRST to determine if quality actually changed.
+			// This must happen before muxing so we can skip the split for same-quality.
+			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+			if err != nil {
+				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
+				return fmt.Errorf("refresh after quality change: %w", err)
+			}
+
+			// Cancel old downloaders (safe to call multiple times)
+			if result.VideoDownloader != nil {
+				result.VideoDownloader.Cancel()
+			}
+			if result.AudioDownloader != nil {
+				result.AudioDownloader.Cancel()
+			}
+
+			// Capture old downloader sequences before replacement
+			var oldVideoSeq, oldAudioSeq int
+			if result.VideoDownloader != nil {
+				oldVideoSeq = result.VideoDownloader.CurrentSeq()
+			}
+			if result.AudioDownloader != nil {
+				oldAudioSeq = result.AudioDownloader.CurrentSeq()
+			}
+
+			// Create fresh downloaders in the current staging dir to check quality.
+			// ForceStartSeq ensures they continue from where the old ones left off.
+			jobCtx.VideoStartSeq = oldVideoSeq
+			jobCtx.AudioStartSeq = oldAudioSeq
+
+			var refreshResult *DownloadResult
+			var refreshErr error
+			if result.IsHls {
+				refreshResult, refreshErr = DownloadHls(ctx, jobCtx, freshInfo, o.potProvider)
+			} else {
+				refreshResult, refreshErr = DownloadDash(ctx, jobCtx, freshInfo, o.cipherSolver, o.potProvider)
+			}
+
+			// Clear orchestrator seqs so they don't persist to future iterations
+			jobCtx.VideoStartSeq = 0
+			jobCtx.AudioStartSeq = 0
+
+			if refreshErr != nil {
+				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+				return nil // Can't continue, finalize what we have
+			}
+
+			newQuality := o.extractQualityFromResult(refreshResult)
+
+			if !newQuality.Changed(currentQuality) {
+				// Same quality — transient error, not a real quality change.
+				// Continue in the same staging directory with fresh downloaders.
+				o.logger.Info("quality unchanged after re-fetch, continuing download",
+					"quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
+
+				result = refreshResult
+
+				if monitor != nil {
+					select {
+					case <-qualityChangeCh:
+					default:
+					}
+					monitor.UpdateBaseline(currentQuality)
+				}
+
+				attachProgress(result)
+				continue
+			}
+
+			// Quality actually changed — split into a new segment.
+			o.logger.Info("quality split",
+				"from", currentQuality.Label, "to", newQuality.Label,
+				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
+
+			// Mux the old segment in the background (unless too short)
 			if !shortSegment {
 				muxIdx := segmentIndex
 				muxStart := segmentStartTime
@@ -191,33 +264,18 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					"jobID", jobCtx.Job.ID)
 			}
 
-			// Re-fetch manifest and select new best quality (concurrent with background mux)
-			freshInfo, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
-			if err != nil {
-				o.logger.Error("failed to refresh video info after quality change", "err", err, "jobID", jobCtx.Job.ID)
-				return fmt.Errorf("refresh after quality change: %w", err)
-			}
-
-			// Cancel old downloaders
-			if result.VideoDownloader != nil {
-				result.VideoDownloader.Cancel()
-			}
-			if result.AudioDownloader != nil {
-				result.AudioDownloader.Cancel()
-			}
-
-			// Create new staging subdirectory for the new segment
+			// Create downloaders in the NEW staging dir. The refreshResult created above points
+			// to the old staging dir and was used only to check quality — discard it.
 			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
 			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
 				return fmt.Errorf("create segment staging dir: %w", err)
 			}
 
-			// Create a temporary job context pointing to the new staging dir
 			segJobCtx := *jobCtx
 			segJobCtx.StagingDir = segStagingDir
+			segJobCtx.VideoStartSeq = oldVideoSeq
+			segJobCtx.AudioStartSeq = oldAudioSeq
 
-			var refreshResult *DownloadResult
-			var refreshErr error
 			if result.IsHls {
 				refreshResult, refreshErr = DownloadHls(ctx, &segJobCtx, freshInfo, o.potProvider)
 			} else {
@@ -225,20 +283,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 
 			if refreshErr != nil {
-				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				return nil // Can't continue, finalize what we have
+				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+				return nil
 			}
-
-			newQuality := o.extractQualityFromResult(refreshResult)
-			o.logger.Info("quality split",
-				"from", currentQuality.Label, "to", newQuality.Label,
-				"segment", segmentIndex, "jobID", jobCtx.Job.ID)
 
 			currentQuality = newQuality
 			result = refreshResult
 			segmentStartTime = time.Now().Unix()
 
-			// Update monitor baseline so it doesn't re-detect the same change
 			if monitor != nil {
 				select {
 				case <-qualityChangeCh:

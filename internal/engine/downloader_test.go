@@ -428,3 +428,47 @@ func TestStreamEnded_AtomicAccess(t *testing.T) {
 		t.Error("should be ended after Store(true)")
 	}
 }
+
+func TestCurrentSeq(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(t.TempDir(), "test.mp4"),
+		StartSeq:   42,
+	})
+	if got := d.CurrentSeq(); got != 42 {
+		t.Errorf("CurrentSeq() = %d, want 42", got)
+	}
+}
+
+func TestForceStartSeq_ExistingFile(t *testing.T) {
+	// ForceStartSeq + existing file = should honor StartSeq (same-quality append path)
+	tmpDir := t.TempDir()
+	outFile := filepath.Join(tmpDir, "video_stream")
+	os.WriteFile(outFile, []byte("existing segment data"), 0o644)
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       "https://example.com/sq/$Number$",
+		OutputFile:    outFile,
+		StartSeq:      100,
+		ForceStartSeq: true,
+	})
+	if got := d.CurrentSeq(); got != 100 {
+		t.Errorf("CurrentSeq() = %d, want 100", got)
+	}
+}
+
+func TestForceStartSeq_MissingFile(t *testing.T) {
+	// ForceStartSeq + missing file = should still honor StartSeq (different-quality split path)
+	tmpDir := t.TempDir()
+	outFile := filepath.Join(tmpDir, "video_stream") // does not exist
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:       "https://example.com/sq/$Number$",
+		OutputFile:    outFile,
+		StartSeq:      100,
+		ForceStartSeq: true,
+	})
+	if got := d.CurrentSeq(); got != 100 {
+		t.Errorf("CurrentSeq() = %d, want 100", got)
+	}
+}

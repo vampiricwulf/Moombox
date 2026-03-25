@@ -170,15 +170,23 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		dashCookieHeader = job.YT.GetCookieHeader()
 	}
 
-	// Use last downloaded sequence from DB as StartSeq fallback for crash recovery.
-	// The resume file (.resume.json) takes priority if it exists; StartSeq is only
-	// used when no resume file is found (e.g., after a crash without graceful shutdown).
+	// Orchestrator-provided StartSeq takes priority (quality recovery/split).
+	// Falls back to DB-stored last sequence for crash recovery.
+	// The resume file (.resume.json) takes priority over both if it exists.
 	videoStartSeq := 0
-	if job.Job.LastVideoSeq != nil && *job.Job.LastVideoSeq > 0 {
+	forceVideoSeq := false
+	if job.VideoStartSeq > 0 {
+		videoStartSeq = job.VideoStartSeq
+		forceVideoSeq = true
+	} else if job.Job.LastVideoSeq != nil && *job.Job.LastVideoSeq > 0 {
 		videoStartSeq = *job.Job.LastVideoSeq
 	}
 	audioStartSeq := 0
-	if job.Job.LastAudioSeq != nil && *job.Job.LastAudioSeq > 0 {
+	forceAudioSeq := false
+	if job.AudioStartSeq > 0 {
+		audioStartSeq = job.AudioStartSeq
+		forceAudioSeq = true
+	} else if job.Job.LastAudioSeq != nil && *job.Job.LastAudioSeq > 0 {
 		audioStartSeq = *job.Job.LastAudioSeq
 	}
 
@@ -189,6 +197,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			BaseURL:          videoStream.BaseURL,
 			OutputFile:       result.VideoPath,
 			StartSeq:         videoStartSeq,
+			ForceStartSeq:    forceVideoSeq,
 			InitURL:          videoStream.Initialization,
 			PoToken:          dashPoToken,
 			CookieHeader:     dashCookieHeader,
@@ -218,6 +227,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			BaseURL:          audioStream.BaseURL,
 			OutputFile:       result.AudioPath,
 			StartSeq:         audioStartSeq,
+			ForceStartSeq:    forceAudioSeq,
 			InitURL:          audioStream.Initialization,
 			PoToken:          dashPoToken,
 			CookieHeader:     dashCookieHeader,
