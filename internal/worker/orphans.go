@@ -246,6 +246,12 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		if job.DescriptionFile != "" {
 			knownFiles[normalizePath(job.DescriptionFile)] = true
 		}
+		// Include quality-split segment files so they aren't flagged as orphans.
+		for _, seg := range job.Segments {
+			if seg.FilePath != "" {
+				knownFiles[normalizePath(seg.FilePath)] = true
+			}
+		}
 	}
 
 	var entries []OrphanedEntry
