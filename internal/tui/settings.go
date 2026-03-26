@@ -169,7 +169,7 @@ type notifEventGroup struct {
 
 // Notification event groups.
 var notifEventGroups = []notifEventGroup{
-	{"Job Lifecycle", []string{"found", "added", "scheduled", "live", "downloading", "muxing", "finished", "error", "cancelled", "auth"}},
+	{"Job Lifecycle", []string{"found", "added", "scheduled", "live", "downloading", "quality_split", "muxing", "finished", "error", "cancelled", "auth"}},
 	{"Trim", []string{"trim_created", "trim_deleted", "trim_error"}},
 	{"System", []string{"disk_warning", "update_available"}},
 }

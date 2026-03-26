@@ -1,3 +1,3 @@
 ### Improvements
 
-- Add Discord webhook notification when a quality split occurs during a live stream download — shows channel, from/to quality, and segment number (fires only for real quality changes, not transient error recovery)
+- Add `quality_split` event to notification event filter lists in Web UI and TUI settings, making it selectable alongside other notification events
