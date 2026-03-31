@@ -597,6 +597,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	routes.AuthRoutes(r, authDeps, webServer.CfgMu())
 	routes.ClientTokenRoutes(r, authDeps)
 	routes.PlayerPrefsRoutes(r, db)
+	routes.WatchRoutes(r, db)
 
 	// WebSocket upgrade handler — register on the router before static file mounting.
 	// TS uses noServer mode which upgrades on any path; frontend connects to ws://host/ (root).
