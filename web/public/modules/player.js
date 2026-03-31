@@ -31,6 +31,7 @@ export class PlayerController {
     this._watchSaveInterval = null;
     this._watchedTriggered = false;
     this._onPauseSave = null;
+    this._onSeekedWatch = null;
     this._onBeforeUnload = null;
   }
 

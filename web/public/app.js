@@ -1443,6 +1443,19 @@ class MoomboxApp {
       return;
     }
 
+    // If watch state changed, rebuild to refresh pill and action buttons
+    const watchPill = content.querySelector(".watch-pill");
+    const watchedNow = !!job.watched;
+    const hadWatchPill = !!watchPill;
+    const watchPillStale = watchedNow !== (watchPill?.classList.contains("watched") ?? false)
+      || (job.resumePosition != null) !== (watchPill?.classList.contains("in-progress") ?? false)
+      || (watchedNow && !hadWatchPill) || (!watchedNow && !job.resumePosition && hadWatchPill);
+    if (watchPillStale) {
+      this.renderJobDetails(job);
+      this.loadJobLogs(job.id);
+      return;
+    }
+
     // Update status badge
     if (statusBadge) {
       const statusClass = job.status.toLowerCase().replace("?", "");

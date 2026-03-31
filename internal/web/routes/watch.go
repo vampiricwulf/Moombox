@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -21,6 +22,10 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			jsonError(rw, "invalid request body", http.StatusBadRequest)
 			return
 		}
+		if body.Position < 0 || math.IsNaN(body.Position) || math.IsInf(body.Position, 0) {
+			jsonError(rw, "invalid position value", http.StatusBadRequest)
+			return
+		}
 		db.UpdateResumePosition(jobID, body.Position)
 		rw.WriteHeader(http.StatusNoContent)
 	})
@@ -32,6 +37,10 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			Position float64 `json:"position"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			rw.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body.Position < 0 || math.IsNaN(body.Position) || math.IsInf(body.Position, 0) {
 			rw.WriteHeader(http.StatusBadRequest)
 			return
 		}
