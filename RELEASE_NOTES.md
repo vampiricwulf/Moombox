@@ -1,21 +1,23 @@
 ### Features
 
-- Add watch tracking for downloaded videos — Plex-like resume and watched status in the Web UI
-  - Resume dialog when opening a video with a saved position ("Resume from X:XX" or "Start from beginning")
-  - Automatic position save every 10 seconds during playback, on pause, and on tab close
-  - Auto-mark as watched when reaching the end (within 30s or 95% of duration)
-  - Eyeball icon on job thumbnails: filled green (watched), outlined amber (in progress)
-  - Watch status pill in job details with 4 states (unwatched, paused at, watched, watched + paused at)
-  - Mark Watched / Mark Unwatched buttons in job details and batch action bar
-  - Multi-segment (quality-split) playback support for resume and watched detection
-- Add `GET /api/jobs/{id}/watch-state` endpoint for mutable player state (watched, resume position, chat offset) — separate from the immutably-cached job endpoint
+- Add channel filter dropdown to Tasks and Archived panels — auto-populated from job data, stacks with existing search and status filters
+- Add full filtering and multiselect to Archived panel — search, status filter, channel filter, batch actions, filter count display
+- Reposition batch action bar to fixed viewport bottom with slide-up animation — always visible regardless of scroll position
 
 ### Improvements
 
-- `UpdateJobFields` now returns the updated job, eliminating redundant database reads in mux notifications and watch endpoints
-- Migrate chat offset from `player_prefs` table to `jobs` table — chat offset is now per-job (not per-video-id), loaded from the watch-state endpoint, and no longer requires a separate API call
+- Select All now respects active filters — only selects visible/filtered jobs, shows count when filtered
+- Per-panel selection state — Tasks and Archived panels track selections independently
+- Escape key and Clear All are panel-aware — only affect the active panel's selections
+- Selection left-border accent for stronger visual feedback when scrolling
+- Mobile batch bar polish — flex-wrap, 44px touch targets, compact layout
+- Skip redundant channel dropdown rebuild when channel list hasn't changed
+- Add ARIA labels to filter controls, job checkboxes, and batch action bar
+- Batch action bar announces selection changes to screen readers via live region
+- Extract STATUS_FILTER_MAP constant — single source of truth for filter status groups
 
 ### Bug Fixes
 
-- Fix resume dialog not appearing due to browser caching the immutable job response
-- Fix watch status pill not updating in real-time during playback
+- Fix Select All selecting all jobs regardless of active filters
+- Fix layout shift when selecting/deselecting jobs (transparent border-left on base state)
+- Fix batch bar animation race condition on rapid selection toggling
