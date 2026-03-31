@@ -123,6 +123,7 @@ sl-tab::part(base) {
     cursor: pointer;
     transition: background-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
     border-radius: var(--sl-border-radius-medium);
+    border-left: 3px solid transparent;
 }
 
 .video-item:hover {
@@ -759,6 +760,10 @@ sl-badge.status.cookies::part(base) {
 /* Add padding to body to account for fixed status bar */
 body {
     padding-bottom: 28px;
+}
+
+body.batch-bar-active {
+    padding-bottom: 68px;
 }
 
 #status-bar-left, #status-bar-right {
