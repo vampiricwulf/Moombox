@@ -3027,55 +3027,65 @@ class MoomboxApp {
   }
 
   /**
-   * Set up a searchable channel filter dropdown.
-   * @param {string} prefix - ID prefix (e.g. "tasks-channel" → input is "tasks-channel-input")
+   * Set up a Chosen-style searchable channel filter dropdown.
+   * Trigger is a button; dropdown panel contains a search input + menu.
+   * @param {string} prefix - ID prefix (e.g. "tasks-channel" → dropdown is "tasks-channel-dropdown")
    * @param {() => string} getFilter - returns current filter value
    * @param {(val: string) => void} setFilter - apply new filter value and re-render
    */
   _setupChannelFilter(prefix, getFilter, setFilter) {
     const dropdown = document.getElementById(`${prefix}-dropdown`);
-    const input = document.getElementById(`${prefix}-input`);
-    const menu = document.getElementById(`${prefix}-menu`);
-    if (!dropdown || !input || !menu) return;
+    if (!dropdown) return;
+    const trigger = dropdown.querySelector(".channel-filter-trigger");
+    const label = trigger?.querySelector(".channel-filter-label");
+    const clearBtn = trigger?.querySelector(".channel-filter-clear");
+    const searchInput = dropdown.querySelector(".channel-filter-search");
+    const menu = dropdown.querySelector(".channel-filter-menu");
+    if (!trigger || !label || !searchInput || !menu) return;
 
-    // When dropdown opens: populate menu, select text for easy replacement
+    const updateTrigger = () => {
+      const val = getFilter();
+      if (val) {
+        label.textContent = val;
+        label.classList.remove("placeholder");
+        if (clearBtn) clearBtn.style.display = "";
+      } else {
+        label.textContent = "All channels";
+        label.classList.add("placeholder");
+        if (clearBtn) clearBtn.style.display = "none";
+      }
+    };
+
+    // When dropdown opens: reset search, populate menu, focus search input
     dropdown.addEventListener("sl-show", () => {
+      searchInput.value = "";
       const channels = this._channelLists?.[prefix] || [];
-      const query = "";
-      this._renderChannelMenuItems(menu, channels, query);
-      // Select existing text so typing replaces it
-      setTimeout(() => {
-        const nativeInput = input.shadowRoot?.querySelector("input");
-        if (nativeInput) nativeInput.select();
-      }, 0);
+      this._renderChannelMenuItems(menu, channels, "");
+      setTimeout(() => searchInput.focus(), 0);
     });
 
-    // Filter menu items as user types
-    input.addEventListener("sl-input", () => {
+    // Filter menu items as user types in the search input
+    searchInput.addEventListener("sl-input", () => {
       const channels = this._channelLists?.[prefix] || [];
-      const query = input.value.trim().toLowerCase();
+      const query = searchInput.value.trim().toLowerCase();
       this._renderChannelMenuItems(menu, channels, query);
     });
 
     // Handle menu item selection
     dropdown.addEventListener("sl-select", (e) => {
-      const channelName = e.detail.item.value;
-      input.value = channelName;
-      setFilter(channelName);
+      setFilter(e.detail.item.value);
+      updateTrigger();
       dropdown.hide();
     });
 
-    // Handle clear button — prevent dropdown from opening when clearing
-    input.addEventListener("sl-clear", (e) => {
-      e.stopPropagation();
-      setFilter("");
-      dropdown.hide();
-    });
-
-    // When dropdown closes, restore display to current filter value
-    dropdown.addEventListener("sl-after-hide", () => {
-      input.value = getFilter();
-    });
+    // Handle clear button on trigger (prevent dropdown from opening)
+    if (clearBtn) {
+      clearBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setFilter("");
+        updateTrigger();
+      });
+    }
   }
 
   /** Render menu items for a channel filter dropdown, filtered by query. */
