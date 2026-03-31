@@ -2122,6 +2122,20 @@ sl-progress-bar {
     flex-wrap: wrap;
 }
 
+/* Channel filter searchable dropdown */
+.channel-filter-dropdown {
+    min-width: 140px;
+}
+
+.channel-filter-dropdown sl-input {
+    cursor: pointer;
+}
+
+.channel-filter-dropdown sl-menu {
+    max-height: 240px;
+    overflow: auto;
+}
+
 #tasks-filter-count {
     font-size: var(--sl-font-size-small);
     color: var(--sl-color-neutral-500);

@@ -396,13 +396,12 @@ class MoomboxApp {
       });
     }
 
-    const tasksChannelFilter = document.getElementById("tasks-channel-filter");
-    if (tasksChannelFilter) {
-      tasksChannelFilter.addEventListener("sl-change", () => {
-        this.tasksChannelFilter = tasksChannelFilter.value || "";
-        this.renderJobs();
-      });
-    }
+    this._setupChannelFilter("tasks-channel", () => {
+      return this.tasksChannelFilter;
+    }, (val) => {
+      this.tasksChannelFilter = val;
+      this.renderJobs();
+    });
 
     // Archived search/filter
     let archivedSearchTimeout = null;
@@ -425,13 +424,12 @@ class MoomboxApp {
       });
     }
 
-    const archivedChannelFilter = document.getElementById("archived-channel-filter");
-    if (archivedChannelFilter) {
-      archivedChannelFilter.addEventListener("sl-change", () => {
-        this.archivedChannelFilter = archivedChannelFilter.value || "";
-        this.renderArchivedJobs();
-      });
-    }
+    this._setupChannelFilter("archived-channel", () => {
+      return this.archivedChannelFilter;
+    }, (val) => {
+      this.archivedChannelFilter = val;
+      this.renderArchivedJobs();
+    });
 
     // Theme toggle
     const themeToggle = document.getElementById("theme-toggle");
@@ -1130,7 +1128,7 @@ class MoomboxApp {
     // Remove loading skeletons on first render (any message path)
     document.getElementById("jobs-skeleton")?.remove();
 
-    this._populateChannelDropdown("tasks-channel-filter", this.jobs);
+    this._populateChannelDropdown("tasks-channel", this.jobs);
 
     // Update active indicator in status bar
     this.stats.updateActiveIndicator(this.jobs);
@@ -1287,7 +1285,7 @@ class MoomboxApp {
     const table = document.getElementById("archived-table");
     const filterCount = document.getElementById("archived-filter-count");
 
-    this._populateChannelDropdown("archived-channel-filter", this.archivedJobs);
+    this._populateChannelDropdown("archived-channel", this.archivedJobs);
 
     if (this.archivedJobs.length === 0) {
       container.innerHTML = "";
@@ -3028,24 +3026,77 @@ class MoomboxApp {
     });
   }
 
-  /** Populate a channel filter dropdown with unique channel names from a job list. */
-  _populateChannelDropdown(selectId, jobs) {
-    const select = document.getElementById(selectId);
-    if (!select) return;
+  /**
+   * Set up a searchable channel filter dropdown.
+   * @param {string} prefix - ID prefix (e.g. "tasks-channel" → input is "tasks-channel-input")
+   * @param {() => string} getFilter - returns current filter value
+   * @param {(val: string) => void} setFilter - apply new filter value and re-render
+   */
+  _setupChannelFilter(prefix, getFilter, setFilter) {
+    const dropdown = document.getElementById(`${prefix}-dropdown`);
+    const input = document.getElementById(`${prefix}-input`);
+    const menu = document.getElementById(`${prefix}-menu`);
+    if (!dropdown || !input || !menu) return;
+
+    // When dropdown opens: populate menu, select text for easy replacement
+    dropdown.addEventListener("sl-show", () => {
+      const channels = this._channelLists?.[prefix] || [];
+      const query = "";
+      this._renderChannelMenuItems(menu, channels, query);
+      // Select existing text so typing replaces it
+      setTimeout(() => {
+        const nativeInput = input.shadowRoot?.querySelector("input");
+        if (nativeInput) nativeInput.select();
+      }, 0);
+    });
+
+    // Filter menu items as user types
+    input.addEventListener("sl-input", () => {
+      const channels = this._channelLists?.[prefix] || [];
+      const query = input.value.trim().toLowerCase();
+      this._renderChannelMenuItems(menu, channels, query);
+    });
+
+    // Handle menu item selection
+    dropdown.addEventListener("sl-select", (e) => {
+      const channelName = e.detail.item.value;
+      input.value = channelName;
+      setFilter(channelName);
+      dropdown.hide();
+    });
+
+    // Handle clear button
+    input.addEventListener("sl-clear", () => {
+      setFilter("");
+    });
+
+    // When dropdown closes, restore display to current filter value
+    dropdown.addEventListener("sl-after-hide", () => {
+      input.value = getFilter();
+    });
+  }
+
+  /** Render menu items for a channel filter dropdown, filtered by query. */
+  _renderChannelMenuItems(menu, channels, query) {
+    const filtered = query
+      ? channels.filter(ch => ch.toLowerCase().includes(query))
+      : channels;
+    if (filtered.length === 0) {
+      menu.innerHTML = `<sl-menu-item disabled>${query ? "No matching channels" : "No channels"}</sl-menu-item>`;
+    } else {
+      menu.innerHTML = filtered
+        .map(ch => `<sl-menu-item value="${this.escapeHtml(ch)}">${this.escapeHtml(ch)}</sl-menu-item>`)
+        .join("");
+    }
+  }
+
+  /** Update the cached channel list for a filter dropdown. */
+  _populateChannelDropdown(prefix, jobs) {
     const channels = [...new Set(jobs.map(j => j.channelName).filter(Boolean))].sort(
       (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
     );
-    // Skip rebuild if channel list hasn't changed
-    const currentOptions = [...select.querySelectorAll("sl-option")].map(o => o.value);
-    if (channels.length === currentOptions.length && channels.every((ch, i) => ch === currentOptions[i])) return;
-    const currentValue = select.value;
-    select.innerHTML = channels
-      .map(ch => `<sl-option value="${this.escapeHtml(ch)}">${this.escapeHtml(ch)}</sl-option>`)
-      .join("");
-    // Restore selection if the channel still exists
-    if (currentValue && channels.includes(currentValue)) {
-      select.value = currentValue;
-    }
+    if (!this._channelLists) this._channelLists = {};
+    this._channelLists[prefix] = channels;
   }
 
   // ===== Quick Actions =====

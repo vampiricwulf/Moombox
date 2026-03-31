@@ -52,8 +52,10 @@
                     <sl-input id="tasks-search" label="Filter tasks" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
                         <sl-icon slot="prefix" name="search"></sl-icon>
                     </sl-input>
-                    <sl-select id="tasks-channel-filter" label="Filter by channel" placeholder="All channels" clearable size="small" style="min-width:140px">
-                    </sl-select>
+                    <sl-dropdown id="tasks-channel-dropdown" class="channel-filter-dropdown" hoist>
+                        <sl-input slot="trigger" id="tasks-channel-input" placeholder="All channels" clearable size="small" autocomplete="off" aria-label="Filter by channel"></sl-input>
+                        <sl-menu id="tasks-channel-menu"></sl-menu>
+                    </sl-dropdown>
                     <sl-select id="tasks-status-filter" label="Filter by status" placeholder="All statuses" clearable size="small" style="min-width:140px">
                         <sl-option value="active">Active</sl-option>
                         <sl-option value="errors">Errors</sl-option>
@@ -238,8 +240,10 @@
                     <sl-input id="archived-search" label="Filter archived" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
                         <sl-icon slot="prefix" name="search"></sl-icon>
                     </sl-input>
-                    <sl-select id="archived-channel-filter" label="Filter by channel" placeholder="All channels" clearable size="small" style="min-width:140px">
-                    </sl-select>
+                    <sl-dropdown id="archived-channel-dropdown" class="channel-filter-dropdown" hoist>
+                        <sl-input slot="trigger" id="archived-channel-input" placeholder="All channels" clearable size="small" autocomplete="off" aria-label="Filter by channel"></sl-input>
+                        <sl-menu id="archived-channel-menu"></sl-menu>
+                    </sl-dropdown>
                     <sl-select id="archived-status-filter" label="Filter by status" placeholder="All statuses" clearable size="small" style="min-width:140px">
                         <sl-option value="active">Active</sl-option>
                         <sl-option value="errors">Errors</sl-option>
