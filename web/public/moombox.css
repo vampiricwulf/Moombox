@@ -2348,19 +2348,28 @@ html.sl-theme-light {
 
 /* ===== Batch Selection ===== */
 #batch-action-bar {
-    position: sticky;
-    bottom: 0;
+    position: fixed;
+    bottom: 28px; /* sits above the 28px status bar */
+    left: 0;
+    right: 0;
     background: var(--sl-color-neutral-100);
     border-top: 1px solid var(--sl-color-neutral-300);
     padding: var(--sl-spacing-small) var(--sl-spacing-medium);
     display: flex;
     align-items: center;
     gap: var(--sl-spacing-medium);
-    z-index: 10;
+    z-index: 99; /* below status bar (100), above content */
+    transform: translateY(100%);
+    transition: transform 0.15s ease-out;
+}
+
+#batch-action-bar.visible {
+    transform: translateY(0);
 }
 
 .batch-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--sl-spacing-x-small);
 }
 

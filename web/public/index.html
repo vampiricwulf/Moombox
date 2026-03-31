@@ -220,33 +220,6 @@
                     </div>
                 </div>
 
-                <div id="batch-action-bar" style="display: none;">
-                    <span id="batch-count"></span>
-                    <sl-button id="batch-select-all" variant="text" size="small">Select All</sl-button>
-                    <div class="batch-actions">
-                        <sl-button id="batch-cancel" variant="warning" size="small">
-                            <sl-icon slot="prefix" name="x-circle"></sl-icon> Cancel
-                        </sl-button>
-                        <sl-button id="batch-resume" variant="success" size="small">
-                            <sl-icon slot="prefix" name="play-fill"></sl-icon> Resume
-                        </sl-button>
-                        <sl-button id="batch-reinit" variant="primary" size="small">
-                            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon> Reinitialize
-                        </sl-button>
-                        <sl-button id="batch-delete" variant="danger" size="small">
-                            <sl-icon slot="prefix" name="trash"></sl-icon> Delete
-                        </sl-button>
-                        <sl-divider vertical></sl-divider>
-                        <sl-button id="batch-watched" variant="success" size="small">
-                            <sl-icon slot="prefix" name="eye"></sl-icon> Mark Watched
-                        </sl-button>
-                        <sl-button id="batch-unwatched" variant="neutral" size="small">
-                            <sl-icon slot="prefix" name="eye-slash"></sl-icon> Mark Unwatched
-                        </sl-button>
-                    </div>
-                    <sl-icon-button id="batch-clear" name="x-lg" label="Clear selection"></sl-icon-button>
-                </div>
-
                 <div id="empty-state" style="display: none">
                     <sl-icon name="inbox"></sl-icon>
                     <p>No jobs yet</p>
@@ -1661,6 +1634,34 @@
             <sl-button slot="footer" id="remove-password-cancel-btn" variant="default">Cancel</sl-button>
             <sl-button slot="footer" id="remove-password-confirm-btn" variant="danger">Remove Password</sl-button>
         </sl-dialog>
+
+        <!-- Batch Action Bar (fixed, panel-aware) -->
+        <div id="batch-action-bar" style="display: none;">
+            <span id="batch-count"></span>
+            <sl-button id="batch-select-all" variant="text" size="small">Select All</sl-button>
+            <div class="batch-actions">
+                <sl-button id="batch-cancel" variant="warning" size="small">
+                    <sl-icon slot="prefix" name="x-circle"></sl-icon> Cancel
+                </sl-button>
+                <sl-button id="batch-resume" variant="success" size="small">
+                    <sl-icon slot="prefix" name="play-fill"></sl-icon> Resume
+                </sl-button>
+                <sl-button id="batch-reinit" variant="primary" size="small">
+                    <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon> Reinitialize
+                </sl-button>
+                <sl-button id="batch-delete" variant="danger" size="small">
+                    <sl-icon slot="prefix" name="trash"></sl-icon> Delete
+                </sl-button>
+                <sl-divider vertical></sl-divider>
+                <sl-button id="batch-watched" variant="success" size="small">
+                    <sl-icon slot="prefix" name="eye"></sl-icon> Mark Watched
+                </sl-button>
+                <sl-button id="batch-unwatched" variant="neutral" size="small">
+                    <sl-icon slot="prefix" name="eye-slash"></sl-icon> Mark Unwatched
+                </sl-button>
+            </div>
+            <sl-icon-button id="batch-clear" name="x-lg" label="Clear selection"></sl-icon-button>
+        </div>
 
         <!-- Status Bar -->
         <div id="status-bar">

@@ -294,6 +294,8 @@ class MoomboxApp {
         if (e.detail.name !== "stats") {
           this.stats.deactivate();
         }
+        // Refresh batch action bar for the newly active panel
+        this.updateBatchActionBar();
       });
     }
 
@@ -3389,10 +3391,19 @@ class MoomboxApp {
 
     const count = this._activeSelectionSet().size;
     if (count === 0) {
-      bar.style.display = "none";
+      bar.classList.remove("visible");
+      bar.addEventListener("transitionend", () => {
+        if (!bar.classList.contains("visible")) {
+          bar.style.display = "none";
+          document.body.style.paddingBottom = "28px";
+        }
+      }, { once: true });
       return;
     }
     bar.style.display = "";
+    // Force reflow before adding class so the transition plays
+    requestAnimationFrame(() => bar.classList.add("visible"));
+    document.body.style.paddingBottom = "68px";
     document.getElementById("batch-count").textContent = `${count} selected`;
 
     const selectedJobs = this._getSelectedJobs();
