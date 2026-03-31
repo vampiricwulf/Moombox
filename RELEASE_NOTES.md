@@ -1,4 +1,5 @@
-### Bug Fixes
+### Improvements
 
-- Fix channel filter breaking on channels with spaces or special characters (e.g. "shachi too", "Jelly Ch. 【Phase Connect】") — Shoelace sl-option values cannot contain spaces; replaced with searchable sl-dropdown + sl-menu pattern
-- Channel filter is now searchable — type to filter the channel list when the dropdown is open
+- Redesign status filter as Chosen-style searchable dropdown — click to open, type to search, click to select
+- Remove redundant channel filter dropdown — text search already matches channel names
+- Simplify filter bar to two controls: text search + status dropdown
