@@ -488,6 +488,8 @@ class MoomboxApp {
     document.getElementById("batch-resume")?.addEventListener("click", () => this.batchAction("resume"));
     document.getElementById("batch-reinit")?.addEventListener("click", () => this.batchAction("reinitialize"));
     document.getElementById("batch-delete")?.addEventListener("click", () => this.batchAction("delete"));
+    document.getElementById("batch-watched")?.addEventListener("click", () => this.batchAction("watched"));
+    document.getElementById("batch-unwatched")?.addEventListener("click", () => this.batchAction("unwatched"));
     document.getElementById("batch-select-all")?.addEventListener("click", () => {
       this.jobs.forEach(j => this._selectedJobs.add(j.id));
       this.archivedJobs.forEach(j => this._selectedJobs.add(j.id));
@@ -3296,6 +3298,10 @@ class MoomboxApp {
     document.getElementById("batch-resume").style.display = canResume ? "" : "none";
     document.getElementById("batch-reinit").style.display = canReinit ? "" : "none";
     document.getElementById("batch-delete").style.display = canDelete ? "" : "none";
+    const canWatch = selectedJobs.some(j => j.status === "Finished" && !j.watched);
+    const canUnwatch = selectedJobs.some(j => j.status === "Finished" && (j.watched || j.resumePosition != null));
+    document.getElementById("batch-watched").style.display = canWatch ? "" : "none";
+    document.getElementById("batch-unwatched").style.display = canUnwatch ? "" : "none";
   }
 
   async batchAction(action) {
@@ -3323,6 +3329,24 @@ class MoomboxApp {
         confirmMsg = `Delete ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}`, { method: "DELETE" });
         break;
+      case "watched":
+        targets = selectedJobs.filter(j => j.status === "Finished" && !j.watched);
+        confirmMsg = `Mark ${targets.length} job${targets.length !== 1 ? "s" : ""} as watched?`;
+        apiCall = () => fetch("/api/jobs/batch/watched", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobIds: targets.map(j => j.id) }),
+        });
+        break;
+      case "unwatched":
+        targets = selectedJobs.filter(j => j.status === "Finished" && (j.watched || j.resumePosition != null));
+        confirmMsg = `Mark ${targets.length} job${targets.length !== 1 ? "s" : ""} as unwatched?`;
+        apiCall = () => fetch("/api/jobs/batch/watched", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobIds: targets.map(j => j.id) }),
+        });
+        break;
     }
 
     if (!targets || targets.length === 0) return;
@@ -3334,17 +3358,31 @@ class MoomboxApp {
     });
     if (!confirmed) return;
 
-    const results = await Promise.allSettled(targets.map(j => apiCall(j.id)));
-    const succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
-    const failed = targets.length - succeeded;
+    let succeeded, failed;
+    if (action === "watched" || action === "unwatched") {
+      // Single batch API call
+      try {
+        const res = await apiCall();
+        succeeded = res.ok ? targets.length : 0;
+        failed = res.ok ? 0 : targets.length;
+      } catch {
+        succeeded = 0;
+        failed = targets.length;
+      }
+    } else {
+      // Per-job API calls
+      const results = await Promise.allSettled(targets.map(j => apiCall(j.id)));
+      succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
+      failed = targets.length - succeeded;
+    }
 
     this._selectedJobs.clear();
     this.updateBatchActionBar();
 
     if (failed === 0) {
-      const verbs = { delete: "Deleted", cancel: "Cancelled", resume: "Resumed", reinitialize: "Reinitialized" };
+      const verbs = { delete: "Deleted", cancel: "Cancelled", resume: "Resumed", reinitialize: "Reinitialized", watched: "Marked watched", unwatched: "Marked unwatched" };
       const verb = verbs[action] || action;
-      this.showToast(`${verb} ${succeeded} job${succeeded !== 1 ? "s" : ""}`, "success");
+      this.showToast(`${verb}: ${succeeded} job${succeeded !== 1 ? "s" : ""}`, "success");
     } else {
       this.showToast(`${succeeded} of ${targets.length} succeeded. ${failed} failed.`, "warning");
     }
