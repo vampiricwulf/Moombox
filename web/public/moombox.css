@@ -2189,7 +2189,8 @@ html.sl-theme-light {
     }
 
     .tasks-filter-bar sl-input,
-    .tasks-filter-bar sl-select {
+    .tasks-filter-bar sl-select,
+    .tasks-filter-bar .channel-filter-dropdown {
         min-width: 0 !important;
     }
 

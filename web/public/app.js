@@ -3065,9 +3065,11 @@ class MoomboxApp {
       dropdown.hide();
     });
 
-    // Handle clear button
-    input.addEventListener("sl-clear", () => {
+    // Handle clear button — prevent dropdown from opening when clearing
+    input.addEventListener("sl-clear", (e) => {
+      e.stopPropagation();
       setFilter("");
+      dropdown.hide();
     });
 
     // When dropdown closes, restore display to current filter value
