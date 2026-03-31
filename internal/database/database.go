@@ -226,9 +226,10 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 
 // UpdateJobFields performs a partial update of a job using a map of field names to values.
 // This is useful when only a few fields need to change without loading the full job.
-func (db *Database) UpdateJobFields(id string, fields map[string]any) {
+// Returns the updated job after notifying subscribers, or nil on error.
+func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	if len(fields) == 0 {
-		return
+		return nil
 	}
 
 	db.mu.Lock()
@@ -247,7 +248,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 	}
 
 	if len(setClauses) == 0 {
-		return
+		return nil
 	}
 
 	// Always update updated_at
@@ -261,7 +262,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		if db.logger != nil {
 			db.logger.Error("UpdateJobFields failed", "jobID", id, "err", err)
 		}
-		return
+		return nil
 	}
 
 	// Notify subscribers with the full job object (TUI + WebSocket need all fields).
@@ -282,10 +283,11 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		if db.logger != nil {
 			db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)
 		}
-		return
+		return nil
 	}
 
 	db.notifyJobUpdate(job)
+	return job
 }
 
 // UpdateResumePosition saves the playback position without bumping updated_at

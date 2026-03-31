@@ -3032,20 +3032,10 @@ class MoomboxApp {
     return formatDurationSeconds(totalSeconds);
   }
 
-  /** Formats seconds into H:MM:SS or M:SS. */
-  formatDuration(totalSeconds) {
-    const s = Math.floor(totalSeconds);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
-    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-    return `${m}:${String(sec).padStart(2, "0")}`;
-  }
-
   /** Returns the compact watch status pill HTML for job details. */
   watchPillHtml(job) {
     if (job.status !== "Finished") return "";
-    const resumeStr = job.resumePosition != null ? this.formatDuration(job.resumePosition) : "";
+    const resumeStr = job.resumePosition != null ? formatTimestamp(job.resumePosition) : "";
     if (job.watched && resumeStr) {
       return `<span class="watch-pill watched"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="#dcfce7"/></svg>Watched · Paused at ${this.escapeHtml(resumeStr)}</span>`;
     }

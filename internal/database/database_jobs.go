@@ -214,8 +214,9 @@ func (db *Database) BatchSetWatched(jobIDs []string, watched bool) {
 	defer db.mu.Unlock()
 
 	placeholders := make([]string, len(jobIDs))
-	args := make([]any, 0, len(jobIDs)+2)
-	args = append(args, boolToInt(watched))
+	now := time.Now().UTC().Format(time.RFC3339)
+	args := make([]any, 0, len(jobIDs)+3)
+	args = append(args, boolToInt(watched), now)
 	for i, id := range jobIDs {
 		placeholders[i] = "?"
 		args = append(args, id)
@@ -223,7 +224,7 @@ func (db *Database) BatchSetWatched(jobIDs []string, watched bool) {
 	args = append(args, string(StatusFinished))
 
 	query := fmt.Sprintf(
-		"UPDATE jobs SET watched = ?, resume_position = NULL WHERE id IN (%s) AND status = ?",
+		"UPDATE jobs SET watched = ?, resume_position = NULL, updated_at = ? WHERE id IN (%s) AND status = ?",
 		strings.Join(placeholders, ","),
 	)
 	_, err := db.db.ExecContext(db.getCtx(), query, args...)

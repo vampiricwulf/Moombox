@@ -1,7 +1,7 @@
 /**
  * Player Controller — Video player + chat replay
  */
-import { formatMsToTime, isTypingInInput } from "./utils.js";
+import { formatMsToTime, formatTimestamp, isTypingInInput } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 
 export class PlayerController {
@@ -1100,7 +1100,7 @@ export class PlayerController {
     // Remove any existing overlay
     wrapper.querySelector(".resume-overlay")?.remove();
 
-    const formatted = this._formatDuration(resumeSeconds);
+    const formatted = formatTimestamp(resumeSeconds);
     const overlay = document.createElement("div");
     overlay.className = "resume-overlay";
     overlay.innerHTML = `
@@ -1137,14 +1137,6 @@ export class PlayerController {
     });
   }
 
-  _formatDuration(totalSeconds) {
-    const s = Math.floor(totalSeconds);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
-    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-    return `${m}:${String(sec).padStart(2, "0")}`;
-  }
 
   _startWatchTracking(jobId) {
     this._clearWatchTracking();

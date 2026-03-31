@@ -51,18 +51,12 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 	// POST /api/jobs/{id}/watched — mark single job as watched
 	r.Post("/api/jobs/{id}/watched", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
-			return
-		}
-		db.UpdateJobFields(jobID, map[string]any{
+		updated := db.UpdateJobFields(jobID, map[string]any{
 			"watched":         1,
 			"resume_position": nil,
 		})
-		updated, err := db.GetJob(jobID)
-		if err != nil || updated == nil {
-			jsonError(rw, "failed to read back job", http.StatusInternalServerError)
+		if updated == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
 			return
 		}
 		jsonResponse(rw, updated)
@@ -71,18 +65,12 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 	// DELETE /api/jobs/{id}/watched — mark single job as unwatched
 	r.Delete("/api/jobs/{id}/watched", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
-		job, err := db.GetJob(jobID)
-		if err != nil || job == nil {
-			jsonError(rw, "job not found", http.StatusNotFound)
-			return
-		}
-		db.UpdateJobFields(jobID, map[string]any{
+		updated := db.UpdateJobFields(jobID, map[string]any{
 			"watched":         0,
 			"resume_position": nil,
 		})
-		updated, err := db.GetJob(jobID)
-		if err != nil || updated == nil {
-			jsonError(rw, "failed to read back job", http.StatusInternalServerError)
+		if updated == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
 			return
 		}
 		jsonResponse(rw, updated)
