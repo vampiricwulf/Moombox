@@ -1337,6 +1337,12 @@ class MoomboxApp {
       .map((job) => this.renderJobItem(job))
       .join("");
 
+    // Remove stale archived selected IDs
+    const archivedJobIds = new Set(this.archivedJobs.map(j => j.id));
+    this._selectedArchivedJobs.forEach(id => {
+      if (!archivedJobIds.has(id)) this._selectedArchivedJobs.delete(id);
+    });
+
     // Re-apply archived selection state
     this._selectedArchivedJobs.forEach(id => {
       const card = container.querySelector(`[data-job-id="${CSS.escape(id)}"]`);
