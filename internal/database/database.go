@@ -51,8 +51,8 @@ var fieldToColumn = map[string]string{
 	"twitch_category":     "twitch_category",
 	"channel_avatar_url":  "channel_avatar_url",
 	"quality_preference":  "quality_preference",
-	"watched":            "watched",
-	"resume_position":    "resume_position",
+	"watched":             "watched",
+	"resume_position":     "resume_position",
 }
 
 // dbLogger is the interface for database error logging.

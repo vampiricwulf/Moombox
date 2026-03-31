@@ -77,8 +77,8 @@ type Job struct {
 	// Quality monitoring
 	QualityPreference string     `json:"qualityPreference,omitempty"`
 	// Watch tracking
-	Watched        bool     `json:"watched"`
-	ResumePosition *float64 `json:"resumePosition,omitempty"`
+	Watched           bool       `json:"watched"`
+	ResumePosition    *float64   `json:"resumePosition,omitempty"`
 	// Trims (loaded via join)
 	Trims             []TrimRecord `json:"trims,omitempty"`
 	// Segments (loaded via join, for multi-segment quality-split jobs)
