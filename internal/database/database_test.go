@@ -905,7 +905,9 @@ func TestBatchSetWatched(t *testing.T) {
 	}
 
 	// Batch mark as watched
-	db.BatchSetWatched([]string{"yt_bw1", "yt_bw2", "yt_bw3"}, true)
+	if err := db.BatchSetWatched([]string{"yt_bw1", "yt_bw2", "yt_bw3"}, true); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, id := range []string{"yt_bw1", "yt_bw2", "yt_bw3"} {
 		got, err := db.GetJob(id)
@@ -921,7 +923,9 @@ func TestBatchSetWatched(t *testing.T) {
 	}
 
 	// Batch mark as unwatched
-	db.BatchSetWatched([]string{"yt_bw1", "yt_bw2"}, false)
+	if err := db.BatchSetWatched([]string{"yt_bw1", "yt_bw2"}, false); err != nil {
+		t.Fatal(err)
+	}
 
 	got1, _ := db.GetJob("yt_bw1")
 	got3, _ := db.GetJob("yt_bw3")

@@ -89,7 +89,10 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			jsonError(rw, "jobIds required", http.StatusBadRequest)
 			return
 		}
-		db.BatchSetWatched(body.JobIDs, true)
+		if err := db.BatchSetWatched(body.JobIDs, true); err != nil {
+			jsonError(rw, "failed to update jobs", http.StatusInternalServerError)
+			return
+		}
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
@@ -106,7 +109,10 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			jsonError(rw, "jobIds required", http.StatusBadRequest)
 			return
 		}
-		db.BatchSetWatched(body.JobIDs, false)
+		if err := db.BatchSetWatched(body.JobIDs, false); err != nil {
+			jsonError(rw, "failed to update jobs", http.StatusInternalServerError)
+			return
+		}
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 }

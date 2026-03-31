@@ -1103,6 +1103,8 @@ export class PlayerController {
     const formatted = formatTimestamp(resumeSeconds);
     const overlay = document.createElement("div");
     overlay.className = "resume-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-label", "Resume playback");
     overlay.innerHTML = `
       <div class="resume-overlay-content">
         <p>Resume where you left off?</p>
@@ -1118,8 +1120,23 @@ export class PlayerController {
     `;
     wrapper.appendChild(overlay);
 
-    overlay.querySelector("#resume-continue").addEventListener("click", () => {
+    const dismiss = () => {
       overlay.remove();
+      document.removeEventListener("keydown", onKeydown);
+    };
+
+    const onKeydown = (e) => {
+      if (e.key === "Escape") {
+        dismiss();
+        // Start from beginning on Escape (same as clicking "Start from beginning")
+        document.getElementById("player-video").play();
+        this._startWatchTracking(jobId);
+      }
+    };
+    document.addEventListener("keydown", onKeydown);
+
+    overlay.querySelector("#resume-continue").addEventListener("click", () => {
+      dismiss();
       const video = document.getElementById("player-video");
       if (this._seg.active) {
         this._seg.seekToGlobalTime(resumeSeconds, video);
@@ -1131,9 +1148,14 @@ export class PlayerController {
     });
 
     overlay.querySelector("#resume-start").addEventListener("click", () => {
-      overlay.remove();
+      dismiss();
       document.getElementById("player-video").play();
       this._startWatchTracking(jobId);
+    });
+
+    // Focus the primary action
+    requestAnimationFrame(() => {
+      overlay.querySelector("#resume-continue")?.focus();
     });
   }
 
@@ -1145,7 +1167,7 @@ export class PlayerController {
 
     // Periodic save every 10 seconds
     this._watchSaveInterval = setInterval(() => {
-      if (!video || video.paused) return;
+      if (!video || video.paused || document.hidden) return;
       const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
       this._saveResumePosition(jobId, pos);
       this._checkWatched(jobId, video);

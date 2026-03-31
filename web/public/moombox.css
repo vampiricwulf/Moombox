@@ -179,6 +179,14 @@ sl-tab::part(base) {
     height: 14px;
 }
 
+.thumb .watch-indicator.watched {
+    color: var(--sl-color-success-400);
+}
+
+.thumb .watch-indicator.in-progress {
+    color: var(--sl-color-warning-400);
+}
+
 .watch-pill {
     display: inline-flex;
     align-items: center;
@@ -196,13 +204,13 @@ sl-tab::part(base) {
 }
 
 .watch-pill.watched {
-    background: #dcfce7;
-    color: #166534;
+    background: var(--sl-color-success-100);
+    color: var(--sl-color-success-800);
 }
 
 .watch-pill.in-progress {
-    background: #fef3c7;
-    color: #92400e;
+    background: var(--sl-color-warning-100);
+    color: var(--sl-color-warning-800);
 }
 
 .thumb img {

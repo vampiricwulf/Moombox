@@ -482,11 +482,13 @@ class MoomboxApp {
           return;
         }
         if (e.target.closest("#details-mark-watched")) {
-          await fetch(`/api/jobs/${this.selectedJobId}/watched`, { method: "POST" });
+          const res = await fetch(`/api/jobs/${this.selectedJobId}/watched`, { method: "POST" });
+          if (!res.ok) this.showToast("Failed to mark watched", "danger");
           return;
         }
         if (e.target.closest("#details-mark-unwatched")) {
-          await fetch(`/api/jobs/${this.selectedJobId}/watched`, { method: "DELETE" });
+          const res = await fetch(`/api/jobs/${this.selectedJobId}/watched`, { method: "DELETE" });
+          if (!res.ok) this.showToast("Failed to mark unwatched", "danger");
           return;
         }
       });
@@ -1230,12 +1232,10 @@ class MoomboxApp {
   watchIndicatorHtml(job) {
     if (job.status !== "Finished") return "";
     if (job.watched) {
-      // Filled green eye
-      return `<span class="watch-indicator"><svg viewBox="0 0 24 24" fill="#a6e3a1" stroke="#a6e3a1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="#166534"/></svg></span>`;
+      return `<span class="watch-indicator watched"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="rgba(0,0,0,0.4)"/></svg></span>`;
     }
     if (job.resumePosition != null) {
-      // Outlined amber eye
-      return `<span class="watch-indicator"><svg viewBox="0 0 24 24" fill="none" stroke="#f9e2af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>`;
+      return `<span class="watch-indicator in-progress"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>`;
     }
     return "";
   }
@@ -3037,10 +3037,10 @@ class MoomboxApp {
     if (job.status !== "Finished") return "";
     const resumeStr = job.resumePosition != null ? formatTimestamp(job.resumePosition) : "";
     if (job.watched && resumeStr) {
-      return `<span class="watch-pill watched"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="#dcfce7"/></svg>Watched · Paused at ${this.escapeHtml(resumeStr)}</span>`;
+      return `<span class="watch-pill watched"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="rgba(255,255,255,0.6)"/></svg>Watched · Paused at ${this.escapeHtml(resumeStr)}</span>`;
     }
     if (job.watched) {
-      return `<span class="watch-pill watched"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="#dcfce7"/></svg>Watched</span>`;
+      return `<span class="watch-pill watched"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="rgba(255,255,255,0.6)"/></svg>Watched</span>`;
     }
     if (resumeStr) {
       return `<span class="watch-pill in-progress"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Paused at ${this.escapeHtml(resumeStr)}</span>`;
