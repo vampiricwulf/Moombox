@@ -602,7 +602,7 @@ db.UpdateJobFields(jobID, map[string]any{
     "progress": "V:1234 A:1234 C:5678",
 })
 ```
-Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 37-entry whitelist). Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers after write.
+Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 40-entry whitelist). Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers after write. Returns the updated `*Job`.
 
 **Pub/sub:** `OnJobUpdate(func(*Job))` fires when any field of a single job changes. `OnJobsChange(func([]*Job))` fires when the job list changes (add/delete). Both return an unsubscribe function. Multiple subscribers are supported — the WebSocket hub, TUI, and notification manager all subscribe independently. Callback invocation uses `safeCallJobUpdate`/`safeCallJobsChange` wrappers with panic recovery so one misbehaving subscriber does not affect others. The subscriber list is protected by a separate `subMu` RWMutex to avoid contention with the main database mutex.
 

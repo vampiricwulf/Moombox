@@ -476,6 +476,20 @@ All routes use the `/api/` prefix unless otherwise noted. PO Token routes use ba
 | `POST` | `/api/jobs/{id}/open-folder` | Open the job's output folder in Windows Explorer. **Loopback only.** |
 | `DELETE` | `/api/jobs/{id}` | Delete a job and optionally its files. |
 
+### Watch Tracking
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET` | `/api/jobs/{id}/watch-state` | Get mutable player state (watched, resumePosition, chatOffset). Uncached — separate from the immutably-cached job endpoint. |
+| `PUT` | `/api/jobs/{id}/resume-position` | Save playback resume position (lightweight, no WebSocket broadcast). |
+| `POST` | `/api/jobs/{id}/resume-position` | Same as PUT — sendBeacon fallback (beacon only sends POST). |
+| `POST` | `/api/jobs/{id}/watched` | Mark job as watched, clears resume position. Returns updated job. |
+| `DELETE` | `/api/jobs/{id}/watched` | Mark job as unwatched, clears resume position. Returns updated job. |
+| `POST` | `/api/jobs/batch/watched` | Batch mark jobs as watched. Body: `{ jobIds: [...] }`. |
+| `DELETE` | `/api/jobs/batch/watched` | Batch mark jobs as unwatched. Body: `{ jobIds: [...] }`. |
+| `PUT` | `/api/jobs/{id}/chat-offset` | Save chat timing offset. Body: `{ chatOffset: <number> }`. |
+| `DELETE` | `/api/jobs/{id}/chat-offset` | Clear chat timing offset (reset to 0). |
+
 ### Formats
 
 | Method | Path | Notes |

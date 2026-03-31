@@ -49,7 +49,7 @@ db.UpdateJobFields(jobID, map[string]any{
     "progress": "V:1234 A:1234 C:5678",
 })
 ```
-Dynamically builds SET clauses. Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers.
+Dynamically builds SET clauses. Auto-updates `updated_at`. Triggers `OnJobUpdate` subscribers. Returns `*Job`.
 
 ### Job status lifecycle
 `Upcoming` → `Live` → `Downloading` → `Muxing` → `Finished`

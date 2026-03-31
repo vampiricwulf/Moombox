@@ -9,13 +9,13 @@ This document specifies every data persistence layer in Moombox: the SQLite data
 These are hard rules. An AI assisting with Moombox development must follow them without exception:
 
 - **SQLite with WAL mode, 1 connection, 5s busy timeout, foreign keys on.** The DSN is `file:<path>?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on`. Connection pool is `SetMaxOpenConns(1)` and `SetMaxIdleConns(1)`. SQLite is single-writer; do not change the pool size.
-- **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** The method accepts `map[string]any`, maps keys through `fieldToColumn` (37 entries), dynamically builds a `SET` clause, and auto-appends `updated_at` with the current UTC RFC3339 timestamp. After writing, it re-reads the full job row to notify subscribers with a complete `*Job` object.
-- **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 37 entries mapping Go field names to SQLite column names (identity mapping in all cases). Adding a new column to the jobs table requires adding a corresponding entry here.
+- **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** The method accepts `map[string]any`, maps keys through `fieldToColumn` (40 entries), dynamically builds a `SET` clause, and auto-appends `updated_at` with the current UTC RFC3339 timestamp. After writing, it re-reads the full job row to notify subscribers with a complete `*Job` object. Returns the updated `*Job`.
+- **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 40 entries mapping Go field names to SQLite column names (identity mapping in all cases). Adding a new column to the jobs table requires adding a corresponding entry here.
 - **`JobStatus` is `type JobStatus string`.** Status values are string constants, not integers or enums. Timestamps are ISO 8601 / RFC3339 strings. Optional numeric fields (sequence counters, dimensions, file sizes) use pointers (`*int`, `*int64`, `*float64`).
 - **Batch update coalescing: 100ms signal-driven window, zero IO when idle.** The `batchUpdateLoop` goroutine sleeps on a channel until the first update arrives, then waits 100ms to accumulate more updates, then flushes all pending updates in a single transaction. When no updates are pending, the goroutine consumes zero CPU and performs zero IO.
 - **Config migrations are non-destructive.** `migrateOldFormat()` only applies a migration when the target section does not already exist in the TOML file. It never overwrites user-configured values in existing sections.
 - **FlexDuration parses config values as minutes or days, context-dependent.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` it means days. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the context-appropriate unit.
-- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v6. Each migration checks the current version before applying. Migrations run at startup in `Database.Init()`. There is no rollback mechanism.
+- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v9. Each migration checks the current version before applying. Migrations run at startup in `Database.Init()`. There is no rollback mechanism.
 - **Cookie file format is Netscape.** The jar only loads cookies matching YouTube/Google domains or Twitch domains. Cookies are filtered to essential authentication cookies only.
 - **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `max_files` are deleted.
 - **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, and base URL. They are validated on load (URL match + file size check) and cleared only on clean stream completion.
@@ -126,7 +126,7 @@ The `batchUpdateLoop()` goroutine implements signal-driven coalescing to reduce 
 4. Re-read the full job row via SELECT (subscribers need all fields, not just the changed ones).
 5. Notify all `onJobUpdate` subscribers with the complete `*Job`.
 
-**fieldToColumn map (37 entries):**
+**fieldToColumn map (40 entries):**
 
 ```
 status, progress, percent, eta, speed, error, title, channel_name,
@@ -136,7 +136,7 @@ last_video_seq, last_audio_seq, total_video_seq, total_audio_seq,
 total_chat_messages, chat_status, chat_filename, chat_file, thumbnail_file,
 description_file, is_vod, video_width, video_height, video_fps, file_size,
 last_recheck_at, twitch_quality, twitch_category, channel_avatar_url,
-quality_preference
+quality_preference, watched, resume_position, chat_offset
 ```
 
 All entries use identity mapping (Go key name == SQLite column name).
@@ -178,7 +178,7 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 
 ### Schema
 
-**Current version: 6**
+**Current version: 9**
 
 #### Tables
 
@@ -235,6 +235,9 @@ Both registration methods return an unsubscribe function. Unsubscription nils ou
 | end_time | REAL | NULL | Trim end (seconds, float64) |
 | last_recheck_at | TEXT | NULL | RFC3339 |
 | quality_preference | TEXT | '' | e.g. "1080p60", "best" (added v5) |
+| watched | INTEGER | 0 | Boolean (0/1), watched status (added v8) |
+| resume_position | REAL | NULL | Playback resume position in seconds (added v8) |
+| chat_offset | REAL | 0 | Chat timing offset in seconds, can be negative (added v9, migrated from player_prefs) |
 
 **Indexes on jobs:** `idx_jobs_status(status)`, `idx_jobs_updated_at(updated_at)`, `idx_jobs_video_id(video_id)` (added v4).
 
@@ -335,6 +338,9 @@ Migrations are forward-only and run at startup in `Database.migrate()`. If the `
 | v4 | Added `idx_jobs_video_id` index (used by `HasActiveJob`, `AddToHistory`) |
 | v5 | Added `quality_preference` column to jobs; created `segments` table with index |
 | v6 | Created `client_tokens` table with `idx_client_tokens_prefix` index |
+| v7 | Created `player_prefs` table (video_id PK, chat_offset) — deprecated in v9 |
+| v8 | Added `watched` and `resume_position` columns to jobs for watch tracking |
+| v9 | Added `chat_offset` column to jobs; backfilled from `player_prefs` via video_id join |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 
