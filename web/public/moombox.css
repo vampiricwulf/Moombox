@@ -2123,11 +2123,11 @@ sl-progress-bar {
 }
 
 /* Channel filter searchable dropdown (Chosen-style) */
-.channel-filter-dropdown {
+.chosen-select {
     min-width: 140px;
 }
 
-.channel-filter-trigger {
+.chosen-select-trigger {
     all: unset;
     display: flex;
     align-items: center;
@@ -2146,51 +2146,51 @@ sl-progress-bar {
     white-space: nowrap;
 }
 
-.channel-filter-trigger:hover {
+.chosen-select-trigger:hover {
     border-color: var(--sl-input-border-color-hover);
 }
 
-.channel-filter-trigger:focus-visible {
+.chosen-select-trigger:focus-visible {
     outline: var(--sl-focus-ring);
     outline-offset: var(--sl-focus-ring-offset);
 }
 
-.channel-filter-trigger .channel-filter-label {
+.chosen-select-trigger .chosen-select-label {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
-.channel-filter-trigger .channel-filter-label.placeholder {
+.chosen-select-trigger .chosen-select-label.placeholder {
     color: var(--sl-input-placeholder-color);
 }
 
-.channel-filter-trigger sl-icon {
+.chosen-select-trigger sl-icon {
     font-size: 0.75rem;
     color: var(--sl-input-icon-color);
     flex-shrink: 0;
 }
 
-.channel-filter-trigger .channel-filter-clear {
+.chosen-select-trigger .chosen-select-clear {
     font-size: 0.75rem;
     color: var(--sl-input-icon-color);
     flex-shrink: 0;
     cursor: pointer;
 }
 
-.channel-filter-trigger .channel-filter-clear:hover {
+.chosen-select-trigger .chosen-select-clear:hover {
     color: var(--sl-input-icon-color-hover, var(--sl-color-neutral-700));
 }
 
-.channel-filter-panel {
+.chosen-select-panel {
     padding: var(--sl-spacing-x-small);
 }
 
-.channel-filter-panel sl-input {
+.chosen-select-panel sl-input {
     margin-bottom: var(--sl-spacing-x-small);
 }
 
-.channel-filter-menu {
+.chosen-select-menu {
     max-height: 200px;
     overflow: auto;
 }
@@ -2249,8 +2249,8 @@ html.sl-theme-light {
 
     .tasks-filter-bar sl-input,
     .tasks-filter-bar sl-select,
-    .tasks-filter-bar .channel-filter-dropdown,
-    .tasks-filter-bar .channel-filter-trigger {
+    .tasks-filter-bar .chosen-select,
+    .tasks-filter-bar .chosen-select-trigger {
         min-width: 0 !important;
     }
 

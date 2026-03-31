@@ -45,8 +45,6 @@ class MoomboxApp {
     this.tasksStatusFilter = "";
     this.archivedSearchQuery = "";
     this.archivedStatusFilter = "";
-    this.tasksChannelFilter = "";
-    this.archivedChannelFilter = "";
     this.focusedJobIndex = -1;
     this.theme = localStorage.getItem("moombox-theme") || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
@@ -388,19 +386,17 @@ class MoomboxApp {
       });
     }
 
-    const tasksStatusFilter = document.getElementById("tasks-status-filter");
-    if (tasksStatusFilter) {
-      tasksStatusFilter.addEventListener("sl-change", () => {
-        this.tasksStatusFilter = tasksStatusFilter.value || "";
-        this.renderJobs();
-      });
-    }
+    const STATUS_OPTIONS = [
+      { value: "active", label: "Active" },
+      { value: "errors", label: "Errors" },
+      { value: "finished", label: "Finished" },
+    ];
 
-    this._setupChannelFilter("tasks-channel", () => {
-      return this.tasksChannelFilter;
-    }, (val) => {
-      this.tasksChannelFilter = val;
-      this.renderJobs();
+    this._setupChosenSelect("tasks-status-dropdown", {
+      placeholder: "All statuses",
+      options: STATUS_OPTIONS,
+      getFilter: () => this.tasksStatusFilter,
+      setFilter: (val) => { this.tasksStatusFilter = val; this.renderJobs(); },
     });
 
     // Archived search/filter
@@ -416,19 +412,11 @@ class MoomboxApp {
       });
     }
 
-    const archivedStatusFilter = document.getElementById("archived-status-filter");
-    if (archivedStatusFilter) {
-      archivedStatusFilter.addEventListener("sl-change", () => {
-        this.archivedStatusFilter = archivedStatusFilter.value || "";
-        this.renderArchivedJobs();
-      });
-    }
-
-    this._setupChannelFilter("archived-channel", () => {
-      return this.archivedChannelFilter;
-    }, (val) => {
-      this.archivedChannelFilter = val;
-      this.renderArchivedJobs();
+    this._setupChosenSelect("archived-status-dropdown", {
+      placeholder: "All statuses",
+      options: STATUS_OPTIONS,
+      getFilter: () => this.archivedStatusFilter,
+      setFilter: (val) => { this.archivedStatusFilter = val; this.renderArchivedJobs(); },
     });
 
     // Theme toggle
@@ -1128,7 +1116,6 @@ class MoomboxApp {
     // Remove loading skeletons on first render (any message path)
     document.getElementById("jobs-skeleton")?.remove();
 
-    this._populateChannelDropdown("tasks-channel", this.jobs);
 
     // Update active indicator in status bar
     this.stats.updateActiveIndicator(this.jobs);
@@ -1196,7 +1183,7 @@ class MoomboxApp {
     }
 
     const filtered = this.getFilteredJobs();
-    const isFiltered = this.tasksSearchQuery || this.tasksStatusFilter || this.tasksChannelFilter;
+    const isFiltered = this.tasksSearchQuery || this.tasksStatusFilter;
 
     // Update filter count
     if (filterCount) {
@@ -1285,7 +1272,6 @@ class MoomboxApp {
     const table = document.getElementById("archived-table");
     const filterCount = document.getElementById("archived-filter-count");
 
-    this._populateChannelDropdown("archived-channel", this.archivedJobs);
 
     if (this.archivedJobs.length === 0) {
       container.innerHTML = "";
@@ -1302,7 +1288,7 @@ class MoomboxApp {
     }
 
     const filtered = this.getFilteredArchivedJobs();
-    const isFiltered = this.archivedSearchQuery || this.archivedStatusFilter || this.archivedChannelFilter;
+    const isFiltered = this.archivedSearchQuery || this.archivedStatusFilter;
 
     // Update filter count
     if (filterCount) {
@@ -2976,10 +2962,6 @@ class MoomboxApp {
       }
     }
 
-    // Channel filter
-    if (this.tasksChannelFilter) {
-      jobs = jobs.filter((j) => (j.channelName || "") === this.tasksChannelFilter);
-    }
 
     return jobs;
   }
@@ -3004,10 +2986,6 @@ class MoomboxApp {
       }
     }
 
-    // Channel filter
-    if (this.archivedChannelFilter) {
-      jobs = jobs.filter((j) => (j.channelName || "") === this.archivedChannelFilter);
-    }
 
     return jobs;
   }
@@ -3027,58 +3005,72 @@ class MoomboxApp {
   }
 
   /**
-   * Set up a Chosen-style searchable channel filter dropdown.
-   * Trigger is a button; dropdown panel contains a search input + menu.
-   * @param {string} prefix - ID prefix (e.g. "tasks-channel" → dropdown is "tasks-channel-dropdown")
-   * @param {() => string} getFilter - returns current filter value
-   * @param {(val: string) => void} setFilter - apply new filter value and re-render
+   * Set up a Chosen-style searchable select dropdown.
+   * Button trigger shows current selection; dropdown panel has search input + menu.
+   * @param {string} dropdownId - ID of the sl-dropdown element
+   * @param {object} config
+   * @param {string} config.placeholder - text when nothing selected (e.g. "All statuses")
+   * @param {{value: string, label: string}[]} config.options - static options list
+   * @param {() => string} config.getFilter - returns current filter value
+   * @param {(val: string) => void} config.setFilter - apply new filter value and re-render
    */
-  _setupChannelFilter(prefix, getFilter, setFilter) {
-    const dropdown = document.getElementById(`${prefix}-dropdown`);
+  _setupChosenSelect(dropdownId, { placeholder, options, getFilter, setFilter }) {
+    const dropdown = document.getElementById(dropdownId);
     if (!dropdown) return;
-    const trigger = dropdown.querySelector(".channel-filter-trigger");
-    const label = trigger?.querySelector(".channel-filter-label");
-    const clearBtn = trigger?.querySelector(".channel-filter-clear");
-    const searchInput = dropdown.querySelector(".channel-filter-search");
-    const menu = dropdown.querySelector(".channel-filter-menu");
+    const trigger = dropdown.querySelector(".chosen-select-trigger");
+    const label = trigger?.querySelector(".chosen-select-label");
+    const clearBtn = trigger?.querySelector(".chosen-select-clear");
+    const searchInput = dropdown.querySelector(".chosen-select-search");
+    const menu = dropdown.querySelector(".chosen-select-menu");
     if (!trigger || !label || !searchInput || !menu) return;
 
     const updateTrigger = () => {
       const val = getFilter();
-      if (val) {
-        label.textContent = val;
+      const opt = val ? options.find(o => o.value === val) : null;
+      if (opt) {
+        label.textContent = opt.label;
         label.classList.remove("placeholder");
         if (clearBtn) clearBtn.style.display = "";
       } else {
-        label.textContent = "All channels";
+        label.textContent = placeholder;
         label.classList.add("placeholder");
         if (clearBtn) clearBtn.style.display = "none";
       }
     };
 
-    // When dropdown opens: reset search, populate menu, focus search input
+    const renderItems = (query) => {
+      const filtered = query
+        ? options.filter(o => o.label.toLowerCase().includes(query))
+        : options;
+      if (filtered.length === 0) {
+        menu.innerHTML = `<sl-menu-item disabled>No matches</sl-menu-item>`;
+      } else {
+        menu.innerHTML = filtered
+          .map(o => `<sl-menu-item value="${this.escapeHtml(o.value)}">${this.escapeHtml(o.label)}</sl-menu-item>`)
+          .join("");
+      }
+    };
+
+    // When dropdown opens: reset search, show all options, focus search
     dropdown.addEventListener("sl-show", () => {
       searchInput.value = "";
-      const channels = this._channelLists?.[prefix] || [];
-      this._renderChannelMenuItems(menu, channels, "");
+      renderItems("");
       setTimeout(() => searchInput.focus(), 0);
     });
 
-    // Filter menu items as user types in the search input
+    // Filter options as user types
     searchInput.addEventListener("sl-input", () => {
-      const channels = this._channelLists?.[prefix] || [];
-      const query = searchInput.value.trim().toLowerCase();
-      this._renderChannelMenuItems(menu, channels, query);
+      renderItems(searchInput.value.trim().toLowerCase());
     });
 
-    // Handle menu item selection
+    // Handle option selection
     dropdown.addEventListener("sl-select", (e) => {
       setFilter(e.detail.item.value);
       updateTrigger();
       dropdown.hide();
     });
 
-    // Handle clear button on trigger (prevent dropdown from opening)
+    // Handle clear button on trigger
     if (clearBtn) {
       clearBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -3086,29 +3078,6 @@ class MoomboxApp {
         updateTrigger();
       });
     }
-  }
-
-  /** Render menu items for a channel filter dropdown, filtered by query. */
-  _renderChannelMenuItems(menu, channels, query) {
-    const filtered = query
-      ? channels.filter(ch => ch.toLowerCase().includes(query))
-      : channels;
-    if (filtered.length === 0) {
-      menu.innerHTML = `<sl-menu-item disabled>${query ? "No matching channels" : "No channels"}</sl-menu-item>`;
-    } else {
-      menu.innerHTML = filtered
-        .map(ch => `<sl-menu-item value="${this.escapeHtml(ch)}">${this.escapeHtml(ch)}</sl-menu-item>`)
-        .join("");
-    }
-  }
-
-  /** Update the cached channel list for a filter dropdown. */
-  _populateChannelDropdown(prefix, jobs) {
-    const channels = [...new Set(jobs.map(j => j.channelName).filter(Boolean))].sort(
-      (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
-    );
-    if (!this._channelLists) this._channelLists = {};
-    this._channelLists[prefix] = channels;
   }
 
   // ===== Quick Actions =====
@@ -3626,8 +3595,8 @@ class MoomboxApp {
     if (selectAllBtn) {
       const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
       const isFiltered = panel === "archived"
-        ? (this.archivedSearchQuery || this.archivedStatusFilter || this.archivedChannelFilter)
-        : (this.tasksSearchQuery || this.tasksStatusFilter || this.tasksChannelFilter);
+        ? (this.archivedSearchQuery || this.archivedStatusFilter)
+        : (this.tasksSearchQuery || this.tasksStatusFilter);
       if (isFiltered) {
         const totalVisible = panel === "archived"
           ? this.getFilteredArchivedJobs().length

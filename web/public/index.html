@@ -52,24 +52,19 @@
                     <sl-input id="tasks-search" label="Filter tasks" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
                         <sl-icon slot="prefix" name="search"></sl-icon>
                     </sl-input>
-                    <sl-dropdown id="tasks-channel-dropdown" class="channel-filter-dropdown" hoist>
-                        <button slot="trigger" class="channel-filter-trigger" aria-label="Filter by channel" aria-haspopup="listbox">
-                            <span class="channel-filter-label placeholder">All channels</span>
-                            <sl-icon class="channel-filter-clear" name="x-circle-fill" style="display:none" title="Clear filter"></sl-icon>
+                    <sl-dropdown id="tasks-status-dropdown" class="chosen-select" hoist>
+                        <button slot="trigger" class="chosen-select-trigger" aria-label="Filter by status" aria-haspopup="listbox">
+                            <span class="chosen-select-label placeholder">All statuses</span>
+                            <sl-icon class="chosen-select-clear" name="x-circle-fill" style="display:none" title="Clear filter"></sl-icon>
                             <sl-icon name="chevron-down"></sl-icon>
                         </button>
-                        <div class="channel-filter-panel">
-                            <sl-input class="channel-filter-search" placeholder="Search channels..." size="small" clearable autocomplete="off">
+                        <div class="chosen-select-panel">
+                            <sl-input class="chosen-select-search" placeholder="Search..." size="small" clearable autocomplete="off">
                                 <sl-icon slot="prefix" name="search"></sl-icon>
                             </sl-input>
-                            <sl-menu class="channel-filter-menu"></sl-menu>
+                            <sl-menu class="chosen-select-menu"></sl-menu>
                         </div>
                     </sl-dropdown>
-                    <sl-select id="tasks-status-filter" label="Filter by status" placeholder="All statuses" clearable size="small" style="min-width:140px">
-                        <sl-option value="active">Active</sl-option>
-                        <sl-option value="errors">Errors</sl-option>
-                        <sl-option value="finished">Finished</sl-option>
-                    </sl-select>
                     <span id="tasks-filter-count" style="display:none"></span>
                     <sl-button variant="primary" id="add-video-btn">
                         <sl-icon slot="prefix" name="plus"></sl-icon>
@@ -249,24 +244,19 @@
                     <sl-input id="archived-search" label="Filter archived" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
                         <sl-icon slot="prefix" name="search"></sl-icon>
                     </sl-input>
-                    <sl-dropdown id="archived-channel-dropdown" class="channel-filter-dropdown" hoist>
-                        <button slot="trigger" class="channel-filter-trigger" aria-label="Filter by channel" aria-haspopup="listbox">
-                            <span class="channel-filter-label placeholder">All channels</span>
-                            <sl-icon class="channel-filter-clear" name="x-circle-fill" style="display:none" title="Clear filter"></sl-icon>
+                    <sl-dropdown id="archived-status-dropdown" class="chosen-select" hoist>
+                        <button slot="trigger" class="chosen-select-trigger" aria-label="Filter by status" aria-haspopup="listbox">
+                            <span class="chosen-select-label placeholder">All statuses</span>
+                            <sl-icon class="chosen-select-clear" name="x-circle-fill" style="display:none" title="Clear filter"></sl-icon>
                             <sl-icon name="chevron-down"></sl-icon>
                         </button>
-                        <div class="channel-filter-panel">
-                            <sl-input class="channel-filter-search" placeholder="Search channels..." size="small" clearable autocomplete="off">
+                        <div class="chosen-select-panel">
+                            <sl-input class="chosen-select-search" placeholder="Search..." size="small" clearable autocomplete="off">
                                 <sl-icon slot="prefix" name="search"></sl-icon>
                             </sl-input>
-                            <sl-menu class="channel-filter-menu"></sl-menu>
+                            <sl-menu class="chosen-select-menu"></sl-menu>
                         </div>
                     </sl-dropdown>
-                    <sl-select id="archived-status-filter" label="Filter by status" placeholder="All statuses" clearable size="small" style="min-width:140px">
-                        <sl-option value="active">Active</sl-option>
-                        <sl-option value="errors">Errors</sl-option>
-                        <sl-option value="finished">Finished</sl-option>
-                    </sl-select>
                     <span id="archived-filter-count" style="display:none"></span>
                 </div>
 
