@@ -3040,6 +3040,9 @@ class MoomboxApp {
     const channels = [...new Set(jobs.map(j => j.channelName).filter(Boolean))].sort(
       (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
     );
+    // Skip rebuild if channel list hasn't changed
+    const currentOptions = [...select.querySelectorAll("sl-option")].map(o => o.value);
+    if (channels.length === currentOptions.length && channels.every((ch, i) => ch === currentOptions[i])) return;
     const currentValue = select.value;
     select.innerHTML = channels
       .map(ch => `<sl-option value="${this.escapeHtml(ch)}">${this.escapeHtml(ch)}</sl-option>`)
@@ -3559,6 +3562,23 @@ class MoomboxApp {
     bar.classList.add("visible");
     document.body.classList.add("batch-bar-active");
     document.getElementById("batch-count").textContent = `${count} selected`;
+
+    // Update Select All label with count when filters are active
+    const selectAllBtn = document.getElementById("batch-select-all");
+    if (selectAllBtn) {
+      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+      const isFiltered = panel === "archived"
+        ? (this.archivedSearchQuery || this.archivedStatusFilter || this.archivedChannelFilter)
+        : (this.tasksSearchQuery || this.tasksStatusFilter || this.tasksChannelFilter);
+      if (isFiltered) {
+        const totalVisible = panel === "archived"
+          ? this.getFilteredArchivedJobs().length
+          : this.getFilteredJobs().length;
+        selectAllBtn.textContent = `Select All (${totalVisible})`;
+      } else {
+        selectAllBtn.textContent = "Select All";
+      }
+    }
 
     const selectedJobs = this._getSelectedJobs();
     const canCancel = selectedJobs.some(j => CANCEL_STATUSES.has(j.status));
