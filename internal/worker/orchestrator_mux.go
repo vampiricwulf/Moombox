@@ -52,16 +52,15 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 		return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
 	}
 
-	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+	freshJob := o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"status": database.StatusMuxing,
 	})
+	if freshJob == nil {
+		freshJob = jobCtx.Job
+	}
 
 	// Send "Muxing Starting" notification with enriched fields (matching TypeScript muxFinalize)
 	if o.notifier != nil {
-		freshJob, _ := o.db.GetJob(jobCtx.Job.ID)
-		if freshJob == nil {
-			freshJob = jobCtx.Job
-		}
 		var muxFields []notifications.Field
 		if freshJob.LastVideoSeq != nil {
 			muxFields = append(muxFields, notifications.Field{Name: "Video Segments", Value: fmt.Sprintf("%d", *freshJob.LastVideoSeq), Inline: true})
@@ -181,10 +180,10 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	// Copy assets (chat, description, thumbnail) to output directory
 	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates)
 
-	o.db.UpdateJobFields(jobCtx.Job.ID, updates)
+	finishedJob := o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
 	// Send "Download Finished" notification
-	o.sendFinishedNotification(jobCtx, outputFile, probeData, info)
+	o.sendFinishedNotification(jobCtx, finishedJob, outputFile, probeData, info)
 
 	o.logger.Info("download complete", "jobID", jobCtx.Job.ID, "output", outputFile)
 	return nil
@@ -354,12 +353,10 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 }
 
 // sendFinishedNotification sends a "Download Finished" notification with enriched fields.
-func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, outputFile string, probeData *ffprobeData, info os.FileInfo) {
+func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, finishedJob *database.Job, outputFile string, probeData *ffprobeData, info os.FileInfo) {
 	if o.notifier == nil {
 		return
 	}
-
-	finishedJob, _ := o.db.GetJob(jobCtx.Job.ID)
 	if finishedJob == nil {
 		finishedJob = jobCtx.Job
 	}
