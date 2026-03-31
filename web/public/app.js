@@ -24,7 +24,8 @@ class MoomboxApp {
     this.logs = [];
     this.config = null;
     this.selectedJobId = null;
-    this._selectedJobs = new Set();
+    this._selectedTaskJobs = new Set();
+    this._selectedArchivedJobs = new Set();
     this._lastCheckedJobIds = { jobs: null, archived: null };
     this.reconnectAttempts = 0;
     this.autoCookieReloginRequired = null;
@@ -49,6 +50,17 @@ class MoomboxApp {
     this.stats = new StatsController(this);
 
     this.init();
+  }
+
+  /** Return the selection set for the currently active panel. */
+  _activeSelectionSet() {
+    const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+    return panel === "archived" ? this._selectedArchivedJobs : this._selectedTaskJobs;
+  }
+
+  /** Return the selection set for a given container key ("jobs" or "archived"). */
+  _selectionSetFor(containerKey) {
+    return containerKey === "archived" ? this._selectedArchivedJobs : this._selectedTaskJobs;
   }
 
   async init() {
@@ -416,6 +428,7 @@ class MoomboxApp {
         if (checkbox) {
           e.stopPropagation();
           const jobId = checkbox.dataset.jobId;
+          const selectionSet = this._selectionSetFor(containerKey);
           // Shift+Click: select range between last checked and current (within same container)
           const lastId = this._lastCheckedJobIds[containerKey];
           if (e.shiftKey && lastId && checkbox.checked) {
@@ -426,16 +439,16 @@ class MoomboxApp {
               const [start, end] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
               for (let i = start; i <= end; i++) {
                 const id = allCards[i].dataset.jobId;
-                this._selectedJobs.add(id);
+                selectionSet.add(id);
                 allCards[i].classList.add("selected");
                 const cb = allCards[i].querySelector(".job-checkbox");
                 if (cb) cb.checked = true;
               }
             }
           } else if (checkbox.checked) {
-            this._selectedJobs.add(jobId);
+            selectionSet.add(jobId);
           } else {
-            this._selectedJobs.delete(jobId);
+            selectionSet.delete(jobId);
           }
           this._lastCheckedJobIds[containerKey] = jobId;
           checkbox.closest(".video-item")?.classList.toggle("selected", checkbox.checked);
@@ -1168,14 +1181,14 @@ class MoomboxApp {
       this.focusedJobIndex = -1;
     }
 
-    // Remove stale selected IDs (jobs that no longer exist in either list)
-    const currentJobIds = new Set([...this.jobs, ...this.archivedJobs].map(j => j.id));
-    this._selectedJobs.forEach(id => {
-      if (!currentJobIds.has(id)) this._selectedJobs.delete(id);
+    // Remove stale selected IDs (jobs that no longer exist)
+    const taskJobIds = new Set(this.jobs.map(j => j.id));
+    this._selectedTaskJobs.forEach(id => {
+      if (!taskJobIds.has(id)) this._selectedTaskJobs.delete(id);
     });
 
     // Re-apply selection state and sync the batch bar
-    this._selectedJobs.forEach(id => {
+    this._selectedTaskJobs.forEach(id => {
       const card = container.querySelector(`[data-job-id="${CSS.escape(id)}"]`);
       if (card) {
         card.classList.add("selected");
@@ -1288,7 +1301,7 @@ class MoomboxApp {
     if (canReinit) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Reinitialize" data-quick-action="reinitialize" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
     if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
 
-    const isSelected = this._selectedJobs.has(job.id);
+    const isSelected = this._selectedTaskJobs.has(job.id) || this._selectedArchivedJobs.has(job.id);
     return `
       <div class="video-item${isSelected ? " selected" : ""}" data-job-id="${this.escapeHtml(job.id)}" data-status="${this.escapeHtml(statusClass)}">
         <div class="thumb">
@@ -3339,17 +3352,20 @@ class MoomboxApp {
     }
   }
 
-  /** Return all selected jobs from both active and archived lists. */
+  /** Return selected jobs for the currently active panel. */
   _getSelectedJobs() {
-    const allJobs = [...this.jobs, ...this.archivedJobs];
-    return allJobs.filter(j => this._selectedJobs.has(j.id));
+    const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+    if (panel === "archived") {
+      return this.archivedJobs.filter(j => this._selectedArchivedJobs.has(j.id));
+    }
+    return this.jobs.filter(j => this._selectedTaskJobs.has(j.id));
   }
 
   updateBatchActionBar() {
     const bar = document.getElementById("batch-action-bar");
     if (!bar) return;
 
-    const count = this._selectedJobs.size;
+    const count = this._activeSelectionSet().size;
     if (count === 0) {
       bar.style.display = "none";
       return;
@@ -3453,7 +3469,7 @@ class MoomboxApp {
       failed = targets.length - succeeded;
     }
 
-    this._selectedJobs.clear();
+    this._activeSelectionSet().clear();
     this.updateBatchActionBar();
 
     if (failed === 0) {
