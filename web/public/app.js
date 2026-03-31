@@ -38,6 +38,8 @@ class MoomboxApp {
     this._logSearchQuery = "";
     this.tasksSearchQuery = "";
     this.tasksStatusFilter = "";
+    this.archivedSearchQuery = "";
+    this.archivedStatusFilter = "";
     this.focusedJobIndex = -1;
     this.theme = localStorage.getItem("moombox-theme") || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
@@ -384,6 +386,27 @@ class MoomboxApp {
       tasksStatusFilter.addEventListener("sl-change", () => {
         this.tasksStatusFilter = tasksStatusFilter.value || "";
         this.renderJobs();
+      });
+    }
+
+    // Archived search/filter
+    let archivedSearchTimeout = null;
+    const archivedSearch = document.getElementById("archived-search");
+    if (archivedSearch) {
+      archivedSearch.addEventListener("sl-input", () => {
+        clearTimeout(archivedSearchTimeout);
+        archivedSearchTimeout = setTimeout(() => {
+          this.archivedSearchQuery = archivedSearch.value.trim();
+          this.renderArchivedJobs();
+        }, 200);
+      });
+    }
+
+    const archivedStatusFilter = document.getElementById("archived-status-filter");
+    if (archivedStatusFilter) {
+      archivedStatusFilter.addEventListener("sl-change", () => {
+        this.archivedStatusFilter = archivedStatusFilter.value || "";
+        this.renderArchivedJobs();
       });
     }
 
@@ -1237,11 +1260,46 @@ class MoomboxApp {
     const container = document.getElementById("archived-container");
     const emptyState = document.getElementById("archived-empty-state");
     const table = document.getElementById("archived-table");
+    const filterCount = document.getElementById("archived-filter-count");
 
     if (this.archivedJobs.length === 0) {
       container.innerHTML = "";
       table.style.display = "none";
       emptyState.style.display = "flex";
+      const icon = emptyState.querySelector("sl-icon");
+      if (icon) icon.name = "archive";
+      const msg = emptyState.querySelector("p");
+      if (msg) msg.textContent = "No archived jobs";
+      const subtext = emptyState.querySelector(".empty-state-subtext");
+      if (subtext) subtext.textContent = "Finished jobs older than the configured age will appear here automatically";
+      if (filterCount) filterCount.style.display = "none";
+      return;
+    }
+
+    const filtered = this.getFilteredArchivedJobs();
+    const isFiltered = this.archivedSearchQuery || this.archivedStatusFilter;
+
+    // Update filter count
+    if (filterCount) {
+      if (isFiltered) {
+        filterCount.textContent = `${filtered.length} of ${this.archivedJobs.length}`;
+        filterCount.style.display = "";
+      } else {
+        filterCount.style.display = "none";
+      }
+    }
+
+    if (filtered.length === 0 && isFiltered) {
+      container.innerHTML = "";
+      table.style.display = "none";
+      emptyState.style.display = "flex";
+      const icon = emptyState.querySelector("sl-icon");
+      if (icon) icon.name = "search";
+      const msg = emptyState.querySelector("p");
+      if (msg) msg.textContent = "No matching archived jobs";
+      const subtext = emptyState.querySelector(".empty-state-subtext");
+      if (subtext) subtext.textContent = "Search matches titles and channel names";
+      if (filterCount) filterCount.style.display = "";
       return;
     }
 
@@ -1249,7 +1307,7 @@ class MoomboxApp {
     emptyState.style.display = "none";
 
     // Sort archived jobs by updatedAt descending (most recent first)
-    const sorted = [...this.archivedJobs].sort(
+    const sorted = [...filtered].sort(
       (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
     );
 
@@ -1257,7 +1315,16 @@ class MoomboxApp {
       .map((job) => this.renderJobItem(job))
       .join("");
 
-    // Event delegation is set up in setupEventListeners() - no per-item listeners needed
+    // Re-apply archived selection state
+    this._selectedArchivedJobs.forEach(id => {
+      const card = container.querySelector(`[data-job-id="${CSS.escape(id)}"]`);
+      if (card) {
+        card.classList.add("selected");
+        const cb = card.querySelector(".job-checkbox");
+        if (cb) cb.checked = true;
+      }
+    });
+    this.updateBatchActionBar();
   }
 
   /** Update local job resume position and refresh UI (called by player on silent saves). */
@@ -2874,6 +2941,34 @@ class MoomboxApp {
         finished: ["Finished", "Cancelled"],
       };
       const allowed = statusMap[this.tasksStatusFilter];
+      if (allowed) {
+        jobs = jobs.filter((j) => allowed.includes(j.status));
+      }
+    }
+
+    return jobs;
+  }
+
+  getFilteredArchivedJobs() {
+    let jobs = this.archivedJobs;
+
+    // Text filter
+    if (this.archivedSearchQuery) {
+      const query = this.archivedSearchQuery.toLowerCase();
+      jobs = jobs.filter((j) =>
+        (j.title || "").toLowerCase().includes(query) ||
+        (j.channelName || "").toLowerCase().includes(query)
+      );
+    }
+
+    // Status filter
+    if (this.archivedStatusFilter) {
+      const statusMap = {
+        active: ["Downloading", "Live", "Upcoming", "Muxing"],
+        errors: ["Error", "COOKIES?"],
+        finished: ["Finished", "Cancelled"],
+      };
+      const allowed = statusMap[this.archivedStatusFilter];
       if (allowed) {
         jobs = jobs.filter((j) => allowed.includes(j.status));
       }
