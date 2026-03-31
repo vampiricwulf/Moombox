@@ -288,6 +288,20 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 	db.notifyJobUpdate(job)
 }
 
+// UpdateResumePosition saves the playback position without bumping updated_at
+// or triggering subscriber notifications. Designed for frequent periodic saves
+// during video playback (every ~10 seconds).
+func (db *Database) UpdateResumePosition(jobID string, seconds float64) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.db.ExecContext(db.getCtx(),
+		"UPDATE jobs SET resume_position = ? WHERE id = ?", seconds, jobID)
+	if err != nil && db.logger != nil {
+		db.logger.Error("UpdateResumePosition failed", "jobID", jobID, "err", err)
+	}
+}
+
 func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
 	var isVod, manuallyAdded, allowNonStream, watched int

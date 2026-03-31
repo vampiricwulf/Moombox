@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -841,5 +842,93 @@ func TestWatchedAndResumePosition(t *testing.T) {
 	}
 	if !got.Watched {
 		t.Error("expected watched to still be true after clearing resume_position")
+	}
+}
+
+func TestUpdateResumePosition(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	job := &Job{
+		ID:      "yt_resume1",
+		VideoID: "resume1",
+		URL:     "https://youtube.com/watch?v=resume1",
+		Status:  StatusFinished,
+	}
+	db.AddJob(job)
+
+	// Save a resume position
+	db.UpdateResumePosition("yt_resume1", 500.5)
+
+	got, err := db.GetJob("yt_resume1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ResumePosition == nil || *got.ResumePosition != 500.5 {
+		t.Errorf("expected resume_position 500.5, got %v", got.ResumePosition)
+	}
+
+	// Verify updated_at was NOT bumped (compare with original)
+	originalUpdatedAt := job.UpdatedAt
+	if got.UpdatedAt != originalUpdatedAt {
+		t.Errorf("UpdateResumePosition should not bump updated_at, but it changed from %q to %q", originalUpdatedAt, got.UpdatedAt)
+	}
+}
+
+func TestBatchSetWatched(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Create 3 finished jobs
+	for i, id := range []string{"yt_bw1", "yt_bw2", "yt_bw3"} {
+		job := &Job{
+			ID:      id,
+			VideoID: fmt.Sprintf("bw%d", i+1),
+			URL:     fmt.Sprintf("https://youtube.com/watch?v=bw%d", i+1),
+			Status:  StatusFinished,
+		}
+		db.AddJob(job)
+		// Set resume positions
+		db.UpdateResumePosition(id, float64((i+1)*100))
+	}
+
+	// Batch mark as watched
+	db.BatchSetWatched([]string{"yt_bw1", "yt_bw2", "yt_bw3"}, true)
+
+	for _, id := range []string{"yt_bw1", "yt_bw2", "yt_bw3"} {
+		got, err := db.GetJob(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Watched {
+			t.Errorf("job %s: expected watched=true", id)
+		}
+		if got.ResumePosition != nil {
+			t.Errorf("job %s: expected resume_position cleared, got %v", id, got.ResumePosition)
+		}
+	}
+
+	// Batch mark as unwatched
+	db.BatchSetWatched([]string{"yt_bw1", "yt_bw2"}, false)
+
+	got1, _ := db.GetJob("yt_bw1")
+	got3, _ := db.GetJob("yt_bw3")
+	if got1.Watched {
+		t.Error("yt_bw1: expected watched=false after batch unwatched")
+	}
+	if !got3.Watched {
+		t.Error("yt_bw3: should still be watched (not in batch unwatched)")
 	}
 }

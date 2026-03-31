@@ -202,6 +202,41 @@ func (db *Database) UpdateJobSync(job *Job) error {
 	return updateJobExec(db.getCtx(), db.db, job)
 }
 
+// BatchSetWatched marks multiple jobs as watched or unwatched and clears
+// their resume_position. Only affects Finished jobs. Triggers OnJobsChange
+// for a full list refresh.
+func (db *Database) BatchSetWatched(jobIDs []string, watched bool) {
+	if len(jobIDs) == 0 {
+		return
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	placeholders := make([]string, len(jobIDs))
+	args := make([]any, 0, len(jobIDs)+2)
+	args = append(args, boolToInt(watched))
+	for i, id := range jobIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, string(StatusFinished))
+
+	query := fmt.Sprintf(
+		"UPDATE jobs SET watched = ?, resume_position = NULL WHERE id IN (%s) AND status = ?",
+		strings.Join(placeholders, ","),
+	)
+	_, err := db.db.ExecContext(db.getCtx(), query, args...)
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Error("BatchSetWatched failed", "err", err)
+		}
+		return
+	}
+
+	db.notifyJobsChange()
+}
+
 // DeleteJob removes a job and its associated data.
 func (db *Database) DeleteJob(id string) error {
 	db.mu.Lock()
