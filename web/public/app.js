@@ -40,6 +40,8 @@ class MoomboxApp {
     this.tasksStatusFilter = "";
     this.archivedSearchQuery = "";
     this.archivedStatusFilter = "";
+    this.tasksChannelFilter = "";
+    this.archivedChannelFilter = "";
     this.focusedJobIndex = -1;
     this.theme = localStorage.getItem("moombox-theme") || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
@@ -389,6 +391,14 @@ class MoomboxApp {
       });
     }
 
+    const tasksChannelFilter = document.getElementById("tasks-channel-filter");
+    if (tasksChannelFilter) {
+      tasksChannelFilter.addEventListener("sl-change", () => {
+        this.tasksChannelFilter = tasksChannelFilter.value || "";
+        this.renderJobs();
+      });
+    }
+
     // Archived search/filter
     let archivedSearchTimeout = null;
     const archivedSearch = document.getElementById("archived-search");
@@ -406,6 +416,14 @@ class MoomboxApp {
     if (archivedStatusFilter) {
       archivedStatusFilter.addEventListener("sl-change", () => {
         this.archivedStatusFilter = archivedStatusFilter.value || "";
+        this.renderArchivedJobs();
+      });
+    }
+
+    const archivedChannelFilter = document.getElementById("archived-channel-filter");
+    if (archivedChannelFilter) {
+      archivedChannelFilter.addEventListener("sl-change", () => {
+        this.archivedChannelFilter = archivedChannelFilter.value || "";
         this.renderArchivedJobs();
       });
     }
@@ -1107,6 +1125,8 @@ class MoomboxApp {
     // Remove loading skeletons on first render (any message path)
     document.getElementById("jobs-skeleton")?.remove();
 
+    this._populateChannelDropdown("tasks-channel-filter", this.jobs);
+
     // Update active indicator in status bar
     this.stats.updateActiveIndicator(this.jobs);
 
@@ -1173,7 +1193,7 @@ class MoomboxApp {
     }
 
     const filtered = this.getFilteredJobs();
-    const isFiltered = this.tasksSearchQuery || this.tasksStatusFilter;
+    const isFiltered = this.tasksSearchQuery || this.tasksStatusFilter || this.tasksChannelFilter;
 
     // Update filter count
     if (filterCount) {
@@ -1262,6 +1282,8 @@ class MoomboxApp {
     const table = document.getElementById("archived-table");
     const filterCount = document.getElementById("archived-filter-count");
 
+    this._populateChannelDropdown("archived-channel-filter", this.archivedJobs);
+
     if (this.archivedJobs.length === 0) {
       container.innerHTML = "";
       table.style.display = "none";
@@ -1277,7 +1299,7 @@ class MoomboxApp {
     }
 
     const filtered = this.getFilteredArchivedJobs();
-    const isFiltered = this.archivedSearchQuery || this.archivedStatusFilter;
+    const isFiltered = this.archivedSearchQuery || this.archivedStatusFilter || this.archivedChannelFilter;
 
     // Update filter count
     if (filterCount) {
@@ -2887,8 +2909,12 @@ class MoomboxApp {
           }
           break;
         case "f": {
-          if (isTasksActive) {
+          const panel = activePanel?.getAttribute("name");
+          if (panel === "tasks") {
             const searchInput = document.getElementById("tasks-search");
+            if (searchInput) { searchInput.focus(); e.preventDefault(); }
+          } else if (panel === "archived") {
+            const searchInput = document.getElementById("archived-search");
             if (searchInput) { searchInput.focus(); e.preventDefault(); }
           }
           break;
@@ -2946,6 +2972,11 @@ class MoomboxApp {
       }
     }
 
+    // Channel filter
+    if (this.tasksChannelFilter) {
+      jobs = jobs.filter((j) => (j.channelName || "") === this.tasksChannelFilter);
+    }
+
     return jobs;
   }
 
@@ -2974,6 +3005,11 @@ class MoomboxApp {
       }
     }
 
+    // Channel filter
+    if (this.archivedChannelFilter) {
+      jobs = jobs.filter((j) => (j.channelName || "") === this.archivedChannelFilter);
+    }
+
     return jobs;
   }
 
@@ -2989,6 +3025,23 @@ class MoomboxApp {
       if (pa >= 6) return new Date(b.updatedAt) - new Date(a.updatedAt);
       return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" });
     });
+  }
+
+  /** Populate a channel filter dropdown with unique channel names from a job list. */
+  _populateChannelDropdown(selectId, jobs) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const channels = [...new Set(jobs.map(j => j.channelName).filter(Boolean))].sort(
+      (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
+    );
+    const currentValue = select.value;
+    select.innerHTML = channels
+      .map(ch => `<sl-option value="${this.escapeHtml(ch)}">${this.escapeHtml(ch)}</sl-option>`)
+      .join("");
+    // Restore selection if the channel still exists
+    if (currentValue && channels.includes(currentValue)) {
+      select.value = currentValue;
+    }
   }
 
   // ===== Quick Actions =====
