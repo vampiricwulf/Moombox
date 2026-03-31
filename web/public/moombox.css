@@ -2387,11 +2387,31 @@ html.sl-theme-light {
 
 .video-item.selected {
     background: var(--sl-color-primary-50);
+    border-left: 3px solid var(--sl-color-primary-500);
 }
 
 @media (max-width: 768px) {
     .video-item .job-checkbox {
         opacity: 1;
+    }
+
+    #batch-action-bar {
+        flex-wrap: wrap;
+        padding: var(--sl-spacing-x-small) var(--sl-spacing-small);
+        gap: var(--sl-spacing-x-small);
+    }
+
+    .batch-actions {
+        flex-wrap: wrap;
+        gap: var(--sl-spacing-2x-small);
+    }
+
+    .batch-actions sl-button::part(base) {
+        min-height: 44px;
+    }
+
+    #batch-count {
+        font-size: 0.8rem;
     }
 }
 
