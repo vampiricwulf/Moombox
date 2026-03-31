@@ -26,6 +26,12 @@ export class PlayerController {
     this._seg = new SegmentPlayer();
     /** Monotonic counter to detect stale responses from rapid job switching */
     this._selectionSeq = 0;
+
+    // Watch state tracking
+    this._watchSaveInterval = null;
+    this._watchedTriggered = false;
+    this._onPauseSave = null;
+    this._onBeforeUnload = null;
   }
 
   initPlayer() {
@@ -415,7 +421,15 @@ export class PlayerController {
 
   onSegmentEnded() {
     const video = document.getElementById("player-video");
-    this._seg.onSegmentEnded(video);
+    const advanced = this._seg.onSegmentEnded(video);
+
+    // Watched detection fallback — video played to natural end
+    // Only trigger when no more segments to advance to (advanced === false or non-segmented)
+    if (!advanced && this.playerJob && !this._watchedTriggered) {
+      this._watchedTriggered = true;
+      this._clearWatchTracking();
+      fetch(`/api/jobs/${this.playerJob.id}/watched`, { method: "POST" }).catch(() => {});
+    }
   }
 
   /**
@@ -562,11 +576,25 @@ export class PlayerController {
     const segIndicator = document.getElementById("player-segment-indicator");
     if (segIndicator) segIndicator.remove();
 
+    // Remove resume overlay if present from previous job
+    document.querySelector("#player-video-wrapper .resume-overlay")?.remove();
+
     // Multi-segment or single-file video source
     if (this.playerJob.segments && this.playerJob.segments.length > 0) {
       this.initMultiSegmentPlayer(jobId, this.playerJob.segments);
     } else {
       video.src = `/api/jobs/${jobId}/video`;
+    }
+
+    // Watch tracking: show resume dialog or start from beginning
+    this._clearWatchTracking();
+    this._watchedTriggered = false;
+    const resumePos = this.playerJob.resumePosition;
+
+    if (resumePos != null && resumePos > 0) {
+      this._showResumeDialog(jobId, resumePos);
+    } else {
+      this._startWatchTracking(jobId);
     }
 
     // Load chat if available
@@ -1057,6 +1085,137 @@ export class PlayerController {
     // Remaining text after last native emote
     if (cursor < message.length) {
       this._appendTwitchWords(container, message.substring(cursor));
+    }
+  }
+
+  // ── Resume dialog & watch tracking ──────────────────────────────────
+
+  _showResumeDialog(jobId, resumeSeconds) {
+    const wrapper = document.getElementById("player-video-wrapper");
+    // Remove any existing overlay
+    wrapper.querySelector(".resume-overlay")?.remove();
+
+    const formatted = this._formatDuration(resumeSeconds);
+    const overlay = document.createElement("div");
+    overlay.className = "resume-overlay";
+    overlay.innerHTML = `
+      <div class="resume-overlay-content">
+        <p>Resume where you left off?</p>
+        <div class="resume-actions">
+          <sl-button variant="primary" size="medium" id="resume-continue">
+            <sl-icon slot="prefix" name="play-fill"></sl-icon> Resume from ${formatted}
+          </sl-button>
+          <sl-button variant="neutral" size="medium" id="resume-start">
+            Start from beginning
+          </sl-button>
+        </div>
+      </div>
+    `;
+    wrapper.appendChild(overlay);
+
+    overlay.querySelector("#resume-continue").addEventListener("click", () => {
+      overlay.remove();
+      const video = document.getElementById("player-video");
+      if (this._seg.active) {
+        this._seg.seekToGlobalTime(resumeSeconds, video);
+      } else {
+        video.currentTime = resumeSeconds;
+      }
+      video.play();
+      this._startWatchTracking(jobId);
+    });
+
+    overlay.querySelector("#resume-start").addEventListener("click", () => {
+      overlay.remove();
+      document.getElementById("player-video").play();
+      this._startWatchTracking(jobId);
+    });
+  }
+
+  _formatDuration(totalSeconds) {
+    const s = Math.floor(totalSeconds);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    return `${m}:${String(sec).padStart(2, "0")}`;
+  }
+
+  _startWatchTracking(jobId) {
+    this._clearWatchTracking();
+
+    const video = document.getElementById("player-video");
+
+    // Periodic save every 10 seconds
+    this._watchSaveInterval = setInterval(() => {
+      if (!video || video.paused) return;
+      const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
+      this._saveResumePosition(jobId, pos);
+      this._checkWatched(jobId, video);
+    }, 10000);
+
+    // Save on pause
+    this._onPauseSave = () => {
+      const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
+      this._saveResumePosition(jobId, pos);
+    };
+    video.addEventListener("pause", this._onPauseSave);
+
+    // Save on tab close
+    this._onBeforeUnload = () => {
+      const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
+      const blob = new Blob([JSON.stringify({ position: pos })], { type: "application/json" });
+      navigator.sendBeacon(`/api/jobs/${jobId}/resume-position`, blob);
+    };
+    window.addEventListener("beforeunload", this._onBeforeUnload);
+  }
+
+  _clearWatchTracking() {
+    if (this._watchSaveInterval) {
+      clearInterval(this._watchSaveInterval);
+      this._watchSaveInterval = null;
+    }
+    const video = document.getElementById("player-video");
+    if (this._onPauseSave) {
+      video?.removeEventListener("pause", this._onPauseSave);
+      this._onPauseSave = null;
+    }
+    if (this._onBeforeUnload) {
+      window.removeEventListener("beforeunload", this._onBeforeUnload);
+      this._onBeforeUnload = null;
+    }
+  }
+
+  _saveResumePosition(jobId, position) {
+    fetch(`/api/jobs/${jobId}/resume-position`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ position }),
+    }).catch(() => {}); // Fire-and-forget
+  }
+
+  _checkWatched(jobId, video) {
+    if (this._watchedTriggered) return;
+
+    let currentPos, totalDuration;
+    if (this._seg.active) {
+      currentPos = this._seg.getGlobalTime(video);
+      totalDuration = this._seg.totalDuration;
+    } else {
+      currentPos = video.currentTime;
+      totalDuration = video.duration;
+    }
+
+    if (!totalDuration || !isFinite(totalDuration)) return;
+
+    const withinThreshold =
+      (totalDuration - currentPos <= 30) ||
+      (currentPos / totalDuration >= 0.95);
+
+    if (withinThreshold) {
+      this._watchedTriggered = true;
+      this._clearWatchTracking();
+      fetch(`/api/jobs/${jobId}/watched`, { method: "POST" }).catch(() => {});
     }
   }
 

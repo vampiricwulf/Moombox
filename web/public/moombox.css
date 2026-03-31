@@ -2375,3 +2375,35 @@ html.sl-theme-light {
         opacity: 1;
     }
 }
+
+/* Resume overlay */
+.resume-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    border-radius: var(--sl-border-radius-medium);
+}
+
+.resume-overlay-content {
+    text-align: center;
+    color: #fff;
+}
+
+.resume-overlay-content p {
+    margin-bottom: 1rem;
+    font-size: 1.1rem;
+}
+
+.resume-overlay-content .resume-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+    flex-wrap: wrap;
+}
