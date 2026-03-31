@@ -47,6 +47,9 @@ browser-profile/
 # Brainstorm session files
 .superpowers/
 
+# Git worktrees
+.worktrees/
+
 # Environment
 .env
 .env.*
