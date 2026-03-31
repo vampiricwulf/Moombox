@@ -1215,6 +1215,20 @@ class MoomboxApp {
     // Event delegation is set up in setupEventListeners() - no per-item listeners needed
   }
 
+  /** Returns eyeball overlay HTML for a job thumbnail, or empty string. */
+  watchIndicatorHtml(job) {
+    if (job.status !== "Finished") return "";
+    if (job.watched) {
+      // Filled green eye
+      return `<span class="watch-indicator"><svg viewBox="0 0 24 24" fill="#a6e3a1" stroke="#a6e3a1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="#166534"/></svg></span>`;
+    }
+    if (job.resumePosition != null) {
+      // Outlined amber eye
+      return `<span class="watch-indicator"><svg viewBox="0 0 24 24" fill="none" stroke="#f9e2af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>`;
+    }
+    return "";
+  }
+
   renderJobItem(job) {
     const statusClass = job.status.toLowerCase().replace("?", "");
     const isTwitch = job.platform === "twitch";
@@ -1249,6 +1263,7 @@ class MoomboxApp {
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
                ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}>` : ""}
+          ${this.watchIndicatorHtml(job)}
         </div>
         <div class="stream-info">
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>
@@ -1276,6 +1291,19 @@ class MoomboxApp {
     if (thumbImg && job.thumbnailUrl && thumbImg.src !== job.thumbnailUrl) {
       thumbImg.src = job.thumbnailUrl;
       thumbImg.classList.remove("thumb-avatar");
+    }
+
+    // Update watch indicator
+    const existingIndicator = card.querySelector(".thumb .watch-indicator");
+    const newIndicatorHtml = this.watchIndicatorHtml(job);
+    if (newIndicatorHtml) {
+      if (existingIndicator) {
+        existingIndicator.outerHTML = newIndicatorHtml;
+      } else {
+        card.querySelector(".thumb")?.insertAdjacentHTML("beforeend", newIndicatorHtml);
+      }
+    } else if (existingIndicator) {
+      existingIndicator.remove();
     }
 
     // Update title only when changed (avoids recreating sl-tag shadow DOM for TW badge)
