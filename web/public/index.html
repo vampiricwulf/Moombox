@@ -49,12 +49,12 @@
             <!-- Tasks Panel -->
             <sl-tab-panel name="tasks">
                 <div class="panel-header tasks-filter-bar">
-                    <sl-input id="tasks-search" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
+                    <sl-input id="tasks-search" label="Filter tasks" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
                         <sl-icon slot="prefix" name="search"></sl-icon>
                     </sl-input>
-                    <sl-select id="tasks-channel-filter" placeholder="All channels" clearable size="small" style="min-width:140px">
+                    <sl-select id="tasks-channel-filter" label="Filter by channel" placeholder="All channels" clearable size="small" style="min-width:140px">
                     </sl-select>
-                    <sl-select id="tasks-status-filter" placeholder="All statuses" clearable size="small" style="min-width:140px">
+                    <sl-select id="tasks-status-filter" label="Filter by status" placeholder="All statuses" clearable size="small" style="min-width:140px">
                         <sl-option value="active">Active</sl-option>
                         <sl-option value="errors">Errors</sl-option>
                         <sl-option value="finished">Finished</sl-option>
@@ -235,12 +235,12 @@
             <!-- Archived Panel -->
             <sl-tab-panel name="archived">
                 <div class="panel-header tasks-filter-bar">
-                    <sl-input id="archived-search" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
+                    <sl-input id="archived-search" label="Filter archived" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
                         <sl-icon slot="prefix" name="search"></sl-icon>
                     </sl-input>
-                    <sl-select id="archived-channel-filter" placeholder="All channels" clearable size="small" style="min-width:140px">
+                    <sl-select id="archived-channel-filter" label="Filter by channel" placeholder="All channels" clearable size="small" style="min-width:140px">
                     </sl-select>
-                    <sl-select id="archived-status-filter" placeholder="All statuses" clearable size="small" style="min-width:140px">
+                    <sl-select id="archived-status-filter" label="Filter by status" placeholder="All statuses" clearable size="small" style="min-width:140px">
                         <sl-option value="active">Active</sl-option>
                         <sl-option value="errors">Errors</sl-option>
                         <sl-option value="finished">Finished</sl-option>
@@ -1652,8 +1652,8 @@
         </sl-dialog>
 
         <!-- Batch Action Bar (fixed, panel-aware) -->
-        <div id="batch-action-bar" style="display: none;">
-            <span id="batch-count"></span>
+        <div id="batch-action-bar" role="status" aria-live="polite" style="display: none;">
+            <span id="batch-count" aria-label="Selection count"></span>
             <sl-button id="batch-select-all" variant="text" size="small">Select All</sl-button>
             <div class="batch-actions">
                 <sl-button id="batch-cancel" variant="warning" size="small">

@@ -15,6 +15,11 @@ const RESUME_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
 const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
 const MUX_STATUSES = new Set(["Cancelled", "Error"]);
 const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
+const STATUS_FILTER_MAP = {
+  active: ["Downloading", "Live", "Upcoming", "Muxing"],
+  errors: ["Error", "COOKIES?"],
+  finished: ["Finished", "Cancelled"],
+};
 
 class MoomboxApp {
   constructor() {
@@ -1419,7 +1424,7 @@ class MoomboxApp {
     return `
       <div class="video-item${isSelected ? " selected" : ""}" data-job-id="${this.escapeHtml(job.id)}" data-status="${this.escapeHtml(statusClass)}">
         <div class="thumb">
-          <input type="checkbox" class="job-checkbox" data-job-id="${this.escapeHtml(job.id)}" ${isSelected ? "checked" : ""}>
+          <input type="checkbox" class="job-checkbox" data-job-id="${this.escapeHtml(job.id)}" ${isSelected ? "checked" : ""} aria-label="Select ${this.escapeHtml(job.title)}">
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
                ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}>` : ""}
@@ -2967,12 +2972,7 @@ class MoomboxApp {
 
     // Status filter
     if (this.tasksStatusFilter) {
-      const statusMap = {
-        active: ["Downloading", "Live", "Upcoming", "Muxing"],
-        errors: ["Error", "COOKIES?"],
-        finished: ["Finished", "Cancelled"],
-      };
-      const allowed = statusMap[this.tasksStatusFilter];
+      const allowed = STATUS_FILTER_MAP[this.tasksStatusFilter];
       if (allowed) {
         jobs = jobs.filter((j) => allowed.includes(j.status));
       }
@@ -3000,12 +3000,7 @@ class MoomboxApp {
 
     // Status filter
     if (this.archivedStatusFilter) {
-      const statusMap = {
-        active: ["Downloading", "Live", "Upcoming", "Muxing"],
-        errors: ["Error", "COOKIES?"],
-        finished: ["Finished", "Cancelled"],
-      };
-      const allowed = statusMap[this.archivedStatusFilter];
+      const allowed = STATUS_FILTER_MAP[this.archivedStatusFilter];
       if (allowed) {
         jobs = jobs.filter((j) => allowed.includes(j.status));
       }
