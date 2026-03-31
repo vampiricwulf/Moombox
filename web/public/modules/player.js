@@ -369,6 +369,10 @@ export class PlayerController {
     // Invalidate any in-flight fetches from a previous selection
     this._selectionSeq++;
 
+    // Stop watch tracking (interval, pause handler, beforeunload)
+    this._clearWatchTracking();
+    document.querySelector("#player-video-wrapper .resume-overlay")?.remove();
+
     this.playerJob = null;
     this.playerChatData = null;
     this.playerChatMessages = [];
@@ -1161,6 +1165,10 @@ export class PlayerController {
     };
     video.addEventListener("pause", this._onPauseSave);
 
+    // Check watched on seek (handles seek-to-end)
+    this._onSeekedWatch = () => this._checkWatched(jobId, video);
+    video.addEventListener("seeked", this._onSeekedWatch);
+
     // Save on tab close
     this._onBeforeUnload = () => {
       const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
@@ -1179,6 +1187,10 @@ export class PlayerController {
     if (this._onPauseSave) {
       video?.removeEventListener("pause", this._onPauseSave);
       this._onPauseSave = null;
+    }
+    if (this._onSeekedWatch) {
+      video?.removeEventListener("seeked", this._onSeekedWatch);
+      this._onSeekedWatch = null;
     }
     if (this._onBeforeUnload) {
       window.removeEventListener("beforeunload", this._onBeforeUnload);
@@ -1203,7 +1215,9 @@ export class PlayerController {
       totalDuration = this._seg.totalDuration;
     } else {
       currentPos = video.currentTime;
-      totalDuration = video.duration;
+      // Prefer lengthSeconds from job metadata; fall back to video element duration
+      const jobLen = this.playerJob?.lengthSeconds;
+      totalDuration = (jobLen && jobLen > 0) ? jobLen : video.duration;
     }
 
     if (!totalDuration || !isFinite(totalDuration)) return;
