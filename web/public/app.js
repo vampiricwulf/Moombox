@@ -515,16 +515,33 @@ class MoomboxApp {
     document.getElementById("batch-watched")?.addEventListener("click", () => this.batchAction("watched"));
     document.getElementById("batch-unwatched")?.addEventListener("click", () => this.batchAction("unwatched"));
     document.getElementById("batch-select-all")?.addEventListener("click", () => {
-      this.jobs.forEach(j => this._selectedJobs.add(j.id));
-      this.archivedJobs.forEach(j => this._selectedJobs.add(j.id));
-      document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = true; });
-      document.querySelectorAll(".video-item").forEach(el => el.classList.add("selected"));
+      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+      const selectionSet = this._activeSelectionSet();
+      let visibleJobs;
+      if (panel === "archived") {
+        visibleJobs = this.getFilteredArchivedJobs();
+      } else {
+        visibleJobs = this.getFilteredJobs();
+      }
+      visibleJobs.forEach(j => selectionSet.add(j.id));
+      // Only update checkboxes in the active panel's container
+      const containerId = panel === "archived" ? "archived-container" : "jobs-container";
+      const container = document.getElementById(containerId);
+      if (container) {
+        container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = true; });
+        container.querySelectorAll(".video-item").forEach(el => el.classList.add("selected"));
+      }
       this.updateBatchActionBar();
     });
     document.getElementById("batch-clear")?.addEventListener("click", () => {
-      this._selectedJobs.clear();
-      document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
-      document.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+      const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+      this._activeSelectionSet().clear();
+      const containerId = panel === "archived" ? "archived-container" : "jobs-container";
+      const container = document.getElementById(containerId);
+      if (container) {
+        container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
+        container.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+      }
       this.updateBatchActionBar();
     });
   }
@@ -2758,11 +2775,16 @@ class MoomboxApp {
 
       switch (e.key) {
         case "Escape":
-          if (this._selectedJobs.size > 0) {
-            this._selectedJobs.clear();
+          if (this._activeSelectionSet().size > 0) {
+            const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
+            this._activeSelectionSet().clear();
+            const containerId = panel === "archived" ? "archived-container" : "jobs-container";
+            const container = document.getElementById(containerId);
+            if (container) {
+              container.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
+              container.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
+            }
             this.updateBatchActionBar();
-            document.querySelectorAll(".job-checkbox").forEach(cb => { cb.checked = false; });
-            document.querySelectorAll(".video-item.selected").forEach(el => el.classList.remove("selected"));
             return;
           }
           break;
