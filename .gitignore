@@ -44,6 +44,9 @@ browser-profile/
 # Cache
 .cache/
 
+# Brainstorm session files
+.superpowers/
+
 # Environment
 .env
 .env.*
