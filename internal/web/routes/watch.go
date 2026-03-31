@@ -12,6 +12,21 @@ import (
 // WatchRoutes registers watch tracking API routes.
 func WatchRoutes(r chi.Router, db *database.Database) {
 
+	// GET /api/jobs/{id}/watch-state — lightweight read of mutable watch fields
+	r.Get("/api/jobs/{id}/watch-state", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+		rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		jsonResponse(rw, map[string]any{
+			"watched":        job.Watched,
+			"resumePosition": job.ResumePosition,
+		})
+	})
+
 	// PUT /api/jobs/{id}/resume-position — lightweight periodic save
 	r.Put("/api/jobs/{id}/resume-position", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")

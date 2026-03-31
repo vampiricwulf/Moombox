@@ -1228,6 +1228,28 @@ class MoomboxApp {
     // Event delegation is set up in setupEventListeners() - no per-item listeners needed
   }
 
+  /** Update local job resume position and refresh UI (called by player on silent saves). */
+  _updateJobResumePosition(jobId, position) {
+    const job = this.jobs.find(j => j.id === jobId) || this.archivedJobs.find(j => j.id === jobId);
+    if (job) {
+      job.resumePosition = position;
+      // Update thumbnail indicator
+      this.updateJobCard(job);
+      // Update details pill if this job's details are open
+      if (this.selectedJobId === jobId) {
+        const pill = document.querySelector("#job-details-content .watch-pill");
+        const newPill = this.watchPillHtml(job);
+        if (pill && newPill) {
+          pill.outerHTML = newPill;
+        } else if (!pill && newPill) {
+          // Insert pill after status badge
+          const statusRow = document.querySelector("#job-details-content .status")?.closest(".details-row");
+          statusRow?.insertAdjacentHTML("afterend", newPill);
+        }
+      }
+    }
+  }
+
   /** Returns eyeball overlay HTML for a job thumbnail, or empty string. */
   watchIndicatorHtml(job) {
     if (job.status !== "Finished") return "";

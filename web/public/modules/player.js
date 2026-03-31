@@ -591,11 +591,20 @@ export class PlayerController {
       video.src = `/api/jobs/${jobId}/video`;
     }
 
-    // Watch tracking: show resume dialog or start from beginning
+    // Fetch fresh watch state (not cached like the job endpoint)
     this._clearWatchTracking();
     this._watchedTriggered = false;
-    const resumePos = this.playerJob.resumePosition;
+    try {
+      const wsRes = await fetch(`/api/jobs/${jobId}/watch-state`);
+      if (this._selectionSeq !== selectionId) return;
+      if (wsRes.ok) {
+        const ws = await wsRes.json();
+        this.playerJob.watched = ws.watched;
+        this.playerJob.resumePosition = ws.resumePosition;
+      }
+    } catch { /* proceed with cached values */ }
 
+    const resumePos = this.playerJob.resumePosition;
     if (resumePos != null && resumePos > 0) {
       this._showResumeDialog(jobId, resumePos);
     } else {
@@ -1221,6 +1230,11 @@ export class PlayerController {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ position }),
     }).catch(() => {}); // Fire-and-forget
+
+    // Update local state so the details pill reflects the current position
+    // without needing a WebSocket broadcast (resume saves are silent)
+    if (this.playerJob) this.playerJob.resumePosition = position;
+    this.app._updateJobResumePosition(jobId, position);
   }
 
   _checkWatched(jobId, video) {
