@@ -1448,7 +1448,7 @@ class MoomboxApp {
     const watchedNow = !!job.watched;
     const hadWatchPill = !!watchPill;
     const watchPillStale = watchedNow !== (watchPill?.classList.contains("watched") ?? false)
-      || (job.resumePosition != null) !== (watchPill?.classList.contains("in-progress") ?? false)
+      || (!watchedNow && (job.resumePosition != null) !== (watchPill?.classList.contains("in-progress") ?? false))
       || (watchedNow && !hadWatchPill) || (!watchedNow && !job.resumePosition && hadWatchPill);
     if (watchPillStale) {
       this.renderJobDetails(job);
@@ -3349,6 +3349,14 @@ class MoomboxApp {
     const canUnwatch = selectedJobs.some(j => j.status === "Finished" && (j.watched || j.resumePosition != null));
     document.getElementById("batch-watched").style.display = canWatch ? "" : "none";
     document.getElementById("batch-unwatched").style.display = canUnwatch ? "" : "none";
+
+    // Hide divider between standard and watch buttons when either side is empty
+    const divider = bar.querySelector("sl-divider");
+    if (divider) {
+      const hasStandard = canCancel || canResume || canReinit || canDelete;
+      const hasWatch = canWatch || canUnwatch;
+      divider.style.display = (hasStandard && hasWatch) ? "" : "none";
+    }
   }
 
   async batchAction(action) {

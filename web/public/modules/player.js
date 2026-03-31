@@ -1218,7 +1218,7 @@ export class PlayerController {
     if (!totalDuration || !isFinite(totalDuration)) return;
 
     const withinThreshold =
-      (totalDuration - currentPos <= 30) ||
+      (totalDuration > 60 && totalDuration - currentPos <= 30) ||
       (currentPos / totalDuration >= 0.95);
 
     if (withinThreshold) {
