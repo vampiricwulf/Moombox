@@ -51,6 +51,8 @@ var fieldToColumn = map[string]string{
 	"twitch_category":     "twitch_category",
 	"channel_avatar_url":  "channel_avatar_url",
 	"quality_preference":  "quality_preference",
+	"watched":            "watched",
+	"resume_position":    "resume_position",
 }
 
 // dbLogger is the interface for database error logging.
@@ -153,7 +155,7 @@ func (db *Database) prepareStatements() error {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at, quality_preference
+		last_recheck_at, quality_preference, watched, resume_position
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -204,7 +206,7 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 		thumbnail_file=?, description_file=?,
 		twitch_quality=?, twitch_category=?, channel_avatar_url=?,
 		selected_video_itag=?, selected_audio_itag=?, start_time=?, end_time=?,
-		last_recheck_at=?, quality_preference=?
+		last_recheck_at=?, quality_preference=?, watched=?, resume_position=?
 		WHERE id=?`,
 		job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform, job.Status,
 		job.Progress, job.Percent, job.ETA, job.Speed, job.Error, job.UpdatedAt,
@@ -217,7 +219,7 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 		job.ThumbnailFile, job.DescriptionFile,
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
-		job.LastRecheckAt, job.QualityPreference,
+		job.LastRecheckAt, job.QualityPreference, boolToInt(job.Watched), job.ResumePosition,
 		job.ID)
 	return err
 }
@@ -273,7 +275,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at, quality_preference
+		last_recheck_at, quality_preference, watched, resume_position
 		FROM jobs WHERE id = ?`, id)
 	job, scanErr := scanJob(row)
 	if scanErr != nil {
@@ -288,7 +290,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) {
 
 func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
-	var isVod, manuallyAdded, allowNonStream int
+	var isVod, manuallyAdded, allowNonStream, watched int
 	err := row.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
 		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
@@ -302,7 +304,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 		&j.ThumbnailFile, &j.DescriptionFile,
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
-		&j.LastRecheckAt, &j.QualityPreference,
+		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition,
 	)
 	if err != nil {
 		return nil, err
@@ -310,12 +312,13 @@ func scanJob(row *sql.Row) (*Job, error) {
 	j.IsVod = isVod != 0
 	j.ManuallyAdded = manuallyAdded != 0
 	j.AllowNonStream = allowNonStream != 0
+	j.Watched = watched != 0
 	return &j, nil
 }
 
 func scanJobRows(rows *sql.Rows) (*Job, error) {
 	var j Job
-	var isVod, manuallyAdded, allowNonStream int
+	var isVod, manuallyAdded, allowNonStream, watched int
 	err := rows.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
 		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
@@ -329,7 +332,7 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 		&j.ThumbnailFile, &j.DescriptionFile,
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
-		&j.LastRecheckAt, &j.QualityPreference,
+		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition,
 	)
 	if err != nil {
 		return nil, err
@@ -337,6 +340,7 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 	j.IsVod = isVod != 0
 	j.ManuallyAdded = manuallyAdded != 0
 	j.AllowNonStream = allowNonStream != 0
+	j.Watched = watched != 0
 	return &j, nil
 }
 

@@ -792,3 +792,54 @@ func TestHasActiveJob(t *testing.T) {
 		t.Error("expected no active job after finishing")
 	}
 }
+
+func TestWatchedAndResumePosition(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	job := &Job{
+		ID:      "yt_watch1",
+		VideoID: "watch1",
+		URL:     "https://youtube.com/watch?v=watch1",
+		Status:  StatusFinished,
+		Title:   "Test Video",
+	}
+	db.AddJob(job)
+
+	db.UpdateJobFields("yt_watch1", map[string]any{
+		"watched":         1,
+		"resume_position": 1234.5,
+	})
+
+	got, err := db.GetJob("yt_watch1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Watched {
+		t.Error("expected watched to be true")
+	}
+	if got.ResumePosition == nil || *got.ResumePosition != 1234.5 {
+		t.Errorf("expected resume_position 1234.5, got %v", got.ResumePosition)
+	}
+
+	db.UpdateJobFields("yt_watch1", map[string]any{
+		"resume_position": nil,
+	})
+
+	got, err = db.GetJob("yt_watch1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ResumePosition != nil {
+		t.Errorf("expected resume_position to be nil, got %v", got.ResumePosition)
+	}
+	if !got.Watched {
+		t.Error("expected watched to still be true after clearing resume_position")
+	}
+}

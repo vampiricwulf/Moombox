@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 // createSchema defines the full schema for new databases. It includes all tables
 // and indexes from the start. The incremental migrations below handle upgrading
@@ -67,7 +67,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     start_time REAL,
     end_time REAL,
     last_recheck_at TEXT,
-    quality_preference TEXT DEFAULT ''
+    quality_preference TEXT DEFAULT '',
+    watched INTEGER DEFAULT 0,
+    resume_position REAL
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -322,6 +324,24 @@ func (db *Database) migrate() error {
 		}
 
 		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 7)
+		if err != nil {
+			return err
+		}
+	}
+
+	if version < 8 {
+		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN watched INTEGER DEFAULT 0`); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return err
+			}
+		}
+		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN resume_position REAL`); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return err
+			}
+		}
+
+		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 8)
 		if err != nil {
 			return err
 		}

@@ -143,7 +143,7 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at, quality_preference
+		last_recheck_at, quality_preference, watched, resume_position
 		FROM jobs ORDER BY updated_at DESC`
 
 	rows, err := db.db.QueryContext(db.getCtx(), query)
