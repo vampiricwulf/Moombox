@@ -179,6 +179,32 @@ sl-tab::part(base) {
     height: 14px;
 }
 
+.watch-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.watch-pill svg {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+}
+
+.watch-pill.watched {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.watch-pill.in-progress {
+    background: #fef3c7;
+    color: #92400e;
+}
+
 .thumb img {
     object-fit: cover;
     height: 4.5rem;

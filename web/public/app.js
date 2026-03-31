@@ -471,14 +471,23 @@ class MoomboxApp {
     setupJobContainer(document.getElementById("jobs-container"), "jobs", () => this.jobs);
     setupJobContainer(document.getElementById("archived-container"), "archived", () => this.archivedJobs);
 
-    // Event delegation for trim delete buttons (avoids inline onclick)
+    // Event delegation for trim delete buttons and watch actions (avoids inline onclick)
     const detailsContent = document.getElementById("job-details-content");
     if (detailsContent) {
-      detailsContent.addEventListener("click", (e) => {
+      detailsContent.addEventListener("click", async (e) => {
         const btn = e.target.closest("[data-delete-trim]");
         if (btn) {
           e.stopPropagation();
           this.deleteTrim(btn.dataset.jobId, btn.dataset.trimId);
+          return;
+        }
+        if (e.target.closest("#details-mark-watched")) {
+          await fetch(`/api/jobs/${this.selectedJobId}/watched`, { method: "POST" });
+          return;
+        }
+        if (e.target.closest("#details-mark-unwatched")) {
+          await fetch(`/api/jobs/${this.selectedJobId}/watched`, { method: "DELETE" });
+          return;
         }
       });
     }
@@ -1650,6 +1659,15 @@ class MoomboxApp {
               <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
             </span>
           </div>
+          ${this.watchPillHtml(job)}
+          ${job.status === "Finished" ? `
+          <div class="details-row" id="watch-actions-row">
+            <span class="details-label"></span>
+            <span class="details-value">
+              ${!job.watched ? `<sl-button id="details-mark-watched" variant="success" size="small"><sl-icon slot="prefix" name="eye"></sl-icon> Mark Watched</sl-button>` : ""}
+              ${job.watched || job.resumePosition != null ? `<sl-button id="details-mark-unwatched" variant="neutral" size="small"><sl-icon slot="prefix" name="eye-slash"></sl-icon> Mark Unwatched</sl-button>` : ""}
+            </span>
+          </div>` : ""}
           ${job.chatStatus ? (() => {
             const chatVariantMap = { downloading: "primary", finished: "success", error: "danger", unavailable: "neutral", pending: "neutral" };
             const chatVariant = chatVariantMap[job.chatStatus] || "neutral";
@@ -2999,6 +3017,32 @@ class MoomboxApp {
 
   formatDurationSeconds(totalSeconds) {
     return formatDurationSeconds(totalSeconds);
+  }
+
+  /** Formats seconds into H:MM:SS or M:SS. */
+  formatDuration(totalSeconds) {
+    const s = Math.floor(totalSeconds);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+    return `${m}:${String(sec).padStart(2, "0")}`;
+  }
+
+  /** Returns the compact watch status pill HTML for job details. */
+  watchPillHtml(job) {
+    if (job.status !== "Finished") return "";
+    const resumeStr = job.resumePosition != null ? this.formatDuration(job.resumePosition) : "";
+    if (job.watched && resumeStr) {
+      return `<span class="watch-pill watched"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="#dcfce7"/></svg>Watched · Paused at ${this.escapeHtml(resumeStr)}</span>`;
+    }
+    if (job.watched) {
+      return `<span class="watch-pill watched"><svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3" fill="#dcfce7"/></svg>Watched</span>`;
+    }
+    if (resumeStr) {
+      return `<span class="watch-pill in-progress"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Paused at ${this.escapeHtml(resumeStr)}</span>`;
+    }
+    return "";
   }
 
   setInputValue(id, value) {
