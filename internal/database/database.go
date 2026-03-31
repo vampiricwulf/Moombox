@@ -53,6 +53,7 @@ var fieldToColumn = map[string]string{
 	"quality_preference":  "quality_preference",
 	"watched":             "watched",
 	"resume_position":     "resume_position",
+	"chat_offset":         "chat_offset",
 }
 
 // dbLogger is the interface for database error logging.
@@ -155,7 +156,7 @@ func (db *Database) prepareStatements() error {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at, quality_preference, watched, resume_position
+		last_recheck_at, quality_preference, watched, resume_position, chat_offset
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -206,7 +207,7 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 		thumbnail_file=?, description_file=?,
 		twitch_quality=?, twitch_category=?, channel_avatar_url=?,
 		selected_video_itag=?, selected_audio_itag=?, start_time=?, end_time=?,
-		last_recheck_at=?, quality_preference=?, watched=?, resume_position=?
+		last_recheck_at=?, quality_preference=?, watched=?, resume_position=?, chat_offset=?
 		WHERE id=?`,
 		job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform, job.Status,
 		job.Progress, job.Percent, job.ETA, job.Speed, job.Error, job.UpdatedAt,
@@ -220,7 +221,7 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt, job.QualityPreference, boolToInt(job.Watched), job.ResumePosition,
-		job.ID)
+		job.ChatOffset, job.ID)
 	return err
 }
 
@@ -276,7 +277,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at, quality_preference, watched, resume_position
+		last_recheck_at, quality_preference, watched, resume_position, chat_offset
 		FROM jobs WHERE id = ?`, id)
 	job, scanErr := scanJob(row)
 	if scanErr != nil {
@@ -304,6 +305,19 @@ func (db *Database) UpdateResumePosition(jobID string, seconds float64) {
 	}
 }
 
+// UpdateChatOffset saves the chat timing offset without bumping updated_at
+// or triggering subscriber notifications.
+func (db *Database) UpdateChatOffset(jobID string, offset float64) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.db.ExecContext(db.getCtx(),
+		"UPDATE jobs SET chat_offset = ? WHERE id = ?", offset, jobID)
+	if err != nil && db.logger != nil {
+		db.logger.Error("UpdateChatOffset failed", "jobID", jobID, "err", err)
+	}
+}
+
 func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
 	var isVod, manuallyAdded, allowNonStream, watched int
@@ -320,7 +334,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 		&j.ThumbnailFile, &j.DescriptionFile,
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
-		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition,
+		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 	)
 	if err != nil {
 		return nil, err
@@ -348,7 +362,7 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 		&j.ThumbnailFile, &j.DescriptionFile,
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
-		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition,
+		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
 	)
 	if err != nil {
 		return nil, err
@@ -360,29 +374,3 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 	return &j, nil
 }
 
-// GetPlayerPref returns the chat_offset for a video, or 0 if not set.
-func (db *Database) GetPlayerPref(videoID string) (float64, bool) {
-	var offset float64
-	err := db.db.QueryRowContext(db.getCtx(),
-		"SELECT chat_offset FROM player_prefs WHERE video_id = ?", videoID).Scan(&offset)
-	if err != nil {
-		return 0, false
-	}
-	return offset, true
-}
-
-// SetPlayerPref upserts the chat_offset for a video.
-func (db *Database) SetPlayerPref(videoID string, chatOffset float64) error {
-	_, err := db.db.ExecContext(db.getCtx(),
-		`INSERT INTO player_prefs (video_id, chat_offset) VALUES (?, ?)
-		 ON CONFLICT(video_id) DO UPDATE SET chat_offset = excluded.chat_offset`,
-		videoID, chatOffset)
-	return err
-}
-
-// DeletePlayerPref removes the player preferences for a video.
-func (db *Database) DeletePlayerPref(videoID string) error {
-	_, err := db.db.ExecContext(db.getCtx(),
-		"DELETE FROM player_prefs WHERE video_id = ?", videoID)
-	return err
-}

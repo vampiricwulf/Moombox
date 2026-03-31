@@ -193,13 +193,12 @@ export class PlayerController {
       const persistOffset = () => {
         if (!this.playerJob) return;
         const val = parseFloat(offsetInput.value);
-        const videoID = this.playerJob.videoId;
+        const jobId = this.playerJob.id;
         if (isNaN(val) || val === 0) {
-          // Remove custom offset
           this.playerCustomOffsetMs = 0;
-          fetch(`/api/player-prefs/${encodeURIComponent(videoID)}`, { method: "DELETE" }).catch(() => {});
+          fetch(`/api/jobs/${jobId}/chat-offset`, { method: "DELETE" }).catch(() => {});
         } else {
-          fetch(`/api/player-prefs/${encodeURIComponent(videoID)}`, {
+          fetch(`/api/jobs/${jobId}/chat-offset`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ chatOffset: val }),
@@ -226,7 +225,7 @@ export class PlayerController {
         }
         // Persist the cleared offset
         if (this.playerJob) {
-          fetch(`/api/player-prefs/${encodeURIComponent(this.playerJob.videoId)}`, { method: "DELETE" }).catch(() => {});
+          fetch(`/api/jobs/${this.playerJob.id}/chat-offset`, { method: "DELETE" }).catch(() => {});
         }
         const resetBtn = document.getElementById("player-chat-offset-reset");
         if (resetBtn) resetBtn.style.display = "none";
@@ -694,25 +693,15 @@ export class PlayerController {
     document.getElementById("player-sidebar-msg-count").textContent =
       `${this.playerChatMessages.length} messages`;
 
-    // Load saved custom chat offset
+    // Load saved custom chat offset (from watch-state response, already on playerJob)
     const offsetInput = document.getElementById("player-chat-offset");
     if (offsetInput) {
       offsetInput.value = "";
       this.playerCustomOffsetMs = 0;
-      if (this.playerJob.videoId) {
-        try {
-          const prefRes = await fetch(`/api/player-prefs/${encodeURIComponent(this.playerJob.videoId)}`);
-          if (this._selectionSeq !== selectionId) return; // Selection changed
-          if (prefRes.ok) {
-            const pref = await prefRes.json();
-            if (pref.chatOffset && pref.chatOffset !== 0) {
-              offsetInput.value = pref.chatOffset;
-              this.playerCustomOffsetMs = pref.chatOffset * 1000;
-            }
-          }
-        } catch (e) {
-          // Ignore — no saved offset
-        }
+      const savedOffset = this.playerJob.chatOffset;
+      if (savedOffset && savedOffset !== 0) {
+        offsetInput.value = savedOffset;
+        this.playerCustomOffsetMs = savedOffset * 1000;
       }
     }
   }

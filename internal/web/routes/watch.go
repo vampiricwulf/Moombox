@@ -24,6 +24,7 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 		jsonResponse(rw, map[string]any{
 			"watched":        job.Watched,
 			"resumePosition": job.ResumePosition,
+			"chatOffset":     job.ChatOffset,
 		})
 	})
 
@@ -129,5 +130,30 @@ func WatchRoutes(r chi.Router, db *database.Database) {
 			return
 		}
 		jsonResponse(rw, map[string]any{"success": true})
+	})
+
+	// PUT /api/jobs/{id}/chat-offset — save chat timing offset
+	r.Put("/api/jobs/{id}/chat-offset", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		var body struct {
+			ChatOffset float64 `json:"chatOffset"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			jsonError(rw, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if math.IsNaN(body.ChatOffset) || math.IsInf(body.ChatOffset, 0) {
+			jsonError(rw, "invalid offset value", http.StatusBadRequest)
+			return
+		}
+		db.UpdateChatOffset(jobID, body.ChatOffset)
+		rw.WriteHeader(http.StatusNoContent)
+	})
+
+	// DELETE /api/jobs/{id}/chat-offset — clear chat timing offset
+	r.Delete("/api/jobs/{id}/chat-offset", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		db.UpdateChatOffset(jobID, 0)
+		rw.WriteHeader(http.StatusNoContent)
 	})
 }

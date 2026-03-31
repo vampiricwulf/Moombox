@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 // createSchema defines the full schema for new databases. It includes all tables
 // and indexes from the start. The incremental migrations below handle upgrading
@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     last_recheck_at TEXT,
     quality_preference TEXT DEFAULT '',
     watched INTEGER DEFAULT 0,
-    resume_position REAL
+    resume_position REAL,
+    chat_offset REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -342,6 +343,30 @@ func (db *Database) migrate() error {
 		}
 
 		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 8)
+		if err != nil {
+			return err
+		}
+	}
+
+	if version < 9 {
+		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN chat_offset REAL NOT NULL DEFAULT 0`); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return err
+			}
+		}
+
+		// Backfill from player_prefs: copy chat_offset to jobs using video_id match
+		if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET chat_offset = (
+			SELECT pp.chat_offset FROM player_prefs pp WHERE pp.video_id = jobs.video_id
+		) WHERE EXISTS (
+			SELECT 1 FROM player_prefs pp WHERE pp.video_id = jobs.video_id
+		)`); err != nil {
+			if db.logger != nil {
+				db.logger.Warn("v9 migration: player_prefs backfill failed (non-fatal)", "err", err)
+			}
+		}
+
+		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 9)
 		if err != nil {
 			return err
 		}

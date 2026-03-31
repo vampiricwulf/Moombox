@@ -76,9 +76,10 @@ type Job struct {
 	EndTime           *float64   `json:"endTime,omitempty"`
 	// Quality monitoring
 	QualityPreference string     `json:"qualityPreference,omitempty"`
-	// Watch tracking
+	// Watch tracking / player state
 	Watched           bool       `json:"watched"`
 	ResumePosition    *float64   `json:"resumePosition,omitempty"`
+	ChatOffset        float64    `json:"chatOffset"`
 	// Trims (loaded via join)
 	Trims             []TrimRecord `json:"trims,omitempty"`
 	// Segments (loaded via join, for multi-segment quality-split jobs)
