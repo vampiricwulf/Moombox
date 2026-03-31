@@ -1173,6 +1173,7 @@ export class PlayerController {
     // Save on tab close
     this._onBeforeUnload = () => {
       const pos = this._seg.active ? this._seg.getGlobalTime(video) : video.currentTime;
+      if (!isFinite(pos) || pos <= 0) return;
       const blob = new Blob([JSON.stringify({ position: pos })], { type: "application/json" });
       navigator.sendBeacon(`/api/jobs/${jobId}/resume-position`, blob);
     };
@@ -1200,6 +1201,7 @@ export class PlayerController {
   }
 
   _saveResumePosition(jobId, position) {
+    if (!isFinite(position) || position <= 0) return;
     fetch(`/api/jobs/${jobId}/resume-position`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
