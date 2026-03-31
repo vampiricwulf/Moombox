@@ -1242,9 +1242,9 @@ class MoomboxApp {
         if (pill && newPill) {
           pill.outerHTML = newPill;
         } else if (!pill && newPill) {
-          // Insert pill after status badge
-          const statusRow = document.querySelector("#job-details-content .status")?.closest(".details-row");
-          statusRow?.insertAdjacentHTML("afterend", newPill);
+          // Insert pill after status badge inside the same value span
+          const badge = document.querySelector("#job-details-content .status");
+          badge?.insertAdjacentHTML("afterend", " " + newPill);
         }
       }
     }
@@ -1692,9 +1692,9 @@ class MoomboxApp {
             <span class="details-label">Status:</span>
             <span class="details-value">
               <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
+              ${this.watchPillHtml(job)}
             </span>
           </div>
-          ${this.watchPillHtml(job)}
           ${job.status === "Finished" ? `
           <div class="details-row" id="watch-actions-row">
             <span class="details-label"></span>
