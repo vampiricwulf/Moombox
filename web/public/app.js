@@ -8,6 +8,8 @@ import { SettingsController } from "./modules/settings.js";
 import { TrimController } from "./modules/trimmer.js";
 import { StatsController } from "./modules/stats.js";
 import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime, isTypingInInput } from "./modules/utils.js";
+import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
+import { applyFilterTokens } from "./modules/filter-engine.js";
 
 // Status sets for quick action visibility (single source of truth)
 const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"]);
@@ -41,10 +43,10 @@ class MoomboxApp {
     this.logFilter = "all";
     this._logAutoScroll = true;
     this._logSearchQuery = "";
-    this.tasksSearchQuery = "";
-    this.tasksStatusFilter = "";
-    this.archivedSearchQuery = "";
-    this.archivedStatusFilter = "";
+    this.tasksFilterTokens = [];
+    this.archivedFilterTokens = [];
+    this._tasksChannels = [];
+    this._archivedChannels = [];
     this.focusedJobIndex = -1;
     this.theme = localStorage.getItem("moombox-theme") || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
@@ -373,50 +375,17 @@ class MoomboxApp {
       });
     }
 
-    // Tasks search/filter
-    let tasksSearchTimeout = null;
-    const tasksSearch = document.getElementById("tasks-search");
-    if (tasksSearch) {
-      tasksSearch.addEventListener("sl-input", () => {
-        clearTimeout(tasksSearchTimeout);
-        tasksSearchTimeout = setTimeout(() => {
-          this.tasksSearchQuery = tasksSearch.value.trim();
-          this.renderJobs();
-        }, 200);
-      });
-    }
-
-    const STATUS_OPTIONS = [
-      { value: "active", label: "Active" },
-      { value: "errors", label: "Errors" },
-      { value: "finished", label: "Finished" },
-    ];
-
-    this._setupChosenSelect("tasks-status-dropdown", {
-      placeholder: "All statuses",
-      options: STATUS_OPTIONS,
-      getFilter: () => this.tasksStatusFilter,
-      setFilter: (val) => { this.tasksStatusFilter = val; this.renderJobs(); },
+    // Unified filter controls
+    this._setupUnifiedFilter("tasks-filter", {
+      getTokens: () => this.tasksFilterTokens,
+      setTokens: (tokens) => { this.tasksFilterTokens = tokens; this.renderJobs(); },
+      getChannels: () => this._tasksChannels,
     });
 
-    // Archived search/filter
-    let archivedSearchTimeout = null;
-    const archivedSearch = document.getElementById("archived-search");
-    if (archivedSearch) {
-      archivedSearch.addEventListener("sl-input", () => {
-        clearTimeout(archivedSearchTimeout);
-        archivedSearchTimeout = setTimeout(() => {
-          this.archivedSearchQuery = archivedSearch.value.trim();
-          this.renderArchivedJobs();
-        }, 200);
-      });
-    }
-
-    this._setupChosenSelect("archived-status-dropdown", {
-      placeholder: "All statuses",
-      options: STATUS_OPTIONS,
-      getFilter: () => this.archivedStatusFilter,
-      setFilter: (val) => { this.archivedStatusFilter = val; this.renderArchivedJobs(); },
+    this._setupUnifiedFilter("archived-filter", {
+      getTokens: () => this.archivedFilterTokens,
+      setTokens: (tokens) => { this.archivedFilterTokens = tokens; this.renderArchivedJobs(); },
+      getChannels: () => this._archivedChannels,
     });
 
     // Theme toggle
@@ -3005,79 +2974,292 @@ class MoomboxApp {
   }
 
   /**
-   * Set up a Chosen-style searchable select dropdown.
-   * Button trigger shows current selection; dropdown panel has search input + menu.
-   * @param {string} dropdownId - ID of the sl-dropdown element
-   * @param {object} config
-   * @param {string} config.placeholder - text when nothing selected (e.g. "All statuses")
-   * @param {{value: string, label: string}[]} config.options - static options list
-   * @param {() => string} config.getFilter - returns current filter value
-   * @param {(val: string) => void} config.setFilter - apply new filter value and re-render
+   * Set up a unified filter control with chip input and optgroup dropdown.
+   * @param {string} containerId - ID of the .unified-filter container
+   * @param {object} opts
+   * @param {() => Array} opts.getTokens - returns current token array
+   * @param {(tokens: Array) => void} opts.setTokens - apply new tokens and re-render
+   * @param {() => string[]} opts.getChannels - returns current channel list for dropdown
    */
-  _setupChosenSelect(dropdownId, { placeholder, options, getFilter, setFilter }) {
-    const dropdown = document.getElementById(dropdownId);
-    if (!dropdown) return;
-    const trigger = dropdown.querySelector(".chosen-select-trigger");
-    const label = trigger?.querySelector(".chosen-select-label");
-    const clearBtn = trigger?.querySelector(".chosen-select-clear");
-    const searchInput = dropdown.querySelector(".chosen-select-search");
-    const menu = dropdown.querySelector(".chosen-select-menu");
-    if (!trigger || !label || !searchInput || !menu) return;
+  _setupUnifiedFilter(containerId, { getTokens, setTokens, getChannels }) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const chipsEl = container.querySelector(".unified-filter-chips");
+    const input = container.querySelector(".unified-filter-input");
+    const clearBtn = container.querySelector(".unified-filter-clear");
+    const dropdown = container.querySelector(".unified-filter-dropdown");
+    const menu = container.querySelector(".unified-filter-menu");
+    if (!chipsEl || !input || !dropdown || !menu) return;
 
-    const updateTrigger = () => {
-      const val = getFilter();
-      const opt = val ? options.find(o => o.value === val) : null;
-      if (opt) {
-        label.textContent = opt.label;
-        label.classList.remove("placeholder");
-        if (clearBtn) clearBtn.style.display = "";
-      } else {
-        label.textContent = placeholder;
-        label.classList.add("placeholder");
-        if (clearBtn) clearBtn.style.display = "none";
+    const STATUS_OPTIONS = [
+      { type: "status", value: "active", label: "Active" },
+      { type: "status", value: "errors", label: "Errors" },
+      { type: "status", value: "finished", label: "Finished" },
+    ];
+    const PLATFORM_OPTIONS = [
+      { type: "platform", value: "youtube", label: "YouTube" },
+      { type: "platform", value: "twitch", label: "Twitch" },
+    ];
+
+    /** Render chips from current structured tokens (not free-text). */
+    const renderChips = () => {
+      const tokens = getTokens();
+      chipsEl.innerHTML = "";
+      for (const token of tokens) {
+        if (token.type === "text") continue; // text stays in input, not chipped
+        const tag = document.createElement("sl-tag");
+        tag.size = "small";
+        tag.removable = true;
+        if (token.type === "or") {
+          tag.textContent = token.terms.map(t => {
+            const prefix = t.negate ? "-" : "";
+            return prefix + this._filterTokenLabel(t);
+          }).join(" | ");
+          tag.variant = token.terms.some(t => t.negate) ? "danger" : "neutral";
+        } else {
+          const prefix = token.negate ? "-" : "";
+          tag.textContent = prefix + this._filterTokenLabel(token);
+          tag.variant = token.negate ? "danger" : "neutral";
+        }
+        tag.addEventListener("sl-remove", () => {
+          const updated = getTokens().filter(t => t !== token);
+          setTokens(updated);
+          renderChips();
+          updateClearBtn();
+          renderDropdownItems();
+        });
+        chipsEl.appendChild(tag);
       }
     };
 
-    const renderItems = (query) => {
-      const filtered = query
-        ? options.filter(o => o.label.toLowerCase().includes(query))
-        : options;
-      if (filtered.length === 0) {
-        menu.innerHTML = `<sl-menu-item disabled>No matches</sl-menu-item>`;
-      } else {
-        menu.innerHTML = filtered
-          .map(o => `<sl-menu-item value="${this.escapeHtml(o.value)}">${this.escapeHtml(o.label)}</sl-menu-item>`)
-          .join("");
+    /**
+     * Sync tokens from chips + current input text.
+     * Parses the input text — structured tokens (status:, channel:, platform:)
+     * become chips and are removed from the input. Free text stays in the input.
+     */
+    const syncTokens = () => {
+      const chipTokens = getTokens().filter(t => t.type !== "text");
+      const inputText = input.value.trim();
+      if (!inputText) {
+        setTokens(chipTokens);
+        updateClearBtn();
+        renderDropdownItems();
+        return;
       }
+      const parsed = parseFilterQuery(inputText);
+      const newChips = [];
+      const remainingText = [];
+      for (const t of parsed) {
+        if (t.type === "text") {
+          remainingText.push(t);
+        } else if (t.type === "or") {
+          // OR groups with any structured term become chips; pure text ORs stay
+          const hasStructured = t.terms.some(term => term.type !== "text");
+          if (hasStructured) {
+            newChips.push(t);
+          } else {
+            remainingText.push(t);
+          }
+        } else {
+          newChips.push(t);
+        }
+      }
+      const allTokens = [...chipTokens, ...newChips, ...remainingText];
+      setTokens(allTokens);
+      // Update input to show only remaining free text
+      if (newChips.length > 0) {
+        input.value = remainingText.map(t => serializeToken(t)).join(" ");
+        renderChips();
+      }
+      updateClearBtn();
+      renderDropdownItems();
     };
 
-    // When dropdown opens: reset search, show all options, focus search
-    dropdown.addEventListener("sl-show", () => {
-      searchInput.value = "";
-      renderItems("");
-      setTimeout(() => searchInput.focus(), 0);
+    const updateClearBtn = () => {
+      const hasContent = getTokens().length > 0 || input.value.trim();
+      clearBtn.style.display = hasContent ? "" : "none";
+    };
+
+    /** Add a structured token as a chip. */
+    const addChipToken = (token) => {
+      const tokens = getTokens().filter(t => t.type !== "text");
+      const textTokens = getTokens().filter(t => t.type === "text");
+      // Check if already exists
+      const exists = tokens.some(t =>
+        t.type === token.type && t.value === token.value && t.negate === token.negate
+      );
+      if (exists) {
+        // Toggle off — remove it
+        const updated = tokens.filter(t =>
+          !(t.type === token.type && t.value === token.value && t.negate === token.negate)
+        );
+        setTokens([...updated, ...textTokens]);
+      } else {
+        // Also remove any opposite negate version
+        const cleaned = tokens.filter(t =>
+          !(t.type === token.type && t.value === token.value)
+        );
+        setTokens([...cleaned, token, ...textTokens]);
+      }
+      renderChips();
+      updateClearBtn();
+      renderDropdownItems();
+    };
+
+    /** Render the optgroup dropdown items. */
+    const renderDropdownItems = () => {
+      const query = input.value.trim().toLowerCase();
+      const activeTokens = getTokens();
+      let html = "";
+
+      const groups = [
+        { header: "Statuses", items: STATUS_OPTIONS },
+        { header: "Platforms", items: PLATFORM_OPTIONS },
+        { header: "Channels", items: getChannels().map(ch => ({ type: "channel", value: ch, label: ch })) },
+      ];
+
+      for (const group of groups) {
+        const filtered = query
+          ? group.items.filter(o => o.label.toLowerCase().includes(query))
+          : group.items;
+        if (filtered.length === 0) continue;
+
+        html += `<sl-menu-item data-group-header disabled>${this.escapeHtml(group.header)}</sl-menu-item>`;
+        for (const opt of filtered) {
+          const isActive = activeTokens.some(t =>
+            t.type === opt.type && t.value === opt.value && !t.negate
+          );
+          const isExcluded = activeTokens.some(t =>
+            t.type === opt.type && t.value === opt.value && t.negate
+          );
+          const cls = (isActive || isExcluded) ? ' class="already-active"' : "";
+          const val = this.escapeHtml(JSON.stringify({ type: opt.type, value: opt.value }));
+          html += `<sl-menu-item value='${val}'${cls}>`;
+          html += this.escapeHtml(opt.label);
+          html += `<sl-icon slot="suffix" class="filter-item-exclude" name="dash-circle" data-exclude='${val}' title="Exclude"></sl-icon>`;
+          html += `</sl-menu-item>`;
+        }
+      }
+
+      if (!html) {
+        html = `<sl-menu-item disabled>No matches</sl-menu-item>`;
+      }
+      menu.innerHTML = html;
+    };
+
+    // --- Event Wiring ---
+
+    // Clicking container focuses input
+    container.addEventListener("click", (e) => {
+      if (e.target.closest("sl-tag") || e.target.closest(".unified-filter-clear")) return;
+      input.focus();
     });
 
-    // Filter options as user types
-    searchInput.addEventListener("sl-input", () => {
-      renderItems(searchInput.value.trim().toLowerCase());
+    // Input focus opens dropdown
+    input.addEventListener("focus", () => {
+      renderDropdownItems();
+      dropdown.show();
     });
 
-    // Handle option selection
+    // Input typing: debounced filter update + dropdown filtering
+    let filterTimeout = null;
+    input.addEventListener("input", () => {
+      clearTimeout(filterTimeout);
+      renderDropdownItems();
+      filterTimeout = setTimeout(() => syncTokens(), 200);
+    });
+
+    // Enter key: if input has structured tags, chip them immediately
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        clearTimeout(filterTimeout);
+        syncTokens();
+      }
+      if (e.key === "Backspace" && !input.value) {
+        // Remove last chip
+        const tokens = getTokens();
+        const chipTokens = tokens.filter(t => t.type !== "text");
+        if (chipTokens.length > 0) {
+          const last = chipTokens[chipTokens.length - 1];
+          const updated = tokens.filter(t => t !== last);
+          setTokens(updated);
+          renderChips();
+          updateClearBtn();
+          renderDropdownItems();
+        }
+      }
+      if (e.key === "Escape") {
+        dropdown.hide();
+        input.blur();
+      }
+    });
+
+    // Stop keyboard shortcut propagation while typing in the filter
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+    });
+
+    // Dropdown item clicked — add as chip
     dropdown.addEventListener("sl-select", (e) => {
-      setFilter(e.detail.item.value);
-      updateTrigger();
-      dropdown.hide();
+      const raw = e.detail.item.value;
+      if (!raw) return;
+      try {
+        const { type, value } = JSON.parse(raw);
+        addChipToken({ type, value, negate: false });
+      } catch {}
+      input.focus();
     });
 
-    // Handle clear button on trigger
-    if (clearBtn) {
-      clearBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        setFilter("");
-        updateTrigger();
-      });
+    // Exclude icon clicked — add negated chip
+    menu.addEventListener("click", (e) => {
+      const excludeIcon = e.target.closest(".filter-item-exclude");
+      if (!excludeIcon) return;
+      e.stopPropagation(); // prevent sl-select from firing
+      try {
+        const { type, value } = JSON.parse(excludeIcon.dataset.exclude);
+        addChipToken({ type, value, negate: true });
+      } catch {}
+      input.focus();
+    });
+
+    // Clear all
+    clearBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      input.value = "";
+      setTokens([]);
+      renderChips();
+      updateClearBtn();
+    });
+
+    // Close dropdown when focus leaves filter entirely
+    container.addEventListener("focusout", (e) => {
+      // Check if new focus target is still within the container or dropdown
+      setTimeout(() => {
+        if (!container.contains(document.activeElement) &&
+            !dropdown.contains(document.activeElement)) {
+          dropdown.hide();
+        }
+      }, 100);
+    });
+
+    // Initial render
+    renderChips();
+    updateClearBtn();
+  }
+
+  /** Get display label for a filter token. */
+  _filterTokenLabel(token) {
+    if (token.type === "text") return token.value;
+    if (token.type === "status") {
+      const labels = { active: "Active", errors: "Errors", finished: "Finished" };
+      return labels[token.value] || token.value;
     }
+    if (token.type === "platform") {
+      return token.value === "youtube" ? "YouTube" : token.value === "twitch" ? "Twitch" : token.value;
+    }
+    if (token.type === "channel") return token.value;
+    return token.value;
   }
 
   // ===== Quick Actions =====
