@@ -17,11 +17,6 @@ const RESUME_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
 const REINIT_STATUSES = new Set(["Error", "Cancelled", "COOKIES?"]);
 const MUX_STATUSES = new Set(["Cancelled", "Error"]);
 const DELETE_STATUSES = new Set(["Finished", "Error", "Cancelled", "COOKIES?"]);
-const STATUS_FILTER_MAP = {
-  active: ["Downloading", "Live", "Upcoming", "Muxing"],
-  errors: ["Error", "COOKIES?"],
-  finished: ["Finished", "Cancelled"],
-};
 
 class MoomboxApp {
   constructor() {
@@ -1084,7 +1079,9 @@ class MoomboxApp {
   renderJobs() {
     // Remove loading skeletons on first render (any message path)
     document.getElementById("jobs-skeleton")?.remove();
-
+    this._tasksChannels = [...new Set(this.jobs.map(j => j.channelName).filter(Boolean))].sort(
+      (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
+    );
 
     // Update active indicator in status bar
     this.stats.updateActiveIndicator(this.jobs);
@@ -1152,7 +1149,7 @@ class MoomboxApp {
     }
 
     const filtered = this.getFilteredJobs();
-    const isFiltered = this.tasksSearchQuery || this.tasksStatusFilter;
+    const isFiltered = this.tasksFilterTokens.length > 0;
 
     // Update filter count
     if (filterCount) {
@@ -1240,7 +1237,9 @@ class MoomboxApp {
     const emptyState = document.getElementById("archived-empty-state");
     const table = document.getElementById("archived-table");
     const filterCount = document.getElementById("archived-filter-count");
-
+    this._archivedChannels = [...new Set(this.archivedJobs.map(j => j.channelName).filter(Boolean))].sort(
+      (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })
+    );
 
     if (this.archivedJobs.length === 0) {
       container.innerHTML = "";
@@ -1257,7 +1256,7 @@ class MoomboxApp {
     }
 
     const filtered = this.getFilteredArchivedJobs();
-    const isFiltered = this.archivedSearchQuery || this.archivedStatusFilter;
+    const isFiltered = this.archivedFilterTokens.length > 0;
 
     // Update filter count
     if (filterCount) {
@@ -2874,13 +2873,9 @@ class MoomboxApp {
           break;
         case "f": {
           const panel = activePanel?.getAttribute("name");
-          if (panel === "tasks") {
-            const searchInput = document.getElementById("tasks-search");
-            if (searchInput) { searchInput.focus(); e.preventDefault(); }
-          } else if (panel === "archived") {
-            const searchInput = document.getElementById("archived-search");
-            if (searchInput) { searchInput.focus(); e.preventDefault(); }
-          }
+          const filterId = panel === "archived" ? "archived-filter" : "tasks-filter";
+          const filterInput = document.querySelector(`#${filterId} .unified-filter-input`);
+          if (filterInput) { filterInput.focus(); e.preventDefault(); }
           break;
         }
       }
@@ -2912,51 +2907,11 @@ class MoomboxApp {
   // ===== Search/Filter =====
 
   getFilteredJobs() {
-    let jobs = this.jobs;
-
-    // Text filter
-    if (this.tasksSearchQuery) {
-      const query = this.tasksSearchQuery.toLowerCase();
-      jobs = jobs.filter((j) =>
-        (j.title || "").toLowerCase().includes(query) ||
-        (j.channelName || "").toLowerCase().includes(query)
-      );
-    }
-
-    // Status filter
-    if (this.tasksStatusFilter) {
-      const allowed = STATUS_FILTER_MAP[this.tasksStatusFilter];
-      if (allowed) {
-        jobs = jobs.filter((j) => allowed.includes(j.status));
-      }
-    }
-
-
-    return jobs;
+    return applyFilterTokens(this.jobs, this.tasksFilterTokens);
   }
 
   getFilteredArchivedJobs() {
-    let jobs = this.archivedJobs;
-
-    // Text filter
-    if (this.archivedSearchQuery) {
-      const query = this.archivedSearchQuery.toLowerCase();
-      jobs = jobs.filter((j) =>
-        (j.title || "").toLowerCase().includes(query) ||
-        (j.channelName || "").toLowerCase().includes(query)
-      );
-    }
-
-    // Status filter
-    if (this.archivedStatusFilter) {
-      const allowed = STATUS_FILTER_MAP[this.archivedStatusFilter];
-      if (allowed) {
-        jobs = jobs.filter((j) => allowed.includes(j.status));
-      }
-    }
-
-
-    return jobs;
+    return applyFilterTokens(this.archivedJobs, this.archivedFilterTokens);
   }
 
   _sortJobs(jobs) {
@@ -3777,8 +3732,8 @@ class MoomboxApp {
     if (selectAllBtn) {
       const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
       const isFiltered = panel === "archived"
-        ? (this.archivedSearchQuery || this.archivedStatusFilter)
-        : (this.tasksSearchQuery || this.tasksStatusFilter);
+        ? this.archivedFilterTokens.length > 0
+        : this.tasksFilterTokens.length > 0;
       if (isFiltered) {
         const totalVisible = panel === "archived"
           ? this.getFilteredArchivedJobs().length
