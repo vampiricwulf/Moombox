@@ -49,22 +49,17 @@
             <!-- Tasks Panel -->
             <sl-tab-panel name="tasks">
                 <div class="panel-header tasks-filter-bar">
-                    <sl-input id="tasks-search" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
-                        <sl-icon slot="prefix" name="search"></sl-icon>
-                    </sl-input>
-                    <sl-dropdown id="tasks-status-dropdown" class="chosen-select" hoist>
-                        <button slot="trigger" class="chosen-select-trigger" aria-label="Filter by status" aria-haspopup="listbox">
-                            <span class="chosen-select-label placeholder">All statuses</span>
-                            <sl-icon class="chosen-select-clear" name="x-circle-fill" style="display:none" title="Clear filter"></sl-icon>
-                            <sl-icon name="chevron-down"></sl-icon>
-                        </button>
-                        <div class="chosen-select-panel">
-                            <sl-input class="chosen-select-search" placeholder="Search..." size="small" clearable autocomplete="off">
-                                <sl-icon slot="prefix" name="search"></sl-icon>
-                            </sl-input>
-                            <sl-menu class="chosen-select-menu"></sl-menu>
-                        </div>
-                    </sl-dropdown>
+                    <div id="tasks-filter" class="unified-filter">
+                        <div class="unified-filter-chips"></div>
+                        <input class="unified-filter-input" placeholder="Filter..." autocomplete="off" aria-label="Filter jobs">
+                        <sl-icon class="unified-filter-clear" name="x-circle-fill" style="display:none" title="Clear all filters"></sl-icon>
+                        <sl-dropdown class="unified-filter-dropdown" hoist>
+                            <button slot="trigger" class="unified-filter-dropdown-trigger" aria-hidden="true" tabindex="-1"></button>
+                            <div class="unified-filter-panel">
+                                <sl-menu class="unified-filter-menu"></sl-menu>
+                            </div>
+                        </sl-dropdown>
+                    </div>
                     <span id="tasks-filter-count" style="display:none"></span>
                     <sl-button variant="primary" id="add-video-btn">
                         <sl-icon slot="prefix" name="plus"></sl-icon>
@@ -241,22 +236,17 @@
             <!-- Archived Panel -->
             <sl-tab-panel name="archived">
                 <div class="panel-header tasks-filter-bar">
-                    <sl-input id="archived-search" placeholder="Filter by title or channel..." clearable size="small" style="flex:1;min-width:180px">
-                        <sl-icon slot="prefix" name="search"></sl-icon>
-                    </sl-input>
-                    <sl-dropdown id="archived-status-dropdown" class="chosen-select" hoist>
-                        <button slot="trigger" class="chosen-select-trigger" aria-label="Filter by status" aria-haspopup="listbox">
-                            <span class="chosen-select-label placeholder">All statuses</span>
-                            <sl-icon class="chosen-select-clear" name="x-circle-fill" style="display:none" title="Clear filter"></sl-icon>
-                            <sl-icon name="chevron-down"></sl-icon>
-                        </button>
-                        <div class="chosen-select-panel">
-                            <sl-input class="chosen-select-search" placeholder="Search..." size="small" clearable autocomplete="off">
-                                <sl-icon slot="prefix" name="search"></sl-icon>
-                            </sl-input>
-                            <sl-menu class="chosen-select-menu"></sl-menu>
-                        </div>
-                    </sl-dropdown>
+                    <div id="archived-filter" class="unified-filter">
+                        <div class="unified-filter-chips"></div>
+                        <input class="unified-filter-input" placeholder="Filter..." autocomplete="off" aria-label="Filter archived jobs">
+                        <sl-icon class="unified-filter-clear" name="x-circle-fill" style="display:none" title="Clear all filters"></sl-icon>
+                        <sl-dropdown class="unified-filter-dropdown" hoist>
+                            <button slot="trigger" class="unified-filter-dropdown-trigger" aria-hidden="true" tabindex="-1"></button>
+                            <div class="unified-filter-panel">
+                                <sl-menu class="unified-filter-menu"></sl-menu>
+                            </div>
+                        </sl-dropdown>
+                    </div>
                     <span id="archived-filter-count" style="display:none"></span>
                 </div>
 

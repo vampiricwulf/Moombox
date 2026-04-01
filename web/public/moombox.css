@@ -2122,77 +2122,113 @@ sl-progress-bar {
     flex-wrap: wrap;
 }
 
-/* Channel filter searchable dropdown (Chosen-style) */
-.chosen-select {
-    min-width: 140px;
-}
-
-.chosen-select-trigger {
-    all: unset;
+/* ===== Unified Filter Control ===== */
+.unified-filter {
+    flex: 1;
+    min-width: 180px;
     display: flex;
     align-items: center;
-    gap: var(--sl-spacing-x-small);
+    gap: var(--sl-spacing-2x-small);
     padding: 0 var(--sl-spacing-small);
-    height: var(--sl-input-height-small);
+    min-height: var(--sl-input-height-small);
     border: solid var(--sl-input-border-width) var(--sl-input-border-color);
     border-radius: var(--sl-input-border-radius-small);
     background: var(--sl-input-background-color);
-    color: var(--sl-input-color);
+    cursor: text;
+    flex-wrap: wrap;
+    position: relative;
+}
+
+.unified-filter:focus-within {
+    border-color: var(--sl-input-border-color-focus);
+    box-shadow: 0 0 0 var(--sl-focus-ring-width) var(--sl-input-focus-ring-color);
+}
+
+.unified-filter-chips {
+    display: contents;
+}
+
+.unified-filter-chips sl-tag {
+    cursor: default;
+    max-width: 200px;
+}
+
+.unified-filter-chips sl-tag::part(base) {
+    padding: 0 var(--sl-spacing-2x-small);
+    height: 1.4rem;
+}
+
+.unified-filter-input {
+    all: unset;
+    flex: 1;
+    min-width: 60px;
     font-size: var(--sl-input-font-size-small);
     font-family: var(--sl-input-font-family);
-    cursor: pointer;
-    box-sizing: border-box;
-    min-width: 140px;
-    white-space: nowrap;
+    color: var(--sl-input-color);
+    padding: var(--sl-spacing-2x-small) 0;
 }
 
-.chosen-select-trigger:hover {
-    border-color: var(--sl-input-border-color-hover);
-}
-
-.chosen-select-trigger:focus-visible {
-    outline: var(--sl-focus-ring);
-    outline-offset: var(--sl-focus-ring-offset);
-}
-
-.chosen-select-trigger .chosen-select-label {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.chosen-select-trigger .chosen-select-label.placeholder {
+.unified-filter-input::placeholder {
     color: var(--sl-input-placeholder-color);
 }
 
-.chosen-select-trigger sl-icon {
-    font-size: 0.75rem;
+.unified-filter-clear {
+    font-size: 0.85rem;
     color: var(--sl-input-icon-color);
-    flex-shrink: 0;
-}
-
-.chosen-select-trigger .chosen-select-clear {
-    font-size: 0.75rem;
-    color: var(--sl-input-icon-color);
-    flex-shrink: 0;
     cursor: pointer;
+    flex-shrink: 0;
 }
 
-.chosen-select-trigger .chosen-select-clear:hover {
-    color: var(--sl-input-icon-color-hover, var(--sl-color-neutral-700));
+.unified-filter-clear:hover {
+    color: var(--sl-color-neutral-700);
 }
 
-.chosen-select-panel {
-    padding: var(--sl-spacing-x-small);
+/* Hidden trigger — dropdown is opened programmatically */
+.unified-filter-dropdown-trigger {
+    all: unset;
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
 }
 
-.chosen-select-panel sl-input {
-    margin-bottom: var(--sl-spacing-x-small);
+.unified-filter-panel {
+    min-width: 220px;
 }
 
-.chosen-select-menu {
-    max-height: 200px;
+.unified-filter-menu {
+    max-height: 280px;
     overflow: auto;
+}
+
+.unified-filter-menu sl-menu-item[data-group-header] {
+    font-weight: var(--sl-font-weight-semibold);
+    font-size: var(--sl-font-size-x-small);
+    color: var(--sl-color-neutral-500);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    pointer-events: none;
+    padding-top: var(--sl-spacing-x-small);
+}
+
+.unified-filter-menu sl-menu-item[data-group-header]:first-child {
+    padding-top: 0;
+}
+
+.unified-filter-menu .filter-item-exclude {
+    font-size: 0.7rem;
+    color: var(--sl-color-neutral-400);
+    cursor: pointer;
+    margin-left: auto;
+    padding: 2px 4px;
+}
+
+.unified-filter-menu .filter-item-exclude:hover {
+    color: var(--sl-color-danger-600);
+}
+
+.unified-filter-menu sl-menu-item.already-active {
+    opacity: 0.5;
 }
 
 #tasks-filter-count {
@@ -2247,10 +2283,7 @@ html.sl-theme-light {
         align-items: stretch;
     }
 
-    .tasks-filter-bar sl-input,
-    .tasks-filter-bar sl-select,
-    .tasks-filter-bar .chosen-select,
-    .tasks-filter-bar .chosen-select-trigger {
+    .unified-filter {
         min-width: 0 !important;
     }
 
