@@ -39,13 +39,15 @@ The file structure:
 |------|-------|---------|
 | `web/public/index.html` | — | SPA shell. Loads Shoelace from CDN, defines the base HTML structure, imports `app.js`. |
 | `web/public/login.html` | — | Authentication page. Served inline by `AuthMiddleware` when auth is required and the user is not authenticated. The URL bar is preserved (no redirect to `/login`). |
-| `web/public/app.js` | ~2,560 | Main SPA module. Job list, log viewer, status bar, WebSocket connection management, settings integration, theme switching, search/filter. |
+| `web/public/app.js` | ~2,560 | Main SPA module. Job list, unified filter control, log viewer, status bar, WebSocket connection management, settings integration, theme switching. |
 | `web/public/modules/player.js` | ~900 | Video player with niconico-style scrolling chat overlay. Handles multi-segment seeking (segments are separate video files that the player stitches together into a seamless timeline). |
 | `web/public/modules/setup.js` | ~785 | First-run setup wizard. Walks the user through initial configuration, FFmpeg installation, yt-dlp plugin setup, and cookie capture. |
 | `web/public/modules/settings.js` | ~1,600 | Settings dialog. Covers full config editing, channel management, cookie management, integration settings. |
 | `web/public/modules/trimmer.js` | ~510 | Trim clip creation UI. Lets the user define start/end timestamps on a finished recording and create a trimmed clip. |
 | `web/public/modules/stats.js` | ~160 | Statistics dashboard. Displays job counts, sizes, durations, and other aggregate metrics. |
 | `web/public/modules/imports.js` | ~210 | Zip archive import. Upload a zip file containing video/chat/metadata to create a job from external content. |
+| `web/public/modules/filter-parser.js` | ~110 | Filter query parser. Booru-style tag syntax: `status:active`, `channel:"name"`, `platform:youtube`, negation (`-tag`), OR groups (`a\|b`), quoting for spaces. |
+| `web/public/modules/filter-engine.js` | ~65 | Filter engine. Evaluates parsed tokens against job objects. AND intersection across tokens, OR union within pipe groups. |
 | `web/public/modules/utils.js` | ~70 | Shared formatting helpers (durations, file sizes, dates, etc.). |
 | `web/public/moombox.css` | ~2,090 | All styles. Includes desktop layout, mobile responsive breakpoints, dark/light theme variables, and component-specific styles. |
 | `web/public/favicon.svg` | — | SVG favicon for the web dashboard. |
@@ -58,11 +60,12 @@ The login page (`login.html`) is not served as a separate route. Instead, `AuthM
 
 ### State Management
 
-The Web UI uses a centralized `MoomboxApp` class (defined in `app.js`) as the single state container. It holds the current job list, filter/search state, theme preference, WebSocket connection, and references to loaded modules.
+The Web UI uses a centralized `MoomboxApp` class (defined in `app.js`) as the single state container. It holds the current job list, filter tokens, theme preference, WebSocket connection, and references to loaded modules.
+
+**Unified filter state:** Each panel (Tasks, Archived) maintains an independent array of filter tokens (`tasksFilterTokens`, `archivedFilterTokens`). Tokens are parsed from user input by `filter-parser.js` and evaluated against jobs by `filter-engine.js`. Structured tokens (status/channel/platform) appear as visual chips (`sl-tag`); free text stays in the input. An optgroup dropdown offers clickable options grouped by Statuses, Platforms, and Channels (auto-populated from current jobs).
 
 Persistent client-side state is stored in `localStorage`:
 - Theme preference (dark/light)
-- Search and filter state
 - Any module-specific preferences
 
 ### Module Loading
