@@ -511,26 +511,41 @@ func (a *App) handleJobUpdate(job *database.Job) {
 		ChatStatus:        job.ChatStatus,
 	})
 
-	// Only re-sort/re-render if status changed
+	// Only rebuild task list and detail panel when display-relevant fields
+	// have changed. Progress-only updates (speed, ETA, segments) are handled
+	// by progressStore and don't need expensive list rebuilds.
+	if prev := a.taskList.GetJobByID(job.ID); prev == nil ||
+		prev.Status != job.Status ||
+		prev.Title != job.Title ||
+		prev.ChannelName != job.ChannelName ||
+		prev.ThumbnailURL != job.ThumbnailURL ||
+		prev.Description != job.Description ||
+		prev.StreamStartTime != job.StreamStartTime ||
+		prev.StreamEndTime != job.StreamEndTime ||
+		prev.Error != job.Error ||
+		prev.OutputFile != job.OutputFile ||
+		prev.Filename != job.Filename ||
+		prev.IsVod != job.IsVod ||
+		prev.ChatStatus != job.ChatStatus {
+		a.taskList.UpdateJob(job)
+		if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
+			a.details.SetJob(job)
+		}
+	}
+
+	// Only run status-transition logic when status actually changed
 	prevStatus, exists := a.statusMap[job.ID]
-	if exists && prevStatus == job.Status {
-		return
+	if !exists || prevStatus != job.Status {
+		a.statusMap[job.ID] = job.Status
+
+		// Clean up progress for terminal/error statuses (match TS behavior)
+		if isCompletedStatus(job.Status) || job.Status == database.StatusError || job.Status == database.StatusCookies {
+			a.progressStore.Delete(job.ID)
+		}
+
+		// Update terminal title on status change
+		a.updateTerminalTitle()
 	}
-
-	a.statusMap[job.ID] = job.Status
-
-	a.taskList.UpdateJob(job)
-	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
-		a.details.SetJob(job)
-	}
-
-	// Clean up progress for terminal/error statuses (match TS behavior)
-	if isCompletedStatus(job.Status) || job.Status == database.StatusError || job.Status == database.StatusCookies {
-		a.progressStore.Delete(job.ID)
-	}
-
-	// Update terminal title on status change
-	a.updateTerminalTitle()
 }
 
 func (a *App) updateSelectedJob() {
