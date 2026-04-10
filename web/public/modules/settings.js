@@ -10,6 +10,7 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "found", label: "Found" },
       { id: "added", label: "Added" },
       { id: "scheduled", label: "Scheduled" },
+      { id: "rescheduled", label: "Rescheduled" },
       { id: "live", label: "Live" },
       { id: "downloading", label: "Downloading" },
       { id: "quality_split", label: "Quality Split" },
