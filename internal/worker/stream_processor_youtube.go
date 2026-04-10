@@ -143,16 +143,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		}
 		consecutiveErrors = 0
 
-		// Update scheduled start time + persist to DB if not yet stored
+		// Update local scheduledStartTime for interval calculation
 		if probeInfo.ScheduledStartTime != "" {
 			scheduledStartTime = probeInfo.ScheduledStartTime
-			if job.StreamStartTime == "" {
-				job.StreamStartTime = probeInfo.ScheduledStartTime
-				sp.db.UpdateJobFields(job.ID, map[string]any{
-					"stream_start_time": probeInfo.ScheduledStartTime,
-				})
-			}
 		}
+		// Persist any metadata changes (change-detected, zero-cost if nothing differs)
+		sp.updateJobMetadata(job, probeInfo, true)
 
 		// B2: Try starting chat if not yet available
 		if sp.cfgMu != nil {
@@ -187,7 +183,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.stopEarlyChat(chatDl)
 				return nil, fmt.Errorf("full fetch on live: %w", err)
 			}
-			sp.updateJobMetadataOnLive(job, fullInfo)
+			if fullInfo.ScheduledStartTime == "" && job.StreamStartTime == "" {
+				fullInfo.ScheduledStartTime = time.Now().UTC().Format(time.RFC3339)
+			}
+			sp.updateJobMetadata(job, fullInfo, true)
 			sp.db.UpdateJobFields(job.ID, map[string]any{
 				"status": database.StatusLive,
 				"is_vod": false,
@@ -212,7 +211,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.stopEarlyChat(chatDl)
 				return nil, fmt.Errorf("full fetch on VOD: %w", err)
 			}
-			sp.updateJobMetadataOnLive(job, fullInfo)
+			sp.updateJobMetadata(job, fullInfo, true)
 			sp.db.UpdateJobFields(job.ID, map[string]any{
 				"is_vod": true,
 			})
@@ -243,7 +242,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				}
 				switch fullInfo.StreamStatus {
 				case youtube.StreamLive:
-					sp.updateJobMetadataOnLive(job, fullInfo)
+					if fullInfo.ScheduledStartTime == "" && job.StreamStartTime == "" {
+						fullInfo.ScheduledStartTime = time.Now().UTC().Format(time.RFC3339)
+					}
+					sp.updateJobMetadata(job, fullInfo, true)
 					sp.db.UpdateJobFields(job.ID, map[string]any{
 						"status": database.StatusLive,
 						"is_vod": false,
@@ -254,7 +256,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					}
 					return &StreamProcessResult{VideoInfo: fullInfo, ShouldDownload: true, IsVod: false, ChatDownloader: chatDl}, nil
 				case youtube.StreamVOD, youtube.StreamPostLive:
-					sp.updateJobMetadataOnLive(job, fullInfo)
+					sp.updateJobMetadata(job, fullInfo, true)
 					sp.db.UpdateJobFields(job.ID, map[string]any{
 						"is_vod": true,
 					})

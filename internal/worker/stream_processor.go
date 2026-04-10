@@ -119,7 +119,7 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 		"playability", info.PlayabilityError,
 		"videoID", job.VideoID)
 
-	sp.updateJobMetadata(job, info)
+	sp.updateJobMetadata(job, info, false)
 
 	if errMsg := sp.checkPlayability(info); errMsg != "" {
 		return &StreamProcessResult{
@@ -137,7 +137,12 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 	switch info.StreamStatus {
 	case youtube.StreamLive:
 		sp.logger.Info("stream is live, starting download", "videoID", job.VideoID)
-		sp.updateJobMetadataOnLive(job, info)
+		// Fallback: use current time if YouTube didn't provide a start time
+		if info.ScheduledStartTime == "" && job.StreamStartTime == "" {
+			now := time.Now().UTC().Format(time.RFC3339)
+			info.ScheduledStartTime = now
+		}
+		sp.updateJobMetadata(job, info, true)
 		sp.db.UpdateJobFields(job.ID, map[string]any{
 			"status": database.StatusLive,
 			"is_vod": false,
