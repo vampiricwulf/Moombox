@@ -104,6 +104,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.listenForUpdates()
 
 	case JobsUpdateMsg:
+		// If jobs already exist, the user has used the app before — dismiss the newcomer hint.
+		if len(msg.Jobs) > 0 {
+			a.seenChordHint = true
+		}
 		// Structural change: clear and rebuild progress store + status map (match TS onJobsChange)
 		a.progressStore.Clear()
 		a.statusMap = make(map[string]database.JobStatus)
