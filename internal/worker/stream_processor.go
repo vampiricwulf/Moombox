@@ -233,38 +233,108 @@ func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.
 	return 10 * time.Minute
 }
 
-func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.VideoInfo) {
+// updateJobMetadata updates job metadata from video info.
+//
+// When overwrite is false (initial fetch): fills blank fields only.
+// When overwrite is true (probe refresh / live transition): overwrites fields
+// that have actually changed, skipping DB writes when nothing differs.
+//
+// In both modes, guards apply: empty strings and "Unknown Title"/"Unknown Channel"
+// sentinel values are never written.
+func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.VideoInfo, overwrite bool) {
 	updates := map[string]any{}
-	shouldNotifyStartTime := false
+	notifyStartTimeConfirmed := false
+	notifyScheduleChanged := false
+	oldStartTime := ""
 
+	// Title
 	if info.Title != "" && info.Title != "Unknown Title" {
-		updates["title"] = info.Title
+		if overwrite {
+			if info.Title != job.Title {
+				updates["title"] = info.Title
+			}
+		} else {
+			updates["title"] = info.Title
+		}
 	}
+
+	// Channel name
 	if info.ChannelName != "" && info.ChannelName != "Unknown Channel" {
-		updates["channel_name"] = info.ChannelName
+		if overwrite {
+			if info.ChannelName != job.ChannelName {
+				updates["channel_name"] = info.ChannelName
+			}
+		} else {
+			updates["channel_name"] = info.ChannelName
+		}
 	}
+
+	// Thumbnail
 	if info.ThumbnailURL != "" {
-		updates["thumbnail_url"] = info.ThumbnailURL
+		if overwrite {
+			if info.ThumbnailURL != job.ThumbnailURL {
+				updates["thumbnail_url"] = info.ThumbnailURL
+			}
+		} else {
+			updates["thumbnail_url"] = info.ThumbnailURL
+		}
 	}
+
+	// Description
 	if info.Description != "" {
-		updates["description"] = info.Description
+		if overwrite {
+			if info.Description != job.Description {
+				updates["description"] = info.Description
+			}
+		} else {
+			updates["description"] = info.Description
+		}
 	}
-	// Store stream start time for filename template
-	if info.ScheduledStartTime != "" && job.StreamStartTime == "" {
-		updates["stream_start_time"] = info.ScheduledStartTime
-		shouldNotifyStartTime = true
+
+	// Stream start time
+	if info.ScheduledStartTime != "" {
+		if overwrite {
+			if info.ScheduledStartTime != job.StreamStartTime {
+				if job.StreamStartTime == "" {
+					notifyStartTimeConfirmed = true
+				} else {
+					notifyScheduleChanged = true
+					oldStartTime = job.StreamStartTime
+				}
+				updates["stream_start_time"] = info.ScheduledStartTime
+			}
+		} else if job.StreamStartTime == "" {
+			updates["stream_start_time"] = info.ScheduledStartTime
+			notifyStartTimeConfirmed = true
+		}
 	}
-	if info.LengthSeconds != nil && *info.LengthSeconds > 0 {
-		updates["length_seconds"] = *info.LengthSeconds
-	}
+
 	// Stream end time
-	if info.EndTimestamp != "" && job.StreamEndTime == "" {
-		updates["stream_end_time"] = info.EndTimestamp
+	if info.EndTimestamp != "" {
+		if overwrite {
+			if info.EndTimestamp != job.StreamEndTime {
+				updates["stream_end_time"] = info.EndTimestamp
+			}
+		} else if job.StreamEndTime == "" {
+			updates["stream_end_time"] = info.EndTimestamp
+		}
+	}
+
+	// Length
+	if info.LengthSeconds != nil && *info.LengthSeconds > 0 {
+		if overwrite {
+			if job.LengthSeconds == nil || *info.LengthSeconds != *job.LengthSeconds {
+				updates["length_seconds"] = *info.LengthSeconds
+			}
+		} else {
+			updates["length_seconds"] = *info.LengthSeconds
+		}
 	}
 
 	if len(updates) > 0 {
 		sp.db.UpdateJobFields(job.ID, updates)
-		// Apply updates to local job object
+
+		// Sync local job object
 		if v, ok := updates["title"].(string); ok {
 			job.Title = v
 		}
@@ -274,16 +344,22 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 		if v, ok := updates["thumbnail_url"].(string); ok {
 			job.ThumbnailURL = v
 		}
+		if v, ok := updates["description"].(string); ok {
+			job.Description = v
+		}
 		if v, ok := updates["stream_start_time"].(string); ok {
 			job.StreamStartTime = v
 		}
 		if v, ok := updates["stream_end_time"].(string); ok {
 			job.StreamEndTime = v
 		}
+		if v, ok := updates["length_seconds"].(int); ok {
+			job.LengthSeconds = &v
+		}
 	}
 
-	// Notify when scheduled start time is first confirmed
-	if shouldNotifyStartTime && (info.IsUpcoming || info.IsLive) && sp.notifier != nil {
+	// Notifications
+	if notifyStartTimeConfirmed && (info.IsUpcoming || info.IsLive) && sp.notifier != nil {
 		startsAt := info.ScheduledStartTime
 		if t, err := time.Parse(time.RFC3339, startsAt); err == nil {
 			startsAt = t.Format("2006-01-02 15:04:05")
@@ -302,53 +378,28 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 			},
 		)
 	}
-}
 
-// updateJobMetadataOnLive refreshes all metadata when stream transitions to live.
-// Always overwrites stream_start_time from scheduledStartTime (YouTube updates it when going live),
-// or falls back to current time if no start time is available.
-func (sp *StreamProcessor) updateJobMetadataOnLive(job *database.Job, info *youtube.VideoInfo) {
-	updates := map[string]any{}
-
-	if info.Title != "" && info.Title != "Unknown Title" {
-		updates["title"] = info.Title
-		job.Title = info.Title
-	}
-	if info.ChannelName != "" && info.ChannelName != "Unknown Channel" {
-		updates["channel_name"] = info.ChannelName
-		job.ChannelName = info.ChannelName
-	}
-	if info.ThumbnailURL != "" {
-		updates["thumbnail_url"] = info.ThumbnailURL
-		job.ThumbnailURL = info.ThumbnailURL
-	}
-	if info.Description != "" {
-		updates["description"] = info.Description
-	}
-
-	// Always overwrite streamStartTime — YouTube updates scheduledStartTime when stream goes live
-	if info.ScheduledStartTime != "" {
-		updates["stream_start_time"] = info.ScheduledStartTime
-		job.StreamStartTime = info.ScheduledStartTime
-	} else if job.StreamStartTime == "" {
-		// No start time from YouTube — use the moment we detected it going live
-		now := time.Now().UTC().Format(time.RFC3339)
-		updates["stream_start_time"] = now
-		job.StreamStartTime = now
-	}
-
-	if info.LengthSeconds != nil && *info.LengthSeconds > 0 {
-		updates["length_seconds"] = *info.LengthSeconds
-	}
-	// Always update end time (not conditional on empty)
-	if info.EndTimestamp != "" {
-		updates["stream_end_time"] = info.EndTimestamp
-		job.StreamEndTime = info.EndTimestamp
-	}
-
-	if len(updates) > 0 {
-		sp.db.UpdateJobFields(job.ID, updates)
-		sp.logger.Info("refreshed metadata on live", "videoID", job.VideoID)
+	if notifyScheduleChanged && sp.notifier != nil {
+		fmtTime := func(raw string) string {
+			if t, err := time.Parse(time.RFC3339, raw); err == nil {
+				return t.Format("2006-01-02 15:04:05")
+			}
+			return raw
+		}
+		sp.notifier.Send("Schedule Changed",
+			fmt.Sprintf("Rescheduled: %s", job.Title),
+			notifications.TypeInfo,
+			[]notifications.Field{
+				{Name: "Channel", Value: job.ChannelName, Inline: true},
+				{Name: "Old Time", Value: fmtTime(oldStartTime), Inline: true},
+				{Name: "New Time", Value: fmtTime(info.ScheduledStartTime), Inline: true},
+			},
+			notifications.SendOptions{
+				URL:       job.URL,
+				Thumbnail: job.ThumbnailURL,
+				Event:     "rescheduled",
+			},
+		)
 	}
 }
 

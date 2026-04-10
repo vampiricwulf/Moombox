@@ -35,8 +35,6 @@ func addTestJob(t *testing.T, db *database.Database, job *database.Job) *databas
 	return got
 }
 
-func intPtr(v int) *int { return &v }
-
 func TestUpdateJobMetadata_FillBlanks(t *testing.T) {
 	sp, db := newTestSP(t)
 
