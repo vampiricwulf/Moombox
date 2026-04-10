@@ -294,6 +294,7 @@ These are the event strings used for filtering. A target with no event filter re
 | `found` | Monitor detects a new stream/video |
 | `added` | Job manually added (API or CLI) |
 | `scheduled` | Upcoming stream detected with scheduled start time |
+| `rescheduled` | Stream scheduled start time changed |
 | `live` | Stream goes live |
 | `downloading` | Download begins or resumes |
 | `muxing` | FFmpeg mux step begins |

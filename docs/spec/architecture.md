@@ -304,11 +304,12 @@ The `StreamProcessor` is the first stage of job processing. It determines what a
    - 5 minutes to 1 hour: 5-minute interval
    - Less than 5 minutes: 1-minute interval
    - Plus random jitter up to 30 seconds
-4. Polls via lightweight `ProbeVideoStatus()` (ANDROID_VR client for speed)
+4. Polls via lightweight `ProbeVideoStatus()` (ANDROID_VR client for speed). Persists metadata from each probe (title, thumbnail, description, scheduled start time, etc.) using change detection — only writes to DB when values actually differ, at zero additional network cost since the probe already returns this data
 5. Chat surge detection: if 30+ new messages arrive within a 15-second window, triggers an immediate probe (the stream may have gone live early)
 6. Members-only detection: if the probe returns `PlayabilityMembersOnly` or `PlayabilityLoginRequired` and auth cookies are available, switches to authenticated probing
 7. On transition to `StreamLive`: performs full multi-client fetch, updates metadata, sends notification, passes pre-started chat downloader to the orchestrator
-8. Maximum 10 consecutive probe errors before giving up
+8. If the scheduled start time changes between probes, sends a "Schedule Changed" notification (event: `rescheduled`)
+9. Maximum 10 consecutive probe errors before giving up
 
 **Twitch path (`processTwitch()`):**
 - VOD jobs (video ID prefix `tw_v`): fetches VOD info and HLS playlist, selects best variant, optionally creates VOD chat downloader
