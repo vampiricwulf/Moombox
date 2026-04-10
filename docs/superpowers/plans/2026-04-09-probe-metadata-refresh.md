@@ -12,6 +12,118 @@
 
 ---
 
+### Task 0: Fix TUI not showing metadata updates when status unchanged
+
+**Files:**
+- Modify: `internal/tui/app_update.go:499-534`
+
+**Bug:** `handleJobUpdate` short-circuits when the job status hasn't changed (line 516-518), only updating the progress store. This means metadata changes (title, thumbnail, start time) written via `UpdateJobFields` during the Upcoming phase are invisible to the TUI — the task list and detail panel never receive the updated job object.
+
+The fix: always update the stored job in the task list and refresh the detail panel if it's the selected job. Only gate the re-sort and terminal title update behind the status-change check.
+
+- [ ] **Step 1: Update `handleJobUpdate` to always propagate job data**
+
+In `internal/tui/app_update.go`, replace lines 499-534:
+
+```go
+func (a *App) handleJobUpdate(job *database.Job) {
+	// Always update progress store (zero-cost)
+	a.progressStore.Set(job.ID, &ProgressData{
+		Progress:          job.Progress,
+		Percent:           job.Percent,
+		Speed:             job.Speed,
+		ETA:               job.ETA,
+		LastVideoSeq:      job.LastVideoSeq,
+		LastAudioSeq:      job.LastAudioSeq,
+		TotalVideoSeq:     job.TotalVideoSeq,
+		TotalAudioSeq:     job.TotalAudioSeq,
+		TotalChatMessages: job.TotalChatMessages,
+		ChatStatus:        job.ChatStatus,
+	})
+
+	// Only re-sort/re-render if status changed
+	prevStatus, exists := a.statusMap[job.ID]
+	if exists && prevStatus == job.Status {
+		return
+	}
+
+	a.statusMap[job.ID] = job.Status
+
+	a.taskList.UpdateJob(job)
+	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
+		a.details.SetJob(job)
+	}
+
+	// Clean up progress for terminal/error statuses (match TS behavior)
+	if isCompletedStatus(job.Status) || job.Status == database.StatusError || job.Status == database.StatusCookies {
+		a.progressStore.Delete(job.ID)
+	}
+
+	// Update terminal title on status change
+	a.updateTerminalTitle()
+}
+```
+
+with:
+
+```go
+func (a *App) handleJobUpdate(job *database.Job) {
+	// Always update progress store (zero-cost)
+	a.progressStore.Set(job.ID, &ProgressData{
+		Progress:          job.Progress,
+		Percent:           job.Percent,
+		Speed:             job.Speed,
+		ETA:               job.ETA,
+		LastVideoSeq:      job.LastVideoSeq,
+		LastAudioSeq:      job.LastAudioSeq,
+		TotalVideoSeq:     job.TotalVideoSeq,
+		TotalAudioSeq:     job.TotalAudioSeq,
+		TotalChatMessages: job.TotalChatMessages,
+		ChatStatus:        job.ChatStatus,
+	})
+
+	// Always update the stored job so metadata changes (title, thumbnail,
+	// start time) are visible even when status hasn't changed.
+	a.taskList.UpdateJob(job)
+	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
+		a.details.SetJob(job)
+	}
+
+	// Only run status-transition logic when status actually changed
+	prevStatus, exists := a.statusMap[job.ID]
+	if !exists || prevStatus != job.Status {
+		a.statusMap[job.ID] = job.Status
+
+		// Clean up progress for terminal/error statuses (match TS behavior)
+		if isCompletedStatus(job.Status) || job.Status == database.StatusError || job.Status == database.StatusCookies {
+			a.progressStore.Delete(job.ID)
+		}
+
+		// Update terminal title on status change
+		a.updateTerminalTitle()
+	}
+}
+```
+
+- [ ] **Step 2: Build and test**
+
+Run: `go build ./... && go test ./...`
+Expected: Clean build, all tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add internal/tui/app_update.go
+git commit -m "fix: TUI not showing metadata updates when job status unchanged
+
+handleJobUpdate short-circuited on same-status updates, only updating
+the progress store. Metadata changes (title, thumbnail, start time)
+from UpdateJobFields were invisible. Now always propagates job data to
+task list and detail panel, gating only status-transition logic."
+```
+
+---
+
 ### Task 1: Register `rescheduled` notification event in TUI and Web UI
 
 **Files:**
