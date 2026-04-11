@@ -94,6 +94,9 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("GitHub API rate limit exceeded (HTTP %d) — try again later", resp.StatusCode)
+		}
 		return nil, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
 
@@ -159,22 +162,24 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("download failed: %w", err)
 	}
 
-	// Download and verify signature
-	if release.SignatureURL != "" {
-		sigPath := newPath + ".sig"
-		if err := u.downloadFile(ctx, release.SignatureURL, sigPath); err != nil {
-			os.Remove(newPath)
-			return fmt.Errorf("signature download failed: %w", err)
-		}
-
-		if err := VerifySignature(newPath, sigPath); err != nil {
-			os.Remove(newPath)
-			os.Remove(sigPath)
-			return fmt.Errorf("signature verification failed: %w", err)
-		}
-		os.Remove(sigPath)
-		u.logger.Info("[Updater] Signature verified", "version", release.Version)
+	// Download and verify signature (mandatory — never apply unsigned binaries)
+	if release.SignatureURL == "" {
+		os.Remove(newPath)
+		return fmt.Errorf("release has no signature URL — refusing to apply unsigned binary")
 	}
+	sigPath := newPath + ".sig"
+	if err := u.downloadFile(ctx, release.SignatureURL, sigPath); err != nil {
+		os.Remove(newPath)
+		return fmt.Errorf("signature download failed: %w", err)
+	}
+
+	if err := VerifySignature(newPath, sigPath); err != nil {
+		os.Remove(newPath)
+		os.Remove(sigPath)
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+	os.Remove(sigPath)
+	u.logger.Info("[Updater] Signature verified", "version", release.Version)
 
 	// Rename current exe to .old
 	oldPath := u.exePath + ".old"
@@ -227,6 +232,9 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("no release found for %s (local/dev build?)", tag)
+	}
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		return fmt.Errorf("GitHub API rate limit exceeded (HTTP %d) — try again later", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
@@ -314,9 +322,16 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 		return err
 	}
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	// Cap download at 200 MB to prevent disk exhaustion from a compromised source.
+	const maxDownloadSize = 200 << 20
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize))
+	if err != nil {
 		f.Close()
 		return err
+	}
+	if n >= maxDownloadSize {
+		f.Close()
+		return fmt.Errorf("download exceeds %d MB size limit", maxDownloadSize>>20)
 	}
 
 	// Flush to disk before closing to prevent corruption on power loss

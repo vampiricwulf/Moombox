@@ -259,9 +259,8 @@ export class SettingsController {
         result.textContent = "";
         try {
           const resp = await fetch("/api/update/verify", { method: "POST" });
-          if (!resp.ok) throw new Error(resp.statusText);
           const data = await resp.json();
-          if (data.verified) {
+          if (resp.ok && data.verified) {
             result.textContent = "Signature valid";
             result.style.color = "var(--sl-color-success-600)";
           } else {

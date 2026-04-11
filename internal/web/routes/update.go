@@ -17,6 +17,9 @@ import (
 // available update info. Set by main.go, read by status route and update routes.
 var SharedUpdateInfo atomic.Pointer[updater.ReleaseInfo]
 
+// updateInProgress prevents concurrent apply requests from racing on binary swap.
+var updateInProgress atomic.Bool
+
 // UpdateRouteDeps holds dependencies for the update routes.
 type UpdateRouteDeps struct {
 	Updater    *updater.Updater
@@ -84,13 +87,20 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, cfgMu *sync.RWMutex) {
 			return
 		}
 
+		if !updateInProgress.CompareAndSwap(false, true) {
+			jsonError(w, "update already in progress", http.StatusConflict)
+			return
+		}
+
 		release := SharedUpdateInfo.Load()
 		if release == nil {
+			updateInProgress.Store(false)
 			jsonError(w, "no update available", http.StatusBadRequest)
 			return
 		}
 
 		if err := deps.Updater.ApplyUpdate(r.Context(), release); err != nil {
+			updateInProgress.Store(false)
 			jsonError(w, "update failed", http.StatusInternalServerError)
 			return
 		}
@@ -107,8 +117,8 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, cfgMu *sync.RWMutex) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-				fmt.Fprintf(os.Stderr, "panic in update restart handler: %v\n", r)
-			}
+					fmt.Fprintf(os.Stderr, "panic in update restart handler: %v\n", r)
+				}
 			}()
 			if deps.OnRestart != nil {
 				deps.OnRestart()
@@ -123,7 +133,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, cfgMu *sync.RWMutex) {
 			return
 		}
 		if err := deps.Updater.VerifyCurrentSignature(r.Context()); err != nil {
-			jsonResponse(w, map[string]any{"error": "signature verification failed"})
+			jsonError(w, "signature verification failed", http.StatusUnprocessableEntity)
 			return
 		}
 		jsonResponse(w, map[string]any{"verified": true})
