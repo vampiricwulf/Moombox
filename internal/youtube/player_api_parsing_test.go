@@ -194,6 +194,60 @@ func TestClassifyStream_Upcoming(t *testing.T) {
 	}
 }
 
+func TestClassifyStream_UpcomingVD_WaitingRoom(t *testing.T) {
+	// When YouTube starts the waiting room at scheduled time, isLive becomes true
+	// but isUpcoming is also true. Without microformat, this should still classify
+	// as upcoming (not live) since the creator hasn't actually started streaming.
+	vd := map[string]any{
+		"isLiveContent": true,
+		"isLive":        true,
+		"isUpcoming":    true,
+	}
+	status, isLive, isUpcoming, _ := classifyStream(vd, nil, nil, false)
+	if status != StreamUpcoming {
+		t.Errorf("expected StreamUpcoming for waiting room, got %q", status)
+	}
+	if isLive {
+		t.Error("expected isLive=false for waiting room")
+	}
+	if !isUpcoming {
+		t.Error("expected isUpcoming=true for waiting room")
+	}
+}
+
+func TestClassifyStream_UpcomingVD_WithFormats(t *testing.T) {
+	// If isUpcoming is true but formats are present, the stream is actually
+	// playable — should NOT be forced to upcoming.
+	vd := map[string]any{
+		"isLiveContent": true,
+		"isLive":        true,
+		"isUpcoming":    true,
+	}
+	status, isLive, _, _ := classifyStream(vd, nil, nil, true)
+	if status == StreamUpcoming {
+		t.Error("should not classify as upcoming when formats are present")
+	}
+	if !isLive {
+		t.Error("expected isLive=true when formats are present")
+	}
+}
+
+func TestClassifyStream_UpcomingVD_Only(t *testing.T) {
+	// When only isUpcoming=true is set (no isLive, no playability, no microformat),
+	// should classify as upcoming via the standalone isUpcomingVD check.
+	vd := map[string]any{
+		"isLiveContent": true,
+		"isUpcoming":    true,
+	}
+	status, _, isUpcoming, _ := classifyStream(vd, nil, nil, false)
+	if status != StreamUpcoming {
+		t.Errorf("expected StreamUpcoming, got %q", status)
+	}
+	if !isUpcoming {
+		t.Error("expected isUpcoming=true")
+	}
+}
+
 func TestClassifyStream_VOD(t *testing.T) {
 	vd := map[string]any{"isLiveContent": true}
 	mf := map[string]any{

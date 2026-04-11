@@ -418,6 +418,13 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	if isUpcomingPremiere {
 		return StreamUpcoming, false, true, false
 	}
+	// videoDetails.isUpcoming overrides isLive for waiting room / offline slate.
+	// YouTube may set isLive=true when the scheduled time passes (serving the
+	// waiting room as a "live" feed), but isUpcoming=true means the creator
+	// hasn't actually started streaming yet.
+	if isUpcomingVD && !hasFormats {
+		return StreamUpcoming, false, true, false
+	}
 	if isLiveNow || isPremiereNow {
 		return StreamLive, true, false, false
 	}

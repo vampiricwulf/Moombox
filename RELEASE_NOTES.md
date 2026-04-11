@@ -1,11 +1,9 @@
 ### Bug Fixes
 
-- **Security:** Self-updater now rejects unsigned binaries — signature verification is mandatory and cannot be bypassed
-- **Security:** Downloads capped at 200 MB to prevent disk exhaustion from a compromised source
-- Fixed concurrent update apply requests racing on binary swap (returns 409 Conflict)
+- **Fixed premature download start for rescheduled streams** — when a stream's scheduled time was pushed back, Moombox would start downloading at the original time (capturing YouTube's waiting room/offline slate instead of actual content)
+- ANDROID_VR probe status is now cross-validated against a full WEB fetch before transitioning from Upcoming to Live or VOD
+- `classifyStream` now uses `videoDetails.isUpcoming` as a standalone upcoming signal, preventing YouTube's waiting room from being misclassified as live
 
 ### Improvements
 
-- GitHub API rate-limit errors (403/429) now show a clear diagnostic instead of a generic status code
-- Verify signature endpoint returns proper HTTP error status (422) instead of 200 with error field
-- Fixed misaligned indentation in update restart panic recovery handler
+- Periodic full WEB fetch every 30 minutes during upcoming polling catches metadata changes (e.g., rescheduled start times) that the lightweight ANDROID_VR probe can't see

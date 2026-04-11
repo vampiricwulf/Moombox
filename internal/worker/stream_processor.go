@@ -19,6 +19,7 @@ const (
 	chatSurgeWindowMs        = 15_000 // 15 seconds (matches TS CHAT_SURGE_WINDOW_MS)
 	chatSurgeThreshold       = 30     // messages in window to trigger early probe (matches TS CHAT_SURGE_THRESHOLD)
 	probeJitterMax           = 30 * time.Second
+	fullFetchInterval        = 30 * time.Minute // Periodic full WEB fetch for metadata ANDROID_VR can't see
 	twitchPollInterval       = 15 * time.Second
 	twitchPollJitterMax      = 5 * time.Second
 )

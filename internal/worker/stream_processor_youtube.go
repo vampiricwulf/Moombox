@@ -28,6 +28,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	consecutiveErrors := 0
 	scheduledStartTime := initialInfo.ScheduledStartTime
 	membersOnly := false
+	lastFullFetch := time.Now() // Initial full fetch just happened in Process()
 
 	// B2: Start early chat downloader (only if chat download is enabled)
 	if sp.cfgMu != nil {
@@ -150,6 +151,22 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		// Persist any metadata changes (change-detected, zero-cost if nothing differs)
 		sp.updateJobMetadata(job, probeInfo, true)
 
+		// Periodic full WEB fetch to catch metadata ANDROID_VR can't see
+		// (e.g., rescheduled start times only available in microformat).
+		if time.Since(lastFullFetch) >= fullFetchInterval && probeInfo.StreamStatus == youtube.StreamUpcoming {
+			fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
+			if err == nil {
+				sp.updateJobMetadata(job, fullInfo, true)
+				if fullInfo.ScheduledStartTime != "" {
+					scheduledStartTime = fullInfo.ScheduledStartTime
+				}
+				sp.logger.Debug("periodic full fetch completed", "videoID", job.VideoID)
+			} else {
+				sp.logger.Debug("periodic full fetch failed, will retry later", "videoID", job.VideoID, "err", err)
+			}
+			lastFullFetch = time.Now()
+		}
+
 		// B2: Try starting chat if not yet available
 		if sp.cfgMu != nil {
 			sp.cfgMu.RLock()
@@ -177,11 +194,23 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 
 		switch probeInfo.StreamStatus {
 		case youtube.StreamLive:
-			sp.logger.Info("stream is now live", "videoID", job.VideoID)
+			sp.logger.Info("stream is now live (probe)", "videoID", job.VideoID)
 			fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
 			if err != nil {
 				sp.stopEarlyChat(chatDl)
 				return nil, fmt.Errorf("full fetch on live: %w", err)
+			}
+			// Cross-check: if full WEB fetch says still upcoming, the probe was
+			// fooled by YouTube's waiting room / offline slate. Keep polling.
+			if fullInfo.StreamStatus == youtube.StreamUpcoming {
+				sp.updateJobMetadata(job, fullInfo, true)
+				if fullInfo.ScheduledStartTime != "" {
+					scheduledStartTime = fullInfo.ScheduledStartTime
+				}
+				sp.logger.Info("full fetch says still upcoming — probe saw waiting room, continuing poll",
+					"videoID", job.VideoID, "scheduledStart", scheduledStartTime)
+				lastFullFetch = time.Now()
+				continue
 			}
 			if fullInfo.ScheduledStartTime == "" && job.StreamStartTime == "" {
 				fullInfo.ScheduledStartTime = time.Now().UTC().Format(time.RFC3339)
@@ -205,11 +234,22 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			}, nil
 
 		case youtube.StreamVOD, youtube.StreamPostLive:
-			sp.logger.Info("stream became VOD", "videoID", job.VideoID)
+			sp.logger.Info("stream became VOD (probe)", "videoID", job.VideoID)
 			fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
 			if err != nil {
 				sp.stopEarlyChat(chatDl)
 				return nil, fmt.Errorf("full fetch on VOD: %w", err)
+			}
+			// Cross-check: if full WEB fetch says still upcoming, keep polling.
+			if fullInfo.StreamStatus == youtube.StreamUpcoming {
+				sp.updateJobMetadata(job, fullInfo, true)
+				if fullInfo.ScheduledStartTime != "" {
+					scheduledStartTime = fullInfo.ScheduledStartTime
+				}
+				sp.logger.Info("full fetch says still upcoming — probe misclassified, continuing poll",
+					"videoID", job.VideoID, "scheduledStart", scheduledStartTime)
+				lastFullFetch = time.Now()
+				continue
 			}
 			sp.updateJobMetadata(job, fullInfo, true)
 			sp.db.UpdateJobFields(job.ID, map[string]any{
