@@ -515,7 +515,12 @@ func mergeWatchPageMetadata(target *VideoInfo, source *VideoInfo) {
 	if source == nil {
 		return
 	}
-	if target.ScheduledStartTime == "" {
+	// Always prefer watch page's ScheduledStartTime — its microformat
+	// liveBroadcastDetails.startTimestamp is the authoritative source that
+	// YouTube updates for rescheduled streams. Other clients may only have
+	// liveStreamability.scheduledStartTime (epoch) which YouTube does not
+	// always update on reschedule.
+	if source.ScheduledStartTime != "" {
 		target.ScheduledStartTime = source.ScheduledStartTime
 	}
 	if target.Description == "" {

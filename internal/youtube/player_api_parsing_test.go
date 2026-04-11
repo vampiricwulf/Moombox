@@ -423,6 +423,23 @@ func TestMergeWatchPageMetadata_DoNotOverwrite(t *testing.T) {
 	}
 }
 
+func TestMergeWatchPageMetadata_ScheduledStartTimeOverwrite(t *testing.T) {
+	// Watch page's liveBroadcastDetails.startTimestamp is authoritative —
+	// it should overwrite a stale liveStreamability.scheduledStartTime from TV client.
+	target := &VideoInfo{
+		ScheduledStartTime: "2025-01-01T14:00:00Z", // old time from TV client
+	}
+	source := &VideoInfo{
+		ScheduledStartTime: "2025-01-01T16:00:00Z", // rescheduled time from watch page
+	}
+
+	mergeWatchPageMetadata(target, source)
+
+	if target.ScheduledStartTime != "2025-01-01T16:00:00Z" {
+		t.Errorf("expected watch page's rescheduled time, got %q", target.ScheduledStartTime)
+	}
+}
+
 // --- JSON helper tests ---
 
 func TestGetStr(t *testing.T) {
