@@ -94,18 +94,37 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// Send "Download Starting" notification
 	if o.notifier != nil {
 		dlType := "Live Stream"
+		desc := fmt.Sprintf("Now live — beginning download: %s", jobCtx.Job.Title)
 		if isVod {
 			dlType = "VOD"
+			desc = fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title)
 		}
 		startFields := []notifications.Field{
 			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
 			{Name: "Type", Value: dlType, Inline: true},
 		}
-		// Include format selection details (matching TypeScript)
+		// Include scheduled start time if available
+		if jobCtx.Job.StreamStartTime != "" {
+			if t, err := time.Parse(time.RFC3339, jobCtx.Job.StreamStartTime); err == nil {
+				startFields = append(startFields, notifications.Field{
+					Name: "Scheduled For", Value: fmt.Sprintf("<t:%d:f>", t.Unix()), Inline: true,
+				})
+			}
+		}
+		// Include format selection details with human-readable labels
 		if jobCtx.Job.SelectedVideoItag != nil {
 			label := "None"
 			if *jobCtx.Job.SelectedVideoItag >= 0 {
-				label = fmt.Sprintf("itag %d", *jobCtx.Job.SelectedVideoItag)
+				itag := *jobCtx.Job.SelectedVideoItag
+				label = fmt.Sprintf("itag %d", itag)
+				if videoInfo != nil {
+					for _, f := range videoInfo.Formats {
+						if f.Itag == itag && f.QualityLabel != "" {
+							label = f.QualityLabel
+							break
+						}
+					}
+				}
 			}
 			startFields = append(startFields, notifications.Field{Name: "Video", Value: label, Inline: true})
 		}
@@ -130,8 +149,8 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 				Name: "Post-Download Trim", Value: startStr + " - " + endStr,
 			})
 		}
-		o.notifier.Send("Download Starting",
-			fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title),
+		o.notifier.Send("YouTube Download Starting",
+			desc,
 			notifications.TypeDownload,
 			startFields,
 			notifications.SendOptions{
@@ -370,12 +389,17 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 					o.logger.Error("post-download trim failed", "err", trimErr, "jobID", jobCtx.Job.ID)
 					if o.notifier != nil {
 						o.notifier.Send("Trim Failed",
-							fmt.Sprintf("Failed to create trim for \"%s\": %v", jobCtx.Job.Title, trimErr),
+							fmt.Sprintf("Failed to create trim for \"%s\"", jobCtx.Job.Title),
 							notifications.TypeError,
-							nil,
+							[]notifications.Field{
+								{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+								{Name: "Video ID", Value: jobCtx.Job.VideoID, Inline: true},
+								{Name: "Error", Value: trimErr.Error()},
+							},
 							notifications.SendOptions{
-								URL:   jobCtx.Job.URL,
-								Event: "trim_error",
+								URL:       jobCtx.Job.URL,
+								Thumbnail: jobCtx.Job.ThumbnailURL,
+								Event:     "trim_error",
 							},
 						)
 					}

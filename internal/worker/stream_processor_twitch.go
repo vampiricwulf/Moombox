@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
@@ -207,31 +206,6 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		"is_vod":         false,
 		"twitch_quality": variant.Name,
 	})
-
-	// Send "Twitch Stream Live" notification
-	if sp.notifier != nil {
-		qualityLabel := variant.Name
-		if variant.Height > 0 {
-			qualityLabel = fmt.Sprintf("%s (%dp)", variant.Name, variant.Height)
-		}
-		fields := []notifications.Field{
-			{Name: "Channel", Value: streamInfo.ChannelDisplayName, Inline: true},
-			{Name: "Quality", Value: qualityLabel, Inline: true},
-		}
-		if streamInfo.GameCategory != "" {
-			fields = append(fields, notifications.Field{Name: "Category", Value: streamInfo.GameCategory, Inline: true})
-		}
-		sp.notifier.Send("Twitch Stream Live",
-			fmt.Sprintf("Now live: %s", job.Title),
-			notifications.TypeSuccess,
-			fields,
-			notifications.SendOptions{
-				URL:       job.URL,
-				Thumbnail: streamInfo.ThumbnailURL,
-				Event:     "live",
-			},
-		)
-	}
 
 	// Start Twitch IRC chat downloader if chat recording is enabled
 	var twitchChatDl *twitch.ChatDownloader

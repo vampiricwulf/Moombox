@@ -233,7 +233,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
 			if o.notifier != nil {
-				o.notifier.Send("Quality Split",
+				o.notifier.Send("YouTube Quality Split",
 					fmt.Sprintf("Stream quality changed during download: %s", jobCtx.Job.Title),
 					notifications.TypeDownload,
 					[]notifications.Field{

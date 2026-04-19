@@ -395,11 +395,15 @@ func (w *DownloadWorker) handleCancellation(job *database.Job, stagingDir string
 		if w.notifier != nil {
 			w.notifier.Send("Download Cancelled",
 				fmt.Sprintf("Cancelled: %s", job.Title),
-				notifications.TypeWarning,
-				nil,
+				notifications.TypeCancelled,
+				[]notifications.Field{
+					{Name: "Channel", Value: job.ChannelName, Inline: true},
+					{Name: "Video ID", Value: job.VideoID, Inline: true},
+				},
 				notifications.SendOptions{
-					URL:   job.URL,
-					Event: "cancelled",
+					URL:       job.URL,
+					Thumbnail: job.ThumbnailURL,
+					Event:     "cancelled",
 				},
 			)
 		}

@@ -148,7 +148,6 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 			"status": database.StatusLive,
 			"is_vod": false,
 		})
-		sp.sendLiveNotification(job, info)
 		return &StreamProcessResult{
 			VideoInfo:      info,
 			ShouldDownload: true,
@@ -303,7 +302,10 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 			if info.ScheduledStartTime != job.StreamStartTime {
 				if job.StreamStartTime == "" {
 					notifyStartTimeConfirmed = true
-				} else {
+				} else if !info.IsLive {
+					// Only notify schedule change for genuine reschedules (upcoming).
+					// When a stream goes live, YouTube updates the scheduled time to the
+					// actual start — that's not a reschedule, and Download Starting covers it.
 					notifyScheduleChanged = true
 					oldStartTime = job.StreamStartTime
 				}
@@ -368,9 +370,9 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 	if notifyStartTimeConfirmed && (info.IsUpcoming || info.IsLive) && sp.notifier != nil {
 		startsAt := info.ScheduledStartTime
 		if t, err := time.Parse(time.RFC3339, startsAt); err == nil {
-			startsAt = t.Format("2006-01-02 15:04:05")
+			startsAt = fmt.Sprintf("<t:%d:f>", t.Unix())
 		}
-		sp.notifier.Send("Start Time Confirmed",
+		sp.notifier.Send("YouTube Start Time Confirmed",
 			fmt.Sprintf("Scheduled: %s", job.Title),
 			notifications.TypeInfo,
 			[]notifications.Field{
@@ -388,11 +390,11 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 	if notifyScheduleChanged && sp.notifier != nil {
 		fmtTime := func(raw string) string {
 			if t, err := time.Parse(time.RFC3339, raw); err == nil {
-				return t.Format("2006-01-02 15:04:05")
+				return fmt.Sprintf("<t:%d:f>", t.Unix())
 			}
 			return raw
 		}
-		sp.notifier.Send("Schedule Changed",
+		sp.notifier.Send("YouTube Schedule Changed",
 			fmt.Sprintf("Rescheduled: %s", job.Title),
 			notifications.TypeInfo,
 			[]notifications.Field{
@@ -407,32 +409,4 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 			},
 		)
 	}
-}
-
-// sendLiveNotification sends a "Stream Live" notification (matches TS sendLiveNotification).
-func (sp *StreamProcessor) sendLiveNotification(job *database.Job, info *youtube.VideoInfo) {
-	if sp.notifier == nil {
-		return
-	}
-	url := job.URL
-	if url == "" {
-		url = fmt.Sprintf("https://www.youtube.com/watch?v=%s", job.VideoID)
-	}
-	thumbnail := ""
-	if info != nil {
-		thumbnail = info.ThumbnailURL
-	}
-	sp.notifier.Send("Stream Live",
-		fmt.Sprintf("Stream is now live: %s", job.Title),
-		notifications.TypeSuccess,
-		[]notifications.Field{
-			{Name: "Channel", Value: job.ChannelName, Inline: true},
-			{Name: "Video ID", Value: job.VideoID, Inline: true},
-		},
-		notifications.SendOptions{
-			URL:       url,
-			Thumbnail: thumbnail,
-			Event:     "live",
-		},
-	)
 }

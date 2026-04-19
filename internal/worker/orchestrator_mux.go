@@ -253,23 +253,51 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 
 	// Send notification
 	if o.notifier != nil {
-		segInfo := fmt.Sprintf("%d segments", len(segments))
+		finishedJob, _ := o.db.GetJob(jobCtx.Job.ID)
+		if finishedJob == nil {
+			finishedJob = jobCtx.Job
+		}
+
 		var qualityLabels []string
 		for _, seg := range segments {
 			qualityLabels = append(qualityLabels, seg.Quality)
 		}
+		finFields := []notifications.Field{
+			{Name: "Segments", Value: fmt.Sprintf("%d segments", len(segments)), Inline: true},
+			{Name: "Qualities", Value: strings.Join(qualityLabels, " -> "), Inline: true},
+			{Name: "Total Size", Value: formatFileSize(totalSize), Inline: true},
+			{Name: "Duration", Value: formatDurationHuman(time.Duration(totalDuration) * time.Second), Inline: true},
+		}
+		// Resolution from first segment
+		if len(segments) > 0 && segments[0].VideoWidth != nil && segments[0].VideoHeight != nil &&
+			*segments[0].VideoWidth > 0 && *segments[0].VideoHeight > 0 {
+			res := fmt.Sprintf("%dx%d", *segments[0].VideoWidth, *segments[0].VideoHeight)
+			if segments[0].VideoFps != nil && *segments[0].VideoFps > 0 {
+				res += fmt.Sprintf(" @%dfps", *segments[0].VideoFps)
+			}
+			finFields = append(finFields, notifications.Field{Name: "Resolution", Value: res, Inline: true})
+		}
+		// Total time
+		if finishedJob.DownloadStartedAt != "" {
+			if startedAt, err := time.Parse(time.RFC3339, finishedJob.DownloadStartedAt); err == nil {
+				finFields = append(finFields, notifications.Field{
+					Name: "Total Time", Value: formatDurationHuman(time.Since(startedAt)), Inline: true,
+				})
+			}
+		}
+		// Chat messages
+		if finishedJob.TotalChatMessages != nil && *finishedJob.TotalChatMessages > 0 {
+			finFields = append(finFields, notifications.Field{
+				Name: "Chat Messages", Value: fmt.Sprintf("%d", *finishedJob.TotalChatMessages), Inline: true,
+			})
+		}
 		o.notifier.Send("Download Finished",
 			fmt.Sprintf("Successfully archived: %s", jobCtx.Job.Title),
 			notifications.TypeSuccess,
-			[]notifications.Field{
-				{Name: "Segments", Value: segInfo, Inline: true},
-				{Name: "Qualities", Value: strings.Join(qualityLabels, " -> "), Inline: true},
-				{Name: "Total Size", Value: formatFileSize(totalSize), Inline: true},
-				{Name: "Duration", Value: formatDurationHuman(time.Duration(totalDuration) * time.Second), Inline: true},
-			},
+			finFields,
 			notifications.SendOptions{
 				URL:       jobCtx.Job.URL,
-				Thumbnail: jobCtx.Job.ThumbnailURL,
+				Image:     jobCtx.Job.ThumbnailURL,
 				Event:     "finished",
 			},
 		)

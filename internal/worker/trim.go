@@ -254,8 +254,9 @@ func (ts *TrimService) DeleteTrim(jobID, trimID string) error {
 				{Name: "Duration", Value: durStr, Inline: true},
 			},
 			notifications.SendOptions{
-				URL:   job.URL,
-				Event: "trim_deleted",
+				URL:       job.URL,
+				Thumbnail: job.ThumbnailURL,
+				Event:     "trim_deleted",
 			},
 		)
 	}

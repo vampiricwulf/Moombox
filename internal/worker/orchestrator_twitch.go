@@ -71,8 +71,10 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Send "Twitch Download Starting" notification
 	if o.notifier != nil {
 		dlType := "Live Stream"
+		desc := fmt.Sprintf("Now live — beginning download: %s", jobCtx.Job.Title)
 		if isVod {
 			dlType = "VOD"
+			desc = fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title)
 		}
 		qualityLabel := variant.Name
 		if variant.Height > 0 {
@@ -82,14 +84,18 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			}
 			qualityLabel = fmt.Sprintf("%s (%dp%s)", variant.Name, variant.Height, fpsStr)
 		}
+		startFields := []notifications.Field{
+			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+			{Name: "Quality", Value: qualityLabel, Inline: true},
+			{Name: "Type", Value: dlType, Inline: true},
+		}
+		if jobCtx.Job.TwitchCategory != "" {
+			startFields = append(startFields, notifications.Field{Name: "Category", Value: jobCtx.Job.TwitchCategory, Inline: true})
+		}
 		o.notifier.Send("Twitch Download Starting",
-			fmt.Sprintf("Beginning download: %s", jobCtx.Job.Title),
+			desc,
 			notifications.TypeDownload,
-			[]notifications.Field{
-				{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
-				{Name: "Quality", Value: qualityLabel, Inline: true},
-				{Name: "Type", Value: dlType, Inline: true},
-			},
+			startFields,
 			notifications.SendOptions{
 				URL:       jobCtx.Job.URL,
 				Thumbnail: jobCtx.Job.ThumbnailURL,
@@ -326,7 +332,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
 			if o.notifier != nil {
-				o.notifier.Send("Quality Split",
+				o.notifier.Send("Twitch Quality Split",
 					fmt.Sprintf("Stream quality changed during download: %s", jobCtx.Job.Title),
 					notifications.TypeDownload,
 					[]notifications.Field{

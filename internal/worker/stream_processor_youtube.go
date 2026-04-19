@@ -220,8 +220,6 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				"status": database.StatusLive,
 				"is_vod": false,
 			})
-			sp.sendLiveNotification(job, fullInfo)
-
 			// Untrack early chat — it will be handed to the orchestrator
 			if chatDl != nil {
 				sp.untrackChat(chatDl)
@@ -290,7 +288,6 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 						"status": database.StatusLive,
 						"is_vod": false,
 					})
-					sp.sendLiveNotification(job, fullInfo)
 					if chatDl != nil {
 						sp.untrackChat(chatDl)
 					}
