@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
@@ -62,6 +63,19 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	})
 	defer unsubscribe()
 	ctx = ctx2
+
+	// Register connectivity callback for immediate bail on offline
+	var offlineCancelled atomic.Bool
+	var unregisterConn func()
+	if o.onConnectivityChange != nil {
+		unregisterConn = o.onConnectivityChange(func(online bool) {
+			if !online {
+				offlineCancelled.Store(true)
+				cancel() // cancel download context
+			}
+		})
+		defer unregisterConn()
+	}
 
 	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 		"status":              database.StatusDownloading,
@@ -419,18 +433,52 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	segmentMuxWg.Wait()
 
 	if ctx.Err() != nil {
-		// Shutdown: stop chat but preserve staging dir for resume
-		if twitchChatDl != nil {
-			twitchChatDl.Stop()
+		if offlineCancelled.Load() {
+			// Connectivity loss: mux what we have and finalize
+			o.logger.Warn("Twitch download interrupted by connectivity loss, muxing captured data", "jobID", jobCtx.Job.ID)
+
+			if o.notifier != nil {
+				o.notifier.Send("Twitch Download Split — Connectivity Lost",
+					fmt.Sprintf("Internet connectivity lost during download: %s", jobCtx.Job.Title),
+					notifications.TypeDownload,
+					[]notifications.Field{
+						{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
+						{Name: "Quality", Value: currentQuality.Label, Inline: true},
+						{Name: "Segment", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true},
+					},
+					notifications.SendOptions{
+						URL:       jobCtx.Job.URL,
+						Thumbnail: jobCtx.Job.ThumbnailURL,
+						Event:     "connectivity_split",
+					},
+				)
+			}
+
+			// Stop chat
+			if twitchChatDl != nil {
+				twitchChatDl.Stop()
+			}
+			// IMPORTANT: Fall through to muxing logic below.
+		} else {
+			// Shutdown/user cancel: preserve staging dir for resume
+			if twitchChatDl != nil {
+				twitchChatDl.Stop()
+			}
+			return ctx.Err()
 		}
-		return ctx.Err()
+	}
+
+	// After the fall-through from connectivity loss, use a fresh context for muxing
+	muxCtx := ctx
+	if offlineCancelled.Load() {
+		muxCtx = context.Background()
 	}
 
 	// If we had quality splits, mux the final segment
 	if segmentIndex > 0 {
 		segmentEndTime := time.Now().Unix()
 		result := &DownloadResult{HasVideo: true, VideoPath: videoPath}
-		seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)
+		seg, muxErr := o.muxSegment(muxCtx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)
 		if muxErr != nil {
 			o.logger.Error("failed to mux final Twitch quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {
@@ -484,7 +532,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		HasVideo:  true,
 		VideoPath: videoPath,
 	}
-	return o.muxAndFinalize(ctx, jobCtx, dlResult)
+	return o.muxAndFinalize(muxCtx, jobCtx, dlResult)
 }
 
 // buildTwitchProbeFn creates a quality probe function for Twitch streams.
