@@ -103,9 +103,9 @@ YouTube streams are resumable — segments are available from CDN for the full d
 3. **Finalize the job** — job transitions to Muxing → Finished with whatever was captured
 4. **Auto-recovery** — when connectivity returns, the Twitch monitor's `CheckNow()` (fired by `OnStateChange`) re-detects the stream and creates a new job if still live
 
-Implementation: the download worker receives an `OnConnectivityChange func(fn func(online bool)) (unregister func())` callback (wired from `connMon.OnStateChange` in main.go). The Twitch orchestrator calls it when a download starts, registering a callback that cancels the download-specific context when transitioning to offline. The returned unregister func is deferred to clean up when the download finishes. The orchestrator then checks `IsOnline()` — if false, it follows the mux-and-finalize path instead of the normal error/shutdown path.
+Implementation: both `IsOnline func() bool` and `OnConnectivityChange func(fn func(online bool)) func()` are added to `DownloadWorkerDeps` (wired from `connMon.IsOnline` and `connMon.OnStateChange` in main.go). The Twitch orchestrator calls `OnConnectivityChange` when a download starts, registering a callback that (1) sets a local `offlineCancelled atomic.Bool` flag, then (2) cancels the download-specific context. The returned unregister func is deferred to clean up when the download finishes.
 
-To distinguish connectivity cancellation from user cancellation or shutdown: when the context is cancelled AND `IsOnline()` is false, treat as connectivity loss. When cancelled AND online, treat as shutdown/user cancel (existing behavior — preserve staging dir).
+To distinguish connectivity cancellation from user cancellation or shutdown: the orchestrator checks the `offlineCancelled` flag (not `IsOnline()`). This avoids a race where connectivity returns between context cancellation and the check — the flag is set *before* the context is cancelled, so it's always reliable. When `offlineCancelled` is true, follow the mux-and-finalize path. Otherwise, treat as shutdown/user cancel (existing behavior — preserve staging dir).
 
 **Decision points to guard (YouTube only):**
 
@@ -176,7 +176,7 @@ defer connMon.Stop()
 ```
 
 **Consumer wiring:**
-- **Download worker/orchestrators:** Pass `connMon.IsOnline` when building `DownloaderOptions` in the strategy files. Also pass `connMon.OnStateChange` as `OnConnectivityChange` on `DownloadWorkerDeps` so the Twitch orchestrator can register/unregister per-download callbacks.
+- **Download worker/orchestrators:** Add `IsOnline func() bool` and `OnConnectivityChange func(fn func(online bool)) func()` to `DownloadWorkerDeps`. `IsOnline` flows through to `DownloaderOptions` when strategies build downloaders. `OnConnectivityChange` is used by the Twitch orchestrator to register/unregister per-download callbacks.
 - **Monitors:** Pass `connMon.IsOnline` to each monitor constructor
 - **OnStateChange callbacks:**
   ```go
