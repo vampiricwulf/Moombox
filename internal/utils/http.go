@@ -14,6 +14,16 @@ import (
 // client timeout only guards against truly stuck connections.
 var utilsHTTPClient = &http.Client{Timeout: 5 * time.Minute}
 
+var connReporter interface {
+	ReportFailure(tag string)
+	ReportSuccess(tag string)
+}
+
+// SetConnectivityReporter sets the global connectivity reporter for HTTP utilities.
+func SetConnectivityReporter(r interface{ ReportFailure(string); ReportSuccess(string) }) {
+	connReporter = r
+}
+
 // FetchWithTimeout performs an HTTP GET with a timeout.
 // IMPORTANT: The caller receives a cancel function that MUST be called after
 // the response body has been fully read. The timeout context is kept alive
@@ -33,8 +43,14 @@ func FetchWithTimeout(ctx context.Context, url string, timeout time.Duration, he
 
 	resp, err := utilsHTTPClient.Do(req)
 	if err != nil {
+		if connReporter != nil {
+			connReporter.ReportFailure("utils/http")
+		}
 		cancel()
 		return nil, nil, err
+	}
+	if connReporter != nil {
+		connReporter.ReportSuccess("utils/http")
 	}
 
 	return resp, cancel, nil

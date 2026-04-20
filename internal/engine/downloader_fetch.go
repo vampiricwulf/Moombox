@@ -15,6 +15,16 @@ import (
 // normal timeouts. Segments on slow connections can take several minutes.
 var engineHTTPClient = &http.Client{Timeout: 5 * time.Minute}
 
+var connReporter interface {
+	ReportFailure(tag string)
+	ReportSuccess(tag string)
+}
+
+// SetConnectivityReporter sets the global connectivity reporter for the engine package.
+func SetConnectivityReporter(r interface{ ReportFailure(string); ReportSuccess(string) }) {
+	connReporter = r
+}
+
 // fetchSegment downloads a single segment (or playlist) by URL.
 func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
@@ -37,7 +47,13 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
+		if connReporter != nil {
+			connReporter.ReportFailure("engine/fetch")
+		}
 		return nil, 0, err
+	}
+	if connReporter != nil {
+		connReporter.ReportSuccess("engine/fetch")
 	}
 	defer resp.Body.Close()
 
@@ -95,7 +111,13 @@ func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) 
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
+		if connReporter != nil {
+			connReporter.ReportFailure("engine/fetch")
+		}
 		return -1, err
+	}
+	if connReporter != nil {
+		connReporter.ReportSuccess("engine/fetch")
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
@@ -128,7 +150,13 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
+		if connReporter != nil {
+			connReporter.ReportFailure("engine/fetch")
+		}
 		return 0
+	}
+	if connReporter != nil {
+		connReporter.ReportSuccess("engine/fetch")
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
@@ -194,7 +222,13 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
+		if connReporter != nil {
+			connReporter.ReportFailure("engine/fetch")
+		}
 		return nil, 0, err
+	}
+	if connReporter != nil {
+		connReporter.ReportSuccess("engine/fetch")
 	}
 	defer resp.Body.Close()
 

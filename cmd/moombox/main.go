@@ -27,6 +27,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/connectivity"
+	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/logger"
@@ -35,6 +36,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/updater"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
@@ -234,6 +236,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	connMon := connectivity.NewMonitor(log)
 	connMon.Start(ctx)
 	defer connMon.Stop()
+	utils.SetConnectivityReporter(connMon)
+	engine.SetConnectivityReporter(connMon)
 
 	// =========================================================================
 	// 4. Load cookies

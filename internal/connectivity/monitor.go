@@ -35,6 +35,12 @@ type logger interface {
 	Error(msg string, args ...any)
 }
 
+// Reporter provides network result reporting. Passed to HTTP utilities.
+type Reporter interface {
+	ReportFailure(tag string)
+	ReportSuccess(tag string)
+}
+
 func NewMonitor(log logger) *Monitor {
 	m := &Monitor{
 		callbacks: make(map[uint64]func(online bool)),
