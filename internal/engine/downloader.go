@@ -56,6 +56,7 @@ type DownloaderOptions struct {
 	RetryDelayCap      int // seconds
 	LiveCheckRetries   int
 	CheckStreamStatus  func(ctx context.Context) (bool, error) // Returns true if stream ended
+	IsOnline           func() bool                             // Returns false if device has no internet
 	Logger             DownloaderLogger
 }
 
