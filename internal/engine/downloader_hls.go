@@ -31,6 +31,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		if err != nil {
 			// 404/410 on playlist fetch -- variant may have been removed
 			if plStatus == 404 || plStatus == 410 {
+				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
+					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+						return err
+					}
+					consecutiveErrors = 0
+					continue
+				}
 				if d.opts.CheckStreamStatus != nil {
 					ended, checkErr := d.opts.CheckStreamStatus(ctx)
 					if checkErr != nil {
@@ -44,6 +52,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			}
 			consecutiveErrors++
 			if consecutiveErrors > 5 {
+				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
+					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+						return err
+					}
+					consecutiveErrors = 0
+					continue
+				}
 				// Before giving up, check if stream is still live (quality may have changed)
 				if d.opts.CheckStreamStatus != nil {
 					ended, checkErr := d.opts.CheckStreamStatus(ctx)
@@ -147,11 +163,21 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		// Stale detection: no new segments available
 		if len(newSegments) == 0 {
 			staleCount++
-			if staleCount >= 5 && d.opts.CheckStreamStatus != nil {
-				ended, _ := d.opts.CheckStreamStatus(ctx)
-				if ended {
-					d.streamEnded.Store(true)
-					return nil
+			if staleCount >= 5 {
+				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
+					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+						return err
+					}
+					staleCount = 0
+					continue
+				}
+				if d.opts.CheckStreamStatus != nil {
+					ended, _ := d.opts.CheckStreamStatus(ctx)
+					if ended {
+						d.streamEnded.Store(true)
+						return nil
+					}
 				}
 			}
 		} else {
