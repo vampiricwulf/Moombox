@@ -281,6 +281,11 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
 		})
 
+		if sp.isOnline != nil && !sp.isOnline() {
+			sp.logger.Debug("skipping Twitch probe — device offline", "login", login)
+			continue
+		}
+
 		streamInfo, err := sp.tw.GetStreamInfo(ctx, login)
 		if err != nil {
 			consecutiveErrors++

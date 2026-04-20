@@ -125,6 +125,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
 		})
 
+		// Skip probe when offline — don't burn error counter
+		if sp.isOnline != nil && !sp.isOnline() {
+			sp.logger.Debug("skipping probe — device offline", "videoID", job.VideoID)
+			continue
+		}
+
 		// Probe — use lightweight authenticated probe if members-only was detected
 		var probeInfo *youtube.VideoInfo
 		var probeErr error

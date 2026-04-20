@@ -48,6 +48,7 @@ type StreamProcessor struct {
 	db       *database.Database
 	notifier *notifications.Manager
 	logger   logger
+	isOnline func() bool
 
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
@@ -66,6 +67,11 @@ func (sp *StreamProcessor) SetCfgMu(mu *sync.RWMutex) {
 // SetNotifier sets the notification manager for the stream processor.
 func (sp *StreamProcessor) SetNotifier(nm *notifications.Manager) {
 	sp.notifier = nm
+}
+
+// SetIsOnline sets the connectivity check function.
+func (sp *StreamProcessor) SetIsOnline(fn func() bool) {
+	sp.isOnline = fn
 }
 
 // Stop gracefully stops the stream processor and any active chat downloaders.
