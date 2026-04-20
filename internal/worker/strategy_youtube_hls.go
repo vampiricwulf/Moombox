@@ -16,7 +16,7 @@ import (
 // Fetches the HLS master playlist, selects the best variant based on
 // max_video_resolution config, and passes the selected variant's playlist URL
 // to the SegmentDownloader.
-func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, potProvider *bgutils.PotProvider) (*DownloadResult, error) {
+func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.HlsManifestURL == "" {
 		return nil, fmt.Errorf("no HLS manifest URL available")
 	}
@@ -150,6 +150,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		PoToken:          hlsPoToken,
 		RetryDelayCap:    job.Config.SegmentRetryDelayCap,
 		LiveCheckRetries: job.Config.SegmentLiveCheckRetries,
+		IsOnline:         isOnline,
 		Logger:           job.Logger,
 		CheckStreamStatus: func(ctx context.Context) (bool, error) {
 			info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)

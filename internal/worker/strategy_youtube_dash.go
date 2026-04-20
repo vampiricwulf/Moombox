@@ -15,7 +15,7 @@ import (
 // DownloadDash sets up DASH segment downloaders for a live/post-live stream.
 // Applies cipher decryption to manifest URL, n-parameter decryption to stream URLs,
 // and injects PO token into the manifest URL path.
-func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, cipherSolver *cipher.Solver, potProvider *bgutils.PotProvider) (*DownloadResult, error) {
+func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, cipherSolver *cipher.Solver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.DashManifestURL == "" {
 		return nil, fmt.Errorf("no DASH manifest URL available")
 	}
@@ -203,6 +203,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			CookieHeader:     dashCookieHeader,
 			RetryDelayCap:    job.Config.SegmentRetryDelayCap,
 			LiveCheckRetries: job.Config.SegmentLiveCheckRetries,
+			IsOnline:         isOnline,
 			Logger:           job.Logger,
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
@@ -233,6 +234,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			CookieHeader:     dashCookieHeader,
 			RetryDelayCap:    job.Config.SegmentRetryDelayCap,
 			LiveCheckRetries: job.Config.SegmentLiveCheckRetries,
+			IsOnline:         isOnline,
 			Logger:           job.Logger,
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)

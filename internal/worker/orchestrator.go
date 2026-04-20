@@ -27,27 +27,31 @@ const (
 
 // DownloadOrchestrator coordinates the full download lifecycle for a job.
 type DownloadOrchestrator struct {
-	muxer        *engine.Muxer
-	ffmpegPath   string
-	db           *database.Database
-	queue        *JobQueue
-	cipherSolver *cipher.Solver
-	potProvider  *bgutils.PotProvider
-	notifier     *notifications.Manager
-	logger       logger
+	muxer                *engine.Muxer
+	ffmpegPath           string
+	db                   *database.Database
+	queue                *JobQueue
+	cipherSolver         *cipher.Solver
+	potProvider          *bgutils.PotProvider
+	notifier             *notifications.Manager
+	isOnline             func() bool
+	onConnectivityChange func(fn func(online bool)) func()
+	logger               logger
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.
-func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager) *DownloadOrchestrator {
+func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager, isOnline func() bool, onConnChange func(fn func(online bool)) func()) *DownloadOrchestrator {
 	return &DownloadOrchestrator{
-		muxer:        engine.NewMuxer(ffmpegPath, logger),
-		ffmpegPath:   ffmpegPath,
-		db:           db,
-		queue:        queue,
-		cipherSolver: cs,
-		potProvider:  pp,
-		notifier:     nm,
-		logger:       logger,
+		muxer:                engine.NewMuxer(ffmpegPath, logger),
+		ffmpegPath:           ffmpegPath,
+		db:                   db,
+		queue:                queue,
+		cipherSolver:         cs,
+		potProvider:          pp,
+		notifier:             nm,
+		isOnline:             isOnline,
+		onConnectivityChange: onConnChange,
+		logger:               logger,
 	}
 }
 
@@ -190,9 +194,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	if useDirectVod && len(videoInfo.Formats) > 0 {
 		result, err = DownloadVod(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider)
 	} else if videoInfo.DashManifestURL != "" {
-		result, err = DownloadDash(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider)
+		result, err = DownloadDash(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider, o.isOnline)
 	} else if videoInfo.HlsManifestURL != "" {
-		result, err = DownloadHls(ctx, jobCtx, videoInfo, o.potProvider)
+		result, err = DownloadHls(ctx, jobCtx, videoInfo, o.potProvider, o.isOnline)
 	} else if len(videoInfo.Formats) > 0 {
 		// Fallback: no DASH/HLS manifest but formats exist — download directly
 		result, err = DownloadVod(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider)

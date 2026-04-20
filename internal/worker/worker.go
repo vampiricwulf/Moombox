@@ -84,10 +84,12 @@ type DownloadWorker struct {
 
 // DownloadWorkerDeps holds optional dependencies for the download worker.
 type DownloadWorkerDeps struct {
-	CipherSolver  *cipher.Solver
-	PotProvider   *bgutils.PotProvider
-	TwitchService *twitch.Service
-	Notifier      *notifications.Manager
+	CipherSolver         *cipher.Solver
+	PotProvider          *bgutils.PotProvider
+	TwitchService        *twitch.Service
+	Notifier             *notifications.Manager
+	IsOnline             func() bool
+	OnConnectivityChange func(fn func(online bool)) func()
 }
 
 // NewDownloadWorker creates a new download worker.
@@ -105,11 +107,15 @@ func NewDownloadWorker(
 	var pp *bgutils.PotProvider
 	var tw *twitch.Service
 	var nm *notifications.Manager
+	var isOnline func() bool
+	var onConnChange func(func(online bool)) func()
 	if deps != nil {
 		cs = deps.CipherSolver
 		pp = deps.PotProvider
 		tw = deps.TwitchService
 		nm = deps.Notifier
+		isOnline = deps.IsOnline
+		onConnChange = deps.OnConnectivityChange
 	}
 
 	sp := NewStreamProcessor(yt, tw, cfg, db, logger)
@@ -123,7 +129,7 @@ func NewDownloadWorker(
 		tw:           tw,
 		cfg:          cfg,
 		queue:        queue,
-		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, pp, nm),
+		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, pp, nm, isOnline, onConnChange),
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,
