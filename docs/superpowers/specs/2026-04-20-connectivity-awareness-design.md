@@ -49,7 +49,7 @@ type Monitor struct {
 - `Start(ctx context.Context)` — spawns background goroutine polling `InternetGetConnectedState` every 5 seconds
 - `Stop()` — cancels the background goroutine
 - `IsOnline() bool` — atomic read of cached state (~1ns, safe from any goroutine)
-- `OnStateChange(fn func(online bool))` — registers callback for state transitions
+- `OnStateChange(fn func(online bool)) func()` — registers callback for state transitions, returns an unregister func. Permanent callbacks (main.go wiring) ignore the return; temporary callbacks (Twitch orchestrator) defer it.
 
 **Windows API:**
 - Calls `wininet.dll` → `InternetGetConnectedState` via `syscall.NewLazyDLL` / `NewLazyProc`
@@ -67,10 +67,17 @@ type Monitor struct {
 - Handles edge case where Windows reports "connected" but traffic can't actually flow
 
 **State transition logic:**
-- Requires 2 consecutive offline polls (10 seconds) before declaring offline — prevents flapping on momentary glitches
-- Returns to online on a single successful poll — recovery should be fast
-- Callbacks fire only on actual transitions (online→offline or offline→online), not every poll tick
-- State transitions logged at Info level: "Internet connectivity lost" / "Internet connectivity restored"
+
+Combined offline state: `offline = windowsOffline OR passiveOffline`
+
+- `windowsOffline`: set after 2 consecutive offline polls (10s), cleared on 1 online poll
+- `passiveOffline`: set when 5+ failures from 2+ caller tags with 0 successes in 30s, cleared when a `ReportSuccess()` call arrives (i.e., at least one HTTP request actually succeeds)
+
+Recovery paths:
+- Windows-triggered offline → clears on a single successful Windows API poll
+- Passive-triggered offline → clears when real traffic succeeds (`ReportSuccess`), not just when Windows says "connected." This prevents flapping when Windows reports online but traffic still can't flow.
+
+Callbacks fire only on actual transitions of the combined state (online→offline or offline→online), not every poll tick. State transitions logged at Info level: "Internet connectivity lost" / "Internet connectivity restored"
 
 ### 2. Download Subsystem Integration
 
@@ -111,6 +118,9 @@ To distinguish connectivity cancellation from user cancellation or shutdown: whe
 | `downloader_hls.go` | ~48 | 5+ consecutive errors + CheckStreamStatus → ended | If offline, skip conclusion, wait |
 | `downloader_hls.go` | ~150 | 5 stale iterations + CheckStreamStatus → ended | If offline, skip conclusion, wait |
 
+**YouTube probe loop (`stream_processor_youtube.go`):**
+The pre-download probe loop for upcoming/scheduled streams has a 10-consecutive-error threshold before giving up. During an outage, probe failures would burn through this counter and error out the job. Guard this the same way: if offline, skip the probe attempt and don't increment the error counter. Resume probing when online.
+
 **CheckStreamStatus guarding (both platforms):** When `CheckStreamStatus` returns an error (probe failed), the current code logs "assuming ended" in several places. With connectivity awareness: if offline, treat the error as "assume still live" instead of "assume ended."
 
 **What stays the same:** All existing retry logic, backoff timers, segment fetch retries. The connectivity check is purely a gate on terminal decisions — it doesn't change the retry behavior itself (except for Twitch, where the orchestrator cancels the download context to force an immediate stop).
@@ -137,7 +147,7 @@ Each monitor receives `IsOnline func() bool` via its constructor or a setter met
 - Included in initial state sent on WebSocket connect (so new connections know current status)
 
 **Offline banner:**
-- When a `"connectivity": { "online": false }` event arrives, display a banner/bar at the top of the page: "Internet connection lost — downloads and monitoring paused"
+- When a `"connectivity": { "online": false }` event arrives, display a banner/bar at the top of the page: "Internet connection lost"
 - Auto-dismiss when `"connectivity": { "online": true }` arrives
 - CSS class toggles (e.g., `.connectivity-banner.show`) — no complex state management
 
@@ -166,7 +176,7 @@ defer connMon.Stop()
 ```
 
 **Consumer wiring:**
-- **Download worker/orchestrators:** Pass `connMon.IsOnline` when building `DownloaderOptions` in the strategy files
+- **Download worker/orchestrators:** Pass `connMon.IsOnline` when building `DownloaderOptions` in the strategy files. Also pass `connMon.OnStateChange` as `OnConnectivityChange` on `DownloadWorkerDeps` so the Twitch orchestrator can register/unregister per-download callbacks.
 - **Monitors:** Pass `connMon.IsOnline` to each monitor constructor
 - **OnStateChange callbacks:**
   ```go
