@@ -48,6 +48,8 @@ type StatusBarModel struct {
 	ShowChordHint bool
 	// SelectedCount tracks batch-selected jobs for status bar display.
 	SelectedCount int
+	// offline indicates that internet connectivity is unavailable.
+	offline bool
 }
 
 // NewStatusBarModel creates a new status bar model.
@@ -149,6 +151,11 @@ func (m *StatusBarModel) renderControls() string {
 func (m *StatusBarModel) renderMetrics() string {
 	var parts []string
 	compact := m.width < statusBarCompactThreshold
+
+	// Connectivity indicator
+	if m.offline {
+		parts = append(parts, statusBarRedStyle.Render("OFFLINE"))
+	}
 
 	// Batch selection count
 	if m.SelectedCount > 0 {

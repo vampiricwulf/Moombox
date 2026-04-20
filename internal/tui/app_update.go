@@ -171,6 +171,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusBar.SetDiskStatus(msg.Free, msg.UsedPct, msg.Warn)
 		return a, a.listenForUpdates()
 
+	case ConnectivityMsg:
+		a.statusBar.offline = !msg.Online
+		return a, nil
+
 	case UpdateStatusMsg:
 		a.updateAvailable = &msg
 		a.details.updateInfo = &msg

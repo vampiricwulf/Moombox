@@ -162,6 +162,11 @@ type (
 	}
 )
 
+// ConnectivityMsg is sent when internet connectivity state changes.
+type ConnectivityMsg struct {
+	Online bool
+}
+
 // chordState tracks the two-key chord system state machine.
 type chordState struct {
 	prefix     string    // "a", "r", "o", "q" or ""
