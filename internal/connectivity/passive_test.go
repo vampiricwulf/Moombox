@@ -7,7 +7,7 @@ import (
 
 func TestPassiveTracker_NoTriggerOnSingleCaller(t *testing.T) {
 	pt := NewPassiveTracker()
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		pt.ReportFailure("engine/fetch")
 	}
 	if pt.ShouldTriggerOffline() {

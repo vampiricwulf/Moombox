@@ -5,6 +5,16 @@ import (
 	"testing"
 )
 
+func newTestMonitor(checkFn func() bool) *Monitor {
+	m := &Monitor{
+		callbacks: make(map[uint64]func(online bool)),
+		checkFn:   checkFn,
+		passive:   NewPassiveTracker(),
+	}
+	m.online.Store(true)
+	return m
+}
+
 func TestNewMonitor_DefaultsOnline(t *testing.T) {
 	m := NewMonitor(nil)
 	if !m.IsOnline() {

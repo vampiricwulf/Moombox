@@ -46,15 +46,6 @@ func NewMonitor(log logger) *Monitor {
 	return m
 }
 
-func newTestMonitor(checkFn func() bool) *Monitor {
-	m := &Monitor{
-		callbacks: make(map[uint64]func(online bool)),
-		checkFn:   checkFn,
-		passive:   NewPassiveTracker(),
-	}
-	m.online.Store(true)
-	return m
-}
 
 func (m *Monitor) Start(ctx context.Context) {
 	ctx2, cancel := context.WithCancel(ctx)
