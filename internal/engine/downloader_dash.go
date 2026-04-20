@@ -195,6 +195,14 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 	*consecutiveGoneErrors++
 
 	if hasStartedDownloading && *consecutiveGoneErrors > 10 {
+		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
+			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+				return err
+			}
+			*consecutiveGoneErrors = 0
+			return nil // Continue loop
+		}
 		// Check if stream is actually ended, or if our format just disappeared
 		if d.opts.CheckStreamStatus != nil {
 			ended, checkErr := d.opts.CheckStreamStatus(ctx)
@@ -274,6 +282,14 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 
 	// Check stream status at threshold
 	if *sameHeadRetryDelay == liveCheckThreshold && d.opts.CheckStreamStatus != nil {
+		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
+			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+				return err
+			}
+			*sameHeadRetryDelay = 0
+			return nil
+		}
 		ended, _ := d.opts.CheckStreamStatus(ctx)
 		if ended {
 			return errStreamDone
@@ -282,6 +298,14 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 
 	// Check status on every probe at cap
 	if *sameHeadRetryDelay >= delayCap && d.opts.CheckStreamStatus != nil {
+		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
+			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+				return err
+			}
+			*sameHeadRetryDelay = 0
+			return nil
+		}
 		ended, _ := d.opts.CheckStreamStatus(ctx)
 		if ended {
 			return errStreamDone
@@ -294,6 +318,15 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 
 	// Also check no-segment timeout
 	if time.Since(d.lastSegTime) > NoSegmentTimeout {
+		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
+			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+				return err
+			}
+			d.lastSegTime = time.Now() // Reset timer on recovery
+			*sameHeadRetryDelay = 0
+			return nil
+		}
 		if d.opts.CheckStreamStatus != nil && hasStartedDownloading {
 			ended, checkErr := d.opts.CheckStreamStatus(ctx)
 			if checkErr != nil {
