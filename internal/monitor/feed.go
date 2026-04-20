@@ -46,6 +46,7 @@ type FeedMonitor struct {
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
+	IsOnline        func() bool // nil = always online
 }
 
 // NewFeedMonitor creates a new RSS feed monitor.
@@ -194,6 +195,10 @@ func (fm *FeedMonitor) runCycle(ctx context.Context) {
 }
 
 func (fm *FeedMonitor) doCheck(ctx context.Context) {
+	if fm.IsOnline != nil && !fm.IsOnline() {
+		fm.logger.Debug("skipping feed poll — offline")
+		return
+	}
 	channels := fm.getYouTubeChannels()
 	if len(channels) == 0 {
 		return

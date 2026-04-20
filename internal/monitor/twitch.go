@@ -38,6 +38,7 @@ type TwitchMonitor struct {
 
 	OnSchedule    func(nextCheckAt int64)
 	OnStreamFound func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig)
+	IsOnline      func() bool // nil = always online
 }
 
 // NewTwitchMonitor creates a new Twitch monitor.
@@ -190,6 +191,10 @@ func (tm *TwitchMonitor) runCycle(ctx context.Context) {
 }
 
 func (tm *TwitchMonitor) doCheck(ctx context.Context) {
+	if tm.IsOnline != nil && !tm.IsOnline() {
+		tm.logger.Debug("skipping Twitch poll — offline")
+		return
+	}
 	channels := tm.getTwitchChannels()
 	if len(channels) == 0 {
 		return

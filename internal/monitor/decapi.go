@@ -55,6 +55,7 @@ type DecapiMonitor struct {
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
+	IsOnline        func() bool // nil = always online
 }
 
 // NewDecapiMonitor creates a new DECAPI monitor.
@@ -219,6 +220,10 @@ func (dm *DecapiMonitor) runCycle(ctx context.Context) {
 }
 
 func (dm *DecapiMonitor) doCheck(ctx context.Context) {
+	if dm.IsOnline != nil && !dm.IsOnline() {
+		dm.logger.Debug("skipping DECAPI poll — offline")
+		return
+	}
 	channels := dm.getYouTubeChannels()
 	if len(channels) == 0 {
 		return
