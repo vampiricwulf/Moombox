@@ -78,13 +78,26 @@ type Monitor struct {
 IsOnline func() bool // Returns false if device has no internet connectivity
 ```
 
-**Behavior:** At every decision point where the downloader would conclude a stream has ended, it first checks `IsOnline()`. If offline:
+**Behavior — YouTube (DASH/HLS):** At every decision point where the downloader would conclude a stream has ended, it first checks `IsOnline()`. If offline:
 
 1. **Suppress the terminal conclusion** — don't return `errStreamDone`, `ErrQualityLost`, or break out of the download loop
 2. **Enter a connectivity wait loop** — sleep 5s, re-check `IsOnline()`, repeat until online or context cancelled
 3. **Resume normally** — when online returns, the existing retry logic continues from where it was
 
-**Decision points to guard:**
+YouTube streams are resumable — segments are available from CDN for the full duration. Waiting is the right strategy.
+
+**Behavior — Twitch (HLS):** Twitch HLS has no resume capability — segments are ephemeral. When offline is detected during a Twitch download:
+
+1. **Bail immediately** — the downloader returns promptly (no extended retries while offline)
+2. **Mux what we have** — the Twitch orchestrator treats this as a connectivity-split (analogous to the existing quality split path), muxing all captured segments via `muxSegment()` / `muxFinalize()`
+3. **Finalize the job** — job transitions to Muxing → Finished with whatever was captured
+4. **Auto-recovery** — when connectivity returns, the Twitch monitor's `CheckNow()` (fired by `OnStateChange`) re-detects the stream and creates a new job if still live
+
+Implementation: the Twitch orchestrator registers its own `OnStateChange` callback when a download starts (deregisters on finish). The callback cancels the download-specific context, causing the HLS downloader to return immediately. The orchestrator then checks `IsOnline()` — if false, it follows the mux-and-finalize path instead of the normal error/shutdown path.
+
+To distinguish connectivity cancellation from user cancellation or shutdown: when the context is cancelled AND `IsOnline()` is false, treat as connectivity loss. When cancelled AND online, treat as shutdown/user cancel (existing behavior — preserve staging dir).
+
+**Decision points to guard (YouTube only):**
 
 | File | Line | Current behavior | Change |
 |------|------|-----------------|--------|
@@ -95,9 +108,9 @@ IsOnline func() bool // Returns false if device has no internet connectivity
 | `downloader_hls.go` | ~48 | 5+ consecutive errors + CheckStreamStatus → ended | If offline, skip conclusion, wait |
 | `downloader_hls.go` | ~150 | 5 stale iterations + CheckStreamStatus → ended | If offline, skip conclusion, wait |
 
-**CheckStreamStatus guarding:** When `CheckStreamStatus` returns an error (probe failed), the current code logs "assuming ended" in several places. With connectivity awareness: if offline, treat the error as "assume still live" instead of "assume ended."
+**CheckStreamStatus guarding (both platforms):** When `CheckStreamStatus` returns an error (probe failed), the current code logs "assuming ended" in several places. With connectivity awareness: if offline, treat the error as "assume still live" instead of "assume ended."
 
-**What stays the same:** All existing retry logic, backoff timers, segment fetch retries. The connectivity check is purely a gate on terminal decisions — it doesn't change the retry behavior itself.
+**What stays the same:** All existing retry logic, backoff timers, segment fetch retries. The connectivity check is purely a gate on terminal decisions — it doesn't change the retry behavior itself (except for Twitch, where the orchestrator cancels the download context to force an immediate stop).
 
 ### 3. Monitor Subsystem Integration
 
@@ -173,6 +186,15 @@ defer connMon.Stop()
 | State transition → offline | Info | "Internet connectivity lost" |
 | State transition → online | Info | "Internet connectivity restored" |
 | Monitor poll skipped (offline) | Debug | "Skipping feed poll — offline" |
-| Download conclusion suppressed | Warn | "Stream end signal suppressed — device offline, waiting for connectivity" |
+| YouTube download conclusion suppressed | Warn | "Stream end signal suppressed — device offline, waiting for connectivity" |
+| Twitch download connectivity split | Warn | "Twitch download interrupted by connectivity loss, muxing captured data" |
 | CheckStreamStatus error while offline | Debug | "Stream status check failed while offline, assuming still live" |
 | Passive failure reported | Debug | "Connectivity failure reported" (with caller info) |
+
+### 8. Notifications
+
+A Discord/webhook notification is sent when a Twitch download is split due to connectivity loss, following the existing quality split notification pattern:
+- **Title:** "Twitch Download Split — Connectivity Lost"
+- **Description:** "Internet connectivity lost during download: {title}"
+- **Fields:** Channel, Quality, Segments captured
+- **Event:** `"connectivity_split"`
