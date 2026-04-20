@@ -57,13 +57,14 @@ type Monitor struct {
 - Returns bool (connected/not) + flags (LAN/modem/proxy — ignored)
 
 **Passive backup:**
-- Exposes `ReportFailure()` and `ReportSuccess()` for subsystems to call after HTTP requests
+- Exposes `ReportFailure(tag string)` and `ReportSuccess(tag string)` for subsystems to call after HTTP requests
 - Called from shared HTTP utilities (`utils.FetchBody`, `utils.FetchWithTimeout`) and segment fetch code (`engine.fetchSegment`, `engine.fetchChunkWithRetry`)
+- **Critical distinction:** `ReportFailure` is called ONLY on network-level failures (connection refused, DNS error, timeout, TLS handshake error — i.e., no HTTP response received). Any HTTP response (even 4xx/5xx) means the server was reached and should call `ReportSuccess`. A 429 rate limit or 500 server error proves connectivity is working — only the absence of any response indicates a potential outage.
 - Tracks failure counts within a 30-second rolling window
 - Callers identify themselves with a string tag (e.g., `"engine/fetch"`, `"utils/http"`, `"monitor/feed"`) so the monitor can distinguish correlated failures across subsystems from repeated failures within a single subsystem
 - Two trigger paths:
   - Windows API says offline → offline (after debounce)
-  - Windows API says online BUT 5+ failures from 2+ distinct caller tags with zero successes in the 30s window → also offline (handles "connected to WiFi but no internet" edge case)
+  - Windows API says online BUT 5+ network-level failures from 2+ distinct caller tags with zero successes in the 30s window → also offline (handles "connected to WiFi but no internet" edge case)
 - Handles edge case where Windows reports "connected" but traffic can't actually flow
 
 **State transition logic:**
