@@ -18,7 +18,7 @@ Moombox has no way to distinguish between "the internet is down" and "the stream
 ## Non-Goals
 
 - Linux/Mac support (Windows-only, per project constraints)
-- Freezing download goroutines (keep retry loops running, just suppress conclusions)
+- Freezing YouTube download goroutines (keep retry loops running, just suppress conclusions — Twitch is the exception: bail immediately since segments are ephemeral)
 - Catch-up burst polling on recovery (single immediate poll per monitor is sufficient)
 - Distinguishing between partial connectivity scenarios (e.g., can reach YouTube but not Twitch)
 
@@ -60,9 +60,10 @@ type Monitor struct {
 - Exposes `ReportFailure()` and `ReportSuccess()` for subsystems to call after HTTP requests
 - Called from shared HTTP utilities (`utils.FetchBody`, `utils.FetchWithTimeout`) and segment fetch code (`engine.fetchSegment`, `engine.fetchChunkWithRetry`)
 - Tracks failure counts within a 30-second rolling window
+- Callers identify themselves with a string tag (e.g., `"engine/fetch"`, `"utils/http"`, `"monitor/feed"`) so the monitor can distinguish correlated failures across subsystems from repeated failures within a single subsystem
 - Two trigger paths:
   - Windows API says offline → offline (after debounce)
-  - Windows API says online BUT 5+ failures from 2+ distinct callers with zero successes in the 30s window → also offline (handles "connected to WiFi but no internet" edge case)
+  - Windows API says online BUT 5+ failures from 2+ distinct caller tags with zero successes in the 30s window → also offline (handles "connected to WiFi but no internet" edge case)
 - Handles edge case where Windows reports "connected" but traffic can't actually flow
 
 **State transition logic:**
@@ -86,6 +87,8 @@ IsOnline func() bool // Returns false if device has no internet connectivity
 
 YouTube streams are resumable — segments are available from CDN for the full duration. Waiting is the right strategy.
 
+**Counter reset on recovery:** When the connectivity wait loop exits (online again), reset all threshold counters that triggered the wait (consecutive gone errors, consecutive fetch errors, stale iteration count, no-segment timer, backoff delay). The errors were caused by connectivity, not the stream — starting fresh avoids immediately re-triggering the same threshold. If the stream actually ended during the outage, `CheckStreamStatus` will detect it on the next cycle (since it can now reach YouTube).
+
 **Behavior — Twitch (HLS):** Twitch HLS has no resume capability — segments are ephemeral. When offline is detected during a Twitch download:
 
 1. **Bail immediately** — the downloader returns promptly (no extended retries while offline)
@@ -93,7 +96,7 @@ YouTube streams are resumable — segments are available from CDN for the full d
 3. **Finalize the job** — job transitions to Muxing → Finished with whatever was captured
 4. **Auto-recovery** — when connectivity returns, the Twitch monitor's `CheckNow()` (fired by `OnStateChange`) re-detects the stream and creates a new job if still live
 
-Implementation: the Twitch orchestrator registers its own `OnStateChange` callback when a download starts (deregisters on finish). The callback cancels the download-specific context, causing the HLS downloader to return immediately. The orchestrator then checks `IsOnline()` — if false, it follows the mux-and-finalize path instead of the normal error/shutdown path.
+Implementation: the download worker receives an `OnConnectivityChange func(fn func(online bool)) (unregister func())` callback (wired from `connMon.OnStateChange` in main.go). The Twitch orchestrator calls it when a download starts, registering a callback that cancels the download-specific context when transitioning to offline. The returned unregister func is deferred to clean up when the download finishes. The orchestrator then checks `IsOnline()` — if false, it follows the mux-and-finalize path instead of the normal error/shutdown path.
 
 To distinguish connectivity cancellation from user cancellation or shutdown: when the context is cancelled AND `IsOnline()` is false, treat as connectivity loss. When cancelled AND online, treat as shutdown/user cancel (existing behavior — preserve staging dir).
 
