@@ -437,6 +437,11 @@ func (hub *WebSocketHub) BroadcastCheckTimers(data any) {
 	hub.Broadcast("check_timers", data)
 }
 
+// BroadcastConnectivity sends connectivity state to all clients.
+func (hub *WebSocketHub) BroadcastConnectivity(online bool) {
+	hub.Broadcast("connectivity", map[string]any{"online": online})
+}
+
 // BroadcastLog sends a log line to all clients and stores in buffer.
 func (hub *WebSocketHub) BroadcastLog(line string) {
 	// Truncate very long log lines to prevent buffer bloat

@@ -39,6 +39,23 @@ a:hover {
     text-decoration: underline;
 }
 
+/* Connectivity banner */
+.connectivity-banner {
+    display: none;
+    background: var(--sl-color-warning-600);
+    color: white;
+    text-align: center;
+    padding: 6px 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+.connectivity-banner.show {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+
 /* Tab styling */
 sl-tab-group {
     flex: 1;

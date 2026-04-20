@@ -902,6 +902,9 @@ class MoomboxApp {
         this.renderJobs();
         this.renderLogs();
         this.updateCheckCountdown();
+        if (p.connectivity !== undefined) {
+          this.handleConnectivityChange({ online: p.connectivity });
+        }
         // Refresh details dialog if open — data may have changed during disconnect
         if (this.selectedJobId) {
           const job = this.jobs.find((j) => j.id === this.selectedJobId);
@@ -987,9 +990,23 @@ class MoomboxApp {
         this.updateVersionIndicator();
         break;
 
+      case "connectivity":
+        this.handleConnectivityChange(p);
+        break;
+
       case "pong":
         this._lastPong = Date.now();
         break;
+    }
+  }
+
+  handleConnectivityChange(payload) {
+    const banner = document.getElementById("connectivity-banner");
+    if (!banner) return;
+    if (payload.online) {
+      banner.classList.remove("show");
+    } else {
+      banner.classList.add("show");
     }
   }
 
