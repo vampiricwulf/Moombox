@@ -44,13 +44,21 @@
 
 ---
 
-### Task 1: ConnectivityMonitor Core
+### Task 1: ConnectivityMonitor Core + Passive Tracker
 
 **Files:**
+- Create: `internal/connectivity/passive.go`
+- Create: `internal/connectivity/passive_test.go`
 - Create: `internal/connectivity/monitor.go`
 - Create: `internal/connectivity/monitor_test.go`
 
-- [ ] **Step 1: Write test for Monitor defaults and IsOnline**
+**Note:** passive.go must be created first — monitor.go depends on `NewPassiveTracker()`.
+
+- [ ] **Step 1: Create passive.go first (monitor.go depends on it)**
+
+Write `internal/connectivity/passive.go` with the `PassiveTracker` implementation (see Task 2 for the full code — it must exist before monitor.go can compile).
+
+- [ ] **Step 2: Write test for Monitor defaults and IsOnline**
 
 ```go
 // internal/connectivity/monitor_test.go
@@ -134,12 +142,12 @@ func TestMonitor_OnStateChange_Unregister(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
 Run: `cd D:/Git/Moombox && go test ./internal/connectivity/...`
-Expected: compilation failure — package doesn't exist yet
+Expected: compilation failure — Monitor types not defined yet
 
-- [ ] **Step 3: Write the Monitor implementation**
+- [ ] **Step 4: Write the Monitor implementation**
 
 ```go
 // internal/connectivity/monitor.go
@@ -340,25 +348,26 @@ func checkInternetConnected() bool {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cd D:/Git/Moombox && go test ./internal/connectivity/... -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit monitor core**
 
 ```bash
 git add internal/connectivity/
-git commit -m "feat(connectivity): add ConnectivityMonitor with Windows API polling"
+git commit -m "feat(connectivity): add ConnectivityMonitor with Windows API polling and passive tracker"
 ```
 
 ---
 
-### Task 2: Passive Failure Tracker
+### Task 2: Passive Tracker Tests
 
 **Files:**
-- Create: `internal/connectivity/passive.go`
-- Create: `internal/connectivity/passive_test.go`
+- Modify: `internal/connectivity/passive_test.go` (add comprehensive tests)
+
+These tests validate the passive tracker that was created as part of Task 1.
 
 - [ ] **Step 1: Write tests for PassiveTracker**
 
@@ -1033,6 +1042,10 @@ if ctx.Err() != nil {
 		if twitchChatDl != nil {
 			twitchChatDl.Stop()
 		}
+		// IMPORTANT: The muxing code below must use context.Background() instead
+		// of ctx (which is now cancelled). The data is already downloaded locally —
+		// FFmpeg doesn't need internet. Follow the same pattern as the quality split
+		// path (line ~370 in the existing code: o.muxSegment(context.Background(), ...)).
 		// Fall through to muxing logic below (don't return)
 	} else {
 		// Shutdown/user cancel: preserve staging dir for resume
