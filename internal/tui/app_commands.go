@@ -471,3 +471,11 @@ func (a *App) QuitTUI() {
 		a.program.Quit()
 	}
 }
+
+// Send delivers an external message into the TUI's Update loop.
+// Safe to call from any goroutine. No-op if the program hasn't started yet.
+func (a *App) Send(msg tea.Msg) {
+	if a.program != nil {
+		a.program.Send(msg)
+	}
+}

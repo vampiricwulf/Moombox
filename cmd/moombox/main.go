@@ -26,6 +26,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/connectivity"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/logger"
@@ -228,6 +229,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// No defer db.Close() here to avoid double-close.
 
 	// =========================================================================
+	// 3b. Connectivity monitor
+	// =========================================================================
+	connMon := connectivity.NewMonitor(log)
+	connMon.Start(ctx)
+	defer connMon.Stop()
+
+	// =========================================================================
 	// 4. Load cookies
 	// =========================================================================
 	if !useTUI {
@@ -305,10 +313,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// 10. Download worker
 	// =========================================================================
 	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
-		CipherSolver:  cipherSolver,
-		PotProvider:   potProvider,
-		TwitchService: twService,
-		Notifier:      notifyMgr,
+		CipherSolver:         cipherSolver,
+		PotProvider:          potProvider,
+		TwitchService:        twService,
+		Notifier:             notifyMgr,
+		IsOnline:             connMon.IsOnline,
+		OnConnectivityChange: connMon.OnStateChange,
 	})
 
 	// =========================================================================
@@ -333,6 +343,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// 14. Twitch monitor
 	// =========================================================================
 	twitchMon := monitor.NewTwitchMonitor(cfg, db, twService, log)
+
+	// Wire connectivity to monitors so they skip polls when offline
+	feedMon.IsOnline = connMon.IsOnline
+	decapiMon.IsOnline = connMon.IsOnline
+	twitchMon.IsOnline = connMon.IsOnline
 
 	// =========================================================================
 	// 15. Cookie refresh service
@@ -676,6 +691,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			"nextFeedCheck":    feedMon.GetNextCheckAt(),
 			"nextDecapiCheck":  decapiMon.GetNextCheckAt(),
 			"nextTwitchCheck":  twitchMon.GetNextCheckAt(),
+			"connectivity":    connMon.IsOnline(),
 		}
 	}
 
@@ -956,6 +972,16 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			db.RouteLogToJobs(line) // Route to per-job buffer (matches TS knownJobIds log routing)
 		}
 	}()
+
+	// Connectivity -> monitors + WebSocket: kick monitors on reconnect, broadcast state
+	connMon.OnStateChange(func(online bool) {
+		if online {
+			feedMon.CheckNow()
+			decapiMon.CheckNow()
+			twitchMon.CheckNow()
+		}
+		wsHub.BroadcastConnectivity(online)
+	})
 
 	// =========================================================================
 	// Start services (consumers first)
@@ -1649,6 +1675,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			}
 		}
 
+		// Wire connectivity state to TUI (uses program.Send, not a channel)
+		unsubConnTUI := connMon.OnStateChange(func(online bool) {
+			app.Send(tui.ConnectivityMsg{Online: online})
+		})
+
 		// Suppress stdout logging while TUI runs — BubbleTea owns the
 		// alternate screen, and raw log writes corrupt the display.
 		// The TUI log panel receives logs via Subscribe() instead.
@@ -1668,6 +1699,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		log.Unsubscribe(tuiLogSub)
 		unsubTUIJobUpdate()
 		unsubTUIJobsChange()
+		unsubConnTUI()
 
 		// Report dropped messages (helps diagnose missed TUI updates)
 		if n := tuiDroppedJobs.Load(); n > 0 {

@@ -122,6 +122,9 @@ func NewDownloadWorker(
 	if nm != nil {
 		sp.SetNotifier(nm)
 	}
+	if deps != nil && deps.IsOnline != nil {
+		sp.SetIsOnline(deps.IsOnline)
+	}
 
 	return &DownloadWorker{
 		db:           db,
