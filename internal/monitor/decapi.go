@@ -392,21 +392,10 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 		title = body[:idx]
 	}
 
-	// Compare with last known video
-	lastVideo, _ := dm.db.GetLastVideo(ch.ID)
-	if videoID == lastVideo {
-		return nil // No change
-	}
-
-	// Update last video
+	// Update last video tracking
 	dm.db.SetLastVideo(ch.ID, videoID)
 
-	// Check if already processed
-	if processed, _ := dm.db.HasProcessed(videoID); processed {
-		return nil
-	}
-
-	// Check if active job exists
+	// Skip if active job exists (but not if merely finished — stream may restart on same URL)
 	if active, _ := dm.db.HasActiveJob(videoID); active {
 		return nil
 	}

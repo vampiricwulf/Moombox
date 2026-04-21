@@ -321,12 +321,7 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 			continue
 		}
 
-		// Skip if already processed
-		if processed, _ := fm.db.HasProcessed(videoID); processed {
-			continue
-		}
-
-		// Skip if active job exists
+		// Skip if active job exists (but not if merely finished — stream may restart on same URL)
 		if active, _ := fm.db.HasActiveJob(videoID); active {
 			continue
 		}
