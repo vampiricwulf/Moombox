@@ -97,6 +97,7 @@ type ProcessYouTubeVideoParams struct {
 	ProbeVideo VideoProbeFunc
 	AddToHistory func(videoID string) error
 	Tracker  *MetadataFailureTracker
+	IsReprobe bool // true if re-checking a previously processed video (logs demoted to Debug)
 	Logger   interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -145,33 +146,39 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 	// Clear failure counter on success
 	p.Tracker.ClearFailure(p.VideoID)
 
-	// Classify stream status
+	// Classify stream status (demote to Debug for re-probes of finished videos)
+	logInfo := p.Logger.Info
+	if p.IsReprobe {
+		logInfo = p.Logger.Debug
+	}
+
 	switch meta.StreamStatus {
 	case "not_a_stream":
-		if !includeNonLive {
-			p.Logger.Info(fmt.Sprintf("[Monitor] Skipping non-stream content: %s (%s)", p.Title, p.VideoID))
+		if !includeNonLive || p.IsReprobe {
+			logInfo(fmt.Sprintf("[Monitor] Skipping non-stream content: %s (%s)", p.Title, p.VideoID))
 			if p.AddToHistory != nil {
 				p.AddToHistory(p.VideoID)
 			}
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
 		}
-		p.Logger.Info(fmt.Sprintf("[Monitor] Including non-stream content (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
+		logInfo(fmt.Sprintf("[Monitor] Including non-stream content (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
 
 	case "upcoming":
-		p.Logger.Info(fmt.Sprintf("[Monitor] Found upcoming stream/premiere: %s (%s) - will monitor", p.Title, p.VideoID))
+		logInfo(fmt.Sprintf("[Monitor] Found upcoming stream/premiere: %s (%s) - will monitor", p.Title, p.VideoID))
 
 	case "live":
+		// Always INFO for live — this is actionable even on re-probe
 		p.Logger.Info(fmt.Sprintf("[Monitor] Found LIVE stream/premiere: %s (%s) - queuing for download", p.Title, p.VideoID))
 
 	case "post_live", "vod":
-		if !includeNonLive {
-			p.Logger.Info(fmt.Sprintf("[Monitor] Skipping ended stream (%s): %s (%s)", meta.StreamStatus, p.Title, p.VideoID))
+		if !includeNonLive || p.IsReprobe {
+			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (%s): %s (%s)", meta.StreamStatus, p.Title, p.VideoID))
 			if p.AddToHistory != nil {
 				p.AddToHistory(p.VideoID)
 			}
 			return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
 		}
-		p.Logger.Info(fmt.Sprintf("[Monitor] Including ended stream (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
+		logInfo(fmt.Sprintf("[Monitor] Including ended stream (include_non_live_content=true): %s (%s)", p.Title, p.VideoID))
 	}
 
 	p.Logger.Debug(fmt.Sprintf("[Monitor] Video %s classified as: %s", p.VideoID, meta.StreamStatus))

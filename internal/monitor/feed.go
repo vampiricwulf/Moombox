@@ -354,10 +354,20 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 			continue
 		}
 
-		fm.logger.Info("feed match found",
-			"videoID", videoID,
-			"title", title,
-			"channel", ch.Name)
+		// Check if this is a re-probe of a previously processed video
+		reprobe, _ := fm.db.HasProcessed(videoID)
+
+		if reprobe {
+			fm.logger.Debug("feed match found (re-probe)",
+				"videoID", videoID,
+				"title", title,
+				"channel", ch.Name)
+		} else {
+			fm.logger.Info("feed match found",
+				"videoID", videoID,
+				"title", title,
+				"channel", ch.Name)
+		}
 
 		// Probe video metadata to classify stream status before creating job
 		result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
@@ -367,6 +377,7 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 			ProbeVideo:   fm.ProbeVideo,
 			AddToHistory: func(id string) error { return fm.db.AddToHistory(id) },
 			Tracker:      fm.MetadataTracker,
+			IsReprobe:    reprobe,
 			Logger:       fm.logger,
 		})
 		if !result.ShouldProcess {

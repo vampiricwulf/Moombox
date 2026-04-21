@@ -407,10 +407,20 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 
 	videoURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
 
-	dm.logger.Info("decapi match found",
-		"videoID", videoID,
-		"title", title,
-		"channel", ch.Name)
+	// Check if this is a re-probe of a previously processed video
+	reprobe, _ := dm.db.HasProcessed(videoID)
+
+	if reprobe {
+		dm.logger.Debug("decapi match found (re-probe)",
+			"videoID", videoID,
+			"title", title,
+			"channel", ch.Name)
+	} else {
+		dm.logger.Info("decapi match found",
+			"videoID", videoID,
+			"title", title,
+			"channel", ch.Name)
+	}
 
 	// Probe video metadata to classify stream status before creating job
 	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
@@ -420,6 +430,7 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 		ProbeVideo:   dm.ProbeVideo,
 		AddToHistory: func(id string) error { return dm.db.AddToHistory(id) },
 		Tracker:      dm.MetadataTracker,
+		IsReprobe:    reprobe,
 		Logger:       dm.logger,
 	})
 	if !result.ShouldProcess {
