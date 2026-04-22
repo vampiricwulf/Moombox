@@ -2,7 +2,12 @@ package web
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 func TestExtractIP(t *testing.T) {
@@ -338,6 +343,203 @@ func TestIsLoopbackRequest(t *testing.T) {
 			if result != tt.expected {
 				t.Errorf("IsLoopbackRequest(RemoteAddr=%q) = %v, expected %v",
 					tt.remoteAddr, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestCSRFMiddleware exercises the tightened CSRF policy (audit web.md C-1/C-5/C-8).
+// Mutating requests must present an allowed Origin/Referer OR the in-process
+// internal token; missing Origin on loopback no longer passes.
+func TestCSRFMiddleware(t *testing.T) {
+	const internalToken = "test-internal-token"
+
+	makeCfg := func(networkAccess string) (*config.MoomboxConfig, *sync.RWMutex) {
+		cfg := &config.MoomboxConfig{
+			Network: config.NetworkConfig{NetworkAccess: networkAccess},
+		}
+		return cfg, &sync.RWMutex{}
+	}
+
+	makeRequest := func(method, path string, headers map[string]string) *http.Request {
+		r := httptest.NewRequest(method, path, strings.NewReader(""))
+		for k, v := range headers {
+			r.Header.Set(k, v)
+		}
+		return r
+	}
+
+	passHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	tests := []struct {
+		name           string
+		networkAccess  string
+		method         string
+		path           string
+		headers        map[string]string
+		wantStatus     int
+		wantReasonSub  string // substring expected in body on reject
+	}{
+		{
+			name:          "GET passes without Origin",
+			networkAccess: "localhost",
+			method:        http.MethodGet,
+			path:          "/api/jobs",
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "HEAD passes without Origin",
+			networkAccess: "localhost",
+			method:        http.MethodHead,
+			path:          "/api/jobs",
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "POT /get_pot exempt from CSRF",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/get_pot",
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "POT /invalidate_caches exempt",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/invalidate_caches",
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "InternalToken header bypasses CSRF on mutating request",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/restart",
+			headers:       map[string]string{InternalTokenHeader: internalToken},
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "Wrong InternalToken falls back to Origin check; missing Origin rejected",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/restart",
+			headers:       map[string]string{InternalTokenHeader: "wrong-token"},
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+		{
+			name:          "POST without Origin on localhost rejected (tightened policy)",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/jobs",
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+		{
+			name:          "PUT without Origin on localhost rejected",
+			networkAccess: "localhost",
+			method:        http.MethodPut,
+			path:          "/api/config",
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+		{
+			name:          "DELETE without Origin on localhost rejected",
+			networkAccess: "localhost",
+			method:        http.MethodDelete,
+			path:          "/api/jobs/abc",
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+		{
+			name:          "POST with allowed localhost Origin passes",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/jobs",
+			headers:       map[string]string{"Origin": "http://localhost:774"},
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "POST with 127.0.0.1 Origin passes",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/jobs",
+			headers:       map[string]string{"Origin": "http://127.0.0.1:774"},
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "POST with evil.com Origin rejected on localhost",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/jobs",
+			headers:       map[string]string{"Origin": "http://evil.com"},
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "invalid origin",
+		},
+		{
+			name:          "POST with Referer works when Origin absent",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/jobs",
+			headers:       map[string]string{"Referer": "http://localhost:774/"},
+			wantStatus:    http.StatusNoContent,
+		},
+		{
+			name:          "POST without Origin on LAN rejected (no loopback bypass)",
+			networkAccess: "lan",
+			method:        http.MethodPost,
+			path:          "/api/jobs",
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+		{
+			name:          "POST without Origin on external rejected",
+			networkAccess: "external",
+			method:        http.MethodPost,
+			path:          "/api/jobs",
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+		{
+			name:          "POST /api/restart without Origin rejected (closes audit C-1)",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/restart",
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+		{
+			name:          "POST /api/auth/set-password without Origin rejected (closes audit C-5)",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/auth/set-password",
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+		{
+			name:          "POST /api/jobs/abc/open-folder without Origin rejected (closes audit C-8)",
+			networkAccess: "localhost",
+			method:        http.MethodPost,
+			path:          "/api/jobs/abc/open-folder",
+			wantStatus:    http.StatusForbidden,
+			wantReasonSub: "missing origin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, mu := makeCfg(tt.networkAccess)
+			mw := CSRFMiddleware(cfg, mu, internalToken)
+			handler := mw(passHandler)
+
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, makeRequest(tt.method, tt.path, tt.headers))
+
+			if rr.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d (body: %q)", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			if tt.wantReasonSub != "" && !strings.Contains(rr.Body.String(), tt.wantReasonSub) {
+				t.Errorf("body %q does not contain %q", rr.Body.String(), tt.wantReasonSub)
 			}
 		})
 	}

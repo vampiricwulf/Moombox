@@ -79,10 +79,8 @@ The middleware chain is applied in `NewServer()` in `internal/web/server.go`. Th
 1. **Safe methods pass through.** GET, HEAD, and OPTIONS requests are never subject to CSRF validation.
 2. **Loopback-only routes are exempt.** The paths `/get_pot`, `/invalidate_caches`, and `/invalidate_it` are called by external Python scripts (yt-dlp) that do not send Origin/Referer headers. These routes are already protected by `LoopbackOnly` middleware at the route level, so CSRF protection is redundant.
 3. **Internal token bypass.** If the request includes an `X-Internal-Token` header whose value matches the server's startup-generated token (compared with `crypto/subtle.ConstantTimeCompare`), the request passes through. This is safe because browsers cannot set custom headers on cross-origin requests without a CORS preflight, which the server does not grant to untrusted origins.
-4. **Origin/Referer validation.** If an `Origin` or `Referer` header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`.
-5. **Missing Origin/Referer handling.** If no Origin or Referer header is present and no internal token is provided:
-   - If `network_access` is `external` or `public` AND a password is configured: reject with `403 Forbidden: missing origin`. This prevents CSRF via form submissions that omit the Origin header.
-   - Otherwise (localhost or LAN access): allow the request, since IP gating and the auth middleware provide sufficient protection for local networks.
+4. **Origin/Referer required on mutating requests.** Any POST/PUT/DELETE (and other mutating method) must present either an allowed `Origin`/`Referer` header or the internal token. If neither is present, the request is rejected with `403 Forbidden: missing origin` regardless of `network_access`. Previously localhost / LAN access bypassed this check, but that allowed any local process or same-origin browser tab to call state-changing endpoints (`/api/restart`, `/api/auth/set-password`, `/api/jobs/{id}/open-folder`) without browser context. Non-browser local CLIs should set `Origin: http://localhost:<port>` or supply the internal token.
+5. **Origin/Referer validation.** When a header is present, it is validated against the `network_access` config using `isAllowedOrigin`. If the origin is not allowed, the request is rejected with `403 Forbidden: invalid origin`.
 
 **Source:** `CSRFMiddleware` in `internal/web/middleware.go`.
 

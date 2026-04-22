@@ -84,6 +84,19 @@ func SecurityHeaders(next http.Handler) http.Handler {
 
 // CSRFMiddleware validates Origin/Referer headers on mutating requests.
 // Same-process clients (TUI) bypass CSRF by sending the internal token.
+//
+// Policy (tightened per audit reports/web.md C-1/C-5/C-8): every mutating
+// request must present either (a) the in-process InternalToken, or
+// (b) an Origin/Referer header that matches the configured network_access
+// policy. The previous "missing Origin OK on loopback" bypass allowed any
+// local process or same-origin browser tab on default-config installs to
+// issue POST /api/restart, PUT /api/auth/set-password, etc. without proof
+// of browser context.
+//
+// Legitimate browser fetches always set Origin on cross-origin OR
+// same-origin mutating requests (Fetch spec). Non-browser local CLIs
+// (e.g. `moombox add`) should set Origin to the server's base URL or use
+// the InternalToken.
 func CSRFMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, internalToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +127,6 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, internalToke
 
 			cfgMu.RLock()
 			networkAccess := cfg.Network.NetworkAccess
-			passwordHash := cfg.Network.PasswordHash
 			cfgMu.RUnlock()
 
 			origin := r.Header.Get("Origin")
@@ -122,26 +134,20 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, internalToke
 				origin = r.Header.Get("Referer")
 			}
 
-			// If Origin/Referer present, validate it
-			if origin != "" {
-				if !isAllowedOrigin(origin, networkAccess) {
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusForbidden)
-					w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))
-					return
-				}
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// No Origin/Referer and no internal token: reject when external
-			// access with auth is enabled (prevents CSRF from form submissions
-			// that omit Origin). Local/LAN access is safe since IP gate +
-			// auth middleware provide sufficient protection.
-			if (networkAccess == "external" || networkAccess == "public") && passwordHash != "" {
+			// Mutating requests must present a recognizable Origin or Referer.
+			// This replaces the previous loopback bypass that let any local
+			// process call state-changing endpoints without browser context.
+			if origin == "" {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"Forbidden: missing origin"}`))
+				return
+			}
+
+			if !isAllowedOrigin(origin, networkAccess) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden: invalid origin"}`))
 				return
 			}
 
