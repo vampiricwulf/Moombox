@@ -333,6 +333,18 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 		"contentPlaybackContext": pbCtx,
 	}
 
+	// Inject PO token (serviceIntegrityDimensions.poToken) for WEB-family clients.
+	// Failure is non-fatal — the request still runs without it; PLAYER_PO_TOKEN_POLICY
+	// is not yet required upstream, but supplying a token is future-proof and matches
+	// yt-dlp's behaviour.
+	if p.potProvider != nil && clientAcceptsPlayerPoToken(client) && ytcfg != nil && ytcfg.VisitorData != "" {
+		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, ytcfg.VisitorData, false); err == nil && poToken != "" {
+			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
+		} else if err != nil {
+			p.logger.Debug("[PlayerApi] PO token generation failed, continuing without", slog.String("client", client.ClientName), slog.String("error", err.Error()))
+		}
+	}
+
 	body, err := json.Marshal(postData)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request body: %w", err)
@@ -428,6 +440,15 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 	}
 	postData["playbackContext"] = map[string]any{
 		"contentPlaybackContext": pbCtx,
+	}
+
+	// Inject PO token for WEB_EMBEDDED (same rationale as fetchWithClient).
+	if p.potProvider != nil && ytcfg != nil && ytcfg.VisitorData != "" {
+		if poToken, err := p.potProvider.GeneratePoTokenString(ctx, ytcfg.VisitorData, false); err == nil && poToken != "" {
+			postData["serviceIntegrityDimensions"] = map[string]any{"poToken": poToken}
+		} else if err != nil {
+			p.logger.Debug("[PlayerApi] PO token generation failed for WEB_EMBEDDED, continuing without", slog.String("error", err.Error()))
+		}
 	}
 
 	body, err := json.Marshal(postData)

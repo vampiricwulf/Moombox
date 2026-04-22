@@ -308,6 +308,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		ytService.PlayerAPI.SetCipherSolver(cipherSolver)
 	}
 
+	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
+	ytService.PlayerAPI.SetPotProvider(potProvider)
+
 	// =========================================================================
 	// 9. Notification manager
 	// =========================================================================
