@@ -171,28 +171,6 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 	return jobs, nil
 }
 
-// UpdateJob queues a job update for batch writing.
-func (db *Database) UpdateJob(job *Job) {
-	job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	select {
-	case db.updateCh <- job:
-	default:
-		// Channel full, do synchronous update
-		db.mu.Lock()
-		err := updateJobExec(db.getCtx(), db.db, job)
-		db.mu.Unlock()
-
-		if err != nil {
-			if db.logger != nil {
-				db.logger.Error("database sync update fallback failed", "jobID", job.ID, "err", err)
-			}
-		} else {
-			// Notify subscribers (batch path does this in flushUpdates)
-			db.notifyJobUpdate(job)
-		}
-	}
-}
-
 // UpdateJobSync synchronously updates a job in the database.
 func (db *Database) UpdateJobSync(job *Job) error {
 	db.mu.Lock()

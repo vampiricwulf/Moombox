@@ -77,10 +77,6 @@ type Database struct {
 	closeOnce sync.Once
 	logger    dbLogger
 
-	// Batch update coalescing
-	updateCh  chan *Job
-	batchDone chan struct{}
-
 	// Pub/sub
 	onJobUpdate  []jobUpdateSub
 	onJobsChange []jobsChangeSub
@@ -117,10 +113,8 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 	sqlDB.SetMaxIdleConns(1)
 
 	db := &Database{
-		db:        sqlDB,
-		updateCh:  make(chan *Job, 100),
-		batchDone: make(chan struct{}),
-		jobLogs:   make(map[string][]string),
+		db:      sqlDB,
+		jobLogs: make(map[string][]string),
 	}
 	if len(logger) > 0 && logger[0] != nil {
 		db.logger = logger[0]
@@ -137,9 +131,6 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("failed to prepare statements: %w", err)
 	}
-
-	// Start batch update goroutine
-	go db.batchUpdateLoop()
 
 	return db, nil
 }
@@ -165,15 +156,11 @@ func (db *Database) prepareStatements() error {
 	return nil
 }
 
-// Close flushes pending updates and closes the database.
+// Close closes the database.
 // Safe to call concurrently — only the first call performs cleanup.
 func (db *Database) Close() error {
 	var closeErr error
 	db.closeOnce.Do(func() {
-		// Close update channel and wait for batch loop to finish
-		close(db.updateCh)
-		<-db.batchDone
-
 		if db.stmtGetJob != nil {
 			db.stmtGetJob.Close()
 		}
