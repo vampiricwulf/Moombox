@@ -26,6 +26,12 @@
 # tls_cert_path = "./moombox.crt"
 # tls_key_path = "./moombox.key"
 
+# Lifetime of the "remember me" client token cookie, in days.
+# Defaults to 365 (1 year). Range: 1 to 3650 (~10 years). Shorter values
+# reduce blast radius of a leaked cookie; longer values reduce re-login
+# friction for personal-use setups.
+# client_token_ttl_days = 365
+
 # ─── Paths ────────────────────────────────────────────────────────────────────
 [paths]
 

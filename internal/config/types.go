@@ -21,12 +21,13 @@ type MoomboxConfig struct {
 
 // NetworkConfig holds server and network access settings.
 type NetworkConfig struct {
-	Port          int    `toml:"port" json:"port"`
-	NetworkAccess string `toml:"network_access" json:"network_access"`
-	HTTPSEnabled  bool   `toml:"https_enabled" json:"https_enabled"`
-	TLSCertPath   string `toml:"tls_cert_path,omitempty" json:"tls_cert_path,omitempty"`
-	TLSKeyPath    string `toml:"tls_key_path,omitempty" json:"tls_key_path,omitempty"`
-	PasswordHash  string `toml:"password_hash,omitempty" json:"-"`
+	Port               int    `toml:"port" json:"port"`
+	NetworkAccess      string `toml:"network_access" json:"network_access"`
+	HTTPSEnabled       bool   `toml:"https_enabled" json:"https_enabled"`
+	TLSCertPath        string `toml:"tls_cert_path,omitempty" json:"tls_cert_path,omitempty"`
+	TLSKeyPath         string `toml:"tls_key_path,omitempty" json:"tls_key_path,omitempty"`
+	PasswordHash       string `toml:"password_hash,omitempty" json:"-"`
+	ClientTokenTTLDays int    `toml:"client_token_ttl_days,omitempty" json:"client_token_ttl_days,omitempty"`
 }
 
 // PathsConfig holds file and directory path settings.

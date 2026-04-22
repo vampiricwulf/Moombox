@@ -15,8 +15,9 @@ import (
 func Defaults() *MoomboxConfig {
 	return &MoomboxConfig{
 		Network: NetworkConfig{
-			Port:          774,
-			NetworkAccess: "localhost",
+			Port:               774,
+			NetworkAccess:      "localhost",
+			ClientTokenTTLDays: 365,
 		},
 		Paths: PathsConfig{
 			DatabasePath:     "./moombox.db",
@@ -324,6 +325,10 @@ func validate(cfg *MoomboxConfig) {
 	}
 	if cfg.Network.NetworkAccess != "localhost" && cfg.Network.NetworkAccess != "lan" && cfg.Network.NetworkAccess != "external" {
 		cfg.Network.NetworkAccess = defaults.Network.NetworkAccess
+	}
+	// ClientTokenTTLDays: 1 day to 10 years. Default to 365d (1y) if unset or out of range.
+	if cfg.Network.ClientTokenTTLDays <= 0 || cfg.Network.ClientTokenTTLDays > 3650 {
+		cfg.Network.ClientTokenTTLDays = defaults.Network.ClientTokenTTLDays
 	}
 	switch strings.ToUpper(cfg.Logs.LogLevel) {
 	case "DEBUG", "INFO", "WARN", "ERROR":

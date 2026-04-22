@@ -126,7 +126,10 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, cfgMu *sync.RWMutex) {
 						LastIP:      web.ExtractIP(req),
 					}
 					if err := deps.DB.AddClientToken(ct); err == nil {
-						setClientCookie(rw, req, rawToken)
+						cfgMu.RLock()
+						ttlDays := deps.Cfg.Network.ClientTokenTTLDays
+						cfgMu.RUnlock()
+						setClientCookie(rw, req, rawToken, ttlDays)
 					}
 				}
 			}
@@ -374,12 +377,16 @@ func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func setClientCookie(w http.ResponseWriter, r *http.Request, rawToken string) {
+func setClientCookie(w http.ResponseWriter, r *http.Request, rawToken string, ttlDays int) {
+	if ttlDays <= 0 {
+		ttlDays = 365 // mirror config default: 1 year
+	}
+	maxAge := ttlDays * 86400
 	http.SetCookie(w, &http.Cookie{
 		Name:     "moombox_client",
 		Value:    rawToken,
 		Path:     "/",
-		MaxAge:   315360000, // ~10 years
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,

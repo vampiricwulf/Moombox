@@ -246,6 +246,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		if v, ok := net["tls_key_path"].(string); ok {
 			cfg.Network.TLSKeyPath = v
 		}
+		if v, ok := net["client_token_ttl_days"].(float64); ok {
+			cfg.Network.ClientTokenTTLDays = int(v)
+		}
 	}
 
 	// Paths sub-fields

@@ -34,6 +34,37 @@ func TestDefaults(t *testing.T) {
 	if cfg.Cookies.CookieFile != "./cookies.txt" {
 		t.Errorf("expected ./cookies.txt, got %s", cfg.Cookies.CookieFile)
 	}
+	if cfg.Network.ClientTokenTTLDays != 365 {
+		t.Errorf("expected ClientTokenTTLDays default 365, got %d", cfg.Network.ClientTokenTTLDays)
+	}
+}
+
+// TestValidateClientTokenTTL verifies range enforcement on the configurable
+// "remember me" cookie lifetime — reports/web.md Q3.
+func TestValidateClientTokenTTL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    int
+		expected int
+	}{
+		{"zero resets to default", 0, 365},
+		{"negative resets to default", -1, 365},
+		{"one day allowed", 1, 1},
+		{"365 allowed", 365, 365},
+		{"3650 allowed (max)", 3650, 3650},
+		{"over 3650 resets to default", 3651, 365},
+		{"very large resets to default", 1000000, 365},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Network.ClientTokenTTLDays = tt.input
+			validate(cfg)
+			if cfg.Network.ClientTokenTTLDays != tt.expected {
+				t.Errorf("validate(%d) → %d, want %d", tt.input, cfg.Network.ClientTokenTTLDays, tt.expected)
+			}
+		})
+	}
 }
 
 func TestLoadFromFile(t *testing.T) {
