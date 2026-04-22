@@ -3,6 +3,8 @@ package database
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -325,7 +327,7 @@ func TestUpdateJobFieldsInvalidKey(t *testing.T) {
 	}
 	db.AddJob(job)
 
-	// Invalid field name should be silently ignored
+	// Invalid field name should be ignored (with a Debug-level log) without affecting other updates.
 	db.UpdateJobFields("yt_invalid", map[string]any{
 		"nonexistent_field": "value",
 	})
@@ -935,4 +937,63 @@ func TestBatchSetWatched(t *testing.T) {
 	if !got3.Watched {
 		t.Error("yt_bw3: should still be watched (not in batch unwatched)")
 	}
+}
+
+// TestFieldToColumnCoverage asserts that every writable column on Job has an
+// entry in fieldToColumn. Drift here caused audit finding database.md C3 where
+// six fields (manually_added, allow_non_stream, selected_video_itag,
+// selected_audio_itag, start_time, end_time) were silently dropped by
+// UpdateJobFields.
+//
+// The excluded set covers fields that are either auto-managed (id, createdAt,
+// updatedAt), loaded via join (trims, gaps, segments), or intentionally
+// not-writable partially. Add here when a new column legitimately shouldn't go
+// through UpdateJobFields — don't just delete the map entry.
+func TestFieldToColumnCoverage(t *testing.T) {
+	excluded := map[string]bool{
+		"id":         true, // primary key, set at insert
+		"videoId":    true, // set at insert
+		"url":        true, // set at insert
+		"platform":   true, // set at insert
+		"createdAt":  true, // set at insert
+		"updatedAt":  true, // auto-managed by UpdateJobFields itself
+		"gaps":       true, // loaded via join
+		"trims":      true, // loaded via join
+		"segments":   true, // loaded via join
+	}
+
+	for field := range reflect.TypeFor[Job]().Fields() {
+		tag := field.Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		jsonName := strings.SplitN(tag, ",", 2)[0]
+		if jsonName == "" {
+			continue
+		}
+		if excluded[jsonName] {
+			continue
+		}
+		column := camelToSnake(jsonName)
+		if _, ok := fieldToColumn[column]; !ok {
+			t.Errorf("Job field %q (column %q) has no fieldToColumn entry — either add it to the map or to the excluded set in this test", jsonName, column)
+		}
+	}
+}
+
+// camelToSnake converts a camelCase identifier to snake_case. Used only by
+// TestFieldToColumnCoverage to bridge Job's JSON tags and the DB schema.
+func camelToSnake(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			b.WriteByte('_')
+		}
+		if r >= 'A' && r <= 'Z' {
+			b.WriteRune(r + ('a' - 'A'))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

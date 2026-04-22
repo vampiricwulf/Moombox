@@ -13,6 +13,9 @@ import (
 )
 
 // fieldToColumn maps UpdateJobFields key names to database column names.
+// Every column on `jobs` that callers should be able to write partially should
+// have an entry here. When adding a new column to the schema, add a matching
+// entry here (TestFieldToColumnCoverage keeps this honest).
 var fieldToColumn = map[string]string{
 	"status":              "status",
 	"progress":            "progress",
@@ -42,6 +45,8 @@ var fieldToColumn = map[string]string{
 	"thumbnail_file":      "thumbnail_file",
 	"description_file":    "description_file",
 	"is_vod":              "is_vod",
+	"manually_added":      "manually_added",
+	"allow_non_stream":    "allow_non_stream",
 	"video_width":         "video_width",
 	"video_height":        "video_height",
 	"video_fps":           "video_fps",
@@ -50,6 +55,10 @@ var fieldToColumn = map[string]string{
 	"twitch_quality":      "twitch_quality",
 	"twitch_category":     "twitch_category",
 	"channel_avatar_url":  "channel_avatar_url",
+	"selected_video_itag": "selected_video_itag",
+	"selected_audio_itag": "selected_audio_itag",
+	"start_time":          "start_time",
+	"end_time":            "end_time",
 	"quality_preference":  "quality_preference",
 	"watched":             "watched",
 	"resume_position":     "resume_position",
@@ -229,6 +238,9 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	for key, val := range fields {
 		col, ok := fieldToColumn[key]
 		if !ok {
+			if db.logger != nil {
+				db.logger.Debug("UpdateJobFields: ignoring unknown field", "jobID", id, "field", key)
+			}
 			continue
 		}
 		setClauses = append(setClauses, col+"=?")
