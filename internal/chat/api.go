@@ -339,9 +339,10 @@ func parseResponse(data map[string]any) (*ChatApiResponse, error) {
 			msg.IsMembership = true
 		}
 
-		// Set replay offset
+		// Set replay offset (may be negative for pre-stream waiting-room chat)
 		if hasReplayOffset {
 			msg.OffsetMs = replayOffsetMs
+			msg.HasOffset = true
 		}
 
 		result.Messages = append(result.Messages, *msg)

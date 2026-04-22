@@ -1,17 +1,25 @@
 package chat
 
 // ChatMessage represents a single chat message.
+//
+// OffsetMs is the signed millisecond offset relative to stream start. Negative
+// values are legitimate for pre-stream "waiting room" chat. HasOffset
+// distinguishes "offset actually 0ms" from "offset unknown"; callers should
+// check HasOffset before treating OffsetMs as authoritative. Older chat files
+// written before HasOffset was introduced deserialize with HasOffset=false,
+// which matches the prior semantics (offsetMs=0 was the unset sentinel).
 type ChatMessage struct {
-	ID              string        `json:"id"`
-	TimestampUsec   string        `json:"timestampUsec"`
-	TimestampText   string        `json:"timestampText,omitempty"`
-	OffsetMs        int64         `json:"offsetMs"`
-	AuthorName      string        `json:"authorName"`
-	AuthorChannelID string        `json:"authorChannelId"`
-	AuthorBadges    []string      `json:"authorBadges,omitempty"`
-	Message         []MessagePart `json:"message"`
+	ID              string         `json:"id"`
+	TimestampUsec   string         `json:"timestampUsec"`
+	TimestampText   string         `json:"timestampText,omitempty"`
+	OffsetMs        int64          `json:"offsetMs"`
+	HasOffset       bool           `json:"hasOffset,omitempty"`
+	AuthorName      string         `json:"authorName"`
+	AuthorChannelID string         `json:"authorChannelId"`
+	AuthorBadges    []string       `json:"authorBadges,omitempty"`
+	Message         []MessagePart  `json:"message"`
 	Superchat       *SuperchatInfo `json:"superchat,omitempty"`
-	IsMembership    bool          `json:"isMembership,omitempty"`
+	IsMembership    bool           `json:"isMembership,omitempty"`
 }
 
 // MessagePart represents a text or emoji segment in a chat message.

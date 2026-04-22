@@ -325,11 +325,14 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		for i := range resp.Messages {
 			msg := &resp.Messages[i]
 
-			// Calculate offsetMs if not already set
-			if msg.OffsetMs == 0 && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
+			// Calculate offsetMs if not already set from replay wrapper.
+			// Pre-stream waiting-room chat can produce legitimate negative offsets,
+			// so HasOffset is the sentinel rather than OffsetMs == 0.
+			if !msg.HasOffset && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
 				usec, _ := strconv.ParseInt(msg.TimestampUsec, 10, 64)
 				if usec > 0 {
 					msg.OffsetMs = usec/1000 - cd.streamStartMs
+					msg.HasOffset = true
 				}
 			}
 
