@@ -2,7 +2,9 @@ package routes
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -92,8 +94,9 @@ func PotRoutes(r chi.Router, deps *PotRoutesDeps) {
 			return
 		}
 
-		if deps.Logger != nil && len(poToken) > 30 {
-			deps.Logger.Info("[PotProvider] POT generated: " + poToken[:30] + "...")
+		if deps.Logger != nil {
+			hash := sha256.Sum256([]byte(poToken))
+			deps.Logger.Info("[PotProvider] POT generated", "hash", fmt.Sprintf("%x", hash[:4]), "len", len(poToken))
 		}
 
 		jsonResponse(rw, &PotSessionData{
