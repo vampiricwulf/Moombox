@@ -1347,7 +1347,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			return result, nil
 		}
 		app.OnDeleteOrphan = func(path string) error {
-			return worker.DeleteOrphanedFile(path, cfg)
+			return worker.DeleteOrphanedFile(path, db, cfg)
 		}
 		app.OnListClientTokens = func() ([]*database.ClientToken, error) {
 			return db.ListClientTokens()

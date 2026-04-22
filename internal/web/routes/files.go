@@ -57,7 +57,7 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 		var errors []map[string]string
 
 		for _, path := range body.Paths {
-			if err := worker.DeleteOrphanedFile(path, deps.Cfg); err != nil {
+			if err := worker.DeleteOrphanedFile(path, deps.DB, deps.Cfg); err != nil {
 				errors = append(errors, map[string]string{
 					"path":  path,
 					"error": "failed to delete file",

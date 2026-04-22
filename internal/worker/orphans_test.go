@@ -1,8 +1,13 @@
 package worker
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
 func TestNormalizePath(t *testing.T) {
@@ -63,5 +68,57 @@ func TestIsUnderDirectory(t *testing.T) {
 					tt.path, tt.dir, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestDeleteOrphanedFileRefusesActiveJob verifies that DeleteOrphanedFile refuses to
+// remove a staging directory whose owning job has become active between scan and
+// delete. This is the race that reports/worker.md Finding 18 flagged.
+func TestDeleteOrphanedFileRefusesActiveJob(t *testing.T) {
+	dir := t.TempDir()
+	stagingDir := filepath.Join(dir, "staging")
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.MoomboxConfig{Paths: config.PathsConfig{StagingDirectory: stagingDir}}
+
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	jobID := "yt_activeOrphanRaceTest"
+	job := &database.Job{
+		ID:      jobID,
+		VideoID: "activeOrphanRaceTest",
+		URL:     "https://youtube.com/watch?v=activeOrphanRaceTest",
+		Status:  database.StatusDownloading, // active — must not be deletable
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	jobStagingPath := filepath.Join(stagingDir, jobID)
+	if err := os.MkdirAll(jobStagingPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := DeleteOrphanedFile(jobStagingPath, db, cfg); err == nil {
+		t.Fatal("expected DeleteOrphanedFile to refuse active job's staging dir, got nil error")
+	}
+
+	if _, err := os.Stat(jobStagingPath); err != nil {
+		t.Errorf("staging dir should still exist after refused delete: %v", err)
+	}
+
+	// Now transition to a terminal state — delete should succeed.
+	db.UpdateJobFields(jobID, map[string]any{"status": database.StatusCancelled})
+	if err := DeleteOrphanedFile(jobStagingPath, db, cfg); err != nil {
+		t.Errorf("expected delete to succeed after job transitioned to Cancelled, got %v", err)
+	}
+	if _, err := os.Stat(jobStagingPath); !os.IsNotExist(err) {
+		t.Errorf("staging dir should be gone after successful delete, got err=%v", err)
 	}
 }

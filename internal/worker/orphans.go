@@ -62,8 +62,20 @@ func ScanOrphanedFiles(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 	return entries, nil
 }
 
+// activeJobStatuses lists statuses that mean a job is actively using its
+// staging and/or output paths. Deletion must refuse these.
+var activeJobStatuses = map[database.JobStatus]bool{
+	database.StatusDownloading: true,
+	database.StatusLive:        true,
+	database.StatusUpcoming:    true,
+	database.StatusMuxing:      true,
+}
+
 // DeleteOrphanedFile safely deletes a file or directory if it's under the configured directories.
-func DeleteOrphanedFile(path string, cfg *config.MoomboxConfig) error {
+// Re-queries the database immediately before deletion and refuses if any currently-active job owns
+// the path — closes the race window between ScanOrphanedFiles and the user's delete click during
+// which a user might restart a job and make its staging/output path live again.
+func DeleteOrphanedFile(path string, db *database.Database, cfg *config.MoomboxConfig) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
@@ -82,6 +94,16 @@ func DeleteOrphanedFile(path string, cfg *config.MoomboxConfig) error {
 		}
 	}
 
+	// Recheck: refuse if the path is now owned by an active job. Scan filtered these out, but a job
+	// could have been restarted between scan and delete. DB lookup is authoritative.
+	if db != nil {
+		if jobID, err := findActiveJobForPath(absPath, db, cfg); err != nil {
+			return fmt.Errorf("check for active job: %w", err)
+		} else if jobID != "" {
+			return fmt.Errorf("refusing to delete: path is now owned by active job %s", jobID)
+		}
+	}
+
 	info, err := os.Stat(absPath)
 	if err != nil {
 		return fmt.Errorf("path not found: %w", err)
@@ -91,6 +113,58 @@ func DeleteOrphanedFile(path string, cfg *config.MoomboxConfig) error {
 		return os.RemoveAll(absPath)
 	}
 	return os.Remove(absPath)
+}
+
+// findActiveJobForPath returns the ID of a currently-active job that owns the given path,
+// or "" if the path is not associated with any active job.
+//
+// For staging paths, the jobID is the first path component under the staging directory
+// (staging/<jobID>/...). For output paths, we scan all jobs and check their output/chat/
+// thumbnail/description/segment file paths for a normalized match.
+func findActiveJobForPath(absPath string, db *database.Database, cfg *config.MoomboxConfig) (string, error) {
+	stagingDir := resolveStagingDir(cfg)
+	if rel, err := filepath.Rel(stagingDir, absPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
+		// Path under staging/ — the first component is the jobID
+		parts := strings.SplitN(rel, string(filepath.Separator), 2)
+		if len(parts) > 0 && parts[0] != "" {
+			jobID := parts[0]
+			job, err := db.GetJob(jobID)
+			if err != nil {
+				return "", err
+			}
+			if job != nil && activeJobStatuses[job.Status] {
+				return jobID, nil
+			}
+		}
+		return "", nil
+	}
+
+	outputDir := resolveOutputDir(cfg)
+	if rel, err := filepath.Rel(outputDir, absPath); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
+		// Path under output/ — scan active jobs for a matching file reference
+		jobs, err := db.GetAllJobs()
+		if err != nil {
+			return "", err
+		}
+		target := normalizePath(absPath)
+		for _, job := range jobs {
+			if !activeJobStatuses[job.Status] {
+				continue
+			}
+			for _, candidate := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
+				if candidate != "" && normalizePath(candidate) == target {
+					return job.ID, nil
+				}
+			}
+			for _, seg := range job.Segments {
+				if seg.FilePath != "" && normalizePath(seg.FilePath) == target {
+					return job.ID, nil
+				}
+			}
+		}
+	}
+
+	return "", nil
 }
 
 func resolveStagingDir(cfg *config.MoomboxConfig) string {
