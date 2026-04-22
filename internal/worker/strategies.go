@@ -72,3 +72,18 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 	return result, nil
 }
 
+// poTokenBinding returns the content binding value to pass to the PO token provider.
+// Prefers visitorData (matches yt-dlp and bgutil-ytdlp-pot-provider upstream), falling
+// back to ChannelID if visitor data extraction failed. Logs a warning on fallback so
+// the underlying extraction issue is surfaced rather than silently degrading caching.
+func poTokenBinding(job *JobContext, videoInfo *youtube.VideoInfo) string {
+	if job != nil && job.YT != nil {
+		if vd := job.YT.GetVisitorData(); vd != "" {
+			return vd
+		}
+	}
+	if job != nil && job.Logger != nil {
+		job.Logger.Warn("[POT] visitor data unavailable; falling back to channelID for content binding")
+	}
+	return videoInfo.ChannelID
+}

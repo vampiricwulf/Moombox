@@ -25,7 +25,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 
 	// Inject PO token if available
 	if potProvider != nil {
-		poToken, err := potProvider.GeneratePoTokenString(ctx, videoInfo.ChannelID, false)
+		poToken, err := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
 		if err != nil {
 			job.Logger.Warn("pot: failed to generate PO token for HLS", "err", err)
 		} else if poToken != "" {
@@ -132,7 +132,7 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	variantURL := bestVariant.URL
 	var hlsPoToken string
 	if potProvider != nil {
-		poToken, potErr := potProvider.GeneratePoTokenString(ctx, videoInfo.ChannelID, false)
+		poToken, potErr := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
 		if potErr != nil {
 			job.Logger.Warn("[POT] failed to generate PO token for HLS variant", "err", potErr)
 		} else if poToken != "" {

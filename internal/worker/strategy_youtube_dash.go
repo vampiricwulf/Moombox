@@ -38,7 +38,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 
 	// Step 2: Inject PO token into manifest URL (/pot/{token} path segment)
 	if potProvider != nil {
-		poToken, err := potProvider.GeneratePoTokenString(ctx, videoInfo.ChannelID, false)
+		poToken, err := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
 		if err != nil {
 			job.Logger.Warn("[POT] failed to generate PO token for manifest", "err", err)
 		} else if poToken != "" {
@@ -86,7 +86,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	// Step 5: Generate PO token for DASH segment URLs (applied via PoToken in DownloaderOptions)
 	var dashPoToken string
 	if potProvider != nil {
-		poToken, potErr := potProvider.GeneratePoTokenString(ctx, videoInfo.ChannelID, false)
+		poToken, potErr := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
 		if potErr != nil {
 			job.Logger.Warn("[POT] failed to generate PO token for DASH segments", "err", potErr)
 		} else if poToken != "" {
