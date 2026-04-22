@@ -1,6 +1,15 @@
 package cipher
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
+
+// CipherTimeout bounds a single goja signature- or n-param-decryption call.
+// A malformed player.js (e.g. an accidental infinite loop after a YouTube-side
+// change) would otherwise hang the solver goroutine while holding Solvers.mu,
+// freezing every download. Matches bgutils' DefaultMintTimeout (3s).
+const CipherTimeout = 3 * time.Second
 
 // Solvers holds the decrypted n-parameter and signature functions.
 // The underlying Goja VM is not thread-safe, so a mutex serializes calls.

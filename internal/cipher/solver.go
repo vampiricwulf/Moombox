@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	gojavm "github.com/dop251/goja"
 )
@@ -224,6 +225,13 @@ func getFromPrepared(code string) (*Solvers, error) {
 						err = fmt.Errorf("sig decrypt panic: %v", r)
 					}
 				}()
+				timer := time.AfterFunc(CipherTimeout, func() {
+					vm.Interrupt(fmt.Sprintf("cipher sig decrypt timeout (%v)", CipherTimeout))
+				})
+				defer func() {
+					timer.Stop()
+					vm.ClearInterrupt()
+				}()
 				val, callErr := sigFn(gojavm.Undefined(), vm.ToValue(input))
 				if callErr != nil {
 					return "", fmt.Errorf("sig decrypt: %w", callErr)
@@ -243,6 +251,13 @@ func getFromPrepared(code string) (*Solvers, error) {
 					if r := recover(); r != nil {
 						err = fmt.Errorf("n decrypt panic: %v", r)
 					}
+				}()
+				timer := time.AfterFunc(CipherTimeout, func() {
+					vm.Interrupt(fmt.Sprintf("cipher n decrypt timeout (%v)", CipherTimeout))
+				})
+				defer func() {
+					timer.Stop()
+					vm.ClearInterrupt()
 				}()
 				val, callErr := nFn(gojavm.Undefined(), vm.ToValue(input))
 				if callErr != nil {
