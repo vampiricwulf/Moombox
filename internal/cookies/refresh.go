@@ -75,6 +75,11 @@ type RefreshService struct {
 	// a network error and not a never-authenticated state). The platform
 	// parameter is "youtube" or "twitch".
 	OnRecoveryNeeded func(platform string)
+
+	// OnAuthRecovered is called when a platform transitions from
+	// not-authenticated to authenticated (the inverse of OnRecoveryNeeded).
+	// Useful for waking jobs that were parked in the COOKIES? status.
+	OnAuthRecovered func(platform string)
 }
 
 // NewRefreshService creates a new cookie refresh service.
@@ -261,6 +266,19 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 		if prevTW && !twAuth && twErr == nil {
 			rs.logger.Warn("twitch auth lost, triggering recovery")
 			rs.OnRecoveryNeeded("twitch")
+		}
+	}
+
+	// Detect recovery transitions: previously not authenticated -> now authenticated.
+	// Fired so callers can wake jobs parked in COOKIES? state.
+	if hasChecked && rs.OnAuthRecovered != nil {
+		if !prevYT && ytAuth && ytErr == nil {
+			rs.logger.Info("youtube auth recovered")
+			rs.OnAuthRecovered("youtube")
+		}
+		if !prevTW && twAuth && twErr == nil {
+			rs.logger.Info("twitch auth recovered")
+			rs.OnAuthRecovered("twitch")
 		}
 	}
 

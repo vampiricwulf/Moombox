@@ -742,6 +742,46 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}()
 	}
 
+	// When a platform transitions from not-authenticated to authenticated, sweep
+	// any jobs parked in StatusCookies on that platform back to Upcoming so they
+	// get re-probed without manual intervention. Closes audit decision #23
+	// (worker.md Q3).
+	cookieRefresh.OnAuthRecovered = func(platform string) {
+		jobs, err := db.GetAllJobs()
+		if err != nil {
+			log.Warn("auth-recovered sweep: GetAllJobs failed", "platform", platform, "err", err)
+			return
+		}
+		resumed := 0
+		for _, job := range jobs {
+			if job.Status != database.StatusCookies {
+				continue
+			}
+			if job.Platform != platform {
+				continue
+			}
+			db.UpdateJobFields(job.ID, map[string]any{
+				"status": database.StatusUpcoming,
+				"error":  "",
+			})
+			resumed++
+		}
+		if resumed > 0 {
+			log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			if notifyMgr != nil {
+				notifyMgr.Send("Authentication Recovered",
+					fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
+					notifications.TypeInfo,
+					[]notifications.Field{
+						{Name: "Platform", Value: platform, Inline: true},
+						{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+					},
+					notifications.SendOptions{},
+				)
+			}
+		}
+	}
+
 	// =========================================================================
 	// Wire up event callbacks
 	// =========================================================================
