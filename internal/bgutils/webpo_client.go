@@ -144,27 +144,19 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 		return tokenMinter, nil
 	}
 
-	if itData.WebsafeFallbackToken != "" {
-		// Path B: Fallback token — use directly as PO token
-		bgClient.Shutdown() // VM not needed for fallback path
-		fallbackToken := itData.WebsafeFallbackToken
-
-		tokenMinter := &TokenMinter{
-			MintFunc: func(contentBinding string) (string, error) {
-				// Fallback token is static — same token for all content bindings
-				return fallbackToken, nil
-			},
-			ExpiresAt: time.Now().Add(itData.EstimatedTTL),
-			// No Cleanup needed — VM already shut down
-		}
-
-		wpc.logger.Info("[PotProvider] Using websafe fallback token",
-			"ttl", itData.EstimatedTTL, "tokenLen", len(fallbackToken))
-		return tokenMinter, nil
-	}
-
-	// Neither path worked
+	// Path B removed: previously, when GenerateIT returned a null integrity token
+	// we treated WebsafeFallbackToken as a valid PO token and cached it. That masked
+	// BotGuard VM failures (e.g. crypto.getRandomValues regressions) and diverged from
+	// upstream bgutil-ytdlp-pot-provider which errors in this case. YouTube does not
+	// accept the websafe fallback as a real PO token for authenticated player requests,
+	// so the silent-fallback behaviour degraded quality without signal.
 	bgClient.Shutdown()
+	if itData.WebsafeFallbackToken != "" {
+		return nil, &BGError{
+			Code:    ErrIntegrity,
+			Message: "GenerateIT returned no integrity token (only websafe fallback); BotGuard VM likely failed — check goja shims",
+		}
+	}
 	return nil, &BGError{Code: ErrIntegrity, Message: "no integrity token or fallback token available"}
 }
 
