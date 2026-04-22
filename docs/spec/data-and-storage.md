@@ -341,6 +341,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. If the `
 | v7 | Created `player_prefs` table (video_id PK, chat_offset) — deprecated in v9 |
 | v8 | Added `watched` and `resume_position` columns to jobs for watch tracking |
 | v9 | Added `chat_offset` column to jobs; backfilled from `player_prefs` via video_id join |
+| v10 | Dropped `player_prefs` table (superseded by `jobs.chat_offset` in v9); removed from `createSchema` for fresh installs |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 
