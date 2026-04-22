@@ -1,23 +1,24 @@
 package database
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-const schemaVersion = 10
+const schemaVersion = 11
 
 // createSchema defines the full schema for new databases. It includes all tables
 // and indexes from the start. The incremental migrations below handle upgrading
 // existing databases from older schema versions. Tables like "segments" and
 // "client_tokens" appear in both places by design: createSchema for new databases,
 // migrations for upgrades from older versions.
+//
+// Schema versioning uses SQLite's built-in PRAGMA user_version (since v11). Older
+// databases created with the legacy schema_version table are auto-migrated by
+// migrate() on first open.
 const createSchema = `
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER NOT NULL UNIQUE
-);
-
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     video_id TEXT NOT NULL,
@@ -136,18 +137,55 @@ CREATE INDEX IF NOT EXISTS idx_segments_job_id ON segments(job_id);
 CREATE INDEX IF NOT EXISTS idx_client_tokens_prefix ON client_tokens(token_prefix);
 `
 
-func (db *Database) migrate() error {
-	// Check current schema version
-	var version int
-	row := db.db.QueryRowContext(db.getCtx(), "SELECT version FROM schema_version LIMIT 1")
-	err := row.Scan(&version)
+// readUserVersion reads SQLite's PRAGMA user_version. Returns 0 on a fresh DB.
+func (db *Database) readUserVersion() (int, error) {
+	var v int
+	err := db.db.QueryRowContext(db.getCtx(), "PRAGMA user_version").Scan(&v)
+	return v, err
+}
+
+// writeUserVersion sets SQLite's PRAGMA user_version. PRAGMA statements do not
+// accept bind parameters, so the value is interpolated via %d (always a Go int
+// literal in-package, never user input — injection-safe).
+func (db *Database) writeUserVersion(v int) error {
+	_, err := db.db.ExecContext(db.getCtx(), fmt.Sprintf("PRAGMA user_version = %d", v))
+	return err
+}
+
+// readLegacyVersion returns the value from the old schema_version table, or
+// (0, false) if the table is missing, empty, or can't be read. Used once during
+// the v11 cutover to carry the version forward to PRAGMA user_version.
+func (db *Database) readLegacyVersion() (int, bool) {
+	var v int
+	err := db.db.QueryRowContext(db.getCtx(), "SELECT version FROM schema_version LIMIT 1").Scan(&v)
 	if err != nil {
-		// Table doesn't exist or is empty — create everything
-		if _, err := db.db.ExecContext(db.getCtx(), createSchema); err != nil {
-			return err
-		}
-		_, err = db.db.ExecContext(db.getCtx(), "INSERT INTO schema_version (version) VALUES (?)", schemaVersion)
+		return 0, false
+	}
+	return v, true
+}
+
+func (db *Database) migrate() error {
+	// Read current schema version from PRAGMA user_version (authoritative since v11).
+	version, err := db.readUserVersion()
+	if err != nil {
 		return err
+	}
+
+	// If PRAGMA is 0 the DB is either brand-new or still on the pre-v11 schema_version
+	// table. Check the legacy table; if it exists, carry the value forward.
+	if version == 0 {
+		if legacy, hasLegacy := db.readLegacyVersion(); hasLegacy {
+			version = legacy
+			if err := db.writeUserVersion(version); err != nil {
+				return err
+			}
+		} else {
+			// Fresh install — create schema, seed PRAGMA at current version.
+			if _, err := db.db.ExecContext(db.getCtx(), createSchema); err != nil {
+				return err
+			}
+			return db.writeUserVersion(schemaVersion)
+		}
 	}
 
 	// Run incremental migrations if needed
@@ -182,7 +220,7 @@ func (db *Database) migrate() error {
 			}
 		}
 
-		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 2)
+		err = db.writeUserVersion(2)
 		if err != nil {
 			return err
 		}
@@ -235,7 +273,7 @@ func (db *Database) migrate() error {
 			}
 		}
 
-		_, err = db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 3)
+		err = db.writeUserVersion(3)
 		if err != nil {
 			return err
 		}
@@ -247,7 +285,7 @@ func (db *Database) migrate() error {
 			return err
 		}
 
-		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 4)
+		err := db.writeUserVersion(4)
 		if err != nil {
 			return err
 		}
@@ -283,7 +321,7 @@ func (db *Database) migrate() error {
 			return err
 		}
 
-		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 5)
+		err := db.writeUserVersion(5)
 		if err != nil {
 			return err
 		}
@@ -305,7 +343,7 @@ func (db *Database) migrate() error {
 			return err
 		}
 
-		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 6)
+		err := db.writeUserVersion(6)
 		if err != nil {
 			return err
 		}
@@ -319,7 +357,7 @@ func (db *Database) migrate() error {
 			return err
 		}
 
-		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 7)
+		err := db.writeUserVersion(7)
 		if err != nil {
 			return err
 		}
@@ -337,7 +375,7 @@ func (db *Database) migrate() error {
 			}
 		}
 
-		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 8)
+		err := db.writeUserVersion(8)
 		if err != nil {
 			return err
 		}
@@ -361,7 +399,7 @@ func (db *Database) migrate() error {
 			}
 		}
 
-		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 9)
+		err := db.writeUserVersion(9)
 		if err != nil {
 			return err
 		}
@@ -373,8 +411,20 @@ func (db *Database) migrate() error {
 			return err
 		}
 
-		_, err := db.db.ExecContext(db.getCtx(), "UPDATE schema_version SET version = ?", 10)
+		err := db.writeUserVersion(10)
 		if err != nil {
+			return err
+		}
+	}
+
+	if version < 11 {
+		// Schema versioning moved to PRAGMA user_version. Drop the legacy
+		// schema_version table now that readUserVersion is authoritative.
+		if _, err := db.db.ExecContext(db.getCtx(), `DROP TABLE IF EXISTS schema_version`); err != nil {
+			return err
+		}
+
+		if err := db.writeUserVersion(11); err != nil {
 			return err
 		}
 	}

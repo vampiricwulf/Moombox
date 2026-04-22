@@ -318,17 +318,13 @@ Capped at 10,000 entries; oldest pruned on insert.
 | channel_id | TEXT | PRIMARY KEY |
 | video_id | TEXT | NOT NULL |
 
-**schema_version:**
+**Schema version:**
 
-| Column | Type | Notes |
-|--------|------|-------|
-| version | INTEGER | NOT NULL, UNIQUE |
-
-Single row tracking current schema version.
+Tracked via SQLite's built-in `PRAGMA user_version` (since v11). Older databases created with the legacy `schema_version` table are auto-migrated on first open.
 
 ### Schema Migrations
 
-Migrations are forward-only and run at startup in `Database.migrate()`. If the `schema_version` table does not exist or cannot be read, the full `createSchema` DDL is executed (creates all tables at current version).
+Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA user_version` is authoritative. On a fresh DB the PRAGMA reads 0 and `createSchema` is executed followed by a PRAGMA set to the current version. On a pre-v11 DB the PRAGMA still reads 0, so migrate() falls back to reading the legacy `schema_version` table, carries the value forward into PRAGMA, runs any pending migrations, and the v11 block drops the legacy table.
 
 | Version | Changes |
 |---------|---------|
@@ -342,6 +338,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. If the `
 | v8 | Added `watched` and `resume_position` columns to jobs for watch tracking |
 | v9 | Added `chat_offset` column to jobs; backfilled from `player_prefs` via video_id join |
 | v10 | Dropped `player_prefs` table (superseded by `jobs.chat_offset` in v9); removed from `createSchema` for fresh installs |
+| v11 | Replaced custom `schema_version` table with SQLite's built-in `PRAGMA user_version`. Existing DBs auto-migrate: legacy value carried forward, then the table is dropped |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 

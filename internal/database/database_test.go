@@ -939,6 +939,90 @@ func TestBatchSetWatched(t *testing.T) {
 	}
 }
 
+// TestMigrateFromLegacyVersionTable verifies the v11 cutover: an existing DB
+// using the pre-v11 schema_version table is detected, its version carried
+// forward to PRAGMA user_version, and the legacy table is dropped.
+func TestMigrateFromLegacyVersionTable(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+
+	// Bootstrap a full current-schema DB, then forcibly reset it to look like a
+	// pre-v11 install (schema_version table present, PRAGMA user_version=0).
+	db1, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db1.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL UNIQUE)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db1.db.Exec(`DELETE FROM schema_version`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db1.db.Exec(`INSERT INTO schema_version (version) VALUES (6)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db1.db.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
+	db1.Close()
+
+	// Re-open. migrate() should read legacy=6, carry it to PRAGMA, run the
+	// remaining migrations (v7..v11), and drop the schema_version table.
+	db2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("re-open after simulated-legacy reset: %v", err)
+	}
+	defer db2.Close()
+
+	got, err := db2.readUserVersion()
+	if err != nil {
+		t.Fatalf("readUserVersion: %v", err)
+	}
+	if got != schemaVersion {
+		t.Errorf("PRAGMA user_version after migration = %d, want %d", got, schemaVersion)
+	}
+
+	// Legacy table must be gone.
+	var count int
+	err = db2.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_version'`).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("legacy schema_version table still present after migration (found %d entries)", count)
+	}
+}
+
+// TestFreshInstallUsesPragma verifies that a brand-new DB sets PRAGMA
+// user_version without ever creating the legacy schema_version table.
+func TestFreshInstallUsesPragma(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "fresh.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	got, err := db.readUserVersion()
+	if err != nil {
+		t.Fatalf("readUserVersion: %v", err)
+	}
+	if got != schemaVersion {
+		t.Errorf("fresh install PRAGMA user_version = %d, want %d", got, schemaVersion)
+	}
+
+	var count int
+	err = db.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_version'`).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("legacy schema_version table present on fresh install (found %d entries)", count)
+	}
+}
+
 // TestFieldToColumnCoverage asserts that every writable column on Job has an
 // entry in fieldToColumn. Drift here caused audit finding database.md C3 where
 // six fields (manually_added, allow_non_stream, selected_video_itag,
