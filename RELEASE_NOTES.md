@@ -17,6 +17,12 @@ This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-repor
 - **TUI apiClient rebuilds on HTTPS toggle** — the cached `*http.Client` was never invalidated when the user toggled HTTPS in Settings; subsequent API calls used the wrong transport. Cache now tracks the HTTPSEnabled value it was built against and self-heals on mismatch. (tui.md Finding 3)
 - **WebSocket heartbeat timeout hardened** — a transient `ws.send()` throw (e.g. InvalidStateError during a reconnect) was swallowed without advancing any counter, so the 45 s pong timeout could fire on a socket that was fine. Heartbeat now tracks `_lastPingSent` separately and only declares the socket dead when a ping went out AND no pong came back. (frontend-js.md C3)
 
+### Correctness fixes added in test.6
+
+- **Deterministic Cookie header + header-separator sanitisation** — `CookieJar.GetCookieHeader` iterated a `map[string]string`, so successive calls produced different `Cookie:` headers for the same jar (breaking HTTP-level debugging and tripping YouTube endpoints that inspect `__Secure-*` ordering). Now sorted alphabetically. `sanitizeCookieValue` also strips `;` and `,` which terminate cookie pairs at the HTTP header parser — closes a header-injection vector. (cookies.md #1 + #2)
+- **PassiveTracker per-tag success** — `ReportSuccess(tag)` previously wiped every failure across every subsystem, letting a flaky single-subsystem success pattern mask a genuine multi-subsystem outage. Now clears only failures for the given tag and keeps the triggered flag stable while the threshold is still met. (small-packages.md question #3)
+- **Chat message-ID generator race** — `randomAlphaNum` used `math/rand` globals, which are not concurrent-safe. Multiple parallel chat downloaders could race at `generateMessageID`. Switched to `math/rand/v2`, whose package-level `IntN` is documented as concurrent-safe. (chat.md C10)
+
 ### Security
 
 - **Tightened CSRF** — `POST/PUT/DELETE` now requires an allowed `Origin` header or the internal token in every network-access mode. The prior localhost/LAN bypass let any local process or same-origin tab call `/api/restart`, first-time `set-password`, and `open-folder` without proof of browser context. Modern browsers already send `Origin` on same-origin mutations, so the Web UI is unaffected; the TUI continues to use the internal token.
