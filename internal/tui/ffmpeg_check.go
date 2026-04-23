@@ -39,10 +39,9 @@ type FFmpegCheckModel struct {
 	customValid  bool
 
 	// Install state
-	installOptions []installOption
-	installing     bool
-	installResult  string
-	installError   bool
+	installing    bool
+	installResult string
+	installError  bool
 
 	// Success state — any keypress dismisses the overlay
 	successDismiss bool
@@ -78,11 +77,6 @@ type FFmpegCheckModel struct {
 	OnCheckPrereqs func() (bool, bool)
 }
 
-type installOption struct {
-	label  string
-	method string
-}
-
 // NewFFmpegCheckModel creates a new FFmpeg check model.
 func NewFFmpegCheckModel() *FFmpegCheckModel {
 	return &FFmpegCheckModel{
@@ -101,7 +95,6 @@ func (m *FFmpegCheckModel) Open() {
 	m.installing = false
 	m.installResult = ""
 	m.installError = false
-	m.installOptions = nil
 	m.successDismiss = false
 	m.warning = ""
 	m.reviewScript = ""
@@ -287,39 +280,6 @@ func (m *FFmpegCheckModel) handleMainKey(key string) string {
 	return ""
 }
 
-func (m *FFmpegCheckModel) buildInstallOptions() {
-	m.installOptions = nil
-
-	chocoAvail, wingetAvail := false, false
-	if m.OnCheckPrereqs != nil {
-		chocoAvail, wingetAvail = m.OnCheckPrereqs()
-	}
-
-	if chocoAvail {
-		m.installOptions = append(m.installOptions, installOption{
-			label:  "Install via Chocolatey",
-			method: "choco",
-		})
-	} else {
-		m.installOptions = append(m.installOptions, installOption{
-			label:  "Install Chocolatey + FFmpeg",
-			method: "choco-install",
-		})
-	}
-
-	if wingetAvail {
-		m.installOptions = append(m.installOptions, installOption{
-			label:  "Install via Winget",
-			method: "winget",
-		})
-	}
-
-	m.installOptions = append(m.installOptions, installOption{
-		label:  "Cancel",
-		method: "",
-	})
-}
-
 // buildMainForm creates the huh Select form for the main menu.
 // Returns a tea.Cmd from Init() that must be delivered to bubbletea.
 func (m *FFmpegCheckModel) buildMainForm() tea.Cmd {
@@ -346,12 +306,22 @@ func (m *FFmpegCheckModel) buildMainForm() tea.Cmd {
 // Returns a tea.Cmd from Init() that must be delivered to bubbletea.
 func (m *FFmpegCheckModel) buildInstallForm() tea.Cmd {
 	m.values["method"] = ""
-	m.buildInstallOptions()
+
+	chocoAvail, wingetAvail := false, false
+	if m.OnCheckPrereqs != nil {
+		chocoAvail, wingetAvail = m.OnCheckPrereqs()
+	}
 
 	var opts []huh.Option[string]
-	for _, opt := range m.installOptions {
-		opts = append(opts, huh.NewOption(opt.label, opt.method))
+	if chocoAvail {
+		opts = append(opts, huh.NewOption("Install via Chocolatey", "choco"))
+	} else {
+		opts = append(opts, huh.NewOption("Install Chocolatey + FFmpeg", "choco-install"))
 	}
+	if wingetAvail {
+		opts = append(opts, huh.NewOption("Install via Winget", "winget"))
+	}
+	opts = append(opts, huh.NewOption("Cancel", ""))
 
 	f := huh.NewForm(
 		huh.NewGroup(
