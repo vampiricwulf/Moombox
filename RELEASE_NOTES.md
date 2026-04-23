@@ -1,6 +1,64 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.4` with TUI config-lock and apiClient fixes and a WebSocket heartbeat fix.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.10` with a fifth parallel-agent batch over `internal/database/` and `internal/chat/` residual findings.
 
-This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-report audit. All 32 commits build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus five parallel-agent batches from the multi-report audit. All 216 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Parallel-agent batch 5 (test.11)
+
+Fifth dispatch targeting residual low-severity findings in `internal/chat/` and `internal/database/`. Both agents branched from v2.5.2 (not `test`), so 37 commits were rebased/cherry-picked onto test with several conflicts resolved. Net: **37 more commits**.
+
+**Chat** (chat.md — 22 findings across 20 commits):
+
+- **C1** encapsulate `writeChatFile` state mutation so `cd.messages` and `cd.flushedToDisk` always reset on success
+- **C3** always `saveResume` on cancel when `flushedToDisk`, regardless of in-memory buffer
+- **C4** log at debug when `TimestampUsec` ParseInt fails instead of silently yielding `usec=0` (combined with HasOffset guard from test.8)
+- **C6** run `cullDedup` on every successful fetch so pinned-announcement loops can't grow the dedup map unbounded
+- **C9** type-assert `isCustomEmoji` as `bool` instead of loose equality against an `any`
+- **C10** swap `math/rand.Intn` for `math/rand/v2.IntN` in `generateMessageID` — the v1 global is not concurrent-safe
+- **C11** accept both `string` and `float64` for `videoOffsetTimeMsec` (YouTube occasionally ships either)
+- **C12** log `updateChatFileHeader` IO errors via `OnError` instead of swallowing silently
+- **C13** `fsync` before rename in `writeFullChatFile` so a crash mid-write can't leave a zero-byte file overwriting a good archive
+- **C15** fix stale-continuation retry sleep ordering — sleep between retries, not before the first
+- **R1** only mark `switchedToAllChat = true` when the response actually contained an All Chat continuation, so a subsequent poll can retry the upgrade
+- **E1 + E2** handle unknown badge `iconType` values (fallthrough stores the raw lowercase string) and detect MEMBER via `icon.iconType` as well as tooltip heuristics
+- **E3** pick the largest emoji thumbnail variant instead of `thumbnails[0]`
+- **G1 + G2** wrap panic-recovery `OnError` call in its own deferred recover and include `debug.Stack()` in the panic message
+- **Q5** bump watch-page fetch limit to 10 MB (chat-response limit stays at 5 MB)
+- **Q6** rename ms-suffixed constants to typed `time.Duration` (`writeInterval`, `maxStaleContinuationAttempts`)
+- **Q8** `uint32` keys for `superchatTierColors` (matches YouTube's raw palette) and debug-log unknown bgColors so drift is visible
+- **Q12** snapshot resume state under lock, then JSON-marshal and write outside lock — keeps `MessageCount()` / `IsRunning()` unblocked during persistence
+- **Q13** log `clearResume`'s `os.Remove` error at warn level so AV/permissions issues don't silently reload stale state
+- **U4** remove unused `lastTimestamp` field from resume state
+
+The chat subsystem gained a nil-safe optional `Logger` field on `ChatDownloader` and `ChatAPI` for the parse-level debug diagnostics (C4, C11). Existing callers that don't wire one in continue unchanged.
+
+**Database** (database.md — 16 findings across 17 commits, including one net-new):
+
+- **Q1** fix spec drift in `docs/spec/data-and-storage.md` (`closed bool` → `closeOnce sync.Once`)
+- **Q4** `intToBool` helper matches the existing `boolToInt` on the write side
+- **U4** unify `scanJob` and `scanJobRows` via a minimal `rowScanner` interface — drops ~45 lines of copy-paste
+- **Q5** factor `UpdateResumePosition` and `UpdateChatOffset` into `updateSingleColumnSilent` guarded by a `silentColumns` whitelist
+- **U3** reuse the prepared `stmtGetJob` in `UpdateJobFields` read-back instead of re-parsing the SELECT every call
+- **Q9** copy the package-level `fieldToColumn` map into a per-instance copy at `Open()` so runtime mutation of the shared map is no longer possible
+- **T5** track prepared statements in a `preparedStmts` slice via a `prepareStmt` helper so new additions can't leak on shutdown
+- **D1** extract `insertJobExec` helper shared by `AddJob` and `ImportFromJSON` — keeps the 41-column INSERT in one place
+- **D4** extract `capLogLines` helper for the `>200 → keep 100` log-buffer retention
+- **I1** cache `GetJobStats` results for 5s — the 14-case aggregation is a full-table scan and polled by dashboard tiles
+- **I2** `attachTrimsAndGaps` now filters trims/gaps/segments by `WHERE job_id IN (?, ?, ?)` with 500-ID chunking, rather than full-table scanning three times for every `GetAllJobs` call
+- **I7** `BatchSetWatched` chunks into batches of 500 inside a single transaction to respect `SQLITE_MAX_VARIABLE_NUMBER`
+- **Sub2** top-level panic recovery on the `notifyJobUpdate` / `notifyJobsChange` iteration loops so a subscriber panic can't escape into the caller
+- **Sub4** shrink subscriber slices when `cap(s) > 4*len(s)` so subscribe/unsubscribe thrashing can't leak array backing
+- **Sub5** fix misleading test comment about trailing-nil trimming (the unsubscribe path uses `append(a[:i], a[i+1:]…)`, which slices out rather than nils)
+- **S2** expand the ALTER-TABLE-from-literal-slice comment in `migrations.go` to warn future editors that the pattern is safe only because the input is a compile-time literal
+- **M6** v9 `player_prefs → jobs.chat_offset` backfill now counts expected rows up front and logs at ERROR (not WARN) on a row-count mismatch
+- **I4** (new — agent didn't reach it before hitting its limit) schema v12 migration adds `idx_history_added_at` on `history(added_at)` — `pruneHistory` ORDERs by it on every `AddToHistory`
+
+**Deferred from this batch** — these agent commits were recognised as obsolete or incompatible with earlier test-branch work and intentionally skipped:
+
+- **Q3** remove half-wired `db.ctx` field — tied up with deleted `database_batch.go` (`UpdateJob` batched path was removed in decision #17); partial application would have created inconsistency. Can be done cleanly as a standalone sweep later.
+- **P4** route UpdateJob to sync path when batch loop dies — the batch loop itself was deleted in decision #17, so obsolete.
+- **Q10** bound `Close()`'s wait on `batchDone` with a 5s timeout — `batchDone` no longer exists (same reason as P4).
+- **M7** `INSERT OR IGNORE` for schema_version seed — the `schema_version` table was dropped by the PRAGMA `user_version` cutover (decision #22); there's no seed to guard anymore.
+- **M3** wrap each migration step in a BeginTx — the agent's 200-line refactor was designed for the pre-PRAGMA `UPDATE schema_version` pattern; `PRAGMA user_version` cannot be set inside a transaction, so M3 needs a fresh design. Saved as `reports/drafts/m3-migrations-tx-refactor.diff` for reference.
 
 ### Correctness fixes since test.3
 
