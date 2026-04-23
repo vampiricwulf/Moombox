@@ -302,14 +302,30 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 		return "", fmt.Errorf("no websocket URL in CDP version response")
 	}
 
-	// Use Storage.getCookies via the browser-level connection
-	result, err := cdpSendCommandWithResult(version.WebSocketDebuggerURL, "Storage.getCookies", nil)
-	if err != nil {
-		// Fall back to page-level Network.getAllCookies
+	// Helper: parse a CDP result blob into cookies.
+	parseResult := func(raw json.RawMessage) (cdpCookieResult, error) {
+		var cookieResult cdpCookieResult
+		if err := json.Unmarshal(raw, &cookieResult); err != nil {
+			return cookieResult, fmt.Errorf("parse CDP cookies: %w", err)
+		}
+		return cookieResult, nil
+	}
+
+	// Primary: browser-level Storage.getCookies. Returns a result even if
+	// empty when the page has no assigned cookies yet, so a zero-length
+	// cookies slice is not definitive success — we still try the fallbacks
+	// before giving up (finding #17).
+	var cookieResult cdpCookieResult
+	if result, err := cdpSendCommandWithResult(version.WebSocketDebuggerURL, "Storage.getCookies", nil); err == nil {
+		cookieResult, _ = parseResult(result)
+	}
+
+	// If Storage.getCookies returned nothing, try the page-level fallbacks.
+	if len(cookieResult.Cookies) == 0 {
 		fallbackReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json", port), nil)
 		pagesResp, err2 := cookiesHTTPClient.Do(fallbackReq)
 		if err2 != nil {
-			return "", fmt.Errorf("CDP Storage.getCookies failed: %v, fallback failed: %v", err, err2)
+			return "", fmt.Errorf("CDP cookie fallback listing failed: %w", err2)
 		}
 		defer func() {
 			io.Copy(io.Discard, pagesResp.Body)
@@ -320,18 +336,26 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 			WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 			Type                 string `json:"type"`
 		}
-		json.NewDecoder(pagesResp.Body).Decode(&targets)
+		if err := json.NewDecoder(pagesResp.Body).Decode(&targets); err != nil {
+			return "", fmt.Errorf("CDP fallback decode: %w", err)
+		}
 
+		// Fallback 1: page-level Network.getAllCookies.
 		for _, t := range targets {
 			if t.Type == "page" && t.WebSocketDebuggerURL != "" {
-				result, err = cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getAllCookies", nil)
-				if err == nil {
-					break
+				if raw, err := cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getAllCookies", nil); err == nil {
+					if parsed, perr := parseResult(raw); perr == nil && len(parsed.Cookies) > 0 {
+						cookieResult = parsed
+						break
+					}
 				}
 			}
 		}
-		// Third fallback: Network.getCookies with explicit URLs (matching TS CdpClient.getAllCookies)
-		if err != nil {
+
+		// Fallback 2: Network.getCookies with explicit URL list (matches TS
+		// CdpClient.getAllCookies behavior for browsers that no longer
+		// expose Storage.getCookies or Network.getAllCookies).
+		if len(cookieResult.Cookies) == 0 {
 			for _, t := range targets {
 				if t.Type == "page" && t.WebSocketDebuggerURL != "" {
 					params := map[string]any{
@@ -345,22 +369,21 @@ func cdpGetCookiesAsNetscape(ctx context.Context, port int) (string, error) {
 							"https://twitch.tv",
 						},
 					}
-					result, err = cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getCookies", params)
-					if err == nil {
-						break
+					if raw, err := cdpSendCommandWithResult(t.WebSocketDebuggerURL, "Network.getCookies", params); err == nil {
+						if parsed, perr := parseResult(raw); perr == nil && len(parsed.Cookies) > 0 {
+							cookieResult = parsed
+							break
+						}
 					}
 				}
 			}
 		}
-		if err != nil {
-			return "", fmt.Errorf("failed to extract cookies via CDP")
-		}
-	}
 
-	// Parse cookie result
-	var cookieResult cdpCookieResult
-	if err := json.Unmarshal(result, &cookieResult); err != nil {
-		return "", fmt.Errorf("parse CDP cookies: %w", err)
+		// Still nothing — surface as an explicit error instead of silently
+		// handing back a Netscape file with just headers.
+		if len(cookieResult.Cookies) == 0 {
+			return "", fmt.Errorf("CDP returned no cookies (Storage.getCookies, Network.getAllCookies, Network.getCookies all empty)")
+		}
 	}
 
 	// Convert to extractedCookie for filtering/deduplication (matching TS cdpCookiesToNetscape)
