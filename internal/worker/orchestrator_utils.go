@@ -58,7 +58,10 @@ func (o *DownloadOrchestrator) runFFprobe(ctx context.Context, filePath string) 
 
 	out, err := cmd.Output()
 	if err != nil {
-		o.logger.Debug("ffprobe failed", "err", err)
+		// Promote from Debug → Warn: ffprobe failure usually means a bad
+		// FFmpeg install or a truly malformed file — falling back to format
+		// metadata silently used to hide both (audit worker.md Finding 13).
+		o.logger.Warn("ffprobe failed; falling back to format metadata", "err", err)
 		return nil
 	}
 
