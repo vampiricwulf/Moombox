@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,14 +15,44 @@ import (
 // client timeout only guards against truly stuck connections.
 var utilsHTTPClient = &http.Client{Timeout: 5 * time.Minute}
 
-var connReporter interface {
+// ConnectivityReporter is the subset of connectivity.Monitor we invoke from
+// the HTTP helpers. Tagging via "utils/http" lets the passive tracker
+// distinguish this subsystem from other fetch paths (see
+// internal/connectivity/passive.go).
+type ConnectivityReporter interface {
 	ReportFailure(tag string)
 	ReportSuccess(tag string)
 }
 
+// connReporter is an atomic.Pointer so that SetConnectivityReporter can be
+// called without racing with concurrent fetches. In practice main.go
+// installs the reporter once at startup, but making the read lock-free
+// removes any happens-before foot-gun for future callers or tests that
+// might reinstall the reporter mid-run.
+var connReporter atomic.Pointer[ConnectivityReporter]
+
 // SetConnectivityReporter sets the global connectivity reporter for HTTP utilities.
-func SetConnectivityReporter(r interface{ ReportFailure(string); ReportSuccess(string) }) {
-	connReporter = r
+// Safe to call concurrently with in-flight fetches.
+func SetConnectivityReporter(r ConnectivityReporter) {
+	if r == nil {
+		connReporter.Store(nil)
+		return
+	}
+	connReporter.Store(&r)
+}
+
+// reportConnResult is an internal helper that loads the reporter atomically
+// and forwards the success/failure callback if one is installed.
+func reportConnResult(failed bool) {
+	rp := connReporter.Load()
+	if rp == nil {
+		return
+	}
+	if failed {
+		(*rp).ReportFailure("utils/http")
+	} else {
+		(*rp).ReportSuccess("utils/http")
+	}
 }
 
 // FetchWithTimeout performs an HTTP GET with a timeout.
@@ -43,15 +74,11 @@ func FetchWithTimeout(ctx context.Context, url string, timeout time.Duration, he
 
 	resp, err := utilsHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("utils/http")
-		}
+		reportConnResult(true)
 		cancel()
 		return nil, nil, err
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("utils/http")
-	}
+	reportConnResult(false)
 
 	return resp, cancel, nil
 }

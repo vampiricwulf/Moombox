@@ -142,6 +142,26 @@ func TestExtractTwitchTarget(t *testing.T) {
 			input:    "https://twitch.tv/search",
 			expected: nil,
 		},
+		{
+			name:     "reserved path store",
+			input:    "https://twitch.tv/store",
+			expected: nil,
+		},
+		{
+			name:     "reserved path tags",
+			input:    "https://twitch.tv/tags",
+			expected: nil,
+		},
+		{
+			name:     "reserved path drops",
+			input:    "https://twitch.tv/drops",
+			expected: nil,
+		},
+		{
+			name:     "reserved path subscriptions",
+			input:    "https://twitch.tv/subscriptions",
+			expected: nil,
+		},
 
 		// URL with port (hostname must strip port)
 		{

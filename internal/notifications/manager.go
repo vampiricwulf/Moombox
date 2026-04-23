@@ -115,10 +115,10 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 			}
 			parts := strings.Join(segments[:2], "/")
 			webhookURL := "https://discord.com/api/webhooks/" + parts
-			s = &DiscordWebhook{URL: webhookURL, Logger: logger}
+			s = &DiscordWebhook{URL: webhookURL}
 
 		case discordWebhookRe.MatchString(url):
-			s = &DiscordWebhook{URL: url, Logger: logger}
+			s = &DiscordWebhook{URL: url}
 
 		case strings.Contains(url, "discord.com/api/webhooks"):
 			logger.Warn("rejected invalid Discord webhook URL (must be HTTPS with valid ID/token)", "url", url)

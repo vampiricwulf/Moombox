@@ -9,6 +9,12 @@ const (
 	defaultPassiveWindow   = 30 * time.Second
 	defaultPassiveMinFails = 5
 	defaultPassiveMinTags  = 2
+
+	// maxFailureEntries caps the failure slice size to prevent unbounded
+	// growth if a subsystem emits failures faster than the 30s window can
+	// prune them. The threshold logic only needs minFails + minTags worth
+	// of entries, so anything beyond a comfortable cap is wasted memory.
+	maxFailureEntries = 256
 )
 
 type failureEntry struct {
@@ -39,6 +45,11 @@ func (pt *PassiveTracker) ReportFailure(tag string) {
 	defer pt.mu.Unlock()
 	pt.failures = append(pt.failures, failureEntry{tag: tag, at: time.Now()})
 	pt.pruneOld()
+	// Hard cap: if a subsystem spams failures faster than pruneOld can
+	// drop them, trim the oldest entries to keep memory bounded.
+	if len(pt.failures) > maxFailureEntries {
+		pt.failures = pt.failures[len(pt.failures)-maxFailureEntries:]
+	}
 }
 
 // ReportSuccess removes failure entries for the given tag. The tracker

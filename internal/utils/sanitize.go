@@ -13,13 +13,19 @@ var (
 	// invalidFSChars matches characters invalid on most filesystems
 	invalidFSChars = regexp.MustCompile(`[<>:"/\\|?*]`)
 
-	// windowsReservedNames are device names that cannot be used as filenames on Windows.
+	// windowsReservedNames are device names that cannot be used as filenames on
+	// Windows. Covers the documented DOS devices (CON, PRN, AUX, NUL, COM1-9,
+	// LPT1-9), the newer COM0/LPT0 variants that Windows 11 also reserves, and
+	// the console redirection devices (CONIN$, CONOUT$) that are accepted by
+	// CreateFile.
 	windowsReservedNames = map[string]bool{
 		"con": true, "prn": true, "aux": true, "nul": true,
-		"com1": true, "com2": true, "com3": true, "com4": true,
+		"com0": true, "com1": true, "com2": true, "com3": true, "com4": true,
 		"com5": true, "com6": true, "com7": true, "com8": true, "com9": true,
-		"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true,
+		"lpt0": true, "lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true,
 		"lpt5": true, "lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+		"conin$":  true,
+		"conout$": true,
 	}
 )
 

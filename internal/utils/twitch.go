@@ -25,9 +25,29 @@ var (
 	twitchLoginRegex    = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,24}$`)
 	twitchVODPrefixRe   = regexp.MustCompile(`^v(\d{1,12})$`)
 	twitchVODBareRe     = regexp.MustCompile(`^\d{7,12}$`)
+	// twitchReservedPaths lists first-path-segment slugs on twitch.tv that
+	// are site navigation / product pages rather than channel logins, so we
+	// must not treat them as channel names when parsing /<slug>.
 	twitchReservedPaths = map[string]bool{
-		"directory": true, "downloads": true, "jobs": true,
-		"settings": true, "videos": true, "search": true, "p": true,
+		"directory":   true,
+		"downloads":   true,
+		"jobs":        true,
+		"settings":    true,
+		"videos":      true,
+		"search":      true,
+		"p":           true, // /p/... promotional/product pages
+		"store":       true,
+		"tag":         true, // legacy tag browsing
+		"tags":        true,
+		"turbo":       true,
+		"drops":       true,
+		"wallet":      true,
+		"prime":       true,
+		"subs":        true,
+		"subscriptions": true,
+		"friends":     true,
+		"inventory":   true,
+		"payments":    true,
 	}
 )
 

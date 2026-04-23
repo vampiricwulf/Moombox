@@ -77,8 +77,21 @@ const (
 	maxJobLogLines  = 500
 )
 
+// minLogRotationSize is the smallest acceptable rotation threshold. Below
+// this, a single formatted log line could exceed the cap and trigger
+// rotation on every Write — a hot loop. 4 KiB is well under any sane
+// log-file-size budget while being more than any realistic single
+// structured log line.
+const minLogRotationSize = 4096
+
 // New creates a new Logger with file rotation support.
 func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
+	if maxSize < minLogRotationSize {
+		maxSize = minLogRotationSize
+	}
+	if maxFiles < 1 {
+		maxFiles = 1
+	}
 	l := &Logger{
 		filePath: filePath,
 		maxSize:  maxSize,
@@ -111,12 +124,21 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	}
 	multi := io.MultiWriter(writers...)
 
-	// Custom handler with timestamp formatting
+	// Custom handler with timestamp formatting. Use the attribute's own
+	// time value (captured by slog at the log call site) rather than
+	// time.Now() so formatted timestamps reflect the exact call moment
+	// even when slog buffers. This also keeps file/stdout timestamps in
+	// lock-step with the ring-buffer / subscriber timestamps emitted
+	// through formatLogLine.
 	opts := &slog.HandlerOptions{
 		Level: l.level,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
-				a.Value = slog.StringValue(time.Now().Format("2006-01-02 15:04:05"))
+				t := a.Value.Time()
+				if t.IsZero() {
+					t = time.Now()
+				}
+				a.Value = slog.StringValue(t.Format("2006-01-02 15:04:05"))
 			}
 			return a
 		},
@@ -396,6 +418,20 @@ func (l *Logger) GetRecentLines() []string {
 }
 
 // Subscribe creates a new subscription channel for log lines.
+//
+// The returned channel is buffered (capacity 100); if the subscriber's
+// reader cannot keep up, broadcast drops new messages and emits a
+// rate-limited warning rather than blocking.
+//
+// Lifecycle: callers must drive their own read loop with a select that
+// also listens to a cancellation signal (context, stop chan, etc.).
+// Unsubscribe does NOT close the returned channel (see Unsubscribe
+// godoc for rationale). When the Logger is Close'd, all remaining
+// subscribers (those that never Unsubscribed) do have their channels
+// closed, so a read loop that blocks on <-ch will unblock at shutdown.
+// A goroutine that Unsubscribes mid-run and continues to read from the
+// channel will block forever — either stop reading once you Unsubscribe
+// or never Unsubscribe (let Close drain you).
 func (l *Logger) Subscribe() chan string {
 	ch := make(chan string, 100)
 	l.subMu.Lock()
@@ -404,10 +440,15 @@ func (l *Logger) Subscribe() chan string {
 	return ch
 }
 
-// Unsubscribe removes a subscription channel.
-// The channel is not closed here to avoid a race with broadcast() which may
-// be concurrently sending to it. Instead, the channel is simply removed from
-// the list and left for GC.
+// Unsubscribe removes a subscription channel from the broadcast list.
+//
+// The channel is intentionally NOT closed here: broadcast may be
+// concurrently sending to it under its own lock, and closing a channel
+// that a goroutine may still write to is a panic. After Unsubscribe
+// returns, no new messages will be sent to the channel, but any
+// goroutine still blocked on <-ch will block forever unless it also
+// exits on some external signal. See Subscribe's godoc for the
+// required caller pattern.
 func (l *Logger) Unsubscribe(ch chan string) {
 	l.subMu.Lock()
 	defer l.subMu.Unlock()

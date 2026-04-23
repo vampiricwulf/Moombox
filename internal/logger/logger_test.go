@@ -297,15 +297,17 @@ func TestLogRotation(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "rotate.log")
 
-	// Use a very small max size to trigger rotation quickly
-	l, err := New(logPath, "DEBUG", 100, 3)
+	// Use the minimum allowed rotation size so rotation triggers after
+	// just a few log lines without bypassing New's clamp.
+	l, err := New(logPath, "DEBUG", minLogRotationSize, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
 
-	// Write enough to trigger rotation
-	for i := range 20 {
+	// Each log line is ~100 bytes, so ~50 lines is enough to exceed the 4 KiB
+	// threshold and force rotation.
+	for i := range 60 {
 		l.Info("rotation test message that is long enough to exceed the limit", "i", i)
 	}
 
@@ -315,6 +317,27 @@ func TestLogRotation(t *testing.T) {
 	}
 	if _, err := os.Stat(logPath + ".1"); os.IsNotExist(err) {
 		t.Error("expected rotated log file .1 to exist")
+	}
+}
+
+// TestNewClampsSmallMaxSize verifies New clamps unreasonably small maxSize
+// values up to the documented minimum. Regression for audit
+// reports/small-packages.md logger.go:130-147.
+func TestNewClampsSmallMaxSize(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "clamp.log")
+
+	l, err := New(logPath, "DEBUG", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	if l.maxSize < minLogRotationSize {
+		t.Errorf("maxSize=%d, want >= %d", l.maxSize, minLogRotationSize)
+	}
+	if l.maxFiles < 1 {
+		t.Errorf("maxFiles=%d, want >= 1", l.maxFiles)
 	}
 }
 
