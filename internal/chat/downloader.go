@@ -371,8 +371,6 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			if now-cd.lastWriteMs >= writeIntervalMs {
 				cd.writeChatFile()
 				cd.lastWriteMs = now
-				cd.messages = nil // All written to disk, free memory
-				cd.flushedToDisk = true
 
 				// Update header to keep messageCount accurate after incremental flushes
 				cd.updateChatFileHeader()
@@ -495,6 +493,8 @@ func (cd *ChatDownloader) getOutputPaths() (outputFile, resumeFile string) {
 // - Flushed: the on-disk file already has old messages. Use incremental append:
 //   read only the last bytes to locate ']', truncate there, then append new
 //   messages + closing structure. Memory cost: O(new messages) not O(file size).
+//
+// On success, clears the in-memory buffer and marks flushedToDisk = true.
 func (cd *ChatDownloader) writeChatFile() {
 	outputFile, _ := cd.getOutputPaths()
 	if outputFile == "" {
@@ -507,13 +507,29 @@ func (cd *ChatDownloader) writeChatFile() {
 	if !cd.flushedToDisk {
 		// All messages in memory — write complete file atomically
 		cd.writeFullChatFile()
+		cd.messages = nil // All written to disk, free memory
+		cd.flushedToDisk = true
 		return
 	}
 
-	// Incremental append: open existing file and append new messages
+	// Incremental append: open existing file and append new messages.
+	// If any step fails, fall back to a full rewrite that prepends on-disk
+	// messages — both paths clear the in-memory buffer on success.
+	if cd.incrementalAppend(outputFile) {
+		cd.messages = nil
+	} else {
+		cd.prependExistingMessages(outputFile)
+		cd.writeFullChatFile()
+		cd.messages = nil
+	}
+}
+
+// incrementalAppend performs an in-place append of cd.messages to the existing
+// chat file on disk. Returns true on success, false if a full rewrite is needed.
+func (cd *ChatDownloader) incrementalAppend(outputFile string) bool {
 	newMessages := cd.messages
 	if len(newMessages) == 0 {
-		return
+		return true
 	}
 
 	// Check if output file exists
@@ -527,9 +543,7 @@ func (cd *ChatDownloader) writeChatFile() {
 				cd.OnError(fmt.Errorf("chat file too small (%d bytes), rewriting", info.Size()))
 			}
 		}
-		cd.prependExistingMessages(outputFile)
-		cd.writeFullChatFile()
-		return
+		return false
 	}
 
 	f, err := os.OpenFile(outputFile, os.O_RDWR, 0o644)
@@ -537,9 +551,7 @@ func (cd *ChatDownloader) writeChatFile() {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("chat file open failed, rewriting: %w", err))
 		}
-		cd.prependExistingMessages(outputFile)
-		cd.writeFullChatFile()
-		return
+		return false
 	}
 	defer f.Close()
 
@@ -553,10 +565,7 @@ func (cd *ChatDownloader) writeChatFile() {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("chat file read failed, rewriting: %w", err))
 		}
-		f.Close()
-		cd.prependExistingMessages(outputFile)
-		cd.writeFullChatFile()
-		return
+		return false
 	}
 
 	tail := string(tailBuf)
@@ -571,10 +580,7 @@ func (cd *ChatDownloader) writeChatFile() {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("chat file missing closing bracket, rewriting"))
 		}
-		f.Close()
-		cd.prependExistingMessages(outputFile)
-		cd.writeFullChatFile()
-		return
+		return false
 	}
 
 	bracketBytePos := fileSize - tailSize + int64(bracketOffset)
@@ -588,10 +594,7 @@ func (cd *ChatDownloader) writeChatFile() {
 			if cd.OnError != nil {
 				cd.OnError(fmt.Errorf("chat file check-read failed, rewriting: %w", err))
 			}
-			f.Close()
-			cd.prependExistingMessages(outputFile)
-			cd.writeFullChatFile()
-			return
+			return false
 		}
 		for i := len(checkBuf) - 1; i >= 0; i-- {
 			if checkBuf[i] == '}' {
@@ -627,17 +630,16 @@ func (cd *ChatDownloader) writeChatFile() {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("chat file truncate failed, rewriting: %w", err))
 		}
-		f.Close()
-		cd.prependExistingMessages(outputFile)
-		cd.writeFullChatFile()
-		return
+		return false
 	}
 	// WriteAt after truncation — log if it fails since data may be lost.
 	if _, err := f.WriteAt([]byte(appendStr), bracketBytePos); err != nil {
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("write appended chat messages: %w", err))
 		}
+		// Data partially written but caller should not re-buffer — treat as success.
 	}
+	return true
 }
 
 func (cd *ChatDownloader) writeFullChatFile() {
