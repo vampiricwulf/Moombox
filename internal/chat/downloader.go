@@ -691,13 +691,41 @@ func (cd *ChatDownloader) writeFullChatFile() {
 	jsonBytes = utils.PadMessageCountJSON(jsonBytes)
 
 	tmpFile := outputFile + ".tmp"
-	if err := os.WriteFile(tmpFile, jsonBytes, 0o644); err != nil {
+	// Write + fsync + close before rename. A crash between write and rename
+	// must not leave an empty/truncated tmp file that could then be renamed
+	// over a good chat.json, since the rename is the atomicity guarantee.
+	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("open chat file: %w", err))
+		}
+		return
+	}
+	if _, err := f.Write(jsonBytes); err != nil {
+		f.Close()
+		os.Remove(tmpFile)
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("write chat file: %w", err))
 		}
 		return
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpFile)
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("fsync chat file: %w", err))
+		}
+		return
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpFile)
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("close chat file: %w", err))
+		}
+		return
+	}
 	if err := os.Rename(tmpFile, outputFile); err != nil {
+		os.Remove(tmpFile)
 		if cd.OnError != nil {
 			cd.OnError(fmt.Errorf("rename chat file: %w", err))
 		}
