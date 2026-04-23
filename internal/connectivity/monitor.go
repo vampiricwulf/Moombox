@@ -23,6 +23,7 @@ type Monitor struct {
 	callbacks    map[uint64]func(online bool)
 	nextID       uint64
 	cancel       context.CancelFunc
+	started      atomic.Bool
 	checkFn      func() bool
 	passive      *PassiveTracker
 	logger       logger
@@ -52,10 +53,24 @@ func NewMonitor(log logger) *Monitor {
 	return m
 }
 
-
+// Start launches the background poll goroutine. Calling Start more than once
+// on the same Monitor is a no-op — we ignore subsequent calls rather than
+// leaking the first cancel func and spawning a second goroutine.
 func (m *Monitor) Start(ctx context.Context) {
+	if !m.started.CompareAndSwap(false, true) {
+		return
+	}
 	ctx2, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
+
+	// Seed state with a synchronous probe so IsOnline() reflects reality before
+	// the first tick fires 5 seconds later. Without this, a machine that boots
+	// with no network will report online=true for up to 5 seconds.
+	if !m.checkFn() {
+		m.offlinePolls = 2 // skip the debounce — we already know we are offline
+		m.poll()
+	}
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
