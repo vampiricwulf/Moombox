@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -142,7 +143,12 @@ func (j *CookieJar) GetCookie(name string) string {
 }
 
 // cookieValueSanitizer strips characters that could enable header injection.
-var cookieValueSanitizer = strings.NewReplacer("\r", "", "\n", "")
+// cookieValueSanitizer strips characters that could enable header injection
+// or silently corrupt the Cookie: header parser:
+//   - \r / \n: classic header-injection vectors.
+//   - ; , : cookie header field separators per RFC 6265; a value containing
+//     these terminates the pair early and mis-routes everything after.
+var cookieValueSanitizer = strings.NewReplacer("\r", "", "\n", "", ";", "", ",", "")
 
 // sanitizeCookieValue strips characters that could enable header injection.
 func sanitizeCookieValue(v string) string {
@@ -150,13 +156,25 @@ func sanitizeCookieValue(v string) string {
 }
 
 // GetCookieHeader returns a Cookie header string with all cookies.
+//
+// Pairs are emitted in a stable sorted-by-name order. Go's map iteration is
+// deliberately randomized, which meant two successive calls could produce
+// different Cookie headers for the same jar contents — a poor fit for
+// SAPISIDHASH flows where an attacker-controlled reshuffle makes HTTP-level
+// debugging painful and occasionally trips YouTube endpoints that inspect
+// __Secure-* ordering. Alphabetical is simple and deterministic.
 func (j *CookieJar) GetCookieHeader() string {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 
-	pairs := make([]string, 0, len(j.cookies))
-	for name, value := range j.cookies {
-		pairs = append(pairs, name+"="+sanitizeCookieValue(value))
+	names := make([]string, 0, len(j.cookies))
+	for name := range j.cookies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	pairs := make([]string, 0, len(names))
+	for _, name := range names {
+		pairs = append(pairs, name+"="+sanitizeCookieValue(j.cookies[name]))
 	}
 	return strings.Join(pairs, "; ")
 }
