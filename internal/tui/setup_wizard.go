@@ -783,13 +783,13 @@ func (m *SetupWizardModel) handleChannelEditKey(key string) string {
 			m.updateTextInputForField()
 		}
 		return ""
-	case "left":
+	case keyLeft:
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelFieldReverse(field)
 			m.clampChannelEditField()
 		}
 		return ""
-	case "right":
+	case keyRight:
 		if field.ftype == fieldToggle || field.ftype == fieldCycle {
 			m.cycleChannelField(field)
 			m.clampChannelEditField()
