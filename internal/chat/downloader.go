@@ -56,7 +56,6 @@ type ChatDownloader struct {
 	streamStartMs int64
 	flushedToDisk bool
 	lastWriteAt   time.Time
-	lastTimestamp  string
 	cancelCtx     context.CancelFunc // for aborting sleep on stop/markStreamEnded
 	done          chan struct{}       // closed when Start() completes; nil if never started
 
@@ -383,7 +382,6 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			}
 			cd.messages = append(cd.messages, *msg)
 			cd.messageCount++
-			cd.lastTimestamp = msg.TimestampUsec
 			newInBatch++
 		}
 
@@ -902,12 +900,11 @@ func (cd *ChatDownloader) saveResume() {
 	copy(recentIDs, src)
 
 	state := ChatResumeState{
-		MessageCount:      cd.messageCount,
-		Continuation:      cd.continuation,
-		Timestamp:         time.Now().Unix(),
-		VideoID:           cd.opts.VideoID,
-		RecentIDs:         recentIDs,
-		LastTimestampUsec: cd.lastTimestamp,
+		MessageCount: cd.messageCount,
+		Continuation: cd.continuation,
+		Timestamp:    time.Now().Unix(),
+		VideoID:      cd.opts.VideoID,
+		RecentIDs:    recentIDs,
 	}
 	cd.mu.Unlock()
 

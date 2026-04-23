@@ -57,13 +57,16 @@ type ChatProgress struct {
 }
 
 // ChatResumeState holds chat download progress for crash recovery.
+//
+// Older resume files may have a `lastTimestampUsec` field written — that
+// field is ignored on load (encoding/json silently drops unknown fields)
+// and is no longer written.
 type ChatResumeState struct {
-	LastTimestampUsec string   `json:"lastTimestampUsec"`
-	MessageCount      int      `json:"messageCount"`
-	Continuation      string   `json:"continuation"`
-	Timestamp         int64    `json:"timestamp"`
-	VideoID           string   `json:"videoId"`
-	RecentIDs         []string `json:"recentIds"`
+	MessageCount int      `json:"messageCount"`
+	Continuation string   `json:"continuation"`
+	Timestamp    int64    `json:"timestamp"`
+	VideoID      string   `json:"videoId"`
+	RecentIDs    []string `json:"recentIds"`
 }
 
 // Superchat tier color mapping (YouTube's internal ARGB color codes).
