@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,14 +38,47 @@ var engineHTTPClient = &http.Client{
 	},
 }
 
-var connReporter interface {
+// ConnectivityReporter is the interface the engine uses to notify the
+// connectivity monitor about HTTP successes and failures. It's stored in an
+// atomic.Pointer so SetConnectivityReporter and the many concurrent readers
+// in fetchSegment/probe/* don't race.
+type ConnectivityReporter interface {
 	ReportFailure(tag string)
 	ReportSuccess(tag string)
 }
 
+var connReporter atomic.Pointer[ConnectivityReporter]
+
 // SetConnectivityReporter sets the global connectivity reporter for the engine package.
-func SetConnectivityReporter(r interface{ ReportFailure(string); ReportSuccess(string) }) {
-	connReporter = r
+// Safe to call before or after downloads start; reads are lock-free via atomic.Pointer.
+func SetConnectivityReporter(r ConnectivityReporter) {
+	if r == nil {
+		connReporter.Store(nil)
+		return
+	}
+	connReporter.Store(&r)
+}
+
+// loadConnReporter returns the current reporter or nil if none is set.
+// Small helper so callers don't need to double-deref the atomic pointer.
+func loadConnReporter() ConnectivityReporter {
+	p := connReporter.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func reportFailure(tag string) {
+	if r := loadConnReporter(); r != nil {
+		r.ReportFailure(tag)
+	}
+}
+
+func reportSuccess(tag string) {
+	if r := loadConnReporter(); r != nil {
+		r.ReportSuccess(tag)
+	}
 }
 
 // fetchSegment downloads a single segment (or playlist) by URL.
@@ -69,14 +103,10 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("engine/fetch")
-		}
+		reportFailure("engine/fetch")
 		return nil, 0, err
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("engine/fetch")
-	}
+	reportSuccess("engine/fetch")
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
@@ -133,14 +163,10 @@ func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) 
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("engine/fetch")
-		}
+		reportFailure("engine/fetch")
 		return -1, err
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("engine/fetch")
-	}
+	reportSuccess("engine/fetch")
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
@@ -172,14 +198,10 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("engine/fetch")
-		}
+		reportFailure("engine/fetch")
 		return 0
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("engine/fetch")
-	}
+	reportSuccess("engine/fetch")
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
@@ -244,14 +266,10 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("engine/fetch")
-		}
+		reportFailure("engine/fetch")
 		return nil, 0, err
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("engine/fetch")
-	}
+	reportSuccess("engine/fetch")
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {

@@ -480,6 +480,46 @@ func TestStreamEnded_AtomicAccess(t *testing.T) {
 	}
 }
 
+type fakeReporter struct {
+	fails    int
+	successes int
+}
+
+func (f *fakeReporter) ReportFailure(string) { f.fails++ }
+func (f *fakeReporter) ReportSuccess(string) { f.successes++ }
+
+func TestConnectivityReporter_SetAndClear(t *testing.T) {
+	// Clean up after ourselves so we don't leak state into other tests
+	t.Cleanup(func() { SetConnectivityReporter(nil) })
+
+	if r := loadConnReporter(); r != nil {
+		t.Errorf("expected nil reporter initially, got %T", r)
+	}
+
+	f := &fakeReporter{}
+	SetConnectivityReporter(f)
+
+	r := loadConnReporter()
+	if r == nil {
+		t.Fatal("expected non-nil reporter after Set")
+	}
+	r.ReportFailure("test")
+	r.ReportSuccess("test")
+	if f.fails != 1 || f.successes != 1 {
+		t.Errorf("expected fails=1 successes=1, got fails=%d successes=%d", f.fails, f.successes)
+	}
+
+	// Clear it explicitly
+	SetConnectivityReporter(nil)
+	if r := loadConnReporter(); r != nil {
+		t.Errorf("expected nil after SetConnectivityReporter(nil), got %T", r)
+	}
+
+	// Helpers are no-op when no reporter
+	reportFailure("no-reporter") // should not panic
+	reportSuccess("no-reporter") // should not panic
+}
+
 func TestCurrentSeq(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
 		BaseURL:    "https://example.com/sq/$Number$",
