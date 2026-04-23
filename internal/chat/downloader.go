@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -134,8 +135,18 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 
 	defer func() {
 		if r := recover(); r != nil {
+			// Capture the stack at the point of panic so production crashes
+			// are diagnosable from the OnError sink alone.
+			stack := debug.Stack()
 			if cd.OnError != nil {
-				cd.OnError(fmt.Errorf("chat downloader panic: %v", r))
+				// Guard against a panicking OnError handler — we're already
+				// in recovery, a second panic here would escape the goroutine.
+				func() {
+					defer func() {
+						_ = recover()
+					}()
+					cd.OnError(fmt.Errorf("chat downloader panic: %v\n%s", r, stack))
+				}()
 			}
 			cd.mu.Lock()
 			cd.running = false
