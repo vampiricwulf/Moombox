@@ -1297,7 +1297,7 @@ func RestartRoute(r chi.Router, onRestart func()) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "panic in restart handler: %v\n", r)
+					reportPanic("restart handler", r)
 				}
 			}()
 			time.Sleep(500 * time.Millisecond)
