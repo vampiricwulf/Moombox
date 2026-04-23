@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const schemaVersion = 11
+const schemaVersion = 12
 
 // createSchema defines the full schema for new databases. It includes all tables
 // and indexes from the start. The incremental migrations below handle upgrading
@@ -135,6 +135,7 @@ CREATE INDEX IF NOT EXISTS idx_gaps_job_id ON gaps(job_id);
 CREATE INDEX IF NOT EXISTS idx_trims_job_id ON trims(job_id);
 CREATE INDEX IF NOT EXISTS idx_segments_job_id ON segments(job_id);
 CREATE INDEX IF NOT EXISTS idx_client_tokens_prefix ON client_tokens(token_prefix);
+CREATE INDEX IF NOT EXISTS idx_history_added_at ON history(added_at);
 `
 
 // readUserVersion reads SQLite's PRAGMA user_version. Returns 0 on a fresh DB.
@@ -450,6 +451,19 @@ func (db *Database) migrate() error {
 		}
 
 		if err := db.writeUserVersion(11); err != nil {
+			return err
+		}
+	}
+
+	if version < 12 {
+		// pruneHistory ORDERs by added_at and DELETEs via a subquery on every
+		// AddToHistory. Without an index on added_at the subquery is a full
+		// table scan. CREATE INDEX IF NOT EXISTS is idempotent on retry.
+		if _, err := db.db.ExecContext(db.getCtx(), `CREATE INDEX IF NOT EXISTS idx_history_added_at ON history(added_at)`); err != nil {
+			return err
+		}
+
+		if err := db.writeUserVersion(12); err != nil {
 			return err
 		}
 	}
