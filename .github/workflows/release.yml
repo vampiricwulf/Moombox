@@ -80,6 +80,11 @@ jobs:
         with:
           body_path: release_body.md
           generate_release_notes: ${{ env.use_github_notes == 'true' }}
+          # Tags containing '-' (e.g. v2.6.0-test.1, v2.6.0-beta.2, v2.6.0-rc.1)
+          # are treated as pre-releases: GitHub won't mark them "Latest" and the
+          # /releases/latest endpoint continues to point at the last stable tag.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
             Moombox.exe
             Moombox.exe.sig
