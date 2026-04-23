@@ -560,11 +560,15 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				w.logger.Info("attempting automatic cookie refresh...")
 				if w.OnCookieRefreshNeeded() {
 					w.logger.Info("cookie refresh succeeded, retrying job")
+					// Set to Upcoming so StreamProcessor.Process re-probes and
+					// correctly classifies the stream (live/VOD/upcoming). Using
+					// Live was wrong when the stream had transitioned to post-live
+					// or had not yet started (per audit reports/worker.md Finding 21).
 					w.db.UpdateJobFields(job.ID, map[string]any{
-						"status": database.StatusLive,
+						"status": database.StatusUpcoming,
 						"error":  "",
 					})
-					w.queue.Enqueue(job.ID, database.StatusLive)
+					w.queue.Enqueue(job.ID, database.StatusUpcoming)
 					return
 				}
 				w.logger.Warn("auto cookie refresh failed — re-run setup from Settings")
