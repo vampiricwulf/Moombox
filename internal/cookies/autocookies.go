@@ -48,7 +48,8 @@ type AutoCookieService struct {
 	cookiePath     string
 	jar            *CookieJar
 	setupProcess   *os.Process
-	refreshCmd     *exec.Cmd // tracks in-flight headless refresh browser
+	setupJob       *processJob // Windows Job Object for setup browser; nil on non-Windows
+	refreshCmd     *exec.Cmd   // tracks in-flight headless refresh browser
 	setupBrowser   *DetectedBrowser
 	browserExited  bool
 	cdpPort        int
@@ -553,6 +554,12 @@ func (s *AutoCookieService) killRefreshProcess() {
 func (s *AutoCookieService) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Close the setup Job Object — KILL_ON_JOB_CLOSE terminates any
+	// browser process the user left behind even if killSetupProcess didn't.
+	if s.setupJob != nil {
+		s.setupJob.close()
+		s.setupJob = nil
+	}
 	s.setupProcess = nil
 	s.setupBrowser = nil
 	s.browserExited = false

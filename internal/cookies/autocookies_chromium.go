@@ -38,12 +38,31 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		url,
 	)
 
+	// Create a Job Object before launching so the browser dies if Moombox
+	// crashes before cleanup runs. Closed by cleanup() during
+	// FinishSetup/CancelSetup. Mirrors the Firefox refresh path.
+	job, jobErr := newProcessJob()
+	if jobErr != nil {
+		s.logger.Warn("failed to create job object for chromium setup", "err", jobErr)
+	}
+
 	if err := cmd.Start(); err != nil {
+		if job != nil {
+			job.close()
+		}
 		return fmt.Errorf("start browser: %w", err)
+	}
+
+	if job != nil {
+		if assignErr := job.assign(cmd.Process); assignErr != nil {
+			s.logger.Warn("failed to assign chromium setup process to job object",
+				"pid", cmd.Process.Pid, "err", assignErr)
+		}
 	}
 
 	s.mu.Lock()
 	s.setupProcess = cmd.Process
+	s.setupJob = job
 	s.cdpPort = port
 	s.mu.Unlock()
 
@@ -117,9 +136,31 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 	)
 
+	// Job Object so an orphaned headless Chromium dies with Moombox if we
+	// crash before the defer below runs. Headless leaks are invisible —
+	// without this, a crashed refresh leaves a zombie chrome.exe holding
+	// the profile lock, breaking the next refresh attempt silently.
+	job, jobErr := newProcessJob()
+	if jobErr != nil {
+		s.logger.Warn("failed to create job object for chromium refresh", "err", jobErr)
+	}
+	defer func() {
+		if job != nil {
+			job.close()
+		}
+	}()
+
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start headless browser: %w", err)
 	}
+
+	if job != nil {
+		if assignErr := job.assign(cmd.Process); assignErr != nil {
+			s.logger.Warn("failed to assign chromium refresh process to job object",
+				"pid", cmd.Process.Pid, "err", assignErr)
+		}
+	}
+
 	s.mu.Lock()
 	s.refreshCmd = cmd
 	s.mu.Unlock()
