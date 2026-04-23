@@ -19,7 +19,11 @@ var (
 	// ("jsUrl", "PLAYER_JS_URL", and more recently "scriptSrc"); match any
 	// of them so a rename doesn't quietly disable cipher compilation.
 	jsURLRegex             = regexp.MustCompile(`"(?:jsUrl|PLAYER_JS_URL|scriptSrc)":"([^"]+)"`)
-	visitorDataRegex       = regexp.MustCompile(`"visitorData":"([^"]+)"`)
+	// visitorDataRegex matches both the camel-case form seen on watch pages
+	// and the snake-case form the homepage has historically used. Kept in
+	// sync with service.go's homepage extraction so a single rename only
+	// has to be edited in one place.
+	visitorDataRegex       = regexp.MustCompile(`"(?:visitorData|visitor_data)":"([^"]+)"`)
 	sessionIndexRegex      = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
 	delegatedSessionRegex  = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
 	dataSyncIDRegex        = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
