@@ -1,6 +1,10 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.17` with another `internal/engine/` pass.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.18` with monitor ctx threading.
 
-This build bundles Sprint #1 + Sprint #2 work plus twelve batches from the multi-report audit. All 287 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus thirteen batches from the multi-report audit. All 289 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 13 (test.19)
+
+- **cross-cutting C4 + monitor #4** — `VideoProbeFunc` now takes a `ctx` parameter so monitor shutdown actually cancels in-flight `ProbeVideoStatus` calls. The legacy callback discarded the monitor's ctx and used `context.Background()`, which meant a 15-item feed across N channels could pin shutdown for minutes while every probe burned through its 4-retry exponential-backoff budget. Threaded through `ProcessYouTubeVideoParams.Ctx` so both `feed.processFeed` and `decapi.processResponse` forward their existing ctx; tests and the wiring in `cmd/moombox/main.go` updated to match.
 
 ### Manual batch 12 (test.18)
 
