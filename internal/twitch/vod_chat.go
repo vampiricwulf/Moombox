@@ -191,8 +191,12 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			break
 		}
 
-		// No new messages at this offset — we've exhausted duplicates
-		if newCount == 0 {
+		// If this page was entirely duplicates AND the server has no more
+		// pages, we're done. Previously we broke on newCount==0 alone,
+		// which killed the download on resume whenever the first page
+		// back matched already-seen IDs — the rest of the VOD past that
+		// offset was never archived. With hasNext==true we keep paging.
+		if newCount == 0 && !hasNext {
 			break
 		}
 
@@ -200,9 +204,19 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			break
 		}
 
-		// Advance offset to the last edge's offset
+		// Advance offset to the last edge's offset so the next page
+		// moves forward in time even when the current page was entirely
+		// duplicates (newCount==0 with hasNext==true).
 		if len(edges) > 0 {
-			contentOffset = edges[len(edges)-1].ContentOffsetSeconds
+			newOffset := edges[len(edges)-1].ContentOffsetSeconds
+			// Guard against a pathological server response that never
+			// advances the offset — break to avoid an infinite loop.
+			if newCount == 0 && newOffset <= contentOffset {
+				vcd.logger.Warn("[TwitchVodChat] offset did not advance on all-duplicate page; stopping",
+					"offset", contentOffset)
+				break
+			}
+			contentOffset = newOffset
 		}
 
 		// Periodic flush every 5 seconds
