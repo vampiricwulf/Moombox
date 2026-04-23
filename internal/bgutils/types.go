@@ -18,9 +18,11 @@ const (
 	// Default request key for PO token generation
 	DefaultRequestKey = "O43z0dpjhgX20SCx4KAo"
 
-	// User agent strings used across bgutils package
-	UserAgentFull  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	UserAgentShort = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+	// UserAgentFull is used for BOTH the JS DOM shim navigator.userAgent AND
+	// every HTTP request this package makes. Upstream bgutils-js uses a single
+	// UA across both surfaces — split UAs give an inconsistent fingerprint
+	// between the VM's self-view and the server's view of the client.
+	UserAgentFull = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 	// Timeouts
 	BotGuardLoadTimeout = 10 * time.Second

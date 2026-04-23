@@ -187,7 +187,7 @@ func generateIntegrityToken(ctx context.Context, config *BgConfig, botguardRespo
 	if !config.UseYouTubeAPI {
 		req.Header.Set("x-goog-api-key", BotGuardAPIKey)
 	}
-	req.Header.Set("User-Agent", UserAgentShort)
+	req.Header.Set("User-Agent", UserAgentFull)
 
 	resp, err := bgHTTPClient.Do(req)
 	if err != nil {

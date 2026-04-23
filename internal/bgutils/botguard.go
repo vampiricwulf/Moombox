@@ -308,7 +308,7 @@ func fetchInterpreter(ctx context.Context, interpreterURL string) (string, error
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", UserAgentShort)
+	req.Header.Set("User-Agent", UserAgentFull)
 
 	resp, err := bgHTTPClient.Do(req)
 	if err != nil {

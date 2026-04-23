@@ -45,7 +45,7 @@ func FetchChallenge(ctx context.Context, config *BgConfig) (*DescrambledChalleng
 	if !config.UseYouTubeAPI {
 		req.Header.Set("x-goog-api-key", BotGuardAPIKey)
 	}
-	req.Header.Set("User-Agent", UserAgentShort)
+	req.Header.Set("User-Agent", UserAgentFull)
 
 	resp, err := bgHTTPClient.Do(req)
 	if err != nil {
