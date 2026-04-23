@@ -483,7 +483,9 @@ func parseMessageRuns(message map[string]any) []MessagePart {
 					}
 				}
 			}
-			part.IsCustomEmoji = emoji["isCustomEmoji"] == true
+			if v, ok := emoji["isCustomEmoji"].(bool); ok {
+				part.IsCustomEmoji = v
+			}
 			parts = append(parts, part)
 		}
 	}
