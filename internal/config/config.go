@@ -405,18 +405,35 @@ func validate(cfg *MoomboxConfig) {
 		cfg.Disk.CriticalPercent = min(cfg.Disk.WarnPercent+5, 99)
 	}
 
-	// Validate channel-level quality_preference (applies to both YouTube and Twitch)
-	validQualities := map[string]bool{
-		"best": true, "2160p60": true, "2160p": true, "1440p60": true, "1440p": true,
-		"1080p60": true, "1080p": true, "900p60": true, "900p": true,
-		"720p60": true, "720p": true, "480p": true, "360p": true, "160p": true,
-		"audio_only": true,
-	}
+	// Validate channel-level quality_preference (applies to both YouTube and Twitch).
+	// Uses the package-level validQualityPreferences set so the map isn't
+	// rebuilt on every validate() call.
 	for i := range cfg.Channels {
-		if cfg.Channels[i].QualityPreference != "" && !validQualities[cfg.Channels[i].QualityPreference] {
+		if cfg.Channels[i].QualityPreference != "" && !validQualityPreferences[cfg.Channels[i].QualityPreference] {
 			cfg.Channels[i].QualityPreference = ""
 		}
 	}
+}
+
+// validQualityPreferences is the authoritative set of quality_preference
+// strings accepted on a channel. Package-level so validate() doesn't
+// reallocate it per call.
+var validQualityPreferences = map[string]bool{
+	"best":       true,
+	"2160p60":    true,
+	"2160p":      true,
+	"1440p60":    true,
+	"1440p":      true,
+	"1080p60":    true,
+	"1080p":      true,
+	"900p60":     true,
+	"900p":       true,
+	"720p60":     true,
+	"720p":       true,
+	"480p":       true,
+	"360p":       true,
+	"160p":       true,
+	"audio_only": true,
 }
 
 // Save writes the configuration to a TOML file at the given path.
