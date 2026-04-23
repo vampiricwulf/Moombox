@@ -99,6 +99,9 @@ type Database struct {
 
 	// Prepared statements
 	stmtGetJob *sql.Stmt
+	// preparedStmts tracks every *sql.Stmt prepared via prepareStmt so Close
+	// can release them without each addition risking a leak.
+	preparedStmts []*sql.Stmt
 
 	// Per-job in-memory log buffers
 	jobLogsMu sync.RWMutex
@@ -157,10 +160,21 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 	return db, nil
 }
 
+// prepareStmt prepares a statement and records it in preparedStmts so Close
+// can release it. All prepared statements should flow through this helper.
+func (db *Database) prepareStmt(query string) (*sql.Stmt, error) {
+	stmt, err := db.db.PrepareContext(context.Background(), query)
+	if err != nil {
+		return nil, err
+	}
+	db.preparedStmts = append(db.preparedStmts, stmt)
+	return stmt, nil
+}
+
 func (db *Database) prepareStatements() error {
 	var err error
 
-	db.stmtGetJob, err = db.db.PrepareContext(db.getCtx(), `SELECT id, video_id, url, title, channel_name, platform,
+	db.stmtGetJob, err = db.prepareStmt(`SELECT id, video_id, url, title, channel_name, platform,
 		status, progress, percent, eta, speed, error, created_at, updated_at,
 		last_video_seq, last_audio_seq, total_video_seq, total_audio_seq,
 		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
@@ -183,8 +197,11 @@ func (db *Database) prepareStatements() error {
 func (db *Database) Close() error {
 	var closeErr error
 	db.closeOnce.Do(func() {
-		if db.stmtGetJob != nil {
-			db.stmtGetJob.Close()
+		// Release all prepared statements tracked by prepareStmt.
+		for _, stmt := range db.preparedStmts {
+			if stmt != nil {
+				stmt.Close()
+			}
 		}
 
 		closeErr = db.db.Close()
