@@ -309,6 +309,100 @@ func TestResumeState_SkipSaveWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestResumeState_StaleStateReturnsNil(t *testing.T) {
+	// Resume state older than maxResumeStateAge is considered stale.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+	staleTs := time.Now().Add(-30 * 24 * time.Hour).Unix() // 30 days ago
+	staleState := ResumeState{
+		LastSeq:      100,
+		BytesWritten: 5000,
+		Timestamp:    staleTs,
+		BaseURL:      "https://example.com/sq/$Number$",
+	}
+	data, _ := json.Marshal(staleState)
+	if err := os.WriteFile(resumeFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	state, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if state != nil {
+		t.Errorf("expected nil state for stale resume file, got %+v", state)
+	}
+}
+
+func TestResumeState_FreshStateAccepted(t *testing.T) {
+	// Resume state within maxResumeStateAge is honored.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+	freshTs := time.Now().Add(-1 * time.Hour).Unix() // 1 hour ago
+	freshState := ResumeState{
+		LastSeq:      100,
+		BytesWritten: 5000,
+		Timestamp:    freshTs,
+		BaseURL:      "https://example.com/sq/$Number$",
+	}
+	data, _ := json.Marshal(freshState)
+	if err := os.WriteFile(resumeFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	state, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected non-nil state for fresh resume file")
+	}
+	if state.LastSeq != 100 {
+		t.Errorf("LastSeq: got %d, want 100", state.LastSeq)
+	}
+}
+
+func TestResumeState_ZeroTimestampAccepted(t *testing.T) {
+	// Timestamp == 0 is treated as "legacy/unset" and should NOT be rejected
+	// as stale -- the other validation paths (empty/negative seq) still
+	// apply, but timestamp alone doesn't invalidate a valid-looking state.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+	state := ResumeState{
+		LastSeq:      50,
+		BytesWritten: 1000,
+		Timestamp:    0, // legacy/unset
+		BaseURL:      "https://example.com/sq/$Number$",
+	}
+	data, _ := json.Marshal(state)
+	if err := os.WriteFile(resumeFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	loaded, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected non-nil state even with Timestamp=0")
+	}
+}
+
 func TestResumeState_EmptyStateReturnsNil(t *testing.T) {
 	// A resume file with LastSeq=0 and BytesWritten=0 is effectively empty
 	// (saveResume() shouldn't have written it at all, but could happen via

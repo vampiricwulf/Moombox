@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// maxResumeStateAge is the oldest resume state we'll trust. Beyond this, we
+// treat the file as stale (the downloader likely changed URL/quality since
+// then, or the segment numbering has rolled) and start fresh. Seven days is
+// generous enough for weekend-long outages without letting ancient state
+// linger for months.
+const maxResumeStateAge = 7 * 24 * time.Hour
+
 // ResumeState holds download progress for crash recovery.
 type ResumeState struct {
 	LastSeq      int    `json:"lastSeq"`
@@ -31,6 +38,17 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 	// for YouTube live DASH (StartNumber=0) on resume.
 	if state.LastSeq < 0 || (state.LastSeq == 0 && state.BytesWritten == 0) {
 		return nil, nil
+	}
+	// Stale resume files are rejected. Timestamp == 0 is permitted (legacy
+	// state files saved before the field was used); only explicit future
+	// timestamps and > maxResumeStateAge in the past are considered stale.
+	if state.Timestamp > 0 {
+		age := time.Since(time.Unix(state.Timestamp, 0))
+		if age > maxResumeStateAge {
+			d.logger.Info("[Downloader] Resume state too old, starting fresh",
+				"age", age, "maxAge", maxResumeStateAge)
+			return nil, nil
+		}
 	}
 	return &state, nil
 }
