@@ -410,6 +410,26 @@ func TestDeduplicateFormats(t *testing.T) {
 	}
 }
 
+func TestDeduplicateFormats_SameAuthPrefersFirstInsertion(t *testing.T) {
+	// When two formats share the same itag AND auth level, the first one
+	// inserted into the pool wins. This is the guarantee
+	// parseFormatsWithCipher relies on to prefer adaptiveFormats over the
+	// legacy muxed formats[] array (adaptiveFormats is iterated first).
+	webAuth := AuthLevelWeb
+	pool := []Format{
+		{Itag: 137, URL: "https://example.com/adaptive", AuthLevel: &webAuth, Source: "adaptive"},
+		{Itag: 137, URL: "https://example.com/muxed", AuthLevel: &webAuth, Source: "muxed"},
+	}
+
+	result := deduplicateFormats(pool)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 deduplicated format, got %d", len(result))
+	}
+	if result[0].Source != "adaptive" {
+		t.Errorf("expected first-inserted (adaptive) to win same-auth tiebreak, got %q", result[0].Source)
+	}
+}
+
 func TestDeduplicateFormats_EmptyPool(t *testing.T) {
 	result := deduplicateFormats(nil)
 	if len(result) != 0 {

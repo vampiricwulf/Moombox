@@ -140,7 +140,13 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 	}
 
 	var formats []Format
-	for _, key := range []string{"formats", "adaptiveFormats"} {
+	// adaptiveFormats is iterated first so that when an itag appears in both
+	// arrays the DASH/adaptive entry lands in the pool first and wins the
+	// same-auth-level tiebreak in deduplicateFormats. adaptiveFormats carry
+	// contentLength + clean byte ranges and are the preferred source for
+	// live→post-live transitions where formats[] can temporarily point at
+	// muxed URLs that 404 once the broadcast wraps up.
+	for _, key := range []string{"adaptiveFormats", "formats"} {
 		arr, ok := streamingData[key].([]any)
 		if !ok {
 			continue
