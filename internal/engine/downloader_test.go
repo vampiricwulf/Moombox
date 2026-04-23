@@ -309,6 +309,151 @@ func TestResumeState_SkipSaveWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestResumeState_StaleStateReturnsNil(t *testing.T) {
+	// Resume state older than maxResumeStateAge is considered stale.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+	staleTs := time.Now().Add(-30 * 24 * time.Hour).Unix() // 30 days ago
+	staleState := ResumeState{
+		LastSeq:      100,
+		BytesWritten: 5000,
+		Timestamp:    staleTs,
+		BaseURL:      "https://example.com/sq/$Number$",
+	}
+	data, _ := json.Marshal(staleState)
+	if err := os.WriteFile(resumeFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	state, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if state != nil {
+		t.Errorf("expected nil state for stale resume file, got %+v", state)
+	}
+}
+
+func TestResumeState_FreshStateAccepted(t *testing.T) {
+	// Resume state within maxResumeStateAge is honored.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+	freshTs := time.Now().Add(-1 * time.Hour).Unix() // 1 hour ago
+	freshState := ResumeState{
+		LastSeq:      100,
+		BytesWritten: 5000,
+		Timestamp:    freshTs,
+		BaseURL:      "https://example.com/sq/$Number$",
+	}
+	data, _ := json.Marshal(freshState)
+	if err := os.WriteFile(resumeFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	state, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected non-nil state for fresh resume file")
+	}
+	if state.LastSeq != 100 {
+		t.Errorf("LastSeq: got %d, want 100", state.LastSeq)
+	}
+}
+
+func TestResumeState_ZeroTimestampAccepted(t *testing.T) {
+	// Timestamp == 0 is treated as "legacy/unset" and should NOT be rejected
+	// as stale -- the other validation paths (empty/negative seq) still
+	// apply, but timestamp alone doesn't invalidate a valid-looking state.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+	state := ResumeState{
+		LastSeq:      50,
+		BytesWritten: 1000,
+		Timestamp:    0, // legacy/unset
+		BaseURL:      "https://example.com/sq/$Number$",
+	}
+	data, _ := json.Marshal(state)
+	if err := os.WriteFile(resumeFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	loaded, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected non-nil state even with Timestamp=0")
+	}
+}
+
+func TestResumeState_EmptyStateReturnsNil(t *testing.T) {
+	// A resume file with LastSeq=0 and BytesWritten=0 is effectively empty
+	// (saveResume() shouldn't have written it at all, but could happen via
+	// corruption or hand-editing). loadResume should treat it as absent so
+	// the caller doesn't advance currentSeq past segment 0 on first resume.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+
+	emptyState := `{"lastSeq":0,"bytesWritten":0,"timestamp":0,"baseUrl":""}`
+	if err := os.WriteFile(resumeFile, []byte(emptyState), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	state, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if state != nil {
+		t.Errorf("expected nil state for empty resume file, got %+v", state)
+	}
+}
+
+func TestResumeState_NegativeLastSeqReturnsNil(t *testing.T) {
+	// Defensive: a negative LastSeq would make currentSeq = LastSeq+1
+	// go negative. Reject it.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+
+	if err := os.WriteFile(resumeFile, []byte(`{"lastSeq":-1,"bytesWritten":0}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	state, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if state != nil {
+		t.Errorf("expected nil state for negative lastSeq, got %+v", state)
+	}
+}
+
 func TestResumeState_CorruptedFile(t *testing.T) {
 	tmp := t.TempDir()
 	resumeFile := filepath.Join(tmp, "test.resume.json")
@@ -427,6 +572,67 @@ func TestStreamEnded_AtomicAccess(t *testing.T) {
 	if !d.streamEnded.Load() {
 		t.Error("should be ended after Store(true)")
 	}
+}
+
+type fakeReporter struct {
+	fails    int
+	successes int
+}
+
+func (f *fakeReporter) ReportFailure(string) { f.fails++ }
+func (f *fakeReporter) ReportSuccess(string) { f.successes++ }
+
+func TestApplyPoTokenQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		url   string
+		token string
+		want  string
+	}{
+		{"empty token leaves URL untouched", "https://e.com/sq/1", "", "https://e.com/sq/1"},
+		{"URL with no query uses ?", "https://e.com/sq/1", "abc", "https://e.com/sq/1?pot=abc"},
+		{"URL with existing query uses &", "https://e.com/sq/1?itag=137", "xyz", "https://e.com/sq/1?itag=137&pot=xyz"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyPoTokenQuery(tt.url, tt.token)
+			if got != tt.want {
+				t.Errorf("applyPoTokenQuery(%q, %q) = %q, want %q", tt.url, tt.token, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConnectivityReporter_SetAndClear(t *testing.T) {
+	// Clean up after ourselves so we don't leak state into other tests
+	t.Cleanup(func() { SetConnectivityReporter(nil) })
+
+	if r := loadConnReporter(); r != nil {
+		t.Errorf("expected nil reporter initially, got %T", r)
+	}
+
+	f := &fakeReporter{}
+	SetConnectivityReporter(f)
+
+	r := loadConnReporter()
+	if r == nil {
+		t.Fatal("expected non-nil reporter after Set")
+	}
+	r.ReportFailure("test")
+	r.ReportSuccess("test")
+	if f.fails != 1 || f.successes != 1 {
+		t.Errorf("expected fails=1 successes=1, got fails=%d successes=%d", f.fails, f.successes)
+	}
+
+	// Clear it explicitly
+	SetConnectivityReporter(nil)
+	if r := loadConnReporter(); r != nil {
+		t.Errorf("expected nil after SetConnectivityReporter(nil), got %T", r)
+	}
+
+	// Helpers are no-op when no reporter
+	reportFailure("no-reporter") // should not panic
+	reportSuccess("no-reporter") // should not panic
 }
 
 func TestCurrentSeq(t *testing.T) {

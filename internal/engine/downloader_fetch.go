@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,14 +38,81 @@ var engineHTTPClient = &http.Client{
 	},
 }
 
-var connReporter interface {
+// Segment read limits applied to resp.Body. Both are bounded so a
+// misbehaving server can't force the downloader to allocate unbounded
+// memory for a single response.
+const (
+	// maxSegmentBodyBytes caps the body of a normal segment/playlist fetch.
+	// YouTube live DASH segments are typically 200KB-4MB; 100 MB gives
+	// enormous headroom without letting a broken response balloon RAM.
+	maxSegmentBodyBytes = 100 << 20
+	// maxIgnoredRangeBodyBytes is used when a server returns 200 OK to a
+	// Range request instead of 206 Partial. We discard the body at 50 MB
+	// so a dumb static server on a multi-GB VOD can't drain the process.
+	maxIgnoredRangeBodyBytes = 50 << 20
+	// errorBodySnippetBytes caps how much of an HTTP-error response body
+	// we include in the returned error message. Enough to capture
+	// YouTube's JSON errors or a one-line HTML title, but small enough
+	// that a chatty error page doesn't explode the log line.
+	errorBodySnippetBytes = 512
+)
+
+// applyPoTokenQuery appends `?pot=<token>` (or `&pot=<token>` if the URL
+// already has a query string) to a segment URL. Returns the URL unchanged
+// if the token is empty. Centralized here so segment, head-probe, and
+// chunk fetch all inject the token identically.
+func applyPoTokenQuery(rawURL, token string) string {
+	if token == "" {
+		return rawURL
+	}
+	sep := "?"
+	if strings.Contains(rawURL, "?") {
+		sep = "&"
+	}
+	return rawURL + sep + "pot=" + token
+}
+
+// ConnectivityReporter is the interface the engine uses to notify the
+// connectivity monitor about HTTP successes and failures. It's stored in an
+// atomic.Pointer so SetConnectivityReporter and the many concurrent readers
+// in fetchSegment/probe/* don't race.
+type ConnectivityReporter interface {
 	ReportFailure(tag string)
 	ReportSuccess(tag string)
 }
 
+var connReporter atomic.Pointer[ConnectivityReporter]
+
 // SetConnectivityReporter sets the global connectivity reporter for the engine package.
-func SetConnectivityReporter(r interface{ ReportFailure(string); ReportSuccess(string) }) {
-	connReporter = r
+// Safe to call before or after downloads start; reads are lock-free via atomic.Pointer.
+func SetConnectivityReporter(r ConnectivityReporter) {
+	if r == nil {
+		connReporter.Store(nil)
+		return
+	}
+	connReporter.Store(&r)
+}
+
+// loadConnReporter returns the current reporter or nil if none is set.
+// Small helper so callers don't need to double-deref the atomic pointer.
+func loadConnReporter() ConnectivityReporter {
+	p := connReporter.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func reportFailure(tag string) {
+	if r := loadConnReporter(); r != nil {
+		r.ReportFailure(tag)
+	}
+}
+
+func reportSuccess(tag string) {
+	if r := loadConnReporter(); r != nil {
+		r.ReportSuccess(tag)
+	}
 }
 
 // fetchSegment downloads a single segment (or playlist) by URL.
@@ -53,13 +121,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 	defer cancel()
 
 	// Apply GVS PO token to segment URL (query mode: ?pot=token)
-	if d.opts.PoToken != "" {
-		sep := "?"
-		if strings.Contains(segURL, "?") {
-			sep = "&"
-		}
-		segURL = segURL + sep + "pot=" + d.opts.PoToken
-	}
+	segURL = applyPoTokenQuery(segURL, d.opts.PoToken)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 	if err != nil {
@@ -69,21 +131,26 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("engine/fetch")
-		}
+		reportFailure("engine/fetch")
 		return nil, 0, err
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("engine/fetch")
-	}
+	reportSuccess("engine/fetch")
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
+		// Read a short body snippet for diagnostic error messages. YouTube
+		// returns useful JSON on 403 (cipher issues, pot-token rejection)
+		// and HTML on 4xx from the CDN. We cap at errorBodySnippetBytes so
+		// a chatty error page can't blow the log line up.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodySnippetBytes))
+		if len(snippet) > 0 {
+			return nil, resp.StatusCode, fmt.Errorf("HTTP %d: %s",
+				resp.StatusCode, strings.TrimSpace(string(snippet)))
+		}
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20)) // 100MB max segment
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBodyBytes))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -114,14 +181,7 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 // YouTube returns the X-Head-Seqnum header on GET requests to a non-existent segment.
 func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) {
 	probeURL := d.buildSegmentURL(999999999)
-	// Apply GVS PO token
-	if d.opts.PoToken != "" {
-		sep := "?"
-		if strings.Contains(probeURL, "?") {
-			sep = "&"
-		}
-		probeURL = probeURL + sep + "pot=" + d.opts.PoToken
-	}
+	probeURL = applyPoTokenQuery(probeURL, d.opts.PoToken)
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -133,14 +193,10 @@ func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) 
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("engine/fetch")
-		}
+		reportFailure("engine/fetch")
 		return -1, err
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("engine/fetch")
-	}
+	reportSuccess("engine/fetch")
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
@@ -172,14 +228,10 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("engine/fetch")
-		}
+		reportFailure("engine/fetch")
 		return 0
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("engine/fetch")
-	}
+	reportSuccess("engine/fetch")
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
@@ -244,14 +296,10 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 
 	resp, err := engineHTTPClient.Do(req)
 	if err != nil {
-		if connReporter != nil {
-			connReporter.ReportFailure("engine/fetch")
-		}
+		reportFailure("engine/fetch")
 		return nil, 0, err
 	}
-	if connReporter != nil {
-		connReporter.ReportSuccess("engine/fetch")
-	}
+	reportSuccess("engine/fetch")
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
@@ -259,7 +307,7 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 	}
 	if resp.StatusCode == http.StatusOK {
 		// Server ignored Range header -- cap read to avoid unbounded memory usage
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB cap for ignored-range fallback
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxIgnoredRangeBodyBytes))
 		return data, resp.StatusCode, err
 	}
 	if resp.StatusCode != http.StatusPartialContent {

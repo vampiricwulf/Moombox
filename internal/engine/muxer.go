@@ -107,9 +107,7 @@ func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string
 
 	if needsTwoPass {
 		err := m.runTwoPassEncode(ctx, videoPath, audioPath, outputPath, opts)
-		if err != nil {
-			os.Remove(outputPath)
-		}
+		cleanupFailedMux(ctx, err, outputPath)
 		return err
 	}
 
@@ -122,10 +120,25 @@ func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string
 	} else {
 		err = m.runFFmpeg(ctx, args)
 	}
-	if err != nil {
-		os.Remove(outputPath)
-	}
+	cleanupFailedMux(ctx, err, outputPath)
 	return err
+}
+
+// cleanupFailedMux removes the output file on mux failure, but preserves
+// partial output when the failure is due to caller-initiated cancellation.
+// Context cancel during mux is almost always a user shutdown — keeping the
+// partial file lets the user decide whether to restart the mux or salvage
+// what's there. True ffmpeg errors (invalid args, corrupt input, etc.)
+// still get cleaned up so we don't leave broken MP4s on disk.
+func cleanupFailedMux(ctx context.Context, err error, outputPath string) {
+	if err == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		// Parent context cancelled — preserve partial output.
+		return
+	}
+	os.Remove(outputPath)
 }
 
 func (m *Muxer) buildArgs(videoPath, audioPath, outputPath string, opts *TrimOptions, needsEncode bool) []string {

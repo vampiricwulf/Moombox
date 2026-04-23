@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,6 +21,12 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 
 	staleCount := 0
 	consecutiveErrors := 0
+	// Track retries for a single segment sequence so we don't spin forever
+	// on a segment the CDN is returning 5xx for. When we hit the cap, we
+	// escalate to the stream-status check path so the loop can exit if the
+	// stream actually ended, or advance past the segment if not.
+	stuckSeq := int64(-1)
+	stuckSeqRetries := 0
 
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
@@ -78,6 +85,21 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		result := ParseHls(string(data), d.opts.BaseURL)
 		if result == nil || result.Playlist == nil {
 			consecutiveErrors++
+			// Log a snippet of the response so "parse failure" surfaces the
+			// actual content — often CDNs return HTML error pages with
+			// 200 OK that ParseHls silently rejects. First 200 bytes is
+			// enough to tell m3u8 from HTML/JSON/text.
+			snippet := string(data)
+			if len(snippet) > 200 {
+				snippet = snippet[:200] + "..."
+			}
+			if strings.HasPrefix(strings.TrimSpace(snippet), "<") {
+				d.logger.Warn("[Downloader] HLS playlist returned HTML instead of m3u8",
+					"snippet", snippet, "attempt", consecutiveErrors)
+			} else {
+				d.logger.Debug("[Downloader] HLS playlist parse failed",
+					"snippet", snippet, "attempt", consecutiveErrors)
+			}
 			if consecutiveErrors > 5 {
 				return fmt.Errorf("failed to parse HLS playlist after %d consecutive errors", consecutiveErrors)
 			}
@@ -131,14 +153,53 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 
 			segData, _, segErr := d.fetchSegment(ctx, seg.URL)
 			if segErr != nil {
+				// Track repeated failures of the same sequence so we can
+				// escalate when a permanently-unavailable segment is
+				// stuck in the playlist.
+				curSeqNow := d.currentSeq.Load()
+				if curSeqNow == stuckSeq {
+					stuckSeqRetries++
+				} else {
+					stuckSeq = curSeqNow
+					stuckSeqRetries = 1
+				}
 				// Don't skip -- break to re-fetch playlist and retry.
 				// If CDN purged it, gap detection handles it next iteration.
 				d.logger.Debug("[Downloader] HLS segment failed, will retry after playlist refresh",
-					"seq", d.currentSeq.Load(), "error", segErr)
+					"seq", curSeqNow, "error", segErr, "stuckRetries", stuckSeqRetries)
+				if stuckSeqRetries >= MaxSegmentRetries {
+					// Escalate: is the stream actually still live? If so,
+					// advance past this segment (treat as gap) so we don't
+					// hang forever. Mirrors DASH's stuckOnSegment path.
+					ended := false
+					if d.opts.CheckStreamStatus != nil {
+						var checkErr error
+						ended, checkErr = d.opts.CheckStreamStatus(ctx)
+						if checkErr != nil {
+							d.logger.Warn("[Downloader] HLS stream status check failed while stuck",
+								"err", checkErr)
+						}
+					}
+					if ended {
+						d.streamEnded.Store(true)
+						return nil
+					}
+					d.logger.Warn("[Downloader] HLS segment stuck, advancing past it as gap",
+						"seq", curSeqNow, "retries", stuckSeqRetries)
+					if d.OnGap != nil {
+						d.OnGap(DownloadGap{From: int(curSeqNow), To: int(curSeqNow)})
+					}
+					d.currentSeq.Add(1)
+					stuckSeq = -1
+					stuckSeqRetries = 0
+				}
 				sleepCtx(ctx, 2*time.Second)
 				segFailed = true
 				break
 			}
+			// Success — reset stuck tracking.
+			stuckSeq = -1
+			stuckSeqRetries = 0
 			hlsSeq := int(d.currentSeq.Load())
 			n, writeErr := d.outputFile.Write(segData)
 			if writeErr != nil {

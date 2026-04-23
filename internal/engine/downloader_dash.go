@@ -11,6 +11,32 @@ import (
 // that the download loop should exit cleanly (return nil to the caller).
 var errStreamDone = errors.New("stream done")
 
+// Retry state thresholds and delays for the DASH error handler chain.
+// All named here so grep-for-literal tuning is unambiguous.
+const (
+	// goneRetryDuringDownload is how many consecutive 403/410 responses we
+	// tolerate after the first segment has been written before deciding the
+	// stream has ended (or the selected quality has disappeared).
+	goneRetryDuringDownload = 10
+	// goneRetryBeforeFirstSegment is how many 403/410 we tolerate while
+	// hunting for the first valid segment (e.g. pre-roll that's not yet
+	// published). Each failure advances currentSeq by 1.
+	goneRetryBeforeFirstSegment = 20
+
+	// genericRetryDelay is the fixed delay used between retries for
+	// non-HTTP-status errors (timeouts, network failures).
+	genericRetryDelay = 2 * time.Second
+	// firstSegmentHuntDelay is the short delay between advancing past a
+	// 403/410 while hunting for the first valid segment.
+	firstSegmentHuntDelay = 100 * time.Millisecond
+	// singleGoneRetryDelay is the small wait between a single 403/410 hit
+	// during normal downloading before the next attempt.
+	singleGoneRetryDelay = 500 * time.Millisecond
+	// transientFailureRetryDelay is used when behind head but not stuck on
+	// a single segment — treated as a quick transient.
+	transientFailureRetryDelay = 1 * time.Second
+)
+
 // runDashLoop is the main DASH download loop.
 func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	// Save resume state on exit; only clear on clean stream completion.
@@ -185,16 +211,16 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 			sameHeadRetryDelay, lastConfirmedHead, delayCap, liveCheckThreshold)
 	}
 
-	// Generic non-HTTP error (timeout, network, etc.) -- simple 2s retry (matches TS)
+	// Generic non-HTTP error (timeout, network, etc.) -- simple fixed-delay retry
 	*consecutiveGoneErrors = 0
-	sleepCtx(ctx, 2*time.Second)
+	sleepCtx(ctx, genericRetryDelay)
 	return nil
 }
 
 func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGoneErrors *int, hasStartedDownloading bool) error {
 	*consecutiveGoneErrors++
 
-	if hasStartedDownloading && *consecutiveGoneErrors > 10 {
+	if hasStartedDownloading && *consecutiveGoneErrors > goneRetryDuringDownload {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
@@ -215,16 +241,16 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 		d.streamEnded.Store(true)
 		return errStreamDone
 	}
-	if !hasStartedDownloading && *consecutiveGoneErrors <= 20 {
+	if !hasStartedDownloading && *consecutiveGoneErrors <= goneRetryBeforeFirstSegment {
 		d.currentSeq.Add(1)
-		sleepCtx(ctx, 100*time.Millisecond)
+		sleepCtx(ctx, firstSegmentHuntDelay)
 		return nil // Continue loop
 	}
-	if !hasStartedDownloading && *consecutiveGoneErrors > 20 {
+	if !hasStartedDownloading && *consecutiveGoneErrors > goneRetryBeforeFirstSegment {
 		return errStreamDone // Failed to find valid starting segment
 	}
-	// Single GONE while downloading -- small delay before retry (matches TS)
-	sleepCtx(ctx, 500*time.Millisecond)
+	// Single GONE while downloading -- small delay before retry
+	sleepCtx(ctx, singleGoneRetryDelay)
 	return nil // Continue loop
 }
 
@@ -263,7 +289,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 
 	if behindHead && !stuckOnSegment {
 		// Transient failure while behind head -- retry with small delay
-		sleepCtx(ctx, 1*time.Second)
+		sleepCtx(ctx, transientFailureRetryDelay)
 		return nil // Continue loop
 	}
 

@@ -199,15 +199,15 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 		Width:     rep.Width,
 		Height:    rep.Height,
 		FPS:       parseFrameRate(rep.FrameRate),
+		Itag:      -1, // Sentinel: unknown itag. Non-numeric ids leave this as-is.
 	}
 
-	// Parse itag from ID
+	// Parse itag from ID. Only override the -1 sentinel when parsing succeeds.
+	// This prevents multiple non-numeric representations from all colliding on
+	// itag 0 and confusing manual-itag-override selection downstream.
 	if rep.ID != "" {
-		var err error
-		stream.Itag, err = strconv.Atoi(rep.ID)
-		if err != nil {
-			// Non-numeric representation ID — itag stays 0
-			stream.Itag = 0
+		if v, err := strconv.Atoi(rep.ID); err == nil {
+			stream.Itag = v
 		}
 	}
 
@@ -308,10 +308,26 @@ func SegmentURL(template string, seqNum int) string {
 }
 
 // CalculateSegmentRange maps a time range to segment indices in a DASH stream.
+//
+// Returns nil if the time range is nonsensical:
+//   - negative startTimeSec or endTimeSec
+//   - endTimeSec > 0 and endTimeSec <= startTimeSec (reversed or empty range)
+//
+// startTimeSec == 0 is valid (range starts at the beginning). endTimeSec == 0
+// is valid as "unbounded" (only startTimeSec applies).
 func CalculateSegmentRange(stream *DashStream, startTimeSec, endTimeSec float64) *SegmentRange {
+	// Input validation: reject negative times and reversed/empty ranges so
+	// callers get a nil (treat as invalid) instead of bizarre segment math.
+	if startTimeSec < 0 || endTimeSec < 0 {
+		return nil
+	}
+	if endTimeSec > 0 && endTimeSec <= startTimeSec {
+		return nil
+	}
+
 	timescale := float64(stream.Timescale)
 	if timescale == 0 {
-		timescale = 1000 // Default fallback (matches TS)
+		timescale = 1000 // Default fallback
 	}
 
 	// Expand segments with repeat counts
@@ -513,9 +529,20 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 			playlist.EndList = true
 
 		case line != "" && !strings.HasPrefix(line, "#"):
-			// Segment URL
+			// Segment URL. If the preceding #EXTINF was missing/malformed and
+			// parsed to a non-positive duration, fall back to TargetDuration so
+			// downstream progress math doesn't divide by zero. TargetDuration
+			// itself is also validated to be positive.
+			segDur := currentDuration
+			if segDur <= 0 {
+				if playlist.TargetDuration > 0 {
+					segDur = playlist.TargetDuration
+				} else {
+					segDur = defaultSegmentDuration
+				}
+			}
 			segment := HlsSegment{
-				Duration:      currentDuration,
+				Duration:      segDur,
 				URL:           resolveURL(baseURL, line),
 				Discontinuity: discontinuity,
 			}

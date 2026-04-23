@@ -145,31 +145,31 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		})
 	}
 
-	// Handle any remaining gaps (use range-based gap detection)
-	catchupGapStart := -1
-	for nextSeq <= targetSeq {
-		if _, ok := buffer[nextSeq]; ok {
-			// Close any open gap
-			if catchupGapStart >= 0 && d.OnGap != nil {
-				d.OnGap(DownloadGap{From: catchupGapStart, To: nextSeq - 1})
-				catchupGapStart = -1
+	// Stop at the first gap instead of writing past it. DASH fMP4 segments
+	// are not self-contained — writing seg N then skipping N+1..N+k then
+	// writing N+k+1 produces a file with a hole in the middle that will
+	// confuse the muxer. By returning nextSeq pointing at the gap, the DASH
+	// main loop will re-fetch the missing segments sequentially with the
+	// full retry logic in handleDashError rather than the one-shot
+	// fetchSegmentWithRetry used by catch-up workers. We still report the
+	// gap range so callers can track what's about to be retried.
+	// (Audit reports/engine.md Finding 4.)
+	if nextSeq <= targetSeq {
+		// Find how far the gap extends so the gap event covers the whole
+		// contiguous missing range up to the next buffered segment (or the
+		// end of the catch-up target if the tail is all missing).
+		gapEnd := nextSeq
+		for gapEnd <= targetSeq {
+			if _, ok := buffer[gapEnd]; ok {
+				break
 			}
-			n, writeErr := d.outputFile.Write(buffer[nextSeq])
-			if writeErr != nil {
-				return 0, fmt.Errorf("write error during catch-up gap flush (segment %d): %w", nextSeq, writeErr)
-			}
-			d.bytesWritten.Add(int64(n))
-			delete(buffer, nextSeq)
-		} else {
-			if catchupGapStart < 0 {
-				catchupGapStart = nextSeq
-			}
+			gapEnd++
 		}
-		nextSeq++
-	}
-	// Close final gap range
-	if catchupGapStart >= 0 && d.OnGap != nil {
-		d.OnGap(DownloadGap{From: catchupGapStart, To: nextSeq - 1})
+		if d.OnGap != nil {
+			d.OnGap(DownloadGap{From: nextSeq, To: gapEnd - 1})
+		}
+		d.logger.Info("[Downloader] Parallel catch-up stopping at gap; main loop will re-fetch",
+			"gapFrom", nextSeq, "gapTo", gapEnd-1)
 	}
 
 	return nextSeq, nil

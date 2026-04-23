@@ -163,6 +163,61 @@ segment102.ts`
 	}
 }
 
+func TestParseHls_ZeroDurationFallback(t *testing.T) {
+	// Malformed #EXTINF with zero duration should fall back to TargetDuration.
+	m3u8 := `#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:0,
+seg0.ts
+#EXTINF:,
+seg1.ts
+#EXTINF:4.0,
+seg2.ts`
+
+	result := ParseHls(m3u8, "https://example.com/")
+	if result == nil || result.Playlist == nil {
+		t.Fatal("expected playlist")
+	}
+	pl := result.Playlist
+	if len(pl.Segments) != 3 {
+		t.Fatalf("expected 3 segments, got %d", len(pl.Segments))
+	}
+	// seg0: EXTINF:0 -> falls back to TargetDuration (6)
+	if pl.Segments[0].Duration != 6.0 {
+		t.Errorf("seg0 Duration: got %f, want 6.0 (TargetDuration fallback)", pl.Segments[0].Duration)
+	}
+	// seg1: malformed EXTINF -> falls back too
+	if pl.Segments[1].Duration != 6.0 {
+		t.Errorf("seg1 Duration: got %f, want 6.0 (TargetDuration fallback)", pl.Segments[1].Duration)
+	}
+	// seg2: valid EXTINF stays as-is
+	if pl.Segments[2].Duration != 4.0 {
+		t.Errorf("seg2 Duration: got %f, want 4.0", pl.Segments[2].Duration)
+	}
+}
+
+func TestParseHls_ZeroDurationNoTargetDuration(t *testing.T) {
+	// Zero-duration segment + no TargetDuration -> falls back to
+	// defaultSegmentDuration (2.0) so progress math never sees zero.
+	m3u8 := `#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:0,
+seg0.ts`
+
+	result := ParseHls(m3u8, "https://example.com/")
+	if result == nil || result.Playlist == nil {
+		t.Fatal("expected playlist")
+	}
+	if len(result.Playlist.Segments) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(result.Playlist.Segments))
+	}
+	if result.Playlist.Segments[0].Duration != defaultSegmentDuration {
+		t.Errorf("Duration: got %f, want %f (default fallback)",
+			result.Playlist.Segments[0].Duration, defaultSegmentDuration)
+	}
+}
+
 func TestParseHls_VOD(t *testing.T) {
 	m3u8 := `#EXTM3U
 #EXT-X-TARGETDURATION:6
@@ -190,6 +245,62 @@ func TestSegmentURL(t *testing.T) {
 	url := SegmentURL(tmpl, 42)
 	if url != "https://example.com/sq/42" {
 		t.Errorf("expected .../sq/42, got %s", url)
+	}
+}
+
+func TestParseDash_NonNumericID_Itag(t *testing.T) {
+	// Non-numeric representation IDs should leave Itag at the -1 sentinel
+	// so they don't all collide on 0 and confuse manual-itag selection.
+	mpd := `<?xml version="1.0"?>
+<MPD>
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="video-1080" bandwidth="4000000" width="1920" height="1080">
+        <BaseURL>https://example.com/seg</BaseURL>
+      </Representation>
+      <Representation id="video-720" bandwidth="2000000" width="1280" height="720">
+        <BaseURL>https://example.com/seg2</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+	streams, err := ParseDash(mpd, "")
+	if err != nil {
+		t.Fatalf("ParseDash: %v", err)
+	}
+	if len(streams) != 2 {
+		t.Fatalf("expected 2 streams, got %d", len(streams))
+	}
+	for i, s := range streams {
+		if s.Itag != -1 {
+			t.Errorf("stream %d: Itag = %d, want -1 (sentinel for non-numeric ID)", i, s.Itag)
+		}
+	}
+}
+
+func TestParseDash_MissingID_Itag(t *testing.T) {
+	// Representations without an id attribute get the -1 sentinel.
+	mpd := `<?xml version="1.0"?>
+<MPD>
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation bandwidth="4000000" width="1920" height="1080">
+        <BaseURL>https://example.com/seg</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+	streams, err := ParseDash(mpd, "")
+	if err != nil {
+		t.Fatalf("ParseDash: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(streams))
+	}
+	if streams[0].Itag != -1 {
+		t.Errorf("Itag = %d, want -1 (sentinel for missing ID)", streams[0].Itag)
 	}
 }
 
@@ -337,6 +448,42 @@ func TestCalculateSegmentRange_NoSegments(t *testing.T) {
 	// Should use estimated 2s segments
 	if result.StartSegment != 2 { // 5.0 / 2.0 = segment 2 (0-indexed)
 		t.Errorf("StartSegment: got %d, want 2", result.StartSegment)
+	}
+}
+
+func TestCalculateSegmentRange_NegativeTimes(t *testing.T) {
+	stream := &DashStream{StartNumber: 0, Timescale: 1000}
+	// Negative start
+	if r := CalculateSegmentRange(stream, -1.0, 10.0); r != nil {
+		t.Errorf("expected nil for negative startTimeSec, got %+v", r)
+	}
+	// Negative end
+	if r := CalculateSegmentRange(stream, 1.0, -5.0); r != nil {
+		t.Errorf("expected nil for negative endTimeSec, got %+v", r)
+	}
+}
+
+func TestCalculateSegmentRange_ReversedRange(t *testing.T) {
+	stream := &DashStream{StartNumber: 0, Timescale: 1000}
+	// End <= start with end > 0 should return nil
+	if r := CalculateSegmentRange(stream, 10.0, 5.0); r != nil {
+		t.Errorf("expected nil for reversed range, got %+v", r)
+	}
+	// Zero-length range (start == end)
+	if r := CalculateSegmentRange(stream, 10.0, 10.0); r != nil {
+		t.Errorf("expected nil for zero-length range, got %+v", r)
+	}
+}
+
+func TestCalculateSegmentRange_EndZero_IsUnbounded(t *testing.T) {
+	stream := &DashStream{StartNumber: 0, Timescale: 1000}
+	// endTimeSec == 0 means "no end bound" -- valid even with startTimeSec > 0
+	r := CalculateSegmentRange(stream, 5.0, 0)
+	if r == nil {
+		t.Fatal("expected non-nil result for endTimeSec == 0")
+	}
+	if r.EndSegment != -1 {
+		t.Errorf("EndSegment: got %d, want -1 (unbounded)", r.EndSegment)
 	}
 }
 

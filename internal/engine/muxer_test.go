@@ -1,6 +1,10 @@
 package engine
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -206,6 +210,54 @@ func TestBuildArgs_ABRMode(t *testing.T) {
 	checkContains(t, args, "5000k")
 	checkContains(t, args, "-b:a")
 	checkContains(t, args, "128k")
+}
+
+func TestCleanupFailedMux_PreservesOnCtxCancel(t *testing.T) {
+	// Create a fake "partial output" file
+	tmp := t.TempDir()
+	outPath := filepath.Join(tmp, "partial.mp4")
+	if err := os.WriteFile(outPath, []byte("partial data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cancelled parent ctx: cleanup should NOT remove the file
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cleanupFailedMux(ctx, errors.New("ffmpeg killed"), outPath)
+
+	if _, err := os.Stat(outPath); err != nil {
+		t.Errorf("partial output was removed despite ctx cancel: %v", err)
+	}
+}
+
+func TestCleanupFailedMux_RemovesOnRealError(t *testing.T) {
+	tmp := t.TempDir()
+	outPath := filepath.Join(tmp, "broken.mp4")
+	if err := os.WriteFile(outPath, []byte("broken data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh ctx (not cancelled) + real error: file SHOULD be removed
+	cleanupFailedMux(context.Background(), errors.New("ffmpeg: invalid args"), outPath)
+
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Errorf("broken output should have been removed, stat err=%v", err)
+	}
+}
+
+func TestCleanupFailedMux_NoopOnSuccess(t *testing.T) {
+	tmp := t.TempDir()
+	outPath := filepath.Join(tmp, "good.mp4")
+	if err := os.WriteFile(outPath, []byte("good data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// err == nil: file should be left alone
+	cleanupFailedMux(context.Background(), nil, outPath)
+
+	if _, err := os.Stat(outPath); err != nil {
+		t.Errorf("successful mux output was removed: %v", err)
+	}
 }
 
 func TestHasTrim(t *testing.T) {
