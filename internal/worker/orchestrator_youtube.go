@@ -205,7 +205,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			if refreshErr != nil {
 				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				return nil // Can't continue, finalize what we have
+				// Return nil to exit the live loop; muxAndFinalize will process
+				// whatever video/audio data was captured before the refresh failed.
+				return nil
 			}
 
 			newQuality := o.extractQualityFromResult(refreshResult)
@@ -306,6 +308,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			if refreshErr != nil {
 				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+				// Return nil to exit the live loop; muxAndFinalize will process
+				// whatever video/audio data was captured in the current staging dir.
 				return nil
 			}
 
