@@ -259,8 +259,29 @@ func (j *CookieJar) GetSapisidCookies() (sapisid, sapisid1p, sapisid3p string) {
 	return
 }
 
+// allowedSAPISIDHASHOrigins is the set of origins for which Moombox will
+// generate a SAPISIDHASH Authorization header. Keeping this tight is
+// defense-in-depth: if a bug or config path ever lets a caller supply an
+// attacker-controlled origin (e.g. "https://evil.example"), we must not
+// hand them a valid SAPISIDHASH bound to that origin — Google's auth uses
+// the origin as a shared secret between client and server. The current
+// in-tree callers only pass https://www.youtube.com, so tightening to an
+// allowlist is zero-regression.
+var allowedSAPISIDHASHOrigins = map[string]struct{}{
+	"https://www.youtube.com":    {},
+	"https://youtube.com":        {},
+	"https://studio.youtube.com": {},
+	"https://music.youtube.com":  {},
+	"https://www.youtubekids.com": {},
+}
+
 // GenerateAuthorizationHeader generates the full Authorization header with SAPISIDHASH variants.
+// If origin is not a recognized YouTube origin, returns "" — callers must not
+// use the result to authenticate against arbitrary origins.
 func (j *CookieJar) GenerateAuthorizationHeader(origin string) string {
+	if _, ok := allowedSAPISIDHASHOrigins[origin]; !ok {
+		return ""
+	}
 	sapisid, sapisid1p, sapisid3p := j.GetSapisidCookies()
 
 	// Capture timestamp once so all SID hashes in the same header share the same time

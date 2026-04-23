@@ -107,6 +107,54 @@ func TestGenerateAuthorizationHeader(t *testing.T) {
 	}
 }
 
+// TestGenerateAuthorizationHeaderOriginAllowlist verifies that bogus origins
+// do not produce an Authorization header — the allowlist prevents emitting a
+// SAPISIDHASH bound to an attacker-controlled origin (finding #12).
+func TestGenerateAuthorizationHeaderOriginAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(path, []byte(testCookieFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewCookieJar()
+	jar.Load(path)
+
+	for _, ok := range []string{
+		"https://www.youtube.com",
+		"https://studio.youtube.com",
+		"https://music.youtube.com",
+	} {
+		if jar.GenerateAuthorizationHeader(ok) == "" {
+			t.Errorf("expected allowlisted origin %q to produce header", ok)
+		}
+	}
+	for _, bad := range []string{
+		"https://evil.example",
+		"https://youtube.com.evil.example",
+		"http://www.youtube.com", // wrong scheme
+		"",
+	} {
+		if got := jar.GenerateAuthorizationHeader(bad); got != "" {
+			t.Errorf("expected origin %q to be rejected, got %q", bad, got)
+		}
+	}
+}
+
+// TestMakeSidAuthorizationKnownVector locks down the SAPISIDHASH format
+// against a known (timestamp, sid, origin) input so future refactors can't
+// silently break Google's hash scheme (finding #58).
+func TestMakeSidAuthorizationKnownVector(t *testing.T) {
+	// sha1("1234567890 test-sid https://www.youtube.com") computed once:
+	// printf '%s' "1234567890 test-sid https://www.youtube.com" | sha1sum
+	// = 96d13ea75f0bf102d71aebdfdaa599807584b65c
+	got := makeSidAuthorization("SAPISIDHASH", "test-sid", "https://www.youtube.com", 1234567890)
+	want := "SAPISIDHASH 1234567890_96d13ea75f0bf102d71aebdfdaa599807584b65c"
+	if got != want {
+		t.Errorf("SAPISIDHASH mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestEmptyJar(t *testing.T) {
 	jar := NewCookieJar()
 	if jar.HasYouTubeAuthCookies() {
