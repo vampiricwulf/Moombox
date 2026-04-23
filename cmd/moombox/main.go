@@ -1110,7 +1110,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("web server panic", "panic", r)
-				webErrCh <- fmt.Errorf("web server panic: %v", r)
+				// webErrCh is buffered to 1. If webServer.Start already
+				// sent a nil value (fast graceful return followed by the
+				// deferred recover firing — extremely rare but possible),
+				// a plain send would block forever. Use non-blocking send.
+				select {
+				case webErrCh <- fmt.Errorf("web server panic: %v", r):
+				default:
+				}
 			}
 		}()
 		webErrCh <- webServer.Start(ctx)
