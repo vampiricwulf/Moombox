@@ -14,7 +14,7 @@ func TestErrTwitchAuthExpiredWrapping(t *testing.T) {
 	// Mirror the exact format string used in gqlRequest — if the wrapping
 	// pattern is ever changed to use %s instead of %w, this test will fail
 	// and surface the regression before it reaches production.
-	err := fmt.Errorf("gql auth failure (%d): %s: %w", 401, "unauthorized", ErrTwitchAuthExpired)
+	err := fmt.Errorf("gql auth failure (%d) (%s): %s: %w", 401, "StreamMetadata", "unauthorized", ErrTwitchAuthExpired)
 	if !errors.Is(err, ErrTwitchAuthExpired) {
 		t.Error("expected errors.Is(err, ErrTwitchAuthExpired) to be true for wrapped auth failure")
 	}

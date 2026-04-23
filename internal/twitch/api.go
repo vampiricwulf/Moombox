@@ -55,11 +55,23 @@ func NewAPI(logger interface {
 	return &API{logger: logger}
 }
 
+// opLabel returns the operation name or a placeholder when the caller passed
+// an empty string (raw query). Keeps error messages parseable when grepping.
+func opLabel(opName string) string {
+	if opName == "" {
+		return "raw"
+	}
+	return opName
+}
+
 // gqlRequest sends a GQL request and returns the raw JSON response.
-func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.RawMessage, error) {
+// opName is used only to annotate error messages so log correlation is
+// possible when multiple GQL operations share a pipeline — pass an empty
+// string for ad-hoc raw queries.
+func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken string) (json.RawMessage, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("marshal gql body: %w", err)
+		return nil, fmt.Errorf("marshal gql body (%s): %w", opLabel(opName), err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, constants.TwitchURLs.GQL, bytes.NewReader(data))
@@ -77,17 +89,17 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 
 	resp, err := twitchHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("gql request: %w", err)
+		return nil, fmt.Errorf("gql request (%s): %w", opLabel(opName), err)
 	}
 	defer resp.Body.Close()
 
 	respData, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
-		return nil, fmt.Errorf("read gql response: %w", err)
+		return nil, fmt.Errorf("read gql response (%s): %w", opLabel(opName), err)
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("gql rate limited (429): %s", string(respData))
+		return nil, fmt.Errorf("gql rate limited (429) (%s): %s", opLabel(opName), string(respData))
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		// Wrap the sentinel so callers can detect auth-expiry via
@@ -97,12 +109,12 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 		// (e.g. mature-gated streams) and treating that as "re-auth
 		// needed" would loop the user through a login flow pointlessly.
 		if authToken != "" {
-			return nil, fmt.Errorf("gql auth failure (%d): %s: %w", resp.StatusCode, string(respData), ErrTwitchAuthExpired)
+			return nil, fmt.Errorf("gql auth failure (%d) (%s): %s: %w", resp.StatusCode, opLabel(opName), string(respData), ErrTwitchAuthExpired)
 		}
-		return nil, fmt.Errorf("gql auth failure (%d): %s", resp.StatusCode, string(respData))
+		return nil, fmt.Errorf("gql auth failure (%d) (%s): %s", resp.StatusCode, opLabel(opName), string(respData))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gql http %d: %s", resp.StatusCode, string(respData))
+		return nil, fmt.Errorf("gql http %d (%s): %s", resp.StatusCode, opLabel(opName), string(respData))
 	}
 
 	// Twitch GQL returns 200 even on errors — check for errors in response.
@@ -118,7 +130,7 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 			if msg == "" {
 				msg = "unknown error"
 			}
-			return nil, fmt.Errorf("gql error: %s", msg)
+			return nil, fmt.Errorf("gql error (%s): %s", opLabel(opName), msg)
 		}
 	} else if len(respData) > 0 && respData[0] == '[' {
 		// Batch response — fail only when EVERY element errored. Twitch
@@ -131,7 +143,7 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 		// missing fields; logging at Warn is enough for observability.
 		var batchResults []json.RawMessage
 		if err := json.Unmarshal(respData, &batchResults); err != nil {
-			return nil, fmt.Errorf("parse batch response: %w", err)
+			return nil, fmt.Errorf("parse batch response (%s): %w", opLabel(opName), err)
 		}
 		allErrored := len(batchResults) > 0
 		firstErrMsg := ""
@@ -153,10 +165,10 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 			if firstErrMsg == "" {
 				firstErrMsg = "all batch elements returned errors"
 			}
-			return nil, fmt.Errorf("gql batch error: %s", firstErrMsg)
+			return nil, fmt.Errorf("gql batch error (%s): %s", opLabel(opName), firstErrMsg)
 		}
 		if firstErrMsg != "" && a.logger != nil {
-			a.logger.Warn("twitch gql batch: partial failure", "err", firstErrMsg)
+			a.logger.Warn("twitch gql batch: partial failure", "op", opLabel(opName), "err", firstErrMsg)
 		}
 	}
 
@@ -213,7 +225,7 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 		}),
 	}
 
-	respData, err := a.gqlRequest(ctx, batch, authToken)
+	respData, err := a.gqlRequest(ctx, "StreamMetadata+ComscoreStreamingQuery", batch, authToken)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +344,7 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 		userQuery := gqlRawQuery{
 			Query: fmt.Sprintf(`{ user(login: "%s") { profileImageURL(width: 300) } }`, safeLogin),
 		}
-		rawResp, err := a.gqlRequest(ctx, userQuery, authToken)
+		rawResp, err := a.gqlRequest(ctx, "UserProfileImageFallback", userQuery, authToken)
 		if err == nil {
 			if json.Unmarshal(rawResp, &userResp) == nil && userResp.Data.User != nil {
 				info.ProfileImageURL = userResp.Data.User.ProfileImageURL
@@ -369,7 +381,7 @@ func (a *API) GetStreamAccessToken(ctx context.Context, channelLogin, authToken 
 		}`, safeLogin),
 	}
 
-	respData, err := a.gqlRequest(ctx, query, authToken)
+	respData, err := a.gqlRequest(ctx, "StreamPlaybackAccessToken", query, authToken)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +423,7 @@ func (a *API) GetVodAccessToken(ctx context.Context, vodID, authToken string) (*
 		}`, safeID),
 	}
 
-	respData, err := a.gqlRequest(ctx, query, authToken)
+	respData, err := a.gqlRequest(ctx, "VideoPlaybackAccessToken", query, authToken)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +452,7 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 		"videoID":      vodID,
 	})
 
-	respData, err := a.gqlRequest(ctx, query, authToken)
+	respData, err := a.gqlRequest(ctx, "VideoMetadata", query, authToken)
 	if err != nil {
 		return nil, err
 	}
@@ -547,7 +559,7 @@ func (a *API) GetVodComments(ctx context.Context, vodID string, contentOffsetSec
 		"contentOffsetSeconds": contentOffsetSeconds,
 	})
 
-	respData, err := a.gqlRequest(ctx, query, authToken)
+	respData, err := a.gqlRequest(ctx, "VideoCommentsByOffsetOrCursor", query, authToken)
 	if err != nil {
 		return nil, false, err
 	}
