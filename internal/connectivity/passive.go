@@ -41,11 +41,46 @@ func (pt *PassiveTracker) ReportFailure(tag string) {
 	pt.pruneOld()
 }
 
+// ReportSuccess removes failure entries for the given tag. The tracker
+// triggers when multiple distinct tags have piled up failures within the
+// window, so clearing per-tag gives the threshold logic a truthful picture
+// rather than the prior "any success clears everything" behaviour — which
+// let a single subsystem's intermittent-success pattern mask a genuine
+// multi-subsystem outage.
+//
+// The triggered flag is cleared only when the pruned failure set can no
+// longer meet the trigger threshold, so callers that rely on
+// IsTriggered() state see a stable signal.
 func (pt *PassiveTracker) ReportSuccess(tag string) {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
-	pt.triggered = false
-	pt.failures = pt.failures[:0]
+
+	// Remove entries for this specific tag.
+	filtered := pt.failures[:0]
+	for _, f := range pt.failures {
+		if f.tag != tag {
+			filtered = append(filtered, f)
+		}
+	}
+	pt.failures = filtered
+
+	// If the remaining failures no longer meet the trigger threshold, clear
+	// the triggered flag so consumers that poll IsTriggered don't see
+	// stale positives.
+	if !pt.triggered {
+		return
+	}
+	if len(pt.failures) < pt.minFails {
+		pt.triggered = false
+		return
+	}
+	tags := make(map[string]struct{})
+	for _, f := range pt.failures {
+		tags[f.tag] = struct{}{}
+	}
+	if len(tags) < pt.minTags {
+		pt.triggered = false
+	}
 }
 
 func (pt *PassiveTracker) ShouldTriggerOffline() bool {

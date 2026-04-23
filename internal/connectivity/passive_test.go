@@ -46,6 +46,44 @@ func TestPassiveTracker_SuccessClearsTrigger(t *testing.T) {
 	}
 }
 
+// TestPassiveTracker_SuccessPerTag verifies that ReportSuccess only drops
+// failures for the given tag rather than wiping everything. A flaky subsystem
+// producing alternating success/failure should not mask an outage in another
+// subsystem. Regression for audit reports/small-packages.md question #3.
+func TestPassiveTracker_SuccessPerTag(t *testing.T) {
+	pt := NewPassiveTracker()
+	pt.ReportFailure("engine/fetch")
+	pt.ReportFailure("engine/fetch")
+	pt.ReportFailure("engine/fetch")
+	pt.ReportFailure("monitor/feed")
+	pt.ReportFailure("monitor/feed")
+	if !pt.ShouldTriggerOffline() {
+		t.Fatal("should trigger: 5 failures across 2 tags")
+	}
+
+	// engine/fetch recovers but monitor/feed is still failing — the trigger
+	// should clear because the remaining failures come from only one tag,
+	// but monitor/feed's failures must NOT be erased.
+	pt.ReportSuccess("engine/fetch")
+	if pt.IsTriggered() {
+		t.Error("triggered flag should clear after per-tag success drops us below minTags")
+	}
+	pt.mu.Lock()
+	remaining := len(pt.failures)
+	pt.mu.Unlock()
+	if remaining != 2 {
+		t.Errorf("expected 2 monitor/feed failures to remain, got %d", remaining)
+	}
+
+	// Two more monitor/feed failures alone still shouldn't trigger — one tag.
+	pt.ReportFailure("monitor/feed")
+	pt.ReportFailure("monitor/feed")
+	pt.ReportFailure("monitor/feed")
+	if pt.ShouldTriggerOffline() {
+		t.Error("should not trigger with failures from only one tag")
+	}
+}
+
 func TestPassiveTracker_WindowExpiry(t *testing.T) {
 	pt := &PassiveTracker{
 		window:   100 * time.Millisecond,
