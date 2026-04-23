@@ -13,12 +13,20 @@ import (
 	"time"
 )
 
+// cookieJarLogger is the optional logger interface CookieJar uses to report
+// malformed or skipped cookie lines. Kept optional so NewCookieJar callers
+// that don't want diagnostics need not supply a logger.
+type cookieJarLogger interface {
+	Debug(msg string, args ...any)
+}
+
 // CookieJar parses and manages cookies from a Netscape-format cookie file.
 type CookieJar struct {
 	mu       sync.RWMutex
 	cookies  map[string]string // name -> value
 	domains  map[string]string // name -> domain (for dedup priority)
 	filePath string
+	logger   cookieJarLogger // optional; set via SetLogger
 }
 
 // Essential YouTube cookies needed for authentication.
@@ -45,22 +53,44 @@ func NewCookieJar() *CookieJar {
 	}
 }
 
-// Load reads and parses a Netscape cookie file.
-func (j *CookieJar) Load(filePath string) error {
+// SetLogger attaches an optional logger that CookieJar uses to report
+// diagnostic events like malformed lines in the cookie file. Safe to call
+// before or after Load. Pass nil to clear.
+func (j *CookieJar) SetLogger(logger cookieJarLogger) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	j.logger = logger
+}
 
-	j.filePath = filePath
-	j.cookies = make(map[string]string)
-	j.domains = make(map[string]string)
+// Load reads and parses a Netscape cookie file.
+//
+// The file is fully read and parsed into a new set of maps before the jar's
+// live state is replaced. This way a transient read error (EIO, permission
+// flip) cannot silently wipe authentication that was valid a moment ago —
+// either the load fully succeeds and swaps in the new maps, or the previous
+// state is left intact. A not-exist file is still treated as an empty jar.
+func (j *CookieJar) Load(filePath string) error {
+	// Snapshot logger once; the field is protected by the mutex.
+	j.mu.RLock()
+	logger := j.logger
+	j.mu.RUnlock()
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // No cookies file is OK
+			// No cookies file is OK; clear state so callers see an empty jar.
+			j.mu.Lock()
+			j.filePath = filePath
+			j.cookies = make(map[string]string)
+			j.domains = make(map[string]string)
+			j.mu.Unlock()
+			return nil
 		}
 		return fmt.Errorf("failed to read cookie file: %w", err)
 	}
+
+	cookies := make(map[string]string)
+	domains := make(map[string]string)
 
 	lines := strings.SplitSeq(string(data), "\n")
 	for line := range lines {
@@ -75,7 +105,13 @@ func (j *CookieJar) Load(filePath string) error {
 
 		parts := strings.Split(line, "\t")
 		if len(parts) < 7 {
-			continue // Malformed line — Netscape format requires exactly 7 tab-delimited fields
+			// Malformed line — Netscape format requires exactly 7 tab-delimited fields.
+			// Log at Debug so the file can be diagnosed without being spammy when
+			// third-party tools leave trailing blank lines or stray comments.
+			if logger != nil {
+				logger.Debug("skipping malformed cookie line", "fields", len(parts))
+			}
+			continue
 		}
 
 		rawDomain := strings.TrimSpace(parts[0])
@@ -85,7 +121,10 @@ func (j *CookieJar) Load(filePath string) error {
 		}
 
 		name := strings.TrimSpace(parts[5])
-		value := strings.TrimSpace(parts[6])
+		// Join tab-separated remainder so a cookie whose value legitimately
+		// contains a tab (rare, but permitted by some emitters) is preserved
+		// instead of truncated to the first tab.
+		value := strings.TrimSpace(strings.Join(parts[6:], "\t"))
 
 		// Skip entries with empty domain or name
 		if domain == "" || name == "" {
@@ -111,14 +150,20 @@ func (j *CookieJar) Load(filePath string) error {
 		}
 
 		// Prefer youtube.com cookies over google.com when both exist
-		existingDomain, exists := j.domains[name]
+		existingDomain, exists := domains[name]
 		if exists && strings.Contains(existingDomain, "youtube.com") && !strings.Contains(domain, "youtube.com") {
 			continue
 		}
 
-		j.cookies[name] = value
-		j.domains[name] = domain
+		cookies[name] = value
+		domains[name] = domain
 	}
+
+	j.mu.Lock()
+	j.filePath = filePath
+	j.cookies = cookies
+	j.domains = domains
+	j.mu.Unlock()
 
 	return nil
 }

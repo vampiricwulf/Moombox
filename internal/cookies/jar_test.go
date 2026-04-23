@@ -197,6 +197,102 @@ func TestReloadCookies(t *testing.T) {
 	}
 }
 
+// TestLoadPreservesStateOnReadError verifies that Load does not clobber
+// previously loaded cookies when a subsequent read fails for a reason other
+// than "file does not exist" (finding #28 in reports/cookies.md).
+func TestLoadPreservesStateOnReadError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(path, []byte(testCookieFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if jar.GetSapisid() != "abc123sapisid" {
+		t.Fatal("expected SAPISID loaded before error")
+	}
+
+	// Point at a directory to force a read error that isn't os.IsNotExist.
+	if err := jar.Load(dir); err == nil {
+		t.Fatal("expected error loading a directory")
+	}
+
+	// State must be preserved: valid auth cookies from the first Load are still present.
+	if got := jar.GetSapisid(); got != "abc123sapisid" {
+		t.Errorf("expected jar state preserved after failed Load, got SAPISID=%q", got)
+	}
+	if !jar.HasYouTubeAuthCookies() {
+		t.Error("expected HasYouTubeAuthCookies still true after failed Load")
+	}
+}
+
+// TestLoadTabInValue ensures values containing tabs are preserved rather
+// than truncated at the first tab (finding #16 in reports/cookies.md).
+func TestLoadTabInValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	// SAPISID value contains a literal tab mid-string; strings.Split would
+	// leave 8 parts instead of 7 — the fix joins parts[6:] with "\t".
+	content := ".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tpart1\tpart2\n" +
+		".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tlogin\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := jar.GetSapisid(); got != "part1\tpart2" {
+		t.Errorf("expected SAPISID with embedded tab preserved, got %q", got)
+	}
+}
+
+type recordingLogger struct {
+	debugs [][]any
+}
+
+func (r *recordingLogger) Debug(msg string, args ...any) {
+	r.debugs = append(r.debugs, append([]any{msg}, args...))
+}
+
+// TestLoadLogsMalformedLines ensures SetLogger + a malformed line produces
+// a Debug log (finding #16 in reports/cookies.md).
+func TestLoadLogsMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	content := ".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tok\n" +
+		"malformed\tline\twith\ttoo\tfew\tfields\n" +
+		".youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tlogin\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := &recordingLogger{}
+	jar := NewCookieJar()
+	jar.SetLogger(logger)
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(logger.debugs) == 0 {
+		t.Fatal("expected at least one Debug log for malformed line")
+	}
+	foundMalformed := false
+	for _, entry := range logger.debugs {
+		if msg, ok := entry[0].(string); ok && strings.Contains(msg, "malformed") {
+			foundMalformed = true
+			break
+		}
+	}
+	if !foundMalformed {
+		t.Errorf("expected Debug log containing 'malformed', got %v", logger.debugs)
+	}
+}
+
 func TestSapisidCookieVariants(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cookies.txt")
