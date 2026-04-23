@@ -1,6 +1,17 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.14` with `internal/engine/` dead-code cleanup.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.15` with another `internal/cookies/` pass.
 
-This build bundles Sprint #1 + Sprint #2 work plus nine batches from the multi-report audit. All 270 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus ten batches from the multi-report audit. All 279 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 10 (test.16)
+
+Continued cleanup on `internal/cookies/` — focused on real-world correctness (browser detection, leak prevention) plus test coverage of recently shipped fixes:
+
+- **cookies #15** — `FlexDuration.AsDuration(base)` helper plus call-site fixes in `cmd/moombox/main.go` and `internal/monitor/feed.go`. The `time.Duration(d.Minutes()) * time.Minute` pattern was truncating fractional values to int64 nanoseconds before multiplying — a 1.5-minute interval collapsed to 1 minute. Same bug surfaced in two places.
+- **cookies #7 + #30 + #31** — added LibreWolf, Zen, Vivaldi, and Thorium to browser auto-detection. Privacy-focused forks now detect ahead of mainstream browsers in their family. Includes Windows registry ProgID matchers and PATH/install-path candidates.
+- **cookies #8** — wired Windows Job Objects into both Chromium setup and refresh paths. Previously only the Firefox refresh path used `KILL_ON_JOB_CLOSE`; a Moombox crash would orphan headless chrome.exe processes that held the profile lock and silently broke the next refresh.
+- **cookies #52** — dropped the `jobCounter` global. Job Objects are now anonymous (lpName=NULL) instead of named — the per-process counter served only to avoid collisions on naming that nothing outside the package consumed.
+- **cookies #59** — locked down `GetCookieHeader`'s deterministic sort (originally fixed in #1) with an explicit ordering test. 50-iteration byte-equality plus alphabetical assertion.
+- **cookies #57** — extracted `parseDefaultBrowserProgID` from `detectDefaultBrowserWindows` and added 15-case fixture-driven coverage. Locks in the new ProgID matchers without needing a real Windows registry.
 
 ### Manual batch 9 (test.15)
 
