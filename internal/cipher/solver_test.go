@@ -2,7 +2,9 @@ package cipher
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetFromPrepared(t *testing.T) {
@@ -204,5 +206,64 @@ func TestInvalidateSolver(t *testing.T) {
 	}
 	if cached != "" {
 		t.Error("expected disk cache evicted")
+	}
+}
+
+// TestSolverTimeoutInterruptsInfiniteLoop verifies that a malicious or
+// malformed player.js with an infinite loop is bounded by CipherTimeout
+// rather than hanging the decrypt path. Also verifies that after an
+// interrupt, a SUBSEQUENT call on the same VM is not poisoned by a
+// still-pending interrupt flag — the race that the time.AfterFunc-based
+// first draft could leave behind.
+func TestSolverTimeoutInterruptsInfiniteLoop(t *testing.T) {
+	code := `
+_result.sig = function(input) {
+    if (input === "hang") {
+        while (true) {} // hang forever
+    }
+    return input.split("").reverse().join("");
+};
+_result.n = function(input) {
+    return input + "_ok";
+};
+`
+	solvers, err := getFromPrepared(code)
+	if err != nil {
+		t.Fatalf("getFromPrepared: %v", err)
+	}
+
+	// Hang call — should return an error within roughly CipherTimeout, not
+	// indefinitely.
+	start := time.Now()
+	_, sigErr := solvers.Sig("hang")
+	elapsed := time.Since(start)
+	if sigErr == nil {
+		t.Fatal("expected error on infinite-loop sig call, got nil")
+	}
+	if !strings.Contains(sigErr.Error(), "timeout") && !strings.Contains(sigErr.Error(), "Interrupt") {
+		t.Logf("hang error: %v", sigErr)
+	}
+	if elapsed > CipherTimeout*2 {
+		t.Errorf("hang call took %v, expected close to CipherTimeout (%v)", elapsed, CipherTimeout)
+	}
+
+	// Subsequent call on the SAME VM must succeed — if ClearInterrupt ordering
+	// is wrong, this second call would fail with InterruptedError leaking from
+	// the prior timeout.
+	result, err := solvers.Sig("hello")
+	if err != nil {
+		t.Fatalf("subsequent sig call after timeout failed (interrupt-flag leak?): %v", err)
+	}
+	if result != "olleh" {
+		t.Errorf("subsequent sig call: expected 'olleh', got %q", result)
+	}
+
+	// Same check for N.
+	nResult, err := solvers.N("foo")
+	if err != nil {
+		t.Fatalf("subsequent n call after sig timeout failed: %v", err)
+	}
+	if nResult != "foo_ok" {
+		t.Errorf("subsequent n call: expected 'foo_ok', got %q", nResult)
 	}
 }

@@ -225,18 +225,9 @@ func getFromPrepared(code string) (*Solvers, error) {
 						err = fmt.Errorf("sig decrypt panic: %v", r)
 					}
 				}()
-				timer := time.AfterFunc(CipherTimeout, func() {
-					vm.Interrupt(fmt.Sprintf("cipher sig decrypt timeout (%v)", CipherTimeout))
+				return callWithTimeout(vm, "sig", func() (gojavm.Value, error) {
+					return sigFn(gojavm.Undefined(), vm.ToValue(input))
 				})
-				defer func() {
-					timer.Stop()
-					vm.ClearInterrupt()
-				}()
-				val, callErr := sigFn(gojavm.Undefined(), vm.ToValue(input))
-				if callErr != nil {
-					return "", fmt.Errorf("sig decrypt: %w", callErr)
-				}
-				return val.String(), nil
 			}
 		}
 	}
@@ -252,21 +243,62 @@ func getFromPrepared(code string) (*Solvers, error) {
 						err = fmt.Errorf("n decrypt panic: %v", r)
 					}
 				}()
-				timer := time.AfterFunc(CipherTimeout, func() {
-					vm.Interrupt(fmt.Sprintf("cipher n decrypt timeout (%v)", CipherTimeout))
+				return callWithTimeout(vm, "n", func() (gojavm.Value, error) {
+					return nFn(gojavm.Undefined(), vm.ToValue(input))
 				})
-				defer func() {
-					timer.Stop()
-					vm.ClearInterrupt()
-				}()
-				val, callErr := nFn(gojavm.Undefined(), vm.ToValue(input))
-				if callErr != nil {
-					return "", fmt.Errorf("n decrypt: %w", callErr)
-				}
-				return val.String(), nil
 			}
 		}
 	}
 
 	return solvers, nil
+}
+
+// callWithTimeout invokes a goja callable under CipherTimeout and safely resets
+// the VM's interrupt flag after the call returns.
+//
+// The invocation runs in a dedicated goroutine so that vm.Interrupt (which must
+// be called from a non-VM goroutine) can race the completion. The select waits
+// for either the goroutine's result or the timeout. On timeout, vm.Interrupt is
+// fired and we BLOCK on the result channel until the goroutine actually exits —
+// only then do we call ClearInterrupt. This ordering is what makes the next
+// call to this VM start with a clean slate; the earlier time.AfterFunc
+// implementation could leave a pending interrupt that aborted the next call.
+//
+// The caller still owns the VM mutex (Solvers.mu) for the duration of this
+// function, so there is no concurrent VM access from elsewhere.
+func callWithTimeout(vm *gojavm.Runtime, label string, fn func() (gojavm.Value, error)) (string, error) {
+	type callResult struct {
+		val gojavm.Value
+		err error
+	}
+
+	done := make(chan callResult, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- callResult{nil, fmt.Errorf("cipher %s panic inside goroutine: %v", label, r)}
+			}
+		}()
+		v, e := fn()
+		done <- callResult{v, e}
+	}()
+
+	timer := time.NewTimer(CipherTimeout)
+	defer timer.Stop()
+
+	var r callResult
+	select {
+	case r = <-done:
+		// Normal path — no interrupt fired. ClearInterrupt below is a no-op
+		// but keeps the cleanup symmetric.
+	case <-timer.C:
+		vm.Interrupt(fmt.Sprintf("cipher %s decrypt timeout (%v)", label, CipherTimeout))
+		r = <-done // wait for the goroutine to observe the interrupt and return
+	}
+	vm.ClearInterrupt()
+
+	if r.err != nil {
+		return "", fmt.Errorf("%s decrypt: %w", label, r.err)
+	}
+	return r.val.String(), nil
 }
