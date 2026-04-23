@@ -3805,26 +3805,32 @@ class MoomboxApp {
 
   async batchAction(action) {
     const selectedJobs = this._getSelectedJobs();
+    // Strip jobs already being acted on (single-click cancel/resume/etc.
+    // immediately followed by a batch op on the same id would otherwise race).
+    const isPerJob = action === "cancel" || action === "resume" || action === "reinitialize" || action === "delete";
+    const eligibleJobs = isPerJob
+      ? selectedJobs.filter(j => !this._jobActionsInFlight.has(j.id))
+      : selectedJobs;
     let targets, confirmMsg, apiCall;
 
     switch (action) {
       case "cancel":
-        targets = selectedJobs.filter(j => CANCEL_STATUSES.has(j.status));
+        targets = eligibleJobs.filter(j => CANCEL_STATUSES.has(j.status));
         confirmMsg = `Cancel ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
         break;
       case "resume":
-        targets = selectedJobs.filter(j => RESUME_STATUSES.has(j.status));
+        targets = eligibleJobs.filter(j => RESUME_STATUSES.has(j.status));
         confirmMsg = `Resume ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/resume`, { method: "POST" });
         break;
       case "reinitialize":
-        targets = selectedJobs.filter(j => REINIT_STATUSES.has(j.status));
+        targets = eligibleJobs.filter(j => REINIT_STATUSES.has(j.status));
         confirmMsg = `Reinitialize ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}/reinitialize`, { method: "POST" });
         break;
       case "delete":
-        targets = selectedJobs.filter(j => DELETE_STATUSES.has(j.status));
+        targets = eligibleJobs.filter(j => DELETE_STATUSES.has(j.status));
         confirmMsg = `Delete ${targets.length} job${targets.length !== 1 ? "s" : ""}?`;
         apiCall = (id) => fetch(`/api/jobs/${id}`, { method: "DELETE" });
         break;
@@ -3869,10 +3875,16 @@ class MoomboxApp {
         failed = targets.length;
       }
     } else {
-      // Per-job API calls
-      const results = await Promise.allSettled(targets.map(j => apiCall(j.id)));
-      succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
-      failed = targets.length - succeeded;
+      // Per-job API calls. Track each target in _jobActionsInFlight so a
+      // concurrent single-click action is gated while the batch runs.
+      for (const j of targets) this._jobActionsInFlight.add(j.id);
+      try {
+        const results = await Promise.allSettled(targets.map(j => apiCall(j.id)));
+        succeeded = results.filter(r => r.status === "fulfilled" && r.value?.ok).length;
+        failed = targets.length - succeeded;
+      } finally {
+        for (const j of targets) this._jobActionsInFlight.delete(j.id);
+      }
     }
 
     this._activeSelectionSet().clear();
