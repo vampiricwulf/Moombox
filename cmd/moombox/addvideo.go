@@ -126,6 +126,9 @@ func addVideo(input string) {
 		}
 	}
 
-	// Give async notifications a moment to dispatch (match TS await behavior)
-	time.Sleep(500 * time.Millisecond)
+	// Wait for in-flight notification dispatches to finish. Manager.Wait has
+	// its own 30s timeout; calling it here replaces the previous unbounded
+	// 500ms sleep with a deterministic flush so we do not lose notifications
+	// when a webhook is slow and do not linger when they are fast.
+	notifyMgr.Wait()
 }
