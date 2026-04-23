@@ -175,26 +175,41 @@ func (cd *ChatDownloader) clearResumeState() {
 
 // Start connects to Twitch IRC and begins recording chat messages.
 // C1: Includes reconnect logic with exponential backoff on error limit.
+//
+// Start is safe to call once per ChatDownloader instance. Calling Start
+// concurrently (or after a previous Start returns) returns an error rather
+// than racing on the dedup/resume state — the struct retains seenIDs and
+// seenOrder across calls, and re-initialising them while a previous session
+// is still draining would drop messages.
 func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.mu.Lock()
+	if cd.running {
+		cd.mu.Unlock()
+		return fmt.Errorf("twitch chat downloader already running for %s", cd.channelLogin)
+	}
 	cd.running = true
+	alreadyInitialized := cd.totalCount > 0 || len(cd.seenIDs) > 0
 	cd.mu.Unlock()
 
-	// Try to resume from saved state (matches TS start() resume logic)
-	resumeState := cd.loadResumeState()
-	if resumeState != nil && len(resumeState.RecentIDs) > 0 {
-		cd.mu.Lock()
-		cd.totalCount = resumeState.MessageCount
-		cd.lastTimestampMs = resumeState.LastTimestampMs
-		cd.flushedToDisk = true
-		cd.seenIDs = make(map[string]struct{}, len(resumeState.RecentIDs))
-		cd.seenOrder = make([]string, 0, len(resumeState.RecentIDs))
-		for _, id := range resumeState.RecentIDs {
-			cd.seenIDs[id] = struct{}{}
-			cd.seenOrder = append(cd.seenOrder, id)
+	// Try to resume from saved state (matches TS start() resume logic).
+	// Only load resume state on a fresh Start — if the downloader already
+	// has in-memory state from a prior session, preserve it rather than
+	// replacing with the on-disk snapshot.
+	if !alreadyInitialized {
+		if resumeState := cd.loadResumeState(); resumeState != nil && len(resumeState.RecentIDs) > 0 {
+			cd.mu.Lock()
+			cd.totalCount = resumeState.MessageCount
+			cd.lastTimestampMs = resumeState.LastTimestampMs
+			cd.flushedToDisk = true
+			cd.seenIDs = make(map[string]struct{}, len(resumeState.RecentIDs))
+			cd.seenOrder = make([]string, 0, len(resumeState.RecentIDs))
+			for _, id := range resumeState.RecentIDs {
+				cd.seenIDs[id] = struct{}{}
+				cd.seenOrder = append(cd.seenOrder, id)
+			}
+			cd.mu.Unlock()
+			cd.logger.Info("[TwitchChat] Resuming from saved state", "messages", resumeState.MessageCount)
 		}
-		cd.mu.Unlock()
-		cd.logger.Info("[TwitchChat] Resuming from saved state", "messages", resumeState.MessageCount)
 	}
 
 	defer func() {

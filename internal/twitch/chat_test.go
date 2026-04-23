@@ -1,6 +1,7 @@
 package twitch
 
 import (
+	"context"
 	"reflect"
 	"strconv"
 	"testing"
@@ -336,6 +337,29 @@ func TestChatDedupPruning(t *testing.T) {
 	}
 	if hasFirst {
 		t.Error("expected oldest message to be pruned from dedup set")
+	}
+}
+
+// TestChatDownloaderStartDoubleCallRejected verifies that a second Start call
+// against a running downloader returns an error rather than racing on the
+// dedup/resume state. Regression test for audit reports/twitch.md issue #4.
+func TestChatDownloaderStartDoubleCallRejected(t *testing.T) {
+	cd := NewChatDownloader(ChatDownloaderOptions{
+		ChannelLogin: "test",
+		StreamID:     "123",
+	}, &testLogger{})
+
+	// Simulate an already-running downloader.
+	cd.mu.Lock()
+	cd.running = true
+	cd.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := cd.Start(ctx)
+	if err == nil {
+		t.Fatal("expected Start to fail when downloader is already running")
 	}
 }
 
