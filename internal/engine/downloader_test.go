@@ -309,6 +309,57 @@ func TestResumeState_SkipSaveWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestResumeState_EmptyStateReturnsNil(t *testing.T) {
+	// A resume file with LastSeq=0 and BytesWritten=0 is effectively empty
+	// (saveResume() shouldn't have written it at all, but could happen via
+	// corruption or hand-editing). loadResume should treat it as absent so
+	// the caller doesn't advance currentSeq past segment 0 on first resume.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+
+	emptyState := `{"lastSeq":0,"bytesWritten":0,"timestamp":0,"baseUrl":""}`
+	if err := os.WriteFile(resumeFile, []byte(emptyState), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	state, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if state != nil {
+		t.Errorf("expected nil state for empty resume file, got %+v", state)
+	}
+}
+
+func TestResumeState_NegativeLastSeqReturnsNil(t *testing.T) {
+	// Defensive: a negative LastSeq would make currentSeq = LastSeq+1
+	// go negative. Reject it.
+	tmp := t.TempDir()
+	resumeFile := filepath.Join(tmp, "test.resume.json")
+
+	if err := os.WriteFile(resumeFile, []byte(`{"lastSeq":-1,"bytesWritten":0}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/sq/$Number$",
+		OutputFile: filepath.Join(tmp, "test.mp4"),
+		ResumeFile: resumeFile,
+	})
+	state, err := d.loadResume()
+	if err != nil {
+		t.Fatalf("loadResume: %v", err)
+	}
+	if state != nil {
+		t.Errorf("expected nil state for negative lastSeq, got %+v", state)
+	}
+}
+
 func TestResumeState_CorruptedFile(t *testing.T) {
 	tmp := t.TempDir()
 	resumeFile := filepath.Join(tmp, "test.resume.json")

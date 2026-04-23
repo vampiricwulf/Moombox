@@ -23,6 +23,15 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
+	// Guard against empty / corrupted resume files that round-trip a zero
+	// LastSeq + zero BytesWritten. saveResume() skips writing until seq > 0
+	// but a manually corrupted file could still have this shape. Treating
+	// it as valid would cause the caller to advance currentSeq to
+	// LastSeq+1 = 1 and skip segment 0 entirely, losing the first segment
+	// for YouTube live DASH (StartNumber=0) on resume.
+	if state.LastSeq < 0 || (state.LastSeq == 0 && state.BytesWritten == 0) {
+		return nil, nil
+	}
 	return &state, nil
 }
 
