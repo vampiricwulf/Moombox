@@ -356,6 +356,52 @@ func TestHasAdequateFormats(t *testing.T) {
 	if !hasAdequateFormats(info) {
 		t.Error("expected true for video+audio formats")
 	}
+
+	// Audio detection should work even when AudioQuality is empty but mime
+	// type says audio (seen with some Innertube adaptiveFormats payloads).
+	info = &VideoInfo{Formats: []Format{
+		{Itag: 137, MimeType: "video/mp4", Width: new(1920), Height: new(1080), URL: "https://example.com"},
+		{Itag: 140, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", URL: "https://example.com"},
+	}}
+	if !hasAdequateFormats(info) {
+		t.Error("expected true when audio-only format has empty AudioQuality but audio mime type")
+	}
+}
+
+func TestFormatIsAudio(t *testing.T) {
+	tests := []struct {
+		name string
+		f    Format
+		want bool
+	}{
+		{
+			"audio mime, no AudioQuality",
+			Format{MimeType: "audio/mp4; codecs=\"mp4a.40.2\""},
+			true,
+		},
+		{
+			"audio mime with AudioQuality",
+			Format{MimeType: "audio/webm; codecs=\"opus\"", AudioQuality: "AUDIO_QUALITY_MEDIUM"},
+			true,
+		},
+		{
+			"video mime",
+			Format{MimeType: "video/mp4", Width: new(1920), Height: new(1080)},
+			false,
+		},
+		{
+			"audio mime but has Width set (combined/muxed — unusual)",
+			Format{MimeType: "audio/mp4", Width: new(1920)},
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.f.IsAudio(); got != tt.want {
+				t.Errorf("IsAudio() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestMergeWatchPageMetadata(t *testing.T) {
