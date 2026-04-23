@@ -10,6 +10,13 @@
     --status-cancelled: #6b7280;
     --status-cookies: #d946ef;
 
+    /* Bottom-bar geometry — status bar is fixed at the viewport bottom and the
+       batch-action bar slides up above it. Body padding and the batch bar's
+       bottom offset reference these vars so the stack stays consistent if the
+       status-bar height changes. */
+    --status-bar-h: 28px;
+    --batch-bar-h: 40px;
+
     /* Toasts must render above the setup/FFmpeg overlays (z-index 10000) */
     --sl-z-index-toast: 10100;
 }
@@ -25,6 +32,8 @@ body {
     background-color: var(--sl-color-neutral-0);
     color: var(--sl-color-neutral-900);
     min-height: 100vh;
+    /* dvh tracks the visible viewport as mobile browser chrome collapses/expands. */
+    min-height: 100dvh;
     display: flex;
     flex-direction: column;
 }
@@ -37,6 +46,27 @@ a {
 a:hover {
     color: var(--sl-color-primary-700);
     text-decoration: underline;
+}
+
+/* Screen-reader-only text — visually hidden but announced by assistive tech. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* <main> wraps the tab group so it fills the flex body and behaves like sl-tab-group did. */
+main.app-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 
 /* Connectivity banner */
@@ -381,6 +411,8 @@ sl-badge.status.cookies::part(base) {
 .video-item[data-status="upcoming"] .job-progress-bar { --indicator-color: var(--status-upcoming); }
 .video-item[data-status="error"] .job-progress-bar { --indicator-color: var(--status-error); }
 .video-item[data-status="cookies"] .job-progress-bar { --indicator-color: var(--status-cookies); }
+.video-item[data-status="finished"] .job-progress-bar { --indicator-color: var(--status-finished); }
+.video-item[data-status="cancelled"] .job-progress-bar { --indicator-color: var(--status-cancelled); }
 
 /* Archived table - same layout as #video-table */
 .archived-table {
@@ -681,6 +713,8 @@ sl-badge.status.cookies::part(base) {
 #logs-container {
     position: relative;
     height: calc(100vh - 12rem);
+    /* dvh prevents overflow under iOS Safari's collapsing URL bar. */
+    height: calc(100dvh - 12rem);
 }
 
 #logs-viewer {
@@ -764,7 +798,7 @@ sl-badge.status.cookies::part(base) {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    height: 28px;
+    height: var(--status-bar-h);
     padding: 0 var(--sl-spacing-medium);
     background: var(--sl-color-neutral-100);
     border-top: 1px solid var(--sl-color-neutral-200);
@@ -776,11 +810,11 @@ sl-badge.status.cookies::part(base) {
 
 /* Add padding to body to account for fixed status bar */
 body {
-    padding-bottom: 28px;
+    padding-bottom: var(--status-bar-h);
 }
 
 body.batch-bar-active {
-    padding-bottom: 68px;
+    padding-bottom: calc(var(--status-bar-h) + var(--batch-bar-h));
 }
 
 #status-bar-left, #status-bar-right {
@@ -892,6 +926,7 @@ sl-progress-bar {
     display: flex;
     gap: var(--sl-spacing-large);
     min-height: calc(100vh - 12rem);
+    min-height: calc(100dvh - 12rem);
 }
 
 .settings-menu {
@@ -1164,6 +1199,16 @@ sl-progress-bar {
     font-family: var(--sl-font-mono);
 }
 
+/* Inline snippet blocks for CLI/command examples inside settings dialogs. */
+.code-snippet {
+    margin: 0.5em 0;
+    padding: 0.5em;
+    background: var(--sl-color-neutral-100);
+    border-radius: var(--sl-border-radius-medium);
+    font-size: 0.85em;
+    overflow-x: auto;
+}
+
 /* Responsive settings */
 @media only screen and (max-width: 768px) {
     .settings-container {
@@ -1266,6 +1311,7 @@ sl-progress-bar {
     display: flex;
     flex-direction: column;
     height: calc(100vh - 8rem);
+    height: calc(100dvh - 8rem);
 }
 
 #player-header {
@@ -1367,12 +1413,21 @@ sl-progress-bar {
     background: var(--sl-color-neutral-100);
     border: 1px solid var(--sl-color-neutral-300);
     border-radius: var(--sl-border-radius-small);
+    /* Hide the browser default focus ring for mouse clicks, but keep a
+       visible focus indicator for keyboard users via :focus-visible below. */
     outline: none;
     text-align: right;
 }
 
 #player-chat-offset:focus {
     border-color: var(--sl-color-primary-500);
+}
+
+#player-chat-offset:focus-visible {
+    /* Meets AA 3:1 non-text contrast for keyboard users — a thin border-color
+       change alone was not sufficient. */
+    outline: 2px solid var(--sl-color-primary-500);
+    outline-offset: 1px;
 }
 
 #player-chat-offset::placeholder {
@@ -2117,6 +2172,14 @@ sl-progress-bar {
     grid-template-columns: auto 1fr;
     gap: var(--sl-spacing-2x-small) var(--sl-spacing-medium);
     align-items: center;
+    margin: 0;
+}
+
+/* Reset <dt>/<dd> defaults so they sit in the grid cleanly. */
+.keyboard-shortcut-grid dt,
+.keyboard-shortcut-grid dd {
+    margin: 0;
+    padding: 0;
 }
 
 .keyboard-shortcut-grid kbd {
@@ -2479,7 +2542,7 @@ html.sl-theme-light {
 /* ===== Batch Selection ===== */
 #batch-action-bar {
     position: fixed;
-    bottom: 28px; /* sits above the 28px status bar */
+    bottom: var(--status-bar-h); /* sits above the status bar */
     left: 0;
     right: 0;
     background: var(--sl-color-neutral-100);

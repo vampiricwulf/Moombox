@@ -13,7 +13,27 @@
 
         <title>Moombox</title>
 
+        <!-- Theme bootstrap — runs before stylesheets resolve to avoid FOUC on light theme.
+             Mirrors the logic in app.js setTheme() so a returning user sees their saved
+             preference on first paint instead of the dark-themed default flashing first. -->
+        <script>
+            (function () {
+                try {
+                    var saved = localStorage.getItem("moombox-theme");
+                    var theme = saved || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+                    document.documentElement.className = theme === "light" ? "sl-theme-light" : "sl-theme-dark";
+                    var meta = document.querySelector('meta[name="theme-color"]');
+                    if (meta) meta.content = theme === "light" ? "#ffffff" : "#1C1B22";
+                    // Stash the resolved theme so the later stylesheet tags can swap media= correctly.
+                    window.__moomboxBootTheme = theme;
+                } catch (e) {
+                    // localStorage/matchMedia unavailable — leave default sl-theme-dark class intact.
+                }
+            })();
+        </script>
+
         <!-- Shoelace UI Components — SRI-pinned; refresh hashes via scripts/update-shoelace.sh when bumping version. -->
+
         <link
             rel="stylesheet"
             id="sl-theme-dark"
@@ -29,6 +49,18 @@
             crossorigin="anonymous"
             media="not all"
         />
+        <script>
+            // Swap which theme stylesheet is active based on the bootstrap result above.
+            // Must run after the two <link> tags exist so getElementById() finds them.
+            (function () {
+                var theme = window.__moomboxBootTheme;
+                if (theme !== "light") return;
+                var dark = document.getElementById("sl-theme-dark");
+                var light = document.getElementById("sl-theme-light");
+                if (dark) dark.media = "not all";
+                if (light) light.media = "";
+            })();
+        </script>
         <script
             type="module"
             src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/shoelace-autoloader.js"
@@ -43,6 +75,8 @@
             <sl-icon name="wifi-off"></sl-icon>
             Internet connection lost
         </div>
+        <h1 class="visually-hidden">Moombox Dashboard</h1>
+        <main class="app-main">
         <sl-tab-group>
             <sl-tab slot="nav" panel="tasks">Tasks</sl-tab>
             <sl-tab slot="nav" panel="archived">Archived</sl-tab>
@@ -194,15 +228,15 @@
                 </sl-dialog>
 
                 <!-- Jobs Table -->
-                <div id="video-table">
-                    <div id="video-table-header">
-                        <div>Thumbnail</div>
-                        <div>Video</div>
-                        <div>Status</div>
-                        <div>Progress</div>
-                        <div></div>
+                <div id="video-table" role="table" aria-label="Jobs">
+                    <div id="video-table-header" role="row">
+                        <div role="columnheader">Thumbnail</div>
+                        <div role="columnheader">Video</div>
+                        <div role="columnheader">Status</div>
+                        <div role="columnheader">Progress</div>
+                        <div role="columnheader"><span class="visually-hidden">Actions</span></div>
                     </div>
-                    <div id="jobs-container">
+                    <div id="jobs-container" role="rowgroup">
                         <!-- Jobs will be rendered here -->
                     </div>
                     <div id="jobs-skeleton">
@@ -231,7 +265,7 @@
                 </div>
 
                 <div id="empty-state" style="display: none">
-                    <sl-icon name="inbox"></sl-icon>
+                    <sl-icon name="inbox" aria-hidden="true"></sl-icon>
                     <p>No jobs yet</p>
                     <p class="empty-state-subtext">Add a YouTube or Twitch URL to start archiving</p>
                     <sl-button class="empty-state-cta" variant="primary" size="small" id="empty-state-add-btn">
@@ -257,21 +291,21 @@
                     <span id="archived-filter-count" style="display:none"></span>
                 </div>
 
-                <div id="archived-table" class="archived-table">
-                    <div id="archived-table-header">
-                        <div>Thumbnail</div>
-                        <div>Video</div>
-                        <div>Status</div>
-                        <div>Progress</div>
-                        <div></div>
+                <div id="archived-table" class="archived-table" role="table" aria-label="Archived jobs">
+                    <div id="archived-table-header" role="row">
+                        <div role="columnheader">Thumbnail</div>
+                        <div role="columnheader">Video</div>
+                        <div role="columnheader">Status</div>
+                        <div role="columnheader">Progress</div>
+                        <div role="columnheader"><span class="visually-hidden">Actions</span></div>
                     </div>
-                    <div id="archived-container">
+                    <div id="archived-container" role="rowgroup">
                         <!-- Archived jobs will be rendered here -->
                     </div>
                 </div>
 
                 <div id="archived-empty-state" style="display: none">
-                    <sl-icon name="archive"></sl-icon>
+                    <sl-icon name="archive" aria-hidden="true"></sl-icon>
                     <p>No archived jobs</p>
                     <p class="empty-state-subtext">Finished jobs older than the configured age will appear here automatically</p>
                 </div>
@@ -295,7 +329,7 @@
                         <div id="player-sidebar" style="display: none">
                             <div id="player-sidebar-header">
                                 <span id="player-sidebar-msg-count">0 messages</span>
-                                <input type="text" id="player-chat-offset" inputmode="decimal" placeholder="-0.0s offset" />
+                                <input type="text" id="player-chat-offset" inputmode="decimal" placeholder="-0.0s offset" aria-label="Chat offset in seconds" title="Chat offset in seconds" />
                                 <sl-icon-button id="player-chat-offset-reset" name="x-circle" label="Reset offset" style="display: none"></sl-icon-button>
                             </div>
                             <div id="chat-search-container">
@@ -311,7 +345,7 @@
                         </div>
                     </div>
                     <div id="player-empty-state">
-                        <sl-icon name="play-circle"></sl-icon>
+                        <sl-icon name="play-circle" aria-hidden="true"></sl-icon>
                         <p>Select a finished video to play</p>
                         <p class="empty-state-subtext">Choose from the dropdown above to watch with synced chat overlay</p>
                     </div>
@@ -1048,11 +1082,11 @@
                                     <p class="settings-help">
                                         You can also point yt-dlp at the extracted plugin directly:
                                     </p>
-                                    <pre style="margin: 0.5em 0; padding: 0.5em; background: var(--sl-color-neutral-100); border-radius: var(--sl-border-radius-medium); font-size: 0.85em; overflow-x: auto;"><code id="ytdlp-manual-cmd">yt-dlp --plugin-dirs "./assets/yt-dlp-plugin" &lt;URL&gt;</code></pre>
+                                    <pre class="code-snippet"><code id="ytdlp-manual-cmd">yt-dlp --plugin-dirs "./assets/yt-dlp-plugin" &lt;URL&gt;</code></pre>
                                     <p class="settings-help">
                                         Or use extractor args without a plugin:
                                     </p>
-                                    <pre style="margin: 0.5em 0; padding: 0.5em; background: var(--sl-color-neutral-100); border-radius: var(--sl-border-radius-medium); font-size: 0.85em; overflow-x: auto;"><code id="ytdlp-extractor-cmd">yt-dlp --extractor-args "youtube:player-client=web;po_token=web.gvs+http://127.0.0.1:774/get_pot" &lt;URL&gt;</code></pre>
+                                    <pre class="code-snippet"><code id="ytdlp-extractor-cmd">yt-dlp --extractor-args "youtube:player-client=web;po_token=web.gvs+http://127.0.0.1:774/get_pot" &lt;URL&gt;</code></pre>
                                 </sl-details>
                             </div>
                         </div>
@@ -1077,6 +1111,7 @@
                 </div>
             </sl-tab-panel>
         </sl-tab-group>
+        </main>
 
         <!-- Job Details Dialog (outside tab group so it works from any tab) -->
         <sl-dialog
@@ -1619,26 +1654,26 @@
         <!-- Keyboard Help Dialog -->
         <sl-dialog label="Keyboard Shortcuts" id="keyboard-help-dialog">
             <h4 style="margin:0 0 var(--sl-spacing-small)">Global</h4>
-            <div class="keyboard-shortcut-grid">
-                <kbd>A</kbd> <span>Add video</span>
-                <kbd>?</kbd> <span>Show this help</span>
-                <kbd>Esc</kbd> <span>Close dialog</span>
-                <kbd>1</kbd>-<kbd>8</kbd> <span>Switch tabs</span>
-                <kbd>F</kbd> <span>Focus search</span>
-                <kbd>↑</kbd> <kbd>↓</kbd> <span>Navigate job list</span>
-                <kbd>Enter</kbd> <span>Open selected job details</span>
-            </div>
+            <dl class="keyboard-shortcut-grid">
+                <dt><kbd>A</kbd></dt><dd>Add video</dd>
+                <dt><kbd>?</kbd></dt><dd>Show this help</dd>
+                <dt><kbd>Esc</kbd></dt><dd>Close dialog</dd>
+                <dt><kbd>1</kbd>-<kbd>8</kbd></dt><dd>Switch tabs</dd>
+                <dt><kbd>F</kbd></dt><dd>Focus search</dd>
+                <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Navigate job list</dd>
+                <dt><kbd>Enter</kbd></dt><dd>Open selected job details</dd>
+            </dl>
             <sl-divider></sl-divider>
             <h4 style="margin:0 0 var(--sl-spacing-small)">Player Tab</h4>
-            <div class="keyboard-shortcut-grid">
-                <kbd>Space</kbd> <span>Play / Pause</span>
-                <kbd>←</kbd> <kbd>→</kbd> <span>Seek 5s (Shift: 30s)</span>
-                <kbd>↑</kbd> <kbd>↓</kbd> <span>Volume up / down</span>
-                <kbd>F</kbd> <span>Toggle fullscreen</span>
-                <kbd>M</kbd> <span>Toggle mute</span>
-                <kbd>C</kbd> <span>Toggle chat overlay</span>
-                <kbd>S</kbd> <span>Toggle chat sidebar</span>
-            </div>
+            <dl class="keyboard-shortcut-grid">
+                <dt><kbd>Space</kbd></dt><dd>Play / Pause</dd>
+                <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Seek 5s (Shift: 30s)</dd>
+                <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Volume up / down</dd>
+                <dt><kbd>F</kbd></dt><dd>Toggle fullscreen</dd>
+                <dt><kbd>M</kbd></dt><dd>Toggle mute</dd>
+                <dt><kbd>C</kbd></dt><dd>Toggle chat overlay</dd>
+                <dt><kbd>S</kbd></dt><dd>Toggle chat sidebar</dd>
+            </dl>
         </sl-dialog>
 
         <sl-dialog id="update-dialog" label="Update Available">
@@ -1695,7 +1730,7 @@
                     <sl-icon name="wifi-off"></sl-icon>
                     <span class="status-label">Connecting...</span>
                 </span>
-                <span class="status-divider"></span>
+                <span class="status-divider" role="separator" aria-orientation="vertical"></span>
                 <span id="active-indicator" style="display:none"></span>
                 <span id="check-countdown"></span>
             </div>
@@ -1706,7 +1741,7 @@
                 <span id="yt-indicator" title="YouTube" style="display:none">YT</span>
                 <span id="tw-indicator" title="Twitch" style="display:none">TW</span>
                 <sl-icon-button id="btn-refresh-cookies" name="arrow-clockwise" label="Refresh cookies" style="display:none"></sl-icon-button>
-                <span class="status-divider"></span>
+                <span class="status-divider" role="separator" aria-orientation="vertical"></span>
                 <span id="version-indicator" class="version-indicator" style="display:none"></span>
                 <sl-icon-button id="theme-toggle" name="moon" label="Toggle theme"></sl-icon-button>
             </div>
