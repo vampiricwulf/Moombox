@@ -274,14 +274,36 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	globalThis.MutationObserver = function() { this.observe = function() {}; this.disconnect = function() {}; this.takeRecords = function() { return []; }; };
 	globalThis.IntersectionObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
 	globalThis.ResizeObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
+	// Capture the native CSPRNG bridges into closure-local variables BEFORE
+	// the outer bootstrap clears the globals. Without this capture,
+	// getRandomValues would look up __cryptoRandBytes on globalThis at call
+	// time and fail with "not a function" as soon as RegisterDOMShim returned.
+	var _randBytes = __cryptoRandBytes;
+	var _randomUUID = __cryptoRandomUUID;
 	globalThis.crypto = {
 		getRandomValues: function(arr) {
-			var bytes = new Uint8Array(__cryptoRandBytes(arr.length));
+			var bytes = new Uint8Array(_randBytes(arr.length));
 			for (var i = 0; i < arr.length; i++) { arr[i] = bytes[i]; }
 			return arr;
 		},
-		subtle: {},
-		randomUUID: __cryptoRandomUUID
+		// subtle is stubbed to reject async ops with a clear error rather than
+		// throwing on missing-method access. BotGuard variants that probe
+		// subtle.digest / subtle.importKey / ... degrade gracefully.
+		subtle: {
+			digest: function() { return Promise.reject(new Error('crypto.subtle.digest not supported')); },
+			importKey: function() { return Promise.reject(new Error('crypto.subtle.importKey not supported')); },
+			exportKey: function() { return Promise.reject(new Error('crypto.subtle.exportKey not supported')); },
+			sign: function() { return Promise.reject(new Error('crypto.subtle.sign not supported')); },
+			verify: function() { return Promise.reject(new Error('crypto.subtle.verify not supported')); },
+			encrypt: function() { return Promise.reject(new Error('crypto.subtle.encrypt not supported')); },
+			decrypt: function() { return Promise.reject(new Error('crypto.subtle.decrypt not supported')); },
+			deriveKey: function() { return Promise.reject(new Error('crypto.subtle.deriveKey not supported')); },
+			deriveBits: function() { return Promise.reject(new Error('crypto.subtle.deriveBits not supported')); },
+			generateKey: function() { return Promise.reject(new Error('crypto.subtle.generateKey not supported')); },
+			wrapKey: function() { return Promise.reject(new Error('crypto.subtle.wrapKey not supported')); },
+			unwrapKey: function() { return Promise.reject(new Error('crypto.subtle.unwrapKey not supported')); }
+		},
+		randomUUID: _randomUUID
 	};
 	globalThis.postMessage = function() {};
 	globalThis.addEventListener = function() {};
