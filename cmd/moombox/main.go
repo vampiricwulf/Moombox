@@ -941,9 +941,35 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			"nextTwitchCheck": twitchMon.GetNextCheckAt(),
 		})
 	}
-	feedMon.OnSchedule = func(_ int64) { broadcastAllTimers() }
-	decapiMon.OnSchedule = func(_ int64) { broadcastAllTimers() }
-	twitchMon.OnSchedule = func(_ int64) { broadcastAllTimers() }
+
+	// OnSchedule subscriber slots — set once before monitor.Start() and only
+	// mutated via atomic.Pointer.Store thereafter. Reassigning the monitor's
+	// plain func field while its goroutine is running would race with
+	// scheduleNext() reading it; funneling subscribers through an atomic
+	// pointer keeps the read-side lock-free and the write-side safe.
+	var (
+		feedTUISchedule   atomic.Pointer[func(int64)]
+		decapiTUISchedule atomic.Pointer[func(int64)]
+		twitchTUISchedule atomic.Pointer[func(int64)]
+	)
+	feedMon.OnSchedule = func(next int64) {
+		broadcastAllTimers()
+		if fn := feedTUISchedule.Load(); fn != nil {
+			(*fn)(next)
+		}
+	}
+	decapiMon.OnSchedule = func(next int64) {
+		broadcastAllTimers()
+		if fn := decapiTUISchedule.Load(); fn != nil {
+			(*fn)(next)
+		}
+	}
+	twitchMon.OnSchedule = func(next int64) {
+		broadcastAllTimers()
+		if fn := twitchTUISchedule.Load(); fn != nil {
+			(*fn)(next)
+		}
+	}
 
 	// Initialize per-job log tracking with existing jobs (matches TS knownJobIds)
 	if existingJobs, err := db.GetAllJobs(); err == nil {
@@ -1605,12 +1631,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Backfill TUI with logs emitted before subscription
 		app.BackfillLogs(log.GetRecentLines())
 
-		// Forward monitor schedule events to TUI
-		wrapOnSchedule := func(orig func(int64), makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
+		// Forward monitor schedule events to TUI. We store a TUI-only callback
+		// in the atomic slot defined earlier; the dispatcher wired to
+		// feedMon/decapiMon/twitchMon.OnSchedule (set before monitor.Start())
+		// loads it lock-free. Reassignment here is race-free because the
+		// monitor goroutine never reads the field directly.
+		makeTUISchedule := func(makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
 			return func(nextCheckAt int64) {
-				if orig != nil {
-					orig(nextCheckAt)
-				}
 				t := time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
 				select {
 				case checkTimersCh <- makeMsg(t):
@@ -1618,15 +1645,18 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				}
 			}
 		}
-		feedMon.OnSchedule = wrapOnSchedule(feedMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+		feedFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
 			return tui.CheckTimersMsg{NextFeedCheck: t}
 		})
-		decapiMon.OnSchedule = wrapOnSchedule(decapiMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+		decapiFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
 			return tui.CheckTimersMsg{NextDecapiCheck: t}
 		})
-		twitchMon.OnSchedule = wrapOnSchedule(twitchMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+		twitchFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
 			return tui.CheckTimersMsg{NextTwitchCheck: t}
 		})
+		feedTUISchedule.Store(&feedFn)
+		decapiTUISchedule.Store(&decapiFn)
+		twitchTUISchedule.Store(&twitchFn)
 
 		// Send initial timer values — monitors fire OnSchedule during Start()
 		// before the TUI wrappers above are installed, so the TUI misses those.
