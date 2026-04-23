@@ -1,6 +1,15 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.12` with a seventh batch — primarily `internal/goja/` (untouched by prior batches) plus scattered cross-cutting lows.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.13` with an eighth batch of scattered lows across `internal/config/` and `internal/worker/`.
 
-This build bundles Sprint #1 + Sprint #2 work plus seven batches from the multi-report audit. All 260 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus eight batches from the multi-report audit. All 268 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 8 (test.14)
+
+- **config F14 + F21** — `PoToken` and `VisitorData` are now `json:"-"` so they stop leaking via `GET /api/config`. Session-scoped secrets should be treated like `PasswordHash`; the prior tags shipped them to any authenticated remote client.
+- **config F26** — hoist `validQualities` into package-level `validQualityPreferences`; no more 15-string map rebuilt on every `validate()` call.
+- **config F29** — `ChannelTerms.MarshalTOML` uses `bytes.TrimRight(buf, "\n")` instead of `bytes.TrimSpace` so legitimate leading/trailing whitespace inside a quoted string literal is preserved.
+- **config F35** — removed unused `ChannelTerms.IsEmpty` (replaced by `len(Patterns()) == 0` in tests).
+- **worker F13** — promoted `ffprobe failed` log from Debug to Warn; a broken FFmpeg install no longer degrades silently through the format-metadata fallback path.
+- **worker F56** — removed dead `sanitizeFilename` helper (only referenced by its own tests; production uses `config.ResolveTemplate`).
 
 ### Manual batch 7 (test.13)
 
