@@ -123,9 +123,13 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 			}
 
 			nextSeq++
+			// Always keep currentSeq in sync so a crash mid-catch-up loses at
+			// most the one segment currently being written rather than up to
+			// ResumeCatchupInterval. saveResume is still periodic since it
+			// touches disk. (Audit reports/engine.md Finding 1.)
+			d.currentSeq.Store(int64(nextSeq))
 			segsSinceResume++
 			if segsSinceResume >= ResumeCatchupInterval {
-				d.currentSeq.Store(int64(nextSeq))
 				d.saveResume()
 				segsSinceResume = 0
 			}
