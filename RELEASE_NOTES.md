@@ -1,6 +1,6 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Supersedes the `v2.6.0-test.1` tag, whose CI run failed because `go-winres` rejected the pre-release suffix — now fixed by stripping it before computing the Windows numeric version.
 
-This build bundles Sprint #1 of the multi-report audit: security hardening, database correctness, cipher resilience, and initial frontend test coverage. All 16 commits build clean and pass `go test -race ./...` plus a new JS test suite.
+This build bundles Sprint #1 of the multi-report audit: security hardening, database correctness, cipher resilience, and initial frontend test coverage. All 17 commits build clean and pass `go test -race ./...` plus a new JS test suite.
 
 ### Security
 
@@ -32,4 +32,5 @@ This build bundles Sprint #1 of the multi-report audit: security hardening, data
 ### Internal
 
 - **Frontend JS tests** — seeds baseline coverage via Node's built-in test runner (zero devDependencies). 39 tests across `filter-parser`, `filter-engine`, and `utils`. Run with `node --test web/tests/*.test.mjs`. See `web/tests/README.md`.
-- **Release workflow supports pre-releases** — tags containing `-` (e.g. `v2.6.0-test.1`) are marked as pre-release and don't become `/releases/latest`.
+- **Release workflow supports pre-releases** — tags containing `-` (e.g. `v2.6.0-test.2`) are marked as pre-release and don't become `/releases/latest`. The workflow also strips the pre-release suffix when building the Windows numeric version (`2.6.0.0`) since `go-winres` requires pure integer components.
+- **Shoelace CDN hardened with SRI** — `index.html` and `login.html` now carry `sha384` integrity hashes for the three jsdelivr references. Closes `frontend-html-css.md` S-13. The initial attempt to vendor the full CDN distribution was reverted; SRI pinning is the lighter and more appropriate fix given Moombox is an online tool.
