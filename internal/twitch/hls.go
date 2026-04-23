@@ -257,7 +257,18 @@ func FetchHLSMasterPlaylist(ctx context.Context, url string) ([]TwitchHLSVariant
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body) // drain for connection reuse
+		// Usher returns 404 for "channel offline" vs "unauthorized" vs
+		// "geoblocked" — each with a distinct body. Previously we
+		// discarded the body and returned "hls playlist http 404", which
+		// left users guessing why. Include a bounded prefix of the body
+		// in the error (yt-dlp does the same — see references/yt-dlp
+		// twitch.py). Drain the rest for connection reuse.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10)) // 4 KB prefix
+		io.Copy(io.Discard, resp.Body)
+		bodyStr := strings.TrimSpace(string(body))
+		if bodyStr != "" {
+			return nil, fmt.Errorf("hls playlist http %d: %s", resp.StatusCode, bodyStr)
+		}
 		return nil, fmt.Errorf("hls playlist http %d", resp.StatusCode)
 	}
 
