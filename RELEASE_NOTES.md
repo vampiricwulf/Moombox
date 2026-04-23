@@ -23,6 +23,48 @@ This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-repor
 - **PassiveTracker per-tag success** — `ReportSuccess(tag)` previously wiped every failure across every subsystem, letting a flaky single-subsystem success pattern mask a genuine multi-subsystem outage. Now clears only failures for the given tag and keeps the triggered flag stable while the threshold is still met. (small-packages.md question #3)
 - **Chat message-ID generator race** — `randomAlphaNum` used `math/rand` globals, which are not concurrent-safe. Multiple parallel chat downloaders could race at `generateMessageID`. Switched to `math/rand/v2`, whose package-level `IntN` is documented as concurrent-safe. (chat.md C10)
 
+### Parallel-agent batch (test.7)
+
+Three agents audited `internal/cookies/`, `internal/youtube/`, and `internal/engine/` in isolated worktrees and committed 34 focused fixes totaling +1,900 / −200 lines. All scoped to their package, all race-detector clean, all audit findings with owner-decision or cross-package implications deferred.
+
+**Cookies** (cookies.md 20 findings):
+- Cookie jar preserves state on transient read errors instead of wiping
+- SAPISIDHASH restricted to known YouTube origins (known-vector test added)
+- `updateCookieFile` honors `Set-Cookie` Domain= attribute (no more guess-from-name drift)
+- Chromium setup cleanup, headless anti-automation, navigate-vs-read error distinction, lockfile glob widened to `Singleton*` / `*lockfile*`
+- Firefox `cookies.sqlite` opens with `_busy_timeout=2000`; `user.js` disables telemetry rather than bypassing
+- Suffix-anchored domain matching everywhere (rejects `.fakegoogle.com.evil.tld`)
+- Dead `setupCmd` field removed; refresh error message now names only platforms with cookies
+- CDP empty-result falls through all fallbacks and errors if all empty
+- Tests for `isRelevantDomain`, `isEssentialCookie`, `deduplicateAndFormat`, `mergeCookieFiles`, and the SAPISIDHASH known-vector
+
+**YouTube** (youtube.md 11 findings):
+- `IsAudio` detects audio mime types even when `AudioQuality` is empty
+- `collectFormats` no longer mutates caller's slice
+- Unknown-metadata sentinels hoisted to named constants
+- Formats with failed n-param decryption are dropped rather than emitted with broken URLs
+- Innertube requests now retry on truncated body + JSON parse errors (covers transient CDN glitches)
+- Upcoming streams classified via `playabilityStatus.liveStreamability` (more accurate than status-string matching)
+- `scriptSrc` recognised as a player-URL key; JSON slashes in player URLs are unescaped
+- visitor-data regex shared between service.go and watch_page.go
+- `adaptiveFormats` preferred over legacy `formats` at the same auth level
+- Missing cipher solver now surfaces as a warning, not a silent format drop
+- Unused `intPtr` test helper removed
+
+**Engine** (engine.md 14 findings):
+- `CalculateSegmentRange` validates time-range inputs (rejects negatives, reversed ranges)
+- `ParseDash` uses -1 sentinel for non-numeric representation IDs instead of silently dropping
+- `parseMediaPlaylist` falls back to target-duration for zero-duration segments
+- `loadResume` rejects empty / corrupt / >7-day-old state
+- `Mux` preserves partial output on context cancel (for connectivity-loss resume)
+- `connReporter` stored in `atomic.Pointer` — lock-free concurrent reads
+- `applyPoTokenQuery` helper extracted; segment-size/error-snippet limits named
+- Parallel catch-up stops at first gap instead of writing a hole into the fMP4 stream (closes a real file-corruption risk)
+- DASH retry-state constants named instead of inlined literals
+- HLS parse failure logs playlist snippet; `fetchSegment` includes error-body snippet in error message
+- HLS live loop escalates after repeated same-segment failures (prevents infinite retry)
+- 17 new tests across manifest, muxer, resume-state, and connectivity paths
+
 ### Security
 
 - **Tightened CSRF** — `POST/PUT/DELETE` now requires an allowed `Origin` header or the internal token in every network-access mode. The prior localhost/LAN bypass let any local process or same-origin tab call `/api/restart`, first-time `set-password`, and `open-folder` without proof of browser context. Modern browsers already send `Origin` on same-origin mutations, so the Web UI is unaffected; the TUI continues to use the internal token.
