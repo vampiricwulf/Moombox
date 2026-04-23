@@ -526,11 +526,26 @@ func extractBadges(renderer map[string]any) []string {
 					badges = append(badges, "moderator")
 				case "VERIFIED":
 					badges = append(badges, "verified")
+				case "MEMBER":
+					// Direct MEMBER iconType detection — more reliable than
+					// tooltip matching, which fails on localized clients.
+					if !slices.Contains(badges, "member") {
+						badges = append(badges, "member")
+					}
+				default:
+					// Unknown iconType — store the raw (lowercased) value so
+					// the UI can render new YouTube badge types without a code
+					// change here.
+					lower := strings.ToLower(iconType)
+					if lower != "" && !slices.Contains(badges, lower) {
+						badges = append(badges, lower)
+					}
 				}
 			}
 		}
 
-		// Check tooltip for member badge
+		// Check tooltip for member badge (localization-dependent — English only,
+		// but kept as a secondary signal to catch older responses without iconType)
 		if tooltip, ok := badgeRenderer["tooltip"].(string); ok {
 			if strings.Contains(strings.ToLower(tooltip), "member") {
 				if !slices.Contains(badges, "member") {
