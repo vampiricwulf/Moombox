@@ -7,6 +7,22 @@ import (
 	"strings"
 )
 
+// isDuplicateColumnErr reports whether err indicates an ALTER TABLE ADD
+// COLUMN failed because the column already exists. Used to make migrations
+// idempotent across partial-apply retries.
+//
+// modernc.org/sqlite does expose an integer result code via *sqlite.Error,
+// but the driver returns a wrapped error whose type isn't importable without
+// pulling the driver into this package's dependency graph. Stick with string
+// matching for now — if modernc changes the error text, migrations start
+// failing loudly rather than silently, which is the preferable fail mode.
+func isDuplicateColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "duplicate column")
+}
+
 const schemaVersion = 12
 
 // createSchema defines the full schema for new databases. It includes all tables
@@ -194,7 +210,7 @@ func (db *Database) migrate() error {
 		// Add chat_file column to store absolute chat file path
 		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN chat_file TEXT`); err != nil {
 			// Column may already exist if migration was partially applied
-			if !strings.Contains(err.Error(), "duplicate column") {
+			if !isDuplicateColumnErr(err) {
 				return err
 			}
 		}
@@ -238,7 +254,7 @@ func (db *Database) migrate() error {
 		// Use a strict allowlist check instead.
 		for _, col := range []string{"thumbnail_file", "description_file"} {
 			if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN `+col+` TEXT`); err != nil {
-				if !strings.Contains(err.Error(), "duplicate column") {
+				if !isDuplicateColumnErr(err) {
 					return err
 				}
 			}
@@ -302,7 +318,7 @@ func (db *Database) migrate() error {
 	if version < 5 {
 		// Add quality_preference column to jobs
 		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN quality_preference TEXT DEFAULT ''`); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column") {
+			if !isDuplicateColumnErr(err) {
 				return err
 			}
 		}
@@ -373,12 +389,12 @@ func (db *Database) migrate() error {
 
 	if version < 8 {
 		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN watched INTEGER DEFAULT 0`); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column") {
+			if !isDuplicateColumnErr(err) {
 				return err
 			}
 		}
 		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN resume_position REAL`); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column") {
+			if !isDuplicateColumnErr(err) {
 				return err
 			}
 		}
@@ -391,7 +407,7 @@ func (db *Database) migrate() error {
 
 	if version < 9 {
 		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN chat_offset REAL NOT NULL DEFAULT 0`); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column") {
+			if !isDuplicateColumnErr(err) {
 				return err
 			}
 		}
