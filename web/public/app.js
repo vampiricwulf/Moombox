@@ -146,16 +146,30 @@ class MoomboxApp {
         }
       });
 
-    // Debounced format fetch when URL changes while advanced is checked
-    let formatFetchTimeout = null;
+    // Debounced format fetch when URL changes while advanced is checked.
+    // Store the timer on `this` so resetAdvancedOptions() and the add-dialog
+    // close hook can cancel a pending fetch — otherwise a stale timer can
+    // fire after submit/close and re-populate a closed dialog.
     document
       .getElementById("video-url-input")
       .addEventListener("sl-input", () => {
         if (document.getElementById("advanced-options-toggle").checked) {
-          clearTimeout(formatFetchTimeout);
-          formatFetchTimeout = setTimeout(() => this.fetchFormatsForAdvanced(), 500);
+          clearTimeout(this._formatFetchTimeout);
+          this._formatFetchTimeout = setTimeout(() => {
+            this._formatFetchTimeout = null;
+            this.fetchFormatsForAdvanced();
+          }, 500);
         }
       });
+
+    // Cancel any pending format fetch when the add dialog closes so a
+    // stale debounce timer can't fire against a hidden dialog.
+    document.getElementById("add-dialog")?.addEventListener("sl-after-hide", () => {
+      if (this._formatFetchTimeout) {
+        clearTimeout(this._formatFetchTimeout);
+        this._formatFetchTimeout = null;
+      }
+    });
 
     // Details dialog buttons
     document
@@ -2236,6 +2250,14 @@ class MoomboxApp {
    * Reset advanced options panel to default state
    */
   resetAdvancedOptions() {
+    // Cancel any pending debounced format fetch; otherwise it could fire
+    // after reset and re-disable the advanced section against a stale
+    // _lastFormatVideoId.
+    if (this._formatFetchTimeout) {
+      clearTimeout(this._formatFetchTimeout);
+      this._formatFetchTimeout = null;
+    }
+
     const toggle = document.getElementById("advanced-options-toggle");
     toggle.checked = false;
     document.getElementById("advanced-options-panel").style.display = "none";
