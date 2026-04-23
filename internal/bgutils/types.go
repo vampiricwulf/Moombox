@@ -24,10 +24,34 @@ const (
 	// between the VM's self-view and the server's view of the client.
 	UserAgentFull = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-	// Timeouts
-	BotGuardLoadTimeout = 10 * time.Second
-	SnapshotTimeout     = 30 * time.Second
-	DefaultMintTimeout  = 3 * time.Second
+	// Timeouts. Names reflect what each actually bounds — earlier names
+	// (BotGuardLoadTimeout for the callback wait, SnapshotTimeout for the
+	// interpreter-load wait) were descriptively inverted. The renamed
+	// constants are documented alongside; the old names remain as aliases
+	// for any external reference but should not be used in new code.
+	//
+	// BotGuardCallbackTimeout: wait for the async callback delivered by
+	// vm.a() during NewBotGuardClient. If BotGuard never invokes the
+	// callback in this window, abort.
+	BotGuardCallbackTimeout = 10 * time.Second
+
+	// InterpreterExecutionTimeout: execution budget for vm.RunString on
+	// the BotGuard interpreter JS (the big blob). A malformed/malicious
+	// script must not burn more than this before we Interrupt.
+	InterpreterExecutionTimeout = 30 * time.Second
+
+	// SnapshotDefaultTimeout: default budget for BotGuardClient.Snapshot
+	// when the caller passes 0.
+	SnapshotDefaultTimeout = 30 * time.Second
+
+	// DefaultMintTimeout: fallback budget when minting takes a value-zero
+	// timeout. Used only by the minter wrapper, not by Snapshot anymore.
+	DefaultMintTimeout = 3 * time.Second
+
+	// Legacy aliases — kept so historical names continue to resolve while
+	// call sites migrate. Prefer the new names above in new code.
+	BotGuardLoadTimeout = BotGuardCallbackTimeout
+	SnapshotTimeout     = InterpreterExecutionTimeout
 
 	// Cache TTLs
 	SessionCacheTTL = 6 * time.Hour

@@ -70,7 +70,7 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 
 	// Step 3: Take snapshot — creates a native JS array that BotGuard populates
 	wpc.logger.Debug("[PotProvider] Generating BotGuard snapshot...")
-	botguardResponse, webPoSignalOutput, err := bgClient.Snapshot(ctx, SnapshotTimeout)
+	botguardResponse, webPoSignalOutput, err := bgClient.Snapshot(ctx, SnapshotDefaultTimeout)
 	if err != nil {
 		bgClient.Shutdown()
 		return nil, fmt.Errorf("snapshot: %w", err)

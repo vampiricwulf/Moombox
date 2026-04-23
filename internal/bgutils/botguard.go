@@ -86,12 +86,12 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 		_, runErr := vm.RunString(interpreterJS)
 		vmDone <- runErr
 	}()
-	timer := time.NewTimer(SnapshotTimeout)
+	timer := time.NewTimer(InterpreterExecutionTimeout)
 	select {
 	case err = <-vmDone:
 		timer.Stop()
 	case <-timer.C:
-		vm.Interrupt(fmt.Sprintf("BotGuard interpreter execution timeout (%v)", SnapshotTimeout))
+		vm.Interrupt(fmt.Sprintf("BotGuard interpreter execution timeout (%v)", InterpreterExecutionTimeout))
 		err = <-vmDone // wait for RunString to return after interrupt
 	case <-ctx.Done():
 		vm.Interrupt("context cancelled")
@@ -172,7 +172,7 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 	}
 
 	// Wait for async callback with timeout
-	loadTimer := time.NewTimer(BotGuardLoadTimeout)
+	loadTimer := time.NewTimer(BotGuardCallbackTimeout)
 	select {
 	case cb := <-resultCh:
 		loadTimer.Stop()
@@ -198,15 +198,16 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 //
 // Honours ctx.Done(): on cancel, vm.Interrupt is fired so an in-flight snapshot
 // unblocks instead of burning the full timeout budget. Timeout=0 falls back to
-// SnapshotTimeout (30s) — the ambient BotGuard snapshot budget — not the much
-// shorter DefaultMintTimeout, which was too aggressive for a cold snapshot.
+// SnapshotDefaultTimeout (30s) — the ambient BotGuard snapshot budget — not
+// the much shorter DefaultMintTimeout, which was too aggressive for a cold
+// snapshot.
 func (c *BotGuardClient) Snapshot(ctx context.Context, timeout time.Duration) (string, *goja.Object, error) {
 	if c.asyncSnapshot == nil {
 		return "", nil, &BGError{Code: ErrAsyncSnapshot, Message: "async snapshot function not available"}
 	}
 
 	if timeout == 0 {
-		timeout = SnapshotTimeout
+		timeout = SnapshotDefaultTimeout
 	}
 
 	// Create a proper JS array for webPoSignalOutput.
