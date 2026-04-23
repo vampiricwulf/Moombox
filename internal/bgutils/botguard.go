@@ -206,13 +206,18 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 // Snapshot calls the async snapshot function to generate a BotGuard response.
 // Returns the botguard response string and a JS array that BotGuard populates
 // with signal data (webPoSignalOutput[0] will be the getMinter callback).
-func (c *BotGuardClient) Snapshot(timeout time.Duration) (string, *goja.Object, error) {
+//
+// Honours ctx.Done(): on cancel, vm.Interrupt is fired so an in-flight snapshot
+// unblocks instead of burning the full timeout budget. Timeout=0 falls back to
+// SnapshotTimeout (30s) — the ambient BotGuard snapshot budget — not the much
+// shorter DefaultMintTimeout, which was too aggressive for a cold snapshot.
+func (c *BotGuardClient) Snapshot(ctx context.Context, timeout time.Duration) (string, *goja.Object, error) {
 	if c.asyncSnapshot == nil {
 		return "", nil, &BGError{Code: ErrAsyncSnapshot, Message: "async snapshot function not available"}
 	}
 
 	if timeout == 0 {
-		timeout = DefaultMintTimeout
+		timeout = SnapshotTimeout
 	}
 
 	// Create a proper JS array for webPoSignalOutput.
@@ -255,14 +260,18 @@ func (c *BotGuardClient) Snapshot(timeout time.Duration) (string, *goja.Object, 
 		}
 	}
 
-	// Wait for result
+	// Wait for result, timeout, or context cancellation.
 	snapshotTimer := time.NewTimer(timeout)
+	defer snapshotTimer.Stop()
 	select {
 	case result := <-resultCh:
-		snapshotTimer.Stop()
 		return result, webPoSignalOutput, nil
 	case <-snapshotTimer.C:
+		c.vm.Interrupt("snapshot timeout")
 		return "", nil, &BGError{Code: ErrTimeout, Message: "snapshot timed out"}
+	case <-ctx.Done():
+		c.vm.Interrupt("context cancelled during snapshot")
+		return "", nil, ctx.Err()
 	}
 }
 
@@ -279,7 +288,9 @@ func (c *BotGuardClient) ClearTimers() {
 func (c *BotGuardClient) Shutdown() {
 	defer func() {
 		if r := recover(); r != nil {
-			// Goja VM may panic during shutdown — safe to ignore (matches TS try/catch pattern)
+			// Goja VM may panic during shutdown — log (if we have a sink) but
+			// never propagate; shutdown is always best-effort.
+			c.logWarn("bgutils: BotGuardClient.Shutdown panic", "panic", r)
 		}
 	}()
 
