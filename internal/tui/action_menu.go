@@ -560,7 +560,7 @@ func (m *ActionMenuModel) renderJobSelect(contentW, boxW int) string {
 
 	var footer string
 	if m.jobConfirm {
-		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Bold(true).Render(
+		footer = YellowBoldStyle.Render(
 			fmt.Sprintf("Enter: confirm %s | Esc: cancel", strings.ToLower(m.pendingLabel)))
 	} else {
 		footer = DimStyle.Render("Enter: select | Esc: back")
@@ -573,7 +573,7 @@ func (m *ActionMenuModel) renderJobSelect(contentW, boxW int) string {
 
 func (m *ActionMenuModel) renderConfirm(contentW, boxW int) string {
 	ch := 3
-	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Bold(true).Render(
+	prompt := YellowBoldStyle.Render(
 		fmt.Sprintf("Confirm: %s?", m.confirmLabel))
 	hint := DimStyle.Render("Enter: confirm | Esc: cancel")
 

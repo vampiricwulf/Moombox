@@ -554,7 +554,7 @@ func (m *TaskListModel) renderHeader(w int) string {
 	}
 
 	if m.filter != FilterAll {
-		left += " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("["+m.filter.String()+"]")
+		left += " " + YellowStyle.Render("["+m.filter.String()+"]")
 	}
 
 	// Countdown timers (T3 - match TS format, colored dots before labels)
@@ -682,7 +682,7 @@ func (m *TaskListModel) renderDivider(count int, selected bool, maxW int) string
 
 	line := prefix + strings.Repeat("\u2500", ruleLeft) + " " + label + " " + strings.Repeat("\u2500", ruleRight)
 
-	color := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Bold(true)
+	color := YellowBoldStyle
 	if selected {
 		color = color.Background(lipgloss.Color("#333399")).Foreground(ColorWhite)
 	}

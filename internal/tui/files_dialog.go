@@ -77,7 +77,7 @@ func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 
 	var style lipgloss.Style
 	if d.dialog != nil && d.dialog.deleteConfirmID == f.Path {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+		style = YellowStyle
 	} else if index == m.Index() {
 		style = lipgloss.NewStyle().Foreground(ColorCyan)
 	} else {
@@ -318,7 +318,7 @@ func (m *FilesDialogModel) View() string {
 
 	if m.feedbackMsg != "" {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("  "+m.feedbackMsg))
+		lines = append(lines, YellowStyle.Render("  "+m.feedbackMsg))
 	}
 
 	lines = append(lines, "")

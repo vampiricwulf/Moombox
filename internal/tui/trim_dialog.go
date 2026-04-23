@@ -493,7 +493,7 @@ func (m *TrimDialogModel) renderCreateMode(w, h int) string {
 		}
 
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+		lines = append(lines, YellowStyle.Render(
 			"  ⚠ This will create a new file with re-encoded video/audio",
 		))
 
@@ -567,7 +567,7 @@ func (m *TrimDialogModel) renderDeleteMode(w, h int) string {
 
 		var style lipgloss.Style
 		if m.deleteConfirmID == tr.ID {
-			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+			style = YellowStyle
 		} else if i == m.selectedTrimIdx {
 			style = lipgloss.NewStyle().Foreground(ColorCookies)
 		} else {
@@ -578,7 +578,7 @@ func (m *TrimDialogModel) renderDeleteMode(w, h int) string {
 
 	if m.deleteConfirmID != "" {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+		lines = append(lines, YellowStyle.Render(
 			"  ⚠ Press Enter again to confirm deletion",
 		))
 	}

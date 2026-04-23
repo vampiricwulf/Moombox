@@ -460,14 +460,14 @@ func (m *LogViewerModel) View() string {
 	}
 	// Level filter suffix (L3)
 	if m.level != LogLevelAll {
-		suffix := " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("["+m.level.String()+"+]")
+		suffix := " " + YellowStyle.Render("["+m.level.String()+"+]")
 		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
 			header += suffix
 		}
 	}
 	// PAUSED indicator when not auto-scrolling and focused (L4)
 	if !m.autoScroll && m.focused {
-		suffix := " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("[PAUSED]")
+		suffix := " " + YellowStyle.Render("[PAUSED]")
 		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {
 			header += suffix
 		}

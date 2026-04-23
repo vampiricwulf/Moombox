@@ -65,7 +65,7 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 	var style lipgloss.Style
 	highlighted := false
 	if d.dialog != nil && d.dialog.revokeConfirmID == ct.ID {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+		style = YellowStyle
 		highlighted = true
 	} else if index == m.Index() {
 		style = lipgloss.NewStyle().Foreground(ColorCyan)
@@ -302,7 +302,7 @@ func (m *ClientTokensDialogModel) View() string {
 
 	if m.feedbackMsg != "" {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("  "+m.feedbackMsg))
+		lines = append(lines, YellowStyle.Render("  "+m.feedbackMsg))
 	}
 
 	lines = append(lines, "")

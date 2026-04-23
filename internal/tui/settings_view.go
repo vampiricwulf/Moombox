@@ -71,7 +71,7 @@ func (m *SettingsModel) View() string {
 	// Status line
 	content.WriteString("\n")
 	if m.closeConfirm {
-		content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+		content.WriteString(YellowStyle.Render(
 			"Save changes? [Y]es / [N]o / [Esc] Cancel"))
 	} else {
 		switch m.status {
@@ -81,7 +81,7 @@ func (m *SettingsModel) View() string {
 			content.WriteString(lipgloss.NewStyle().Foreground(ColorRed).Render(m.errorMsg))
 		default:
 			if m.dirty {
-				content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Faint(true).Render("Unsaved changes"))
+				content.WriteString(YellowFaintStyle.Render("Unsaved changes"))
 			}
 		}
 	}
@@ -225,14 +225,14 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 		case isChanged && selected:
 			prefix = "*>"
 			if needsRestart {
-				prefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+				prefixStyle = YellowStyle
 			} else {
 				prefixStyle = lipgloss.NewStyle().Foreground(ColorCyan)
 			}
 		case isChanged:
 			prefix = "* "
 			if needsRestart {
-				prefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Faint(true)
+				prefixStyle = YellowFaintStyle
 			} else {
 				prefixStyle = lipgloss.NewStyle().Foreground(ColorGreen).Faint(true)
 			}
@@ -293,7 +293,7 @@ func (m *SettingsModel) renderFields(sec settingsSection, w, maxH int) string {
 			infoParts = append(infoParts, fd.help)
 		}
 		if needsRestart {
-			infoParts = append(infoParts, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("[restart required]"))
+			infoParts = append(infoParts, YellowStyle.Render("[restart required]"))
 		} else if isChanged {
 			infoParts = append(infoParts, lipgloss.NewStyle().Foreground(ColorGreen).Render("[modified]"))
 		}
@@ -339,7 +339,7 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 	// Action bar
 	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
 	if m.channelDeleteConf {
-		actionBar += lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("Press D again to confirm delete")
+		actionBar += YellowStyle.Render("Press D again to confirm delete")
 	}
 	lines = append(lines, actionBar)
 
@@ -386,7 +386,7 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 
 		line := prefix + platStr + " " + nameStyle.Render(truncateString(name, 20)) + " " + idStr
 		if !enabled {
-			line += lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Faint(true).Render(" (disabled)")
+			line += YellowFaintStyle.Render(" (disabled)")
 		}
 		terms := ch.Terms.Simple
 		if terms != "" {
@@ -485,7 +485,7 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 
 	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
 	if m.notifDeleteConf {
-		actionBar += lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render("Press D again to confirm delete")
+		actionBar += YellowStyle.Render("Press D again to confirm delete")
 	}
 	lines = append(lines, actionBar)
 
@@ -751,7 +751,7 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 		}
 	}
 	if isExternal {
-		lines = append(lines, "  "+lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+		lines = append(lines, "  "+YellowStyle.Render(
 			"Warning: Network access will be reset to localhost"))
 	}
 
@@ -774,8 +774,7 @@ func (m *SettingsModel) renderRestartOverlay() string {
 	h := 10
 
 	var content strings.Builder
-	content.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Bold(true).
-		Render("Restart Required") + "\n\n")
+	content.WriteString(YellowBoldStyle.Render("Restart Required") + "\n\n")
 	content.WriteString("Some settings require a restart to take effect:\n")
 	content.WriteString(DimStyle.Render("port, network access, database path, log settings") + "\n\n")
 
@@ -785,7 +784,7 @@ func (m *SettingsModel) renderRestartOverlay() string {
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#f1c40f")).
+		BorderForeground(ColorYellow).
 		Width(w).
 		Height(h).
 		Render(content.String())

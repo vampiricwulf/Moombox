@@ -18,7 +18,7 @@ var (
 	statusBarRedStyle = lipgloss.NewStyle().Foreground(ColorRed)
 	statusBarGrnStyle = lipgloss.NewStyle().Foreground(ColorGreen)
 	statusBarWrnStyle = lipgloss.NewStyle().Foreground(ColorWarning)
-	statusBarYelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f"))
+	statusBarYelStyle = lipgloss.NewStyle().Foreground(ColorYellow)
 )
 
 // CookieStatus represents the authentication state for a platform.

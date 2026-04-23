@@ -1321,7 +1321,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 
 	if m.cookieTimedOut {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+		lines = append(lines, YellowStyle.Render(
 			"Cookie extraction timed out."))
 		lines = append(lines, "")
 		lines = append(lines, "  R  Try Again")
@@ -1339,7 +1339,7 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 			// Browser is open, waiting for login — show countdown
 			countdownText := fmt.Sprintf("Waiting for %s login... (%ds remaining)", platformName, m.cookieCountdown)
 			if m.cookieCountdown <= 10 {
-				lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(countdownText))
+				lines = append(lines, m.spinner.View()+" "+YellowStyle.Render(countdownText))
 			} else {
 				lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(countdownText))
 			}
@@ -1518,7 +1518,7 @@ func (m *SetupWizardModel) viewAdvanced() string {
 			lines = append(lines, ErrorStyle.Render(m.errorMsg))
 		}
 		if m.escConfirm {
-			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+			lines = append(lines, YellowStyle.Render(
 				"Press Esc again to abandon setup"))
 		} else {
 			lines = append(lines, DimStyle.Render("Esc: Back to mode select"))
@@ -1596,7 +1596,7 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 
 	if m.cookieTimedOut {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+		lines = append(lines, YellowStyle.Render(
 			"Cookie extraction timed out."))
 		lines = append(lines, "")
 		lines = append(lines, "  R  Try Again")
@@ -1613,7 +1613,7 @@ func (m *SetupWizardModel) viewAdvancedCookies(contentW, boxW, h int) string {
 			// Browser is open, waiting for login — show countdown
 			countdownText := fmt.Sprintf("Waiting for %s login... (%ds remaining)", platformName, m.cookieCountdown)
 			if m.cookieCountdown <= 10 {
-				lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(countdownText))
+				lines = append(lines, m.spinner.View()+" "+YellowStyle.Render(countdownText))
 			} else {
 				lines = append(lines, m.spinner.View()+" "+lipgloss.NewStyle().Foreground(ColorCyan).Render(countdownText))
 			}
@@ -1714,7 +1714,7 @@ func (m *SetupWizardModel) renderChannelList(contentW int) []string {
 
 	if m.channelDeleteConf {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(
+		lines = append(lines, YellowStyle.Render(
 			"Press D again to confirm delete"))
 	}
 

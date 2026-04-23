@@ -25,9 +25,14 @@ var (
 	ColorWarning = lipgloss.Color("#f39c12")
 	ColorCyan    = lipgloss.Color("#00bcd4")
 	ColorGray    = lipgloss.Color("#95a5a6")
-	ColorWhite = lipgloss.Color("#ffffff")
-	ColorGreen = lipgloss.Color("#2ecc71")
-	ColorRed   = lipgloss.Color("#e74c3c")
+	ColorWhite   = lipgloss.Color("#ffffff")
+	ColorGreen   = lipgloss.Color("#2ecc71")
+	ColorRed     = lipgloss.Color("#e74c3c")
+	// ColorYellow is the canonical "warn/attention" highlight used across
+	// dialogs, feedback, and countdown UIs. Keep in sync with ColorMuxing
+	// and ColorLogWarn, which happen to share the same hex value but carry
+	// different semantic meaning.
+	ColorYellow = lipgloss.Color("#f1c40f")
 
 	// Log level colors.
 	ColorLogError = lipgloss.Color("#e74c3c")
@@ -57,6 +62,13 @@ var (
 	SeparatorStyle = lipgloss.NewStyle().Foreground(ColorGray)
 	ErrorStyle     = lipgloss.NewStyle().Foreground(ColorError)
 	SelectedStyle  = lipgloss.NewStyle().Bold(true)
+
+	// Yellow highlight styles — pre-allocated to avoid per-frame
+	// lipgloss.NewStyle() allocations in render loops (see reports/tui.md
+	// Findings 13, 14, 31).
+	YellowStyle      = lipgloss.NewStyle().Foreground(ColorYellow)
+	YellowBoldStyle  = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
+	YellowFaintStyle = lipgloss.NewStyle().Foreground(ColorYellow).Faint(true)
 )
 
 // moomboxTheme returns a huh theme matching the Moombox TUI color scheme.

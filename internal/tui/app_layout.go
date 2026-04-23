@@ -150,7 +150,7 @@ func feedbackColor(msg string) color.Color {
 	if strings.HasPrefix(msg, "Press ") || strings.HasPrefix(msg, "Action:") ||
 		strings.HasPrefix(msg, "Request:") || strings.HasPrefix(msg, "Open:") ||
 		strings.HasPrefix(msg, "Quit:") {
-		return lipgloss.Color("#f1c40f")
+		return ColorYellow
 	}
 
 	// Errors (red) — cancelled jobs, invalid chords, or any failure
@@ -173,7 +173,7 @@ func feedbackColor(msg string) color.Color {
 		strings.Contains(lower, "no platforms") ||
 		strings.Contains(lower, "already exists") ||
 		strings.HasPrefix(msg, "Already up to date") {
-		return lipgloss.Color("#f1c40f")
+		return ColorYellow
 	}
 
 	// Default: success (green)

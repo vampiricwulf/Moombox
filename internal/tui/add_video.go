@@ -683,7 +683,7 @@ func (m *AddVideoModel) renderFormatStep(w, h int, isVideo bool) string {
 	}
 
 	if m.errorMsg != "" {
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Render(m.errorMsg))
+		lines = append(lines, YellowStyle.Render(m.errorMsg))
 		lines = append(lines, "")
 	}
 

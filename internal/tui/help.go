@@ -155,8 +155,8 @@ func (m *HelpModel) buildContent() {
 			allLines = append(allLines, "")
 		}
 		allLines = append(allLines, HeaderStyle.Render(sec.title))
+		keyStyle := YellowStyle.Width(14)
 		for _, k := range sec.keys {
-			keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f1c40f")).Width(14)
 			allLines = append(allLines, "  "+keyStyle.Render(k.key)+k.desc)
 		}
 	}
