@@ -553,17 +553,21 @@ func (db *Database) ImportFromJSON(path string) error {
 
 // --- Job logs ---
 
+// capLogLines enforces the 200-line cap on a per-job log buffer. When
+// exceeded, the slice is trimmed to the most recent 100 lines. Shared by
+// AddJobLog and RouteLogToJobs so the policy lives in one place.
+func capLogLines(logs []string) []string {
+	if len(logs) > 200 {
+		return logs[len(logs)-100:]
+	}
+	return logs
+}
+
 // AddJobLog adds a log line to the per-job in-memory buffer.
 func (db *Database) AddJobLog(jobID, line string) {
 	db.jobLogsMu.Lock()
 	defer db.jobLogsMu.Unlock()
-	logs := db.jobLogs[jobID]
-	logs = append(logs, line)
-	// Match TS: cap at 200 lines, trim to last 100
-	if len(logs) > 200 {
-		logs = logs[len(logs)-100:]
-	}
-	db.jobLogs[jobID] = logs
+	db.jobLogs[jobID] = capLogLines(append(db.jobLogs[jobID], line))
 }
 
 // GetJobLogs returns a copy of the in-memory log lines for a job.
@@ -595,12 +599,7 @@ func (db *Database) RouteLogToJobs(line string) {
 
 	for jobID := range db.jobLogs {
 		if strings.Contains(line, jobID) {
-			logs := db.jobLogs[jobID]
-			logs = append(logs, line)
-			if len(logs) > 200 {
-				logs = logs[len(logs)-100:]
-			}
-			db.jobLogs[jobID] = logs
+			db.jobLogs[jobID] = capLogLines(append(db.jobLogs[jobID], line))
 			return // Each log line belongs to at most one job
 		}
 	}
