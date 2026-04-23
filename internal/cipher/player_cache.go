@@ -59,10 +59,17 @@ func NewPlayerCache(cacheDir string, logger interface {
 	return &PlayerCache{cacheDir: dir, logger: logger}, nil
 }
 
-// CacheKey returns the SHA256 hash of the player URL for use as a cache key.
+// CacheKey returns a short hex digest of the player URL for use as a cache
+// key. Full 64-char SHA-256 was overkill for this domain (a few thousand
+// entries at most) and hit Windows MAX_PATH limits faster when combined with
+// a long cacheDir. 16 hex chars = 64 bits of hash space; collision probability
+// across thousands of entries is ~1 in 2^50 — negligible for cache keys.
+//
+// Existing 64-char cached files from prior versions become unreachable and
+// are harmlessly eviction-swept by the background 24h tick.
 func CacheKey(playerURL string) string {
 	h := sha256.Sum256([]byte(playerURL))
-	return fmt.Sprintf("%x", h)
+	return fmt.Sprintf("%x", h[:8]) // 8 bytes = 16 hex chars
 }
 
 // PlayerIDFromURL extracts the player ID from a player URL.
@@ -84,6 +91,15 @@ func (pc *PlayerCache) FilePath(playerURL string) string {
 }
 
 // Get returns the cached player JS for the given URL, or empty string if not cached/expired.
+//
+// TTL semantics use file ModTime which can drift in a couple of known cases:
+//   - Windows AV or backup tools that touch the file reset ModTime, extending
+//     the effective TTL. This is harmless — fresh-enough is still fresh.
+//   - Manual file replacement with an older ModTime may expire a valid cache
+//     prematurely. Also harmless — we just re-download.
+//
+// If a future copy-in-known-good-baseline feature is added, pair it with a
+// sidecar metadata file instead of relying on ModTime.
 func (pc *PlayerCache) Get(playerURL string) (string, error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -98,7 +114,7 @@ func (pc *PlayerCache) Get(playerURL string) (string, error) {
 		return "", err
 	}
 
-	// Check TTL
+	// Check TTL (see ModTime caveats above).
 	if time.Since(info.ModTime()) > playerCacheTTL {
 		os.Remove(path)
 		return "", nil
