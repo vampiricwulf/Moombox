@@ -390,6 +390,19 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Wire auth verification callbacks so AutoCookieService can verify via real API
 	autoCookieSvc.VerifyYouTubeAuth = cookieRefresh.CheckYouTubeAuth
 	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
+
+	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
+	// func field exactly once (before cookieRefresh.Start()) to a dispatcher
+	// that atomically loads the TUI-side slot. The TUI branch stores a
+	// callback later — Store is race-free against the refresh goroutine's
+	// Load, unlike field reassignment.
+	var authChangeTUI atomic.Pointer[func(cookies.AuthStatus)]
+	cookieRefresh.OnAuthChange = func(s cookies.AuthStatus) {
+		if fn := authChangeTUI.Load(); fn != nil {
+			(*fn)(s)
+		}
+	}
+
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms).
 	// cfgMu is declared at the top of run() to guard all cfg mutations.
@@ -1707,13 +1720,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			default:
 			}
 		}
-		origOnAuthChange := cookieRefresh.OnAuthChange
-		cookieRefresh.OnAuthChange = func(s cookies.AuthStatus) {
-			if origOnAuthChange != nil {
-				origOnAuthChange(s)
-			}
+		// Store TUI-side callback in the atomic slot; the dispatcher wired to
+		// cookieRefresh.OnAuthChange (set before cookieRefresh.Start()) loads it
+		// lock-free on each auth change. Store is race-free with the refresh
+		// goroutine's Load — unlike the previous field reassignment.
+		tuiAuthFn := func(s cookies.AuthStatus) {
 			authStatusToTUI(s)
 		}
+		authChangeTUI.Store(&tuiAuthFn)
 		// Send initial cookie status
 		authStatusToTUI(cookieRefresh.GetStatus())
 
