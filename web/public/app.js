@@ -3956,9 +3956,20 @@ let _reloading = false;
 window.fetch = async function (...args) {
   const response = await _originalFetch.apply(this, args);
   if (response.status === 401 && !_reloading) {
-    // Don't redirect for auth endpoints themselves
-    const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-    if (!url.includes("/api/auth/")) {
+    // Don't redirect for auth endpoints themselves. Extract the pathname
+    // in a way that handles string URLs, Request objects, and URL
+    // instances — previously fetch(new Request(...)) left url === "" and
+    // triggered a reload loop because the empty string passed the
+    // !url.includes("/api/auth/") guard.
+    let pathname = "";
+    try {
+      const input = args[0];
+      const rawUrl = typeof input === "string"
+        ? input
+        : (input instanceof URL ? input.href : input?.url || "");
+      if (rawUrl) pathname = new URL(rawUrl, location.origin).pathname;
+    } catch { /* malformed url — fall through to reload */ }
+    if (!pathname.startsWith("/api/auth/")) {
       // Session expired — reload to get login page
       _reloading = true;
       window.location.reload();
