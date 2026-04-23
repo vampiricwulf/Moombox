@@ -103,63 +103,62 @@ func parseChallengeData(raw []byte) (*DescrambledChallenge, error) {
 
 	challenge := &DescrambledChallenge{}
 
-	// Challenge array indices (from BgUtils reference implementation):
-	//   0 = messageId (request tracking)
-	//   1 = interpreterScript (inline JS fallback)
-	//   2 = interpreterURL (primary JS source)
-	//   3 = interpreterHash (integrity check)
-	//   4 = program (BotGuard bytecode, required)
-	//   5 = globalName (VM global object name, required)
-	//   6 = (unused/reserved)
-	//   7 = clientExperimentsStateBlob
+	// Challenge array indices (from BgUtils reference implementation).
+	// Named constants keep the index-based parsing self-documenting and make
+	// future format drift easy to spot (a new index lands → add a const).
+	const (
+		idxMessageID         = 0 // request tracking
+		idxInterpreterScript = 1 // inline JS (wrappedScript; fallback when URL absent)
+		idxInterpreterURL    = 2 // URL to fetch interpreter JS (primary source)
+		idxInterpreterHash   = 3 // integrity check
+		idxProgram           = 4 // BotGuard bytecode (required)
+		idxGlobalName        = 5 // VM global object name (required)
+		// idx 6 unused / reserved
+		// idx 7 clientExperimentsStateBlob — parsed-but-unused historically;
+		// dropped in DEAD-6. If a future caller needs it, add a const + field.
+	)
 
-	// Index 0: messageId
-	if len(challengeArr) > 0 {
+	if len(challengeArr) > idxMessageID {
 		var messageID string
-		if err := json.Unmarshal(challengeArr[0], &messageID); err == nil {
+		if err := json.Unmarshal(challengeArr[idxMessageID], &messageID); err == nil {
 			challenge.MessageID = messageID
 		}
 	}
 
-	// Extract fields from challenge array by index
-	// Index 4: program (required)
-	if len(challengeArr) > 4 {
+	if len(challengeArr) > idxProgram {
 		var program string
-		if err := json.Unmarshal(challengeArr[4], &program); err == nil {
+		if err := json.Unmarshal(challengeArr[idxProgram], &program); err == nil {
 			challenge.Program = program
 		}
 	}
 
-	// Index 5: globalName (required)
-	if len(challengeArr) > 5 {
+	if len(challengeArr) > idxGlobalName {
 		var globalName string
-		if err := json.Unmarshal(challengeArr[5], &globalName); err == nil {
+		if err := json.Unmarshal(challengeArr[idxGlobalName], &globalName); err == nil {
 			challenge.GlobalName = globalName
 		}
 	}
 
-	// Index 1: wrappedScript (inline JS) - used as fallback
+	// Inline script (fallback) — extract first, then use only if URL absent.
 	var interpreterScript string
-	if len(challengeArr) > 1 {
-		interpreterScript = extractStringFromArrayOrValue(challengeArr[1])
+	if len(challengeArr) > idxInterpreterScript {
+		interpreterScript = extractStringFromArrayOrValue(challengeArr[idxInterpreterScript])
 	}
 
-	// Index 2: wrappedUrl (URL to fetch interpreter JS) - primary source
-	if len(challengeArr) > 2 {
-		url := extractStringFromArrayOrValue(challengeArr[2])
+	// URL (primary source).
+	if len(challengeArr) > idxInterpreterURL {
+		url := extractStringFromArrayOrValue(challengeArr[idxInterpreterURL])
 		if url != "" {
 			challenge.InterpreterURL = url
 		}
 	}
-	// Fallback to inline script if no URL
 	if challenge.InterpreterURL == "" && interpreterScript != "" {
 		challenge.InterpreterScript = interpreterScript
 	}
 
-	// Index 3: interpreterHash
-	if len(challengeArr) > 3 {
+	if len(challengeArr) > idxInterpreterHash {
 		var hash string
-		if err := json.Unmarshal(challengeArr[3], &hash); err == nil {
+		if err := json.Unmarshal(challengeArr[idxInterpreterHash], &hash); err == nil {
 			challenge.InterpreterHash = hash
 		}
 	}
