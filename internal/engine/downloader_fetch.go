@@ -215,6 +215,12 @@ func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) 
 
 // probeFileSize discovers the total file size using a Range: bytes=0-0 request.
 // Returns 0 if the server doesn't support Range requests or the size is unknown.
+//
+// Status check happens before body drain: if the server ignores Range and
+// returns 200 OK with the full file, we close without reading. The legacy
+// behavior unconditionally io.Copy'd the body to io.Discard first, which on
+// a non-Range-supporting CDN meant pulling a multi-GB VOD just to throw it
+// away (audit reports/engine.md Finding 14).
 func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -232,12 +238,18 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 		return 0
 	}
 	reportSuccess("engine/fetch")
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusPartialContent {
-		return 0 // Server doesn't support range requests
+		// Server doesn't honor Range. Don't drain the body — it could be
+		// multiple GB and we have no use for it. The connection is sacrificed
+		// (no keep-alive reuse) but that's cheaper than the bandwidth.
+		return 0
 	}
+
+	// 1-byte body; safe to drain so the connection can be reused for the
+	// real chunked download that follows.
+	io.Copy(io.Discard, resp.Body)
 
 	// Parse Content-Range: bytes 0-0/TOTAL
 	contentRange := resp.Header.Get("Content-Range")
