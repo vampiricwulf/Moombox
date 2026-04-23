@@ -741,7 +741,17 @@ export class SettingsController {
 
     this.app.showToast("Restarting Moombox...", "primary");
 
+    // Arm the redirect timer synchronously up front so the .then()
+    // error branch can always clearTimeout(id); previously it was
+    // assigned inside .then() which could race the 3500ms timer.
     let redirectTimeoutId = null;
+    if (portChanged || httpsChanged) {
+      const proto = newHttps ? "https:" : "http:";
+      const host = window.location.hostname;
+      const redirectUrl = `${proto}//${host}:${newPort}/`;
+      this.app.showToast(`Redirecting to ${redirectUrl} in a few seconds...`, "primary");
+      redirectTimeoutId = setTimeout(() => { window.location.href = redirectUrl; }, 3500);
+    }
 
     fetch("/api/restart", { method: "POST" })
       .then(resp => {
@@ -754,14 +764,6 @@ export class SettingsController {
       .catch(() => {
         // Connection will drop during restart — expected
       });
-
-    if (portChanged || httpsChanged) {
-      const proto = newHttps ? "https:" : "http:";
-      const host = window.location.hostname;
-      const redirectUrl = `${proto}//${host}:${newPort}/`;
-      this.app.showToast(`Redirecting to ${redirectUrl} in a few seconds...`, "primary");
-      redirectTimeoutId = setTimeout(() => { window.location.href = redirectUrl; }, 3500);
-    }
   }
 
   _markDirty() {
