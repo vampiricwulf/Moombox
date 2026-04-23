@@ -273,6 +273,16 @@ func (dm *DecapiMonitor) waitForRateLimit(ctx context.Context) {
 		return
 	}
 
+	// Defensive: if remaining==0 but resetAt is zero, we lack a server-provided
+	// window end (e.g. headers included X-RateLimit-Remaining: 0 without a
+	// matching X-RateLimit-Reset). Without this, time.Until(zero) returns a
+	// large negative duration, the waitDur>0 guard skips the wait, and we
+	// busy-loop. Treat missing resetAt as a fresh 60s window matching the
+	// default rate-limit cadence established in checkChannel.
+	if rl.resetAt.IsZero() {
+		rl.resetAt = time.Now().Add(60 * time.Second)
+	}
+
 	// Need to wait
 	waitDur := time.Until(rl.resetAt)
 	dm.mu.Unlock()
