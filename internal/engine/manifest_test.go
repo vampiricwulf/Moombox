@@ -193,6 +193,62 @@ func TestSegmentURL(t *testing.T) {
 	}
 }
 
+func TestParseDash_NonNumericID_Itag(t *testing.T) {
+	// Non-numeric representation IDs should leave Itag at the -1 sentinel
+	// so they don't all collide on 0 and confuse manual-itag selection.
+	mpd := `<?xml version="1.0"?>
+<MPD>
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="video-1080" bandwidth="4000000" width="1920" height="1080">
+        <BaseURL>https://example.com/seg</BaseURL>
+      </Representation>
+      <Representation id="video-720" bandwidth="2000000" width="1280" height="720">
+        <BaseURL>https://example.com/seg2</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+	streams, err := ParseDash(mpd, "")
+	if err != nil {
+		t.Fatalf("ParseDash: %v", err)
+	}
+	if len(streams) != 2 {
+		t.Fatalf("expected 2 streams, got %d", len(streams))
+	}
+	for i, s := range streams {
+		if s.Itag != -1 {
+			t.Errorf("stream %d: Itag = %d, want -1 (sentinel for non-numeric ID)", i, s.Itag)
+		}
+	}
+}
+
+func TestParseDash_MissingID_Itag(t *testing.T) {
+	// Representations without an id attribute get the -1 sentinel.
+	mpd := `<?xml version="1.0"?>
+<MPD>
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation bandwidth="4000000" width="1920" height="1080">
+        <BaseURL>https://example.com/seg</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+
+	streams, err := ParseDash(mpd, "")
+	if err != nil {
+		t.Fatalf("ParseDash: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(streams))
+	}
+	if streams[0].Itag != -1 {
+		t.Errorf("Itag = %d, want -1 (sentinel for missing ID)", streams[0].Itag)
+	}
+}
+
 func TestParseDash_EmptyPeriods(t *testing.T) {
 	mpd := `<?xml version="1.0"?><MPD></MPD>`
 	streams, err := ParseDash(mpd, "")

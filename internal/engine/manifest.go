@@ -199,15 +199,15 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 		Width:     rep.Width,
 		Height:    rep.Height,
 		FPS:       parseFrameRate(rep.FrameRate),
+		Itag:      -1, // Sentinel: unknown itag. Non-numeric ids leave this as-is.
 	}
 
-	// Parse itag from ID
+	// Parse itag from ID. Only override the -1 sentinel when parsing succeeds.
+	// This prevents multiple non-numeric representations from all colliding on
+	// itag 0 and confusing manual-itag-override selection downstream.
 	if rep.ID != "" {
-		var err error
-		stream.Itag, err = strconv.Atoi(rep.ID)
-		if err != nil {
-			// Non-numeric representation ID — itag stays 0
-			stream.Itag = 0
+		if v, err := strconv.Atoi(rep.ID); err == nil {
+			stream.Itag = v
 		}
 	}
 
