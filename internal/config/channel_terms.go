@@ -19,14 +19,6 @@ type ChannelTerms struct {
 	IsMap bool
 }
 
-// IsEmpty returns true if no terms are configured.
-func (t ChannelTerms) IsEmpty() bool {
-	if t.IsMap {
-		return len(t.Named) == 0
-	}
-	return t.Simple == ""
-}
-
 // Patterns returns all term patterns as a slice for matching.
 func (t ChannelTerms) Patterns() []string {
 	if t.IsMap {
@@ -53,11 +45,14 @@ func (ct ChannelTerms) MarshalTOML() ([]byte, error) {
 		return buf.Bytes(), nil
 	}
 	// Use the TOML encoder to properly escape backslashes, quotes, etc.
+	// Trim only the trailing newline the encoder appends — bytes.TrimSpace
+	// would also strip meaningful leading/trailing space inside a quoted
+	// string literal the user configured on purpose.
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(ct.Simple); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSpace(buf.Bytes()), nil
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // MarshalJSON serializes ChannelTerms as a JSON string (simple) or object (named).
