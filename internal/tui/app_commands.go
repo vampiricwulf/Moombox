@@ -67,20 +67,22 @@ func (t *internalTokenTransport) RoundTrip(req *http.Request) (*http.Response, e
 // apiClient returns an HTTP client suitable for local API calls.
 // Injects the internal CSRF bypass token. When HTTPS is enabled, TLS
 // verification is skipped since the server uses a self-signed certificate.
-// The client is cached on first call and reused for all subsequent requests.
+// The client is cached and rebuilt on HTTPS toggle (audit tui.md Finding 3).
 func (a *App) apiClient() *http.Client {
-	if a.cachedClient != nil {
-		return a.cachedClient
-	}
-	base := http.DefaultTransport
 	httpsEnabled := false
 	if a.cfg != nil {
 		if a.cfgMu != nil {
 			a.cfgMu.RLock()
-			defer a.cfgMu.RUnlock()
 		}
 		httpsEnabled = a.cfg.Network.HTTPSEnabled
+		if a.cfgMu != nil {
+			a.cfgMu.RUnlock()
+		}
 	}
+	if a.cachedClient != nil && a.cachedClientHTTPS == httpsEnabled {
+		return a.cachedClient
+	}
+	base := http.DefaultTransport
 	if httpsEnabled {
 		base = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -89,6 +91,7 @@ func (a *App) apiClient() *http.Client {
 	a.cachedClient = &http.Client{
 		Transport: &internalTokenTransport{base: base, token: a.internalToken},
 	}
+	a.cachedClientHTTPS = httpsEnabled
 	return a.cachedClient
 }
 

@@ -251,8 +251,12 @@ type App struct {
 	// Internal token for CSRF bypass on local API calls
 	internalToken string
 
-	// Cached HTTP client for local API calls (avoids re-creating per request)
-	cachedClient *http.Client
+	// Cached HTTP client for local API calls (avoids re-creating per request).
+	// cachedClientHTTPS records which HTTPSEnabled value the cache was built
+	// against so a toggle in settings forces a rebuild on the next call
+	// (audit reports/tui.md Finding 3).
+	cachedClient      *http.Client
+	cachedClientHTTPS bool
 
 	// Terminal background detection (updated from BackgroundColorMsg)
 	isDark bool
