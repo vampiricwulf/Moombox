@@ -158,8 +158,19 @@ func detectDefaultBrowserWindows() string {
 	if err != nil {
 		return ""
 	}
-	// Output: "    ProgId    REG_SZ    ChromeHTML\r\n"
-	for line := range strings.SplitSeq(string(out), "\n") {
+	return parseDefaultBrowserProgID(string(out))
+}
+
+// parseDefaultBrowserProgID extracts the browser type from `reg query`
+// output for the UrlAssociations\https\UserChoice key. Output looks like:
+//
+//	HKEY_CURRENT_USER\Software\Microsoft\Windows\...
+//	    ProgId    REG_SZ    ChromeHTML
+//
+// Returns "" if no recognized ProgId is found. Pure function so the
+// matcher table can be tested without shelling out to reg.exe.
+func parseDefaultBrowserProgID(regOutput string) string {
+	for line := range strings.SplitSeq(regOutput, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "ProgId") {
 			continue
