@@ -31,10 +31,14 @@ const (
 	youtubeClientVersion = "2.20260301.00.00"
 )
 
-// cookieUpdate holds a parsed Set-Cookie value and its expiry timestamp.
+// cookieUpdate holds a parsed Set-Cookie value, expiry, and authoritative
+// domain. Domain is captured from the Set-Cookie Domain= attribute so new
+// rows can be written under the correct host instead of guessing from the
+// cookie name.
 type cookieUpdate struct {
 	Value  string
 	Expiry int64
+	Domain string // e.g. ".youtube.com" — from Set-Cookie Domain= when present
 }
 
 // AuthStatus tracks the authentication state for each platform.
@@ -498,6 +502,7 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 		now := time.Now().Unix()
 		expiry := now + 365*24*60*60
 		skipCookie := false
+		domainAttr := ""
 		for _, part := range parts[1:] {
 			trimmed := strings.TrimSpace(strings.ToLower(part))
 			if strings.HasPrefix(trimmed, "expires=") {
@@ -520,13 +525,23 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 					}
 					expiry = now + maxAge
 				}
+			} else if strings.HasPrefix(trimmed, "domain=") {
+				_, dom, _ := strings.Cut(part, "=")
+				domainAttr = strings.TrimSpace(dom)
 			}
 		}
 		if skipCookie {
 			continue
 		}
 
-		updates[name] = cookieUpdate{Value: value, Expiry: expiry}
+		// Normalize domain so the Netscape row uses a leading-dot form when
+		// the Set-Cookie explicitly said Domain= (which implies subdomain
+		// scope per RFC 6265).
+		if domainAttr != "" && !strings.HasPrefix(domainAttr, ".") {
+			domainAttr = "." + domainAttr
+		}
+
+		updates[name] = cookieUpdate{Value: value, Expiry: expiry, Domain: domainAttr}
 	}
 
 	if len(updates) == 0 {
@@ -548,6 +563,17 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 
 // updateCookieFile re-reads the cookie file, updates matching cookies with new
 // values and expiry, and adds new cookies not already in the file.
+//
+// Behavior notes relative to the original implementation:
+//   - Every row matching an updated cookie name is refreshed (per finding #4),
+//     not just the first one. Leaving stale duplicates on .google.com while a
+//     fresh value lands on .youtube.com caused silent cookie drift on legacy
+//     files that contained multiple domain variants of the same name.
+//   - The Netscape "include subdomains" flag is derived from whether the
+//     domain begins with "." (finding #5) instead of being hardcoded TRUE.
+//   - Domain for newly-inserted rows is taken from the Set-Cookie Domain=
+//     attribute when the server provided one (finding #40); falling back to
+//     the legacy .youtube.com / .google.com heuristic only as a last resort.
 func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) error {
 	filePath := rs.jar.GetFilePath()
 	if filePath == "" {
@@ -562,12 +588,19 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 	var result strings.Builder
 	updated := make(map[string]bool)
 	scanner := bufio.NewScanner(bytes.NewReader(data))
+	// Netscape cookie files occasionally contain values that push a single
+	// line past bufio.Scanner's default 64KiB buffer; bump the ceiling to
+	// 1MiB so an oversized line surfaces as an error below instead of a
+	// silently truncated row.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 
-		// Check if this is a cookie line that we need to update
+		// Check if this is a cookie line that we need to update.
+		// Every matching row is rewritten (not just the first) so multi-domain
+		// duplicates do not drift out of sync with the refreshed values.
 		if trimmed != "" && (!strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "#HttpOnly_")) {
 			parts := strings.Split(trimmed, "\t")
 			if len(parts) >= 7 {
@@ -597,25 +630,37 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 		if updated[name] {
 			continue
 		}
-		// Determine domain and secure flag
-		domain := ".youtube.com"
-		if strings.Contains(strings.ToUpper(name), "GOOGLE") {
-			domain = ".google.com"
+		domain := cu.Domain
+		if domain == "" {
+			// Fallback when the Set-Cookie lacked Domain=. Prefer YouTube;
+			// Google-only auth cookies are only emitted by google.com paths.
+			domain = ".youtube.com"
+			if isGoogleOnlyAuthName(name) {
+				domain = ".google.com"
+			}
+		}
+		// Subdomain flag follows RFC 6265: leading-dot domain = include
+		// subdomains. The legacy code hardcoded TRUE even for no-dot domains.
+		subdomains := "FALSE"
+		if strings.HasPrefix(domain, ".") {
+			subdomains = "TRUE"
 		}
 		secure := "FALSE"
 		if strings.HasPrefix(name, "__Secure-") {
 			secure = "TRUE"
 		}
 		// Netscape format: domain, include_subdomains, path, secure, expiry, name, value
-		fmt.Fprintf(&result, "%s\tTRUE\t/\t%s\t%d\t%s\t%s\n",
-			domain, secure, cu.Expiry, name, cu.Value)
-		rs.logger.Debug("added new cookie to file", "name", name)
+		if _, werr := fmt.Fprintf(&result, "%s\t%s\t/\t%s\t%d\t%s\t%s\n",
+			domain, subdomains, secure, cu.Expiry, name, cu.Value); werr != nil {
+			return fmt.Errorf("write new cookie row: %w", werr)
+		}
+		rs.logger.Debug("added new cookie to file", "name", name, "domain", domain)
 		updated[name] = true
 	}
 
 	// Write via temp file + rename to prevent corruption on partial failure
 	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(result.String()), 0600); err != nil {
+	if err := os.WriteFile(tmpPath, []byte(result.String()), 0o600); err != nil {
 		return fmt.Errorf("write temp cookie file: %w", err)
 	}
 	if err := os.Rename(tmpPath, filePath); err != nil {
@@ -628,6 +673,19 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 	}
 
 	return nil
+}
+
+// isGoogleOnlyAuthName returns true for cookie names that live on the
+// google.com domain (not youtube.com) in a typical Google session. The
+// legacy code used strings.Contains(name, "GOOGLE") which matched nothing
+// real — most google.com auth cookies are named SID, HSID, SSID, APISID,
+// SAPISID, or the __Secure- variants.
+func isGoogleOnlyAuthName(name string) bool {
+	switch name {
+	case "SID", "HSID", "SSID", "APISID", "SAPISID":
+		return true
+	}
+	return strings.HasPrefix(name, "__Secure-1P") || strings.HasPrefix(name, "__Secure-3P")
 }
 
 func (rs *RefreshService) checkTwitchAuth(ctx context.Context) (bool, error) {
