@@ -6,14 +6,13 @@ import (
 	"strings"
 )
 
+// (legacySigHelperPattern moved to extractor_legacy.go — its only consumer.)
+
 // sigCandidate represents a sig decryption function call with its control code.
 type sigCandidate struct {
 	funcName string
 	literal  string // numeric control code passed as first arg
 }
-
-// sigHelperPattern matches helper object method calls in sig function bodies.
-var sigHelperPattern = regexp.MustCompile(`([a-zA-Z_$][\w$]*)\.\w+\(\s*\w`)
 
 // preprocessPlayer extracts sig and n functions from player JS and generates
 // standalone executable JS code. Returns code that when executed sets _result.n and _result.sig.
@@ -22,14 +21,23 @@ var sigHelperPattern = regexp.MustCompile(`([a-zA-Z_$][\w$]*)\.\w+\(\s*\w`)
 // which handles YouTube's modern obfuscation. Falls back to legacy regex extraction
 // for older player.js versions.
 func preprocessPlayer(playerJS string) (string, error) {
-	// Try new "full player" approach first (robust against modern obfuscation)
-	code, err := preprocessPlayerFull(playerJS)
-	if err == nil {
-		return code, nil
-	}
+	code, _, err := preprocessPlayerWithBranch(playerJS)
+	return code, err
+}
 
-	// Fall back to legacy regex-based extraction
-	return preprocessPlayerLegacy(playerJS)
+// preprocessPlayerWithBranch is preprocessPlayer, but it also reports which
+// extraction branch succeeded ("full" or "legacy") so the caller can log it
+// at the top of the compile path — otherwise a silent fallback to the legacy
+// regex extractor looks identical to the full-player path in production logs.
+func preprocessPlayerWithBranch(playerJS string) (code, branch string, err error) {
+	if c, err := preprocessPlayerFull(playerJS); err == nil {
+		return c, "full", nil
+	}
+	c, err := preprocessPlayerLegacy(playerJS)
+	if err != nil {
+		return "", "", err
+	}
+	return c, "legacy", nil
 }
 
 // --- Shared JS parsing helpers ---

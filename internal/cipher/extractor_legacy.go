@@ -9,6 +9,11 @@ import (
 
 // --- Legacy regex-based approach (fallback for older player.js versions) ---
 
+// legacySigHelperPattern matches helper object method calls in legacy sig
+// function bodies. Only the legacy extractor uses this; kept alongside its
+// consumer so the full-player path has a cleaner surface.
+var legacySigHelperPattern = regexp.MustCompile(`([a-zA-Z_$][\w$]*)\.\w+\(\s*\w`)
+
 // Regex patterns for finding the signature decipher function name in player JS.
 // YouTube's player JS changes frequently, so we try multiple patterns.
 var sigFunctionNamePatterns = []*regexp.Regexp{
@@ -99,7 +104,7 @@ func extractSigFunction(playerJS string) (string, error) {
 
 	// Step 3: Find the helper object name from the function body
 	// The function body calls methods on a helper object like: XX.YY(a,ZZ)
-	helperPattern := sigHelperPattern
+	helperPattern := legacySigHelperPattern
 	helperMatch := helperPattern.FindStringSubmatch(funcBody)
 	if helperMatch == nil {
 		return "", fmt.Errorf("could not find helper object in sig function")

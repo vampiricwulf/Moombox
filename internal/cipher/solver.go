@@ -113,7 +113,12 @@ func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) 
 	s.logger.Debug("cipher: fetching player JS", "playerID", playerID)
 	playerJS, err := s.playerCache.Fetch(ctx, playerURL)
 	if err != nil {
-		return nil, fmt.Errorf("fetch player JS for %s: %w", playerID, err)
+		// PlayerCache.Fetch already includes "fetch player JS" in its message;
+		// wrap with a different verb to avoid "fetch player JS: fetch player JS: ..."
+		return nil, fmt.Errorf("compile solver for %s: %w", playerID, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// Log extraction strategy results for debugging
@@ -137,15 +142,24 @@ func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) 
 			"playerID", playerID)
 	}
 
-	preprocessed, err := preprocessPlayer(playerJS)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	preprocessed, branch, err := preprocessPlayerWithBranch(playerJS)
 	if err != nil {
 		return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
+	}
+	s.logger.Info("cipher: extraction branch", "playerID", playerID, "branch", branch)
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	s.logger.Debug("cipher: compiling solver", "playerID", playerID)
 	solvers, err := getFromPrepared(preprocessed)
 	if err != nil {
-		return nil, fmt.Errorf("compile solver for %s: %w", playerID, err)
+		return nil, fmt.Errorf("compile cipher solver for %s: %w", playerID, err)
 	}
 
 	return solvers, nil
