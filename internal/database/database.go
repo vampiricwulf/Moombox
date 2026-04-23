@@ -106,6 +106,13 @@ type Database struct {
 	// Per-job in-memory log buffers
 	jobLogsMu sync.RWMutex
 	jobLogs   map[string][]string
+
+	// GetJobStats cache — the aggregate is a full-table scan, so results are
+	// cached for jobStatsCacheTTL. Not invalidated on writes: stats drive UI
+	// widgets where a few-second staleness is acceptable.
+	statsMu       sync.Mutex
+	statsCached   *JobStats
+	statsCachedAt time.Time
 }
 
 // getCtx returns the stored context or context.Background().
@@ -115,6 +122,10 @@ func (db *Database) getCtx() context.Context {
 	}
 	return context.Background()
 }
+
+// jobStatsCacheTTL is how long GetJobStats' result stays fresh in the in-memory
+// cache before another full-table scan is required.
+const jobStatsCacheTTL = 5 * time.Second
 
 // Open creates or opens a SQLite database at the given path.
 // The logger parameter is optional; if nil, database errors will be silently dropped.

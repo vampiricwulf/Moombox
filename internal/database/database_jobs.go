@@ -451,8 +451,20 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	}
 }
 
-// GetJobStats returns aggregate statistics across all jobs.
+// GetJobStats returns aggregate statistics across all jobs. The result is a
+// full-table scan, so values are cached for jobStatsCacheTTL (~5s); callers
+// that need exact numbers should query directly.
 func (db *Database) GetJobStats() (*JobStats, error) {
+	// Fast path: serve from cache if fresh. Returning the cached pointer is
+	// safe because callers only read the value; no mutations are expected.
+	db.statsMu.Lock()
+	if db.statsCached != nil && time.Since(db.statsCachedAt) < jobStatsCacheTTL {
+		cached := db.statsCached
+		db.statsMu.Unlock()
+		return cached, nil
+	}
+	db.statsMu.Unlock()
+
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
@@ -483,6 +495,13 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("GetJobStats: %w", err)
 	}
+
+	// Cache the fresh result for the next ~5s.
+	db.statsMu.Lock()
+	db.statsCached = &s
+	db.statsCachedAt = time.Now()
+	db.statsMu.Unlock()
+
 	return &s, nil
 }
 
