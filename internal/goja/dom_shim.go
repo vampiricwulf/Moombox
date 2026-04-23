@@ -343,9 +343,12 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	globalThis.isSecureContext = true;
 
 	// Console stub — BotGuard interpreter calls console.log/warn/error;
-	// without this, ReferenceError aborts execution silently.
+	// without this, ReferenceError aborts execution silently. Capped at
+	// __consoleMaxMessages to prevent a chatty interpreter from unbounded
+	// memory growth before we drain the buffer.
+	var __consoleMaxMessages = 100;
 	var __consoleMessages = [];
-	function __consolePush(lvl, args) { if (__consoleMessages.length < 100) __consoleMessages.push([lvl, Array.prototype.slice.call(args)]); }
+	function __consolePush(lvl, args) { if (__consoleMessages.length < __consoleMaxMessages) __consoleMessages.push([lvl, Array.prototype.slice.call(args)]); }
 	globalThis.console = {
 		log: function() { __consolePush('log', arguments); },
 		warn: function() { __consolePush('warn', arguments); },
