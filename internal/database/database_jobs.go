@@ -159,6 +159,9 @@ func (db *Database) UpdateJobSync(job *Job) error {
 // BatchSetWatched marks multiple jobs as watched or unwatched and clears
 // their resume_position. Only affects Finished jobs. Triggers OnJobsChange
 // for a full list refresh.
+//
+// jobIDs is chunked to stay under SQLITE_MAX_VARIABLE_NUMBER and all chunks
+// run inside a single outer transaction so the update is atomic.
 func (db *Database) BatchSetWatched(jobIDs []string, watched bool) error {
 	if len(jobIDs) == 0 {
 		return nil
@@ -167,24 +170,49 @@ func (db *Database) BatchSetWatched(jobIDs []string, watched bool) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	placeholders := make([]string, len(jobIDs))
-	now := time.Now().UTC().Format(time.RFC3339)
-	args := make([]any, 0, len(jobIDs)+3)
-	args = append(args, boolToInt(watched), now)
-	for i, id := range jobIDs {
-		placeholders[i] = "?"
-		args = append(args, id)
-	}
-	args = append(args, string(StatusFinished))
-
-	query := fmt.Sprintf(
-		"UPDATE jobs SET watched = ?, resume_position = NULL, updated_at = ? WHERE id IN (%s) AND status = ?",
-		strings.Join(placeholders, ","),
-	)
-	_, err := db.db.ExecContext(db.getCtx(), query, args...)
+	tx, err := db.db.BeginTx(db.getCtx(), nil)
 	if err != nil {
 		if db.logger != nil {
-			db.logger.Error("BatchSetWatched failed", "err", err)
+			db.logger.Error("BatchSetWatched: BeginTx failed", "err", err)
+		}
+		return err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	for start := 0; start < len(jobIDs); start += idChunkSize {
+		end := start + idChunkSize
+		if end > len(jobIDs) {
+			end = len(jobIDs)
+		}
+		chunk := jobIDs[start:end]
+
+		placeholders := make([]string, len(chunk))
+		// args: watched, updated_at, ...ids, status  → len(chunk) + 3 entries
+		args := make([]any, 0, len(chunk)+3)
+		args = append(args, boolToInt(watched), now)
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		args = append(args, string(StatusFinished))
+
+		query := fmt.Sprintf(
+			"UPDATE jobs SET watched = ?, resume_position = NULL, updated_at = ? WHERE id IN (%s) AND status = ?",
+			strings.Join(placeholders, ","),
+		)
+		if _, err := tx.ExecContext(db.getCtx(), query, args...); err != nil {
+			if db.logger != nil {
+				db.logger.Error("BatchSetWatched failed", "err", err)
+			}
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		if db.logger != nil {
+			db.logger.Error("BatchSetWatched: commit failed", "err", err)
 		}
 		return err
 	}
