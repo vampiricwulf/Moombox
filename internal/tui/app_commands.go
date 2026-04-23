@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -89,6 +90,10 @@ func (a *App) apiClient() *http.Client {
 	}
 	a.cachedClient = &http.Client{
 		Transport: &internalTokenTransport{base: base, token: a.internalToken},
+		// 30s is generous for a loopback call; chi has its own server-side
+		// timeouts but defence-in-depth keeps a silent pipe stall from
+		// hanging the TUI until the user force-quits.
+		Timeout: 30 * time.Second,
 	}
 	a.cachedClientHTTPS = httpsEnabled
 	return a.cachedClient
