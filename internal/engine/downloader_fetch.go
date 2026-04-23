@@ -50,6 +50,11 @@ const (
 	// Range request instead of 206 Partial. We discard the body at 50 MB
 	// so a dumb static server on a multi-GB VOD can't drain the process.
 	maxIgnoredRangeBodyBytes = 50 << 20
+	// errorBodySnippetBytes caps how much of an HTTP-error response body
+	// we include in the returned error message. Enough to capture
+	// YouTube's JSON errors or a one-line HTML title, but small enough
+	// that a chatty error page doesn't explode the log line.
+	errorBodySnippetBytes = 512
 )
 
 // applyPoTokenQuery appends `?pot=<token>` (or `&pot=<token>` if the URL
@@ -133,6 +138,15 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
+		// Read a short body snippet for diagnostic error messages. YouTube
+		// returns useful JSON on 403 (cipher issues, pot-token rejection)
+		// and HTML on 4xx from the CDN. We cap at errorBodySnippetBytes so
+		// a chatty error page can't blow the log line up.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodySnippetBytes))
+		if len(snippet) > 0 {
+			return nil, resp.StatusCode, fmt.Errorf("HTTP %d: %s",
+				resp.StatusCode, strings.TrimSpace(string(snippet)))
+		}
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
