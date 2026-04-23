@@ -42,6 +42,12 @@ type Updater struct {
 	client         *http.Client
 }
 
+// downloadClient is the shared HTTP client used for binary downloads. It
+// gets a generous timeout because update payloads can be 20-30 MB; the
+// per-request u.client (10s timeout) is reserved for quick GitHub API
+// calls. Shared so repeated downloadFile calls reuse idle connections.
+var downloadClient = &http.Client{Timeout: 5 * time.Minute}
+
 // githubRelease is the subset of the GitHub API response we parse.
 type githubRelease struct {
 	TagName     string        `json:"tag_name"`
@@ -328,11 +334,8 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 	}
 	req.Header.Set("User-Agent", "Moombox/"+u.currentVersion)
 
-	// Use a separate client with a generous timeout for binary downloads.
-	// The main u.client has a 10s timeout suited for API calls, but binary
-	// downloads (10-30MB) need much longer.
-	dlClient := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := dlClient.Do(req)
+	// Use the package-level downloadClient (see its godoc for rationale).
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return err
 	}
