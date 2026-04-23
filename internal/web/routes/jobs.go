@@ -656,7 +656,11 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 					streamStartTime = meta.StartedAt
 					twitchCategory = meta.GameCategory
 				} else {
-					jobID = fmt.Sprintf("tw_manual_%s_%d", login, time.Now().UnixMilli())
+					// UnixNano instead of UnixMilli: two rapid manual adds
+					// within the same millisecond (double-click, script)
+					// would otherwise collide on the generated jobID and
+					// trip the duplicate-check path.
+					jobID = fmt.Sprintf("tw_manual_%s_%d", login, time.Now().UnixNano())
 				}
 			}
 
