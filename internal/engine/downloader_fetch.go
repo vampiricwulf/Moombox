@@ -11,9 +11,31 @@ import (
 )
 
 // engineHTTPClient is a shared HTTP client for segment and chunk downloads.
-// Uses a long timeout as a safety net — context-based cancellation handles
-// normal timeouts. Segments on slow connections can take several minutes.
-var engineHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+//
+// Transport config: the Go default caps idle connections per host at 2,
+// which causes TCP-handshake churn during high-concurrency catch-up with
+// ParallelDownloads (6) workers plus HEAD probes and playlist fetches.
+// Bump idle-per-host to ParallelDownloads+2 so the workers reuse sockets,
+// and keep them alive for 90 s (matches http.DefaultTransport's value).
+//
+// Timeout: context-based cancellation at every callsite is the primary
+// deadline mechanism (each request has its own ctx with SegmentTimeout /
+// ChunkTimeout wired). The client-level Timeout is a safety net for the
+// pathological "ctx never fires AND server keeps the socket open forever"
+// case; 5 minutes is generous enough for multi-MB segments on slow
+// connections without becoming a hang vector.
+var engineHTTPClient = &http.Client{
+	Timeout: 5 * time.Minute,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   ParallelDownloads + 2,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	},
+}
 
 var connReporter interface {
 	ReportFailure(tag string)
