@@ -328,6 +328,13 @@ export class TrimController {
     this._dragging = handle;
     track.setPointerCapture(e.pointerId);
 
+    // Per-drag AbortController so pointermove/up/cancel are removed together.
+    // This nests inside the outer this._abort (set in open()) — if the dialog
+    // is destroyed mid-drag, the blur handler calls _dragCleanup, and
+    // destroy()'s outer abort also aborts this signal defensively.
+    const dragAbort = new AbortController();
+    const sig = dragAbort.signal;
+
     const onMove = (ev) => {
       const rect = track.getBoundingClientRect();
       const x = ev.clientX - rect.left;
@@ -347,17 +354,15 @@ export class TrimController {
     const onUp = () => {
       this._dragging = null;
       this._dragCleanup = null;
-      track.removeEventListener("pointermove", onMove);
-      track.removeEventListener("pointerup", onUp);
-      track.removeEventListener("pointercancel", onUp);
+      dragAbort.abort();
     };
 
-    // Store cleanup so destroy() can remove listeners mid-drag
+    // Store cleanup so destroy() / window blur can remove listeners mid-drag
     this._dragCleanup = onUp;
 
-    track.addEventListener("pointermove", onMove);
-    track.addEventListener("pointerup", onUp);
-    track.addEventListener("pointercancel", onUp);
+    track.addEventListener("pointermove", onMove, { signal: sig });
+    track.addEventListener("pointerup", onUp, { signal: sig });
+    track.addEventListener("pointercancel", onUp, { signal: sig });
   }
 
   // ===== Transport controls =====
