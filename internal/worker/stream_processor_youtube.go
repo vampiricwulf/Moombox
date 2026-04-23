@@ -387,10 +387,20 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	dl.OnError = func(err error) {
 		sp.logger.Warn("[Chat] Early chat API error", "jobID", job.ID, "err", err)
 	}
+	// Transition chat_status from "pending" -> "downloading" only when chat
+	// actually starts receiving data (matches setupChatDownloader behavior).
+	// Previously we wrote "downloading" eagerly before Start, so a chat API
+	// that failed immediately would leave the UI stuck at "downloading"
+	// (per audit reports/worker.md Finding 22).
+	dl.OnStart = func(messageCount int, resuming bool) {
+		sp.db.UpdateJobFields(job.ID, map[string]any{
+			"chat_status": "downloading",
+		})
+	}
 	sp.trackChat(dl)
 
 	sp.db.UpdateJobFields(job.ID, map[string]any{
-		"chat_status": "downloading",
+		"chat_status": "pending",
 	})
 
 	// Start in background

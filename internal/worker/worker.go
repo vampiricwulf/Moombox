@@ -18,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -205,11 +206,14 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 
 	for _, job := range jobs {
 		// Reset Muxing jobs to Downloading — muxing was interrupted by shutdown
-		// and is idempotent (partial output is overwritten).
+		// and is idempotent (partial output is overwritten). Clear any stale
+		// error string so the UI doesn't show a prior error alongside the fresh
+		// Downloading state (per audit reports/worker.md Finding 24).
 		if job.Status == database.StatusMuxing {
 			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
 			w.db.UpdateJobFields(job.ID, map[string]any{
 				"status": database.StatusDownloading,
+				"error":  "",
 			})
 			job.Status = database.StatusDownloading
 		}
@@ -255,12 +259,10 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 			}
 		}()
 
-		// Check if context is done before restarting
-		select {
-		case <-ctx.Done():
+		// Check if context is done before restarting.
+		// ctx-aware sleep so shutdown during the pause returns promptly.
+		if err := utils.Sleep(ctx, time.Second); err != nil {
 			return
-		default:
-			time.Sleep(time.Second) // Brief pause before restart
 		}
 	}
 }
@@ -558,11 +560,15 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				w.logger.Info("attempting automatic cookie refresh...")
 				if w.OnCookieRefreshNeeded() {
 					w.logger.Info("cookie refresh succeeded, retrying job")
+					// Set to Upcoming so StreamProcessor.Process re-probes and
+					// correctly classifies the stream (live/VOD/upcoming). Using
+					// Live was wrong when the stream had transitioned to post-live
+					// or had not yet started (per audit reports/worker.md Finding 21).
 					w.db.UpdateJobFields(job.ID, map[string]any{
-						"status": database.StatusLive,
+						"status": database.StatusUpcoming,
 						"error":  "",
 					})
-					w.queue.Enqueue(job.ID, database.StatusLive)
+					w.queue.Enqueue(job.ID, database.StatusUpcoming)
 					return
 				}
 				w.logger.Warn("auto cookie refresh failed — re-run setup from Settings")

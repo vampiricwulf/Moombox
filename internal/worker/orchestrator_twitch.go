@@ -227,7 +227,9 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Quality-aware download loop
 	for ctx.Err() == nil {
 
-		// Run HLS downloader in goroutine to listen for quality changes
+		// Run HLS downloader in goroutine to listen for quality changes.
+		// Compute the error before sending so a panic inside Start is delivered once
+		// via the deferred recover without risking a double-send on the buffered channel.
 		downloadDone := make(chan error, 1)
 		go func() {
 			defer func() {
@@ -235,7 +237,8 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 					downloadDone <- fmt.Errorf("twitch download panic: %v", r)
 				}
 			}()
-			downloadDone <- videoDl.Start(ctx)
+			err := videoDl.Start(ctx)
+			downloadDone <- err
 		}()
 
 		var dlErr error

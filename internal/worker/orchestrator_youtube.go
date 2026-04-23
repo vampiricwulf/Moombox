@@ -98,7 +98,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			return ctx.Err()
 		}
 
-		// Run segment downloaders in a goroutine so we can also listen for quality changes
+		// Run segment downloaders in a goroutine so we can also listen for quality changes.
+		// Compute the error before sending so a panic inside runDownloaders is delivered
+		// once via the deferred recover without risking a double-send on the buffered channel.
 		downloadDone := make(chan error, 1)
 		go func() {
 			defer func() {
@@ -106,7 +108,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					downloadDone <- fmt.Errorf("runDownloaders panic: %v", r)
 				}
 			}()
-			downloadDone <- o.runDownloaders(ctx, result)
+			err := o.runDownloaders(ctx, result)
+			downloadDone <- err
 		}()
 
 		var downloadErr error
@@ -202,7 +205,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			if refreshErr != nil {
 				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				return nil // Can't continue, finalize what we have
+				// Return nil to exit the live loop; muxAndFinalize will process
+				// whatever video/audio data was captured before the refresh failed.
+				return nil
 			}
 
 			newQuality := o.extractQualityFromResult(refreshResult)
@@ -303,6 +308,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			if refreshErr != nil {
 				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
+				// Return nil to exit the live loop; muxAndFinalize will process
+				// whatever video/audio data was captured in the current staging dir.
 				return nil
 			}
 
@@ -395,9 +402,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				continue
 			}
 
-			// Replace downloaders with refreshed versions
-			result.VideoDownloader = refreshResult.VideoDownloader
-			result.AudioDownloader = refreshResult.AudioDownloader
+			// Replace the whole result so all fields (Video/AudioFormat, dimensions,
+			// IsHls, paths) reflect the refreshed manifest. Previously only the
+			// downloader pointers were swapped, leaving stale VideoFormat metadata
+			// that downstream muxing could pick up as a fallback.
+			result = refreshResult
 
 			attachProgress(result)
 
