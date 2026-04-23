@@ -13,6 +13,10 @@ const (
 	chatMaxConsecutiveErrs = 20
 	chatDedupMax           = 5000
 	chatSaveInterval       = 1 * time.Second
+	// ircReadDeadline bounds each conn.Read in runIRCSession. Twitch sends
+	// PING every ~5 min; this gives us one missed heartbeat plus slack
+	// before we treat the socket as dead and trigger the reconnect path.
+	ircReadDeadline = 6 * time.Minute
 )
 
 // ChatDownloader connects to Twitch IRC and records live chat messages.

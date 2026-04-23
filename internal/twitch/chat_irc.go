@@ -89,7 +89,14 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			}
 		}
 
-		_, data, err := conn.Read(ctx)
+		// Read with a per-read deadline so a silent socket (e.g. NAT
+		// dropping the connection mid-stream) triggers a reconnect
+		// instead of blocking until the parent context cancels. Twitch
+		// IRC sends a PING every ~5 minutes; readDeadline covers two
+		// missed PINGs before we give up on the session.
+		readCtx, readCancel := context.WithTimeout(ctx, ircReadDeadline)
+		_, data, err := conn.Read(readCtx)
+		readCancel()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -111,10 +118,23 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 
 			// Handle PING
 			if strings.HasPrefix(line, "PING") {
+				if ctx.Err() != nil {
+					// Caller is shutting us down — skip the write
+					// rather than racing on a cancelled conn.
+					return nil
+				}
 				if err := conn.Write(ctx, websocket.MessageText, []byte("PONG :tmi.twitch.tv")); err != nil {
 					cd.logger.Warn("IRC PONG write failed", "err", err)
 				}
 				continue
+			}
+
+			// Twitch occasionally issues RECONNECT to request clients
+			// drop and reconnect. Return nil so the outer loop does a
+			// clean reconnect without incrementing the error counter.
+			if strings.HasPrefix(line, "RECONNECT") {
+				cd.logger.Info("twitch IRC RECONNECT received; reconnecting", "channel", cd.channelLogin)
+				return nil
 			}
 
 			msg := cd.parseLine(line)
