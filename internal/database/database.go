@@ -188,6 +188,10 @@ func boolToInt(b bool) int {
 	return 0
 }
 
+func intToBool(i int) bool {
+	return i != 0
+}
+
 // updateJobExec performs a full job UPDATE using the provided executor (either *sql.DB or *sql.Tx).
 // This is the single implementation shared by both direct and transactional update paths.
 func updateJobExec(ctx context.Context, exec executor, job *Job) error {
@@ -338,10 +342,10 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	j.IsVod = isVod != 0
-	j.ManuallyAdded = manuallyAdded != 0
-	j.AllowNonStream = allowNonStream != 0
-	j.Watched = watched != 0
+	j.IsVod = intToBool(isVod)
+	j.ManuallyAdded = intToBool(manuallyAdded)
+	j.AllowNonStream = intToBool(allowNonStream)
+	j.Watched = intToBool(watched)
 	return &j, nil
 }
 
@@ -366,10 +370,10 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	j.IsVod = isVod != 0
-	j.ManuallyAdded = manuallyAdded != 0
-	j.AllowNonStream = allowNonStream != 0
-	j.Watched = watched != 0
+	j.IsVod = intToBool(isVod)
+	j.ManuallyAdded = intToBool(manuallyAdded)
+	j.AllowNonStream = intToBool(allowNonStream)
+	j.Watched = intToBool(watched)
 	return &j, nil
 }
 
