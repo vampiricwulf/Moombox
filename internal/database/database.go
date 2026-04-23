@@ -255,6 +255,37 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 	return err
 }
 
+// insertJobExec performs an INSERT OR IGNORE INTO jobs using the provided
+// executor (either *sql.DB or *sql.Tx). Single implementation shared by
+// AddJob and ImportFromJSON so the 41-column INSERT only exists once.
+func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, error) {
+	return exec.ExecContext(ctx, `INSERT OR IGNORE INTO jobs (id, video_id, url, title, channel_name, platform,
+		status, progress, percent, eta, speed, error, created_at, updated_at,
+		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
+		length_seconds, download_started_at, thumbnail_url, description, output_file,
+		filename, output_directory, chat_status, total_chat_messages, chat_filename, chat_file,
+		thumbnail_file, description_file,
+		twitch_quality, twitch_category, channel_avatar_url,
+		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
+		quality_preference)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		?)`,
+		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
+		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
+		job.CreatedAt, job.UpdatedAt,
+		boolToInt(job.IsVod), boolToInt(job.ManuallyAdded), boolToInt(job.AllowNonStream),
+		job.StreamStartTime, job.StreamEndTime,
+		job.LengthSeconds, job.DownloadStartedAt, job.ThumbnailURL, job.Description,
+		job.OutputFile, job.Filename, job.OutputDirectory,
+		job.ChatStatus, job.TotalChatMessages, job.ChatFilename, job.ChatFile,
+		job.ThumbnailFile, job.DescriptionFile,
+		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
+		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
+		job.LastRecheckAt,
+		job.QualityPreference)
+}
+
 // UpdateJobFields performs a partial update of a job using a map of field names to values.
 // This is useful when only a few fields need to change without loading the full job.
 // Returns the updated job after notifying subscribers, or nil on error.

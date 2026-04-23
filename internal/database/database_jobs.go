@@ -20,31 +20,7 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 	}
 	job.UpdatedAt = now
 
-	result, err := db.db.ExecContext(db.getCtx(), `INSERT OR IGNORE INTO jobs (id, video_id, url, title, channel_name, platform,
-		status, progress, percent, eta, speed, error, created_at, updated_at,
-		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
-		length_seconds, download_started_at, thumbnail_url, description, output_file,
-		filename, output_directory, chat_status, total_chat_messages, chat_filename, chat_file,
-		thumbnail_file, description_file,
-		twitch_quality, twitch_category, channel_avatar_url,
-		selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
-		quality_preference)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?)`,
-		job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
-		job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
-		job.CreatedAt, job.UpdatedAt,
-		boolToInt(job.IsVod), boolToInt(job.ManuallyAdded), boolToInt(job.AllowNonStream),
-		job.StreamStartTime, job.StreamEndTime,
-		job.LengthSeconds, job.DownloadStartedAt, job.ThumbnailURL, job.Description,
-		job.OutputFile, job.Filename, job.OutputDirectory,
-		job.ChatStatus, job.TotalChatMessages, job.ChatFilename, job.ChatFile,
-		job.ThumbnailFile, job.DescriptionFile,
-		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
-		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
-		job.LastRecheckAt,
-		job.QualityPreference)
+	result, err := insertJobExec(db.getCtx(), db.db, job)
 	if err != nil {
 		return false, fmt.Errorf("failed to insert job: %w", err)
 	}
@@ -534,36 +510,13 @@ func (db *Database) ImportFromJSON(path string) error {
 	defer tx.Rollback()
 
 	// Import jobs
-	for _, job := range jsonDB.Jobs {
+	for i := range jsonDB.Jobs {
+		job := &jsonDB.Jobs[i]
 		if job.Platform == "" {
 			job.Platform = "youtube"
 		}
-		// Use AddJob logic but in transaction
-		_, err := tx.ExecContext(db.getCtx(), `INSERT OR IGNORE INTO jobs (id, video_id, url, title, channel_name, platform,
-			status, progress, percent, eta, speed, error, created_at, updated_at,
-			is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
-			length_seconds, download_started_at, thumbnail_url, description, output_file,
-			filename, output_directory, chat_status, total_chat_messages, chat_filename, chat_file,
-			thumbnail_file, description_file,
-			twitch_quality, twitch_category, channel_avatar_url,
-			selected_video_itag, selected_audio_itag, start_time, end_time, last_recheck_at,
-			quality_preference)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?)`,
-			job.ID, job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform,
-			job.Status, job.Progress, job.Percent, job.ETA, job.Speed, job.Error,
-			job.CreatedAt, job.UpdatedAt,
-			boolToInt(job.IsVod), boolToInt(job.ManuallyAdded), boolToInt(job.AllowNonStream),
-			job.StreamStartTime, job.StreamEndTime, job.LengthSeconds, job.DownloadStartedAt,
-			job.ThumbnailURL, job.Description, job.OutputFile, job.Filename, job.OutputDirectory,
-			job.ChatStatus, job.TotalChatMessages, job.ChatFilename, job.ChatFile,
-			job.ThumbnailFile, job.DescriptionFile,
-			job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
-			job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
-			job.LastRecheckAt,
-			job.QualityPreference)
-		if err != nil {
+		// Use the shared insert helper inside the transaction.
+		if _, err := insertJobExec(db.getCtx(), tx, job); err != nil {
 			if db.logger != nil {
 				db.logger.Warn("import: failed to insert job", "jobID", job.ID, "err", err)
 			}
