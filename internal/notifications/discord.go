@@ -110,27 +110,36 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	// Handle Discord rate limiting (429) with retry-after
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := resp.Header.Get("Retry-After")
-		if secs, parseErr := strconv.ParseFloat(retryAfter, 64); parseErr == nil && secs > 0 && secs <= 30 {
-			time.Sleep(time.Duration(secs * float64(time.Second)))
-			// Retry once with a fresh context and request (original body/context were consumed)
-			retryCtx, retryCancel := context.WithTimeout(context.Background(), discordTimeout)
-			defer retryCancel()
-			retryReq, retryErr := http.NewRequestWithContext(retryCtx, http.MethodPost, d.URL, bytes.NewReader(body))
-			if retryErr == nil {
-				retryReq.Header.Set("Content-Type", "application/json")
-				resp2, doErr := discordHTTPClient.Do(retryReq)
-				if doErr == nil {
-					defer func() {
-						io.Copy(io.Discard, resp2.Body)
-						resp2.Body.Close()
-					}()
-					if resp2.StatusCode < 400 {
-						return nil
-					}
-				}
-			}
+		secs, parseErr := strconv.ParseFloat(retryAfter, 64)
+		if parseErr != nil || secs <= 0 || secs > 30 {
+			// retry-after missing, malformed, or beyond our ceiling — surface the 429 directly
+			return fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
 		}
-		return fmt.Errorf("discord rate limited (retry-after: %s)", retryAfter)
+		time.Sleep(time.Duration(secs * float64(time.Second)))
+		// Retry once with a fresh context and request (original body/context were consumed)
+		retryCtx, retryCancel := context.WithTimeout(context.Background(), discordTimeout)
+		defer retryCancel()
+		retryReq, retryErr := http.NewRequestWithContext(retryCtx, http.MethodPost, d.URL, bytes.NewReader(body))
+		if retryErr != nil {
+			return fmt.Errorf("create discord retry request: %w", retryErr)
+		}
+		retryReq.Header.Set("Content-Type", "application/json")
+		resp2, doErr := discordHTTPClient.Do(retryReq)
+		if doErr != nil {
+			return fmt.Errorf("discord webhook retry request: %w", doErr)
+		}
+		defer func() {
+			io.Copy(io.Discard, resp2.Body)
+			resp2.Body.Close()
+		}()
+		if resp2.StatusCode < 400 {
+			return nil
+		}
+		if resp2.StatusCode == http.StatusTooManyRequests {
+			// second 429 — report the repeated rate limit with the new retry-after
+			return fmt.Errorf("discord rate limited after retry (retry-after: %s)", resp2.Header.Get("Retry-After"))
+		}
+		return fmt.Errorf("discord webhook returned %d after retry", resp2.StatusCode)
 	}
 
 	if resp.StatusCode >= 400 {
