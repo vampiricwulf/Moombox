@@ -62,6 +62,20 @@ type BgConfig struct {
 	RequestKey    string
 	VisitorData   string
 	UseYouTubeAPI bool // Use YouTube's JNN endpoint instead of Google's
+
+	// SessionTTL overrides the default session-cache TTL (SessionCacheTTL = 6h)
+	// when set > 0. Mirrors upstream bgutil-ytdlp-pot-provider's TOKEN_TTL env
+	// var. Useful for test rigs and for operators who observe PO tokens lasting
+	// longer than 6h in their environment.
+	SessionTTL time.Duration
+}
+
+// sessionTTL returns the configured session TTL or the package default.
+func (c *BgConfig) sessionTTL() time.Duration {
+	if c != nil && c.SessionTTL > 0 {
+		return c.SessionTTL
+	}
+	return SessionCacheTTL
 }
 
 // DescrambledChallenge contains the parsed challenge data from the WAA API.

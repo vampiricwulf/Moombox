@@ -237,7 +237,7 @@ func (pp *PotProvider) mintPoToken(minter *TokenMinter, contentBinding string) (
 	return &SessionData{
 		PoToken:        token,
 		ContentBinding: contentBinding,
-		ExpiresAt:      time.Now().Add(SessionCacheTTL),
+		ExpiresAt:      time.Now().Add(pp.config.sessionTTL()),
 	}, nil
 }
 
