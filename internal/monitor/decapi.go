@@ -421,7 +421,15 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 	dm.db.SetLastVideo(ch.ID, videoID)
 
 	// Skip if active job exists (but not if merely finished — stream may restart on same URL)
-	if active, _ := dm.db.HasActiveJob(videoID); active {
+	active, err := dm.db.HasActiveJob(videoID)
+	if err != nil {
+		// Don't swallow DB errors — proceeding as if no active job could
+		// create duplicates if the DB was simply busy. Log and abort this
+		// entry for the current cycle.
+		dm.logger.Debug("HasActiveJob query failed", "videoID", videoID, "err", err)
+		return nil
+	}
+	if active {
 		return nil
 	}
 
@@ -432,8 +440,13 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 
 	videoURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
 
-	// Check if this is a re-probe of a previously processed video
-	reprobe, _ := dm.db.HasProcessed(videoID)
+	// Check if this is a re-probe of a previously processed video. A DB-busy
+	// here is best treated as "not yet processed" so we probe and let upstream
+	// dedup (INSERT-OR-IGNORE) handle collisions. We still log for visibility.
+	reprobe, hpErr := dm.db.HasProcessed(videoID)
+	if hpErr != nil {
+		dm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
+	}
 
 	if reprobe {
 		dm.logger.Debug("decapi match found (re-probe)",

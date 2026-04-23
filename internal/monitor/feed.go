@@ -333,7 +333,15 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 		}
 
 		// Skip if active job exists (but not if merely finished — stream may restart on same URL)
-		if active, _ := fm.db.HasActiveJob(videoID); active {
+		active, err := fm.db.HasActiveJob(videoID)
+		if err != nil {
+			// Don't swallow DB errors — proceeding as if no active job could
+			// create duplicates if the DB was simply busy. Log and skip this
+			// entry for the current cycle.
+			fm.logger.Debug("HasActiveJob query failed", "videoID", videoID, "err", err)
+			continue
+		}
+		if active {
 			continue
 		}
 
@@ -365,8 +373,14 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 			continue
 		}
 
-		// Check if this is a re-probe of a previously processed video
-		reprobe, _ := fm.db.HasProcessed(videoID)
+		// Check if this is a re-probe of a previously processed video.
+		// Ignore the error — a DB-busy here is best treated as "not yet
+		// processed" so we probe and let upstream dedup (INSERT-OR-IGNORE)
+		// handle collisions. We still log for visibility.
+		reprobe, hpErr := fm.db.HasProcessed(videoID)
+		if hpErr != nil {
+			fm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
+		}
 
 		if reprobe {
 			fm.logger.Debug("feed match found (re-probe)",

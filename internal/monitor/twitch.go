@@ -246,10 +246,21 @@ func (tm *TwitchMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	// only because SQLite's INSERT-OR-IGNORE caught the collision at
 	// insert time.
 	jobID := twitch.BuildJobID(info.StreamID, false)
-	if processed, _ := tm.db.HasProcessed(jobID); processed {
+	processed, hpErr := tm.db.HasProcessed(jobID)
+	if hpErr != nil {
+		tm.logger.Debug("HasProcessed query failed", "jobID", jobID, "err", hpErr)
+	}
+	if processed {
 		return nil
 	}
-	if active, _ := tm.db.HasActiveJob(info.StreamID); active {
+	active, haErr := tm.db.HasActiveJob(info.StreamID)
+	if haErr != nil {
+		// Don't swallow DB errors — proceeding could create duplicates if
+		// the DB was simply busy. Log and abort for this cycle.
+		tm.logger.Debug("HasActiveJob query failed", "streamID", info.StreamID, "err", haErr)
+		return nil
+	}
+	if active {
 		return nil
 	}
 
