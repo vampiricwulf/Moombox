@@ -299,6 +299,41 @@ func TestCollectFormats(t *testing.T) {
 	}
 }
 
+func TestCollectFormats_DoesNotMutateInput(t *testing.T) {
+	formats := []Format{
+		{Itag: 137, MimeType: "video/mp4", URL: "https://example.com/v"},
+		{Itag: 140, MimeType: "audio/mp4", URL: "https://example.com/a"},
+	}
+
+	pool := []Format{}
+	collectFormats(&pool, formats, "first", AuthLevelWeb)
+
+	// The caller's slice must retain its original empty Source/AuthLevel so
+	// that a subsequent collectFormats call with a different source/level
+	// does not get a stale value from the previous call.
+	for i, f := range formats {
+		if f.Source != "" {
+			t.Errorf("formats[%d].Source was mutated to %q, expected empty", i, f.Source)
+		}
+		if f.AuthLevel != nil {
+			t.Errorf("formats[%d].AuthLevel was mutated to %v, expected nil", i, f.AuthLevel)
+		}
+	}
+
+	// A second collect with a different source/level must not be leaked into
+	// previously-added pool entries.
+	pool2 := []Format{}
+	collectFormats(&pool2, formats, "second", AuthLevelAndroidVR)
+	for _, f := range pool {
+		if f.Source != "first" {
+			t.Errorf("pool entry source changed to %q after second collect", f.Source)
+		}
+		if f.AuthLevel == nil || *f.AuthLevel != AuthLevelWeb {
+			t.Errorf("pool entry auth level changed to %v after second collect", f.AuthLevel)
+		}
+	}
+}
+
 func TestDeduplicateFormats(t *testing.T) {
 	webAuth := AuthLevelWeb
 	vrAuth := AuthLevelAndroidVR

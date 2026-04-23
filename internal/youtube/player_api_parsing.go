@@ -440,11 +440,19 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	return StreamVOD, false, false, false
 }
 
+// collectFormats appends formats into pool with the given source label and
+// auth level. Each format is copied into the pool rather than mutated in
+// place, so the caller's slice is unaffected — important when the same
+// Format slice is referenced by more than one VideoInfo (e.g. when a
+// watch-page parse is shared between the public and authenticated paths).
+// The shared authLevel pointer is intentional: dedup compares levels by
+// value, not identity.
 func collectFormats(pool *[]Format, formats []Format, source string, authLevel int) {
-	for i := range formats {
-		formats[i].Source = source
-		formats[i].AuthLevel = &authLevel
-		*pool = append(*pool, formats[i])
+	level := authLevel
+	for _, f := range formats {
+		f.Source = source
+		f.AuthLevel = &level
+		*pool = append(*pool, f)
 	}
 }
 
