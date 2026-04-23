@@ -43,7 +43,11 @@ class MoomboxApp {
     this._tasksChannels = [];
     this._archivedChannels = [];
     this.focusedJobIndex = -1;
-    this.theme = localStorage.getItem("moombox-theme") || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    // Theme: respect explicit user choice in localStorage; otherwise follow
+    // the OS light/dark preference and keep tracking it across the session.
+    const storedTheme = localStorage.getItem("moombox-theme");
+    this._themeFollowsOS = !storedTheme;
+    this.theme = storedTheme || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 
     // Module controllers
     this.setup = new SetupController(this);
@@ -87,7 +91,7 @@ class MoomboxApp {
     if (this._initialized) return;
     this._initialized = true;
 
-    this.setTheme(this.theme);
+    this.setTheme(this.theme, { fromOS: this._themeFollowsOS });
     this.setupEventListeners();
     this.setupKeyboardShortcuts();
     this.settings.setupListeners();
@@ -95,6 +99,20 @@ class MoomboxApp {
     this.loadConfig();
     this.loadStatus();
     this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);
+
+    // Track OS theme changes mid-session — only applied while the user
+    // has not yet made an explicit choice via the theme toggle.
+    const darkMQ = window.matchMedia("(prefers-color-scheme: dark)");
+    const onOSThemeChange = (e) => {
+      if (this._themeFollowsOS) {
+        this.setTheme(e.matches ? "dark" : "light", { fromOS: true });
+      }
+    };
+    if (typeof darkMQ.addEventListener === "function") {
+      darkMQ.addEventListener("change", onOSThemeChange);
+    } else if (typeof darkMQ.addListener === "function") {
+      darkMQ.addListener(onOSThemeChange); // Safari < 14
+    }
   }
 
   async checkSetupStatus() {
@@ -3300,7 +3318,7 @@ class MoomboxApp {
 
   // ===== Theme =====
 
-  setTheme(theme) {
+  setTheme(theme, opts = {}) {
     this.theme = theme;
     const html = document.documentElement;
     const darkSheet = document.getElementById("sl-theme-dark");
@@ -3319,7 +3337,14 @@ class MoomboxApp {
       if (toggleBtn) toggleBtn.name = "moon";
     }
 
-    localStorage.setItem("moombox-theme", theme);
+    // Persist only when the user explicitly picked a theme. OS-driven
+    // changes stay ephemeral so the session continues to follow the OS.
+    if (opts.fromOS) {
+      this._themeFollowsOS = true;
+    } else {
+      this._themeFollowsOS = false;
+      localStorage.setItem("moombox-theme", theme);
+    }
     // Update theme-color meta tag
     const metaTheme = document.querySelector('meta[name="theme-color"]');
     if (metaTheme) metaTheme.content = theme === "light" ? "#ffffff" : "#1C1B22";
