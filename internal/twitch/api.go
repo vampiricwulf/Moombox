@@ -173,7 +173,14 @@ type gqlRawQuery struct {
 }
 
 // GetStreamInfo fetches stream info for a channel (batched StreamMetadata + ComscoreStreamingQuery).
+// channelLogin is lowercased before the GQL call — Twitch channel names are
+// case-insensitive on lookup, but some response paths (and downstream helpers
+// like the thumbnail CDN URL built below) only produce correct values when
+// the login is the canonical lower-case form. Mixed-case logins entered via
+// config could otherwise silently return an empty stream.
 func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string) (*TwitchStreamInfo, error) {
+	channelLogin = strings.ToLower(channelLogin)
+
 	batch := []gqlPersistedQuery{
 		newPersistedQuery("StreamMetadata", constants.TwitchGQLHashes.StreamMetadata, map[string]any{
 			"channelLogin": channelLogin,
@@ -325,8 +332,9 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 }
 
 // GetStreamAccessToken fetches an HLS access token for a live channel.
+// channelLogin is lowercased before the Usher call — see GetStreamInfo.
 func (a *API) GetStreamAccessToken(ctx context.Context, channelLogin, authToken string) (*TwitchAccessToken, error) {
-	safeLogin := safeLoginRe.ReplaceAllString(channelLogin, "")
+	safeLogin := safeLoginRe.ReplaceAllString(strings.ToLower(channelLogin), "")
 
 	query := gqlRawQuery{
 		Query: fmt.Sprintf(`{
