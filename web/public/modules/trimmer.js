@@ -423,39 +423,44 @@ export class TrimController {
       el instanceof HTMLElement && (el.tagName === "SL-BUTTON" || el.tagName === "SL-ICON-BUTTON" || el.tagName === "BUTTON")
     )) return;
 
+    // Stop the keydown before any bubbling listener (the app-level document
+    // keydown for shortcuts, the player document keydown for transport)
+    // can also act on it. Anything we handle here is trim-local.
+    const handle = () => { e.preventDefault(); e.stopPropagation(); };
+
     switch (e.key) {
       case " ":
-        e.preventDefault();
+        handle();
         this._togglePlay();
         break;
       case "i":
       case "I":
-        e.preventDefault();
+        handle();
         this._setStartMarker();
         break;
       case "o":
       case "O":
-        e.preventDefault();
+        handle();
         this._setEndMarker();
         break;
       case "ArrowLeft": {
-        e.preventDefault();
+        handle();
         const delta = e.shiftKey ? 30 : 5;
         this._seekToGlobalTime(Math.max(0, this._getGlobalTime() - delta));
         break;
       }
       case "ArrowRight": {
-        e.preventDefault();
+        handle();
         const delta = e.shiftKey ? 30 : 5;
         this._seekToGlobalTime(Math.min(this.duration, this._getGlobalTime() + delta));
         break;
       }
       case ",":
-        e.preventDefault();
+        handle();
         this._frameStep(-1);
         break;
       case ".":
-        e.preventDefault();
+        handle();
         this._frameStep(1);
         break;
     }
