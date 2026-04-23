@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -27,6 +28,48 @@ const (
 
 // monitorHTTPClient is a shared HTTP client with a timeout for monitor HTTP requests.
 var monitorHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// ConnectivityReporter is the subset of connectivity.Monitor we invoke from
+// monitor HTTP paths. Wiring this into the FeedMonitor and DecapiMonitor lets
+// their fetches contribute to the passive-outage tracker (see
+// internal/connectivity/passive.go) so a DNS outage that hits only YouTube
+// RSS or DECAPI can still flip the global online/offline state.
+type ConnectivityReporter interface {
+	ReportFailure(tag string)
+	ReportSuccess(tag string)
+}
+
+// connReporter is an atomic.Pointer so SetConnectivityReporter can be called
+// without racing against concurrent fetches. In practice main.go installs
+// the reporter once at startup, but making the read lock-free removes a
+// happens-before foot-gun for future callers or tests.
+var connReporter atomic.Pointer[ConnectivityReporter]
+
+// SetConnectivityReporter wires the package-wide connectivity reporter for
+// monitor HTTP paths. Safe to call concurrently with in-flight fetches.
+func SetConnectivityReporter(r ConnectivityReporter) {
+	if r == nil {
+		connReporter.Store(nil)
+		return
+	}
+	connReporter.Store(&r)
+}
+
+// reportMonitorResult forwards a fetch outcome to the installed reporter, if
+// any. tag identifies the subsystem (e.g. "monitor/feed", "monitor/decapi")
+// so the passive tracker can count distinct-subsystem failures toward the
+// offline-trigger threshold.
+func reportMonitorResult(tag string, failed bool) {
+	rp := connReporter.Load()
+	if rp == nil {
+		return
+	}
+	if failed {
+		(*rp).ReportFailure(tag)
+	} else {
+		(*rp).ReportSuccess(tag)
+	}
+}
 
 // FeedMonitor polls YouTube RSS feeds for new videos from monitored channels.
 type FeedMonitor struct {
@@ -251,14 +294,21 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 
 	resp, err := monitorHTTPClient.Do(req)
 	if err != nil {
+		// Transport-level failure — most likely a DNS error, TCP reset, or
+		// context deadline. Contributes toward the passive offline trigger.
+		reportMonitorResult("monitor/feed", true)
 		return fmt.Errorf("fetch feed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// 4xx/5xx is not necessarily a connectivity problem (YouTube could be
+		// rate-limiting or a channel ID is dead), but we don't want to flag
+		// these as success either. Leave the tracker alone.
 		io.Copy(io.Discard, resp.Body) // drain for connection reuse
 		return fmt.Errorf("feed http %d", resp.StatusCode)
 	}
+	reportMonitorResult("monitor/feed", false)
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {

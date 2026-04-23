@@ -316,6 +316,8 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 
 	resp, err := monitorHTTPClient.Do(req)
 	if err != nil {
+		// Transport-level failure — feeds the passive offline tracker.
+		reportMonitorResult("monitor/decapi", true)
 		return fmt.Errorf("decapi request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -335,6 +337,8 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	dm.updateRateLimit(resp)
 
 	if resp.StatusCode == http.StatusTooManyRequests {
+		// 429 reached the server — explicit throttle, not a connectivity
+		// problem. Don't report as failure or success.
 		retryAfter := resp.Header.Get("Retry-After")
 		if secs, err := strconv.Atoi(retryAfter); err == nil {
 			dm.mu.Lock()
@@ -346,8 +350,10 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		// Non-2xx — server reachable but unhappy; leave tracker alone.
 		return fmt.Errorf("decapi http %d", resp.StatusCode)
 	}
+	reportMonitorResult("monitor/decapi", false)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
