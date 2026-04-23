@@ -18,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -255,12 +256,10 @@ func (w *DownloadWorker) pollForJobs(ctx context.Context) {
 			}
 		}()
 
-		// Check if context is done before restarting
-		select {
-		case <-ctx.Done():
+		// Check if context is done before restarting.
+		// ctx-aware sleep so shutdown during the pause returns promptly.
+		if err := utils.Sleep(ctx, time.Second); err != nil {
 			return
-		default:
-			time.Sleep(time.Second) // Brief pause before restart
 		}
 	}
 }
