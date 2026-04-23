@@ -3207,14 +3207,17 @@ class MoomboxApp {
       filterTimeout = setTimeout(() => syncTokens(), 200);
     });
 
-    // Enter key: if input has structured tags, chip them immediately
+    // Single keydown handler — do local input behaviour AND stop propagation
+    // so global shortcuts never see keys while the filter is focused.
+    // Previously there were two keydown handlers and the listener-ordering
+    // dependency between them was implicit; one combined handler makes the
+    // ordering explicit and impossible to break by future listener shuffling.
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
         clearTimeout(filterTimeout);
         syncTokens();
-      }
-      if (e.key === "Backspace" && !input.value) {
+      } else if (e.key === "Backspace" && !input.value) {
         // Remove last chip
         const tokens = getTokens();
         const chipTokens = tokens.filter(t => t.type !== "text");
@@ -3226,15 +3229,12 @@ class MoomboxApp {
           updateClearBtn();
           renderDropdownItems();
         }
-      }
-      if (e.key === "Escape") {
+      } else if (e.key === "Escape") {
         dropdown.hide();
         input.blur();
       }
-    });
-
-    // Stop keyboard shortcut propagation while typing in the filter
-    input.addEventListener("keydown", (e) => {
+      // Always stop propagation so app-level shortcuts don't fire for
+      // ordinary typing in this input.
       e.stopPropagation();
     });
 
