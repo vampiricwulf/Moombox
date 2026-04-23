@@ -207,7 +207,21 @@ func (s *Solver) cacheSolvers(key string, solvers *Solvers) {
 
 // getFromPrepared executes preprocessed JS code in a Goja VM and extracts sig/n functions.
 // The code is expected to set _result.sig and _result.n when invoked with a _result object.
-func getFromPrepared(code string) (*Solvers, error) {
+//
+// goja.RunString and vm.NewObject can panic on certain malformed inputs (stack
+// overflows in deep recursion, some parser states). Without recovery the
+// compileSolver call site would propagate the panic up the call tree and kill
+// the containing goroutine, which in the worker would crash the download path
+// it ran on. Wrap the whole thing in a deferred recover so a broken player
+// script produces a clean error return the caller can handle.
+func getFromPrepared(code string) (solvers *Solvers, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			solvers = nil
+			err = fmt.Errorf("compile cipher solver panicked: %v", r)
+		}
+	}()
+
 	vm := gojavm.New()
 
 	// Create result container
@@ -217,12 +231,12 @@ func getFromPrepared(code string) (*Solvers, error) {
 	}
 
 	// Execute the preprocessed code
-	_, err := vm.RunString(code)
+	_, err = vm.RunString(code)
 	if err != nil {
 		return nil, fmt.Errorf("run preprocessed code: %w", err)
 	}
 
-	solvers := &Solvers{}
+	solvers = &Solvers{}
 
 	// Extract sig function
 	sigVal := resultObj.Get("sig")
