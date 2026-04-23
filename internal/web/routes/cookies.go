@@ -46,7 +46,11 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		ok, err := autoCookieSvc.RefreshCookies(req.Context())
 		if err != nil {
-			jsonResponse(rw, map[string]any{"success": false, "error": "cookie refresh failed"})
+			// Return 500 so XHR callers with `if (!response.ok)` branches
+			// treat this as a real error. Previously the handler replied
+			// HTTP 200 with {success:false,...}, which the frontend could
+			// easily mis-handle as a successful call.
+			jsonError(rw, "cookie refresh failed", http.StatusInternalServerError)
 			return
 		}
 
@@ -90,7 +94,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		}
 
 		if err := autoCookieSvc.StartSetup(body.Platform); err != nil {
-			jsonResponse(rw, map[string]any{"success": false, "error": "failed to start setup"})
+			jsonError(rw, "failed to start setup", http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(rw, map[string]any{"success": true})
@@ -105,12 +109,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		ytAuth, twAuth, err := autoCookieSvc.FinishSetup(req.Context())
 		if err != nil {
-			jsonResponse(rw, map[string]any{
-				"success":              false,
-				"authenticated":        false,
-				"twitchAuthenticated":  false,
-				"error":               "failed to finish setup",
-			})
+			jsonError(rw, "failed to finish setup", http.StatusInternalServerError)
 			return
 		}
 		jsonResponse(rw, map[string]any{
