@@ -442,8 +442,10 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		}
 	}
 
-	// Save resume state when cancelled or context cancelled (shutdown race)
-	if len(cd.messages) > 0 && cd.wasCancelledOrShutdown(ctx) {
+	// Save resume state when cancelled or context cancelled (shutdown race).
+	// We save if there are unflushed messages OR any disk-flushed state exists
+	// (dedup IDs, continuation token) so a resume can pick up where we left off.
+	if cd.wasCancelledOrShutdown(ctx) && (len(cd.messages) > 0 || cd.flushedToDisk) {
 		cd.saveResume()
 	}
 }
