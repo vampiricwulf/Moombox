@@ -84,6 +84,21 @@ func TestPassiveTracker_SuccessPerTag(t *testing.T) {
 	}
 }
 
+func TestPassiveTracker_FailureSliceCapped(t *testing.T) {
+	pt := NewPassiveTracker()
+	// Push far more than the cap. Without bounding, the slice would grow
+	// unbounded until window expiry.
+	for range maxFailureEntries * 3 {
+		pt.ReportFailure("engine/fetch")
+	}
+	pt.mu.Lock()
+	got := len(pt.failures)
+	pt.mu.Unlock()
+	if got > maxFailureEntries {
+		t.Fatalf("failure slice exceeded cap: got %d, want <= %d", got, maxFailureEntries)
+	}
+}
+
 func TestPassiveTracker_WindowExpiry(t *testing.T) {
 	pt := &PassiveTracker{
 		window:   100 * time.Millisecond,
