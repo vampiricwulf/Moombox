@@ -141,8 +141,11 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 	er.cache[cacheKey] = data
 	er.cacheOrder = append(er.cacheOrder, cacheKey)
 	delete(er.inflight, cacheKey)
-	close(done) // unblock any waiters
 	er.mu.Unlock()
+	// Release er.mu before close(done) so any waiting goroutines wake up
+	// and re-acquire er.mu cleanly without contending against the still-
+	// held lock. Minor throughput win under high concurrent resolve rates.
+	close(done)
 
 	total := len(bttvResult) + len(ffzResult) + len(sevenTVResult)
 	if total > 0 {
