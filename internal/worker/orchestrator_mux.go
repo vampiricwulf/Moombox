@@ -13,6 +13,21 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
 
+// writeDescriptionAtomic writes the description via tmp+rename so a crash
+// mid-write can't leave a partially-written .description file that the DB
+// row still points at. The tmp file is cleaned up on rename failure.
+func writeDescriptionAtomic(finalPath, body string) error {
+	tmpPath := finalPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(body), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
 	o.logger.Info("muxing", "jobID", jobCtx.Job.ID)
 
@@ -325,10 +340,12 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		}
 	}
 
-	// Save video description as .description (matching TypeScript assetDownloader)
+	// Save video description as .description (matching TypeScript assetDownloader).
+	// Atomic write via tmp+rename: a crash mid-write would otherwise leave a
+	// truncated .description file with the DB row pointing at it.
 	if jobCtx.Job.Description != "" {
 		descPath := filepath.Join(outputDir, filenameBase+".description")
-		if err := os.WriteFile(descPath, []byte(jobCtx.Job.Description), 0o644); err != nil {
+		if err := writeDescriptionAtomic(descPath, jobCtx.Job.Description); err != nil {
 			o.logger.Warn("failed to save description", "err", err)
 		} else {
 			updates["description_file"] = descPath
