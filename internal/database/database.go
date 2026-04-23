@@ -294,31 +294,47 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	return job
 }
 
-// UpdateResumePosition saves the playback position without bumping updated_at
-// or triggering subscriber notifications. Designed for frequent periodic saves
-// during video playback (every ~10 seconds).
-func (db *Database) UpdateResumePosition(jobID string, seconds float64) {
+// silentColumns is the whitelist of columns that may be updated via
+// updateSingleColumnSilent. Restricting to this set prevents accidental misuse
+// for fields that should trigger subscriber notifications.
+var silentColumns = map[string]struct{}{
+	"resume_position": {},
+	"chat_offset":     {},
+}
+
+// updateSingleColumnSilent sets a single column on jobs WITHOUT bumping
+// updated_at or notifying subscribers. Designed for high-frequency player
+// state saves (every ~10s). The column name must be present in silentColumns
+// so this helper can't be misused for subscribed fields.
+func (db *Database) updateSingleColumnSilent(jobID, column string, value any, opName string) {
+	if _, ok := silentColumns[column]; !ok {
+		if db.logger != nil {
+			db.logger.Error(opName+": disallowed column", "column", column)
+		}
+		return
+	}
+
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	_, err := db.db.ExecContext(db.getCtx(),
-		"UPDATE jobs SET resume_position = ? WHERE id = ?", seconds, jobID)
+		"UPDATE jobs SET "+column+" = ? WHERE id = ?", value, jobID)
 	if err != nil && db.logger != nil {
-		db.logger.Error("UpdateResumePosition failed", "jobID", jobID, "err", err)
+		db.logger.Error(opName+" failed", "jobID", jobID, "err", err)
 	}
+}
+
+// UpdateResumePosition saves the playback position without bumping updated_at
+// or triggering subscriber notifications. Designed for frequent periodic saves
+// during video playback (every ~10 seconds).
+func (db *Database) UpdateResumePosition(jobID string, seconds float64) {
+	db.updateSingleColumnSilent(jobID, "resume_position", seconds, "UpdateResumePosition")
 }
 
 // UpdateChatOffset saves the chat timing offset without bumping updated_at
 // or triggering subscriber notifications.
 func (db *Database) UpdateChatOffset(jobID string, offset float64) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	_, err := db.db.ExecContext(db.getCtx(),
-		"UPDATE jobs SET chat_offset = ? WHERE id = ?", offset, jobID)
-	if err != nil && db.logger != nil {
-		db.logger.Error("UpdateChatOffset failed", "jobID", jobID, "err", err)
-	}
+	db.updateSingleColumnSilent(jobID, "chat_offset", offset, "UpdateChatOffset")
 }
 
 // rowScanner is implemented by both *sql.Row and *sql.Rows, allowing a single
