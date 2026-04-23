@@ -196,9 +196,28 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 			"error", err.Error(),
 		)
 		if rbErr := os.Rename(oldPath, u.exePath); rbErr != nil {
-			u.logger.Error("[Updater] Rollback also failed",
-				"error", rbErr.Error(),
+			// Both steps failed: the running binary no longer exists on disk
+			// at its original path. Log very loudly so the user notices even
+			// if the logger's file target is gone, and drop a marker file
+			// next to the binary so the launcher / next run has a clear
+			// breadcrumb for recovery.
+			u.logger.Error("[Updater] Rollback also failed — binary may be missing",
+				"original", u.exePath,
+				"backup", oldPath,
+				"staged", newPath,
+				"placeError", err.Error(),
+				"rollbackError", rbErr.Error(),
 			)
+			markerPath := u.exePath + ".update-broken"
+			msg := fmt.Sprintf("Moombox update failed at %s\nplace error: %v\nrollback error: %v\nOriginal binary may be at %s and staged binary at %s — manual recovery required.\n",
+				time.Now().UTC().Format(time.RFC3339), err, rbErr, oldPath, newPath)
+			if mErr := os.WriteFile(markerPath, []byte(msg), 0o644); mErr != nil {
+				u.logger.Error("[Updater] Failed to write broken-update marker",
+					"path", markerPath,
+					"error", mErr.Error(),
+				)
+			}
+			return fmt.Errorf("failed to place new binary and rollback failed: place=%v rollback=%v", err, rbErr)
 		}
 		return fmt.Errorf("failed to place new binary: %w", err)
 	}
@@ -279,9 +298,15 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 }
 
 // CleanupOldBinary removes stale files left over from previous updates:
-// .old (previous binary), .new (interrupted download), .new.sig (interrupted verification).
+// .old (previous binary), .new (interrupted download), .new.sig (interrupted
+// verification), and .sig (VerifyCurrentSignature intermediate that may be
+// left behind if ApplyUpdate was interrupted between its write and rename).
+//
+// .update-broken markers from a failed double-rename rollback are
+// intentionally NOT cleaned here — they are evidence for the user that
+// manual recovery may be needed and should be deleted explicitly.
 func (u *Updater) CleanupOldBinary() {
-	for _, suffix := range []string{".old", ".new", ".new.sig"} {
+	for _, suffix := range []string{".old", ".new", ".new.sig", ".sig"} {
 		path := u.exePath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {
