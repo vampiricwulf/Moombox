@@ -26,7 +26,6 @@ type BotGuardClient struct {
 	vm            *goja.Runtime
 	timerMgr      *gojahelpers.TimerManager
 	globalName    string
-	syncSnapshot  goja.Callable
 	asyncSnapshot goja.Callable
 	shutdownFn    goja.Callable
 	logger        botguardLogger // may be nil
@@ -155,21 +154,11 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 	emptyArrays := vm.ToValue([][]any{{}, {}})
 
 	// Call vm.a(program, callback, true, undefined, noOp, [[], []])
-	result, err := aFn(vmObj, vm.ToValue(challenge.Program), callbackFn, vm.ToValue(true), goja.Undefined(), noOp, emptyArrays)
-	if err != nil {
+	// Return value (upstream's "syncSnapshot" position) is intentionally ignored —
+	// we only need the asyncSnapshot / shutdownFn delivered via the callback arg.
+	if _, err := aFn(vmObj, vm.ToValue(challenge.Program), callbackFn, vm.ToValue(true), goja.Undefined(), noOp, emptyArrays); err != nil {
 		client.Shutdown()
 		return nil, &BGError{Code: ErrSyncSnapshot, Message: fmt.Sprintf("vm.a() call failed: %v", err)}
-	}
-
-	// Extract syncSnapshot from result (first element if array)
-	if result != nil && !goja.IsUndefined(result) {
-		resultObj := result.ToObject(vm)
-		idx0 := resultObj.Get("0")
-		if idx0 != nil && !goja.IsUndefined(idx0) {
-			if fn, ok := goja.AssertFunction(idx0); ok {
-				client.syncSnapshot = fn
-			}
-		}
 	}
 
 	// Drain any timer callbacks that were enqueued during vm.a() execution.
