@@ -28,13 +28,14 @@ var nArrayPatterns = []*regexp.Regexp{
 
 // urlClassPatterns match the n-param URL class by finding the pattern:
 //   new XXXX(url, !0)).get("n")  or  new XXXX(url, true)).get("n")
-// The class name changes across player versions (e.g., g.fb → g.sB).
-// Patterns are tried in priority order: dotted (!0), dotted (true), bare.
+// The class name changes across player versions (e.g., g.fb → g.sB). Some
+// future minifier could nest another level ("a.b.c"); the multi-level form
+// accepts any number of dotted segments. Bare identifier stays as a fallback.
 var urlClassPatterns = []*regexp.Regexp{
-	// Dotted identifier with !0: new g.sB(Z, !0)).get("n")
-	regexp.MustCompile(`new\s+([a-zA-Z_$][\w$]*\.[a-zA-Z_$][\w$]*)\([^,]+,\s*!0\)\)\.get\("n"\)`),
+	// Dotted identifier with !0: new g.sB(Z, !0)).get("n") — also a.b.c.X
+	regexp.MustCompile(`new\s+([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)+)\([^,]+,\s*!0\)\)\.get\("n"\)`),
 	// Dotted identifier with true: new g.sB(Z, true)).get("n")
-	regexp.MustCompile(`new\s+([a-zA-Z_$][\w$]*\.[a-zA-Z_$][\w$]*)\([^,]+,\s*true\)\)\.get\("n"\)`),
+	regexp.MustCompile(`new\s+([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)+)\([^,]+,\s*true\)\)\.get\("n"\)`),
 	// Bare identifier: new UrlBuilder(Z, !0)).get("n") or true
 	regexp.MustCompile(`new\s+([a-zA-Z_$][\w$]*)\([^,]+,\s*(?:!0|true)\)\)\.get\("n"\)`),
 }
