@@ -660,7 +660,7 @@ This distinction is critical: on shutdown, jobs in `Downloading` status keep tha
 func isTerminalStatus(status database.JobStatus) bool {
     switch status {
     case database.StatusFinished, database.StatusError,
-         database.StatusCancelled, database.StatusMuxing:
+         database.StatusCancelled:
         return true
     default:
         return false
@@ -668,7 +668,10 @@ func isTerminalStatus(status database.JobStatus) bool {
 }
 ```
 
-Note: `Muxing` is treated as terminal for the queue (the job is not re-enqueued) because muxing runs in a background goroutine that completes independently.
+Note: `Muxing` is **not** terminal. If muxing was interrupted by shutdown
+(the muxer process was killed mid-encode), `enqueueExistingJobs` resets
+the job's status back to `Downloading` on next launch so the orchestrator
+re-runs the mux step. Mux is idempotent — partial output is overwritten.
 
 ## Error Hierarchy
 
