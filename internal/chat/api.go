@@ -489,9 +489,34 @@ func parseMessageRuns(message map[string]any) []MessagePart {
 			}
 			if image, ok := emoji["image"].(map[string]any); ok {
 				if thumbs, ok := image["thumbnails"].([]any); ok && len(thumbs) > 0 {
-					if thumb, ok := thumbs[0].(map[string]any); ok {
-						part.EmojiURL, _ = thumb["url"].(string)
+					// Pick the largest thumbnail (by width*height, then width,
+					// then height) rather than thumbs[0] which is usually the
+					// smallest.
+					var bestURL string
+					var bestScore int64
+					for _, t := range thumbs {
+						tm, ok := t.(map[string]any)
+						if !ok {
+							continue
+						}
+						url, _ := tm["url"].(string)
+						if url == "" {
+							continue
+						}
+						w, _ := tm["width"].(float64)
+						h, _ := tm["height"].(float64)
+						score := int64(w) * int64(h)
+						if score == 0 {
+							// Fallback when dimensions are missing — prefer
+							// whichever has dimensions, else just the last one.
+							score = int64(w) + int64(h)
+						}
+						if bestURL == "" || score > bestScore {
+							bestURL = url
+							bestScore = score
+						}
 					}
+					part.EmojiURL = bestURL
 				}
 			}
 			if v, ok := emoji["isCustomEmoji"].(bool); ok {
