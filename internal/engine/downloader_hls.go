@@ -284,6 +284,11 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 
 	work := make(chan segWork, ParallelDownloads)
 	results := make(chan segResult, ParallelDownloads*3)
+	// done unblocks workers stuck on a full results channel when the
+	// consumer below returns early on write error; without it wg.Wait
+	// would never complete and the entire worker pool would leak.
+	done := make(chan struct{})
+	defer close(done)
 	var wg sync.WaitGroup
 
 	// Spawn fixed worker pool
@@ -299,7 +304,11 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 					continue // drain channel
 				}
 				if data := d.fetchSegmentWithRetry(ctx, item.segURL); data != nil {
-					results <- segResult{idx: item.idx, data: data}
+					select {
+					case results <- segResult{idx: item.idx, data: data}:
+					case <-done:
+						return
+					}
 				}
 			}
 		})

@@ -41,6 +41,13 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	bufferCap := ParallelDownloads * 3
 	work := make(chan segWork, ParallelDownloads)
 	results := make(chan segResult, bufferCap)
+	// done is closed when this function returns so workers blocked on
+	// `results <-` can unblock and exit. Without it, an early consumer
+	// return (e.g. write error below) would leave workers wedged on a
+	// full results channel — wg.Wait then blocks forever and the closer
+	// goroutine never closes results, leaking the entire pool.
+	done := make(chan struct{})
+	defer close(done)
 	var wg sync.WaitGroup
 
 	// Spawn fixed worker pool
@@ -57,7 +64,11 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				}
 				segURL := d.buildSegmentURL(item.seq)
 				if data := d.fetchSegmentWithRetry(ctx, segURL); data != nil {
-					results <- segResult{seq: item.seq, data: data}
+					select {
+					case results <- segResult{seq: item.seq, data: data}:
+					case <-done:
+						return
+					}
 				}
 			}
 		})
