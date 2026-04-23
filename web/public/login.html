@@ -113,7 +113,7 @@
         </style>
     </head>
     <body>
-        <div class="login-container">
+        <main class="login-container">
             <div class="login-header">
                 <sl-icon name="box-seam"></sl-icon>
                 <h1>Moombox</h1>
@@ -128,19 +128,21 @@
             <div class="login-form">
                 <sl-input
                     id="login-password"
+                    name="password"
                     type="password"
                     label="Password"
                     placeholder="Enter password"
                     required
                     autofocus
                     toggle-password
+                    autocomplete="current-password"
                 ></sl-input>
                 <sl-button id="login-submit" variant="primary">
                     <sl-icon slot="prefix" name="box-arrow-in-right"></sl-icon>
                     Login
                 </sl-button>
             </div>
-        </div>
+        </main>
 
         <script>
             document.addEventListener("DOMContentLoaded", () => {
