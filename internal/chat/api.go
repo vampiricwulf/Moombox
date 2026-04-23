@@ -590,6 +590,7 @@ func generateMessageID() string {
 // multiple chat downloaders running in parallel touched generateMessageID
 // simultaneously — audit chat.md C10).
 func randomAlphaNum(n int) string {
+	// math/rand/v2 top-level funcs are concurrency-safe; see go.dev/ref/mod.
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
