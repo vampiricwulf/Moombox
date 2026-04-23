@@ -33,6 +33,10 @@ export class PlayerController {
     this._onPauseSave = null;
     this._onSeekedWatch = null;
     this._onBeforeUnload = null;
+
+    // Abort controller for the resume-dialog document keydown listener,
+    // so clearPlayer()/job switches don't leak a stale Escape handler.
+    this._resumeDialogAbort = null;
   }
 
   initPlayer() {
@@ -371,7 +375,7 @@ export class PlayerController {
 
     // Stop watch tracking (interval, pause handler, beforeunload)
     this._clearWatchTracking();
-    document.querySelector("#player-video-wrapper .resume-overlay")?.remove();
+    this._dismissResumeDialog();
 
     this.playerJob = null;
     this.playerChatData = null;
@@ -581,7 +585,7 @@ export class PlayerController {
     if (segIndicator) segIndicator.remove();
 
     // Remove resume overlay if present from previous job
-    document.querySelector("#player-video-wrapper .resume-overlay")?.remove();
+    this._dismissResumeDialog();
 
     // Multi-segment or single-file video source
     if (this.playerJob.segments && this.playerJob.segments.length > 0) {
@@ -1095,8 +1099,8 @@ export class PlayerController {
 
   _showResumeDialog(jobId, resumeSeconds) {
     const wrapper = document.getElementById("player-video-wrapper");
-    // Remove any existing overlay
-    wrapper.querySelector(".resume-overlay")?.remove();
+    // Remove any existing overlay and tear down any prior keydown handler
+    this._dismissResumeDialog();
 
     const formatted = formatTimestamp(resumeSeconds);
     const overlay = document.createElement("div");
@@ -1118,20 +1122,21 @@ export class PlayerController {
     `;
     wrapper.appendChild(overlay);
 
-    const dismiss = () => {
-      overlay.remove();
-      document.removeEventListener("keydown", onKeydown);
-    };
+    // Bind all handlers through an AbortController so they can be torn down
+    // cleanly on job switch / clearPlayer, not just Escape/click inside the overlay.
+    this._resumeDialogAbort = new AbortController();
+    const sig = this._resumeDialogAbort.signal;
 
-    const onKeydown = (e) => {
+    const dismiss = () => this._dismissResumeDialog();
+
+    document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         dismiss();
         // Start from beginning on Escape (same as clicking "Start from beginning")
         document.getElementById("player-video").play();
         this._startWatchTracking(jobId);
       }
-    };
-    document.addEventListener("keydown", onKeydown);
+    }, { signal: sig });
 
     overlay.querySelector("#resume-continue").addEventListener("click", () => {
       dismiss();
@@ -1143,18 +1148,31 @@ export class PlayerController {
       }
       video.play();
       this._startWatchTracking(jobId);
-    });
+    }, { signal: sig });
 
     overlay.querySelector("#resume-start").addEventListener("click", () => {
       dismiss();
       document.getElementById("player-video").play();
       this._startWatchTracking(jobId);
-    });
+    }, { signal: sig });
 
     // Focus the primary action
     requestAnimationFrame(() => {
       overlay.querySelector("#resume-continue")?.focus();
     });
+  }
+
+  /**
+   * Tear down the resume-dialog overlay and any associated listeners.
+   * Safe to call even if no overlay is currently shown.
+   */
+  _dismissResumeDialog() {
+    const wrapper = document.getElementById("player-video-wrapper");
+    wrapper?.querySelector(".resume-overlay")?.remove();
+    if (this._resumeDialogAbort) {
+      this._resumeDialogAbort.abort();
+      this._resumeDialogAbort = null;
+    }
   }
 
 
