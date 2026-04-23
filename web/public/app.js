@@ -740,18 +740,26 @@ class MoomboxApp {
     if (!this._version) { el.style.display = "none"; return; }
 
     el.style.display = "";
-    // Remove old listener by replacing with a fresh clone
-    const fresh = el.cloneNode(false);
-    el.replaceWith(fresh);
+    // Bind a single stable click handler once; toggle what it does via
+    // the _updateAvailable flag. Previously we cloneNode(false)'d the
+    // element to drop the prior listener, which also dropped any nested
+    // icon children that might be added later and any unrelated listeners.
+    if (!this._versionClickHandler) {
+      this._versionClickHandler = () => {
+        if (this._updateAvailable) this.showUpdateDialog();
+      };
+      el.addEventListener("click", this._versionClickHandler);
+    }
     if (this._updateAvailable) {
-      fresh.textContent = `v${this._version} ⬆`;
-      fresh.className = "version-indicator has-update";
-      fresh.title = `Update available: v${this._updateAvailable.version}`;
-      fresh.addEventListener("click", () => this.showUpdateDialog());
+      el.textContent = `v${this._version} ⬆`;
+      el.className = "version-indicator has-update";
+      el.title = `Update available: v${this._updateAvailable.version}`;
+      el.style.cursor = "pointer";
     } else {
-      fresh.textContent = `v${this._version}`;
-      fresh.className = "version-indicator";
-      fresh.title = `Moombox v${this._version}`;
+      el.textContent = `v${this._version}`;
+      el.className = "version-indicator";
+      el.title = `Moombox v${this._version}`;
+      el.style.cursor = "";
     }
   }
 
