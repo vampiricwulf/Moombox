@@ -10,6 +10,13 @@
     --status-cancelled: #6b7280;
     --status-cookies: #d946ef;
 
+    /* Bottom-bar geometry — status bar is fixed at the viewport bottom and the
+       batch-action bar slides up above it. Body padding and the batch bar's
+       bottom offset reference these vars so the stack stays consistent if the
+       status-bar height changes. */
+    --status-bar-h: 28px;
+    --batch-bar-h: 40px;
+
     /* Toasts must render above the setup/FFmpeg overlays (z-index 10000) */
     --sl-z-index-toast: 10100;
 }
@@ -791,7 +798,7 @@ sl-badge.status.cookies::part(base) {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    height: 28px;
+    height: var(--status-bar-h);
     padding: 0 var(--sl-spacing-medium);
     background: var(--sl-color-neutral-100);
     border-top: 1px solid var(--sl-color-neutral-200);
@@ -803,11 +810,11 @@ sl-badge.status.cookies::part(base) {
 
 /* Add padding to body to account for fixed status bar */
 body {
-    padding-bottom: 28px;
+    padding-bottom: var(--status-bar-h);
 }
 
 body.batch-bar-active {
-    padding-bottom: 68px;
+    padding-bottom: calc(var(--status-bar-h) + var(--batch-bar-h));
 }
 
 #status-bar-left, #status-bar-right {
@@ -2508,7 +2515,7 @@ html.sl-theme-light {
 /* ===== Batch Selection ===== */
 #batch-action-bar {
     position: fixed;
-    bottom: 28px; /* sits above the 28px status bar */
+    bottom: var(--status-bar-h); /* sits above the status bar */
     left: 0;
     right: 0;
     background: var(--sl-color-neutral-100);
