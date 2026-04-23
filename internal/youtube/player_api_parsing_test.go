@@ -261,6 +261,55 @@ func TestClassifyStream_VOD(t *testing.T) {
 	}
 }
 
+func TestClassifyStream_LiveStreamabilityFallback(t *testing.T) {
+	// ANDROID_VR probes of an unpublished scheduled premiere sometimes
+	// return only playabilityStatus.liveStreamability — no microformat,
+	// no videoDetails.isUpcoming, no LIVE_STREAM_OFFLINE status. Those
+	// should still classify as upcoming rather than not_a_stream.
+	vd := map[string]any{}
+	ps := map[string]any{
+		"status": "OK",
+		"liveStreamability": map[string]any{
+			"liveStreamabilityRenderer": map[string]any{
+				"offlineSlate": map[string]any{
+					"liveStreamOfflineSlateRenderer": map[string]any{
+						"scheduledStartTime": "1999999999",
+					},
+				},
+			},
+		},
+	}
+
+	status, _, isUpcoming, _ := classifyStream(vd, ps, nil, false)
+	if status != StreamUpcoming {
+		t.Errorf("expected StreamUpcoming from liveStreamability, got %q", status)
+	}
+	if !isUpcoming {
+		t.Error("expected isUpcoming=true from liveStreamability")
+	}
+}
+
+func TestClassifyStream_LiveStreamabilityDoesNotOverrideFormats(t *testing.T) {
+	// A stream that has liveStreamability but also has formats is already
+	// live — the hasFormats guard should keep classification out of the
+	// upcoming branch.
+	vd := map[string]any{"isLiveContent": true, "isLive": true}
+	ps := map[string]any{
+		"status": "OK",
+		"liveStreamability": map[string]any{
+			"liveStreamabilityRenderer": map[string]any{},
+		},
+	}
+
+	status, isLive, _, _ := classifyStream(vd, ps, nil, true)
+	if status == StreamUpcoming {
+		t.Errorf("should not classify as upcoming when formats are present, got %q", status)
+	}
+	if !isLive {
+		t.Error("expected isLive=true when formats are present")
+	}
+}
+
 func TestClassifyStream_PostLiveDVR(t *testing.T) {
 	vd := map[string]any{"isLiveContent": true}
 	mf := map[string]any{
@@ -299,6 +348,41 @@ func TestCollectFormats(t *testing.T) {
 	}
 }
 
+func TestCollectFormats_DoesNotMutateInput(t *testing.T) {
+	formats := []Format{
+		{Itag: 137, MimeType: "video/mp4", URL: "https://example.com/v"},
+		{Itag: 140, MimeType: "audio/mp4", URL: "https://example.com/a"},
+	}
+
+	pool := []Format{}
+	collectFormats(&pool, formats, "first", AuthLevelWeb)
+
+	// The caller's slice must retain its original empty Source/AuthLevel so
+	// that a subsequent collectFormats call with a different source/level
+	// does not get a stale value from the previous call.
+	for i, f := range formats {
+		if f.Source != "" {
+			t.Errorf("formats[%d].Source was mutated to %q, expected empty", i, f.Source)
+		}
+		if f.AuthLevel != nil {
+			t.Errorf("formats[%d].AuthLevel was mutated to %v, expected nil", i, f.AuthLevel)
+		}
+	}
+
+	// A second collect with a different source/level must not be leaked into
+	// previously-added pool entries.
+	pool2 := []Format{}
+	collectFormats(&pool2, formats, "second", AuthLevelAndroidVR)
+	for _, f := range pool {
+		if f.Source != "first" {
+			t.Errorf("pool entry source changed to %q after second collect", f.Source)
+		}
+		if f.AuthLevel == nil || *f.AuthLevel != AuthLevelWeb {
+			t.Errorf("pool entry auth level changed to %v after second collect", f.AuthLevel)
+		}
+	}
+}
+
 func TestDeduplicateFormats(t *testing.T) {
 	webAuth := AuthLevelWeb
 	vrAuth := AuthLevelAndroidVR
@@ -323,6 +407,26 @@ func TestDeduplicateFormats(t *testing.T) {
 				t.Errorf("expected itag 137 to prefer lower auth level (AndroidVR), got %d", *f.AuthLevel)
 			}
 		}
+	}
+}
+
+func TestDeduplicateFormats_SameAuthPrefersFirstInsertion(t *testing.T) {
+	// When two formats share the same itag AND auth level, the first one
+	// inserted into the pool wins. This is the guarantee
+	// parseFormatsWithCipher relies on to prefer adaptiveFormats over the
+	// legacy muxed formats[] array (adaptiveFormats is iterated first).
+	webAuth := AuthLevelWeb
+	pool := []Format{
+		{Itag: 137, URL: "https://example.com/adaptive", AuthLevel: &webAuth, Source: "adaptive"},
+		{Itag: 137, URL: "https://example.com/muxed", AuthLevel: &webAuth, Source: "muxed"},
+	}
+
+	result := deduplicateFormats(pool)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 deduplicated format, got %d", len(result))
+	}
+	if result[0].Source != "adaptive" {
+		t.Errorf("expected first-inserted (adaptive) to win same-auth tiebreak, got %q", result[0].Source)
 	}
 }
 
@@ -355,6 +459,52 @@ func TestHasAdequateFormats(t *testing.T) {
 	}}
 	if !hasAdequateFormats(info) {
 		t.Error("expected true for video+audio formats")
+	}
+
+	// Audio detection should work even when AudioQuality is empty but mime
+	// type says audio (seen with some Innertube adaptiveFormats payloads).
+	info = &VideoInfo{Formats: []Format{
+		{Itag: 137, MimeType: "video/mp4", Width: new(1920), Height: new(1080), URL: "https://example.com"},
+		{Itag: 140, MimeType: "audio/mp4; codecs=\"mp4a.40.2\"", URL: "https://example.com"},
+	}}
+	if !hasAdequateFormats(info) {
+		t.Error("expected true when audio-only format has empty AudioQuality but audio mime type")
+	}
+}
+
+func TestFormatIsAudio(t *testing.T) {
+	tests := []struct {
+		name string
+		f    Format
+		want bool
+	}{
+		{
+			"audio mime, no AudioQuality",
+			Format{MimeType: "audio/mp4; codecs=\"mp4a.40.2\""},
+			true,
+		},
+		{
+			"audio mime with AudioQuality",
+			Format{MimeType: "audio/webm; codecs=\"opus\"", AudioQuality: "AUDIO_QUALITY_MEDIUM"},
+			true,
+		},
+		{
+			"video mime",
+			Format{MimeType: "video/mp4", Width: new(1920), Height: new(1080)},
+			false,
+		},
+		{
+			"audio mime but has Width set (combined/muxed — unusual)",
+			Format{MimeType: "audio/mp4", Width: new(1920)},
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.f.IsAudio(); got != tt.want {
+				t.Errorf("IsAudio() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

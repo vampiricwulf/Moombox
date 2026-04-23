@@ -1,6 +1,8 @@
 // Package youtube provides YouTube Innertube API integration.
 package youtube
 
+import "strings"
+
 // StreamStatus indicates the current state of a YouTube video.
 type StreamStatus string
 
@@ -70,9 +72,13 @@ func (f *Format) IsVideo() bool {
 	return f.Width != nil || f.Height != nil
 }
 
-// IsAudio returns true if this format contains audio only.
+// IsAudio returns true if this format contains audio only. Uses mimeType as
+// the primary signal because some Innertube responses (notably TV client
+// adaptiveFormats) omit audioQuality entirely — relying on AudioQuality alone
+// would misclassify those as non-audio and trip hasAdequateFormats into an
+// unnecessary ANDROID_VR fallback.
 func (f *Format) IsAudio() bool {
-	return f.AudioQuality != "" && f.Width == nil
+	return strings.Contains(f.MimeType, "audio") && f.Width == nil
 }
 
 // MaxDimension returns max(width, height) for resolution comparison.
@@ -114,6 +120,15 @@ const (
 	AuthLevelWeb         = 5
 	AuthLevelWebEmbedded = 6
 	AuthLevelWebCreator  = 7
+)
+
+// Sentinel values written by parsePlayerResponse when metadata is missing.
+// mergeWatchPageMetadata inspects these to decide whether to overwrite with
+// a source value; they must stay in sync with the strings produced in
+// parsePlayerResponse.
+const (
+	UnknownTitleSentinel   = "Unknown Title"
+	UnknownChannelSentinel = "Unknown Channel"
 )
 
 // CreateEmptyVideoInfo creates a minimal valid VideoInfo for error paths.

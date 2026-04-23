@@ -47,10 +47,10 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		description = ytcfg.Description
 	}
 	if title == "" {
-		title = "Unknown Title"
+		title = UnknownTitleSentinel
 	}
 	if channelName == "" {
-		channelName = "Unknown Channel"
+		channelName = UnknownChannelSentinel
 	}
 
 	// Thumbnail
@@ -140,7 +140,14 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 	}
 
 	var formats []Format
-	for _, key := range []string{"formats", "adaptiveFormats"} {
+	cipherNeededButMissing := false
+	// adaptiveFormats is iterated first so that when an itag appears in both
+	// arrays the DASH/adaptive entry lands in the pool first and wins the
+	// same-auth-level tiebreak in deduplicateFormats. adaptiveFormats carry
+	// contentLength + clean byte ranges and are the preferred source for
+	// live→post-live transitions where formats[] can temporarily point at
+	// muxed URLs that 404 once the broadcast wraps up.
+	for _, key := range []string{"adaptiveFormats", "formats"} {
 		arr, ok := streamingData[key].([]any)
 		if !ok {
 			continue
@@ -155,10 +162,19 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 			sigCipher := getStr(f, "signatureCipher")
 
 			// Handle signatureCipher (older format without direct URL)
-			if formatURL == "" && sigCipher != "" && playerURL != "" && p.cipherSolver != nil {
-				decrypted := p.decryptSignatureCipher(ctx, sigCipher, playerURL)
-				if decrypted != "" {
-					formatURL = decrypted
+			if formatURL == "" && sigCipher != "" {
+				if playerURL != "" && p.cipherSolver != nil {
+					decrypted := p.decryptSignatureCipher(ctx, sigCipher, playerURL)
+					if decrypted != "" {
+						formatURL = decrypted
+					}
+				} else if p.cipherSolver == nil {
+					// Caller did not wire a cipher solver, but this response
+					// shipped ciphered URLs — every such format will be
+					// dropped. Surface a single Warn so a silently-broken
+					// init (no cipher cache dir, disabled pipeline, etc.)
+					// is visible.
+					cipherNeededButMissing = true
 				}
 			}
 
@@ -166,9 +182,17 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 				continue
 			}
 
-			// Decrypt n-parameter to avoid throttling
+			// Decrypt n-parameter to avoid throttling. If decryption is
+			// attempted and fails, drop the format entirely — YouTube's CDN
+			// will return HTTP 403 on a throttled URL that carries an
+			// encrypted n-value the player can't solve, so keeping the raw
+			// URL would just waste retries and produce misleading errors.
 			if playerURL != "" && p.cipherSolver != nil {
-				formatURL = p.decryptNParam(ctx, formatURL, playerURL)
+				decrypted, ok := p.decryptNParamStrict(ctx, formatURL, playerURL)
+				if !ok {
+					continue
+				}
+				formatURL = decrypted
 			}
 
 			format := Format{
@@ -195,6 +219,9 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 
 			formats = append(formats, format)
 		}
+	}
+	if cipherNeededButMissing {
+		p.logger.Warn("[PlayerApi] Response contained signatureCipher formats but no cipher solver is wired; ciphered formats were dropped")
 	}
 	return formats
 }
@@ -254,31 +281,51 @@ func (p *PlayerAPI) decryptSignatureCipher(ctx context.Context, sigCipher, playe
 }
 
 // decryptNParam decrypts the n-parameter in a URL to avoid throttling.
+// On any failure it returns the raw URL unchanged, so callers that prefer
+// a best-effort behaviour (manifest/VOD refreshers) can keep using it. For
+// the parser's own format list, use decryptNParamStrict, which signals
+// failure so the caller can drop the format.
+//
 // Uses string replacement to preserve original URL parameter order —
 // Go's url.Values.Encode() sorts parameters alphabetically, which breaks
 // YouTube's URL signature verification and causes HTTP 403.
 func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string) string {
+	out, _ := p.decryptNParamStrict(ctx, rawURL, playerURL)
+	if out == "" {
+		return rawURL
+	}
+	return out
+}
+
+// decryptNParamStrict is like decryptNParam but returns (newURL, true) only
+// when the URL either had no n-param to decrypt or the decryption succeeded.
+// When the URL has an n-param but decryption fails (solver unavailable,
+// Goja error, etc.) it returns ("", false) so the caller can drop the
+// format. Keeping a throttled URL in the pool would just 403 at the CDN
+// and waste retries.
+func (p *PlayerAPI) decryptNParamStrict(ctx context.Context, rawURL, playerURL string) (string, bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return rawURL
+		return "", false
 	}
 
 	// Extract the raw (percent-encoded) n-param for accurate string matching.
 	rawN, nParam := cipher.RawQueryParam(u.RawQuery, "n")
 	if rawN == "" || nParam == "" {
-		return rawURL
+		// No n-param to decrypt — URL is already usable.
+		return rawURL, true
 	}
 
 	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
 	if err != nil {
 		p.logger.Warn("[PlayerApi] N-param solver unavailable", slog.String("error", err.Error()))
-		return rawURL
+		return "", false
 	}
 
 	decryptedN, err := solvers.DecryptN(nParam)
 	if err != nil {
 		p.logger.Warn("[PlayerApi] N-param decryption failed", slog.String("error", err.Error()))
-		return rawURL
+		return "", false
 	}
 
 	// Replace the first occurrence of n=<value> that is a proper query parameter
@@ -286,10 +333,12 @@ func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string)
 	for _, prefix := range []string{"?", "&"} {
 		old := prefix + "n=" + rawN
 		if strings.Contains(rawURL, old) {
-			return strings.Replace(rawURL, old, prefix+"n="+url.QueryEscape(decryptedN), 1)
+			return strings.Replace(rawURL, old, prefix+"n="+url.QueryEscape(decryptedN), 1), true
 		}
 	}
-	return rawURL
+	// The decrypt succeeded but the n= token wasn't in a recognisable
+	// query position — treat as pass-through.
+	return rawURL, true
 }
 
 // DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.
@@ -405,6 +454,14 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	isUpcomingFromPlayability := status == "LIVE_STREAM_OFFLINE" ||
 		(status == "UNPLAYABLE" && strings.Contains(reason, "live event will begin"))
 
+	// playabilityStatus.liveStreamability is the renderer YouTube attaches
+	// to scheduled streams that haven't gone live yet. Some probes
+	// (notably ANDROID_VR on unpublished premieres) return this without
+	// a full microformat or videoDetails.isUpcoming flag — the raw
+	// fallthrough would misclassify those as not_a_stream and end the
+	// polling cycle. Detect it independently.
+	_, hasLiveStreamability := getNestedMap(playabilityStatus, "liveStreamability", "liveStreamabilityRenderer")
+
 	// Premiere detection: has scheduled start but not marked as live content,
 	// and reason contains "premiere" or videoDetails says upcoming.
 	isPremiere := lbd != nil && getStr(lbd, "startTimestamp") != "" && !isLiveContent &&
@@ -428,6 +485,12 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	if isLiveNow || isPremiereNow {
 		return StreamLive, true, false, false
 	}
+	// liveStreamability with no formats — treat as upcoming. Runs before the
+	// lbd==nil && !isLiveContent shortcut so premieres that only expose the
+	// renderer aren't mis-classified as not_a_stream.
+	if hasLiveStreamability && !hasFormats {
+		return StreamUpcoming, false, true, false
+	}
 	if lbd == nil && !isLiveContent && !isPremiere {
 		return StreamNotAStream, false, false, false
 	}
@@ -440,11 +503,19 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	return StreamVOD, false, false, false
 }
 
+// collectFormats appends formats into pool with the given source label and
+// auth level. Each format is copied into the pool rather than mutated in
+// place, so the caller's slice is unaffected — important when the same
+// Format slice is referenced by more than one VideoInfo (e.g. when a
+// watch-page parse is shared between the public and authenticated paths).
+// The shared authLevel pointer is intentional: dedup compares levels by
+// value, not identity.
 func collectFormats(pool *[]Format, formats []Format, source string, authLevel int) {
-	for i := range formats {
-		formats[i].Source = source
-		formats[i].AuthLevel = &authLevel
-		*pool = append(*pool, formats[i])
+	level := authLevel
+	for _, f := range formats {
+		f.Source = source
+		f.AuthLevel = &level
+		*pool = append(*pool, f)
 	}
 }
 

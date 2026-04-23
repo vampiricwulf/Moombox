@@ -12,8 +12,10 @@ import (
 )
 
 var (
-	homepageVisitorDataRe = regexp.MustCompile(`"(?:visitorData|visitor_data)":"([^"]+)"`)
-	homepageApiKeyRe      = regexp.MustCompile(`"INNERTUBE_API_KEY":"([^"]+)"`)
+	// homepageApiKeyRe extracts the Innertube API key from the YouTube homepage.
+	// Visitor-data extraction reuses the shared visitorDataRegex from
+	// watch_page.go so a rename only has to be edited in one place.
+	homepageApiKeyRe = regexp.MustCompile(`"INNERTUBE_API_KEY":"([^"]+)"`)
 )
 
 // Service is the YouTube service facade wrapping player API, auth, and format selection.
@@ -81,7 +83,7 @@ func (s *Service) Init(ctx context.Context) {
 		html := string(body)
 
 		// Extract visitor data
-		if m := homepageVisitorDataRe.FindStringSubmatch(html); m != nil {
+		if m := visitorDataRegex.FindStringSubmatch(html); m != nil {
 			s.vdMu.Lock()
 			s.visitorData = m[1]
 			s.vdMu.Unlock()

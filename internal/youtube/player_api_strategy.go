@@ -460,7 +460,10 @@ func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg
 }
 
 // doRetryRequest performs an HTTP POST with retry logic (up to 4 attempts with
-// exponential backoff on 5xx/429 errors). Parses the player response on success.
+// exponential backoff). Retries on transport errors, partial body reads,
+// 5xx/429 responses, and JSON unmarshal failures — all of which have been
+// observed as transient CDN issues that would otherwise unnecessarily push
+// callers through their full fallback chain.
 func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []byte, headers map[string]string, ytcfg *YtcfgData, clientLabel string) (*VideoInfo, error) {
 	var playerURL string
 	if ytcfg != nil {
@@ -497,7 +500,13 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 		resp.Body.Close()
 		if err != nil {
-			lastErr = err
+			// Partial body read (truncated CDN response, transient network
+			// hiccup). Retry rather than fall through to the next client.
+			lastErr = fmt.Errorf("%s read body: %w", clientLabel, err)
+			p.logger.Debug("[PlayerApi] Body read failed, retrying",
+				slog.String("client", clientLabel),
+				slog.Int("attempt", attempt+1),
+				slog.String("error", err.Error()))
 			continue
 		}
 
@@ -511,7 +520,16 @@ func (p *PlayerAPI) doRetryRequest(ctx context.Context, apiURL string, body []by
 
 		var data map[string]any
 		if err := json.Unmarshal(respBody, &data); err != nil {
-			return nil, fmt.Errorf("failed to parse response: %w", err)
+			// A 200 with unparseable JSON usually means a truncated or
+			// HTML-wrapped edge response; retry so a one-off CDN glitch
+			// does not knock us off to the next client for good.
+			lastErr = fmt.Errorf("%s parse response: %w", clientLabel, err)
+			p.logger.Debug("[PlayerApi] JSON unmarshal failed, retrying",
+				slog.String("client", clientLabel),
+				slog.Int("attempt", attempt+1),
+				slog.Int("bodyLen", len(respBody)),
+				slog.String("error", err.Error()))
+			continue
 		}
 		return p.parsePlayerResponse(ctx, data, playerURL, ytcfg)
 	}
@@ -550,10 +568,10 @@ func mergeWatchPageMetadata(target *VideoInfo, source *VideoInfo) {
 	if target.ThumbnailURL == "" {
 		target.ThumbnailURL = source.ThumbnailURL
 	}
-	if target.Title == "Unknown Title" && source.Title != "Unknown Title" {
+	if target.Title == UnknownTitleSentinel && source.Title != UnknownTitleSentinel {
 		target.Title = source.Title
 	}
-	if target.ChannelName == "Unknown Channel" && source.ChannelName != "Unknown Channel" {
+	if target.ChannelName == UnknownChannelSentinel && source.ChannelName != UnknownChannelSentinel {
 		target.ChannelName = source.ChannelName
 	}
 	if target.ChannelID == "" {
