@@ -1,6 +1,15 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.2` with a second batch of audit-driven fixes (Twitch correctness, constants cleanup).
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.3` with a third batch covering cipher/STS invalidation, engine-level atomic fields and HTTP transport tuning, and a Twitch chat data-loss fix.
 
-This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-report audit: security hardening, database correctness, cipher resilience, Twitch extraction fixes, and the constants-catalog cleanup. All 22 commits build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-report audit. All 29 commits build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Correctness fixes added since test.3
+
+- **Cipher STS cache** — `Solver.InvalidateSolver(playerURL)` now also drops the STS cache entry for that player. The previous behaviour kept the stale `signatureTimestamp`, so a freshly-compiled solver paired with an old STS could trigger a 403 → invalidate → 403 loop. `InvalidateCache()` (all-clear) symmetrically clears both caches now. (audit cipher.md C2)
+- **Cipher compile panic recovery** — `getFromPrepared` wraps goja.RunString/NewObject in a deferred recover. A malformed player.js that panics goja (stack overflow, parser edge case) used to kill the download goroutine; now it returns a clean error and the caller invalidates & retries. (cipher.md H5)
+- **Engine parallel catch-up resume** — `runParallelCatchUp` was only updating `d.currentSeq` every `ResumeCatchupInterval` (10) segments. A crash in between lost up to 9 segments of work on restart; now updates on every successful write. (engine.md Finding 1, Critical)
+- **Engine atomic fields** — `cipherFailureFired`, `lastSegTime`, `lastHeadProbeTime` are now `atomic.Bool` / a new `atomicTime` wrapper. Previously read/written from the download loop AND the parallel-worker result consumer with no synchronization — race-detector-clean now. (engine.md Findings 2, 3)
+- **Engine HTTP transport tuning** — shared `engineHTTPClient` now sets `MaxIdleConnsPerHost = ParallelDownloads + 2` (8) so the 6 parallel workers + HEAD probes reuse TCP connections instead of churning handshakes. Kept the 5-minute safety-net Timeout. (engine.md Finding 5)
+- **Twitch chat append-failure fallback** — when incremental append fails, the fallback now reads the existing file and merges with the current batch before rewriting, instead of overwriting the aggregate with only the last batch. (twitch.md issue #5)
 
 ### Security
 
