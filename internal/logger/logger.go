@@ -77,8 +77,21 @@ const (
 	maxJobLogLines  = 500
 )
 
+// minLogRotationSize is the smallest acceptable rotation threshold. Below
+// this, a single formatted log line could exceed the cap and trigger
+// rotation on every Write — a hot loop. 4 KiB is well under any sane
+// log-file-size budget while being more than any realistic single
+// structured log line.
+const minLogRotationSize = 4096
+
 // New creates a new Logger with file rotation support.
 func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
+	if maxSize < minLogRotationSize {
+		maxSize = minLogRotationSize
+	}
+	if maxFiles < 1 {
+		maxFiles = 1
+	}
 	l := &Logger{
 		filePath: filePath,
 		maxSize:  maxSize,
