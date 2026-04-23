@@ -97,22 +97,49 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 			} `json:"errors"`
 		}
 		if json.Unmarshal(respData, &errCheck) == nil && len(errCheck.Errors) > 0 {
-			return nil, fmt.Errorf("gql error: %s", errCheck.Errors[0].Message)
+			msg := errCheck.Errors[0].Message
+			if msg == "" {
+				msg = "unknown error"
+			}
+			return nil, fmt.Errorf("gql error: %s", msg)
 		}
 	} else if len(respData) > 0 && respData[0] == '[' {
-		// Batch response — check each result for errors
+		// Batch response — fail only when EVERY element errored. Twitch
+		// sometimes returns partial failures (e.g. ComscoreStreamingQuery
+		// erroring while StreamMetadata succeeds). The pre-existing
+		// "return on first error" behaviour made a single flaky element
+		// fail the whole monitor cycle, producing noisy warnings while
+		// the useful data was sitting right there in the response.
+		// Callers already re-parse elements individually and tolerate
+		// missing fields; logging at Warn is enough for observability.
 		var batchResults []json.RawMessage
-		if json.Unmarshal(respData, &batchResults) == nil {
-			for _, item := range batchResults {
-				var errCheck struct {
-					Errors []struct {
-						Message string `json:"message"`
-					} `json:"errors"`
-				}
-				if json.Unmarshal(item, &errCheck) == nil && len(errCheck.Errors) > 0 {
-					return nil, fmt.Errorf("gql batch error: %s", errCheck.Errors[0].Message)
-				}
+		if err := json.Unmarshal(respData, &batchResults); err != nil {
+			return nil, fmt.Errorf("parse batch response: %w", err)
+		}
+		allErrored := len(batchResults) > 0
+		firstErrMsg := ""
+		for _, item := range batchResults {
+			var errCheck struct {
+				Errors []struct {
+					Message string `json:"message"`
+				} `json:"errors"`
 			}
+			if err := json.Unmarshal(item, &errCheck); err != nil || len(errCheck.Errors) == 0 {
+				allErrored = false
+				continue
+			}
+			if firstErrMsg == "" {
+				firstErrMsg = errCheck.Errors[0].Message
+			}
+		}
+		if allErrored {
+			if firstErrMsg == "" {
+				firstErrMsg = "all batch elements returned errors"
+			}
+			return nil, fmt.Errorf("gql batch error: %s", firstErrMsg)
+		}
+		if firstErrMsg != "" && a.logger != nil {
+			a.logger.Warn("twitch gql batch: partial failure", "err", firstErrMsg)
 		}
 	}
 
