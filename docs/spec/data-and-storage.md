@@ -50,11 +50,11 @@ Source: `Open()` in `internal/database/database.go`.
 
 ```go
 type Database struct {
-    db     *sql.DB
-    ctx    context.Context
-    mu     sync.RWMutex
-    closed bool
-    logger dbLogger
+    db        *sql.DB
+    ctx       context.Context
+    mu        sync.RWMutex
+    closeOnce sync.Once
+    logger    dbLogger
 
     // Batch update coalescing
     updateCh  chan *Job     // buffer 100
