@@ -168,6 +168,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// cfgMu guards all reads/writes of the shared *config.MoomboxConfig below.
+	// Declared early so it covers the password-hash and cookie-platform
+	// auto-detection writes that happen during startup, not just the runtime
+	// handlers. Downstream constructors receive &cfgMu so every reader agrees
+	// on the same lock.
+	var cfgMu sync.RWMutex
+
 	// =========================================================================
 	// 1. Load config
 	// =========================================================================
@@ -209,8 +216,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		tempAuth := web.NewAuthService()
 		hash, err := tempAuth.HashPassword(cfg.Network.PasswordHash)
 		if err == nil {
+			cfgMu.Lock()
 			cfg.Network.PasswordHash = hash
-			if saveErr := config.Save(cfg, configPath); saveErr != nil {
+			saveErr := config.Save(cfg, configPath)
+			cfgMu.Unlock()
+			if saveErr != nil {
 				log.Warn("Failed to save auto-hashed password", slog.String("error", saveErr.Error()))
 			}
 		} else {
@@ -264,9 +274,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					detected = append(detected, "twitch")
 				}
 				if len(detected) > 0 {
+					cfgMu.Lock()
 					cfg.Cookies.Platforms = detected
-					if err := config.Save(cfg, configPath); err != nil {
-						log.Warn("Failed to persist detected cookie platforms", slog.String("error", err.Error()))
+					saveErr := config.Save(cfg, configPath)
+					cfgMu.Unlock()
+					if saveErr != nil {
+						log.Warn("Failed to persist detected cookie platforms", slog.String("error", saveErr.Error()))
 					} else {
 						log.Info("Detected cookie platforms from cookie file", slog.Any("platforms", detected))
 					}
@@ -378,8 +391,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	autoCookieSvc.VerifyYouTubeAuth = cookieRefresh.CheckYouTubeAuth
 	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
 	// Wire persistPlatforms callback: saves verified platforms to config
-	// so we can detect auth loss after restart (matches TS persistPlatforms)
-	var cfgMu sync.RWMutex
+	// so we can detect auth loss after restart (matches TS persistPlatforms).
+	// cfgMu is declared at the top of run() to guard all cfg mutations.
 	dlWorker.SetCfgMu(&cfgMu)
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
 		cfgMu.Lock()
