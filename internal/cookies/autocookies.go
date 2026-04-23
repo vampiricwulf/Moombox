@@ -442,9 +442,29 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
-	errMsg := "refresh completed but auth verification failed — manual re-login required"
+	// Neither platform verified. Build a targeted message naming only the
+	// platforms that actually had cookies worth verifying — if a user only
+	// signed in to YouTube, they should not see "Twitch needs re-login".
+	// If neither platform even has cookies (e.g. first run before setup),
+	// emit no error at all: the refresh completed cleanly, there was just
+	// nothing to refresh yet.
+	var failed []string
+	if ytHasCookies {
+		failed = append(failed, "YouTube")
+	}
+	if twHasCookies {
+		failed = append(failed, "Twitch")
+	}
+	if len(failed) == 0 {
+		s.logger.Debug("cookie refresh completed with no cookies to verify")
+		s.mu.Lock()
+		s.lastError = nil
+		s.mu.Unlock()
+		return false, nil
+	}
+	errMsg := strings.Join(failed, " + ") + " auth verification failed — manual re-login required"
 	s.setError(errMsg)
-	s.logger.Warn("refresh completed but auth verification failed")
+	s.logger.Warn("refresh completed but auth verification failed", "platforms", strings.Join(failed, ","))
 	return false, nil
 }
 
