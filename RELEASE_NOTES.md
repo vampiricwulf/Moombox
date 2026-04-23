@@ -1,6 +1,13 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.13` with an eighth batch of scattered lows across `internal/config/` and `internal/worker/`.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.14` with `internal/engine/` dead-code cleanup.
 
-This build bundles Sprint #1 + Sprint #2 work plus eight batches from the multi-report audit. All 268 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus nine batches from the multi-report audit. All 270 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 9 (test.15)
+
+Small cleanup pass on `internal/engine/`:
+
+- **engine F38** — deleted `Muxer.MuxEncode` (CRF re-encode wrapper with zero production callers; `Mux` is the only path).
+- **engine F39 + F40 + F41** — unexported `TotalDurationSec`, `TotalSegmentCount`, `SegmentDurationSec`, `EstimateSegmentCount`. All four were test-only; lowercasing them preserves the test coverage of the underlying segment-math (useful if a DASH-VOD progress estimator is ever wired) while shrinking the public API surface by four.
 
 ### Manual batch 8 (test.14)
 
