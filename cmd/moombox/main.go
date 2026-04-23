@@ -90,6 +90,19 @@ func waitForKeypress() {
 }
 
 func main() {
+	// Subcommands (like `moombox add <url>`) do not need the launcher/child
+	// split — they run briefly in-process and exit. Checking for them before
+	// the `_MOOMBOX_CHILD` gate avoids spawning an unnecessary child process
+	// (saves ~100ms and prevents a silent ghost spawn on CLI add commands).
+	if len(os.Args) > 1 && os.Args[1] == "add" {
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: moombox add <video_id_or_url>")
+			os.Exit(1)
+		}
+		addVideo(os.Args[2])
+		return
+	}
+
 	// Launcher/supervisor: if we're not already a child process, act as the
 	// launcher. The launcher spawns moombox as a child, waits for it, and
 	// respawns when the child exits with exitCodeRestart (config change or
@@ -98,16 +111,6 @@ func main() {
 	// process chain buildup across multiple restarts.
 	if os.Getenv("_MOOMBOX_CHILD") != "1" {
 		launchAndSupervise()
-		return
-	}
-
-	// Check for subcommands before flag parsing
-	if len(os.Args) > 1 && os.Args[1] == "add" {
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: moombox add <video_id_or_url>")
-			os.Exit(1)
-		}
-		addVideo(os.Args[2])
 		return
 	}
 
