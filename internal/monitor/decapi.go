@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -190,6 +191,13 @@ func (dm *DecapiMonitor) calculateInterval(channelCount int) time.Duration {
 
 	// Floor
 	interval = max(interval, decapiMinInterval)
+
+	// Add ±10% jitter so multiple Moombox instances don't synchronize polls
+	// against decapi.me. Feed and Twitch monitors already jitter.
+	tenPercent := int64(interval) / 10
+	if tenPercent > 0 {
+		interval = interval - time.Duration(tenPercent) + time.Duration(rand.Int63n(2*tenPercent))
+	}
 
 	return interval
 }
