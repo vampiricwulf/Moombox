@@ -499,10 +499,19 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 	}
 
 	if v.PreviewURL != "" {
+		hadTemplate := thumbWidthRe.MatchString(v.PreviewURL) || thumbHeightRe.MatchString(v.PreviewURL)
 		thumbURL := thumbWidthRe.ReplaceAllString(v.PreviewURL, "640")
 		thumbURL = thumbHeightRe.ReplaceAllString(thumbURL, "360")
-		// Replace hardcoded small dimensions (e.g. -90x60. or _320x180.) with -640x360.
-		info.ThumbnailURL = thumbDimRe.ReplaceAllString(thumbURL, "-640x360.")
+		// Only apply the hard-coded-dimension fallback when the URL had
+		// no {width}/{height} template. The template path already
+		// produces a canonical 640x360 URL; running thumbDimRe on it
+		// would rewrite dash vs underscore separators and mangle
+		// legacy URLs that already embedded -640x360. with a literal.
+		if !hadTemplate {
+			info.ThumbnailURL = thumbDimRe.ReplaceAllString(thumbURL, "-640x360.")
+		} else {
+			info.ThumbnailURL = thumbURL
+		}
 	}
 	if v.Game != nil {
 		info.GameCategory = v.Game.DisplayName
