@@ -35,9 +35,23 @@ func (cd *ChatDownloader) flush() {
 		if writeErr == nil {
 			updateChatFileHeaderFields(cd.outputPath, count, cd.logger)
 		} else {
-			// Fallback to full rewrite on append error
-			cd.logger.Debug("append failed, falling back to full write", "err", writeErr)
-			writeErr = cd.writeFullChatFile(msgs, count)
+			// Fallback: read the existing file, merge with the current batch,
+			// and rewrite. The earlier implementation passed only `msgs` to
+			// writeFullChatFile here, which replaced the aggregate with just
+			// the latest batch — silently dropping every message from prior
+			// flushes whenever append hit a transient I/O glitch.
+			cd.logger.Warn("append failed, merging existing file with current batch", "err", writeErr)
+			existing, readErr := readChatFileMessages(cd.outputPath)
+			if readErr != nil {
+				// Can't recover without destroying data — leave the file
+				// alone and keep the batch in the in-memory buffer so the
+				// next flush retries. The early-return below skips the
+				// `cd.messages = cd.messages[snapshotLen:]` truncation.
+				cd.logger.Error("append failed and cannot read existing file for merge; preserving file, retrying next flush", "err", readErr)
+				return
+			}
+			merged := append(existing, msgs...)
+			writeErr = cd.writeFullChatFile(merged, count)
 		}
 	}
 
