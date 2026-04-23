@@ -64,11 +64,6 @@ type SessionData struct {
 	ExpiresAt      time.Time
 }
 
-// GetPoToken returns the PO token string.
-func (s *SessionData) GetPoToken() string {
-	return s.PoToken
-}
-
 // TokenMinter holds a minter callback and its expiry.
 // The Cleanup function shuts down the underlying BotGuard VM when the minter
 // is evicted from cache. The VM must stay alive while the minter is cached

@@ -976,17 +976,6 @@ func TestPotProvider_CleanupExpiredBoth(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// SessionData.GetPoToken
-// ---------------------------------------------------------------------------
-
-func TestSessionData_GetPoToken(t *testing.T) {
-	s := &SessionData{PoToken: "abc"}
-	if s.GetPoToken() != "abc" {
-		t.Errorf("expected 'abc', got %q", s.GetPoToken())
-	}
-}
-
-// ---------------------------------------------------------------------------
 // BGError — all error codes
 // ---------------------------------------------------------------------------
 
