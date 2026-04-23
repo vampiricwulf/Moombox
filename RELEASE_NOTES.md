@@ -23,7 +23,40 @@ This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-repor
 - **PassiveTracker per-tag success** — `ReportSuccess(tag)` previously wiped every failure across every subsystem, letting a flaky single-subsystem success pattern mask a genuine multi-subsystem outage. Now clears only failures for the given tag and keeps the triggered flag stable while the threshold is still met. (small-packages.md question #3)
 - **Chat message-ID generator race** — `randomAlphaNum` used `math/rand` globals, which are not concurrent-safe. Multiple parallel chat downloaders could race at `generateMessageID`. Switched to `math/rand/v2`, whose package-level `IntN` is documented as concurrent-safe. (chat.md C10)
 
-### Parallel-agent batch (test.7)
+### Parallel-agent batch 2 (test.8)
+
+Second dispatch, this one over `internal/tui/`, `internal/web/`, and `internal/worker/`. All three agents ran to the token limit; the **23 commits they had already completed** were fully merged, and the incomplete items were left for a later round. Every batch race-detector-clean.
+
+**TUI** (tui.md — 6 fixes):
+- Log buffer backing-array aliasing prevented (a reslice on the ring buffer could let writers stomp reader-held slices)
+- Pre-allocated yellow warning styles; 17+ inline `#f1c40f` literals consolidated
+- `SpinnerInit` tick-closure deduplicated across dialog models
+- Setup-wizard channel editor uses `keyLeft`/`keyRight` constants instead of string literals
+- `ffmpeg installOption` list building inlined into `buildInstallForm` (clearer control flow)
+- Non-Windows `openBrowser` branches dropped (Moombox is Windows-only per SPEC)
+
+**Web** (web.md — 10 fixes):
+- `HSTS` header emitted on TLS connections (max-age=31536000; `includeSubDomains` intentionally omitted)
+- WebSocket bound with an idle-read timeout (2× ping interval); obsolete message-size check removed
+- `GET /api/config` RLock released before JSON encoding
+- `/api/logs` response capped at 500 lines (prevents unbounded response on noisy sessions)
+- `open-folder` route releases the explorer.exe handle after Start
+- Cookie route failures return real HTTP error codes instead of generic 200/500
+- Twitch manual job ID uses nanosecond timestamp (collision risk on rapid adds eliminated)
+- Background goroutines in route handlers route panics through the structured logger
+- Rate-limiter cleanup goroutine panics are now logged
+- Throttle callbacks survive hub Close without a nil-map panic
+
+**Worker** (worker.md — 7 fixes):
+- Early chat path uses the correct `pending → downloading` transition
+- Cookie-refresh re-probe re-queues as `Upcoming` (not whatever leftover state)
+- Muxing→Downloading reset clears stale error field
+- `pollForJobs` restart-pause uses ctx-aware sleep (was blocking on `time.Sleep`)
+- Refresh-error comments in YouTube live loop clarified
+- Still-live manifest refresh replaces the entire result rather than cherry-picking fields
+- Live-stream loops now compute the download error BEFORE sending it (was a no-op send race)
+
+### Parallel-agent batch 1 (test.7)
 
 Three agents audited `internal/cookies/`, `internal/youtube/`, and `internal/engine/` in isolated worktrees and committed 34 focused fixes totaling +1,900 / −200 lines. All scoped to their package, all race-detector clean, all audit findings with owner-decision or cross-package implications deferred.
 
