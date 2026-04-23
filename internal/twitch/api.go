@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -15,6 +16,13 @@ import (
 	"time"
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )
+
+// ErrTwitchAuthExpired signals that Twitch rejected the provided auth-token
+// (401 or 403 on a GQL call). Callers can wrap and detect this via errors.Is
+// to surface a re-auth prompt to the user rather than treating it as a
+// generic HTTP failure. Without this signal, token rotation in the user's
+// browser produced indistinguishable errors from transient network trouble.
+var ErrTwitchAuthExpired = errors.New("twitch auth token expired or invalid")
 
 // twitchHTTPClient is a shared HTTP client with a timeout for all Twitch API requests.
 var twitchHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -82,6 +90,15 @@ func (a *API) gqlRequest(ctx context.Context, body any, authToken string) (json.
 		return nil, fmt.Errorf("gql rate limited (429): %s", string(respData))
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// Wrap the sentinel so callers can detect auth-expiry via
+		// errors.Is(err, ErrTwitchAuthExpired) without parsing strings.
+		// Only surface the sentinel when the caller actually supplied a
+		// token — anon GQL requests legitimately get 401 on some paths
+		// (e.g. mature-gated streams) and treating that as "re-auth
+		// needed" would loop the user through a login flow pointlessly.
+		if authToken != "" {
+			return nil, fmt.Errorf("gql auth failure (%d): %s: %w", resp.StatusCode, string(respData), ErrTwitchAuthExpired)
+		}
 		return nil, fmt.Errorf("gql auth failure (%d): %s", resp.StatusCode, string(respData))
 	}
 	if resp.StatusCode != http.StatusOK {
