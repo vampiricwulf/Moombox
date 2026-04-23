@@ -14,10 +14,16 @@ import (
 )
 
 // Firefox user.js preferences to suppress first-run dialogs.
+// Telemetry is explicitly disabled (healthreport upload off, toolkit
+// telemetry off) in addition to bypassing the data-submission notification
+// so we do not silently opt users into sending usage data just because
+// Moombox launched their browser for cookie extraction.
 const firefoxUserJS = `user_pref("browser.aboutwelcome.enabled", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("toolkit.telemetry.enabled", false);
 user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
 user_pref("browser.rights.3.shown", true);
 `
@@ -175,8 +181,15 @@ func readFirefoxCookies(profileDir string) (string, error) {
 }
 
 // queryFirefoxCookieDB opens the Firefox cookie database and reads all cookies.
+//
+// _busy_timeout=2000 hands SQLite the wait itself — WAL-mode locks from a
+// mid-flush Firefox process return "database is locked" almost immediately
+// under the default 0ms busy timeout, and the caller's 5×500ms retry loop
+// doesn't help if each open returns the error before even waiting. 2s lets
+// SQLite block on the lock until Firefox's fsync completes, which is the
+// desired behavior for most real-world contention.
 func queryFirefoxCookieDB(dbPath string) ([]string, error) {
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_busy_timeout=2000")
 	if err != nil {
 		return nil, fmt.Errorf("open cookies.sqlite: %w", err)
 	}
