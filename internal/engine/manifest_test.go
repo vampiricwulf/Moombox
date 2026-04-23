@@ -54,11 +54,11 @@ func TestParseDash(t *testing.T) {
 		t.Fatalf("expected 1 segment entry, got %d", len(video.Segments))
 	}
 	// r=9 means 10 occurrences, each 2000ms = 20s total
-	totalSegs := TotalSegmentCount(&video)
+	totalSegs := totalSegmentCount(&video)
 	if totalSegs != 10 {
 		t.Errorf("expected 10 segments, got %d", totalSegs)
 	}
-	totalDur := TotalDurationSec(&video)
+	totalDur := totalDurationSec(&video)
 	if totalDur != 20.0 {
 		t.Errorf("expected 20.0s duration, got %f", totalDur)
 	}
@@ -360,11 +360,11 @@ func TestParseDash_SegmentTemplate(t *testing.T) {
 	if s.Segments[0].R != 4 {
 		t.Errorf("repeat: got %d, want 4", s.Segments[0].R)
 	}
-	count := TotalSegmentCount(&s)
+	count := totalSegmentCount(&s)
 	if count != 5 {
 		t.Errorf("total segments: got %d, want 5", count)
 	}
-	dur := TotalDurationSec(&s)
+	dur := totalDurationSec(&s)
 	if dur != 10.0 { // 5 segments * 180000/90000 = 10s
 		t.Errorf("total duration: got %f, want 10.0", dur)
 	}
@@ -510,18 +510,18 @@ func TestCalculateSegmentRange_WithTimeline(t *testing.T) {
 
 func TestSegmentDurationSec_Default(t *testing.T) {
 	stream := &DashStream{Timescale: 1000}
-	dur := SegmentDurationSec(stream)
+	dur := segmentDurationSec(stream)
 	if dur != defaultSegmentDuration {
 		t.Errorf("expected default %f, got %f", defaultSegmentDuration, dur)
 	}
 }
 
 func TestEstimateSegmentCount(t *testing.T) {
-	count := EstimateSegmentCount(10.0)
+	count := estimateSegmentCount(10.0)
 	if count != 5 { // ceil(10 / 2) = 5
 		t.Errorf("expected 5, got %d", count)
 	}
-	count = EstimateSegmentCount(0)
+	count = estimateSegmentCount(0)
 	if count != 0 {
 		t.Errorf("expected 0, got %d", count)
 	}

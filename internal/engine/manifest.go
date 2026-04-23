@@ -611,8 +611,11 @@ func resolveURL(base, ref string) string {
 	return baseU.ResolveReference(refU).String()
 }
 
-// TotalDurationSec returns the total duration of a DASH stream in seconds.
-func TotalDurationSec(stream *DashStream) float64 {
+// totalDurationSec returns the total duration of a DASH stream in seconds.
+// Private helper — kept for test coverage of the segment-math paths that
+// might eventually feed a progress estimator. Not exported because no
+// production caller exists today.
+func totalDurationSec(stream *DashStream) float64 {
 	if stream.Timescale == 0 || len(stream.Segments) == 0 {
 		return 0
 	}
@@ -625,8 +628,8 @@ func TotalDurationSec(stream *DashStream) float64 {
 	return total
 }
 
-// TotalSegmentCount returns the total number of segments, expanding repeats.
-func TotalSegmentCount(stream *DashStream) int {
+// totalSegmentCount returns the total number of segments, expanding repeats.
+func totalSegmentCount(stream *DashStream) int {
 	total := 0
 	for _, seg := range stream.Segments {
 		total += seg.R + 1
@@ -634,17 +637,17 @@ func TotalSegmentCount(stream *DashStream) int {
 	return total
 }
 
-// SegmentDurationSec returns the average segment duration in seconds.
-func SegmentDurationSec(stream *DashStream) float64 {
-	count := TotalSegmentCount(stream)
+// segmentDurationSec returns the average segment duration in seconds.
+func segmentDurationSec(stream *DashStream) float64 {
+	count := totalSegmentCount(stream)
 	if count == 0 {
 		return defaultSegmentDuration
 	}
-	return TotalDurationSec(stream) / float64(count)
+	return totalDurationSec(stream) / float64(count)
 }
 
-// EstimateSegmentCount estimates the number of segments for a given duration.
-func EstimateSegmentCount(durationSec float64) int {
+// estimateSegmentCount estimates the number of segments for a given duration.
+func estimateSegmentCount(durationSec float64) int {
 	return int(math.Ceil(durationSec / defaultSegmentDuration))
 }
 

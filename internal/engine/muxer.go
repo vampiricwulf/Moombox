@@ -75,11 +75,6 @@ func (m *Muxer) MuxCopy(ctx context.Context, videoPath, audioPath, outputPath st
 	return m.Mux(ctx, videoPath, audioPath, outputPath, nil)
 }
 
-// MuxEncode muxes with CRF re-encoding for precise trimming.
-func (m *Muxer) MuxEncode(ctx context.Context, videoPath, audioPath, outputPath string, crf int) error {
-	return m.Mux(ctx, videoPath, audioPath, outputPath, &TrimOptions{CRF: crf, UsePreciseTrim: true})
-}
-
 // Mux performs FFmpeg muxing with optional trimming/encoding.
 func (m *Muxer) Mux(ctx context.Context, videoPath, audioPath, outputPath string, opts *TrimOptions) error {
 	// Validate inputs
