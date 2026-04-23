@@ -14,6 +14,17 @@ import (
 // discordWebhookRe validates standard Discord webhook URLs (HTTPS only).
 var discordWebhookRe = regexp.MustCompile(`^https://(?:\w+\.)?discord\.com/api/webhooks/\d+/[\w-]+`)
 
+// discordWebhookPath matches the path prefix of a Discord webhook URL so we
+// can redact everything after /api/webhooks/ in error logs.
+var discordWebhookPath = regexp.MustCompile(`(?i)(discord\.com/api/webhooks)/[^\s]*`)
+
+// redactDiscordWebhookURL strips the ID/token segments after /api/webhooks/
+// so a rejected-webhook log can still indicate "it was a discord URL" without
+// copying the secret portion verbatim.
+func redactDiscordWebhookURL(url string) string {
+	return discordWebhookPath.ReplaceAllString(url, "$1/<redacted>")
+}
+
 // NotificationType represents the visual style of a notification.
 type NotificationType int
 
@@ -121,7 +132,10 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 			s = &DiscordWebhook{URL: url}
 
 		case strings.Contains(url, "discord.com/api/webhooks"):
-			logger.Warn("rejected invalid Discord webhook URL (must be HTTPS with valid ID/token)", "url", url)
+			// Log with the token segment redacted. Even a near-valid URL
+			// carries a real secret; a rejection log that copies it verbatim
+			// ends up in every log-collection store that tails the file.
+			logger.Warn("rejected invalid Discord webhook URL (must be HTTPS with valid ID/token)", "url", redactDiscordWebhookURL(url))
 			continue
 
 		default:
