@@ -288,7 +288,8 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 			solvers.Sig = func(input string) (result string, err error) {
 				defer func() {
 					if r := recover(); r != nil {
-						err = fmt.Errorf("sig decrypt panic: %v", r)
+						solvers.MarkDead()
+						err = fmt.Errorf("sig decrypt panic (solver poisoned): %v", r)
 					}
 				}()
 				return callWithTimeout(vm, "sig", func() (gojavm.Value, error) {
@@ -306,7 +307,8 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 			solvers.N = func(input string) (result string, err error) {
 				defer func() {
 					if r := recover(); r != nil {
-						err = fmt.Errorf("n decrypt panic: %v", r)
+						solvers.MarkDead()
+						err = fmt.Errorf("n decrypt panic (solver poisoned): %v", r)
 					}
 				}()
 				return callWithTimeout(vm, "n", func() (gojavm.Value, error) {

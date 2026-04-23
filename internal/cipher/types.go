@@ -1,9 +1,17 @@
 package cipher
 
 import (
+	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ErrSolverDead is returned by DecryptN/DecryptSig after the Solvers'
+// underlying Goja VM panicked — subsequent calls fail fast instead of
+// re-entering a potentially-corrupt runtime. Callers should catch this
+// and call Solver.InvalidateSolver to force a re-compile.
+var ErrSolverDead = errors.New("cipher solver is poisoned (prior panic); recompile required")
 
 // CipherTimeout bounds a single goja signature- or n-param-decryption call.
 // A malformed player.js (e.g. an accidental infinite loop after a YouTube-side
@@ -13,11 +21,30 @@ const CipherTimeout = 3 * time.Second
 
 // Solvers holds the decrypted n-parameter and signature functions.
 // The underlying Goja VM is not thread-safe, so a mutex serializes calls.
+//
+// The dead flag is set by the Sig/N closures if their inline recover fires:
+// a Goja panic can leave the VM in a corrupt state where subsequent calls
+// panic again. Tripping dead forces the next DecryptN/DecryptSig to return
+// ErrSolverDead so the caller can InvalidateSolver and recompile.
 type Solvers struct {
-	mu  sync.Mutex
-	N   func(string) (string, error) // n-parameter decryption, nil if not found
-	Sig func(string) (string, error) // signature decryption, nil if not found
+	mu   sync.Mutex
+	dead atomic.Bool
+	N    func(string) (string, error) // n-parameter decryption, nil if not found
+	Sig  func(string) (string, error) // signature decryption, nil if not found
 }
+
+// MarkDead flags the solver as poisoned. Callers inside the Sig/N closures
+// should invoke this on panic recovery before returning the error.
+func (s *Solvers) MarkDead() {
+	if s != nil {
+		s.dead.Store(true)
+	}
+}
+
+// IsDead reports whether the solver has been marked poisoned. Exposed for
+// external diagnostics; DecryptN/DecryptSig already return ErrSolverDead
+// when this is true.
+func (s *Solvers) IsDead() bool { return s != nil && s.dead.Load() }
 
 // DecryptN calls the N solver with mutex protection.
 //
@@ -29,6 +56,9 @@ func (s *Solvers) DecryptN(input string) (string, error) {
 	if s.N == nil {
 		return input, nil
 	}
+	if s.dead.Load() {
+		return "", ErrSolverDead
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.N(input)
@@ -39,6 +69,9 @@ func (s *Solvers) DecryptN(input string) (string, error) {
 func (s *Solvers) DecryptSig(input string) (string, error) {
 	if s.Sig == nil {
 		return input, nil
+	}
+	if s.dead.Load() {
+		return "", ErrSolverDead
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
