@@ -18,6 +18,14 @@ const (
 	wsThrottleWindow = 100 * time.Millisecond
 	wsMaxMessageSize = 1024 * 1024 // 1MB (match TS maxPayload)
 	maxLogBuffer     = 200         // Trim log ring buffer to this size
+	// wsReadIdleTimeout bounds how long a single Conn.Read may block
+	// waiting for a frame. Longer than 2× wsPingInterval (30s) so that
+	// a normally-responsive client — which keeps the peer alive via
+	// automatic pong replies — is never closed mid-session. If the
+	// peer goes silent AND the ping loop somehow still succeeds (e.g.,
+	// kernel-level TCP keepalives ACKing past an app-level zombie),
+	// the Read will eventually error out and readPump will tear down.
+	wsReadIdleTimeout = 90 * time.Second
 )
 
 // WSMessage is a WebSocket message sent to clients.
@@ -275,18 +283,26 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 	}()
 
 	for {
-		msgType, data, err := client.conn.Read(client.ctx)
+		// Bound each Read with an idle timeout. The detached client.ctx
+		// has no expiry, so without this a stale peer (TCP still ACKing
+		// at the kernel but app-level silent) could park the goroutine
+		// here forever. The timeout is generous enough (>2× ping
+		// interval) that a healthy but chatty-less client is never
+		// reaped mid-session — library-internal pong handling refreshes
+		// nothing, but any message (including the browser's pong frame
+		// being processed) surfaces soon enough that Read returns well
+		// before wsReadIdleTimeout on a live connection that's actually
+		// exchanging traffic via BroadcastLog/job updates.
+		readCtx, readCancel := context.WithTimeout(client.ctx, wsReadIdleTimeout)
+		msgType, data, err := client.conn.Read(readCtx)
+		readCancel()
 		if err != nil {
 			return
 		}
 
-		// Validate message size
-		if len(data) > wsMaxMessageSize {
-			hub.logger.Warn("oversized websocket message rejected")
-			client.conn.Close(websocket.StatusMessageTooBig, "Message too large")
-			return
-		}
-
+		// Library already enforces wsMaxMessageSize via SetReadLimit,
+		// which closes the connection before Read returns on oversize
+		// frames, so no redundant length check is needed here.
 		if msgType != websocket.MessageText {
 			continue
 		}
