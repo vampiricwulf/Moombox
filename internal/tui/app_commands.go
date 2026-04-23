@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -447,16 +446,12 @@ func (a *App) resolveChannelCmd(input string) tea.Cmd {
 	})
 }
 
+// openBrowser launches the default browser for the given URL.
+// Moombox is Windows-only (see CLAUDE.md), so this uses the Windows shell's
+// `start` command. Other-OS branches were removed as dead code per audit
+// reports/tui.md Finding 33.
 func openBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", url)
-	case "darwin":
-		cmd = exec.Command("open", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
+	cmd := exec.Command("cmd", "/c", "start", "", url)
 	_ = cmd.Start()
 }
 
