@@ -340,6 +340,42 @@ func TestCalculateSegmentRange_NoSegments(t *testing.T) {
 	}
 }
 
+func TestCalculateSegmentRange_NegativeTimes(t *testing.T) {
+	stream := &DashStream{StartNumber: 0, Timescale: 1000}
+	// Negative start
+	if r := CalculateSegmentRange(stream, -1.0, 10.0); r != nil {
+		t.Errorf("expected nil for negative startTimeSec, got %+v", r)
+	}
+	// Negative end
+	if r := CalculateSegmentRange(stream, 1.0, -5.0); r != nil {
+		t.Errorf("expected nil for negative endTimeSec, got %+v", r)
+	}
+}
+
+func TestCalculateSegmentRange_ReversedRange(t *testing.T) {
+	stream := &DashStream{StartNumber: 0, Timescale: 1000}
+	// End <= start with end > 0 should return nil
+	if r := CalculateSegmentRange(stream, 10.0, 5.0); r != nil {
+		t.Errorf("expected nil for reversed range, got %+v", r)
+	}
+	// Zero-length range (start == end)
+	if r := CalculateSegmentRange(stream, 10.0, 10.0); r != nil {
+		t.Errorf("expected nil for zero-length range, got %+v", r)
+	}
+}
+
+func TestCalculateSegmentRange_EndZero_IsUnbounded(t *testing.T) {
+	stream := &DashStream{StartNumber: 0, Timescale: 1000}
+	// endTimeSec == 0 means "no end bound" -- valid even with startTimeSec > 0
+	r := CalculateSegmentRange(stream, 5.0, 0)
+	if r == nil {
+		t.Fatal("expected non-nil result for endTimeSec == 0")
+	}
+	if r.EndSegment != -1 {
+		t.Errorf("EndSegment: got %d, want -1 (unbounded)", r.EndSegment)
+	}
+}
+
 func TestCalculateSegmentRange_WithTimeline(t *testing.T) {
 	stream := &DashStream{
 		StartNumber: 100,

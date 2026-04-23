@@ -308,10 +308,26 @@ func SegmentURL(template string, seqNum int) string {
 }
 
 // CalculateSegmentRange maps a time range to segment indices in a DASH stream.
+//
+// Returns nil if the time range is nonsensical:
+//   - negative startTimeSec or endTimeSec
+//   - endTimeSec > 0 and endTimeSec <= startTimeSec (reversed or empty range)
+//
+// startTimeSec == 0 is valid (range starts at the beginning). endTimeSec == 0
+// is valid as "unbounded" (only startTimeSec applies).
 func CalculateSegmentRange(stream *DashStream, startTimeSec, endTimeSec float64) *SegmentRange {
+	// Input validation: reject negative times and reversed/empty ranges so
+	// callers get a nil (treat as invalid) instead of bizarre segment math.
+	if startTimeSec < 0 || endTimeSec < 0 {
+		return nil
+	}
+	if endTimeSec > 0 && endTimeSec <= startTimeSec {
+		return nil
+	}
+
 	timescale := float64(stream.Timescale)
 	if timescale == 0 {
-		timescale = 1000 // Default fallback (matches TS)
+		timescale = 1000 // Default fallback
 	}
 
 	// Expand segments with repeat counts
