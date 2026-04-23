@@ -1,6 +1,51 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.10` with a fifth parallel-agent batch over `internal/database/` and `internal/chat/` residual findings.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.11` with a sixth batch over `internal/bgutils/` and `internal/cipher/` — this one applied manually because the Agent-tool worktree branched from main instead of test.
 
-This build bundles Sprint #1 + Sprint #2 work plus five parallel-agent batches from the multi-report audit. All 216 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus six batches from the multi-report audit. All 245 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 6 (test.12)
+
+Both `internal/bgutils/` and `internal/cipher/` were scheduled as parallel agent dispatches, but both agents detected the worktree was branched from main instead of `test` (a bug in the `Agent` tool's worktree-creation path) and aborted cleanly per explicit instructions. Implementation done directly on `test`. Net: **28 more commits** across the two subsystems.
+
+**bgutils** (bgutils.md — 17 findings across 17 commits):
+
+- **QI-2** `randomAlphaNum` switched from per-byte `crypto/rand.Int` + `big.Int` allocations to a single `rand.Read` + modular reduction
+- **CRIT-5** replaced-minter `Cleanup()` now runs *outside* `pp.mu` in `generateAndMint`, mirroring the AfterFunc eviction path; new `safeCleanup(m, reason)` helper shields panics
+- **CRIT-6** `InvalidateCaches` and `InvalidateIntegrityTokens` drain the minter map under lock, then iterate + `safeCleanup` after release — the `/invalidate_it` route can't freeze every concurrent `GeneratePoToken` during the sweep
+- **PR-1 + PR-3** mint-path panic recovery: the inflight entry's `done` channel always closes and map is always cleaned up, even on Goja VM panic
+- **CRIT-4 + TS-2** per-minter `sync.Mutex` on `WebPoMinter`; `Cleanup` now routes through `minter.Shutdown(bgClient.Shutdown)` so VM teardown serializes with any in-flight `Mint`
+- **CRIT-8** plumbed a `botguardLogger` (nil-safe) through `NewBotGuardClient`; timer-callback errors go through `logger.Warn` instead of `fmt.Fprintf(os.Stderr)`
+- **CRIT-10 + PR-2** `Snapshot(ctx, timeout)` — on cancel, `vm.Interrupt` is fired so an in-flight snapshot unblocks instead of burning the full 30s; default timeout fixed (was mistakenly `DefaultMintTimeout = 3s`, now `SnapshotDefaultTimeout = 30s`); `Shutdown` panic now logged
+- **DEAD-4** deleted `SessionData.GetPoToken` (no callers)
+- **DEAD-2** deleted `BotGuardClient.syncSnapshot` field + capture block (captured but never invoked)
+- **DEAD-3 + DEAD-6** removed `IntegrityTokenData.MintRefreshThreshold` and `DescrambledChallenge.ClientExperimentsBlob` — both parsed but never read
+- **DEAD-1** deleted `cold_start.go` + its six tests — zero production callers
+- **QI-1** HTTP requests (challenge fetch, interpreter fetch, GenerateIT POST) now use `UserAgentFull`, matching the VM's view; `UserAgentShort` removed
+- **QI-6** challenge-array parsing now uses a named const block (`idxMessageID`, `idxProgram`, …) instead of bare numeric indices
+- **CRIT-9** timeouts renamed: `BotGuardCallbackTimeout` and `InterpreterExecutionTimeout` replace the descriptively-inverted `BotGuardLoadTimeout` / `SnapshotTimeout`; old names aliased for compat
+- **FRESH-1** `BgConfig.SessionTTL` configuration hook (falls back to 6h default when 0), mirroring upstream `TOKEN_TTL`
+- **FRESH-4** interpreter JS now cached by URL with an LRU cap of 4; saves the ~1-3 MB download per minter when YouTube hasn't rotated
+
+**cipher** (cipher.md — 17 commits):
+
+- **H1** solver LRU cap raised from 3 to 10 — monitoring 4+ channels no longer causes constant re-compiles
+- **H2** LRU now moves on access, not just on insertion
+- **H3** disk-cache eviction now runs on a 24h background ticker (with required inline panic recovery per CLAUDE.md), not only at startup
+- **M1** documented the ModTime-based TTL's known edge cases (AV touching, manual file replacement)
+- **M2** `ResolveURL` skips the `url.Parse` step for n-param replacement — splits at first `?` instead, dropping one brittle error path
+- **M3** `StsCache` grew an inflight dedup map mirroring `bgutils.PotProvider` so concurrent `GetSts` calls for the same player share one fetch
+- **M5** `Solvers.dead atomic.Bool` + `ErrSolverDead` — after a Goja panic, subsequent `DecryptN`/`DecryptSig` fail fast instead of re-entering the corrupt VM
+- **M6** `compileSolver` checks `ctx.Err()` between extract/preprocess/compile steps so a worker cancel short-circuits promptly
+- **Q5** `compileSolver` logs which extraction branch succeeded (`full` or `legacy`) at Info — prod triage gains back the diff
+- **Q7** `findURLClassName` accepts multi-level dotted identifiers (`a.b.c`, not just `a.b`) — future minifier hardening
+- **Q9** `legacySigHelperPattern` moved from `extractor.go` to `extractor_legacy.go` (its only consumer)
+- **Q10** `CacheKey` truncated to 16 hex chars (64-bit hash space; negligible collision for this domain) — shorter cache paths, Windows MAX_PATH headroom. Existing 64-char files become unreachable and are harmlessly swept by the new H3 background tick
+- **Q11** deleted `OverridePlayerURL` pass-through (no config knob ever wired through it)
+- **Q12** eliminated error-chain stutter (`fetch player JS for abc: fetch player JS: ...`)
+- **Q13** `Solvers.HasN()` / `HasSig()` accessors so callers can distinguish "no cipher required" from "cipher silently skipped"
+- **DU3** deleted `StsRequest` / `StsResponse` types (unused)
+- **DU4 + DU2** deleted `Solver.InvalidateCache` and `StsCache.Invalidate` — both all-clear methods had zero callers; keyed invalidation (`InvalidateSolver` + `InvalidateKey`) is the production path
+
+**Agent-tool worktree-base bug** — for the historical record, this was the second batch in a row where `Agent` + `isolation: "worktree"` created the worktree off `main` (v2.5.2 / `f3ac3fb`) instead of the current `test` HEAD. Batch 5 worked around this by rebasing after the fact (10+ conflicts). This batch dodged it by having the agents verify their base on startup and abort if wrong — both did so cleanly, zero wasted work. Manual implementation followed.
 
 ### Parallel-agent batch 5 (test.11)
 
