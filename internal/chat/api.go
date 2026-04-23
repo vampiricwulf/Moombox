@@ -300,13 +300,24 @@ func (api *ChatAPI) parseResponse(data map[string]any) (*ChatApiResponse, error)
 					continue
 				}
 			}
-			if offsetStr, ok := replayAction["videoOffsetTimeMsec"].(string); ok {
-				parsed, err := strconv.ParseInt(offsetStr, 10, 64)
-				if err == nil {
-					replayOffsetMs = parsed
+			// videoOffsetTimeMsec is usually a string (e.g. "12345") but some
+			// responses ship it as a raw JSON number — accept both.
+			if raw, present := replayAction["videoOffsetTimeMsec"]; present {
+				switch v := raw.(type) {
+				case string:
+					parsed, err := strconv.ParseInt(v, 10, 64)
+					if err == nil {
+						replayOffsetMs = parsed
+						hasReplayOffset = true
+					} else {
+						api.logDebug("chat: videoOffsetTimeMsec string parse failed", "value", v, "err", err)
+					}
+				case float64:
+					replayOffsetMs = int64(v)
 					hasReplayOffset = true
+				default:
+					api.logDebug("chat: videoOffsetTimeMsec unexpected type", "type", fmt.Sprintf("%T", raw))
 				}
-				// Non-numeric offset string: skip setting replay offset
 			}
 		}
 
