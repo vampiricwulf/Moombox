@@ -1,6 +1,30 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.11` with a sixth batch over `internal/bgutils/` and `internal/cipher/` — this one applied manually because the Agent-tool worktree branched from main instead of test.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.12` with a seventh batch — primarily `internal/goja/` (untouched by prior batches) plus scattered cross-cutting lows.
 
-This build bundles Sprint #1 + Sprint #2 work plus six batches from the multi-report audit. All 245 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus seven batches from the multi-report audit. All 260 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 7 (test.13)
+
+Again manual rather than agent-dispatched — the Agent-tool worktree-base bug has become reliable enough that we're pattern-matching around it. Net: **14 more commits** across three subsystems.
+
+**goja** (goja.md — 6 commits):
+
+- **C1 + API1** `crypto.getRandomValues` was broken from the moment `RegisterDOMShim` returned — the JS closure looked up `__cryptoRandBytes` on `globalThis` at call time, but the Go cleanup block cleared the global to `undefined` immediately after shim registration. Every subsequent call threw `TypeError: __cryptoRandBytes is not a function` and silently forced callers down the Math.random fallback path. Fixed by capturing the native CSPRNG bridges into closure-local variables (`_randBytes`, `_randomUUID`) *before* the cleanup runs, plus stubbing the common `crypto.subtle.*` methods to return rejected Promises instead of leaving the object empty (API1). This is a **critical** correctness fix that's been silently degrading PO-token quality.
+- **C2 + C3 + P3** in DOM shim registration: propagate every `vm.Set` error (seven call sites previously dropped their returns silently), propagate `crypto/rand.Read` errors as JS GoErrors (previously ignored — all-zero "random" bytes would undermine BotGuard assumptions), and add a 65536-byte cap to `getRandomValues` matching the browser WebCrypto spec so a script can't OOM by asking for a giant slice.
+- **DD1 + DD2** delete the unused `RunString` / `CallFunction` wrapper helpers — production code used `vm.RunString` / `fn(this, args...)` directly.
+- **T1 + P2 + DD5** in `timer.go`: clamp `delayMs` via `clampDelayMs` to prevent `time.Duration` overflow when a script passes a huge value; add per-callback panic recovery inside `DrainCallbacks` so one bad callback can't abort the drain; remove the unused `timerEntry.interval` field; replace two `fmt.Fprintf(os.Stderr, ...)` timer-goroutine panic prints with an optional `SetLogger`-plumbed sink.
+- **Q6** name the `__consoleMessages` buffer cap (`__consoleMaxMessages = 100`) so a future change can find and update it without grepping the embedded JS for "< 100".
+- **T2** atomic check+enqueue in the interval tick goroutine under `tm.mu`, plus a test reorder (Drain-after-Clear) to match the actual contract. Fixes a race-detector flake exposed by DD5's struct-layout change.
+
+**Cross-cutting lows** (cross-cutting.md — 7 commits):
+
+- **C1** thread an optional logger into `AuthService` via `SetLogger` so the session-cleanup goroutine's panic-recovery no longer swallows errors silently.
+- **C2** redact the `/api/webhooks/{id}/{token}` segment when logging rejected Discord webhooks — a near-valid URL carries a real secret, and rejection logs still land in log-collection stores that tail the file.
+- **C3** partial — collect `worker.setJobError`'s six magic-string classifications (`login required`, `cookies?`, `age restricted`, `members only`, `max probe errors`, `member-only`) into `isCookiesRequiredError()` / `isNonActionableError()` helpers with the fragments in package-level slices. When the larger sentinel-errors migration lands, these become one-line `errors.Is` wrappers.
+- **C5** `EmoteResolver.Resolve`'s inflight-dedup wait now respects `ctx.Done()` via a `select`; a cancelled download no longer blocks on a fetcher stuck on network IO.
+- **C6** set a 30s `Timeout` on the TUI's loopback HTTP client (chi's server-side timeouts bounded most failure modes, but a stalled pipe mid-response could hang the TUI indefinitely).
+- **C7** `orchestrator_mux.go` writes the `.description` via `writeDescriptionAtomic` (tmp+rename) — a crash mid-write previously left a truncated file with the DB row pointing at it.
+- **C9** promote the four database scan-error logs (`getAllJobsUnlocked`/`getGaps`/`getTrimsUnlocked`/`getSegments`) from Debug to Warn — these indicate schema drift or a programmer bug, not expected noise.
+- **C10** introduce `isDuplicateColumnErr(err)` helper in `migrations.go`; migrate all six call sites. When modernc/sqlite eventually changes error text (or we move to code-based detection via `*sqlite.Error`), it's a one-place change.
 
 ### Manual batch 6 (test.12)
 
