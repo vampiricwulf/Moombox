@@ -83,7 +83,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	}
 
 	if chatDl != nil {
-		chatDl.OnProgress = chatProgressFn
+		chatDl.SetOnProgress(chatProgressFn)
 	}
 
 	for {
@@ -184,7 +184,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		if chatDl == nil && downloadChatRetry {
 			chatDl = sp.tryStartEarlyChat(ctx, job, probeInfo)
 			if chatDl != nil {
-				chatDl.OnProgress = chatProgressFn
+				chatDl.SetOnProgress(chatProgressFn)
 			}
 		}
 

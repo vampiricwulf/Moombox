@@ -408,12 +408,12 @@ func TestCallbackFieldsAssignment(t *testing.T) {
 	errorCalled := false
 
 	cd.OnStart = func(messageCount int, resuming bool) { startCalled = true }
-	cd.OnProgress = func(p ChatProgress) { progressCalled = true }
+	cd.SetOnProgress(func(p ChatProgress) { progressCalled = true })
 	cd.OnFinish = func() { finishCalled = true }
 	cd.OnError = func(err error) { errorCalled = true }
 
 	cd.OnStart(0, false)
-	cd.OnProgress(ChatProgress{MessageCount: 10})
+	cd.callOnProgress(ChatProgress{MessageCount: 10})
 	cd.OnFinish()
 	cd.OnError(nil)
 

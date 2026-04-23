@@ -236,9 +236,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	}
 	if chatDl != nil {
 		chatDone = make(chan struct{})
-		chatDl.OnProgress = func(p chat.ChatProgress) {
+		chatDl.SetOnProgress(func(p chat.ChatProgress) {
 			tracker.SetChatCount(p.MessageCount)
-		}
+		})
 		go func() {
 			defer close(chatDone)
 			defer func() {

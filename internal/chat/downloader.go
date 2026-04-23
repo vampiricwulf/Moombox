@@ -59,16 +59,44 @@ type ChatDownloader struct {
 	cancelCtx     context.CancelFunc // for aborting sleep on stop/markStreamEnded
 	done          chan struct{}       // closed when Start() completes; nil if never started
 
-	OnStart    func(messageCount int, resuming bool)
-	OnProgress func(p ChatProgress)
-	OnFinish   func()
-	OnError    func(err error)
+	OnStart  func(messageCount int, resuming bool)
+	OnFinish func()
+	OnError  func(err error)
+
+	// onProgress is reassigned mid-flight by callers (orchestrator after the
+	// chat goroutine has already started polling), so it can't be a plain
+	// public field — concurrent reassignment + read from runChatLoop is a
+	// data race per Go's memory model. Reads/writes go through callOnProgress
+	// and SetOnProgress under onProgressMu. Separate from cd.mu so a slow
+	// callback doesn't block other downloader state.
+	onProgressMu sync.RWMutex
+	onProgress   func(p ChatProgress)
 
 	// Logger is an optional diagnostic sink for non-fatal, debug-level drift
 	// signals (e.g. unexpected API field shapes). nil-safe — if not set,
 	// debug diagnostics are silently dropped.
 	Logger interface {
 		Debug(msg string, args ...any)
+	}
+}
+
+// SetOnProgress installs the progress callback. Safe to call before or after
+// Start; the chat goroutine reads through callOnProgress under the same lock.
+func (cd *ChatDownloader) SetOnProgress(fn func(p ChatProgress)) {
+	cd.onProgressMu.Lock()
+	cd.onProgress = fn
+	cd.onProgressMu.Unlock()
+}
+
+// callOnProgress snapshots the current progress callback under the lock and
+// invokes it outside the lock so a slow caller (e.g. a database update)
+// does not block a concurrent SetOnProgress.
+func (cd *ChatDownloader) callOnProgress(p ChatProgress) {
+	cd.onProgressMu.RLock()
+	fn := cd.onProgress
+	cd.onProgressMu.RUnlock()
+	if fn != nil {
+		fn(p)
 	}
 }
 
@@ -386,13 +414,13 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		}
 
 		// Emit progress on every batch with new messages (not throttled)
-		if newInBatch > 0 && cd.OnProgress != nil {
+		if newInBatch > 0 {
 			lastTs := ""
 			if len(resp.Messages) > 0 {
 				lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
 			}
-			cd.OnProgress(ChatProgress{
-				MessageCount: cd.messageCount,
+			cd.callOnProgress(ChatProgress{
+				MessageCount:  cd.messageCount,
 				LastTimestamp: lastTs,
 			})
 		}
