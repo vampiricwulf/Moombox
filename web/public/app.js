@@ -821,6 +821,7 @@ class MoomboxApp {
       const isReconnect = this.reconnectAttempts > 0;
       this.reconnectAttempts = 0;
       this._lastPong = Date.now();
+      this._lastPingSent = Date.now();
       this.updateConnectionStatus(true);
       // Refresh status (cookie + Twitch auth) on reconnect
       this.loadStatus();
@@ -828,17 +829,26 @@ class MoomboxApp {
       // (e.g., config saved via TUI, or restart-required settings that were applied).
       // Skip if user has unsaved changes to avoid silently overwriting their edits.
       if (isReconnect && !this.settings._dirty) this.loadConfig();
-      // Start client-side heartbeat to detect half-open connections
+      // Start client-side heartbeat to detect half-open connections.
+      // Track pings sent AND pongs received so a transient send() throw
+      // (InvalidStateError during a tab/network blip) doesn't cause a false
+      // positive close — we only declare the socket dead when a ping has
+      // been sent AND the corresponding pong hasn't come back in time.
       if (this._pingInterval) clearInterval(this._pingInterval);
       this._pingInterval = setInterval(() => {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          // If no pong received within 45s, connection is likely dead
-          if (Date.now() - this._lastPong > 45000) {
-            console.log("WebSocket heartbeat timeout — reconnecting");
-            this.ws.close();
-            return;
-          }
-          try { this.ws.send(JSON.stringify({ type: "ping" })); } catch { /* connection closed between check and send */ }
+        if (this.ws?.readyState !== WebSocket.OPEN) return;
+        const now = Date.now();
+        // Dead-socket check: only fire if a recent ping actually went out.
+        if (this._lastPingSent > this._lastPong && now - this._lastPingSent > 45000) {
+          console.log("WebSocket heartbeat timeout — reconnecting");
+          this.ws.close();
+          return;
+        }
+        try {
+          this.ws.send(JSON.stringify({ type: "ping" }));
+          this._lastPingSent = now;
+        } catch {
+          /* connection closed between check and send; next tick will observe readyState */
         }
       }, 15000);
     };
