@@ -370,83 +370,113 @@ func (db *Database) getSegments(jobID string) ([]Segment, error) {
 	return segments, nil
 }
 
-// attachTrimsAndGaps batch-loads all trims and gaps and attaches them to jobs.
+// idChunkSize bounds the number of bind parameters per query to stay well
+// under SQLite's SQLITE_MAX_VARIABLE_NUMBER (32766 in modern builds, 999 in
+// older defaults). 500 leaves plenty of headroom and keeps plans compact.
+const idChunkSize = 500
+
+// attachTrimsAndGaps batch-loads trims, gaps, and segments for the given jobs
+// and attaches them to the caller-provided slice. Queries are narrowed to the
+// requested job IDs via WHERE job_id IN (...) and chunked to respect
+// SQLITE_MAX_VARIABLE_NUMBER.
 // Caller must already hold db.mu (read or write).
 func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	if len(jobs) == 0 {
 		return
 	}
 
-	// Batch-load all trims in one query.
-	trimRows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size FROM trims`)
-	if err != nil {
-		if db.logger != nil {
-			db.logger.Warn("attachTrimsAndGaps: failed to query trims", "err", err)
+	// Collect the job IDs we actually care about so each sub-query is
+	// parametrized (WHERE job_id IN (?, ?, ...)) instead of scanning the
+	// whole trims/gaps/segments table.
+	ids := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		ids = append(ids, j.ID)
+	}
+
+	trimMap := make(map[string][]TrimRecord, len(jobs))
+	gapMap := make(map[string][]Gap, len(jobs))
+	segMap := make(map[string][]Segment, len(jobs))
+
+	for start := 0; start < len(ids); start += idChunkSize {
+		end := start + idChunkSize
+		if end > len(ids) {
+			end = len(ids)
 		}
-	} else {
-		trimMap := make(map[string][]TrimRecord, len(jobs))
-		for trimRows.Next() {
-			var tr TrimRecord
-			if err := trimRows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
-				&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err == nil {
-				trimMap[tr.JobID] = append(trimMap[tr.JobID], tr)
-			}
+		chunk := ids[start:end]
+		placeholders := strings.Repeat("?,", len(chunk))
+		placeholders = placeholders[:len(placeholders)-1] // drop trailing ","
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
 		}
-		trimRows.Close()
-		for _, job := range jobs {
-			if trims, ok := trimMap[job.ID]; ok {
-				job.Trims = trims
+
+		// Trims
+		trimRows, err := db.db.QueryContext(db.getCtx(),
+			`SELECT id, job_id, start_time, end_time, filename, created_at, duration, file_size
+			FROM trims WHERE job_id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			if db.logger != nil {
+				db.logger.Warn("attachTrimsAndGaps: failed to query trims", "err", err)
 			}
+		} else {
+			for trimRows.Next() {
+				var tr TrimRecord
+				if err := trimRows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
+					&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err == nil {
+					trimMap[tr.JobID] = append(trimMap[tr.JobID], tr)
+				}
+			}
+			trimRows.Close()
+		}
+
+		// Gaps
+		gapRows, err := db.db.QueryContext(db.getCtx(),
+			`SELECT id, job_id, gap_from, gap_to, stream
+			FROM gaps WHERE job_id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			if db.logger != nil {
+				db.logger.Warn("attachTrimsAndGaps: failed to query gaps", "err", err)
+			}
+		} else {
+			for gapRows.Next() {
+				var g Gap
+				if err := gapRows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err == nil {
+					gapMap[g.JobID] = append(gapMap[g.JobID], g)
+				}
+			}
+			gapRows.Close()
+		}
+
+		// Segments
+		segRows, err := db.db.QueryContext(db.getCtx(),
+			`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds
+			FROM segments WHERE job_id IN (`+placeholders+`) ORDER BY segment_index`, args...)
+		if err != nil {
+			if db.logger != nil {
+				db.logger.Warn("attachTrimsAndGaps: failed to query segments", "err", err)
+			}
+		} else {
+			for segRows.Next() {
+				var s Segment
+				if err := segRows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
+					&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
+					&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds); err == nil {
+					segMap[s.JobID] = append(segMap[s.JobID], s)
+				}
+			}
+			segRows.Close()
 		}
 	}
 
-	// Batch-load all gaps in one query.
-	gapRows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id, job_id, gap_from, gap_to, stream FROM gaps`)
-	if err != nil {
-		if db.logger != nil {
-			db.logger.Warn("attachTrimsAndGaps: failed to query gaps", "err", err)
+	for _, job := range jobs {
+		if trims, ok := trimMap[job.ID]; ok {
+			job.Trims = trims
 		}
-	} else {
-		gapMap := make(map[string][]Gap, len(jobs))
-		for gapRows.Next() {
-			var g Gap
-			if err := gapRows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err == nil {
-				gapMap[g.JobID] = append(gapMap[g.JobID], g)
-			}
+		if gaps, ok := gapMap[job.ID]; ok {
+			job.Gaps = gaps
 		}
-		gapRows.Close()
-		for _, job := range jobs {
-			if gaps, ok := gapMap[job.ID]; ok {
-				job.Gaps = gaps
-			}
-		}
-	}
-
-	// Batch-load all segments in one query.
-	segRows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds
-		FROM segments ORDER BY segment_index`)
-	if err != nil {
-		if db.logger != nil {
-			db.logger.Warn("attachTrimsAndGaps: failed to query segments", "err", err)
-		}
-	} else {
-		segMap := make(map[string][]Segment, len(jobs))
-		for segRows.Next() {
-			var s Segment
-			if err := segRows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
-				&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
-				&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds); err == nil {
-				segMap[s.JobID] = append(segMap[s.JobID], s)
-			}
-		}
-		segRows.Close()
-		for _, job := range jobs {
-			if segs, ok := segMap[job.ID]; ok {
-				job.Segments = segs
-			}
+		if segs, ok := segMap[job.ID]; ok {
+			job.Segments = segs
 		}
 	}
 }
