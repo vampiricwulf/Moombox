@@ -12,6 +12,28 @@ type jobsChangeSub struct {
 	fn func([]*Job)
 }
 
+// shrinkJobUpdateSubs copies a jobUpdateSub slice into a fresh smaller-capacity
+// slice when cap has grown to more than 4× len (typical after many
+// subscribe/unsubscribe cycles). Keeps steady-state memory reasonable.
+func shrinkJobUpdateSubs(s []jobUpdateSub) []jobUpdateSub {
+	if cap(s) > 4*len(s) {
+		shrunk := make([]jobUpdateSub, len(s))
+		copy(shrunk, s)
+		return shrunk
+	}
+	return s
+}
+
+// shrinkJobsChangeSubs is the jobsChangeSub counterpart to shrinkJobUpdateSubs.
+func shrinkJobsChangeSubs(s []jobsChangeSub) []jobsChangeSub {
+	if cap(s) > 4*len(s) {
+		shrunk := make([]jobsChangeSub, len(s))
+		copy(shrunk, s)
+		return shrunk
+	}
+	return s
+}
+
 // OnJobUpdate registers a callback for job update events.
 // Returns an unsubscribe function that removes the callback.
 func (db *Database) OnJobUpdate(fn func(*Job)) func() {
@@ -26,6 +48,7 @@ func (db *Database) OnJobUpdate(fn func(*Job)) func() {
 		for i, sub := range db.onJobUpdate {
 			if sub.id == id {
 				db.onJobUpdate = append(db.onJobUpdate[:i], db.onJobUpdate[i+1:]...)
+				db.onJobUpdate = shrinkJobUpdateSubs(db.onJobUpdate)
 				break
 			}
 		}
@@ -46,6 +69,7 @@ func (db *Database) OnJobsChange(fn func([]*Job)) func() {
 		for i, sub := range db.onJobsChange {
 			if sub.id == id {
 				db.onJobsChange = append(db.onJobsChange[:i], db.onJobsChange[i+1:]...)
+				db.onJobsChange = shrinkJobsChangeSubs(db.onJobsChange)
 				break
 			}
 		}
