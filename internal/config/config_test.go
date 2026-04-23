@@ -405,7 +405,7 @@ func TestChannelTermsJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &emptyDecoded); err != nil {
 		t.Fatalf("failed to unmarshal empty terms channel: %v", err)
 	}
-	if !emptyDecoded.Terms.IsEmpty() {
+	if len(emptyDecoded.Terms.Patterns()) != 0 {
 		t.Error("expected empty terms after round-trip")
 	}
 
@@ -421,7 +421,7 @@ func TestChannelTermsJSON(t *testing.T) {
 	if channels[0].Terms.Simple != "(?i)karaoke" {
 		t.Errorf("expected first channel terms '(?i)karaoke', got %q", channels[0].Terms.Simple)
 	}
-	if !channels[1].Terms.IsEmpty() {
+	if len(channels[1].Terms.Patterns()) != 0 {
 		t.Error("expected second channel to have empty terms")
 	}
 }
