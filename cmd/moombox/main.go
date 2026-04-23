@@ -198,7 +198,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		waitForKeypress()
 		os.Exit(1)
 	}
-	defer log.Close()
+	// Close the logger at most once — the deferred close at the bottom of
+	// run() AND the force-exit timer both need to flush buffered lines on
+	// exit, and logger.Close is not guaranteed idempotent at this layer.
+	var logCloseOnce sync.Once
+	closeLog := func() { logCloseOnce.Do(func() { log.Close() }) }
+	defer closeLog()
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
 
@@ -466,22 +471,28 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	wsHub := webServer.WebSocket()
 	r := webServer.Router()
 
-	// Rate limiters
+	// Rate limiters and auth service. Each Close / Stop is non-idempotent
+	// (close(done) panics on second call), so wrap them all in a single
+	// sync.Once-guarded closeLimiters helper that both the normal deferred
+	// shutdown AND the force-exit timer below can safely invoke.
 	apiRL := web.NewRateLimiter(20, time.Minute)
-	defer apiRL.Close()
 	potRL := web.NewRateLimiter(10, time.Minute)
-	defer potRL.Close()
-
-	// Auth service
 	authSvc := web.NewAuthService()
 	authSvc.Start()
-	defer authSvc.Stop()
-
-	// Auth rate limiters
 	loginRL := web.NewRateLimiter(5, time.Minute)
-	defer loginRL.Close()
 	passwordRL := web.NewRateLimiter(3, time.Minute)
-	defer passwordRL.Close()
+
+	var limitersCloseOnce sync.Once
+	closeLimiters := func() {
+		limitersCloseOnce.Do(func() {
+			apiRL.Close()
+			potRL.Close()
+			loginRL.Close()
+			passwordRL.Close()
+			authSvc.Stop()
+		})
+	}
+	defer closeLimiters()
 
 	// Wire auth middleware for external connections
 	webServer.SetAuth(authSvc)
@@ -1776,10 +1787,20 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	log.Info("Shutdown signal received, shutting down gracefully...")
 
-	// 10-second force-exit timer
+	// 10-second force-exit timer. Close rate limiters here too — os.Exit
+	// skips remaining defers, so shutting them down in-line is the only way
+	// their goroutines get a chance to stop cleanly. closeLimiters() and
+	// closeLog() are both sync.Once-guarded so the deferred close paths
+	// already running concurrently do not double-close these resources.
 	forceExit := time.AfterFunc(10*time.Second, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "force-exit handler panic: %v\n", r)
+			}
+		}()
 		log.Error("Graceful shutdown timed out, forcing exit")
-		log.Close() // flush buffered logs before force exit
+		closeLimiters()
+		closeLog() // flush buffered logs before force exit
 		os.Exit(1)
 	})
 	defer forceExit.Stop()
