@@ -243,6 +243,24 @@ func TestParseEmoteTagsOutOfBounds(t *testing.T) {
 	}
 }
 
+// TestParseEmoteTagsNonBMP covers the case where the message contains a
+// character outside the Basic Multilingual Plane (e.g. 🎉 U+1F389) before
+// the emote position. Twitch sends UTF-16 code-unit offsets — the non-BMP
+// character counts as 2 code units, one Go rune. Rune-indexed slicing
+// would pull the emote name off by one per non-BMP character already seen.
+// Regression test for audit reports/twitch.md issue #3.
+func TestParseEmoteTagsNonBMP(t *testing.T) {
+	// "🎉 Kappa" — 🎉 is at UTF-16 [0..1], space at [2], "Kappa" at [3..7].
+	// Twitch sends emote position 3-7 (UTF-16) for "Kappa".
+	refs := parseEmoteTags("25:3-7", "🎉 Kappa")
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d", len(refs))
+	}
+	if refs[0].Name != "Kappa" {
+		t.Errorf("expected Name=\"Kappa\", got %q (UTF-16 vs rune index drift)", refs[0].Name)
+	}
+}
+
 func TestChatDedupAddMessage(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{
 		ChannelLogin: "test",

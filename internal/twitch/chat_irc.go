@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/coder/websocket"
 
@@ -331,13 +332,18 @@ func parseBadges(s string) []string {
 }
 
 // parseEmoteTags parses IRC emote tags like "id:start-end,start-end/id:start-end".
+// Twitch's IRC emote-tag offsets count UTF-16 code units (mirroring JavaScript's
+// string indexing), NOT Go runes. For characters outside the Basic Multilingual
+// Plane (U+10000+, e.g. the 🎉 emoji) a single rune is two UTF-16 code units, so
+// indexing message runes by the Twitch offsets drifts by one per non-BMP char
+// already seen. The VOD path (api.go) already uses utf16Len for the same reason.
 func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 	if emotesStr == "" {
 		return nil
 	}
 
 	var refs []TwitchEmoteRef
-	msgRunes := []rune(message)
+	msgUnits := utf16.Encode([]rune(message))
 
 	for group := range strings.SplitSeq(emotesStr, "/") {
 		emoteID, positions, ok := strings.Cut(group, ":")
@@ -357,8 +363,8 @@ func parseEmoteTags(emotesStr, message string) []TwitchEmoteRef {
 			}
 
 			name := ""
-			if start >= 0 && end < len(msgRunes) {
-				name = string(msgRunes[start : end+1])
+			if start >= 0 && end < len(msgUnits) {
+				name = string(utf16.Decode(msgUnits[start : end+1]))
 			}
 
 			refs = append(refs, TwitchEmoteRef{
