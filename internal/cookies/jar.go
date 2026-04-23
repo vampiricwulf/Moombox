@@ -131,16 +131,18 @@ func (j *CookieJar) Load(filePath string) error {
 			continue
 		}
 
-		// Only include YouTube/Google and Twitch cookies
-		isYouTubeGoogle := strings.Contains(domain, "youtube.com") || strings.Contains(domain, "google.com")
-		isTwitch := strings.Contains(domain, "twitch.tv")
+		// Only include YouTube/Google and Twitch cookies. Use suffix-anchored
+		// matchers so a malicious or hand-edited file entry like
+		// ".fakegoogle.com.evil.tld" does not get treated as google.com.
+		isYouTubeGoogle := isYouTubeDomain(domain) || isGoogleDomain(domain)
+		isTwitch := isTwitchDomain(domain)
 
 		if !isYouTubeGoogle && !isTwitch {
 			continue
 		}
 
 		// Filter to essential cookies
-		isGoogleAuth := strings.Contains(domain, "google.com") && (name == "SID" || name == "HSID" ||
+		isGoogleAuth := isGoogleDomain(domain) && (name == "SID" || name == "HSID" ||
 			name == "SSID" || name == "APISID" || name == "SAPISID" ||
 			strings.HasPrefix(name, "__Secure-1P") || strings.HasPrefix(name, "__Secure-3P"))
 		isTwitchEssential := isTwitch && essentialTwitchCookies[name]
@@ -151,7 +153,7 @@ func (j *CookieJar) Load(filePath string) error {
 
 		// Prefer youtube.com cookies over google.com when both exist
 		existingDomain, exists := domains[name]
-		if exists && strings.Contains(existingDomain, "youtube.com") && !strings.Contains(domain, "youtube.com") {
+		if exists && isYouTubeDomain(existingDomain) && !isYouTubeDomain(domain) {
 			continue
 		}
 

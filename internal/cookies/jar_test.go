@@ -245,6 +245,64 @@ func TestReloadCookies(t *testing.T) {
 	}
 }
 
+// TestDomainMatchers locks down the suffix-anchored domain matchers so the
+// substring-match hazard (e.g. "fakegoogle.com.evil.tld") does not regress
+// (finding #39 in reports/cookies.md).
+func TestDomainMatchers(t *testing.T) {
+	cases := []struct {
+		fn     func(string) bool
+		name   string
+		domain string
+		want   bool
+	}{
+		// isYouTubeDomain
+		{isYouTubeDomain, "youtube exact", "youtube.com", true},
+		{isYouTubeDomain, "youtube subdomain", "www.youtube.com", true},
+		{isYouTubeDomain, "youtube subdomain with dot prefix", ".www.youtube.com", true},
+		{isYouTubeDomain, "youtube music subdomain", "music.youtube.com", true},
+		{isYouTubeDomain, "evil substring", "fakeyoutube.com.evil.tld", false},
+		{isYouTubeDomain, "youtube in middle", "foo.youtube.com.bar", false},
+		{isYouTubeDomain, "unrelated", "example.com", false},
+		// isGoogleDomain
+		{isGoogleDomain, "google exact", "google.com", true},
+		{isGoogleDomain, "accounts.google.com", "accounts.google.com", true},
+		{isGoogleDomain, "fakegoogle", "fakegoogle.com", false},
+		{isGoogleDomain, "google substring not subdomain", "notgoogle.com", false},
+		// isTwitchDomain
+		{isTwitchDomain, "twitch exact", "twitch.tv", true},
+		{isTwitchDomain, "twitch subdomain", "api.twitch.tv", true},
+		{isTwitchDomain, "twitch substring", "twitch.tv.evil.tld", false},
+	}
+	for _, tc := range cases {
+		if got := tc.fn(tc.domain); got != tc.want {
+			t.Errorf("%s: %q -> got %v, want %v", tc.name, tc.domain, got, tc.want)
+		}
+	}
+}
+
+// TestLoadRejectsLookalikeDomains ensures a cookie entry whose domain merely
+// embeds "youtube.com" as a substring is filtered out during Load so it
+// cannot leak into the Cookie header (finding #39).
+func TestLoadRejectsLookalikeDomains(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	content := `# Netscape HTTP Cookie File
+fakeyoutube.com.evil.tld	TRUE	/	TRUE	0	SAPISID	attacker_value
+.youtube.com	TRUE	/	TRUE	0	SAPISID	legit_value
+.youtube.com	TRUE	/	TRUE	0	LOGIN_INFO	legit_login
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if jar.GetSapisid() != "legit_value" {
+		t.Errorf("lookalike domain must not win SAPISID, got %q", jar.GetSapisid())
+	}
+}
+
 // TestLoadPreservesStateOnReadError verifies that Load does not clobber
 // previously loaded cookies when a subsequent read fails for a reason other
 // than "file does not exist" (finding #28 in reports/cookies.md).

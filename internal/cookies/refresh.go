@@ -484,6 +484,11 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 
 	updates := make(map[string]cookieUpdate)
 	for _, sc := range setCookies {
+		// Cheap early filter before tokenizing — only cookies that mention
+		// youtube.com or google.com anywhere in the Set-Cookie string are
+		// candidates. The authoritative check against the parsed Domain=
+		// attribute happens below via domainMatches so hosts like
+		// "fakegoogle.com" that merely embed the substring are rejected.
 		scLower := strings.ToLower(sc)
 		if !strings.Contains(scLower, "youtube.com") && !strings.Contains(scLower, "google.com") {
 			continue
@@ -539,6 +544,14 @@ func (rs *RefreshService) processYouTubeSetCookies(resp *http.Response) {
 		// scope per RFC 6265).
 		if domainAttr != "" && !strings.HasPrefix(domainAttr, ".") {
 			domainAttr = "." + domainAttr
+		}
+
+		// When the server supplied Domain=, reject anything that is not an
+		// actual YouTube or Google host — blocks the corner case where the
+		// early substring pre-filter let through a Set-Cookie carrying a
+		// Domain= for e.g. accounts.google.com.evil.tld.
+		if domainAttr != "" && !isYouTubeDomain(domainAttr) && !isGoogleDomain(domainAttr) {
+			continue
 		}
 
 		updates[name] = cookieUpdate{Value: value, Expiry: expiry, Domain: domainAttr}

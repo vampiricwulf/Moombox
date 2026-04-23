@@ -17,11 +17,28 @@ type extractedCookie struct {
 	value    string
 }
 
+// domainMatches is true when domain is exactly target or a proper subdomain
+// of target (i.e. ends with "." + target). Unlike strings.Contains it does
+// not match unrelated hosts like "fakegoogle.com.evil.tld" that merely
+// embed the target as a substring.
+func domainMatches(domain, target string) bool {
+	d := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	t := strings.ToLower(strings.TrimSpace(target))
+	return d == t || strings.HasSuffix(d, "."+t)
+}
+
+// isYouTubeDomain is true for youtube.com / www.youtube.com / music.youtube.com / etc.
+func isYouTubeDomain(domain string) bool { return domainMatches(domain, "youtube.com") }
+
+// isGoogleDomain is true for google.com and its subdomains (accounts.google.com etc.).
+func isGoogleDomain(domain string) bool { return domainMatches(domain, "google.com") }
+
+// isTwitchDomain is true for twitch.tv and its subdomains.
+func isTwitchDomain(domain string) bool { return domainMatches(domain, "twitch.tv") }
+
 // isRelevantDomain returns true for YouTube/Google/Twitch domains (matching TS).
 func isRelevantDomain(domain string) bool {
-	return strings.Contains(domain, "youtube.com") ||
-		strings.Contains(domain, "google.com") ||
-		strings.Contains(domain, "twitch.tv")
+	return isYouTubeDomain(domain) || isGoogleDomain(domain) || isTwitchDomain(domain)
 }
 
 // isEssentialCookie checks if a cookie should be included in extraction (matching TS).
@@ -31,14 +48,14 @@ func isEssentialCookie(name, domain string) bool {
 		return true
 	}
 	// Google domain auth cookies
-	if strings.Contains(domain, "google.com") {
+	if isGoogleDomain(domain) {
 		if name == "SID" || name == "HSID" || name == "SSID" || name == "APISID" || name == "SAPISID" ||
 			strings.HasPrefix(name, "__Secure-1P") || strings.HasPrefix(name, "__Secure-3P") {
 			return true
 		}
 	}
 	// Twitch essential cookies
-	if strings.Contains(domain, "twitch.tv") && essentialTwitchCookies[name] {
+	if isTwitchDomain(domain) && essentialTwitchCookies[name] {
 		return true
 	}
 	return false
@@ -65,7 +82,7 @@ func deduplicateAndFormat(cookies []extractedCookie) []string {
 		}
 
 		existing, exists := byName[c.name]
-		if exists && strings.Contains(existing.domain, "youtube.com") && !strings.Contains(c.domain, "youtube.com") {
+		if exists && isYouTubeDomain(existing.domain) && !isYouTubeDomain(c.domain) {
 			continue // Already have youtube.com version, skip google.com
 		}
 		if !exists {
