@@ -1,6 +1,15 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.15` with another `internal/cookies/` pass.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.16` with `internal/worker/` + `internal/engine/` concurrency fixes.
 
-This build bundles Sprint #1 + Sprint #2 work plus ten batches from the multi-report audit. All 279 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus eleven batches from the multi-report audit. All 283 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 11 (test.17)
+
+Targeted concurrency hazards in the worker + engine packages — real `-race`-visible bugs and shutdown-correctness fixes:
+
+- **worker #2** — `ChatDownloader.OnProgress` is now an unexported field protected by an `RWMutex` with `SetOnProgress`/`callOnProgress` helpers. The orchestrator overwrites this callback after the chat goroutine has already started polling, so the previous public-field design was a Go memory-model data race on a func value. Three call sites in the worker package updated.
+- **worker #7** — Background segment-mux goroutines now run with a 5-minute bounded context instead of `context.Background()`. The `defer segmentMuxWg.Wait()` at the top of the live download loop blocks return until every spawned mux goroutine completes; with an unbounded context, a stuck FFmpeg pinned shutdown indefinitely. User-cancel still preserves partial output (the ctx is detached from parent) but the worst case is bounded.
+- **worker #25 + #26** — Catch-up parallel and HLS-VOD parallel pools no longer leak workers on early consumer return. Both pools deadlocked on a write error: consumer returns mid-stream, workers blocked on full results channel, `wg.Wait` never completes, closer goroutine never fires. Added a per-call `done` channel closed by defer at function exit so workers unblock cleanly.
+- **worker #19** — Doc fix in `docs/spec/architecture.md`: the terminal-status block claimed `StatusMuxing` was terminal; the actual implementation excludes it (`enqueueExistingJobs` resets interrupted muxes back to `Downloading`). Doc updated to match the canonical code behavior.
 
 ### Manual batch 10 (test.16)
 
