@@ -1081,6 +1081,13 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			jsonError(rw, "failed to open folder", http.StatusInternalServerError)
 			return
 		}
+		// Release the OS process handle immediately — we don't call
+		// cmd.Wait() (explorer.exe detaches and runs independently),
+		// and without Release() the handle leaks until the Moombox
+		// process exits, accumulating for every open-folder request.
+		if cmd.Process != nil {
+			_ = cmd.Process.Release()
+		}
 
 		jsonResponse(rw, map[string]bool{"success": true})
 	})
