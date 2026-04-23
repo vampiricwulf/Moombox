@@ -33,10 +33,14 @@ type DetectedBrowser struct {
 	Name string `json:"name"`
 }
 
-// isFirefoxBased returns true for Firefox and Firefox-family browsers (Waterfox, etc.)
-// that use cookies.sqlite and the -profile flag.
+// isFirefoxBased returns true for Firefox and Firefox-family browsers
+// (Waterfox, LibreWolf, Zen) that use cookies.sqlite and the -profile flag.
 func isFirefoxBased(browserType string) bool {
-	return browserType == "firefox" || browserType == "waterfox"
+	switch browserType {
+	case "firefox", "waterfox", "librewolf", "zen":
+		return true
+	}
+	return false
 }
 
 // browserInfo maps a browser type to its display name and paths/candidates.
@@ -47,18 +51,27 @@ type browserInfo struct {
 	windowsPaths []string // relative paths under Program Files / LocalAppData
 }
 
+// knownBrowsers is the search-order list. Firefox-family entries come first
+// so the Firefox-based extraction path (cookies.sqlite, no CDP) is preferred
+// when both kinds are installed. Within each family, more privacy-focused or
+// less-common forks come ahead of mainline browsers so a user who took the
+// trouble to install LibreWolf isn't auto-detected as Firefox.
 var knownBrowsers = []browserInfo{
-	{"firefox", "Firefox", firefoxPaths, []string{`Mozilla Firefox\firefox.exe`}},
+	{"librewolf", "LibreWolf", librewolfPaths, []string{`LibreWolf\librewolf.exe`}},
+	{"zen", "Zen Browser", zenPaths, []string{`Zen Browser\zen.exe`}},
 	{"waterfox", "Waterfox", waterfoxPaths, []string{`Waterfox\waterfox.exe`}},
-	{"chrome", "Google Chrome", chromePaths, []string{`Google\Chrome\Application\chrome.exe`}},
+	{"firefox", "Firefox", firefoxPaths, []string{`Mozilla Firefox\firefox.exe`}},
+	{"vivaldi", "Vivaldi", vivaldiPaths, []string{`Vivaldi\Application\vivaldi.exe`}},
+	{"thorium", "Thorium", thoriumPaths, []string{`Thorium\Application\thorium.exe`}},
 	{"brave", "Brave", bravePaths, []string{`BraveSoftware\Brave-Browser\Application\brave.exe`}},
+	{"chrome", "Google Chrome", chromePaths, []string{`Google\Chrome\Application\chrome.exe`}},
 	{"opera", "Opera GX", operaPaths, []string{`Programs\Opera GX\opera.exe`, `Programs\Opera\opera.exe`}},
 	{"edge", "Microsoft Edge", edgePaths, []string{`Microsoft\Edge\Application\msedge.exe`}},
 }
 
 // DetectBrowser finds the best available browser, caching the result for 60s.
-// It checks the system's default browser first, then falls back to
-// Firefox > Waterfox > Chrome > Brave > Opera > Edge.
+// It checks the system's default browser first, then falls back to the
+// knownBrowsers order (Firefox-family ahead of Chromium-family).
 func DetectBrowser() *DetectedBrowser {
 	browserDetectCache.mu.Lock()
 	defer browserDetectCache.mu.Unlock()
@@ -157,18 +170,29 @@ func detectDefaultBrowserWindows() string {
 		}
 		progID := strings.ToLower(parts[2])
 		switch {
+		// Firefox family. LibreWolf/Zen ahead of Firefox so a fork user
+		// who has both Firefox-fork ProgIDs registered hits the fork.
+		case strings.HasPrefix(progID, "librewolfurl"), strings.HasPrefix(progID, "librewolfhtml"):
+			return "librewolf"
+		case strings.HasPrefix(progID, "zenbrowserurl"), strings.HasPrefix(progID, "zenurl"):
+			return "zen"
 		case strings.HasPrefix(progID, "waterfoxhtml"):
 			return "waterfox"
 		case strings.HasPrefix(progID, "firefoxurl"):
 			return "firefox"
-		case strings.HasPrefix(progID, "msedgehtm"):
-			return "edge"
-		case strings.HasPrefix(progID, "chromehtml"):
-			return "chrome"
+		// Chromium family.
+		case strings.HasPrefix(progID, "vivaldihtm"):
+			return "vivaldi"
+		case strings.HasPrefix(progID, "thoriumhtm"):
+			return "thorium"
 		case strings.HasPrefix(progID, "bravehtml"):
 			return "brave"
+		case strings.HasPrefix(progID, "chromehtml"):
+			return "chrome"
 		case strings.HasPrefix(progID, "operagxstable"), strings.HasPrefix(progID, "operastable"):
 			return "opera"
+		case strings.HasPrefix(progID, "msedgehtm"):
+			return "edge"
 		}
 		return ""
 	}
@@ -187,6 +211,34 @@ func waterfoxPaths() []string {
 		return []string{"waterfox", "/Applications/Waterfox.app/Contents/MacOS/waterfox"}
 	}
 	return []string{"waterfox"}
+}
+
+func librewolfPaths() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"librewolf", "/Applications/LibreWolf.app/Contents/MacOS/librewolf"}
+	}
+	return []string{"librewolf"}
+}
+
+func zenPaths() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"zen", "/Applications/Zen Browser.app/Contents/MacOS/zen"}
+	}
+	return []string{"zen", "zen-browser"}
+}
+
+func vivaldiPaths() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"vivaldi", "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi"}
+	}
+	return []string{"vivaldi", "vivaldi-stable"}
+}
+
+func thoriumPaths() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"thorium", "/Applications/Thorium.app/Contents/MacOS/Thorium"}
+	}
+	return []string{"thorium", "thorium-browser"}
 }
 
 func edgePaths() []string {
