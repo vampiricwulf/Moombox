@@ -934,7 +934,17 @@ func (cd *ChatDownloader) saveResume() {
 
 func (cd *ChatDownloader) clearResume() {
 	_, resumeFile := cd.getOutputPaths()
-	os.Remove(resumeFile)
+	if resumeFile == "" {
+		return
+	}
+	if err := os.Remove(resumeFile); err != nil && !os.IsNotExist(err) {
+		// Not fatal, but stale state left on disk could cause the next
+		// Start() to reload resume data from a superseded run. Route
+		// through OnError so operators see permission/AV-lock problems.
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("clear resume state: %w", err))
+		}
+	}
 }
 
 // sleep waits for the given duration, but returns early if the context is cancelled
