@@ -1,15 +1,21 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.3` with a third batch covering cipher/STS invalidation, engine-level atomic fields and HTTP transport tuning, and a Twitch chat data-loss fix.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.4` with TUI config-lock and apiClient fixes and a WebSocket heartbeat fix.
 
-This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-report audit. All 29 commits build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-report audit. All 32 commits build clean and pass `go test -race ./...` plus the frontend JS test suite.
 
-### Correctness fixes added since test.3
+### Correctness fixes since test.3
 
-- **Cipher STS cache** — `Solver.InvalidateSolver(playerURL)` now also drops the STS cache entry for that player. The previous behaviour kept the stale `signatureTimestamp`, so a freshly-compiled solver paired with an old STS could trigger a 403 → invalidate → 403 loop. `InvalidateCache()` (all-clear) symmetrically clears both caches now. (audit cipher.md C2)
+- **Cipher STS cache** — `Solver.InvalidateSolver(playerURL)` now also drops the STS cache entry for that player. Previously the stale `signatureTimestamp` paired with a freshly-compiled solver could trigger a 403 → invalidate → 403 loop. `InvalidateCache()` (all-clear) symmetrically clears both caches now. (audit cipher.md C2)
 - **Cipher compile panic recovery** — `getFromPrepared` wraps goja.RunString/NewObject in a deferred recover. A malformed player.js that panics goja (stack overflow, parser edge case) used to kill the download goroutine; now it returns a clean error and the caller invalidates & retries. (cipher.md H5)
 - **Engine parallel catch-up resume** — `runParallelCatchUp` was only updating `d.currentSeq` every `ResumeCatchupInterval` (10) segments. A crash in between lost up to 9 segments of work on restart; now updates on every successful write. (engine.md Finding 1, Critical)
 - **Engine atomic fields** — `cipherFailureFired`, `lastSegTime`, `lastHeadProbeTime` are now `atomic.Bool` / a new `atomicTime` wrapper. Previously read/written from the download loop AND the parallel-worker result consumer with no synchronization — race-detector-clean now. (engine.md Findings 2, 3)
-- **Engine HTTP transport tuning** — shared `engineHTTPClient` now sets `MaxIdleConnsPerHost = ParallelDownloads + 2` (8) so the 6 parallel workers + HEAD probes reuse TCP connections instead of churning handshakes. Kept the 5-minute safety-net Timeout. (engine.md Finding 5)
-- **Twitch chat append-failure fallback** — when incremental append fails, the fallback now reads the existing file and merges with the current batch before rewriting, instead of overwriting the aggregate with only the last batch. (twitch.md issue #5)
+- **Engine HTTP transport tuning** — shared `engineHTTPClient` now sets `MaxIdleConnsPerHost = ParallelDownloads + 2` (8) so the 6 parallel workers + HEAD probes reuse TCP connections instead of churning handshakes. (engine.md Finding 5)
+- **Twitch chat append-failure fallback** — when incremental append fails, the fallback reads the existing file and merges with the current batch before rewriting, instead of overwriting the aggregate with only the last batch. (twitch.md issue #5)
+
+### Correctness fixes added in test.5
+
+- **TUI OnSaveConfig not held under cfgMu** — FFmpeg-path persistence wrote TOML to disk while holding `cfgMu.Lock()`, stalling every reader (job render, settings open, apiClient build) for hundreds of ms. Now snapshots the callback + config under lock, releases, then invokes. (tui.md Finding 2)
+- **TUI apiClient rebuilds on HTTPS toggle** — the cached `*http.Client` was never invalidated when the user toggled HTTPS in Settings; subsequent API calls used the wrong transport. Cache now tracks the HTTPSEnabled value it was built against and self-heals on mismatch. (tui.md Finding 3)
+- **WebSocket heartbeat timeout hardened** — a transient `ws.send()` throw (e.g. InvalidStateError during a reconnect) was swallowed without advancing any counter, so the 45 s pong timeout could fire on a socket that was fine. Heartbeat now tracks `_lastPingSent` separately and only declares the socket dead when a ping went out AND no pong came back. (frontend-js.md C3)
 
 ### Security
 
