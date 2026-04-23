@@ -67,11 +67,19 @@ func (er *EmoteResolver) Resolve(ctx context.Context, channelID string, channelL
 		er.mu.Unlock()
 		return cached
 	}
-	// Dedup: if another goroutine is already fetching this key, wait for it
+	// Dedup: if another goroutine is already fetching this key, wait for it.
+	// Respect ctx so a cancelled download doesn't sit here waiting on a
+	// fetcher that may itself be blocked on network IO.
 	if wait, ok := er.inflight[cacheKey]; ok {
 		er.mu.Unlock()
-		<-wait
-		// Now it should be in cache
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil
+		}
+		// Now it should be in cache (unless ctx cancelled and fetcher hadn't
+		// populated yet — in which case cache miss is fine, Twitch emote
+		// resolution is best-effort).
 		er.mu.Lock()
 		cached := er.cache[cacheKey]
 		er.mu.Unlock()
