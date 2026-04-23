@@ -78,3 +78,22 @@ func (sc *StsCache) Invalidate() {
 	sc.order = nil
 	sc.mu.Unlock()
 }
+
+// InvalidateKey drops the cached STS for a single player. Called from
+// Solver.InvalidateSolver so that re-fetching the player script also gets
+// a fresh signatureTimestamp — a stale STS paired with a freshly compiled
+// solver can produce a 403/loop cycle (see audit cipher.md C2).
+func (sc *StsCache) InvalidateKey(key string) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if _, ok := sc.cache[key]; !ok {
+		return
+	}
+	delete(sc.cache, key)
+	for i, k := range sc.order {
+		if k == key {
+			sc.order = append(sc.order[:i], sc.order[i+1:]...)
+			break
+		}
+	}
+}
