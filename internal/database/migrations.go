@@ -227,7 +227,14 @@ func (db *Database) migrate() error {
 	}
 
 	if version < 3 {
-		// Add thumbnail_file and description_file columns
+		// Add thumbnail_file and description_file columns.
+		//
+		// WARNING: The column names are concatenated into the ALTER TABLE
+		// statement below because SQLite does not allow bind parameters for
+		// identifiers. This is safe ONLY because the slice is a hardcoded
+		// compile-time literal — do not copy this pattern with any value
+		// that could come from user input, configuration, or another query.
+		// Use a strict allowlist check instead.
 		for _, col := range []string{"thumbnail_file", "description_file"} {
 			if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE jobs ADD COLUMN `+col+` TEXT`); err != nil {
 				if !strings.Contains(err.Error(), "duplicate column") {
