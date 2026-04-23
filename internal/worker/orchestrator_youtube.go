@@ -270,9 +270,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 						}
 					}()
 					defer segmentMuxWg.Done()
-					// Use background context — data is already downloaded, let FFmpeg finish
-					// even during cancellation to avoid orphaned partial output files.
-					seg, muxErr := o.muxSegment(context.Background(), jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
+					// Detached from the parent ctx so user-cancellation doesn't
+					// orphan a partial output, but with a 5-min ceiling: defer
+					// segmentMuxWg.Wait() means a stuck FFmpeg blocks shutdown
+					// indefinitely, and worker.Stop()'s 10s grace can't override
+					// it. 5 min is well above any normal segment mux time.
+					muxCtx, muxCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+					defer muxCancel()
+					seg, muxErr := o.muxSegment(muxCtx, jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
 					if muxErr != nil {
 						o.logger.Error("failed to mux quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
 					} else if seg != nil {
