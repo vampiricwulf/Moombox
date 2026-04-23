@@ -55,6 +55,26 @@ func NewSolver(cacheDir string, logger interface {
 		logger.Debug("[Cipher] player cache eviction skipped", "err", err)
 	}
 
+	// Background sweep: Solver lives for the process lifetime. The 14-day
+	// TTL on disk entries means a long-running 24/7 process would never
+	// evict without this — startup-only eviction leaves entries for the
+	// full window. Goroutine runs forever; panic recovery per CLAUDE.md
+	// keeps a filesystem hiccup from killing it.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("cipher: disk eviction goroutine panic", "panic", r)
+			}
+		}()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := pc.Evict(); err != nil {
+				logger.Warn("cipher: periodic disk eviction failed", "err", err)
+			}
+		}
+	}()
+
 	return s, nil
 }
 
