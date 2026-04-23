@@ -431,9 +431,6 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 		title = body[:idx]
 	}
 
-	// Update last video tracking
-	dm.db.SetLastVideo(ch.ID, videoID)
-
 	// Skip if active job exists (but not if merely finished — stream may restart on same URL)
 	active, err := dm.db.HasActiveJob(videoID)
 	if err != nil {

@@ -366,9 +366,6 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 		return nil
 	}
 
-	// Track latest video for DECAPI baseline
-	fm.db.SetLastVideo(ch.ID, entries[0].VideoID)
-
 	// Build lookbehind set for description dedup
 	lookbehind := 0
 	if ch.NumDescLookbehind != nil {
