@@ -18,13 +18,7 @@ var discordHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // DiscordWebhook sends notifications via Discord webhook.
 type DiscordWebhook struct {
-	URL    string
-	Logger interface {
-		Debug(msg string, args ...any)
-		Info(msg string, args ...any)
-		Warn(msg string, args ...any)
-		Error(msg string, args ...any)
-	}
+	URL string
 }
 
 type discordPayload struct {
