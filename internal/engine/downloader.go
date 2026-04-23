@@ -96,6 +96,16 @@ func (nopLogger) Info(string, ...any)  {}
 func (nopLogger) Warn(string, ...any)  {}
 func (nopLogger) Error(string, ...any) {}
 
+// atomicTime wraps atomic.Int64 to store a time.Time as UnixNano for
+// lock-free access across the download loop and parallel-worker goroutines.
+// The zero value represents a zero time (IsZero() returns true from Load()).
+type atomicTime struct{ v atomic.Int64 }
+
+func (a *atomicTime) Store(t time.Time)          { a.v.Store(t.UnixNano()) }
+func (a *atomicTime) Load() time.Time            { n := a.v.Load(); if n == 0 { return time.Time{} }; return time.Unix(0, n) }
+func (a *atomicTime) StoreNow()                  { a.v.Store(time.Now().UnixNano()) }
+func (a *atomicTime) Since() time.Duration       { return time.Since(a.Load()) }
+
 // SegmentDownloader downloads DASH or HLS segments sequentially/in parallel.
 type SegmentDownloader struct {
 	opts              DownloaderOptions
@@ -107,10 +117,10 @@ type SegmentDownloader struct {
 	bytesWritten      atomic.Int64
 	currentSeq        atomic.Int64
 	headSeq           atomic.Int64
-	lastSegTime       time.Time
-	lastHeadProbeTime  time.Time
-	logger             DownloaderLogger
-	cipherFailureFired bool
+	lastSegTime       atomicTime
+	lastHeadProbeTime atomicTime
+	logger            DownloaderLogger
+	cipherFailureFired atomic.Bool
 
 	// Callbacks
 	OnStart          func(seq int, resuming bool)

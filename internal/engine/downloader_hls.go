@@ -146,7 +146,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			}
 			d.bytesWritten.Add(int64(n))
 			d.currentSeq.Add(1)
-			d.lastSegTime = time.Now()
+			d.lastSegTime.StoreNow()
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{

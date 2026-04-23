@@ -41,7 +41,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	consecutiveGoneErrors := 0
 	hasStartedDownloading := false
 	segsSinceResume := 0
-	d.lastSegTime = time.Now() // Initialize to avoid premature NoSegmentTimeout
+	d.lastSegTime.StoreNow() // Initialize to avoid premature NoSegmentTimeout
 
 	// Same-segment retry tracking with exponential backoff (matches TS handleFailedSegmentDownload)
 	sameSegRetries := 0
@@ -70,11 +70,11 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		}
 
 		// Probe head sequence (use dedicated timer, not lastSegTime -- matches TS lastHeadProbeTime)
-		if d.headSeq.Load() < 0 || time.Since(d.lastHeadProbeTime) > HeadProbeInterval {
+		if d.headSeq.Load() < 0 || d.lastHeadProbeTime.Since() > HeadProbeInterval {
 			if headSeq, err := d.probeHeadSequence(ctx); err == nil {
 				d.headSeq.Store(int64(headSeq))
 			}
-			d.lastHeadProbeTime = time.Now()
+			d.lastHeadProbeTime.StoreNow()
 		}
 
 		// Parallel catch-up if far behind
@@ -92,7 +92,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				if headSeq, err := d.probeHeadSequence(ctx); err == nil {
 					d.headSeq.Store(int64(headSeq))
 				}
-				d.lastHeadProbeTime = time.Now()
+				d.lastHeadProbeTime.StoreNow()
 				// Only re-enter loop if catch-up closed the gap (TS: returns false if stillFarBehind)
 				curHead := int(d.headSeq.Load())
 				curSeqNow := int(d.currentSeq.Load())
@@ -127,7 +127,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			return fmt.Errorf("write segment %d: %w", writeSeq, writeErr)
 		}
 		d.bytesWritten.Add(int64(n))
-		d.lastSegTime = time.Now()
+		d.lastSegTime.StoreNow()
 		consecutiveGoneErrors = 0
 		sameHeadRetryDelay = 0
 		sameSegRetries = 0
@@ -167,8 +167,8 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	if statusCode == 403 || statusCode == 410 {
 		// 403 before any bytes written = likely cipher failure (wrong n-param or sig).
 		// 410 = stream ended (not cipher). Only fire on 403.
-		if statusCode == 403 && !d.cipherFailureFired && d.bytesWritten.Load() == 0 {
-			d.cipherFailureFired = true
+		if statusCode == 403 && !d.cipherFailureFired.Load() && d.bytesWritten.Load() == 0 {
+			d.cipherFailureFired.Store(true)
 			if d.OnCipherFailure != nil {
 				d.OnCipherFailure()
 			}
@@ -317,13 +317,13 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	}
 
 	// Also check no-segment timeout
-	if time.Since(d.lastSegTime) > NoSegmentTimeout {
+	if d.lastSegTime.Since() > NoSegmentTimeout {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 				return err
 			}
-			d.lastSegTime = time.Now() // Reset timer on recovery
+			d.lastSegTime.StoreNow() // Reset timer on recovery
 			*sameHeadRetryDelay = 0
 			return nil
 		}

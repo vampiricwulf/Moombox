@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 )
 
 // runParallelCatchUp downloads segments in parallel to catch up to the live edge.
@@ -111,7 +110,7 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 				return nextSeq, fmt.Errorf("write segment %d: %w", nextSeq, err)
 			}
 			d.bytesWritten.Add(int64(n))
-			d.lastSegTime = time.Now()
+			d.lastSegTime.StoreNow()
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
