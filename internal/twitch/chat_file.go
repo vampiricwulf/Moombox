@@ -68,8 +68,13 @@ func appendChatMessages(path string, msgs []TwitchChatMessage, logger chatLogger
 
 	fileSize := info.Size()
 
-	// Read last 10 bytes to find ']'
-	tailSize := min(int64(10), fileSize)
+	// Scan the last 256 bytes for ']'. Earlier revisions scanned only the
+	// last 10 bytes, which failed if a JSON pretty-printer (or a padding
+	// shift from PadMessageCountJSON) left trailing whitespace wider than
+	// that — returning "no closing bracket found" and forcing the caller
+	// down a recovery path that used to lose prior flushes. 256 bytes
+	// covers any realistic trailing-whitespace layout.
+	tailSize := min(int64(256), fileSize)
 	tailBuf := make([]byte, tailSize)
 	if _, err := f.ReadAt(tailBuf, fileSize-tailSize); err != nil {
 		return err
