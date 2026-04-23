@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaults(t *testing.T) {
@@ -250,6 +251,30 @@ func TestResolveTemplate(t *testing.T) {
 	}
 	if !strings.Contains(result, "20240315") {
 		t.Error("expected result to contain date")
+	}
+}
+
+// TestFlexDurationAsDuration verifies that AsDuration preserves sub-base-unit
+// precision — the legacy `time.Duration(d.Minutes()) * time.Minute` pattern
+// truncated 1.5 minutes to 1 minute (cookies.md #15).
+func TestFlexDurationAsDuration(t *testing.T) {
+	cases := []struct {
+		name  string
+		value float64
+		base  time.Duration
+		want  time.Duration
+	}{
+		{"whole minutes", 30, time.Minute, 30 * time.Minute},
+		{"fractional minutes preserved", 1.5, time.Minute, 90 * time.Second},
+		{"fractional days", 0.5, 24 * time.Hour, 12 * time.Hour},
+		{"zero", 0, time.Minute, 0},
+	}
+	for _, tc := range cases {
+		got := FlexDuration{Value: tc.value}.AsDuration(tc.base)
+		if got != tc.want {
+			t.Errorf("%s: AsDuration(%v) of value=%v: got %v, want %v",
+				tc.name, tc.base, tc.value, got, tc.want)
+		}
 	}
 }
 

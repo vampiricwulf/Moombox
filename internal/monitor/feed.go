@@ -178,11 +178,7 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
 		return
 	}
 
-	intervalMin := fm.cfg.Monitors.FeedCheckInterval.Value
-	if intervalMin <= 0 {
-		intervalMin = 10 // default 10 minutes
-	}
-	interval := time.Duration(intervalMin) * time.Minute
+	interval := fm.cfg.Monitors.FeedCheckInterval.AsDuration(time.Minute)
 	if interval < time.Minute {
 		interval = 10 * time.Minute
 	}

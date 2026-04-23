@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // FlexDuration represents a time value that can be specified as either a plain
@@ -105,6 +106,17 @@ func (d FlexDuration) Minutes() float64 {
 // Days returns the value interpreted as days.
 func (d FlexDuration) Days() float64 {
 	return d.Value
+}
+
+// AsDuration scales the stored value into a time.Duration assuming the value
+// is in `base` units (e.g. AsDuration(time.Minute) for refresh intervals).
+//
+// Use this instead of `time.Duration(d.Minutes()) * time.Minute` — that
+// pattern truncates the float64 result of Minutes() to int64 nanoseconds
+// before multiplying, so a 1.5-minute value collapses to 1ns * time.Minute
+// = 1 minute, and any sub-base-unit fraction is silently lost.
+func (d FlexDuration) AsDuration(base time.Duration) time.Duration {
+	return time.Duration(d.Value * float64(base))
 }
 
 // UnmarshalTOML implements the TOML unmarshaler interface.

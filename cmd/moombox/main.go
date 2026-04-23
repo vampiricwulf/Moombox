@@ -1141,7 +1141,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Start auto-cookie periodic refresh if enabled and profile exists
 	if cfg.Cookies.AutoEnabled {
 		if _, err := os.Stat(browserProfileDir); err == nil {
-			interval := time.Duration(cfg.Cookies.RefreshInterval.Minutes()) * time.Minute
+			interval := cfg.Cookies.RefreshInterval.AsDuration(time.Minute)
 			if interval > 0 {
 				autoCookieSvc.StartPeriodicRefresh(ctx, interval)
 			}
