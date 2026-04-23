@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -147,7 +148,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Batched log messages — single Update/View cycle for all pending logs
 		a.logBuffer = append(a.logBuffer, msg.Lines...)
 		if len(a.logBuffer) > 1000 {
-			a.logBuffer = a.logBuffer[len(a.logBuffer)-1000:]
+			// slices.Clone avoids aliasing the old backing array; without it
+			// the re-slice retains the full original capacity, leaking memory
+			// over the 24/7 runtime target.
+			a.logBuffer = slices.Clone(a.logBuffer[len(a.logBuffer)-1000:])
 		}
 		return a, a.listenForUpdates()
 

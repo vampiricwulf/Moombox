@@ -104,7 +104,10 @@ func NewLogViewerModel() *LogViewerModel {
 func (m *LogViewerModel) AddLine(line string) {
 	m.lines = append(m.lines, line)
 	if len(m.lines) > maxLogLines {
-		m.lines = m.lines[len(m.lines)-maxLogLines:]
+		// slices.Clone prevents the re-slice from aliasing the old backing
+		// array, which would otherwise retain MBs of string headers over the
+		// 24/7 runtime target.
+		m.lines = slices.Clone(m.lines[len(m.lines)-maxLogLines:])
 	}
 	m.rebuildFiltered()
 	if m.autoScroll {
@@ -117,7 +120,8 @@ func (m *LogViewerModel) AddLine(line string) {
 func (m *LogViewerModel) AddLines(batch []string) {
 	m.lines = append(m.lines, batch...)
 	if len(m.lines) > maxLogLines {
-		m.lines = m.lines[len(m.lines)-maxLogLines:]
+		// See AddLine — slices.Clone to avoid backing-array aliasing.
+		m.lines = slices.Clone(m.lines[len(m.lines)-maxLogLines:])
 	}
 	m.rebuildFiltered()
 	if m.autoScroll {
