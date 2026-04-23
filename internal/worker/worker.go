@@ -648,22 +648,6 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	}
 }
 
-var filenameReplacer = strings.NewReplacer(
-	"/", "_", "\\", "_", ":", "_", "*", "_", "?", "_",
-	"\"", "_", "<", "_", ">", "_", "|", "_",
-)
-
-// sanitizeFilename removes invalid characters from a filename.
-func sanitizeFilename(name string) string {
-	result := filenameReplacer.Replace(name)
-	// Truncate by rune count to avoid splitting multi-byte UTF-8 characters
-	runes := []rune(result)
-	if len(runes) > 200 {
-		result = string(runes[:200])
-	}
-	return result
-}
-
 // fetchURL is a helper to download a URL's body.
 func fetchURL(ctx context.Context, url string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
