@@ -166,9 +166,17 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 				continue
 			}
 
-			// Decrypt n-parameter to avoid throttling
+			// Decrypt n-parameter to avoid throttling. If decryption is
+			// attempted and fails, drop the format entirely — YouTube's CDN
+			// will return HTTP 403 on a throttled URL that carries an
+			// encrypted n-value the player can't solve, so keeping the raw
+			// URL would just waste retries and produce misleading errors.
 			if playerURL != "" && p.cipherSolver != nil {
-				formatURL = p.decryptNParam(ctx, formatURL, playerURL)
+				decrypted, ok := p.decryptNParamStrict(ctx, formatURL, playerURL)
+				if !ok {
+					continue
+				}
+				formatURL = decrypted
 			}
 
 			format := Format{
@@ -254,31 +262,51 @@ func (p *PlayerAPI) decryptSignatureCipher(ctx context.Context, sigCipher, playe
 }
 
 // decryptNParam decrypts the n-parameter in a URL to avoid throttling.
+// On any failure it returns the raw URL unchanged, so callers that prefer
+// a best-effort behaviour (manifest/VOD refreshers) can keep using it. For
+// the parser's own format list, use decryptNParamStrict, which signals
+// failure so the caller can drop the format.
+//
 // Uses string replacement to preserve original URL parameter order —
 // Go's url.Values.Encode() sorts parameters alphabetically, which breaks
 // YouTube's URL signature verification and causes HTTP 403.
 func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string) string {
+	out, _ := p.decryptNParamStrict(ctx, rawURL, playerURL)
+	if out == "" {
+		return rawURL
+	}
+	return out
+}
+
+// decryptNParamStrict is like decryptNParam but returns (newURL, true) only
+// when the URL either had no n-param to decrypt or the decryption succeeded.
+// When the URL has an n-param but decryption fails (solver unavailable,
+// Goja error, etc.) it returns ("", false) so the caller can drop the
+// format. Keeping a throttled URL in the pool would just 403 at the CDN
+// and waste retries.
+func (p *PlayerAPI) decryptNParamStrict(ctx context.Context, rawURL, playerURL string) (string, bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return rawURL
+		return "", false
 	}
 
 	// Extract the raw (percent-encoded) n-param for accurate string matching.
 	rawN, nParam := cipher.RawQueryParam(u.RawQuery, "n")
 	if rawN == "" || nParam == "" {
-		return rawURL
+		// No n-param to decrypt — URL is already usable.
+		return rawURL, true
 	}
 
 	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
 	if err != nil {
 		p.logger.Warn("[PlayerApi] N-param solver unavailable", slog.String("error", err.Error()))
-		return rawURL
+		return "", false
 	}
 
 	decryptedN, err := solvers.DecryptN(nParam)
 	if err != nil {
 		p.logger.Warn("[PlayerApi] N-param decryption failed", slog.String("error", err.Error()))
-		return rawURL
+		return "", false
 	}
 
 	// Replace the first occurrence of n=<value> that is a proper query parameter
@@ -286,10 +314,12 @@ func (p *PlayerAPI) decryptNParam(ctx context.Context, rawURL, playerURL string)
 	for _, prefix := range []string{"?", "&"} {
 		old := prefix + "n=" + rawN
 		if strings.Contains(rawURL, old) {
-			return strings.Replace(rawURL, old, prefix+"n="+url.QueryEscape(decryptedN), 1)
+			return strings.Replace(rawURL, old, prefix+"n="+url.QueryEscape(decryptedN), 1), true
 		}
 	}
-	return rawURL
+	// The decrypt succeeded but the n= token wasn't in a recognisable
+	// query position — treat as pass-through.
+	return rawURL, true
 }
 
 // DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.
