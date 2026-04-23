@@ -39,6 +39,27 @@ a:hover {
     text-decoration: underline;
 }
 
+/* Screen-reader-only text — visually hidden but announced by assistive tech. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* <main> wraps the tab group so it fills the flex body and behaves like sl-tab-group did. */
+main.app-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
 /* Connectivity banner */
 .connectivity-banner {
     display: none;
