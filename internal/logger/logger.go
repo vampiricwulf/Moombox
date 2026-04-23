@@ -396,6 +396,20 @@ func (l *Logger) GetRecentLines() []string {
 }
 
 // Subscribe creates a new subscription channel for log lines.
+//
+// The returned channel is buffered (capacity 100); if the subscriber's
+// reader cannot keep up, broadcast drops new messages and emits a
+// rate-limited warning rather than blocking.
+//
+// Lifecycle: callers must drive their own read loop with a select that
+// also listens to a cancellation signal (context, stop chan, etc.).
+// Unsubscribe does NOT close the returned channel (see Unsubscribe
+// godoc for rationale). When the Logger is Close'd, all remaining
+// subscribers (those that never Unsubscribed) do have their channels
+// closed, so a read loop that blocks on <-ch will unblock at shutdown.
+// A goroutine that Unsubscribes mid-run and continues to read from the
+// channel will block forever — either stop reading once you Unsubscribe
+// or never Unsubscribe (let Close drain you).
 func (l *Logger) Subscribe() chan string {
 	ch := make(chan string, 100)
 	l.subMu.Lock()
@@ -404,10 +418,15 @@ func (l *Logger) Subscribe() chan string {
 	return ch
 }
 
-// Unsubscribe removes a subscription channel.
-// The channel is not closed here to avoid a race with broadcast() which may
-// be concurrently sending to it. Instead, the channel is simply removed from
-// the list and left for GC.
+// Unsubscribe removes a subscription channel from the broadcast list.
+//
+// The channel is intentionally NOT closed here: broadcast may be
+// concurrently sending to it under its own lock, and closing a channel
+// that a goroutine may still write to is a panic. After Unsubscribe
+// returns, no new messages will be sent to the channel, but any
+// goroutine still blocked on <-ch will block forever unless it also
+// exits on some external signal. See Subscribe's godoc for the
+// required caller pattern.
 func (l *Logger) Unsubscribe(ch chan string) {
 	l.subMu.Lock()
 	defer l.subMu.Unlock()
