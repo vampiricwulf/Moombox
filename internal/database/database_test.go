@@ -532,7 +532,9 @@ func TestSubscriberSliceTrim(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Register multiple subscribers and unsubscribe them to verify trailing nil trimming
+	// Register multiple subscribers, then unsubscribe them to verify that
+	// the slice length is reduced correctly. Unsubscribe is implemented via
+	// slice-out (append(s[:i], s[i+1:]...)) — no trailing-nil trimming.
 	unsubs := make([]func(), 5)
 	for i := range unsubs {
 		unsubs[i] = db.OnJobUpdate(func(j *Job) {})
@@ -543,12 +545,12 @@ func TestSubscriberSliceTrim(t *testing.T) {
 		unsubs[i]()
 	}
 
-	// After unsubscribing all, the internal slice should be trimmed
+	// After unsubscribing all, the internal slice length should be 0.
 	db.subMu.RLock()
 	sliceLen := len(db.onJobUpdate)
 	db.subMu.RUnlock()
 	if sliceLen != 0 {
-		t.Errorf("expected subscriber slice trimmed to 0, got %d", sliceLen)
+		t.Errorf("expected subscriber slice length 0, got %d", sliceLen)
 	}
 }
 
