@@ -332,12 +332,14 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 
 		// Switch from "Top Chat" (filtered) to "All Chat" (unfiltered) on the first response.
 		// YouTube defaults to Top Chat which can aggressively filter messages to zero.
+		// Only mark the switch as complete when we actually upgraded the continuation —
+		// if the AllChatContinuation header wasn't present (e.g. early-preroll response),
+		// leave switchedToAllChat == false so a subsequent poll can retry the upgrade.
 		if !switchedToAllChat && resp.AllChatContinuation != "" {
 			cd.continuation = resp.AllChatContinuation
 			switchedToAllChat = true
 			continue // Re-poll immediately with the unfiltered continuation
 		}
-		switchedToAllChat = true // Don't check again even if header wasn't present
 
 		// Process messages
 		newInBatch := 0
