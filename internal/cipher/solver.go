@@ -66,10 +66,14 @@ func (s *Solver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, er
 	key := CacheKey(playerURL)
 	playerID := PlayerIDFromURL(playerURL)
 
-	// Check solver cache (fast path)
-	s.solverMu.RLock()
+	// Check solver cache (fast path). Touch the LRU order on hit so the
+	// cap=10 window reflects actual access patterns rather than first-insertion.
+	s.solverMu.Lock()
 	solvers, ok := s.solverData[key]
-	s.solverMu.RUnlock()
+	if ok {
+		s.touchLRU(key)
+	}
+	s.solverMu.Unlock()
 	if ok {
 		return solvers, nil
 	}
@@ -79,10 +83,14 @@ func (s *Solver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, er
 	s.compileMu.Lock()
 	defer s.compileMu.Unlock()
 
-	// Re-check cache after acquiring compile lock (another goroutine may have compiled)
-	s.solverMu.RLock()
+	// Re-check cache after acquiring compile lock (another goroutine may have compiled).
+	// Also touch the LRU order to reflect the access.
+	s.solverMu.Lock()
 	solvers, ok = s.solverData[key]
-	s.solverMu.RUnlock()
+	if ok {
+		s.touchLRU(key)
+	}
+	s.solverMu.Unlock()
 	if ok {
 		return solvers, nil
 	}
@@ -188,23 +196,42 @@ func (s *Solver) cacheSolvers(key string, solvers *Solvers) {
 	s.solverMu.Lock()
 	defer s.solverMu.Unlock()
 
-	// If key already exists, move it to the end (most recently used)
+	// If key already exists, refresh its position via touchLRU (which also
+	// handles the "was missing" no-op path cleanly).
 	if _, exists := s.solverData[key]; exists {
-		for i, k := range s.solverOrder {
-			if k == key {
-				s.solverOrder = append(s.solverOrder[:i], s.solverOrder[i+1:]...)
-				break
-			}
-		}
+		s.touchLRU(key)
 	} else if len(s.solverData) >= solverCacheSize {
-		// Evict the oldest entry (LRU)
+		// Evict the oldest entry (head of order slice).
 		evictKey := s.solverOrder[0]
 		s.solverOrder = s.solverOrder[1:]
 		delete(s.solverData, evictKey)
 	}
 
 	s.solverData[key] = solvers
-	s.solverOrder = append(s.solverOrder, key)
+	if !containsKey(s.solverOrder, key) {
+		s.solverOrder = append(s.solverOrder, key)
+	}
+}
+
+// touchLRU moves key to the end of solverOrder so the LRU window reflects
+// the most-recently-USED entries, not the most-recently-INSERTED ones.
+// Caller must hold s.solverMu.Lock() (not RLock — this mutates).
+func (s *Solver) touchLRU(key string) {
+	for i, k := range s.solverOrder {
+		if k == key {
+			s.solverOrder = append(append(s.solverOrder[:i], s.solverOrder[i+1:]...), key)
+			return
+		}
+	}
+}
+
+func containsKey(order []string, key string) bool {
+	for _, k := range order {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 // getFromPrepared executes preprocessed JS code in a Goja VM and extracts sig/n functions.
