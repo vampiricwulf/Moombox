@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"math/big"
 	"sync"
 	"time"
 )
@@ -278,17 +277,24 @@ func (pp *PotProvider) cleanupExpired() {
 
 const alphaNum = "abcdefghijklmnopqrstuvwxyz0123456789"
 
+// randomAlphaNum generates n cryptographically-random alphanumeric characters.
+// Uses a single rand.Read call and modular reduction rather than per-byte
+// big.Int allocations. The modular bias against len(alphaNum)=36 out of 256 is
+// negligible for the probe-identifier use case (~0.4% skew per byte).
 func randomAlphaNum(n int) string {
-	b := make([]byte, n)
-	max := big.NewInt(int64(len(alphaNum)))
-	for i := range b {
-		idx, err := rand.Int(rand.Reader, max)
-		if err != nil {
-			// Fallback: use index 0 (extremely unlikely to fail)
-			b[i] = alphaNum[0]
-			continue
-		}
-		b[i] = alphaNum[idx.Int64()]
+	if n <= 0 {
+		return ""
 	}
-	return string(b)
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		// Fallback: fill with index 0 (extremely unlikely to fail on Windows)
+		for i := range buf {
+			buf[i] = alphaNum[0]
+		}
+		return string(buf)
+	}
+	for i, b := range buf {
+		buf[i] = alphaNum[int(b)%len(alphaNum)]
+	}
+	return string(buf)
 }
