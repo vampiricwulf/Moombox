@@ -25,6 +25,8 @@ body {
     background-color: var(--sl-color-neutral-0);
     color: var(--sl-color-neutral-900);
     min-height: 100vh;
+    /* dvh tracks the visible viewport as mobile browser chrome collapses/expands. */
+    min-height: 100dvh;
     display: flex;
     flex-direction: column;
 }
@@ -704,6 +706,8 @@ sl-badge.status.cookies::part(base) {
 #logs-container {
     position: relative;
     height: calc(100vh - 12rem);
+    /* dvh prevents overflow under iOS Safari's collapsing URL bar. */
+    height: calc(100dvh - 12rem);
 }
 
 #logs-viewer {
@@ -915,6 +919,7 @@ sl-progress-bar {
     display: flex;
     gap: var(--sl-spacing-large);
     min-height: calc(100vh - 12rem);
+    min-height: calc(100dvh - 12rem);
 }
 
 .settings-menu {
@@ -1289,6 +1294,7 @@ sl-progress-bar {
     display: flex;
     flex-direction: column;
     height: calc(100vh - 8rem);
+    height: calc(100dvh - 8rem);
 }
 
 #player-header {
