@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
 // ErrQualityLost signals that the stream is still live but the selected
@@ -26,7 +28,8 @@ const (
 	NoSegmentTimeout    = 10 * time.Minute
 	ResumeSeqInterval   = 50 // Save resume state every N sequential segments
 	ResumeCatchupInterval = 10 // Save resume state every N catch-up segments
-	DownloadChunkSize   = 5 * 1024 * 1024       // 5MB chunks for VOD downloads (matches TS)
+	// DownloadChunkSize is sourced from the central constants catalog (5 MB).
+	DownloadChunkSize   = constants.DownloadChunkSize
 	MaxChunkRetries     = 3                      // Per-chunk retry limit
 	ProgressThrottle    = 500 * time.Millisecond // Throttle VOD progress emission
 
