@@ -13,8 +13,11 @@ import (
 
 const discordTimeout = 15 * time.Second
 
-// discordHTTPClient is a shared HTTP client with a timeout for Discord webhook requests.
-var discordHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// discordHTTPClient is a shared HTTP client for Discord webhook requests.
+// Per-request timeout is enforced by the context; the client-level Timeout
+// is a belt-and-suspenders cap in case a retry/redirect chain slips past
+// the request context.
+var discordHTTPClient = &http.Client{Timeout: 2 * discordTimeout}
 
 // DiscordWebhook sends notifications via Discord webhook.
 type DiscordWebhook struct {
