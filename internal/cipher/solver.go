@@ -9,9 +9,11 @@ import (
 	gojavm "github.com/dop251/goja"
 )
 
-const (
-	solverCacheSize = 3
-)
+// solverCacheSize caps the in-memory LRU. VM heap is ~30-50MB each × 10 =
+// ~500MB worst case. Multi-channel monitoring routinely has 4+ active player
+// URLs; the previous cap of 3 caused constant re-compiles when the 4th video
+// probed. 10 leaves comfortable headroom while still bounding memory.
+const solverCacheSize = 10
 
 // Solver manages 2-tier caching (disk -> solver) for cipher decryption.
 type Solver struct {
