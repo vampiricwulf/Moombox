@@ -244,13 +244,9 @@ func parseIntegrityTokenResponse(raw []byte) (*IntegrityTokenData, error) {
 		EstimatedTTL:   time.Duration(ttlSecs) * time.Second,
 	}
 
-	// Parse optional fields: mintRefreshThreshold (index 2), websafeFallbackToken (index 3)
-	if len(arr) > 2 {
-		var threshold float64
-		if json.Unmarshal(arr[2], &threshold) == nil {
-			data.MintRefreshThreshold = int(threshold)
-		}
-	}
+	// Parse optional fields: websafeFallbackToken (index 3).
+	// index 2 is mintRefreshThreshold upstream but we don't implement
+	// proactive mint refresh (see reports/bgutils.md FRESH-2); skip it.
 	if len(arr) > 3 {
 		var fallback string
 		if json.Unmarshal(arr[3], &fallback) == nil {

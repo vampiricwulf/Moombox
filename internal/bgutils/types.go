@@ -40,21 +40,19 @@ type BgConfig struct {
 
 // DescrambledChallenge contains the parsed challenge data from the WAA API.
 type DescrambledChallenge struct {
-	MessageID               string // Index 0: request message ID
-	InterpreterURL          string // URL to fetch interpreter JS (index 2)
-	InterpreterScript       string // Inline interpreter JS (index 1, fallback)
-	InterpreterHash         string
-	Program                 string
-	GlobalName              string
-	ClientExperimentsBlob   string
+	MessageID         string // Index 0: request message ID
+	InterpreterURL    string // URL to fetch interpreter JS (index 2)
+	InterpreterScript string // Inline interpreter JS (index 1, fallback)
+	InterpreterHash   string
+	Program           string
+	GlobalName        string
 }
 
 // IntegrityTokenData contains the response from the GenerateIT API.
 type IntegrityTokenData struct {
-	IntegrityToken        string
-	EstimatedTTL          time.Duration
-	MintRefreshThreshold  int
-	WebsafeFallbackToken  string
+	IntegrityToken       string
+	EstimatedTTL         time.Duration
+	WebsafeFallbackToken string
 }
 
 // SessionData contains a cached PO token session.

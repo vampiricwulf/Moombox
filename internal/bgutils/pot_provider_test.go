@@ -390,40 +390,18 @@ func TestParseChallengeData_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestParseChallengeData_ClientExperimentsBlob(t *testing.T) {
-	// Use scrambled format so the inner array fields are parsed correctly
-	innerArr := []any{
-		"msg", "script", "https://url.com", "hash", "program", "global",
-		nil,         // 6 (unused)
-		"blob-data", // 7 clientExperimentsBlob
-	}
-	innerJSON, _ := json.Marshal(innerArr)
-	scrambled := scrambleString(string(innerJSON))
-
-	outer, _ := json.Marshal([]any{"outer", scrambled})
-
-	ch, err := parseChallengeData(outer)
-	if err != nil {
-		t.Fatalf("parseChallengeData: %v", err)
-	}
-	if ch.ClientExperimentsBlob != "blob-data" {
-		t.Errorf("ClientExperimentsBlob: expected 'blob-data', got %q", ch.ClientExperimentsBlob)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // parseIntegrityTokenResponse
 // ---------------------------------------------------------------------------
 
 func TestParseIntegrityTokenResponse(t *testing.T) {
 	tests := []struct {
-		name          string
-		input         string
-		wantToken     string
-		wantTTL       time.Duration
-		wantThreshold int
-		wantFallback  string
-		wantErr       bool
+		name         string
+		input        string
+		wantToken    string
+		wantTTL      time.Duration
+		wantFallback string
+		wantErr      bool
 	}{
 		{
 			name:      "minimal_valid",
@@ -432,12 +410,11 @@ func TestParseIntegrityTokenResponse(t *testing.T) {
 			wantTTL:   3600 * time.Second,
 		},
 		{
-			name:          "all_fields",
-			input:         `["token-xyz", 7200, 5, "fallback-token"]`,
-			wantToken:     "token-xyz",
-			wantTTL:       7200 * time.Second,
-			wantThreshold: 5,
-			wantFallback:  "fallback-token",
+			name:         "all_fields",
+			input:        `["token-xyz", 7200, 5, "fallback-token"]`,
+			wantToken:    "token-xyz",
+			wantTTL:      7200 * time.Second,
+			wantFallback: "fallback-token",
 		},
 		{
 			name:      "invalid_ttl_uses_default",
@@ -483,9 +460,6 @@ func TestParseIntegrityTokenResponse(t *testing.T) {
 			}
 			if data.EstimatedTTL != tt.wantTTL {
 				t.Errorf("EstimatedTTL: expected %v, got %v", tt.wantTTL, data.EstimatedTTL)
-			}
-			if data.MintRefreshThreshold != tt.wantThreshold {
-				t.Errorf("MintRefreshThreshold: expected %d, got %d", tt.wantThreshold, data.MintRefreshThreshold)
 			}
 			if data.WebsafeFallbackToken != tt.wantFallback {
 				t.Errorf("WebsafeFallbackToken: expected %q, got %q", tt.wantFallback, data.WebsafeFallbackToken)

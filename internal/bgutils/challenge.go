@@ -164,14 +164,6 @@ func parseChallengeData(raw []byte) (*DescrambledChallenge, error) {
 		}
 	}
 
-	// Index 7: clientExperimentsStateBlob
-	if len(challengeArr) > 7 {
-		var blob string
-		if err := json.Unmarshal(challengeArr[7], &blob); err == nil {
-			challenge.ClientExperimentsBlob = blob
-		}
-	}
-
 	if challenge.Program == "" || challenge.GlobalName == "" {
 		return nil, &BGError{
 			Code:    ErrChallengeParse,
