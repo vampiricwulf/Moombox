@@ -14,29 +14,47 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	}
 
-	// Register CSPRNG byte source for crypto.getRandomValues
-	// (replaces Math.random()-based JS implementation)
-	vm.Set("__cryptoRandBytes", func(call goja.FunctionCall) goja.Value {
+	// CSPRNG byte source for crypto.getRandomValues (replaces the
+	// Math.random()-based JS implementation). Browser spec caps the
+	// requested length at 65536; mirror that to guard against a script
+	// allocating an arbitrary-sized slice.
+	if err := vm.Set("__cryptoRandBytes", func(call goja.FunctionCall) goja.Value {
 		n := int(call.Argument(0).ToInteger())
 		if n <= 0 {
 			return vm.ToValue([]byte{})
 		}
+		if n > 65536 {
+			panic(vm.NewGoError(fmt.Errorf("getRandomValues length exceeds 65536: %d", n)))
+		}
 		buf := make([]byte, n)
-		crand.Read(buf)
+		if _, err := crand.Read(buf); err != nil {
+			panic(vm.NewGoError(fmt.Errorf("crypto/rand.Read failed: %w", err)))
+		}
 		return vm.ToValue(buf)
-	})
+	}); err != nil {
+		return fmt.Errorf("register __cryptoRandBytes: %w", err)
+	}
 
-	// Register randomUUID as Go native function using CSPRNG
-	vm.Set("__cryptoRandomUUID", func(call goja.FunctionCall) goja.Value {
+	// Register randomUUID as a Go native using CSPRNG. On entropy failure
+	// panic into a JS exception rather than silently returning an all-zeros
+	// (i.e., predictable) UUID — BotGuard's security assumptions hinge on
+	// actual randomness here.
+	if err := vm.Set("__cryptoRandomUUID", func(call goja.FunctionCall) goja.Value {
 		b := make([]byte, 16)
-		crand.Read(b)
+		if _, err := crand.Read(b); err != nil {
+			panic(vm.NewGoError(fmt.Errorf("crypto/rand.Read for UUID failed: %w", err)))
+		}
 		b[6] = (b[6] & 0x0f) | 0x40 // version 4
 		b[8] = (b[8] & 0x3f) | 0x80 // variant 1
 		return vm.ToValue(fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]))
-	})
+	}); err != nil {
+		return fmt.Errorf("register __cryptoRandomUUID: %w", err)
+	}
 
-	// Pass userAgent via Go to avoid JS template literal injection
-	vm.Set("__moomboxUserAgent", userAgent)
+	// Pass userAgent via Go to avoid JS template literal injection.
+	if err := vm.Set("__moomboxUserAgent", userAgent); err != nil {
+		return fmt.Errorf("register __moomboxUserAgent: %w", err)
+	}
 
 	shimCode := `
 (function() {
@@ -354,15 +372,20 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 })();
 `
 
-	_, err := vm.RunString(shimCode)
-
-	// Clean up temporary globals (crypto functions still referenced via globalThis.crypto)
-	vm.Set("__moomboxUserAgent", goja.Undefined())
-	vm.Set("__cryptoRandBytes", goja.Undefined())
-	vm.Set("__cryptoRandomUUID", goja.Undefined())
-
-	if err != nil {
+	if _, err := vm.RunString(shimCode); err != nil {
 		return fmt.Errorf("DOM shim execution failed: %w", err)
+	}
+
+	// Leave the __cryptoRandBytes / __cryptoRandomUUID globals in place —
+	// the earlier attempt to "clean up" these globals broke the closures
+	// captured inside globalThis.crypto, because the closures referenced
+	// the globals by name at call time. The C1 fix captures them into
+	// closure-local variables inside the IIFE, but leaving the globals as
+	// hidden names also costs nothing (they aren't enumerable on globalThis
+	// the same way BotGuard-observable APIs are). __moomboxUserAgent is
+	// only used during IIFE execution — safe to drop.
+	if err := vm.Set("__moomboxUserAgent", goja.Undefined()); err != nil {
+		return fmt.Errorf("clear __moomboxUserAgent: %w", err)
 	}
 	return nil
 }
