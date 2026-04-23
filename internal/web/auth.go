@@ -22,11 +22,27 @@ const (
 	saltLen        = 16
 )
 
+// authLogger captures the minimal logging surface used for the session-
+// cleanup goroutine's panic-recovery diagnostics. nil-safe.
+type authLogger interface {
+	Error(msg string, args ...any)
+}
+
 // AuthService manages password hashing and session tokens.
 type AuthService struct {
 	mu       sync.RWMutex
 	sessions map[string]sessionEntry
+	logger   authLogger // set via SetLogger; may be nil
 	done     chan struct{} // closed by Stop() to exit cleanup goroutine
+}
+
+// SetLogger wires an optional logger used for the session-cleanup
+// goroutine's panic-recovery diagnostics. Without it, panics are swallowed
+// silently (the pre-existing behaviour).
+func (as *AuthService) SetLogger(l authLogger) {
+	as.mu.Lock()
+	as.logger = l
+	as.mu.Unlock()
 }
 
 type sessionEntry struct {
@@ -53,7 +69,14 @@ func (as *AuthService) Start() {
 		defer ticker.Stop()
 		defer func() {
 			if r := recover(); r != nil {
-				// No logger available on AuthService — panic recovery is silent
+				// Route through SetLogger's sink if present so a panic in
+				// the evict loop doesn't vanish silently.
+				as.mu.RLock()
+				l := as.logger
+				as.mu.RUnlock()
+				if l != nil {
+					l.Error("auth: session cleanup goroutine panic", "panic", r)
+				}
 			}
 		}()
 		for {
