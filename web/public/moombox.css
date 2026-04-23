@@ -1199,6 +1199,16 @@ sl-progress-bar {
     font-family: var(--sl-font-mono);
 }
 
+/* Inline snippet blocks for CLI/command examples inside settings dialogs. */
+.code-snippet {
+    margin: 0.5em 0;
+    padding: 0.5em;
+    background: var(--sl-color-neutral-100);
+    border-radius: var(--sl-border-radius-medium);
+    font-size: 0.85em;
+    overflow-x: auto;
+}
+
 /* Responsive settings */
 @media only screen and (max-width: 768px) {
     .settings-container {
