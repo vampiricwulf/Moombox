@@ -193,8 +193,13 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	if statusCode == 403 || statusCode == 410 {
 		// 403 before any bytes written = likely cipher failure (wrong n-param or sig).
 		// 410 = stream ended (not cipher). Only fire on 403.
-		if statusCode == 403 && !d.cipherFailureFired.Load() && d.bytesWritten.Load() == 0 {
-			d.cipherFailureFired.Store(true)
+		// CAS rather than Load+Store: video and audio downloaders share a
+		// cipherSolver, so concurrent 403s on both could otherwise both pass
+		// the Load check, both Store(true), and both invoke OnCipherFailure
+		// — duplicating an InvalidateSolver call. CAS guarantees exactly one
+		// fire per downloader instance.
+		if statusCode == 403 && d.bytesWritten.Load() == 0 &&
+			d.cipherFailureFired.CompareAndSwap(false, true) {
 			if d.OnCipherFailure != nil {
 				d.OnCipherFailure()
 			}
