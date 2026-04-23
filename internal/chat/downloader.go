@@ -63,6 +63,21 @@ type ChatDownloader struct {
 	OnProgress func(p ChatProgress)
 	OnFinish   func()
 	OnError    func(err error)
+
+	// Logger is an optional diagnostic sink for non-fatal, debug-level drift
+	// signals (e.g. unexpected API field shapes). nil-safe — if not set,
+	// debug diagnostics are silently dropped.
+	Logger interface {
+		Debug(msg string, args ...any)
+	}
+}
+
+// logDebug routes a debug-level diagnostic through the optional Logger.
+// No-op when Logger is nil.
+func (cd *ChatDownloader) logDebug(msg string, args ...any) {
+	if cd.Logger != nil {
+		cd.Logger.Debug(msg, args...)
+	}
 }
 
 // NewChatDownloader creates a new chat downloader.
@@ -111,6 +126,10 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	cd.cancelFlag = false
 	cd.streamEnded = false
 	cd.done = make(chan struct{})
+	// Propagate Logger to the API so parse-level drift diagnostics are captured.
+	if cd.api != nil {
+		cd.api.Logger = cd.Logger
+	}
 	cd.mu.Unlock()
 
 	defer func() {
@@ -329,8 +348,10 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			// Pre-stream waiting-room chat can produce legitimate negative offsets,
 			// so HasOffset is the sentinel rather than OffsetMs == 0.
 			if !msg.HasOffset && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
-				usec, _ := strconv.ParseInt(msg.TimestampUsec, 10, 64)
-				if usec > 0 {
+				usec, err := strconv.ParseInt(msg.TimestampUsec, 10, 64)
+				if err != nil {
+					cd.logDebug("chat: timestampUsec parse failed", "videoID", cd.opts.VideoID, "value", msg.TimestampUsec, "err", err)
+				} else if usec > 0 {
 					msg.OffsetMs = usec/1000 - cd.streamStartMs
 					msg.HasOffset = true
 				}

@@ -42,6 +42,20 @@ type ChatAPI struct {
 	cookieHeader string
 	generateAuth func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
 	client       *http.Client
+
+	// Logger is an optional debug-level diagnostic sink for API drift
+	// signals (unexpected field shapes, parse failures). nil-safe.
+	Logger interface {
+		Debug(msg string, args ...any)
+	}
+}
+
+// logDebug routes a debug-level diagnostic through the optional Logger.
+// No-op when Logger is nil.
+func (api *ChatAPI) logDebug(msg string, args ...any) {
+	if api.Logger != nil {
+		api.Logger.Debug(msg, args...)
+	}
 }
 
 // NewChatAPI creates a new chat API client.
@@ -167,7 +181,7 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 		return nil, fmt.Errorf("parse chat response: %w", err)
 	}
 
-	return parseResponse(data)
+	return api.parseResponse(data)
 }
 
 // ExtractChatContinuation extracts a chat continuation token from watch page HTML.
@@ -223,7 +237,7 @@ func ExtractChatContinuation(html string) (string, bool, error) {
 }
 
 // parseResponse parses the chat API response into structured data.
-func parseResponse(data map[string]any) (*ChatApiResponse, error) {
+func (api *ChatAPI) parseResponse(data map[string]any) (*ChatApiResponse, error) {
 	result := &ChatApiResponse{
 		TimeoutMs: -1, // -1 = not set; let caller decide default based on isReplay
 	}
@@ -322,16 +336,16 @@ func parseResponse(data map[string]any) (*ChatApiResponse, error) {
 			continue
 		}
 
-		msg := parseMessageRenderer(renderer)
+		msg := api.parseMessageRenderer(renderer)
 		if msg == nil {
 			continue
 		}
 
 		// Check for superchat (paid message or paid sticker)
 		if paidRenderer, ok := item["liveChatPaidMessageRenderer"].(map[string]any); ok {
-			msg.Superchat = parseSuperChatInfo(paidRenderer)
+			msg.Superchat = api.parseSuperChatInfo(paidRenderer)
 		} else if stickerRenderer, ok := item["liveChatPaidStickerRenderer"].(map[string]any); ok {
-			msg.Superchat = parseSuperChatInfo(stickerRenderer)
+			msg.Superchat = api.parseSuperChatInfo(stickerRenderer)
 		}
 
 		// Check membership
@@ -368,7 +382,7 @@ func parseResponse(data map[string]any) (*ChatApiResponse, error) {
 	return result, nil
 }
 
-func parseMessageRenderer(renderer map[string]any) *ChatMessage {
+func (api *ChatAPI) parseMessageRenderer(renderer map[string]any) *ChatMessage {
 	msg := &ChatMessage{}
 
 	msg.ID, _ = renderer["id"].(string)
@@ -381,7 +395,7 @@ func parseMessageRenderer(renderer map[string]any) *ChatMessage {
 		msg.TimestampText, _ = text["simpleText"].(string)
 	}
 	if msg.TimestampText == "" && msg.TimestampUsec != "" {
-		msg.TimestampText = formatTimestamp(msg.TimestampUsec)
+		msg.TimestampText = api.formatTimestamp(msg.TimestampUsec)
 	}
 
 	// Author — check both simpleText and runs
@@ -413,7 +427,7 @@ func parseMessageRenderer(renderer map[string]any) *ChatMessage {
 	return msg
 }
 
-func parseSuperChatInfo(paidRenderer map[string]any) *SuperchatInfo {
+func (api *ChatAPI) parseSuperChatInfo(paidRenderer map[string]any) *SuperchatInfo {
 	sc := &SuperchatInfo{}
 
 	if purchase, ok := paidRenderer["purchaseAmountText"].(map[string]any); ok {
@@ -552,9 +566,13 @@ func extractCurrency(amountText string) string {
 	return "UNKNOWN"
 }
 
-func formatTimestamp(usec string) string {
+func (api *ChatAPI) formatTimestamp(usec string) string {
 	ts, err := strconv.ParseInt(usec, 10, 64)
-	if err != nil || ts == 0 {
+	if err != nil {
+		api.logDebug("chat: formatTimestamp parse failed", "value", usec, "err", err)
+		return "0:00:00"
+	}
+	if ts == 0 {
 		return "0:00:00"
 	}
 	t := time.UnixMilli(ts / 1000)
