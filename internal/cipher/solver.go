@@ -185,19 +185,6 @@ func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) 
 	return solvers, nil
 }
 
-// InvalidateCache clears all cached solvers (e.g., when player JS is updated).
-// Also clears the STS cache so stale signatureTimestamp values don't get
-// paired with freshly-compiled solvers on the next call.
-func (s *Solver) InvalidateCache() {
-	s.solverMu.Lock()
-	s.solverData = make(map[string]*Solvers)
-	s.solverOrder = nil
-	s.solverMu.Unlock()
-	if s.stsCache != nil {
-		s.stsCache.Invalidate()
-	}
-}
-
 // InvalidateSolver evicts a specific player's solver from both the in-memory
 // cache and the disk player cache. Called when a solver is known to be broken
 // (e.g., producing 403 errors at runtime). The STS cache keyed on the same

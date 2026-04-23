@@ -111,14 +111,6 @@ func (sc *StsCache) fetchAndExtract(ctx context.Context, playerCache *PlayerCach
 	return m[1], nil
 }
 
-// Invalidate clears the STS cache.
-func (sc *StsCache) Invalidate() {
-	sc.mu.Lock()
-	sc.cache = make(map[string]string)
-	sc.order = nil
-	sc.mu.Unlock()
-}
-
 // InvalidateKey drops the cached STS for a single player. Called from
 // Solver.InvalidateSolver so that re-fetching the player script also gets
 // a fresh signatureTimestamp — a stale STS paired with a freshly compiled
