@@ -1292,8 +1292,18 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 
 // LogRoutes registers log-related API routes.
 func LogRoutes(r chi.Router, getRecentLogs func() []string) {
+	// logRouteMaxLines caps the number of log lines any single call to
+	// GET /api/logs may return. The backing ring buffer can be larger
+	// (or a different implementation might not cap at all), but emitting
+	// thousands of lines in one JSON response to a low-bandwidth client
+	// would stall the response pipeline. 500 comfortably covers the
+	// recent-events UX the frontend needs.
+	const logRouteMaxLines = 500
 	r.Get("/api/logs", func(rw http.ResponseWriter, req *http.Request) {
 		logs := getRecentLogs()
+		if len(logs) > logRouteMaxLines {
+			logs = logs[len(logs)-logRouteMaxLines:]
+		}
 		jsonResponse(rw, logs)
 	})
 }
