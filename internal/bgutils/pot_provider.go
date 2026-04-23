@@ -136,30 +136,37 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 	return session, err
 }
 
-// InvalidateCaches clears all cached data.
+// InvalidateCaches clears all cached data. Minter Cleanup runs outside pp.mu
+// so a slow VM teardown can't block concurrent GeneratePoToken callers.
 func (pp *PotProvider) InvalidateCaches() {
 	pp.mu.Lock()
-	defer pp.mu.Unlock()
-	// Shut down VMs for all cached minters
+	toCleanup := make([]*TokenMinter, 0, len(pp.minterCache))
 	for _, m := range pp.minterCache {
-		if m.Cleanup != nil {
-			m.Cleanup()
-		}
+		toCleanup = append(toCleanup, m)
 	}
 	pp.sessionCache = make(map[string]*SessionData)
 	pp.minterCache = make(map[string]*TokenMinter)
+	pp.mu.Unlock()
+
+	for _, m := range toCleanup {
+		pp.safeCleanup(m, "InvalidateCaches")
+	}
 }
 
 // InvalidateIntegrityTokens clears minter cache (forces BotGuard re-run).
+// Minter Cleanup runs outside pp.mu (see InvalidateCaches rationale).
 func (pp *PotProvider) InvalidateIntegrityTokens() {
 	pp.mu.Lock()
-	defer pp.mu.Unlock()
+	toCleanup := make([]*TokenMinter, 0, len(pp.minterCache))
 	for _, m := range pp.minterCache {
-		if m.Cleanup != nil {
-			m.Cleanup()
-		}
+		toCleanup = append(toCleanup, m)
 	}
 	pp.minterCache = make(map[string]*TokenMinter)
+	pp.mu.Unlock()
+
+	for _, m := range toCleanup {
+		pp.safeCleanup(m, "InvalidateIntegrityTokens")
+	}
 }
 
 // GetMinterCacheKeys returns the content binding keys in the minter cache.
