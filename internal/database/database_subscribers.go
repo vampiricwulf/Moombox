@@ -52,8 +52,16 @@ func (db *Database) OnJobsChange(fn func([]*Job)) func() {
 	}
 }
 
-// notifyJobUpdate snapshots subscribers and notifies them of a single job update.
+// notifyJobUpdate snapshots subscribers and notifies them of a single job
+// update. A top-level recover guards the iteration itself (not just callbacks)
+// so the caller of UpdateJobFields/UpdateJob can never crash on a bad fan-out.
 func (db *Database) notifyJobUpdate(job *Job) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("notifyJobUpdate iteration panic", "panic", r)
+		}
+	}()
+
 	db.subMu.RLock()
 	subs := make([]func(*Job), 0, len(db.onJobUpdate))
 	for _, sub := range db.onJobUpdate {
@@ -67,8 +75,16 @@ func (db *Database) notifyJobUpdate(job *Job) {
 }
 
 // notifyJobsChange must be called while db.mu is already held (Lock or RLock).
-// It uses getAllJobsUnlocked to avoid deadlock.
+// It uses getAllJobsUnlocked to avoid deadlock. A top-level recover guards
+// the snapshot / goroutine-dispatch logic so a panic here can't take down
+// the calling write path (AddJob, DeleteJob, ...).
 func (db *Database) notifyJobsChange() {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("notifyJobsChange iteration panic", "panic", r)
+		}
+	}()
+
 	db.subMu.RLock()
 	subs := make([]func([]*Job), 0, len(db.onJobsChange))
 	for _, sub := range db.onJobsChange {
