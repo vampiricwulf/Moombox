@@ -455,6 +455,7 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 
 		// Probe video metadata to classify stream status before creating job
 		result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+			Ctx:          ctx,
 			VideoID:      videoID,
 			Title:        title,
 			Channel:      ch,

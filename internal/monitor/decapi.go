@@ -368,7 +368,7 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 		return err
 	}
 
-	return dm.processResponse(string(body), ch)
+	return dm.processResponse(ctx, string(body), ch)
 }
 
 func (dm *DecapiMonitor) updateRateLimit(resp *http.Response) {
@@ -412,7 +412,7 @@ func (dm *DecapiMonitor) updateRateLimit(resp *http.Response) {
 	}
 }
 
-func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) error {
+func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *config.ChannelConfig) error {
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return nil
@@ -473,6 +473,7 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 
 	// Probe video metadata to classify stream status before creating job
 	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		Ctx:          ctx,
 		VideoID:      videoID,
 		Title:        title,
 		Channel:      ch,

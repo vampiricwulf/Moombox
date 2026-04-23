@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -227,7 +228,7 @@ func TestProcessYouTubeVideo_LiveStream(t *testing.T) {
 		VideoID: "live123",
 		Title:   "Feed Title",
 		Channel: &config.ChannelConfig{},
-		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+		ProbeVideo: func(_ context.Context, videoID string) (*VideoProbeResult, error) {
 			return &VideoProbeResult{
 				StreamStatus: "live",
 				Title:        "Better Title",
@@ -255,7 +256,7 @@ func TestProcessYouTubeVideo_NotAStream(t *testing.T) {
 		VideoID: "vid123",
 		Title:   "Regular Video",
 		Channel: &config.ChannelConfig{},
-		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+		ProbeVideo: func(_ context.Context, videoID string) (*VideoProbeResult, error) {
 			return &VideoProbeResult{StreamStatus: "not_a_stream"}, nil
 		},
 		AddToHistory: func(id string) error {
@@ -279,7 +280,7 @@ func TestProcessYouTubeVideo_NotAStreamWithIncludeNonLive(t *testing.T) {
 		VideoID: "vid123",
 		Title:   "Regular Video",
 		Channel: &config.ChannelConfig{IncludeNonLiveContent: true},
-		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+		ProbeVideo: func(_ context.Context, videoID string) (*VideoProbeResult, error) {
 			return &VideoProbeResult{StreamStatus: "not_a_stream"}, nil
 		},
 		Tracker: NewMetadataFailureTracker(),
@@ -298,7 +299,7 @@ func TestProcessYouTubeVideo_ProbeError(t *testing.T) {
 		VideoID: "err123",
 		Title:   "Test",
 		Channel: &config.ChannelConfig{},
-		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+		ProbeVideo: func(_ context.Context, videoID string) (*VideoProbeResult, error) {
 			return nil, fmt.Errorf("network error")
 		},
 		Tracker: tracker,
@@ -315,7 +316,7 @@ func TestProcessYouTubeVideo_UnknownTitleNotOverwrite(t *testing.T) {
 		VideoID: "vid123",
 		Title:   "Good Feed Title",
 		Channel: &config.ChannelConfig{},
-		ProbeVideo: func(videoID string) (*VideoProbeResult, error) {
+		ProbeVideo: func(_ context.Context, videoID string) (*VideoProbeResult, error) {
 			return &VideoProbeResult{
 				StreamStatus: "live",
 				Title:        "Unknown Title", // Should not overwrite

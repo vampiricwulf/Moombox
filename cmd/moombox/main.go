@@ -835,8 +835,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	// Wire ProbeVideo callback for monitors (metadata check before job creation).
 	// Returns VideoProbeResult with stream status so monitors can skip non-streams.
-	probeVideoFunc := func(videoID string) (*monitor.VideoProbeResult, error) {
-		ctx := context.Background()
+	// Uses the caller-supplied ctx so monitor shutdown cancels in-flight probes
+	// (per audit reports/cross-cutting.md C4).
+	probeVideoFunc := func(ctx context.Context, videoID string) (*monitor.VideoProbeResult, error) {
 		meta, err := ytService.ProbeVideoStatus(ctx, videoID)
 		if err != nil {
 			return nil, err

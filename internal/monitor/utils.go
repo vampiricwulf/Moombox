@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -30,8 +31,10 @@ type VideoProbeResult struct {
 }
 
 // VideoProbeFunc probes a YouTube video and returns its stream status.
-// This is typically wired to youtube.Service.ProbeVideoStatus.
-type VideoProbeFunc func(videoID string) (*VideoProbeResult, error)
+// This is typically wired to youtube.Service.ProbeVideoStatus. Takes a
+// context so probes inherit the monitor's lifecycle — without it, in-flight
+// probes finish out their full retry budget after the monitor is stopped.
+type VideoProbeFunc func(ctx context.Context, videoID string) (*VideoProbeResult, error)
 
 // MetadataFailureTracker tracks per-video probe failure counts.
 // It is safe for concurrent use.
@@ -91,6 +94,7 @@ func (t *MetadataFailureTracker) evictExcess() {
 
 // ProcessYouTubeVideoParams holds the dependencies for ProcessYouTubeVideo.
 type ProcessYouTubeVideoParams struct {
+	Ctx      context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
 	VideoID  string
 	Title    string
 	Channel  *config.ChannelConfig
@@ -127,7 +131,11 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		return ProcessYouTubeVideoResult{ShouldProcess: true, Title: p.Title}
 	}
 
-	meta, err := p.ProbeVideo(p.VideoID)
+	ctx := p.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	meta, err := p.ProbeVideo(ctx, p.VideoID)
 	if err != nil {
 		count, giveUp := p.Tracker.RecordFailure(p.VideoID)
 		if giveUp {
