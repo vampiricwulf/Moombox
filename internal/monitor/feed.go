@@ -309,6 +309,17 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 		lookbehind = *ch.NumDescLookbehind
 	}
 
+	// Precompute per-entry line sets once; filterUniqueDescriptionLines
+	// previously rebuilt these from scratch for every i, producing O(N*M*K)
+	// trim work (N entries × M older entries × K lines) per channel.
+	var entryLineSets []map[string]struct{}
+	if lookbehind > 0 {
+		entryLineSets = make([]map[string]struct{}, len(entries))
+		for i := range entries {
+			entryLineSets[i] = descriptionLineSet(entries[i].MediaGroup.Description)
+		}
+	}
+
 	for i, entry := range entries {
 		select {
 		case <-ctx.Done():
@@ -330,7 +341,7 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 		description := entry.MediaGroup.Description
 		if lookbehind > 0 && i+1 < len(entries) {
 			end := min(i+1+lookbehind, len(entries))
-			description = filterUniqueDescriptionLines(description, entries[i+1:end])
+			description = filterUniqueDescriptionLinesPrecomputed(description, entryLineSets[i+1:end])
 		}
 
 		// Get video URL
@@ -392,23 +403,45 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 	return nil
 }
 
-// filterUniqueDescriptionLines removes lines that appear in older entries' descriptions.
-func filterUniqueDescriptionLines(description string, olderEntries []atomEntry) string {
-	olderLines := make(map[string]struct{})
-	for _, older := range olderEntries {
-		for line := range strings.SplitSeq(older.MediaGroup.Description, "\n") {
-			olderLines[strings.TrimSpace(line)] = struct{}{}
-		}
+// descriptionLineSet builds the trimmed-line lookup set for a description.
+// Sharing one set per entry across the outer loop keeps dedup work linear in
+// total lines rather than quadratic in entries.
+func descriptionLineSet(description string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for line := range strings.SplitSeq(description, "\n") {
+		set[strings.TrimSpace(line)] = struct{}{}
 	}
+	return set
+}
 
+// filterUniqueDescriptionLinesPrecomputed removes lines that appear in any of
+// the precomputed older-entry line sets.
+func filterUniqueDescriptionLinesPrecomputed(description string, olderLineSets []map[string]struct{}) string {
 	var unique []string
 	for line := range strings.SplitSeq(description, "\n") {
-		if _, found := olderLines[strings.TrimSpace(line)]; !found {
+		trimmed := strings.TrimSpace(line)
+		found := false
+		for _, set := range olderLineSets {
+			if _, ok := set[trimmed]; ok {
+				found = true
+				break
+			}
+		}
+		if !found {
 			unique = append(unique, line)
 		}
 	}
-
 	return strings.Join(unique, "\n")
+}
+
+// filterUniqueDescriptionLines is retained for backwards-compat (and tests)
+// but now routes through the precomputed-set implementation.
+func filterUniqueDescriptionLines(description string, olderEntries []atomEntry) string {
+	sets := make([]map[string]struct{}, len(olderEntries))
+	for i := range olderEntries {
+		sets[i] = descriptionLineSet(olderEntries[i].MediaGroup.Description)
+	}
+	return filterUniqueDescriptionLinesPrecomputed(description, sets)
 }
 
 func (fm *FeedMonitor) getYouTubeChannels() []config.ChannelConfig {
