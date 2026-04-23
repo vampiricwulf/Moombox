@@ -381,6 +381,8 @@ sl-badge.status.cookies::part(base) {
 .video-item[data-status="upcoming"] .job-progress-bar { --indicator-color: var(--status-upcoming); }
 .video-item[data-status="error"] .job-progress-bar { --indicator-color: var(--status-error); }
 .video-item[data-status="cookies"] .job-progress-bar { --indicator-color: var(--status-cookies); }
+.video-item[data-status="finished"] .job-progress-bar { --indicator-color: var(--status-finished); }
+.video-item[data-status="cancelled"] .job-progress-bar { --indicator-color: var(--status-cancelled); }
 
 /* Archived table - same layout as #video-table */
 .archived-table {
