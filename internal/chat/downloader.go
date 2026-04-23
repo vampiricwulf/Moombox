@@ -743,14 +743,26 @@ func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
 // without rewriting the entire file. Reads only the first 1KB.
 func (cd *ChatDownloader) updateChatFileHeader() {
 	outputFile, _ := cd.getOutputPaths()
+	if outputFile == "" {
+		return // No output file set yet (early chat)
+	}
 
 	info, err := os.Stat(outputFile)
-	if err != nil || info.Size() < 50 {
+	if err != nil {
+		if !os.IsNotExist(err) && cd.OnError != nil {
+			cd.OnError(fmt.Errorf("update chat header: stat: %w", err))
+		}
 		return
+	}
+	if info.Size() < 50 {
+		return // File too small to have a meaningful header yet
 	}
 
 	f, err := os.OpenFile(outputFile, os.O_RDWR, 0o644)
 	if err != nil {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("update chat header: open: %w", err))
+		}
 		return
 	}
 	defer f.Close()
@@ -760,6 +772,9 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 	headerBuf := make([]byte, headerSize)
 	n, err := f.ReadAt(headerBuf, 0)
 	if err != nil && n == 0 {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("update chat header: read: %w", err))
+		}
 		return
 	}
 	header := string(headerBuf[:n])
