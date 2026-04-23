@@ -48,7 +48,6 @@ type AutoCookieService struct {
 	cookiePath     string
 	jar            *CookieJar
 	setupProcess   *os.Process
-	setupCmd       *exec.Cmd
 	refreshCmd     *exec.Cmd // tracks in-flight headless refresh browser
 	setupBrowser   *DetectedBrowser
 	browserExited  bool
@@ -535,7 +534,6 @@ func (s *AutoCookieService) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.setupProcess = nil
-	s.setupCmd = nil
 	s.setupBrowser = nil
 	s.browserExited = false
 	s.cdpPort = 0

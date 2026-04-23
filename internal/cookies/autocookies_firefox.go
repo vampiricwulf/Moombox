@@ -45,7 +45,6 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 	}
 
 	s.mu.Lock()
-	s.setupCmd = cmd
 	s.setupProcess = cmd.Process
 	s.mu.Unlock()
 

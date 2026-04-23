@@ -43,7 +43,6 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	}
 
 	s.mu.Lock()
-	s.setupCmd = cmd
 	s.setupProcess = cmd.Process
 	s.cdpPort = port
 	s.mu.Unlock()
@@ -65,10 +64,10 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	defer cdpCancel()
 	if err := waitForCDP(cdpCtx, port, cdpPollTimeout); err != nil {
 		// killSetupProcess only signals the OS process; setupProcess,
-		// setupCmd, cdpPort, and setupBrowser remain populated on the
-		// struct, so a follow-up StartSetup would see "setup already in
-		// progress" and refuse to retry. Clearing via cleanup() lets the
-		// user try again immediately after a CDP start-up failure.
+		// cdpPort, and setupBrowser remain populated on the struct, so a
+		// follow-up StartSetup would see "setup already in progress" and
+		// refuse to retry. Clearing via cleanup() lets the user try again
+		// immediately after a CDP start-up failure.
 		s.killSetupProcess()
 		s.cleanup()
 		return err
