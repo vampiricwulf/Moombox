@@ -2,7 +2,7 @@ package goja
 
 import (
 	"fmt"
-	"os"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,12 +10,19 @@ import (
 	"github.com/dop251/goja"
 )
 
+// maxTimerDelayMs caps the JS-side setTimeout/setInterval delay argument so
+// that delayMs * time.Millisecond (1e6 ns) can't overflow time.Duration
+// (int64 nanoseconds). A malicious/bugged script passing math.MaxInt64 would
+// otherwise produce a near-zero or negative duration and fire immediately.
+const maxTimerDelayMs = math.MaxInt64 / int64(time.Millisecond)
+
 // TimerManager tracks setTimeout/setInterval calls for cleanup.
 //
 // IMPORTANT: Goja runtimes are NOT goroutine-safe. Timer callbacks are queued
 // and must be drained on the same goroutine that owns the VM via DrainCallbacks().
 type TimerManager struct {
 	vm      *goja.Runtime
+	logger  timerLogger // may be nil
 	mu      sync.Mutex
 	timers  map[int64]*timerEntry
 	nextID  atomic.Int64
@@ -28,12 +35,31 @@ type TimerManager struct {
 	callbacks  []goja.Callable
 }
 
+// timerLogger captures the minimal logging surface used by TimerManager for
+// goroutine-boundary diagnostics. Same shape as the loggers plumbed elsewhere
+// in the package; nil-safe.
+type timerLogger interface {
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
+
 type timerEntry struct {
-	id       int64
-	timer    *time.Timer
-	ticker   *time.Ticker
-	interval bool
-	done     chan struct{} // closed on ClearTimer to stop the interval goroutine
+	id     int64
+	timer  *time.Timer
+	ticker *time.Ticker
+	done   chan struct{} // closed on ClearTimer to stop the interval goroutine
+}
+
+// clampDelayMs bounds delayMs to [0, maxTimerDelayMs]. Caller then multiplies
+// by time.Millisecond safely.
+func clampDelayMs(delayMs int64) int64 {
+	if delayMs < 0 {
+		return 0
+	}
+	if delayMs > maxTimerDelayMs {
+		return maxTimerDelayMs
+	}
+	return delayMs
 }
 
 // NewTimerManager creates a timer manager for a Goja runtime.
@@ -42,6 +68,18 @@ func NewTimerManager(vm *goja.Runtime) *TimerManager {
 		vm:     vm,
 		timers: make(map[int64]*timerEntry),
 		done:   make(chan struct{}),
+	}
+}
+
+// SetLogger wires an optional logger used for goroutine-boundary diagnostics
+// (timer panics, interval-callback errors). nil disables logging.
+func (tm *TimerManager) SetLogger(l timerLogger) {
+	tm.logger = l
+}
+
+func (tm *TimerManager) logWarn(msg string, args ...any) {
+	if tm.logger != nil {
+		tm.logger.Warn(msg, args...)
 	}
 }
 
@@ -71,9 +109,20 @@ func (tm *TimerManager) DrainCallbacks() (int, error) {
 
 	var firstErr error
 	for _, fn := range cbs {
-		if _, err := fn(goja.Undefined()); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("timer callback: %w", err)
-		}
+		// Per-callback panic recovery: one buggy callback must not abort the
+		// drain pass, otherwise any remaining callbacks are lost.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("timer callback panic: %v", r)
+					}
+				}
+			}()
+			if _, err := fn(goja.Undefined()); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("timer callback: %w", err)
+			}
+		}()
 	}
 	return len(cbs), firstErr
 }
@@ -97,14 +146,15 @@ func (tm *TimerManager) SetTimeout(fn goja.Callable, delayMs int64) int64 {
 		return id
 	}
 
-	delay := max(time.Duration(delayMs)*time.Millisecond, 0)
+	delay := time.Duration(clampDelayMs(delayMs)) * time.Millisecond
 
 	t := time.AfterFunc(delay, func() {
 		defer func() {
 			if r := recover(); r != nil {
-				// Timer goroutine panic recovery — log to stderr since we
-				// can't safely access the Goja VM from this goroutine.
-				fmt.Fprintf(os.Stderr, "timer: panic in setTimeout cleanup id=%d: %v\n", id, r)
+				// Timer goroutine panic recovery — route through the logger
+				// if one is set (nil-safe), since we can't access the Goja
+				// VM from this goroutine.
+				tm.logWarn("goja: panic in setTimeout cleanup", "id", id, "panic", r)
 			}
 		}()
 
@@ -137,21 +187,21 @@ func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 		return id
 	}
 
-	delay := time.Duration(delayMs) * time.Millisecond
+	delay := time.Duration(clampDelayMs(delayMs)) * time.Millisecond
 	if delay <= 0 {
 		delay = 1 * time.Millisecond
 	}
 
 	ticker := time.NewTicker(delay)
 	entryDone := make(chan struct{})
-	entry := &timerEntry{id: id, ticker: ticker, interval: true, done: entryDone}
+	entry := &timerEntry{id: id, ticker: ticker, done: entryDone}
 	tm.timers[id] = entry
 	tm.mu.Unlock()
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Fprintf(os.Stderr, "timer: panic in setInterval goroutine id=%d: %v\n", id, r)
+				tm.logWarn("goja: panic in setInterval goroutine", "id", id, "panic", r)
 			}
 		}()
 
