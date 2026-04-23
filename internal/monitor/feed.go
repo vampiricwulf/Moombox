@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -19,10 +20,56 @@ const (
 	feedFetchTimeout    = 15 * time.Second
 	feedProcessTimeout  = 60 * time.Second
 	defaultMaxFeedItems = 15
+	// feedStagger spaces consecutive channel feed fetches. Decapi and Twitch
+	// already stagger; a tight loop of YouTube RSS fetches on a big channel
+	// list looks like scraping behavior from a single source IP.
+	feedStagger = 500 * time.Millisecond
 )
 
 // monitorHTTPClient is a shared HTTP client with a timeout for monitor HTTP requests.
 var monitorHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+// ConnectivityReporter is the subset of connectivity.Monitor we invoke from
+// monitor HTTP paths. Wiring this into the FeedMonitor and DecapiMonitor lets
+// their fetches contribute to the passive-outage tracker (see
+// internal/connectivity/passive.go) so a DNS outage that hits only YouTube
+// RSS or DECAPI can still flip the global online/offline state.
+type ConnectivityReporter interface {
+	ReportFailure(tag string)
+	ReportSuccess(tag string)
+}
+
+// connReporter is an atomic.Pointer so SetConnectivityReporter can be called
+// without racing against concurrent fetches. In practice main.go installs
+// the reporter once at startup, but making the read lock-free removes a
+// happens-before foot-gun for future callers or tests.
+var connReporter atomic.Pointer[ConnectivityReporter]
+
+// SetConnectivityReporter wires the package-wide connectivity reporter for
+// monitor HTTP paths. Safe to call concurrently with in-flight fetches.
+func SetConnectivityReporter(r ConnectivityReporter) {
+	if r == nil {
+		connReporter.Store(nil)
+		return
+	}
+	connReporter.Store(&r)
+}
+
+// reportMonitorResult forwards a fetch outcome to the installed reporter, if
+// any. tag identifies the subsystem (e.g. "monitor/feed", "monitor/decapi")
+// so the passive tracker can count distinct-subsystem failures toward the
+// offline-trigger threshold.
+func reportMonitorResult(tag string, failed bool) {
+	rp := connReporter.Load()
+	if rp == nil {
+		return
+	}
+	if failed {
+		(*rp).ReportFailure(tag)
+	} else {
+		(*rp).ReportSuccess(tag)
+	}
+}
 
 // FeedMonitor polls YouTube RSS feeds for new videos from monitored channels.
 type FeedMonitor struct {
@@ -217,6 +264,18 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 		if err := fm.checkChannel(ctx, ch); err != nil {
 			fm.logger.Warn("feed check failed", "channel", ch.Name, "err", err)
 		}
+
+		// Stagger between requests to avoid looking like a scraper and to
+		// match the pacing of the other two monitors.
+		if i < len(channels)-1 {
+			staggerTimer := time.NewTimer(feedStagger)
+			select {
+			case <-ctx.Done():
+				staggerTimer.Stop()
+				return
+			case <-staggerTimer.C:
+			}
+		}
 	}
 }
 
@@ -235,14 +294,21 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 
 	resp, err := monitorHTTPClient.Do(req)
 	if err != nil {
+		// Transport-level failure — most likely a DNS error, TCP reset, or
+		// context deadline. Contributes toward the passive offline trigger.
+		reportMonitorResult("monitor/feed", true)
 		return fmt.Errorf("fetch feed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// 4xx/5xx is not necessarily a connectivity problem (YouTube could be
+		// rate-limiting or a channel ID is dead), but we don't want to flag
+		// these as success either. Leave the tracker alone.
 		io.Copy(io.Discard, resp.Body) // drain for connection reuse
 		return fmt.Errorf("feed http %d", resp.StatusCode)
 	}
+	reportMonitorResult("monitor/feed", false)
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
@@ -300,13 +366,21 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 		return nil
 	}
 
-	// Track latest video for DECAPI baseline
-	fm.db.SetLastVideo(ch.ID, entries[0].VideoID)
-
 	// Build lookbehind set for description dedup
 	lookbehind := 0
 	if ch.NumDescLookbehind != nil {
 		lookbehind = *ch.NumDescLookbehind
+	}
+
+	// Precompute per-entry line sets once; filterUniqueDescriptionLines
+	// previously rebuilt these from scratch for every i, producing O(N*M*K)
+	// trim work (N entries × M older entries × K lines) per channel.
+	var entryLineSets []map[string]struct{}
+	if lookbehind > 0 {
+		entryLineSets = make([]map[string]struct{}, len(entries))
+		for i := range entries {
+			entryLineSets[i] = descriptionLineSet(entries[i].MediaGroup.Description)
+		}
 	}
 
 	for i, entry := range entries {
@@ -322,7 +396,15 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 		}
 
 		// Skip if active job exists (but not if merely finished — stream may restart on same URL)
-		if active, _ := fm.db.HasActiveJob(videoID); active {
+		active, err := fm.db.HasActiveJob(videoID)
+		if err != nil {
+			// Don't swallow DB errors — proceeding as if no active job could
+			// create duplicates if the DB was simply busy. Log and skip this
+			// entry for the current cycle.
+			fm.logger.Debug("HasActiveJob query failed", "videoID", videoID, "err", err)
+			continue
+		}
+		if active {
 			continue
 		}
 
@@ -330,7 +412,7 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 		description := entry.MediaGroup.Description
 		if lookbehind > 0 && i+1 < len(entries) {
 			end := min(i+1+lookbehind, len(entries))
-			description = filterUniqueDescriptionLines(description, entries[i+1:end])
+			description = filterUniqueDescriptionLinesPrecomputed(description, entryLineSets[i+1:end])
 		}
 
 		// Get video URL
@@ -354,8 +436,14 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 			continue
 		}
 
-		// Check if this is a re-probe of a previously processed video
-		reprobe, _ := fm.db.HasProcessed(videoID)
+		// Check if this is a re-probe of a previously processed video.
+		// Ignore the error — a DB-busy here is best treated as "not yet
+		// processed" so we probe and let upstream dedup (INSERT-OR-IGNORE)
+		// handle collisions. We still log for visibility.
+		reprobe, hpErr := fm.db.HasProcessed(videoID)
+		if hpErr != nil {
+			fm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
+		}
 
 		if reprobe {
 			fm.logger.Debug("feed match found (re-probe)",
@@ -392,23 +480,45 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 	return nil
 }
 
-// filterUniqueDescriptionLines removes lines that appear in older entries' descriptions.
-func filterUniqueDescriptionLines(description string, olderEntries []atomEntry) string {
-	olderLines := make(map[string]struct{})
-	for _, older := range olderEntries {
-		for line := range strings.SplitSeq(older.MediaGroup.Description, "\n") {
-			olderLines[strings.TrimSpace(line)] = struct{}{}
-		}
+// descriptionLineSet builds the trimmed-line lookup set for a description.
+// Sharing one set per entry across the outer loop keeps dedup work linear in
+// total lines rather than quadratic in entries.
+func descriptionLineSet(description string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for line := range strings.SplitSeq(description, "\n") {
+		set[strings.TrimSpace(line)] = struct{}{}
 	}
+	return set
+}
 
+// filterUniqueDescriptionLinesPrecomputed removes lines that appear in any of
+// the precomputed older-entry line sets.
+func filterUniqueDescriptionLinesPrecomputed(description string, olderLineSets []map[string]struct{}) string {
 	var unique []string
 	for line := range strings.SplitSeq(description, "\n") {
-		if _, found := olderLines[strings.TrimSpace(line)]; !found {
+		trimmed := strings.TrimSpace(line)
+		found := false
+		for _, set := range olderLineSets {
+			if _, ok := set[trimmed]; ok {
+				found = true
+				break
+			}
+		}
+		if !found {
 			unique = append(unique, line)
 		}
 	}
-
 	return strings.Join(unique, "\n")
+}
+
+// filterUniqueDescriptionLines is retained for backwards-compat (and tests)
+// but now routes through the precomputed-set implementation.
+func filterUniqueDescriptionLines(description string, olderEntries []atomEntry) string {
+	sets := make([]map[string]struct{}, len(olderEntries))
+	for i := range olderEntries {
+		sets[i] = descriptionLineSet(olderEntries[i].MediaGroup.Description)
+	}
+	return filterUniqueDescriptionLinesPrecomputed(description, sets)
 }
 
 func (fm *FeedMonitor) getYouTubeChannels() []config.ChannelConfig {

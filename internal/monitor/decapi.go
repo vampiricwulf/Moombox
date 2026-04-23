@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -191,6 +192,13 @@ func (dm *DecapiMonitor) calculateInterval(channelCount int) time.Duration {
 	// Floor
 	interval = max(interval, decapiMinInterval)
 
+	// Add ±10% jitter so multiple Moombox instances don't synchronize polls
+	// against decapi.me. Feed and Twitch monitors already jitter.
+	tenPercent := int64(interval) / 10
+	if tenPercent > 0 {
+		interval = interval - time.Duration(tenPercent) + time.Duration(rand.Int63n(2*tenPercent))
+	}
+
 	return interval
 }
 
@@ -273,6 +281,16 @@ func (dm *DecapiMonitor) waitForRateLimit(ctx context.Context) {
 		return
 	}
 
+	// Defensive: if remaining==0 but resetAt is zero, we lack a server-provided
+	// window end (e.g. headers included X-RateLimit-Remaining: 0 without a
+	// matching X-RateLimit-Reset). Without this, time.Until(zero) returns a
+	// large negative duration, the waitDur>0 guard skips the wait, and we
+	// busy-loop. Treat missing resetAt as a fresh 60s window matching the
+	// default rate-limit cadence established in checkChannel.
+	if rl.resetAt.IsZero() {
+		rl.resetAt = time.Now().Add(60 * time.Second)
+	}
+
 	// Need to wait
 	waitDur := time.Until(rl.resetAt)
 	dm.mu.Unlock()
@@ -306,6 +324,8 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 
 	resp, err := monitorHTTPClient.Do(req)
 	if err != nil {
+		// Transport-level failure — feeds the passive offline tracker.
+		reportMonitorResult("monitor/decapi", true)
 		return fmt.Errorf("decapi request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -325,6 +345,8 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	dm.updateRateLimit(resp)
 
 	if resp.StatusCode == http.StatusTooManyRequests {
+		// 429 reached the server — explicit throttle, not a connectivity
+		// problem. Don't report as failure or success.
 		retryAfter := resp.Header.Get("Retry-After")
 		if secs, err := strconv.Atoi(retryAfter); err == nil {
 			dm.mu.Lock()
@@ -336,8 +358,10 @@ func (dm *DecapiMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		// Non-2xx — server reachable but unhappy; leave tracker alone.
 		return fmt.Errorf("decapi http %d", resp.StatusCode)
 	}
+	reportMonitorResult("monitor/decapi", false)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
@@ -364,10 +388,25 @@ func (dm *DecapiMonitor) updateRateLimit(resp *http.Response) {
 	if v := resp.Header.Get("X-RateLimit-Reset"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			// Could be epoch seconds or relative seconds
+			var newReset time.Time
 			if n > 1_000_000_000 {
-				dm.rateLimit.resetAt = time.Unix(n, 0)
+				newReset = time.Unix(n, 0)
 			} else {
-				dm.rateLimit.resetAt = time.Now().Add(time.Duration(n) * time.Second)
+				newReset = time.Now().Add(time.Duration(n) * time.Second)
+			}
+
+			// Sanity: reject resetAt values already in the past (server clock
+			// skew or a stale cached header). A past resetAt causes
+			// waitForRateLimit's proactive-reset branch to fire immediately,
+			// handing out a fresh burst of requests and defeating backoff.
+			// Also reject values that would shorten an existing future
+			// resetAt — back-off should never retreat.
+			if !newReset.After(time.Now()) {
+				// past or now — ignore
+			} else if !dm.rateLimit.resetAt.IsZero() && newReset.Before(dm.rateLimit.resetAt) {
+				// would shorten existing backoff — keep the longer window
+			} else {
+				dm.rateLimit.resetAt = newReset
 			}
 		}
 	}
@@ -392,11 +431,16 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 		title = body[:idx]
 	}
 
-	// Update last video tracking
-	dm.db.SetLastVideo(ch.ID, videoID)
-
 	// Skip if active job exists (but not if merely finished — stream may restart on same URL)
-	if active, _ := dm.db.HasActiveJob(videoID); active {
+	active, err := dm.db.HasActiveJob(videoID)
+	if err != nil {
+		// Don't swallow DB errors — proceeding as if no active job could
+		// create duplicates if the DB was simply busy. Log and abort this
+		// entry for the current cycle.
+		dm.logger.Debug("HasActiveJob query failed", "videoID", videoID, "err", err)
+		return nil
+	}
+	if active {
 		return nil
 	}
 
@@ -407,8 +451,13 @@ func (dm *DecapiMonitor) processResponse(body string, ch *config.ChannelConfig) 
 
 	videoURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
 
-	// Check if this is a re-probe of a previously processed video
-	reprobe, _ := dm.db.HasProcessed(videoID)
+	// Check if this is a re-probe of a previously processed video. A DB-busy
+	// here is best treated as "not yet processed" so we probe and let upstream
+	// dedup (INSERT-OR-IGNORE) handle collisions. We still log for visibility.
+	reprobe, hpErr := dm.db.HasProcessed(videoID)
+	if hpErr != nil {
+		dm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
+	}
 
 	if reprobe {
 		dm.logger.Debug("decapi match found (re-probe)",
