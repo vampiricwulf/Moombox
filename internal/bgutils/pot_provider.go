@@ -110,16 +110,25 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 
 	pp.mu.Unlock()
 
-	var session *SessionData
-	var err error
-
-	if hasMinter {
-		pp.logger.Debug("[PotProvider] using cached minter", "binding", bindingPrefix)
-		session, err = pp.mintPoToken(minter, contentBinding)
-	} else {
+	// Recover panics from the Goja VM paths and convert them into errors.
+	// Without this a panic escapes before the inflight map is cleared or
+	// entry.done is closed, wedging every concurrent waiter on this binding
+	// forever.
+	session, err := func() (s *SessionData, e error) {
+		defer func() {
+			if r := recover(); r != nil {
+				s = nil
+				e = fmt.Errorf("bgutils mint panic: %v", r)
+				pp.logger.Error("[PotProvider] mint panic", "binding", bindingPrefix, "panic", r)
+			}
+		}()
+		if hasMinter {
+			pp.logger.Debug("[PotProvider] using cached minter", "binding", bindingPrefix)
+			return pp.mintPoToken(minter, contentBinding)
+		}
 		pp.logger.Debug("[PotProvider] generating new minter", "binding", bindingPrefix)
-		session, err = pp.generateAndMint(ctx, contentBinding)
-	}
+		return pp.generateAndMint(ctx, contentBinding)
+	}()
 
 	// Store result on the entry so all waiters can read it, then signal
 	entry.session = session
