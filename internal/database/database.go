@@ -271,18 +271,8 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 
 	// Notify subscribers with the full job object (TUI + WebSocket need all fields).
 	// A full SELECT is required here because UpdateJobFields only writes a subset.
-	row := db.db.QueryRowContext(db.getCtx(), `SELECT id, video_id, url, title, channel_name, platform,
-		status, progress, percent, eta, speed, error, created_at, updated_at,
-		last_video_seq, last_audio_seq, total_video_seq, total_audio_seq,
-		is_vod, manually_added, allow_non_stream, stream_start_time, stream_end_time,
-		length_seconds, download_started_at, thumbnail_url, description, output_file,
-		filename, output_directory, video_width, video_height, video_fps, file_size,
-		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
-		twitch_quality, twitch_category,
-		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at, quality_preference, watched, resume_position, chat_offset
-		FROM jobs WHERE id = ?`, id)
-	job, scanErr := scanJob(row)
+	// Reuse the prepared stmtGetJob (column list maintained in prepareStatements).
+	job, scanErr := scanJob(db.stmtGetJob.QueryRowContext(db.getCtx(), id))
 	if scanErr != nil {
 		if db.logger != nil {
 			db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)
