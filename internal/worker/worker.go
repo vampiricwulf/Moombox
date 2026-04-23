@@ -22,6 +22,61 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
+// Error-classification helpers. These scan error strings because several
+// upstream producers (YouTube extractors, cipher, cookie jar) return plain
+// fmt.Errorf with no sentinel — a dedicated sentinel-error migration is
+// tracked in reports/cross-cutting.md C3 but is cross-package and deferred.
+// Keeping the magic strings in one place makes the migration mechanical
+// when we tackle it: these functions become one-line errors.Is checks.
+
+// cookiesRequiredPrefixes / cookiesRequiredSubstrings are the lower-cased
+// error fragments that indicate the job should transition to StatusCookies
+// rather than generic StatusError.
+var (
+	cookiesRequiredPrefixes = []string{
+		"login required",
+		"member-only",
+		"members only",
+	}
+	cookiesRequiredSubstrings = []string{
+		"cookies?",
+	}
+	nonActionablePrefixes = []string{
+		"max probe errors",
+	}
+	nonActionableSubstrings = []string{
+		"age restricted",
+	}
+)
+
+func isCookiesRequiredError(errLower string) bool {
+	for _, p := range cookiesRequiredPrefixes {
+		if strings.HasPrefix(errLower, p) {
+			return true
+		}
+	}
+	for _, s := range cookiesRequiredSubstrings {
+		if strings.Contains(errLower, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func isNonActionableError(errLower string) bool {
+	for _, p := range nonActionablePrefixes {
+		if strings.HasPrefix(errLower, p) {
+			return true
+		}
+	}
+	for _, s := range nonActionableSubstrings {
+		if strings.Contains(errLower, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // heartbeatInterval is the safety-net poll interval for catching missed jobs.
 // Normal job discovery is signal-driven via NotifyNewJob.
 const heartbeatInterval = 60 * time.Second
@@ -515,10 +570,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 
 	status := database.StatusError
 	errLower := strings.ToLower(errMsg)
-	if strings.HasPrefix(errLower, "login required") ||
-		strings.HasPrefix(errLower, "member-only") ||
-		strings.HasPrefix(errLower, "members only") ||
-		strings.Contains(errLower, "cookies?") {
+	if isCookiesRequiredError(errLower) {
 		status = database.StatusCookies
 	}
 
@@ -530,8 +582,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Suppress notifications for non-actionable errors (matches TS behavior):
 	// - Age-restricted content: nothing user can do
 	// - Probe timeout: transient, stream may have ended naturally
-	suppressNotification := strings.Contains(errLower, "age restricted") ||
-		strings.HasPrefix(errLower, "max probe errors")
+	suppressNotification := isNonActionableError(errLower)
 
 	// Send error/auth notification
 	if w.notifier != nil && !suppressNotification {
