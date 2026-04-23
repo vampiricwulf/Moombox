@@ -414,6 +414,14 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 				}
 			}()
 			hub.throttleMu.Lock()
+			// If Close() ran between scheduling and firing, the maps are
+			// nil; bail out before touching them to avoid the otherwise-
+			// guaranteed nil-map assign panic (which the recover above
+			// would catch, but that's a bug waiting to happen).
+			if hub.throttlePending == nil {
+				hub.throttleMu.Unlock()
+				return
+			}
 			pending := hub.throttlePending[jobID]
 			delete(hub.throttlePending, jobID)
 			delete(hub.throttleTimers, jobID)
@@ -433,6 +441,11 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 					}
 				}()
 				hub.throttleMu.Lock()
+				// Same guard as above: Close() may have nilled the map.
+				if hub.throttleTimestamps == nil {
+					hub.throttleMu.Unlock()
+					return
+				}
 				// Only delete if no new activity has occurred since our trailing send
 				if t, ok := hub.throttleTimestamps[jobID]; ok && time.Since(t) >= wsThrottleWindow {
 					delete(hub.throttleTimestamps, jobID)
