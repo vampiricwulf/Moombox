@@ -64,7 +64,13 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	cdpCtx, cdpCancel := context.WithTimeout(context.Background(), cdpPollTimeout)
 	defer cdpCancel()
 	if err := waitForCDP(cdpCtx, port, cdpPollTimeout); err != nil {
+		// killSetupProcess only signals the OS process; setupProcess,
+		// setupCmd, cdpPort, and setupBrowser remain populated on the
+		// struct, so a follow-up StartSetup would see "setup already in
+		// progress" and refuse to retry. Clearing via cleanup() lets the
+		// user try again immediately after a CDP start-up failure.
 		s.killSetupProcess()
+		s.cleanup()
 		return err
 	}
 
@@ -94,14 +100,21 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		return "", fmt.Errorf("get free port: %w", err)
 	}
 
+	// Mirror the anti-automation flags used in the visible setup launch —
+	// YouTube raises fraud scores and may rate-limit sessions when a browser
+	// advertises itself as automated, which would invalidate the very cookies
+	// we are trying to refresh. --window-size + --disable-blink-features
+	// together make the headless session look closer to a normal window.
 	cmd := exec.Command(browser.Path,
 		"--headless=new",
 		fmt.Sprintf("--user-data-dir=%s", s.profileDir),
 		"--no-first-run",
 		"--no-default-browser-check",
+		"--disable-blink-features=AutomationControlled",
 		"--disable-gpu",
 		"--disable-session-crashed-bubble",
 		"--disable-features=InfiniteSessionRestore",
+		"--window-size=1280,720",
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 	)
 
@@ -218,8 +231,9 @@ func cdpNavigateAndWait(ctx context.Context, wsURL string, targetURL string) err
 	if err := conn.Write(navCtx, websocket.MessageText, enableMsg); err != nil {
 		return fmt.Errorf("CDP Page.enable: %w", err)
 	}
-	// Read Page.enable response
-	conn.Read(navCtx)
+	// Read Page.enable response (response body ignored; an error here is
+	// surfaced later when Page.navigate also fails).
+	_, _, _ = conn.Read(navCtx)
 
 	// Send Page.navigate
 	navMsg, _ := json.Marshal(map[string]any{
@@ -231,12 +245,19 @@ func cdpNavigateAndWait(ctx context.Context, wsURL string, targetURL string) err
 		return fmt.Errorf("CDP Page.navigate: %w", err)
 	}
 
-	// Wait for Page.loadEventFired (read messages until we see it or timeout)
+	// Wait for Page.loadEventFired (read messages until we see it or timeout).
+	// Distinguish "context expired" (the read-loop budget ran out — page is
+	// likely loaded, just didn't fire the event in time) from "read failed
+	// before the budget ran out" (genuine transport failure: return the err
+	// so the caller can decide).
 	for {
 		_, data, err := conn.Read(navCtx)
 		if err != nil {
-			// Context cancelled or timeout — still acceptable, page likely loaded
-			return nil
+			if navCtx.Err() != nil {
+				// Budget exhausted — navigation likely complete, just no event.
+				return nil
+			}
+			return fmt.Errorf("CDP read during navigate: %w", err)
 		}
 		var msg struct {
 			Method string `json:"method"`
@@ -477,7 +498,20 @@ func getFreePort() (int, error) {
 }
 
 func cleanChromiumLockFiles(profileDir string) {
+	// Remove the canonical set first; covers every known Chromium variant.
 	for _, name := range chromiumLockFiles {
 		os.Remove(filepath.Join(profileDir, name))
+	}
+	// Newer Chrome/Brave/Edge/Opera builds sometimes leave additional
+	// Singleton* variants (e.g. SingletonLock.lock); glob them too so a
+	// stray lock file from a recent version doesn't block headless launch.
+	for _, pattern := range []string{"Singleton*", "*lockfile*"} {
+		matches, err := filepath.Glob(filepath.Join(profileDir, pattern))
+		if err != nil {
+			continue
+		}
+		for _, m := range matches {
+			os.Remove(m)
+		}
 	}
 }
