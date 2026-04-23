@@ -450,13 +450,18 @@ func (api *ChatAPI) parseSuperChatInfo(paidRenderer map[string]any) *SuperchatIn
 		sc.Currency = extractCurrency(amountText)
 	}
 
-	// Use headerBackgroundColor (not bodyBackgroundColor)
+	// Use headerBackgroundColor (not bodyBackgroundColor).
+	// ARGB color values are 32-bit unsigned ints; convert via uint32 so
+	// the lookup key matches superchatTierColors' natural type.
 	if bgColor, ok := paidRenderer["headerBackgroundColor"].(float64); ok {
-		colorVal := int64(bgColor)
+		colorVal := uint32(bgColor)
 		if tier, ok := superchatTierColors[colorVal]; ok {
 			sc.Tier = tier.tier
 			sc.Color = tier.color
 		} else {
+			// Unknown bgColor — log at debug so tier-table drift is visible
+			// without polluting the error channel.
+			api.logDebug("chat: unknown superchat headerBackgroundColor", "color", colorVal)
 			sc.Tier = 1
 			sc.Color = "blue"
 		}

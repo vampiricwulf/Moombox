@@ -66,8 +66,9 @@ type ChatResumeState struct {
 	RecentIDs         []string `json:"recentIds"`
 }
 
-// Superchat tier color mapping (YouTube's internal color codes).
-var superchatTierColors = map[int64]struct {
+// Superchat tier color mapping (YouTube's internal ARGB color codes).
+// Keys are uint32 since the raw values are 32-bit unsigned ARGB ints.
+var superchatTierColors = map[uint32]struct {
 	tier  int
 	color string
 }{
