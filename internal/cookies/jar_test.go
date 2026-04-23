@@ -88,6 +88,47 @@ func TestCookieHeader(t *testing.T) {
 	}
 }
 
+// TestCookieHeaderDeterministicOrder verifies that GetCookieHeader emits
+// cookies in a stable sorted order regardless of map iteration randomization
+// (cookies.md #1, locked down per #59). Without sort, two consecutive calls
+// can produce different Cookie headers, defeating HTTP-level debugging and
+// occasionally tripping YouTube endpoints that inspect __Secure-* ordering.
+func TestCookieHeaderDeterministicOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(path, []byte(testCookieFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewCookieJar()
+	if err := jar.Load(path); err != nil {
+		t.Fatal(err)
+	}
+
+	first := jar.GetCookieHeader()
+	if first == "" {
+		t.Fatal("expected non-empty cookie header")
+	}
+
+	// Repeated calls must return the byte-identical header.
+	for i := 0; i < 50; i++ {
+		if got := jar.GetCookieHeader(); got != first {
+			t.Fatalf("cookie header order drifted on iteration %d:\n first: %s\n   got: %s", i, first, got)
+		}
+	}
+
+	// Pairs must be alphabetically sorted by name.
+	pairs := strings.Split(first, "; ")
+	prev := ""
+	for _, p := range pairs {
+		name, _, _ := strings.Cut(p, "=")
+		if prev != "" && name < prev {
+			t.Errorf("cookie header not sorted: %q comes after %q in %q", name, prev, first)
+		}
+		prev = name
+	}
+}
+
 func TestGenerateAuthorizationHeader(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cookies.txt")
