@@ -374,10 +374,25 @@ func (dm *DecapiMonitor) updateRateLimit(resp *http.Response) {
 	if v := resp.Header.Get("X-RateLimit-Reset"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			// Could be epoch seconds or relative seconds
+			var newReset time.Time
 			if n > 1_000_000_000 {
-				dm.rateLimit.resetAt = time.Unix(n, 0)
+				newReset = time.Unix(n, 0)
 			} else {
-				dm.rateLimit.resetAt = time.Now().Add(time.Duration(n) * time.Second)
+				newReset = time.Now().Add(time.Duration(n) * time.Second)
+			}
+
+			// Sanity: reject resetAt values already in the past (server clock
+			// skew or a stale cached header). A past resetAt causes
+			// waitForRateLimit's proactive-reset branch to fire immediately,
+			// handing out a fresh burst of requests and defeating backoff.
+			// Also reject values that would shorten an existing future
+			// resetAt — back-off should never retreat.
+			if !newReset.After(time.Now()) {
+				// past or now — ignore
+			} else if !dm.rateLimit.resetAt.IsZero() && newReset.Before(dm.rateLimit.resetAt) {
+				// would shorten existing backoff — keep the longer window
+			} else {
+				dm.rateLimit.resetAt = newReset
 			}
 		}
 	}
