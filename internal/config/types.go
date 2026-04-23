@@ -72,9 +72,13 @@ type DownloaderConfig struct {
 	Prefer60fps             bool   `toml:"prefer_60fps" json:"prefer_60fps"`
 	SegmentRetryDelayCap    int    `toml:"segment_retry_delay_cap" json:"segment_retry_delay_cap"`
 	SegmentLiveCheckRetries int    `toml:"segment_live_check_retries" json:"segment_live_check_retries"`
-	PoToken                 string `toml:"po_token,omitempty" json:"po_token,omitempty"`
-	VisitorData             string `toml:"visitor_data,omitempty" json:"visitor_data,omitempty"`
-	PotProviderURL          string `toml:"pot_provider_url,omitempty" json:"pot_provider_url,omitempty"`
+	// PoToken and VisitorData are session-scoped secrets. Like PasswordHash,
+	// they must never be returned by GET /api/config — use json:"-" to hide
+	// them from any encoder walking the Config struct. Operators who need to
+	// inspect them can read config.toml directly.
+	PoToken        string `toml:"po_token,omitempty" json:"-"`
+	VisitorData    string `toml:"visitor_data,omitempty" json:"-"`
+	PotProviderURL string `toml:"pot_provider_url,omitempty" json:"pot_provider_url,omitempty"`
 }
 
 // CookiesConfig holds cookie file and auto-cookie acquisition settings.
