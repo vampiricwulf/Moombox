@@ -1,6 +1,14 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.16` with `internal/worker/` + `internal/engine/` concurrency fixes.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.17` with another `internal/engine/` pass.
 
-This build bundles Sprint #1 + Sprint #2 work plus eleven batches from the multi-report audit. All 283 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus twelve batches from the multi-report audit. All 287 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 12 (test.18)
+
+Engine-level correctness + bandwidth-waste fixes:
+
+- **engine #2** — `cipherFailureFired` now uses `CompareAndSwap(false, true)` instead of `Load+Store`. The audio and video downloaders share a `cipherSolver`, so concurrent 403s could both pass the Load check and both fire `OnCipherFailure`, duplicating the `InvalidateSolver` work. CAS guarantees exactly one fire per downloader instance.
+- **engine #14** — `probeFileSize` no longer drains the response body when the server ignores the `Range` header. The legacy code unconditionally `io.Copy`'d to `io.Discard` before checking the status code; if a CDN responded 200 OK with the full file, we'd download a multi-GB VOD just to throw it away. Reordered: status check first, drain only on 206 Partial.
+- **engine #26** — replaced eight stale "matches TS" / "TypeScript" comments with explanations of the actual reasoning (head probe uses a separate timer to avoid resetting staleness detection, init segment failure is non-fatal because FFmpeg can usually demux without it, etc.). Comments now serve readers who never saw the original TypeScript codebase.
 
 ### Manual batch 11 (test.17)
 
