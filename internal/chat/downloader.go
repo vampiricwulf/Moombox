@@ -880,8 +880,15 @@ func (cd *ChatDownloader) loadResume() (*ChatResumeState, error) {
 }
 
 func (cd *ChatDownloader) saveResume() {
-	outputFile, resumeFile := cd.getOutputPaths()
+	// Snapshot the fields under lock, then release before the ~200 KB marshal
+	// + file write. Holding cd.mu for the entire write would block concurrent
+	// MessageCount() / IsRunning() callers (TUI/web UI refreshers) on every
+	// batched flush.
+	cd.mu.Lock()
+	outputFile := cd.opts.OutputFile
+	resumeFile := cd.opts.ResumeFile
 	if resumeFile == "" || outputFile == "" {
+		cd.mu.Unlock()
 		return // No output path yet (early chat)
 	}
 	// Use seenOrder (insertion order) for deterministic resume state,
@@ -902,6 +909,7 @@ func (cd *ChatDownloader) saveResume() {
 		RecentIDs:         recentIDs,
 		LastTimestampUsec: cd.lastTimestamp,
 	}
+	cd.mu.Unlock()
 
 	data, err := json.Marshal(state)
 	if err != nil {
