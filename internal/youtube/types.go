@@ -122,6 +122,15 @@ const (
 	AuthLevelWebCreator  = 7
 )
 
+// Sentinel values written by parsePlayerResponse when metadata is missing.
+// mergeWatchPageMetadata inspects these to decide whether to overwrite with
+// a source value; they must stay in sync with the strings produced in
+// parsePlayerResponse.
+const (
+	UnknownTitleSentinel   = "Unknown Title"
+	UnknownChannelSentinel = "Unknown Channel"
+)
+
 // CreateEmptyVideoInfo creates a minimal valid VideoInfo for error paths.
 func CreateEmptyVideoInfo() *VideoInfo {
 	return &VideoInfo{

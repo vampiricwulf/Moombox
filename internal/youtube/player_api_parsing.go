@@ -47,10 +47,10 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		description = ytcfg.Description
 	}
 	if title == "" {
-		title = "Unknown Title"
+		title = UnknownTitleSentinel
 	}
 	if channelName == "" {
-		channelName = "Unknown Channel"
+		channelName = UnknownChannelSentinel
 	}
 
 	// Thumbnail

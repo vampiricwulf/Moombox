@@ -550,10 +550,10 @@ func mergeWatchPageMetadata(target *VideoInfo, source *VideoInfo) {
 	if target.ThumbnailURL == "" {
 		target.ThumbnailURL = source.ThumbnailURL
 	}
-	if target.Title == "Unknown Title" && source.Title != "Unknown Title" {
+	if target.Title == UnknownTitleSentinel && source.Title != UnknownTitleSentinel {
 		target.Title = source.Title
 	}
-	if target.ChannelName == "Unknown Channel" && source.ChannelName != "Unknown Channel" {
+	if target.ChannelName == UnknownChannelSentinel && source.ChannelName != UnknownChannelSentinel {
 		target.ChannelName = source.ChannelName
 	}
 	if target.ChannelID == "" {
