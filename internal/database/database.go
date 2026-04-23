@@ -321,10 +321,19 @@ func (db *Database) UpdateChatOffset(jobID string, offset float64) {
 	}
 }
 
-func scanJob(row *sql.Row) (*Job, error) {
+// rowScanner is implemented by both *sql.Row and *sql.Rows, allowing a single
+// scanJobRow function to serve both the single-row and iteration paths.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanJobRow reads a Job from either an *sql.Row (single-row query) or an
+// *sql.Rows iterator (multi-row query). Column order must match the SELECT
+// list used by prepareStatements() and getAllJobsUnlocked().
+func scanJobRow(r rowScanner) (*Job, error) {
 	var j Job
 	var isVod, manuallyAdded, allowNonStream, watched int
-	err := row.Scan(
+	err := r.Scan(
 		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
 		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
 		&j.CreatedAt, &j.UpdatedAt,
@@ -349,31 +358,10 @@ func scanJob(row *sql.Row) (*Job, error) {
 	return &j, nil
 }
 
-func scanJobRows(rows *sql.Rows) (*Job, error) {
-	var j Job
-	var isVod, manuallyAdded, allowNonStream, watched int
-	err := rows.Scan(
-		&j.ID, &j.VideoID, &j.URL, &j.Title, &j.ChannelName, &j.Platform,
-		&j.Status, &j.Progress, &j.Percent, &j.ETA, &j.Speed, &j.Error,
-		&j.CreatedAt, &j.UpdatedAt,
-		&j.LastVideoSeq, &j.LastAudioSeq, &j.TotalVideoSeq, &j.TotalAudioSeq,
-		&isVod, &manuallyAdded, &allowNonStream, &j.StreamStartTime, &j.StreamEndTime,
-		&j.LengthSeconds, &j.DownloadStartedAt, &j.ThumbnailURL, &j.Description,
-		&j.OutputFile, &j.Filename, &j.OutputDirectory,
-		&j.VideoWidth, &j.VideoHeight, &j.VideoFps, &j.FileSize,
-		&j.ChatStatus, &j.TotalChatMessages, &j.ChatFilename, &j.ChatFile,
-		&j.ThumbnailFile, &j.DescriptionFile,
-		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
-		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
-		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
-	)
-	if err != nil {
-		return nil, err
-	}
-	j.IsVod = intToBool(isVod)
-	j.ManuallyAdded = intToBool(manuallyAdded)
-	j.AllowNonStream = intToBool(allowNonStream)
-	j.Watched = intToBool(watched)
-	return &j, nil
-}
+// scanJob is a thin wrapper for single-row scans. Retained for readability at
+// call sites that expect an *sql.Row.
+func scanJob(row *sql.Row) (*Job, error) { return scanJobRow(row) }
+
+// scanJobRows is a thin wrapper for multi-row iteration scans.
+func scanJobRows(rows *sql.Rows) (*Job, error) { return scanJobRow(rows) }
 
