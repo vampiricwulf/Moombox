@@ -247,8 +247,15 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		}
 	}()
 
-	// C1: Reconnect loop -- on error limit, save state and reconnect
-	maxReconnects := 10
+	// C1: Reconnect loop -- on error limit, save state and reconnect.
+	// reconnectAttempts is reset after any session that stayed connected for
+	// longer than reconnectResetUptime. Long-running (8+ hour) streams
+	// previously exhausted the counter on sparse network hiccups and then
+	// gave up chat for the remainder of the stream.
+	const (
+		maxReconnects        = 10
+		reconnectResetUptime = 5 * time.Minute
+	)
 	reconnectAttempts := 0
 
 	for reconnectAttempts <= maxReconnects {
@@ -271,10 +278,22 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			}
 		}
 
+		sessionStart := time.Now()
 		err := cd.runIRCSession(ctx)
+		sessionUptime := time.Since(sessionStart)
+
 		if err == nil || ctx.Err() != nil || !cd.IsRunning() {
 			return nil
 		}
+
+		// Session stayed connected long enough to be considered healthy —
+		// treat the disconnect as an isolated hiccup and reset the counter.
+		if sessionUptime >= reconnectResetUptime && reconnectAttempts > 0 {
+			cd.logger.Info("IRC session was stable before disconnect; resetting reconnect counter",
+				"channel", cd.channelLogin, "uptime", sessionUptime)
+			reconnectAttempts = 0
+		}
+
 		reconnectAttempts++
 		cd.logger.Warn("IRC session error, will reconnect", "err", err, "channel", cd.channelLogin)
 	}
