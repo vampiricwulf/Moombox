@@ -133,7 +133,7 @@ func (db *Database) getAllJobsUnlocked() ([]*Job, error) {
 		job, err := scanJobRows(rows)
 		if err != nil {
 			if db.logger != nil {
-				db.logger.Debug("getAllJobsUnlocked: scan error", "err", err)
+				db.logger.Warn("getAllJobsUnlocked: scan error", "err", err)
 			}
 			continue
 		}
@@ -274,7 +274,7 @@ func (db *Database) getGaps(jobID string) ([]Gap, error) {
 		var g Gap
 		if err := rows.Scan(&g.ID, &g.JobID, &g.From, &g.To, &g.Stream); err != nil {
 			if db.logger != nil {
-				db.logger.Debug("getGaps: scan error", "jobID", jobID, "err", err)
+				db.logger.Warn("getGaps: scan error", "jobID", jobID, "err", err)
 			}
 			continue
 		}
@@ -334,7 +334,7 @@ func (db *Database) getTrimsUnlocked(jobID string) ([]TrimRecord, error) {
 		if err := rows.Scan(&tr.ID, &tr.JobID, &tr.StartTime, &tr.EndTime,
 			&tr.Filename, &tr.CreatedAt, &tr.Duration, &tr.FileSize); err != nil {
 			if db.logger != nil {
-				db.logger.Debug("getTrimsUnlocked: scan error", "jobID", jobID, "err", err)
+				db.logger.Warn("getTrimsUnlocked: scan error", "jobID", jobID, "err", err)
 			}
 			continue
 		}
@@ -386,7 +386,7 @@ func (db *Database) getSegments(jobID string) ([]Segment, error) {
 			&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
 			&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds); err != nil {
 			if db.logger != nil {
-				db.logger.Debug("getSegments: scan error", "jobID", jobID, "err", err)
+				db.logger.Warn("getSegments: scan error", "jobID", jobID, "err", err)
 			}
 			continue
 		}
