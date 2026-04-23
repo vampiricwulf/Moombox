@@ -86,6 +86,11 @@ type Database struct {
 	closeOnce sync.Once
 	logger    dbLogger
 
+	// fieldToColumn is a per-instance copy of the package-level map. Snapshotting
+	// into the struct at Open() keeps the map read-only at runtime — callers
+	// writing to a shared mutable package-level map would otherwise risk races.
+	fieldToColumn map[string]string
+
 	// Pub/sub
 	onJobUpdate  []jobUpdateSub
 	onJobsChange []jobsChangeSub
@@ -121,9 +126,17 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 	sqlDB.SetMaxOpenConns(1) // SQLite is single-writer
 	sqlDB.SetMaxIdleConns(1)
 
+	// Snapshot the package-level fieldToColumn map into the instance so that
+	// the package-level map is effectively immutable once any Database is open.
+	ftc := make(map[string]string, len(fieldToColumn))
+	for k, v := range fieldToColumn {
+		ftc[k] = v
+	}
+
 	db := &Database{
-		db:      sqlDB,
-		jobLogs: make(map[string][]string),
+		db:            sqlDB,
+		fieldToColumn: ftc,
+		jobLogs:       make(map[string][]string),
 	}
 	if len(logger) > 0 && logger[0] != nil {
 		db.logger = logger[0]
@@ -240,7 +253,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	args := make([]any, 0, len(fields)+2)
 
 	for key, val := range fields {
-		col, ok := fieldToColumn[key]
+		col, ok := db.fieldToColumn[key]
 		if !ok {
 			if db.logger != nil {
 				db.logger.Debug("UpdateJobFields: ignoring unknown field", "jobID", id, "field", key)
