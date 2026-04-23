@@ -163,6 +163,61 @@ segment102.ts`
 	}
 }
 
+func TestParseHls_ZeroDurationFallback(t *testing.T) {
+	// Malformed #EXTINF with zero duration should fall back to TargetDuration.
+	m3u8 := `#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:0,
+seg0.ts
+#EXTINF:,
+seg1.ts
+#EXTINF:4.0,
+seg2.ts`
+
+	result := ParseHls(m3u8, "https://example.com/")
+	if result == nil || result.Playlist == nil {
+		t.Fatal("expected playlist")
+	}
+	pl := result.Playlist
+	if len(pl.Segments) != 3 {
+		t.Fatalf("expected 3 segments, got %d", len(pl.Segments))
+	}
+	// seg0: EXTINF:0 -> falls back to TargetDuration (6)
+	if pl.Segments[0].Duration != 6.0 {
+		t.Errorf("seg0 Duration: got %f, want 6.0 (TargetDuration fallback)", pl.Segments[0].Duration)
+	}
+	// seg1: malformed EXTINF -> falls back too
+	if pl.Segments[1].Duration != 6.0 {
+		t.Errorf("seg1 Duration: got %f, want 6.0 (TargetDuration fallback)", pl.Segments[1].Duration)
+	}
+	// seg2: valid EXTINF stays as-is
+	if pl.Segments[2].Duration != 4.0 {
+		t.Errorf("seg2 Duration: got %f, want 4.0", pl.Segments[2].Duration)
+	}
+}
+
+func TestParseHls_ZeroDurationNoTargetDuration(t *testing.T) {
+	// Zero-duration segment + no TargetDuration -> falls back to
+	// defaultSegmentDuration (2.0) so progress math never sees zero.
+	m3u8 := `#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:0,
+seg0.ts`
+
+	result := ParseHls(m3u8, "https://example.com/")
+	if result == nil || result.Playlist == nil {
+		t.Fatal("expected playlist")
+	}
+	if len(result.Playlist.Segments) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(result.Playlist.Segments))
+	}
+	if result.Playlist.Segments[0].Duration != defaultSegmentDuration {
+		t.Errorf("Duration: got %f, want %f (default fallback)",
+			result.Playlist.Segments[0].Duration, defaultSegmentDuration)
+	}
+}
+
 func TestParseHls_VOD(t *testing.T) {
 	m3u8 := `#EXTM3U
 #EXT-X-TARGETDURATION:6

@@ -529,9 +529,20 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 			playlist.EndList = true
 
 		case line != "" && !strings.HasPrefix(line, "#"):
-			// Segment URL
+			// Segment URL. If the preceding #EXTINF was missing/malformed and
+			// parsed to a non-positive duration, fall back to TargetDuration so
+			// downstream progress math doesn't divide by zero. TargetDuration
+			// itself is also validated to be positive.
+			segDur := currentDuration
+			if segDur <= 0 {
+				if playlist.TargetDuration > 0 {
+					segDur = playlist.TargetDuration
+				} else {
+					segDur = defaultSegmentDuration
+				}
+			}
 			segment := HlsSegment{
-				Duration:      currentDuration,
+				Duration:      segDur,
 				URL:           resolveURL(baseURL, line),
 				Discontinuity: discontinuity,
 			}
