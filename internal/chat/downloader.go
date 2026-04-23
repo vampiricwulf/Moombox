@@ -417,28 +417,34 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 				if freshErr == nil && fresh != "" {
 					cd.continuation = fresh
 					switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
-					cd.sleep(ctx, 10*time.Second)
 					continue
 				}
 
-				// No fresh continuation — retry with exponential backoff
+				// Initial fresh-continuation fetch failed — retry with exponential
+				// backoff. Sleep *between* attempts (after a failure), not before
+				// the first retry. maxStaleContinuationAttempts counts the
+				// failed attempts so far (the initial fetch above is attempt #1).
 				contRetryDelay := 10 * time.Second
-				maxContRetries := maxStaleContinuation
-				contRetries := 0
+				contRetries := 1 // the initial failed call above
+				gotFresh := false
 
-				for !cd.shouldStop() && contRetries < maxContRetries {
+				for !cd.shouldStop() && contRetries < maxStaleContinuation {
 					cd.sleep(ctx, contRetryDelay)
-					contRetries++
+					if cd.shouldStop() {
+						break
+					}
 					retry, _, retryErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
 					if retryErr == nil && retry != "" {
 						cd.continuation = retry
 						switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
+						gotFresh = true
 						break
 					}
+					contRetries++
 					// Exponential backoff: 10s, 20s, 40s, 80s, cap at 5min
 					contRetryDelay = min(contRetryDelay*2, 5*time.Minute)
 				}
-				if contRetries >= maxContRetries {
+				if !gotFresh {
 					break
 				}
 				continue
