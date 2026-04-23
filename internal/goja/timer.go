@@ -215,13 +215,21 @@ func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 				if !ok {
 					return
 				}
+				// Check-and-enqueue under tm.mu so ClearTimer can't fire
+				// between the existence check and the enqueue and leave a
+				// callback in the queue for a timer that was just cleared.
+				// Lock order (tm.mu → callbackMu) matches CancelAll.
 				tm.mu.Lock()
 				_, exists := tm.timers[id]
+				if exists && fn != nil {
+					tm.callbackMu.Lock()
+					tm.callbacks = append(tm.callbacks, fn)
+					tm.callbackMu.Unlock()
+				}
 				tm.mu.Unlock()
 				if !exists {
 					return
 				}
-				tm.enqueueCallback(fn)
 			}
 		}
 	}()

@@ -291,8 +291,12 @@ func TestSetIntervalClearedByID(t *testing.T) {
 
 	id := tm.SetInterval(callable, 20)
 	time.Sleep(100 * time.Millisecond)
-	tm.DrainCallbacks()
+	// Clear before draining so we flush any in-flight callback that raced
+	// with the clear — the contract is "no callbacks after clear+drain",
+	// not "no callbacks after clear alone" (which is impossible to
+	// guarantee without holding both tm.mu and callbackMu during Clear).
 	tm.ClearTimer(id)
+	tm.DrainCallbacks()
 
 	countAtClear := count.Load()
 	time.Sleep(100 * time.Millisecond)
