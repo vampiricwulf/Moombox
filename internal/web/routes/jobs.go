@@ -656,7 +656,11 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 					streamStartTime = meta.StartedAt
 					twitchCategory = meta.GameCategory
 				} else {
-					jobID = fmt.Sprintf("tw_manual_%s_%d", login, time.Now().UnixMilli())
+					// UnixNano instead of UnixMilli: two rapid manual adds
+					// within the same millisecond (double-click, script)
+					// would otherwise collide on the generated jobID and
+					// trip the duplicate-check path.
+					jobID = fmt.Sprintf("tw_manual_%s_%d", login, time.Now().UnixNano())
 				}
 			}
 
@@ -1077,6 +1081,13 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			jsonError(rw, "failed to open folder", http.StatusInternalServerError)
 			return
 		}
+		// Release the OS process handle immediately — we don't call
+		// cmd.Wait() (explorer.exe detaches and runs independently),
+		// and without Release() the handle leaks until the Moombox
+		// process exits, accumulating for every open-folder request.
+		if cmd.Process != nil {
+			_ = cmd.Process.Release()
+		}
 
 		jsonResponse(rw, map[string]bool{"success": true})
 	})
@@ -1281,8 +1292,18 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 
 // LogRoutes registers log-related API routes.
 func LogRoutes(r chi.Router, getRecentLogs func() []string) {
+	// logRouteMaxLines caps the number of log lines any single call to
+	// GET /api/logs may return. The backing ring buffer can be larger
+	// (or a different implementation might not cap at all), but emitting
+	// thousands of lines in one JSON response to a low-bandwidth client
+	// would stall the response pipeline. 500 comfortably covers the
+	// recent-events UX the frontend needs.
+	const logRouteMaxLines = 500
 	r.Get("/api/logs", func(rw http.ResponseWriter, req *http.Request) {
 		logs := getRecentLogs()
+		if len(logs) > logRouteMaxLines {
+			logs = logs[len(logs)-logRouteMaxLines:]
+		}
 		jsonResponse(rw, logs)
 	})
 }
@@ -1297,7 +1318,7 @@ func RestartRoute(r chi.Router, onRestart func()) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "panic in restart handler: %v\n", r)
+					reportPanic("restart handler", r)
 				}
 			}()
 			time.Sleep(500 * time.Millisecond)

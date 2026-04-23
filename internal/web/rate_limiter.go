@@ -11,6 +11,13 @@ import (
 // maxRateLimiterEntries caps per-IP entries to prevent DoS (match TS: 10,000).
 const maxRateLimiterEntries = 10000
 
+// rateLimiterLogger is the minimal interface RateLimiter needs to report
+// background-goroutine panics. Using an interface keeps the package
+// independent of any concrete logger type.
+type rateLimiterLogger interface {
+	Error(msg string, args ...any)
+}
+
 // RateLimiter provides in-memory per-IP sliding window rate limiting.
 type RateLimiter struct {
 	mu       sync.Mutex
@@ -19,6 +26,7 @@ type RateLimiter struct {
 	window   time.Duration
 	cleanup  *time.Ticker
 	done     chan struct{}
+	logger   rateLimiterLogger // optional; may be nil
 }
 
 // NewRateLimiter creates a new rate limiter.
@@ -33,6 +41,12 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 
 	go rl.cleanupLoop()
 	return rl
+}
+
+// SetLogger attaches a logger used to report panics from the cleanup
+// goroutine. Safe to call once after construction. Nil-safe.
+func (rl *RateLimiter) SetLogger(logger rateLimiterLogger) {
+	rl.logger = logger
 }
 
 // AllowWithRetry checks if a request from the given IP is allowed.
@@ -98,7 +112,9 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 func (rl *RateLimiter) cleanupLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			// Rate limiter cleanup panic — silently recover
+			if rl.logger != nil {
+				rl.logger.Error("rate limiter cleanup panic", "panic", r)
+			}
 		}
 	}()
 	for {

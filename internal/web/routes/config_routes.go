@@ -452,16 +452,24 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, saveConfig func(*config.MoomboxConfig) error, callbacks *ConfigRoutesCallbacks) {
 	// GET /api/config
 	r.Get("/api/config", func(rw http.ResponseWriter, req *http.Request) {
-		// Clone config and return with hasPassword injected.
-		// PasswordHash has json:"-" tag so it's already excluded from marshaling.
+		// Snapshot the config under the read lock, then release before
+		// encoding to the socket — json.NewEncoder.Encode streams its
+		// output directly, so a slow client would otherwise hold the
+		// RLock for the full TCP send window and block any writer
+		// (PUT /config, setup/complete, password change) until the
+		// client finished receiving. PasswordHash has json:"-" so it's
+		// omitted from marshaling regardless.
 		cfgMu.RLock()
-		defer cfgMu.RUnlock()
+		cfgCopy := *cfg
+		hasPassword := cfg.Network.PasswordHash != ""
+		cfgMu.RUnlock()
+
 		resp := struct {
 			*config.MoomboxConfig
 			HasPassword bool `json:"hasPassword"`
 		}{
-			MoomboxConfig: cfg,
-			HasPassword:   cfg.Network.PasswordHash != "",
+			MoomboxConfig: &cfgCopy,
+			HasPassword:   hasPassword,
 		}
 		jsonResponse(rw, resp)
 	})

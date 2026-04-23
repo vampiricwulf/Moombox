@@ -2,7 +2,6 @@ package routes
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"sync"
@@ -165,7 +164,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "panic in setup post-save handler: %v\n", r)
+					reportPanic("setup post-save handler", r)
 				}
 			}()
 			if installYtdlp && deps.OnInstallYtdlp != nil {

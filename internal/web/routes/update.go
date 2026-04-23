@@ -1,9 +1,7 @@
 package routes
 
 import (
-	"fmt"
 	"net/http"
-	"os"
 	"sync"
 	"sync/atomic"
 
@@ -117,7 +115,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, cfgMu *sync.RWMutex) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "panic in update restart handler: %v\n", r)
+					reportPanic("update restart handler", r)
 				}
 			}()
 			if deps.OnRestart != nil {

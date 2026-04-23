@@ -53,6 +53,16 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 
+		// Strict-Transport-Security: emitted only when the connection is
+		// already over TLS so that first-time http:// visitors never see
+		// this header (which would pin them to HTTPS for an origin that
+		// might not have a valid cert). 1-year max-age matches common
+		// guidance; includeSubDomains is intentionally omitted because
+		// Moombox does not own subdomains of the host it's bound to.
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
+
 		// Permissions-Policy
 		w.Header().Set("Permissions-Policy",
 			"accelerometer=(), "+
