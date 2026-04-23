@@ -44,15 +44,20 @@ func (s *Solver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*Resolv
 		result = result + sep + url.QueryEscape(sigKey) + "=" + url.QueryEscape(decryptedSig)
 	}
 
-	// Apply n-parameter decryption — replace in-place to preserve param order
-	parsed, err := url.Parse(result)
-	if err != nil {
-		return nil, fmt.Errorf("parse stream URL: %w", err)
+	// Apply n-parameter decryption — replace in-place to preserve param order.
+	// Extract the raw query directly (split at the first '?') instead of via
+	// url.Parse. url.Parse applies strict validation and has stumbled in the
+	// past on decrypted signatures with reserved chars; we only need the raw
+	// query for string matching, not full URL structure.
+	rawQuery := ""
+	if q := strings.Index(result, "?"); q >= 0 {
+		rawQuery = result[q+1:]
 	}
-	// Extract the raw (percent-encoded) n-param from the URL for accurate string
-	// matching. Using Query().Get() returns the decoded value, which won't match
-	// the raw URL if the value contains percent-encoded characters (e.g., %2F, %3D).
-	rawN, decodedN := RawQueryParam(parsed.RawQuery, "n")
+	// The raw (percent-encoded) form is what we must target for in-place
+	// replacement. Query().Get() returns the decoded value which won't match
+	// the raw URL when the value contains percent-encoded characters (e.g.,
+	// %2F, %3D).
+	rawN, decodedN := RawQueryParam(rawQuery, "n")
 	nParam := req.NParam
 	if nParam != "" {
 		// Caller provided a pre-decoded n-param value for the solver. We still
