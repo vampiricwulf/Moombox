@@ -12,6 +12,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
+// videoIDRegex matches a YouTube video ID: exactly 11 characters from
+// [a-zA-Z0-9_-]. Note that this regex also matches some strings that
+// resemble Twitch v-prefixed VOD IDs (e.g., "v1234567890"), so when an
+// input could be either, prefer disambiguating by host or surrounding
+// context before falling back to ExtractVideoID. See utils/media.go's
+// ExtractMediaID and the associated "v-prefixed VOD on bare input"
+// test in media_test.go for the resolution policy.
 var videoIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
 
 // ExtractVideoID extracts a YouTube video ID from various URL formats.
@@ -22,7 +29,8 @@ var videoIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
 //   - youtube.com/shorts/ID
 //   - youtube.com/embed/ID
 //   - youtube.com/v/ID
-//   - bare 11-character ID
+//   - bare 11-character ID (see videoIDRegex godoc for the Twitch
+//     v-prefixed VOD collision)
 func ExtractVideoID(input string) string {
 	input = strings.TrimSpace(input)
 	if input == "" {
