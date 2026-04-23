@@ -23,7 +23,11 @@ jobs:
           $version = "${{ github.ref_name }}".TrimStart("v")
           $commit = (git rev-parse --short HEAD)
           $versionString = "$version ($commit)"
-          $numericVersion = "$version.0"
+          # go-winres needs a pure Windows numeric version (major.minor.patch.build).
+          # Pre-release suffixes like "-test.1" / "-rc.2" are valid semver but not
+          # valid for Windows resource metadata, so strip anything after '-'.
+          $numericBase = ($version -split '-')[0]
+          $numericVersion = "$numericBase.0"
           go install github.com/tc-hib/go-winres@latest
           $json = Get-Content cmd/moombox/winres/winres.json -Raw | ConvertFrom-Json
           $json.RT_MANIFEST.'#1'.'0409'.identity.version = $numericVersion
