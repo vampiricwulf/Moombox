@@ -197,6 +197,21 @@ func (pp *PotProvider) Cleanup() {
 	pp.InvalidateCaches()
 }
 
+// safeCleanup runs m.Cleanup() with panic recovery. Nil-safe for both the
+// minter and the Cleanup func pointer. Used whenever a cached minter is
+// replaced or evicted to keep Goja teardown failures from propagating.
+func (pp *PotProvider) safeCleanup(m *TokenMinter, reason string) {
+	if m == nil || m.Cleanup == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			pp.logger.Error("bgutils: minter Cleanup panic", "reason", reason, "panic", r)
+		}
+	}()
+	m.Cleanup()
+}
+
 func (pp *PotProvider) mintPoToken(minter *TokenMinter, contentBinding string) (*SessionData, error) {
 	token, err := minter.MintFunc(contentBinding)
 	if err != nil {
@@ -218,14 +233,16 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 		return nil, fmt.Errorf("generate minter: %w", err)
 	}
 
-	// Cache the minter (VM stays alive via minter.Cleanup reference)
+	// Cache the minter (VM stays alive via minter.Cleanup reference).
+	// Cleanup of a replaced minter runs OUTSIDE the lock: Goja shutdown can
+	// take real wall time and may transitively invoke user-supplied callbacks
+	// that re-enter the provider, which would deadlock under pp.mu. Panic
+	// recovery shields the current goroutine from a misbehaving VM teardown.
 	pp.mu.Lock()
-	// Clean up any previous minter for this binding before replacing
-	if old, ok := pp.minterCache[contentBinding]; ok && old.Cleanup != nil {
-		old.Cleanup()
-	}
+	old := pp.minterCache[contentBinding]
 	pp.minterCache[contentBinding] = minter
 	pp.mu.Unlock()
+	pp.safeCleanup(old, "replaced minter")
 
 	// Schedule automatic eviction so the Goja VM doesn't linger after expiry.
 	// The minter is per-video and won't be reused for different content bindings.
