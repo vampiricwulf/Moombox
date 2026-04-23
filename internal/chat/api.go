@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"regexp"
 	"slices"
@@ -565,11 +565,15 @@ func generateMessageID() string {
 	return fmt.Sprintf("gen-%d-%s", time.Now().UnixMicro(), randomAlphaNum(6))
 }
 
+// randomAlphaNum uses math/rand/v2 whose per-package helpers are safe for
+// concurrent calls (v1's globals were not, producing a data race when
+// multiple chat downloaders running in parallel touched generateMessageID
+// simultaneously — audit chat.md C10).
 func randomAlphaNum(n int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = chars[rand.Intn(len(chars))]
+		b[i] = chars[rand.IntN(len(chars))]
 	}
 	return string(b)
 }
