@@ -14,7 +14,11 @@ import (
 )
 
 var (
-	jsURLRegex             = regexp.MustCompile(`"(?:jsUrl|PLAYER_JS_URL)":"([^"]+)"`)
+	// jsURLRegex matches the JSON field holding the player script URL.
+	// YouTube has historically used several names for the same value
+	// ("jsUrl", "PLAYER_JS_URL", and more recently "scriptSrc"); match any
+	// of them so a rename doesn't quietly disable cipher compilation.
+	jsURLRegex             = regexp.MustCompile(`"(?:jsUrl|PLAYER_JS_URL|scriptSrc)":"([^"]+)"`)
 	visitorDataRegex       = regexp.MustCompile(`"visitorData":"([^"]+)"`)
 	sessionIndexRegex      = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
 	delegatedSessionRegex  = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
@@ -70,15 +74,24 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	}, nil
 }
 
+// normalizePlayerJSURL un-escapes a JSON-encoded URL (YouTube emits forward
+// slashes as \/ inside its JSON blobs) and prefixes the YouTube base URL for
+// absolute-path URLs. Keeps cipher compilation robust against literal
+// backslashes that can trip some parsers downstream.
+func normalizePlayerJSURL(raw string) string {
+	u := strings.ReplaceAll(raw, `\/`, "/")
+	if strings.HasPrefix(u, "/") {
+		u = constants.YouTubeURLs.Base + u
+	}
+	return u
+}
+
 func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
 	ytcfg := &YtcfgData{}
 
 	// Extract player URL
 	if m := jsURLRegex.FindStringSubmatch(html); m != nil {
-		ytcfg.PlayerURL = m[1]
-		if strings.HasPrefix(ytcfg.PlayerURL, "/") {
-			ytcfg.PlayerURL = constants.YouTubeURLs.Base + ytcfg.PlayerURL
-		}
+		ytcfg.PlayerURL = normalizePlayerJSURL(m[1])
 	}
 
 	// Extract visitor data
@@ -180,11 +193,7 @@ func FetchEmbedPage(ctx context.Context, videoID string) (*EmbedPageResult, erro
 
 	// Also extract player URL from embed page
 	if m := jsURLRegex.FindStringSubmatch(html); m != nil {
-		playerURL := m[1]
-		if strings.HasPrefix(playerURL, "/") {
-			playerURL = constants.YouTubeURLs.Base + playerURL
-		}
-		result.PlayerURL = playerURL
+		result.PlayerURL = normalizePlayerJSURL(m[1])
 	}
 
 	return result, nil
