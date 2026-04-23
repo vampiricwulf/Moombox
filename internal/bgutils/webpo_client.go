@@ -57,7 +57,7 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 
 	// Step 2: Create BotGuard client
 	wpc.logger.Debug("[PotProvider] Creating BotGuard client...")
-	bgClient, err := NewBotGuardClient(ctx, challenge)
+	bgClient, err := NewBotGuardClient(ctx, challenge, wpc.logger)
 	if err != nil {
 		return nil, fmt.Errorf("create BotGuard client: %w", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/dop251/goja"
@@ -13,18 +12,38 @@ import (
 	gojahelpers "github.com/vampiricwulf/Moombox/internal/goja"
 )
 
-// BotGuardClient wraps a Goja runtime running the BotGuard interpreter.
-type BotGuardClient struct {
-	vm           *goja.Runtime
-	timerMgr     *gojahelpers.TimerManager
-	globalName   string
-	syncSnapshot goja.Callable
-	asyncSnapshot goja.Callable
-	shutdownFn   goja.Callable
+// botguardLogger captures the minimal logging surface used by BotGuardClient.
+// Matches the logger shape already used by PotProvider / WebPoClient.
+type botguardLogger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
 }
 
-// NewBotGuardClient creates a BotGuard client by loading the interpreter and initializing the VM.
-func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*BotGuardClient, error) {
+// BotGuardClient wraps a Goja runtime running the BotGuard interpreter.
+type BotGuardClient struct {
+	vm            *goja.Runtime
+	timerMgr      *gojahelpers.TimerManager
+	globalName    string
+	syncSnapshot  goja.Callable
+	asyncSnapshot goja.Callable
+	shutdownFn    goja.Callable
+	logger        botguardLogger // may be nil
+}
+
+// logWarn routes a warning through the plumbed logger if present. Previously
+// the package used fmt.Fprintf(os.Stderr, ...) which bypassed the app's log
+// level/file conventions and made timer-callback failures invisible.
+func (c *BotGuardClient) logWarn(msg string, args ...any) {
+	if c != nil && c.logger != nil {
+		c.logger.Warn(msg, args...)
+	}
+}
+
+// NewBotGuardClient creates a BotGuard client by loading the interpreter and
+// initializing the VM. logger is optional (nil-safe).
+func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, logger botguardLogger) (*BotGuardClient, error) {
 	if challenge.Program == "" || challenge.GlobalName == "" {
 		return nil, &BGError{Code: ErrBadConfig, Message: "program and globalName are required"}
 	}
@@ -54,6 +73,7 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 		vm:         vm,
 		timerMgr:   tm,
 		globalName: challenge.GlobalName,
+		logger:     logger,
 	}
 
 	// Execute the interpreter JS with a timeout to prevent hangs from malicious/buggy scripts
@@ -158,7 +178,7 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge) (*B
 	// the VM-owning goroutine before we proceed.
 	if tm != nil {
 		if _, drainErr := tm.DrainCallbacks(); drainErr != nil {
-			fmt.Fprintf(os.Stderr, "bgutils: timer callback error during init: %v\n", drainErr)
+			client.logWarn("bgutils: timer callback error during init", "err", drainErr)
 		}
 	}
 
@@ -231,7 +251,7 @@ func (c *BotGuardClient) Snapshot(timeout time.Duration) (string, *goja.Object, 
 	// to be executed on the VM thread before we read the result.
 	if c.timerMgr != nil {
 		if _, drainErr := c.timerMgr.DrainCallbacks(); drainErr != nil {
-			fmt.Fprintf(os.Stderr, "bgutils: timer callback error during snapshot: %v\n", drainErr)
+			c.logWarn("bgutils: timer callback error during snapshot", "err", drainErr)
 		}
 	}
 
