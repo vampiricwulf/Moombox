@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -78,6 +79,21 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		result := ParseHls(string(data), d.opts.BaseURL)
 		if result == nil || result.Playlist == nil {
 			consecutiveErrors++
+			// Log a snippet of the response so "parse failure" surfaces the
+			// actual content — often CDNs return HTML error pages with
+			// 200 OK that ParseHls silently rejects. First 200 bytes is
+			// enough to tell m3u8 from HTML/JSON/text.
+			snippet := string(data)
+			if len(snippet) > 200 {
+				snippet = snippet[:200] + "..."
+			}
+			if strings.HasPrefix(strings.TrimSpace(snippet), "<") {
+				d.logger.Warn("[Downloader] HLS playlist returned HTML instead of m3u8",
+					"snippet", snippet, "attempt", consecutiveErrors)
+			} else {
+				d.logger.Debug("[Downloader] HLS playlist parse failed",
+					"snippet", snippet, "attempt", consecutiveErrors)
+			}
 			if consecutiveErrors > 5 {
 				return fmt.Errorf("failed to parse HLS playlist after %d consecutive errors", consecutiveErrors)
 			}
