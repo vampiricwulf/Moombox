@@ -4,9 +4,6 @@ import (
 	"testing"
 )
 
-//go:fix inline
-func intPtr(n int) *int { return new(n) }
-
 func TestSelectBestFormats(t *testing.T) {
 	formats := []Format{
 		{Itag: 137, MimeType: "video/mp4; codecs=\"avc1.640028\"", Bitrate: 4000000, Width: new(1920), Height: new(1080), Fps: new(30), URL: "https://example.com/v1"},
