@@ -396,13 +396,16 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 				// Update header to keep messageCount accurate after incremental flushes
 				cd.updateChatFileHeader()
 
-				// Bound seenIDs to prevent unbounded growth
-				if len(cd.seenIDs) > dedupKeepSize {
-					cd.cullDedup()
-				}
-
 				cd.saveResume()
 			}
+		}
+
+		// Bound seenIDs on every successful fetch — pinned announcements and
+		// already-seen IDs can accumulate via newly-seen batches even when
+		// newInBatch == 0 (resp replayed same IDs), so the cull check must
+		// live outside the write-interval gate to prevent unbounded growth.
+		if len(cd.seenIDs) > dedupKeepSize {
+			cd.cullDedup()
 		}
 
 		// Check if chat has ended
