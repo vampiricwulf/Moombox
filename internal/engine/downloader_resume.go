@@ -58,7 +58,7 @@ func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
 func (d *SegmentDownloader) saveResume() {
 	seq := int(d.currentSeq.Load())
 	if seq <= 0 {
-		return // Nothing downloaded yet (matching TS guard)
+		return // Nothing downloaded yet — no useful state to persist.
 	}
 	state := ResumeState{
 		LastSeq:      seq - 1,

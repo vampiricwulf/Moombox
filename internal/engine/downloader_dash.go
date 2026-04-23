@@ -69,7 +69,8 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	segsSinceResume := 0
 	d.lastSegTime.StoreNow() // Initialize to avoid premature NoSegmentTimeout
 
-	// Same-segment retry tracking with exponential backoff (matches TS handleFailedSegmentDownload)
+	// Same-segment retry tracking with exponential backoff: when the same
+	// sequence keeps failing we ramp the delay so we don't hammer the CDN.
 	sameSegRetries := 0
 	lastRetrySeq := -1
 	sameHeadRetryDelay := 0
@@ -95,7 +96,9 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			return nil
 		}
 
-		// Probe head sequence (use dedicated timer, not lastSegTime -- matches TS lastHeadProbeTime)
+		// Probe head sequence with a dedicated timer rather than reusing
+		// lastSegTime — head probes are out-of-band and shouldn't reset the
+		// "no segments downloaded recently" stale-detection clock.
 		if d.headSeq.Load() < 0 || d.lastHeadProbeTime.Since() > HeadProbeInterval {
 			if headSeq, err := d.probeHeadSequence(ctx); err == nil {
 				d.headSeq.Store(int64(headSeq))
@@ -114,7 +117,10 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 				}
 				d.currentSeq.Store(int64(nextSeq))
 				hasStartedDownloading = true
-				// Re-probe head after catch-up (matches TS behavior)
+				// Re-probe head after catch-up so the next iteration sees
+				// the updated head position rather than the pre-catch-up
+				// snapshot — head can advance significantly during a long
+				// catch-up window.
 				if headSeq, err := d.probeHeadSequence(ctx); err == nil {
 					d.headSeq.Store(int64(headSeq))
 				}

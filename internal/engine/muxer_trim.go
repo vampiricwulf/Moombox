@@ -21,7 +21,9 @@ func (m *Muxer) Trim(ctx context.Context, inputPath, outputPath string, startTim
 	return m.Mux(ctx, inputPath, "", outputPath, opts)
 }
 
-// TrimWithAudio creates a trimmed version with a specific audio bitrate (matches TS probeAudioBitrate flow).
+// TrimWithAudio creates a trimmed version with a specific audio bitrate.
+// Caller probes the source audio bitrate first so the re-encode preserves
+// fidelity instead of dropping to FFmpeg's default 128 kbps.
 func (m *Muxer) TrimWithAudio(ctx context.Context, inputPath, outputPath string, startTime, endTime float64, crf int, audioBitrate int) error {
 	duration := endTime - startTime
 	opts := &TrimOptions{

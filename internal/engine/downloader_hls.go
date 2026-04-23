@@ -374,7 +374,10 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				})
 			}
 
-			// Save resume state periodically (matching TS: every 50 segments)
+			// Save resume state every ResumeCatchupInterval (50) segments —
+			// frequent enough that a crash loses at most that many segments,
+			// rare enough that the disk-touching saveResume isn't on the
+			// hot path for every download.
 			if d.currentSeq.Load()%50 == 0 {
 				d.saveResume()
 			}

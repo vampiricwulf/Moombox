@@ -9,7 +9,7 @@ import (
 )
 
 // runDirectDownload downloads a complete file from a direct URL (for VODs).
-// Uses 5MB chunked Range requests with per-chunk retry and percentage progress (matches TS).
+// Uses 5MB chunked Range requests with per-chunk retry and percentage progress.
 // Falls back to streaming download if the server doesn't support Range requests.
 func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 	// Probe total file size via Range: bytes=0-0

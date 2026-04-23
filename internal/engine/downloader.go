@@ -262,8 +262,10 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	}
 	defer d.outputFile.Close()
 
-	// Download init segment first (only if not resuming and not HLS)
-	// Non-fatal: TypeScript just warns and continues if init segment fails
+	// Download init segment first (only if not resuming and not HLS).
+	// Non-fatal: a missing init segment usually still produces a playable
+	// file (FFmpeg can demux the segment data alone for many codecs), and
+	// failing the entire download here would discard hours of recording.
 	if !resuming && d.opts.InitURL != "" && !d.opts.IsHls {
 		if initErr := d.downloadInitSegment(ctx); initErr != nil {
 			d.logger.Warn("[Downloader] Failed to download init segment", "error", initErr)
