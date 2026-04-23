@@ -2153,6 +2153,14 @@ sl-progress-bar {
     grid-template-columns: auto 1fr;
     gap: var(--sl-spacing-2x-small) var(--sl-spacing-medium);
     align-items: center;
+    margin: 0;
+}
+
+/* Reset <dt>/<dd> defaults so they sit in the grid cleanly. */
+.keyboard-shortcut-grid dt,
+.keyboard-shortcut-grid dd {
+    margin: 0;
+    padding: 0;
 }
 
 .keyboard-shortcut-grid kbd {
