@@ -9,12 +9,49 @@
         <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
         <title>Moombox - Login</title>
 
-        <!-- Shoelace UI Components -->
+        <!-- Theme bootstrap — runs before stylesheets resolve to avoid FOUC on light theme.
+             Mirrors the logic in app.js setTheme() so a returning user sees their saved
+             preference on first paint instead of the dark-themed default flashing first. -->
+        <script>
+            (function () {
+                try {
+                    var saved = localStorage.getItem("moombox-theme");
+                    var theme = saved || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+                    document.documentElement.className = theme === "light" ? "sl-theme-light" : "sl-theme-dark";
+                    var meta = document.querySelector('meta[name="theme-color"]');
+                    if (meta) meta.content = theme === "light" ? "#ffffff" : "#1C1B22";
+                    window.__moomboxBootTheme = theme;
+                } catch (e) {
+                    // localStorage/matchMedia unavailable — leave default sl-theme-dark class intact.
+                }
+            })();
+        </script>
+
+        <!-- Shoelace UI Components — load both themes so the preference-aware bootstrap above can pick. -->
         <link
             rel="stylesheet"
+            id="sl-theme-dark"
             href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/themes/dark.css"
             crossorigin="anonymous"
         />
+        <link
+            rel="stylesheet"
+            id="sl-theme-light"
+            href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/themes/light.css"
+            crossorigin="anonymous"
+            media="not all"
+        />
+        <script>
+            // Swap which theme stylesheet is active based on the bootstrap result above.
+            (function () {
+                var theme = window.__moomboxBootTheme;
+                if (theme !== "light") return;
+                var dark = document.getElementById("sl-theme-dark");
+                var light = document.getElementById("sl-theme-light");
+                if (dark) dark.media = "not all";
+                if (light) light.media = "";
+            })();
+        </script>
         <script
             type="module"
             src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.16.0/cdn/shoelace-autoloader.js"
@@ -25,7 +62,8 @@
             * { box-sizing: border-box; margin: 0; padding: 0; }
             body {
                 font-family: var(--sl-font-sans);
-                background: #1C1B22;
+                /* Follow the active Shoelace theme tokens instead of hardcoding dark #1C1B22. */
+                background: var(--sl-color-neutral-0);
                 color: var(--sl-color-neutral-900);
                 display: flex;
                 align-items: center;
