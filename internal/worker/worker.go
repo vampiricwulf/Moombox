@@ -206,11 +206,14 @@ func (w *DownloadWorker) enqueueExistingJobs() {
 
 	for _, job := range jobs {
 		// Reset Muxing jobs to Downloading — muxing was interrupted by shutdown
-		// and is idempotent (partial output is overwritten).
+		// and is idempotent (partial output is overwritten). Clear any stale
+		// error string so the UI doesn't show a prior error alongside the fresh
+		// Downloading state (per audit reports/worker.md Finding 24).
 		if job.Status == database.StatusMuxing {
 			w.logger.Info("resetting interrupted mux job", "jobID", job.ID)
 			w.db.UpdateJobFields(job.ID, map[string]any{
 				"status": database.StatusDownloading,
+				"error":  "",
 			})
 			job.Status = database.StatusDownloading
 		}
