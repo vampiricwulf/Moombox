@@ -395,19 +395,37 @@ func (db *Database) migrate() error {
 			}
 		}
 
-		// Backfill from player_prefs: copy chat_offset to jobs using video_id match
-		if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET chat_offset = (
+		// Count how many rows we *expect* to backfill so we can detect partial copies.
+		var expected int64
+		if err := db.db.QueryRowContext(db.getCtx(), `SELECT COUNT(*)
+			FROM jobs WHERE EXISTS (
+				SELECT 1 FROM player_prefs pp WHERE pp.video_id = jobs.video_id
+			)`).Scan(&expected); err != nil && db.logger != nil {
+			// Not fatal: just means we can't sanity-check the UPDATE.
+			db.logger.Warn("v9 migration: could not count rows eligible for chat_offset backfill", "err", err)
+		}
+
+		// Backfill from player_prefs: copy chat_offset to jobs using video_id match.
+		res, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET chat_offset = (
 			SELECT pp.chat_offset FROM player_prefs pp WHERE pp.video_id = jobs.video_id
 		) WHERE EXISTS (
 			SELECT 1 FROM player_prefs pp WHERE pp.video_id = jobs.video_id
-		)`); err != nil {
+		)`)
+		if err != nil {
 			if db.logger != nil {
 				db.logger.Warn("v9 migration: player_prefs backfill failed (non-fatal)", "err", err)
 			}
+		} else if db.logger != nil {
+			// A row-count mismatch almost always indicates data corruption or a
+			// migration bug. Log at ERROR (keeping the migration non-fatal so
+			// operators can still boot and investigate).
+			if affected, aerr := res.RowsAffected(); aerr == nil && affected != expected {
+				db.logger.Error("v9 migration: chat_offset backfill row count mismatch",
+					"expected", expected, "affected", affected)
+			}
 		}
 
-		err := db.writeUserVersion(9)
-		if err != nil {
+		if err := db.writeUserVersion(9); err != nil {
 			return err
 		}
 	}
