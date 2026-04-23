@@ -21,7 +21,7 @@
         "disable-window-filtering": false,
         "high-resolution-scrolling-aware": false,
         "ultra-high-resolution-scrolling-aware": false,
-        "long-path-aware": false,
+        "long-path-aware": true,
         "printer-driver-isolation": false,
         "gdi-scaling": false,
         "segment-heap": false,

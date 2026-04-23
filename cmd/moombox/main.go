@@ -90,6 +90,19 @@ func waitForKeypress() {
 }
 
 func main() {
+	// Subcommands (like `moombox add <url>`) do not need the launcher/child
+	// split — they run briefly in-process and exit. Checking for them before
+	// the `_MOOMBOX_CHILD` gate avoids spawning an unnecessary child process
+	// (saves ~100ms and prevents a silent ghost spawn on CLI add commands).
+	if len(os.Args) > 1 && os.Args[1] == "add" {
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: moombox add <video_id_or_url>")
+			os.Exit(1)
+		}
+		addVideo(os.Args[2])
+		return
+	}
+
 	// Launcher/supervisor: if we're not already a child process, act as the
 	// launcher. The launcher spawns moombox as a child, waits for it, and
 	// respawns when the child exits with exitCodeRestart (config change or
@@ -98,16 +111,6 @@ func main() {
 	// process chain buildup across multiple restarts.
 	if os.Getenv("_MOOMBOX_CHILD") != "1" {
 		launchAndSupervise()
-		return
-	}
-
-	// Check for subcommands before flag parsing
-	if len(os.Args) > 1 && os.Args[1] == "add" {
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: moombox add <video_id_or_url>")
-			os.Exit(1)
-		}
-		addVideo(os.Args[2])
 		return
 	}
 
@@ -165,6 +168,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// cfgMu guards all reads/writes of the shared *config.MoomboxConfig below.
+	// Declared early so it covers the password-hash and cookie-platform
+	// auto-detection writes that happen during startup, not just the runtime
+	// handlers. Downstream constructors receive &cfgMu so every reader agrees
+	// on the same lock.
+	var cfgMu sync.RWMutex
+
 	// =========================================================================
 	// 1. Load config
 	// =========================================================================
@@ -188,7 +198,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		waitForKeypress()
 		os.Exit(1)
 	}
-	defer log.Close()
+	// Close the logger at most once — the deferred close at the bottom of
+	// run() AND the force-exit timer both need to flush buffered lines on
+	// exit, and logger.Close is not guaranteed idempotent at this layer.
+	var logCloseOnce sync.Once
+	closeLog := func() { logCloseOnce.Do(func() { log.Close() }) }
+	defer closeLog()
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
 
@@ -206,8 +221,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		tempAuth := web.NewAuthService()
 		hash, err := tempAuth.HashPassword(cfg.Network.PasswordHash)
 		if err == nil {
+			cfgMu.Lock()
 			cfg.Network.PasswordHash = hash
-			if saveErr := config.Save(cfg, configPath); saveErr != nil {
+			saveErr := config.Save(cfg, configPath)
+			cfgMu.Unlock()
+			if saveErr != nil {
 				log.Warn("Failed to save auto-hashed password", slog.String("error", saveErr.Error()))
 			}
 		} else {
@@ -227,8 +245,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		waitForKeypress()
 		os.Exit(1)
 	}
-	// Database is closed explicitly in the shutdown sequence below (stopService "Database").
-	// No defer db.Close() here to avoid double-close.
+	// Database Close is wrapped in sync.Once so both the orderly shutdown
+	// sequence (stopService "Database") and this defer are safe. The defer
+	// guards against any future early-exit paths added between here and the
+	// shutdown block leaking the SQLite handle.
+	var dbCloseOnce sync.Once
+	closeDB := func() { dbCloseOnce.Do(func() { db.Close() }) }
+	defer closeDB()
 
 	// =========================================================================
 	// 3b. Connectivity monitor
@@ -261,9 +284,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 					detected = append(detected, "twitch")
 				}
 				if len(detected) > 0 {
+					cfgMu.Lock()
 					cfg.Cookies.Platforms = detected
-					if err := config.Save(cfg, configPath); err != nil {
-						log.Warn("Failed to persist detected cookie platforms", slog.String("error", err.Error()))
+					saveErr := config.Save(cfg, configPath)
+					cfgMu.Unlock()
+					if saveErr != nil {
+						log.Warn("Failed to persist detected cookie platforms", slog.String("error", saveErr.Error()))
 					} else {
 						log.Info("Detected cookie platforms from cookie file", slog.Any("platforms", detected))
 					}
@@ -377,9 +403,22 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// Wire auth verification callbacks so AutoCookieService can verify via real API
 	autoCookieSvc.VerifyYouTubeAuth = cookieRefresh.CheckYouTubeAuth
 	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
+
+	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
+	// func field exactly once (before cookieRefresh.Start()) to a dispatcher
+	// that atomically loads the TUI-side slot. The TUI branch stores a
+	// callback later — Store is race-free against the refresh goroutine's
+	// Load, unlike field reassignment.
+	var authChangeTUI atomic.Pointer[func(cookies.AuthStatus)]
+	cookieRefresh.OnAuthChange = func(s cookies.AuthStatus) {
+		if fn := authChangeTUI.Load(); fn != nil {
+			(*fn)(s)
+		}
+	}
+
 	// Wire persistPlatforms callback: saves verified platforms to config
-	// so we can detect auth loss after restart (matches TS persistPlatforms)
-	var cfgMu sync.RWMutex
+	// so we can detect auth loss after restart (matches TS persistPlatforms).
+	// cfgMu is declared at the top of run() to guard all cfg mutations.
 	dlWorker.SetCfgMu(&cfgMu)
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
 		cfgMu.Lock()
@@ -440,22 +479,28 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	wsHub := webServer.WebSocket()
 	r := webServer.Router()
 
-	// Rate limiters
+	// Rate limiters and auth service. Each Close / Stop is non-idempotent
+	// (close(done) panics on second call), so wrap them all in a single
+	// sync.Once-guarded closeLimiters helper that both the normal deferred
+	// shutdown AND the force-exit timer below can safely invoke.
 	apiRL := web.NewRateLimiter(20, time.Minute)
-	defer apiRL.Close()
 	potRL := web.NewRateLimiter(10, time.Minute)
-	defer potRL.Close()
-
-	// Auth service
 	authSvc := web.NewAuthService()
 	authSvc.Start()
-	defer authSvc.Stop()
-
-	// Auth rate limiters
 	loginRL := web.NewRateLimiter(5, time.Minute)
-	defer loginRL.Close()
 	passwordRL := web.NewRateLimiter(3, time.Minute)
-	defer passwordRL.Close()
+
+	var limitersCloseOnce sync.Once
+	closeLimiters := func() {
+		limitersCloseOnce.Do(func() {
+			apiRL.Close()
+			potRL.Close()
+			loginRL.Close()
+			passwordRL.Close()
+			authSvc.Stop()
+		})
+	}
+	defer closeLimiters()
 
 	// Wire auth middleware for external connections
 	webServer.SetAuth(authSvc)
@@ -968,9 +1013,35 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			"nextTwitchCheck": twitchMon.GetNextCheckAt(),
 		})
 	}
-	feedMon.OnSchedule = func(_ int64) { broadcastAllTimers() }
-	decapiMon.OnSchedule = func(_ int64) { broadcastAllTimers() }
-	twitchMon.OnSchedule = func(_ int64) { broadcastAllTimers() }
+
+	// OnSchedule subscriber slots — set once before monitor.Start() and only
+	// mutated via atomic.Pointer.Store thereafter. Reassigning the monitor's
+	// plain func field while its goroutine is running would race with
+	// scheduleNext() reading it; funneling subscribers through an atomic
+	// pointer keeps the read-side lock-free and the write-side safe.
+	var (
+		feedTUISchedule   atomic.Pointer[func(int64)]
+		decapiTUISchedule atomic.Pointer[func(int64)]
+		twitchTUISchedule atomic.Pointer[func(int64)]
+	)
+	feedMon.OnSchedule = func(next int64) {
+		broadcastAllTimers()
+		if fn := feedTUISchedule.Load(); fn != nil {
+			(*fn)(next)
+		}
+	}
+	decapiMon.OnSchedule = func(next int64) {
+		broadcastAllTimers()
+		if fn := decapiTUISchedule.Load(); fn != nil {
+			(*fn)(next)
+		}
+	}
+	twitchMon.OnSchedule = func(next int64) {
+		broadcastAllTimers()
+		if fn := twitchTUISchedule.Load(); fn != nil {
+			(*fn)(next)
+		}
+	}
 
 	// Initialize per-job log tracking with existing jobs (matches TS knownJobIds)
 	if existingJobs, err := db.GetAllJobs(); err == nil {
@@ -1082,7 +1153,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("web server panic", "panic", r)
-				webErrCh <- fmt.Errorf("web server panic: %v", r)
+				// webErrCh is buffered to 1. If webServer.Start already
+				// sent a nil value (fast graceful return followed by the
+				// deferred recover firing — extremely rare but possible),
+				// a plain send would block forever. Use non-blocking send.
+				select {
+				case webErrCh <- fmt.Errorf("web server panic: %v", r):
+				default:
+				}
 			}
 		}()
 		webErrCh <- webServer.Start(ctx)
@@ -1632,12 +1710,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		// Backfill TUI with logs emitted before subscription
 		app.BackfillLogs(log.GetRecentLines())
 
-		// Forward monitor schedule events to TUI
-		wrapOnSchedule := func(orig func(int64), makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
+		// Forward monitor schedule events to TUI. We store a TUI-only callback
+		// in the atomic slot defined earlier; the dispatcher wired to
+		// feedMon/decapiMon/twitchMon.OnSchedule (set before monitor.Start())
+		// loads it lock-free. Reassignment here is race-free because the
+		// monitor goroutine never reads the field directly.
+		makeTUISchedule := func(makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
 			return func(nextCheckAt int64) {
-				if orig != nil {
-					orig(nextCheckAt)
-				}
 				t := time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
 				select {
 				case checkTimersCh <- makeMsg(t):
@@ -1645,15 +1724,18 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				}
 			}
 		}
-		feedMon.OnSchedule = wrapOnSchedule(feedMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+		feedFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
 			return tui.CheckTimersMsg{NextFeedCheck: t}
 		})
-		decapiMon.OnSchedule = wrapOnSchedule(decapiMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+		decapiFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
 			return tui.CheckTimersMsg{NextDecapiCheck: t}
 		})
-		twitchMon.OnSchedule = wrapOnSchedule(twitchMon.OnSchedule, func(t time.Time) tui.CheckTimersMsg {
+		twitchFn := makeTUISchedule(func(t time.Time) tui.CheckTimersMsg {
 			return tui.CheckTimersMsg{NextTwitchCheck: t}
 		})
+		feedTUISchedule.Store(&feedFn)
+		decapiTUISchedule.Store(&decapiFn)
+		twitchTUISchedule.Store(&twitchFn)
 
 		// Send initial timer values — monitors fire OnSchedule during Start()
 		// before the TUI wrappers above are installed, so the TUI misses those.
@@ -1704,13 +1786,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			default:
 			}
 		}
-		origOnAuthChange := cookieRefresh.OnAuthChange
-		cookieRefresh.OnAuthChange = func(s cookies.AuthStatus) {
-			if origOnAuthChange != nil {
-				origOnAuthChange(s)
-			}
+		// Store TUI-side callback in the atomic slot; the dispatcher wired to
+		// cookieRefresh.OnAuthChange (set before cookieRefresh.Start()) loads it
+		// lock-free on each auth change. Store is race-free with the refresh
+		// goroutine's Load — unlike the previous field reassignment.
+		tuiAuthFn := func(s cookies.AuthStatus) {
 			authStatusToTUI(s)
 		}
+		authChangeTUI.Store(&tuiAuthFn)
 		// Send initial cookie status
 		authStatusToTUI(cookieRefresh.GetStatus())
 
@@ -1759,10 +1842,20 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 	log.Info("Shutdown signal received, shutting down gracefully...")
 
-	// 10-second force-exit timer
+	// 10-second force-exit timer. Close rate limiters here too — os.Exit
+	// skips remaining defers, so shutting them down in-line is the only way
+	// their goroutines get a chance to stop cleanly. closeLimiters() and
+	// closeLog() are both sync.Once-guarded so the deferred close paths
+	// already running concurrently do not double-close these resources.
 	forceExit := time.AfterFunc(10*time.Second, func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "force-exit handler panic: %v\n", r)
+			}
+		}()
 		log.Error("Graceful shutdown timed out, forcing exit")
-		log.Close() // flush buffered logs before force exit
+		closeLimiters()
+		closeLog() // flush buffered logs before force exit
 		os.Exit(1)
 	})
 	defer forceExit.Stop()
@@ -1810,8 +1903,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	unsubWSJobUpdate()
 	unsubWSJobsChange()
 
-	// 8. Flush database
-	stopService("Database", func() { db.Close() })
+	// 8. Flush database (sync.Once-guarded — also fires from defer closeDB)
+	stopService("Database", closeDB)
 
 	if restartRequested.Load() {
 		log.Info("Shutdown complete, restarting...")
