@@ -237,12 +237,19 @@ func (tm *TwitchMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 		return nil // Channel offline
 	}
 
-	// Dedup by stream ID
+	// Dedup by stream ID. HasProcessed is keyed by job ID (see main.go's
+	// AddToHistory(jobID) call), while HasActiveJob queries the video_id
+	// column which for monitor-created Twitch jobs stores the unprefixed
+	// stream ID (manual Twitch adds in the web routes store jobID in both
+	// columns, which is why their HasActiveJob(jobID) call works). Prior
+	// code passed jobID here — that check was effectively dead, surviving
+	// only because SQLite's INSERT-OR-IGNORE caught the collision at
+	// insert time.
 	jobID := twitch.BuildJobID(info.StreamID, false)
 	if processed, _ := tm.db.HasProcessed(jobID); processed {
 		return nil
 	}
-	if active, _ := tm.db.HasActiveJob(jobID); active {
+	if active, _ := tm.db.HasActiveJob(info.StreamID); active {
 		return nil
 	}
 
