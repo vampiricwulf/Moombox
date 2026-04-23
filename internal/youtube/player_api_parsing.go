@@ -140,6 +140,7 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 	}
 
 	var formats []Format
+	cipherNeededButMissing := false
 	// adaptiveFormats is iterated first so that when an itag appears in both
 	// arrays the DASH/adaptive entry lands in the pool first and wins the
 	// same-auth-level tiebreak in deduplicateFormats. adaptiveFormats carry
@@ -161,10 +162,19 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 			sigCipher := getStr(f, "signatureCipher")
 
 			// Handle signatureCipher (older format without direct URL)
-			if formatURL == "" && sigCipher != "" && playerURL != "" && p.cipherSolver != nil {
-				decrypted := p.decryptSignatureCipher(ctx, sigCipher, playerURL)
-				if decrypted != "" {
-					formatURL = decrypted
+			if formatURL == "" && sigCipher != "" {
+				if playerURL != "" && p.cipherSolver != nil {
+					decrypted := p.decryptSignatureCipher(ctx, sigCipher, playerURL)
+					if decrypted != "" {
+						formatURL = decrypted
+					}
+				} else if p.cipherSolver == nil {
+					// Caller did not wire a cipher solver, but this response
+					// shipped ciphered URLs — every such format will be
+					// dropped. Surface a single Warn so a silently-broken
+					// init (no cipher cache dir, disabled pipeline, etc.)
+					// is visible.
+					cipherNeededButMissing = true
 				}
 			}
 
@@ -209,6 +219,9 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 
 			formats = append(formats, format)
 		}
+	}
+	if cipherNeededButMissing {
+		p.logger.Warn("[PlayerApi] Response contained signatureCipher formats but no cipher solver is wired; ciphered formats were dropped")
 	}
 	return formats
 }
