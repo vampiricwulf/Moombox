@@ -94,7 +94,10 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 		return "", false, fmt.Errorf("watch page returned status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
+	// Watch pages on popular streams can exceed 5 MB once ytInitialData,
+	// ytInitialPlayerResponse and all sidebar chrome are rendered. Chat API
+	// responses stay at 5 MB; only the watch-page fetch gets the 10 MB cap.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
 	if err != nil {
 		return "", false, err
 	}
