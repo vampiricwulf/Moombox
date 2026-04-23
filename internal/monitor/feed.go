@@ -19,6 +19,10 @@ const (
 	feedFetchTimeout    = 15 * time.Second
 	feedProcessTimeout  = 60 * time.Second
 	defaultMaxFeedItems = 15
+	// feedStagger spaces consecutive channel feed fetches. Decapi and Twitch
+	// already stagger; a tight loop of YouTube RSS fetches on a big channel
+	// list looks like scraping behavior from a single source IP.
+	feedStagger = 500 * time.Millisecond
 )
 
 // monitorHTTPClient is a shared HTTP client with a timeout for monitor HTTP requests.
@@ -216,6 +220,18 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 		ch := &channels[i]
 		if err := fm.checkChannel(ctx, ch); err != nil {
 			fm.logger.Warn("feed check failed", "channel", ch.Name, "err", err)
+		}
+
+		// Stagger between requests to avoid looking like a scraper and to
+		// match the pacing of the other two monitors.
+		if i < len(channels)-1 {
+			staggerTimer := time.NewTimer(feedStagger)
+			select {
+			case <-ctx.Done():
+				staggerTimer.Stop()
+				return
+			case <-staggerTimer.C:
+			}
 		}
 	}
 }
