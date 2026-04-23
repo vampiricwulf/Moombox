@@ -98,7 +98,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			return ctx.Err()
 		}
 
-		// Run segment downloaders in a goroutine so we can also listen for quality changes
+		// Run segment downloaders in a goroutine so we can also listen for quality changes.
+		// Compute the error before sending so a panic inside runDownloaders is delivered
+		// once via the deferred recover without risking a double-send on the buffered channel.
 		downloadDone := make(chan error, 1)
 		go func() {
 			defer func() {
@@ -106,7 +108,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 					downloadDone <- fmt.Errorf("runDownloaders panic: %v", r)
 				}
 			}()
-			downloadDone <- o.runDownloaders(ctx, result)
+			err := o.runDownloaders(ctx, result)
+			downloadDone <- err
 		}()
 
 		var downloadErr error
