@@ -8,6 +8,7 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 )
@@ -18,6 +19,14 @@ func newSpinner() spinner.Model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(ColorCyan)
 	return s
+}
+
+// spinnerTickCmd returns a tea.Cmd that emits the spinner's initial Tick
+// message. Shared helper for dialog Open() flows that need to start the
+// spinner animation (see reports/tui.md Finding 15 — previously duplicated
+// as a SpinnerInit method on every dialog type).
+func spinnerTickCmd(s spinner.Model) tea.Cmd {
+	return func() tea.Msg { return s.Tick() }
 }
 
 // newTextInput creates a text input with Moombox styling.

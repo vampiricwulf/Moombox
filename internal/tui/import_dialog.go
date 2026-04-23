@@ -186,9 +186,7 @@ func (m *ImportDialogModel) HandleKey(key string) (string, string) {
 }
 
 // SpinnerInit returns the spinner's initial tick command when importing.
-func (m *ImportDialogModel) SpinnerInit() tea.Cmd {
-	return func() tea.Msg { return m.spinner.Tick() }
-}
+func (m *ImportDialogModel) SpinnerInit() tea.Cmd { return spinnerTickCmd(m.spinner) }
 
 // GetImportTitle returns the optional title metadata.
 func (m *ImportDialogModel) GetImportTitle() string {

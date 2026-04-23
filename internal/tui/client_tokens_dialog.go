@@ -218,9 +218,7 @@ func (m *ClientTokensDialogModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 }
 
 // SpinnerInit returns the spinner's initial tick command.
-func (m *ClientTokensDialogModel) SpinnerInit() tea.Cmd {
-	return func() tea.Msg { return m.spinner.Tick() }
-}
+func (m *ClientTokensDialogModel) SpinnerInit() tea.Cmd { return spinnerTickCmd(m.spinner) }
 
 // HandleKey processes key input. Returns action string and optional command.
 func (m *ClientTokensDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {

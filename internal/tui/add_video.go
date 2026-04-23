@@ -566,9 +566,7 @@ func (m *AddVideoModel) GetStartTime() string { return m.startTimeInput }
 func (m *AddVideoModel) GetEndTime() string { return m.endTimeInput }
 
 // SpinnerInit returns the spinner's initial tick command when loading.
-func (m *AddVideoModel) SpinnerInit() tea.Cmd {
-	return func() tea.Msg { return m.spinner.Tick() }
-}
+func (m *AddVideoModel) SpinnerInit() tea.Cmd { return spinnerTickCmd(m.spinner) }
 
 // GetPlatform returns the detected platform.
 func (m *AddVideoModel) GetPlatform() string { return m.platform }
