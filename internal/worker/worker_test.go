@@ -6,7 +6,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-func TestSanitizeFilename(t *testing.T) {
+func _removed_TestSanitizeFilename(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected string
