@@ -398,9 +398,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				continue
 			}
 
-			// Replace downloaders with refreshed versions
-			result.VideoDownloader = refreshResult.VideoDownloader
-			result.AudioDownloader = refreshResult.AudioDownloader
+			// Replace the whole result so all fields (Video/AudioFormat, dimensions,
+			// IsHls, paths) reflect the refreshed manifest. Previously only the
+			// downloader pointers were swapped, leaving stale VideoFormat metadata
+			// that downstream muxing could pick up as a fallback.
+			result = refreshResult
 
 			attachProgress(result)
 
