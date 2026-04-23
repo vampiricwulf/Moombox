@@ -20,6 +20,11 @@ type Solvers struct {
 }
 
 // DecryptN calls the N solver with mutex protection.
+//
+// When s.N is nil the input passes through unchanged. Callers that need to
+// distinguish "no n-decryption required" (e.g. ANDROID_VR which returns
+// direct URLs) from "decryption silently skipped" should gate on HasN()
+// first — this method's pass-through is intentional but ambiguous.
 func (s *Solvers) DecryptN(input string) (string, error) {
 	if s.N == nil {
 		return input, nil
@@ -29,7 +34,8 @@ func (s *Solvers) DecryptN(input string) (string, error) {
 	return s.N(input)
 }
 
-// DecryptSig calls the Sig solver with mutex protection.
+// DecryptSig calls the Sig solver with mutex protection. See DecryptN's
+// note on the nil-solver pass-through.
 func (s *Solvers) DecryptSig(input string) (string, error) {
 	if s.Sig == nil {
 		return input, nil
@@ -38,6 +44,14 @@ func (s *Solvers) DecryptSig(input string) (string, error) {
 	defer s.mu.Unlock()
 	return s.Sig(input)
 }
+
+// HasN reports whether an n-parameter solver was extracted from the player.
+// Call this when the caller needs to distinguish "format doesn't need n
+// decryption" from "decryption was silently skipped".
+func (s *Solvers) HasN() bool { return s != nil && s.N != nil }
+
+// HasSig reports whether a signature solver was extracted from the player.
+func (s *Solvers) HasSig() bool { return s != nil && s.Sig != nil }
 
 // SignatureRequest contains the inputs for signature decryption.
 type SignatureRequest struct {
@@ -66,12 +80,3 @@ type ResolveURLResponse struct {
 	URL string
 }
 
-// StsRequest contains the inputs for STS extraction.
-type StsRequest struct {
-	PlayerURL string
-}
-
-// StsResponse contains the extracted signature timestamp.
-type StsResponse struct {
-	Sts string
-}
