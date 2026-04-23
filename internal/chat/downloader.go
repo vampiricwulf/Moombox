@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	dedupKeepSize        = 5000 // Keep last N IDs for dedup
-	maxConsecErrorsLive  = 20
-	maxConsecErrorsVod   = 5
-	maxStaleContinuation = 30
-	writeIntervalMs = 1000 // Flush to disk within 1 second
+	dedupKeepSize                = 5000 // Keep last N IDs for dedup
+	maxConsecErrorsLive          = 20
+	maxConsecErrorsVod           = 5
+	maxStaleContinuationAttempts = 30
+	writeInterval                = 1 * time.Second // Flush batched messages to disk at most once per interval
 )
 
 // ChatDownloaderOptions configures a ChatDownloader.
@@ -55,7 +55,7 @@ type ChatDownloader struct {
 	continuation  string
 	streamStartMs int64
 	flushedToDisk bool
-	lastWriteMs   int64
+	lastWriteAt   time.Time
 	lastTimestamp  string
 	cancelCtx     context.CancelFunc // for aborting sleep on stop/markStreamEnded
 	done          chan struct{}       // closed when Start() completes; nil if never started
@@ -399,12 +399,12 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			})
 		}
 
-		// Write to disk within 1-second batching window
+		// Write to disk at most once per writeInterval
 		if newInBatch > 0 {
-			now := time.Now().UnixMilli()
-			if now-cd.lastWriteMs >= writeIntervalMs {
+			now := time.Now()
+			if cd.lastWriteAt.IsZero() || now.Sub(cd.lastWriteAt) >= writeInterval {
 				cd.writeChatFile()
-				cd.lastWriteMs = now
+				cd.lastWriteAt = now
 
 				// Update header to keep messageCount accurate after incremental flushes
 				cd.updateChatFileHeader()
@@ -441,7 +441,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 				contRetries := 1 // the initial failed call above
 				gotFresh := false
 
-				for !cd.shouldStop() && contRetries < maxStaleContinuation {
+				for !cd.shouldStop() && contRetries < maxStaleContinuationAttempts {
 					cd.sleep(ctx, contRetryDelay)
 					if cd.shouldStop() {
 						break
