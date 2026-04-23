@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -378,17 +379,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				a.ffmpegCheck.SetInstallResult("FFmpeg installed: "+msg.Version, false)
 			}
-			// Persist custom/manual FFmpeg path to config
+			// Persist custom/manual FFmpeg path to config. Do the disk write
+			// OUTSIDE the cfgMu so TUI renders and apiClient construction
+			// aren't stalled behind disk IO. Matches settings_security.go:121-131.
+			// Audit reports/tui.md Finding 2.
 			if (a.ffmpegCheck.mode == ffmpegCustom || a.ffmpegCheck.mode == ffmpegManual) && msg.Path != "" && a.cfg != nil {
+				var saveCb func(*config.MoomboxConfig)
+				var cfgSnapshot *config.MoomboxConfig
 				if a.cfgMu != nil {
 					a.cfgMu.Lock()
 				}
 				a.cfg.Paths.FfmpegPath = msg.Path
 				if a.OnSaveConfig != nil {
-					a.OnSaveConfig(a.cfg)
+					saveCb = a.OnSaveConfig
+					cfgSnapshot = a.cfg
 				}
 				if a.cfgMu != nil {
 					a.cfgMu.Unlock()
+				}
+				if saveCb != nil {
+					saveCb(cfgSnapshot)
 				}
 			}
 			a.ffmpegCheck.warning = msg.Warning
