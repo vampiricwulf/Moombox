@@ -261,6 +261,55 @@ func TestClassifyStream_VOD(t *testing.T) {
 	}
 }
 
+func TestClassifyStream_LiveStreamabilityFallback(t *testing.T) {
+	// ANDROID_VR probes of an unpublished scheduled premiere sometimes
+	// return only playabilityStatus.liveStreamability — no microformat,
+	// no videoDetails.isUpcoming, no LIVE_STREAM_OFFLINE status. Those
+	// should still classify as upcoming rather than not_a_stream.
+	vd := map[string]any{}
+	ps := map[string]any{
+		"status": "OK",
+		"liveStreamability": map[string]any{
+			"liveStreamabilityRenderer": map[string]any{
+				"offlineSlate": map[string]any{
+					"liveStreamOfflineSlateRenderer": map[string]any{
+						"scheduledStartTime": "1999999999",
+					},
+				},
+			},
+		},
+	}
+
+	status, _, isUpcoming, _ := classifyStream(vd, ps, nil, false)
+	if status != StreamUpcoming {
+		t.Errorf("expected StreamUpcoming from liveStreamability, got %q", status)
+	}
+	if !isUpcoming {
+		t.Error("expected isUpcoming=true from liveStreamability")
+	}
+}
+
+func TestClassifyStream_LiveStreamabilityDoesNotOverrideFormats(t *testing.T) {
+	// A stream that has liveStreamability but also has formats is already
+	// live — the hasFormats guard should keep classification out of the
+	// upcoming branch.
+	vd := map[string]any{"isLiveContent": true, "isLive": true}
+	ps := map[string]any{
+		"status": "OK",
+		"liveStreamability": map[string]any{
+			"liveStreamabilityRenderer": map[string]any{},
+		},
+	}
+
+	status, isLive, _, _ := classifyStream(vd, ps, nil, true)
+	if status == StreamUpcoming {
+		t.Errorf("should not classify as upcoming when formats are present, got %q", status)
+	}
+	if !isLive {
+		t.Error("expected isLive=true when formats are present")
+	}
+}
+
 func TestClassifyStream_PostLiveDVR(t *testing.T) {
 	vd := map[string]any{"isLiveContent": true}
 	mf := map[string]any{

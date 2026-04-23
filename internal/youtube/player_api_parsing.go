@@ -435,6 +435,14 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	isUpcomingFromPlayability := status == "LIVE_STREAM_OFFLINE" ||
 		(status == "UNPLAYABLE" && strings.Contains(reason, "live event will begin"))
 
+	// playabilityStatus.liveStreamability is the renderer YouTube attaches
+	// to scheduled streams that haven't gone live yet. Some probes
+	// (notably ANDROID_VR on unpublished premieres) return this without
+	// a full microformat or videoDetails.isUpcoming flag — the raw
+	// fallthrough would misclassify those as not_a_stream and end the
+	// polling cycle. Detect it independently.
+	_, hasLiveStreamability := getNestedMap(playabilityStatus, "liveStreamability", "liveStreamabilityRenderer")
+
 	// Premiere detection: has scheduled start but not marked as live content,
 	// and reason contains "premiere" or videoDetails says upcoming.
 	isPremiere := lbd != nil && getStr(lbd, "startTimestamp") != "" && !isLiveContent &&
@@ -457,6 +465,12 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	}
 	if isLiveNow || isPremiereNow {
 		return StreamLive, true, false, false
+	}
+	// liveStreamability with no formats — treat as upcoming. Runs before the
+	// lbd==nil && !isLiveContent shortcut so premieres that only expose the
+	// renderer aren't mis-classified as not_a_stream.
+	if hasLiveStreamability && !hasFormats {
+		return StreamUpcoming, false, true, false
 	}
 	if lbd == nil && !isLiveContent && !isPremiere {
 		return StreamNotAStream, false, false, false
