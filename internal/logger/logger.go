@@ -124,12 +124,21 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	}
 	multi := io.MultiWriter(writers...)
 
-	// Custom handler with timestamp formatting
+	// Custom handler with timestamp formatting. Use the attribute's own
+	// time value (captured by slog at the log call site) rather than
+	// time.Now() so formatted timestamps reflect the exact call moment
+	// even when slog buffers. This also keeps file/stdout timestamps in
+	// lock-step with the ring-buffer / subscriber timestamps emitted
+	// through formatLogLine.
 	opts := &slog.HandlerOptions{
 		Level: l.level,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
-				a.Value = slog.StringValue(time.Now().Format("2006-01-02 15:04:05"))
+				t := a.Value.Time()
+				if t.IsZero() {
+					t = time.Now()
+				}
+				a.Value = slog.StringValue(t.Format("2006-01-02 15:04:05"))
 			}
 			return a
 		},
