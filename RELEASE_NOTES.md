@@ -1,6 +1,6 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Supersedes the `v2.6.0-test.1` tag, whose CI run failed because `go-winres` rejected the pre-release suffix — now fixed by stripping it before computing the Windows numeric version.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.2` with a second batch of audit-driven fixes (Twitch correctness, constants cleanup).
 
-This build bundles Sprint #1 of the multi-report audit: security hardening, database correctness, cipher resilience, and initial frontend test coverage. All 17 commits build clean and pass `go test -race ./...` plus a new JS test suite.
+This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-report audit: security hardening, database correctness, cipher resilience, Twitch extraction fixes, and the constants-catalog cleanup. All 22 commits build clean and pass `go test -race ./...` plus the frontend JS test suite.
 
 ### Security
 
@@ -15,6 +15,12 @@ This build bundles Sprint #1 of the multi-report audit: security hardening, data
 - **Cipher solver 3s timeout** — a malformed or malicious `player.js` with an infinite loop used to hang the decrypt path indefinitely while holding `Solvers.mu`, freezing every download. Bounded by `CipherTimeout` (3s, matching `bgutils.DefaultMintTimeout`); the failed call returns an error so the caller can `InvalidateSolver` and retry.
 - **Cipher timeout race fix** — refines the above. The initial `time.AfterFunc` pattern had a race where the interrupt callback could fire after `ClearInterrupt()`, poisoning the next call. Replaced with the goroutine+select pattern that `bgutils.botguard` already uses. New test exercises both the timeout bound and the "subsequent call succeeds" invariant.
 - **GenerateIT null-integrity-token → error** — when BotGuard fails to produce an integrity token (typically because the goja shims are broken), Moombox previously cached the `websafeFallbackToken` (`"MpQBGAE"`) as a valid PO token for 6h. YouTube doesn't accept it for authenticated player requests, so the silent fallback degraded downloads without signal. Now errors explicitly and points at the likely VM cause.
+
+### Twitch extraction
+
+- **IRC emote tag indexing** — the IRC emote-tag parser used Go rune indices, but Twitch sends UTF-16 code-unit offsets (same as JavaScript's string indexing). Messages containing characters outside the Basic Multilingual Plane (🎉 emoji, CJK extension ideographs, etc.) before an emote now slice the correct Name. The VOD-chat path already had `utf16Len` — the IRC path now uses matching `unicode/utf16` encoding.
+- **GQL batch partial failures tolerated** — Twitch's batched persisted-query endpoint sometimes returns a partial failure (one element errors while others succeed). The previous "return on first error" behaviour failed the whole monitor cycle on a single flaky element. Now errors only when EVERY batch element errored; logs partial failures at Warn so callers' per-element parsing can extract what is available.
+- **Monitor duplicate-check fixed** — `TwitchMonitor.checkChannel` called `db.HasActiveJob(jobID)` but the `video_id` column for monitor-created Twitch jobs stores the unprefixed stream ID. The check was dead code surviving only because SQLite's `INSERT OR IGNORE` caught collisions at insert time. Now passes `info.StreamID`.
 
 ### Database
 
@@ -34,3 +40,4 @@ This build bundles Sprint #1 of the multi-report audit: security hardening, data
 - **Frontend JS tests** — seeds baseline coverage via Node's built-in test runner (zero devDependencies). 39 tests across `filter-parser`, `filter-engine`, and `utils`. Run with `node --test web/tests/*.test.mjs`. See `web/tests/README.md`.
 - **Release workflow supports pre-releases** — tags containing `-` (e.g. `v2.6.0-test.2`) are marked as pre-release and don't become `/releases/latest`. The workflow also strips the pre-release suffix when building the Windows numeric version (`2.6.0.0`) since `go-winres` requires pure integer components.
 - **Shoelace CDN hardened with SRI** — `index.html` and `login.html` now carry `sha384` integrity hashes for the three jsdelivr references. Closes `frontend-html-css.md` S-13. The initial attempt to vendor the full CDN distribution was reverted; SRI pinning is the lighter and more appropriate fix given Moombox is an online tool.
+- **`internal/constants` shrunk** — the aspirational "canonical catalog" clashed with reality: ~40 entries had no consumers, and two of the three that DID have local duplicates in consumers (`MaxSegmentRetries`, `SegmentRetryDelayCap`) had different values than the constants package said. Deleted the dead entries; migrated the one exact-value match (`DownloadChunkSize`). File drops from 433 → 214 lines. Consumers now own their own subsystem-specific limits.
