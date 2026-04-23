@@ -224,15 +224,15 @@
                 </sl-dialog>
 
                 <!-- Jobs Table -->
-                <div id="video-table">
-                    <div id="video-table-header">
-                        <div>Thumbnail</div>
-                        <div>Video</div>
-                        <div>Status</div>
-                        <div>Progress</div>
-                        <div></div>
+                <div id="video-table" role="table" aria-label="Jobs">
+                    <div id="video-table-header" role="row">
+                        <div role="columnheader">Thumbnail</div>
+                        <div role="columnheader">Video</div>
+                        <div role="columnheader">Status</div>
+                        <div role="columnheader">Progress</div>
+                        <div role="columnheader"><span class="visually-hidden">Actions</span></div>
                     </div>
-                    <div id="jobs-container">
+                    <div id="jobs-container" role="rowgroup">
                         <!-- Jobs will be rendered here -->
                     </div>
                     <div id="jobs-skeleton">
@@ -287,15 +287,15 @@
                     <span id="archived-filter-count" style="display:none"></span>
                 </div>
 
-                <div id="archived-table" class="archived-table">
-                    <div id="archived-table-header">
-                        <div>Thumbnail</div>
-                        <div>Video</div>
-                        <div>Status</div>
-                        <div>Progress</div>
-                        <div></div>
+                <div id="archived-table" class="archived-table" role="table" aria-label="Archived jobs">
+                    <div id="archived-table-header" role="row">
+                        <div role="columnheader">Thumbnail</div>
+                        <div role="columnheader">Video</div>
+                        <div role="columnheader">Status</div>
+                        <div role="columnheader">Progress</div>
+                        <div role="columnheader"><span class="visually-hidden">Actions</span></div>
                     </div>
-                    <div id="archived-container">
+                    <div id="archived-container" role="rowgroup">
                         <!-- Archived jobs will be rendered here -->
                     </div>
                 </div>
