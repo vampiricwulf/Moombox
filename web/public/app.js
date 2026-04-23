@@ -2079,14 +2079,21 @@ class MoomboxApp {
   async loadJobLogs(jobId) {
     // Abort any in-flight log fetch (e.g. user switched to a different job)
     if (this._jobLogsAbort) this._jobLogsAbort.abort();
-    this._jobLogsAbort = new AbortController();
+    const abort = new AbortController();
+    this._jobLogsAbort = abort;
 
     try {
-      const response = await fetch(`/api/jobs/${jobId}/logs`, { signal: this._jobLogsAbort.signal });
+      const response = await fetch(`/api/jobs/${jobId}/logs`, { signal: abort.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // Check selection before parsing the body; a switched-away job should
+      // short-circuit instead of wasting CPU decoding JSON we'll discard.
+      if (this.selectedJobId !== jobId || abort.signal.aborted) {
+        abort.abort();
+        return;
+      }
       const logs = await response.json();
-      // Only update if this job is still selected
-      if (this.selectedJobId !== jobId) return;
+      // Re-check after the async body parse — selection may have moved on.
+      if (this.selectedJobId !== jobId || abort.signal.aborted) return;
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) {
         logsEl.textContent =
@@ -2095,6 +2102,7 @@ class MoomboxApp {
     } catch (e) {
       if (e.name === "AbortError") return; // Superseded by a new fetch
       console.error("Failed to load job logs:", e);
+      if (this.selectedJobId !== jobId) return;
       const logsEl = document.getElementById("job-logs-content");
       if (logsEl) logsEl.textContent = "Failed to load logs.";
     }
