@@ -2,28 +2,19 @@ package utils
 
 import "fmt"
 
-// FormatDuration formats a duration in milliseconds to a human-readable string.
-func FormatDuration(ms int64) string {
-	if ms < 0 {
-		return "0s"
+// FormatSpeed formats a speed in bytes/sec to a human-readable string.
+func FormatSpeed(bytesPerSec float64) string {
+	if bytesPerSec <= 0 {
+		return "0 B/s"
 	}
 
-	totalSeconds := ms / 1000
-	hours := totalSeconds / 3600
-	minutes := (totalSeconds % 3600) / 60
-	seconds := totalSeconds % 60
-
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm", hours, minutes)
-	}
-	if minutes > 0 {
-		return fmt.Sprintf("%dm %ds", minutes, seconds)
-	}
-	return fmt.Sprintf("%ds", seconds)
+	return formatBytesForSpeed(int64(bytesPerSec)) + "/s"
 }
 
-// FormatBytes formats a byte count to a human-readable string.
-func FormatBytes(bytes int64) string {
+// formatBytesForSpeed is the internal byte formatter used by FormatSpeed.
+// Kept private — if you need a human-readable byte formatter elsewhere,
+// use FormatFileSize in format.go instead.
+func formatBytesForSpeed(bytes int64) string {
 	if bytes < 0 {
 		return "0 B"
 	}
@@ -47,21 +38,4 @@ func FormatBytes(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
-}
-
-// FormatSpeed formats a speed in bytes/sec to a human-readable string.
-func FormatSpeed(bytesPerSec float64) string {
-	if bytesPerSec <= 0 {
-		return "0 B/s"
-	}
-
-	return FormatBytes(int64(bytesPerSec)) + "/s"
-}
-
-// FormatETA formats an estimated time of arrival in seconds.
-func FormatETA(seconds float64) string {
-	if seconds <= 0 || seconds > 86400 {
-		return ""
-	}
-	return FormatDuration(int64(seconds * 1000))
 }
