@@ -137,7 +137,9 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 		tokenMinter := &TokenMinter{
 			MintFunc:  minter.MintAsWebsafeString,
 			ExpiresAt: time.Now().Add(itData.EstimatedTTL),
-			Cleanup:   bgClient.Shutdown,
+			// Route Cleanup through the minter's own Shutdown so VM teardown
+			// serializes with any in-flight Mint call on the same minter.
+			Cleanup: func() { minter.Shutdown(bgClient.Shutdown) },
 		}
 
 		wpc.logger.Info("[PotProvider] Generated integrity token (full minter)", "ttl", itData.EstimatedTTL)

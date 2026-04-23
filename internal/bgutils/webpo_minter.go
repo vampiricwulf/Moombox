@@ -4,12 +4,20 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strconv"
+	"sync"
 
 	"github.com/dop251/goja"
 )
 
 // WebPoMinter mints PO tokens using the BotGuard-provided callback.
+//
+// The mu mutex serializes all JS-entering operations on the minter's Goja
+// runtime: MintAsWebsafeString (which calls mintCallback) and Cleanup
+// (which invokes the runtime's shutdownFn). Goja runtimes are not
+// goroutine-safe, and the potprovider may concurrently hit a single
+// minter from multiple GeneratePoToken callers + the InvalidateIT path.
 type WebPoMinter struct {
+	mu           sync.Mutex
 	mintCallback goja.Callable
 	vm           *goja.Runtime
 }
@@ -64,8 +72,12 @@ func NewWebPoMinter(itData *IntegrityTokenData, webPoSignalOutput *goja.Object, 
 // MintAsWebsafeString mints a PO token for the given content binding (typically visitor data).
 // Returns a base64url-encoded token string.
 func (m *WebPoMinter) MintAsWebsafeString(contentBinding string) (string, error) {
+	// Serialize entry into the Goja runtime — see struct doc.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.mintCallback == nil {
-		return "", &BGError{Code: ErrIntegrity, Message: "mint callback not initialized"}
+		return "", &BGError{Code: ErrIntegrity, Message: "mint callback not initialized (shutdown?)"}
 	}
 
 	// Encode the content binding as UTF-8 bytes (via TextEncoder in JS)
@@ -86,6 +98,23 @@ func (m *WebPoMinter) MintAsWebsafeString(contentBinding string) (string, error)
 
 	// Encode as base64url (websafe) — TS uses btoa()+replace which keeps = padding
 	return base64.URLEncoding.EncodeToString(resultBytes), nil
+}
+
+// Shutdown releases the minter's Goja resources. Invokes shutdownFn (typically
+// the BotGuardClient's Shutdown) under the minter's mutex so it can't race
+// with an in-flight Mint. Idempotent — a second Shutdown is a no-op, and
+// subsequent Mint calls return a clear error rather than panicking on a
+// torn-down runtime.
+func (m *WebPoMinter) Shutdown(shutdownFn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.mintCallback == nil {
+		return // already shut down
+	}
+	m.mintCallback = nil
+	if shutdownFn != nil {
+		shutdownFn()
+	}
 }
 
 // gojaValueToBytes converts a Goja value (Uint8Array, ArrayBuffer, or Array) to Go bytes.
