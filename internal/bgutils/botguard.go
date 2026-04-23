@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/dop251/goja"
@@ -296,10 +297,50 @@ func (c *BotGuardClient) Shutdown() {
 	}
 }
 
-// fetchInterpreter downloads the BotGuard interpreter JS.
+// Interpreter-JS fetch cache. YouTube rotates the interpreter URL rarely
+// (hours to days) but NewBotGuardClient fetched it fresh on every minter
+// creation — worth ~1-3 MB + parse per call. Keyed by URL since the URL
+// already encodes the content hash in the path. Capped at a handful of
+// entries; old entries become unreachable once YouTube rotates anyway.
+var (
+	interpreterCacheMu    sync.Mutex
+	interpreterCache      = make(map[string]string, interpreterCacheCap)
+	interpreterCacheOrder = make([]string, 0, interpreterCacheCap)
+)
+
+const interpreterCacheCap = 4
+
+func interpreterCacheGet(url string) (string, bool) {
+	interpreterCacheMu.Lock()
+	defer interpreterCacheMu.Unlock()
+	js, ok := interpreterCache[url]
+	return js, ok
+}
+
+func interpreterCachePut(url, js string) {
+	interpreterCacheMu.Lock()
+	defer interpreterCacheMu.Unlock()
+	if _, exists := interpreterCache[url]; exists {
+		return
+	}
+	if len(interpreterCacheOrder) >= interpreterCacheCap {
+		// Evict oldest.
+		oldest := interpreterCacheOrder[0]
+		interpreterCacheOrder = interpreterCacheOrder[1:]
+		delete(interpreterCache, oldest)
+	}
+	interpreterCache[url] = js
+	interpreterCacheOrder = append(interpreterCacheOrder, url)
+}
+
+// fetchInterpreter downloads the BotGuard interpreter JS, returning the
+// cached copy when the URL has been seen before.
 func fetchInterpreter(ctx context.Context, interpreterURL string) (string, error) {
 	if interpreterURL == "" {
 		return "", fmt.Errorf("interpreter URL is empty")
+	}
+	if cached, ok := interpreterCacheGet(interpreterURL); ok {
+		return cached, nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -327,5 +368,7 @@ func fetchInterpreter(ctx context.Context, interpreterURL string) (string, error
 		return "", err
 	}
 
-	return string(body), nil
+	js := string(body)
+	interpreterCachePut(interpreterURL, js)
+	return js, nil
 }
