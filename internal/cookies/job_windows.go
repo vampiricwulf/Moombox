@@ -3,12 +3,9 @@ package cookies
 import (
 	"fmt"
 	"os"
-	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
-
-var jobCounter atomic.Uint64
 
 var (
 	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
@@ -62,9 +59,14 @@ type processJob struct {
 
 // newProcessJob creates a Windows Job Object configured to kill all assigned
 // processes when the job handle is closed.
+//
+// The job is anonymous (lpName=NULL): named jobs are only useful for sharing
+// across processes, and CreateJobObject returning a handle to an existing
+// job-of-the-same-name would silently coalesce unrelated launches into one
+// shared job. The previous per-process counter prevented that collision but
+// served no other purpose, so dropping naming entirely is the simpler fix.
 func newProcessJob() (*processJob, error) {
-	name, _ := syscall.UTF16PtrFromString(fmt.Sprintf("MoomboxBrowserJob_%d_%d", os.Getpid(), jobCounter.Add(1)))
-	h, _, err := procCreateJobObjectW.Call(0, uintptr(unsafe.Pointer(name)))
+	h, _, err := procCreateJobObjectW.Call(0, 0)
 	if h == 0 {
 		return nil, fmt.Errorf("CreateJobObject: %w", err)
 	}
