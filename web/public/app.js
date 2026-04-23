@@ -317,6 +317,7 @@ class MoomboxApp {
           if (!this._playerOpeningFromDetails) {
             this.player.loadPlayerJobList();
           }
+          this.player.attachKeyboardControls?.();
         } else if (e.detail.name === "imports") {
           if (!this.imports.importInitialized) {
             this.imports.initImports();
@@ -325,6 +326,12 @@ class MoomboxApp {
           this.fetchOrphanedFiles();
         } else if (e.detail.name === "stats") {
           this.stats.activate();
+        }
+        // Detach the player's document-level keydown listener when leaving
+        // the player tab — it used to run for every keystroke app-wide even
+        // if the panel early-returned inside the handler.
+        if (e.detail.name !== "player") {
+          this.player.detachKeyboardControls?.();
         }
         // Deactivate stats auto-refresh when leaving the tab
         if (e.detail.name !== "stats") {

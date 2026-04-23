@@ -241,8 +241,11 @@ export class PlayerController {
   }
 
   setupKeyboardControls() {
-    document.addEventListener("keydown", (e) => {
-      // Only active when player tab is shown
+    // The handler is attached only while the player tab is active (see
+    // attachKeyboardControls/detachKeyboardControls). The panel-active
+    // check inside the handler is a defensive second layer in case a
+    // Shoelace tab-change event is missed mid-transition.
+    this._playerKeyHandler = (e) => {
       const playerPanel = document.querySelector('sl-tab-panel[name="player"]');
       if (!playerPanel || !playerPanel.hasAttribute("active")) return;
 
@@ -323,7 +326,25 @@ export class PlayerController {
           break;
         }
       }
-    });
+    };
+
+    // Attach immediately because initPlayer() only runs once the player
+    // tab becomes active for the first time.
+    this.attachKeyboardControls();
+  }
+
+  /** Attach the document-level player keydown listener. Idempotent. */
+  attachKeyboardControls() {
+    if (!this._playerKeyHandler || this._playerKeyAttached) return;
+    document.addEventListener("keydown", this._playerKeyHandler);
+    this._playerKeyAttached = true;
+  }
+
+  /** Detach the document-level player keydown listener. Idempotent. */
+  detachKeyboardControls() {
+    if (!this._playerKeyHandler || !this._playerKeyAttached) return;
+    document.removeEventListener("keydown", this._playerKeyHandler);
+    this._playerKeyAttached = false;
   }
 
   filterChat(query) {
