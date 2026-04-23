@@ -245,8 +245,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		waitForKeypress()
 		os.Exit(1)
 	}
-	// Database is closed explicitly in the shutdown sequence below (stopService "Database").
-	// No defer db.Close() here to avoid double-close.
+	// Database Close is wrapped in sync.Once so both the orderly shutdown
+	// sequence (stopService "Database") and this defer are safe. The defer
+	// guards against any future early-exit paths added between here and the
+	// shutdown block leaking the SQLite handle.
+	var dbCloseOnce sync.Once
+	closeDB := func() { dbCloseOnce.Do(func() { db.Close() }) }
+	defer closeDB()
 
 	// =========================================================================
 	// 3b. Connectivity monitor
@@ -1848,8 +1853,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	unsubWSJobUpdate()
 	unsubWSJobsChange()
 
-	// 8. Flush database
-	stopService("Database", func() { db.Close() })
+	// 8. Flush database (sync.Once-guarded — also fires from defer closeDB)
+	stopService("Database", closeDB)
 
 	if restartRequested.Load() {
 		log.Info("Shutdown complete, restarting...")
