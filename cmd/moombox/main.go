@@ -45,7 +45,7 @@ import (
 )
 
 var (
-	version = "2.6.0-test.9"
+	version = "2.6.0-test.10"
 	commit  = ""
 )
 
@@ -261,6 +261,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	defer connMon.Stop()
 	utils.SetConnectivityReporter(connMon)
 	engine.SetConnectivityReporter(connMon)
+	monitor.SetConnectivityReporter(connMon)
 
 	// =========================================================================
 	// 4. Load cookies

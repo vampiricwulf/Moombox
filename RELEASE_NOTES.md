@@ -23,6 +23,35 @@ This build bundles Sprint #1 + the first slice of Sprint #2 from the multi-repor
 - **PassiveTracker per-tag success** — `ReportSuccess(tag)` previously wiped every failure across every subsystem, letting a flaky single-subsystem success pattern mask a genuine multi-subsystem outage. Now clears only failures for the given tag and keeps the triggered flag stable while the threshold is still met. (small-packages.md question #3)
 - **Chat message-ID generator race** — `randomAlphaNum` used `math/rand` globals, which are not concurrent-safe. Multiple parallel chat downloaders could race at `generateMessageID`. Switched to `math/rand/v2`, whose package-level `IntN` is documented as concurrent-safe. (chat.md C10)
 
+### Parallel-agent batch 4 (test.10)
+
+Fourth dispatch over `internal/twitch/` and `internal/monitor/` — the last two subsystems with a long tail of unaddressed findings. Both agents completed fully, landing **19 more commits**.
+
+**Twitch** (twitch.md — 13 findings across 11 commits):
+- `ChatDownloader.Start` now rejects re-entry instead of racing on `seenIDs` re-init (#4)
+- VOD thumbnail dimension rewrite skipped when no template matched (#6 — was corrupting legacy URLs with embedded `_640x360.`)
+- Twitch channel-login lowercased in GQL paths; mixed-case UI entries no longer silently return empty stream info (#7)
+- New `ErrTwitchAuthExpired` sentinel wraps 401/403 on GQL when a token was supplied; callers can `errors.Is` to distinguish token rotation from transient HTTP failure (#8)
+- IRC reconnect counter resets after stable uptime so a flaky session doesn't permanently back off (#12)
+- IRC session read deadline (6 min, covers two missed pings), clean exit on RECONNECT, proper tag-order handling (#14/#15/#16)
+- Resolve mutex released before closing inflight channel to avoid blocking a stalled caller (#17)
+- VOD chat pagination no longer terminates on an all-duplicate page while `hasNextPage==true` (#31 — fixes resume on stale-continuation)
+- GQL error messages now include operation name for correlation (#34)
+- HLS playlist error messages include Usher response body (#35)
+- `appendChatMessages` scans the last 256 bytes for the closing `]` instead of the last 10 (#30 — earlier padding widths forced the fallback-merge path unnecessarily)
+
+**Monitor** (monitor.md — 8 commits):
+- `waitForRateLimit` now bails when `resetAt` is zero instead of blocking indefinitely (#6)
+- `updateRateLimit` rejects past/backward `X-RateLimit-Reset` timestamps (#7)
+- `filterUniqueDescriptionLines` dropped from O(N×M) to O(N) via seen-map reuse (#8)
+- Swallowed `HasActiveJob` / `HasProcessed` DB errors now logged at Debug instead of silently proceeding with stale assumptions (monitor dead-code items)
+- Feed monitor: per-channel stagger between requests to avoid synchronized polls
+- Decapi monitor: jitter added to polling interval so multiple instances don't synchronize
+- `monitor.SetConnectivityReporter(connMon)` wired up — monitor HTTP failures now feed the passive-connectivity tracker alongside `engine/fetch` and `utils/http` (Critical #2)
+- Dead `SetLastVideo` writes removed (obsolete since cf208bc)
+
+Plus a one-line wire-up in `cmd/moombox/main.go` to call `monitor.SetConnectivityReporter(connMon)` alongside the existing engine / utils wires.
+
 ### Parallel-agent batch 3 (test.9)
 
 Third dispatch over the remaining untouched subsystems — `web/public/*.js`, `web/public/*.html` + `moombox.css`, `cmd/moombox/`, and the small packages (utils, logger, notifications, connectivity, updater, disk, cmd/sign). All four agents completed fully, landing **52 more commits**.
