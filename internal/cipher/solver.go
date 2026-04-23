@@ -62,7 +62,6 @@ func NewSolver(cacheDir string, logger interface {
 // Uses 2-tier caching: solver cache (compiled Goja VMs) -> disk cache (raw JS).
 // Serializes compilation so only one goroutine compiles per player URL.
 func (s *Solver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, error) {
-	playerURL = OverridePlayerURL(playerURL)
 	key := CacheKey(playerURL)
 	playerID := PlayerIDFromURL(playerURL)
 
