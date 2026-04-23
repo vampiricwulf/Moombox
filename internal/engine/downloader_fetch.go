@@ -38,6 +38,35 @@ var engineHTTPClient = &http.Client{
 	},
 }
 
+// Segment read limits applied to resp.Body. Both are bounded so a
+// misbehaving server can't force the downloader to allocate unbounded
+// memory for a single response.
+const (
+	// maxSegmentBodyBytes caps the body of a normal segment/playlist fetch.
+	// YouTube live DASH segments are typically 200KB-4MB; 100 MB gives
+	// enormous headroom without letting a broken response balloon RAM.
+	maxSegmentBodyBytes = 100 << 20
+	// maxIgnoredRangeBodyBytes is used when a server returns 200 OK to a
+	// Range request instead of 206 Partial. We discard the body at 50 MB
+	// so a dumb static server on a multi-GB VOD can't drain the process.
+	maxIgnoredRangeBodyBytes = 50 << 20
+)
+
+// applyPoTokenQuery appends `?pot=<token>` (or `&pot=<token>` if the URL
+// already has a query string) to a segment URL. Returns the URL unchanged
+// if the token is empty. Centralized here so segment, head-probe, and
+// chunk fetch all inject the token identically.
+func applyPoTokenQuery(rawURL, token string) string {
+	if token == "" {
+		return rawURL
+	}
+	sep := "?"
+	if strings.Contains(rawURL, "?") {
+		sep = "&"
+	}
+	return rawURL + sep + "pot=" + token
+}
+
 // ConnectivityReporter is the interface the engine uses to notify the
 // connectivity monitor about HTTP successes and failures. It's stored in an
 // atomic.Pointer so SetConnectivityReporter and the many concurrent readers
@@ -87,13 +116,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 	defer cancel()
 
 	// Apply GVS PO token to segment URL (query mode: ?pot=token)
-	if d.opts.PoToken != "" {
-		sep := "?"
-		if strings.Contains(segURL, "?") {
-			sep = "&"
-		}
-		segURL = segURL + sep + "pot=" + d.opts.PoToken
-	}
+	segURL = applyPoTokenQuery(segURL, d.opts.PoToken)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 	if err != nil {
@@ -113,7 +136,7 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20)) // 100MB max segment
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSegmentBodyBytes))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -144,14 +167,7 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 // YouTube returns the X-Head-Seqnum header on GET requests to a non-existent segment.
 func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) {
 	probeURL := d.buildSegmentURL(999999999)
-	// Apply GVS PO token
-	if d.opts.PoToken != "" {
-		sep := "?"
-		if strings.Contains(probeURL, "?") {
-			sep = "&"
-		}
-		probeURL = probeURL + sep + "pot=" + d.opts.PoToken
-	}
+	probeURL = applyPoTokenQuery(probeURL, d.opts.PoToken)
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -277,7 +293,7 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 	}
 	if resp.StatusCode == http.StatusOK {
 		// Server ignored Range header -- cap read to avoid unbounded memory usage
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB cap for ignored-range fallback
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxIgnoredRangeBodyBytes))
 		return data, resp.StatusCode, err
 	}
 	if resp.StatusCode != http.StatusPartialContent {

@@ -488,6 +488,27 @@ type fakeReporter struct {
 func (f *fakeReporter) ReportFailure(string) { f.fails++ }
 func (f *fakeReporter) ReportSuccess(string) { f.successes++ }
 
+func TestApplyPoTokenQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		url   string
+		token string
+		want  string
+	}{
+		{"empty token leaves URL untouched", "https://e.com/sq/1", "", "https://e.com/sq/1"},
+		{"URL with no query uses ?", "https://e.com/sq/1", "abc", "https://e.com/sq/1?pot=abc"},
+		{"URL with existing query uses &", "https://e.com/sq/1?itag=137", "xyz", "https://e.com/sq/1?itag=137&pot=xyz"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyPoTokenQuery(tt.url, tt.token)
+			if got != tt.want {
+				t.Errorf("applyPoTokenQuery(%q, %q) = %q, want %q", tt.url, tt.token, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConnectivityReporter_SetAndClear(t *testing.T) {
 	// Clean up after ourselves so we don't leak state into other tests
 	t.Cleanup(func() { SetConnectivityReporter(nil) })
