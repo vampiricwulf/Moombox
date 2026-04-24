@@ -130,9 +130,12 @@ func TestStsRegex(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{`signatureTimestamp:19850`, "19850"},
-		{`sts:20123`, "20123"},
-		{`signatureTimestamp: 20456`, "20456"},
+		// Inputs include the surrounding object-literal boundaries because
+		// stsRegex now requires `,` or `{` before and `,` or `}` after to
+		// avoid false matches inside comments / strings (audit D3).
+		{`{signatureTimestamp:19850,`, "19850"},
+		{`,sts:20123}`, "20123"},
+		{`,signatureTimestamp: 20456,`, "20456"},
 	}
 
 	for _, tt := range tests {

@@ -7,7 +7,11 @@ import (
 	"sync"
 )
 
-var stsRegex = regexp.MustCompile(`(?:signatureTimestamp|sts)\s*:\s*(\d+)`)
+// stsRegex anchors the match against an object-literal boundary (`,` or `{`
+// before, `,` or `}` after) so a bare identifier inside a comment or string —
+// or some unrelated `sts:` key in a CSS-shaped config — doesn't false-match.
+// See audit cipher.md D3.
+var stsRegex = regexp.MustCompile(`[,{]\s*(?:signatureTimestamp|sts)\s*:\s*(\d+)\s*[,}]`)
 
 const stsCacheSize = 150
 

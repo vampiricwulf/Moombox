@@ -95,8 +95,15 @@ func findMatchingBrace(js string, start int) int {
 }
 
 // skipStringLiteral advances past a string literal starting at position i.
+// Backticks are template literals: their `${expr}` interpolation can contain
+// arbitrary JS (including more `{`/`}`), so we must recurse through any nested
+// braces — otherwise findMatchingBrace would silently miscount on a player
+// that ever ships untranspiled template strings (audit cipher.md Q6).
 func skipStringLiteral(js string, i int) int {
 	quote := js[i]
+	if quote == '`' {
+		return skipTemplateLiteral(js, i)
+	}
 	i++ // skip opening quote
 	for i < len(js) {
 		if js[i] == '\\' {
@@ -108,6 +115,67 @@ func skipStringLiteral(js string, i int) int {
 		}
 		if js[i] == quote {
 			return i + 1
+		}
+		i++
+	}
+	return i
+}
+
+// skipTemplateLiteral advances past a backtick template literal starting at
+// position i, walking into `${...}` interpolation segments so brace counters
+// in the calling parser don't desync on the embedded `{`/`}`.
+func skipTemplateLiteral(js string, i int) int {
+	i++ // skip opening backtick
+	for i < len(js) {
+		if js[i] == '\\' {
+			i += 2 // skip escaped char
+			if i > len(js) {
+				return len(js)
+			}
+			continue
+		}
+		if js[i] == '`' {
+			return i + 1
+		}
+		if js[i] == '$' && i+1 < len(js) && js[i+1] == '{' {
+			// Enter ${ ... } — skip to matching closing brace, treating the
+			// expression body like a JS fragment (strings, regex, comments,
+			// nested braces all need balanced handling).
+			i += 2 // skip "${"
+			depth := 1
+			for i < len(js) && depth > 0 {
+				ch := js[i]
+				switch ch {
+				case '{':
+					depth++
+					i++
+				case '}':
+					depth--
+					i++
+				case '\'', '"', '`':
+					i = skipStringLiteral(js, i)
+				case '/':
+					if i+1 < len(js) && js[i+1] == '/' {
+						for i < len(js) && js[i] != '\n' {
+							i++
+						}
+					} else if i+1 < len(js) && js[i+1] == '*' {
+						i += 2
+						for i+1 < len(js) {
+							if js[i] == '*' && js[i+1] == '/' {
+								i += 2
+								break
+							}
+							i++
+						}
+					} else {
+						i = skipRegexLiteral(js, i)
+					}
+				default:
+					i++
+				}
+			}
+			continue
 		}
 		i++
 	}

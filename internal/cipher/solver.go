@@ -20,9 +20,13 @@ type Solver struct {
 	playerCache *PlayerCache
 	stsCache    *StsCache
 	solverMu    sync.RWMutex
-	solverData  map[string]*Solvers // key -> compiled solvers (Goja VMs)
-	solverOrder []string            // insertion order for LRU eviction
-	compileMu   sync.Mutex         // serializes compilation to prevent thundering herd
+	solverData  map[string]*Solvers // key -> compiled solvers (Goja VMs); read/write under solverMu
+	// solverOrder MUST only be read or written under solverMu.Lock() — every
+	// helper that touches it (cacheSolvers, touchLRU, InvalidateSolver) uses
+	// in-place slice ops that alias the backing array. Reading it from
+	// elsewhere without the lock would race with mutation. (audit cipher.md H4)
+	solverOrder []string
+	compileMu   sync.Mutex // serializes compilation to prevent thundering herd
 	logger      interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -196,9 +200,14 @@ func (s *Solver) InvalidateSolver(playerURL string) {
 	s.solverMu.Lock()
 	if _, ok := s.solverData[key]; ok {
 		delete(s.solverData, key)
+		// Copy-based removal — avoids aliasing the backing array if any
+		// future reader iterates solverOrder under RLock (audit H4).
 		for i, k := range s.solverOrder {
 			if k == key {
-				s.solverOrder = append(s.solverOrder[:i], s.solverOrder[i+1:]...)
+				newOrder := make([]string, 0, len(s.solverOrder)-1)
+				newOrder = append(newOrder, s.solverOrder[:i]...)
+				newOrder = append(newOrder, s.solverOrder[i+1:]...)
+				s.solverOrder = newOrder
 				break
 			}
 		}
