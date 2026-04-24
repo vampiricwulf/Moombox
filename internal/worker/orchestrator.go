@@ -391,7 +391,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 			// Re-fetch job to get updated fields (output_file set by muxAndFinalize)
 			freshJob, _ := o.db.GetJob(jobCtx.Job.ID)
 			if freshJob != nil && freshJob.Status == database.StatusFinished {
-				_, trimErr := trimService.CreateTrim(ctx, freshJob, startSec, endSec)
+				_, trimErr := trimService.CreateTrim(ctx, freshJob, startSec, endSec, nil)
 				if trimErr != nil {
 					o.logger.Error("post-download trim failed", "err", trimErr, "jobID", jobCtx.Job.ID)
 					if o.notifier != nil {

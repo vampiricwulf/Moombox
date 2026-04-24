@@ -53,7 +53,7 @@ func TrimRoutes(r chi.Router, db *database.Database, trimSvc *worker.TrimService
 			return
 		}
 
-		record, err := trimSvc.CreateTrim(req.Context(), job, *body.StartTime, *body.EndTime)
+		record, err := trimSvc.CreateTrim(req.Context(), job, *body.StartTime, *body.EndTime, nil)
 		if err != nil {
 			// Match TS: don't expose internal error details
 			jsonError(rw, "Failed to create trim", http.StatusBadRequest)

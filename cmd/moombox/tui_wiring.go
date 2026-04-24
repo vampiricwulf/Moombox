@@ -110,7 +110,7 @@ func (s *runState) runTUI() {
 			s.log.Error("Failed to get job for trim", slog.String("jobID", jobID))
 			return "", "Failed to get job"
 		}
-		record, err := s.trimSvc.CreateTrimWithProgress(context.Background(), job, startSec, endSec, onProgress)
+		record, err := s.trimSvc.CreateTrim(context.Background(), job, startSec, endSec, onProgress)
 		if err != nil {
 			s.log.Error("Failed to create trim", slog.String("error", err.Error()))
 			return "", err.Error()

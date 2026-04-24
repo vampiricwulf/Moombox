@@ -54,18 +54,12 @@ func (ts *TrimService) SetNotifier(nm *notifications.Manager) {
 	ts.notifier = nm
 }
 
-// CreateTrimWithProgress creates a trimmed version with FFmpeg progress reporting.
-// progressFn is called with 0-100 as encoding progresses.
-func (ts *TrimService) CreateTrimWithProgress(ctx context.Context, job *database.Job, startTime, endTime float64, progressFn func(float64)) (*database.TrimRecord, error) {
-	return ts.createTrimInternal(ctx, job, startTime, endTime, progressFn)
-}
-
-// CreateTrim creates a trimmed version of a finished download.
-func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startTime, endTime float64) (*database.TrimRecord, error) {
-	return ts.createTrimInternal(ctx, job, startTime, endTime, nil)
-}
-
-func (ts *TrimService) createTrimInternal(ctx context.Context, job *database.Job, startTime, endTime float64, progressFn func(float64)) (*database.TrimRecord, error) {
+// CreateTrim creates a trimmed version of a finished download. progressFn is
+// called with 0-100 as FFmpeg encoding progresses; pass nil when progress
+// reporting is not needed (audit reports/worker.md F58 — previously split
+// into CreateTrim + CreateTrimWithProgress; the two thin wrappers added no
+// value over a single method with an optional callback).
+func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startTime, endTime float64, progressFn func(float64)) (*database.TrimRecord, error) {
 	// Prevent concurrent trim operations on the same job (matching TS activeTrimOps)
 	ts.activeMu.Lock()
 	if ts.activeOps[job.ID] {
