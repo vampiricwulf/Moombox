@@ -55,9 +55,19 @@ type ChatDownloader struct {
 	continuation  string
 	streamStartMs int64
 	flushedToDisk bool
-	lastWriteAt   time.Time
-	cancelCtx     context.CancelFunc // for aborting sleep on stop/markStreamEnded
-	done          chan struct{}       // closed when Start() completes; nil if never started
+	// resumeFileAuto is true when ResumeFile was synthesized from OutputFile in
+	// NewChatDownloader (caller did not pass an explicit ResumeFile). Used by
+	// SetOutputFile to know whether it's safe to re-derive ResumeFile from the
+	// new path — prevents clobbering a caller-provided literal ".resume.json"
+	// (audit chat.md C7).
+	resumeFileAuto bool
+	// ioErrorOccurred is set whenever a disk-IO failure routes through OnError
+	// inside writeFullChatFile / incrementalAppend / updateChatFileHeader.
+	// Inspected by Start() before clearResume() so the resume file is
+	// preserved if the final flush failed (audit chat.md C8).
+	ioErrorOccurred bool
+	cancelCtx       context.CancelFunc // for aborting sleep on stop/markStreamEnded
+	done            chan struct{}      // closed when Start() completes; nil if never started
 
 	OnStart  func(messageCount int, resuming bool)
 	OnFinish func()
@@ -113,8 +123,10 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 	api := NewChatAPI(opts.ApiKey, opts.VisitorData, opts.CookieHeader)
 	api.generateAuth = opts.GenerateAuth
 
+	resumeFileAuto := false
 	if opts.ResumeFile == "" {
 		opts.ResumeFile = opts.OutputFile + ".resume.json"
+		resumeFileAuto = true
 	}
 
 	var streamStartMs int64
@@ -125,11 +137,12 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 	}
 
 	return &ChatDownloader{
-		opts:          opts,
-		api:           api,
-		seenIDs:       make(map[string]struct{}),
-		continuation:  opts.InitialContinuation,
-		streamStartMs: streamStartMs,
+		opts:           opts,
+		api:            api,
+		seenIDs:        make(map[string]struct{}),
+		continuation:   opts.InitialContinuation,
+		streamStartMs:  streamStartMs,
+		resumeFileAuto: resumeFileAuto,
 	}
 }
 
@@ -318,6 +331,10 @@ func (cd *ChatDownloader) wasCancelledOrShutdown(ctx context.Context) bool {
 func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 	consecutiveErrors := 0
 	switchedToAllChat := resuming // Skip All Chat switch when resuming — continuation is already mid-stream
+	// lastWriteAt is loop-local — only the loop reads/writes it for the
+	// writeInterval throttle (audit chat.md U1 — was a struct field, never
+	// touched outside runChatLoop).
+	var lastWriteAt time.Time
 
 	for !cd.shouldStop() {
 		if cd.continuation == "" {
@@ -428,9 +445,9 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		// Write to disk at most once per writeInterval
 		if newInBatch > 0 {
 			now := time.Now()
-			if cd.lastWriteAt.IsZero() || now.Sub(cd.lastWriteAt) >= writeInterval {
+			if lastWriteAt.IsZero() || now.Sub(lastWriteAt) >= writeInterval {
 				cd.writeChatFile()
-				cd.lastWriteAt = now
+				lastWriteAt = now
 
 				// Update header to keep messageCount accurate after incremental flushes
 				cd.updateChatFileHeader()
@@ -542,7 +559,11 @@ func (cd *ChatDownloader) SetOutputFile(path string) {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
 	cd.opts.OutputFile = path
-	if cd.opts.ResumeFile == "" || cd.opts.ResumeFile == ".resume.json" {
+	// Only re-derive ResumeFile when it was auto-synthesized in
+	// NewChatDownloader. Tracking via a flag avoids the literal-string
+	// footgun where a caller passes ResumeFile=".resume.json" explicitly
+	// and gets it silently overwritten (audit chat.md C7).
+	if cd.resumeFileAuto {
 		cd.opts.ResumeFile = path + ".resume.json"
 	}
 }
