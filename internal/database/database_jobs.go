@@ -573,6 +573,10 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 }
 
 // ImportFromJSON imports data from a TypeScript-version moombox.json file.
+//
+// Deprecated: Migration helper from the abandoned Node.js codebase. New
+// installs do not need this; reachability is near-zero (see audit report
+// reports/database.md T3/DC2). Plan to delete after one more release.
 func (db *Database) ImportFromJSON(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {

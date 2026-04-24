@@ -300,6 +300,11 @@ func insertJobExec(ctx context.Context, exec executor, job *Job) (sql.Result, er
 // UpdateJobFields performs a partial update of a job using a map of field names to values.
 // This is useful when only a few fields need to change without loading the full job.
 // Returns the updated job after notifying subscribers, or nil on error.
+//
+// Note: updated_at is bumped and OnJobUpdate fires on every call, even when the
+// supplied values match what's already on disk (no dirty check). Callers that
+// would otherwise emit duplicate writes — e.g. a status set to its current
+// value — should dedupe at the call site (audit reports/database.md U6).
 func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	if len(fields) == 0 {
 		return nil
