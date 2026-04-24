@@ -23,6 +23,13 @@ const (
 	// published). Each failure advances currentSeq by 1.
 	goneRetryBeforeFirstSegment = 20
 
+	// postBytes403CipherThreshold is the number of consecutive post-bytes-
+	// written 403s that trips a cipher-solver invalidation. YouTube can
+	// rotate its cipher solver mid-download; if we keep getting 403s in a
+	// row after bytes have flowed, re-solving is cheaper than continuing
+	// the ErrQualityLost → refresh cycle (audit reports/worker.md F11).
+	postBytes403CipherThreshold = 5
+
 	// genericRetryDelay is the fixed delay used between retries for
 	// non-HTTP-status errors (timeouts, network failures).
 	genericRetryDelay = 2 * time.Second
@@ -200,16 +207,23 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	delayCap, liveCheckThreshold int) error {
 
 	if statusCode == 403 || statusCode == 410 {
-		// 403 before any bytes written = likely cipher failure (wrong n-param or sig).
-		// 410 = stream ended (not cipher). Only fire on 403.
+		// 403 fire cases (only on 403; 410 = stream ended, not cipher):
+		//   (a) pre-bytes — almost certainly a cipher issue (wrong n-param or sig);
+		//   (b) post-bytes burst — >= postBytes403CipherThreshold consecutive
+		//       403s after bytes were written usually means YouTube rotated the
+		//       cipher solver mid-download; invalidate so the next refresh
+		//       re-solves rather than spinning in ErrQualityLost cycles
+		//       (audit reports/worker.md F11).
 		// CAS rather than Load+Store: video and audio downloaders share a
 		// cipherSolver, so concurrent 403s on both could otherwise both pass
 		// the Load check, both Store(true), and both invoke OnCipherFailure
 		// — duplicating an InvalidateSolver call. CAS guarantees exactly one
 		// fire per downloader instance.
-		if statusCode == 403 && d.bytesWritten.Load() == 0 &&
-			d.cipherFailureFired.CompareAndSwap(false, true) {
-			if d.OnCipherFailure != nil {
+		if statusCode == 403 {
+			hasBytes := d.bytesWritten.Load() > 0
+			fireCipher := !hasBytes || *consecutiveGoneErrors >= postBytes403CipherThreshold
+			if fireCipher && d.cipherFailureFired.CompareAndSwap(false, true) &&
+				d.OnCipherFailure != nil {
 				d.OnCipherFailure()
 			}
 		}

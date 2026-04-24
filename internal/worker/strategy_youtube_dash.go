@@ -217,7 +217,9 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		})
 		if cipherSolver != nil && videoInfo.PlayerURL != "" {
 			result.VideoDownloader.OnCipherFailure = func() {
-				job.Logger.Warn("[Cipher] 403 before any data — invalidating solver", "playerURL", videoInfo.PlayerURL)
+				// Engine fires once per downloader instance on either a
+				// pre-bytes 403 OR a post-bytes 403 burst — see audit F11.
+				job.Logger.Warn("[Cipher] 403 signal — invalidating solver", "playerURL", videoInfo.PlayerURL)
 				cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
 			}
 		}
@@ -248,7 +250,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		})
 		if cipherSolver != nil && videoInfo.PlayerURL != "" {
 			result.AudioDownloader.OnCipherFailure = func() {
-				job.Logger.Warn("[Cipher] 403 before any data — invalidating solver", "playerURL", videoInfo.PlayerURL)
+				job.Logger.Warn("[Cipher] 403 signal — invalidating solver", "playerURL", videoInfo.PlayerURL)
 				cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
 			}
 		}
