@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/engine"
-	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -112,43 +111,19 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			downloadDone <- err
 		}()
 
-		var downloadErr error
-		qualityChanged := false
-
-	awaitYTDownload:
-		for {
-			select {
-			case newQ := <-qualityChangeCh:
-				// Proactive quality change while download is running
-				if time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration {
-					// Too soon — don't split. Reset monitor baseline so it
-					// re-detects the change once we're past minSegmentDuration.
-					o.logger.Debug("quality change ignored (min segment duration)",
-						"from", currentQuality.Label, "to", newQ.Label,
-						"jobID", jobCtx.Job.ID)
-					if monitor != nil {
-						monitor.UpdateBaseline(currentQuality)
-					}
-					continue
-				}
-				qualityChanged = true
-				o.logger.Info("proactive quality change detected, stopping downloaders",
-					"from", currentQuality.Label, "to", newQ.Label,
-					"jobID", jobCtx.Job.ID)
-				// Cancel current downloaders
+		qualityChanged, downloadErr := o.awaitDownloadOrQualityChange(
+			downloadDone, qualityChangeCh,
+			segmentStartTime, currentQuality, monitor,
+			func() {
 				if result.VideoDownloader != nil {
 					result.VideoDownloader.Cancel()
 				}
 				if result.AudioDownloader != nil {
 					result.AudioDownloader.Cancel()
 				}
-				downloadErr = <-downloadDone
-				break awaitYTDownload
-			case downloadErr = <-downloadDone:
-				// Download stopped on its own
-				break awaitYTDownload
-			}
-		}
+			},
+			"youtube", jobCtx.Job.ID,
+		)
 
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -237,55 +212,12 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				"from", currentQuality.Label, "to", newQuality.Label,
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
-			if o.notifier != nil {
-				o.notifier.Send("YouTube Quality Split",
-					fmt.Sprintf("Stream quality changed during download: %s", jobCtx.Job.Title),
-					notifications.TypeDownload,
-					[]notifications.Field{
-						{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
-						{Name: "From", Value: currentQuality.Label, Inline: true},
-						{Name: "To", Value: newQuality.Label, Inline: true},
-						{Name: "Segment", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true},
-					},
-					notifications.SendOptions{
-						URL:       jobCtx.Job.URL,
-						Thumbnail: jobCtx.Job.ThumbnailURL,
-						Event:     "quality_split",
-					},
-				)
-			}
+			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex)
 
 			// Mux the old segment in the background (unless too short)
 			if !shortSegment {
-				muxIdx := segmentIndex
-				muxStart := segmentStartTime
-				muxEnd := segmentEndTime
-				muxQuality := currentQuality
-				muxResult := result
-				segmentMuxWg.Add(1)
-				go func() {
-					defer func() {
-						if r := recover(); r != nil {
-							o.logger.Error("panic in mux segment goroutine", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
-						}
-					}()
-					defer segmentMuxWg.Done()
-					// Detached from the parent ctx so user-cancellation doesn't
-					// orphan a partial output, but with a 5-min ceiling: defer
-					// segmentMuxWg.Wait() means a stuck FFmpeg blocks shutdown
-					// indefinitely, and worker.Stop()'s 10s grace can't override
-					// it. 5 min is well above any normal segment mux time.
-					muxCtx, muxCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-					defer muxCancel()
-					seg, muxErr := o.muxSegment(muxCtx, jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
-					if muxErr != nil {
-						o.logger.Error("failed to mux quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
-					} else if seg != nil {
-						o.logger.Info("quality segment muxed",
-							"segment", muxIdx, "quality", muxQuality.Label,
-							"file", seg.Filename, "jobID", jobCtx.Job.ID)
-					}
-				}()
+				o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
+					segmentStartTime, segmentEndTime, currentQuality, result, "youtube")
 				segmentIndex++
 			} else {
 				o.logger.Debug("skipping short segment mux",

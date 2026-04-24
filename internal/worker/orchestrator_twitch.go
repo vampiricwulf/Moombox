@@ -241,35 +241,15 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		}()
 
 		var dlErr error
-		qualityChanged := false
+		var qualityChanged bool
 
 		if !isVod && variant.FetchVariantsFn != nil {
-		awaitTwitchDownload:
-			for {
-				select {
-				case newQ := <-qualityChangeCh:
-					if time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration {
-						// Too soon — don't split. Reset monitor baseline so it
-						// re-detects the change once we're past minSegmentDuration.
-						o.logger.Debug("quality change ignored (min segment duration)",
-							"from", currentQuality.Label, "to", newQ.Label,
-							"jobID", jobCtx.Job.ID)
-						if twitchMonitor != nil {
-							twitchMonitor.UpdateBaseline(currentQuality)
-						}
-						continue
-					}
-					qualityChanged = true
-					o.logger.Info("proactive quality change detected",
-						"from", currentQuality.Label, "to", newQ.Label,
-						"jobID", jobCtx.Job.ID)
-					videoDl.Cancel()
-					dlErr = <-downloadDone
-					break awaitTwitchDownload
-				case dlErr = <-downloadDone:
-					break awaitTwitchDownload
-				}
-			}
+			qualityChanged, dlErr = o.awaitDownloadOrQualityChange(
+				downloadDone, qualityChangeCh,
+				segmentStartTime, currentQuality, twitchMonitor,
+				func() { videoDl.Cancel() },
+				"twitch", jobCtx.Job.ID,
+			)
 		} else {
 			dlErr = <-downloadDone
 		}
@@ -347,54 +327,13 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				"from", currentQuality.Label, "to", newQuality.Label,
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
-			if o.notifier != nil {
-				o.notifier.Send("Twitch Quality Split",
-					fmt.Sprintf("Stream quality changed during download: %s", jobCtx.Job.Title),
-					notifications.TypeDownload,
-					[]notifications.Field{
-						{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
-						{Name: "From", Value: currentQuality.Label, Inline: true},
-						{Name: "To", Value: newQuality.Label, Inline: true},
-						{Name: "Segment", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true},
-					},
-					notifications.SendOptions{
-						URL:       jobCtx.Job.URL,
-						Thumbnail: jobCtx.Job.ThumbnailURL,
-						Event:     "quality_split",
-					},
-				)
-			}
+			o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex)
 
 			// Mux the old segment in the background (unless too short)
 			if !shortSegment {
-				muxIdx := segmentIndex
-				muxStart := segmentStartTime
-				muxEnd := segmentEndTime
-				muxQuality := currentQuality
-				muxVideoPath := videoPath
-				segmentMuxWg.Add(1)
-				go func() {
-					defer func() {
-						if r := recover(); r != nil {
-							o.logger.Error("panic in Twitch mux segment goroutine", "panic", fmt.Sprint(r), "jobID", jobCtx.Job.ID)
-						}
-					}()
-					defer segmentMuxWg.Done()
-					muxResult := &DownloadResult{HasVideo: true, VideoPath: muxVideoPath}
-					// See orchestrator_youtube.go for rationale: detached from
-					// parent ctx (user-cancel preserves partial), bounded at
-					// 5 min so a stuck FFmpeg can't pin shutdown indefinitely.
-					muxCtx, muxCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-					defer muxCancel()
-					seg, muxErr := o.muxSegment(muxCtx, jobCtx, muxIdx, muxStart, muxEnd, muxQuality, muxResult)
-					if muxErr != nil {
-						o.logger.Error("failed to mux Twitch quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
-					} else if seg != nil {
-						o.logger.Info("Twitch quality segment muxed",
-							"segment", muxIdx, "quality", muxQuality.Label,
-							"file", seg.Filename, "jobID", jobCtx.Job.ID)
-					}
-				}()
+				muxResult := &DownloadResult{HasVideo: true, VideoPath: videoPath}
+				o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
+					segmentStartTime, segmentEndTime, currentQuality, muxResult, "twitch")
 				segmentIndex++
 			} else {
 				o.logger.Debug("skipping short segment mux",
