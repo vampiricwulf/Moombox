@@ -1,6 +1,55 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.19` with `cmd/moombox` small audit fixes.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.20` with a wide small-fix sweep across most subsystems.
 
-This build bundles Sprint #1 + Sprint #2 work plus fourteen batches from the multi-report audit. All 291 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus fifteen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 15 (test.21)
+
+Wide small-fix sweep across nearly every subsystem; ~40 audit findings
+landed across chat / cookies / database / engine / utils / worker /
+web / TUI / notifications / disk / updater / bgutils / connectivity /
+logger / Twitch / YouTube. Highlights:
+
+- **chat C7, U1, Q7, R3, C16/Q15**: SetOutputFile literal-".resume.json"
+  footgun fixed via `resumeFileAuto` flag; lastWriteAt moved to
+  loop-local; named maxWatchPageBytes / maxChatResponseBytes / chatHTTPTimeout
+  constants; custom HTTP Transport with MaxIdleConnsPerHost=6 so live
+  chat polls amortise TLS handshakes; extractCurrency now handles
+  suffix-form locales ("5,00 €").
+- **cookies #21, #35, #38**: VerifyAuth nil-callback now logs Warn
+  instead of silently reporting cookie-presence as success;
+  youtubeGuideRequestBody helper centralises the Innertube body that
+  was inlined twice; authVerifyTimeout / refreshOverallBudget named
+  consts.
+- **engine #13, #15, #18, #9**: probeHeadSequence falls back to
+  currentSeq+1000 when the high-probe returns no X-Head-Seqnum;
+  429 backoff switched to exponential (1s→64s capped); callIsOnline
+  wraps caller-supplied probe with 2s timeout + panic recovery; DASH
+  parser logs Debug when manifest produces zero streams.
+- **worker F4, F5, F29, F30, F40, F46**: segment-indexing N+1 comments
+  added; Twitch chat MarkStreamEnded gated on IsRunning; PO token
+  generated once per DASH/HLS download instead of twice; descMaxLen
+  named const; calculateProbeInterval thresholds extracted to
+  probeIntervalImminent / Near / Distant.
+- **web S-22, S-19, S-13**: chi RequestID middleware so panic logs
+  carry a reqID; documented TLS 1.2 minimum choice; client-tokens
+  endpoint now returns LastIP redacted to /24 (IPv4) or /64 (IPv6).
+- **utils, logger, notifications, disk, updater, bgutils, connectivity**:
+  utilsHTTPClient gets MaxIdleConnsPerHost=8 + MaxFetchBodySize hoisted
+  to public const; NewSmoothValue NaN-guards alpha; logger lock
+  hierarchy documented; notifications.Wait single-call contract
+  documented; disk_windows quota semantics + updater.ApplyUpdate
+  rename-window race documented; bgutils QI-5 named responsePrefixMax,
+  QI-7 demoted integrity-token Info → Debug; connectivity
+  OnStateChange callback latency documented.
+- **twitch #9, #23, #25, #26, #29, #33, #44**: GQL ClientID +
+  persisted-query-hash rotation + verification-date docs; unused
+  TwitchEmoteAPIs.BTTVGlobal/FFZGlobal/SevenTVGlobal removed; new
+  RawStreamType field preserves original stream type before
+  live/rerun normalization.
+- **database Q6**: GetJobStats SQL interpolates from JobStatus
+  constants; rename-safe.
+- **TUI Finding 5**: audit dismissed — bubbles/v2 list.RemoveItem
+  has a void return in this version, not a tea.Cmd.
 
 ### Manual batch 14 (test.20)
 
