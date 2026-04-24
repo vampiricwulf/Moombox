@@ -109,4 +109,10 @@ type runState struct {
 	// reference them before tui_wiring fires) ---
 	tuiUpdateStatusCh chan tui.UpdateStatusMsg
 	tuiDiskStatusCh   chan tui.DiskStatusMsg
+
+	// --- Subscription handles (assigned by monitor_callbacks wiring; needed
+	// by shutdown to unsubscribe cleanly before the database closes) ---
+	logSub            chan string
+	unsubWSJobUpdate  func()
+	unsubWSJobsChange func()
 }

@@ -639,7 +639,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	}
 
 	// Database -> WebSocket: broadcast job updates
-	unsubWSJobUpdate := db.OnJobUpdate(func(job *database.Job) {
+	s.unsubWSJobUpdate = db.OnJobUpdate(func(job *database.Job) {
 		// Skip broadcasting updates for archived (old finished) jobs
 		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
 			cfgMu.RLock()
@@ -652,7 +652,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}
 		wsHub.BroadcastJobUpdate(job.ID, job)
 	})
-	unsubWSJobsChange := db.OnJobsChange(func(jobs []*database.Job) {
+	s.unsubWSJobsChange = db.OnJobsChange(func(jobs []*database.Job) {
 		// Keep per-job log tracking in sync (matches TS knownJobIds update)
 		activeIDs := make(map[string]struct{}, len(jobs))
 		for _, j := range jobs {
@@ -666,14 +666,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	})
 
 	// Logger -> WebSocket: broadcast log lines + route to per-job buffers
-	logSub := log.Subscribe()
+	s.logSub = log.Subscribe()
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("log forwarder panic", "panic", r)
 			}
 		}()
-		for line := range logSub {
+		for line := range s.logSub {
 			wsHub.BroadcastLog(line)
 			db.RouteLogToJobs(line) // Route to per-job buffer (matches TS knownJobIds log routing)
 		}
@@ -1412,77 +1412,5 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}
 	}
 
-	log.Info("Shutdown signal received, shutting down gracefully...")
-
-	// 10-second force-exit timer. Close rate limiters here too — os.Exit
-	// skips remaining defers, so shutting them down in-line is the only way
-	// their goroutines get a chance to stop cleanly. closeLimiters() and
-	// closeLog() are both sync.Once-guarded so the deferred close paths
-	// already running concurrently do not double-close these resources.
-	forceExit := time.AfterFunc(10*time.Second, func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Fprintf(os.Stderr, "force-exit handler panic: %v\n", r)
-			}
-		}()
-		log.Error("Graceful shutdown timed out, forcing exit")
-		s.closeLimiters()
-		s.closeLog() // flush buffered logs before force exit
-		os.Exit(1)
-	})
-	defer forceExit.Stop()
-
-	// =========================================================================
-	// Shutdown order: consumers first, flush data, infrastructure last
-	// Each service stop is isolated (like TS stopService pattern) to prevent
-	// one failing service from blocking shutdown of others.
-	// =========================================================================
-
-	// stopService stops a named service with panic isolation and logging.
-	stopService := func(name string, fn func()) {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error(fmt.Sprintf("[Moombox] Error stopping %s: %v", name, r))
-			}
-		}()
-		fn()
-		log.Debug(fmt.Sprintf("[Moombox] Stopped %s", name))
-	}
-
-	// 1. Stop monitors
-	stopService("TwitchMonitor", twitchMon.Stop)
-	stopService("DecapiMonitor", decapiMon.Stop)
-	stopService("FeedMonitor", feedMon.Stop)
-
-	// 2. Stop worker (waits for active downloads to save state)
-	stopService("DownloadWorker", dlWorker.Stop)
-
-	// 3. Flush in-flight notifications (may have been fired during worker stop)
-	stopService("Notifications", notifyMgr.Wait)
-
-	// 4. Stop cookie refresh and auto-cookie service
-	stopService("CookieRefresh", cookieRefresh.Stop)
-	stopService("AutoCookies", autoCookieSvc.Stop)
-
-	// 5. Cleanup PO token provider
-	stopService("PotProvider", potProvider.Cleanup)
-
-	// 6. Stop web server
-	stopService("WebServer", webServer.Stop)
-
-	// 7. Unsubscribe log forwarder and DB event subscribers
-	log.Unsubscribe(logSub)
-	unsubWSJobUpdate()
-	unsubWSJobsChange()
-
-	// 8. Flush database (sync.Once-guarded — also fires from defer s.closeDB)
-	stopService("Database", s.closeDB)
-
-	if s.restartRequested.Load() {
-		log.Info("Shutdown complete, restarting...")
-	} else {
-		log.Info("Shutdown complete")
-	}
-
-	return s.restartRequested.Load()
+	return s.shutdown()
 }
