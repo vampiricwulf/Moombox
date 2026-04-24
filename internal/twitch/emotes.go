@@ -183,7 +183,10 @@ func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) []Emot
 
 	data, err := fetchJSON(ctx, url)
 	if err != nil {
-		er.logger.Debug("bttv fetch failed", "err", err)
+		// Warn rather than Debug — a persistently-down emote provider was
+		// invisible at the default log level, so missing emotes looked like
+		// a Moombox bug. Audit-finding twitch.md #36.
+		er.logger.Warn("bttv fetch failed", "err", err, "channelID", channelID)
 		return nil
 	}
 
@@ -199,7 +202,7 @@ func (er *EmoteResolver) fetchBTTV(ctx context.Context, channelID string) []Emot
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
-		er.logger.Debug("bttv parse failed", "err", err)
+		er.logger.Warn("bttv parse failed", "err", err, "channelID", channelID)
 		return nil
 	}
 
@@ -230,7 +233,8 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) []Emote
 
 	data, err := fetchJSON(ctx, url)
 	if err != nil {
-		er.logger.Debug("ffz fetch failed", "err", err)
+		// Audit-finding twitch.md #36 — see fetchBTTV.
+		er.logger.Warn("ffz fetch failed", "err", err, "channelID", channelID)
 		return nil
 	}
 
@@ -245,7 +249,7 @@ func (er *EmoteResolver) fetchFFZ(ctx context.Context, channelID string) []Emote
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
-		er.logger.Debug("ffz parse failed", "err", err)
+		er.logger.Warn("ffz parse failed", "err", err, "channelID", channelID)
 		return nil
 	}
 
@@ -283,7 +287,8 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) []Emote
 
 	data, err := fetchJSON(ctx, url)
 	if err != nil {
-		er.logger.Debug("7tv fetch failed", "err", err)
+		// Audit-finding twitch.md #36 — see fetchBTTV.
+		er.logger.Warn("7tv fetch failed", "err", err, "channelID", channelID)
 		return nil
 	}
 
@@ -306,7 +311,7 @@ func (er *EmoteResolver) fetch7TV(ctx context.Context, channelID string) []Emote
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
-		er.logger.Debug("7tv parse failed", "err", err)
+		er.logger.Warn("7tv parse failed", "err", err, "channelID", channelID)
 		return nil
 	}
 

@@ -332,26 +332,9 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 		}
 	}
 
-	// Profile image URL fallback: if not in StreamMetadata, try direct GQL query
-	if info.ProfileImageURL == "" {
-		safeLogin := safeLoginRe.ReplaceAllString(channelLogin, "")
-		var userResp struct {
-			Data struct {
-				User *struct {
-					ProfileImageURL string `json:"profileImageURL"`
-				} `json:"user"`
-			} `json:"data"`
-		}
-		userQuery := gqlRawQuery{
-			Query: fmt.Sprintf(`{ user(login: "%s") { profileImageURL(width: 300) } }`, safeLogin),
-		}
-		rawResp, err := a.gqlRequest(ctx, "UserProfileImageFallback", userQuery, authToken)
-		if err == nil {
-			if json.Unmarshal(rawResp, &userResp) == nil && userResp.Data.User != nil {
-				info.ProfileImageURL = userResp.Data.User.ProfileImageURL
-			}
-		}
-	}
+	// Profile image URL is already part of the StreamMetadata response above
+	// — the previous unbatched fallback GQL call was vestigial and tripled
+	// monitor-cycle latency for any rare miss. Audit-finding twitch.md #10.
 
 	// Normalize stream type
 	if info.StreamType != "rerun" {

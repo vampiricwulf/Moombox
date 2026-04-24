@@ -62,16 +62,6 @@ type ChatDownloaderOptions struct {
 	EmoteResolver   *EmoteResolver
 }
 
-// twitchChatResumeState persists IRC chat state for resume after reconnection.
-// Matches TypeScript TwitchChatResumeState interface.
-type twitchChatResumeState struct {
-	MessageCount    int      `json:"messageCount"`
-	LastTimestampMs int64    `json:"lastTimestampMs"`
-	Timestamp       int64    `json:"timestamp"`
-	StreamID        string   `json:"streamId"`
-	RecentIDs       []string `json:"recentIds,omitempty"`
-}
-
 // NewChatDownloader creates a new IRC chat downloader.
 func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 	Debug(msg string, args ...any)
@@ -118,14 +108,19 @@ func (cd *ChatDownloader) getResumeFilePath() string {
 
 // loadResumeState loads the resume state from disk.
 // Returns nil if no valid resume state exists for the current stream.
-func (cd *ChatDownloader) loadResumeState() *twitchChatResumeState {
+//
+// Both the IRC and VOD paths share the exported ChatResumeState type from
+// types.go — the previously separate `twitchChatResumeState` mirror was
+// dropped (audit-finding twitch.md #43). LastOffsetSeconds is unused on the
+// IRC side and serializes as 0; LastTimestampMs is unused on the VOD side.
+func (cd *ChatDownloader) loadResumeState() *ChatResumeState {
 	resumePath := cd.getResumeFilePath()
 	data, err := os.ReadFile(resumePath)
 	if err != nil {
 		return nil
 	}
 
-	var state twitchChatResumeState
+	var state ChatResumeState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil
 	}
@@ -144,7 +139,7 @@ func (cd *ChatDownloader) saveResumeState() {
 	cd.mu.Lock()
 	recentIDs := make([]string, 0, len(cd.seenOrder))
 	recentIDs = append(recentIDs, cd.seenOrder...)
-	state := twitchChatResumeState{
+	state := ChatResumeState{
 		MessageCount:    cd.totalCount,
 		LastTimestampMs: cd.lastTimestampMs,
 		Timestamp:       time.Now().UnixMilli(),
@@ -357,7 +352,14 @@ func (cd *ChatDownloader) Stop() {
 	cd.mu.Unlock()
 }
 
-// MarkStreamEnded signals that the stream has ended.
+// MarkStreamEnded signals that the upstream live stream has ended and the
+// chat downloader should drain. For IRC this is identical to Stop — both
+// flip `running=false` and let the session loop unwind. The wrapper exists
+// for symmetry with VodChatDownloader.MarkStreamEnded (which is a no-op
+// because VOD pagination terminates on its own when the server says
+// hasNextPage=false). Keeping both methods on the TwitchChatDownloader
+// interface lets the orchestrator call MarkStreamEnded on either flavour
+// without type-asserting. Audit-finding twitch.md #45.
 func (cd *ChatDownloader) MarkStreamEnded() {
 	cd.Stop()
 }
