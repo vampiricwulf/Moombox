@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	isatty "github.com/mattn/go-isatty"
@@ -43,15 +42,17 @@ func youtubeThumbnailURL(videoID string) string {
 }
 
 // resolveOutputDir returns the channel-specific output directory if set,
-// otherwise falls back to the global default under cfgMu.RLock (per audit
+// otherwise falls back to the global default under store.Read (per audit
 // reports/cmd-moombox.md D-5).
-func resolveOutputDir(ch *config.ChannelConfig, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) string {
+func resolveOutputDir(ch *config.ChannelConfig, store *config.Store) string {
 	if ch.OutputDirectory != "" {
 		return ch.OutputDirectory
 	}
-	cfgMu.RLock()
-	defer cfgMu.RUnlock()
-	return cfg.Paths.OutputDirectory
+	var dir string
+	store.Read(func(c *config.MoomboxConfig) {
+		dir = c.Paths.OutputDirectory
+	})
+	return dir
 }
 
 // nopLogger is a no-op logger for CLI commands where full logging isn't needed.
@@ -121,10 +122,11 @@ func extractWSIP(r *http.Request) string {
 // the slice. When ageDays is 0, the cutoff is "now" so all finished jobs are
 // hidden (any finished job's updated_at will be before the current moment).
 // Returns the original slice unchanged when no jobs are filtered out.
-func filterJobsByAge(jobs []*database.Job, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) []*database.Job {
-	cfgMu.RLock()
-	ageDays := int(cfg.Monitors.HideFinishedAgeDays.Value)
-	cfgMu.RUnlock()
+func filterJobsByAge(jobs []*database.Job, store *config.Store) []*database.Job {
+	var ageDays int
+	store.Read(func(c *config.MoomboxConfig) {
+		ageDays = int(c.Monitors.HideFinishedAgeDays.Value)
+	})
 	cutoff := time.Now().AddDate(0, 0, -ageDays)
 	anyFiltered := false
 	for _, j := range jobs {

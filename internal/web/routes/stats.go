@@ -2,7 +2,6 @@ package routes
 
 import (
 	"net/http"
-	"sync"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -36,18 +35,20 @@ func ComputeWarnLevel(usedPct float64, cfg *config.MoomboxConfig) string {
 	return "ok"
 }
 
-// UpdateDiskStatus queries disk space and stores the result in SharedDiskStatus.
-// cfgMu protects concurrent reads of the disk threshold config fields.
-// Returns the DiskStatus and warn level, or nil on error.
-func UpdateDiskStatus(outputDir string, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) *DiskStatus {
+// UpdateDiskStatus queries disk space and stores the result in
+// SharedDiskStatus. The Store's Read serialises threshold-field access with
+// concurrent config Updates. Returns the DiskStatus, or nil on disk-read
+// error.
+func UpdateDiskStatus(outputDir string, store *config.Store) *DiskStatus {
 	ds, err := disk.GetDiskSpace(outputDir)
 	if err != nil {
 		return nil
 	}
 
-	cfgMu.RLock()
-	warnLevel := ComputeWarnLevel(ds.UsedPct, cfg)
-	cfgMu.RUnlock()
+	var warnLevel string
+	store.Read(func(c *config.MoomboxConfig) {
+		warnLevel = ComputeWarnLevel(ds.UsedPct, c)
+	})
 
 	status := &DiskStatus{
 		Free:      ds.Free,

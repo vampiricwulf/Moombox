@@ -311,7 +311,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	cfgMu.RLock()
 	initialOutputDir := cfg.Paths.OutputDirectory
 	cfgMu.RUnlock()
-	routes.UpdateDiskStatus(initialOutputDir, cfg, webServer.CfgMu())
+	routes.UpdateDiskStatus(initialOutputDir, s.configStore)
 
 	// Auto-update check: initial check + daily ticker
 	if upd != nil && cfg.Updates.AutoCheckUpdates {
@@ -390,7 +390,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 					cfgMu.RLock()
 					diskOutputDir := cfg.Paths.OutputDirectory
 					cfgMu.RUnlock()
-					if ds := routes.UpdateDiskStatus(diskOutputDir, cfg, webServer.CfgMu()); ds != nil {
+					if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
 						// Broadcast to web clients
 						wsHub.Broadcast("disk_status", map[string]any{
 							"free":      ds.Free,

@@ -114,7 +114,7 @@ func (s *runState) wireMonitorCallbacks() {
 		s.log.Info("Video found", slog.String("source", source), slog.String("videoID", videoID), slog.String("title", title))
 
 		includeNonLive := ch.IncludeNonLiveContent
-		outputDir := resolveOutputDir(ch, s.cfg, &s.cfgMu)
+		outputDir := resolveOutputDir(ch, s.configStore)
 		thumbnailURL := youtubeThumbnailURL(videoID)
 
 		now := time.Now().UTC().Format(time.RFC3339)
@@ -144,7 +144,7 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		s.db.AddToHistory(videoID)
 		s.dlWorker.EnqueueJob(videoID)
-		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(s.db), s.cfg, s.webServer.CfgMu()))
+		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(s.db), s.configStore))
 		if s.notifyMgr.HasTargets() {
 			s.notifyMgr.Send("Stream Found",
 				fmt.Sprintf("Found matching stream: %s", title),
@@ -188,7 +188,7 @@ func (s *runState) wireMonitorCallbacks() {
 		jobID := twitch.BuildJobID(info.StreamID, false)
 		s.log.Info("Stream found by Twitch monitor", slog.String("jobID", jobID), slog.String("title", info.Title))
 
-		outputDir := resolveOutputDir(ch, s.cfg, &s.cfgMu)
+		outputDir := resolveOutputDir(ch, s.configStore)
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		title := info.ChannelDisplayName + " — " + info.Title
@@ -224,7 +224,7 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		s.db.AddToHistory(jobID)
 		s.dlWorker.EnqueueJob(jobID)
-		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(s.db), s.cfg, s.webServer.CfgMu()))
+		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(s.db), s.configStore))
 		if s.notifyMgr.HasTargets() {
 			twitchFields := []notifications.Field{
 				{Name: "Channel", Value: info.ChannelDisplayName, Inline: true},
@@ -313,7 +313,7 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		s.db.PruneJobLogs(activeIDs)
 		s.log.PruneJobLogs(activeIDs)
-		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.cfg, s.webServer.CfgMu()))
+		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 	})
 
 	// Logger -> WebSocket: broadcast log lines + route to per-job buffers

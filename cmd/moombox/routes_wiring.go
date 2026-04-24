@@ -70,7 +70,7 @@ func (s *runState) wireRoutes() func() {
 		OnHideFinishedAgeChanged: func() {
 			// Re-broadcast job list with updated archive threshold
 			jobs, _ := s.db.GetAllJobs()
-			s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.cfg, s.webServer.CfgMu()))
+			s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 		},
 		OnChannelChange: s.kickMonitors,
 	})

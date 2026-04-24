@@ -87,7 +87,7 @@ func (s *runState) wireWebSocket() {
 		if err != nil {
 			jobs = []*database.Job{} // Send empty array, not null
 		}
-		jobs = filterJobsByAge(jobs, s.cfg, s.webServer.CfgMu())
+		jobs = filterJobsByAge(jobs, s.configStore)
 		return map[string]any{
 			"jobs":            jobs,
 			"logs":            s.log.GetRecentLines(),
