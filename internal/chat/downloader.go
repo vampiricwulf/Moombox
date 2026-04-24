@@ -16,10 +16,15 @@ import (
 )
 
 const (
-	dedupKeepSize                = 5000 // Keep last N IDs for dedup
-	maxConsecErrorsLive          = 20
-	maxConsecErrorsVod           = 5
-	maxStaleContinuationAttempts = 30
+	dedupKeepSize       = 5000 // Keep last N IDs for dedup
+	maxConsecErrorsLive = 20
+	maxConsecErrorsVod  = 5
+	// maxStaleContinuationAttempts bounds the fresh-continuation retry loop.
+	// With exponential backoff 10s→5min cap, 12 attempts = ~50 min worst case.
+	// The inner loop also exits early on cd.shouldStop() (which includes
+	// MarkStreamEnded), so in the healthy path the orchestrator trims this
+	// window further (audit chat.md R2 — was 30, tightened to 12).
+	maxStaleContinuationAttempts = 12
 	writeInterval                = 1 * time.Second // Flush batched messages to disk at most once per interval
 )
 
