@@ -3,12 +3,12 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -129,6 +129,13 @@ func (cd *ChatDownloader) reportIOError(err error) {
 		cd.OnError(err)
 	}
 }
+
+// chatWarnAdapter adapts the Debug-only cd.Logger to the Warn-shaped
+// utils.ChatFileLogger. Per-message marshal failures inside AppendChatMessages
+// are non-fatal drift signals; Debug is the right severity.
+type chatWarnAdapter struct{ cd *ChatDownloader }
+
+func (a chatWarnAdapter) Warn(msg string, args ...any) { a.cd.logDebug(msg, args...) }
 
 // NewChatDownloader creates a new chat downloader.
 func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
@@ -652,121 +659,29 @@ func (cd *ChatDownloader) writeChatFile() {
 }
 
 // incrementalAppend performs an in-place append of cd.messages to the existing
-// chat file on disk. Returns true on success, false if a full rewrite is needed.
+// chat file on disk via utils.AppendChatMessages. Returns true on success or
+// on the truncate-then-write-failure path (file broken but caller should
+// advance in-memory state, per utils.ErrChatFilePartialWrite). Returns false
+// when the caller should fall back to a full rewrite.
 func (cd *ChatDownloader) incrementalAppend(outputFile string) bool {
 	newMessages := cd.messages
 	if len(newMessages) == 0 {
 		return true
 	}
 
-	// Check if output file exists
-	info, err := os.Stat(outputFile)
-	if err != nil || info.Size() < 10 {
-		// File missing or too small — fall back to full write
-		if cd.OnError != nil {
-			if err != nil {
-				cd.OnError(fmt.Errorf("chat file stat failed, rewriting: %w", err))
-			} else {
-				cd.OnError(fmt.Errorf("chat file too small (%d bytes), rewriting", info.Size()))
-			}
-		}
-		return false
+	err := utils.AppendChatMessages(outputFile, newMessages, chatWarnAdapter{cd})
+	if err == nil {
+		return true
 	}
-
-	f, err := os.OpenFile(outputFile, os.O_RDWR, 0o644)
-	if err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("chat file open failed, rewriting: %w", err))
-		}
-		return false
+	cd.reportIOError(fmt.Errorf("chat file append: %w", err))
+	if errors.Is(err, utils.ErrChatFilePartialWrite) {
+		// File was truncated but WriteAt failed — falling back to full rewrite
+		// would read the broken file, recover zero prior messages, and drop
+		// history. Advance in-memory state instead; the C8 reportIOError path
+		// already preserved the resume file (audit chat.md C8).
+		return true
 	}
-	defer f.Close()
-
-	fileSize := info.Size()
-
-	// Read last 10 bytes to find ']'
-	tailSize := min(int64(10), fileSize)
-	tailBuf := make([]byte, tailSize)
-	_, err = f.ReadAt(tailBuf, fileSize-tailSize)
-	if err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("chat file read failed, rewriting: %w", err))
-		}
-		return false
-	}
-
-	tail := string(tailBuf)
-	bracketOffset := -1
-	for i := len(tail) - 1; i >= 0; i-- {
-		if tail[i] == ']' {
-			bracketOffset = i
-			break
-		}
-	}
-	if bracketOffset == -1 {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("chat file missing closing bracket, rewriting"))
-		}
-		return false
-	}
-
-	bracketBytePos := fileSize - tailSize + int64(bracketOffset)
-
-	// Check if there are existing messages (look for '}' before ']')
-	hasExisting := false
-	if bracketBytePos > 5 {
-		checkSize := min(int64(5), bracketBytePos)
-		checkBuf := make([]byte, checkSize)
-		if _, err := f.ReadAt(checkBuf, bracketBytePos-checkSize); err != nil {
-			if cd.OnError != nil {
-				cd.OnError(fmt.Errorf("chat file check-read failed, rewriting: %w", err))
-			}
-			return false
-		}
-		for i := len(checkBuf) - 1; i >= 0; i-- {
-			if checkBuf[i] == '}' {
-				hasExisting = true
-				break
-			} else if checkBuf[i] != ' ' && checkBuf[i] != '\n' && checkBuf[i] != '\r' && checkBuf[i] != '\t' {
-				break
-			}
-		}
-	}
-
-	// Build append content
-	var sb strings.Builder
-	if hasExisting {
-		sb.WriteString(",\n")
-	}
-	for i, msg := range newMessages {
-		msgBytes, err := json.Marshal(msg)
-		if err != nil {
-			continue
-		}
-		sb.WriteString("    ")
-		sb.Write(msgBytes)
-		if i < len(newMessages)-1 {
-			sb.WriteString(",\n")
-		}
-	}
-	sb.WriteString("\n  ]\n}")
-	appendStr := sb.String()
-
-	// Truncate at ']' position, then write new content
-	if err := f.Truncate(bracketBytePos); err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("chat file truncate failed, rewriting: %w", err))
-		}
-		return false
-	}
-	// WriteAt after truncation — log if it fails since data may be lost.
-	// reportIOError so Start() preserves the resume file (audit chat.md C8) —
-	// the file may now be partially truncated/written.
-	if _, err := f.WriteAt([]byte(appendStr), bracketBytePos); err != nil {
-		cd.reportIOError(fmt.Errorf("write appended chat messages: %w", err))
-		// Data partially written but caller should not re-buffer — treat as success.
-	}
-	return true
+	return false
 }
 
 func (cd *ChatDownloader) writeFullChatFile() {
@@ -782,42 +697,8 @@ func (cd *ChatDownloader) writeFullChatFile() {
 		Messages:        cd.messages,
 	}
 
-	jsonBytes, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		cd.reportIOError(fmt.Errorf("marshal chat data: %w", err))
-		return
-	}
-	jsonBytes = utils.PadMessageCountJSON(jsonBytes)
-
-	tmpFile := outputFile + ".tmp"
-	// Write + fsync + close before rename. A crash between write and rename
-	// must not leave an empty/truncated tmp file that could then be renamed
-	// over a good chat.json, since the rename is the atomicity guarantee.
-	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		cd.reportIOError(fmt.Errorf("open chat file: %w", err))
-		return
-	}
-	if _, err := f.Write(jsonBytes); err != nil {
-		f.Close()
-		os.Remove(tmpFile)
+	if err := utils.WriteChatFileAtomic(outputFile, &data); err != nil {
 		cd.reportIOError(fmt.Errorf("write chat file: %w", err))
-		return
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmpFile)
-		cd.reportIOError(fmt.Errorf("fsync chat file: %w", err))
-		return
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmpFile)
-		cd.reportIOError(fmt.Errorf("close chat file: %w", err))
-		return
-	}
-	if err := os.Rename(tmpFile, outputFile); err != nil {
-		os.Remove(tmpFile)
-		cd.reportIOError(fmt.Errorf("rename chat file: %w", err))
 	}
 }
 
@@ -856,82 +737,16 @@ func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
 	}
 }
 
-// updateChatFileHeader updates messageCount and downloadedAt in the JSON header
-// without rewriting the entire file. Reads only the first 1KB.
+// updateChatFileHeader updates messageCount and downloadedAt in the JSON
+// header without rewriting the entire file. IO failures route through
+// reportIOError so the resume file is preserved (audit chat.md C8).
 func (cd *ChatDownloader) updateChatFileHeader() {
 	outputFile, _ := cd.getOutputPaths()
 	if outputFile == "" {
 		return // No output file set yet (early chat)
 	}
-
-	info, err := os.Stat(outputFile)
-	if err != nil {
-		if !os.IsNotExist(err) && cd.OnError != nil {
-			cd.OnError(fmt.Errorf("update chat header: stat: %w", err))
-		}
-		return
-	}
-	if info.Size() < 50 {
-		return // File too small to have a meaningful header yet
-	}
-
-	f, err := os.OpenFile(outputFile, os.O_RDWR, 0o644)
-	if err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("update chat header: open: %w", err))
-		}
-		return
-	}
-	defer f.Close()
-
-	headerSize := min(int64(1024), info.Size())
-
-	headerBuf := make([]byte, headerSize)
-	n, err := f.ReadAt(headerBuf, 0)
-	if err != nil && n == 0 {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("update chat header: read: %w", err))
-		}
-		return
-	}
-	header := string(headerBuf[:n])
-
-	// Replace messageCount value (padded to fixed width)
-	header = utils.ReplaceMessageCount(header, cd.messageCount)
-
-	// Replace downloadedAt value
-	utils.ReplaceQuotedField(&header, `"downloadedAt":`, time.Now().UTC().Format(time.RFC3339))
-
-	// With padded messageCount, the header size should be constant.
-	// Fallback handles legacy files written before padding was added.
-	// Failures here mean the on-disk header is out of sync with the array —
-	// route through reportIOError so the resume file is preserved (audit C8).
-	updatedBytes := []byte(header)
-	if len(updatedBytes) == n {
-		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
-			cd.reportIOError(fmt.Errorf("update chat header: write: %w", err))
-		}
-	} else if len(updatedBytes) > n {
-		restSize := info.Size() - int64(n)
-		var restBuf []byte
-		if restSize > 0 {
-			restBuf = make([]byte, restSize)
-			nRest, _ := f.ReadAt(restBuf, int64(n))
-			restBuf = restBuf[:nRest]
-		}
-		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
-			cd.reportIOError(fmt.Errorf("update chat header: write expanded: %w", err))
-			return
-		}
-		if len(restBuf) > 0 {
-			if _, err := f.WriteAt(restBuf, int64(len(updatedBytes))); err != nil {
-				cd.reportIOError(fmt.Errorf("update chat header: write rest: %w", err))
-				return
-			}
-		}
-		if err := f.Truncate(int64(len(updatedBytes)) + restSize); err != nil {
-			cd.reportIOError(fmt.Errorf("update chat header: truncate: %w", err))
-		}
+	if err := utils.UpdateChatFileHeaderFields(outputFile, cd.messageCount); err != nil {
+		cd.reportIOError(fmt.Errorf("update chat header: %w", err))
 	}
 }
 

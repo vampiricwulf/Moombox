@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 func (cd *ChatDownloader) flush() {
@@ -31,9 +33,11 @@ func (cd *ChatDownloader) flush() {
 		writeErr = cd.writeFullChatFile(msgs, count)
 	} else {
 		// Subsequent flushes: append new messages to existing file
-		writeErr = appendChatMessages(cd.outputPath, msgs, cd.logger)
+		writeErr = utils.AppendChatMessages(cd.outputPath, msgs, cd.logger)
 		if writeErr == nil {
-			updateChatFileHeaderFields(cd.outputPath, count, cd.logger)
+			if err := utils.UpdateChatFileHeaderFields(cd.outputPath, count); err != nil {
+				cd.logger.Warn("update chat header", "err", err)
+			}
 		} else {
 			// Fallback: read the existing file, merge with the current batch,
 			// and rewrite. The earlier implementation passed only `msgs` to
@@ -89,7 +93,7 @@ func (cd *ChatDownloader) writeFullChatFile(msgs []TwitchChatMessage, count int)
 	if cd.recordingStartMs > 0 {
 		chatData.RecordingStartTime = time.UnixMilli(cd.recordingStartMs).UTC().Format(time.RFC3339)
 	}
-	return writeChatFileAtomic(cd.outputPath, &chatData)
+	return utils.WriteChatFileAtomic(cd.outputPath, &chatData)
 }
 
 // pruneDedup trims the seenIDs set to keep only the most recent entries.

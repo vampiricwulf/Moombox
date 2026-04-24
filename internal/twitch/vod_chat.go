@@ -281,14 +281,16 @@ func (vcd *VodChatDownloader) flush() {
 	} else {
 		// Subsequent flushes: append new messages to existing file
 		count := int(vcd.totalCount.Load())
-		if err := appendChatMessages(vcd.outputPath, vcd.messages, vcd.logger); err != nil {
+		if err := utils.AppendChatMessages(vcd.outputPath, vcd.messages, vcd.logger); err != nil {
 			vcd.logger.Error("append vod chat file", "err", err)
 			// Fallback: full rewrite
 			if err2 := vcd.writeFullFile(); err2 != nil {
 				vcd.logger.Error("fallback full write failed", "err", err2)
 			}
 		} else {
-			updateChatFileHeaderFields(vcd.outputPath, count, vcd.logger)
+			if err := utils.UpdateChatFileHeaderFields(vcd.outputPath, count); err != nil {
+				vcd.logger.Warn("update vod chat header", "err", err)
+			}
 		}
 	}
 
@@ -307,7 +309,7 @@ func (vcd *VodChatDownloader) writeFullFile() error {
 		MessageCount:       int(vcd.totalCount.Load()),
 		Messages:           vcd.messages,
 	}
-	return writeChatFileAtomic(vcd.outputPath, &chatData)
+	return utils.WriteChatFileAtomic(vcd.outputPath, &chatData)
 }
 
 // reportProgress calls OnProgress and logs percentage if vodDuration is known.
