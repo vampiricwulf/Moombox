@@ -1,6 +1,18 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.21` with another wide small-fix sweep across cipher / cookies / web / chat / worker / youtube / database / small-packages.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.22` with bgutils / engine / twitch small fixes (audit backlog drain).
 
-This build bundles Sprint #1 + Sprint #2 work plus sixteen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus seventeen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 17 (test.23)
+
+Audit backlog drain — agents report remaining small-fix opportunities are now mostly deferred refactors, test-coverage gaps, or already-shipped (table-stale).
+
+- **bgutils QI-9** — FetchChallenge accepts an optional logger and emits a debug summary of which challenge indices populated. Makes silent extractStringFromArrayOrValue failures distinguishable from genuinely-missing fields when YouTube rotates the challenge format.
+- **engine #17** — fetchSegmentWithRetry returns `(data, permanent bool)` instead of a bare nil. Both in-package callers (catch-up and HLS-VOD parallel) now debug-log the distinction between CDN-evicted (403/410) and retries-exhausted segments. Sets the stage for a future "retry-once-at-end" pass.
+- **engine #26 housekeeping** — replaced a stale `// A8:` audit-reference comment with a real WHY explanation in manifest.go.
+- **twitch #10** — removed vestigial unbatched profile-image fallback GQL call (StreamMetadata already carries it).
+- **twitch #36** — per-provider emote failures now log Warn with channelID context so persistent provider outages surface at default log level.
+- **twitch #43** — removed unexported `twitchChatResumeState`; IRC path uses the shared exported `ChatResumeState` from types.go.
+- **twitch #45** — documented MarkStreamEnded IRC ↔ VOD API symmetry.
 
 ### Manual batch 16 (test.22)
 
