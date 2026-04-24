@@ -215,24 +215,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				lastFullFetch = time.Now()
 				continue
 			}
-			if fullInfo.ScheduledStartTime == "" && job.StreamStartTime == "" {
-				fullInfo.ScheduledStartTime = time.Now().UTC().Format(time.RFC3339)
-			}
-			sp.updateJobMetadata(job, fullInfo, true)
-			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"status": database.StatusLive,
-				"is_vod": false,
-			})
-			// Untrack early chat — it will be handed to the orchestrator
-			if chatDl != nil {
-				sp.untrackChat(chatDl)
-			}
-			return &StreamProcessResult{
-				VideoInfo:      fullInfo,
-				ShouldDownload: true,
-				IsVod:          false,
-				ChatDownloader: chatDl, // Pass pre-started chat to orchestrator
-			}, nil
+			return sp.completeStreamTransition(job, fullInfo, chatDl), nil
 
 		case youtube.StreamVOD, youtube.StreamPostLive:
 			sp.logger.Info("stream became VOD (probe)", "videoID", job.VideoID)
@@ -252,19 +235,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				lastFullFetch = time.Now()
 				continue
 			}
-			sp.updateJobMetadata(job, fullInfo, true)
-			sp.db.UpdateJobFields(job.ID, map[string]any{
-				"is_vod": true,
-			})
-			if chatDl != nil {
-				sp.untrackChat(chatDl)
-			}
-			return &StreamProcessResult{
-				VideoInfo:      fullInfo,
-				ShouldDownload: true,
-				IsVod:          true,
-				ChatDownloader: chatDl,
-			}, nil
+			return sp.completeStreamTransition(job, fullInfo, chatDl), nil
 
 		case youtube.StreamUpcoming:
 			// Still waiting
@@ -282,28 +253,8 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					continue // Retry on next iteration
 				}
 				switch fullInfo.StreamStatus {
-				case youtube.StreamLive:
-					if fullInfo.ScheduledStartTime == "" && job.StreamStartTime == "" {
-						fullInfo.ScheduledStartTime = time.Now().UTC().Format(time.RFC3339)
-					}
-					sp.updateJobMetadata(job, fullInfo, true)
-					sp.db.UpdateJobFields(job.ID, map[string]any{
-						"status": database.StatusLive,
-						"is_vod": false,
-					})
-					if chatDl != nil {
-						sp.untrackChat(chatDl)
-					}
-					return &StreamProcessResult{VideoInfo: fullInfo, ShouldDownload: true, IsVod: false, ChatDownloader: chatDl}, nil
-				case youtube.StreamVOD, youtube.StreamPostLive:
-					sp.updateJobMetadata(job, fullInfo, true)
-					sp.db.UpdateJobFields(job.ID, map[string]any{
-						"is_vod": true,
-					})
-					if chatDl != nil {
-						sp.untrackChat(chatDl)
-					}
-					return &StreamProcessResult{VideoInfo: fullInfo, ShouldDownload: true, IsVod: true, ChatDownloader: chatDl}, nil
+				case youtube.StreamLive, youtube.StreamVOD, youtube.StreamPostLive:
+					return sp.completeStreamTransition(job, fullInfo, chatDl), nil
 				default:
 					// Still upcoming per full fetch — continue polling
 					continue
@@ -315,6 +266,42 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				Error:          fmt.Sprintf("unexpected status: %s", probeInfo.StreamStatus),
 			}, nil
 		}
+	}
+}
+
+// completeStreamTransition finalises the probe-resolution flow once fullInfo
+// says the stream is Live or VOD/PostLive: applies the metadata update,
+// flips the job status (Live gets StatusLive+ScheduledStartTime defaulting;
+// VOD/PostLive just flips is_vod), untracks the early chat so the
+// orchestrator can own it, and returns the StreamProcessResult. Shared
+// between the primary probe path and the auth-probe-unclear fallback
+// (audit reports/worker.md F55).
+func (sp *StreamProcessor) completeStreamTransition(job *database.Job, fullInfo *youtube.VideoInfo, chatDl *chat.ChatDownloader) *StreamProcessResult {
+	isVod := fullInfo.StreamStatus == youtube.StreamVOD || fullInfo.StreamStatus == youtube.StreamPostLive
+
+	if !isVod {
+		// Live path: default ScheduledStartTime to now when neither the fetch
+		// nor the existing job row carries one.
+		if fullInfo.ScheduledStartTime == "" && job.StreamStartTime == "" {
+			fullInfo.ScheduledStartTime = time.Now().UTC().Format(time.RFC3339)
+		}
+	}
+	sp.updateJobMetadata(job, fullInfo, true)
+
+	fields := map[string]any{"is_vod": isVod}
+	if !isVod {
+		fields["status"] = database.StatusLive
+	}
+	sp.db.UpdateJobFields(job.ID, fields)
+
+	if chatDl != nil {
+		sp.untrackChat(chatDl)
+	}
+	return &StreamProcessResult{
+		VideoInfo:      fullInfo,
+		ShouldDownload: true,
+		IsVod:          isVod,
+		ChatDownloader: chatDl,
 	}
 }
 
