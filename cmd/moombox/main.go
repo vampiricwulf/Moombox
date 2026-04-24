@@ -24,7 +24,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
-	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
 )
@@ -186,170 +185,35 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// continue to compile unchanged. Subsequent SP-* commits will move those
 	// sections into *runState methods and shrink this block to nothing.
 	var (
-		cfg                = s.cfg
-		cfgMu              = &s.cfgMu
-		log                = s.log
-		upd                = s.upd
-		db                 = s.db
-		connMon            = s.connMon
-		ytService          = s.ytService
-		twService          = s.twService
-		potProvider        = s.potProvider
-		notifyMgr          = s.notifyMgr
-		dlWorker           = s.dlWorker
-		trimSvc            = s.trimSvc
-		feedMon            = s.feedMon
-		decapiMon          = s.decapiMon
-		twitchMon          = s.twitchMon
-		cookieRefresh      = s.cookieRefresh
-		autoCookieSvc      = s.autoCookieSvc
-		browserProfileDir  = s.browserProfileDir
-		webServer          = s.webServer
-		wsHub              = s.wsHub
-		r                  = s.r
-		apiRL              = s.apiRL
-		potRL              = s.potRL
-		loginRL            = s.loginRL
-		passwordRL         = s.passwordRL
-		authSvc            = s.authSvc
-		startTime          = s.startTime
-		getActivePlatforms = s.getActivePlatforms
-		kickMonitors       = s.kickMonitors
-		triggerRestart     = s.triggerRestart
-		tuiUpdateStatusCh  = s.tuiUpdateStatusCh
-		tuiDiskStatusCh    = s.tuiDiskStatusCh
+		cfg               = s.cfg
+		cfgMu             = &s.cfgMu
+		log               = s.log
+		upd               = s.upd
+		db                = s.db
+		connMon           = s.connMon
+		ytService         = s.ytService
+		notifyMgr         = s.notifyMgr
+		dlWorker          = s.dlWorker
+		trimSvc           = s.trimSvc
+		feedMon           = s.feedMon
+		decapiMon         = s.decapiMon
+		twitchMon         = s.twitchMon
+		cookieRefresh     = s.cookieRefresh
+		autoCookieSvc     = s.autoCookieSvc
+		browserProfileDir = s.browserProfileDir
+		webServer         = s.webServer
+		wsHub             = s.wsHub
+		authSvc           = s.authSvc
+		kickMonitors      = s.kickMonitors
+		triggerRestart    = s.triggerRestart
+		tuiUpdateStatusCh = s.tuiUpdateStatusCh
+		tuiDiskStatusCh   = s.tuiDiskStatusCh
 	)
 	authChangeTUI := &s.authChangeTUI
 
-	// Register all routes
-	routes.JobRoutes(r, db, cfg, webServer.CfgMu(), dlWorker, apiRL, &twitchMetadataAdapter{svc: twService}, &youtubeMetadataAdapter{svc: ytService}, notifyMgr, wsHub)
-	routes.FormatRoutes(r, &routes.FormatRoutesDeps{
-		DB:  db,
-		Cfg: cfg,
-		YT:  &ytFormatAdapter{svc: ytService, cfg: cfg},
-	})
-	routes.StatusRoute(r, &routes.StatusRouteDeps{
-		Cfg:       cfg,
-		Version:   version,
-		StartTime: startTime,
-		GetActivePlatforms: getActivePlatforms,
-		GetCookieStatus: func() map[string]any {
-			status := cookieRefresh.GetStatus()
-			return map[string]any{
-				"found":         status.HasYouTubeCookies,
-				"authenticated": status.YouTubeAuthenticated,
-			}
-		},
-		GetTwitchAuthStatus: func() map[string]any {
-			status := cookieRefresh.GetStatus()
-			return map[string]any{
-				"authenticated": status.TwitchAuthenticated,
-			}
-		},
-		GetAutoCookieReloginNeeded: func() any {
-			return autoCookieSvc.GetStatus().NeedsManualRelogin
-		},
-		GetNextFeedCheck:   feedMon.GetNextCheckAt,
-		GetNextDecapiCheck: decapiMon.GetNextCheckAt,
-		GetNextTwitchCheck: twitchMon.GetNextCheckAt,
-	})
-	routes.ConfigRoutes(r, cfg, webServer.CfgMu(), func(c *config.MoomboxConfig) error {
-		return config.Save(c, configPath)
-	}, &routes.ConfigRoutesCallbacks{
-		OnLogLevelChange: func(level string) {
-			log.SetLevel(level)
-		},
-		OnMaxParallelChange: func(n int) {
-			dlWorker.SetParallelDownloads(n)
-		},
-		OnHideFinishedAgeChanged: func() {
-			// Re-broadcast job list with updated archive threshold
-			jobs, _ := db.GetAllJobs()
-			wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, cfg, webServer.CfgMu()))
-		},
-		OnChannelChange: kickMonitors,
-	})
-	routes.ChannelRoutes(r, cfg, webServer.CfgMu(), func(c *config.MoomboxConfig) error {
-		return config.Save(c, configPath)
-	}, kickMonitors)
-	routes.FileRoutes(r, &routes.FileRoutesDeps{
-		DB:     db,
-		Cfg:    cfg,
-		Logger: log,
-	})
-	routes.TrimRoutes(r, db, trimSvc)
-	routes.StatsRoutes(r, &routes.StatsRouteDeps{
-		DB:  db,
-		Cfg: cfg,
-	})
-	routes.PotRoutes(r, &routes.PotRoutesDeps{
-		PotProvider: potProvider,
-		StartTime:   startTime,
-		RateLimit:   potRL,
-		Logger:      log,
-	})
-	routes.SetupRoutes(r, &routes.SetupDeps{
-		Cfg:  cfg,
-		Auth: authSvc,
-		SaveConfig: func(c *config.MoomboxConfig) error {
-			return config.Save(c, configPath)
-		},
-		OnInstallYtdlp: func(port int, httpsEnabled bool) {
-			if err := routes.InstallYtdlpPlugin(port, httpsEnabled); err != nil {
-				log.Error("Failed to install yt-dlp plugin from setup", slog.String("error", err.Error()))
-			} else {
-				log.Info("yt-dlp plugin installed from setup wizard", slog.Int("port", port))
-			}
-		},
-		OnRestart: func() { triggerRestart("setup") },
-	}, webServer.CfgMu())
-	routes.FFmpegRoutes(r, &routes.FFmpegDeps{
-		Cfg:   cfg,
-		CfgMu: webServer.CfgMu(),
-		SaveConfig: func(c *config.MoomboxConfig) error {
-			return config.Save(c, configPath)
-		},
-		RateLimit: apiRL,
-		Logger:    log,
-	})
-	routes.LogRoutes(r, log.GetRecentLines)
-	importCleanup := routes.ImportRoutes(r, db, cfg, webServer.CfgMu(), apiRL)
+	// Register all routes. See routes_wiring.go.
+	importCleanup := s.wireRoutes()
 	defer importCleanup()
-	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc, getActivePlatforms)
-	routes.YtdlpRoutes(r, cfg.Network.Port, cfg.Network.HTTPSEnabled)
-	routes.RestartRoute(r, func() { triggerRestart("API") })
-	routes.UpdateRoutes(r, &routes.UpdateRouteDeps{
-		Updater:    upd,
-		Version:    version,
-		Cfg:        cfg,
-		ConfigPath: configPath,
-		OnRestart:  func() { triggerRestart("update") },
-		OnFound: func(release *updater.ReleaseInfo) {
-			wsHub.Broadcast("update_available", release)
-			select {
-			case tuiUpdateStatusCh <- tui.UpdateStatusMsg{
-				Version:      release.Version,
-				TagName:      release.TagName,
-				ReleaseNotes: release.ReleaseNotes,
-			}:
-			default:
-			}
-		},
-	}, webServer.CfgMu())
-	authDeps := &routes.AuthRoutesDeps{
-		Cfg:        cfg,
-		Auth:       authSvc,
-		DB:         db,
-		LoginRL:    loginRL,
-		PasswordRL: passwordRL,
-		SaveConfig: func(c *config.MoomboxConfig) error {
-			return config.Save(c, configPath)
-		},
-		Logger: log,
-	}
-	routes.AuthRoutes(r, authDeps, webServer.CfgMu())
-	routes.ClientTokenRoutes(r, authDeps)
-	routes.WatchRoutes(r, db)
 
 	// WebSocket wiring: upgrade handler, AuthMiddleware client-token fallback,
 	// upgrade-time WS auth check, InitialState, OpenBrowser + static files.
