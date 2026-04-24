@@ -21,7 +21,21 @@ const (
 	liveChatEndpoint   = "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat"
 	replayChatEndpoint = "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat_replay"
 	youtubeBase        = "https://www.youtube.com"
-	chatHTTPTimeout = 30 * time.Second // Matches TS fetchWithTimeout default (30s)
+
+	// chatHTTPTimeout caps both watch-page fetches and chat-API polls.
+	chatHTTPTimeout = 30 * time.Second
+
+	// maxWatchPageBytes caps the watch page body. YouTube's watch page can
+	// approach 3-4 MB on busy streams, so the ceiling is 10 MB to leave
+	// headroom for ytInitialData growth without letting a runaway response
+	// blow memory (audit reports/chat.md Q5).
+	maxWatchPageBytes = 10 << 20
+
+	// maxChatResponseBytes caps a single chat API response. Live chat
+	// responses are typically <100 KB; 5 MB is a generous upper bound that
+	// catches API drift / pathological replays without being a real ceiling
+	// (audit reports/chat.md Q7).
+	maxChatResponseBytes = 5 << 20
 )
 
 var ytInitialDataRegex = regexp.MustCompile(`(?s)var ytInitialData = ({.+?});</script>`)
@@ -59,6 +73,11 @@ func (api *ChatAPI) logDebug(msg string, args ...any) {
 }
 
 // NewChatAPI creates a new chat API client.
+//
+// Transport tuning: live chat polls every ~5 s for hours at a time. Go's
+// default transport caps idle connections per host at 2, which forces a
+// fresh TCP+TLS handshake on most polls. Bumping idle conns to 6 + 90 s
+// IdleConnTimeout lets keep-alive amortise the handshake (audit chat.md R3).
 func NewChatAPI(apiKey, visitorData, cookieHeader string) *ChatAPI {
 	return &ChatAPI{
 		apiKey:       apiKey,
@@ -66,6 +85,15 @@ func NewChatAPI(apiKey, visitorData, cookieHeader string) *ChatAPI {
 		cookieHeader: cookieHeader,
 		client: &http.Client{
 			Timeout: chatHTTPTimeout,
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				MaxIdleConns:          20,
+				MaxIdleConnsPerHost:   6,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				ForceAttemptHTTP2:     true,
+			},
 		},
 	}
 }
@@ -97,7 +125,7 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 	// Watch pages on popular streams can exceed 5 MB once ytInitialData,
 	// ytInitialPlayerResponse and all sidebar chrome are rendered. Chat API
 	// responses stay at 5 MB; only the watch-page fetch gets the 10 MB cap.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxWatchPageBytes))
 	if err != nil {
 		return "", false, err
 	}
@@ -174,7 +202,7 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 		return nil, fmt.Errorf("chat API returned status %d", resp.StatusCode)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxChatResponseBytes))
 	if err != nil {
 		return nil, err
 	}

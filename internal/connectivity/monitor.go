@@ -102,6 +102,14 @@ func (m *Monitor) IsOnline() bool {
 	return m.online.Load()
 }
 
+// OnStateChange registers a callback invoked whenever connectivity transitions
+// online↔offline. Returns an unsubscribe function.
+//
+// **Latency / serialisation:** callbacks fire serially in the goroutine that
+// detected the transition (typically the polling goroutine). A slow callback
+// blocks every subsequent subscriber AND delays the next poll. Keep handlers
+// short-running; if any work might block, hand off to a goroutine inside the
+// callback. Audit reports/small-packages.md.
 func (m *Monitor) OnStateChange(fn func(online bool)) func() {
 	m.mu.Lock()
 	id := m.nextID

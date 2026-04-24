@@ -16,7 +16,15 @@ const (
 	refreshURL       = "https://www.youtube.com"
 	twitchLoginURL   = "https://www.twitch.tv/login"
 	twitchRefreshURL = "https://www.twitch.tv"
-	processTimeout   = 30 * time.Second
+)
+
+// Cookie service timeout budget. Pulled out of inline literals so a tuning
+// pass is one place rather than scattered across autocookies*.go (audit
+// reports/cookies.md #38).
+const (
+	processTimeout       = 30 * time.Second  // overall browser-launch budget for refresh
+	authVerifyTimeout    = 15 * time.Second  // single VerifyYouTubeAuth / VerifyTwitchAuth call
+	refreshOverallBudget = 2 * time.Minute   // periodic refresh: ctx cap end-to-end
 )
 
 // platformRefreshURLs maps platform names to their refresh URLs.
@@ -246,17 +254,29 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	ytAuth = s.jar.HasYouTubeAuthCookies()
 	twAuth = s.jar.HasTwitchAuthCookies()
 
-	// Real API verification (more reliable than just checking cookie presence)
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Real API verification (more reliable than just checking cookie presence).
+	// When the corresponding Verify callback is nil (test wiring or alternate
+	// constructors), the presence check above is the only signal we have —
+	// surface that explicitly so callers can't quietly succeed on cookies that
+	// are present-but-invalid (audit reports/cookies.md #21).
+	ctx, cancel := context.WithTimeout(ctx, authVerifyTimeout)
 	defer cancel()
-	if ytAuth && s.VerifyYouTubeAuth != nil {
-		if verified, err := s.VerifyYouTubeAuth(ctx); err == nil {
-			ytAuth = verified
+	if ytAuth {
+		if s.VerifyYouTubeAuth != nil {
+			if verified, err := s.VerifyYouTubeAuth(ctx); err == nil {
+				ytAuth = verified
+			}
+		} else {
+			s.logger.Warn("YouTube auth verification callback not wired — reporting based on cookie presence alone")
 		}
 	}
-	if twAuth && s.VerifyTwitchAuth != nil {
-		if verified, err := s.VerifyTwitchAuth(ctx); err == nil {
-			twAuth = verified
+	if twAuth {
+		if s.VerifyTwitchAuth != nil {
+			if verified, err := s.VerifyTwitchAuth(ctx); err == nil {
+				twAuth = verified
+			}
+		} else {
+			s.logger.Warn("Twitch auth verification callback not wired — reporting based on cookie presence alone")
 		}
 	}
 
@@ -381,7 +401,7 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	}
 
 	// Verify auth via API callbacks (matches TypeScript refreshCookies behavior)
-	verifyCtx, verifyCancel := context.WithTimeout(ctx, 15*time.Second)
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, authVerifyTimeout)
 	defer verifyCancel()
 
 	ytAuth := false
@@ -498,7 +518,7 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 				return
 			case <-ticker.C:
 				s.logger.Debug("periodic auto-cookie refresh triggered")
-				refreshCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+				refreshCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
 				ok, err := s.RefreshCookies(refreshCtx)
 				cancel()
 				if err != nil {

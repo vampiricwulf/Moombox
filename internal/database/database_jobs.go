@@ -526,23 +526,32 @@ func (db *Database) GetJobStats() (*JobStats, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	var s JobStats
-	err := db.db.QueryRowContext(db.getCtx(), `SELECT
-		COALESCE(SUM(CASE WHEN status = 'Finished' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status IN ('Downloading', 'Live') THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status = 'Muxing' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status = 'Error' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status = 'Cancelled' THEN 1 ELSE 0 END), 0),
+	// Status literals here are interpolated from the JobStatus constants in
+	// types.go so a status rename can't silently desync the stats query
+	// (audit reports/database.md Q6).
+	statsQuery := fmt.Sprintf(`SELECT
+		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status IN ('%s', '%s') THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = '%s' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN platform = 'twitch' THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status = 'Finished' THEN file_size ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status = 'Error' THEN file_size ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status = 'Cancelled' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = '%s' THEN file_size ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN platform IN ('youtube', '') THEN file_size ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN platform = 'twitch' THEN file_size ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status = 'Finished' THEN length_seconds ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status = 'Finished' THEN total_chat_messages ELSE 0 END), 0)
-		FROM jobs`).Scan(
+		COALESCE(SUM(CASE WHEN status = '%s' THEN length_seconds ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = '%s' THEN total_chat_messages ELSE 0 END), 0)
+		FROM jobs`,
+		StatusFinished, StatusDownloading, StatusLive, StatusMuxing, StatusError, StatusCancelled,
+		StatusFinished, StatusError, StatusCancelled,
+		StatusFinished, StatusFinished,
+	)
+
+	var s JobStats
+	err := db.db.QueryRowContext(db.getCtx(), statsQuery).Scan(
 		&s.FinishedCount, &s.ActiveCount, &s.MuxingCount,
 		&s.ErrorCount, &s.CancelledCount,
 		&s.YouTubeCount, &s.TwitchCount,
