@@ -388,6 +388,18 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			if ctx.Err() != nil {
 				break
 			}
+			// Auth failure — cookies are expired / never worked. Surface
+			// the error and abort the loop immediately rather than burning
+			// maxConsecErrorsLive (20) attempts on a credential state that
+			// will not recover without a refresh (audit chat.md T5). The
+			// caller's OnError gets the wrapped ErrAuthRequired and can
+			// decide whether to refresh cookies and re-Start.
+			if errors.Is(err, ErrAuthRequired) {
+				if cd.OnError != nil {
+					cd.OnError(err)
+				}
+				break
+			}
 
 			consecutiveErrors++
 			if cd.OnError != nil {

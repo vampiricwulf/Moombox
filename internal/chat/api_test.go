@@ -1,6 +1,12 @@
 package chat
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestParseMessageRunsTextOnly(t *testing.T) {
 	msg := map[string]any{
@@ -173,5 +179,41 @@ func TestExtractNavURLFallsBackToCommandMetadata(t *testing.T) {
 func TestExtractNavURLEmptyReturnsEmpty(t *testing.T) {
 	if got := extractNavURL(map[string]any{}); got != "" {
 		t.Errorf("expected empty string for empty nav, got %q", got)
+	}
+}
+
+// --- T5 authentication fast-fail ---
+
+func TestFetchChatReturnsErrAuthRequiredOn401(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	api := NewChatAPI("", "", "")
+	_, err := api.fetchChat(context.Background(), server.URL, "some-continuation-token")
+	if err == nil {
+		t.Fatal("expected error from 401 response, got nil")
+	}
+	if !errors.Is(err, ErrAuthRequired) {
+		t.Errorf("expected errors.Is(err, ErrAuthRequired), got %v", err)
+	}
+}
+
+func TestFetchChatOtherStatusDoesNotMapToAuth(t *testing.T) {
+	// A 500 must NOT be misclassified as auth failure — that would trigger
+	// the loop's fast-fail path on transient server errors.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	api := NewChatAPI("", "", "")
+	_, err := api.fetchChat(context.Background(), server.URL, "some-continuation-token")
+	if err == nil {
+		t.Fatal("expected error from 500 response, got nil")
+	}
+	if errors.Is(err, ErrAuthRequired) {
+		t.Errorf("500 was misclassified as auth failure: %v", err)
 	}
 }

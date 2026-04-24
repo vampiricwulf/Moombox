@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -16,6 +17,15 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )
+
+// ErrAuthRequired is returned from FetchLiveChat / FetchChatReplay when the
+// YouTube Innertube endpoint answers with HTTP 401. This is the canonical
+// symptom of expired SAPISID cookies for member-gated chat; the chat
+// downloader detects it and aborts rather than burning its consecutive-error
+// retry budget on a fundamentally broken credential state (audit chat.md T5).
+// Callers that wish to recover should refresh cookies and re-Start the
+// chat downloader.
+var ErrAuthRequired = errors.New("chat authentication required (HTTP 401)")
 
 const (
 	liveChatEndpoint   = "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat"
@@ -219,6 +229,9 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("%w: status %d", ErrAuthRequired, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("chat API returned status %d", resp.StatusCode)
 	}
 
