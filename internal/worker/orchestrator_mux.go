@@ -405,28 +405,24 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 	if finishedJob == nil {
 		finishedJob = jobCtx.Job
 	}
-	var finFields []notifications.Field
-	finFields = append(finFields, notifications.Field{
-		Name: "File", Value: filepath.Base(outputFile),
-	})
+	fb := notifications.NewFieldBuilder()
+	fb.Add("File", filepath.Base(outputFile))
 	if probeData != nil && probeData.Width > 0 && probeData.Height > 0 {
 		res := fmt.Sprintf("%dx%d", probeData.Width, probeData.Height)
 		if probeData.Fps > 0 {
 			res += fmt.Sprintf(" @%dfps", probeData.Fps)
 		}
-		finFields = append(finFields, notifications.Field{Name: "Resolution", Value: res, Inline: true})
+		fb.AddInline("Resolution", res)
 	}
 	if info != nil {
-		sizeStr := formatFileSize(info.Size())
-		finFields = append(finFields, notifications.Field{Name: "File Size", Value: sizeStr, Inline: true})
+		fb.AddInline("File Size", formatFileSize(info.Size()))
 	}
 	if finishedJob.LengthSeconds != nil && *finishedJob.LengthSeconds > 0 {
-		finFields = append(finFields, notifications.Field{Name: "Duration", Value: formatDurationHuman(time.Duration(*finishedJob.LengthSeconds) * time.Second), Inline: true})
+		fb.AddInline("Duration", formatDurationHuman(time.Duration(*finishedJob.LengthSeconds)*time.Second))
 	}
 	if finishedJob.DownloadStartedAt != "" {
 		if startTime, err := time.Parse(time.RFC3339, finishedJob.DownloadStartedAt); err == nil {
-			elapsed := time.Since(startTime)
-			finFields = append(finFields, notifications.Field{Name: "Total Time", Value: formatDurationHuman(elapsed), Inline: true})
+			fb.AddInline("Total Time", formatDurationHuman(time.Since(startTime)))
 		}
 	}
 	if finishedJob.LastVideoSeq != nil {
@@ -434,10 +430,10 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 		if finishedJob.LastAudioSeq != nil {
 			segStr += fmt.Sprintf(" A: %d", *finishedJob.LastAudioSeq)
 		}
-		finFields = append(finFields, notifications.Field{Name: "Segments", Value: segStr, Inline: true})
+		fb.AddInline("Segments", segStr)
 	}
 	if finishedJob.TotalChatMessages != nil {
-		finFields = append(finFields, notifications.Field{Name: "Chat Messages", Value: fmt.Sprintf("%d", *finishedJob.TotalChatMessages), Inline: true})
+		fb.AddInline("Chat Messages", fmt.Sprintf("%d", *finishedJob.TotalChatMessages))
 	}
 	// Format selection (matching TS muxFinalize notification enrichment)
 	if finishedJob.SelectedVideoItag != nil || finishedJob.SelectedAudioItag != nil {
@@ -459,7 +455,7 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 				formatInfo += fmt.Sprintf("Audio: itag %d", *finishedJob.SelectedAudioItag)
 			}
 		}
-		finFields = append(finFields, notifications.Field{Name: "Format Selection", Value: formatInfo})
+		fb.Add("Format Selection", formatInfo)
 	}
 	// Trimmed range
 	if finishedJob.StartTime != nil || finishedJob.EndTime != nil {
@@ -471,7 +467,7 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 		if finishedJob.EndTime != nil {
 			endStr = FormatSecondsToTimestamp(*finishedJob.EndTime)
 		}
-		finFields = append(finFields, notifications.Field{Name: "Trimmed Range", Value: fmt.Sprintf("%s - %s", startStr, endStr), Inline: true})
+		fb.AddInline("Trimmed Range", fmt.Sprintf("%s - %s", startStr, endStr))
 	}
 	// Description excerpt — Discord embeds cap field values around 1024
 	// chars, but we keep the notification short. 297 + "..." == 300 total
@@ -482,12 +478,12 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 		if len(desc) > descMaxLen {
 			desc = desc[:descMaxLen-3] + "..."
 		}
-		finFields = append(finFields, notifications.Field{Name: "Description", Value: desc})
+		fb.Add("Description", desc)
 	}
 	o.notifier.Send("Download Finished",
 		fmt.Sprintf("Successfully archived: %s", jobCtx.Job.Title),
 		notifications.TypeSuccess,
-		finFields,
+		fb.Build(),
 		notifications.SendOptions{
 			URL:   jobCtx.Job.URL,
 			Image: jobCtx.Job.ThumbnailURL,

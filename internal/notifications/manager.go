@@ -69,6 +69,52 @@ type Field struct {
 	Inline bool   `json:"inline,omitempty"`
 }
 
+// FieldBuilder accumulates notification Fields via chainable calls, reducing
+// the repetitive `if cond { fields = append(fields, Field{...}) }` pattern
+// that appears ~30 times in internal/worker callers. Each method returns
+// the builder so calls can chain. Use Build() to extract the final slice
+// (audit reports/worker.md F38).
+type FieldBuilder struct {
+	fields []Field
+}
+
+// NewFieldBuilder returns an empty builder.
+func NewFieldBuilder() *FieldBuilder { return &FieldBuilder{} }
+
+// Add appends a full-width (block) field.
+func (b *FieldBuilder) Add(name, value string) *FieldBuilder {
+	b.fields = append(b.fields, Field{Name: name, Value: value})
+	return b
+}
+
+// AddInline appends a half-width (side-by-side) field.
+func (b *FieldBuilder) AddInline(name, value string) *FieldBuilder {
+	b.fields = append(b.fields, Field{Name: name, Value: value, Inline: true})
+	return b
+}
+
+// AddIf conditionally appends a block field.
+func (b *FieldBuilder) AddIf(cond bool, name, value string) *FieldBuilder {
+	if cond {
+		b.Add(name, value)
+	}
+	return b
+}
+
+// AddInlineIf conditionally appends an inline field.
+func (b *FieldBuilder) AddInlineIf(cond bool, name, value string) *FieldBuilder {
+	if cond {
+		b.AddInline(name, value)
+	}
+	return b
+}
+
+// Build returns the accumulated fields. The builder should not be reused
+// afterwards — callers that need multiple builds should start a fresh one.
+func (b *FieldBuilder) Build() []Field {
+	return b.fields
+}
+
 // SendOptions provides optional parameters for a notification.
 type SendOptions struct {
 	URL       string // Link URL for the embed title
