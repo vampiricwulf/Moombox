@@ -161,59 +161,26 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 }
 
 // selectHlsByHeight finds an HLS variant matching the target height, optionally with FPS.
+// Thin wrapper around the generic selectAtHeightIdx (audit reports/worker.md F35).
 func selectHlsByHeight(variants []*engine.HlsVariant, targetHeight, targetFPS int) *engine.HlsVariant {
-	var heightMatches []*engine.HlsVariant
-	for _, v := range variants {
-		if v.Height == targetHeight {
-			heightMatches = append(heightMatches, v)
-		}
-	}
-	if len(heightMatches) == 0 {
+	idx := selectAtHeightIdx(variants, func(v *engine.HlsVariant) (int, int, int) {
+		return v.Height, v.FPS, v.Bandwidth
+	}, targetHeight, targetFPS)
+	if idx < 0 {
 		return nil
 	}
-	// If FPS-specific, prefer highest bandwidth among FPS matches
-	if targetFPS > 0 {
-		var bestFPS *engine.HlsVariant
-		for _, v := range heightMatches {
-			if v.FPS >= targetFPS-1 {
-				if bestFPS == nil || v.Bandwidth > bestFPS.Bandwidth {
-					bestFPS = v
-				}
-			}
-		}
-		if bestFPS != nil {
-			return bestFPS
-		}
-	}
-	// Return highest bandwidth at target height
-	best := heightMatches[0]
-	for _, v := range heightMatches[1:] {
-		if v.Bandwidth > best.Bandwidth {
-			best = v
-		}
-	}
-	return best
+	return variants[idx]
 }
 
 // selectNextLowerHls finds the best HLS variant below the target height,
-// descending through available heights. Returns nil if no lower heights exist.
+// descending through available heights. Thin wrapper around selectNextLowerIdx
+// (audit reports/worker.md F36).
 func selectNextLowerHls(variants []*engine.HlsVariant, targetHeight int) *engine.HlsVariant {
-	bestHeight := 0
-	for _, v := range variants {
-		if v.Height < targetHeight && v.Height > bestHeight {
-			bestHeight = v.Height
-		}
-	}
-	if bestHeight == 0 {
+	idx := selectNextLowerIdx(variants, func(v *engine.HlsVariant) (int, int) {
+		return v.Height, v.Bandwidth
+	}, targetHeight)
+	if idx < 0 {
 		return nil
 	}
-	var best *engine.HlsVariant
-	for _, v := range variants {
-		if v.Height == bestHeight {
-			if best == nil || v.Bandwidth > best.Bandwidth {
-				best = v
-			}
-		}
-	}
-	return best
+	return variants[idx]
 }

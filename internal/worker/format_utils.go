@@ -84,66 +84,107 @@ func SelectBestDashStream(streams []DashStreamInfo, preferItag int, maxRes int, 
 	return &streams[best]
 }
 
-// selectByHeightPref finds a DASH stream matching the target height, optionally with FPS.
-// Returns highest bandwidth at that height, preferring FPS match if targetFPS > 0.
-func selectByHeightPref(streams []DashStreamInfo, candidates []int, targetHeight, targetFPS int) *DashStreamInfo {
-	var heightMatches []int
-	for _, idx := range candidates {
-		if streams[idx].Height == targetHeight {
-			heightMatches = append(heightMatches, idx)
+// selectAtHeightIdx returns the index into items of the best-bandwidth entry
+// at targetHeight, preferring entries whose FPS meets targetFPS-1 when
+// targetFPS > 0. Returns -1 when no entry matches the target height.
+// Accessor extracts (height, fps, bandwidth) from each item.
+//
+// Shared between DASH and HLS variant selection — the algorithm is identical
+// modulo the underlying stream type (audit reports/worker.md F35).
+func selectAtHeightIdx[T any](items []T, accessor func(T) (height, fps, bandwidth int), targetHeight, targetFPS int) int {
+	best := -1
+	var bestBw int
+	foundAtFPS := false
+	for i, item := range items {
+		h, f, bw := accessor(item)
+		if h != targetHeight {
+			continue
+		}
+		isFPSMatch := targetFPS > 0 && f >= targetFPS-1
+		if !isFPSMatch && foundAtFPS {
+			// Already have FPS matches; ignore non-FPS entries.
+			continue
+		}
+		if isFPSMatch && !foundAtFPS {
+			// First FPS match — reset best to favour this entry over any
+			// earlier non-FPS ones.
+			best = i
+			bestBw = bw
+			foundAtFPS = true
+			continue
+		}
+		if best < 0 || bw > bestBw {
+			best = i
+			bestBw = bw
 		}
 	}
-	if len(heightMatches) == 0 {
-		return nil
-	}
-	// If FPS-specific (e.g. "1080p60"), prefer highest bandwidth among FPS matches
-	if targetFPS > 0 {
-		bestFPS := -1
-		for _, idx := range heightMatches {
-			if streams[idx].FPS >= targetFPS-1 {
-				if bestFPS == -1 || streams[idx].Bandwidth > streams[bestFPS].Bandwidth {
-					bestFPS = idx
-				}
-			}
-		}
-		if bestFPS >= 0 {
-			return &streams[bestFPS]
-		}
-	}
-	// Return highest bandwidth at target height
-	best := heightMatches[0]
-	for _, idx := range heightMatches[1:] {
-		if streams[idx].Bandwidth > streams[best].Bandwidth {
-			best = idx
-		}
-	}
-	return &streams[best]
+	return best
 }
 
-// selectNextLowerHeight finds the best DASH stream below the target height,
-// descending through available heights. Returns nil if no lower heights exist.
-func selectNextLowerHeight(streams []DashStreamInfo, candidates []int, targetHeight int) *DashStreamInfo {
-	// Find the highest available height below the target
+// selectNextLowerIdx returns the index into items of the best-bandwidth entry
+// whose height is strictly below targetHeight, or -1 if nothing is below.
+// Shared with HLS (audit reports/worker.md F36).
+func selectNextLowerIdx[T any](items []T, accessor func(T) (height, bandwidth int), targetHeight int) int {
 	bestHeight := 0
-	for _, idx := range candidates {
-		h := streams[idx].Height
+	for _, item := range items {
+		h, _ := accessor(item)
 		if h < targetHeight && h > bestHeight {
 			bestHeight = h
 		}
 	}
 	if bestHeight == 0 {
-		return nil
+		return -1
 	}
-	// Among streams at that height, pick highest bandwidth
-	var best *DashStreamInfo
-	for _, idx := range candidates {
-		if streams[idx].Height == bestHeight {
-			if best == nil || streams[idx].Bandwidth > best.Bandwidth {
-				best = &streams[idx]
+	best := -1
+	var bestBw int
+	for i, item := range items {
+		h, bw := accessor(item)
+		if h == bestHeight {
+			if best < 0 || bw > bestBw {
+				best = i
+				bestBw = bw
 			}
 		}
 	}
 	return best
+}
+
+func dashFieldAccessor(s DashStreamInfo) (int, int, int) {
+	return s.Height, s.FPS, s.Bandwidth
+}
+
+func dashHeightBandwidth(s DashStreamInfo) (int, int) {
+	return s.Height, s.Bandwidth
+}
+
+// selectByHeightPref finds a DASH stream matching the target height, optionally with FPS.
+// Returns highest bandwidth at that height, preferring FPS match if targetFPS > 0.
+func selectByHeightPref(streams []DashStreamInfo, candidates []int, targetHeight, targetFPS int) *DashStreamInfo {
+	// Build a filtered view so the generic helper operates on exactly the
+	// caller's candidate set; map the returned index back to the original.
+	filtered := make([]DashStreamInfo, len(candidates))
+	for i, idx := range candidates {
+		filtered[i] = streams[idx]
+	}
+	idx := selectAtHeightIdx(filtered, dashFieldAccessor, targetHeight, targetFPS)
+	if idx < 0 {
+		return nil
+	}
+	return &streams[candidates[idx]]
+}
+
+// selectNextLowerHeight finds the best DASH stream below the target height,
+// descending through available heights. Returns nil if no lower heights exist.
+func selectNextLowerHeight(streams []DashStreamInfo, candidates []int, targetHeight int) *DashStreamInfo {
+	filtered := make([]DashStreamInfo, len(candidates))
+	for i, idx := range candidates {
+		filtered[i] = streams[idx]
+	}
+	idx := selectNextLowerIdx(filtered, dashHeightBandwidth, targetHeight)
+	if idx < 0 {
+		return nil
+	}
+	return &streams[candidates[idx]]
 }
 
 // DashStreamInfo holds basic info about a DASH stream for selection.
