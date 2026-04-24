@@ -4,9 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,10 +25,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/updater"
-	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
-	webpublic "github.com/vampiricwulf/Moombox/web"
 )
 
 var (
@@ -355,94 +351,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	routes.ClientTokenRoutes(r, authDeps)
 	routes.WatchRoutes(r, db)
 
-	// WebSocket upgrade handler — register on the router before static file mounting.
-	// TS uses noServer mode which upgrades on any path; frontend connects to ws://host/ (root).
-	webServer.SetWebSocketHandler(wsHub.HandleUpgrade)
-
-	// Wire persistent client token check for AuthMiddleware fallback
-	webServer.ClientTokenCheck = func(rawToken, ip string) (bool, string) {
-		prefix := web.TokenPrefix(rawToken)
-		ct, err := db.GetClientTokenByPrefix(prefix)
-		if err != nil || ct == nil {
-			return false, ""
-		}
-		if !web.VerifyToken(rawToken, ct.TokenHash) {
-			return false, ""
-		}
-		sessionToken, err := authSvc.CreateSession()
-		if err != nil {
-			return false, ""
-		}
-		// Fire-and-forget usage update
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Error("client token usage update panic", "panic", r)
-				}
-			}()
-			db.UpdateClientTokenUsage(ct.ID, ip)
-		}()
-		return true, sessionToken
-	}
-
-	// Wire WebSocket auth check for external connections
-	wsHub.AuthCheck = func(r *http.Request) bool {
-		cfgMu.RLock()
-		networkAccess := cfg.Network.NetworkAccess
-		passwordHash := cfg.Network.PasswordHash
-		cfgMu.RUnlock()
-		if !web.IsAuthRequired(networkAccess, passwordHash) {
-			return true
-		}
-		// Check session cookie
-		if cookie, err := r.Cookie("moombox_session"); err == nil {
-			if authSvc.ValidateSession(cookie.Value) {
-				return true
-			}
-		}
-		// Fallback: check persistent client token (can't set cookies on WS upgrade, just allow)
-		if cookie, err := r.Cookie("moombox_client"); err == nil && cookie.Value != "" {
-			prefix := web.TokenPrefix(cookie.Value)
-			if ct, err := db.GetClientTokenByPrefix(prefix); err == nil && ct != nil {
-				if web.VerifyToken(cookie.Value, ct.TokenHash) {
-					go func() {
-						defer func() {
-							if r := recover(); r != nil {
-								log.Error("client token usage update panic", "panic", r)
-							}
-						}()
-						db.UpdateClientTokenUsage(ct.ID, extractWSIP(r))
-					}()
-					return true
-				}
-			}
-		}
-		return false
-	}
-
-	// Wire initial state provider for WebSocket connections
-	wsHub.InitialState = func() map[string]any {
-		jobs, err := db.GetAllJobs()
-		if err != nil {
-			jobs = []*database.Job{} // Send empty array, not null
-		}
-		jobs = filterJobsByAge(jobs, cfg, webServer.CfgMu())
-		return map[string]any{
-			"jobs":             jobs,
-			"logs":             log.GetRecentLines(),
-			"nextFeedCheck":    feedMon.GetNextCheckAt(),
-			"nextDecapiCheck":  decapiMon.GetNextCheckAt(),
-			"nextTwitchCheck":  twitchMon.GetNextCheckAt(),
-			"connectivity":    connMon.IsOnline(),
-		}
-	}
-
-	// Open browser to dashboard URL on start (matches TS openBrowser = true default)
-	webServer.OpenBrowser = true
-
-	// Serve embedded static files (web dashboard) with SPA fallback
-	staticFS, _ := fs.Sub(webpublic.PublicFS, "public")
-	webServer.MountStaticFiles(staticFS)
+	// WebSocket wiring: upgrade handler, AuthMiddleware client-token fallback,
+	// upgrade-time WS auth check, InitialState, OpenBrowser + static files.
+	// See ws_wiring.go.
+	s.wireWebSocket()
 
 	// =========================================================================
 	// Wire cookie recovery callback
