@@ -400,26 +400,17 @@ func getSessionToken(r *http.Request) string {
 	return cookie.Value
 }
 
-func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+// setAuthCookie writes a Moombox auth-related cookie (session or client) with
+// the standard flag set. Audit D-2: the previous setSessionCookie /
+// clearSessionCookie / setClientCookie / clearClientCookie helpers were
+// near-identical except for name, value, and MaxAge — a single helper keeps
+// the flags (HttpOnly, Secure, SameSite=Lax, Path=/) in lockstep so a future
+// change to e.g. SameSite=Strict (audit S-5) only needs editing one place.
+// MaxAge < 0 deletes the cookie; MaxAge == 0 is browser-session lifetime.
+func setAuthCookie(w http.ResponseWriter, r *http.Request, name, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     "moombox_session",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
-func setClientCookie(w http.ResponseWriter, r *http.Request, rawToken string, ttlDays int) {
-	if ttlDays <= 0 {
-		ttlDays = 365 // mirror config default: 1 year
-	}
-	maxAge := ttlDays * 86400
-	http.SetCookie(w, &http.Cookie{
-		Name:     "moombox_client",
-		Value:    rawToken,
+		Name:     name,
+		Value:    value,
 		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
@@ -428,16 +419,19 @@ func setClientCookie(w http.ResponseWriter, r *http.Request, rawToken string, tt
 	})
 }
 
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	setAuthCookie(w, r, "moombox_session", "", -1)
+}
+
+func setClientCookie(w http.ResponseWriter, r *http.Request, rawToken string, ttlDays int) {
+	if ttlDays <= 0 {
+		ttlDays = 365 // mirror config default: 1 year
+	}
+	setAuthCookie(w, r, "moombox_client", rawToken, ttlDays*86400)
+}
+
 func clearClientCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     "moombox_client",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteLaxMode,
-	})
+	setAuthCookie(w, r, "moombox_client", "", -1)
 }
 
 // buildTokenLabel creates a human-readable label from the User-Agent and IP.

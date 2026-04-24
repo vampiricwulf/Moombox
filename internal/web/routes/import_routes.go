@@ -51,6 +51,19 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 			channelHeader = channelHeader[:500]
 		}
 
+		// Audit Q-13: peek the first 4 bytes for the ZIP local-file-header
+		// magic ("PK\x03\x04") before allocating a temp file. Otherwise a
+		// caller can stream up to 500MB of arbitrary garbage to disk before
+		// `zip.OpenReader` rejects it, which is a cheap DoS on disk-tight
+		// installs. Empty zips also start with the same magic, so the worst
+		// false negative is wasting a few KB on an empty archive.
+		peek := make([]byte, 4)
+		n, _ := io.ReadFull(req.Body, peek)
+		if n < 4 || peek[0] != 'P' || peek[1] != 'K' || peek[2] != 0x03 || peek[3] != 0x04 {
+			jsonError(rw, "invalid zip file (bad signature)", http.StatusBadRequest)
+			return
+		}
+
 		// Read the uploaded file to a temp location
 		tmpFile, err := os.CreateTemp("", "moombox-import-*.zip")
 		if err != nil {
@@ -60,7 +73,15 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		tmpPath := tmpFile.Name()
 		defer os.Remove(tmpPath)
 
-		_, err = copyWithLimit(tmpFile, req.Body, 500*1024*1024)
+		// Write the already-consumed signature bytes back into the temp file
+		// so the subsequent zip.OpenReader sees a complete archive.
+		if _, err := tmpFile.Write(peek[:n]); err != nil {
+			tmpFile.Close()
+			jsonError(rw, "failed to write upload", http.StatusInternalServerError)
+			return
+		}
+
+		_, err = copyWithLimit(tmpFile, req.Body, 500*1024*1024-int64(n))
 		if err != nil {
 			tmpFile.Close()
 			jsonError(rw, "failed to read upload", http.StatusBadRequest)

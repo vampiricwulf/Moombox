@@ -36,6 +36,15 @@ func CORSMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) func(http.Ha
 				if origin != "" && isAllowedOrigin(origin, networkAccess) {
 					w.WriteHeader(http.StatusNoContent)
 				} else {
+					// Audit Q-8: include Allow + Access-Control-Max-Age:0 on
+					// preflight rejection so callers get a usable response
+					// (advertise the methods we *would* accept) and browsers
+					// don't cache the failure for the default 5s preflight
+					// window — without Max-Age:0 a transient origin
+					// misconfiguration takes effect for several seconds even
+					// after the user fixes it.
+					w.Header().Set("Allow", "GET, POST, PUT, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Max-Age", "0")
 					w.WriteHeader(http.StatusForbidden)
 				}
 				return

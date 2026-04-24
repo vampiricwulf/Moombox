@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -218,6 +219,39 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		if v, ok := ck["refresh_interval"].(float64); ok {
 			if v < 10 {
 				errs["cookies.refresh_interval"] = "refresh_interval must be at least 10"
+			}
+		}
+	}
+
+	// Channels — audit R-4: PUT /config accepts a channels[] replace, but
+	// the per-element validation is otherwise only enforced by
+	// POST /api/config/channels. Validate each entry here so a bulk replace
+	// can't smuggle in empty IDs, duplicates, or unknown platforms.
+	if chs, ok := updates["channels"].([]any); ok {
+		seen := make(map[string]bool, len(chs))
+		for i, raw := range chs {
+			obj, ok := raw.(map[string]any)
+			if !ok {
+				errs[fmt.Sprintf("channels[%d]", i)] = "must be an object"
+				continue
+			}
+			id, _ := obj["id"].(string)
+			id = strings.TrimSpace(id)
+			if id == "" {
+				errs[fmt.Sprintf("channels[%d].id", i)] = "channel ID required"
+				continue
+			}
+			if seen[id] {
+				errs[fmt.Sprintf("channels[%d].id", i)] = "duplicate channel ID"
+				continue
+			}
+			seen[id] = true
+			if v, ok := obj["platform"].(string); ok && v != "" {
+				switch v {
+				case "youtube", "twitch":
+				default:
+					errs[fmt.Sprintf("channels[%d].platform", i)] = "platform must be youtube or twitch"
+				}
 			}
 		}
 	}
