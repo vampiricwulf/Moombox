@@ -154,7 +154,13 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 
 // ApplyUpdate downloads the new binary and replaces the running executable.
 // On Windows, the running exe is renamed to .old before the new one is placed.
-// The caller should trigger a restart after this returns nil.
+//
+// **Rename-window race**: between the os.Rename of the running exe to .old
+// and the os.Rename of .new into place (~milliseconds), the original exe
+// path does not exist. A concurrent process trying to launch Moombox during
+// this window will fail. The caller MUST trigger a restart immediately after
+// this returns nil — the launcher will pick up the freshly-renamed .exe and
+// the running process exits cleanly. Audit reports/small-packages.md.
 func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	u.logger.Info("[Updater] Downloading update",
 		"version", release.Version,

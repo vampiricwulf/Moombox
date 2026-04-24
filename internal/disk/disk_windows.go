@@ -33,6 +33,12 @@ func GetDiskSpace(path string) (*DiskSpace, error) {
 		return nil, fmt.Errorf("disk: utf16 convert: %w", err)
 	}
 
+	// freeBytesAvailable is the bytes available to the *caller* (respects per-
+	// user quota when quotas are enabled — typically equal to totalFreeBytes
+	// on Moombox's single-user Windows targets). totalFreeBytes is the
+	// volume-wide free count. usedPct is computed against freeBytesAvailable
+	// so the dashboard percentage reflects what the caller can actually use,
+	// not the raw filesystem state. Audit reports/small-packages.md.
 	var freeBytesAvailable, totalBytes, totalFreeBytes uint64
 	ret, _, callErr := getDiskFreeSpaceExW.Call(
 		uintptr(unsafe.Pointer(rootPtr)),

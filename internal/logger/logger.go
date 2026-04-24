@@ -30,6 +30,17 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 }
 
 // Logger wraps slog with file rotation, pub/sub, and ring buffer support.
+//
+// Lock hierarchy (acquire in this order to avoid deadlock; never invert):
+//
+//  1. fileMu     — protects file rotation (rotate() and Write of formatted line)
+//  2. ringMu     — protects the ringBuffer slice + ringIndex/ringCount
+//  3. jobLogsMu  — protects the jobLogs map + per-buffer fan-out
+//  4. subMu      — protects the subscribers slice
+//
+// Most operations only take one lock. The Write path takes fileMu first,
+// then publishes to ring/jobs/subscribers (each under its own mutex) without
+// holding fileMu. Audit reports/small-packages.md.
 type Logger struct {
 	slog    *slog.Logger
 	level   *slog.LevelVar

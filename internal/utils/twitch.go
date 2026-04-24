@@ -22,9 +22,14 @@ type TwitchTarget struct {
 }
 
 var (
-	twitchLoginRegex    = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,24}$`)
-	twitchVODPrefixRe   = regexp.MustCompile(`^v(\d{1,12})$`)
-	twitchVODBareRe     = regexp.MustCompile(`^\d{7,12}$`)
+	// twitchLoginRegex matches a valid Twitch login name. Per Twitch's
+	// account creation rules: starts with a letter, then up to 24 more
+	// letters / digits / underscores (25-char total cap). Case-insensitive
+	// is documented but accounts are stored lowercase server-side; callers
+	// should ToLower before comparing for equality.
+	twitchLoginRegex  = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,24}$`)
+	twitchVODPrefixRe = regexp.MustCompile(`^v(\d{1,12})$`)
+	twitchVODBareRe   = regexp.MustCompile(`^\d{7,12}$`)
 	// twitchReservedPaths lists first-path-segment slugs on twitch.tv that
 	// are site navigation / product pages rather than channel logins, so we
 	// must not treat them as channel names when parsing /<slug>.

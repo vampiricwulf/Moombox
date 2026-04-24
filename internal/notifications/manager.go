@@ -200,6 +200,13 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 // Wait blocks until all in-flight notification goroutines have finished
 // or a 30-second timeout expires, whichever comes first.
 // Call during graceful shutdown to avoid losing notifications.
+//
+// **Single-call**: Wait drains the WaitGroup once. Subsequent Send calls
+// after Wait returns will spawn new goroutines that no future Wait will
+// drain. The graceful-shutdown sequence in cmd/moombox stops the worker
+// (which is the dominant Send caller) before invoking Wait, so this is
+// the correct ordering — calling Wait again after that is a no-op.
+// Audit reports/small-packages.md.
 func (m *Manager) Wait() {
 	done := make(chan struct{})
 	go func() {

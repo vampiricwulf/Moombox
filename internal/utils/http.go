@@ -10,10 +10,31 @@ import (
 	"time"
 )
 
+// MaxFetchBodySize caps response bodies read by FetchBody. Public so other
+// packages can validate against the same ceiling instead of guessing.
+const MaxFetchBodySize = 50 << 20
+
 // utilsHTTPClient is a shared HTTP client with a long safety-net timeout.
 // FetchWithTimeout creates its own timeout via context.WithTimeout, so the
 // client timeout only guards against truly stuck connections.
-var utilsHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+//
+// Transport tuning (audit reports/small-packages.md): the Go default caps
+// idle conns per host at 2, which forces a fresh TCP+TLS handshake under
+// any concurrent fetch pattern. Bumping idle-per-host to 8 + 90 s
+// IdleConnTimeout lets keep-alive amortise handshakes for the monitor
+// fan-out and watch-page polling paths.
+var utilsHTTPClient = &http.Client{
+	Timeout: 5 * time.Minute,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	},
+}
 
 // ConnectivityReporter is the subset of connectivity.Monitor we invoke from
 // the HTTP helpers. Tagging via "utils/http" lets the passive tracker
@@ -97,7 +118,6 @@ func FetchBody(ctx context.Context, url string, timeout time.Duration, headers m
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 
-	const maxFetchBodySize = 50 << 20 // 50MB cap
-	return io.ReadAll(io.LimitReader(resp.Body, maxFetchBodySize))
+	return io.ReadAll(io.LimitReader(resp.Body, MaxFetchBodySize))
 }
 

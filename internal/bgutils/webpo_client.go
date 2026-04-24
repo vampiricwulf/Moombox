@@ -88,10 +88,12 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 		}
 	}
 
-	// Log snapshot diagnostics
+	// Log snapshot diagnostics — truncate the BotGuard response to keep the
+	// debug log line bounded (audit reports/bgutils.md QI-5).
+	const responsePrefixMax = 80
 	responsePrefix := botguardResponse
-	if len(responsePrefix) > 80 {
-		responsePrefix = responsePrefix[:80] + "..."
+	if len(responsePrefix) > responsePrefixMax {
+		responsePrefix = responsePrefix[:responsePrefixMax] + "..."
 	}
 	wpc.logger.Debug("[PotProvider] BotGuard snapshot result",
 		"responseLen", len(botguardResponse),
@@ -142,7 +144,11 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 			Cleanup: func() { minter.Shutdown(bgClient.Shutdown) },
 		}
 
-		wpc.logger.Info("[PotProvider] Generated integrity token (full minter)", "ttl", itData.EstimatedTTL)
+		// Demoted Info → Debug: integrity-token mints happen on every IT
+		// rotation (~6h cycle plus invalidation events), so they're routine
+		// and don't need to be in the user-visible default log stream.
+		// Audit reports/bgutils.md QI-7.
+		wpc.logger.Debug("[PotProvider] Generated integrity token (full minter)", "ttl", itData.EstimatedTTL)
 		return tokenMinter, nil
 	}
 
