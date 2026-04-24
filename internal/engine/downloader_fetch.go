@@ -159,22 +159,31 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 }
 
 // fetchSegmentWithRetry attempts to fetch a segment with retries and exponential backoff.
-// Returns the data on success, or nil if all retries failed or the segment is permanently gone.
-func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string) []byte {
+// Returns (data, permanent):
+//   - data != nil: success.
+//   - data == nil, permanent == true: segment is gone for good (403/410). Don't bother retrying.
+//   - data == nil, permanent == false: transient failure (timeout, 5xx, retries exhausted).
+//     Caller may try again later, or treat as a gap.
+//
+// Audit reports/engine.md #17: previously the function collapsed both cases to
+// a bare nil, so callers couldn't distinguish "CDN returned 410 forever" from
+// "we got network jitter for 25 s and gave up". The caller's gap reporting is
+// now able to log the distinction even though no retry-once-at-end logic exists yet.
+func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string) (data []byte, permanent bool) {
 	for attempt := range MaxSegmentRetries {
 		if d.isCancelled() || ctx.Err() != nil {
-			return nil
+			return nil, false
 		}
-		data, status, err := d.fetchSegment(ctx, segURL)
+		body, status, err := d.fetchSegment(ctx, segURL)
 		if err == nil && status < 400 {
-			return data
+			return body, false
 		}
 		if status == 403 || status == 410 {
-			return nil // Segment gone permanently
+			return nil, true // Segment gone permanently — don't retry.
 		}
 		sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
 	}
-	return nil
+	return nil, false
 }
 
 // probeHeadSequence discovers the current live head segment using a high sequence GET probe.

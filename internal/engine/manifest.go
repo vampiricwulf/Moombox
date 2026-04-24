@@ -371,7 +371,8 @@ func CalculateSegmentRange(stream *DashStream, startTimeSec, endTimeSec float64)
 		EndSegment:   -1,
 	}
 
-	// A8: Use stream.StartNumber to convert array index to actual segment number
+	// Use stream.StartNumber to convert array index to actual segment number.
+	// (StartNumber is the sequence number of segment[0], not always 0.)
 	baseNum := stream.StartNumber
 
 	// Walk through segments to find start index

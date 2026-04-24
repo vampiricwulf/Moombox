@@ -303,12 +303,23 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				if d.isCancelled() || ctx.Err() != nil {
 					continue // drain channel
 				}
-				if data := d.fetchSegmentWithRetry(ctx, item.segURL); data != nil {
+				data, permanent := d.fetchSegmentWithRetry(ctx, item.segURL)
+				if data != nil {
 					select {
 					case results <- segResult{idx: item.idx, data: data}:
 					case <-done:
 						return
 					}
+					continue
+				}
+				// Audit reports/engine.md #17: distinguish CDN-evicted segments
+				// from retries-exhausted so debugging silent gaps is tractable.
+				if permanent {
+					d.logger.Debug("[Downloader] HLS VOD segment permanently gone (403/410)",
+						"idx", item.idx)
+				} else {
+					d.logger.Debug("[Downloader] HLS VOD segment retries exhausted",
+						"idx", item.idx)
 				}
 			}
 		})

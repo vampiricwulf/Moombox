@@ -63,12 +63,23 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 					continue // drain channel
 				}
 				segURL := d.buildSegmentURL(item.seq)
-				if data := d.fetchSegmentWithRetry(ctx, segURL); data != nil {
+				data, permanent := d.fetchSegmentWithRetry(ctx, segURL)
+				if data != nil {
 					select {
 					case results <- segResult{seq: item.seq, data: data}:
 					case <-done:
 						return
 					}
+					continue
+				}
+				// Audit reports/engine.md #17: surface the failure mode so the
+				// gap-detection downstream isn't blind to "transient" vs "gone".
+				if permanent {
+					d.logger.Debug("[Downloader] catch-up segment permanently gone (403/410)",
+						"seq", item.seq)
+				} else {
+					d.logger.Debug("[Downloader] catch-up segment retries exhausted",
+						"seq", item.seq)
 				}
 			}
 		})
