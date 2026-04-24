@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 func TestParseIRCTags(t *testing.T) {
@@ -309,27 +311,22 @@ func TestChatDedupPruning(t *testing.T) {
 	}
 
 	cd.mu.Lock()
-	seenLen := len(cd.seenIDs)
-	orderLen := len(cd.seenOrder)
+	dedupLen := cd.dedup.Len()
 	cd.mu.Unlock()
 
 	// After inserting chatDedupMax*2+1 messages:
-	// On the 10001st add, len(seenOrder) becomes 10001 > 10000,
+	// On the 10001st add, dedup.Len() becomes 10001 > 10000,
 	// pruning fires and keeps the last chatDedupMax (5000) entries.
 	expectedLen := chatDedupMax
-	if seenLen != expectedLen {
-		t.Errorf("expected seenIDs=%d after pruning, got %d", expectedLen, seenLen)
-	}
-	if orderLen != expectedLen {
-		t.Errorf("expected seenOrder=%d after pruning, got %d", expectedLen, orderLen)
+	if dedupLen != expectedLen {
+		t.Errorf("expected dedup len=%d after pruning, got %d", expectedLen, dedupLen)
 	}
 
-	// Recent messages should still be in the dedup set
 	cd.mu.Lock()
 	lastID := "msg_" + strconv.Itoa(totalMsgs-1)
-	_, hasLast := cd.seenIDs[lastID]
+	hasLast := cd.dedup.Seen(lastID)
 	firstID := "msg_0"
-	_, hasFirst := cd.seenIDs[firstID]
+	hasFirst := cd.dedup.Seen(firstID)
 	cd.mu.Unlock()
 
 	if !hasLast {
@@ -394,7 +391,7 @@ func TestChatDedupLastTimestamp(t *testing.T) {
 func TestParseLinePrivmsg(t *testing.T) {
 	cd := &ChatDownloader{
 		channelLogin: "testchannel",
-		seenIDs:      make(map[string]struct{}),
+		dedup:        utils.NewOrderedDedup[string](),
 		logger:       &testLogger{},
 	}
 
@@ -424,7 +421,7 @@ func TestParseLinePrivmsg(t *testing.T) {
 func TestParseLineUsernotice(t *testing.T) {
 	cd := &ChatDownloader{
 		channelLogin: "testchannel",
-		seenIDs:      make(map[string]struct{}),
+		dedup:        utils.NewOrderedDedup[string](),
 		logger:       &testLogger{},
 	}
 
@@ -451,7 +448,7 @@ func TestParseLineUsernotice(t *testing.T) {
 func TestParseLineNoID(t *testing.T) {
 	cd := &ChatDownloader{
 		channelLogin: "testchannel",
-		seenIDs:      make(map[string]struct{}),
+		dedup:        utils.NewOrderedDedup[string](),
 		logger:       &testLogger{},
 	}
 
@@ -466,7 +463,7 @@ func TestParseLineNoID(t *testing.T) {
 func TestParseLinePing(t *testing.T) {
 	cd := &ChatDownloader{
 		channelLogin: "testchannel",
-		seenIDs:      make(map[string]struct{}),
+		dedup:        utils.NewOrderedDedup[string](),
 		logger:       &testLogger{},
 	}
 
@@ -480,7 +477,7 @@ func TestParseLinePing(t *testing.T) {
 func TestParseLineUnknownCommand(t *testing.T) {
 	cd := &ChatDownloader{
 		channelLogin: "testchannel",
-		seenIDs:      make(map[string]struct{}),
+		dedup:        utils.NewOrderedDedup[string](),
 		logger:       &testLogger{},
 	}
 

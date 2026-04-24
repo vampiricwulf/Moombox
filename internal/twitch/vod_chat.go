@@ -31,8 +31,7 @@ type VodChatDownloader struct {
 	vodDuration   int   // seconds, used for progress % estimation
 	vodStartMs    int64 // epoch ms when VOD started
 	messages      []TwitchChatMessage
-	seenIDs       map[string]struct{}
-	seenOrder     []string // Insertion-order tracking for deterministic pruning
+	dedup         *utils.OrderedDedup[string]
 	totalCount    atomic.Int64
 	running       atomic.Bool
 	emoteResolver *EmoteResolver
@@ -78,7 +77,7 @@ func NewVodChatDownloader(api *API, opts VodChatOptions, logger interface {
 		vodDuration:   opts.VodDuration,
 		vodStartMs:    opts.VodStartMs,
 		emoteResolver: opts.EmoteResolver,
-		seenIDs:       make(map[string]struct{}),
+		dedup:         utils.NewOrderedDedup[string](),
 		logger:        logger,
 	}
 }
@@ -103,12 +102,7 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		if state.StreamID == vcd.vodID {
 			contentOffset = state.LastOffsetSeconds
 			vcd.totalCount.Store(int64(state.MessageCount))
-			vcd.seenIDs = make(map[string]struct{}, len(state.RecentIDs))
-			vcd.seenOrder = make([]string, 0, len(state.RecentIDs))
-			for _, id := range state.RecentIDs {
-				vcd.seenIDs[id] = struct{}{}
-				vcd.seenOrder = append(vcd.seenOrder, id)
-			}
+			vcd.dedup.Restore(state.RecentIDs)
 			vcd.logger.Info("resumed VOD chat download",
 				"vodID", vcd.vodID,
 				"offset", contentOffset,
@@ -148,11 +142,9 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 
 		newCount := 0
 		for _, edge := range edges {
-			if _, seen := vcd.seenIDs[edge.ID]; seen {
+			if !vcd.dedup.Add(edge.ID) {
 				continue
 			}
-			vcd.seenIDs[edge.ID] = struct{}{}
-			vcd.seenOrder = append(vcd.seenOrder, edge.ID)
 
 			authorName := edge.CommenterDisplayName
 			if authorName == "" {
@@ -227,12 +219,8 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		}
 
 		// Prune dedup — keep most recent chatDedupMax entries by insertion order
-		if len(vcd.seenOrder) > chatDedupMax*2 {
-			removeIDs := vcd.seenOrder[:len(vcd.seenOrder)-chatDedupMax]
-			for _, id := range removeIDs {
-				delete(vcd.seenIDs, id)
-			}
-			vcd.seenOrder = vcd.seenOrder[len(vcd.seenOrder)-chatDedupMax:]
+		if vcd.dedup.Len() > chatDedupMax*2 {
+			vcd.dedup.Keep(chatDedupMax)
 		}
 	}
 
@@ -353,17 +341,8 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 		return
 	}
 
-	// Use seenOrder (insertion order) for deterministic resume state,
-	// not map iteration which is non-deterministic in Go.
-	// Keep only the most recent vodChatResumeMaxRecentIDs entries.
-	recentIDs := vcd.seenOrder
-	if len(recentIDs) > vodChatResumeMaxRecentIDs {
-		recentIDs = recentIDs[len(recentIDs)-vodChatResumeMaxRecentIDs:]
-	}
-	// Copy to avoid aliasing the live slice
-	recentIDsCopy := make([]string, len(recentIDs))
-	copy(recentIDsCopy, recentIDs)
-	recentIDs = recentIDsCopy
+	// Deterministic insertion-order snapshot capped to bound the resume file.
+	recentIDs := vcd.dedup.Snapshot(vodChatResumeMaxRecentIDs)
 
 	state := ChatResumeState{
 		MessageCount:      int(vcd.totalCount.Load()),

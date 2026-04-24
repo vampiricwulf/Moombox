@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 const (
@@ -31,8 +33,7 @@ type ChatDownloader struct {
 	streamStartTime  string
 	streamStartMs    int64
 	messages         []TwitchChatMessage // Unwritten messages in memory
-	seenIDs          map[string]struct{}
-	seenOrder        []string // Insertion-order tracking for deterministic culling
+	dedup            *utils.OrderedDedup[string]
 	outputPath       string
 	running          bool
 	totalCount       int
@@ -85,7 +86,7 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 		outputPath:      opts.OutputPath,
 		streamStartTime: opts.StreamStartTime,
 		streamStartMs:   streamStartMs,
-		seenIDs:         make(map[string]struct{}),
+		dedup:           utils.NewOrderedDedup[string](),
 		emoteResolver:   opts.EmoteResolver,
 		logger:          logger,
 	}
@@ -137,8 +138,7 @@ func (cd *ChatDownloader) loadResumeState() *ChatResumeState {
 // Uses atomic write pattern with .tmp file (matches TS saveResumeState).
 func (cd *ChatDownloader) saveResumeState() {
 	cd.mu.Lock()
-	recentIDs := make([]string, 0, len(cd.seenOrder))
-	recentIDs = append(recentIDs, cd.seenOrder...)
+	recentIDs := cd.dedup.Snapshot(0)
 	state := ChatResumeState{
 		MessageCount:    cd.totalCount,
 		LastTimestampMs: cd.lastTimestampMs,
@@ -187,7 +187,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		return fmt.Errorf("twitch chat downloader already running for %s", cd.channelLogin)
 	}
 	cd.running = true
-	alreadyInitialized := cd.totalCount > 0 || len(cd.seenIDs) > 0
+	alreadyInitialized := cd.totalCount > 0 || cd.dedup.Len() > 0
 	cd.mu.Unlock()
 
 	// Try to resume from saved state (matches TS start() resume logic).
@@ -200,12 +200,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			cd.totalCount = resumeState.MessageCount
 			cd.lastTimestampMs = resumeState.LastTimestampMs
 			cd.flushedToDisk = true
-			cd.seenIDs = make(map[string]struct{}, len(resumeState.RecentIDs))
-			cd.seenOrder = make([]string, 0, len(resumeState.RecentIDs))
-			for _, id := range resumeState.RecentIDs {
-				cd.seenIDs[id] = struct{}{}
-				cd.seenOrder = append(cd.seenOrder, id)
-			}
+			cd.dedup.Restore(resumeState.RecentIDs)
 			cd.mu.Unlock()
 			cd.logger.Info("[TwitchChat] Resuming from saved state", "messages", resumeState.MessageCount)
 		}
@@ -304,20 +299,12 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
 
-	// Dedup
-	if _, seen := cd.seenIDs[msg.ID]; seen {
+	if !cd.dedup.Add(msg.ID) {
 		return
 	}
-	cd.seenIDs[msg.ID] = struct{}{}
-	cd.seenOrder = append(cd.seenOrder, msg.ID)
-
-	// Prune dedup map -- keep most recent chatDedupMax entries by insertion order
-	if len(cd.seenOrder) > chatDedupMax*2 {
-		removeIDs := cd.seenOrder[:len(cd.seenOrder)-chatDedupMax]
-		for _, id := range removeIDs {
-			delete(cd.seenIDs, id)
-		}
-		cd.seenOrder = cd.seenOrder[len(cd.seenOrder)-chatDedupMax:]
+	// Prune at 2× threshold to amortize the Keep cost across inserts.
+	if cd.dedup.Len() > chatDedupMax*2 {
+		cd.dedup.Keep(chatDedupMax)
 	}
 
 	cd.messages = append(cd.messages, *msg)

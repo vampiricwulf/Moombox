@@ -96,17 +96,9 @@ func (cd *ChatDownloader) writeFullChatFile(msgs []TwitchChatMessage, count int)
 	return utils.WriteChatFileAtomic(cd.outputPath, &chatData)
 }
 
-// pruneDedup trims the seenIDs set to keep only the most recent entries.
+// pruneDedup trims the dedup to keep only the most recent chatDedupMax entries.
 func (cd *ChatDownloader) pruneDedup() {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
-	if len(cd.seenOrder) <= chatDedupMax {
-		return
-	}
-	keep := chatDedupMax
-	removeIDs := cd.seenOrder[:len(cd.seenOrder)-keep]
-	for _, id := range removeIDs {
-		delete(cd.seenIDs, id)
-	}
-	cd.seenOrder = cd.seenOrder[len(cd.seenOrder)-keep:]
+	cd.dedup.Keep(chatDedupMax)
 }

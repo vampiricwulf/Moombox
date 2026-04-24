@@ -50,8 +50,7 @@ type ChatDownloader struct {
 	streamEnded   bool
 	messages      []ChatMessage // Unwritten messages in memory
 	messageCount  int
-	seenIDs       map[string]struct{}
-	seenOrder     []string // Insertion order for deterministic culling
+	dedup         *utils.OrderedDedup[string]
 	continuation  string
 	streamStartMs int64
 	flushedToDisk bool
@@ -158,7 +157,7 @@ func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 	return &ChatDownloader{
 		opts:           opts,
 		api:            api,
-		seenIDs:        make(map[string]struct{}),
+		dedup:          utils.NewOrderedDedup[string](),
 		continuation:   opts.InitialContinuation,
 		streamStartMs:  streamStartMs,
 		resumeFileAuto: resumeFileAuto,
@@ -240,12 +239,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.messageCount = state.MessageCount
 		cd.messages = nil // Start fresh — old messages already on disk
 		if len(state.RecentIDs) > 0 {
-			cd.seenIDs = make(map[string]struct{}, len(state.RecentIDs))
-			cd.seenOrder = make([]string, 0, len(state.RecentIDs))
-			for _, id := range state.RecentIDs {
-				cd.seenIDs[id] = struct{}{}
-				cd.seenOrder = append(cd.seenOrder, id)
-			}
+			cd.dedup.Restore(state.RecentIDs)
 		}
 		// Cross-check that the chat file actually exists on disk — guards
 		// against the case where the resume sidecar survived but the chat
@@ -449,15 +443,8 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			}
 
 			// Dedup by ID (skip empty IDs to avoid silent dedup of malformed messages)
-			if msg.ID != "" {
-				if _, seen := cd.seenIDs[msg.ID]; seen {
-					continue
-				}
-			}
-
-			if msg.ID != "" {
-				cd.seenIDs[msg.ID] = struct{}{}
-				cd.seenOrder = append(cd.seenOrder, msg.ID)
+			if msg.ID != "" && !cd.dedup.Add(msg.ID) {
+				continue
 			}
 			cd.messages = append(cd.messages, *msg)
 			cd.messageCount++
@@ -494,8 +481,8 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		// already-seen IDs can accumulate via newly-seen batches even when
 		// newInBatch == 0 (resp replayed same IDs), so the cull check must
 		// live outside the write-interval gate to prevent unbounded growth.
-		if len(cd.seenIDs) > dedupKeepSize {
-			cd.cullDedup()
+		if cd.dedup.Len() > dedupKeepSize {
+			cd.dedup.Keep(dedupKeepSize)
 		}
 
 		// Check if chat has ended
@@ -576,23 +563,6 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 	if cd.wasCancelledOrShutdown(ctx) && (len(cd.messages) > 0 || cd.flushedToDisk) {
 		cd.saveResume()
 	}
-}
-
-func (cd *ChatDownloader) cullDedup() {
-	// Cull seenIDs using insertion order (seenOrder slice) to keep the most
-	// recent entries, matching TypeScript's Set insertion-order behavior.
-	if len(cd.seenOrder) <= dedupKeepSize {
-		return
-	}
-	// Keep only the last dedupKeepSize entries from the ordered slice
-	recentIDs := cd.seenOrder[len(cd.seenOrder)-dedupKeepSize:]
-	trimmed := make(map[string]struct{}, dedupKeepSize)
-	for _, id := range recentIDs {
-		trimmed[id] = struct{}{}
-	}
-	cd.seenIDs = trimmed
-	// Copy to a fresh slice to release old memory
-	cd.seenOrder = append([]string(nil), recentIDs...)
 }
 
 // SetOutputFile updates the output file path. Used when early chat is started
@@ -726,13 +696,11 @@ func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
 	}
 	cd.messages = append(existing, cd.messages...)
 	cd.messageCount = len(cd.messages)
-	// Register recovered message IDs in dedup maps to prevent duplicates
+	// Register recovered message IDs in the dedup to prevent duplicates
+	// on subsequent polls.
 	for _, msg := range existing {
 		if msg.ID != "" {
-			if _, seen := cd.seenIDs[msg.ID]; !seen {
-				cd.seenIDs[msg.ID] = struct{}{}
-				cd.seenOrder = append(cd.seenOrder, msg.ID)
-			}
+			cd.dedup.Add(msg.ID)
 		}
 	}
 }
@@ -774,15 +742,9 @@ func (cd *ChatDownloader) saveResume() {
 		cd.mu.Unlock()
 		return // No output path yet (early chat)
 	}
-	// Use seenOrder (insertion order) for deterministic resume state,
-	// not map iteration which is non-deterministic in Go.
-	// Cap to dedupKeepSize to prevent resume files from growing unbounded.
-	src := cd.seenOrder
-	if len(src) > dedupKeepSize {
-		src = src[len(src)-dedupKeepSize:]
-	}
-	recentIDs := make([]string, len(src))
-	copy(recentIDs, src)
+	// Deterministic insertion-order snapshot, capped to dedupKeepSize so the
+	// resume file stays bounded.
+	recentIDs := cd.dedup.Snapshot(dedupKeepSize)
 
 	state := ChatResumeState{
 		MessageCount: cd.messageCount,

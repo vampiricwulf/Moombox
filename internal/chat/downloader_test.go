@@ -52,14 +52,16 @@ func TestNewChatDownloaderResumeFileCustom(t *testing.T) {
 	}
 }
 
-func TestNewChatDownloaderSeenIDsUsable(t *testing.T) {
+func TestNewChatDownloaderDedupUsable(t *testing.T) {
 	opts := ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"}
 	cd := NewChatDownloader(opts)
 
-	// Verify seenIDs is usable immediately — can add without nil panic
-	cd.seenIDs["test_id"] = struct{}{}
-	if _, exists := cd.seenIDs["test_id"]; !exists {
-		t.Error("expected seenIDs to be usable for dedup tracking")
+	// Verify dedup is usable immediately — can add without nil panic
+	if !cd.dedup.Add("test_id") {
+		t.Error("expected first Add to return true")
+	}
+	if !cd.dedup.Seen("test_id") {
+		t.Error("expected dedup to be usable for dedup tracking")
 	}
 }
 
@@ -273,54 +275,44 @@ func TestMarkStreamEndedSetsFlag(t *testing.T) {
 	}
 }
 
-// --- cullDedup tests ---
+// --- dedup cull tests ---
 
-func TestCullDedupTrimsToKeepSize(t *testing.T) {
+func TestDedupTrimsToKeepSize(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
 
-	// Fill seenIDs beyond dedupKeepSize
 	totalIDs := dedupKeepSize + 100
 	for i := range totalIDs {
-		id := "msg_" + strconv.Itoa(i)
-		cd.seenIDs[id] = struct{}{}
-		cd.seenOrder = append(cd.seenOrder, id)
+		cd.dedup.Add("msg_" + strconv.Itoa(i))
 	}
 
-	cd.cullDedup()
+	cd.dedup.Keep(dedupKeepSize)
 
-	if len(cd.seenIDs) != dedupKeepSize {
-		t.Errorf("expected %d seenIDs after cull, got %d", dedupKeepSize, len(cd.seenIDs))
-	}
-	if len(cd.seenOrder) != dedupKeepSize {
-		t.Errorf("expected %d seenOrder after cull, got %d", dedupKeepSize, len(cd.seenOrder))
+	if cd.dedup.Len() != dedupKeepSize {
+		t.Errorf("expected %d entries after cull, got %d", dedupKeepSize, cd.dedup.Len())
 	}
 
-	// The kept IDs should be the most recent ones
 	lastID := "msg_" + strconv.Itoa(totalIDs-1)
-	if _, exists := cd.seenIDs[lastID]; !exists {
+	if !cd.dedup.Seen(lastID) {
 		t.Error("expected last inserted ID to be retained after cull")
 	}
 
-	// The first IDs should be removed
-	firstID := "msg_" + strconv.Itoa(0)
-	if _, exists := cd.seenIDs[firstID]; exists {
+	firstID := "msg_0"
+	if cd.dedup.Seen(firstID) {
 		t.Error("expected first inserted ID to be removed after cull")
 	}
 }
 
-func TestCullDedupNoopWhenBelowThreshold(t *testing.T) {
+func TestDedupNoopWhenBelowThreshold(t *testing.T) {
 	cd := NewChatDownloader(ChatDownloaderOptions{VideoID: "v1", OutputFile: "/tmp/chat.json"})
 
 	for i := range 10 {
-		id := "msg_" + strconv.Itoa(i)
-		cd.seenIDs[id] = struct{}{}
-		cd.seenOrder = append(cd.seenOrder, id)
+		cd.dedup.Add("msg_" + strconv.Itoa(i))
 	}
 
-	cd.cullDedup()
+	cd.dedup.Keep(dedupKeepSize)
 
-	if len(cd.seenIDs) != 10 {
-		t.Errorf("expected 10 seenIDs (no cull needed), got %d", len(cd.seenIDs))
+	if cd.dedup.Len() != 10 {
+		t.Errorf("expected 10 entries (no cull needed), got %d", cd.dedup.Len())
 	}
 }
 
