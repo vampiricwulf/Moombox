@@ -110,16 +110,20 @@ type YtcfgData struct {
 	ThumbnailURL       string
 }
 
-// AuthLevel constants for format deduplication.
+// AuthLevel constants for format deduplication. Lower = preferred during
+// dedup tiebreaks (more direct / less rewrapped). Public watch-page formats
+// rank ahead of authenticated watch-page formats so cookie-bearing fetches
+// can win the dedup against a stray un-cookied parse (audit I5).
 const (
-	AuthLevelAndroidVR   = 0
-	AuthLevelWatchPage   = 1
-	AuthLevelTVPublic    = 2
-	AuthLevelTVAuth      = 3
-	AuthLevelWebSafari   = 4
-	AuthLevelWeb         = 5
-	AuthLevelWebEmbedded = 6
-	AuthLevelWebCreator  = 7
+	AuthLevelAndroidVR        = 0
+	AuthLevelWatchPagePublic  = 1
+	AuthLevelWatchPageAuth    = 2
+	AuthLevelTVPublic         = 3
+	AuthLevelTVAuth           = 4
+	AuthLevelWebSafari        = 5
+	AuthLevelWeb              = 6
+	AuthLevelWebEmbedded      = 7
+	AuthLevelWebCreator       = 8
 )
 
 // Sentinel values written by parsePlayerResponse when metadata is missing.
@@ -131,18 +135,3 @@ const (
 	UnknownChannelSentinel = "Unknown Channel"
 )
 
-// CreateEmptyVideoInfo creates a minimal valid VideoInfo for error paths.
-func CreateEmptyVideoInfo() *VideoInfo {
-	return &VideoInfo{
-		Title:        "Unknown",
-		ChannelName:  "Unknown",
-		ChannelID:    "",
-		Description:  "",
-		Formats:      []Format{},
-		PlayerURL:    "",
-		StreamStatus: StreamNotAStream,
-		IsLive:       false,
-		IsUpcoming:   false,
-		IsPostLiveDVR: false,
-	}
-}

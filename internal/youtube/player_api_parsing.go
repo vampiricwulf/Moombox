@@ -375,6 +375,16 @@ func (p *PlayerAPI) DecryptNParamInUrl(ctx context.Context, rawURL, playerURL st
 	return p.decryptNParam(ctx, rawURL, playerURL)
 }
 
+// isUpcomingFromPlayability returns true when YouTube's playabilityStatus
+// indicates the stream is scheduled but not yet live. statusCode is the raw
+// `status` field; reasonLower must already be lower-cased. Shared between
+// parsePlayabilityStatus (which suppresses the "error" classification for
+// these) and classifyStream (which routes them to StreamUpcoming).
+func isUpcomingFromPlayability(statusCode, reasonLower string) bool {
+	return statusCode == "LIVE_STREAM_OFFLINE" ||
+		(statusCode == "UNPLAYABLE" && strings.Contains(reasonLower, "live event will begin"))
+}
+
 func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 	if status == nil {
 		return PlayabilityUnknown, ""
@@ -390,9 +400,10 @@ func parsePlayabilityStatus(status map[string]any) (PlayabilityError, string) {
 
 	reasonLower := strings.ToLower(reason)
 
-	// Upcoming indicators are not errors
-	if statusCode == "LIVE_STREAM_OFFLINE" ||
-		(statusCode == "UNPLAYABLE" && strings.Contains(reasonLower, "live event will begin")) {
+	// Upcoming indicators are not errors. The same check is duplicated in
+	// classifyStream — keep both call sites going through the helper so a
+	// reason-string change only has to be edited in one place (audit D1).
+	if isUpcomingFromPlayability(statusCode, reasonLower) {
 		return PlayabilityOK, ""
 	}
 
@@ -454,8 +465,7 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	// Check playability for upcoming
 	status := getStr(playabilityStatus, "status")
 	reason := strings.ToLower(getStr(playabilityStatus, "reason"))
-	isUpcomingFromPlayability := status == "LIVE_STREAM_OFFLINE" ||
-		(status == "UNPLAYABLE" && strings.Contains(reason, "live event will begin"))
+	isUpcomingPlayability := isUpcomingFromPlayability(status, reason)
 
 	// playabilityStatus.liveStreamability is the renderer YouTube attaches
 	// to scheduled streams that haven't gone live yet. Some probes
@@ -472,7 +482,7 @@ func classifyStream(videoDetails, playabilityStatus, microformat map[string]any,
 	isPremiereNow := isPremiere && isLiveNow
 	isUpcomingPremiere := isPremiere && !isLiveNow && !hasFormats
 
-	if isUpcomingFromPlayability {
+	if isUpcomingPlayability {
 		return StreamUpcoming, false, true, false
 	}
 	if isUpcomingPremiere {

@@ -23,11 +23,12 @@ func (p *PlayerAPI) ProbeVideoStatus(ctx context.Context, videoID string, visito
 
 // ProbeVideoStatusAuthenticated performs a lightweight authenticated status probe
 // using the TV_DOWNGRADED client with cookies (no watch page, no STS, no cipher).
-// Used for polling members-only upcoming streams.
-func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID string, visitorData ...string) (*VideoInfo, error) {
+// Used for polling members-only upcoming streams. Pass an empty string for
+// visitorData when none has been captured yet.
+func (p *PlayerAPI) ProbeVideoStatusAuthenticated(ctx context.Context, videoID, visitorData string) (*VideoInfo, error) {
 	ytcfg := DefaultYtcfg()
-	if len(visitorData) > 0 && visitorData[0] != "" {
-		ytcfg.VisitorData = visitorData[0]
+	if visitorData != "" {
+		ytcfg.VisitorData = visitorData
 	}
 	return p.fetchWithClient(ctx, videoID, constants.TVDowngradedClient, ytcfg, 0)
 }
@@ -61,7 +62,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	if wp.PlayerResponse != nil {
 		wpParsed, _ = p.parsePlayerResponse(ctx, wp.PlayerResponse, ytcfg.PlayerURL, ytcfg)
 		if wpParsed != nil {
-			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPage)
+			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPageAuth)
 		}
 	}
 
@@ -84,13 +85,13 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// Try web_safari client for DASH manifest (preferred over web)
 	webResult, webErr := p.fetchWithClient(ctx, videoID, constants.WebSafariClient, ytcfg, sts)
 	webLabel := "web_safari"
-	webAuthLevel := AuthLevelWebSafari // 4 — preferred over standard web (5)
+	webAuthLevel := AuthLevelWebSafari // preferred over standard web
 	if webErr != nil {
 		p.logger.Warn("[PlayerApi] web_safari client failed, trying web fallback", slog.String("error", webErr.Error()))
 		// Fall back to standard web client
 		webResult, webErr = p.fetchWithClient(ctx, videoID, constants.WebClient, ytcfg, sts)
 		webLabel = "web"
-		webAuthLevel = AuthLevelWeb // 5
+		webAuthLevel = AuthLevelWeb
 		if webErr != nil {
 			p.logger.Warn("[PlayerApi] WEB fallback also failed", slog.String("error", webErr.Error()))
 		}
@@ -172,30 +173,7 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		return wcResult, nil
 	}
 
-	// If TV result looks like not_a_stream but watch page says otherwise,
-	// use watch page's stream classification but keep TV's formats if adequate
-	if result.StreamStatus == StreamNotAStream && wpParsed != nil {
-		if wpParsed.StreamStatus != StreamNotAStream {
-			if hasAdequateFormats(result) {
-				// TV has good formats — keep them, override stream classification
-				result.StreamStatus = wpParsed.StreamStatus
-				result.IsLive = wpParsed.IsLive
-				result.IsUpcoming = wpParsed.IsUpcoming
-				result.IsPostLiveDVR = wpParsed.IsPostLiveDVR
-				mergeWatchPageMetadata(result, wpParsed)
-				result.Formats = deduplicateFormats(formatPool)
-				return result, nil
-			}
-			// TV formats inadequate — fall back to watch page entirely
-			wpParsed.Formats = deduplicateFormats(formatPool)
-			return wpParsed, nil
-		}
-	}
-
-	// Merge watch page metadata
-	mergeWatchPageMetadata(result, wpParsed)
-	result.Formats = deduplicateFormats(formatPool)
-	return result, nil
+	return finalizeVideoInfo(result, wpParsed, formatPool), nil
 }
 
 // GetVideoInfoPublic fetches video info without authentication.
@@ -214,7 +192,7 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 	if wp.PlayerResponse != nil {
 		wpParsed, _ = p.parsePlayerResponse(ctx, wp.PlayerResponse, wp.Ytcfg.PlayerURL, wp.Ytcfg)
 		if wpParsed != nil {
-			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPage)
+			collectFormats(&formatPool, wpParsed.Formats, "watch_page", AuthLevelWatchPagePublic)
 		}
 	}
 
@@ -262,26 +240,33 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
-	// not_a_stream override: if TV says not_a_stream but watch page disagrees
-	if result.StreamStatus == StreamNotAStream && wpParsed != nil {
-		if wpParsed.StreamStatus != StreamNotAStream {
-			if hasAdequateFormats(result) {
-				result.StreamStatus = wpParsed.StreamStatus
-				result.IsLive = wpParsed.IsLive
-				result.IsUpcoming = wpParsed.IsUpcoming
-				result.IsPostLiveDVR = wpParsed.IsPostLiveDVR
-				mergeWatchPageMetadata(result, wpParsed)
-				result.Formats = deduplicateFormats(formatPool)
-				return result, nil
-			}
-			wpParsed.Formats = deduplicateFormats(formatPool)
-			return wpParsed, nil
+	return finalizeVideoInfo(result, wpParsed, formatPool), nil
+}
+
+// finalizeVideoInfo applies the not_a_stream override + merge + dedup tail
+// shared by GetVideoInfoAuthenticated and GetVideoInfoPublic. When the TV
+// client classified the video as not_a_stream but the watch page disagreed,
+// the watch page's classification wins; if TV still produced adequate
+// formats they are kept, otherwise the watch-page parse is returned wholesale
+// (audit D3).
+func finalizeVideoInfo(result, wpParsed *VideoInfo, formatPool []Format) *VideoInfo {
+	if result.StreamStatus == StreamNotAStream && wpParsed != nil && wpParsed.StreamStatus != StreamNotAStream {
+		if hasAdequateFormats(result) {
+			result.StreamStatus = wpParsed.StreamStatus
+			result.IsLive = wpParsed.IsLive
+			result.IsUpcoming = wpParsed.IsUpcoming
+			result.IsPostLiveDVR = wpParsed.IsPostLiveDVR
+			mergeWatchPageMetadata(result, wpParsed)
+			result.Formats = deduplicateFormats(formatPool)
+			return result
 		}
+		wpParsed.Formats = deduplicateFormats(formatPool)
+		return wpParsed
 	}
 
 	mergeWatchPageMetadata(result, wpParsed)
 	result.Formats = deduplicateFormats(formatPool)
-	return result, nil
+	return result
 }
 
 // extractSTS extracts the signatureTimestamp from a player URL.
