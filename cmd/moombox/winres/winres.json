@@ -12,7 +12,7 @@
           "version": "0.0.0.0"
         },
         "description": "YouTube/Twitch Stream Archiver",
-        "minimum-os": "win7",
+        "minimum-os": "win10",
         "execution-level": "as invoker",
         "ui-access": false,
         "auto-elevate": false,

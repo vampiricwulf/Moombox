@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -76,7 +75,17 @@ func init() {
 	commit = "unknown"
 }
 
-var noTUIEnvRe = regexp.MustCompile(`^(?i:1|true|yes)$`)
+// envDisablesTUI reports whether the MOOMBOX_NO_TUI value is one of the
+// truthy strings (case-insensitive). Replaces a regex with a tiny switch —
+// faster, no init-time compile, easier to scan (per audit
+// reports/cmd-moombox.md QI-4).
+func envDisablesTUI(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
 
 // Per-minute rate-limit ceilings for the four web rate-limiter slots.
 // Pulled out of NewRateLimiter call sites so a tuning change is one place
@@ -139,7 +148,7 @@ func main() {
 
 	// TTY detection: only use TUI if both stdin/stdout are terminals
 	isTTY := isatty.IsTerminal(os.Stdout.Fd()) && isatty.IsTerminal(os.Stdin.Fd())
-	envNoTUI := noTUIEnvRe.MatchString(strings.TrimSpace(os.Getenv("MOOMBOX_NO_TUI")))
+	envNoTUI := envDisablesTUI(os.Getenv("MOOMBOX_NO_TUI"))
 	useTUI := isTTY && !*headless && !*noTUI && !envNoTUI
 
 	if !useTUI {
