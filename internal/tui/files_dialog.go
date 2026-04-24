@@ -206,6 +206,8 @@ func (m *FilesDialogModel) SelectedFile() *OrphanedFileEntry {
 }
 
 // RemoveFile removes a file by path from the list after successful deletion.
+// Audit reports/tui.md Finding 5 was wrong about list.RemoveItem returning
+// a tea.Cmd — the void return is the actual API in this bubbles/v2 version.
 func (m *FilesDialogModel) RemoveFile(path string) {
 	for i, item := range m.list.Items() {
 		fi, ok := item.(fileItem)

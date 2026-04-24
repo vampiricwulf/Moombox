@@ -192,7 +192,9 @@ func (m *ClientTokensDialogModel) SelectedToken() *database.ClientToken {
 	return ci.token
 }
 
-// RemoveToken removes a token by ID from the list.
+// RemoveToken removes a token by ID from the list. Audit reports/tui.md
+// Finding 5 was wrong about list.RemoveItem returning a tea.Cmd in this
+// version of bubbles/v2 — the void return is the actual API.
 func (m *ClientTokensDialogModel) RemoveToken(id string) {
 	for i, item := range m.list.Items() {
 		ci, ok := item.(clientTokenItem)

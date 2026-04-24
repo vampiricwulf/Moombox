@@ -63,6 +63,14 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 	if err != nil {
 		return nil, fmt.Errorf("parse DASH manifest: %w", err)
 	}
+	// Distinguish "manifest had no parseable streams" from a downstream
+	// "could not find suitable video stream" so debugging missing-formats
+	// reports doesn't require re-running with packet capture (audit
+	// reports/engine.md #9).
+	if len(streams) == 0 {
+		job.Logger.Debug("DASH manifest produced zero streams — likely empty AdaptationSets or all-non-numeric representation IDs",
+			"manifestBytes", len(manifestData))
+	}
 
 	// Step 4: Decrypt n-parameter in each stream's BaseURL (prevents throttling/403)
 	if cipherSolver != nil && videoInfo.PlayerURL != "" {

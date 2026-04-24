@@ -320,7 +320,12 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, cfgMu *sync.RWMutex) {
 
 // ClientTokenRoutes registers client token management endpoints.
 func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
-	// GET /api/client-tokens — list all tokens
+	// GET /api/client-tokens — list all tokens.
+	// LastIP is intentionally redacted to "/24" granularity in the response
+	// payload (per audit reports/web.md S-13). The full IP is still
+	// persisted in the DB for the operator's local diagnostics; it just
+	// doesn't ride out over the network where it would land in browser
+	// devtools, screenshots, etc.
 	r.Get("/api/client-tokens", func(rw http.ResponseWriter, req *http.Request) {
 		if deps.DB == nil {
 			jsonResponse(rw, []any{})
@@ -331,10 +336,18 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 			jsonError(rw, "failed to list tokens", http.StatusInternalServerError)
 			return
 		}
-		if tokens == nil {
-			tokens = []*database.ClientToken{}
+		out := make([]map[string]any, 0, len(tokens))
+		for _, t := range tokens {
+			out = append(out, map[string]any{
+				"id":          t.ID,
+				"tokenPrefix": t.TokenPrefix,
+				"label":       t.Label,
+				"createdAt":   t.CreatedAt,
+				"lastUsedAt":  t.LastUsedAt,
+				"lastIp":      redactIP(t.LastIP),
+			})
 		}
-		jsonResponse(rw, tokens)
+		jsonResponse(rw, out)
 	})
 
 	// DELETE /api/client-tokens/{id} — revoke one token
@@ -356,6 +369,28 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 	})
 }
 
+
+// redactIP truncates an IPv4 to /24 ("a.b.c.0") and IPv6 to /64.
+// Empty input returns empty string. Malformed input returns "" rather
+// than leaking the unparseable original.
+func redactIP(ip string) string {
+	if ip == "" {
+		return ""
+	}
+	if i := strings.LastIndex(ip, "."); i > 0 && strings.Count(ip, ".") == 3 {
+		// IPv4: keep a.b.c, replace last octet with 0.
+		return ip[:i] + ".0"
+	}
+	if strings.Contains(ip, ":") {
+		// IPv6: keep first 4 hextets (covers /64).
+		segs := strings.Split(ip, ":")
+		if len(segs) < 4 {
+			return ""
+		}
+		return strings.Join(segs[:4], ":") + "::"
+	}
+	return ""
+}
 
 func getSessionToken(r *http.Request) string {
 	cookie, err := r.Cookie("moombox_session")
