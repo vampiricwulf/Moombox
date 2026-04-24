@@ -44,7 +44,7 @@ import (
 )
 
 var (
-	version = "2.6.0-test.23"
+	version = "2.6.0-test.24"
 	commit  = ""
 )
 

@@ -1,6 +1,18 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.22` with bgutils / engine / twitch small fixes (audit backlog drain).
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.23` with cookies / web / cmd-moombox final-pass fixes.
 
-This build bundles Sprint #1 + Sprint #2 work plus seventeen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus eighteen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 18 (test.24)
+
+Final pass on the cookies / web / cmd-moombox status tables. Agents report the small-fix backlog is now substantially drained — remaining Open items are deferred refactors, test-coverage gaps, owner-decided dismissals, cross-package signature changes, or larger features (DPAPI #6, ConfigStore #8, event-based subscribers #21, app.js split, etc.).
+
+- **cookies #19, #42, #45 (partial)** — documented deliberate ack discards in cdpSendCommand / cdpNavigateAndWait; named four magic-number sleep/timeout literals (cdpCloseFlushDelay, taskkillDrainDelay, firefoxGracefulCloseTimeout, firefoxExitPollInterval).
+- **web R-4** — validateConfigUpdates per-channel-validates the bulk PUT /config replace path (rejects empty IDs, duplicates, unknown platforms).
+- **web Q-8** — Preflight OPTIONS rejection sets Allow + Access-Control-Max-Age: 0 so failures aren't cached.
+- **web Q-13** — Import endpoint peeks first 4 bytes for ZIP magic before allocating temp file; subsequent copy decrements the read limit by bytes already consumed.
+- **web D-2** — Consolidated clearSessionCookie / setClientCookie / clearClientCookie into a shared setAuthCookie helper so flag sets stay in lockstep.
+- **cmd-moombox QI-4** — Replaced noTUIEnvRe regex with envDisablesTUI() switch helper (no init-time regex compile, faster, zero allocation).
+- **cmd-moombox W-minimum-os** — Bumped winres.json `minimum-os` from "win7" to "win10" to match Go 1.25 + Moombox's Windows-only stance.
 
 ### Manual batch 17 (test.23)
 
