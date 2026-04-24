@@ -16,7 +16,11 @@ import (
 var bgHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // FetchChallenge fetches and descrambles a BotGuard challenge from the WAA API.
-func FetchChallenge(ctx context.Context, config *BgConfig) (*DescrambledChallenge, error) {
+// logger is optional (nil-safe) and receives a debug summary of which challenge
+// indices produced values — see reports/bgutils.md QI-9 for rationale (silent
+// failures in extractStringFromArrayOrValue make upstream format drift hard
+// to diagnose).
+func FetchChallenge(ctx context.Context, config *BgConfig, logger botguardLogger) (*DescrambledChallenge, error) {
 	if config.RequestKey == "" {
 		return nil, &BGError{Code: ErrBadConfig, Message: "requestKey is required"}
 	}
@@ -66,7 +70,24 @@ func FetchChallenge(ctx context.Context, config *BgConfig) (*DescrambledChalleng
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	return parseChallengeData(respBody)
+	challenge, err := parseChallengeData(respBody)
+	if err != nil {
+		return nil, err
+	}
+	// Diagnostic: which indices yielded usable values? extractStringFromArrayOrValue
+	// silently returns "" on parse failure, so upstream format drift would otherwise
+	// surface only as a generic "no interpreter URL or script" error downstream.
+	if logger != nil {
+		logger.Debug("[PotProvider] challenge indices populated",
+			"hasMessageID", challenge.MessageID != "",
+			"hasInterpreterURL", challenge.InterpreterURL != "",
+			"hasInterpreterScript", challenge.InterpreterScript != "",
+			"hasInterpreterHash", challenge.InterpreterHash != "",
+			"hasProgram", challenge.Program != "",
+			"hasGlobalName", challenge.GlobalName != "",
+		)
+	}
+	return challenge, nil
 }
 
 // parseChallengeData parses the raw challenge response and descrambles the data.

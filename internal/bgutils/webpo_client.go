@@ -42,7 +42,7 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 	wpc.logger.Debug("[PotProvider] Fetching BotGuard challenge...")
 
 	// Step 1: Fetch challenge
-	challenge, err := FetchChallenge(ctx, wpc.config)
+	challenge, err := FetchChallenge(ctx, wpc.config, wpc.logger)
 	if err != nil {
 		return nil, fmt.Errorf("fetch challenge: %w", err)
 	}
