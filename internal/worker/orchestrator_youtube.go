@@ -428,7 +428,12 @@ streamEnded:
 	// their DB records must exist before muxAndFinalize calls GetSegments.
 	segmentMuxWg.Wait()
 
-	// If we had quality splits, mux the final segment
+	// If we had quality splits, mux the final segment.
+	// Indexing note (per audit reports/worker.md F4): each background mux uses
+	// segmentIndex BEFORE the increment, then segmentIndex++ leaves the counter
+	// pointing at the NEW staging dir (seg_N). When the loop exits with N splits,
+	// segmentIndex == N and that points at the still-unmuxed final segment in seg_N.
+	// So total segments produced is N+1 (indices 0..N).
 	if segmentIndex > 0 {
 		segmentEndTime := time.Now().Unix()
 		seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)

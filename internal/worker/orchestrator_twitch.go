@@ -480,7 +480,10 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		muxCtx = context.Background()
 	}
 
-	// If we had quality splits, mux the final segment
+	// If we had quality splits, mux the final segment.
+	// Indexing note (per audit reports/worker.md F4): segmentIndex was incremented
+	// AFTER each background mux, so it now points at the still-unmuxed final
+	// segment in seg_N. With N splits the total produced count is N+1 (indices 0..N).
 	if segmentIndex > 0 {
 		segmentEndTime := time.Now().Unix()
 		result := &DownloadResult{HasVideo: true, VideoPath: videoPath}
@@ -494,8 +497,11 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		}
 	}
 
-	// Signal chat to finish
-	if twitchChatDl != nil {
+	// Signal chat to finish.
+	// Per audit reports/worker.md F5: skip MarkStreamEnded if chat was already
+	// Stop()'d above (connectivity-loss path) — racing with the goroutine's
+	// shutdown can panic or deadlock inside the chat downloader.
+	if twitchChatDl != nil && twitchChatDl.IsRunning() {
 		twitchChatDl.MarkStreamEnded()
 		if chatDone != nil {
 			chatEndTimer := time.NewTimer(chatWaitTimeout)
@@ -506,7 +512,8 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 				twitchChatDl.Stop()
 			}
 		}
-
+	}
+	if twitchChatDl != nil {
 		// Update chat status
 		chatCount := twitchChatDl.MessageCount()
 		chatStatus := "finished"

@@ -36,14 +36,18 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		}
 	}
 
-	// Step 2: Inject PO token into manifest URL (/pot/{token} path segment)
+	// Step 2: Generate PO token once, used for both manifest URL injection and segment URLs.
+	// Per audit reports/worker.md F29: previously generated twice (steps 2 and 5),
+	// which was a cache hit but redundant work and confusing duplicate logging.
+	var dashPoToken string
 	if potProvider != nil {
 		poToken, err := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
 		if err != nil {
-			job.Logger.Warn("[POT] failed to generate PO token for manifest", "err", err)
+			job.Logger.Warn("[POT] failed to generate PO token", "err", err)
 		} else if poToken != "" {
+			dashPoToken = poToken
 			dashURL = strings.TrimRight(dashURL, "/") + "/pot/" + poToken
-			job.Logger.Info("[POT] added PO token to manifest URL", "tokenLength", len(poToken))
+			job.Logger.Info("[POT] PO token ready (added to manifest URL, will be used for segment URLs)", "tokenLength", len(poToken))
 		} else {
 			job.Logger.Warn("[POT] generator returned empty token")
 		}
@@ -83,17 +87,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		}
 	}
 
-	// Step 5: Generate PO token for DASH segment URLs (applied via PoToken in DownloaderOptions)
-	var dashPoToken string
-	if potProvider != nil {
-		poToken, potErr := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
-		if potErr != nil {
-			job.Logger.Warn("[POT] failed to generate PO token for DASH segments", "err", potErr)
-		} else if poToken != "" {
-			dashPoToken = poToken
-			job.Logger.Info("[POT] PO token ready for DASH segment URLs", "tokenLength", len(poToken))
-		}
-	}
+	// dashPoToken from step 2 is reused for segment URLs via DownloaderOptions.
 
 	// Convert to DashStreamInfo for selection
 	streamInfos := make([]DashStreamInfo, 0, len(streams))
