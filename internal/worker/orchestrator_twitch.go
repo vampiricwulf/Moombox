@@ -42,11 +42,6 @@ type TwitchChatDownloader interface {
 	IsRunning() bool
 }
 
-// TwitchRecordingTimeAware is an optional interface for chat downloaders that support recording start time.
-type TwitchRecordingTimeAware interface {
-	SetRecordingStartTime(isoString string)
-}
-
 // ExecuteTwitch runs the Twitch download pipeline (B3).
 // Twitch HLS delivers pre-muxed MPEG-TS, so only one segment downloader is needed.
 func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobContext, variant *TwitchVariantInfo, isVod bool, twitchChatDl TwitchChatDownloader) error {
@@ -137,7 +132,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			if strings.Contains(jobCtx.Job.ThumbnailURL, ".webp") {
 				thumbPath = filepath.Join(jobCtx.StagingDir, "thumbnail.webp")
 			}
-			DownloadFileMinSize(thumbCtx, jobCtx.Job.ThumbnailURL, thumbPath, 1000)
+			DownloadFileMinSize(thumbCtx, jobCtx.Job.ThumbnailURL, thumbPath, 1000, o.logger)
 		}()
 	}
 
@@ -201,9 +196,12 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Start Twitch chat in parallel
 	var chatDone chan struct{}
 	if twitchChatDl != nil {
-		// Set recording start time for IRC chat offset calculation (matches TS)
-		if rta, ok := twitchChatDl.(TwitchRecordingTimeAware); ok {
-			rta.SetRecordingStartTime(time.Now().UTC().Format(time.RFC3339))
+		// Set recording start time for IRC chat offset calculation (matches TS).
+		// Per audit reports/worker.md Finding 59 — type assertion directly on the
+		// concrete type since *twitch.ChatDownloader is the only implementation;
+		// no abstraction is providing real value here.
+		if irc, ok := twitchChatDl.(*twitch.ChatDownloader); ok {
+			irc.SetRecordingStartTime(time.Now().UTC().Format(time.RFC3339))
 		}
 		// Wire OnProgress for DB updates (matches TS chat progress tracking)
 		if irc, ok := twitchChatDl.(*twitch.ChatDownloader); ok {

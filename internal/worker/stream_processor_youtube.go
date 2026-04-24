@@ -38,11 +38,6 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	if sp.cfgMu != nil {
 		sp.cfgMu.RUnlock()
 	}
-	var chatDl *chat.ChatDownloader
-	if downloadChat {
-		chatDl = sp.tryStartEarlyChat(ctx, job, initialInfo)
-	}
-
 	// B2: Chat surge detection + throttled DB updates for chat count
 	var surgeMu sync.Mutex
 	surgeWindowStart := time.Now()
@@ -82,8 +77,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		}
 	}
 
-	if chatDl != nil {
-		chatDl.SetOnProgress(chatProgressFn)
+	// Per audit reports/worker.md F16 — pass onProgress into tryStartEarlyChat so
+	// the wiring is centralized and can't drift between the initial start and
+	// the in-loop retry path below.
+	var chatDl *chat.ChatDownloader
+	if downloadChat {
+		chatDl = sp.tryStartEarlyChat(ctx, job, initialInfo, chatProgressFn)
 	}
 
 	for {
@@ -182,10 +181,8 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			sp.cfgMu.RUnlock()
 		}
 		if chatDl == nil && downloadChatRetry {
-			chatDl = sp.tryStartEarlyChat(ctx, job, probeInfo)
-			if chatDl != nil {
-				chatDl.SetOnProgress(chatProgressFn)
-			}
+			// onProgress wired inside tryStartEarlyChat — see F16.
+			chatDl = sp.tryStartEarlyChat(ctx, job, probeInfo, chatProgressFn)
 		}
 
 		// B1: Handle transition to members-only during upcoming
@@ -322,7 +319,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 }
 
 // tryStartEarlyChat attempts to start a chat downloader during the upcoming phase (B2).
-func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.Job, info *youtube.VideoInfo) *chat.ChatDownloader {
+// onProgress is wired before Start so callers don't need a follow-up SetOnProgress
+// (per audit reports/worker.md F16 — keeps initial+retry paths in sync).
+func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.Job, info *youtube.VideoInfo, onProgress func(chat.ChatProgress)) *chat.ChatDownloader {
 	// Fetch watch page to get chat continuation token
 	cookieHeader := ""
 	if sp.yt != nil && sp.yt.Auth != nil {
@@ -384,6 +383,11 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	}
 
 	dl := chat.NewChatDownloader(opts)
+	if onProgress != nil {
+		// Wire OnProgress before Start so the surge-detection callback fires
+		// from the very first batch (F16).
+		dl.SetOnProgress(onProgress)
+	}
 	dl.OnError = func(err error) {
 		sp.logger.Warn("[Chat] Early chat API error", "jobID", job.ID, "err", err)
 	}

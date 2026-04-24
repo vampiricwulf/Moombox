@@ -18,27 +18,27 @@ const (
 
 // ProgressTracker tracks download progress and updates the database.
 type ProgressTracker struct {
-	mu            sync.Mutex
-	db            *database.Database
-	logger        logger
-	jobID         string
-	videoSeq      int
-	audioSeq      int
-	videoTotal    int
-	audioTotal    int
-	chatCount     int
-	bytesTotal       int64
-	speedSmooth      *utils.SmoothValue
-	lastUpdate       time.Time
-	lastPersist      time.Time
-	lastVideoBytes   int64 // last p.Bytes for video downloader delta accumulation
-	lastAudioBytes   int64 // last p.Bytes for audio downloader delta accumulation
-	speedLastBytes   int64 // last bytesTotal snapshot for speed calculation
-	lastBytesTime    time.Time
-	startTime        time.Time // B8: for ETA calculation
-	vodPercent       float64   // VOD download progress percentage (from chunked download)
-	vodTotalBytes    int64     // Total file size for VOD chunked download (0 if not VOD)
-	gaps          []database.Gap
+	mu             sync.Mutex
+	db             *database.Database
+	logger         logger
+	jobID          string
+	videoSeq       int
+	audioSeq       int
+	videoTotal     int
+	audioTotal     int
+	chatCount      int
+	bytesTotal     int64
+	speedSmooth    *utils.SmoothValue
+	lastUpdate     time.Time
+	lastPersist    time.Time
+	lastVideoBytes int64 // last p.Bytes for video downloader delta accumulation
+	lastAudioBytes int64 // last p.Bytes for audio downloader delta accumulation
+	speedLastBytes int64 // last bytesTotal snapshot for speed calculation
+	lastBytesTime  time.Time
+	startTime      time.Time // B8: for ETA calculation
+	vodPercent     float64   // VOD download progress percentage (from chunked download)
+	vodTotalBytes  int64     // Total file size for VOD chunked download (0 if not VOD)
+	gaps           []database.Gap
 }
 
 // NewProgressTracker creates a new progress tracker for a job.

@@ -371,7 +371,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		for _, quality := range thumbQualities {
 			thumbURL := fmt.Sprintf("https://i.ytimg.com/vi/%s/%s.jpg", jobCtx.Job.VideoID, quality)
 			thumbDst := filepath.Join(outputDir, filenameBase+".jpg")
-			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000) == nil {
+			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000, o.logger) == nil {
 				thumbnailSaved = true
 				updates["thumbnail_file"] = thumbDst
 				break
@@ -390,7 +390,7 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 				ext = ".webp"
 			}
 			thumbDst := filepath.Join(outputDir, filenameBase+ext)
-			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000) == nil {
+			if DownloadFileMinSize(ctx, thumbURL, thumbDst, 1000, o.logger) == nil {
 				updates["thumbnail_file"] = thumbDst
 			}
 		}

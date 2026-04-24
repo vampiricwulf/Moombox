@@ -51,7 +51,10 @@ func DownloadFile(ctx context.Context, url, outputPath string) error {
 }
 
 // DownloadFileMinSize downloads a file but discards it if smaller than minSize bytes.
-func DownloadFileMinSize(ctx context.Context, url, outputPath string, minSize int64) error {
+// If lg is non-nil and the file is rejected for being too small, the rejection
+// is also logged at Debug level (per audit reports/worker.md Finding 48 — the
+// silent error was hard to diagnose in production).
+func DownloadFileMinSize(ctx context.Context, url, outputPath string, minSize int64, lg logger) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -82,6 +85,9 @@ func DownloadFileMinSize(ctx context.Context, url, outputPath string, minSize in
 	}
 	if n < minSize {
 		os.Remove(tmpPath)
+		if lg != nil {
+			lg.Debug("DownloadFileMinSize: rejected file (too small)", "url", url, "bytes", n, "min", minSize)
+		}
 		return fmt.Errorf("file too small: %d bytes (min %d)", n, minSize)
 	}
 
