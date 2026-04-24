@@ -5,8 +5,8 @@ import (
 	"sync"
 )
 
-// Store wraps *MoomboxConfig with an embedded RWMutex and optional save
-// path. It offers two primary APIs:
+// Store wraps *MoomboxConfig with a RWMutex (embedded or externally shared)
+// and an optional save path. It offers two primary APIs:
 //
 //   - Read(fn) — run a read-only function with the config under RLock.
 //     Multiple Read calls proceed concurrently; Update is blocked until
@@ -21,18 +21,32 @@ import (
 // sites that still do manual cfgMu.RLock()/Lock(), and Config() returns
 // the raw *MoomboxConfig pointer for dep-injected APIs that take both.
 //
-// Zero-value Store is not usable — construct via NewStore.
+// During gradual migration, construct the Store via NewStoreWithMutex so
+// it shares the same critical section as legacy cfgMu callers. Once all
+// legacy callers have moved to Read/Update, NewStore's embedded-mutex
+// variant becomes preferred.
+//
+// Zero-value Store is not usable — construct via NewStore / NewStoreWithMutex.
 type Store struct {
-	mu       sync.RWMutex
+	mu       *sync.RWMutex
 	cfg      *MoomboxConfig
 	savePath string
 }
 
-// NewStore returns a Store wrapping cfg. savePath may be empty to skip the
-// auto-save step in Update; that's useful during startup before a final
-// config path is negotiated.
+// NewStore returns a Store wrapping cfg with its own embedded RWMutex.
+// savePath may be empty to skip the auto-save step in Update; that's
+// useful during startup before a final config path is negotiated.
 func NewStore(cfg *MoomboxConfig, savePath string) *Store {
-	return &Store{cfg: cfg, savePath: savePath}
+	return &Store{mu: &sync.RWMutex{}, cfg: cfg, savePath: savePath}
+}
+
+// NewStoreWithMutex returns a Store sharing an external RWMutex. Use this
+// during the gradual migration so the Store's Read/Update and legacy
+// cfgMu.RLock()/Lock() sites share the same critical section — without
+// that, new-API and legacy callers would race. Once all legacy callers
+// have migrated, NewStore is preferred.
+func NewStoreWithMutex(cfg *MoomboxConfig, savePath string, mu *sync.RWMutex) *Store {
+	return &Store{mu: mu, cfg: cfg, savePath: savePath}
 }
 
 // Read runs fn with the config held under a read lock. Multiple concurrent
@@ -85,14 +99,14 @@ func (s *Store) SetSavePath(path string) {
 	s.mu.Unlock()
 }
 
-// RWMutex returns the embedded read/write mutex for legacy call sites
+// RWMutex returns the underlying read/write mutex for legacy call sites
 // that still do manual RLock()/Lock() around direct *MoomboxConfig access.
-// New code should use Snapshot/Update instead.
+// New code should use Read/Update instead.
 //
 // DEPRECATED: kept only for the gradual migration from external cfgMu to
 // Store. Planned removal once all cfgMu-holding call sites have migrated.
 func (s *Store) RWMutex() *sync.RWMutex {
-	return &s.mu
+	return s.mu
 }
 
 // Config returns the raw *MoomboxConfig pointer for dependency-injected

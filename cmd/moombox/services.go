@@ -54,6 +54,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return fmt.Errorf("Failed to load config: %w", err)
 	}
 	s.cfg = cfg
+	// configStore shares s.cfgMu so legacy callers (cfgMu.RLock()/Lock()
+	// everywhere) and new callers (s.configStore.Read/Update) serialise
+	// on the same critical section during the gradual migration per
+	// DECISIONS #8. Once all sites migrate, construct with NewStore and
+	// drop the shared-mutex coupling.
+	s.configStore = config.NewStoreWithMutex(cfg, s.configPath, &s.cfgMu)
 
 	if logLevelOverride != "" {
 		cfg.Logs.LogLevel = logLevelOverride

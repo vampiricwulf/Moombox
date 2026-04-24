@@ -40,6 +40,11 @@ type runState struct {
 	// --- Config + synchronisation ---
 	cfg   *config.MoomboxConfig
 	cfgMu sync.RWMutex
+	// configStore shares cfgMu so legacy cfgMu.RLock()/Lock() sites and
+	// new configStore.Read/Update sites serialize correctly during the
+	// gradual migration (DECISIONS #8). Populated in initServices once
+	// cfg + configPath are known.
+	configStore *config.Store
 
 	// --- Infrastructure ---
 	log *logger.Logger
