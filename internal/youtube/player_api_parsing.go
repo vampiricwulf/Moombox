@@ -330,6 +330,9 @@ func (p *PlayerAPI) decryptNParamStrict(ctx context.Context, rawURL, playerURL s
 
 	// Replace the first occurrence of n=<value> that is a proper query parameter
 	// to avoid false-matching within other parameter values.
+	// url.QueryEscape on decryptedN is a no-op today — n-param values are
+	// drawn from a URL-safe alphabet (alphanumeric + '-_'). Kept for safety
+	// in case YouTube ever widens that alphabet to include reserved chars.
 	for _, prefix := range []string{"?", "&"} {
 		old := prefix + "n=" + rawN
 		if strings.Contains(rawURL, old) {
