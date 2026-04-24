@@ -32,6 +32,7 @@ func (s *runState) runTUI() {
 	// Pass config reference, config mutex, and version for settings panel
 	app.SetConfig(s.cfg)
 	app.SetCfgMu(&s.cfgMu)
+	app.SetConfigStore(s.configStore)
 	app.SetVersion(version)
 	app.SetInternalToken(s.webServer.InternalToken())
 	app.IsFirstRun = !s.cfg.ConfigLoaded

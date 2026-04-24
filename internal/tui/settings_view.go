@@ -7,6 +7,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
+
+	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // --- Rendering ---
@@ -741,14 +743,10 @@ func (m *SettingsModel) renderSecurityRemove(w int) string {
 	lines = append(lines, "")
 
 	isExternal := false
-	if m.cfg != nil {
-		if m.cfgMu != nil {
-			m.cfgMu.RLock()
-		}
-		isExternal = m.cfg.Network.NetworkAccess == "external"
-		if m.cfgMu != nil {
-			m.cfgMu.RUnlock()
-		}
+	if m.configStore != nil {
+		m.configStore.Read(func(c *config.MoomboxConfig) {
+			isExternal = c.Network.NetworkAccess == "external"
+		})
 	}
 	if isExternal {
 		lines = append(lines, "  "+YellowStyle.Render(

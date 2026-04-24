@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -226,16 +227,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		}
 	case "O W":
 		scheme := "http"
-		if a.cfg != nil {
-			if a.cfgMu != nil {
-				a.cfgMu.RLock()
-			}
-			if a.cfg.Network.HTTPSEnabled {
-				scheme = "https"
-			}
-			if a.cfgMu != nil {
-				a.cfgMu.RUnlock()
-			}
+		if a.configStore != nil {
+			a.configStore.Read(func(c *config.MoomboxConfig) {
+				if c.Network.HTTPSEnabled {
+					scheme = "https"
+				}
+			})
 		}
 		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
 		a.setFeedback(fmt.Sprintf("Opening: %s", url))

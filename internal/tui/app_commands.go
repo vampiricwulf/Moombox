@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -35,17 +37,15 @@ func safeCmd(fn func() tea.Msg) tea.Cmd {
 func (a *App) apiBaseURL() string {
 	scheme := "http"
 	port := 774
-	if a.cfg != nil {
-		if a.cfgMu != nil {
-			a.cfgMu.RLock()
-			defer a.cfgMu.RUnlock()
-		}
-		if a.cfg.Network.HTTPSEnabled {
-			scheme = "https"
-		}
-		if a.cfg.Network.Port > 0 {
-			port = a.cfg.Network.Port
-		}
+	if a.configStore != nil {
+		a.configStore.Read(func(c *config.MoomboxConfig) {
+			if c.Network.HTTPSEnabled {
+				scheme = "https"
+			}
+			if c.Network.Port > 0 {
+				port = c.Network.Port
+			}
+		})
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d", scheme, port)
 }
@@ -70,14 +70,10 @@ func (t *internalTokenTransport) RoundTrip(req *http.Request) (*http.Response, e
 // The client is cached and rebuilt on HTTPS toggle (audit tui.md Finding 3).
 func (a *App) apiClient() *http.Client {
 	httpsEnabled := false
-	if a.cfg != nil {
-		if a.cfgMu != nil {
-			a.cfgMu.RLock()
-		}
-		httpsEnabled = a.cfg.Network.HTTPSEnabled
-		if a.cfgMu != nil {
-			a.cfgMu.RUnlock()
-		}
+	if a.configStore != nil {
+		a.configStore.Read(func(c *config.MoomboxConfig) {
+			httpsEnabled = c.Network.HTTPSEnabled
+		})
 	}
 	if a.cachedClient != nil && a.cachedClientHTTPS == httpsEnabled {
 		return a.cachedClient

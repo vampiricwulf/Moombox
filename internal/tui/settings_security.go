@@ -1,5 +1,7 @@
 package tui
 
+import "github.com/vampiricwulf/Moombox/internal/config"
+
 // --- Security sub-editor ---
 
 func (m *SettingsModel) handleSecurityKey(key string) string {
@@ -13,16 +15,13 @@ func (m *SettingsModel) handleSecurityKey(key string) string {
 }
 
 func (m *SettingsModel) hasPassword() bool {
-	if m.cfg == nil {
+	if m.configStore == nil {
 		return false
 	}
-	if m.cfgMu != nil {
-		m.cfgMu.RLock()
-	}
-	hash := m.cfg.Network.PasswordHash
-	if m.cfgMu != nil {
-		m.cfgMu.RUnlock()
-	}
+	var hash string
+	m.configStore.Read(func(c *config.MoomboxConfig) {
+		hash = c.Network.PasswordHash
+	})
 	return hash != ""
 }
 
@@ -85,13 +84,10 @@ func (m *SettingsModel) handleSetPassword() {
 			m.secMessageColor = ColorRed
 			return
 		}
-		if m.cfgMu != nil {
-			m.cfgMu.RLock()
-		}
-		currentHash := m.cfg.Network.PasswordHash
-		if m.cfgMu != nil {
-			m.cfgMu.RUnlock()
-		}
+		var currentHash string
+		m.configStore.Read(func(c *config.MoomboxConfig) {
+			currentHash = c.Network.PasswordHash
+		})
 		if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secCurrentPw, currentHash) {
 			m.secMessage = "Current password is incorrect"
 			m.secMessageColor = ColorRed
@@ -157,13 +153,10 @@ func (m *SettingsModel) handleRemovePassword() {
 		return
 	}
 
-	if m.cfgMu != nil {
-		m.cfgMu.RLock()
-	}
-	pwHash := m.cfg.Network.PasswordHash
-	if m.cfgMu != nil {
-		m.cfgMu.RUnlock()
-	}
+	var pwHash string
+	m.configStore.Read(func(c *config.MoomboxConfig) {
+		pwHash = c.Network.PasswordHash
+	})
 	if m.OnVerifyPassword != nil && !m.OnVerifyPassword(m.secRemovePw, pwHash) {
 		m.secMessage = "Current password is incorrect"
 		m.secMessageColor = ColorRed

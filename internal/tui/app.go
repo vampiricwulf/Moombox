@@ -244,9 +244,13 @@ type App struct {
 	// and applied via View()'s tea.View return value.
 	windowTitle string
 
-	// Config reference for settings panel
-	cfg   *config.MoomboxConfig
-	cfgMu *sync.RWMutex // shared config mutex (set via SetCfgMu)
+	// Config reference for settings panel.
+	// configStore is the long-term API; cfg + cfgMu are kept as direct
+	// fields during the gradual migration (DECISIONS #8). New code should
+	// use configStore.Read / configStore.Update instead.
+	cfg         *config.MoomboxConfig
+	cfgMu       *sync.RWMutex
+	configStore *config.Store
 
 	// Internal token for CSRF bypass on local API calls
 	internalToken string
@@ -374,10 +378,24 @@ func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 }
 
 // SetCfgMu sets the shared config mutex for synchronized config access.
-// Propagates to sub-models that write config (settings).
+// Propagates to sub-models that write config (settings). Prefer
+// SetConfigStore for new code.
 func (a *App) SetCfgMu(mu *sync.RWMutex) {
 	a.cfgMu = mu
 	a.settings.cfgMu = mu
+}
+
+// SetConfigStore wires the unified config Store into the App and its
+// sub-models (DECISIONS #8). The Store holds both the *MoomboxConfig
+// pointer and the synchronising mutex; SetConfigStore also sets
+// a.cfg + a.cfgMu so legacy direct-field access still works during the
+// gradual TUI-internal migration.
+func (a *App) SetConfigStore(s *config.Store) {
+	a.configStore = s
+	a.cfg = s.Config()
+	a.cfgMu = s.RWMutex()
+	a.settings.configStore = s
+	a.settings.cfgMu = s.RWMutex()
 }
 
 // SetSetupCallbacks wires callback functions for the TUI setup wizard.
@@ -588,11 +606,16 @@ func (a *App) updateTerminalTitle() {
 
 // getPort returns the configured port or default 774.
 func (a *App) getPort() int {
-	if a.cfg != nil {
-		if a.cfgMu != nil {
-			a.cfgMu.RLock()
-			defer a.cfgMu.RUnlock()
+	if a.configStore != nil {
+		var port int
+		a.configStore.Read(func(c *config.MoomboxConfig) {
+			port = c.Network.Port
+		})
+		if port > 0 {
+			return port
 		}
+	}
+	if a.cfg != nil {
 		if a.cfg.Network.Port > 0 {
 			return a.cfg.Network.Port
 		}

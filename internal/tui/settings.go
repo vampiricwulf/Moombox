@@ -231,7 +231,11 @@ type SettingsModel struct {
 
 	// Config reference
 	cfg   *config.MoomboxConfig
-	cfgMu *sync.RWMutex // shared config mutex
+	// cfgMu is the legacy direct-mutex handle; configStore is the new API.
+	// Both reference the same critical section during the migration
+	// (DECISIONS #8). Set together via App.SetConfigStore.
+	cfgMu       *sync.RWMutex
+	configStore *config.Store
 
 	// Callbacks
 	OnSave           func(cfg *config.MoomboxConfig)
