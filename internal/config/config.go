@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,7 +110,7 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 	}
 
 	cfg.ConfigLoaded = true
-	validate(cfg)
+	Normalize(cfg)
 	return cfg, nil
 }
 
@@ -316,103 +317,207 @@ func toFloat64(v any) (float64, bool) {
 	return 0, false
 }
 
-// validate checks config values and replaces invalid ones with defaults.
-func validate(cfg *MoomboxConfig) {
+// Validate reports configuration issues without mutating cfg. Returns a
+// slice of errors — empty when the config is fully valid. Paired with
+// Normalize, which applies defaults/clamps (DECISIONS #9). Load auto-
+// normalises to avoid data loss on legacy configs; Save validates first
+// and refuses to write a failing config so the user sees the problem.
+func Validate(cfg *MoomboxConfig) []error {
+	return validateOrNormalize(cfg, true)
+}
+
+// Normalize replaces out-of-range or empty fields with their defaults.
+// Idempotent — safe to call multiple times. Use Validate to surface issues
+// before Normalize hides them (DECISIONS #9).
+func Normalize(cfg *MoomboxConfig) {
+	_ = validateOrNormalize(cfg, false)
+}
+
+// validateOrNormalize is the shared implementation. When reportOnly=true it
+// records each issue as an error and leaves cfg untouched; when false it
+// overwrites the offending field with the default and returns nil.
+func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 	defaults := Defaults()
+	var errs []error
+	fail := func(format string, args ...any) {
+		if reportOnly {
+			errs = append(errs, fmt.Errorf(format, args...))
+		}
+	}
 
 	if cfg.Network.Port < 1 || cfg.Network.Port > 65535 {
-		cfg.Network.Port = defaults.Network.Port
+		fail("network.port %d out of range 1..65535", cfg.Network.Port)
+		if !reportOnly {
+			cfg.Network.Port = defaults.Network.Port
+		}
 	}
 	if cfg.Network.NetworkAccess != "localhost" && cfg.Network.NetworkAccess != "lan" && cfg.Network.NetworkAccess != "external" {
-		cfg.Network.NetworkAccess = defaults.Network.NetworkAccess
+		fail("network.network_access %q must be one of localhost|lan|external", cfg.Network.NetworkAccess)
+		if !reportOnly {
+			cfg.Network.NetworkAccess = defaults.Network.NetworkAccess
+		}
 	}
 	// ClientTokenTTLDays: 1 day to 10 years. Default to 365d (1y) if unset or out of range.
 	if cfg.Network.ClientTokenTTLDays <= 0 || cfg.Network.ClientTokenTTLDays > 3650 {
-		cfg.Network.ClientTokenTTLDays = defaults.Network.ClientTokenTTLDays
+		fail("network.client_token_ttl_days %d out of range 1..3650", cfg.Network.ClientTokenTTLDays)
+		if !reportOnly {
+			cfg.Network.ClientTokenTTLDays = defaults.Network.ClientTokenTTLDays
+		}
 	}
 	switch strings.ToUpper(cfg.Logs.LogLevel) {
 	case "DEBUG", "INFO", "WARN", "ERROR":
-		cfg.Logs.LogLevel = strings.ToUpper(cfg.Logs.LogLevel)
+		if !reportOnly {
+			cfg.Logs.LogLevel = strings.ToUpper(cfg.Logs.LogLevel)
+		}
 	default:
-		cfg.Logs.LogLevel = defaults.Logs.LogLevel
+		fail("logs.log_level %q must be one of DEBUG|INFO|WARN|ERROR", cfg.Logs.LogLevel)
+		if !reportOnly {
+			cfg.Logs.LogLevel = defaults.Logs.LogLevel
+		}
 	}
 	if cfg.Monitors.MaxFeedItems < 1 {
-		cfg.Monitors.MaxFeedItems = defaults.Monitors.MaxFeedItems
+		fail("monitors.max_feed_items %d must be >= 1", cfg.Monitors.MaxFeedItems)
+		if !reportOnly {
+			cfg.Monitors.MaxFeedItems = defaults.Monitors.MaxFeedItems
+		}
 	}
 	if cfg.Monitors.FeedCheckInterval.Value < 1 {
-		cfg.Monitors.FeedCheckInterval = defaults.Monitors.FeedCheckInterval
+		fail("monitors.feed_check_interval %v must be >= 1", cfg.Monitors.FeedCheckInterval.Value)
+		if !reportOnly {
+			cfg.Monitors.FeedCheckInterval = defaults.Monitors.FeedCheckInterval
+		}
 	}
 	if cfg.Monitors.HideFinishedAgeDays.Value < 0 {
-		cfg.Monitors.HideFinishedAgeDays = defaults.Monitors.HideFinishedAgeDays
+		fail("monitors.hide_finished_age_days %v must be >= 0", cfg.Monitors.HideFinishedAgeDays.Value)
+		if !reportOnly {
+			cfg.Monitors.HideFinishedAgeDays = defaults.Monitors.HideFinishedAgeDays
+		}
 	}
 	if cfg.Monitors.DecapiCheckInterval != nil && (*cfg.Monitors.DecapiCheckInterval < 15 || *cfg.Monitors.DecapiCheckInterval > 3600) {
-		cfg.Monitors.DecapiCheckInterval = nil
+		fail("monitors.decapi_check_interval %d out of range 15..3600", *cfg.Monitors.DecapiCheckInterval)
+		if !reportOnly {
+			cfg.Monitors.DecapiCheckInterval = nil
+		}
 	}
 	if cfg.Monitors.TwitchCheckInterval != nil && (*cfg.Monitors.TwitchCheckInterval < 1 || *cfg.Monitors.TwitchCheckInterval > 3600) {
-		cfg.Monitors.TwitchCheckInterval = nil
+		fail("monitors.twitch_check_interval %d out of range 1..3600", *cfg.Monitors.TwitchCheckInterval)
+		if !reportOnly {
+			cfg.Monitors.TwitchCheckInterval = nil
+		}
 	}
 	if cfg.Logs.LogMaxFileSize < 1 {
-		cfg.Logs.LogMaxFileSize = defaults.Logs.LogMaxFileSize
+		fail("logs.log_max_file_size %d must be >= 1", cfg.Logs.LogMaxFileSize)
+		if !reportOnly {
+			cfg.Logs.LogMaxFileSize = defaults.Logs.LogMaxFileSize
+		}
 	}
 	if cfg.Logs.LogMaxFiles < 1 {
-		cfg.Logs.LogMaxFiles = defaults.Logs.LogMaxFiles
+		fail("logs.log_max_files %d must be >= 1", cfg.Logs.LogMaxFiles)
+		if !reportOnly {
+			cfg.Logs.LogMaxFiles = defaults.Logs.LogMaxFiles
+		}
 	}
 
 	d := &cfg.Downloader
 	if d.NumParallelDownloads < 1 {
-		d.NumParallelDownloads = defaults.Downloader.NumParallelDownloads
+		fail("downloader.num_parallel_downloads %d must be >= 1", d.NumParallelDownloads)
+		if !reportOnly {
+			d.NumParallelDownloads = defaults.Downloader.NumParallelDownloads
+		}
 	}
 	if d.MaxVideoResolution < 1 {
-		d.MaxVideoResolution = defaults.Downloader.MaxVideoResolution
+		fail("downloader.max_video_resolution %d must be >= 1", d.MaxVideoResolution)
+		if !reportOnly {
+			d.MaxVideoResolution = defaults.Downloader.MaxVideoResolution
+		}
 	}
 	if d.OutputTemplate == "" {
-		d.OutputTemplate = defaults.Downloader.OutputTemplate
+		fail("downloader.output_template must not be empty")
+		if !reportOnly {
+			d.OutputTemplate = defaults.Downloader.OutputTemplate
+		}
 	}
 	if d.SegmentRetryDelayCap < 1 {
-		d.SegmentRetryDelayCap = defaults.Downloader.SegmentRetryDelayCap
+		fail("downloader.segment_retry_delay_cap %d must be >= 1", d.SegmentRetryDelayCap)
+		if !reportOnly {
+			d.SegmentRetryDelayCap = defaults.Downloader.SegmentRetryDelayCap
+		}
 	}
 	if d.SegmentLiveCheckRetries < 1 {
-		d.SegmentLiveCheckRetries = defaults.Downloader.SegmentLiveCheckRetries
+		fail("downloader.segment_live_check_retries %d must be >= 1", d.SegmentLiveCheckRetries)
+		if !reportOnly {
+			d.SegmentLiveCheckRetries = defaults.Downloader.SegmentLiveCheckRetries
+		}
 	}
 
 	if cfg.Paths.DatabasePath == "" {
-		cfg.Paths.DatabasePath = defaults.Paths.DatabasePath
+		fail("paths.database_path must not be empty")
+		if !reportOnly {
+			cfg.Paths.DatabasePath = defaults.Paths.DatabasePath
+		}
 	}
 	if cfg.Paths.LogFilePath == "" {
-		cfg.Paths.LogFilePath = defaults.Paths.LogFilePath
+		fail("paths.log_file_path must not be empty")
+		if !reportOnly {
+			cfg.Paths.LogFilePath = defaults.Paths.LogFilePath
+		}
 	}
 	if cfg.Paths.OutputDirectory == "" {
-		cfg.Paths.OutputDirectory = defaults.Paths.OutputDirectory
+		fail("paths.output_directory must not be empty")
+		if !reportOnly {
+			cfg.Paths.OutputDirectory = defaults.Paths.OutputDirectory
+		}
 	}
 	if cfg.Paths.StagingDirectory == "" {
-		cfg.Paths.StagingDirectory = defaults.Paths.StagingDirectory
+		fail("paths.staging_directory must not be empty")
+		if !reportOnly {
+			cfg.Paths.StagingDirectory = defaults.Paths.StagingDirectory
+		}
 	}
 	if cfg.Cookies.CookieFile == "" {
-		cfg.Cookies.CookieFile = defaults.Cookies.CookieFile
+		fail("cookies.cookie_file must not be empty")
+		if !reportOnly {
+			cfg.Cookies.CookieFile = defaults.Cookies.CookieFile
+		}
 	}
 	if cfg.Cookies.RefreshInterval.Value < 10 {
-		cfg.Cookies.RefreshInterval = defaults.Cookies.RefreshInterval
+		fail("cookies.refresh_interval %v must be >= 10 minutes", cfg.Cookies.RefreshInterval.Value)
+		if !reportOnly {
+			cfg.Cookies.RefreshInterval = defaults.Cookies.RefreshInterval
+		}
 	}
 
 	// Disk thresholds
 	if cfg.Disk.WarnPercent < 1 || cfg.Disk.WarnPercent > 99 {
-		cfg.Disk.WarnPercent = defaults.Disk.WarnPercent
-	}
-	if cfg.Disk.CriticalPercent < 1 || cfg.Disk.CriticalPercent > 99 {
-		cfg.Disk.CriticalPercent = defaults.Disk.CriticalPercent
-	}
-	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
-		cfg.Disk.CriticalPercent = min(cfg.Disk.WarnPercent+5, 99)
-	}
-
-	// Validate channel-level quality_preference (applies to both YouTube and Twitch).
-	// Uses the package-level validQualityPreferences set so the map isn't
-	// rebuilt on every validate() call.
-	for i := range cfg.Channels {
-		if cfg.Channels[i].QualityPreference != "" && !validQualityPreferences[cfg.Channels[i].QualityPreference] {
-			cfg.Channels[i].QualityPreference = ""
+		fail("disk.warn_percent %d out of range 1..99", cfg.Disk.WarnPercent)
+		if !reportOnly {
+			cfg.Disk.WarnPercent = defaults.Disk.WarnPercent
 		}
 	}
+	if cfg.Disk.CriticalPercent < 1 || cfg.Disk.CriticalPercent > 99 {
+		fail("disk.critical_percent %d out of range 1..99", cfg.Disk.CriticalPercent)
+		if !reportOnly {
+			cfg.Disk.CriticalPercent = defaults.Disk.CriticalPercent
+		}
+	}
+	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
+		fail("disk.critical_percent %d must be > disk.warn_percent %d", cfg.Disk.CriticalPercent, cfg.Disk.WarnPercent)
+		if !reportOnly {
+			cfg.Disk.CriticalPercent = min(cfg.Disk.WarnPercent+5, 99)
+		}
+	}
+
+	// Channel-level quality_preference (applies to both YouTube and Twitch).
+	for i := range cfg.Channels {
+		if cfg.Channels[i].QualityPreference != "" && !validQualityPreferences[cfg.Channels[i].QualityPreference] {
+			fail("channels[%d].quality_preference %q unknown", i, cfg.Channels[i].QualityPreference)
+			if !reportOnly {
+				cfg.Channels[i].QualityPreference = ""
+			}
+		}
+	}
+
+	return errs
 }
 
 // validQualityPreferences is the authoritative set of quality_preference
@@ -449,7 +554,15 @@ func Save(cfg *MoomboxConfig, path string) error {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 
-	validate(cfg)
+	// DECISIONS #9: Save validates first and refuses bad input so the user
+	// sees the problem. Load stays auto-normalising to avoid data loss on
+	// legacy configs.
+	if errs := Validate(cfg); len(errs) > 0 {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("invalid config: %w", errors.Join(errs...))
+	}
+	Normalize(cfg)
 	enc := toml.NewEncoder(f)
 	if err := enc.Encode(cfg); err != nil {
 		f.Close()

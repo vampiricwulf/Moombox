@@ -60,7 +60,7 @@ func TestValidateClientTokenTTL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Defaults()
 			cfg.Network.ClientTokenTTLDays = tt.input
-			validate(cfg)
+			Normalize(cfg)
 			if cfg.Network.ClientTokenTTLDays != tt.expected {
 				t.Errorf("validate(%d) → %d, want %d", tt.input, cfg.Network.ClientTokenTTLDays, tt.expected)
 			}
@@ -215,7 +215,7 @@ func TestValidation(t *testing.T) {
 	cfg.Downloader.NumParallelDownloads = 0
 	cfg.Downloader.MaxVideoResolution = -100
 
-	validate(cfg)
+	Normalize(cfg)
 
 	if cfg.Network.Port != 774 {
 		t.Errorf("expected port reset to 774, got %d", cfg.Network.Port)
@@ -364,7 +364,7 @@ func TestValidationDiskThresholds(t *testing.T) {
 	cfg.Disk.WarnPercent = 95
 	cfg.Disk.CriticalPercent = 90
 
-	validate(cfg)
+	Normalize(cfg)
 
 	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
 		t.Errorf("expected critical > warn, got critical=%d, warn=%d",
@@ -460,7 +460,7 @@ func TestValidationQualityPreference(t *testing.T) {
 		{ID: "UC789", QualityPreference: "best", Enabled: &enabled},
 	}
 
-	validate(cfg)
+	Normalize(cfg)
 
 	if cfg.Channels[0].QualityPreference != "1080p60" {
 		t.Errorf("expected 1080p60, got %s", cfg.Channels[0].QualityPreference)
