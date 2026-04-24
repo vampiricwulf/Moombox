@@ -23,9 +23,18 @@ type ChatMessage struct {
 }
 
 // MessagePart represents a text or emoji segment in a chat message.
+//
+// On text segments, URL is the hyperlink target when a YouTube
+// navigationEndpoint is attached to the run (audit chat.md E5). Bold and
+// Italic reflect YouTube's `bold`/`italics` flags on text runs. Renderers
+// that don't care about these fields can ignore them — omitempty keeps the
+// JSON shape backward-compatible with pre-E5 chat files.
 type MessagePart struct {
-	Type          string `json:"type"`                    // "text" or "emoji"
+	Type          string `json:"type"` // "text" or "emoji"
 	Text          string `json:"text,omitempty"`
+	URL           string `json:"url,omitempty"`
+	Bold          bool   `json:"bold,omitempty"`
+	Italic        bool   `json:"italic,omitempty"`
 	EmojiID       string `json:"emojiId,omitempty"`
 	EmojiURL      string `json:"emojiUrl,omitempty"`
 	IsCustomEmoji bool   `json:"isCustomEmoji,omitempty"`

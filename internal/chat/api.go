@@ -529,7 +529,22 @@ func parseMessageRuns(message map[string]any) []MessagePart {
 		}
 
 		if text, ok := runMap["text"].(string); ok {
-			parts = append(parts, MessagePart{Type: "text", Text: text})
+			part := MessagePart{Type: "text", Text: text}
+			// navigationEndpoint on a text run carries a hyperlink target
+			// (chat mentions, pasted URLs, referenced channels). The
+			// urlEndpoint form has the raw target; commandMetadata has
+			// YouTube's redirect-wrapped variant — prefer the direct one
+			// (audit chat.md E5).
+			if nav, ok := runMap["navigationEndpoint"].(map[string]any); ok {
+				part.URL = extractNavURL(nav)
+			}
+			if bold, ok := runMap["bold"].(bool); ok && bold {
+				part.Bold = true
+			}
+			if italic, ok := runMap["italics"].(bool); ok && italic {
+				part.Italic = true
+			}
+			parts = append(parts, part)
 		} else if emoji, ok := runMap["emoji"].(map[string]any); ok {
 			part := MessagePart{Type: "emoji"}
 			if emojiID, ok := emoji["emojiId"].(string); ok {
@@ -583,6 +598,26 @@ func parseMessageRuns(message map[string]any) []MessagePart {
 	}
 
 	return parts
+}
+
+// extractNavURL pulls a hyperlink target out of a YouTube navigationEndpoint.
+// Prefers urlEndpoint.url (direct target) and falls back to
+// commandMetadata.webCommandMetadata.url (YouTube's redirect-wrapped form).
+// Returns "" if neither shape is present.
+func extractNavURL(nav map[string]any) string {
+	if ue, ok := nav["urlEndpoint"].(map[string]any); ok {
+		if url, ok := ue["url"].(string); ok && url != "" {
+			return url
+		}
+	}
+	if cm, ok := nav["commandMetadata"].(map[string]any); ok {
+		if wcm, ok := cm["webCommandMetadata"].(map[string]any); ok {
+			if url, ok := wcm["url"].(string); ok && url != "" {
+				return url
+			}
+		}
+	}
+	return ""
 }
 
 func extractBadges(renderer map[string]any) []string {
