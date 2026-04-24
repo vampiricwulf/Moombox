@@ -10,6 +10,14 @@ import (
 // ParseVersion parses a version string like "v2.0.15" or "2.0.15" into
 // major, minor, patch components. Supports 2-segment ("1.0") and
 // 3-segment ("1.0.0") versions.
+//
+// **Pre-release / build-metadata not supported.** Tags such as
+// "2.5.0-rc1" or "2.5.0+build.42" return an error from this function;
+// CompareVersions falls back to lexical strings.Compare on the original
+// inputs in that case, which is *not* SemVer-correct. Moombox tags are
+// plain "vX.Y.Z" today, so this is acceptable — but if pre-release
+// suffixes ever ship, extend this parser before relying on ordering.
+// Audit reports/small-packages.md.
 func ParseVersion(s string) (major, minor, patch int, err error) {
 	s = strings.TrimPrefix(s, "v")
 	parts := strings.Split(s, ".")

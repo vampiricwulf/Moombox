@@ -94,6 +94,14 @@ func (pt *PassiveTracker) ReportSuccess(tag string) {
 	}
 }
 
+// ShouldTriggerOffline returns true when the failure window has piled up
+// enough distinct subsystems to declare the network offline.
+//
+// **Side effect**: when this returns true, the tracker latches the
+// `triggered` flag so subsequent IsTriggered() polls report offline until
+// a ReportSuccess clears the failures below threshold. The name reads as
+// a predicate but the latch is intentional — Monitor.ReportFailure relies
+// on the latched state. Audit reports/small-packages.md.
 func (pt *PassiveTracker) ShouldTriggerOffline() bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()

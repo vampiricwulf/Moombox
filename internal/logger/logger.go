@@ -116,11 +116,16 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	l.level = new(slog.LevelVar)
 	l.SetLevel(level)
 
-	// Open log file
+	// Open log file. Empty filePath is a deliberate "stdout + ring-buffer
+	// only" mode used by tests and by the launcher's pre-init phase; we
+	// surface it on stderr so callers that mis-construct the logger don't
+	// silently lose all file output. Audit reports/small-packages.md.
 	if filePath != "" {
 		if err := l.openFile(); err != nil {
 			return nil, fmt.Errorf("failed to open log file: %w", err)
 		}
+	} else {
+		fmt.Fprintln(os.Stderr, "logger: no file path configured — log output goes to stdout + ring buffer only")
 	}
 
 	// Create multi-writer (stdout + file)

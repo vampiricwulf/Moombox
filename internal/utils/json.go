@@ -78,14 +78,20 @@ func ReplaceMessageCount(header string, count int) string {
 
 // ReplaceQuotedField replaces a JSON string value in a header buffer.
 // Finds `"key": "old_value"` and replaces with `"key": "new_value"`.
-func ReplaceQuotedField(header *string, key, newValue string) {
+//
+// keyWithQuotes must already include the surrounding quotes and trailing
+// colon (e.g. `"downloadedAt":`). The lookup is intentionally a literal
+// substring scan, so callers must keep the key form unique enough that it
+// will not be matched inside any value earlier in the buffer. Audit
+// reports/small-packages.md.
+func ReplaceQuotedField(header *string, keyWithQuotes, newValue string) {
 	h := *header
-	keyIdx := strings.Index(h, key)
+	keyIdx := strings.Index(h, keyWithQuotes)
 	if keyIdx < 0 {
 		return
 	}
 	// Find opening quote after key
-	valStart := keyIdx + len(key)
+	valStart := keyIdx + len(keyWithQuotes)
 	for valStart < len(h) && h[valStart] != '"' {
 		valStart++
 	}

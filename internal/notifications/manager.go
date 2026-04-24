@@ -61,10 +61,12 @@ func (t NotificationType) Color() int {
 }
 
 // Field is a key-value pair displayed inline in a notification embed.
+// JSON tags exist so notifications/discord.go can alias this type for
+// outbound payloads without maintaining a parallel struct.
 type Field struct {
-	Name   string
-	Value  string
-	Inline bool
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Inline bool   `json:"inline,omitempty"`
 }
 
 // SendOptions provides optional parameters for a notification.
@@ -97,6 +99,12 @@ type sender interface {
 }
 
 // NewManager creates a new notification manager from config.
+//
+// **Discord-only**: the only URL scheme handled today is Discord webhook
+// (either `discord://ID/TOKEN` or a full `https://discord.com/api/webhooks/...`
+// URL). Anything else is logged at Warn and skipped — this is intentional,
+// not a TODO. If/when another transport (e.g. ntfy) is added, register a
+// new sender in the URL-scheme switch below. Audit reports/small-packages.md.
 func NewManager(cfg *config.MoomboxConfig, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)

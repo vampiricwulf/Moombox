@@ -356,14 +356,18 @@ func (u *Updater) downloadFile(ctx context.Context, url, dest string) error {
 		return err
 	}
 
-	// Cap download at 200 MB to prevent disk exhaustion from a compromised source.
+	// Cap download at 200 MB to prevent disk exhaustion from a compromised
+	// source. Read one extra byte so a payload of *exactly* maxDownloadSize
+	// is accepted while anything larger is rejected — without the +1 the
+	// previous `n >= maxDownloadSize` check rejected the boundary case.
+	// Audit reports/small-packages.md.
 	const maxDownloadSize = 200 << 20
-	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize))
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize+1))
 	if err != nil {
 		f.Close()
 		return err
 	}
-	if n >= maxDownloadSize {
+	if n > maxDownloadSize {
 		f.Close()
 		return fmt.Errorf("download exceeds %d MB size limit", maxDownloadSize>>20)
 	}

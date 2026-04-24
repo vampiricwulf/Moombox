@@ -40,11 +40,10 @@ type discordEmbed struct {
 	Timestamp   string              `json:"timestamp,omitempty"`
 }
 
-type discordField struct {
-	Name   string `json:"name"`
-	Value  string `json:"value"`
-	Inline bool   `json:"inline,omitempty"`
-}
+// discordField is a type alias for Field so the Discord JSON encoder can
+// share the same struct without keeping a parallel duplicate definition.
+// Field carries the JSON tags directly. Audit reports/small-packages.md.
+type discordField = Field
 
 type discordImage struct {
 	URL string `json:"url"`
@@ -77,10 +76,9 @@ func (d *DiscordWebhook) Send(title, description string, color int, fields []Fie
 	}
 
 	if len(fields) > 0 {
-		embed.Fields = make([]discordField, len(fields))
-		for i, f := range fields {
-			embed.Fields[i] = discordField(f)
-		}
+		// discordField is a type alias for Field, so this is a direct copy
+		// rather than an element-by-element conversion.
+		embed.Fields = append([]discordField(nil), fields...)
 	}
 
 	payload := discordPayload{
