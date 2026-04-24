@@ -22,9 +22,13 @@ const (
 // pass is one place rather than scattered across autocookies*.go (audit
 // reports/cookies.md #38).
 const (
-	processTimeout       = 30 * time.Second  // overall browser-launch budget for refresh
-	authVerifyTimeout    = 15 * time.Second  // single VerifyYouTubeAuth / VerifyTwitchAuth call
-	refreshOverallBudget = 2 * time.Minute   // periodic refresh: ctx cap end-to-end
+	processTimeout       = 30 * time.Second // overall browser-launch budget for refresh
+	authVerifyTimeout    = 15 * time.Second // single VerifyYouTubeAuth / VerifyTwitchAuth call
+	refreshOverallBudget = 2 * time.Minute  // periodic refresh: ctx cap end-to-end
+	// taskkillDrainDelay is the post-taskkill pause that lets Windows release
+	// the process handle before the next cleanup step inspects state. Replaces
+	// a bare 300ms literal in killSetupProcess (audit reports/cookies.md #45).
+	taskkillDrainDelay = 300 * time.Millisecond
 )
 
 // platformRefreshURLs maps platform names to their refresh URLs.
@@ -556,7 +560,7 @@ func (s *AutoCookieService) killSetupProcess() {
 	}
 
 	killProcessTree(proc)
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(taskkillDrainDelay)
 }
 
 func (s *AutoCookieService) killRefreshProcess() {

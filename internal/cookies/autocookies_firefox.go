@@ -31,6 +31,13 @@ user_pref("browser.rights.3.shown", true);
 // Firefox lock files that prevent launch when a previous session was force-killed.
 var firefoxLockFiles = []string{"parent.lock", ".parentlock"}
 
+// Firefox graceful-close timing. Pulled out of inline literals to make a tuning
+// pass one place rather than scattered (audit reports/cookies.md #45).
+const (
+	firefoxGracefulCloseTimeout = 8 * time.Second        // overall budget for clean exit
+	firefoxExitPollInterval     = 200 * time.Millisecond // poll cadence inside the wait loop
+)
+
 func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url string) error {
 	cleanFirefoxLockFiles(s.profileDir)
 
@@ -76,7 +83,7 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 	s.mu.Unlock()
 
 	if proc == nil || exited {
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(taskkillDrainDelay)
 		return
 	}
 
@@ -89,24 +96,25 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 		proc.Signal(os.Interrupt)
 	}
 
-	// Wait up to 8 seconds for clean exit
-	deadline := time.Now().Add(8 * time.Second)
+	// Wait for clean exit, polling the wait-goroutine's browserExited flag.
+	deadline := time.Now().Add(firefoxGracefulCloseTimeout)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
 		exited = s.browserExited
 		s.mu.Unlock()
 		if exited {
 			s.logger.Debug("Firefox exited cleanly")
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(taskkillDrainDelay)
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(firefoxExitPollInterval)
 	}
 
-	// Force kill
+	// Force kill, then pause briefly so cookies.sqlite write-aheads land
+	// before the next read attempt picks up the lock-released state.
 	s.logger.Warn("Firefox did not exit gracefully, force killing")
 	killProcessTree(proc)
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(cdpCloseFlushDelay)
 }
 
 func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, error) {

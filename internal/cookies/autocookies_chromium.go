@@ -20,10 +20,14 @@ import (
 // place rather than scattered across every CDP helper (audit
 // reports/cookies.md #38).
 const (
-	cdpPollTimeout       = 15 * time.Second // wait for /json/version readiness
-	cdpExtractTimeout    = 30 * time.Second // total budget for extractChromiumCookies
-	cdpRefreshTimeout    = 30 * time.Second // total budget for refreshChromium CDP work
-	cdpNavigateTimeout   = 30 * time.Second // single Page.navigate + loadEventFired wait
+	cdpPollTimeout     = 15 * time.Second      // wait for /json/version readiness
+	cdpExtractTimeout  = 30 * time.Second      // total budget for extractChromiumCookies
+	cdpRefreshTimeout  = 30 * time.Second      // total budget for refreshChromium CDP work
+	cdpNavigateTimeout = 30 * time.Second      // single Page.navigate + loadEventFired wait
+	// cdpCloseFlushDelay is the post-Browser.close pause that lets Chromium
+	// flush cookies to disk before our defer kills the process tree. Replaces
+	// a bare 500ms literal (audit reports/cookies.md #45).
+	cdpCloseFlushDelay = 500 * time.Millisecond
 )
 
 // Chromium lock files that prevent headless launch when a headed session was killed.
@@ -209,9 +213,10 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		return "", err
 	}
 
-	// Close browser
+	// Close browser, then pause briefly so Chromium flushes any final cookie
+	// writes before the defer above tears down the process tree.
 	cdpCloseBrowser(cdpCtx, port)
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(cdpCloseFlushDelay)
 
 	return netscapeCookies, nil
 }
@@ -289,7 +294,8 @@ func cdpNavigateAndWait(ctx context.Context, wsURL string, targetURL string) err
 		return fmt.Errorf("CDP Page.enable: %w", err)
 	}
 	// Read Page.enable response (response body ignored; an error here is
-	// surfaced later when Page.navigate also fails).
+	// surfaced later when Page.navigate also fails — no logger plumbed
+	// into this free function, see audit reports/cookies.md #42).
 	_, _, _ = conn.Read(navCtx)
 
 	// Send Page.navigate
@@ -509,7 +515,12 @@ func cdpSendCommand(wsURL string, method string, params map[string]any) error {
 		return fmt.Errorf("CDP write: %w", err)
 	}
 
-	// Read response (wait up to 5 seconds)
+	// Block briefly for an ack so the WebSocket flushes before defer Close
+	// races the server. The result is intentionally discarded — the only
+	// in-tree caller (cdpCloseBrowser → Browser.close) does not care about
+	// the response payload, and a Read error here just means the browser
+	// went away faster than we could read the ack, which is the desired
+	// outcome of Browser.close anyway (audit reports/cookies.md #19).
 	_, _, _ = conn.Read(ctx)
 	return nil
 }
