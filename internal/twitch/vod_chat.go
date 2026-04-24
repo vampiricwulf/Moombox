@@ -324,12 +324,9 @@ func (vcd *VodChatDownloader) resumeStatePath() string {
 
 // loadResumeState attempts to load a resume state from the sidecar JSON file.
 func (vcd *VodChatDownloader) loadResumeState() (*ChatResumeState, error) {
-	data, err := os.ReadFile(vcd.resumeStatePath())
+	store := utils.ResumeStore[ChatResumeState]{Path: vcd.resumeStatePath()}
+	state, err := store.Load()
 	if err != nil {
-		return nil, err
-	}
-	var state ChatResumeState
-	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
 	return &state, nil
@@ -340,7 +337,6 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 	if vcd.outputPath == "" {
 		return
 	}
-
 	// Deterministic insertion-order snapshot capped to bound the resume file.
 	recentIDs := vcd.dedup.Snapshot(vodChatResumeMaxRecentIDs)
 
@@ -352,19 +348,9 @@ func (vcd *VodChatDownloader) saveResumeState(contentOffset float64) {
 		RecentIDs:         recentIDs,
 	}
 
-	data, err := json.Marshal(state)
-	if err != nil {
-		vcd.logger.Error("marshal vod chat resume state", "err", err)
-		return
-	}
-
-	tmpPath := vcd.resumeStatePath() + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		vcd.logger.Error("write vod chat resume state", "err", err)
-		return
-	}
-	if err := os.Rename(tmpPath, vcd.resumeStatePath()); err != nil {
-		vcd.logger.Error("rename vod chat resume state", "err", err)
+	store := utils.ResumeStore[ChatResumeState]{Path: vcd.resumeStatePath()}
+	if err := store.Save(state); err != nil {
+		vcd.logger.Error("save vod chat resume state", "err", err)
 	}
 }
 
@@ -373,8 +359,8 @@ func (vcd *VodChatDownloader) removeResumeState() {
 	if vcd.outputPath == "" {
 		return
 	}
-	path := vcd.resumeStatePath()
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	store := utils.ResumeStore[ChatResumeState]{Path: vcd.resumeStatePath()}
+	if err := store.Clear(); err != nil {
 		vcd.logger.Warn("remove vod chat resume state", "err", err)
 	}
 }

@@ -719,12 +719,9 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 }
 
 func (cd *ChatDownloader) loadResume() (*ChatResumeState, error) {
-	data, err := os.ReadFile(cd.opts.ResumeFile)
+	store := utils.ResumeStore[ChatResumeState]{Path: cd.opts.ResumeFile}
+	state, err := store.Load()
 	if err != nil {
-		return nil, err
-	}
-	var state ChatResumeState
-	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
 	return &state, nil
@@ -755,33 +752,18 @@ func (cd *ChatDownloader) saveResume() {
 	}
 	cd.mu.Unlock()
 
-	data, err := json.Marshal(state)
-	if err != nil {
+	store := utils.ResumeStore[ChatResumeState]{Path: resumeFile}
+	if err := store.Save(state); err != nil {
 		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("marshal resume state: %w", err))
-		}
-		return
-	}
-	tmpFile := resumeFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("write resume state: %w", err))
-		}
-		return
-	}
-	if err := os.Rename(tmpFile, resumeFile); err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("rename resume state: %w", err))
+			cd.OnError(fmt.Errorf("save resume state: %w", err))
 		}
 	}
 }
 
 func (cd *ChatDownloader) clearResume() {
 	_, resumeFile := cd.getOutputPaths()
-	if resumeFile == "" {
-		return
-	}
-	if err := os.Remove(resumeFile); err != nil && !os.IsNotExist(err) {
+	store := utils.ResumeStore[ChatResumeState]{Path: resumeFile}
+	if err := store.Clear(); err != nil {
 		// Not fatal, but stale state left on disk could cause the next
 		// Start() to reload resume data from a superseded run. Route
 		// through OnError so operators see permission/AV-lock problems.

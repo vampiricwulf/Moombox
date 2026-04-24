@@ -2,9 +2,7 @@ package twitch
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -115,22 +113,15 @@ func (cd *ChatDownloader) getResumeFilePath() string {
 // dropped (audit-finding twitch.md #43). LastOffsetSeconds is unused on the
 // IRC side and serializes as 0; LastTimestampMs is unused on the VOD side.
 func (cd *ChatDownloader) loadResumeState() *ChatResumeState {
-	resumePath := cd.getResumeFilePath()
-	data, err := os.ReadFile(resumePath)
+	store := utils.ResumeStore[ChatResumeState]{Path: cd.getResumeFilePath()}
+	state, err := store.Load()
 	if err != nil {
 		return nil
 	}
-
-	var state ChatResumeState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil
-	}
-
 	// Only use resume state if it matches the current stream
 	if state.StreamID != cd.streamID {
 		return nil
 	}
-
 	return &state
 }
 
@@ -148,26 +139,16 @@ func (cd *ChatDownloader) saveResumeState() {
 	}
 	cd.mu.Unlock()
 
-	data, err := json.Marshal(state)
-	if err != nil {
-		cd.logger.Warn("marshal chat resume state", "err", err)
-		return
-	}
-
-	resumePath := cd.getResumeFilePath()
-	tmpPath := resumePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		cd.logger.Warn("write chat resume state", "err", err)
-		return
-	}
-	if err := os.Rename(tmpPath, resumePath); err != nil {
-		cd.logger.Warn("rename chat resume state", "err", err)
+	store := utils.ResumeStore[ChatResumeState]{Path: cd.getResumeFilePath()}
+	if err := store.Save(state); err != nil {
+		cd.logger.Warn("save chat resume state", "err", err)
 	}
 }
 
 // clearResumeState deletes the resume state file on successful completion.
 func (cd *ChatDownloader) clearResumeState() {
-	if err := os.Remove(cd.getResumeFilePath()); err != nil && !os.IsNotExist(err) {
+	store := utils.ResumeStore[ChatResumeState]{Path: cd.getResumeFilePath()}
+	if err := store.Clear(); err != nil {
 		cd.logger.Warn("remove chat resume state", "err", err)
 	}
 }
