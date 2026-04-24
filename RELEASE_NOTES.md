@@ -1,6 +1,16 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.18` with monitor ctx threading.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.19` with `cmd/moombox` small audit fixes.
 
-This build bundles Sprint #1 + Sprint #2 work plus thirteen batches from the multi-report audit. All 289 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus fourteen batches from the multi-report audit. All 291 commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 14 (test.20)
+
+Five small `cmd/moombox/main.go` audit fixes; no behavior change. Net `main.go` 1919 → 1900 lines:
+
+- **cmd-moombox D-7** — `youtubeThumbnailURL(videoID)` helper extracted; replaces two inline `i.ytimg.com/vi/<id>/maxresdefault.jpg` constructions.
+- **cmd-moombox D-5** — `resolveOutputDir(ch, cfg, &cfgMu)` helper extracted; collapses the two YouTube/Twitch `createJob` channel-OR-global output-dir resolution blocks.
+- **cmd-moombox DC-2** — removed 7 dead defensive nil checks for `notifyMgr` and `autoCookieSvc`. `notifications.NewManager` and `cookies.NewAutoCookieService` both unconditionally return non-nil pointers, so the nil branches (and one paired "service not available" fallback error) were unreachable.
+- **cmd-moombox QI-6** — extracted the four `web.NewRateLimiter(N, time.Minute)` magic numbers to named `rateLimitAPIPerMinute` / `POT` / `Login` / `Password` constants.
+- **cmd-moombox QI-1** — dropped the unused named return on `run()`; the body returned `restartRequested.Load()` directly so the name was documentation-only.
 
 ### Manual batch 13 (test.19)
 
