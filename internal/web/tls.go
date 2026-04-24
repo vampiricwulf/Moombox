@@ -41,7 +41,13 @@ func LoadOrGenerateTLSConfig(certPath, keyPath, networkAccess string, logger int
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
+		// TLS 1.2 minimum — Go's defaults already pin to a modern cipher
+		// suite list, and TLS 1.2 keeps non-browser clients (older curl,
+		// embedded scripts) working. TLS 1.3 ciphers can't be pinned via
+		// CipherSuites by design; bumping MinVersion to VersionTLS13 would
+		// drop everything that hasn't been patched in the last few years.
+		// Audit reports/web.md S-19.
+		MinVersion: tls.VersionTLS12,
 	}, nil
 }
 

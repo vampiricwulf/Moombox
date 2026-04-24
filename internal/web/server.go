@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -91,7 +92,11 @@ func NewServer(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, logger interface 
 		logger:        logger,
 	}
 
-	// Apply middleware (order matters)
+	// Apply middleware (order matters).
+	// RequestID first so RecoveryMiddleware (and any future logger
+	// middleware) can correlate log lines back to the originating request
+	// (audit reports/web.md S-22).
+	r.Use(chimiddleware.RequestID)
 	r.Use(RecoveryMiddleware(logger))
 	r.Use(CORSMiddleware(cfg, s.cfgMu))
 	r.Use(SecurityHeaders)
@@ -577,7 +582,14 @@ func RecoveryMiddleware(logger interface {
 			rw := &recoveryWriter{ResponseWriter: w}
 			defer func() {
 				if rvr := recover(); rvr != nil {
-					logger.Error("panic recovered in HTTP handler", "panic", rvr, "path", r.URL.Path)
+					// Include the chi request ID so panic logs correlate with
+					// any other log lines emitted during this request handling
+					// (audit reports/web.md S-22).
+					logger.Error("panic recovered in HTTP handler",
+						"panic", rvr,
+						"path", r.URL.Path,
+						"reqID", chimiddleware.GetReqID(r.Context()),
+					)
 					if !rw.headersSent {
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusInternalServerError)

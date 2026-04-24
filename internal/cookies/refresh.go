@@ -302,6 +302,13 @@ func setYouTubeHeaders(req *http.Request, cookieHeader, origin, authHeader strin
 	req.Header.Set("X-Origin", origin)
 }
 
+// youtubeGuideRequestBody returns the standard Innertube WEB request body
+// for /youtubei/v1/guide. Centralised here so a clientVersion bump only
+// touches one site (audit reports/cookies.md #35).
+func youtubeGuideRequestBody() string {
+	return `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
+}
+
 func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	if !rs.jar.HasYouTubeAuthCookies() {
 		return false, nil // No auth cookies
@@ -322,7 +329,7 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()
 
-	body := `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
+	body := youtubeGuideRequestBody()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideURL+"?prettyPrint=false", strings.NewReader(body))
 	if err != nil {
 		return false, err
@@ -407,7 +414,7 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 	ctx, cancel := context.WithTimeout(ctx, authCheckTimeout)
 	defer cancel()
 
-	body := `{"context":{"client":{"clientName":"WEB","clientVersion":"` + youtubeClientVersion + `","hl":"en"}}}`
+	body := youtubeGuideRequestBody()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, youtubeGuideRefreshURL, strings.NewReader(body))
 	if err != nil {
 		return false, err
