@@ -78,6 +78,17 @@ func init() {
 
 var noTUIEnvRe = regexp.MustCompile(`^(?i:1|true|yes)$`)
 
+// Per-minute rate-limit ceilings for the four web rate-limiter slots.
+// Pulled out of NewRateLimiter call sites so a tuning change is one place
+// (per audit reports/cmd-moombox.md QI-6). Each is paired with time.Minute
+// so the constant name encodes the window.
+const (
+	rateLimitAPIPerMinute      = 20
+	rateLimitPOTPerMinute      = 10
+	rateLimitLoginPerMinute    = 5
+	rateLimitPasswordPerMinute = 3
+)
+
 // waitForKeypress waits for a keypress before exiting (prevents .exe window from vanishing).
 // Matches TS waitForKeypress() in index.ts — only blocks on a TTY.
 func waitForKeypress() {
@@ -156,7 +167,7 @@ func main() {
 
 // run initializes and runs the full application. Returns true if a restart was
 // requested (config change, update applied, or via web API).
-func run(configPath string, logLevelOverride string, useTUI bool) (restart bool) {
+func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	var restartRequested atomic.Bool
 	var quitTUI func() // set when TUI is running; called on restart to unblock Run()
 
@@ -359,9 +370,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// 11. Trim service
 	// =========================================================================
 	trimSvc := worker.NewTrimService(db, cfg.Paths.FfmpegPath, log)
-	if notifyMgr != nil {
-		trimSvc.SetNotifier(notifyMgr)
-	}
+	trimSvc.SetNotifier(notifyMgr)
 
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
@@ -484,13 +493,13 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 	// (close(done) panics on second call), so wrap them all in a single
 	// sync.Once-guarded closeLimiters helper that both the normal deferred
 	// shutdown AND the force-exit timer below can safely invoke.
-	apiRL := web.NewRateLimiter(20, time.Minute)
-	potRL := web.NewRateLimiter(10, time.Minute)
+	apiRL := web.NewRateLimiter(rateLimitAPIPerMinute, time.Minute)
+	potRL := web.NewRateLimiter(rateLimitPOTPerMinute, time.Minute)
 	authSvc := web.NewAuthService()
 	authSvc.SetLogger(log)
 	authSvc.Start()
-	loginRL := web.NewRateLimiter(5, time.Minute)
-	passwordRL := web.NewRateLimiter(3, time.Minute)
+	loginRL := web.NewRateLimiter(rateLimitLoginPerMinute, time.Minute)
+	passwordRL := web.NewRateLimiter(rateLimitPasswordPerMinute, time.Minute)
 
 	var limitersCloseOnce sync.Once
 	closeLimiters := func() {
@@ -550,10 +559,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 			}
 		},
 		GetAutoCookieReloginNeeded: func() any {
-			if autoCookieSvc != nil {
-				return autoCookieSvc.GetStatus().NeedsManualRelogin
-			}
-			return cookies.AutoCookieReloginRequired{}
+			return autoCookieSvc.GetStatus().NeedsManualRelogin
 		},
 		GetNextFeedCheck:   feedMon.GetNextCheckAt,
 		GetNextDecapiCheck: decapiMon.GetNextCheckAt,
@@ -815,17 +821,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		}
 		if resumed > 0 {
 			log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
-			if notifyMgr != nil {
-				notifyMgr.Send("Authentication Recovered",
-					fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
-					notifications.TypeInfo,
-					[]notifications.Field{
-						{Name: "Platform", Value: platform, Inline: true},
-						{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
-					},
-					notifications.SendOptions{},
-				)
-			}
+			notifyMgr.Send("Authentication Recovered",
+				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
+				notifications.TypeInfo,
+				[]notifications.Field{
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
+				},
+				notifications.SendOptions{},
+			)
 		}
 	}
 
@@ -858,15 +862,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 
 		includeNonLive := ch.IncludeNonLiveContent
 
-		// Determine output directory (channel-specific > global > default)
-		outputDir := ch.OutputDirectory
-		if outputDir == "" {
-			cfgMu.RLock()
-			outputDir = cfg.Paths.OutputDirectory
-			cfgMu.RUnlock()
-		}
-
-		thumbnailURL := fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", videoID)
+		outputDir := resolveOutputDir(ch, cfg, &cfgMu)
+		thumbnailURL := youtubeThumbnailURL(videoID)
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		job := &database.Job{
@@ -907,7 +904,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				notifications.SendOptions{
 					Event:     "found",
 					URL:       videoURL,
-					Thumbnail: fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", videoID),
+					Thumbnail: youtubeThumbnailURL(videoID),
 				})
 		}
 	}
@@ -941,13 +938,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 		jobID := twitch.BuildJobID(info.StreamID, false)
 		log.Info("Stream found by Twitch monitor", slog.String("jobID", jobID), slog.String("title", info.Title))
 
-		// Determine output directory
-		outputDir := ch.OutputDirectory
-		if outputDir == "" {
-			cfgMu.RLock()
-			outputDir = cfg.Paths.OutputDirectory
-			cfgMu.RUnlock()
-		}
+		outputDir := resolveOutputDir(ch, cfg, &cfgMu)
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		title := info.ChannelDisplayName + " — " + info.Title
@@ -1578,9 +1569,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				}
 			},
 			func(platform string) error {
-				if autoCookieSvc == nil {
-					return fmt.Errorf("auto-cookie service not available")
-				}
 				if err := autoCookieSvc.StartSetup(platform); err != nil {
 					log.Error("Failed to start auto-cookie setup", slog.String("platform", platform), slog.String("error", err.Error()))
 					return err
@@ -1588,22 +1576,17 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				return nil
 			},
 			func() (bool, bool, error) {
-				if autoCookieSvc != nil {
-					finishCtx, finishCancel := context.WithTimeout(ctx, 60*time.Second)
-					defer finishCancel()
-					yt, tw, err := autoCookieSvc.FinishSetup(finishCtx)
-					if err != nil {
-						log.Error("Failed to finish auto-cookie setup", slog.String("error", err.Error()))
-						return yt, tw, err
-					}
-					return yt, tw, nil
+				finishCtx, finishCancel := context.WithTimeout(ctx, 60*time.Second)
+				defer finishCancel()
+				yt, tw, err := autoCookieSvc.FinishSetup(finishCtx)
+				if err != nil {
+					log.Error("Failed to finish auto-cookie setup", slog.String("error", err.Error()))
+					return yt, tw, err
 				}
-				return false, false, fmt.Errorf("auto-cookie service not available")
+				return yt, tw, nil
 			},
 			func() {
-				if autoCookieSvc != nil {
-					autoCookieSvc.CancelSetup()
-				}
+				autoCookieSvc.CancelSetup()
 			},
 			func() { triggerRestart("TUI setup wizard") },
 		)
@@ -1772,14 +1755,12 @@ func run(configPath string, logLevelOverride string, useTUI bool) (restart bool)
 				tw = tui.CookieStatusOK
 			}
 			// Check auto-cookie relogin state
-			if autoCookieSvc != nil {
-				relogin := autoCookieSvc.GetStatus().NeedsManualRelogin
-				if relogin.YouTube {
-					yt = tui.CookieStatusRelogin
-				}
-				if relogin.Twitch {
-					tw = tui.CookieStatusRelogin
-				}
+			relogin := autoCookieSvc.GetStatus().NeedsManualRelogin
+			if relogin.YouTube {
+				yt = tui.CookieStatusRelogin
+			}
+			if relogin.Twitch {
+				tw = tui.CookieStatusRelogin
 			}
 			cfgMu.RLock()
 			ytActive, twActive := config.GetActivePlatforms(cfg)

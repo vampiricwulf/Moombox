@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,6 +18,25 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
+
+// youtubeThumbnailURL returns the maxres thumbnail URL for a YouTube video.
+// Centralised here so a future host/quality change is one place, not N
+// (per audit reports/cmd-moombox.md D-7).
+func youtubeThumbnailURL(videoID string) string {
+	return fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", videoID)
+}
+
+// resolveOutputDir returns the channel-specific output directory if set,
+// otherwise falls back to the global default under cfgMu.RLock (per audit
+// reports/cmd-moombox.md D-5).
+func resolveOutputDir(ch *config.ChannelConfig, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) string {
+	if ch.OutputDirectory != "" {
+		return ch.OutputDirectory
+	}
+	cfgMu.RLock()
+	defer cfgMu.RUnlock()
+	return cfg.Paths.OutputDirectory
+}
 
 // nopLogger is a no-op logger for CLI commands where full logging isn't needed.
 type nopLogger struct{}
