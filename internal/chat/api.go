@@ -314,7 +314,36 @@ func (api *ChatAPI) parseResponse(data map[string]any) (*ChatApiResponse, error)
 		return result, nil
 	}
 
-	// Extract continuation — check ALL items, not just first
+	result.NextContinuation, result.TimeoutMs = extractNextContinuation(liveChatCont, result.TimeoutMs)
+	if result.NextContinuation == "" {
+		result.IsComplete = true
+	}
+
+	actions, _ := liveChatCont["actions"].([]any)
+	for _, action := range actions {
+		actionMap, _ := action.(map[string]any)
+		if actionMap == nil {
+			continue
+		}
+		if msg := api.parseAction(actionMap); msg != nil {
+			result.Messages = append(result.Messages, *msg)
+		}
+	}
+
+	if header, _ := liveChatCont["header"].(map[string]any); header != nil {
+		result.AllChatContinuation = extractAllChatContinuation(header)
+	}
+
+	return result, nil
+}
+
+// extractNextContinuation walks the continuations array and returns the first
+// token found plus its timeoutMs hint. Returns ("", defaultTimeoutMs) when
+// no token is found — the caller uses the empty token to set IsComplete.
+// YouTube sometimes ships multiple continuation entries in the array; we
+// stop at the first one carrying a non-empty continuation string.
+func extractNextContinuation(liveChatCont map[string]any, defaultTimeoutMs int) (token string, timeoutMs int) {
+	timeoutMs = defaultTimeoutMs
 	conts, _ := liveChatCont["continuations"].([]any)
 	for _, cont := range conts {
 		contMap, _ := cont.(map[string]any)
@@ -326,135 +355,143 @@ func (api *ChatAPI) parseResponse(data map[string]any) (*ChatApiResponse, error)
 			"invalidationContinuationData",
 			"liveChatReplayContinuationData",
 		} {
-			if contData, ok := contMap[key].(map[string]any); ok {
-				if token, ok := contData["continuation"].(string); ok && token != "" {
-					result.NextContinuation = token
-				}
-				if timeout, ok := contData["timeoutMs"].(float64); ok {
-					result.TimeoutMs = int(timeout)
-				}
-				break
+			contData, ok := contMap[key].(map[string]any)
+			if !ok {
+				continue
 			}
+			if t, ok := contData["continuation"].(string); ok && t != "" {
+				token = t
+			}
+			if ms, ok := contData["timeoutMs"].(float64); ok {
+				timeoutMs = int(ms)
+			}
+			break
 		}
-		if result.NextContinuation != "" {
+		if token != "" {
 			break
 		}
 	}
+	return
+}
 
-	if result.NextContinuation == "" {
-		result.IsComplete = true
+// parseAction parses a single chat action into a ChatMessage. Handles the
+// replay wrapper unwrap, replay-offset extraction, renderer-type selection,
+// superchat / sticker / membership annotation. Returns nil when the action
+// is not a chat message we recognise (missing renderer, malformed replay
+// wrapper, non-chat action type).
+func (api *ChatAPI) parseAction(actionMap map[string]any) *ChatMessage {
+	var replayOffsetMs int64
+	hasReplayOffset := false
+	if replayAction, ok := actionMap["replayChatItemAction"].(map[string]any); ok {
+		innerActions, _ := replayAction["actions"].([]any)
+		if len(innerActions) > 0 {
+			inner, _ := innerActions[0].(map[string]any)
+			if inner == nil {
+				return nil
+			}
+			actionMap = inner
+		}
+		replayOffsetMs, hasReplayOffset = api.extractReplayOffset(replayAction)
 	}
 
-	// Parse actions
-	actions, _ := liveChatCont["actions"].([]any)
-	for _, action := range actions {
-		actionMap, _ := action.(map[string]any)
-		if actionMap == nil {
-			continue
-		}
-
-		// Handle replay wrapper
-		var replayOffsetMs int64
-		hasReplayOffset := false
-		if replayAction, ok := actionMap["replayChatItemAction"].(map[string]any); ok {
-			innerActions, _ := replayAction["actions"].([]any)
-			if len(innerActions) > 0 {
-				actionMap, _ = innerActions[0].(map[string]any)
-				if actionMap == nil {
-					continue
-				}
-			}
-			// videoOffsetTimeMsec is usually a string (e.g. "12345") but some
-			// responses ship it as a raw JSON number — accept both.
-			if raw, present := replayAction["videoOffsetTimeMsec"]; present {
-				switch v := raw.(type) {
-				case string:
-					parsed, err := strconv.ParseInt(v, 10, 64)
-					if err == nil {
-						replayOffsetMs = parsed
-						hasReplayOffset = true
-					} else {
-						api.logDebug("chat: videoOffsetTimeMsec string parse failed", "value", v, "err", err)
-					}
-				case float64:
-					replayOffsetMs = int64(v)
-					hasReplayOffset = true
-				default:
-					api.logDebug("chat: videoOffsetTimeMsec unexpected type", "type", fmt.Sprintf("%T", raw))
-				}
-			}
-		}
-
-		// Find message renderer
-		addAction, _ := actionMap["addChatItemAction"].(map[string]any)
-		if addAction == nil {
-			continue
-		}
-		item, _ := addAction["item"].(map[string]any)
-		if item == nil {
-			continue
-		}
-
-		// Handle all renderer types (including super stickers)
-		var renderer map[string]any
-		if r, ok := item["liveChatTextMessageRenderer"].(map[string]any); ok {
-			renderer = r
-		} else if r, ok := item["liveChatPaidMessageRenderer"].(map[string]any); ok {
-			renderer = r
-		} else if r, ok := item["liveChatPaidStickerRenderer"].(map[string]any); ok {
-			renderer = r
-		} else if r, ok := item["liveChatMembershipItemRenderer"].(map[string]any); ok {
-			renderer = r
-		}
-
-		if renderer == nil {
-			continue
-		}
-
-		msg := api.parseMessageRenderer(renderer)
-		if msg == nil {
-			continue
-		}
-
-		// Check for superchat (paid message or paid sticker)
-		if paidRenderer, ok := item["liveChatPaidMessageRenderer"].(map[string]any); ok {
-			msg.Superchat = api.parseSuperChatInfo(paidRenderer)
-		} else if stickerRenderer, ok := item["liveChatPaidStickerRenderer"].(map[string]any); ok {
-			msg.Superchat = api.parseSuperChatInfo(stickerRenderer)
-		}
-
-		// Check membership
-		if _, ok := item["liveChatMembershipItemRenderer"]; ok {
-			msg.IsMembership = true
-		}
-
-		// Set replay offset (may be negative for pre-stream waiting-room chat)
-		if hasReplayOffset {
-			msg.OffsetMs = replayOffsetMs
-			msg.HasOffset = true
-		}
-
-		result.Messages = append(result.Messages, *msg)
+	addAction, _ := actionMap["addChatItemAction"].(map[string]any)
+	if addAction == nil {
+		return nil
+	}
+	item, _ := addAction["item"].(map[string]any)
+	if item == nil {
+		return nil
 	}
 
-	// Extract unfiltered "Live Chat" continuation from header (available on first response).
-	// YouTube defaults to "Top Chat" (filtered); index [1] is the unfiltered "Live Chat" view.
-	if header, _ := liveChatCont["header"].(map[string]any); header != nil {
-		lchRenderer, _ := header["liveChatHeaderRenderer"].(map[string]any)
-		viewSelector, _ := lchRenderer["viewSelector"].(map[string]any)
-		sortFilter, _ := viewSelector["sortFilterSubMenuRenderer"].(map[string]any)
-		subMenuItems, _ := sortFilter["subMenuItems"].([]any)
-		if len(subMenuItems) > 1 {
-			item, _ := subMenuItems[1].(map[string]any)
-			cont, _ := item["continuation"].(map[string]any)
-			reload, _ := cont["reloadContinuationData"].(map[string]any)
-			if token, ok := reload["continuation"].(string); ok && token != "" {
-				result.AllChatContinuation = token
-			}
-		}
+	renderer := selectRenderer(item)
+	if renderer == nil {
+		return nil
 	}
 
-	return result, nil
+	msg := api.parseMessageRenderer(renderer)
+	if msg == nil {
+		return nil
+	}
+
+	if paid, ok := item["liveChatPaidMessageRenderer"].(map[string]any); ok {
+		msg.Superchat = api.parseSuperChatInfo(paid)
+	} else if sticker, ok := item["liveChatPaidStickerRenderer"].(map[string]any); ok {
+		msg.Superchat = api.parseSuperChatInfo(sticker)
+	}
+	if _, ok := item["liveChatMembershipItemRenderer"]; ok {
+		msg.IsMembership = true
+	}
+	if hasReplayOffset {
+		// Negative offsets are legitimate for pre-stream waiting-room chat.
+		msg.OffsetMs = replayOffsetMs
+		msg.HasOffset = true
+	}
+	return msg
+}
+
+// extractReplayOffset pulls videoOffsetTimeMsec out of a replayChatItemAction.
+// Accepts both the typical string form ("12345") and the raw-number form
+// (JSON float64) that some responses ship (audit chat.md C11). Returns
+// (0, false) when the field is missing or unparseable; the caller falls back
+// to live-mode offset computation.
+func (api *ChatAPI) extractReplayOffset(replayAction map[string]any) (int64, bool) {
+	raw, present := replayAction["videoOffsetTimeMsec"]
+	if !present {
+		return 0, false
+	}
+	switch v := raw.(type) {
+	case string:
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return parsed, true
+		}
+		api.logDebug("chat: videoOffsetTimeMsec string parse failed", "value", v, "err", err)
+	case float64:
+		return int64(v), true
+	default:
+		api.logDebug("chat: videoOffsetTimeMsec unexpected type", "type", fmt.Sprintf("%T", raw))
+	}
+	return 0, false
+}
+
+// selectRenderer picks the first recognised renderer type from the action
+// item. Returns nil for unknown renderer types (silently skipped — YouTube
+// adds new renderer kinds periodically; unrecognised ones are not fatal).
+func selectRenderer(item map[string]any) map[string]any {
+	for _, key := range []string{
+		"liveChatTextMessageRenderer",
+		"liveChatPaidMessageRenderer",
+		"liveChatPaidStickerRenderer",
+		"liveChatMembershipItemRenderer",
+	} {
+		if r, ok := item[key].(map[string]any); ok {
+			return r
+		}
+	}
+	return nil
+}
+
+// extractAllChatContinuation pulls the unfiltered "Live Chat" continuation
+// token out of the liveChatHeaderRenderer.viewSelector sub-menu. YouTube
+// defaults the chat view to "Top Chat" (filtered); subMenuItems[1] carries
+// the continuation that upgrades to the unfiltered view. Returns "" if any
+// step of the navigation is missing — callers stay on Top Chat and retry on
+// a subsequent poll (audit chat.md R1).
+func extractAllChatContinuation(header map[string]any) string {
+	lchRenderer, _ := header["liveChatHeaderRenderer"].(map[string]any)
+	viewSelector, _ := lchRenderer["viewSelector"].(map[string]any)
+	sortFilter, _ := viewSelector["sortFilterSubMenuRenderer"].(map[string]any)
+	subMenuItems, _ := sortFilter["subMenuItems"].([]any)
+	if len(subMenuItems) <= 1 {
+		return ""
+	}
+	item, _ := subMenuItems[1].(map[string]any)
+	cont, _ := item["continuation"].(map[string]any)
+	reload, _ := cont["reloadContinuationData"].(map[string]any)
+	if token, ok := reload["continuation"].(string); ok && token != "" {
+		return token
+	}
+	return ""
 }
 
 func (api *ChatAPI) parseMessageRenderer(renderer map[string]any) *ChatMessage {

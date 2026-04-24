@@ -217,3 +217,164 @@ func TestFetchChatOtherStatusDoesNotMapToAuth(t *testing.T) {
 		t.Errorf("500 was misclassified as auth failure: %v", err)
 	}
 }
+
+// --- Q2 parseResponse sub-extractor tests ---
+
+func TestExtractNextContinuationFindsToken(t *testing.T) {
+	liveChatCont := map[string]any{
+		"continuations": []any{
+			map[string]any{
+				"timedContinuationData": map[string]any{
+					"continuation": "next-token",
+					"timeoutMs":    float64(5000),
+				},
+			},
+		},
+	}
+	token, timeout := extractNextContinuation(liveChatCont, -1)
+	if token != "next-token" {
+		t.Errorf("token: want %q, got %q", "next-token", token)
+	}
+	if timeout != 5000 {
+		t.Errorf("timeout: want 5000, got %d", timeout)
+	}
+}
+
+func TestExtractNextContinuationEmptyArrayReturnsDefault(t *testing.T) {
+	liveChatCont := map[string]any{"continuations": []any{}}
+	token, timeout := extractNextContinuation(liveChatCont, -1)
+	if token != "" {
+		t.Errorf("expected empty token, got %q", token)
+	}
+	if timeout != -1 {
+		t.Errorf("expected default timeout=-1, got %d", timeout)
+	}
+}
+
+func TestExtractNextContinuationStopsAtFirstToken(t *testing.T) {
+	liveChatCont := map[string]any{
+		"continuations": []any{
+			map[string]any{
+				"timedContinuationData": map[string]any{
+					"continuation": "first",
+					"timeoutMs":    float64(1000),
+				},
+			},
+			map[string]any{
+				"timedContinuationData": map[string]any{
+					"continuation": "second",
+					"timeoutMs":    float64(2000),
+				},
+			},
+		},
+	}
+	token, timeout := extractNextContinuation(liveChatCont, -1)
+	if token != "first" || timeout != 1000 {
+		t.Errorf("expected first token/timeout, got %q/%d", token, timeout)
+	}
+}
+
+func TestSelectRendererPicksFirstMatch(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"text", "liveChatTextMessageRenderer"},
+		{"paid", "liveChatPaidMessageRenderer"},
+		{"sticker", "liveChatPaidStickerRenderer"},
+		{"membership", "liveChatMembershipItemRenderer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := map[string]any{tt.key: map[string]any{"id": "x"}}
+			r := selectRenderer(item)
+			if r == nil {
+				t.Fatalf("expected non-nil renderer for %s", tt.key)
+			}
+			if id, _ := r["id"].(string); id != "x" {
+				t.Errorf("wrong renderer selected: %v", r)
+			}
+		})
+	}
+}
+
+func TestSelectRendererReturnsNilForUnknown(t *testing.T) {
+	item := map[string]any{"liveChatFutureRenderer": map[string]any{"id": "x"}}
+	if r := selectRenderer(item); r != nil {
+		t.Errorf("expected nil for unknown renderer type, got %v", r)
+	}
+}
+
+func TestExtractAllChatContinuationHappyPath(t *testing.T) {
+	header := map[string]any{
+		"liveChatHeaderRenderer": map[string]any{
+			"viewSelector": map[string]any{
+				"sortFilterSubMenuRenderer": map[string]any{
+					"subMenuItems": []any{
+						map[string]any{"title": "Top Chat"},
+						map[string]any{
+							"continuation": map[string]any{
+								"reloadContinuationData": map[string]any{
+									"continuation": "all-chat-token",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	token := extractAllChatContinuation(header)
+	if token != "all-chat-token" {
+		t.Errorf("expected all-chat-token, got %q", token)
+	}
+}
+
+func TestExtractAllChatContinuationMissingSecondItem(t *testing.T) {
+	header := map[string]any{
+		"liveChatHeaderRenderer": map[string]any{
+			"viewSelector": map[string]any{
+				"sortFilterSubMenuRenderer": map[string]any{
+					"subMenuItems": []any{map[string]any{"title": "Top Chat"}},
+				},
+			},
+		},
+	}
+	if token := extractAllChatContinuation(header); token != "" {
+		t.Errorf("expected empty on missing subMenuItems[1], got %q", token)
+	}
+}
+
+func TestExtractReplayOffsetStringForm(t *testing.T) {
+	api := &ChatAPI{}
+	raw := map[string]any{"videoOffsetTimeMsec": "12345"}
+	offset, has := api.extractReplayOffset(raw)
+	if !has || offset != 12345 {
+		t.Errorf("string form: want 12345/true, got %d/%v", offset, has)
+	}
+}
+
+func TestExtractReplayOffsetFloatForm(t *testing.T) {
+	api := &ChatAPI{}
+	raw := map[string]any{"videoOffsetTimeMsec": float64(9876)}
+	offset, has := api.extractReplayOffset(raw)
+	if !has || offset != 9876 {
+		t.Errorf("float form: want 9876/true, got %d/%v", offset, has)
+	}
+}
+
+func TestExtractReplayOffsetMissing(t *testing.T) {
+	api := &ChatAPI{}
+	raw := map[string]any{}
+	if _, has := api.extractReplayOffset(raw); has {
+		t.Error("missing field should return has=false")
+	}
+}
+
+func TestExtractReplayOffsetUnparseableString(t *testing.T) {
+	api := &ChatAPI{}
+	raw := map[string]any{"videoOffsetTimeMsec": "not-a-number"}
+	if _, has := api.extractReplayOffset(raw); has {
+		t.Error("unparseable string should return has=false")
+	}
+}
