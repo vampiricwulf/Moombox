@@ -125,7 +125,10 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 					d.headSeq.Store(int64(headSeq))
 				}
 				d.lastHeadProbeTime.StoreNow()
-				// Only re-enter loop if catch-up closed the gap (TS: returns false if stillFarBehind)
+				// Only re-enter loop if catch-up actually closed the gap. If we're
+				// still far behind after a catch-up cycle, fall through to the
+				// sequential download below to avoid spinning in catch-up forever
+				// when head keeps advancing faster than parallel workers can drain.
 				curHead := int(d.headSeq.Load())
 				curSeqNow := int(d.currentSeq.Load())
 				stillFarBehind := curHead > 0 && (curHead-curSeqNow) >= CatchupThreshold
@@ -270,7 +273,23 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 	if *sameHeadRetryDelay > delayCap {
 		*sameHeadRetryDelay = delayCap
 	}
-	backoff := time.Duration(*sameHeadRetryDelay*2) * time.Second
+	// Exponential backoff capped at delayCap seconds. 1s, 2s, 4s, 8s, 16s, …
+	// gets us out of a sustained 429 storm faster than the previous linear
+	// 2s, 4s, 6s ramp, which spent too much time at low values when
+	// YouTube's token bucket is fully depleted (audit reports/engine.md #15).
+	// Shift count is clamped so the int64 cast can't overflow.
+	const maxShift = 6 // 1<<6 == 64s — beyond delayCap default of 60s
+	shift := *sameHeadRetryDelay - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > maxShift {
+		shift = maxShift
+	}
+	backoff := time.Duration(int64(1)<<uint(shift)) * time.Second
+	if backoff > time.Duration(delayCap)*time.Second {
+		backoff = time.Duration(delayCap) * time.Second
+	}
 	d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq.Load(), "delay", backoff)
 	sleepCtx(ctx, backoff)
 	return nil // Continue loop

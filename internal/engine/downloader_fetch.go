@@ -179,8 +179,36 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 
 // probeHeadSequence discovers the current live head segment using a high sequence GET probe.
 // YouTube returns the X-Head-Seqnum header on GET requests to a non-existent segment.
+//
+// Two-tier probe strategy (audit reports/engine.md #13):
+//
+//  1. First attempt: probe at sequence 999,999,999. This is well past any
+//     real live segment number and YouTube has historically responded with
+//     X-Head-Seqnum so we discover the live edge in one round-trip.
+//  2. Fallback: if the first probe returns no X-Head-Seqnum (server changed
+//     behavior, rejected the absurdly high number, or returned an opaque
+//     error page) AND we already have a usable currentSeq, retry at
+//     currentSeq+1000 — close enough to be plausible while still being
+//     ahead of the head.
+//
+// The fallback only fires when currentSeq > 0 because pre-first-segment
+// downloads have no anchor to extrapolate from.
 func (d *SegmentDownloader) probeHeadSequence(ctx context.Context) (int, error) {
-	probeURL := d.buildSegmentURL(999999999)
+	if seq, err := d.probeHeadAt(ctx, 999999999); err == nil {
+		return seq, nil
+	} else if cur := int(d.currentSeq.Load()); cur > 0 {
+		// Fallback to a sane near-future probe. Do not propagate the first
+		// error — we'll surface the fallback's outcome instead.
+		return d.probeHeadAt(ctx, cur+1000)
+	} else {
+		return -1, err
+	}
+}
+
+// probeHeadAt issues a single head-discovery GET at the given probe sequence
+// and parses the X-Head-Seqnum response header.
+func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int, error) {
+	probeURL := d.buildSegmentURL(probeSeq)
 	probeURL = applyPoTokenQuery(probeURL, d.opts.PoToken)
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
