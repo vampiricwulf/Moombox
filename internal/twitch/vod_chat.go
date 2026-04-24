@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,7 +44,31 @@ type VodChatDownloader struct {
 		Error(msg string, args ...any)
 	}
 
-	OnProgress func(count int)
+	// onProgress is read from reportProgress under onProgressMu; callers
+	// must use SetOnProgress rather than direct field assignment to avoid a
+	// data race if the callback is reassigned after Start (audit
+	// reports/worker.md F3).
+	onProgressMu sync.RWMutex
+	onProgress   func(count int)
+}
+
+// SetOnProgress installs the progress callback. Safe to call before or
+// after Start.
+func (vcd *VodChatDownloader) SetOnProgress(fn func(count int)) {
+	vcd.onProgressMu.Lock()
+	vcd.onProgress = fn
+	vcd.onProgressMu.Unlock()
+}
+
+// callOnProgress snapshots the callback under the lock and invokes it
+// outside.
+func (vcd *VodChatDownloader) callOnProgress(count int) {
+	vcd.onProgressMu.RLock()
+	fn := vcd.onProgress
+	vcd.onProgressMu.RUnlock()
+	if fn != nil {
+		fn(count)
+	}
 }
 
 // VodChatOptions configures the VOD chat downloader.
@@ -303,9 +328,7 @@ func (vcd *VodChatDownloader) writeFullFile() error {
 // reportProgress calls OnProgress and logs percentage if vodDuration is known.
 func (vcd *VodChatDownloader) reportProgress(contentOffset float64) {
 	count := int(vcd.totalCount.Load())
-	if vcd.OnProgress != nil {
-		vcd.OnProgress(count)
-	}
+	vcd.callOnProgress(count)
 	if vcd.vodDuration > 0 {
 		pct := min(contentOffset/float64(vcd.vodDuration)*100, 100)
 		vcd.logger.Info("VOD chat progress",

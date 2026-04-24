@@ -46,7 +46,33 @@ type ChatDownloader struct {
 		Error(msg string, args ...any)
 	}
 
-	OnProgress func(count int)
+	// onProgress is read from addMessage under onProgressMu; callers must
+	// use SetOnProgress rather than direct field assignment to avoid a
+	// data race if the callback is reassigned after Start (audit
+	// reports/worker.md F3).
+	onProgressMu sync.RWMutex
+	onProgress   func(count int)
+}
+
+// SetOnProgress installs the progress callback. Safe to call before or
+// after Start — the IRC session goroutine reads via callOnProgress under
+// the same lock.
+func (cd *ChatDownloader) SetOnProgress(fn func(count int)) {
+	cd.onProgressMu.Lock()
+	cd.onProgress = fn
+	cd.onProgressMu.Unlock()
+}
+
+// callOnProgress snapshots the current progress callback under the lock and
+// invokes it outside the lock so a slow callback doesn't block a concurrent
+// SetOnProgress.
+func (cd *ChatDownloader) callOnProgress(count int) {
+	cd.onProgressMu.RLock()
+	fn := cd.onProgress
+	cd.onProgressMu.RUnlock()
+	if fn != nil {
+		fn(count)
+	}
 }
 
 // ChatDownloaderOptions configures the chat downloader.
@@ -294,9 +320,7 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 		cd.lastTimestampMs = msg.TimestampMs
 	}
 
-	if cd.OnProgress != nil {
-		cd.OnProgress(cd.totalCount)
-	}
+	cd.callOnProgress(cd.totalCount)
 }
 
 // MessageCount returns the total number of messages collected.

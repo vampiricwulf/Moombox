@@ -203,12 +203,13 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		if irc, ok := twitchChatDl.(*twitch.ChatDownloader); ok {
 			irc.SetRecordingStartTime(time.Now().UTC().Format(time.RFC3339))
 		}
-		// Wire OnProgress for DB updates (matches TS chat progress tracking)
+		// Wire OnProgress for DB updates via SetOnProgress — avoids the race
+		// surface on public-field reassignment (audit reports/worker.md F3).
 		if irc, ok := twitchChatDl.(*twitch.ChatDownloader); ok {
-			irc.OnProgress = func(count int) { tracker.SetChatCount(count) }
+			irc.SetOnProgress(func(count int) { tracker.SetChatCount(count) })
 		}
 		if vod, ok := twitchChatDl.(*twitch.VodChatDownloader); ok {
-			vod.OnProgress = func(count int) { tracker.SetChatCount(count) }
+			vod.SetOnProgress(func(count int) { tracker.SetChatCount(count) })
 		}
 		chatDone = make(chan struct{})
 		go func() {
