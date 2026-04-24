@@ -1,6 +1,19 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.20` with a wide small-fix sweep across most subsystems.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.21` with another wide small-fix sweep across cipher / cookies / web / chat / worker / youtube / database / small-packages.
 
-This build bundles Sprint #1 + Sprint #2 work plus fifteen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus sixteen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 16 (test.22)
+
+~44 more audit findings closed across two parallel-agent waves. Highlights:
+
+- **cipher D3, H4, Q6**: stsRegex anchored against object-literal boundaries; solverOrder lock contract documented with copy-based InvalidateSolver removal; skipStringLiteral routes backticks through new skipTemplateLiteral handler that walks `${expr}` with proper string/regex/comment/brace balancing.
+- **cookies #9, #14, #22, #24, #38**: removeStaleLock helper guards against deleting locks held by live browsers; setup wait goroutines compare against captured cmd.Process to avoid mis-flagging stale exits; killRefreshProcess polls 2s for the sentinel→real cmd transition; auth-body fallback string capped at 16 KB; CDP timeouts named.
+- **web U-1, P-2, Q-7, Q-12, Q-23, Q-25, R-11, D-5**: removed unused ServiceContext; throttleTimestamps panic-rollback; dropped TOCTOU hub.closed check in pingPump; slices.Clone for rollback snapshots; LoopbackOnly on /minter_cache; `resolved: bool` in /api/resolve-channel; method+remoteAddr on panic logs.
+- **chat C8, C14, G5, R4, U2**: ioErrorOccurred actually wired through reportIOError this time; FetchFreshContinuation forces en-US + detects consent walls; resume cross-checks chat file existence; documented YouTube timeoutMs=0 backpressure; randomAlphaNum inlined.
+- **youtube D1, D3, I5, T5, U3**: extracted isUpcomingFromPlayability + finalizeVideoInfo dedup helpers; AuthLevelWatchPage split into Public/Auth variants; variadic visitorData → required string param; deleted unused CreateEmptyVideoInfo.
+- **worker F16, F42, F48, F59**: tryStartEarlyChat takes onProgress for centralized wiring; gofmt fix for ProgressTracker; DownloadFileMinSize accepts logger so silent file-too-small rejections trace; removed single-impl TwitchRecordingTimeAware interface.
+- **database T3/DC2, U6**: Deprecated tags + behaviour-doc updates.
+- **small-packages**: notifications discordField → type alias for Field with JSON tags; updater 200MB off-by-one fixed correctly (read N+1, compare > N); ParseVersion docs note pre-release/build-metadata limits; passive ShouldTriggerOffline latch documented; utils ReplaceQuotedField param renamed; logger New empty-filePath now writes a stderr notice.
 
 ### Manual batch 15 (test.21)
 
