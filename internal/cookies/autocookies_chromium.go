@@ -16,7 +16,15 @@ import (
 	"github.com/coder/websocket"
 )
 
-const cdpPollTimeout = 15 * time.Second
+// CDP timing constants. Pulled out of inline literals so a tuning pass is one
+// place rather than scattered across every CDP helper (audit
+// reports/cookies.md #38).
+const (
+	cdpPollTimeout       = 15 * time.Second // wait for /json/version readiness
+	cdpExtractTimeout    = 30 * time.Second // total budget for extractChromiumCookies
+	cdpRefreshTimeout    = 30 * time.Second // total budget for refreshChromium CDP work
+	cdpNavigateTimeout   = 30 * time.Second // single Page.navigate + loadEventFired wait
+)
 
 // Chromium lock files that prevent headless launch when a headed session was killed.
 var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"}
@@ -66,6 +74,13 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 	s.cdpPort = port
 	s.mu.Unlock()
 
+	// Capture the process pointer for the wait goroutine. If cleanup() runs
+	// before this goroutine wakes (e.g. a CDP failure → cleanup → new
+	// StartSetup races with the old wait), we must not flag the *new*
+	// setupProcess as exited just because the *old* cmd.Wait() returned.
+	// Comparing against s.setupProcess scopes the write to this setup attempt
+	// without needing a per-setup struct (audit reports/cookies.md #14).
+	proc := cmd.Process
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -74,7 +89,9 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 		}()
 		cmd.Wait()
 		s.mu.Lock()
-		s.browserExited = true
+		if s.setupProcess == proc {
+			s.browserExited = true
+		}
 		s.mu.Unlock()
 	}()
 
@@ -104,7 +121,7 @@ func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 		return "", fmt.Errorf("CDP port not available")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cdpExtractTimeout)
 	defer cancel()
 
 	return cdpGetCookiesAsNetscape(ctx, port)
@@ -174,7 +191,7 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 		s.mu.Unlock()
 	}()
 
-	cdpCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	cdpCtx, cancel := context.WithTimeout(ctx, cdpRefreshTimeout)
 	defer cancel()
 
 	if err := waitForCDP(cdpCtx, port, cdpPollTimeout); err != nil {
@@ -257,7 +274,7 @@ func cdpNavigate(ctx context.Context, port int, url string) error {
 // cdpNavigateAndWait navigates to a URL via CDP and waits for Page.loadEventFired.
 // Matches TS CdpClient.navigate(): Page.enable -> Page.navigate -> wait for load.
 func cdpNavigateAndWait(ctx context.Context, wsURL string, targetURL string) error {
-	navCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	navCtx, cancel := context.WithTimeout(ctx, cdpNavigateTimeout)
 	defer cancel()
 
 	conn, _, err := websocket.Dial(navCtx, wsURL, nil)
@@ -560,10 +577,29 @@ func getFreePort() (int, error) {
 	return port, nil
 }
 
+// lockFileFreshThreshold guards against deleting a lock file that another
+// browser instance is actively using. A truly stale lock from a crashed run
+// will be older than this; a lock held by a live browser will have been
+// touched within seconds (audit reports/cookies.md #9).
+const lockFileFreshThreshold = 5 * time.Second
+
+// removeStaleLock unlinks path only if its mtime is older than
+// lockFileFreshThreshold. Errors stat'ing the file are treated as "not
+// present" — proceed with the unlink attempt, which is itself a no-op for
+// missing files.
+func removeStaleLock(path string) {
+	if info, err := os.Stat(path); err == nil {
+		if time.Since(info.ModTime()) < lockFileFreshThreshold {
+			return // recently touched — likely held by a live browser
+		}
+	}
+	os.Remove(path)
+}
+
 func cleanChromiumLockFiles(profileDir string) {
 	// Remove the canonical set first; covers every known Chromium variant.
 	for _, name := range chromiumLockFiles {
-		os.Remove(filepath.Join(profileDir, name))
+		removeStaleLock(filepath.Join(profileDir, name))
 	}
 	// Newer Chrome/Brave/Edge/Opera builds sometimes leave additional
 	// Singleton* variants (e.g. SingletonLock.lock); glob them too so a
@@ -574,7 +610,7 @@ func cleanChromiumLockFiles(profileDir string) {
 			continue
 		}
 		for _, m := range matches {
-			os.Remove(m)
+			removeStaleLock(m)
 		}
 	}
 }

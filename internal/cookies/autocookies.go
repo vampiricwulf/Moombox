@@ -560,15 +560,31 @@ func (s *AutoCookieService) killSetupProcess() {
 }
 
 func (s *AutoCookieService) killRefreshProcess() {
-	s.mu.Lock()
-	cmd := s.refreshCmd
-	s.mu.Unlock()
+	// RefreshCookies claims the slot with `s.refreshCmd = &exec.Cmd{}`
+	// (a sentinel with nil Process) before refreshFirefox/refreshChromium
+	// assigns the real cmd. A naive `Process == nil → bail` lets a Stop()
+	// during that window leak the real browser when it lands a moment later
+	// (audit reports/cookies.md #22). Poll briefly so the kill catches the
+	// real process once the launcher publishes it, but cap the wait so Stop()
+	// doesn't block indefinitely if the launcher errors before assignment.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		cmd := s.refreshCmd
+		s.mu.Unlock()
 
-	if cmd == nil || cmd.Process == nil {
-		return
+		if cmd == nil {
+			return // launcher cleared the slot — nothing to kill
+		}
+		if cmd.Process != nil {
+			killProcessTree(cmd.Process)
+			return
+		}
+		if !time.Now().Before(deadline) {
+			return // sentinel still in place — give up rather than block Stop()
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-
-	killProcessTree(cmd.Process)
 }
 
 func (s *AutoCookieService) cleanup() {

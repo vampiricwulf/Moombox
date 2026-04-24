@@ -48,7 +48,10 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 	s.setupProcess = cmd.Process
 	s.mu.Unlock()
 
-	// Monitor for exit
+	// Monitor for exit. Compare against s.setupProcess so a stale wait from a
+	// previous setup attempt cannot falsely flag the current one as exited
+	// (audit reports/cookies.md #14).
+	proc := cmd.Process
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -57,7 +60,9 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 		}()
 		cmd.Wait()
 		s.mu.Lock()
-		s.browserExited = true
+		if s.setupProcess == proc {
+			s.browserExited = true
+		}
 		s.mu.Unlock()
 	}()
 
@@ -223,8 +228,10 @@ func queryFirefoxCookieDB(dbPath string) ([]string, error) {
 }
 
 func cleanFirefoxLockFiles(profileDir string) {
+	// Skip recently-touched locks so we don't yank a parent.lock out from
+	// under a live Firefox instance (audit reports/cookies.md #9).
 	for _, name := range firefoxLockFiles {
-		os.Remove(filepath.Join(profileDir, name))
+		removeStaleLock(filepath.Join(profileDir, name))
 	}
 }
 

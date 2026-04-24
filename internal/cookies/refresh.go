@@ -29,6 +29,15 @@ const (
 	// Update this when YouTube bumps the client version — it's used in auth check
 	// and session refresh requests. Format: "2.YYYYMMDD.00.00".
 	youtubeClientVersion = "2.20260301.00.00"
+
+	// authBodyFallbackLimit caps how much of the response body we promote to a
+	// Go string for the JSON-parse-failed fallback path. The real
+	// `"logged_in":"1"` / `"loggedIn":true` markers live in the first hundreds
+	// of bytes of the responseContext block; scanning past 16KB only inflates
+	// memory and increases the surface for accidentally logging cookies or
+	// session tokens that may appear deeper in the payload (audit
+	// reports/cookies.md #24).
+	authBodyFallbackLimit = 16 << 10
 )
 
 // cookieUpdate holds a parsed Set-Cookie value, expiry, and authoritative
@@ -369,8 +378,10 @@ func (rs *RefreshService) checkYouTubeAuth(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("read YouTube auth response: %w", err)
 	}
 	if err := json.Unmarshal(respBody, &data); err != nil {
-		// Fallback to string matching if JSON parse fails
-		respStr := string(respBody)
+		// Fallback to string matching if JSON parse fails. Cap the slice so
+		// the resulting Go string never carries the full multi-MB payload —
+		// the auth marker lives in the first few hundred bytes (#24).
+		respStr := string(respBody[:min(len(respBody), authBodyFallbackLimit)])
 		return strings.Contains(respStr, `"logged_in":"1"`) ||
 			strings.Contains(respStr, `"loggedIn":true`), nil
 	}
@@ -456,7 +467,8 @@ func (rs *RefreshService) checkAndRefreshYouTube(ctx context.Context) (bool, err
 	}
 
 	if err := json.Unmarshal(respBody, &data); err != nil {
-		respStr := string(respBody)
+		// Same cap as the checkYouTubeAuth fallback (#24).
+		respStr := string(respBody[:min(len(respBody), authBodyFallbackLimit)])
 		authenticated = strings.Contains(respStr, `"logged_in":"1"`) ||
 			strings.Contains(respStr, `"loggedIn":true`)
 	} else {
