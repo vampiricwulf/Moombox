@@ -128,11 +128,17 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 		})
 	})
 
-	// Rate-limit mutating ffmpeg endpoints (spawns processes)
-	rl := r
-	if deps.RateLimit != nil {
-		rl = r.With(deps.RateLimit.Middleware)
-	}
+	// Rate-limit mutating ffmpeg endpoints (spawns processes).
+	// Audit D-5: the old `rl := r; if deps.RateLimit != nil { rl = r.With(...) }`
+	// pattern obscured intent. Use chi.Group so the middleware is applied
+	// exactly when RateLimit is configured, and we don't silently skip the
+	// limiter just because a caller forgot to wire it.
+	rl := r.With(func(h http.Handler) http.Handler {
+		if deps.RateLimit == nil {
+			return h
+		}
+		return deps.RateLimit.Middleware(h)
+	})
 
 	// POST /api/ffmpeg/check — check a custom ffmpeg path, save to config if valid
 	rl.Post("/api/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {

@@ -3,6 +3,7 @@ package routes
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -44,8 +45,9 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 
 		// Upsert
 		cfgMu.Lock()
-		oldChannels := make([]config.ChannelConfig, len(cfg.Channels))
-		copy(oldChannels, cfg.Channels)
+		// Audit Q-12: use slices.Clone for the rollback snapshot so the
+		// pattern stays correct if ChannelConfig grows pointer fields.
+		oldChannels := slices.Clone(cfg.Channels)
 		found := false
 		for i, ch := range cfg.Channels {
 			if ch.ID == channel.ID {
@@ -81,8 +83,7 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 		channelID := chi.URLParam(req, "id")
 
 		cfgMu.Lock()
-		oldChannels := make([]config.ChannelConfig, len(cfg.Channels))
-		copy(oldChannels, cfg.Channels)
+		oldChannels := slices.Clone(cfg.Channels)
 		found := false
 		for i, ch := range cfg.Channels {
 			if ch.ID == channelID {
@@ -206,8 +207,10 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 		}
 
 		if resolved == nil {
-			// Not a recognized URL — return input as-is
-			jsonResponse(rw, map[string]any{"id": input, "name": "", "platform": ""})
+			// Not a recognized URL — return input as-is. Audit R-11:
+			// flag resolved=false so callers don't mistake the echoed
+			// input for a real lookup result.
+			jsonResponse(rw, map[string]any{"id": input, "name": "", "platform": "", "resolved": false})
 			return
 		}
 
@@ -215,6 +218,7 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 			"id":       resolved.ID,
 			"name":     resolved.Name,
 			"platform": resolved.Platform,
+			"resolved": true,
 		})
 	})
 }

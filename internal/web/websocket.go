@@ -229,14 +229,11 @@ func (hub *WebSocketHub) pingPump(client *wsClient) {
 		case <-client.ctx.Done():
 			return
 		case <-ticker.C:
-			// Check if hub is closed before attempting ping
-			hub.mu.Lock()
-			closed := hub.closed
-			hub.mu.Unlock()
-			if closed {
-				return
-			}
-
+			// Audit Q-7: Close() cancels every client.ctx, so the select
+			// above is a sufficient stop signal — the previous explicit
+			// hub.closed check under hub.mu was a TOCTOU (closed could
+			// flip between the unlock and the Ping) that the cancelled
+			// ctx + Ping error already cover.
 			ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
 			err := client.conn.Ping(ctx)
 			cancel()
@@ -392,10 +389,24 @@ func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
 		}
 		delete(hub.throttlePending, jobID)
 
+		// Snapshot the prior state so a panic in Broadcast can restore
+		// it (audit P-2). Otherwise, the timestamp moves forward without
+		// a successful send and subsequent updates within the window
+		// silently route to the trailing edge.
+		prevTS, prevExists := lastUpdate, exists
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
 					hub.logger.Error("panic in job update broadcast", "panic", r)
+					hub.throttleMu.Lock()
+					if hub.throttleTimestamps != nil {
+						if prevExists {
+							hub.throttleTimestamps[jobID] = prevTS
+						} else {
+							delete(hub.throttleTimestamps, jobID)
+						}
+					}
+					hub.throttleMu.Unlock()
 				}
 			}()
 			hub.Broadcast("job_update", data)

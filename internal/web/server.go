@@ -27,12 +27,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
-// ServiceContext holds references to all services needed by HTTP handlers.
-type ServiceContext struct {
-	Config *config.MoomboxConfig
-	// DB, Worker, YouTube, Twitch, etc. will be added as needed
-}
-
 // InternalTokenHeader is the header name used by same-process clients (TUI)
 // to bypass CSRF checks. The value must match the token generated at startup.
 const InternalTokenHeader = "X-Internal-Token"
@@ -584,10 +578,14 @@ func RecoveryMiddleware(logger interface {
 				if rvr := recover(); rvr != nil {
 					// Include the chi request ID so panic logs correlate with
 					// any other log lines emitted during this request handling
-					// (audit reports/web.md S-22).
+					// (audit reports/web.md S-22). method+remoteAddr added per
+					// audit Q-25 to make panic reports actionable without
+					// needing the user to reproduce.
 					logger.Error("panic recovered in HTTP handler",
 						"panic", rvr,
+						"method", r.Method,
 						"path", r.URL.Path,
+						"remoteAddr", r.RemoteAddr,
 						"reqID", chimiddleware.GetReqID(r.Context()),
 					)
 					if !rw.headersSent {

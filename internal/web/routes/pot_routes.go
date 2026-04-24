@@ -135,7 +135,10 @@ func PotRoutes(r chi.Router, deps *PotRoutesDeps) {
 		})
 	})
 
-	r.Get("/minter_cache", func(rw http.ResponseWriter, req *http.Request) {
+	// Audit Q-23: GET /minter_cache reveals internal POT cache keys.
+	// Wrap in LoopbackOnly for parity with the other POT endpoints — this
+	// is consumed by the local yt-dlp plugin only.
+	r.With(web.LoopbackOnly).Get("/minter_cache", func(rw http.ResponseWriter, req *http.Request) {
 		if deps.Logger != nil {
 			deps.Logger.Debug("[PotProvider] Minter cache requested")
 		}
