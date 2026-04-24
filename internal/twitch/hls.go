@@ -82,6 +82,13 @@ func ParseHLSMasterPlaylist(content string) []TwitchHLSVariant {
 }
 
 // SelectBestVariant selects the best HLS variant based on preferences.
+//
+// The returned pointer may point into either the caller-owned `variants`
+// slice OR an internal filtered slice (audio_only-stripped, then optionally
+// resolution-capped). Callers MUST treat the return value as read-only:
+// mutating it has undefined effect on the caller's `variants`. Go's escape
+// analysis keeps the underlying array live for the pointer's lifetime, so
+// the read path is safe. Audit-finding #26.
 func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResolution int) *TwitchHLSVariant {
 	if len(variants) == 0 {
 		return nil
@@ -114,10 +121,19 @@ func SelectBestVariant(variants []TwitchHLSVariant, qualityPref string, maxResol
 	}
 
 	if len(filtered) == 0 {
+		// All variants were audio-only and the caller did NOT request
+		// audio_only. Returning variants[0] degrades gracefully to an
+		// audio-only stream rather than failing the download outright —
+		// the user gets at least audio. Audit-finding #25.
 		return &variants[0]
 	}
 
-	// Apply max resolution cap (only if non-empty result)
+	// Apply max resolution cap (only if non-empty result).
+	// We compare the larger dimension (max(Height, Width)) against the cap
+	// so vertical/portrait streams (e.g. 720x1280) are filtered against
+	// their *long edge* — i.e. a 720x1280 portrait stream counts as 1280p
+	// for cap purposes, matching how a typical 16:9 1920x1080 stream is
+	// treated as 1920 wide. See audit-finding #23.
 	if maxResolution > 0 {
 		var withinCap []TwitchHLSVariant
 		for _, v := range filtered {

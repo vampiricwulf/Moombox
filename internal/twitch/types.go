@@ -14,7 +14,8 @@ type TwitchStreamInfo struct {
 	StartedAt          string `json:"startedAt,omitempty"`
 	ProfileImageURL    string `json:"profileImageUrl,omitempty"`
 	IsLive             bool   `json:"isLive"`
-	StreamType         string `json:"streamType,omitempty"` // "live" or "rerun"
+	StreamType         string `json:"streamType,omitempty"`    // Normalized: "live" or "rerun"
+	RawStreamType      string `json:"rawStreamType,omitempty"` // Original from Twitch (e.g. "watchparty", "premiere") — preserved for diagnostics. Audit-finding #29.
 }
 
 // TwitchAccessToken holds HLS access credentials.

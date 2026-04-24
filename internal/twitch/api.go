@@ -290,6 +290,7 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 		ProfileImageURL:    user.ProfileImageURL,
 		IsLive:             true,
 		StreamType:         user.Stream.Type,
+		RawStreamType:      user.Stream.Type, // preserved before normalization (audit twitch.md #29)
 	}
 
 	if user.Stream.Game != nil {

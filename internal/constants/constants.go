@@ -168,9 +168,22 @@ var TwitchURLs = struct {
 }
 
 // TwitchGQLClientID is the public GQL Client-ID.
+//
+// This is the *classic* Twitch web Client-ID. Upstream yt-dlp now defaults
+// to "ue6666qo983tsx6so1t0vnawi233wa" (see references/yt-dlp twitch.py
+// _CLIENT_ID), driven by integrity-token enforcement on the old ID. The
+// classic ID still works for our persisted queries and Usher access tokens
+// today, but if Twitch tightens GQL access this is the first thing to
+// rotate. Audit-finding #9.
 const TwitchGQLClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 
 // TwitchGQLHashes contains persisted query hashes for Twitch GQL.
+//
+// Last verified against references/yt-dlp twitch.py _OPERATION_HASHES on
+// 2026-04-23. When syncing yt-dlp, diff the four hashes below against
+// upstream and bump as needed — Twitch invalidates persisted queries on
+// schema changes, so a stale hash returns a "PersistedQueryNotFound"
+// error and breaks the relevant code path silently. Audit-finding #33.
 var TwitchGQLHashes = struct {
 	StreamMetadata               string
 	ComscoreStreamingQuery       string
@@ -184,20 +197,19 @@ var TwitchGQLHashes = struct {
 }
 
 // TwitchEmoteAPIs contains third-party emote API endpoints.
+//
+// Only the per-channel endpoints are referenced today; global-emote
+// endpoints were removed because they had no callers (audit-finding #44).
+// Re-add BTTVGlobal/FFZGlobal/SevenTVGlobal if global emote merging is
+// ever wired into emotes.go.
 var TwitchEmoteAPIs = struct {
-	BTTVGlobal    string
-	BTTVChannel   string
-	FFZGlobal     string
-	FFZChannel    string
-	SevenTVUser   string
-	SevenTVGlobal string
+	BTTVChannel string
+	FFZChannel  string
+	SevenTVUser string
 }{
-	BTTVGlobal:    "https://api.betterttv.net/3/cached/emotes/global",
-	BTTVChannel:   "https://api.betterttv.net/3/cached/users/twitch",
-	FFZGlobal:     "https://api.frankerfacez.com/v1/set/global",
-	FFZChannel:    "https://api.frankerfacez.com/v1/room/id",
-	SevenTVUser:   "https://7tv.io/v3/users/twitch",
-	SevenTVGlobal: "https://7tv.io/v3/emote-sets/global",
+	BTTVChannel: "https://api.betterttv.net/3/cached/users/twitch",
+	FFZChannel:  "https://api.frankerfacez.com/v1/room/id",
+	SevenTVUser: "https://7tv.io/v3/users/twitch",
 }
 
 // =============================================================================
