@@ -365,8 +365,7 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 	consecutiveErrors := 0
 	switchedToAllChat := resuming // Skip All Chat switch when resuming — continuation is already mid-stream
 	// lastWriteAt is loop-local — only the loop reads/writes it for the
-	// writeInterval throttle (audit chat.md U1 — was a struct field, never
-	// touched outside runChatLoop).
+	// writeInterval throttle (audit chat.md U1).
 	var lastWriteAt time.Time
 
 	for !cd.shouldStop() {
@@ -374,203 +373,56 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 			return
 		}
 
-		// Fetch chat
-		var resp *ChatApiResponse
-		var err error
-		if cd.opts.IsReplay {
-			resp, err = cd.api.FetchChatReplay(ctx, cd.continuation)
-		} else {
-			resp, err = cd.api.FetchLiveChat(ctx, cd.continuation)
-		}
-
+		resp, err := cd.fetchOne(ctx)
 		if err != nil {
-			// If context cancelled (stop/markStreamEnded), exit without counting as error
-			if ctx.Err() != nil {
+			if cd.handleFetchError(ctx, err, &consecutiveErrors) {
 				break
 			}
-			// Auth failure — cookies are expired / never worked. Surface
-			// the error and abort the loop immediately rather than burning
-			// maxConsecErrorsLive (20) attempts on a credential state that
-			// will not recover without a refresh (audit chat.md T5). The
-			// caller's OnError gets the wrapped ErrAuthRequired and can
-			// decide whether to refresh cookies and re-Start.
-			if errors.Is(err, ErrAuthRequired) {
-				if cd.OnError != nil {
-					cd.OnError(err)
-				}
-				break
-			}
-
-			consecutiveErrors++
-			if cd.OnError != nil {
-				cd.OnError(err)
-			}
-
-			// Higher tolerance for live streams (> not >=, matching TypeScript)
-			maxErrors := maxConsecErrorsVod
-			if cd.isStreamActive() {
-				maxErrors = maxConsecErrorsLive
-			}
-			if consecutiveErrors > maxErrors {
-				if cd.OnError != nil {
-					cd.OnError(fmt.Errorf("too many consecutive chat API errors"))
-				}
-				break
-			}
-
-			// Exponential backoff (cap at 30s for VOD, 60s for live)
-			maxBackoff := 30000
-			if cd.isStreamActive() {
-				maxBackoff = 60000
-			}
-			backoffMs := min(5000*consecutiveErrors, maxBackoff)
-			cd.sleep(ctx, time.Duration(backoffMs)*time.Millisecond)
 			continue
 		}
-
 		consecutiveErrors = 0
 
-		// Switch from "Top Chat" (filtered) to "All Chat" (unfiltered) on the first response.
-		// YouTube defaults to Top Chat which can aggressively filter messages to zero.
-		// Only mark the switch as complete when we actually upgraded the continuation —
-		// if the AllChatContinuation header wasn't present (e.g. early-preroll response),
-		// leave switchedToAllChat == false so a subsequent poll can retry the upgrade.
+		// Switch from "Top Chat" (filtered) to "All Chat" (unfiltered) on the
+		// first response. Only mark the switch complete when we actually
+		// upgraded the continuation — if AllChatContinuation was absent
+		// (early preroll), leave the flag false so a subsequent poll retries.
 		if !switchedToAllChat && resp.AllChatContinuation != "" {
 			cd.continuation = resp.AllChatContinuation
 			switchedToAllChat = true
-			continue // Re-poll immediately with the unfiltered continuation
+			continue
 		}
 
-		// Process messages
-		newInBatch := 0
-		for i := range resp.Messages {
-			msg := &resp.Messages[i]
-
-			// Calculate offsetMs if not already set from replay wrapper.
-			// Pre-stream waiting-room chat can produce legitimate negative offsets,
-			// so HasOffset is the sentinel rather than OffsetMs == 0.
-			if !msg.HasOffset && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
-				usec, err := strconv.ParseInt(msg.TimestampUsec, 10, 64)
-				if err != nil {
-					cd.logDebug("chat: timestampUsec parse failed", "videoID", cd.opts.VideoID, "value", msg.TimestampUsec, "err", err)
-				} else if usec > 0 {
-					msg.OffsetMs = usec/1000 - cd.streamStartMs
-					msg.HasOffset = true
-				}
-			}
-
-			// Dedup by ID (skip empty IDs to avoid silent dedup of malformed messages)
-			if msg.ID != "" && !cd.dedup.Add(msg.ID) {
-				continue
-			}
-			cd.messages = append(cd.messages, *msg)
-			cd.messageCount++
-			newInBatch++
-		}
-
-		// Emit progress on every batch with new messages (not throttled)
+		newInBatch, lastTs := cd.processBatch(resp)
 		if newInBatch > 0 {
-			lastTs := ""
-			if len(resp.Messages) > 0 {
-				lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
-			}
 			cd.callOnProgress(ChatProgress{
 				MessageCount:  cd.messageCount,
 				LastTimestamp: lastTs,
 			})
+			cd.maybeFlush(&lastWriteAt, newInBatch)
 		}
 
-		// Write to disk at most once per writeInterval
-		if newInBatch > 0 {
-			now := time.Now()
-			if lastWriteAt.IsZero() || now.Sub(lastWriteAt) >= writeInterval {
-				cd.writeChatFile()
-				lastWriteAt = now
-
-				// Update header to keep messageCount accurate after incremental flushes
-				cd.updateChatFileHeader()
-
-				cd.saveResume()
-			}
-		}
-
-		// Bound seenIDs on every successful fetch — pinned announcements and
-		// already-seen IDs can accumulate via newly-seen batches even when
-		// newInBatch == 0 (resp replayed same IDs), so the cull check must
-		// live outside the write-interval gate to prevent unbounded growth.
+		// Bound dedup on every successful fetch — pinned announcements and
+		// replayed IDs can grow seenIDs even when newInBatch == 0, so the
+		// cull must live outside the write-interval gate (audit chat.md C6).
 		if cd.dedup.Len() > dedupKeepSize {
 			cd.dedup.Keep(dedupKeepSize)
 		}
 
-		// Check if chat has ended
+		// Handle end-of-stream / stale continuation
 		if resp.IsComplete || resp.NextContinuation == "" {
-			if cd.isStreamActive() {
-				// Stream is still live — continuation went stale.
-				// Fetch a fresh continuation token from the watch page.
-				fresh, _, freshErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
-				if freshErr == nil && fresh != "" {
-					cd.continuation = fresh
-					switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
-					continue
-				}
-
-				// Initial fresh-continuation fetch failed — retry with exponential
-				// backoff. Sleep *between* attempts (after a failure), not before
-				// the first retry. maxStaleContinuationAttempts counts the
-				// failed attempts so far (the initial fetch above is attempt #1).
-				contRetryDelay := 10 * time.Second
-				contRetries := 1 // the initial failed call above
-				gotFresh := false
-
-				for !cd.shouldStop() && contRetries < maxStaleContinuationAttempts {
-					cd.sleep(ctx, contRetryDelay)
-					if cd.shouldStop() {
-						break
-					}
-					retry, _, retryErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
-					if retryErr == nil && retry != "" {
-						cd.continuation = retry
-						switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
-						gotFresh = true
-						break
-					}
-					contRetries++
-					// Exponential backoff: 10s, 20s, 40s, 80s, cap at 5min
-					contRetryDelay = min(contRetryDelay*2, 5*time.Minute)
-				}
-				if !gotFresh {
-					break
-				}
-				continue
+			if !cd.isStreamActive() {
+				break // VOD/replay complete
 			}
-			// VOD/replay: chat is complete
-			break
+			if !cd.recoverStaleContinuation(ctx) {
+				break
+			}
+			switchedToAllChat = false // Fresh token defaults to Top Chat — re-trigger switch
+			continue
 		}
 
-		// Update continuation for next request
 		cd.continuation = resp.NextContinuation
-
-		// Wait before next poll (matches TypeScript: timeoutMs || (isReplay ? 0 : 5000))
-		// TS uses || (not ??) so timeoutMs=0 also falls back to the default.
-		//
-		// Edge case (audit chat.md R4): YouTube has historically shipped
-		// timeoutMs=0 on live as a backpressure signal ("nothing to give
-		// you"). Treating it literally as "poll immediately" would hammer
-		// the API in that scenario, so we deliberately fall back to the
-		// 5s live default and keep the old TS behaviour. parseResponse
-		// initialises TimeoutMs to -1 so an absent field is distinguishable
-		// from an explicit zero, and both still fall through here.
-		waitMs := resp.TimeoutMs
-		if waitMs <= 0 {
-			// Not set or zero from API — use replay=0, live=5000
-			if cd.opts.IsReplay {
-				waitMs = 0
-			} else {
-				waitMs = 5000
-			}
-		}
-		if waitMs > 0 {
-			cd.sleep(ctx, time.Duration(waitMs)*time.Millisecond)
+		if delay := cd.computePollDelay(resp); delay > 0 {
+			cd.sleep(ctx, delay)
 		}
 	}
 
@@ -580,6 +432,162 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 	if cd.wasCancelledOrShutdown(ctx) && (len(cd.messages) > 0 || cd.flushedToDisk) {
 		cd.saveResume()
 	}
+}
+
+// fetchOne performs a single chat fetch, routing to the replay or live
+// endpoint based on opts.IsReplay.
+func (cd *ChatDownloader) fetchOne(ctx context.Context) (*ChatApiResponse, error) {
+	if cd.opts.IsReplay {
+		return cd.api.FetchChatReplay(ctx, cd.continuation)
+	}
+	return cd.api.FetchLiveChat(ctx, cd.continuation)
+}
+
+// handleFetchError reacts to an error returned by fetchOne. Returns true when
+// the loop should break — context cancelled, auth failure (ErrAuthRequired),
+// or consecutive-error budget exhausted. On a transient error it calls
+// OnError, sleeps with exponential backoff, and returns false so the caller
+// can `continue`.
+func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, consecutiveErrors *int) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	// Auth failure — cookies are expired / never worked. Abort immediately
+	// rather than burning the consecutive-error budget on a credential state
+	// that will not recover without a refresh (audit chat.md T5).
+	if errors.Is(err, ErrAuthRequired) {
+		if cd.OnError != nil {
+			cd.OnError(err)
+		}
+		return true
+	}
+
+	*consecutiveErrors++
+	if cd.OnError != nil {
+		cd.OnError(err)
+	}
+
+	// Higher tolerance for live streams (> not >=, matching TypeScript)
+	maxErrors := maxConsecErrorsVod
+	if cd.isStreamActive() {
+		maxErrors = maxConsecErrorsLive
+	}
+	if *consecutiveErrors > maxErrors {
+		if cd.OnError != nil {
+			cd.OnError(fmt.Errorf("too many consecutive chat API errors"))
+		}
+		return true
+	}
+
+	// Exponential backoff (cap at 30s for VOD, 60s for live)
+	maxBackoff := 30000
+	if cd.isStreamActive() {
+		maxBackoff = 60000
+	}
+	backoffMs := min(5000*(*consecutiveErrors), maxBackoff)
+	cd.sleep(ctx, time.Duration(backoffMs)*time.Millisecond)
+	return false
+}
+
+// processBatch walks a successful response's messages, computes live-mode
+// offsets for messages that arrived without a replay offset, dedups by ID,
+// and appends newly-seen messages to cd.messages. Returns the new-in-batch
+// count and the last message's timestampText for progress reporting.
+//
+// Pre-stream "waiting-room" chat legitimately produces negative offsets, so
+// HasOffset (not OffsetMs == 0) is the sentinel for "offset not yet set".
+func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, lastTs string) {
+	for i := range resp.Messages {
+		msg := &resp.Messages[i]
+
+		if !msg.HasOffset && cd.streamStartMs > 0 && msg.TimestampUsec != "" {
+			usec, err := strconv.ParseInt(msg.TimestampUsec, 10, 64)
+			if err != nil {
+				cd.logDebug("chat: timestampUsec parse failed", "videoID", cd.opts.VideoID, "value", msg.TimestampUsec, "err", err)
+			} else if usec > 0 {
+				msg.OffsetMs = usec/1000 - cd.streamStartMs
+				msg.HasOffset = true
+			}
+		}
+
+		// Dedup by ID (skip empty IDs to avoid silent dedup of malformed messages)
+		if msg.ID != "" && !cd.dedup.Add(msg.ID) {
+			continue
+		}
+		cd.messages = append(cd.messages, *msg)
+		cd.messageCount++
+		newInBatch++
+	}
+	if len(resp.Messages) > 0 {
+		lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
+	}
+	return
+}
+
+// maybeFlush writes accumulated messages to disk if at least writeInterval
+// has elapsed since the last flush. Updates *lastWriteAt on flush.
+func (cd *ChatDownloader) maybeFlush(lastWriteAt *time.Time, newInBatch int) {
+	if newInBatch == 0 {
+		return
+	}
+	now := time.Now()
+	if !lastWriteAt.IsZero() && now.Sub(*lastWriteAt) < writeInterval {
+		return
+	}
+	cd.writeChatFile()
+	cd.updateChatFileHeader()
+	cd.saveResume()
+	*lastWriteAt = now
+}
+
+// recoverStaleContinuation runs the exponential-backoff fresh-continuation
+// retry loop when the current continuation expired mid-stream. Returns true
+// if a fresh token was obtained (cd.continuation updated), false if the
+// maxStaleContinuationAttempts cap was exhausted or the loop was asked to
+// stop. Sleeps *between* attempts (not before the first), matching C15.
+func (cd *ChatDownloader) recoverStaleContinuation(ctx context.Context) bool {
+	fresh, _, freshErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
+	if freshErr == nil && fresh != "" {
+		cd.continuation = fresh
+		return true
+	}
+
+	contRetryDelay := 10 * time.Second
+	contRetries := 1 // the initial failed call above counts as attempt #1
+	for !cd.shouldStop() && contRetries < maxStaleContinuationAttempts {
+		cd.sleep(ctx, contRetryDelay)
+		if cd.shouldStop() {
+			return false
+		}
+		retry, _, retryErr := cd.api.FetchFreshContinuation(ctx, cd.opts.VideoID)
+		if retryErr == nil && retry != "" {
+			cd.continuation = retry
+			return true
+		}
+		contRetries++
+		// Exponential backoff: 10s, 20s, 40s, 80s, cap at 5min.
+		contRetryDelay = min(contRetryDelay*2, 5*time.Minute)
+	}
+	return false
+}
+
+// computePollDelay returns how long to wait before the next chat fetch,
+// respecting YouTube's TimeoutMs hint when positive and falling back to 5s
+// (live) or 0 (replay) otherwise. A non-positive TimeoutMs is deliberately
+// *not* treated as "poll immediately" — YouTube has historically shipped 0
+// as a backpressure signal ("nothing to give you") and hammering the API
+// would be wasteful (audit chat.md R4). parseResponse initialises TimeoutMs
+// to -1 so an absent field is distinguishable from an explicit zero, and
+// both fall through to the live default here.
+func (cd *ChatDownloader) computePollDelay(resp *ChatApiResponse) time.Duration {
+	waitMs := resp.TimeoutMs
+	if waitMs <= 0 {
+		if cd.opts.IsReplay {
+			return 0
+		}
+		waitMs = 5000
+	}
+	return time.Duration(waitMs) * time.Millisecond
 }
 
 // SetOutputFile updates the output file path. Used when early chat is started
