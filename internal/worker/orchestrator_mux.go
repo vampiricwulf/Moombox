@@ -473,11 +473,14 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 		}
 		finFields = append(finFields, notifications.Field{Name: "Trimmed Range", Value: fmt.Sprintf("%s - %s", startStr, endStr), Inline: true})
 	}
-	// Description excerpt
+	// Description excerpt — Discord embeds cap field values around 1024
+	// chars, but we keep the notification short. 297 + "..." == 300 total
+	// (audit reports/worker.md F40).
+	const descMaxLen = 300
 	if finishedJob.Description != "" {
 		desc := finishedJob.Description
-		if len(desc) > 300 {
-			desc = desc[:297] + "..."
+		if len(desc) > descMaxLen {
+			desc = desc[:descMaxLen-3] + "..."
 		}
 		finFields = append(finFields, notifications.Field{Name: "Description", Value: desc})
 	}

@@ -23,12 +23,15 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 
 	hlsURL := videoInfo.HlsManifestURL
 
-	// Inject PO token if available
+	// Generate PO token once and reuse for master URL, variant URL, and
+	// segment URLs (audit reports/worker.md F30; same dedup as F29 for DASH).
+	var hlsPoToken string
 	if potProvider != nil {
 		poToken, err := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
 		if err != nil {
 			job.Logger.Warn("pot: failed to generate PO token for HLS", "err", err)
 		} else if poToken != "" {
+			hlsPoToken = poToken
 			hlsURL = strings.TrimRight(hlsURL, "/") + "/pot/" + poToken
 			job.Logger.Debug("pot: added PO token to HLS manifest URL")
 		}
@@ -128,18 +131,11 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		VideoFps:    bestVariant.FPS,
 	}
 
-	// Apply PO token to variant playlist URL (path mode) and pass for segment URLs (query mode)
+	// Reuse hlsPoToken from the master-URL step above; no need to mint twice.
 	variantURL := bestVariant.URL
-	var hlsPoToken string
-	if potProvider != nil {
-		poToken, potErr := potProvider.GeneratePoTokenString(ctx, poTokenBinding(job, videoInfo), false)
-		if potErr != nil {
-			job.Logger.Warn("[POT] failed to generate PO token for HLS variant", "err", potErr)
-		} else if poToken != "" {
-			variantURL = strings.TrimRight(variantURL, "/") + "/pot/" + poToken
-			hlsPoToken = poToken
-			job.Logger.Info("[POT] added PO token to HLS variant URL", "tokenLength", len(poToken))
-		}
+	if hlsPoToken != "" {
+		variantURL = strings.TrimRight(variantURL, "/") + "/pot/" + hlsPoToken
+		job.Logger.Info("[POT] added PO token to HLS variant URL", "tokenLength", len(hlsPoToken))
 	}
 
 	result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{

@@ -625,6 +625,11 @@ func extractBadges(renderer map[string]any) []string {
 	return badges
 }
 
+// extractCurrency pulls the currency code out of a YouTube SuperChat amount
+// string. Handles the common prefix-form ("$5.00", "€2.00") plus several
+// suffix-form locales ("5,00 €", Scandinavian/EU). Audit reports/chat.md
+// C16/Q15 — the prior implementation only scanned left-to-right and returned
+// "UNKNOWN" for any string that started with a digit.
 func extractCurrency(amountText string) string {
 	if strings.HasPrefix(amountText, "$") {
 		return "USD"
@@ -644,12 +649,23 @@ func extractCurrency(amountText string) string {
 	if strings.Contains(amountText, "A$") {
 		return "AUD"
 	}
-	// Return the first non-digit character(s) as currency
+	// Prefix form: leading non-digit run is the currency.
 	for i, c := range amountText {
 		if c >= '0' && c <= '9' || c == '.' || c == ',' || c == ' ' {
 			if i > 0 {
 				return strings.TrimSpace(amountText[:i])
 			}
+			break // Falls through to suffix scan below.
+		}
+	}
+	// Suffix form: trailing non-digit run after the last digit/separator.
+	for i := len(amountText) - 1; i >= 0; i-- {
+		c := rune(amountText[i])
+		if c >= '0' && c <= '9' || c == '.' || c == ',' {
+			if i < len(amountText)-1 {
+				return strings.TrimSpace(amountText[i+1:])
+			}
+			break
 		}
 	}
 	return "UNKNOWN"

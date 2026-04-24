@@ -17,10 +17,13 @@ import (
 )
 
 const (
-	streamEndVerifyInterval  = 5 * time.Minute
-	streamSegmentTimeout     = 10 * time.Minute
+	streamEndVerifyInterval = 5 * time.Minute
+	streamSegmentTimeout    = 10 * time.Minute
+	// maxConsecutiveLiveChecks pairs with streamEndVerifyInterval (5 min):
+	// 6 × 5 min = 30-minute "stream actually ended?" verification window
+	// before we accept that the live stream is over (audit reports/worker.md F40).
 	maxConsecutiveLiveChecks = 6
-	chatWaitTimeout          = 2 * time.Minute // TypeScript uses 2 minutes for all chat waits
+	chatWaitTimeout          = 2 * time.Minute
 	qualityMonitorInterval   = 30 * time.Second
 	minSegmentDuration       = 10 * time.Second // Don't split segments shorter than this
 )

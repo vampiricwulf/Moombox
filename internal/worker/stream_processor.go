@@ -227,21 +227,30 @@ func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) string {
 	}
 }
 
+// Probe-interval bands. Tighter polling near the scheduled go-live time so
+// we don't miss the live transition, looser polling for distant streams to
+// avoid hammering YouTube. Audit reports/worker.md F46.
+const (
+	probeIntervalImminent = 1 * time.Minute  // < 5 min until scheduled start
+	probeIntervalNear     = 5 * time.Minute  // < 1 hour
+	probeIntervalDistant  = 10 * time.Minute // ≥ 1 hour OR no schedule
+)
+
 func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.Duration {
 	if info.ScheduledStartTime != "" {
 		if t, err := time.Parse(time.RFC3339, info.ScheduledStartTime); err == nil {
 			until := time.Until(t)
 			switch {
 			case until <= 5*time.Minute:
-				return 1 * time.Minute
+				return probeIntervalImminent
 			case until <= 1*time.Hour:
-				return 5 * time.Minute
+				return probeIntervalNear
 			default:
-				return 10 * time.Minute
+				return probeIntervalDistant
 			}
 		}
 	}
-	return 10 * time.Minute
+	return probeIntervalDistant
 }
 
 // updateJobMetadata updates job metadata from video info.
