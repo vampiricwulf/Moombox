@@ -98,6 +98,13 @@ type runState struct {
 	// reassignment.
 	authChangeTUI atomic.Pointer[func(cookies.AuthStatus)]
 
+	// Same pattern for monitor OnSchedule: each monitor's goroutine loads
+	// the atomic pointer on every schedule event; the TUI wiring later
+	// Store()s a concrete wrapper that pushes into the CheckTimersCh channel.
+	feedTUISchedule   atomic.Pointer[func(int64)]
+	decapiTUISchedule atomic.Pointer[func(int64)]
+	twitchTUISchedule atomic.Pointer[func(int64)]
+
 	// --- Close-once wrappers ---
 	// sync.Once-guarded so both the orderly deferred shutdown and the
 	// 10-second force-exit timer can invoke them safely.
