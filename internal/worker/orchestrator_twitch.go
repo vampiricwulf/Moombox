@@ -62,8 +62,8 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// Register connectivity callback for immediate bail on offline
 	var offlineCancelled atomic.Bool
 	var unregisterConn func()
-	if o.onConnectivityChange != nil {
-		unregisterConn = o.onConnectivityChange(func(online bool) {
+	if o.conn != nil {
+		unregisterConn = o.conn.OnStateChange(func(online bool) {
 			if !online {
 				offlineCancelled.Store(true)
 				cancel() // cancel download context

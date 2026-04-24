@@ -216,12 +216,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 10. Download worker
 	// =========================================================================
 	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
-		CipherSolver:         cipherSolver,
-		PotProvider:          potProvider,
-		TwitchService:        twService,
-		Notifier:             notifyMgr,
-		IsOnline:             s.connMon.IsOnline,
-		OnConnectivityChange: s.connMon.OnStateChange,
+		CipherSolver:  cipherSolver,
+		PotProvider:   potProvider,
+		TwitchService: twService,
+		Notifier:      notifyMgr,
+		Conn:          s.connMon,
 	})
 	s.dlWorker = dlWorker
 

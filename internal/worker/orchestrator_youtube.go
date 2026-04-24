@@ -194,9 +194,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			var refreshResult *DownloadResult
 			var refreshErr error
 			if result.IsHls {
-				refreshResult, refreshErr = DownloadHls(ctx, jobCtx, freshInfo, o.potProvider, o.isOnline)
+				refreshResult, refreshErr = DownloadHls(ctx, jobCtx, freshInfo, o.potProvider, connIsOnline(o.conn))
 			} else {
-				refreshResult, refreshErr = DownloadDash(ctx, jobCtx, freshInfo, o.cipherSolver, o.potProvider, o.isOnline)
+				refreshResult, refreshErr = DownloadDash(ctx, jobCtx, freshInfo, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 			}
 
 			// Clear orchestrator seqs so they don't persist to future iterations
@@ -306,9 +306,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			segJobCtx.AudioStartSeq = oldAudioSeq
 
 			if result.IsHls {
-				refreshResult, refreshErr = DownloadHls(ctx, &segJobCtx, freshInfo, o.potProvider, o.isOnline)
+				refreshResult, refreshErr = DownloadHls(ctx, &segJobCtx, freshInfo, o.potProvider, connIsOnline(o.conn))
 			} else {
-				refreshResult, refreshErr = DownloadDash(ctx, &segJobCtx, freshInfo, o.cipherSolver, o.potProvider, o.isOnline)
+				refreshResult, refreshErr = DownloadDash(ctx, &segJobCtx, freshInfo, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 			}
 
 			if refreshErr != nil {
@@ -396,9 +396,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			var refreshResult *DownloadResult
 			var refreshErr error
 			if result.IsHls {
-				refreshResult, refreshErr = DownloadHls(ctx, jobCtx, freshInfo, o.potProvider, o.isOnline)
+				refreshResult, refreshErr = DownloadHls(ctx, jobCtx, freshInfo, o.potProvider, connIsOnline(o.conn))
 			} else {
-				refreshResult, refreshErr = DownloadDash(ctx, jobCtx, freshInfo, o.cipherSolver, o.potProvider, o.isOnline)
+				refreshResult, refreshErr = DownloadDash(ctx, jobCtx, freshInfo, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 			}
 
 			if refreshErr != nil {

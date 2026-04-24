@@ -28,33 +28,50 @@ const (
 	minSegmentDuration       = 10 * time.Second // Don't split segments shorter than this
 )
 
+// Connectivity is the subset of *connectivity.Monitor the orchestrator uses.
+// Defined as an interface so tests can pass a fake and so callers don't have
+// to unbundle the monitor's methods into separate func-pointer parameters
+// (audit reports/worker.md F54).
+type Connectivity interface {
+	IsOnline() bool
+	OnStateChange(fn func(online bool)) func()
+}
+
+// connIsOnline returns a func that calls c.IsOnline, or nil when c is nil.
+// Strategies take a func() bool parameter for online checks; this adapts a
+// Connectivity value back to that shape without leaking nil pointer calls.
+func connIsOnline(c Connectivity) func() bool {
+	if c == nil {
+		return nil
+	}
+	return c.IsOnline
+}
+
 // DownloadOrchestrator coordinates the full download lifecycle for a job.
 type DownloadOrchestrator struct {
-	muxer                *engine.Muxer
-	ffmpegPath           string
-	db                   *database.Database
-	queue                *JobQueue
-	cipherSolver         *cipher.Solver
-	potProvider          *bgutils.PotProvider
-	notifier             *notifications.Manager
-	isOnline             func() bool
-	onConnectivityChange func(fn func(online bool)) func()
-	logger               logger
+	muxer        *engine.Muxer
+	ffmpegPath   string
+	db           *database.Database
+	queue        *JobQueue
+	cipherSolver *cipher.Solver
+	potProvider  *bgutils.PotProvider
+	notifier     *notifications.Manager
+	conn         Connectivity
+	logger       logger
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.
-func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager, isOnline func() bool, onConnChange func(fn func(online bool)) func()) *DownloadOrchestrator {
+func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager, conn Connectivity) *DownloadOrchestrator {
 	return &DownloadOrchestrator{
-		muxer:                engine.NewMuxer(ffmpegPath, logger),
-		ffmpegPath:           ffmpegPath,
-		db:                   db,
-		queue:                queue,
-		cipherSolver:         cs,
-		potProvider:          pp,
-		notifier:             nm,
-		isOnline:             isOnline,
-		onConnectivityChange: onConnChange,
-		logger:               logger,
+		muxer:        engine.NewMuxer(ffmpegPath, logger),
+		ffmpegPath:   ffmpegPath,
+		db:           db,
+		queue:        queue,
+		cipherSolver: cs,
+		potProvider:  pp,
+		notifier:     nm,
+		conn:         conn,
+		logger:       logger,
 	}
 }
 
@@ -197,9 +214,9 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	if useDirectVod && len(videoInfo.Formats) > 0 {
 		result, err = DownloadVod(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider)
 	} else if videoInfo.DashManifestURL != "" {
-		result, err = DownloadDash(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider, o.isOnline)
+		result, err = DownloadDash(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 	} else if videoInfo.HlsManifestURL != "" {
-		result, err = DownloadHls(ctx, jobCtx, videoInfo, o.potProvider, o.isOnline)
+		result, err = DownloadHls(ctx, jobCtx, videoInfo, o.potProvider, connIsOnline(o.conn))
 	} else if len(videoInfo.Formats) > 0 {
 		// Fallback: no DASH/HLS manifest but formats exist — download directly
 		result, err = DownloadVod(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider)

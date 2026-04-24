@@ -139,13 +139,16 @@ type DownloadWorker struct {
 }
 
 // DownloadWorkerDeps holds optional dependencies for the download worker.
+// Conn carries both IsOnline + OnStateChange — previously two separate func
+// fields; merged into a single Connectivity interface so callers (and tests)
+// can pass a real *connectivity.Monitor or a fake without the two-func dance
+// (audit reports/worker.md F54).
 type DownloadWorkerDeps struct {
-	CipherSolver         *cipher.Solver
-	PotProvider          *bgutils.PotProvider
-	TwitchService        *twitch.Service
-	Notifier             *notifications.Manager
-	IsOnline             func() bool
-	OnConnectivityChange func(fn func(online bool)) func()
+	CipherSolver  *cipher.Solver
+	PotProvider   *bgutils.PotProvider
+	TwitchService *twitch.Service
+	Notifier      *notifications.Manager
+	Conn          Connectivity
 }
 
 // NewDownloadWorker creates a new download worker.
@@ -163,23 +166,21 @@ func NewDownloadWorker(
 	var pp *bgutils.PotProvider
 	var tw *twitch.Service
 	var nm *notifications.Manager
-	var isOnline func() bool
-	var onConnChange func(func(online bool)) func()
+	var conn Connectivity
 	if deps != nil {
 		cs = deps.CipherSolver
 		pp = deps.PotProvider
 		tw = deps.TwitchService
 		nm = deps.Notifier
-		isOnline = deps.IsOnline
-		onConnChange = deps.OnConnectivityChange
+		conn = deps.Conn
 	}
 
 	sp := NewStreamProcessor(yt, tw, cfg, db, logger)
 	if nm != nil {
 		sp.SetNotifier(nm)
 	}
-	if deps != nil && deps.IsOnline != nil {
-		sp.SetIsOnline(deps.IsOnline)
+	if conn != nil {
+		sp.SetIsOnline(conn.IsOnline)
 	}
 
 	return &DownloadWorker{
@@ -188,7 +189,7 @@ func NewDownloadWorker(
 		tw:           tw,
 		cfg:          cfg,
 		queue:        queue,
-		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, pp, nm, isOnline, onConnChange),
+		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, pp, nm, conn),
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,
