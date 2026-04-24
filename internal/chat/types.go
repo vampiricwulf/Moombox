@@ -40,14 +40,19 @@ type SuperchatInfo struct {
 }
 
 // ChatData is the output format for chat files.
+//
+// DownloadedAt is RFC3339 UTC ("2006-01-02T15:04:05Z") — re-readers should
+// parse it with time.RFC3339. Stored as a string rather than time.Time so
+// the JSON form stays stable and human-readable. StreamStartTime uses the
+// same format when present (audit chat.md U3).
 type ChatData struct {
-	VideoID          string        `json:"videoId"`
-	VideoTitle       string        `json:"videoTitle"`
-	ChannelName      string        `json:"channelName"`
-	StreamStartTime  string        `json:"streamStartTime,omitempty"`
-	DownloadedAt     string        `json:"downloadedAt"`
-	MessageCount     int           `json:"messageCount"`
-	Messages         []ChatMessage `json:"messages"`
+	VideoID         string        `json:"videoId"`
+	VideoTitle      string        `json:"videoTitle"`
+	ChannelName     string        `json:"channelName"`
+	StreamStartTime string        `json:"streamStartTime,omitempty"`
+	DownloadedAt    string        `json:"downloadedAt"`
+	MessageCount    int           `json:"messageCount"`
+	Messages        []ChatMessage `json:"messages"`
 }
 
 // ChatProgress holds progress information for event callbacks.

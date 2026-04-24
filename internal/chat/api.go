@@ -107,6 +107,12 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 		return "", false, err
 	}
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
+	// Force English-language watch pages so the EU consent gate hits a
+	// known-shape variant (we detect it via redirect URL below) and so
+	// ytInitialData field names stay stable. DNT is best-effort hygiene
+	// (audit chat.md C14).
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("DNT", "1")
 	if api.cookieHeader != "" {
 		req.Header.Set("Cookie", api.cookieHeader)
 	}
@@ -116,6 +122,20 @@ func (api *ChatAPI) FetchFreshContinuation(ctx context.Context, videoID string) 
 		return "", false, err
 	}
 	defer resp.Body.Close()
+
+	// Detect EU/consent-wall redirect — the response URL switches to
+	// consent.youtube.com / consent.google.com when YouTube wants the
+	// viewer to accept tracking before serving the watch page. The
+	// returned HTML has no ytInitialData so extraction silently fails;
+	// surface the cause distinctly so operators know to ship CONSENT
+	// cookies (audit chat.md C14).
+	if resp.Request != nil && resp.Request.URL != nil {
+		host := resp.Request.URL.Host
+		if strings.HasPrefix(host, "consent.") {
+			io.Copy(io.Discard, resp.Body)
+			return "", false, fmt.Errorf("watch page redirected to consent wall (%s); supply CONSENT cookies", host)
+		}
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
@@ -684,21 +704,16 @@ func (api *ChatAPI) formatTimestamp(usec string) string {
 	return t.UTC().Format("15:04:05")
 }
 
+// generateMessageID synthesises a unique-enough ID for chat messages whose
+// renderer omitted "id" (rare — usually system messages). Uses math/rand/v2
+// whose top-level funcs are concurrency-safe (v1 globals were not — audit
+// chat.md C10/U2).
 func generateMessageID() string {
-	return fmt.Sprintf("gen-%d-%s", time.Now().UnixMicro(), randomAlphaNum(6))
-}
-
-// randomAlphaNum uses math/rand/v2 whose per-package helpers are safe for
-// concurrent calls (v1's globals were not, producing a data race when
-// multiple chat downloaders running in parallel touched generateMessageID
-// simultaneously — audit chat.md C10).
-func randomAlphaNum(n int) string {
-	// math/rand/v2 top-level funcs are concurrency-safe; see go.dev/ref/mod.
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = chars[rand.IntN(len(chars))]
+	var suffix [6]byte
+	for i := range suffix {
+		suffix[i] = chars[rand.IntN(len(chars))]
 	}
-	return string(b)
+	return fmt.Sprintf("gen-%d-%s", time.Now().UnixMicro(), string(suffix[:]))
 }
 

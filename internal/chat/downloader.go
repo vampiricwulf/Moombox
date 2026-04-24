@@ -118,6 +118,18 @@ func (cd *ChatDownloader) logDebug(msg string, args ...any) {
 	}
 }
 
+// reportIOError marks an IO failure and routes the error through OnError.
+// The flag is inspected by Start() before clearResume() so the resume file
+// is preserved when the final flush failed (audit chat.md C8).
+func (cd *ChatDownloader) reportIOError(err error) {
+	cd.mu.Lock()
+	cd.ioErrorOccurred = true
+	cd.mu.Unlock()
+	if cd.OnError != nil {
+		cd.OnError(err)
+	}
+}
+
 // NewChatDownloader creates a new chat downloader.
 func NewChatDownloader(opts ChatDownloaderOptions) *ChatDownloader {
 	api := NewChatAPI(opts.ApiKey, opts.VisitorData, opts.CookieHeader)
@@ -228,7 +240,17 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 				cd.seenOrder = append(cd.seenOrder, id)
 			}
 		}
+		// Cross-check that the chat file actually exists on disk — guards
+		// against the case where the resume sidecar survived but the chat
+		// file was deleted/moved out from under us. Without this, the next
+		// write would take the incremental-append path and fail (audit
+		// chat.md G5).
 		cd.flushedToDisk = cd.messageCount > 0
+		if cd.flushedToDisk && cd.opts.OutputFile != "" {
+			if _, statErr := os.Stat(cd.opts.OutputFile); statErr != nil {
+				cd.flushedToDisk = false
+			}
+		}
 		resuming = true
 	}
 
@@ -249,8 +271,13 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		cd.updateChatFileHeader()
 	}
 
-	// Clear resume state on clean completion (not cancelled).
-	if !cd.wasCancelledOrShutdown(ctx) {
+	// Clear resume state on clean completion (not cancelled), but only if the
+	// final flush + header update succeeded — preserve the resume file when an
+	// IO error fired so the next run can recover (audit chat.md C8).
+	cd.mu.Lock()
+	ioErr := cd.ioErrorOccurred
+	cd.mu.Unlock()
+	if !cd.wasCancelledOrShutdown(ctx) && !ioErr {
 		cd.clearResume()
 	}
 
@@ -513,7 +540,15 @@ func (cd *ChatDownloader) runChatLoop(ctx context.Context, resuming bool) {
 		cd.continuation = resp.NextContinuation
 
 		// Wait before next poll (matches TypeScript: timeoutMs || (isReplay ? 0 : 5000))
-		// TS uses || (not ??) so timeoutMs=0 also falls back to the default
+		// TS uses || (not ??) so timeoutMs=0 also falls back to the default.
+		//
+		// Edge case (audit chat.md R4): YouTube has historically shipped
+		// timeoutMs=0 on live as a backpressure signal ("nothing to give
+		// you"). Treating it literally as "poll immediately" would hammer
+		// the API in that scenario, so we deliberately fall back to the
+		// 5s live default and keep the old TS behaviour. parseResponse
+		// initialises TimeoutMs to -1 so an absent field is distinguishable
+		// from an explicit zero, and both still fall through here.
 		waitMs := resp.TimeoutMs
 		if waitMs <= 0 {
 			// Not set or zero from API — use replay=0, live=5000
@@ -725,10 +760,10 @@ func (cd *ChatDownloader) incrementalAppend(outputFile string) bool {
 		return false
 	}
 	// WriteAt after truncation — log if it fails since data may be lost.
+	// reportIOError so Start() preserves the resume file (audit chat.md C8) —
+	// the file may now be partially truncated/written.
 	if _, err := f.WriteAt([]byte(appendStr), bracketBytePos); err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("write appended chat messages: %w", err))
-		}
+		cd.reportIOError(fmt.Errorf("write appended chat messages: %w", err))
 		// Data partially written but caller should not re-buffer — treat as success.
 	}
 	return true
@@ -749,9 +784,7 @@ func (cd *ChatDownloader) writeFullChatFile() {
 
 	jsonBytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("marshal chat data: %w", err))
-		}
+		cd.reportIOError(fmt.Errorf("marshal chat data: %w", err))
 		return
 	}
 	jsonBytes = utils.PadMessageCountJSON(jsonBytes)
@@ -762,39 +795,29 @@ func (cd *ChatDownloader) writeFullChatFile() {
 	// over a good chat.json, since the rename is the atomicity guarantee.
 	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("open chat file: %w", err))
-		}
+		cd.reportIOError(fmt.Errorf("open chat file: %w", err))
 		return
 	}
 	if _, err := f.Write(jsonBytes); err != nil {
 		f.Close()
 		os.Remove(tmpFile)
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("write chat file: %w", err))
-		}
+		cd.reportIOError(fmt.Errorf("write chat file: %w", err))
 		return
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
 		os.Remove(tmpFile)
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("fsync chat file: %w", err))
-		}
+		cd.reportIOError(fmt.Errorf("fsync chat file: %w", err))
 		return
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmpFile)
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("close chat file: %w", err))
-		}
+		cd.reportIOError(fmt.Errorf("close chat file: %w", err))
 		return
 	}
 	if err := os.Rename(tmpFile, outputFile); err != nil {
 		os.Remove(tmpFile)
-		if cd.OnError != nil {
-			cd.OnError(fmt.Errorf("rename chat file: %w", err))
-		}
+		cd.reportIOError(fmt.Errorf("rename chat file: %w", err))
 	}
 }
 
@@ -881,10 +904,12 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 
 	// With padded messageCount, the header size should be constant.
 	// Fallback handles legacy files written before padding was added.
+	// Failures here mean the on-disk header is out of sync with the array —
+	// route through reportIOError so the resume file is preserved (audit C8).
 	updatedBytes := []byte(header)
 	if len(updatedBytes) == n {
-		if _, err := f.WriteAt(updatedBytes, 0); err != nil && cd.OnError != nil {
-			cd.OnError(fmt.Errorf("update chat header: write: %w", err))
+		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
+			cd.reportIOError(fmt.Errorf("update chat header: write: %w", err))
 		}
 	} else if len(updatedBytes) > n {
 		restSize := info.Size() - int64(n)
@@ -895,21 +920,17 @@ func (cd *ChatDownloader) updateChatFileHeader() {
 			restBuf = restBuf[:nRest]
 		}
 		if _, err := f.WriteAt(updatedBytes, 0); err != nil {
-			if cd.OnError != nil {
-				cd.OnError(fmt.Errorf("update chat header: write expanded: %w", err))
-			}
+			cd.reportIOError(fmt.Errorf("update chat header: write expanded: %w", err))
 			return
 		}
 		if len(restBuf) > 0 {
 			if _, err := f.WriteAt(restBuf, int64(len(updatedBytes))); err != nil {
-				if cd.OnError != nil {
-					cd.OnError(fmt.Errorf("update chat header: write rest: %w", err))
-				}
+				cd.reportIOError(fmt.Errorf("update chat header: write rest: %w", err))
 				return
 			}
 		}
-		if err := f.Truncate(int64(len(updatedBytes)) + restSize); err != nil && cd.OnError != nil {
-			cd.OnError(fmt.Errorf("update chat header: truncate: %w", err))
+		if err := f.Truncate(int64(len(updatedBytes)) + restSize); err != nil {
+			cd.reportIOError(fmt.Errorf("update chat header: truncate: %w", err))
 		}
 	}
 }
