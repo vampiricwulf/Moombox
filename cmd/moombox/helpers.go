@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
+	isatty "github.com/mattn/go-isatty"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/logger"
@@ -18,6 +21,19 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
+
+// waitForKeypress waits for a keypress before exiting (prevents .exe window
+// from vanishing on Windows when the process hit a startup error). Matches
+// the TS waitForKeypress() in index.ts — only blocks on a TTY so scripted
+// runs / CI aren't held up.
+func waitForKeypress() {
+	fmt.Fprintln(os.Stderr, "\nPress Enter to exit...")
+	if !isatty.IsTerminal(os.Stdin.Fd()) {
+		return
+	}
+	reader := bufio.NewReader(os.Stdin)
+	reader.ReadByte()
+}
 
 // youtubeThumbnailURL returns the maxres thumbnail URL for a YouTube video.
 // Centralised here so a future host/quality change is one place, not N

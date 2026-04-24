@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -97,17 +96,6 @@ const (
 	rateLimitLoginPerMinute    = 5
 	rateLimitPasswordPerMinute = 3
 )
-
-// waitForKeypress waits for a keypress before exiting (prevents .exe window from vanishing).
-// Matches TS waitForKeypress() in index.ts — only blocks on a TTY.
-func waitForKeypress() {
-	fmt.Fprintln(os.Stderr, "\nPress Enter to exit...")
-	if !isatty.IsTerminal(os.Stdin.Fd()) {
-		return
-	}
-	reader := bufio.NewReader(os.Stdin)
-	reader.ReadByte()
-}
 
 func main() {
 	// Subcommands (like `moombox add <url>`) do not need the launcher/child
