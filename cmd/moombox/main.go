@@ -13,32 +13,23 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	isatty "github.com/mattn/go-isatty"
-	"github.com/vampiricwulf/Moombox/internal/bgutils"
-	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
-	"github.com/vampiricwulf/Moombox/internal/connectivity"
-	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/logger"
 	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/updater"
-	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 	"github.com/vampiricwulf/Moombox/internal/worker"
-	"github.com/vampiricwulf/Moombox/internal/youtube"
 	webpublic "github.com/vampiricwulf/Moombox/web"
 )
 
@@ -165,370 +156,74 @@ func main() {
 // run initializes and runs the full application. Returns true if a restart was
 // requested (config change, update applied, or via web API).
 func run(configPath string, logLevelOverride string, useTUI bool) bool {
-	var restartRequested atomic.Bool
-	var quitTUI func() // set when TUI is running; called on restart to unblock Run()
-
-	if !useTUI {
-		fmt.Println("Loading configuration...")
-	}
-
-	// Graceful shutdown context
+	// Graceful shutdown context (also stored on runState so every extracted
+	// phase sees the same cancellation).
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// cfgMu guards all reads/writes of the shared *config.MoomboxConfig below.
-	// Declared early so it covers the password-hash and cookie-platform
-	// auto-detection writes that happen during startup, not just the runtime
-	// handlers. Downstream constructors receive &cfgMu so every reader agrees
-	// on the same lock.
-	var cfgMu sync.RWMutex
+	s := &runState{
+		ctx:        ctx,
+		cancel:     cancel,
+		configPath: configPath,
+		useTUI:     useTUI,
+	}
 
-	// =========================================================================
-	// 1. Load config
-	// =========================================================================
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Startup error: Failed to load config: %v\n", err)
+	// Initialise all 16 service sections (config, logger, updater, database,
+	// connectivity, cookies, platform services, worker, monitors, cookie
+	// refresh, web server, rate limiters, auth, shared closures). On a fatal
+	// startup failure, skip deferred cleanup — matches the pre-refactor
+	// behaviour where os.Exit(1) jumps past any defers that may not even
+	// have been registered yet.
+	if err := s.initServices(logLevelOverride); err != nil {
+		fmt.Fprintf(os.Stderr, "Startup error: %v\n", err)
 		waitForKeypress()
 		os.Exit(1)
 	}
 
-	if logLevelOverride != "" {
-		cfg.Logs.LogLevel = logLevelOverride
-	}
+	defer s.closeLog()
+	defer s.closeDB()
+	defer s.connMon.Stop()
+	defer s.closeLimiters()
 
-	// =========================================================================
-	// 2. Initialize logger
-	// =========================================================================
-	log, err := logger.New(cfg.Paths.LogFilePath, cfg.Logs.LogLevel, cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Startup error: Failed to initialize logger: %v\n", err)
-		waitForKeypress()
-		os.Exit(1)
-	}
-	// Close the logger at most once — the deferred close at the bottom of
-	// run() AND the force-exit timer both need to flush buffered lines on
-	// exit, and logger.Close is not guaranteed idempotent at this layer.
-	var logCloseOnce sync.Once
-	closeLog := func() { logCloseOnce.Do(func() { log.Close() }) }
-	defer closeLog()
-
-	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
-
-	// Updater: create instance and clean up .old binary from previous update
-	upd, updErr := updater.New(version, log)
-	if updErr != nil {
-		log.Warn("Updater unavailable", slog.String("error", updErr.Error()))
-	} else {
-		upd.CleanupOldBinary()
-	}
-
-	// Auto-convert plaintext password to scrypt hash (matches TS ConfigManager.load)
-	if cfg.Network.PasswordHash != "" && !web.IsScryptHash(cfg.Network.PasswordHash) {
-		log.Info("[Config] Plaintext password detected, converting to secure hash")
-		tempAuth := web.NewAuthService()
-		hash, err := tempAuth.HashPassword(cfg.Network.PasswordHash)
-		if err == nil {
-			cfgMu.Lock()
-			cfg.Network.PasswordHash = hash
-			saveErr := config.Save(cfg, configPath)
-			cfgMu.Unlock()
-			if saveErr != nil {
-				log.Warn("Failed to save auto-hashed password", slog.String("error", saveErr.Error()))
-			}
-		} else {
-			log.Error("Failed to hash plaintext password", slog.String("error", err.Error()))
-		}
-	}
-
-	// =========================================================================
-	// 3. Open database
-	// =========================================================================
-	if !useTUI {
-		fmt.Println("Initializing database...")
-	}
-	db, err := database.Open(cfg.Paths.DatabasePath, log)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Startup error: Failed to open database: %v\n", err)
-		waitForKeypress()
-		os.Exit(1)
-	}
-	// Database Close is wrapped in sync.Once so both the orderly shutdown
-	// sequence (stopService "Database") and this defer are safe. The defer
-	// guards against any future early-exit paths added between here and the
-	// shutdown block leaking the SQLite handle.
-	var dbCloseOnce sync.Once
-	closeDB := func() { dbCloseOnce.Do(func() { db.Close() }) }
-	defer closeDB()
-
-	// =========================================================================
-	// 3b. Connectivity monitor
-	// =========================================================================
-	connMon := connectivity.NewMonitor(log)
-	connMon.Start(ctx)
-	defer connMon.Stop()
-	utils.SetConnectivityReporter(connMon)
-	engine.SetConnectivityReporter(connMon)
-	monitor.SetConnectivityReporter(connMon)
-
-	// =========================================================================
-	// 4. Load cookies
-	// =========================================================================
-	if !useTUI {
-		fmt.Println("Starting services...")
-	}
-	jar := cookies.NewCookieJar()
-	if cfg.Cookies.CookieFile != "" {
-		if err := jar.Load(cfg.Cookies.CookieFile); err != nil {
-			log.Warn("Failed to load cookies", slog.String("error", err.Error()))
-		} else {
-			log.Info("Cookies loaded", slog.Bool("hasAuth", jar.HasYouTubeAuthCookies()))
-			// Auto-detect platforms from cookie file when not already set
-			if len(cfg.Cookies.Platforms) == 0 && len(cfg.Cookies.ActivePlatforms) == 0 {
-				var detected []string
-				if jar.HasYouTubeAuthCookies() {
-					detected = append(detected, "youtube")
-				}
-				if jar.HasTwitchAuthCookies() {
-					detected = append(detected, "twitch")
-				}
-				if len(detected) > 0 {
-					cfgMu.Lock()
-					cfg.Cookies.Platforms = detected
-					saveErr := config.Save(cfg, configPath)
-					cfgMu.Unlock()
-					if saveErr != nil {
-						log.Warn("Failed to persist detected cookie platforms", slog.String("error", saveErr.Error()))
-					} else {
-						log.Info("Detected cookie platforms from cookie file", slog.Any("platforms", detected))
-					}
-				}
-			}
-		}
-	}
-
-	// =========================================================================
-	// 5. YouTube service
-	// =========================================================================
-	ytService := youtube.NewService(jar, log)
-	ytService.Init(ctx) // Fetch homepage for visitor data and API key
-
-	// =========================================================================
-	// 6. Twitch service
-	// =========================================================================
-	twService := twitch.NewService(jar, log)
-	// Log auth status at startup (matches TS TwitchService.init())
-	if twService.Auth.HasAuthToken() {
-		log.Info("[Twitch] Authenticated (auth-token found in cookies)")
-	} else {
-		log.Debug("[Twitch] No auth-token found, using anonymous access")
-	}
-
-	// =========================================================================
-	// 7. PO Token provider
-	// =========================================================================
-	potProvider := bgutils.NewPotProvider(&bgutils.BgConfig{}, log)
-
-	// =========================================================================
-	// 8. Cipher solver
-	// =========================================================================
-	cacheDir := filepath.Join(os.TempDir(), "yt-cipher")
-	cipherSolver, err := cipher.NewSolver(cacheDir, log)
-	if err != nil {
-		log.Warn("Failed to init cipher solver, will retry on demand", slog.String("error", err.Error()))
-	}
-
-	// Wire cipher solver to YouTube service for format decryption
-	if cipherSolver != nil {
-		ytService.PlayerAPI.SetCipherSolver(cipherSolver)
-	}
-
-	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
-	ytService.PlayerAPI.SetPotProvider(potProvider)
-
-	// =========================================================================
-	// 9. Notification manager
-	// =========================================================================
-	notifyMgr := notifications.NewManager(cfg, log)
-
-	// =========================================================================
-	// 10. Download worker
-	// =========================================================================
-	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
-		CipherSolver:         cipherSolver,
-		PotProvider:          potProvider,
-		TwitchService:        twService,
-		Notifier:             notifyMgr,
-		IsOnline:             connMon.IsOnline,
-		OnConnectivityChange: connMon.OnStateChange,
-	})
-
-	// =========================================================================
-	// 11. Trim service
-	// =========================================================================
-	trimSvc := worker.NewTrimService(db, cfg.Paths.FfmpegPath, log)
-	trimSvc.SetNotifier(notifyMgr)
-
-	// =========================================================================
-	// 12. Feed monitor (YouTube RSS)
-	// =========================================================================
-	feedMon := monitor.NewFeedMonitor(cfg, db, log)
-
-	// =========================================================================
-	// 13. DECAPI monitor
-	// =========================================================================
-	decapiMon := monitor.NewDecapiMonitor(cfg, db, log)
-
-	// =========================================================================
-	// 14. Twitch monitor
-	// =========================================================================
-	twitchMon := monitor.NewTwitchMonitor(cfg, db, twService, log)
-
-	// Wire connectivity to monitors so they skip polls when offline
-	feedMon.IsOnline = connMon.IsOnline
-	decapiMon.IsOnline = connMon.IsOnline
-	twitchMon.IsOnline = connMon.IsOnline
-
-	// =========================================================================
-	// 15. Cookie refresh service
-	// =========================================================================
-	cookieRefresh := cookies.NewRefreshService(jar, 0, log)
-
-	// =========================================================================
-	// 15b. Auto-cookie service
-	// =========================================================================
-	browserProfileDir := cfg.Cookies.BrowserProfileDir
-	if browserProfileDir == "" {
-		browserProfileDir = "./browser-profile"
-	}
-	autoCookieSvc := cookies.NewAutoCookieService(
-		browserProfileDir,
-		cfg.Cookies.CookieFile,
-		jar,
-		log,
+	// Alias runState fields to local names so the not-yet-extracted sections
+	// below (route wiring, WS wiring, monitor callbacks, TUI, shutdown)
+	// continue to compile unchanged. Subsequent SP-* commits will move those
+	// sections into *runState methods and shrink this block to nothing.
+	var (
+		cfg                = s.cfg
+		cfgMu              = &s.cfgMu
+		log                = s.log
+		upd                = s.upd
+		db                 = s.db
+		connMon            = s.connMon
+		ytService          = s.ytService
+		twService          = s.twService
+		potProvider        = s.potProvider
+		notifyMgr          = s.notifyMgr
+		dlWorker           = s.dlWorker
+		trimSvc            = s.trimSvc
+		feedMon            = s.feedMon
+		decapiMon          = s.decapiMon
+		twitchMon          = s.twitchMon
+		cookieRefresh      = s.cookieRefresh
+		autoCookieSvc      = s.autoCookieSvc
+		browserProfileDir  = s.browserProfileDir
+		webServer          = s.webServer
+		wsHub              = s.wsHub
+		r                  = s.r
+		apiRL              = s.apiRL
+		potRL              = s.potRL
+		loginRL            = s.loginRL
+		passwordRL         = s.passwordRL
+		authSvc            = s.authSvc
+		startTime          = s.startTime
+		getActivePlatforms = s.getActivePlatforms
+		kickMonitors       = s.kickMonitors
+		triggerRestart     = s.triggerRestart
+		tuiUpdateStatusCh  = s.tuiUpdateStatusCh
+		tuiDiskStatusCh    = s.tuiDiskStatusCh
 	)
-	// Wire auth verification callbacks so AutoCookieService can verify via real API
-	autoCookieSvc.VerifyYouTubeAuth = cookieRefresh.CheckYouTubeAuth
-	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
-
-	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
-	// func field exactly once (before cookieRefresh.Start()) to a dispatcher
-	// that atomically loads the TUI-side slot. The TUI branch stores a
-	// callback later — Store is race-free against the refresh goroutine's
-	// Load, unlike field reassignment.
-	var authChangeTUI atomic.Pointer[func(cookies.AuthStatus)]
-	cookieRefresh.OnAuthChange = func(s cookies.AuthStatus) {
-		if fn := authChangeTUI.Load(); fn != nil {
-			(*fn)(s)
-		}
-	}
-
-	// Wire persistPlatforms callback: saves verified platforms to config
-	// so we can detect auth loss after restart (matches TS persistPlatforms).
-	// cfgMu is declared at the top of run() to guard all cfg mutations.
-	dlWorker.SetCfgMu(&cfgMu)
-	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
-		cfgMu.Lock()
-		defer cfgMu.Unlock()
-		// During first-run setup, the config file doesn't exist yet. Don't
-		// create it prematurely — the setup wizard's POST /api/setup/complete
-		// will save everything (including platforms) when the user finishes.
-		if !cfg.ConfigLoaded {
-			return
-		}
-		existing := make(map[string]bool)
-		for _, p := range cfg.Cookies.Platforms {
-			existing[p] = true
-		}
-		if youtubeVerified {
-			existing["youtube"] = true
-		}
-		if twitchVerified {
-			existing["twitch"] = true
-		}
-		platforms := make([]string, 0, len(existing))
-		for p := range existing {
-			platforms = append(platforms, p)
-		}
-		slices.Sort(platforms)
-		cfg.Cookies.Platforms = platforms
-		if err := config.Save(cfg, configPath); err != nil {
-			log.Warn("Failed to persist auto-cookie platforms", slog.String("error", err.Error()))
-		} else {
-			log.Debug("Persisted auto-cookie platforms", slog.Any("platforms", platforms))
-		}
-	}
-
-	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
-	dlWorker.OnCookieRefreshNeeded = func() bool {
-		cfgMu.RLock()
-		autoEnabled := cfg.Cookies.AutoEnabled
-		cfgMu.RUnlock()
-		if !autoEnabled {
-			return false
-		}
-		refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		ok, err := autoCookieSvc.RefreshCookies(refreshCtx)
-		if err != nil {
-			log.Warn("auto cookie refresh error", slog.String("error", err.Error()))
-			return false
-		}
-		return ok
-	}
-
-	// =========================================================================
-	// 16. Web server
-	// =========================================================================
-	startTime := time.Now()
-	webServer := web.NewServer(cfg, &cfgMu, log)
-	webServer.SetCommit(commit)
-	wsHub := webServer.WebSocket()
-	r := webServer.Router()
-
-	// Rate limiters and auth service. Each Close / Stop is non-idempotent
-	// (close(done) panics on second call), so wrap them all in a single
-	// sync.Once-guarded closeLimiters helper that both the normal deferred
-	// shutdown AND the force-exit timer below can safely invoke.
-	apiRL := web.NewRateLimiter(rateLimitAPIPerMinute, time.Minute)
-	potRL := web.NewRateLimiter(rateLimitPOTPerMinute, time.Minute)
-	authSvc := web.NewAuthService()
-	authSvc.SetLogger(log)
-	authSvc.Start()
-	loginRL := web.NewRateLimiter(rateLimitLoginPerMinute, time.Minute)
-	passwordRL := web.NewRateLimiter(rateLimitPasswordPerMinute, time.Minute)
-
-	var limitersCloseOnce sync.Once
-	closeLimiters := func() {
-		limitersCloseOnce.Do(func() {
-			apiRL.Close()
-			potRL.Close()
-			loginRL.Close()
-			passwordRL.Close()
-			authSvc.Stop()
-		})
-	}
-	defer closeLimiters()
-
-	// Wire auth middleware for external connections
-	webServer.SetAuth(authSvc)
-	r.Use(webServer.AuthMiddleware)
-
-	// Shared closure: determines which platforms are active for cookie status display.
-	getActivePlatforms := func() map[string]bool {
-		cfgMu.RLock()
-		defer cfgMu.RUnlock()
-		yt, tw := config.GetActivePlatforms(cfg)
-		return map[string]bool{"youtube": yt, "twitch": tw}
-	}
-
-	// Shared callback to kick all monitors when channels change.
-	// Wakes monitors that went idle when they had no channels of their type.
-	kickMonitors := func() {
-		feedMon.CheckNow()
-		decapiMon.CheckNow()
-		twitchMon.CheckNow()
-	}
+	authChangeTUI := &s.authChangeTUI
 
 	// Register all routes
 	routes.JobRoutes(r, db, cfg, webServer.CfgMu(), dlWorker, apiRL, &twitchMetadataAdapter{svc: twService}, &youtubeMetadataAdapter{svc: ytService}, notifyMgr, wsHub)
@@ -597,14 +292,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		RateLimit:   potRL,
 		Logger:      log,
 	})
-	triggerRestart := func(source string) {
-		log.Info("Restart requested", slog.String("source", source))
-		restartRequested.Store(true)
-		cancel()
-		if quitTUI != nil {
-			quitTUI()
-		}
-	}
 	routes.SetupRoutes(r, &routes.SetupDeps{
 		Cfg:  cfg,
 		Auth: authSvc,
@@ -635,8 +322,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	routes.CookieRoutes(r, cookieRefresh, autoCookieSvc, getActivePlatforms)
 	routes.YtdlpRoutes(r, cfg.Network.Port, cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(r, func() { triggerRestart("API") })
-	// TUI update status channel (created here so the OnFound closure can reference it)
-	tuiUpdateStatusCh := make(chan tui.UpdateStatusMsg, 2)
 	routes.UpdateRoutes(r, &routes.UpdateRouteDeps{
 		Updater:    upd,
 		Version:    version,
@@ -859,7 +544,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 
 		includeNonLive := ch.IncludeNonLiveContent
 
-		outputDir := resolveOutputDir(ch, cfg, &cfgMu)
+		outputDir := resolveOutputDir(ch, cfg, cfgMu)
 		thumbnailURL := youtubeThumbnailURL(videoID)
 
 		now := time.Now().UTC().Format(time.RFC3339)
@@ -935,7 +620,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		jobID := twitch.BuildJobID(info.StreamID, false)
 		log.Info("Stream found by Twitch monitor", slog.String("jobID", jobID), slog.String("title", info.Title))
 
-		outputDir := resolveOutputDir(ch, cfg, &cfgMu)
+		outputDir := resolveOutputDir(ch, cfg, cfgMu)
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		title := info.ChannelDisplayName + " — " + info.Title
@@ -1198,12 +883,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	cfgMu.RUnlock()
 	routes.UpdateDiskStatus(initialOutputDir, cfg, webServer.CfgMu())
 
-	// TUI disk status channel (created early so the goroutine can reference it;
-	// only receives messages when TUI mode is active).
-	tuiDiskStatusCh := make(chan tui.DiskStatusMsg, 5)
-
-	// tuiUpdateStatusCh created earlier (before route registration)
-
 	// Auto-update check: initial check + daily ticker
 	if upd != nil && cfg.Updates.AutoCheckUpdates {
 		go func() {
@@ -1340,11 +1019,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	} else {
 		// Start TUI
 		app := tui.NewApp()
-		quitTUI = app.QuitTUI // allow API restart to exit TUI
+		s.quitTUI = app.QuitTUI // allow API restart to exit TUI
 
 		// Pass config reference, config mutex, and version for settings panel
 		app.SetConfig(cfg)
-		app.SetCfgMu(&cfgMu)
+		app.SetCfgMu(cfgMu)
 		app.SetVersion(version)
 		app.SetInternalToken(webServer.InternalToken())
 		app.IsFirstRun = !cfg.ConfigLoaded
@@ -1835,8 +1514,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 			}
 		}()
 		log.Error("Graceful shutdown timed out, forcing exit")
-		closeLimiters()
-		closeLog() // flush buffered logs before force exit
+		s.closeLimiters()
+		s.closeLog() // flush buffered logs before force exit
 		os.Exit(1)
 	})
 	defer forceExit.Stop()
@@ -1884,14 +1563,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	unsubWSJobUpdate()
 	unsubWSJobsChange()
 
-	// 8. Flush database (sync.Once-guarded — also fires from defer closeDB)
-	stopService("Database", closeDB)
+	// 8. Flush database (sync.Once-guarded — also fires from defer s.closeDB)
+	stopService("Database", s.closeDB)
 
-	if restartRequested.Load() {
+	if s.restartRequested.Load() {
 		log.Info("Shutdown complete, restarting...")
 	} else {
 		log.Info("Shutdown complete")
 	}
 
-	return restartRequested.Load()
+	return s.restartRequested.Load()
 }
