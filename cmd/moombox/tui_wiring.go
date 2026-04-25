@@ -61,15 +61,17 @@ func (s *runState) runTUI() {
 		return s.dlWorker.MuxJob(jobID)
 	}
 	app.HasStagingFiles = func(jobID string) bool {
-		s.cfgMu.RLock()
-		base := s.cfg.Paths.EffectiveStagingDir()
-		s.cfgMu.RUnlock()
+		var base string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			base = c.Paths.EffectiveStagingDir()
+		})
 		return worker.HasStagingFiles(base, jobID)
 	}
 	app.HasSegmentFiles = func(jobID string) bool {
-		s.cfgMu.RLock()
-		base := s.cfg.Paths.EffectiveStagingDir()
-		s.cfgMu.RUnlock()
+		var base string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			base = c.Paths.EffectiveStagingDir()
+		})
 		return worker.HasSegmentFiles(base, jobID)
 	}
 	app.OnOpenFolder = func(jobID string) {
@@ -83,9 +85,10 @@ func (s *runState) runTUI() {
 			dir = filepath.Dir(job.OutputFile)
 		} else {
 			// Fall back to staging directory for active jobs
-			s.cfgMu.RLock()
-			stagingBase := s.cfg.Paths.EffectiveStagingDir()
-			s.cfgMu.RUnlock()
+			var stagingBase string
+			s.configStore.Read(func(c *config.MoomboxConfig) {
+				stagingBase = c.Paths.EffectiveStagingDir()
+			})
 			dir = filepath.Join(stagingBase, job.ID)
 			if _, err := os.Stat(dir); err != nil {
 				return // staging dir doesn't exist yet
@@ -242,8 +245,9 @@ func (s *runState) runTUI() {
 	// Wire setup wizard callbacks (OnComplete saves config, OnInstallYtdlp writes plugin)
 	app.SetSetupCallbacks(
 		func(updatedCfg *config.MoomboxConfig) error {
-			s.cfgMu.Lock()
-			defer s.cfgMu.Unlock()
+			mu := s.configStore.RWMutex()
+			mu.Lock()
+			defer mu.Unlock()
 			return config.Save(updatedCfg, s.configPath)
 		},
 		func(port int, httpsEnabled bool) {
@@ -446,9 +450,10 @@ func (s *runState) runTUI() {
 		if relogin.Twitch {
 			tw = tui.CookieStatusRelogin
 		}
-		s.cfgMu.RLock()
-		ytActive, twActive := config.GetActivePlatforms(s.cfg)
-		s.cfgMu.RUnlock()
+		var ytActive, twActive bool
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			ytActive, twActive = config.GetActivePlatforms(c)
+		})
 		select {
 		case cookieStatusCh <- tui.CookieStatusMsg{YT: yt, TW: tw, YTActive: ytActive, TWActive: twActive}:
 		default:

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	isatty "github.com/mattn/go-isatty"
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
@@ -176,7 +177,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// Everything not accessed outside of a *runState method lives on s directly.
 	var (
 		cfg               = s.cfg
-		cfgMu             = &s.cfgMu
 		log               = s.log
 		upd               = s.upd
 		notifyMgr         = s.notifyMgr
@@ -302,15 +302,17 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 
 	// Expose actual bound port for TUI and other components (matches TS: process.env.MOOMBOX_PORT)
 	if actualPort := webServer.ActualPort; actualPort > 0 {
-		cfgMu.Lock()
+		mu := s.configStore.RWMutex()
+		mu.Lock()
 		cfg.Network.Port = actualPort
-		cfgMu.Unlock()
+		mu.Unlock()
 	}
 
 	// Initial disk space check (populate immediately so status bar has data).
-	cfgMu.RLock()
-	initialOutputDir := cfg.Paths.OutputDirectory
-	cfgMu.RUnlock()
+	var initialOutputDir string
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		initialOutputDir = c.Paths.OutputDirectory
+	})
 	routes.UpdateDiskStatus(initialOutputDir, s.configStore)
 
 	// Auto-update check: initial check + daily ticker
@@ -387,9 +389,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				// close enough to the 5-min target while reusing the existing ticker).
 				diskCheckCounter++
 				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
-					cfgMu.RLock()
-					diskOutputDir := cfg.Paths.OutputDirectory
-					cfgMu.RUnlock()
+					var diskOutputDir string
+					s.configStore.Read(func(c *config.MoomboxConfig) {
+						diskOutputDir = c.Paths.OutputDirectory
+					})
 					if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
 						// Broadcast to web clients
 						wsHub.Broadcast("disk_status", map[string]any{

@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	webpublic "github.com/vampiricwulf/Moombox/web"
@@ -47,10 +48,11 @@ func (s *runState) wireWebSocket() {
 
 	// Wire WebSocket auth check for external connections
 	s.wsHub.AuthCheck = func(r *http.Request) bool {
-		s.cfgMu.RLock()
-		networkAccess := s.cfg.Network.NetworkAccess
-		passwordHash := s.cfg.Network.PasswordHash
-		s.cfgMu.RUnlock()
+		var networkAccess, passwordHash string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			networkAccess = c.Network.NetworkAccess
+			passwordHash = c.Network.PasswordHash
+		})
 		if !web.IsAuthRequired(networkAccess, passwordHash) {
 			return true
 		}

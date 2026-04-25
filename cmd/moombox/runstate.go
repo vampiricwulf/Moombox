@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,7 +28,7 @@ import (
 // routes_wiring.go, ws_wiring.go, monitor_callbacks.go, tui_wiring.go and
 // shutdown.go can read and write without a 40-parameter signature. All
 // fields are owned by run() for its lifetime; concurrent reads/writes on
-// top of cfg still go through cfgMu (matching the prior contract).
+// top of cfg go through configStore (DECISIONS #8).
 type runState struct {
 	// --- Immutable context / parameters ---
 	ctx        context.Context
@@ -38,12 +37,12 @@ type runState struct {
 	useTUI     bool
 
 	// --- Config + synchronisation ---
-	cfg   *config.MoomboxConfig
-	cfgMu sync.RWMutex
-	// configStore shares cfgMu so legacy cfgMu.RLock()/Lock() sites and
-	// new configStore.Read/Update sites serialize correctly during the
-	// gradual migration (DECISIONS #8). Populated in initServices once
-	// cfg + configPath are known.
+	cfg *config.MoomboxConfig
+	// configStore owns the cfg synchronisation. Read/Update give a locked
+	// snapshot or lock-mutate-validate-save pass; legacy direct mutators
+	// (settings model big-block, services.go init writes) take the lock
+	// via configStore.RWMutex(). Populated in initServices once cfg +
+	// configPath are known.
 	configStore *config.Store
 
 	// --- Infrastructure ---

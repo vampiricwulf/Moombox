@@ -54,12 +54,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return fmt.Errorf("Failed to load config: %w", err)
 	}
 	s.cfg = cfg
-	// configStore shares s.cfgMu so legacy callers (cfgMu.RLock()/Lock()
-	// everywhere) and new callers (s.configStore.Read/Update) serialise
-	// on the same critical section during the gradual migration per
-	// DECISIONS #8. Once all sites migrate, construct with NewStore and
-	// drop the shared-mutex coupling.
-	s.configStore = config.NewStoreWithMutex(cfg, s.configPath, &s.cfgMu)
+	// configStore owns the synchronising mutex (no external cfgMu — every
+	// caller now goes through Store APIs per DECISIONS #8 wave 4-7).
+	s.configStore = config.NewStore(cfg, s.configPath)
 
 	if logLevelOverride != "" {
 		cfg.Logs.LogLevel = logLevelOverride
@@ -96,11 +93,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 		tempAuth := web.NewAuthService()
 		hash, err := tempAuth.HashPassword(cfg.Network.PasswordHash)
 		if err == nil {
-			s.cfgMu.Lock()
-			cfg.Network.PasswordHash = hash
-			saveErr := config.Save(cfg, s.configPath)
-			s.cfgMu.Unlock()
-			if saveErr != nil {
+			if saveErr := s.configStore.Update(func(c *config.MoomboxConfig) {
+				c.Network.PasswordHash = hash
+			}); saveErr != nil {
 				log.Warn("Failed to save auto-hashed password", slog.String("error", saveErr.Error()))
 			}
 		} else {
@@ -155,10 +150,9 @@ func (s *runState) initServices(logLevelOverride string) error {
 					detected = append(detected, "twitch")
 				}
 				if len(detected) > 0 {
-					s.cfgMu.Lock()
-					cfg.Cookies.Platforms = detected
-					saveErr := config.Save(cfg, s.configPath)
-					s.cfgMu.Unlock()
+					saveErr := s.configStore.Update(func(c *config.MoomboxConfig) {
+						c.Cookies.Platforms = detected
+					})
 					if saveErr != nil {
 						log.Warn("Failed to persist detected cookie platforms", slog.String("error", saveErr.Error()))
 					} else {
@@ -300,31 +294,35 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// so we can detect auth loss after restart (matches TS persistPlatforms).
 	dlWorker.SetConfigStore(s.configStore)
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
-		s.cfgMu.Lock()
-		defer s.cfgMu.Unlock()
 		// During first-run setup, the config file doesn't exist yet. Don't
 		// create it prematurely — the setup wizard's POST /api/setup/complete
 		// will save everything (including platforms) when the user finishes.
-		if !cfg.ConfigLoaded {
-			return
+		var platforms []string
+		err := s.configStore.Update(func(c *config.MoomboxConfig) {
+			if !c.ConfigLoaded {
+				return
+			}
+			existing := make(map[string]bool)
+			for _, p := range c.Cookies.Platforms {
+				existing[p] = true
+			}
+			if youtubeVerified {
+				existing["youtube"] = true
+			}
+			if twitchVerified {
+				existing["twitch"] = true
+			}
+			platforms = make([]string, 0, len(existing))
+			for p := range existing {
+				platforms = append(platforms, p)
+			}
+			slices.Sort(platforms)
+			c.Cookies.Platforms = platforms
+		})
+		if platforms == nil {
+			return // first-run, nothing persisted
 		}
-		existing := make(map[string]bool)
-		for _, p := range cfg.Cookies.Platforms {
-			existing[p] = true
-		}
-		if youtubeVerified {
-			existing["youtube"] = true
-		}
-		if twitchVerified {
-			existing["twitch"] = true
-		}
-		platforms := make([]string, 0, len(existing))
-		for p := range existing {
-			platforms = append(platforms, p)
-		}
-		slices.Sort(platforms)
-		cfg.Cookies.Platforms = platforms
-		if err := config.Save(cfg, s.configPath); err != nil {
+		if err != nil {
 			log.Warn("Failed to persist auto-cookie platforms", slog.String("error", err.Error()))
 		} else {
 			log.Debug("Persisted auto-cookie platforms", slog.Any("platforms", platforms))
@@ -333,9 +331,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func() bool {
-		s.cfgMu.RLock()
-		autoEnabled := cfg.Cookies.AutoEnabled
-		s.cfgMu.RUnlock()
+		var autoEnabled bool
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			autoEnabled = c.Cookies.AutoEnabled
+		})
 		if !autoEnabled {
 			return false
 		}
@@ -393,9 +392,10 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Shared closure: determines which platforms are active for cookie status display.
 	s.getActivePlatforms = func() map[string]bool {
-		s.cfgMu.RLock()
-		defer s.cfgMu.RUnlock()
-		yt, tw := config.GetActivePlatforms(cfg)
+		var yt, tw bool
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			yt, tw = config.GetActivePlatforms(c)
+		})
 		return map[string]bool{"youtube": yt, "twitch": tw}
 	}
 

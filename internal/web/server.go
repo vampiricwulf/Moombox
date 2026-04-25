@@ -35,9 +35,8 @@ const maxCompressBodySize = 1 << 20 // 1MB
 
 // Server is the Moombox HTTP server.
 type Server struct {
-	configStore   *config.Store    // Authoritative cfg+mutex during the migration (DECISIONS #8)
+	configStore   *config.Store // Authoritative cfg + mutex (DECISIONS #8)
 	cfg           *config.MoomboxConfig
-	cfgMu         *sync.RWMutex    // Backed by configStore.RWMutex(); kept for legacy callers
 	router        chi.Router
 	server        *http.Server
 	ws            *WebSocketHub
@@ -64,8 +63,8 @@ type Server struct {
 }
 
 // NewServer creates a new HTTP server. The Store carries both the
-// *MoomboxConfig pointer and the synchronising mutex; legacy callers can
-// still reach the raw mutex via CfgMu() during the migration (DECISIONS #8).
+// *MoomboxConfig pointer and the synchronising mutex used by route +
+// middleware handlers (DECISIONS #8).
 func NewServer(store *config.Store, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -82,7 +81,6 @@ func NewServer(store *config.Store, logger interface {
 	s := &Server{
 		configStore:   store,
 		cfg:           store.Config(),
-		cfgMu:         store.RWMutex(),
 		router:        r,
 		ws:            NewWebSocketHub(logger),
 		internalToken: token,
@@ -109,12 +107,6 @@ func NewServer(store *config.Store, logger interface {
 // send in the X-Internal-Token header to bypass CSRF checks.
 func (s *Server) InternalToken() string {
 	return s.internalToken
-}
-
-// CfgMu returns a pointer to the config read-write mutex for use by route
-// handlers that need synchronized access to the shared config struct.
-func (s *Server) CfgMu() *sync.RWMutex {
-	return s.cfgMu
 }
 
 // SetCommit sets the build commit hash used for cache-busting static asset URLs.

@@ -24,9 +24,10 @@ import (
 // Called once between wireRoutes() and the "start services" phase in run().
 func (s *runState) wireMonitorCallbacks() {
 	s.cookieRefresh.OnRecoveryNeeded = func(platform string) {
-		s.cfgMu.RLock()
-		autoEnabled := s.cfg.Cookies.AutoEnabled
-		s.cfgMu.RUnlock()
+		var autoEnabled bool
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			autoEnabled = c.Cookies.AutoEnabled
+		})
 		if !autoEnabled {
 			s.log.Debug("Auth lost but auto-cookies disabled, skipping recovery", "platform", platform)
 			return
@@ -294,9 +295,10 @@ func (s *runState) wireMonitorCallbacks() {
 	s.unsubWSJobUpdate = s.db.OnJobUpdate(func(job *database.Job) {
 		// Skip broadcasting updates for archived (old finished) jobs
 		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
-			s.cfgMu.RLock()
-			ageDays := int(s.cfg.Monitors.HideFinishedAgeDays.Value)
-			s.cfgMu.RUnlock()
+			var ageDays int
+			s.configStore.Read(func(c *config.MoomboxConfig) {
+				ageDays = int(c.Monitors.HideFinishedAgeDays.Value)
+			})
 			cutoff := time.Now().AddDate(0, 0, -ageDays)
 			if t, err := time.Parse(time.RFC3339, job.UpdatedAt); err == nil && t.Before(cutoff) {
 				return
