@@ -1,6 +1,67 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.24` with the full ConfigStore migration arc + cmd-moombox file split + chat / worker / cipher / bgutils / web / config / monitor fixes.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.25` with the full DECISIONS #21 lifecycle-event arc (writer side feature-complete) plus a web/routes test-coverage push and a defensive cookie / config / worker sweep.
 
-This build bundles Sprint #1 + Sprint #2 work plus nineteen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus twenty batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 20 (test.26)
+
+28 commits across five sessions: **DECISIONS #21 lifecycle-event arc** (writer side feature-complete — deadlock fix + four event types + TUI consumer migrated), a **web/routes test-coverage push** (DECISIONS #32 — 168 new tests across six sub-batches), defensive cookie / config / worker hardening, and a small-fix sweep.
+
+**DECISIONS #21 — event-based subscribers**
+
+Replaces the legacy "fire OnJobsChange on every write" pattern with targeted notifications subscribers can apply as diffs.
+
+- **database C1+C2** — `notifyJobUpdate` + `snapshotJobsChange`/`dispatchJobsChange` now run OUTSIDE `db.mu`. All five OnJobsChange writers (AddJob, DeleteJob, BatchSetWatched, AddTrim, DeleteTrim) follow `Lock → SQL → snapshot → Unlock → dispatch` so a subscriber that calls back into Database no longer deadlocks. Two deadlock-resistance tests trip the bad path with a 2s timeout.
+- **OnJobChange foundation** — `JobChange{Job, Changes}` payload + subscribe API alongside the legacy `OnJobUpdate(*Job)`. UpdateJobFields tracks the changed columns from setClauses (excluding `updated_at`) and fans out to both APIs. WebSocket broadcaster migrates as the proof of concept.
+- **TUI consumer (tui.md F20)** — `handleJobUpdate` consumes `*JobChange` and gates list rebuilds on `hasDisplayChange(ev.Changes)` against a 12-entry `displayColumns` set, replacing the 12-field equality compare against the previous Job snapshot.
+- **JobAdded / JobDeleted / TrimsChanged** — three lifecycle event types + matching `OnJobAdded` / `OnJobDeleted` / `OnTrimsChanged` subscribe APIs. AddJob fires `JobAdded(job)`; DeleteJob's `RowsAffected > 0` gate prevents ghost events on missing IDs; AddTrim/DeleteTrim emit `TrimsChanged(jobID)` with DeleteTrim looking up the parent `job_id` BEFORE the DELETE so the event still carries it. All four COEXIST with OnJobsChange so consumers can migrate gradually.
+- **Empty-DB OnJobsChange fix** — pre-fix, when DeleteJob removed the last row, `snapshotJobsChange` returned nil (from `getAllJobsUnlocked` returning nil for zero rows), and `dispatchJobsChange`'s nil-check then suppressed OnJobsChange entirely. Now normalises nil to `[]*Job{}` when subscribers exist so the empty-list dispatch fires.
+
+Consumer-side migration (WS broadcaster + TUI consume the new lifecycle events; AddJob/DeleteJob/AddTrim/DeleteTrim stop firing OnJobsChange) is the remaining DECISIONS #21 work — tracked for a future batch.
+
+**Web/routes test-coverage push (DECISIONS #32)**
+
+Six sub-batches lifted `internal/web/routes` from 9 tests in 1 file to **177 tests in 13 files**:
+
+- **Sprint 1** — auth (19) + channel (12) + config (14) = 45 tests. Caught and fixed a real `Store.SavePath` deadlock during a test write — `savePath` migrated to `atomic.Pointer[string]` for lock-free reads. Without the fix every PUT /api/config save would have hung in production.
+- **Sprint 2** — setup (10) + update (9) = 19 tests.
+- **Sprint 3** — import (12) tests.
+- **Sprint 4** — stats (5) + trim (9) = 14 tests.
+- **Sprint 5** — jobs (48) tests covering 14 of 17 endpoints.
+- **Final** — watch (14) + pot (11) + panic_log (3) = 28 tests.
+
+Cookies / files / ytdlp routes are uncovered (each blocked on platform/setup deps beyond an httptest stub) — tracked as residual #32 work.
+
+**Defensive / hardening fixes**
+
+- **cookies #23** — `AutoCookieService` gains optional `HasActiveJobs func() bool` callback. `StartPeriodicRefresh` checks it per tick and skips the headless-Chrome launch (1-5s, ~50-150 MB) when no Live/Downloading jobs exist. Wired to `db.GetJobStats().ActiveCount > 0`. Saves ~48 wasted headless launches a day for idle users.
+- **cookies #26** — `validateBrowserProfileDir` refuses paths under 18 known browser profile trees (Chrome / Edge / Brave / Chromium / Vivaldi / Opera / Firefox / Thunderbird / Waterfox / LibreWolf, all channels). Defends a future config-edit-route bug from making Moombox launch headless against the user's real profile and exfiltrating cookies.
+- **goja Q1 partial** — `BotGuardClient.Snapshot` timeout/cancel branches call `c.vm.ClearInterrupt()` after `c.vm.Interrupt(...)` so the client stays reusable across timeout boundaries instead of relying on Shutdown to clear.
+- **engine #25** — `handleDashError` gains `is403LikelyCipher` body inspection so a 403 with `missing_pot` / `po token` / `bot` / `automated` / `captcha` markers no longer triggers cipher invalidation — those are PO-token/CAPTCHA failures the cipher solver can't fix. 13 tests.
+- **twitch #11** — `gqlRequest` wraps a retry loop around `doGQLOnce`. 1s → 2s → 4s exponential schedule, up to 3 retries, capped at 30s. 5xx + 429 + transport errors retry; 401/403 fast-fail through `ErrTwitchAuthExpired`. Honors `Retry-After` header.
+- **twitch #8 follow-up** — `worker.setJobError` matches both `ErrCookiesRequired` AND `twitch.ErrTwitchAuthExpired` to route to StatusCookies. New `twitchAuthSentinel` helper attaches `ErrCookiesRequired` to VOD-error paths whose `%v` formatting strips the wrap.
+- **cross-cutting C3** — sentinels `ErrCookiesRequired` / `ErrNonActionable` / `ErrCancelled` in worker. `checkPlayability` returns `(string, error)` with the right sentinel per PlayabilityError category. Drops four substring-matching helpers and the `strings` import. 11 sentinel-contract tests.
+
+**Config validator hardening**
+
+Five findings closed so a hand-edited TOML can't slip absurd values past Validate:
+
+- **config #6** — `twitch_check_interval` lower bound aligned with web validator (5..3600 from 1..3600).
+- **config #13** — `MaxFeedItems` (1..1000), `FeedCheckInterval` (1..1440 min), `HideFinishedAgeDays` (0..365 days) gain upper bounds that catch typos like `max_feed_items = 1000000`.
+- **config #15** — `cookies.refresh_interval` ≤ 7 days (10080 min). YouTube SAPISID-family cookies last ~years, so a longer cadence is almost always a typo or units confusion.
+- **config #27** — doc-only annotation of each Unicode range in `invalidFSChars` so future "let's keep emoji" requests have explicit context.
+- **config #28** — `loadFromFile` reads bytes once and decodes both struct + raw map from those bytes; migration decode errors now propagate instead of being silently swallowed.
+
+**worker F23 / Q4 — quality-split status flip**
+
+Quality-split downloads on YouTube and Twitch flipped to Muxing too late (in `finalizeMultiSegmentJob`, AFTER the per-segment mux). Now the orchestrator flips to Muxing at stream-end, BEFORE `segmentMuxWg.Wait` + the final-segment mux. UI no longer shows "Downloading" through the post-stream phase.
+
+**Database test-coverage push**
+
+Twelve new tests in `database_extras_test.go`: GetJobStats empty / aggregation / cache-TTL / concurrent paths, attachTrimsAndGaps cross-contamination guard, AddToHistory dedup, ImportFromJSON happy + error paths, concurrent reads/writes race smoke, OnJobUpdate unsubscribe contract, subscriber slice shrink-after-churn.
+
+**Internal**
+
+- **engine sleepCtx → utils.Sleep** — engine's private 7-line `sleepCtx` collapsed into `utils.Sleep` across 5 files. Removes the duplicate, drops 2 tests that exercised the now-deleted private helper. Net -22 LOC.
 
 ### Manual batch 19 (test.25)
 
