@@ -405,8 +405,14 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Monitors.DecapiCheckInterval = nil
 		}
 	}
-	if cfg.Monitors.TwitchCheckInterval != nil && (*cfg.Monitors.TwitchCheckInterval < 1 || *cfg.Monitors.TwitchCheckInterval > 3600) {
-		fail("monitors.twitch_check_interval %d out of range 1..3600", *cfg.Monitors.TwitchCheckInterval)
+	// Aligned with the PUT /api/config Zod schema (config_routes.go:142)
+	// so a hand-edited TOML can't sneak in a value the web UI rejects.
+	// 1-second polling against Twitch's GQL endpoint floods their rate
+	// limiter; 5 seconds is the established minimum that matches the
+	// WebSocket-style heartbeat cadence chats use. Audit reports/config.md
+	// Finding 6.
+	if cfg.Monitors.TwitchCheckInterval != nil && (*cfg.Monitors.TwitchCheckInterval < 5 || *cfg.Monitors.TwitchCheckInterval > 3600) {
+		fail("monitors.twitch_check_interval %d out of range 5..3600", *cfg.Monitors.TwitchCheckInterval)
 		if !reportOnly {
 			cfg.Monitors.TwitchCheckInterval = nil
 		}
