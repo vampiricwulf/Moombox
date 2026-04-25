@@ -3,7 +3,9 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -427,3 +429,120 @@ func TestMatchesTerms(t *testing.T) {
 		})
 	}
 }
+
+func TestProbeCooldownAllowsFreshAndBlocksRecent(t *testing.T) {
+	// ShouldProbe returns true for unseen IDs and false within the cooldown
+	// window after Record — protects feed/DECAPI cycles from re-probing
+	// every ~10 minutes (audit reports/monitor.md #5).
+	cd := NewProbeCooldown(50 * time.Millisecond)
+
+	if !cd.ShouldProbe("vid-1") {
+		t.Fatal("ShouldProbe on unseen videoID: want true, got false")
+	}
+
+	cd.Record("vid-1")
+	if cd.ShouldProbe("vid-1") {
+		t.Errorf("ShouldProbe immediately after Record: want false, got true")
+	}
+
+	// Different ID is independent
+	if !cd.ShouldProbe("vid-2") {
+		t.Errorf("ShouldProbe on different unseen videoID: want true, got false")
+	}
+
+	// After the cooldown elapses the slot is reusable. 80ms gives the test
+	// a generous margin without slowing the suite noticeably.
+	time.Sleep(80 * time.Millisecond)
+	if !cd.ShouldProbe("vid-1") {
+		t.Errorf("ShouldProbe after cooldown elapses: want true, got false")
+	}
+}
+
+func TestProbeCooldownNilReceiver(t *testing.T) {
+	// Both methods accept a nil receiver so call sites can pass an unset
+	// optional pointer without nil-checks.
+	var cd *ProbeCooldown
+
+	if !cd.ShouldProbe("vid-x") {
+		t.Errorf("nil ShouldProbe: want true, got false")
+	}
+	cd.Record("vid-x") // must not panic
+}
+
+func TestProbeCooldownEvictsExcess(t *testing.T) {
+	// The map is capped at probeCooldownMaxSize. Adding more entries
+	// evicts the oldest so the cache can't grow unbounded over a long
+	// uptime with many distinct video IDs.
+	cd := NewProbeCooldown(time.Hour)
+
+	for i := 0; i < probeCooldownMaxSize+50; i++ {
+		cd.Record(fmt.Sprintf("vid-%d", i))
+	}
+
+	cd.mu.Lock()
+	size := len(cd.lastProbe)
+	cd.mu.Unlock()
+
+	if size > probeCooldownMaxSize {
+		t.Errorf("after %d Records: want size <= %d, got %d",
+			probeCooldownMaxSize+50, probeCooldownMaxSize, size)
+	}
+}
+
+func TestProbeCooldownConcurrentSafe(t *testing.T) {
+	// Race-detector smoke test for the shared map. Run with `go test -race`
+	// to confirm no concurrent map access.
+	cd := NewProbeCooldown(time.Hour)
+
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				id := fmt.Sprintf("vid-%d-%d", workerID, i)
+				cd.ShouldProbe(id)
+				cd.Record(id)
+			}
+		}(w)
+	}
+	wg.Wait()
+}
+
+func TestProcessYouTubeVideoSkipsWithinCooldown(t *testing.T) {
+	// When the cooldown is active for a video, ProcessYouTubeVideo must
+	// short-circuit before invoking ProbeVideo. Otherwise the cooldown
+	// would only spread out the work, not eliminate redundant probes.
+	cd := NewProbeCooldown(time.Hour)
+	cd.Record("vid-1")
+
+	probeCalls := 0
+	res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		Ctx:     context.Background(),
+		VideoID: "vid-1",
+		Title:   "test",
+		Channel: &config.ChannelConfig{ID: "ch-1", Name: "Test"},
+		ProbeVideo: func(ctx context.Context, videoID string) (*VideoProbeResult, error) {
+			probeCalls++
+			return &VideoProbeResult{StreamStatus: "live"}, nil
+		},
+		Tracker:  NewMetadataFailureTracker(),
+		Cooldown: cd,
+		Logger:   silentLogger{},
+	})
+
+	if probeCalls != 0 {
+		t.Errorf("expected 0 probe calls within cooldown, got %d", probeCalls)
+	}
+	if res.ShouldProcess {
+		t.Errorf("ShouldProcess: want false during cooldown, got true")
+	}
+}
+
+// silentLogger discards log output for tests that don't need to inspect it.
+type silentLogger struct{}
+
+func (silentLogger) Debug(msg string, args ...any) {}
+func (silentLogger) Info(msg string, args ...any)  {}
+func (silentLogger) Warn(msg string, args ...any)  {}
+func (silentLogger) Error(msg string, args ...any) {}

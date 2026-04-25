@@ -36,7 +36,7 @@ type rateLimitState struct {
 // DecapiMonitor polls DECAPI for latest videos from YouTube channels.
 type DecapiMonitor struct {
 	mu          sync.Mutex
-	cfg         *config.MoomboxConfig
+	configStore *config.Store
 	db          *database.Database
 	checking    bool
 	timer       *time.Timer
@@ -56,19 +56,23 @@ type DecapiMonitor struct {
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
-	IsOnline        func() bool // nil = always online
+	ProbeCooldown   *ProbeCooldown // optional: shared with FeedMonitor to dedup re-probes
+	IsOnline        func() bool    // nil = always online
 }
 
-// NewDecapiMonitor creates a new DECAPI monitor.
-func NewDecapiMonitor(cfg *config.MoomboxConfig, db *database.Database, logger interface {
+// NewDecapiMonitor creates a new DECAPI monitor. The Store carries the
+// cfg+lock used to read channel list and interval settings; all reads
+// happen under configStore.Read so a config-reload doesn't race against
+// an in-flight cycle (audit reports/monitor.md Critical Issue #1).
+func NewDecapiMonitor(store *config.Store, db *database.Database, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *DecapiMonitor {
 	return &DecapiMonitor{
-		cfg: cfg,
-		db:  db,
+		configStore: store,
+		db:          db,
 		rateLimit: rateLimitState{
 			limit:     decapiDefaultRateLimit,
 			remaining: decapiDefaultRateLimit,
@@ -185,8 +189,12 @@ func (dm *DecapiMonitor) calculateInterval(channelCount int) time.Duration {
 	interval := time.Duration(dynamicSec) * time.Second
 
 	// Config override
-	if dm.cfg.Monitors.DecapiCheckInterval != nil && *dm.cfg.Monitors.DecapiCheckInterval >= 15 {
-		interval = time.Duration(*dm.cfg.Monitors.DecapiCheckInterval) * time.Second
+	var cfgInterval *int
+	dm.configStore.Read(func(c *config.MoomboxConfig) {
+		cfgInterval = c.Monitors.DecapiCheckInterval
+	})
+	if cfgInterval != nil && *cfgInterval >= 15 {
+		interval = time.Duration(*cfgInterval) * time.Second
 	}
 
 	// Floor
@@ -480,6 +488,7 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		ProbeVideo:   dm.ProbeVideo,
 		AddToHistory: func(id string) error { return dm.db.AddToHistory(id) },
 		Tracker:      dm.MetadataTracker,
+		Cooldown:     dm.ProbeCooldown,
 		IsReprobe:    reprobe,
 		Logger:       dm.logger,
 	})
@@ -494,16 +503,21 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	return nil
 }
 
+// getYouTubeChannels returns a copy of the YouTube channel list under
+// configStore.Read so the polling loop iterates freely without holding
+// the lock across network calls. Audit reports/monitor.md Critical Issue #1.
 func (dm *DecapiMonitor) getYouTubeChannels() []config.ChannelConfig {
 	var channels []config.ChannelConfig
-	for _, ch := range dm.cfg.Channels {
-		if ch.Enabled != nil && !*ch.Enabled {
-			continue
+	dm.configStore.Read(func(c *config.MoomboxConfig) {
+		for _, ch := range c.Channels {
+			if ch.Enabled != nil && !*ch.Enabled {
+				continue
+			}
+			if ch.Platform == "twitch" {
+				continue
+			}
+			channels = append(channels, ch)
 		}
-		if ch.Platform == "twitch" {
-			continue
-		}
-		channels = append(channels, ch)
-	}
+	})
 	return channels
 }

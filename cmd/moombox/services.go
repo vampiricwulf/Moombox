@@ -234,19 +234,27 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
 	// =========================================================================
-	feedMon := monitor.NewFeedMonitor(cfg, db, log)
+	// Shared probe cooldown: feed and DECAPI both probe YouTube videos via
+	// ytService.ProbeVideoStatus. Sharing one cache means a probe by either
+	// monitor blocks the other from re-probing the same video for the
+	// cooldown window. Caps per-video probe rate at ~2/hour.
+	probeCooldown := monitor.NewProbeCooldown(monitor.DefaultProbeCooldown)
+
+	feedMon := monitor.NewFeedMonitor(s.configStore, db, log)
+	feedMon.ProbeCooldown = probeCooldown
 	s.feedMon = feedMon
 
 	// =========================================================================
 	// 13. DECAPI monitor
 	// =========================================================================
-	decapiMon := monitor.NewDecapiMonitor(cfg, db, log)
+	decapiMon := monitor.NewDecapiMonitor(s.configStore, db, log)
+	decapiMon.ProbeCooldown = probeCooldown
 	s.decapiMon = decapiMon
 
 	// =========================================================================
 	// 14. Twitch monitor
 	// =========================================================================
-	twitchMon := monitor.NewTwitchMonitor(cfg, db, twService, log)
+	twitchMon := monitor.NewTwitchMonitor(s.configStore, db, twService, log)
 	s.twitchMon = twitchMon
 
 	// Wire connectivity to monitors so they skip polls when offline

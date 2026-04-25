@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -21,6 +23,16 @@ const (
 	// maxMetadataFailuresMapSize caps the failure tracker map to prevent
 	// unbounded growth from orphaned entries.
 	maxMetadataFailuresMapSize = 500
+
+	// DefaultProbeCooldown is the default re-probe cooldown applied to
+	// YouTube videos seen in feed/DECAPI cycles. With a feed cycle of
+	// 10 min and 15 items × N channels, every cycle re-probed every
+	// item — 300 probes/cycle for 20 channels. A 30-min cooldown caps
+	// per-video re-probes at 2/hour (audit reports/monitor.md #5).
+	DefaultProbeCooldown = 30 * time.Minute
+
+	// probeCooldownMaxSize caps the cooldown map to bound memory.
+	probeCooldownMaxSize = 2000
 )
 
 // VideoProbeResult holds the stream status returned by a video probe.
@@ -92,6 +104,76 @@ func (t *MetadataFailureTracker) evictExcess() {
 	}
 }
 
+// ProbeCooldown caches "last probe time" per video ID to prevent every
+// feed/DECAPI cycle from re-probing the same videos through the YouTube
+// player API. Both monitors share a single instance so a probe by either
+// blocks the other from re-probing the same video for the cooldown
+// window. Audit reports/monitor.md #5.
+type ProbeCooldown struct {
+	mu        sync.Mutex
+	lastProbe map[string]time.Time
+	duration  time.Duration
+}
+
+// NewProbeCooldown creates a cooldown cache with the given window. Use
+// DefaultProbeCooldown unless tests need a tighter window.
+func NewProbeCooldown(duration time.Duration) *ProbeCooldown {
+	return &ProbeCooldown{
+		lastProbe: make(map[string]time.Time),
+		duration:  duration,
+	}
+}
+
+// ShouldProbe returns true if the video has not been probed within the
+// cooldown window. A nil receiver always returns true so call sites can
+// be guarded uniformly without nil checks.
+func (cd *ProbeCooldown) ShouldProbe(videoID string) bool {
+	if cd == nil {
+		return true
+	}
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	last, ok := cd.lastProbe[videoID]
+	if !ok {
+		return true
+	}
+	return time.Since(last) >= cd.duration
+}
+
+// Record marks videoID as just-probed. Called from ProcessYouTubeVideo
+// after every probe attempt (success or failure) so the cooldown limits
+// total probe rate per video, not just success rate.
+func (cd *ProbeCooldown) Record(videoID string) {
+	if cd == nil {
+		return
+	}
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	cd.lastProbe[videoID] = time.Now()
+	cd.evictExcess()
+}
+
+// evictExcess caps the cooldown map by dropping the oldest entries. Must
+// be called with mu held.
+func (cd *ProbeCooldown) evictExcess() {
+	excess := len(cd.lastProbe) - probeCooldownMaxSize
+	if excess <= 0 {
+		return
+	}
+	type entry struct {
+		id string
+		t  time.Time
+	}
+	entries := make([]entry, 0, len(cd.lastProbe))
+	for id, t := range cd.lastProbe {
+		entries = append(entries, entry{id, t})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].t.Before(entries[j].t) })
+	for i := 0; i < excess && i < len(entries); i++ {
+		delete(cd.lastProbe, entries[i].id)
+	}
+}
+
 // ProcessYouTubeVideoParams holds the dependencies for ProcessYouTubeVideo.
 type ProcessYouTubeVideoParams struct {
 	Ctx      context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
@@ -101,7 +183,8 @@ type ProcessYouTubeVideoParams struct {
 	ProbeVideo VideoProbeFunc
 	AddToHistory func(videoID string) error
 	Tracker  *MetadataFailureTracker
-	IsReprobe bool // true if re-checking a previously processed video (logs demoted to Debug)
+	Cooldown *ProbeCooldown // optional: skips re-probes within the cooldown window
+	IsReprobe bool          // true if re-checking a previously processed video (logs demoted to Debug)
 	Logger   interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -131,11 +214,27 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		return ProcessYouTubeVideoResult{ShouldProcess: true, Title: p.Title}
 	}
 
+	// Cooldown gate: a probe within the last DefaultProbeCooldown is
+	// recent enough that re-probing now contributes nothing. Returning
+	// ShouldProcess=false here means upstream skips OnVideoFound for this
+	// cycle and waits for the cooldown to expire. Audit reports/monitor.md
+	// #5 — caps per-video probe rate at ~2/hour by default.
+	if !p.Cooldown.ShouldProbe(p.VideoID) {
+		p.Logger.Debug("[Monitor] Skipping re-probe within cooldown",
+			"videoID", p.VideoID, "channel", p.Channel.Name)
+		return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
+	}
+
 	ctx := p.Ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	meta, err := p.ProbeVideo(ctx, p.VideoID)
+	// Record after the probe attempt regardless of outcome so transient
+	// failures still respect the cooldown — without that, every cycle
+	// re-tries failing probes immediately, and the failure tracker only
+	// gives up after maxMetadataFailures attempts.
+	p.Cooldown.Record(p.VideoID)
 	if err != nil {
 		count, giveUp := p.Tracker.RecordFailure(p.VideoID)
 		if giveUp {

@@ -20,7 +20,7 @@ const (
 // TwitchMonitor polls Twitch GQL for live streams from monitored channels.
 type TwitchMonitor struct {
 	mu          sync.Mutex
-	cfg         *config.MoomboxConfig
+	configStore *config.Store
 	db          *database.Database
 	tw          *twitch.Service
 	checking    bool
@@ -41,18 +41,21 @@ type TwitchMonitor struct {
 	IsOnline      func() bool // nil = always online
 }
 
-// NewTwitchMonitor creates a new Twitch monitor.
-func NewTwitchMonitor(cfg *config.MoomboxConfig, db *database.Database, tw *twitch.Service, logger interface {
+// NewTwitchMonitor creates a new Twitch monitor. The Store carries the
+// cfg+lock used to read channel list and interval settings; all reads
+// happen under configStore.Read so a config-reload doesn't race against
+// an in-flight cycle (audit reports/monitor.md Critical Issue #1).
+func NewTwitchMonitor(store *config.Store, db *database.Database, tw *twitch.Service, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *TwitchMonitor {
 	return &TwitchMonitor{
-		cfg:    cfg,
-		db:     db,
-		tw:     tw,
-		logger: logger,
+		configStore: store,
+		db:          db,
+		tw:          tw,
+		logger:      logger,
 	}
 }
 
@@ -152,8 +155,12 @@ func (tm *TwitchMonitor) scheduleNext(ctx context.Context) {
 func (tm *TwitchMonitor) calculateInterval() time.Duration {
 	base := twitchDefaultInterval
 
-	if tm.cfg.Monitors.TwitchCheckInterval != nil && *tm.cfg.Monitors.TwitchCheckInterval > 0 {
-		base = time.Duration(*tm.cfg.Monitors.TwitchCheckInterval) * time.Second
+	var cfgInterval *int
+	tm.configStore.Read(func(c *config.MoomboxConfig) {
+		cfgInterval = c.Monitors.TwitchCheckInterval
+	})
+	if cfgInterval != nil && *cfgInterval > 0 {
+		base = time.Duration(*cfgInterval) * time.Second
 	}
 
 	// Apply ±10% jitter (scales with interval)
@@ -286,16 +293,21 @@ func (tm *TwitchMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 	return nil
 }
 
+// getTwitchChannels returns a copy of the Twitch channel list under
+// configStore.Read so the polling loop iterates freely without holding
+// the lock across network calls. Audit reports/monitor.md Critical Issue #1.
 func (tm *TwitchMonitor) getTwitchChannels() []config.ChannelConfig {
 	var channels []config.ChannelConfig
-	for _, ch := range tm.cfg.Channels {
-		if ch.Enabled != nil && !*ch.Enabled {
-			continue
+	tm.configStore.Read(func(c *config.MoomboxConfig) {
+		for _, ch := range c.Channels {
+			if ch.Enabled != nil && !*ch.Enabled {
+				continue
+			}
+			if ch.Platform != "twitch" {
+				continue
+			}
+			channels = append(channels, ch)
 		}
-		if ch.Platform != "twitch" {
-			continue
-		}
-		channels = append(channels, ch)
-	}
+	})
 	return channels
 }

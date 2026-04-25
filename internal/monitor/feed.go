@@ -74,7 +74,7 @@ func reportMonitorResult(tag string, failed bool) {
 // FeedMonitor polls YouTube RSS feeds for new videos from monitored channels.
 type FeedMonitor struct {
 	mu          sync.Mutex
-	cfg         *config.MoomboxConfig
+	configStore *config.Store
 	db          *database.Database
 	checking    bool
 	timer       *time.Timer
@@ -93,18 +93,22 @@ type FeedMonitor struct {
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
-	IsOnline        func() bool // nil = always online
+	ProbeCooldown   *ProbeCooldown // optional: shared with DecapiMonitor to dedup re-probes
+	IsOnline        func() bool    // nil = always online
 }
 
-// NewFeedMonitor creates a new RSS feed monitor.
-func NewFeedMonitor(cfg *config.MoomboxConfig, db *database.Database, logger interface {
+// NewFeedMonitor creates a new RSS feed monitor. The Store carries the
+// cfg+lock used to read channel list and interval settings; all reads
+// happen under configStore.Read so a config-reload doesn't race against
+// an in-flight cycle (audit reports/monitor.md Critical Issue #1).
+func NewFeedMonitor(store *config.Store, db *database.Database, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *FeedMonitor {
 	return &FeedMonitor{
-		cfg:             cfg,
+		configStore:     store,
 		db:              db,
 		logger:          logger,
 		MetadataTracker: NewMetadataFailureTracker(),
@@ -178,7 +182,10 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
 		return
 	}
 
-	interval := fm.cfg.Monitors.FeedCheckInterval.AsDuration(time.Minute)
+	var interval time.Duration
+	fm.configStore.Read(func(c *config.MoomboxConfig) {
+		interval = c.Monitors.FeedCheckInterval.AsDuration(time.Minute)
+	})
 	if interval < time.Minute {
 		interval = 10 * time.Minute
 	}
@@ -349,8 +356,14 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 	maxItems := defaultMaxFeedItems
 	if ch.MaxFeedItems != nil && *ch.MaxFeedItems > 0 {
 		maxItems = *ch.MaxFeedItems
-	} else if fm.cfg.Monitors.MaxFeedItems > 0 {
-		maxItems = fm.cfg.Monitors.MaxFeedItems
+	} else {
+		var cfgMax int
+		fm.configStore.Read(func(c *config.MoomboxConfig) {
+			cfgMax = c.Monitors.MaxFeedItems
+		})
+		if cfgMax > 0 {
+			maxItems = cfgMax
+		}
 	}
 
 	entries := feed.Entries
@@ -462,6 +475,7 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 			ProbeVideo:   fm.ProbeVideo,
 			AddToHistory: func(id string) error { return fm.db.AddToHistory(id) },
 			Tracker:      fm.MetadataTracker,
+			Cooldown:     fm.ProbeCooldown,
 			IsReprobe:    reprobe,
 			Logger:       fm.logger,
 		})
@@ -518,16 +532,22 @@ func filterUniqueDescriptionLines(description string, olderEntries []atomEntry) 
 	return filterUniqueDescriptionLinesPrecomputed(description, sets)
 }
 
+// getYouTubeChannels returns a copy of the YouTube channel list under
+// configStore.Read so doCheck can iterate freely without holding the lock
+// across network calls. Closes the cfgMu race flagged in
+// reports/monitor.md Critical Issue #1.
 func (fm *FeedMonitor) getYouTubeChannels() []config.ChannelConfig {
 	var channels []config.ChannelConfig
-	for _, ch := range fm.cfg.Channels {
-		if ch.Enabled != nil && !*ch.Enabled {
-			continue
+	fm.configStore.Read(func(c *config.MoomboxConfig) {
+		for _, ch := range c.Channels {
+			if ch.Enabled != nil && !*ch.Enabled {
+				continue
+			}
+			if ch.Platform == "twitch" {
+				continue
+			}
+			channels = append(channels, ch)
 		}
-		if ch.Platform == "twitch" {
-			continue
-		}
-		channels = append(channels, ch)
-	}
+	})
 	return channels
 }
