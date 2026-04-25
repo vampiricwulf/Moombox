@@ -1,6 +1,68 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.25` with the full DECISIONS #21 lifecycle-event arc (writer side feature-complete) plus a web/routes test-coverage push and a defensive cookie / config / worker sweep.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.26` with the **DPAPI cookie fallback** arc (DECISIONS #6 done), **proactive cipher retry** (DECISIONS #7 done), **bgutils single-minter cache** (CRIT-2 done), the **DECISIONS #21 consumer migration** (writer + primary consumers complete), and a hardening sweep across cookies / web / config / logger.
 
-This build bundles Sprint #1 + Sprint #2 work plus twenty batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus twenty-one batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 21 (test.27)
+
+18 commits closing six previously-deferred DECISIONS arcs and two cross-cutting follow-ons.
+
+**DECISIONS #6 — DPAPI cookie fallback (done)**
+
+Windows-only `internal/cookies/dpapi/` subpackage reads + AES-GCM-decrypts Chrome v10/v11 cookies straight from a Chromium-family profile's SQLite Cookies file using the master key from Local State (DPAPI-encrypted, decrypted via `CryptUnprotectData` syscall).
+
+- **`dpapi.go`** — cross-platform helpers (decryptV10Cookie, chromeEpochToUnix, chromeSameSiteString); **`dpapi_windows.go`** — Windows DPAPI wrapper + `ReadChromeCookies`; **`dpapi_other.go`** — non-Windows stub returning `ErrNotSupported`. 8 tests cover round-trip v10 + v11, legacy-prefix rejection, too-short ciphertext, bad-master-key auth-tag failure, epoch + SameSite mappings.
+- **`profiles.go`** — auto-detects Chromium-family profiles across 11 channels (Chrome / Edge / Brave / Vivaldi / Chromium, all stable + beta + dev + canary). Tests use a synthetic LOCALAPPDATA tree so they pass without any installed browser.
+- **Wired into `AutoCookieService.RefreshCookies`** as a CDP-failure fallback gated on `cookies.dpapi_fallback` (default off — opt-in privacy surface; the fallback reads the user's REAL Chromium-family browser profile). Browser-family scope: Chromium-family only (Firefox uses cookies.sqlite directly via the existing path).
+
+The DPAPI path is read-only and explicitly safe to point at the user's real profile. The cookies #26 launch-path defence (refusing to launch headless against a real profile) stays in force; the two flows are intentionally separate.
+
+**DECISIONS #7 — proactive cipher retry (done)**
+
+`SegmentDownloader` gains an atomic `baseURLOverride` (`atomic.Pointer[string]`) + `SetBaseURL` + `getBaseURL`. The `OnCipherFailure` callback signature changes to `func() string`; returning a non-empty URL triggers an atomic swap. Worker-side: snapshots the original (pre-decryption) BaseURL per itag, callback re-resolves via the freshly-rebuilt cipher solver, returns the new decrypted URL. The engine continues fetching at the new URL without `ErrQualityLost` / manifest refresh. 2 race-detected tests.
+
+**bgutils CRIT-2 — single-minter cache (done)**
+
+`minterCache` keys all entries under a `defaultMinterKey` constant; one BotGuard VM per process serves every content binding. New `minterCreatingMu` mutex serialises VM init across goroutines so a fresh process serving two bindings can't spin up two parallel BotGuard VMs (one would be replaced + leaked). Map shape preserved so `InvalidateIntegrityTokens` / `GetMinterCacheKeys` / `cleanupExpired` stay structurally identical (a future proxy/IP-keyed expansion is a one-line change). 6 test seed-key updates + a new `TestPotProvider_OneMinterServesAllBindings` regression that mints three different bindings via one cached minter.
+
+**bgutils TD-3 — observability (CRIT-2 follow-on)**
+
+Eight monotonically-increasing atomic counters expose cache + generation state so operators can spot when YouTube is rotating ciphers more aggressively than usual: `SessionHits`, `MinterHits`, `MintersCreated`, `MintersInvalidated`, `MintersEvicted`, `GenerateErrors`, `InflightWaits`, plus a `CachedMinters` live-cache snapshot. `pp.Stats() PotStats` returns a consistent snapshot. New `GET /pot_stats` route (LoopbackOnly) serialises it. 7 unit tests + 3 HTTP tests.
+
+**DECISIONS #21 consumer migration (done — writer + primary consumers)**
+
+Backend ships targeted lifecycle events; consumers stop double-handling.
+
+- **AddJob, AddTrim, DeleteTrim, DeleteJob** no longer fire `OnJobsChange`. WS broadcaster + TUI consume the targeted lifecycle events directly. Only `BatchSetWatched` still fires `OnJobsChange`.
+- TUI handlers do surgical state mutations: append on add, remove on delete, refresh-one-row on trim change.
+
+**Cross-cutting C3 — sentinel migration follow-on**
+
+Cookies-package errors get six exported sentinels: `ErrNoBrowserFound`, `ErrSetupInProgress`, `ErrNoSetupInProgress`, `ErrSetupCancelled`, `ErrRefreshInProgress`, `ErrProfileNotFound`. HTTP routes in `internal/web/routes/cookies.go` discriminate via `errors.Is` to map sentinels to appropriate status codes (409 Conflict, 404 Not Found, 424 Failed Dependency) instead of blanket 500s. 5 producer-contract + sentinel-distinctness tests. Cipher-package follow-on deferred — no current consumer string-matches cipher errors.
+
+**cookies #3 — ensure CDP page target before extraction**
+
+`extractChromiumCookies` silently returned empty cookies if the user closed all tabs after logging in (the per-page fallbacks `Network.getAllCookies` / `Network.getCookies` both iterate `t.Type == "page"` targets, of which there were none). New `cdpEnsurePageTarget` reuses any existing page target (navigates it to the platform URL via `cdpNavigateAndWait`) or spawns a new tab via `Target.createTarget` on the browser-level WS. Soft-fail: if ensure errors, the call still proceeds — `Storage.getCookies` is browser-level and may succeed regardless.
+
+**cookies #25 + config #22 — Windows DACL**
+
+`internal/utils.ApplyUserOnlyDACL` (icacls user-only ACL helper) hoisted from `internal/cookies` and shared. Both the auto-cookies profile dir AND the config dir now get the user-only DACL on every Save (idempotent at the OS level).
+
+**web S-3 — sliding-window session renewal**
+
+`ValidateSessionAndSlide` refreshes `createdAt` past half-TTL; middleware re-issues the cookie with a fresh `Max-Age` so the browser's stored expiry slides in lockstep with the server's. Active users no longer get unexpectedly logged out at the original session expiry.
+
+**config #8 — explicit `network_access` overrides legacy fields**
+
+A user explicit `[network] network_access = "..."` now wins over legacy `allow_lan` / `allow_external`. 5 regression cases.
+
+**goja Q1 (done) — `RunStringWithTimeout` helper**
+
+Extracted into `internal/goja`. The bgutils interpreter init migrates to it (drops 25 lines of hand-rolled timeboxing). Pairs with the earlier `97caffe` Snapshot ClearInterrupt fix.
+
+**Internal**
+
+- **logger formatLogLine `sync.Pool`** — pool `strings.Builder` instances. `strings.Clone` breaks the alias between pooled buffer and returned string. Concurrent-corruption regression test.
+- **logger Write rotate retry** — silent-drop bug fix when rotate's reopen fails (transient ENOSPC, AV holding the file, etc.). `Write` now retries `openFile` on the next call instead of dropping the line forever.
 
 ### Manual batch 20 (test.26)
 
