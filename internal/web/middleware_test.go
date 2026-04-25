@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -354,11 +353,11 @@ func TestIsLoopbackRequest(t *testing.T) {
 func TestCSRFMiddleware(t *testing.T) {
 	const internalToken = "test-internal-token"
 
-	makeCfg := func(networkAccess string) (*config.MoomboxConfig, *sync.RWMutex) {
+	makeStore := func(networkAccess string) *config.Store {
 		cfg := &config.MoomboxConfig{
 			Network: config.NetworkConfig{NetworkAccess: networkAccess},
 		}
-		return cfg, &sync.RWMutex{}
+		return config.NewStore(cfg, "")
 	}
 
 	makeRequest := func(method, path string, headers map[string]string) *http.Request {
@@ -528,8 +527,8 @@ func TestCSRFMiddleware(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, mu := makeCfg(tt.networkAccess)
-			mw := CSRFMiddleware(cfg, mu, internalToken)
+			store := makeStore(tt.networkAccess)
+			mw := CSRFMiddleware(store, internalToken)
 			handler := mw(passHandler)
 
 			rr := httptest.NewRecorder()

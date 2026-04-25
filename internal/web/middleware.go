@@ -6,20 +6,20 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
 // CORSMiddleware validates Origin headers based on network_access config.
-func CORSMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) func(http.Handler) http.Handler {
+func CORSMiddleware(store *config.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
-			cfgMu.RLock()
-			networkAccess := cfg.Network.NetworkAccess
-			cfgMu.RUnlock()
+			var networkAccess string
+			store.Read(func(c *config.MoomboxConfig) {
+				networkAccess = c.Network.NetworkAccess
+			})
 
 			if origin != "" {
 				// Validate origin based on network_access
@@ -116,7 +116,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 // same-origin mutating requests (Fetch spec). Non-browser local CLIs
 // (e.g. `moombox add`) should set Origin to the server's base URL or use
 // the InternalToken.
-func CSRFMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, internalToken string) func(http.Handler) http.Handler {
+func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Only check mutating methods
@@ -144,9 +144,10 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, internalToke
 				return
 			}
 
-			cfgMu.RLock()
-			networkAccess := cfg.Network.NetworkAccess
-			cfgMu.RUnlock()
+			var networkAccess string
+			store.Read(func(c *config.MoomboxConfig) {
+				networkAccess = c.Network.NetworkAccess
+			})
 
 			origin := r.Header.Get("Origin")
 			if origin == "" {
@@ -176,14 +177,15 @@ func CSRFMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, internalToke
 }
 
 // IPGateMiddleware restricts access based on network_access config.
-func IPGateMiddleware(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) func(http.Handler) http.Handler {
+func IPGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := ExtractIP(r)
 
-			cfgMu.RLock()
-			networkAccess := cfg.Network.NetworkAccess
-			cfgMu.RUnlock()
+			var networkAccess string
+			store.Read(func(c *config.MoomboxConfig) {
+				networkAccess = c.Network.NetworkAccess
+			})
 
 			switch networkAccess {
 			case "external", "public":

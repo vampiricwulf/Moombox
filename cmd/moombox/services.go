@@ -353,7 +353,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 16. Web server
 	// =========================================================================
 	s.startTime = time.Now()
-	webServer := web.NewServer(cfg, &s.cfgMu, log)
+	webServer := web.NewServer(s.configStore, log)
 	webServer.SetCommit(commit)
 	s.webServer = webServer
 	s.wsHub = webServer.WebSocket()

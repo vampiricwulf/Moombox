@@ -35,8 +35,9 @@ const maxCompressBodySize = 1 << 20 // 1MB
 
 // Server is the Moombox HTTP server.
 type Server struct {
+	configStore   *config.Store    // Authoritative cfg+mutex during the migration (DECISIONS #8)
 	cfg           *config.MoomboxConfig
-	cfgMu         *sync.RWMutex    // Protects concurrent access to cfg fields (external, shared with main)
+	cfgMu         *sync.RWMutex    // Backed by configStore.RWMutex(); kept for legacy callers
 	router        chi.Router
 	server        *http.Server
 	ws            *WebSocketHub
@@ -62,9 +63,10 @@ type Server struct {
 	}
 }
 
-// NewServer creates a new HTTP server.
-// cfgMu is the shared config mutex — all components that read/write cfg must use the same one.
-func NewServer(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, logger interface {
+// NewServer creates a new HTTP server. The Store carries both the
+// *MoomboxConfig pointer and the synchronising mutex; legacy callers can
+// still reach the raw mutex via CfgMu() during the migration (DECISIONS #8).
+func NewServer(store *config.Store, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -78,8 +80,9 @@ func NewServer(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, logger interface 
 	token := hex.EncodeToString(tokenBytes)
 
 	s := &Server{
-		cfg:           cfg,
-		cfgMu:         cfgMu,
+		configStore:   store,
+		cfg:           store.Config(),
+		cfgMu:         store.RWMutex(),
 		router:        r,
 		ws:            NewWebSocketHub(logger),
 		internalToken: token,
@@ -92,10 +95,10 @@ func NewServer(cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, logger interface 
 	// (audit reports/web.md S-22).
 	r.Use(chimiddleware.RequestID)
 	r.Use(RecoveryMiddleware(logger))
-	r.Use(CORSMiddleware(cfg, s.cfgMu))
+	r.Use(CORSMiddleware(store))
 	r.Use(SecurityHeaders)
-	r.Use(CSRFMiddleware(cfg, s.cfgMu, token))
-	r.Use(IPGateMiddleware(cfg, s.cfgMu))
+	r.Use(CSRFMiddleware(store, token))
+	r.Use(IPGateMiddleware(store))
 	r.Use(MaxBodySize(maxCompressBodySize)) // default body limit (import endpoint overrides to 500MB)
 	r.Use(CompressionMiddleware)
 
@@ -138,10 +141,11 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		// No auth required if not configured
-		s.cfgMu.RLock()
-		networkAccess := s.cfg.Network.NetworkAccess
-		passwordHash := s.cfg.Network.PasswordHash
-		s.cfgMu.RUnlock()
+		var networkAccess, passwordHash string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			networkAccess = c.Network.NetworkAccess
+			passwordHash = c.Network.PasswordHash
+		})
 		if !IsAuthRequired(networkAccess, passwordHash) {
 			next.ServeHTTP(w, r)
 			return
