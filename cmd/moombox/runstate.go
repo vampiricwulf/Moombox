@@ -126,6 +126,7 @@ type runState struct {
 	logSub              chan string
 	unsubWSJobUpdate    func()
 	unsubWSJobAdded     func()
+	unsubWSJobDeleted   func()
 	unsubWSTrimsChanged func()
 	unsubWSJobsChange   func()
 }

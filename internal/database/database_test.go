@@ -486,13 +486,11 @@ func TestOnJobsChangeSubscriber(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Seed two jobs BEFORE subscribing so AddJob's OnJobAdded-only
-	// dispatch (DECISIONS #21 consumer migration — AddJob no longer
-	// fires OnJobsChange) doesn't bait this test. We then exercise
-	// OnJobsChange via DeleteJob, which is one of the writers that
-	// still fires it.
-	db.AddJob(&Job{ID: "keep", VideoID: "k", URL: "u1", Status: StatusUpcoming})
-	db.AddJob(&Job{ID: "drop", VideoID: "d", URL: "u2", Status: StatusUpcoming})
+	// Seed a Finished job — BatchSetWatched only modifies Finished
+	// rows, and post-DECISIONS-#21 it's the only OnJobsChange writer
+	// left (AddJob/DeleteJob/AddTrim/DeleteTrim all migrated to
+	// targeted lifecycle events).
+	db.AddJob(&Job{ID: "watched_target", VideoID: "v", URL: "u", Status: StatusFinished})
 
 	var receivedJobs []*Job
 	var mu sync.Mutex
@@ -508,9 +506,9 @@ func TestOnJobsChangeSubscriber(t *testing.T) {
 	})
 	defer unsub()
 
-	// DeleteJob is one of the OnJobsChange writers that still fires
-	// the legacy full-list dispatch.
-	if err := db.DeleteJob("drop"); err != nil {
+	// BatchSetWatched is the only writer that still fires OnJobsChange
+	// post-DECISIONS-#21 consumer migration.
+	if err := db.BatchSetWatched([]string{"watched_target"}, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -522,7 +520,7 @@ func TestOnJobsChangeSubscriber(t *testing.T) {
 
 	mu.Lock()
 	if len(receivedJobs) != 1 {
-		t.Errorf("expected 1 job remaining in change notification, got %d", len(receivedJobs))
+		t.Errorf("expected 1 job in change notification, got %d", len(receivedJobs))
 	}
 	mu.Unlock()
 }
@@ -1151,12 +1149,13 @@ func TestSubscriberCanCallDatabaseFromCallback(t *testing.T) {
 	}
 }
 
-// TestJobsChangeSubscriberCanCallDatabaseFromCallback mirrors the above
-// for the OnJobsChange path (DeleteJob/AddTrim/DeleteTrim/BatchSetWatched
-// — AddJob no longer fires OnJobsChange post-DECISIONS-#21 consumer
-// migration). Same deadlock surface (snapshotJobsChange runs under
-// db.mu, dispatchJobsChange runs after Unlock); the test forces the
-// dispatch path via DeleteJob and waits on a timeout.
+// TestJobsChangeSubscriberCanCallDatabaseFromCallback mirrors the
+// OnJobUpdate sibling for the OnJobsChange path. Post-DECISIONS-#21
+// consumer migration, BatchSetWatched is the only OnJobsChange
+// writer; the test forces the dispatch path through it. Same
+// deadlock surface (snapshotJobsChange runs under db.mu,
+// dispatchJobsChange runs after Unlock); the assertion is that a
+// callback that calls back into Database doesn't hang.
 func TestJobsChangeSubscriberCanCallDatabaseFromCallback(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -1166,11 +1165,7 @@ func TestJobsChangeSubscriberCanCallDatabaseFromCallback(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Seed two jobs (AddJob doesn't fire OnJobsChange any more) so the
-	// DeleteJob below has both something to remove AND a residual row
-	// so dispatchJobsChange's empty-DB path doesn't kick in.
-	db.AddJob(&Job{ID: "callback_keep", VideoID: "k", URL: "u1", Status: StatusUpcoming})
-	db.AddJob(&Job{ID: "callback_drop", VideoID: "d", URL: "u2", Status: StatusUpcoming})
+	db.AddJob(&Job{ID: "cb_target", VideoID: "v", URL: "u", Status: StatusFinished})
 
 	callbackDone := make(chan struct{}, 1)
 	readBackOK := make(chan bool, 1)
@@ -1184,7 +1179,7 @@ func TestJobsChangeSubscriberCanCallDatabaseFromCallback(t *testing.T) {
 	defer unsub()
 
 	go func() {
-		db.DeleteJob("callback_drop")
+		db.BatchSetWatched([]string{"cb_target"}, true)
 	}()
 
 	select {

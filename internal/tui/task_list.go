@@ -197,6 +197,42 @@ func (m *TaskListModel) AddJob(job *database.Job) {
 	m.resetMarquee()
 }
 
+// RemoveJob drops the job with the given ID from the list and
+// rebuilds the virtual list. Used by the JobDeleted lifecycle
+// handler — the TUI removes the row surgically instead of
+// clearing + rebuilding from a fresh full-list snapshot. DECISIONS #21.
+//
+// No-ops on unknown IDs (a SetJobs snapshot may have already
+// excluded the row, or the user may delete via a TUI path that
+// doesn't go through the database event chain).
+func (m *TaskListModel) RemoveJob(jobID string) {
+	idx, ok := m.jobIndex[jobID]
+	if !ok || idx >= len(m.jobs) {
+		return
+	}
+	// Remember the previously-selected job (if any) so we can follow
+	// it after the rebuild — a removal that ISN'T the selected row
+	// should keep the selection on the same job.
+	var prevSelectedID string
+	if sel := m.SelectedJob(); sel != nil {
+		prevSelectedID = sel.ID
+	}
+
+	m.jobs = append(m.jobs[:idx], m.jobs[idx+1:]...)
+	m.rebuildJobIndex()
+	m.rebuildVirtualList()
+
+	if prevSelectedID != "" && prevSelectedID != jobID {
+		for i, item := range m.list.Items() {
+			if ti, ok := item.(taskItem); ok && ti.job != nil && ti.job.ID == prevSelectedID {
+				m.list.Select(i)
+				break
+			}
+		}
+	}
+	m.resetMarquee()
+}
+
 // UpdateJob replaces a single job by ID using the index map (O(1) lookup).
 // Returns true if the job was found and replaced.
 func (m *TaskListModel) UpdateJob(job *database.Job) bool {

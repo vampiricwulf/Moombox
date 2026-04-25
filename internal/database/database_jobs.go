@@ -245,16 +245,15 @@ func (db *Database) DeleteJob(id string) error {
 	}
 	rowsAffected, _ := result.RowsAffected()
 
-	jobs := db.snapshotJobsChange()
 	db.mu.Unlock()
-	// JobDeleted only fires when a row actually went away — DELETE on a
-	// missing ID is a no-op, so subscribers shouldn't get a ghost-removal
-	// event. The legacy OnJobsChange dispatch keeps its existing
-	// fire-on-every-call behaviour during the migration.
+	// Fires ONLY OnJobDeleted — the legacy OnJobsChange dispatch was
+	// dropped now that the WS broadcaster + TUI consume the targeted
+	// lifecycle event (DECISIONS #21 consumer migration). The DELETE
+	// on a missing ID stays silent (rowsAffected == 0): no event, no
+	// broadcast, no work.
 	if rowsAffected > 0 {
 		db.notifyJobDeleted(id)
 	}
-	db.dispatchJobsChange(jobs)
 	return nil
 }
 

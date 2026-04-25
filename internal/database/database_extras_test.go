@@ -874,18 +874,14 @@ func TestOnJobDeletedFires(t *testing.T) {
 	}
 }
 
-// TestOnJobDeletedFiresAlongsideOnJobsChange locks the migration
-// invariant: DeleteJob must dispatch BOTH the legacy full-list
-// OnJobsChange and the new targeted OnJobDeleted. Two jobs are
-// inserted so the post-delete DB still has a row — there's a
-// pre-existing quirk where snapshotJobsChange returns nil when the
-// DB is empty after the delete, suppressing OnJobsChange. That's
-// orthogonal to this commit; the migration-invariant check works
-// correctly in the common "delete leaves rows" case which is what
-// real deployments hit ~all the time anyway (you don't usually
-// arrive at "zero remaining jobs" — there's always a Finished
-// Archive row or two).
-func TestOnJobDeletedFiresAlongsideOnJobsChange(t *testing.T) {
+// TestOnJobDeletedFiresAndOnJobsChangeDoesNot locks the post-migration
+// behaviour: DeleteJob fires OnJobDeleted but no longer fires
+// OnJobsChange. The legacy full-list dispatch on delete was dropped
+// once the WS broadcaster + TUI consume the targeted lifecycle event
+// (DECISIONS #21 consumer migration). BatchSetWatched is the only
+// remaining OnJobsChange writer; tests targeting that path use it
+// directly.
+func TestOnJobDeletedFiresAndOnJobsChangeDoesNot(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -894,12 +890,12 @@ func TestOnJobDeletedFiresAlongsideOnJobsChange(t *testing.T) {
 	defer db.Close()
 
 	if _, err := db.AddJob(&Job{
-		ID: "dual_del_keep", VideoID: "v1", URL: "u1", Status: StatusUpcoming,
+		ID: "post_keep", VideoID: "v1", URL: "u1", Status: StatusUpcoming,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.AddJob(&Job{
-		ID: "dual_del_target", VideoID: "v2", URL: "u2", Status: StatusUpcoming,
+		ID: "post_target", VideoID: "v2", URL: "u2", Status: StatusUpcoming,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -912,32 +908,31 @@ func TestOnJobDeletedFiresAlongsideOnJobsChange(t *testing.T) {
 	uL := db.OnJobsChange(func(jobs []*Job) { listHits <- jobs })
 	defer uL()
 
-	if err := db.DeleteJob("dual_del_target"); err != nil {
+	if err := db.DeleteJob("post_target"); err != nil {
 		t.Fatal(err)
 	}
 
+	// OnJobDeleted must fire.
 	select {
 	case <-deletedHits:
 		// good
 	case <-time.After(2 * time.Second):
 		t.Fatal("OnJobDeleted did not fire")
 	}
+	// OnJobsChange must NOT fire — DeleteJob no longer dispatches it.
 	select {
 	case jobs := <-listHits:
-		// OnJobsChange runs in its own goroutine; assert the snapshot
-		// reflects the post-delete state (one job remaining).
-		if len(jobs) != 1 || jobs[0].ID != "dual_del_keep" {
-			t.Errorf("OnJobsChange snapshot: want [dual_del_keep], got %d jobs", len(jobs))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("OnJobsChange did not fire")
+		t.Errorf("OnJobsChange should NOT fire on DeleteJob post-migration; got %d jobs", len(jobs))
+	case <-time.After(200 * time.Millisecond):
+		// expected
 	}
 }
 
 // TestOnJobDeletedDoesNotFireOnMissingID guards the rowsAffected==0
-// branch: DeleteJob with a nonexistent ID is a SQL no-op, so no
-// targeted event must escape. (OnJobsChange still fires — that's
-// the existing legacy contract this commit doesn't alter.)
+// branch: DeleteJob with a nonexistent ID is a SQL no-op — no
+// targeted event must escape. Post-DECISIONS-#21, OnJobsChange also
+// no longer fires on DeleteJob, so the missing-ID case is silent
+// across both the legacy and new event paths.
 func TestOnJobDeletedDoesNotFireOnMissingID(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
@@ -1009,14 +1004,21 @@ func TestOnJobDeletedUnsubscribeStopsCallbacks(t *testing.T) {
 	}
 }
 
-// TestOnJobsChangeFiresWhenDeleteEmptiesDB regresses against a quirk
-// where snapshotJobsChange returned nil from getAllJobsUnlocked for an
-// empty DB after the last DELETE — and dispatchJobsChange's nil-check
-// then suppressed OnJobsChange entirely. Subscribers (TUI task list,
-// WS broadcaster) need to know the list is now empty so they can
-// clear their local state. The fix normalises the empty-DB nil to
-// []*Job{} so dispatchJobsChange fires with the empty list.
-func TestOnJobsChangeFiresWhenDeleteEmptiesDB(t *testing.T) {
+// TestEmptyDBSnapshotIsNonNil locks the empty-DB normalisation in
+// snapshotJobsChange: when a writer that fires OnJobsChange (today
+// just BatchSetWatched) leaves zero rows behind, the snapshot must
+// be the empty []*Job{} sentinel rather than nil so
+// dispatchJobsChange's nil-check doesn't suppress the dispatch
+// entirely. Pre-fix, a BatchSetWatched on an empty job set (or a
+// future writer that empties the table) would silently skip the
+// fan-out; subscribers needed the empty-list signal to clear
+// their local state.
+//
+// (Pre-DECISIONS-#21 this regression test exercised DeleteJob; that
+// writer no longer fires OnJobsChange, so the test exercises
+// snapshotJobsChange via BatchSetWatched-on-zero-rows instead. The
+// underlying invariant is unchanged.)
+func TestEmptyDBSnapshotIsNonNil(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -1024,27 +1026,29 @@ func TestOnJobsChangeFiresWhenDeleteEmptiesDB(t *testing.T) {
 	}
 	defer db.Close()
 
-	if _, err := db.AddJob(&Job{
-		ID: "only_job", VideoID: "v", URL: "u", Status: StatusUpcoming,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
 	listHits := make(chan []*Job, 1)
 	uL := db.OnJobsChange(func(jobs []*Job) { listHits <- jobs })
 	defer uL()
 
-	if err := db.DeleteJob("only_job"); err != nil {
+	// BatchSetWatched on an empty ID set is a no-op SQL-wise but still
+	// goes through snapshotJobsChange + dispatchJobsChange — except
+	// that the empty-IDs early return at the top of BatchSetWatched
+	// skips the dispatch. Use a non-existent ID instead so the
+	// transaction runs (matches zero rows) and dispatch fires.
+	if err := db.BatchSetWatched([]string{"nonexistent_id"}, true); err != nil {
 		t.Fatal(err)
 	}
 
 	select {
 	case jobs := <-listHits:
+		if jobs == nil {
+			t.Errorf("OnJobsChange snapshot must be non-nil when subscribers exist (got nil)")
+		}
 		if len(jobs) != 0 {
-			t.Errorf("OnJobsChange after empty: want 0 jobs, got %d", len(jobs))
+			t.Errorf("OnJobsChange snapshot: want 0 jobs (empty DB), got %d", len(jobs))
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("OnJobsChange did not fire when delete emptied the DB")
+		t.Fatal("OnJobsChange did not fire — snapshotJobsChange may have returned nil and suppressed dispatch")
 	}
 }
 

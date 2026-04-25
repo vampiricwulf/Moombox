@@ -350,6 +350,27 @@ func (s *runState) wireMonitorCallbacks() {
 		s.wsHub.BroadcastJobUpdate(job.ID, job)
 	})
 
+	// OnJobDeleted subscriber: DeleteJob no longer fires OnJobsChange
+	// (writer-side dispatch dropped per DECISIONS #21). Frontend's WS
+	// protocol doesn't have a singular "job_deleted" event yet, so we
+	// preserve the existing behaviour by re-broadcasting the full
+	// filtered list — same payload shape the frontend was getting
+	// from the legacy OnJobsChange path. Per-job log buffers are also
+	// pruned via the active-IDs set derived from the post-delete
+	// snapshot (the deleted ID drops out naturally). A future commit
+	// can swap the full rebroadcast for a targeted "job_deleted" frame
+	// once the frontend gains a handler for it.
+	s.unsubWSJobDeleted = s.db.OnJobDeleted(func(ev *database.JobDeleted) {
+		jobs := getAllJobsSafe(s.db)
+		activeIDs := make(map[string]struct{}, len(jobs))
+		for _, j := range jobs {
+			activeIDs[j.ID] = struct{}{}
+		}
+		s.db.PruneJobLogs(activeIDs)
+		s.log.PruneJobLogs(activeIDs)
+		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
+	})
+
 	s.unsubWSJobsChange = s.db.OnJobsChange(func(jobs []*database.Job) {
 		// Keep per-job log tracking in sync (matches TS knownJobIds update)
 		activeIDs := make(map[string]struct{}, len(jobs))

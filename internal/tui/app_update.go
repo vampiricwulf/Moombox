@@ -88,6 +88,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.jobUpdateCh = nil
 		case "jobAdded":
 			a.jobAddedCh = nil
+		case "jobDeleted":
+			a.jobDeletedCh = nil
 		case "jobTrimsChanged":
 			a.jobTrimsChangedCh = nil
 		case "jobsUpdate":
@@ -111,6 +113,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case JobAddedMsg:
 		a.handleJobAdded(msg.Added)
+		return a, a.listenForUpdates()
+
+	case JobDeletedMsg:
+		a.handleJobDeleted(msg.Deleted)
 		return a, a.listenForUpdates()
 
 	case TrimsChangedMsg:
@@ -642,6 +648,32 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 
 	// Update terminal title — adding a new job may change the
 	// active-stream count shown in the title.
+	a.updateTerminalTitle()
+}
+
+// handleJobDeleted applies a JobDeleted lifecycle event from the
+// database. DeleteJob no longer fires OnJobsChange post-DECISIONS-#21
+// migration, so the TUI removes the row surgically here instead of
+// rebuilding the whole task list from a fresh snapshot.
+//
+// Drops the per-job entries from progressStore + statusMap, removes
+// the row from taskList, and refreshes the detail panel if the
+// deleted job was selected (the SelectedJob() call returns the next
+// row that takeover-selection landed on after the removal — or nil
+// if the list is now empty).
+func (a *App) handleJobDeleted(ev *database.JobDeleted) {
+	if ev == nil || ev.JobID == "" {
+		return
+	}
+	a.progressStore.Delete(ev.JobID)
+	delete(a.statusMap, ev.JobID)
+	a.taskList.RemoveJob(ev.JobID)
+	a.statusBar.SetJobs(a.taskList.Jobs())
+	a.actionMenu.SetJobs(a.taskList.Jobs())
+	// Refresh detail panel: SelectedJob may have moved to a different
+	// row (or be nil if the list is empty). updateSelectedJob handles
+	// both cases.
+	a.updateSelectedJob()
 	a.updateTerminalTitle()
 }
 
