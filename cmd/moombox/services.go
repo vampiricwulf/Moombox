@@ -337,6 +337,20 @@ func (s *runState) initServices(logLevelOverride string) error {
 		}
 	}
 
+	// Wire active-job lookup so the periodic auto-cookie refresh can skip
+	// the headless-Chrome launch when nothing is actively pulling content
+	// (audit reports/cookies.md #23). Uses the cached GetJobStats query
+	// (jobStatsCacheTTL ≈ 5s) so the per-tick check stays cheap. A nil-stats
+	// fallback returns true (refresh-on-error) so a transient DB hiccup
+	// doesn't silently drop refreshes.
+	autoCookieSvc.HasActiveJobs = func() bool {
+		stats, err := s.db.GetJobStats()
+		if err != nil || stats == nil {
+			return true
+		}
+		return stats.ActiveCount > 0
+	}
+
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func() bool {
 		var autoEnabled bool

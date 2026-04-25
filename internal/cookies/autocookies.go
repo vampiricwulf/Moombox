@@ -79,6 +79,14 @@ type AutoCookieService struct {
 	// Called from FinishSetup after successful auth verification.
 	PersistPlatforms func(youtubeVerified, twitchVerified bool)
 
+	// HasActiveJobs reports whether the database has any Live or Downloading
+	// jobs. Optional. Used to skip the periodic refresh's headless-Chrome
+	// launch (1-5s, GPU init, memory) when nothing's actively pulling
+	// authenticated content. nil leaves the legacy always-fire behaviour;
+	// when set, periodic refresh skips ticks where the callback returns
+	// false. Audit reports/cookies.md #23.
+	HasActiveJobs func() bool
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -503,8 +511,21 @@ func (s *AutoCookieService) Stop() {
 	s.cleanup()
 }
 
+// shouldSkipPeriodicRefresh reports whether the next periodic-refresh tick
+// should be skipped because no active jobs exist. When HasActiveJobs is nil
+// the service refreshes on every tick (legacy behaviour). Audit
+// reports/cookies.md #23.
+func (s *AutoCookieService) shouldSkipPeriodicRefresh() bool {
+	if s.HasActiveJobs == nil {
+		return false
+	}
+	return !s.HasActiveJobs()
+}
+
 // StartPeriodicRefresh starts a background goroutine that periodically
-// refreshes cookies via headless browser visit.
+// refreshes cookies via headless browser visit. When HasActiveJobs is set,
+// ticks where it returns false are skipped to avoid spawning a headless
+// browser when nothing needs authenticated YouTube/Twitch access.
 func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval time.Duration) {
 	s.logger.Info("auto-cookie periodic refresh enabled", "interval", interval.String())
 	go func() {
@@ -521,6 +542,10 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if s.shouldSkipPeriodicRefresh() {
+					s.logger.Debug("periodic auto-cookie refresh skipped — no active jobs")
+					continue
+				}
 				s.logger.Debug("periodic auto-cookie refresh triggered")
 				refreshCtx, cancel := context.WithTimeout(ctx, refreshOverallBudget)
 				ok, err := s.RefreshCookies(refreshCtx)
