@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 )
 
 // Store wraps *MoomboxConfig with a RWMutex (embedded or externally shared)
@@ -28,16 +29,22 @@ import (
 //
 // Zero-value Store is not usable — construct via NewStore / NewStoreWithMutex.
 type Store struct {
-	mu       *sync.RWMutex
-	cfg      *MoomboxConfig
-	savePath string
+	mu  *sync.RWMutex
+	cfg *MoomboxConfig
+	// savePath is held in an atomic.Pointer so SavePath() / Update can read
+	// it lock-free. Route writers call SavePath() while holding s.mu.Lock
+	// (copy-on-write rollback pattern); a separate RLock here would have
+	// deadlocked against the held write lock.
+	savePath atomic.Pointer[string]
 }
 
 // NewStore returns a Store wrapping cfg with its own embedded RWMutex.
 // savePath may be empty to skip the auto-save step in Update; that's
 // useful during startup before a final config path is negotiated.
 func NewStore(cfg *MoomboxConfig, savePath string) *Store {
-	return &Store{mu: &sync.RWMutex{}, cfg: cfg, savePath: savePath}
+	s := &Store{mu: &sync.RWMutex{}, cfg: cfg}
+	s.savePath.Store(&savePath)
+	return s
 }
 
 // NewStoreWithMutex returns a Store sharing an external RWMutex. Use this
@@ -46,7 +53,9 @@ func NewStore(cfg *MoomboxConfig, savePath string) *Store {
 // that, new-API and legacy callers would race. Once all legacy callers
 // have migrated, NewStore is preferred.
 func NewStoreWithMutex(cfg *MoomboxConfig, savePath string, mu *sync.RWMutex) *Store {
-	return &Store{mu: mu, cfg: cfg, savePath: savePath}
+	s := &Store{mu: mu, cfg: cfg}
+	s.savePath.Store(&savePath)
+	return s
 }
 
 // Read runs fn with the config held under a read lock. Multiple concurrent
@@ -84,33 +93,36 @@ func (s *Store) Update(fn func(*MoomboxConfig)) error {
 		return errors.Join(errs...)
 	}
 	Normalize(s.cfg)
-	if s.savePath == "" {
+	path := s.SavePath()
+	if path == "" {
 		return nil
 	}
-	return Save(s.cfg, s.savePath)
+	return Save(s.cfg, path)
 }
 
 // SetSavePath installs or overrides the path used by Update for auto-save.
 // Useful when the path is negotiated after NewStore (first-run wizard,
-// test harnesses).
+// test harnesses). Stored via atomic.Pointer so SavePath() can read it
+// without grabbing s.mu — route writers call SavePath() while already
+// holding s.mu.Lock for their copy-on-write pattern, and an internal
+// RLock would have deadlocked against the held write lock.
 func (s *Store) SetSavePath(path string) {
-	s.mu.Lock()
-	s.savePath = path
-	s.mu.Unlock()
+	s.savePath.Store(&path)
 }
 
 // SavePath returns the path Update / SaveLocked write to. Empty string
 // means "no save configured" (e.g., during first-run setup before a path
-// has been negotiated). Used by route handlers that call config.Save
-// directly on a working copy to keep the copy-on-write rollback pattern
-// while still routing through the Store's lifecycle.
+// has been negotiated). Lock-free via atomic load so it's safe to call
+// while holding s.mu in either direction; in practice route writers
+// invoke this from inside their PUT /api/config critical section.
 //
 // DEPRECATED: kept for the gradual migration from external save callbacks
 // to Store. Future write APIs (UpdateE) will absorb these direct callers.
 func (s *Store) SavePath() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.savePath
+	if p := s.savePath.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // SaveLocked persists the current config to savePath. The caller MUST
@@ -129,10 +141,11 @@ func (s *Store) SavePath() string {
 // mutations or build out an UpdateE-style transactional API for handlers
 // that need both validation aborts and save-failure rollback.
 func (s *Store) SaveLocked() error {
-	if s.savePath == "" {
+	path := s.SavePath()
+	if path == "" {
 		return nil
 	}
-	return Save(s.cfg, s.savePath)
+	return Save(s.cfg, path)
 }
 
 // RWMutex returns the underlying read/write mutex for legacy call sites
