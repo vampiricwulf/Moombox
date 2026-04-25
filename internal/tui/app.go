@@ -25,7 +25,10 @@ const (
 
 // Message types for async updates.
 type (
-	JobUpdateMsg   struct{ Job *database.Job }
+	// JobUpdateMsg carries a single-job update, including the list of
+	// columns that were actually written. Subscribers gate expensive
+	// re-renders on Change.Changes (DECISIONS #21 / audit tui.md F20).
+	JobUpdateMsg   struct{ Change *database.JobChange }
 	JobsUpdateMsg  struct{ Jobs []*database.Job }
 	LogBatchMsg struct{ Lines []string }
 	CheckTimersMsg struct {
@@ -225,7 +228,7 @@ type App struct {
 	logBuffer []string
 
 	// Channels for async updates
-	jobUpdateCh      <-chan *database.Job
+	jobUpdateCh      <-chan *database.JobChange
 	jobsUpdateCh     <-chan []*database.Job
 	logCh            <-chan string
 	checkTimersCh    <-chan CheckTimersMsg
@@ -416,7 +419,7 @@ func (a *App) SetupWizHashPassword(fn func(string) (string, error)) {
 
 // SetUpdateChannels configures the async update channels.
 func (a *App) SetUpdateChannels(
-	jobUpdate <-chan *database.Job,
+	jobUpdate <-chan *database.JobChange,
 	jobsUpdate <-chan []*database.Job,
 	logCh <-chan string,
 	checkTimers <-chan CheckTimersMsg,
@@ -491,11 +494,11 @@ func (a *App) listenForUpdates() tea.Cmd {
 	}
 	return func() tea.Msg {
 		select {
-		case job, ok := <-a.jobUpdateCh:
+		case ev, ok := <-a.jobUpdateCh:
 			if !ok {
 				return channelClosedMsg{Name: "jobUpdate"}
 			}
-			return JobUpdateMsg{Job: job}
+			return JobUpdateMsg{Change: ev}
 		case jobs, ok := <-a.jobsUpdateCh:
 			if !ok {
 				return channelClosedMsg{Name: "jobsUpdate"}

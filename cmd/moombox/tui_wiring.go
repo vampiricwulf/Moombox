@@ -331,7 +331,7 @@ func (s *runState) runTUI() {
 	}
 
 	// Create async update channels for TUI
-	jobUpdateCh := make(chan *database.Job, 100)
+	jobUpdateCh := make(chan *database.JobChange, 100)
 	jobsUpdateCh := make(chan []*database.Job, 10)
 	logCh := make(chan string, 200)
 	checkTimersCh := make(chan tui.CheckTimersMsg, 10)
@@ -350,10 +350,13 @@ func (s *runState) runTUI() {
 		}
 	}
 
-	// Forward DB events to TUI channels
-	unsubTUIJobUpdate := s.db.OnJobUpdate(func(job *database.Job) {
+	// Forward DB events to TUI channels. OnJobChange (not OnJobUpdate)
+	// gives us the changed-columns list, which the TUI uses to gate
+	// expensive list/detail rebuilds (see hasDisplayChange in
+	// app_update.go). DECISIONS #21 / audit tui.md F20.
+	unsubTUIJobUpdate := s.db.OnJobChange(func(ev *database.JobChange) {
 		select {
-		case jobUpdateCh <- job:
+		case jobUpdateCh <- ev:
 		default:
 			tuiDroppedJobs.Add(1)
 		}

@@ -102,7 +102,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.listenForUpdates()
 
 	case JobUpdateMsg:
-		a.handleJobUpdate(msg.Job)
+		a.handleJobUpdate(msg.Change)
 		return a, a.listenForUpdates()
 
 	case JobsUpdateMsg:
@@ -515,7 +515,41 @@ func (a *App) setFeedbackWithDuration(msg string, d time.Duration) {
 	a.feedbackTimer = time.Now().Add(d)
 }
 
-func (a *App) handleJobUpdate(job *database.Job) {
+// displayColumns is the set of database column names whose changes require
+// rebuilding the task-list row and (if selected) the detail panel.
+// Mirrors the previous 12-field compare in handleJobUpdate but driven by
+// JobChange.Changes from UpdateJobFields — the database tells us exactly
+// which columns were written, so we no longer need to fetch the previous
+// snapshot and compare field-by-field. Audit reports/tui.md F20.
+var displayColumns = map[string]struct{}{
+	"status":            {},
+	"title":             {},
+	"channel_name":      {},
+	"thumbnail_url":     {},
+	"description":       {},
+	"stream_start_time": {},
+	"stream_end_time":   {},
+	"error":             {},
+	"output_file":       {},
+	"filename":          {},
+	"is_vod":            {},
+	"chat_status":       {},
+}
+
+// hasDisplayChange reports whether any column in changes warrants a
+// task-list / detail-panel rebuild.
+func hasDisplayChange(changes []string) bool {
+	for _, col := range changes {
+		if _, ok := displayColumns[col]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) handleJobUpdate(ev *database.JobChange) {
+	job := ev.Job
+
 	// Always update progress store (zero-cost)
 	a.progressStore.Set(job.ID, &ProgressData{
 		Progress:          job.Progress,
@@ -530,22 +564,10 @@ func (a *App) handleJobUpdate(job *database.Job) {
 		ChatStatus:        job.ChatStatus,
 	})
 
-	// Only rebuild task list and detail panel when display-relevant fields
-	// have changed. Progress-only updates (speed, ETA, segments) are handled
-	// by progressStore and don't need expensive list rebuilds.
-	if prev := a.taskList.GetJobByID(job.ID); prev == nil ||
-		prev.Status != job.Status ||
-		prev.Title != job.Title ||
-		prev.ChannelName != job.ChannelName ||
-		prev.ThumbnailURL != job.ThumbnailURL ||
-		prev.Description != job.Description ||
-		prev.StreamStartTime != job.StreamStartTime ||
-		prev.StreamEndTime != job.StreamEndTime ||
-		prev.Error != job.Error ||
-		prev.OutputFile != job.OutputFile ||
-		prev.Filename != job.Filename ||
-		prev.IsVod != job.IsVod ||
-		prev.ChatStatus != job.ChatStatus {
+	// Rebuild task-list row + detail panel only when a display-relevant
+	// column was actually written. Progress-only updates (~10/sec during
+	// downloads) flow through progressStore and don't need list rebuilds.
+	if hasDisplayChange(ev.Changes) {
 		a.taskList.UpdateJob(job)
 		if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
 			a.details.SetJob(job)

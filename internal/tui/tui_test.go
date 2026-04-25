@@ -228,3 +228,60 @@ func TestIsCompletedStatus(t *testing.T) {
 		}
 	}
 }
+
+// --- hasDisplayChange (DECISIONS #21 / audit tui.md F20) ---
+
+func TestHasDisplayChange(t *testing.T) {
+	tests := []struct {
+		name    string
+		changes []string
+		want    bool
+	}{
+		{"empty changes", nil, false},
+		{"empty slice", []string{}, false},
+		{"progress-only update (10/sec path)", []string{"progress", "percent", "speed", "eta", "last_video_seq", "last_audio_seq"}, false},
+		{"silent column slipped through (shouldn't reach here, defensive)", []string{"resume_position", "chat_offset"}, false},
+		{"status transition", []string{"status"}, true},
+		{"title rename", []string{"title"}, true},
+		{"channel name rename", []string{"channel_name"}, true},
+		{"thumbnail update", []string{"thumbnail_url"}, true},
+		{"description update", []string{"description"}, true},
+		{"stream start/end timestamps", []string{"stream_start_time", "stream_end_time"}, true},
+		{"error message attached", []string{"error"}, true},
+		{"output file finalized", []string{"output_file", "filename"}, true},
+		{"is_vod flag flipped", []string{"is_vod"}, true},
+		{"chat status changed", []string{"chat_status"}, true},
+		{"mixed: progress + status (status wins)", []string{"progress", "status", "eta"}, true},
+		{"mixed: progress + error (error wins)", []string{"percent", "error"}, true},
+		{"unknown column ignored", []string{"some_unknown_column"}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasDisplayChange(tc.changes)
+			if got != tc.want {
+				t.Errorf("hasDisplayChange(%v) = %v, want %v", tc.changes, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDisplayColumnsCoverage guards against drift between handleJobUpdate's
+// pre-migration 12-field compare and the column-set check that replaced it.
+// If a future audit recommends skipping a column (or adding one), update
+// both this test and the displayColumns map together.
+func TestDisplayColumnsCoverage(t *testing.T) {
+	want := []string{
+		"status", "title", "channel_name", "thumbnail_url", "description",
+		"stream_start_time", "stream_end_time", "error",
+		"output_file", "filename", "is_vod", "chat_status",
+	}
+	if len(displayColumns) != len(want) {
+		t.Fatalf("displayColumns size = %d, want %d (drift from handleJobUpdate's pre-migration field set)", len(displayColumns), len(want))
+	}
+	for _, col := range want {
+		if _, ok := displayColumns[col]; !ok {
+			t.Errorf("displayColumns missing %q", col)
+		}
+	}
+}
