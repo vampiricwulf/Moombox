@@ -3,6 +3,7 @@ package web
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHashPassword(t *testing.T) {
@@ -217,6 +218,80 @@ func TestValidateSession(t *testing.T) {
 				t.Errorf("ValidateSession(%q) = %v, expected %v", token, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestValidateSessionAndSlideRenewsAfterHalfTTL covers the audit S-3
+// sliding-window renewal: a session that's past half the TTL but
+// before the absolute expiry should be reported as valid AND
+// signalled as "slid" so the caller can re-issue the cookie. Earlier
+// validations (within the first half of TTL) skip the slide so the
+// hot path stays on the cheap RLock-only check.
+func TestValidateSessionAndSlideRenewsAfterHalfTTL(t *testing.T) {
+	as := NewAuthService()
+	token, err := as.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh session: should validate without sliding.
+	valid, slid := as.ValidateSessionAndSlide(token)
+	if !valid {
+		t.Fatal("fresh session should validate")
+	}
+	if slid {
+		t.Error("fresh session should NOT slide (within first half of TTL)")
+	}
+
+	// Force the session's createdAt back so it's past the slide threshold
+	// but not yet expired. Requires a helper because sessionEntry is
+	// package-private.
+	as.mu.Lock()
+	e := as.sessions[token]
+	e.createdAt = time.Now().Add(-(sessionSlideThreshold + time.Hour))
+	as.sessions[token] = e
+	as.mu.Unlock()
+
+	valid, slid = as.ValidateSessionAndSlide(token)
+	if !valid {
+		t.Error("aged-but-not-expired session should validate")
+	}
+	if !slid {
+		t.Error("aged session should be slid")
+	}
+
+	// After sliding, createdAt should be ~now; subsequent validation
+	// should NOT slide again.
+	valid, slid = as.ValidateSessionAndSlide(token)
+	if !valid || slid {
+		t.Errorf("just-slid session: valid=%v slid=%v, want valid=true slid=false", valid, slid)
+	}
+}
+
+// TestValidateSessionAndSlideExpiredFails verifies the hard-expiry
+// boundary: a session past sessionTTL (even with sliding enabled)
+// should fail validation. Sliding only renews ACTIVE sessions; an
+// abandoned token still expires.
+func TestValidateSessionAndSlideExpiredFails(t *testing.T) {
+	as := NewAuthService()
+	token, err := as.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force createdAt past the absolute TTL.
+	as.mu.Lock()
+	e := as.sessions[token]
+	e.createdAt = time.Now().Add(-(sessionTTL + time.Hour))
+	as.sessions[token] = e
+	as.mu.Unlock()
+
+	valid, slid := as.ValidateSessionAndSlide(token)
+	if valid {
+		t.Error("expired session should not validate")
+	}
+	if slid {
+		t.Error("expired session should not slide")
 	}
 }
 

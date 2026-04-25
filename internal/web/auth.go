@@ -15,11 +15,18 @@ import (
 const (
 	sessionTTL     = 24 * time.Hour
 	sessionCleanup = 1 * time.Hour
-	scryptN        = 16384
-	scryptR        = 8
-	scryptP        = 1
-	scryptKeyLen   = 64
-	saltLen        = 16
+	// sessionSlideThreshold is the elapsed-fraction of sessionTTL past
+	// which ValidateSession refreshes the session's createdAt timestamp
+	// (sliding-window renewal). Audit reports/web.md S-3. Set to half
+	// the TTL so an actively-used session — one validation per visit —
+	// gets renewed before the absolute expiry hits, but inactive
+	// sessions still expire on schedule.
+	sessionSlideThreshold = sessionTTL / 2
+	scryptN               = 16384
+	scryptR               = 8
+	scryptP               = 1
+	scryptKeyLen          = 64
+	saltLen               = 16
 )
 
 // authLogger captures the minimal logging surface used for the session-
@@ -166,9 +173,26 @@ func (as *AuthService) CreateSession() (string, error) {
 }
 
 // ValidateSession checks if a session token is valid and not expired.
+// Equivalent to ValidateSessionAndSlide but discards the slide signal
+// for callers (e.g. internal cleanup, tests) that don't issue cookies.
 func (as *AuthService) ValidateSession(token string) bool {
+	valid, _ := as.ValidateSessionAndSlide(token)
+	return valid
+}
+
+// ValidateSessionAndSlide checks the session token, refreshes its
+// createdAt when more than half the TTL has elapsed (sliding-window
+// renewal), and returns whether the validation succeeded plus whether
+// the session was slid so the caller can re-issue the cookie with a
+// fresh Max-Age. Audit reports/web.md S-3.
+//
+// The "slide only when half the TTL has elapsed" trigger keeps the
+// hot path on the cheaper RLock most of the time — fresh validations
+// don't incur the write — and bounds the per-session createdAt churn
+// to at most a few times per day.
+func (as *AuthService) ValidateSessionAndSlide(token string) (valid, slid bool) {
 	if token == "" {
-		return false
+		return false, false
 	}
 
 	as.mu.RLock()
@@ -176,10 +200,34 @@ func (as *AuthService) ValidateSession(token string) bool {
 	as.mu.RUnlock()
 
 	if !ok {
-		return false
+		return false, false
 	}
 
-	return time.Since(entry.createdAt) < sessionTTL
+	elapsed := time.Since(entry.createdAt)
+	if elapsed >= sessionTTL {
+		return false, false
+	}
+
+	if elapsed < sessionSlideThreshold {
+		return true, false
+	}
+
+	// Past the slide threshold — refresh createdAt so an active user
+	// stays logged in indefinitely. Re-check the entry under the
+	// writer lock so we don't clobber a concurrent invalidation.
+	now := time.Now()
+	as.mu.Lock()
+	if e, stillOk := as.sessions[token]; stillOk {
+		e.createdAt = now
+		as.sessions[token] = e
+		as.mu.Unlock()
+		return true, true
+	}
+	as.mu.Unlock()
+	// Session was invalidated between the RLock and the Lock — race
+	// loser. The first check still saw it valid, so honour that for
+	// this request; future requests get the invalidation.
+	return true, false
 }
 
 // InvalidateSession removes a single session.

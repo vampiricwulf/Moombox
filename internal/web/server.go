@@ -156,7 +156,15 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		// Check session cookie
 		if s.auth != nil {
 			if cookie, err := r.Cookie("moombox_session"); err == nil {
-				if s.auth.ValidateSession(cookie.Value) {
+				if valid, slid := s.auth.ValidateSessionAndSlide(cookie.Value); valid {
+					// Sliding-window renewal: when the server-side TTL
+					// was just refreshed past the half-elapsed mark,
+					// re-issue the cookie with a fresh Max-Age so the
+					// browser doesn't drop it before the server would.
+					// Audit reports/web.md S-3.
+					if slid {
+						SetSessionCookie(w, r, cookie.Value)
+					}
 					next.ServeHTTP(w, r)
 					return
 				}
