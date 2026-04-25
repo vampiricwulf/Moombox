@@ -1,6 +1,75 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.23` with cookies / web / cmd-moombox final-pass fixes.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.24` with the full ConfigStore migration arc + cmd-moombox file split + chat / worker / cipher / bgutils / web / config / monitor fixes.
 
-This build bundles Sprint #1 + Sprint #2 work plus eighteen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus nineteen batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 19 (test.25)
+
+The largest single batch in the test.N series — 38 commits closing the full **ConfigStore migration arc** (DECISIONS #8 + #9, eight waves), the **cmd-moombox file split** (SP-1..SP-7), the **chat audit drain**, eight **worker correctness fixes**, **cipher T2** (embedded-JS extraction), and a final small-fix sweep across cipher / bgutils / config / web / monitor.
+
+**ConfigStore arc — DECISIONS #8 + #9 — eight waves complete**
+
+Replaces the external-cfgMu pattern with a unified `config.Store` that owns both the `*MoomboxConfig` pointer and the synchronising mutex. After the migration, every package reads cfg through `store.Read` or writes through `store.Update` / `store.RWMutex()`; `runState.cfgMu` is gone, `NewStoreWithMutex` collapses to `NewStore`. Closes config Finding 31, monitor Critical Issues #1 and #5, and a handful of TUI / cmd-moombox cfgMu race risks.
+
+- **Wave 0** — `config.Store` + `Validate` / `Normalize` split (DECISIONS #9). Validate reports errors without mutating; Normalize applies defaults; Save now Validates first.
+- **Wave 1** — small helpers: `routes.UpdateDiskStatus`, `filterJobsByAge`, `resolveOutputDir`.
+- **Wave 2** — TUI read sites.
+- **Wave 3** — web middleware (`CORSMiddleware`, `CSRFMiddleware`, `IPGateMiddleware`) + `web.Server` constructor.
+- **Wave 4a/4b/4c** — all eight `internal/web/routes` constructors (auth, channel, config, jobs, import, setup, ffmpeg, update). Reads convert to `store.Read`; writes-with-rollback (channel CRUD, password change) keep the manual lock pattern via `store.RWMutex().Lock()` + `store.SaveLocked()` so save-failure rollback semantics are preserved.
+- **Wave 5** — `worker.DownloadWorker` + `StreamProcessor`. `SetCfgMu(mu)` becomes `SetConfigStore(store)`. Nullable `configStore` field with early-init `cfg`-fallback preserves the construct-then-set lifecycle.
+- **Wave 6** — TUI settings + settings_security + app_update fully on configStore. `cfgMu` field dropped from App and SettingsModel; `App.SetCfgMu` removed.
+- **Wave 7** — cmd/moombox + `Server.CfgMu()` removal. `runState.cfgMu` field dropped; `NewStoreWithMutex` switched to `NewStore` (Store now owns its own embedded mutex).
+- **Wave 8** — monitor package (Feed / Decapi / Twitch). All cfg reads go through `store.Read`; `getYouTubeChannels` / `getTwitchChannels` deep-copy the channel slice under RLock so the polling loop iterates without holding the lock across network calls.
+
+Two transitional Store accessors added during the migration — `SaveLocked()` and `SavePath()` — used by route writers + TUI big-block that need caller-managed rollback. They go away once a transactional `UpdateE` API lands.
+
+**Re-probe cooldown — monitor #5**
+
+New `ProbeCooldown` cache shared between FeedMonitor and DecapiMonitor. `ProcessYouTubeVideo` short-circuits before invoking `ProbeVideo` if the video is within the cooldown window (default 30 min). Records on every probe attempt regardless of success/failure so transient failures still respect the gate.
+
+Concrete impact: 20 channels × 15 items × 6 cycles/hour = 1800 probes/hour previously; capped at ~2 probes/video/hour now. ~10× fewer YouTube Innertube POSTs for typical workloads. Bounded at 2,000 entries with FIFO eviction.
+
+**cmd-moombox file split — SP-1..SP-7**
+
+`cmd/moombox/main.go` (1,909 lines) split into seven files of focused concerns. After the split, main.go is 454 lines (-76%) — purely the init + run + shutdown driver.
+
+- **SP-1** `helpers.go` — `waitForKeypress`
+- **SP-2** `services.go` — sixteen service-construction sections + `runState` struct
+- **SP-3** `routes_wiring.go` — chi route registration (`s.wireRoutes()`)
+- **SP-4** `tui_wiring.go` — TUI app construction + callbacks (`s.runTUI()`)
+- **SP-5** `ws_wiring.go` — WebSocket handler + InitialState provider
+- **SP-6** `monitor_callbacks.go` — monitor `OnVideoFound`, cookie `OnRecoveryNeeded`, DB `OnJobUpdate` / `OnJobsChange` wiring
+- **SP-7** `shutdown.go` — orderly shutdown sequence
+
+**Chat audit drain**
+
+- **Cross-package extracts**: `utils.WriteChatFileAtomic` + `AppendChatMessages` + `UpdateChatFileHeaderFields` (chat D1); `utils.OrderedDedup[K]` (chat D2); `utils.ResumeStore[T]` + `ErrNoResume` (chat D3). Used by both YouTube chat and Twitch IRC chat — drops ~500 LOC of near-identical code.
+- **chat R2** — stale-continuation retry cap reduced 30 → 12.
+- **chat E5** — `parseMessageRuns` now preserves URL / bold / italic runs instead of dropping them.
+- **chat T5** — HTTP 401 fast-fails via new `ErrAuthRequired` sentinel.
+- **chat Q1 / Q2** — `runChatLoop` and `parseResponse` split into phase helpers (~200 + ~155 lines each).
+
+**Worker audit work**
+
+- **F3** — `SetOnProgress` on Twitch chat downloaders is now method-wrapper-based to avoid the race where a goroutine read `OnProgress` mid-assignment.
+- **F11** — cipher invalidation now fires on post-bytes 403 bursts (≥ `postBytes403CipherThreshold`) so cipher rotations mid-download don't burn cycles in `ErrQualityLost` retries.
+- **F35 + F36** — `selectAtHeightIdx[T]` / `selectNextLowerIdx[T]` generics collapse the four duplicated height-based stream selectors.
+- **F38** — `notifications.FieldBuilder` for the repetitive `{Name, Value, Inline}` append pattern (10+ sites).
+- **F54** — `worker.Connectivity` interface; `DownloadWorkerDeps.Conn` replaces the split `isOnline` + `onConnectivityChange` fields.
+- **F55** — `completeStreamTransition` helper for the common end-of-stream finalization pattern.
+- **F58** — `CreateTrim` + `CreateTrimWithProgress` merged into a single signature.
+- **F27 partial** — three shared quality-split patterns extracted (`awaitDownloadOrQualityChange`, `launchBackgroundSegmentMux`, `sendQualitySplitNotification`) used by both YouTube and Twitch orchestrators.
+
+**Cipher / bgutils**
+
+- **cipher T2** — 442 lines of inline JS extracted to `internal/cipher/js/*.js` files via `go:embed`. Readability win + JS can now be linted independently.
+- **cipher Q3** — hardcoded `https://rr1---sn-a.googlevideo.com/videoplayback?n=` URL collapsed into a single `_videoplaybackBase` var in `n_binding_template.js`.
+- **bgutils goja Q1** — `BotGuardClient.Shutdown` calls `vm.ClearInterrupt` before any goja operation. Previously a Snapshot timeout left the VM Interrupt'd; the subsequent `shutdownFn` invocation panicked, masked only by the defer-recover at the top of `Shutdown` (silently dropping the BotGuard cleanup-callback).
+
+**Web / config / cookies**
+
+- **web S-7** — `/api/cookies/auto-refresh` + `/api/cookies/auto-setup/{start,finish,cancel}` now wear the apiRL rate limiter so a buggy or hostile client can't trigger a flurry of headless-browser spawns.
+- **web S-15** — `import_routes.sanitizeForFilename` collapsed into `utils.SanitizeForFilename` (the local copy was a strictly weaker subset — no UTF-8 rune-aware truncation, no Windows-reserved-name guard, no whitespace collapsing).
+- **config 17** — `LogMaxFileSize` / `LogMaxFiles` Validate bounds aligned with the PUT /api/config Zod schema (1024..1073741824 / 1..100). A hand-edited TOML can no longer slip past Validate with a value the web UI would have rejected.
 
 ### Manual batch 18 (test.24)
 
