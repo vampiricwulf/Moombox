@@ -336,6 +336,20 @@ func (s *runState) wireMonitorCallbacks() {
 		s.wsHub.BroadcastJobUpdate(job.ID, job)
 	})
 
+	// OnTrimsChanged subscriber: AddTrim/DeleteTrim no longer fire
+	// OnJobsChange (writer-side dispatch dropped per DECISIONS #21).
+	// Re-fetch the affected job (so its Trims field reflects the
+	// current SQLite state) and broadcast it through BroadcastJobUpdate
+	// — frontend's existing job_update handler replaces the in-memory
+	// job and re-renders, picking up the new trim list naturally.
+	s.unsubWSTrimsChanged = s.db.OnTrimsChanged(func(ev *database.TrimsChanged) {
+		job, err := s.db.GetJob(ev.JobID)
+		if err != nil || job == nil {
+			return
+		}
+		s.wsHub.BroadcastJobUpdate(job.ID, job)
+	})
+
 	s.unsubWSJobsChange = s.db.OnJobsChange(func(jobs []*database.Job) {
 		// Keep per-job log tracking in sync (matches TS knownJobIds update)
 		activeIDs := make(map[string]struct{}, len(jobs))

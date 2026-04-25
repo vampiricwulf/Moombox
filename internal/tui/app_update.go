@@ -88,6 +88,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.jobUpdateCh = nil
 		case "jobAdded":
 			a.jobAddedCh = nil
+		case "jobTrimsChanged":
+			a.jobTrimsChangedCh = nil
 		case "jobsUpdate":
 			a.jobsUpdateCh = nil
 		case "log":
@@ -109,6 +111,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case JobAddedMsg:
 		a.handleJobAdded(msg.Added)
+		return a, a.listenForUpdates()
+
+	case TrimsChangedMsg:
+		a.handleTrimsChanged(msg.Job)
 		return a, a.listenForUpdates()
 
 	case JobsUpdateMsg:
@@ -637,6 +643,26 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 	// Update terminal title — adding a new job may change the
 	// active-stream count shown in the title.
 	a.updateTerminalTitle()
+}
+
+// handleTrimsChanged applies a TrimsChanged lifecycle event from the
+// database. The forwarder in tui_wiring already re-fetched the job so
+// its Trims field is current; we just slot the refreshed pointer into
+// the task list (UpdateJob is idempotent on no-display-change rows
+// but updates the cached *Job so future selections render the new
+// trim list) and refresh the detail panel if the job is selected.
+//
+// AddTrim/DeleteTrim no longer fire OnJobsChange post-DECISIONS-#21
+// migration; this handler is the only path that surfaces trim
+// mutations to the TUI.
+func (a *App) handleTrimsChanged(job *database.Job) {
+	if job == nil {
+		return
+	}
+	a.taskList.UpdateJob(job)
+	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
+		a.details.SetJob(job)
+	}
 }
 
 func (a *App) updateSelectedJob() {

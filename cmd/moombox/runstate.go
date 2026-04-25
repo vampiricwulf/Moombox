@@ -123,8 +123,9 @@ type runState struct {
 
 	// --- Subscription handles (assigned by monitor_callbacks wiring; needed
 	// by shutdown to unsubscribe cleanly before the database closes) ---
-	logSub            chan string
-	unsubWSJobUpdate  func()
-	unsubWSJobAdded   func()
-	unsubWSJobsChange func()
+	logSub              chan string
+	unsubWSJobUpdate    func()
+	unsubWSJobAdded     func()
+	unsubWSTrimsChanged func()
+	unsubWSJobsChange   func()
 }

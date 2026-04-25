@@ -33,6 +33,12 @@ type (
 	// lifecycle event — the TUI handler appends instead of clearing +
 	// rebuilding the whole task list (the legacy OnJobsChange path).
 	JobAddedMsg    struct{ Added *database.JobAdded }
+	// TrimsChangedMsg carries a refreshed Job snapshot whose Trims
+	// field reflects the post-AddTrim/DeleteTrim state. The forwarder
+	// in tui_wiring re-fetches via db.GetJob so the handler can apply
+	// the new trim list to the cached row + (if selected) the detail
+	// panel. DECISIONS #21 lifecycle event.
+	TrimsChangedMsg struct{ Job *database.Job }
 	JobsUpdateMsg  struct{ Jobs []*database.Job }
 	LogBatchMsg struct{ Lines []string }
 	CheckTimersMsg struct {
@@ -232,9 +238,10 @@ type App struct {
 	logBuffer []string
 
 	// Channels for async updates
-	jobUpdateCh      <-chan *database.JobChange
-	jobAddedCh       <-chan *database.JobAdded
-	jobsUpdateCh     <-chan []*database.Job
+	jobUpdateCh        <-chan *database.JobChange
+	jobAddedCh         <-chan *database.JobAdded
+	jobTrimsChangedCh  <-chan *database.Job
+	jobsUpdateCh       <-chan []*database.Job
 	logCh            <-chan string
 	checkTimersCh    <-chan CheckTimersMsg
 	cookieStatusCh   <-chan CookieStatusMsg
@@ -426,6 +433,7 @@ func (a *App) SetupWizHashPassword(fn func(string) (string, error)) {
 func (a *App) SetUpdateChannels(
 	jobUpdate <-chan *database.JobChange,
 	jobAdded <-chan *database.JobAdded,
+	jobTrimsChanged <-chan *database.Job,
 	jobsUpdate <-chan []*database.Job,
 	logCh <-chan string,
 	checkTimers <-chan CheckTimersMsg,
@@ -435,6 +443,7 @@ func (a *App) SetUpdateChannels(
 ) {
 	a.jobUpdateCh = jobUpdate
 	a.jobAddedCh = jobAdded
+	a.jobTrimsChangedCh = jobTrimsChanged
 	a.jobsUpdateCh = jobsUpdate
 	a.logCh = logCh
 	a.checkTimersCh = checkTimers
@@ -494,7 +503,8 @@ func (a *App) marqueeTick() tea.Cmd {
 
 func (a *App) listenForUpdates() tea.Cmd {
 	// If all channels are nil, don't spawn a blocking goroutine
-	if a.jobUpdateCh == nil && a.jobAddedCh == nil && a.jobsUpdateCh == nil && a.logCh == nil &&
+	if a.jobUpdateCh == nil && a.jobAddedCh == nil && a.jobTrimsChangedCh == nil &&
+		a.jobsUpdateCh == nil && a.logCh == nil &&
 		a.checkTimersCh == nil && a.cookieStatusCh == nil && a.diskStatusCh == nil &&
 		a.updateStatusCh == nil {
 		return nil
@@ -511,6 +521,11 @@ func (a *App) listenForUpdates() tea.Cmd {
 				return channelClosedMsg{Name: "jobAdded"}
 			}
 			return JobAddedMsg{Added: ev}
+		case job, ok := <-a.jobTrimsChangedCh:
+			if !ok {
+				return channelClosedMsg{Name: "jobTrimsChanged"}
+			}
+			return TrimsChangedMsg{Job: job}
 		case jobs, ok := <-a.jobsUpdateCh:
 			if !ok {
 				return channelClosedMsg{Name: "jobsUpdate"}

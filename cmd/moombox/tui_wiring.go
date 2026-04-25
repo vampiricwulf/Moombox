@@ -333,12 +333,13 @@ func (s *runState) runTUI() {
 	// Create async update channels for TUI
 	jobUpdateCh := make(chan *database.JobChange, 100)
 	jobAddedCh := make(chan *database.JobAdded, 100)
+	jobTrimsChangedCh := make(chan *database.Job, 50)
 	jobsUpdateCh := make(chan []*database.Job, 10)
 	logCh := make(chan string, 200)
 	checkTimersCh := make(chan tui.CheckTimersMsg, 10)
 	cookieStatusCh := make(chan tui.CookieStatusMsg, 5)
 
-	app.SetUpdateChannels(jobUpdateCh, jobAddedCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, s.tuiDiskStatusCh, s.tuiUpdateStatusCh)
+	app.SetUpdateChannels(jobUpdateCh, jobAddedCh, jobTrimsChangedCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, s.tuiDiskStatusCh, s.tuiUpdateStatusCh)
 
 	// Dropped-message counters — track silent drops on TUI channels
 	var tuiDroppedJobs, tuiDroppedLogs atomic.Int64
@@ -370,6 +371,21 @@ func (s *runState) runTUI() {
 	unsubTUIJobAdded := s.db.OnJobAdded(func(ev *database.JobAdded) {
 		select {
 		case jobAddedCh <- ev:
+		default:
+			tuiDroppedJobs.Add(1)
+		}
+	})
+	// OnTrimsChanged subscriber: AddTrim/DeleteTrim no longer fire
+	// OnJobsChange (writer-side dispatch dropped). Re-fetch the
+	// affected job here (so its Trims field is current) and forward
+	// the refreshed pointer to the TUI handler. DECISIONS #21.
+	unsubTUITrimsChanged := s.db.OnTrimsChanged(func(ev *database.TrimsChanged) {
+		job, err := s.db.GetJob(ev.JobID)
+		if err != nil || job == nil {
+			return
+		}
+		select {
+		case jobTrimsChangedCh <- job:
 		default:
 			tuiDroppedJobs.Add(1)
 		}
@@ -517,6 +533,7 @@ func (s *runState) runTUI() {
 	s.log.Unsubscribe(tuiLogSub)
 	unsubTUIJobUpdate()
 	unsubTUIJobAdded()
+	unsubTUITrimsChanged()
 	unsubTUIJobsChange()
 	unsubConnTUI()
 

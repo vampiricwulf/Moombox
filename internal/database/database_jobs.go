@@ -322,14 +322,13 @@ func (db *Database) AddTrim(trim *TrimRecord) error {
 		return err
 	}
 
-	jobs := db.snapshotJobsChange()
 	db.mu.Unlock()
-	// TrimsChanged fires alongside the legacy OnJobsChange dispatch
-	// during the DECISIONS #21 lifecycle-event migration. Carries the
-	// parent job's ID so subscribers can re-fetch trims (or invalidate
-	// a cached detail panel) without scanning the full job list.
+	// Fires ONLY OnTrimsChanged — the legacy OnJobsChange dispatch was
+	// dropped now that the WS broadcaster + TUI consume the targeted
+	// lifecycle event (DECISIONS #21 consumer migration). DeleteJob and
+	// BatchSetWatched still fire OnJobsChange; their migrations land
+	// separately.
 	db.notifyTrimsChanged(trim.JobID)
-	db.dispatchJobsChange(jobs)
 	return nil
 }
 
@@ -339,14 +338,12 @@ func (db *Database) DeleteTrim(trimID string) error {
 
 	// Look up the parent job_id BEFORE the DELETE so notifyTrimsChanged
 	// can carry it. ErrNoRows means the trim never existed — silent
-	// success preserves the legacy DeleteTrim contract (no event
-	// fired, OnJobsChange still dispatches via the snapshot path).
+	// success: no event fired, no broadcast, the caller's "delete
+	// this trim" intent is satisfied by the SQL no-op.
 	var jobID string
 	err := db.db.QueryRowContext(db.getCtx(), "SELECT job_id FROM trims WHERE id = ?", trimID).Scan(&jobID)
 	if err == sql.ErrNoRows {
-		jobs := db.snapshotJobsChange()
 		db.mu.Unlock()
-		db.dispatchJobsChange(jobs)
 		return nil
 	}
 	if err != nil {
@@ -359,10 +356,10 @@ func (db *Database) DeleteTrim(trimID string) error {
 		return err
 	}
 
-	jobs := db.snapshotJobsChange()
 	db.mu.Unlock()
+	// Same as AddTrim — fires ONLY OnTrimsChanged; the legacy
+	// OnJobsChange dispatch was dropped per DECISIONS #21.
 	db.notifyTrimsChanged(jobID)
-	db.dispatchJobsChange(jobs)
 	return nil
 }
 

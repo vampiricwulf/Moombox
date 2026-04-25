@@ -82,6 +82,9 @@ func (s *runState) shutdown() bool {
 	if s.unsubWSJobAdded != nil {
 		s.unsubWSJobAdded()
 	}
+	if s.unsubWSTrimsChanged != nil {
+		s.unsubWSTrimsChanged()
+	}
 	if s.unsubWSJobsChange != nil {
 		s.unsubWSJobsChange()
 	}
