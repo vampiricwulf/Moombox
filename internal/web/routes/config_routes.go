@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/go-chi/chi/v5"
 
@@ -481,9 +480,14 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 	}
 }
 
-// ConfigRoutes registers config-related API routes.
-// cfgMu protects concurrent reads/writes to the shared cfg struct.
-func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, saveConfig func(*config.MoomboxConfig) error, callbacks *ConfigRoutesCallbacks) {
+// ConfigRoutes registers config-related API routes. The Store carries the
+// cfg pointer + lock; PUT /api/config keeps the copy-on-write pattern so
+// validation or save failures never leak partial mutations into the live
+// config seen by other readers.
+func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCallbacks) {
+	mu := store.RWMutex()
+	cfg := store.Config()
+
 	// GET /api/config
 	r.Get("/api/config", func(rw http.ResponseWriter, req *http.Request) {
 		// Snapshot the config under the read lock, then release before
@@ -493,10 +497,12 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, 
 		// (PUT /config, setup/complete, password change) until the
 		// client finished receiving. PasswordHash has json:"-" so it's
 		// omitted from marshaling regardless.
-		cfgMu.RLock()
-		cfgCopy := *cfg
-		hasPassword := cfg.Network.PasswordHash != ""
-		cfgMu.RUnlock()
+		var cfgCopy config.MoomboxConfig
+		var hasPassword bool
+		store.Read(func(c *config.MoomboxConfig) {
+			cfgCopy = *c
+			hasPassword = c.Network.PasswordHash != ""
+		})
 
 		resp := struct {
 			*config.MoomboxConfig
@@ -527,13 +533,13 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, 
 			return
 		}
 
-		cfgMu.Lock()
+		mu.Lock()
 
 		// Prevent enabling external access without a password
 		if net, ok := updates["network"].(map[string]any); ok {
 			if v, ok := net["network_access"].(string); ok && v == "external" {
 				if cfg.Network.PasswordHash == "" {
-					cfgMu.Unlock()
+					mu.Unlock()
 					jsonError(rw, "A password must be set before enabling external access. Go to Settings \u2192 Security.", http.StatusBadRequest)
 					return
 				}
@@ -545,17 +551,17 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, 
 		oldNumParallel := cfg.Downloader.NumParallelDownloads
 		oldHideAge := cfg.Monitors.HideFinishedAgeDays.Value
 
-		// Work on a copy so the live config isn't modified if save fails
+		// Work on a copy so the live config isn't modified if save fails.
+		// SaveLocked persists s.cfg, so we need to commit-then-save in a
+		// way that lets us roll back on save failure. Save the standalone
+		// copy directly via config.Save, then assign back only on success.
 		cfgCopy := *cfg
 		applyConfigUpdates(&cfgCopy, updates)
 
-		// Persist to disk
-		if saveConfig != nil {
-			if err := saveConfig(&cfgCopy); err != nil {
-				cfgMu.Unlock()
-				jsonError(rw, "failed to save config", http.StatusInternalServerError)
-				return
-			}
+		if err := config.Save(&cfgCopy, store.SavePath()); err != nil {
+			mu.Unlock()
+			jsonError(rw, "failed to save config", http.StatusInternalServerError)
+			return
 		}
 
 		// Save succeeded — apply to live config
@@ -566,7 +572,7 @@ func ConfigRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, 
 		newNumParallel := cfg.Downloader.NumParallelDownloads
 		newHideAge := cfg.Monitors.HideFinishedAgeDays.Value
 
-		cfgMu.Unlock()
+		mu.Unlock()
 
 		// Hot-reload runtime-reloadable settings (outside the lock to avoid deadlocks in callbacks)
 		if callbacks != nil {

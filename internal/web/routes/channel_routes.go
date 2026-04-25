@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/go-chi/chi/v5"
 
@@ -13,9 +12,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
-// ChannelRoutes registers channel-related API routes.
-// cfgMu protects concurrent reads/writes to the shared cfg struct.
-func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, saveConfig func(*config.MoomboxConfig) error, onChannelChange func()) {
+// ChannelRoutes registers channel-related API routes. The Store carries
+// the cfg pointer + lock; SaveLocked persists to disk under the same lock
+// so a rollback can restore the in-memory channel slice if the save fails.
+func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func()) {
+	mu := store.RWMutex()
+	cfg := store.Config()
+
 	// POST /api/config/channels
 	r.Post("/api/config/channels", func(rw http.ResponseWriter, req *http.Request) {
 		var channel config.ChannelConfig
@@ -44,7 +47,7 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 		}
 
 		// Upsert
-		cfgMu.Lock()
+		mu.Lock()
 		// Audit Q-12: use slices.Clone for the rollback snapshot so the
 		// pattern stays correct if ChannelConfig grows pointer fields.
 		oldChannels := slices.Clone(cfg.Channels)
@@ -60,16 +63,14 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 			cfg.Channels = append(cfg.Channels, channel)
 		}
 
-		// Persist to disk
-		if saveConfig != nil {
-			if err := saveConfig(cfg); err != nil {
-				cfg.Channels = oldChannels
-				cfgMu.Unlock()
-				jsonError(rw, "failed to save config", http.StatusInternalServerError)
-				return
-			}
+		// Persist to disk; restore on save failure so in-memory and disk stay in sync.
+		if err := store.SaveLocked(); err != nil {
+			cfg.Channels = oldChannels
+			mu.Unlock()
+			jsonError(rw, "failed to save config", http.StatusInternalServerError)
+			return
 		}
-		cfgMu.Unlock()
+		mu.Unlock()
 
 		if onChannelChange != nil {
 			onChannelChange()
@@ -82,7 +83,7 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 	r.Delete("/api/config/channels/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		channelID := chi.URLParam(req, "id")
 
-		cfgMu.Lock()
+		mu.Lock()
 		oldChannels := slices.Clone(cfg.Channels)
 		found := false
 		for i, ch := range cfg.Channels {
@@ -94,21 +95,19 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 		}
 
 		if !found {
-			cfgMu.Unlock()
+			mu.Unlock()
 			jsonError(rw, "channel not found", http.StatusNotFound)
 			return
 		}
 
-		// Persist to disk
-		if saveConfig != nil {
-			if err := saveConfig(cfg); err != nil {
-				cfg.Channels = oldChannels
-				cfgMu.Unlock()
-				jsonError(rw, "failed to save config", http.StatusInternalServerError)
-				return
-			}
+		// Persist to disk; restore on save failure so in-memory and disk stay in sync.
+		if err := store.SaveLocked(); err != nil {
+			cfg.Channels = oldChannels
+			mu.Unlock()
+			jsonError(rw, "failed to save config", http.StatusInternalServerError)
+			return
 		}
-		cfgMu.Unlock()
+		mu.Unlock()
 
 		if onChannelChange != nil {
 			onChannelChange()
@@ -127,10 +126,10 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 			return
 		}
 
-		cfgMu.Lock()
+		mu.Lock()
 
 		if len(body.IDs) != len(cfg.Channels) {
-			cfgMu.Unlock()
+			mu.Unlock()
 			jsonError(rw, "ids count must match channels count", http.StatusBadRequest)
 			return
 		}
@@ -139,7 +138,7 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 		seen := make(map[string]bool, len(body.IDs))
 		for _, id := range body.IDs {
 			if seen[id] {
-				cfgMu.Unlock()
+				mu.Unlock()
 				jsonError(rw, "duplicate channel ID: "+id, http.StatusBadRequest)
 				return
 			}
@@ -157,7 +156,7 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 		for _, id := range body.IDs {
 			ch, ok := lookup[id]
 			if !ok {
-				cfgMu.Unlock()
+				mu.Unlock()
 				jsonError(rw, "unknown channel ID: "+id, http.StatusBadRequest)
 				return
 			}
@@ -167,15 +166,13 @@ func ChannelRoutes(r chi.Router, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex,
 		oldChannels := cfg.Channels
 		cfg.Channels = reordered
 
-		if saveConfig != nil {
-			if err := saveConfig(cfg); err != nil {
-				cfg.Channels = oldChannels
-				cfgMu.Unlock()
-				jsonError(rw, "failed to save config", http.StatusInternalServerError)
-				return
-			}
+		if err := store.SaveLocked(); err != nil {
+			cfg.Channels = oldChannels
+			mu.Unlock()
+			jsonError(rw, "failed to save config", http.StatusInternalServerError)
+			return
 		}
-		cfgMu.Unlock()
+		mu.Unlock()
 
 		if onChannelChange != nil {
 			onChannelChange()

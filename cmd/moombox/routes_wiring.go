@@ -58,9 +58,7 @@ func (s *runState) wireRoutes() func() {
 		GetNextDecapiCheck: s.decapiMon.GetNextCheckAt,
 		GetNextTwitchCheck: s.twitchMon.GetNextCheckAt,
 	})
-	routes.ConfigRoutes(s.r, s.cfg, s.webServer.CfgMu(), func(c *config.MoomboxConfig) error {
-		return config.Save(c, s.configPath)
-	}, &routes.ConfigRoutesCallbacks{
+	routes.ConfigRoutes(s.r, s.configStore, &routes.ConfigRoutesCallbacks{
 		OnLogLevelChange: func(level string) {
 			s.log.SetLevel(level)
 		},
@@ -74,9 +72,7 @@ func (s *runState) wireRoutes() func() {
 		},
 		OnChannelChange: s.kickMonitors,
 	})
-	routes.ChannelRoutes(s.r, s.cfg, s.webServer.CfgMu(), func(c *config.MoomboxConfig) error {
-		return config.Save(c, s.configPath)
-	}, s.kickMonitors)
+	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors)
 	routes.FileRoutes(s.r, &routes.FileRoutesDeps{
 		DB:     s.db,
 		Cfg:    s.cfg,
@@ -141,17 +137,13 @@ func (s *runState) wireRoutes() func() {
 		},
 	}, s.webServer.CfgMu())
 	authDeps := &routes.AuthRoutesDeps{
-		Cfg:        s.cfg,
 		Auth:       s.authSvc,
 		DB:         s.db,
 		LoginRL:    s.loginRL,
 		PasswordRL: s.passwordRL,
-		SaveConfig: func(c *config.MoomboxConfig) error {
-			return config.Save(c, s.configPath)
-		},
-		Logger: s.log,
+		Logger:     s.log,
 	}
-	routes.AuthRoutes(s.r, authDeps, s.webServer.CfgMu())
+	routes.AuthRoutes(s.r, authDeps, s.configStore)
 	routes.ClientTokenRoutes(s.r, authDeps)
 	routes.WatchRoutes(s.r, s.db)
 

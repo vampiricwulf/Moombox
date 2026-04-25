@@ -190,3 +190,42 @@ func TestStoreRWMutexLegacyAccess(t *testing.T) {
 		t.Errorf("legacy access: want %d, got %d", Defaults().Network.Port, port)
 	}
 }
+
+func TestStoreSaveLockedWritesToDisk(t *testing.T) {
+	// Caller-locked save is the migration bridge for write-with-rollback
+	// route handlers. The caller holds the write lock, mutates the config,
+	// calls SaveLocked, and rolls back the in-memory mutation if SaveLocked
+	// returns an error — preserving the cfgMu+saveConfig transactional
+	// pattern while routing through the Store's lock + savePath.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	cfg := Defaults()
+	s := NewStore(cfg, path)
+
+	s.RWMutex().Lock()
+	cfg.Network.Port = 8765
+	err := s.SaveLocked()
+	s.RWMutex().Unlock()
+	if err != nil {
+		t.Fatalf("SaveLocked: %v", err)
+	}
+
+	reloaded, err := loadFromFile(path)
+	if err != nil {
+		t.Fatalf("loadFromFile: %v", err)
+	}
+	if reloaded.Network.Port != 8765 {
+		t.Errorf("reloaded Port: want 8765, got %d", reloaded.Network.Port)
+	}
+}
+
+func TestStoreSaveLockedNoOpOnEmptyPath(t *testing.T) {
+	cfg := Defaults()
+	s := NewStore(cfg, "") // no save path
+
+	s.RWMutex().Lock()
+	defer s.RWMutex().Unlock()
+	if err := s.SaveLocked(); err != nil {
+		t.Errorf("SaveLocked with empty savePath should be a no-op, got %v", err)
+	}
+}

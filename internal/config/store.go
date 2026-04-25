@@ -99,6 +99,42 @@ func (s *Store) SetSavePath(path string) {
 	s.mu.Unlock()
 }
 
+// SavePath returns the path Update / SaveLocked write to. Empty string
+// means "no save configured" (e.g., during first-run setup before a path
+// has been negotiated). Used by route handlers that call config.Save
+// directly on a working copy to keep the copy-on-write rollback pattern
+// while still routing through the Store's lifecycle.
+//
+// DEPRECATED: kept for the gradual migration from external save callbacks
+// to Store. Future write APIs (UpdateE) will absorb these direct callers.
+func (s *Store) SavePath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.savePath
+}
+
+// SaveLocked persists the current config to savePath. The caller MUST
+// already hold the write lock (s.RWMutex().Lock()) — this method does NOT
+// acquire it. Returns nil immediately if savePath is empty (e.g., during
+// first-run setup before a path has been negotiated).
+//
+// Used by routes/TUI handlers that mutate the config and need the
+// snapshot-mutate-save-rollback pattern: after mutating cfg under the lock
+// they call SaveLocked, and if it returns an error they restore their
+// snapshot before releasing the lock so the in-memory state stays in sync
+// with disk.
+//
+// DEPRECATED: kept only for the gradual migration from external cfgMu +
+// saveConfig callbacks to Store. New callers should use Update for simple
+// mutations or build out an UpdateE-style transactional API for handlers
+// that need both validation aborts and save-failure rollback.
+func (s *Store) SaveLocked() error {
+	if s.savePath == "" {
+		return nil
+	}
+	return Save(s.cfg, s.savePath)
+}
+
 // RWMutex returns the underlying read/write mutex for legacy call sites
 // that still do manual RLock()/Lock() around direct *MoomboxConfig access.
 // New code should use Read/Update instead.

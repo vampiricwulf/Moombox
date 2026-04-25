@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -19,30 +18,38 @@ import (
 
 // AuthRoutesDeps holds dependencies for auth routes.
 type AuthRoutesDeps struct {
-	Cfg        *config.MoomboxConfig
 	Auth       *web.AuthService
 	DB         *database.Database
 	LoginRL    *web.RateLimiter // 5 attempts/60s
 	PasswordRL *web.RateLimiter // 3 attempts/60s
-	SaveConfig func(*config.MoomboxConfig) error
 	Logger     interface {
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
 	}
 }
 
-// AuthRoutes registers authentication endpoints.
-// cfgMu protects concurrent reads/writes to the shared cfg struct.
-func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, cfgMu *sync.RWMutex) {
+// AuthRoutes registers authentication endpoints. The Store carries both
+// the read-mostly *config.MoomboxConfig used for password-hash / network
+// access checks and the lock that the set-password / remove-password
+// handlers grab to atomically verify-and-replace the hash.
+func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
+	// Capture once: pointer stays stable for the lifetime of the Store.
+	// store.RWMutex() / store.Config() are the deprecated migration
+	// accessors — they go away once the write sites move to a future
+	// transactional Update API (DECISIONS #8 follow-up).
+	mu := store.RWMutex()
+	cfg := store.Config()
+
 	// GET /api/auth/status - public, returns auth state
 	r.Get("/api/auth/status", func(rw http.ResponseWriter, req *http.Request) {
 		sessionToken := getSessionToken(req)
 		authenticated := deps.Auth.ValidateSession(sessionToken)
 
-		cfgMu.RLock()
-		networkAccess := deps.Cfg.Network.NetworkAccess
-		passwordHash := deps.Cfg.Network.PasswordHash
-		cfgMu.RUnlock()
+		var networkAccess, passwordHash string
+		store.Read(func(c *config.MoomboxConfig) {
+			networkAccess = c.Network.NetworkAccess
+			passwordHash = c.Network.PasswordHash
+		})
 
 		jsonResponse(rw, map[string]any{
 			"authRequired":  web.IsAuthRequired(networkAccess, passwordHash),
@@ -70,9 +77,10 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, cfgMu *sync.RWMutex) {
 			return
 		}
 
-		cfgMu.RLock()
-		passwordHash := deps.Cfg.Network.PasswordHash
-		cfgMu.RUnlock()
+		var passwordHash string
+		store.Read(func(c *config.MoomboxConfig) {
+			passwordHash = c.Network.PasswordHash
+		})
 
 		if passwordHash == "" {
 			jsonError(rw, "No password is set", http.StatusBadRequest)
@@ -126,9 +134,10 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, cfgMu *sync.RWMutex) {
 						LastIP:      web.ExtractIP(req),
 					}
 					if err := deps.DB.AddClientToken(ct); err == nil {
-						cfgMu.RLock()
-						ttlDays := deps.Cfg.Network.ClientTokenTTLDays
-						cfgMu.RUnlock()
+						var ttlDays int
+						store.Read(func(c *config.MoomboxConfig) {
+							ttlDays = c.Network.ClientTokenTTLDays
+						})
 						setClientCookie(rw, req, rawToken, ttlDays)
 					}
 				}
@@ -202,26 +211,25 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, cfgMu *sync.RWMutex) {
 		}
 
 		// Verify current password and write new hash under the same lock
-		// to prevent TOCTOU (hash could change between read and write)
-		cfgMu.Lock()
-		oldHash := deps.Cfg.Network.PasswordHash
+		// to prevent TOCTOU (hash could change between read and write).
+		// Rollback on save failure keeps in-memory cfg in sync with disk.
+		mu.Lock()
+		oldHash := cfg.Network.PasswordHash
 		if oldHash != "" {
 			if !deps.Auth.VerifyPassword(body.CurrentPassword, oldHash) {
-				cfgMu.Unlock()
+				mu.Unlock()
 				jsonError(rw, "Current password is incorrect", http.StatusUnauthorized)
 				return
 			}
 		}
-		deps.Cfg.Network.PasswordHash = hash
-		if deps.SaveConfig != nil {
-			if err := deps.SaveConfig(deps.Cfg); err != nil {
-				deps.Cfg.Network.PasswordHash = oldHash
-				cfgMu.Unlock()
-				jsonError(rw, "failed to save config", http.StatusInternalServerError)
-				return
-			}
+		cfg.Network.PasswordHash = hash
+		if err := store.SaveLocked(); err != nil {
+			cfg.Network.PasswordHash = oldHash
+			mu.Unlock()
+			jsonError(rw, "failed to save config", http.StatusInternalServerError)
+			return
 		}
-		cfgMu.Unlock()
+		mu.Unlock()
 
 		// Invalidate other sessions (keep current if authenticated)
 		if isAuthenticated && token != "" {
@@ -271,34 +279,33 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, cfgMu *sync.RWMutex) {
 			return
 		}
 
-		// Verify and remove under the same lock to prevent TOCTOU
-		cfgMu.Lock()
-		oldHash := deps.Cfg.Network.PasswordHash
-		oldAccess := deps.Cfg.Network.NetworkAccess
+		// Verify and remove under the same lock to prevent TOCTOU.
+		// Rollback on save failure keeps in-memory cfg in sync with disk.
+		mu.Lock()
+		oldHash := cfg.Network.PasswordHash
+		oldAccess := cfg.Network.NetworkAccess
 
 		if oldHash == "" {
-			cfgMu.Unlock()
+			mu.Unlock()
 			jsonError(rw, "No password is set", http.StatusBadRequest)
 			return
 		}
 
 		if !deps.Auth.VerifyPassword(body.CurrentPassword, oldHash) {
-			cfgMu.Unlock()
+			mu.Unlock()
 			jsonError(rw, "Current password is incorrect", http.StatusUnauthorized)
 			return
 		}
-		deps.Cfg.Network.PasswordHash = ""
-		deps.Cfg.Network.NetworkAccess = "localhost" // Reset to safe default
-		if deps.SaveConfig != nil {
-			if err := deps.SaveConfig(deps.Cfg); err != nil {
-				deps.Cfg.Network.PasswordHash = oldHash
-				deps.Cfg.Network.NetworkAccess = oldAccess
-				cfgMu.Unlock()
-				jsonError(rw, "failed to save config", http.StatusInternalServerError)
-				return
-			}
+		cfg.Network.PasswordHash = ""
+		cfg.Network.NetworkAccess = "localhost" // Reset to safe default
+		if err := store.SaveLocked(); err != nil {
+			cfg.Network.PasswordHash = oldHash
+			cfg.Network.NetworkAccess = oldAccess
+			mu.Unlock()
+			jsonError(rw, "failed to save config", http.StatusInternalServerError)
+			return
 		}
-		cfgMu.Unlock()
+		mu.Unlock()
 
 		deps.Auth.InvalidateAllSessions()
 		if deps.DB != nil {
