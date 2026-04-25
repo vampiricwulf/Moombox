@@ -267,6 +267,14 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	if err := os.MkdirAll(s.profileDir, 0o755); err != nil {
 		return fmt.Errorf("create profile dir: %w", err)
 	}
+	// Tighten the dir's ACL so only the current user can read its
+	// contents (cookies.sqlite, browsing history, login state). Non-
+	// Windows hosts get a no-op; Windows shells out to icacls. A
+	// failed tightening doesn't fail setup — log and continue.
+	// Audit reports/cookies.md #25.
+	if err := applyUserOnlyDACL(s.profileDir); err != nil {
+		s.logger.Warn("could not restrict profile dir to current user", "path", s.profileDir, "err", err)
+	}
 
 	s.mu.Lock()
 	s.setupBrowser = browser
