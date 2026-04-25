@@ -237,14 +237,22 @@ func (db *Database) BatchSetWatched(jobIDs []string, watched bool) error {
 func (db *Database) DeleteJob(id string) error {
 	db.mu.Lock()
 
-	_, err := db.db.ExecContext(db.getCtx(), "DELETE FROM jobs WHERE id = ?", id)
+	result, err := db.db.ExecContext(db.getCtx(), "DELETE FROM jobs WHERE id = ?", id)
 	if err != nil {
 		db.mu.Unlock()
 		return err
 	}
+	rowsAffected, _ := result.RowsAffected()
 
 	jobs := db.snapshotJobsChange()
 	db.mu.Unlock()
+	// JobDeleted only fires when a row actually went away — DELETE on a
+	// missing ID is a no-op, so subscribers shouldn't get a ghost-removal
+	// event. The legacy OnJobsChange dispatch keeps its existing
+	// fire-on-every-call behaviour during the migration.
+	if rowsAffected > 0 {
+		db.notifyJobDeleted(id)
+	}
 	db.dispatchJobsChange(jobs)
 	return nil
 }

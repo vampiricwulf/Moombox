@@ -101,6 +101,7 @@ type Database struct {
 	onJobUpdate  []jobUpdateSub
 	onJobChange  []jobChangeSub
 	onJobAdded   []jobAddedSub
+	onJobDeleted []jobDeletedSub
 	onJobsChange []jobsChangeSub
 	nextSubID    uint64
 	subMu        sync.RWMutex

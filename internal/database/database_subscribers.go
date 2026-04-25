@@ -32,6 +32,21 @@ type JobAdded struct {
 	Job *Job
 }
 
+// JobDeleted is the event payload delivered to OnJobDeleted subscribers
+// when DeleteJob successfully removes a row. Carries the deleted job's
+// ID — the row is gone by the time subscribers run, so the post-delete
+// Job snapshot would be empty. Subscribers that need richer context
+// (e.g. "what platform was this?") should fetch and cache the Job
+// before calling DeleteJob, or wait for the planned Job-pointer
+// payload variant if a future consumer needs it.
+//
+// Third event type in the DECISIONS #21 lifecycle-event set, paired with
+// DeleteJob. Coexists with OnJobsChange during migration on the same
+// terms as JobAdded.
+type JobDeleted struct {
+	JobID string
+}
+
 // jobUpdateSub pairs a subscriber ID with its callback function.
 type jobUpdateSub struct {
 	id uint64
@@ -48,6 +63,12 @@ type jobChangeSub struct {
 type jobAddedSub struct {
 	id uint64
 	fn func(*JobAdded)
+}
+
+// jobDeletedSub pairs a subscriber ID with its JobDeleted callback.
+type jobDeletedSub struct {
+	id uint64
+	fn func(*JobDeleted)
 }
 
 // jobsChangeSub pairs a subscriber ID with its callback function.
@@ -94,6 +115,17 @@ func shrinkJobChangeSubs(s []jobChangeSub) []jobChangeSub {
 func shrinkJobAddedSubs(s []jobAddedSub) []jobAddedSub {
 	if cap(s) > 4*len(s) {
 		shrunk := make([]jobAddedSub, len(s))
+		copy(shrunk, s)
+		return shrunk
+	}
+	return s
+}
+
+// shrinkJobDeletedSubs is the jobDeletedSub counterpart for the lifecycle
+// JobDeleted subscribers added for DECISIONS #21.
+func shrinkJobDeletedSubs(s []jobDeletedSub) []jobDeletedSub {
+	if cap(s) > 4*len(s) {
+		shrunk := make([]jobDeletedSub, len(s))
 		copy(shrunk, s)
 		return shrunk
 	}
@@ -174,6 +206,37 @@ func (db *Database) OnJobAdded(fn func(*JobAdded)) func() {
 			if sub.id == id {
 				db.onJobAdded = append(db.onJobAdded[:i], db.onJobAdded[i+1:]...)
 				db.onJobAdded = shrinkJobAddedSubs(db.onJobAdded)
+				break
+			}
+		}
+	}
+}
+
+// OnJobDeleted registers a callback for job-deletion lifecycle events.
+// Fires once per successful DeleteJob (does NOT fire when the DELETE
+// matched zero rows — the ID didn't exist, so there's nothing to
+// notify about). Returns an unsubscribe function that removes the
+// callback.
+//
+// Coexists with OnJobsChange during the DECISIONS #21 migration —
+// DeleteJob currently fires both so consumers can pick the granularity
+// that fits. Subscribers that only need to remove an entry from a local
+// map by ID should prefer OnJobDeleted; those maintaining a sorted
+// full-list view stay on OnJobsChange until further lifecycle events
+// (TrimsChanged) ship.
+func (db *Database) OnJobDeleted(fn func(*JobDeleted)) func() {
+	db.subMu.Lock()
+	defer db.subMu.Unlock()
+	id := db.nextSubID
+	db.nextSubID++
+	db.onJobDeleted = append(db.onJobDeleted, jobDeletedSub{id: id, fn: fn})
+	return func() {
+		db.subMu.Lock()
+		defer db.subMu.Unlock()
+		for i, sub := range db.onJobDeleted {
+			if sub.id == id {
+				db.onJobDeleted = append(db.onJobDeleted[:i], db.onJobDeleted[i+1:]...)
+				db.onJobDeleted = shrinkJobDeletedSubs(db.onJobDeleted)
 				break
 			}
 		}
@@ -349,6 +412,17 @@ func (db *Database) safeCallJobAdded(fn func(*JobAdded), event *JobAdded) {
 	fn(event)
 }
 
+// safeCallJobDeleted calls an OnJobDeleted subscriber with panic recovery.
+// One misbehaving consumer can't take down the rest of the fan-out.
+func (db *Database) safeCallJobDeleted(fn func(*JobDeleted), event *JobDeleted) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("database subscriber panic on job deleted", "jobID", event.JobID, "panic", r)
+		}
+	}()
+	fn(event)
+}
+
 // notifyJobAdded fans out the OnJobAdded callbacks. The caller MUST NOT
 // hold db.mu — subscribers may call back into the Database (e.g. GetJob,
 // UpdateJobFields, AddJobLog) and a held db.mu would deadlock against
@@ -381,5 +455,36 @@ func (db *Database) notifyJobAdded(job *Job) {
 	event := &JobAdded{Job: job}
 	for _, fn := range subs {
 		db.safeCallJobAdded(fn, event)
+	}
+}
+
+// notifyJobDeleted fans out the OnJobDeleted callbacks. The caller MUST
+// NOT hold db.mu — subscribers may call back into the Database and a
+// held db.mu would deadlock against any Lock/RLock attempt.
+//
+// Per-callback invocations run sequentially in the caller's goroutine
+// (DeleteJob is comparatively rare). A top-level recover guards the
+// iteration; safeCallJobDeleted recovers per-callback panics.
+func (db *Database) notifyJobDeleted(jobID string) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("notifyJobDeleted iteration panic", "panic", r)
+		}
+	}()
+
+	db.subMu.RLock()
+	if len(db.onJobDeleted) == 0 {
+		db.subMu.RUnlock()
+		return
+	}
+	subs := make([]func(*JobDeleted), 0, len(db.onJobDeleted))
+	for _, sub := range db.onJobDeleted {
+		subs = append(subs, sub.fn)
+	}
+	db.subMu.RUnlock()
+
+	event := &JobDeleted{JobID: jobID}
+	for _, fn := range subs {
+		db.safeCallJobDeleted(fn, event)
 	}
 }

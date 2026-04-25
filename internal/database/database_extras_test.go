@@ -831,6 +831,219 @@ func TestOnJobAddedSurvivesPanic(t *testing.T) {
 	}
 }
 
+// TestOnJobDeletedFires covers the JobDeleted lifecycle event added
+// for the DECISIONS #21 follow-on. DeleteJob must deliver a JobDeleted
+// carrying the removed job's ID once the row is gone.
+func TestOnJobDeletedFires(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "del1", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan *JobDeleted, 4)
+	unsub := db.OnJobDeleted(func(ev *JobDeleted) { events <- ev })
+	defer unsub()
+
+	if err := db.DeleteJob("del1"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.JobID != "del1" {
+			t.Errorf("event JobID: want del1, got %q", ev.JobID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobDeleted did not fire within 2s")
+	}
+}
+
+// TestOnJobDeletedFiresAlongsideOnJobsChange locks the migration
+// invariant: DeleteJob must dispatch BOTH the legacy full-list
+// OnJobsChange and the new targeted OnJobDeleted. Two jobs are
+// inserted so the post-delete DB still has a row — there's a
+// pre-existing quirk where snapshotJobsChange returns nil when the
+// DB is empty after the delete, suppressing OnJobsChange. That's
+// orthogonal to this commit; the migration-invariant check works
+// correctly in the common "delete leaves rows" case which is what
+// real deployments hit ~all the time anyway (you don't usually
+// arrive at "zero remaining jobs" — there's always a Finished
+// Archive row or two).
+func TestOnJobDeletedFiresAlongsideOnJobsChange(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "dual_del_keep", VideoID: "v1", URL: "u1", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddJob(&Job{
+		ID: "dual_del_target", VideoID: "v2", URL: "u2", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deletedHits := make(chan *JobDeleted, 1)
+	listHits := make(chan []*Job, 1)
+
+	uD := db.OnJobDeleted(func(ev *JobDeleted) { deletedHits <- ev })
+	defer uD()
+	uL := db.OnJobsChange(func(jobs []*Job) { listHits <- jobs })
+	defer uL()
+
+	if err := db.DeleteJob("dual_del_target"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-deletedHits:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobDeleted did not fire")
+	}
+	select {
+	case jobs := <-listHits:
+		// OnJobsChange runs in its own goroutine; assert the snapshot
+		// reflects the post-delete state (one job remaining).
+		if len(jobs) != 1 || jobs[0].ID != "dual_del_keep" {
+			t.Errorf("OnJobsChange snapshot: want [dual_del_keep], got %d jobs", len(jobs))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobsChange did not fire")
+	}
+}
+
+// TestOnJobDeletedDoesNotFireOnMissingID guards the rowsAffected==0
+// branch: DeleteJob with a nonexistent ID is a SQL no-op, so no
+// targeted event must escape. (OnJobsChange still fires — that's
+// the existing legacy contract this commit doesn't alter.)
+func TestOnJobDeletedDoesNotFireOnMissingID(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	events := make(chan *JobDeleted, 4)
+	unsub := db.OnJobDeleted(func(ev *JobDeleted) { events <- ev })
+	defer unsub()
+
+	// DELETE on an ID that doesn't exist — SQL succeeds, 0 rows affected.
+	if err := db.DeleteJob("ghost"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-events:
+		t.Errorf("OnJobDeleted should not fire for a missing ID; got %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+		// expected — no event
+	}
+}
+
+// TestOnJobDeletedUnsubscribeStopsCallbacks confirms the returned
+// unsub closure removes the subscriber cleanly.
+func TestOnJobDeletedUnsubscribeStopsCallbacks(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "uns_d_a", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddJob(&Job{
+		ID: "uns_d_b", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hits := make(chan *JobDeleted, 4)
+	unsub := db.OnJobDeleted(func(ev *JobDeleted) { hits <- ev })
+
+	if err := db.DeleteJob("uns_d_a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hits:
+	case <-time.After(time.Second):
+		t.Fatal("first event should have fired")
+	}
+
+	unsub()
+	if err := db.DeleteJob("uns_d_b"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-hits:
+		t.Errorf("post-unsubscribe event should NOT fire; got %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+		// expected
+	}
+}
+
+// TestOnJobDeletedSurvivesPanic locks safeCallJobDeleted's per-callback
+// recover so one panicking subscriber can't break the rest of the
+// fan-out or the writer path.
+func TestOnJobDeletedSurvivesPanic(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "pan_d", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	panicked := false
+	survived := make(chan struct{}, 1)
+
+	uPanic := db.OnJobDeleted(func(*JobDeleted) {
+		panicked = true
+		panic("test panic")
+	})
+	defer uPanic()
+	uOK := db.OnJobDeleted(func(*JobDeleted) { survived <- struct{}{} })
+	defer uOK()
+
+	if err := db.DeleteJob("pan_d"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-survived:
+		// good — second subscriber fired despite first one panicking
+	case <-time.After(2 * time.Second):
+		t.Fatal("second subscriber should fire even if first panics")
+	}
+	if !panicked {
+		t.Error("panicking subscriber should have been invoked")
+	}
+}
+
 func TestSubscriberSliceShrinksAfterChurn(t *testing.T) {
 	// Locks down shrinkJobUpdateSubs: after many subscribe/unsubscribe
 	// cycles the underlying slice is rebuilt at smaller capacity so
