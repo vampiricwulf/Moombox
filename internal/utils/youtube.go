@@ -190,13 +190,44 @@ type YouTubeChannelInfo struct {
 
 // ResolveYouTubeChannel fetches a YouTube channel page and extracts the channel ID and name.
 // urlPath should be like "/@Handle", "/c/Name", or "/user/Name".
+//
+// Retries up to 3 times with 1s/2s exponential backoff on transient
+// failures (network errors, HTTP 5xx surfaces as "HTTP 5xx" in the
+// FetchBody error string). HTTP 4xx errors and ctx cancellation
+// fast-fail. Audit reports/small-packages.md.
 func ResolveYouTubeChannel(ctx context.Context, urlPath string) (*YouTubeChannelInfo, error) {
 	pageURL := "https://www.youtube.com" + urlPath
-	body, err := FetchBody(ctx, pageURL, 15*time.Second, map[string]string{
+	headers := map[string]string{
 		"User-Agent": constants.UserAgents.Web,
-	})
+	}
+
+	var body []byte
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(1<<(attempt-1)) * time.Second
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		body, err = FetchBody(ctx, pageURL, 15*time.Second, headers)
+		if err == nil {
+			break
+		}
+		// Don't retry 4xx — those are deterministic ("not found", auth
+		// missing, etc.) and won't fix themselves with a second try.
+		es := err.Error()
+		if strings.Contains(es, "HTTP 4") {
+			return nil, fmt.Errorf("failed to fetch channel page: %w", err)
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch channel page: %w", err)
+		return nil, fmt.Errorf("failed to fetch channel page after retries: %w", err)
 	}
 
 	page := string(body)

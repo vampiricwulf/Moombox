@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/connectivity"
 )
 
 // MaxFetchBodySize caps response bodies read by FetchBody. Public so other
@@ -36,14 +38,12 @@ var utilsHTTPClient = &http.Client{
 	},
 }
 
-// ConnectivityReporter is the subset of connectivity.Monitor we invoke from
-// the HTTP helpers. Tagging via "utils/http" lets the passive tracker
+// ConnectivityReporter is a type alias to connectivity.Reporter so the HTTP
+// helpers don't carry a separate-but-identical interface that drifts on
+// future renames. Tagging via "utils/http" lets the passive tracker
 // distinguish this subsystem from other fetch paths (see
-// internal/connectivity/passive.go).
-type ConnectivityReporter interface {
-	ReportFailure(tag string)
-	ReportSuccess(tag string)
-}
+// internal/connectivity/passive.go). Audit reports/small-packages.md.
+type ConnectivityReporter = connectivity.Reporter
 
 // connReporter is an atomic.Pointer so that SetConnectivityReporter can be
 // called without racing with concurrent fetches. In practice main.go
