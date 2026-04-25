@@ -64,58 +64,173 @@ func opLabel(opName string) string {
 	return opName
 }
 
+// gqlMaxRetries caps the number of retry attempts on transient failures
+// (5xx, 429, network errors). 3 retries with the backoff schedule below
+// give a worst-case total wait of 7s before giving up.
+const gqlMaxRetries = 3
+
+// gqlBaseRetryDelay is the first-retry wait. Doubles each subsequent
+// retry up to gqlMaxRetryDelay. Audit reports/twitch.md #11.
+const gqlBaseRetryDelay = 1 * time.Second
+
+// gqlMaxRetryDelay caps the exponential backoff so a long Retry-After
+// or repeated 429s can't pin a monitor cycle for minutes.
+const gqlMaxRetryDelay = 30 * time.Second
+
 // gqlRequest sends a GQL request and returns the raw JSON response.
 // opName is used only to annotate error messages so log correlation is
 // possible when multiple GQL operations share a pipeline — pass an empty
 // string for ad-hoc raw queries.
+//
+// Transient failures (5xx, 429, transport errors) are retried with
+// exponential backoff (1s → 2s → 4s) up to gqlMaxRetries. 429 honors
+// `Retry-After` if present and within gqlMaxRetryDelay; otherwise the
+// backoff schedule wins. Auth failures (401/403) and 4xx responses are
+// not retried — they need a different recovery path (re-login, fix
+// caller).
 func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken string) (json.RawMessage, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal gql body (%s): %w", opLabel(opName), err)
 	}
 
+	var lastErr error
+	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
+		if attempt > 0 {
+			// Compute backoff for this retry. retryAfter takes precedence
+			// when the previous response was a 429 with a usable header.
+			delay := gqlBaseRetryDelay << (attempt - 1) // 1s, 2s, 4s, …
+			if delay > gqlMaxRetryDelay {
+				delay = gqlMaxRetryDelay
+			}
+			if a.logger != nil {
+				a.logger.Debug("twitch gql retry", "op", opLabel(opName), "attempt", attempt, "delay", delay.String(), "prev_err", lastErr)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		respData, statusCode, hdrRetryAfter, doErr := a.doGQLOnce(ctx, data, authToken)
+		if doErr != nil {
+			// Transport-level error — retry unless ctx is done.
+			lastErr = fmt.Errorf("gql request (%s): %w", opLabel(opName), doErr)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+
+		// 429: respect Retry-After when reasonable, else fall through to
+		// the standard backoff on the next iteration.
+		if statusCode == http.StatusTooManyRequests {
+			if ra := parseRetryAfter(hdrRetryAfter); ra > 0 && ra <= gqlMaxRetryDelay {
+				if a.logger != nil {
+					a.logger.Debug("twitch gql 429 honoring Retry-After", "op", opLabel(opName), "wait", ra.String())
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(ra):
+				}
+			}
+			lastErr = fmt.Errorf("gql rate limited (429) (%s): %s", opLabel(opName), string(respData))
+			continue
+		}
+
+		// 5xx: retry. Other server-side failures often clear within seconds.
+		if statusCode >= 500 && statusCode < 600 {
+			lastErr = fmt.Errorf("gql http %d (%s): %s", statusCode, opLabel(opName), string(respData))
+			continue
+		}
+
+		// 401/403: auth-related — fast-fail without retry.
+		if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+			// Wrap the sentinel so callers can detect auth-expiry via
+			// errors.Is(err, ErrTwitchAuthExpired) without parsing strings.
+			// Only surface the sentinel when the caller actually supplied a
+			// token — anon GQL requests legitimately get 401 on some paths
+			// (e.g. mature-gated streams) and treating that as "re-auth
+			// needed" would loop the user through a login flow pointlessly.
+			if authToken != "" {
+				return nil, fmt.Errorf("gql auth failure (%d) (%s): %s: %w", statusCode, opLabel(opName), string(respData), ErrTwitchAuthExpired)
+			}
+			return nil, fmt.Errorf("gql auth failure (%d) (%s): %s", statusCode, opLabel(opName), string(respData))
+		}
+
+		// Other 4xx: caller-facing failure (bad query, missing field, …);
+		// retrying won't help.
+		if statusCode >= 400 && statusCode < 500 {
+			return nil, fmt.Errorf("gql http %d (%s): %s", statusCode, opLabel(opName), string(respData))
+		}
+
+		// 200 path: continue with response-body validation below.
+		return a.parseGQLBody(opName, respData)
+	}
+
+	return nil, fmt.Errorf("gql exhausted %d retries: %w", gqlMaxRetries, lastErr)
+}
+
+// doGQLOnce performs a single HTTP POST against Twitch GQL. Returns the
+// response body, status code, Retry-After header value, and a transport
+// error if the request couldn't reach the server.
+func (a *API) doGQLOnce(ctx context.Context, data []byte, authToken string) ([]byte, int, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, constants.TwitchURLs.GQL, bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 
 	req.Header.Set("Client-ID", constants.TwitchGQLClientID)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", constants.UserAgents.Web)
-
 	if authToken != "" {
 		req.Header.Set("Authorization", "OAuth "+authToken)
 	}
 
 	resp, err := twitchHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("gql request (%s): %w", opLabel(opName), err)
+		return nil, 0, "", err
 	}
 	defer resp.Body.Close()
 
 	respData, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // 5MB limit
 	if err != nil {
-		return nil, fmt.Errorf("read gql response (%s): %w", opLabel(opName), err)
+		return nil, resp.StatusCode, resp.Header.Get("Retry-After"), err
 	}
+	return respData, resp.StatusCode, resp.Header.Get("Retry-After"), nil
+}
 
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("gql rate limited (429) (%s): %s", opLabel(opName), string(respData))
+// parseRetryAfter returns the parsed Retry-After header as a Duration.
+// Honors both the seconds form (RFC 7231 §7.1.3) and the HTTP-date form.
+// Returns 0 for empty / unparseable values so callers can fall back to
+// their own backoff schedule.
+func parseRetryAfter(hdr string) time.Duration {
+	hdr = strings.TrimSpace(hdr)
+	if hdr == "" {
+		return 0
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		// Wrap the sentinel so callers can detect auth-expiry via
-		// errors.Is(err, ErrTwitchAuthExpired) without parsing strings.
-		// Only surface the sentinel when the caller actually supplied a
-		// token — anon GQL requests legitimately get 401 on some paths
-		// (e.g. mature-gated streams) and treating that as "re-auth
-		// needed" would loop the user through a login flow pointlessly.
-		if authToken != "" {
-			return nil, fmt.Errorf("gql auth failure (%d) (%s): %s: %w", resp.StatusCode, opLabel(opName), string(respData), ErrTwitchAuthExpired)
+	// Seconds form
+	if secs, err := strconv.Atoi(hdr); err == nil {
+		if secs <= 0 {
+			return 0
 		}
-		return nil, fmt.Errorf("gql auth failure (%d) (%s): %s", resp.StatusCode, opLabel(opName), string(respData))
+		return time.Duration(secs) * time.Second
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gql http %d (%s): %s", resp.StatusCode, opLabel(opName), string(respData))
+	// HTTP-date form
+	if t, err := http.ParseTime(hdr); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
 	}
+	return 0
+}
+
+// parseGQLBody validates a successful (HTTP 200) GQL response body and
+// returns it unchanged. Twitch returns 200 even on GQL-level errors, so
+// we still have to look inside.
+func (a *API) parseGQLBody(opName string, respData []byte) (json.RawMessage, error) {
 
 	// Twitch GQL returns 200 even on errors — check for errors in response.
 	// Response can be a single object or an array (batch requests).
