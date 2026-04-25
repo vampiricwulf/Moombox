@@ -135,3 +135,92 @@ func TestMonitor_StartInitialOfflineProbe(t *testing.T) {
 		t.Fatal("Start should have seeded offline state before the first tick")
 	}
 }
+
+// TestMonitor_StopBeforeStartIsSafe covers the audit-flagged untested
+// edge: Stop must not panic if Start was never called. The cancel
+// field is nil at that point, and the guard in Stop is what we're
+// asserting actually runs. Audit reports/small-packages.md.
+func TestMonitor_StopBeforeStartIsSafe(t *testing.T) {
+	m := newTestMonitor(func() bool { return true })
+	m.Stop() // would panic on nil cancel without the guard
+	// A second call should also be a no-op.
+	m.Stop()
+}
+
+// TestMonitor_PassiveAndActiveIntegrated covers the audit's "two tags
+// trip offline → success restores" end-to-end scenario. PassiveTracker
+// is wired through Monitor.ReportFailure / ReportSuccess; the
+// transition should fire OnStateChange callbacks in both directions.
+func TestMonitor_PassiveAndActiveIntegrated(t *testing.T) {
+	var checkOnline atomic.Bool
+	checkOnline.Store(true)
+	m := newTestMonitor(func() bool { return checkOnline.Load() })
+
+	// Speed the passive threshold up so the test doesn't need 5 distinct
+	// failures across 30s. Two tags × three failures per tag is the
+	// minimum that satisfies defaultPassiveMinFails (5) and
+	// defaultPassiveMinTags (2).
+	var transitions []bool
+	var mu = make(chan struct{}, 1)
+	mu <- struct{}{}
+	m.OnStateChange(func(online bool) {
+		<-mu
+		transitions = append(transitions, online)
+		mu <- struct{}{}
+	})
+
+	// Fire 3 failures from each of two distinct subsystems within the
+	// passive window. ShouldTriggerOffline latches; the next
+	// ReportFailure call after threshold flips the monitor to offline.
+	for i := 0; i < 3; i++ {
+		m.ReportFailure("utils/http")
+	}
+	for i := 0; i < 3; i++ {
+		m.ReportFailure("monitor/feed")
+	}
+
+	if m.IsOnline() {
+		t.Fatal("monitor should be offline after 6 cross-tag failures")
+	}
+
+	// A successful call from either subsystem clears that tag's failures.
+	// Once both tags drop below threshold, ReportSuccess flips back to
+	// online — provided the active checkFn agrees.
+	m.ReportSuccess("utils/http")
+	m.ReportSuccess("monitor/feed")
+
+	if !m.IsOnline() {
+		t.Fatal("monitor should be back online after both tags clear")
+	}
+
+	<-mu
+	got := append([]bool(nil), transitions...)
+	mu <- struct{}{}
+	if len(got) != 2 || got[0] != false || got[1] != true {
+		t.Errorf("transitions: want [false, true], got %v", got)
+	}
+}
+
+// TestNewMonitorWithIntervalClamps verifies the lower bound on the
+// configurable poll interval — values below 100ms get clamped up.
+func TestNewMonitorWithIntervalClamps(t *testing.T) {
+	tests := []struct {
+		name     string
+		given    time.Duration
+		wantMin  time.Duration
+	}{
+		{"zero clamps up", 0, 100 * time.Millisecond},
+		{"negative clamps up", -1 * time.Second, 100 * time.Millisecond},
+		{"50ms clamps up", 50 * time.Millisecond, 100 * time.Millisecond},
+		{"exactly 100ms passes through", 100 * time.Millisecond, 100 * time.Millisecond},
+		{"1s passes through", time.Second, time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewMonitorWithInterval(nil, tc.given)
+			if m.pollInterval < tc.wantMin {
+				t.Errorf("pollInterval = %v, want ≥ %v", m.pollInterval, tc.wantMin)
+			}
+		})
+	}
+}

@@ -14,7 +14,11 @@ var (
 	procInternetGetConnected = wininet.NewProc("InternetGetConnectedState")
 )
 
-const pollInterval = 5 * time.Second
+// defaultPollInterval is the production poll cadence. NewMonitor uses this;
+// tests and operators with non-default needs use NewMonitorWithInterval to
+// override (e.g. faster cadence when stress-testing the transition logic,
+// slower cadence on power-constrained hosts). Audit reports/small-packages.md.
+const defaultPollInterval = 5 * time.Second
 
 type Monitor struct {
 	online       atomic.Bool
@@ -25,6 +29,7 @@ type Monitor struct {
 	cancel       context.CancelFunc
 	started      atomic.Bool
 	checkFn      func() bool
+	pollInterval time.Duration
 	passive      *PassiveTracker
 	logger       logger
 }
@@ -42,12 +47,27 @@ type Reporter interface {
 	ReportSuccess(tag string)
 }
 
+// NewMonitor constructs a connectivity monitor with the default 5s poll
+// cadence. Use NewMonitorWithInterval if you need a different cadence.
 func NewMonitor(log logger) *Monitor {
+	return NewMonitorWithInterval(log, defaultPollInterval)
+}
+
+// NewMonitorWithInterval constructs a connectivity monitor with a
+// caller-specified poll cadence. Values < 100ms are clamped up to that
+// minimum to keep tight test loops from saturating the polling
+// goroutine — a tighter check window doesn't catch transitions any
+// faster, since the underlying syscall takes ~tens-of-ms anyway.
+func NewMonitorWithInterval(log logger, interval time.Duration) *Monitor {
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
 	m := &Monitor{
-		callbacks: make(map[uint64]func(online bool)),
-		checkFn:   checkInternetConnected,
-		passive:   NewPassiveTracker(),
-		logger:    log,
+		callbacks:    make(map[uint64]func(online bool)),
+		checkFn:      checkInternetConnected,
+		pollInterval: interval,
+		passive:      NewPassiveTracker(),
+		logger:       log,
 	}
 	m.online.Store(true)
 	return m
@@ -79,7 +99,7 @@ func (m *Monitor) Start(ctx context.Context) {
 				}
 			}
 		}()
-		ticker := time.NewTicker(pollInterval)
+		ticker := time.NewTicker(m.pollInterval)
 		defer ticker.Stop()
 		for {
 			select {
