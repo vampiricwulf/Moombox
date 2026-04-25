@@ -259,9 +259,18 @@ func (c *BotGuardClient) Snapshot(ctx context.Context, timeout time.Duration) (s
 		return result, webPoSignalOutput, nil
 	case <-snapshotTimer.C:
 		c.vm.Interrupt("snapshot timeout")
+		// Pair Interrupt with ClearInterrupt so a subsequent Snapshot
+		// (or any other JS call) on the SAME client doesn't trip the
+		// stale interrupt and fail before doing real work. Today every
+		// caller follows a Snapshot timeout with Shutdown — which
+		// would clear the interrupt itself — but defending here keeps
+		// the client reusable across timeout boundaries. Audit
+		// reports/goja.md Q1.
+		c.vm.ClearInterrupt()
 		return "", nil, &BGError{Code: ErrTimeout, Message: "snapshot timed out"}
 	case <-ctx.Done():
 		c.vm.Interrupt("context cancelled during snapshot")
+		c.vm.ClearInterrupt()
 		return "", nil, ctx.Err()
 	}
 }
