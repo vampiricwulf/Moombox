@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
@@ -26,6 +27,7 @@ type fakePotProvider struct {
 	invalidateCount  atomic.Int32
 	invalidateITHits atomic.Int32
 	cacheKeys        []string
+	stats            bgutils.PotStats
 }
 
 func (f *fakePotProvider) GeneratePoTokenString(ctx context.Context, contentBinding string, bypassCache bool) (string, error) {
@@ -48,6 +50,9 @@ func (f *fakePotProvider) InvalidateIntegrityTokens() {
 }
 func (f *fakePotProvider) GetMinterCacheKeys() []string {
 	return f.cacheKeys
+}
+func (f *fakePotProvider) Stats() bgutils.PotStats {
+	return f.stats
 }
 
 type potFixture struct {
@@ -295,6 +300,76 @@ func TestMinterCacheRejectsNonLoopback(t *testing.T) {
 	f := newPotFixture(t)
 	req := loopbackPotRequest("GET", "/minter_cache", nil)
 	req.RemoteAddr = "192.168.1.50:1234"
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-loopback: want 403, got %d", rec.Code)
+	}
+}
+
+// --- /pot_stats (audit reports/bgutils.md TD-3, CRIT-2 follow-on) ---
+
+func TestPotStatsReturnsCounters(t *testing.T) {
+	f := newPotFixture(t)
+	f.prov.stats = bgutils.PotStats{
+		SessionHits:        12,
+		MinterHits:         3,
+		MintersCreated:     2,
+		MintersInvalidated: 1,
+		MintersEvicted:     1,
+		GenerateErrors:     4,
+		InflightWaits:      6,
+		CachedMinters:      1,
+	}
+
+	req := loopbackPotRequest("GET", "/pot_stats", nil)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pot_stats: want 200, got %d", rec.Code)
+	}
+	var got bgutils.PotStats
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode pot_stats response: %v", err)
+	}
+	if got != f.prov.stats {
+		t.Errorf("pot_stats: want %+v, got %+v", f.prov.stats, got)
+	}
+}
+
+func TestPotStatsReturnsZeroForNilProvider(t *testing.T) {
+	rl := web.NewRateLimiter(100, time.Minute)
+	t.Cleanup(rl.Close)
+
+	r := chi.NewRouter()
+	PotRoutes(r, &PotRoutesDeps{
+		PotProvider: nil,
+		StartTime:   time.Now(),
+		RateLimit:   rl,
+		Logger:      silentLogger{},
+	})
+
+	req := loopbackPotRequest("GET", "/pot_stats", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pot_stats nil provider: want 200, got %d", rec.Code)
+	}
+	var got bgutils.PotStats
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if (got != bgutils.PotStats{}) {
+		t.Errorf("pot_stats nil provider: want zero, got %+v", got)
+	}
+}
+
+func TestPotStatsRejectsNonLoopback(t *testing.T) {
+	f := newPotFixture(t)
+	req := loopbackPotRequest("GET", "/pot_stats", nil)
+	req.RemoteAddr = "203.0.113.5:1234"
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {

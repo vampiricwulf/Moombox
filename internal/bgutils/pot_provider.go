@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,6 +56,52 @@ type PotProvider struct {
 		Warn(msg string, args ...any)
 		Error(msg string, args ...any)
 	}
+
+	// Observability counters (atomic, monotonically increasing across the
+	// process lifetime). Operators sample via /stats and compute deltas
+	// externally. Audit reports/bgutils.md TD-3 (CRIT-2 follow-on).
+	sessionHits        atomic.Uint64
+	minterHits         atomic.Uint64
+	mintersCreated     atomic.Uint64
+	mintersInvalidated atomic.Uint64
+	mintersEvicted     atomic.Uint64
+	generateErrors     atomic.Uint64
+	inflightWaits      atomic.Uint64
+}
+
+// PotStats is a snapshot of PotProvider counters. The numeric fields are
+// monotonically increasing — operators compute deltas externally. The
+// CachedMinters field is the live cache size, not a counter.
+type PotStats struct {
+	SessionHits        uint64 `json:"session_hits"`
+	MinterHits         uint64 `json:"minter_hits"`
+	MintersCreated     uint64 `json:"minters_created"`
+	MintersInvalidated uint64 `json:"minters_invalidated"`
+	MintersEvicted     uint64 `json:"minters_evicted"`
+	GenerateErrors     uint64 `json:"generate_errors"`
+	InflightWaits      uint64 `json:"inflight_waits"`
+	CachedMinters      int    `json:"cached_minters"`
+}
+
+// Stats returns a snapshot of the provider's observability counters.
+// Spike of mintersCreated relative to mintersEvicted suggests YouTube
+// is rotating ciphers more aggressively than usual; spike of
+// generateErrors suggests BotGuard challenges are degrading. Audit
+// reports/bgutils.md TD-3.
+func (pp *PotProvider) Stats() PotStats {
+	pp.mu.Lock()
+	cached := len(pp.minterCache)
+	pp.mu.Unlock()
+	return PotStats{
+		SessionHits:        pp.sessionHits.Load(),
+		MinterHits:         pp.minterHits.Load(),
+		MintersCreated:     pp.mintersCreated.Load(),
+		MintersInvalidated: pp.mintersInvalidated.Load(),
+		MintersEvicted:     pp.mintersEvicted.Load(),
+		GenerateErrors:     pp.generateErrors.Load(),
+		InflightWaits:      pp.inflightWaits.Load(),
+		CachedMinters:      cached,
+	}
 }
 
 // NewPotProvider creates a new PO token provider.
@@ -97,6 +144,7 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 		if session, ok := pp.sessionCache[contentBinding]; ok {
 			if time.Now().Before(session.ExpiresAt) {
 				pp.mu.Unlock()
+				pp.sessionHits.Add(1)
 				pp.logger.Debug("[PotProvider] session cache hit", "binding", bindingPrefix)
 				return session, nil
 			}
@@ -107,6 +155,7 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 	// Check for inflight request (dedup) — all waiters read from the same entry
 	if entry, ok := pp.inflight[contentBinding]; ok {
 		pp.mu.Unlock()
+		pp.inflightWaits.Add(1)
 		pp.logger.Debug("[PotProvider] waiting for inflight request", "binding", bindingPrefix)
 		select {
 		case <-entry.done:
@@ -148,12 +197,17 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 			}
 		}()
 		if hasMinter {
+			pp.minterHits.Add(1)
 			pp.logger.Debug("[PotProvider] using cached minter", "binding", bindingPrefix)
 			return pp.mintPoToken(minter, contentBinding)
 		}
 		pp.logger.Debug("[PotProvider] generating new minter", "binding", bindingPrefix)
 		return pp.generateAndMint(ctx, contentBinding, bypassCache)
 	}()
+
+	if err != nil {
+		pp.generateErrors.Add(1)
+	}
 
 	// Store result on the entry so all waiters can read it, then signal
 	entry.session = session
@@ -185,6 +239,7 @@ func (pp *PotProvider) InvalidateCaches() {
 	for _, m := range toCleanup {
 		pp.safeCleanup(m, "InvalidateCaches")
 	}
+	pp.mintersInvalidated.Add(uint64(len(toCleanup)))
 }
 
 // InvalidateIntegrityTokens clears minter cache (forces BotGuard re-run).
@@ -201,6 +256,7 @@ func (pp *PotProvider) InvalidateIntegrityTokens() {
 	for _, m := range toCleanup {
 		pp.safeCleanup(m, "InvalidateIntegrityTokens")
 	}
+	pp.mintersInvalidated.Add(uint64(len(toCleanup)))
 }
 
 // GetMinterCacheKeys returns the content binding keys in the minter cache.
@@ -307,6 +363,10 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	pp.minterCache[defaultMinterKey] = minter
 	pp.mu.Unlock()
 	pp.safeCleanup(old, "replaced minter")
+	pp.mintersCreated.Add(1)
+	if old != nil {
+		pp.mintersInvalidated.Add(1)
+	}
 
 	// Schedule automatic eviction so the Goja VM doesn't linger after
 	// expiry. ONE minter serves the whole process, so its TTL is the
@@ -332,6 +392,7 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 				cleanup()
 			}
 			if evicted {
+				pp.mintersEvicted.Add(1)
 				pp.logger.Debug("[PotProvider] evicted expired minter")
 			}
 		})
@@ -353,6 +414,7 @@ func (pp *PotProvider) cleanupExpired() {
 				m.Cleanup()
 			}
 			delete(pp.minterCache, k)
+			pp.mintersEvicted.Add(1)
 		}
 	}
 }

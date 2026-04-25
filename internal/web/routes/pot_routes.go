@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
@@ -26,6 +27,7 @@ type PotProviderInterface interface {
 	InvalidateCaches()
 	InvalidateIntegrityTokens()
 	GetMinterCacheKeys() []string
+	Stats() bgutils.PotStats
 }
 
 // PotRoutesDeps holds dependencies for POT routes.
@@ -151,5 +153,18 @@ func PotRoutes(r chi.Router, deps *PotRoutesDeps) {
 			keys = []string{}
 		}
 		jsonResponse(rw, keys)
+	})
+
+	// GET /pot_stats returns the PotProvider observability counters
+	// (session/minter cache hits, minter create/evict/invalidate counts,
+	// generate errors, inflight waits) and current cached-minter count.
+	// Counters are monotonically increasing; operators sample and compute
+	// deltas externally. Audit reports/bgutils.md TD-3 (CRIT-2 follow-on).
+	r.With(web.LoopbackOnly).Get("/pot_stats", func(rw http.ResponseWriter, req *http.Request) {
+		if deps.PotProvider == nil {
+			jsonResponse(rw, bgutils.PotStats{})
+			return
+		}
+		jsonResponse(rw, deps.PotProvider.Stats())
 	})
 }
