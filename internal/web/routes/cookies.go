@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -62,11 +63,18 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		ok, err := autoCookieSvc.RefreshCookies(req.Context())
 		if err != nil {
-			// Return 500 so XHR callers with `if (!response.ok)` branches
-			// treat this as a real error. Previously the handler replied
-			// HTTP 200 with {success:false,...}, which the frontend could
-			// easily mis-handle as a successful call.
-			jsonError(rw, "cookie refresh failed", http.StatusInternalServerError)
+			// Discriminate sentinel errors so the frontend can surface a
+			// useful message (and so XHR callers with `if (!response.ok)`
+			// branches treat this as a real error rather than the previous
+			// HTTP 200 + {success:false,...} that was easy to mis-handle).
+			switch {
+			case errors.Is(err, cookies.ErrNoBrowserFound):
+				jsonError(rw, "no supported browser installed", http.StatusFailedDependency)
+			case errors.Is(err, cookies.ErrProfileNotFound):
+				jsonError(rw, "browser profile not found — run setup first", http.StatusNotFound)
+			default:
+				jsonError(rw, "cookie refresh failed", http.StatusInternalServerError)
+			}
 			return
 		}
 
@@ -110,7 +118,15 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		}
 
 		if err := autoCookieSvc.StartSetup(body.Platform); err != nil {
-			jsonError(rw, "failed to start setup", http.StatusInternalServerError)
+			switch {
+			case errors.Is(err, cookies.ErrSetupInProgress),
+				errors.Is(err, cookies.ErrRefreshInProgress):
+				jsonError(rw, err.Error(), http.StatusConflict)
+			case errors.Is(err, cookies.ErrNoBrowserFound):
+				jsonError(rw, "no supported browser installed", http.StatusFailedDependency)
+			default:
+				jsonError(rw, "failed to start setup", http.StatusInternalServerError)
+			}
 			return
 		}
 		jsonResponse(rw, map[string]any{"success": true})
@@ -125,7 +141,14 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 
 		ytAuth, twAuth, err := autoCookieSvc.FinishSetup(req.Context())
 		if err != nil {
-			jsonError(rw, "failed to finish setup", http.StatusInternalServerError)
+			switch {
+			case errors.Is(err, cookies.ErrNoSetupInProgress):
+				jsonError(rw, err.Error(), http.StatusNotFound)
+			case errors.Is(err, cookies.ErrSetupCancelled):
+				jsonError(rw, err.Error(), http.StatusConflict)
+			default:
+				jsonError(rw, "failed to finish setup", http.StatusInternalServerError)
+			}
 			return
 		}
 		jsonResponse(rw, map[string]any{

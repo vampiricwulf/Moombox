@@ -253,17 +253,17 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	s.mu.Lock()
 	if s.setupProcess != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("setup already in progress")
+		return ErrSetupInProgress
 	}
 	if s.refreshCmd != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("cookie refresh in progress, please try again shortly")
+		return fmt.Errorf("please try again shortly: %w", ErrRefreshInProgress)
 	}
 	s.mu.Unlock()
 
 	browser := DetectBrowser()
 	if browser == nil {
-		return fmt.Errorf("no supported browser found (Firefox, Chrome, Brave, Edge, Opera, or Waterfox required)")
+		return fmt.Errorf("Firefox, Chrome, Brave, Edge, Opera, or Waterfox required: %w", ErrNoBrowserFound)
 	}
 
 	if err := os.MkdirAll(s.profileDir, 0o755); err != nil {
@@ -305,11 +305,11 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	s.mu.Lock()
 	if s.setupProcess == nil || s.setupBrowser == nil {
 		s.mu.Unlock()
-		return false, false, fmt.Errorf("no setup in progress")
+		return false, false, ErrNoSetupInProgress
 	}
 	if s.cancelled {
 		s.mu.Unlock()
-		return false, false, fmt.Errorf("setup was cancelled")
+		return false, false, ErrSetupCancelled
 	}
 	browser := s.setupBrowser
 	s.mu.Unlock()
@@ -457,12 +457,12 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	browser := DetectBrowser()
 	if browser == nil {
 		s.setError("no browser found for refresh")
-		return false, fmt.Errorf("no browser found")
+		return false, ErrNoBrowserFound
 	}
 
 	if _, err := os.Stat(s.profileDir); os.IsNotExist(err) {
 		s.setError("browser profile not found — run setup first")
-		return false, fmt.Errorf("profile not found")
+		return false, fmt.Errorf("run setup first: %w", ErrProfileNotFound)
 	}
 
 	if len(s.refreshPlatforms()) == 0 {
