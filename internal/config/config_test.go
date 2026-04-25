@@ -145,6 +145,40 @@ func TestValidateMonitorBounds(t *testing.T) {
 	}
 }
 
+// TestValidateCookiesRefreshInterval covers the upper-bound check
+// added for audit reports/config.md Finding 15.
+func TestValidateCookiesRefreshInterval(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   float64
+		wantSet bool // true => caller-supplied value preserved; false => reset to default
+	}{
+		{"below lower bound resets", 5, false},
+		{"at lower bound passes", 10, true},
+		{"default passes", Defaults().Cookies.RefreshInterval.Value, true},
+		{"daily passes", 1440, true},
+		{"at upper bound passes", 10080, true},
+		{"above upper bound resets", 10081, false},
+		{"absurd large resets", 1_000_000, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Cookies.RefreshInterval = FlexDuration{Value: tt.value}
+			Normalize(cfg)
+			if tt.wantSet {
+				if cfg.Cookies.RefreshInterval.Value != tt.value {
+					t.Errorf("RefreshInterval = %v, want kept %v", cfg.Cookies.RefreshInterval.Value, tt.value)
+				}
+			} else {
+				if cfg.Cookies.RefreshInterval.Value != Defaults().Cookies.RefreshInterval.Value {
+					t.Errorf("RefreshInterval = %v, want reset to default %v", cfg.Cookies.RefreshInterval.Value, Defaults().Cookies.RefreshInterval.Value)
+				}
+			}
+		})
+	}
+}
+
 // TestValidateClientTokenTTL verifies range enforcement on the configurable
 // "remember me" cookie lifetime — reports/web.md Q3.
 func TestValidateClientTokenTTL(t *testing.T) {

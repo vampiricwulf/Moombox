@@ -490,8 +490,13 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Cookies.CookieFile = defaults.Cookies.CookieFile
 		}
 	}
-	if cfg.Cookies.RefreshInterval.Value < 10 {
-		fail("cookies.refresh_interval %v must be >= 10 minutes", cfg.Cookies.RefreshInterval.Value)
+	// 10080 minutes = 7 days. YouTube SAPISID-family cookies last on the
+	// order of years, so a refresh cadence longer than a week stops being
+	// "preventive" and starts to look like a typo. Catch values like
+	// "1000000" (1.9 years) before they become a silent never-refresh.
+	// Audit reports/config.md Finding 15.
+	if cfg.Cookies.RefreshInterval.Value < 10 || cfg.Cookies.RefreshInterval.Value > 10080 {
+		fail("cookies.refresh_interval %v out of range 10..10080 minutes", cfg.Cookies.RefreshInterval.Value)
 		if !reportOnly {
 			cfg.Cookies.RefreshInterval = defaults.Cookies.RefreshInterval
 		}
