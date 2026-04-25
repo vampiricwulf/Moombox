@@ -39,6 +39,9 @@ const (
 )
 
 func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url string) error {
+	if s.profileDirErr != nil {
+		return s.profileDirErr
+	}
 	cleanFirefoxLockFiles(s.profileDir)
 
 	// Write user.js to suppress first-run dialogs
@@ -118,6 +121,9 @@ func (s *AutoCookieService) closeFirefoxGracefully() {
 }
 
 func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *DetectedBrowser) (string, error) {
+	if s.profileDirErr != nil {
+		return "", s.profileDirErr
+	}
 	tempScreenshot := filepath.Join(s.profileDir, "refresh-screenshot.png")
 	defer os.Remove(tempScreenshot)
 

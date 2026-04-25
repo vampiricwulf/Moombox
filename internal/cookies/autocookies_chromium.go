@@ -34,6 +34,9 @@ const (
 var chromiumLockFiles = []string{"lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"}
 
 func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url string) error {
+	if s.profileDirErr != nil {
+		return s.profileDirErr
+	}
 	port, err := getFreePort()
 	if err != nil {
 		return fmt.Errorf("get free port: %w", err)
@@ -132,6 +135,9 @@ func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 }
 
 func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *DetectedBrowser) (string, error) {
+	if s.profileDirErr != nil {
+		return "", s.profileDirErr
+	}
 	cleanChromiumLockFiles(s.profileDir)
 
 	port, err := getFreePort()

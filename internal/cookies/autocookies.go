@@ -37,6 +37,59 @@ var platformRefreshURLs = map[string]string{
 	"twitch":  twitchRefreshURL,
 }
 
+// dangerousProfilePathSubstrings flags absolute profile directories that
+// belong to a real installed browser. Allowing the auto-cookie service
+// to launch headless against one of these would let a malicious config
+// (or, in the future, a compromised /api/config write) launch Chrome
+// against the user's actual logged-in profile and exfiltrate session
+// cookies via the cookies.txt export. Patterns are matched
+// case-insensitively against the path's lowercased absolute form;
+// backslashes on Windows are preserved (filepath.Abs already
+// canonicalises). Audit reports/cookies.md #26.
+var dangerousProfilePathSubstrings = []string{
+	`\google\chrome\user data`,
+	`\google\chrome beta\user data`,
+	`\google\chrome dev\user data`,
+	`\google\chrome canary\user data`,
+	`\microsoft\edge\user data`,
+	`\microsoft\edge beta\user data`,
+	`\microsoft\edge dev\user data`,
+	`\microsoft\edge canary\user data`,
+	`\bravesoftware\brave-browser\user data`,
+	`\chromium\user data`,
+	`\vivaldi\user data`,
+	`\opera software\opera stable`,
+	`\opera software\opera gx stable`,
+	`\mozilla\firefox\profiles`,
+	`\mozilla\firefox developer edition\profiles`,
+	`\waterfox\profiles`,
+	`\thunderbird\profiles`,
+	`\librewolf\profiles`,
+}
+
+// validateBrowserProfileDir refuses configured profile directories that
+// sit inside any user-installed browser's real profile tree. Empty
+// input is allowed — that just signals "auto-cookies not configured"
+// and the service's Configured status reports false. Otherwise the
+// path is resolved to absolute, lowercased, and checked against the
+// dangerous-substring list above. Audit reports/cookies.md #26.
+func validateBrowserProfileDir(profileDir string) error {
+	if profileDir == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(profileDir)
+	if err != nil {
+		return fmt.Errorf("resolve profile dir: %w", err)
+	}
+	lower := strings.ToLower(abs)
+	for _, pat := range dangerousProfilePathSubstrings {
+		if strings.Contains(lower, pat) {
+			return fmt.Errorf("profile dir %q points at a known browser profile path; refusing to launch a headless session against it (audit cookies.md #26)", abs)
+		}
+	}
+	return nil
+}
+
 // AutoCookieReloginRequired tracks which platforms need manual re-login.
 type AutoCookieReloginRequired struct {
 	YouTube bool `json:"youtube"`
@@ -87,6 +140,13 @@ type AutoCookieService struct {
 	// false. Audit reports/cookies.md #23.
 	HasActiveJobs func() bool
 
+	// profileDirErr captures any validation failure on the configured
+	// profile directory (e.g. it points at a real browser's profile
+	// tree). Computed once at construction so all subprocess-launching
+	// entry points can fast-fail with the same message instead of each
+	// re-running the check. Audit reports/cookies.md #26.
+	profileDirErr error
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -109,11 +169,23 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 			profileDir = abs
 		}
 	}
+	// Validate ONCE at construction; subprocess-launching entry points
+	// fast-fail with the cached error rather than each running the
+	// scan independently. A malformed dir doesn't return an error from
+	// the constructor — Configured will simply report false (empty
+	// case) or the entry-point fast-fail kicks in (dangerous case)
+	// — to preserve the current "constructor never errors" contract.
+	// Audit reports/cookies.md #26.
+	profileDirErr := validateBrowserProfileDir(profileDir)
+	if profileDirErr != nil && logger != nil {
+		logger.Error("auto-cookie profile dir rejected at construction", "err", profileDirErr)
+	}
 	return &AutoCookieService{
-		profileDir: profileDir,
-		cookiePath: cookiePath,
-		jar:        jar,
-		logger:     logger,
+		profileDir:    profileDir,
+		cookiePath:    cookiePath,
+		jar:           jar,
+		profileDirErr: profileDirErr,
+		logger:        logger,
 	}
 }
 
