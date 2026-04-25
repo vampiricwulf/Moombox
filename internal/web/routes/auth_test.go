@@ -17,12 +17,16 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
-// silentLogger discards log output for tests; matches the AuthRoutesDeps
-// Logger interface (Info + Warn).
+// silentLogger discards log output for tests. The four-method shape
+// matches both the narrower AuthRoutesDeps.Logger interface (Info+Warn)
+// and the wider Debug+Info+Warn+Error interface used by updater.New
+// and other packages, so tests across this package can share it.
 type silentLogger struct{}
 
-func (silentLogger) Info(msg string, args ...any) {}
-func (silentLogger) Warn(msg string, args ...any) {}
+func (silentLogger) Debug(msg string, args ...any) {}
+func (silentLogger) Info(msg string, args ...any)  {}
+func (silentLogger) Warn(msg string, args ...any)  {}
+func (silentLogger) Error(msg string, args ...any) {}
 
 // authFixture wires the dependencies AuthRoutes needs against a temp
 // database + config + permissive rate limiters. Returned router has the
