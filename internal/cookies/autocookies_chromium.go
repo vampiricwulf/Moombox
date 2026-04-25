@@ -28,6 +28,10 @@ const (
 	// flush cookies to disk before our defer kills the process tree. Replaces
 	// a bare 500ms literal (audit reports/cookies.md #45).
 	cdpCloseFlushDelay = 500 * time.Millisecond
+	// cdpEnsureTargetSettleDelay is the post-Target.createTarget pause that
+	// lets the new tab register as a CDP page target before the cookie
+	// extraction iterates targets again. Audit reports/cookies.md #3.
+	cdpEnsureTargetSettleDelay = 500 * time.Millisecond
 )
 
 // Chromium lock files that prevent headless launch when a headed session was killed.
@@ -122,6 +126,7 @@ func (s *AutoCookieService) startChromiumSetup(browser *DetectedBrowser, url str
 func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 	s.mu.Lock()
 	port := s.cdpPort
+	platform := s.targetPlatform
 	s.mu.Unlock()
 
 	if port == 0 {
@@ -130,6 +135,19 @@ func (s *AutoCookieService) extractChromiumCookies() (string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), cdpExtractTimeout)
 	defer cancel()
+
+	// Ensure a page target on the platform host exists before extraction.
+	// Without this, the per-page fallbacks in cdpGetCookiesAsNetscape
+	// (Network.getAllCookies / Network.getCookies, both per-page) silently
+	// return empty if the user closed all tabs after logging in. Soft-fail:
+	// if the ensure step errors, still try extraction — Storage.getCookies
+	// is browser-level and may succeed regardless. Audit reports/cookies.md #3.
+	if targetURL, ok := platformRefreshURLs[platform]; ok {
+		if err := cdpEnsurePageTarget(ctx, port, targetURL); err != nil {
+			s.logger.Debug("ensure CDP page target before extraction failed",
+				"err", err, "url", targetURL)
+		}
+	}
 
 	return cdpGetCookiesAsNetscape(ctx, port)
 }
@@ -280,6 +298,75 @@ func cdpNavigate(ctx context.Context, port int, url string) error {
 		}
 	}
 	return fmt.Errorf("no page target found")
+}
+
+// cdpEnsurePageTarget guarantees that the browser at port has at least one
+// CDP `page` target that has been navigated to targetURL. The cookie
+// extraction fallbacks in cdpGetCookiesAsNetscape iterate over
+// `t.Type == "page"` targets; if the user closed all tabs after logging in,
+// those fallbacks silently return empty.
+//
+// Behavior:
+//   - Reuses the first existing page target if one exists, navigating it
+//     to targetURL via cdpNavigateAndWait so the cookies for the platform
+//     origin are guaranteed to have been touched.
+//   - Otherwise spawns a new tab via Target.createTarget on the
+//     browser-level WebSocket, then waits a short settle window so the
+//     new tab registers as a page target before the caller iterates again.
+//
+// Audit reports/cookies.md #3.
+func cdpEnsurePageTarget(ctx context.Context, port int, targetURL string) error {
+	listReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json", port), nil)
+	listResp, err := cookiesHTTPClient.Do(listReq)
+	if err != nil {
+		return fmt.Errorf("CDP target list: %w", err)
+	}
+	var targets []struct {
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+		Type                 string `json:"type"`
+	}
+	decodeErr := json.NewDecoder(listResp.Body).Decode(&targets)
+	io.Copy(io.Discard, listResp.Body)
+	listResp.Body.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("CDP target list decode: %w", decodeErr)
+	}
+
+	for _, t := range targets {
+		if t.Type == "page" && t.WebSocketDebuggerURL != "" {
+			return cdpNavigateAndWait(ctx, t.WebSocketDebuggerURL, targetURL)
+		}
+	}
+
+	// No page target — fetch the browser-level WebSocket URL and spawn a
+	// new tab. This is the user-closed-all-tabs branch the audit calls out.
+	versionReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json/version", port), nil)
+	versionResp, err := cookiesHTTPClient.Do(versionReq)
+	if err != nil {
+		return fmt.Errorf("CDP version fetch: %w", err)
+	}
+	var version struct {
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	decodeErr = json.NewDecoder(versionResp.Body).Decode(&version)
+	io.Copy(io.Discard, versionResp.Body)
+	versionResp.Body.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("CDP version decode: %w", decodeErr)
+	}
+	if version.WebSocketDebuggerURL == "" {
+		return fmt.Errorf("CDP version response missing webSocketDebuggerUrl")
+	}
+
+	if _, err := cdpSendCommandWithResult(version.WebSocketDebuggerURL, "Target.createTarget", map[string]any{"url": targetURL}); err != nil {
+		return fmt.Errorf("Target.createTarget: %w", err)
+	}
+	select {
+	case <-time.After(cdpEnsureTargetSettleDelay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
 }
 
 // cdpNavigateAndWait navigates to a URL via CDP and waits for Page.loadEventFired.
