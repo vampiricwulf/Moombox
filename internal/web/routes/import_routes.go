@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -18,11 +17,9 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
-
-// unsafeFilenameRe matches characters not safe for filenames.
-var unsafeFilenameRe = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
 
 // ImportRoutes registers import-related API routes.
 // Uses its own 5/min rate limiter per the spec.
@@ -260,7 +257,7 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, rl *
 		importsDir := filepath.Join(outputDir, "imports")
 		os.MkdirAll(importsDir, 0o755)
 
-		baseFilename := fmt.Sprintf("%s [%s]", sanitizeForFilename(title), videoID)
+		baseFilename := fmt.Sprintf("%s [%s]", utils.SanitizeForFilename(title), videoID)
 		videoOutName := filepath.Join("imports", baseFilename+videoExt)
 		videoOutPath := filepath.Join(outputDir, videoOutName)
 
@@ -347,14 +344,3 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func sanitizeForFilename(s string) string {
-	s = unsafeFilenameRe.ReplaceAllString(s, "_")
-	s = strings.TrimSpace(s)
-	if len(s) > 200 {
-		s = s[:200]
-	}
-	if s == "" {
-		s = "untitled"
-	}
-	return s
-}

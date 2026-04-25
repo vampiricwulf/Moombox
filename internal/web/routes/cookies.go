@@ -7,10 +7,15 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
-// CookieRoutes registers cookie-related API routes.
-func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool) {
+// CookieRoutes registers cookie-related API routes. The optional rate
+// limiter wraps the headless-browser endpoints (/auto-refresh and the
+// auto-setup start/finish/cancel trio) so a buggy or hostile client
+// can't trigger a flurry of browser process launches — an expensive
+// operation per audit reports/web.md S-7.
+func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSvc *cookies.AutoCookieService, getActivePlatforms func() map[string]bool, rl *web.RateLimiter) {
 	// POST /api/cookies/recheck
 	r.Post("/api/cookies/recheck", func(rw http.ResponseWriter, req *http.Request) {
 		refreshSvc.CheckNow(req.Context())
@@ -37,8 +42,19 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		jsonResponse(rw, response)
 	})
 
+	// Sub-router for endpoints that spawn or steer a headless browser. The
+	// underlying AutoCookieService already serialises with refreshCmd so
+	// concurrent calls fast-fail, but rate-limiting the request flow stops
+	// a caller from burning CPU on the fast-fail path.
+	heavy := r.With(func(h http.Handler) http.Handler {
+		if rl == nil {
+			return h
+		}
+		return rl.Middleware(h)
+	})
+
 	// POST /api/cookies/auto-refresh — trigger headless browser cookie refresh
-	r.Post("/api/cookies/auto-refresh", func(rw http.ResponseWriter, req *http.Request) {
+	heavy.Post("/api/cookies/auto-refresh", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
 			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
@@ -77,7 +93,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	})
 
 	// POST /api/cookies/auto-setup/start
-	r.Post("/api/cookies/auto-setup/start", func(rw http.ResponseWriter, req *http.Request) {
+	heavy.Post("/api/cookies/auto-setup/start", func(rw http.ResponseWriter, req *http.Request) {
 		var body struct {
 			Platform string `json:"platform"`
 		}
@@ -101,7 +117,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	})
 
 	// POST /api/cookies/auto-setup/finish
-	r.Post("/api/cookies/auto-setup/finish", func(rw http.ResponseWriter, req *http.Request) {
+	heavy.Post("/api/cookies/auto-setup/finish", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
 			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return
@@ -120,7 +136,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	})
 
 	// POST /api/cookies/auto-setup/cancel
-	r.Post("/api/cookies/auto-setup/cancel", func(rw http.ResponseWriter, req *http.Request) {
+	heavy.Post("/api/cookies/auto-setup/cancel", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
 			jsonError(rw, "auto-cookie service not configured", http.StatusServiceUnavailable)
 			return

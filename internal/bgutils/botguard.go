@@ -285,6 +285,15 @@ func (c *BotGuardClient) Shutdown() {
 		}
 	}()
 
+	// Clear any pending Interrupt left over from a Snapshot/NewBotGuardClient
+	// timeout or ctx-cancel before touching the VM. Without this, the next
+	// goja call (shutdownFn invocation, vm.Set) trips the interrupt and the
+	// shutdownFn never runs — masking is caught by the defer above but
+	// defeats the cleanup. Audit reports/goja.md Q1.
+	if c.vm != nil {
+		c.vm.ClearInterrupt()
+	}
+
 	if c.timerMgr != nil {
 		c.timerMgr.CancelAll()
 	}

@@ -105,7 +105,7 @@ func (s *runState) wireRoutes() func() {
 	})
 	routes.LogRoutes(s.r, s.log.GetRecentLines)
 	importCleanup := routes.ImportRoutes(s.r, s.db, s.configStore, s.apiRL)
-	routes.CookieRoutes(s.r, s.cookieRefresh, s.autoCookieSvc, s.getActivePlatforms)
+	routes.CookieRoutes(s.r, s.cookieRefresh, s.autoCookieSvc, s.getActivePlatforms, s.apiRL)
 	routes.YtdlpRoutes(s.r, s.cfg.Network.Port, s.cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(s.r, func() { s.triggerRestart("API") })
 	routes.UpdateRoutes(s.r, &routes.UpdateRouteDeps{
