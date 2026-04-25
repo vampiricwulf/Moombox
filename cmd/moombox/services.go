@@ -351,6 +351,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 		return stats.ActiveCount > 0
 	}
 
+	// Mirror the cookies.dpapi_fallback config flag onto the service.
+	// Read once at startup — toggling at runtime would require a
+	// restart, which is consistent with how other AutoCookieService
+	// fields work (set at construction, never re-read). DECISIONS #6.
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		autoCookieSvc.DpapiFallback = c.Cookies.DpapiFallback
+	})
+
 	// Wire auto-cookie refresh into download worker (attempts refresh on auth failure)
 	dlWorker.OnCookieRefreshNeeded = func() bool {
 		var autoEnabled bool

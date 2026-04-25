@@ -89,6 +89,16 @@ type CookiesConfig struct {
 	Platforms         []string     `toml:"platforms,omitempty" json:"platforms,omitempty"`
 	ActivePlatforms   []string     `toml:"active_platforms,omitempty" json:"active_platforms,omitempty"`
 	RefreshInterval   FlexDuration `toml:"refresh_interval" json:"refresh_interval"`
+
+	// DpapiFallback enables a Windows-only fallback path: if the
+	// CDP-based refresh launch fails (e.g. the user has Chrome open
+	// and our managed-profile launch can't acquire whatever resource
+	// it needs), Moombox tries to read cookies directly from the
+	// user's REAL Chromium-family browser profile via the Windows
+	// CryptUnprotectData API. Default off — the fallback reads the
+	// user's actual signed-in cookies, so it's an opt-in privacy
+	// surface that the user has to consciously enable. DECISIONS #6.
+	DpapiFallback bool `toml:"dpapi_fallback,omitempty" json:"dpapi_fallback,omitempty"`
 }
 
 // DiskConfig holds disk space monitoring settings.

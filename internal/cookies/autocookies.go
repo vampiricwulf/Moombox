@@ -140,6 +140,14 @@ type AutoCookieService struct {
 	// false. Audit reports/cookies.md #23.
 	HasActiveJobs func() bool
 
+	// DpapiFallback enables the Windows-only DPAPI cookie-extraction
+	// path as a fallback when the CDP refresh launch fails. Off by
+	// default — the fallback reads the user's REAL Chromium-family
+	// browser profile, which is a privacy surface the user has to
+	// opt into. When true, RefreshCookies tries DPAPI as a backstop
+	// once the primary CDP launch returns an error. DECISIONS #6.
+	DpapiFallback bool
+
 	// profileDirErr captures any validation failure on the configured
 	// profile directory (e.g. it points at a real browser's profile
 	// tree). Computed once at construction so all subprocess-launching
@@ -461,6 +469,25 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		netscapeCookies, err = s.refreshFirefox(ctx, browser)
 	} else {
 		netscapeCookies, err = s.refreshChromium(ctx, browser)
+	}
+
+	// DPAPI fallback: if the CDP path failed and the user has opted
+	// in, try reading cookies directly from their real Chromium-family
+	// profile via CryptUnprotectData. Skipped for Firefox-based
+	// browsers — Firefox uses cookies.sqlite (no DPAPI involved) and
+	// already has its own SQLite-direct path. DECISIONS #6.
+	if err != nil && s.DpapiFallback && !isFirefoxBased(browser.Type) {
+		s.logger.Warn("CDP refresh failed; attempting DPAPI fallback", "cdp_err", err)
+		fallbackCookies, fallbackErr := dpapiExtractAsNetscape()
+		if fallbackErr != nil {
+			s.logger.Warn("DPAPI fallback also failed; surfacing original CDP error",
+				"dpapi_err", fallbackErr)
+			// fall through with the original CDP err
+		} else {
+			s.logger.Info("DPAPI fallback succeeded; using user's signed-in browser cookies")
+			netscapeCookies = fallbackCookies
+			err = nil
+		}
 	}
 
 	if err != nil {
