@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // Defaults returns a new MoomboxConfig with all default values applied.
@@ -598,6 +600,15 @@ func Save(cfg *MoomboxConfig, path string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
+	// Tighten the config dir's ACL to current-user-only on Windows.
+	// Files written inside (moombox.toml, .tmp scratchpads) inherit
+	// the restrictive ACL so the password hash + cookie paths +
+	// auth tokens aren't readable by other non-admin users on a
+	// shared host. No-op on non-Windows; idempotent if the dir
+	// already has the right ACL. Failures are logged-but-survived
+	// at the caller level — config save still proceeds. Audit
+	// reports/config.md Finding 22.
+	_ = utils.ApplyUserOnlyDACL(dir)
 
 	tmpPath := path + ".tmp"
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 const (
@@ -272,7 +274,7 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	// Windows hosts get a no-op; Windows shells out to icacls. A
 	// failed tightening doesn't fail setup — log and continue.
 	// Audit reports/cookies.md #25.
-	if err := applyUserOnlyDACL(s.profileDir); err != nil {
+	if err := utils.ApplyUserOnlyDACL(s.profileDir); err != nil {
 		s.logger.Warn("could not restrict profile dir to current user", "path", s.profileDir, "err", err)
 	}
 
