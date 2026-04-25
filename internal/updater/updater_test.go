@@ -1,0 +1,397 @@
+package updater
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// silentTestLogger is a no-op logger for updater tests. The package's
+// logger interface is anonymous so each test file declares its own.
+type silentTestLogger struct{}
+
+func (silentTestLogger) Debug(msg string, args ...any) {}
+func (silentTestLogger) Info(msg string, args ...any)  {}
+func (silentTestLogger) Warn(msg string, args ...any)  {}
+func (silentTestLogger) Error(msg string, args ...any) {}
+
+// newTestUpdater constructs an Updater that uses the given httptest
+// origin for both the GitHub API (apiBaseURL) AND the asset downloads
+// (the test handler must serve both /repos/... and /assets/... paths).
+// exePath points at a tempdir file that ApplyUpdate can rename.
+func newTestUpdater(t *testing.T, current string, srv *httptest.Server, verifier func(string, string) error) (*Updater, string) {
+	t.Helper()
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "moombox.exe")
+	if err := os.WriteFile(exePath, []byte("current binary"), 0o755); err != nil {
+		t.Fatalf("seed exe: %v", err)
+	}
+	if verifier == nil {
+		verifier = func(string, string) error { return nil }
+	}
+	return &Updater{
+		currentVersion:  strings.TrimPrefix(current, "v"),
+		exePath:         exePath,
+		logger:          silentTestLogger{},
+		repoOwner:       "test",
+		repoName:        "Moombox",
+		client:          &http.Client{Timeout: 5 * time.Second},
+		apiBaseURL:      srv.URL,
+		verifySignature: verifier,
+	}, exePath
+}
+
+// --- CheckForUpdate: server failure modes ---
+
+// TestCheckForUpdateRateLimited covers the GitHub rate-limit branch
+// (HTTP 403 / 429 → friendly "rate limit exceeded" error). Audit
+// reports/small-packages.md updater test rate-limited.
+func TestCheckForUpdateRateLimited(t *testing.T) {
+	for _, code := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+			rw.WriteHeader(code)
+		}))
+		t.Cleanup(srv.Close)
+
+		u, _ := newTestUpdater(t, "2.0.15", srv, nil)
+		_, err := u.CheckForUpdate(context.Background())
+		if err == nil {
+			t.Fatalf("CheckForUpdate at HTTP %d: want error, got nil", code)
+		}
+		if !strings.Contains(err.Error(), "rate limit") {
+			t.Errorf("HTTP %d: error should mention rate limit, got %v", code, err)
+		}
+	}
+}
+
+// TestCheckForUpdateOtherHTTPError covers any non-OK / non-rate-limit
+// status — the helper should surface the status code without claiming
+// it's a rate-limit issue.
+func TestCheckForUpdateOtherHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		http.Error(rw, "boom", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, _ := newTestUpdater(t, "2.0.15", srv, nil)
+	_, err := u.CheckForUpdate(context.Background())
+	if err == nil {
+		t.Fatal("CheckForUpdate at HTTP 503: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("error should contain 503, got %v", err)
+	}
+	if strings.Contains(err.Error(), "rate limit") {
+		t.Errorf("503 should NOT be classified as rate-limit, got %v", err)
+	}
+}
+
+// TestCheckForUpdateNoMoomboxAsset covers the "release found but no
+// Moombox.exe asset" branch. Audit reports/small-packages.md
+// updater test no asset.
+func TestCheckForUpdateNoMoomboxAsset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(rw).Encode(githubRelease{
+			TagName: "v3.0.0",
+			Assets: []githubAsset{
+				{Name: "something-else.zip", BrowserDownloadURL: "http://example.com/x.zip"},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	u, _ := newTestUpdater(t, "2.0.15", srv, nil)
+	_, err := u.CheckForUpdate(context.Background())
+	if err == nil {
+		t.Fatal("CheckForUpdate without Moombox.exe asset: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no Moombox.exe asset") {
+		t.Errorf("error should mention missing asset, got %v", err)
+	}
+}
+
+// TestCheckForUpdateUpToDateReturnsNil covers the "remote ≤ current"
+// branch: nil release, nil error. With pre-release support added in
+// this commit, a v2.6.0-test.10 client checking against v2.6.0-test.27
+// must report an update — not "up to date" — because pre-release
+// numeric identifiers compare numerically.
+func TestCheckForUpdateUpToDateReturnsNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(rw).Encode(githubRelease{
+			TagName: "v2.0.15",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	u, _ := newTestUpdater(t, "2.0.15", srv, nil)
+	got, err := u.CheckForUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("CheckForUpdate (up-to-date): %v", err)
+	}
+	if got != nil {
+		t.Errorf("up-to-date: want nil, got %+v", got)
+	}
+}
+
+// TestCheckForUpdatePrereleaseOrdering verifies the new SemVer-2.0.0
+// ordering propagates through CheckForUpdate: a pre-release client
+// checking against a higher pre-release tag should see the update.
+func TestCheckForUpdatePrereleaseOrdering(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(rw).Encode(githubRelease{
+			TagName: "v2.6.0-test.27",
+			Assets: []githubAsset{
+				{Name: "Moombox.exe", BrowserDownloadURL: "http://example.com/exe"},
+				{Name: "Moombox.exe.sig", BrowserDownloadURL: "http://example.com/sig"},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	u, _ := newTestUpdater(t, "2.6.0-test.10", srv, nil)
+	got, err := u.CheckForUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("CheckForUpdate (pre-release): %v", err)
+	}
+	if got == nil {
+		t.Fatal("test.10 → test.27 should be an update; CompareVersions ordering broken?")
+	}
+	if got.TagName != "v2.6.0-test.27" {
+		t.Errorf("ReleaseInfo.TagName: want v2.6.0-test.27, got %q", got.TagName)
+	}
+}
+
+// --- downloadFile: oversize + HTTP error ---
+
+// TestDownloadFileRejectsOversize covers the maxDownloadSize cap. We
+// serve a 201 MB body (1 MB over the 200 MB cap) and assert the helper
+// errors with a clear message rather than writing the full payload.
+func TestDownloadFileRejectsOversize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("oversize test allocates 201 MB; skipping in -short mode")
+	}
+	const overSize = 201 << 20
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		// Stream zero-bytes; cheaper than allocating a 201MB buffer.
+		buf := make([]byte, 1<<20)
+		for i := 0; i <= 200; i++ {
+			rw.Write(buf)
+		}
+		rw.Write(buf[:1])
+	}))
+	t.Cleanup(srv.Close)
+
+	u, _ := newTestUpdater(t, "1.0.0", srv, nil)
+	dest := filepath.Join(t.TempDir(), "big.bin")
+	err := u.downloadFile(context.Background(), srv.URL, dest)
+	if err == nil {
+		t.Fatal("downloadFile on 201MB body: want size-limit error, got nil")
+	}
+	if !strings.Contains(err.Error(), "size limit") {
+		t.Errorf("error should mention size limit, got %v", err)
+	}
+	_ = overSize // intentionally unused — kept as a documentation constant
+}
+
+// TestDownloadFileHTTPError covers the non-200 branch.
+func TestDownloadFileHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		http.Error(rw, "missing", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, _ := newTestUpdater(t, "1.0.0", srv, nil)
+	dest := filepath.Join(t.TempDir(), "bin")
+	err := u.downloadFile(context.Background(), srv.URL, dest)
+	if err == nil {
+		t.Fatal("downloadFile on 404: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should contain 404, got %v", err)
+	}
+}
+
+// --- CleanupOldBinary ---
+
+// TestCleanupOldBinaryRemovesStaleArtifacts covers all four suffixes
+// the helper sweeps (.old, .new, .new.sig, .sig). The .update-broken
+// marker is intentionally preserved.
+func TestCleanupOldBinaryRemovesStaleArtifacts(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	u, exePath := newTestUpdater(t, "1.0.0", srv, nil)
+
+	stale := []string{exePath + ".old", exePath + ".new", exePath + ".new.sig", exePath + ".sig"}
+	preserved := exePath + ".update-broken"
+	for _, p := range append(stale, preserved) {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+
+	u.CleanupOldBinary()
+
+	for _, p := range stale {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("stale file %s not removed: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(preserved); err != nil {
+		t.Errorf("preserved marker %s should still exist: %v", preserved, err)
+	}
+}
+
+// --- ApplyUpdate: end-to-end happy + rollback ---
+
+// TestApplyUpdateEndToEnd covers the full success path: the updater
+// downloads .new + .new.sig, verifies the (stub) signature, swaps the
+// running exe via .old → exe, .new → exe, and removes the .sig.
+func TestApplyUpdateEndToEnd(t *testing.T) {
+	const newBody = "fresh moombox binary"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/exe", func(rw http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(rw, newBody)
+	})
+	mux.HandleFunc("/sig", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.Write(make([]byte, ed25519.SignatureSize))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	verifyCalls := atomic.Int32{}
+	verifier := func(binPath, sigPath string) error {
+		verifyCalls.Add(1)
+		// Sanity: both files must exist when verify runs.
+		if _, err := os.Stat(binPath); err != nil {
+			return fmt.Errorf("verifier: binary missing: %w", err)
+		}
+		if _, err := os.Stat(sigPath); err != nil {
+			return fmt.Errorf("verifier: signature missing: %w", err)
+		}
+		return nil
+	}
+	u, exePath := newTestUpdater(t, "1.0.0", srv, verifier)
+
+	err := u.ApplyUpdate(context.Background(), &ReleaseInfo{
+		Version:      "2.0.0",
+		TagName:      "v2.0.0",
+		DownloadURL:  srv.URL + "/exe",
+		SignatureURL: srv.URL + "/sig",
+	})
+	if err != nil {
+		t.Fatalf("ApplyUpdate: %v", err)
+	}
+
+	// Post-conditions: new binary at exePath, .old contains the original,
+	// no .new or .sig leftovers.
+	got, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatalf("read post-update exe: %v", err)
+	}
+	if string(got) != newBody {
+		t.Errorf("exe contents: want %q, got %q", newBody, string(got))
+	}
+	if old, err := os.ReadFile(exePath + ".old"); err != nil {
+		t.Errorf("old binary missing: %v", err)
+	} else if string(old) != "current binary" {
+		t.Errorf(".old contents: want %q, got %q", "current binary", string(old))
+	}
+	for _, suffix := range []string{".new", ".new.sig", ".sig"} {
+		if _, err := os.Stat(exePath + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("stray %s file: %v", suffix, err)
+		}
+	}
+	if got := verifyCalls.Load(); got != 1 {
+		t.Errorf("verifier calls: want 1, got %d", got)
+	}
+}
+
+// TestApplyUpdateRollbackOnVerifyFailure covers the rollback path:
+// signature verification fails → .new is removed → original exe is
+// untouched.
+func TestApplyUpdateRollbackOnVerifyFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/exe", func(rw http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(rw, "tampered binary")
+	})
+	mux.HandleFunc("/sig", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.Write(make([]byte, ed25519.SignatureSize))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	verifier := func(string, string) error {
+		return errors.New("signature mismatch")
+	}
+	u, exePath := newTestUpdater(t, "1.0.0", srv, verifier)
+
+	err := u.ApplyUpdate(context.Background(), &ReleaseInfo{
+		Version:      "2.0.0",
+		DownloadURL:  srv.URL + "/exe",
+		SignatureURL: srv.URL + "/sig",
+	})
+	if err == nil {
+		t.Fatal("ApplyUpdate with bad signature: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "signature verification failed") {
+		t.Errorf("error: want signature-verification phrasing, got %v", err)
+	}
+	// Original exe must still exist and be unchanged.
+	got, err := os.ReadFile(exePath)
+	if err != nil {
+		t.Fatalf("read exe after failed apply: %v", err)
+	}
+	if string(got) != "current binary" {
+		t.Errorf("exe was modified despite verify failure: got %q", string(got))
+	}
+	// .new + .sig must be cleaned up.
+	for _, suffix := range []string{".new", ".sig"} {
+		if _, err := os.Stat(exePath + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s leaked after verify failure: %v", suffix, err)
+		}
+	}
+}
+
+// TestApplyUpdateRefusesMissingSignature covers the explicit refusal
+// when ReleaseInfo.SignatureURL is empty — never apply unsigned binaries.
+func TestApplyUpdateRefusesMissingSignature(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(rw, "x")
+	}))
+	t.Cleanup(srv.Close)
+
+	u, _ := newTestUpdater(t, "1.0.0", srv, nil)
+
+	err := u.ApplyUpdate(context.Background(), &ReleaseInfo{
+		Version:      "2.0.0",
+		DownloadURL:  srv.URL,
+		SignatureURL: "",
+	})
+	if err == nil {
+		t.Fatal("ApplyUpdate without signature URL: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no signature URL") {
+		t.Errorf("error: want 'no signature URL' phrasing, got %v", err)
+	}
+}
+
+// _ keeps signing-package round-trip imports referenced even when the
+// happy-path test stubs the verifier rather than using a real signature.
+var _ = func() string {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	return hex.EncodeToString(pub)
+}

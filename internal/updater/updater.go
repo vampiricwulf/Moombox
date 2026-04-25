@@ -40,6 +40,14 @@ type Updater struct {
 	repoOwner      string
 	repoName       string
 	client         *http.Client
+
+	// apiBaseURL is the GitHub API origin. Tests override to point at an
+	// httptest server so CheckForUpdate doesn't hit github.com.
+	apiBaseURL string
+	// verifySignature lets tests substitute a stub key-verifier without
+	// needing access to the embedded production private key. Defaults
+	// to the package-level VerifySignature in New().
+	verifySignature func(binaryPath, sigPath string) error
 }
 
 // downloadClient is the shared HTTP client used for binary downloads. It
@@ -77,14 +85,16 @@ func New(currentVersion string, log logger) (*Updater, error) {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		apiBaseURL:      "https://api.github.com",
+		verifySignature: VerifySignature,
 	}, nil
 }
 
 // CheckForUpdate queries GitHub for the latest release. Returns nil if
 // already up-to-date, or a ReleaseInfo if a newer version exists.
 func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest",
-		u.repoOwner, u.repoName)
+	url := fmt.Sprintf("%s/repos/%s/%s/releases/latest",
+		u.apiBaseURL, u.repoOwner, u.repoName)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -185,7 +195,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("signature download failed: %w", err)
 	}
 
-	if err := VerifySignature(newPath, sigPath); err != nil {
+	if err := u.verifySignature(newPath, sigPath); err != nil {
 		os.Remove(newPath)
 		os.Remove(sigPath)
 		return fmt.Errorf("signature verification failed: %w", err)
