@@ -290,7 +290,11 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			consecutiveErrors++
 			sp.logger.Warn("twitch poll error", "channel", login, "err", err, "consecutive", consecutiveErrors)
 			if consecutiveErrors >= maxConsecutiveProbeErrors {
-				return nil, fmt.Errorf("max probe errors: %w", err)
+				// Wrap with ErrNonActionable so worker.setJobError suppresses
+				// the user notification — the retry budget exhausted means
+				// the stream isn't going to come up regardless of further
+				// probes (audit cross-cutting.md C3 follow-up).
+				return nil, fmt.Errorf("max probe errors: %w (%w)", err, ErrNonActionable)
 			}
 			continue
 		}

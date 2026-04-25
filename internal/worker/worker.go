@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -22,60 +21,28 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-// Error-classification helpers. These scan error strings because several
-// upstream producers (YouTube extractors, cipher, cookie jar) return plain
-// fmt.Errorf with no sentinel — a dedicated sentinel-error migration is
-// tracked in reports/cross-cutting.md C3 but is cross-package and deferred.
-// Keeping the magic strings in one place makes the migration mechanical
-// when we tackle it: these functions become one-line errors.Is checks.
+// Error-classification sentinels. Producers wrap their errors with these
+// via fmt.Errorf("...: %w", sentinel); consumers use errors.Is to detect
+// the category. Replaces the prior string-matching helpers (audit
+// reports/cross-cutting.md C3 follow-up).
 
-// cookiesRequiredPrefixes / cookiesRequiredSubstrings are the lower-cased
-// error fragments that indicate the job should transition to StatusCookies
-// rather than generic StatusError.
-var (
-	cookiesRequiredPrefixes = []string{
-		"login required",
-		"member-only",
-		"members only",
-	}
-	cookiesRequiredSubstrings = []string{
-		"cookies?",
-	}
-	nonActionablePrefixes = []string{
-		"max probe errors",
-	}
-	nonActionableSubstrings = []string{
-		"age restricted",
-	}
-)
+// ErrCookiesRequired marks errors where the job should transition to
+// StatusCookies rather than generic StatusError. Producers attach this
+// sentinel to player-API "Login required" / "Member-only" failures and
+// to any explicit cookies-needed signal.
+var ErrCookiesRequired = errors.New("cookies required (auth needed)")
 
-func isCookiesRequiredError(errLower string) bool {
-	for _, p := range cookiesRequiredPrefixes {
-		if strings.HasPrefix(errLower, p) {
-			return true
-		}
-	}
-	for _, s := range cookiesRequiredSubstrings {
-		if strings.Contains(errLower, s) {
-			return true
-		}
-	}
-	return false
-}
+// ErrNonActionable marks errors where there's nothing the user can do
+// (age-restricted content, exhausted retry budgets). Notification
+// dispatch is suppressed for these to avoid noisy "your stream failed"
+// pings about content that was never going to succeed.
+var ErrNonActionable = errors.New("non-actionable error")
 
-func isNonActionableError(errLower string) bool {
-	for _, p := range nonActionablePrefixes {
-		if strings.HasPrefix(errLower, p) {
-			return true
-		}
-	}
-	for _, s := range nonActionableSubstrings {
-		if strings.Contains(errLower, s) {
-			return true
-		}
-	}
-	return false
-}
+// ErrCancelled is the sentinel used by the StreamProcessor when a
+// download was cancelled mid-flight (ctx.Done before live, user-cancel
+// during upcoming wait). Lets the worker pick the cancelled-status
+// branch without comparing error strings.
+var ErrCancelled = errors.New("cancelled")
 
 // heartbeatInterval is the safety-net poll interval for catching missed jobs.
 // Normal job discovery is signal-driven via NotifyNewJob.
@@ -372,7 +339,12 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			return
 		}
 		if result.Error != "" {
-			w.setJobError(job, errors.New(result.Error))
+			// AsError preserves any ErrSentinel attached by the producer
+			// (e.g. ErrCookiesRequired from checkPlayability) so
+			// setJobError's errors.Is checks fire correctly. Without
+			// this wrap, the prior code's errors.New stripped the
+			// sentinel and forced setJobError back to string-matching.
+			w.setJobError(job, result.AsError())
 		}
 		return
 	}
@@ -581,8 +553,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	w.logger.Error("job error", "jobID", job.ID, "err", errMsg)
 
 	status := database.StatusError
-	errLower := strings.ToLower(errMsg)
-	if isCookiesRequiredError(errLower) {
+	if errors.Is(err, ErrCookiesRequired) {
 		status = database.StatusCookies
 	}
 
@@ -594,7 +565,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Suppress notifications for non-actionable errors (matches TS behavior):
 	// - Age-restricted content: nothing user can do
 	// - Probe timeout: transient, stream may have ended naturally
-	suppressNotification := isNonActionableError(errLower)
+	suppressNotification := errors.Is(err, ErrNonActionable)
 
 	// Send error/auth notification
 	if w.notifier != nil && !suppressNotification {

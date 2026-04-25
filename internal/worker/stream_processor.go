@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -30,6 +31,12 @@ type StreamProcessResult struct {
 	ShouldDownload bool
 	IsVod          bool
 	Error          string
+	// ErrSentinel optionally wraps Error with a worker-package sentinel
+	// (ErrCookiesRequired / ErrNonActionable / ErrCancelled) so the
+	// downstream consumer can errors.Is the category without parsing
+	// the display string. Producers set this when the failure category
+	// is known; consumers fall back to plain Error otherwise.
+	ErrSentinel    error
 	ChatDownloader *chat.ChatDownloader // Pre-started chat downloader from upcoming phase (B2)
 
 	// Twitch-specific fields
@@ -37,6 +44,24 @@ type StreamProcessResult struct {
 	TwitchVariant        *twitch.TwitchHLSVariant
 	TwitchChatDownloader *twitch.ChatDownloader
 	TwitchVodChatDl      *twitch.VodChatDownloader
+}
+
+// AsError converts the result's failure into an error, preserving the
+// display string and (when ErrSentinel is set) the categorisation that
+// errors.Is can match against. Returns nil when there's no error to
+// surface (Error == "").
+func (r *StreamProcessResult) AsError() error {
+	if r.Error == "" {
+		return nil
+	}
+	if r.ErrSentinel != nil {
+		// Multi-%w form: errors.Is matches both the display-only inner
+		// error AND the sentinel. The display string is "<message>
+		// (<sentinel>)" — slightly longer than just the message but the
+		// sentinel suffix is reasonably descriptive.
+		return fmt.Errorf("%w (%w)", errors.New(r.Error), r.ErrSentinel)
+	}
+	return errors.New(r.Error)
 }
 
 // StreamProcessor handles stream status probing and waiting.
@@ -139,11 +164,12 @@ func (sp *StreamProcessor) Process(ctx context.Context, job *database.Job) (*Str
 
 	sp.updateJobMetadata(job, info, false)
 
-	if errMsg := sp.checkPlayability(info); errMsg != "" {
+	if errMsg, sentinel := sp.checkPlayability(info); errMsg != "" {
 		return &StreamProcessResult{
 			VideoInfo:      info,
 			ShouldDownload: false,
 			Error:          errMsg,
+			ErrSentinel:    sentinel,
 		}, nil
 	}
 
@@ -217,10 +243,15 @@ func (sp *StreamProcessor) handleStreamStatus(ctx context.Context, job *database
 	}
 }
 
-// checkPlayability returns an error string if the video is not playable (matches TS checkPlayability).
-func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) string {
+// checkPlayability returns an error string and an optional sentinel for
+// classification when the video is not playable. The display string is
+// the user-facing error; the sentinel (ErrCookiesRequired for member /
+// login, ErrNonActionable for age-restricted) lets the downstream
+// worker route the job to StatusCookies or suppress notifications via
+// errors.Is rather than substring matching. Both empty/nil → playable.
+func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, error) {
 	if info.PlayabilityError == "" || info.PlayabilityError == youtube.PlayabilityOK {
-		return ""
+		return "", nil
 	}
 	reason := info.PlayabilityReason
 	if reason == "" {
@@ -228,13 +259,13 @@ func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) string {
 	}
 	switch info.PlayabilityError {
 	case youtube.PlayabilityMembersOnly:
-		return fmt.Sprintf("Member-only: %s", reason)
+		return fmt.Sprintf("Member-only: %s", reason), ErrCookiesRequired
 	case youtube.PlayabilityLoginRequired:
-		return fmt.Sprintf("Login required: %s", reason)
+		return fmt.Sprintf("Login required: %s", reason), ErrCookiesRequired
 	case youtube.PlayabilityAgeRestricted:
-		return fmt.Sprintf("Age restricted: %s", reason)
+		return fmt.Sprintf("Age restricted: %s", reason), ErrNonActionable
 	default:
-		return reason
+		return reason, nil
 	}
 }
 

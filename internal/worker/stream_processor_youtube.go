@@ -141,7 +141,11 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			sp.logger.Warn("probe error", "videoID", job.VideoID, "err", err, "consecutive", consecutiveErrors)
 			if consecutiveErrors >= maxConsecutiveProbeErrors {
 				sp.stopEarlyChat(chatDl)
-				return nil, fmt.Errorf("max probe errors: %w", err)
+				// Wrap with ErrNonActionable so worker.setJobError suppresses
+				// the user notification — exhausted probe retries mean the
+				// stream isn't going to come up regardless of further work
+				// (audit cross-cutting.md C3 follow-up).
+				return nil, fmt.Errorf("max probe errors: %w (%w)", err, ErrNonActionable)
 			}
 			continue
 		}
