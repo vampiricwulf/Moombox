@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
@@ -356,6 +357,16 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	}
 
 streamEnded:
+	// Stream is no longer downloading. Flip status to Muxing now so the
+	// UI reflects reality during background-mux Wait + the final-segment
+	// mux below — the prior single-flip in finalizeMultiSegmentJob /
+	// muxAndFinalize fired AFTER all real mux work, leaving the UI on
+	// "Downloading" through ~the entire post-stream phase. Audit
+	// reports/worker.md F23 / Q4.
+	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+		"status": database.StatusMuxing,
+	})
+
 	// Wait for background segment muxes to finish before final mux —
 	// their DB records must exist before muxAndFinalize calls GetSegments.
 	segmentMuxWg.Wait()

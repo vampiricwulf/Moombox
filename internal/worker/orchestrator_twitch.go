@@ -373,6 +373,16 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 
 	tracker.Finalize()
 
+	// Stream is no longer downloading. Flip status to Muxing now so the
+	// UI reflects reality during background-mux Wait + the final-segment
+	// mux below — the prior single-flip in finalizeMultiSegmentJob /
+	// muxAndFinalize fired AFTER all real mux work, leaving the UI on
+	// "Downloading" through ~the entire post-stream phase. Audit
+	// reports/worker.md F23 / Q4.
+	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+		"status": database.StatusMuxing,
+	})
+
 	// Wait for any background segment muxes to finish
 	segmentMuxWg.Wait()
 
