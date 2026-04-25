@@ -91,8 +91,13 @@ type Database struct {
 	// writing to a shared mutable package-level map would otherwise risk races.
 	fieldToColumn map[string]string
 
-	// Pub/sub
+	// Pub/sub. onJobChange coexists with onJobUpdate during the
+	// DECISIONS #21 migration — both fire on every UpdateJobFields,
+	// so callers can opt into the richer JobChange shape (full Job +
+	// changed columns) without disturbing legacy OnJobUpdate
+	// subscribers.
 	onJobUpdate  []jobUpdateSub
+	onJobChange  []jobChangeSub
 	onJobsChange []jobsChangeSub
 	nextSubID    uint64
 	subMu        sync.RWMutex
@@ -347,6 +352,20 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 		return nil
 	}
 
+	// Capture the schema column names that were actually written so
+	// OnJobChange subscribers can drive fine-grained updates. Don't
+	// include "updated_at" — every UpdateJobFields call bumps it, so
+	// signalling it would defeat the consumer's "skip updated_at-only
+	// updates" optimisation.
+	changes := make([]string, 0, len(setClauses))
+	for _, clause := range setClauses {
+		col := clause[:len(clause)-2] // strip "=?"
+		if col == "updated_at" {
+			continue
+		}
+		changes = append(changes, col)
+	}
+
 	// Read back the full job under the same critical section so subscribers
 	// see consistent state. TUI + WebSocket need all fields; UpdateJobFields
 	// only wrote a subset, so a SELECT is required.
@@ -360,7 +379,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 		return nil
 	}
 
-	db.notifyJobUpdate(job)
+	db.notifyJobUpdate(job, changes)
 	return job
 }
 

@@ -463,6 +463,174 @@ func TestUnsubscribeStopsCallback(t *testing.T) {
 	}
 }
 
+// TestOnJobChangeReceivesChangedColumns covers the new fine-grained
+// event API added for DECISIONS #21. Each UpdateJobFields call must
+// fire OnJobChange with the schema column names that were written —
+// minus updated_at, which is bumped on every call and would defeat
+// the consumer's "skip identity-only updates" optimisation.
+func TestOnJobChangeReceivesChangedColumns(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "ch1", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan *JobChange, 4)
+	unsub := db.OnJobChange(func(c *JobChange) { events <- c })
+	defer unsub()
+
+	db.UpdateJobFields("ch1", map[string]any{
+		"status":   StatusDownloading,
+		"progress": "10%",
+	})
+
+	select {
+	case ev := <-events:
+		if ev.Job == nil || ev.Job.ID != "ch1" {
+			t.Errorf("event Job: want ch1, got %+v", ev.Job)
+		}
+		// updated_at must NOT appear; the writer-set columns must.
+		seen := map[string]bool{}
+		for _, c := range ev.Changes {
+			seen[c] = true
+		}
+		if !seen["status"] || !seen["progress"] {
+			t.Errorf("Changes missing expected columns: %v", ev.Changes)
+		}
+		if seen["updated_at"] {
+			t.Error("Changes should NOT include updated_at — every call bumps it")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobChange did not fire within 2s")
+	}
+}
+
+func TestOnJobChangeFiresAlongsideOnJobUpdate(t *testing.T) {
+	// Both APIs coexist during the migration. A single UpdateJobFields
+	// call must fan out to BOTH OnJobUpdate and OnJobChange
+	// subscribers — neither path can starve the other.
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "dual", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	updateHits := make(chan *Job, 1)
+	changeHits := make(chan *JobChange, 1)
+
+	uu := db.OnJobUpdate(func(j *Job) { updateHits <- j })
+	defer uu()
+	uc := db.OnJobChange(func(c *JobChange) { changeHits <- c })
+	defer uc()
+
+	db.UpdateJobFields("dual", map[string]any{"status": StatusDownloading})
+
+	select {
+	case <-updateHits:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobUpdate did not fire")
+	}
+	select {
+	case <-changeHits:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobChange did not fire")
+	}
+}
+
+func TestOnJobChangeUnsubscribeStopsCallbacks(t *testing.T) {
+	// Mirror of TestUnsubscribeStopsCallback for the new API. Once
+	// the returned unsub func runs, no further events should arrive.
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "uns", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hits := make(chan *JobChange, 4)
+	unsub := db.OnJobChange(func(c *JobChange) { hits <- c })
+
+	db.UpdateJobFields("uns", map[string]any{"status": StatusDownloading})
+	select {
+	case <-hits:
+	case <-time.After(time.Second):
+		t.Fatal("first event should have fired")
+	}
+
+	unsub()
+	db.UpdateJobFields("uns", map[string]any{"status": StatusFinished})
+
+	select {
+	case ev := <-hits:
+		t.Errorf("post-unsubscribe event should NOT fire; got %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestOnJobChangeSurvivesPanic(t *testing.T) {
+	// safeCallJobChange wraps each subscriber in a per-callback recover
+	// so one panicking handler doesn't break the rest of the fan-out
+	// or the writer path.
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "p", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	panicked := false
+	survived := make(chan struct{}, 1)
+
+	uPanic := db.OnJobChange(func(*JobChange) {
+		panicked = true
+		panic("test panic")
+	})
+	defer uPanic()
+	uOK := db.OnJobChange(func(*JobChange) { survived <- struct{}{} })
+	defer uOK()
+
+	db.UpdateJobFields("p", map[string]any{"status": StatusFinished})
+
+	select {
+	case <-survived:
+		// good — second subscriber fired despite first one panicking
+	case <-time.After(2 * time.Second):
+		t.Fatal("second subscriber should fire even if first panics")
+	}
+	if !panicked {
+		t.Error("panicking subscriber should have been invoked")
+	}
+}
+
 func TestSubscriberSliceShrinksAfterChurn(t *testing.T) {
 	// Locks down shrinkJobUpdateSubs: after many subscribe/unsubscribe
 	// cycles the underlying slice is rebuilt at smaller capacity so

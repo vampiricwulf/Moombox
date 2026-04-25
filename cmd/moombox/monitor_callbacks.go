@@ -291,8 +291,18 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 	}
 
-	// Database -> WebSocket: broadcast job updates
-	s.unsubWSJobUpdate = s.db.OnJobUpdate(func(job *database.Job) {
+	// Database -> WebSocket: broadcast job updates. Uses the
+	// fine-grained OnJobChange API so we can skip broadcasts that
+	// only touched silent columns (resume_position, chat_offset —
+	// see silentColumns in database/database.go) — those are
+	// player-state writes that happen ~10/sec while the user
+	// scrubs and don't merit a WebSocket frame each.
+	//
+	// DECISIONS #21 first migrated subscriber: this is the proof-
+	// of-concept that the new event API delivers a real perf win.
+	// Future work: migrate TUI's job-list redraw similarly.
+	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
+		job := ev.Job
 		// Skip broadcasting updates for archived (old finished) jobs
 		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
 			var ageDays int

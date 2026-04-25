@@ -1,9 +1,34 @@
 package database
 
+// JobChange is the event payload delivered to OnJobChange subscribers.
+// Combines the post-update Job snapshot with the list of columns that
+// were actually written. Subscribers that need fine-grained
+// notifications (e.g. WebSocket broadcasters that want to skip
+// identity-only updates, TUI views that want to re-render only the
+// affected cells) can use Changes; those that only care about the
+// full job can ignore it.
+//
+// This is the foundation for the DECISIONS #21 event-based subscriber
+// migration. Today only UpdateJobFields emits JobChange events; future
+// work will extend AddJob/DeleteJob/AddTrim/DeleteTrim to emit
+// JobAdded/JobDeleted/TrimsChanged events through a similar API,
+// letting subscribers apply diffs locally instead of re-fetching the
+// full list every time.
+type JobChange struct {
+	Job     *Job
+	Changes []string // schema column names from fieldToColumn that were written
+}
+
 // jobUpdateSub pairs a subscriber ID with its callback function.
 type jobUpdateSub struct {
 	id uint64
 	fn func(*Job)
+}
+
+// jobChangeSub pairs a subscriber ID with its JobChange callback.
+type jobChangeSub struct {
+	id uint64
+	fn func(*JobChange)
 }
 
 // jobsChangeSub pairs a subscriber ID with its callback function.
@@ -34,6 +59,17 @@ func shrinkJobsChangeSubs(s []jobsChangeSub) []jobsChangeSub {
 	return s
 }
 
+// shrinkJobChangeSubs is the jobChangeSub counterpart for the
+// per-update event subscribers added for DECISIONS #21.
+func shrinkJobChangeSubs(s []jobChangeSub) []jobChangeSub {
+	if cap(s) > 4*len(s) {
+		shrunk := make([]jobChangeSub, len(s))
+		copy(shrunk, s)
+		return shrunk
+	}
+	return s
+}
+
 // OnJobUpdate registers a callback for job update events.
 // Returns an unsubscribe function that removes the callback.
 func (db *Database) OnJobUpdate(fn func(*Job)) func() {
@@ -49,6 +85,34 @@ func (db *Database) OnJobUpdate(fn func(*Job)) func() {
 			if sub.id == id {
 				db.onJobUpdate = append(db.onJobUpdate[:i], db.onJobUpdate[i+1:]...)
 				db.onJobUpdate = shrinkJobUpdateSubs(db.onJobUpdate)
+				break
+			}
+		}
+	}
+}
+
+// OnJobChange registers a callback for fine-grained job-update events.
+// Each invocation receives a JobChange carrying both the post-write
+// snapshot and the list of columns that were actually written.
+// Returns an unsubscribe function that removes the callback.
+//
+// Coexists with OnJobUpdate (legacy, full-Job-only). Both fire on
+// every UpdateJobFields call; subscribers can pick whichever shape
+// fits their needs. A future migration will deprecate OnJobUpdate
+// once all callers move to OnJobChange (DECISIONS #21).
+func (db *Database) OnJobChange(fn func(*JobChange)) func() {
+	db.subMu.Lock()
+	defer db.subMu.Unlock()
+	id := db.nextSubID
+	db.nextSubID++
+	db.onJobChange = append(db.onJobChange, jobChangeSub{id: id, fn: fn})
+	return func() {
+		db.subMu.Lock()
+		defer db.subMu.Unlock()
+		for i, sub := range db.onJobChange {
+			if sub.id == id {
+				db.onJobChange = append(db.onJobChange[:i], db.onJobChange[i+1:]...)
+				db.onJobChange = shrinkJobChangeSubs(db.onJobChange)
 				break
 			}
 		}
@@ -82,9 +146,14 @@ func (db *Database) OnJobsChange(fn func([]*Job)) func() {
 // deadlock against any RLock/Lock attempt those callbacks make. Audit
 // reports/database.md C1.
 //
+// Fans out to BOTH the legacy OnJobUpdate(*Job) subscribers and the
+// newer OnJobChange(*JobChange) subscribers. The caller passes the
+// changed-columns slice so JobChange consumers can drive fine-grained
+// rendering / broadcasting; OnJobUpdate consumers ignore it.
+//
 // A top-level recover guards the iteration itself (not just per-callback)
 // so the caller of UpdateJobFields can never crash on a bad fan-out.
-func (db *Database) notifyJobUpdate(job *Job) {
+func (db *Database) notifyJobUpdate(job *Job, changes []string) {
 	defer func() {
 		if r := recover(); r != nil && db.logger != nil {
 			db.logger.Error("notifyJobUpdate iteration panic", "panic", r)
@@ -92,14 +161,24 @@ func (db *Database) notifyJobUpdate(job *Job) {
 	}()
 
 	db.subMu.RLock()
-	subs := make([]func(*Job), 0, len(db.onJobUpdate))
+	updateSubs := make([]func(*Job), 0, len(db.onJobUpdate))
 	for _, sub := range db.onJobUpdate {
-		subs = append(subs, sub.fn)
+		updateSubs = append(updateSubs, sub.fn)
+	}
+	changeSubs := make([]func(*JobChange), 0, len(db.onJobChange))
+	for _, sub := range db.onJobChange {
+		changeSubs = append(changeSubs, sub.fn)
 	}
 	db.subMu.RUnlock()
 
-	for _, fn := range subs {
+	for _, fn := range updateSubs {
 		db.safeCallJobUpdate(fn, job)
+	}
+	if len(changeSubs) > 0 {
+		event := &JobChange{Job: job, Changes: changes}
+		for _, fn := range changeSubs {
+			db.safeCallJobChange(fn, event)
+		}
 	}
 }
 
@@ -185,4 +264,15 @@ func (db *Database) safeCallJobsChange(fn func([]*Job), jobs []*Job) {
 		}
 	}()
 	fn(jobs)
+}
+
+// safeCallJobChange calls an OnJobChange subscriber with panic recovery.
+// One misbehaving consumer can't take down the rest of the fan-out.
+func (db *Database) safeCallJobChange(fn func(*JobChange), event *JobChange) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("database subscriber panic on job change", "jobID", event.Job.ID, "panic", r)
+		}
+	}()
+	fn(event)
 }
