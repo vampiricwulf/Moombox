@@ -405,14 +405,18 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Monitors.TwitchCheckInterval = nil
 		}
 	}
-	if cfg.Logs.LogMaxFileSize < 1 {
-		fail("logs.log_max_file_size %d must be >= 1", cfg.Logs.LogMaxFileSize)
+	// Bounds match the PUT /api/config Zod schema (config_routes.go) so a
+	// hand-edited TOML can't get past Validate with a value the web UI
+	// would have rejected. 1KB lower bound prevents pathological log
+	// rotation; 1GB upper bound prevents accidental disk exhaustion.
+	if cfg.Logs.LogMaxFileSize < 1024 || cfg.Logs.LogMaxFileSize > 1073741824 {
+		fail("logs.log_max_file_size %d out of range 1024..1073741824", cfg.Logs.LogMaxFileSize)
 		if !reportOnly {
 			cfg.Logs.LogMaxFileSize = defaults.Logs.LogMaxFileSize
 		}
 	}
-	if cfg.Logs.LogMaxFiles < 1 {
-		fail("logs.log_max_files %d must be >= 1", cfg.Logs.LogMaxFiles)
+	if cfg.Logs.LogMaxFiles < 1 || cfg.Logs.LogMaxFiles > 100 {
+		fail("logs.log_max_files %d out of range 1..100", cfg.Logs.LogMaxFiles)
 		if !reportOnly {
 			cfg.Logs.LogMaxFiles = defaults.Logs.LogMaxFiles
 		}
