@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // runHlsLoop is the main HLS download loop.
@@ -78,7 +80,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				}
 				return fmt.Errorf("HLS playlist fetch failed after %d consecutive errors: %w", consecutiveErrors, err)
 			}
-			sleepCtx(ctx, 5*time.Second)
+			utils.Sleep(ctx, 5*time.Second)
 			continue
 		}
 
@@ -103,7 +105,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			if consecutiveErrors > 5 {
 				return fmt.Errorf("failed to parse HLS playlist after %d consecutive errors", consecutiveErrors)
 			}
-			sleepCtx(ctx, 5*time.Second)
+			utils.Sleep(ctx, 5*time.Second)
 			continue
 		}
 		pl := result.Playlist
@@ -193,7 +195,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					stuckSeq = -1
 					stuckSeqRetries = 0
 				}
-				sleepCtx(ctx, 2*time.Second)
+				utils.Sleep(ctx, 2*time.Second)
 				segFailed = true
 				break
 			}
@@ -260,7 +262,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		if targetDur <= 0 {
 			targetDur = 2.0
 		}
-		sleepCtx(ctx, time.Duration(targetDur*float64(time.Second)))
+		utils.Sleep(ctx, time.Duration(targetDur*float64(time.Second)))
 	}
 }
 

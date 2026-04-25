@@ -224,26 +224,6 @@ func TestTruncateURL(t *testing.T) {
 	}
 }
 
-func TestSleepCtx_ContextCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	start := time.Now()
-	cancel() // Cancel immediately
-	sleepCtx(ctx, 10*time.Second)
-	elapsed := time.Since(start)
-	if elapsed > 1*time.Second {
-		t.Errorf("sleepCtx should return quickly on cancelled context, took %v", elapsed)
-	}
-}
-
-func TestSleepCtx_NormalSleep(t *testing.T) {
-	start := time.Now()
-	sleepCtx(context.Background(), 50*time.Millisecond)
-	elapsed := time.Since(start)
-	if elapsed < 40*time.Millisecond {
-		t.Errorf("sleepCtx returned too quickly: %v", elapsed)
-	}
-}
-
 func TestResumeState_LoadSave(t *testing.T) {
 	tmp := t.TempDir()
 	resumeFile := filepath.Join(tmp, "test.resume.json")

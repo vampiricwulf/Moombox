@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // errStreamDone is a sentinel used internally by DASH error handlers to signal
@@ -252,7 +254,7 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 
 	// Generic non-HTTP error (timeout, network, etc.) -- simple fixed-delay retry
 	*consecutiveGoneErrors = 0
-	sleepCtx(ctx, genericRetryDelay)
+	utils.Sleep(ctx, genericRetryDelay)
 	return nil
 }
 
@@ -317,14 +319,14 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 	}
 	if !hasStartedDownloading && *consecutiveGoneErrors <= goneRetryBeforeFirstSegment {
 		d.currentSeq.Add(1)
-		sleepCtx(ctx, firstSegmentHuntDelay)
+		utils.Sleep(ctx, firstSegmentHuntDelay)
 		return nil // Continue loop
 	}
 	if !hasStartedDownloading && *consecutiveGoneErrors > goneRetryBeforeFirstSegment {
 		return errStreamDone // Failed to find valid starting segment
 	}
 	// Single GONE while downloading -- small delay before retry
-	sleepCtx(ctx, singleGoneRetryDelay)
+	utils.Sleep(ctx, singleGoneRetryDelay)
 	return nil // Continue loop
 }
 
@@ -351,7 +353,7 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 		backoff = time.Duration(delayCap) * time.Second
 	}
 	d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq.Load(), "delay", backoff)
-	sleepCtx(ctx, backoff)
+	utils.Sleep(ctx, backoff)
 	return nil // Continue loop
 }
 
@@ -379,7 +381,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 
 	if behindHead && !stuckOnSegment {
 		// Transient failure while behind head -- retry with small delay
-		sleepCtx(ctx, transientFailureRetryDelay)
+		utils.Sleep(ctx, transientFailureRetryDelay)
 		return nil // Continue loop
 	}
 
@@ -454,6 +456,6 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		return errStreamDone
 	}
 
-	sleepCtx(ctx, time.Duration(*sameHeadRetryDelay)*time.Second)
+	utils.Sleep(ctx, time.Duration(*sameHeadRetryDelay)*time.Second)
 	return nil // Continue loop
 }

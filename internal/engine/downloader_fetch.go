@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // engineHTTPClient is a shared HTTP client for segment and chunk downloads.
@@ -181,7 +183,7 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		if status == 403 || status == 410 {
 			return nil, true // Segment gone permanently — don't retry.
 		}
-		sleepCtx(ctx, time.Duration(5*(attempt+1))*time.Second)
+		utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
 	}
 	return nil, false
 }
@@ -321,7 +323,7 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 		if status >= 500 || status == 0 {
 			delay := time.Duration(1<<uint(attempt)) * time.Second
 			delay = min(delay, 60*time.Second)
-			sleepCtx(ctx, delay)
+			utils.Sleep(ctx, delay)
 			continue
 		}
 
