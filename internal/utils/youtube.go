@@ -180,6 +180,11 @@ var (
 	externalIDRe       = regexp.MustCompile(`"externalId"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"`)
 	ogTitleRe          = regexp.MustCompile(`<meta\s+property="og:title"\s+content="([^"]+)"`)
 	titleRe            = regexp.MustCompile(`<title>([^<]+)</title>`)
+
+	// youtubeBaseURL is the base for ResolveYouTubeChannel page fetches.
+	// Tests override this to point at an httptest server. Production
+	// always points at the real YouTube origin.
+	youtubeBaseURL = "https://www.youtube.com"
 )
 
 // YouTubeChannelInfo holds resolved YouTube channel information.
@@ -196,7 +201,7 @@ type YouTubeChannelInfo struct {
 // FetchBody error string). HTTP 4xx errors and ctx cancellation
 // fast-fail. Audit reports/small-packages.md.
 func ResolveYouTubeChannel(ctx context.Context, urlPath string) (*YouTubeChannelInfo, error) {
-	pageURL := "https://www.youtube.com" + urlPath
+	pageURL := youtubeBaseURL + urlPath
 	headers := map[string]string{
 		"User-Agent": constants.UserAgents.Web,
 	}
