@@ -384,23 +384,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.ffmpegCheck.SetInstallResult("FFmpeg installed: "+msg.Version, false)
 			}
 			// Persist custom/manual FFmpeg path to config. Do the disk write
-			// OUTSIDE the cfgMu so TUI renders and apiClient construction
-			// aren't stalled behind disk IO. Matches settings_security.go:121-131.
-			// Audit reports/tui.md Finding 2.
+			// OUTSIDE the configStore lock so TUI renders and apiClient
+			// construction aren't stalled behind disk IO. Matches
+			// settings_security.go:121-131. Audit reports/tui.md Finding 2.
 			if (a.ffmpegCheck.mode == ffmpegCustom || a.ffmpegCheck.mode == ffmpegManual) && msg.Path != "" && a.cfg != nil {
 				var saveCb func(*config.MoomboxConfig)
 				var cfgSnapshot *config.MoomboxConfig
-				if a.cfgMu != nil {
-					a.cfgMu.Lock()
-				}
+				mu := a.configStore.RWMutex()
+				mu.Lock()
 				a.cfg.Paths.FfmpegPath = msg.Path
 				if a.OnSaveConfig != nil {
 					saveCb = a.OnSaveConfig
 					cfgSnapshot = a.cfg
 				}
-				if a.cfgMu != nil {
-					a.cfgMu.Unlock()
-				}
+				mu.Unlock()
 				if saveCb != nil {
 					saveCb(cfgSnapshot)
 				}

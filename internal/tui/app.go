@@ -244,12 +244,11 @@ type App struct {
 	// and applied via View()'s tea.View return value.
 	windowTitle string
 
-	// Config reference for settings panel.
-	// configStore is the long-term API; cfg + cfgMu are kept as direct
-	// fields during the gradual migration (DECISIONS #8). New code should
-	// use configStore.Read / configStore.Update instead.
+	// Config reference for settings panel. cfg is the direct
+	// *MoomboxConfig pointer (used by applyValues big-block writes);
+	// configStore exposes the same struct with synchronisation. New code
+	// should prefer configStore.Read / configStore.Update.
 	cfg         *config.MoomboxConfig
-	cfgMu       *sync.RWMutex
 	configStore *config.Store
 
 	// Internal token for CSRF bypass on local API calls
@@ -377,25 +376,15 @@ func (a *App) SetConfig(cfg *config.MoomboxConfig) {
 	a.taskList.SetHideFinishedAgeDays(int(cfg.Monitors.HideFinishedAgeDays.Days()))
 }
 
-// SetCfgMu sets the shared config mutex for synchronized config access.
-// Propagates to sub-models that write config (settings). Prefer
-// SetConfigStore for new code.
-func (a *App) SetCfgMu(mu *sync.RWMutex) {
-	a.cfgMu = mu
-	a.settings.cfgMu = mu
-}
-
 // SetConfigStore wires the unified config Store into the App and its
-// sub-models (DECISIONS #8). The Store holds both the *MoomboxConfig
-// pointer and the synchronising mutex; SetConfigStore also sets
-// a.cfg + a.cfgMu so legacy direct-field access still works during the
-// gradual TUI-internal migration.
+// sub-models (DECISIONS #8). Also sets a.cfg + a.settings.cfg as
+// stable pointers for the applyValues big-block writes that mutate cfg
+// directly under the Store's lock.
 func (a *App) SetConfigStore(s *config.Store) {
 	a.configStore = s
 	a.cfg = s.Config()
-	a.cfgMu = s.RWMutex()
 	a.settings.configStore = s
-	a.settings.cfgMu = s.RWMutex()
+	a.settings.cfg = s.Config()
 }
 
 // SetSetupCallbacks wires callback functions for the TUI setup wizard.

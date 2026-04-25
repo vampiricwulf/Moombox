@@ -114,13 +114,10 @@ func (m *SettingsModel) handleSetPassword() {
 			m.secMessageColor = ColorRed
 			return
 		}
-		if m.cfgMu != nil {
-			m.cfgMu.Lock()
-		}
+		mu := m.configStore.RWMutex()
+		mu.Lock()
 		m.cfg.Network.PasswordHash = hash
-		if m.cfgMu != nil {
-			m.cfgMu.Unlock()
-		}
+		mu.Unlock()
 		if m.OnSave != nil {
 			m.OnSave(m.cfg)
 		}
@@ -164,17 +161,14 @@ func (m *SettingsModel) handleRemovePassword() {
 	}
 
 	// Remove password
-	if m.cfgMu != nil {
-		m.cfgMu.Lock()
-	}
+	mu := m.configStore.RWMutex()
+	mu.Lock()
 	networkReset := m.cfg.Network.NetworkAccess == "external"
 	m.cfg.Network.PasswordHash = ""
 	if networkReset {
 		m.cfg.Network.NetworkAccess = "localhost"
 	}
-	if m.cfgMu != nil {
-		m.cfgMu.Unlock()
-	}
+	mu.Unlock()
 	if networkReset {
 		m.values["network_access"] = "localhost"
 		m.dirty = true

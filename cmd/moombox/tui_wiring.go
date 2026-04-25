@@ -29,9 +29,10 @@ func (s *runState) runTUI() {
 	app := tui.NewApp()
 	s.quitTUI = app.QuitTUI // allow API restart to exit TUI
 
-	// Pass config reference, config mutex, and version for settings panel
+	// Pass config reference, config Store, and version for settings panel.
+	// SetConfigStore also captures the cfg pointer used for direct-field
+	// writes in the settings model — see App.SetConfigStore.
 	app.SetConfig(s.cfg)
-	app.SetCfgMu(&s.cfgMu)
 	app.SetConfigStore(s.configStore)
 	app.SetVersion(version)
 	app.SetInternalToken(s.webServer.InternalToken())

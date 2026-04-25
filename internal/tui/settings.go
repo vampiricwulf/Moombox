@@ -5,7 +5,6 @@ import (
 	"image/color"
 	"maps"
 	"strconv"
-	"sync"
 
 	"charm.land/bubbles/v2/textinput"
 
@@ -229,12 +228,11 @@ type SettingsModel struct {
 	status   saveStatus
 	errorMsg string
 
-	// Config reference
-	cfg   *config.MoomboxConfig
-	// cfgMu is the legacy direct-mutex handle; configStore is the new API.
-	// Both reference the same critical section during the migration
-	// (DECISIONS #8). Set together via App.SetConfigStore.
-	cfgMu       *sync.RWMutex
+	// Config reference. cfg is the direct *MoomboxConfig pointer used by
+	// applyValues' big-block writes; configStore exposes the same struct
+	// with synchronisation for snapshot reads. Both wired together via
+	// App.SetConfigStore.
+	cfg         *config.MoomboxConfig
 	configStore *config.Store
 
 	// Callbacks
@@ -312,30 +310,24 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.buttonFocus = -1
 
 	// Snapshot config under read lock
-	if m.cfgMu != nil {
-		m.cfgMu.RLock()
-	}
+	m.configStore.Read(func(c *config.MoomboxConfig) {
+		// Channel editor
+		m.channelIndex = 0
+		m.channelMode = "list"
+		m.channelDeleteConf = false
+		m.channels = make([]config.ChannelConfig, len(cfg.Channels))
+		copy(m.channels, cfg.Channels)
 
-	// Channel editor
-	m.channelIndex = 0
-	m.channelMode = "list"
-	m.channelDeleteConf = false
-	m.channels = make([]config.ChannelConfig, len(cfg.Channels))
-	copy(m.channels, cfg.Channels)
+		// Notification editor
+		m.notifIndex = 0
+		m.notifMode = "list"
+		m.notifDeleteConf = false
+		m.notifications = make([]config.NotificationConfig, len(cfg.Notifications))
+		copy(m.notifications, cfg.Notifications)
 
-	// Notification editor
-	m.notifIndex = 0
-	m.notifMode = "list"
-	m.notifDeleteConf = false
-	m.notifications = make([]config.NotificationConfig, len(cfg.Notifications))
-	copy(m.notifications, cfg.Notifications)
-
-	// Load values
-	m.loadValues(cfg)
-
-	if m.cfgMu != nil {
-		m.cfgMu.RUnlock()
-	}
+		// Load values
+		m.loadValues(cfg)
+	})
 
 	// Security
 	m.secMode = securityStatus
@@ -444,13 +436,10 @@ func (m *SettingsModel) applyValues() {
 	}
 
 	// Validate external access requires password (snapshot under RLock)
-	if m.cfgMu != nil {
-		m.cfgMu.RLock()
-	}
-	passwordHash := m.cfg.Network.PasswordHash
-	if m.cfgMu != nil {
-		m.cfgMu.RUnlock()
-	}
+	var passwordHash string
+	m.configStore.Read(func(c *config.MoomboxConfig) {
+		passwordHash = c.Network.PasswordHash
+	})
 	if m.values["network_access"] == "external" && passwordHash == "" {
 		m.errorMsg = "Password required for external access. Set password in Network section."
 		m.status = saveError
@@ -458,9 +447,8 @@ func (m *SettingsModel) applyValues() {
 	}
 
 	// Lock for all config writes
-	if m.cfgMu != nil {
-		m.cfgMu.Lock()
-	}
+	mu := m.configStore.RWMutex()
+	mu.Lock()
 
 	// Network
 	m.cfg.Network.Port = port
@@ -541,9 +529,7 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Channels = m.channels
 	m.cfg.Notifications = m.notifications
 
-	if m.cfgMu != nil {
-		m.cfgMu.Unlock()
-	}
+	mu.Unlock()
 }
 
 // recheckDirty recalculates dirty state by comparing values against originalValues.
