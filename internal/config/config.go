@@ -375,20 +375,26 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			cfg.Logs.LogLevel = defaults.Logs.LogLevel
 		}
 	}
-	if cfg.Monitors.MaxFeedItems < 1 {
-		fail("monitors.max_feed_items %d must be >= 1", cfg.Monitors.MaxFeedItems)
+	// Upper bounds derived from plausible operating envelopes — over-large
+	// values turn into per-tick scan costs (MaxFeedItems = O(N) per channel
+	// per cycle), wall-clock latency (FeedCheckInterval > 24h means jobs
+	// would never get found before they finish), and storage retention
+	// shifts (HideFinishedAgeDays > 1y is a UI bug, not a feature). Audit
+	// reports/config.md Finding 13.
+	if cfg.Monitors.MaxFeedItems < 1 || cfg.Monitors.MaxFeedItems > 1000 {
+		fail("monitors.max_feed_items %d out of range 1..1000", cfg.Monitors.MaxFeedItems)
 		if !reportOnly {
 			cfg.Monitors.MaxFeedItems = defaults.Monitors.MaxFeedItems
 		}
 	}
-	if cfg.Monitors.FeedCheckInterval.Value < 1 {
-		fail("monitors.feed_check_interval %v must be >= 1", cfg.Monitors.FeedCheckInterval.Value)
+	if cfg.Monitors.FeedCheckInterval.Value < 1 || cfg.Monitors.FeedCheckInterval.Value > 1440 {
+		fail("monitors.feed_check_interval %v out of range 1..1440 minutes", cfg.Monitors.FeedCheckInterval.Value)
 		if !reportOnly {
 			cfg.Monitors.FeedCheckInterval = defaults.Monitors.FeedCheckInterval
 		}
 	}
-	if cfg.Monitors.HideFinishedAgeDays.Value < 0 {
-		fail("monitors.hide_finished_age_days %v must be >= 0", cfg.Monitors.HideFinishedAgeDays.Value)
+	if cfg.Monitors.HideFinishedAgeDays.Value < 0 || cfg.Monitors.HideFinishedAgeDays.Value > 365 {
+		fail("monitors.hide_finished_age_days %v out of range 0..365 days", cfg.Monitors.HideFinishedAgeDays.Value)
 		if !reportOnly {
 			cfg.Monitors.HideFinishedAgeDays = defaults.Monitors.HideFinishedAgeDays
 		}

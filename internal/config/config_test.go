@@ -40,6 +40,111 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+// TestValidateMonitorBounds verifies the new upper bounds on
+// MaxFeedItems / FeedCheckInterval / HideFinishedAgeDays.
+// Pre-Finding-13 only the lower bound was enforced — setting
+// max_feed_items = 1000000 was silently accepted.
+func TestValidateMonitorBounds(t *testing.T) {
+	tests := []struct {
+		name             string
+		mutate           func(*MoomboxConfig)
+		wantMaxFeed      int
+		wantFeedInterval float64
+		wantHideAge      float64
+	}{
+		{
+			name: "defaults pass through",
+			mutate: func(cfg *MoomboxConfig) {
+				// no mutation
+			},
+			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
+			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+		},
+		{
+			name: "max_feed_items above 1000 resets",
+			mutate: func(cfg *MoomboxConfig) {
+				cfg.Monitors.MaxFeedItems = 5000
+			},
+			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
+			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+		},
+		{
+			name: "max_feed_items at upper bound passes",
+			mutate: func(cfg *MoomboxConfig) {
+				cfg.Monitors.MaxFeedItems = 1000
+			},
+			wantMaxFeed:      1000,
+			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+		},
+		{
+			name: "feed_check_interval > 1440 resets",
+			mutate: func(cfg *MoomboxConfig) {
+				cfg.Monitors.FeedCheckInterval = FlexDuration{Value: 5000}
+			},
+			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
+			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+		},
+		{
+			name: "feed_check_interval at upper bound passes",
+			mutate: func(cfg *MoomboxConfig) {
+				cfg.Monitors.FeedCheckInterval = FlexDuration{Value: 1440}
+			},
+			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
+			wantFeedInterval: 1440,
+			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+		},
+		{
+			name: "hide_finished_age_days > 365 resets",
+			mutate: func(cfg *MoomboxConfig) {
+				cfg.Monitors.HideFinishedAgeDays = FlexDuration{Value: 9999}
+			},
+			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
+			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+		},
+		{
+			name: "hide_finished_age_days at upper bound passes",
+			mutate: func(cfg *MoomboxConfig) {
+				cfg.Monitors.HideFinishedAgeDays = FlexDuration{Value: 365}
+			},
+			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
+			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:      365,
+		},
+		{
+			name: "all three above bounds reset together",
+			mutate: func(cfg *MoomboxConfig) {
+				cfg.Monitors.MaxFeedItems = 1000000
+				cfg.Monitors.FeedCheckInterval = FlexDuration{Value: 99999}
+				cfg.Monitors.HideFinishedAgeDays = FlexDuration{Value: 99999}
+			},
+			wantMaxFeed:      Defaults().Monitors.MaxFeedItems,
+			wantFeedInterval: Defaults().Monitors.FeedCheckInterval.Value,
+			wantHideAge:      Defaults().Monitors.HideFinishedAgeDays.Value,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			tt.mutate(cfg)
+			Normalize(cfg)
+			if cfg.Monitors.MaxFeedItems != tt.wantMaxFeed {
+				t.Errorf("MaxFeedItems = %d, want %d", cfg.Monitors.MaxFeedItems, tt.wantMaxFeed)
+			}
+			if cfg.Monitors.FeedCheckInterval.Value != tt.wantFeedInterval {
+				t.Errorf("FeedCheckInterval = %v, want %v", cfg.Monitors.FeedCheckInterval.Value, tt.wantFeedInterval)
+			}
+			if cfg.Monitors.HideFinishedAgeDays.Value != tt.wantHideAge {
+				t.Errorf("HideFinishedAgeDays = %v, want %v", cfg.Monitors.HideFinishedAgeDays.Value, tt.wantHideAge)
+			}
+		})
+	}
+}
+
 // TestValidateClientTokenTTL verifies range enforcement on the configurable
 // "remember me" cookie lifetime — reports/web.md Q3.
 func TestValidateClientTokenTTL(t *testing.T) {
