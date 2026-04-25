@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/chat"
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
@@ -31,13 +32,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	lastFullFetch := time.Now() // Initial full fetch just happened in Process()
 
 	// B2: Start early chat downloader (only if chat download is enabled)
-	if sp.cfgMu != nil {
-		sp.cfgMu.RLock()
-	}
-	downloadChat := sp.cfg.Downloader.DownloadChat
-	if sp.cfgMu != nil {
-		sp.cfgMu.RUnlock()
-	}
+	var downloadChat bool
+	sp.readConfig(func(c *config.MoomboxConfig) {
+		downloadChat = c.Downloader.DownloadChat
+	})
 	// B2: Chat surge detection + throttled DB updates for chat count
 	var surgeMu sync.Mutex
 	surgeWindowStart := time.Now()
@@ -173,13 +171,10 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		}
 
 		// B2: Try starting chat if not yet available
-		if sp.cfgMu != nil {
-			sp.cfgMu.RLock()
-		}
-		downloadChatRetry := sp.cfg.Downloader.DownloadChat
-		if sp.cfgMu != nil {
-			sp.cfgMu.RUnlock()
-		}
+		var downloadChatRetry bool
+		sp.readConfig(func(c *config.MoomboxConfig) {
+			downloadChatRetry = c.Downloader.DownloadChat
+		})
 		if chatDl == nil && downloadChatRetry {
 			// onProgress wired inside tryStartEarlyChat — see F16.
 			chatDl = sp.tryStartEarlyChat(ctx, job, probeInfo, chatProgressFn)
@@ -333,13 +328,10 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 	}
 
 	// Create staging dir for early chat output (matches TypeScript behavior)
-	if sp.cfgMu != nil {
-		sp.cfgMu.RLock()
-	}
-	stagingBase := sp.cfg.Paths.StagingDirectory
-	if sp.cfgMu != nil {
-		sp.cfgMu.RUnlock()
-	}
+	var stagingBase string
+	sp.readConfig(func(c *config.MoomboxConfig) {
+		stagingBase = c.Paths.StagingDirectory
+	})
 	if stagingBase == "" {
 		stagingBase = "./staging"
 	}

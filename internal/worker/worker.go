@@ -123,8 +123,8 @@ type DownloadWorker struct {
 	db           *database.Database
 	yt           *youtube.Service
 	tw           *twitch.Service
-	cfg          *config.MoomboxConfig
-	cfgMu        *sync.RWMutex // shared config mutex (set via SetCfgMu)
+	cfg          *config.MoomboxConfig // captured for early-init reads before SetConfigStore
+	configStore  *config.Store         // shared config store (set via SetConfigStore)
 	queue        *JobQueue
 	orchestrator *DownloadOrchestrator
 	streamProc   *StreamProcessor
@@ -136,6 +136,19 @@ type DownloadWorker struct {
 	// OnCookieRefreshNeeded is called when auth fails and auto-refresh should be attempted.
 	// Returns true if cookies were refreshed successfully.
 	OnCookieRefreshNeeded func() bool
+}
+
+// readConfig runs fn under configStore's read lock when the store has been
+// wired (post-SetConfigStore). During the brief early-init window between
+// NewDownloadWorker and main.go's SetConfigStore call, fn runs against
+// w.cfg directly without locking — at that point no other goroutine holds
+// or contends for the cfg mutex.
+func (w *DownloadWorker) readConfig(fn func(*config.MoomboxConfig)) {
+	if w.configStore != nil {
+		w.configStore.Read(fn)
+		return
+	}
+	fn(w.cfg)
 }
 
 // DownloadWorkerDeps holds optional dependencies for the download worker.
@@ -383,13 +396,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 	jobCtx := w.buildJobContext(job)
 
 	// Route to platform-specific orchestrator
-	if w.cfgMu != nil {
-		w.cfgMu.RLock()
-	}
-	maxRes := w.cfg.Downloader.MaxVideoResolution
-	if w.cfgMu != nil {
-		w.cfgMu.RUnlock()
-	}
+	var maxRes int
+	w.readConfig(func(c *config.MoomboxConfig) {
+		maxRes = c.Downloader.MaxVideoResolution
+	})
 	var dlErr error
 	if job.Platform == "twitch" && result.TwitchVariant != nil {
 		variant := &TwitchVariantInfo{
@@ -491,20 +501,21 @@ func isTerminalStatus(status database.JobStatus) bool {
 
 func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	// Snapshot all config fields under lock
-	if w.cfgMu != nil {
-		w.cfgMu.RLock()
-	}
-	cfgOutputDir := w.cfg.Paths.OutputDirectory
-	cfgStagingDir := w.cfg.Paths.EffectiveStagingDir()
-	cfgTemplate := w.cfg.Downloader.OutputTemplate
-	cfgMaxRes := w.cfg.Downloader.MaxVideoResolution
-	cfgPrefer60 := w.cfg.Downloader.Prefer60fps
-	cfgChat := w.cfg.Downloader.DownloadChat
-	cfgRetryCap := w.cfg.Downloader.SegmentRetryDelayCap
-	cfgLiveRetries := w.cfg.Downloader.SegmentLiveCheckRetries
-	if w.cfgMu != nil {
-		w.cfgMu.RUnlock()
-	}
+	var (
+		cfgOutputDir, cfgStagingDir, cfgTemplate string
+		cfgMaxRes, cfgRetryCap, cfgLiveRetries   int
+		cfgPrefer60, cfgChat                     bool
+	)
+	w.readConfig(func(c *config.MoomboxConfig) {
+		cfgOutputDir = c.Paths.OutputDirectory
+		cfgStagingDir = c.Paths.EffectiveStagingDir()
+		cfgTemplate = c.Downloader.OutputTemplate
+		cfgMaxRes = c.Downloader.MaxVideoResolution
+		cfgPrefer60 = c.Downloader.Prefer60fps
+		cfgChat = c.Downloader.DownloadChat
+		cfgRetryCap = c.Downloader.SegmentRetryDelayCap
+		cfgLiveRetries = c.Downloader.SegmentLiveCheckRetries
+	})
 
 	outputDir := cfgOutputDir
 	if job.OutputDirectory != "" {
@@ -694,10 +705,13 @@ func (w *DownloadWorker) Stop() {
 	}
 }
 
-// SetCfgMu sets the shared config mutex for synchronized config access.
-func (w *DownloadWorker) SetCfgMu(mu *sync.RWMutex) {
-	w.cfgMu = mu
-	w.streamProc.SetCfgMu(mu)
+// SetConfigStore wires the shared *config.Store on the worker and the
+// underlying StreamProcessor. Called once during startup after the Store
+// has been constructed; safe to call before Run because no read sites
+// fire until the queue has work to process.
+func (w *DownloadWorker) SetConfigStore(store *config.Store) {
+	w.configStore = store
+	w.streamProc.SetConfigStore(store)
 }
 
 // SetParallelDownloads updates the max parallel downloads at runtime.
@@ -719,13 +733,10 @@ func (w *DownloadWorker) ResumeJob(jobID string) {
 // Clears all progress fields and deletes the staging directory.
 func (w *DownloadWorker) ReinitializeJob(jobID string) {
 	// Read config for staging path
-	if w.cfgMu != nil {
-		w.cfgMu.RLock()
-	}
-	stagingBase := w.cfg.Paths.EffectiveStagingDir()
-	if w.cfgMu != nil {
-		w.cfgMu.RUnlock()
-	}
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) {
+		stagingBase = c.Paths.EffectiveStagingDir()
+	})
 
 	// Delete staging directory
 	stagingDir := filepath.Join(stagingBase, jobID)
@@ -770,13 +781,10 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 // Bypasses the download queue — runs directly in a wg-tracked goroutine.
 func (w *DownloadWorker) MuxJob(jobID string) error {
 	// Read config for staging check
-	if w.cfgMu != nil {
-		w.cfgMu.RLock()
-	}
-	stagingBase := w.cfg.Paths.EffectiveStagingDir()
-	if w.cfgMu != nil {
-		w.cfgMu.RUnlock()
-	}
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) {
+		stagingBase = c.Paths.EffectiveStagingDir()
+	})
 
 	if !HasSegmentFiles(stagingBase, jobID) {
 		return fmt.Errorf("no segment files found in staging")

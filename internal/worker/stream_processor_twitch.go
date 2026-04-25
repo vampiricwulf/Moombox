@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
@@ -58,15 +59,14 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: fmt.Sprintf("twitch VOD HLS error: %v", err)}, nil
 	}
 
-	if sp.cfgMu != nil {
-		sp.cfgMu.RLock()
-	}
-	vodMaxRes := sp.cfg.Downloader.MaxVideoResolution
-	vodDownloadChat := sp.cfg.Downloader.DownloadChat
-	vodStagingDir := sp.cfg.Paths.StagingDirectory
-	if sp.cfgMu != nil {
-		sp.cfgMu.RUnlock()
-	}
+	var vodMaxRes int
+	var vodDownloadChat bool
+	var vodStagingDir string
+	sp.readConfig(func(c *config.MoomboxConfig) {
+		vodMaxRes = c.Downloader.MaxVideoResolution
+		vodDownloadChat = c.Downloader.DownloadChat
+		vodStagingDir = c.Paths.StagingDirectory
+	})
 
 	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, vodMaxRes)
 	if variant == nil {
@@ -182,15 +182,14 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		return nil, fmt.Errorf("twitch HLS: %w", err)
 	}
 
-	if sp.cfgMu != nil {
-		sp.cfgMu.RLock()
-	}
-	liveMaxRes := sp.cfg.Downloader.MaxVideoResolution
-	liveDownloadChat := sp.cfg.Downloader.DownloadChat
-	liveStagingBase := sp.cfg.Paths.StagingDirectory
-	if sp.cfgMu != nil {
-		sp.cfgMu.RUnlock()
-	}
+	var liveMaxRes int
+	var liveDownloadChat bool
+	var liveStagingBase string
+	sp.readConfig(func(c *config.MoomboxConfig) {
+		liveMaxRes = c.Downloader.MaxVideoResolution
+		liveDownloadChat = c.Downloader.DownloadChat
+		liveStagingBase = c.Paths.StagingDirectory
+	})
 
 	variant := sp.tw.SelectBestVariant(variants, job.TwitchQuality, liveMaxRes)
 	if variant == nil {

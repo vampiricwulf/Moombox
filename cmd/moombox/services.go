@@ -298,7 +298,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Wire persistPlatforms callback: saves verified platforms to config
 	// so we can detect auth loss after restart (matches TS persistPlatforms).
-	dlWorker.SetCfgMu(&s.cfgMu)
+	dlWorker.SetConfigStore(s.configStore)
 	autoCookieSvc.PersistPlatforms = func(youtubeVerified, twitchVerified bool) {
 		s.cfgMu.Lock()
 		defer s.cfgMu.Unlock()

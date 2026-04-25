@@ -41,14 +41,14 @@ type StreamProcessResult struct {
 
 // StreamProcessor handles stream status probing and waiting.
 type StreamProcessor struct {
-	yt       *youtube.Service
-	tw       *twitch.Service
-	cfg      *config.MoomboxConfig
-	cfgMu    *sync.RWMutex // shared config mutex (set via SetCfgMu)
-	db       *database.Database
-	notifier *notifications.Manager
-	logger   logger
-	isOnline func() bool
+	yt          *youtube.Service
+	tw          *twitch.Service
+	cfg         *config.MoomboxConfig // captured for early-init reads before SetConfigStore
+	configStore *config.Store         // shared config store (set via SetConfigStore)
+	db          *database.Database
+	notifier    *notifications.Manager
+	logger      logger
+	isOnline    func() bool
 
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
@@ -59,9 +59,20 @@ func NewStreamProcessor(yt *youtube.Service, tw *twitch.Service, cfg *config.Moo
 	return &StreamProcessor{yt: yt, tw: tw, cfg: cfg, db: db, logger: logger}
 }
 
-// SetCfgMu sets the shared config mutex for synchronized config access.
-func (sp *StreamProcessor) SetCfgMu(mu *sync.RWMutex) {
-	sp.cfgMu = mu
+// SetConfigStore wires the shared *config.Store onto the stream processor.
+// Called by DownloadWorker.SetConfigStore during startup.
+func (sp *StreamProcessor) SetConfigStore(store *config.Store) {
+	sp.configStore = store
+}
+
+// readConfig runs fn under configStore's read lock when wired, or against
+// sp.cfg directly during early init (matches DownloadWorker.readConfig).
+func (sp *StreamProcessor) readConfig(fn func(*config.MoomboxConfig)) {
+	if sp.configStore != nil {
+		sp.configStore.Read(fn)
+		return
+	}
+	fn(sp.cfg)
 }
 
 // SetNotifier sets the notification manager for the stream processor.
