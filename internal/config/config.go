@@ -672,6 +672,22 @@ func GetActivePlatforms(cfg *MoomboxConfig) (youtube, twitch bool) {
 
 // sanitizeTemplateStr removes invalid filesystem characters from a string,
 // preserving Unicode characters (CJK, Japanese, etc).
+//
+// The negated character class allowlists:
+//   - \w        word characters (ASCII letters, digits, underscore)
+//   - \s        whitespace
+//   - \-        literal hyphen
+//   - U+3000..U+303F   CJK symbols and punctuation
+//   - U+3040..U+309F   Hiragana
+//   - U+30A0..U+30FF   Katakana
+//   - U+FF00..U+FFEF   Halfwidth and Fullwidth Forms
+//   - U+4E00..U+9FAF   CJK Unified Ideographs (BMP plane covering common
+//                      Chinese, Japanese kanji, and Korean hanja)
+//
+// Anything outside these ranges (e.g. emoji, math symbols, Cyrillic,
+// Greek, Hebrew, Arabic) gets stripped — the goal is "filename-safe
+// across NTFS / ext4 / APFS while keeping East Asian content readable",
+// not "preserve every script". Audit reports/config.md Finding 27.
 var invalidFSChars = regexp.MustCompile(`[^\w\s\-\x{3000}-\x{303F}\x{3040}-\x{309F}\x{30A0}-\x{30FF}\x{FF00}-\x{FFEF}\x{4E00}-\x{9FAF}]`)
 
 func sanitizeTemplateStr(s string) string {
