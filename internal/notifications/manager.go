@@ -123,11 +123,22 @@ type SendOptions struct {
 	Image     string // Full-width image URL
 }
 
+// maxInflightNotifications caps the number of concurrent notification
+// goroutines. Beyond this, Send drops the notification with a Warn log
+// rather than spawning unbounded goroutines under load — Discord
+// rate-limits each webhook to 30 req/min anyway, so a higher cap would
+// just queue requests for the rate-limiter to throttle. 16 is well
+// above the steady-state for a healthy Moombox instance and gives
+// enough headroom for a brief burst (e.g. multiple job-completion
+// events firing in the same second). Audit reports/small-packages.md.
+const maxInflightNotifications = 16
+
 // Manager dispatches notifications to configured targets.
 type Manager struct {
-	targets []notificationTarget
-	wg      sync.WaitGroup
-	logger  interface {
+	targets   []notificationTarget
+	wg        sync.WaitGroup
+	semaphore chan struct{}
+	logger    interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -157,7 +168,10 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
 }) *Manager {
-	m := &Manager{logger: logger}
+	m := &Manager{
+		logger:    logger,
+		semaphore: make(chan struct{}, maxInflightNotifications),
+	}
 
 	for _, nc := range cfg.Notifications {
 		url := nc.URL
@@ -235,10 +249,24 @@ func (m *Manager) Send(title, description string, ntype NotificationType, fields
 			}
 		}
 
+		// Bound concurrent senders. Try-send into the semaphore so a
+		// burst of events doesn't spawn a goroutine flood that Discord
+		// will just throttle anyway. On overflow, drop with a Warn —
+		// notifications are non-critical, so dropping is preferable to
+		// blocking the caller (which is often a worker on a hot path).
+		select {
+		case m.semaphore <- struct{}{}:
+		default:
+			m.logger.Warn("dropping notification — too many in flight",
+				"cap", maxInflightNotifications, "title", title, "event", opts.Event)
+			continue
+		}
+
 		// Send asynchronously (tracked by WaitGroup for graceful shutdown)
 		m.wg.Add(1)
 		go func(s sender) {
 			defer m.wg.Done()
+			defer func() { <-m.semaphore }()
 			defer func() {
 				if r := recover(); r != nil {
 					m.logger.Error("panic in notification sender", "panic", fmt.Sprint(r))
