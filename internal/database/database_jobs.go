@@ -44,6 +44,10 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 
 	jobs := db.snapshotJobsChange()
 	db.mu.Unlock()
+	// JobAdded fires alongside the legacy OnJobsChange dispatch during
+	// the DECISIONS #21 lifecycle-event migration. Both delivered with
+	// db.mu released so subscribers can call back into Database freely.
+	db.notifyJobAdded(job)
 	db.dispatchJobsChange(jobs)
 	return true, nil
 }

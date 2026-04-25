@@ -19,6 +19,19 @@ type JobChange struct {
 	Changes []string // schema column names from fieldToColumn that were written
 }
 
+// JobAdded is the event payload delivered to OnJobAdded subscribers when
+// AddJob successfully inserts a new row. Carries the Job pointer the
+// caller passed in (post-write — CreatedAt / UpdatedAt populated).
+//
+// Second event type in the DECISIONS #21 lifecycle-event set, paired with
+// AddJob. Coexists with OnJobsChange during migration: AddJob fires both
+// so consumers can move at their own pace. Once every consumer has
+// migrated, AddJob will stop firing OnJobsChange and the full-list
+// dispatch on insert goes away.
+type JobAdded struct {
+	Job *Job
+}
+
 // jobUpdateSub pairs a subscriber ID with its callback function.
 type jobUpdateSub struct {
 	id uint64
@@ -29,6 +42,12 @@ type jobUpdateSub struct {
 type jobChangeSub struct {
 	id uint64
 	fn func(*JobChange)
+}
+
+// jobAddedSub pairs a subscriber ID with its JobAdded callback.
+type jobAddedSub struct {
+	id uint64
+	fn func(*JobAdded)
 }
 
 // jobsChangeSub pairs a subscriber ID with its callback function.
@@ -64,6 +83,17 @@ func shrinkJobsChangeSubs(s []jobsChangeSub) []jobsChangeSub {
 func shrinkJobChangeSubs(s []jobChangeSub) []jobChangeSub {
 	if cap(s) > 4*len(s) {
 		shrunk := make([]jobChangeSub, len(s))
+		copy(shrunk, s)
+		return shrunk
+	}
+	return s
+}
+
+// shrinkJobAddedSubs is the jobAddedSub counterpart for the lifecycle
+// JobAdded subscribers added for DECISIONS #21.
+func shrinkJobAddedSubs(s []jobAddedSub) []jobAddedSub {
+	if cap(s) > 4*len(s) {
+		shrunk := make([]jobAddedSub, len(s))
 		copy(shrunk, s)
 		return shrunk
 	}
@@ -113,6 +143,37 @@ func (db *Database) OnJobChange(fn func(*JobChange)) func() {
 			if sub.id == id {
 				db.onJobChange = append(db.onJobChange[:i], db.onJobChange[i+1:]...)
 				db.onJobChange = shrinkJobChangeSubs(db.onJobChange)
+				break
+			}
+		}
+	}
+}
+
+// OnJobAdded registers a callback for job-insertion lifecycle events.
+// Fires once per successful AddJob (does NOT fire when AddJob's
+// INSERT OR IGNORE returns added=false because the row already
+// existed). Returns an unsubscribe function that removes the
+// callback.
+//
+// Coexists with OnJobsChange during the DECISIONS #21 migration —
+// AddJob currently fires both so consumers can pick the granularity
+// that fits. Subscribers that only need to know "a new job exists"
+// should prefer OnJobAdded; those that maintain a sorted full-list
+// view stay on OnJobsChange until further lifecycle events
+// (JobDeleted, TrimsChanged) ship.
+func (db *Database) OnJobAdded(fn func(*JobAdded)) func() {
+	db.subMu.Lock()
+	defer db.subMu.Unlock()
+	id := db.nextSubID
+	db.nextSubID++
+	db.onJobAdded = append(db.onJobAdded, jobAddedSub{id: id, fn: fn})
+	return func() {
+		db.subMu.Lock()
+		defer db.subMu.Unlock()
+		for i, sub := range db.onJobAdded {
+			if sub.id == id {
+				db.onJobAdded = append(db.onJobAdded[:i], db.onJobAdded[i+1:]...)
+				db.onJobAdded = shrinkJobAddedSubs(db.onJobAdded)
 				break
 			}
 		}
@@ -275,4 +336,50 @@ func (db *Database) safeCallJobChange(fn func(*JobChange), event *JobChange) {
 		}
 	}()
 	fn(event)
+}
+
+// safeCallJobAdded calls an OnJobAdded subscriber with panic recovery.
+// One misbehaving consumer can't take down the rest of the fan-out.
+func (db *Database) safeCallJobAdded(fn func(*JobAdded), event *JobAdded) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("database subscriber panic on job added", "jobID", event.Job.ID, "panic", r)
+		}
+	}()
+	fn(event)
+}
+
+// notifyJobAdded fans out the OnJobAdded callbacks. The caller MUST NOT
+// hold db.mu — subscribers may call back into the Database (e.g. GetJob,
+// UpdateJobFields, AddJobLog) and a held db.mu would deadlock against
+// any Lock/RLock attempt.
+//
+// Per-callback invocations run sequentially in the caller's goroutine —
+// AddJob is comparatively rare (channel discovery / manual add) so the
+// goroutine spawn used by dispatchJobsChange isn't worth the bookkeeping
+// here. A top-level recover guards the iteration itself; safeCallJobAdded
+// recovers per-callback panics so one misbehaving consumer can't break
+// the rest of the fan-out.
+func (db *Database) notifyJobAdded(job *Job) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("notifyJobAdded iteration panic", "panic", r)
+		}
+	}()
+
+	db.subMu.RLock()
+	if len(db.onJobAdded) == 0 {
+		db.subMu.RUnlock()
+		return
+	}
+	subs := make([]func(*JobAdded), 0, len(db.onJobAdded))
+	for _, sub := range db.onJobAdded {
+		subs = append(subs, sub.fn)
+	}
+	db.subMu.RUnlock()
+
+	event := &JobAdded{Job: job}
+	for _, fn := range subs {
+		db.safeCallJobAdded(fn, event)
+	}
 }

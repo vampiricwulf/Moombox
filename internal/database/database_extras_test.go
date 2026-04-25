@@ -631,6 +631,206 @@ func TestOnJobChangeSurvivesPanic(t *testing.T) {
 	}
 }
 
+// TestOnJobAddedFires covers the new lifecycle event added for the
+// DECISIONS #21 follow-on. AddJob must deliver a JobAdded carrying
+// the inserted Job pointer (post-write — UpdatedAt populated).
+func TestOnJobAddedFires(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	events := make(chan *JobAdded, 4)
+	unsub := db.OnJobAdded(func(ev *JobAdded) { events <- ev })
+	defer unsub()
+
+	job := &Job{ID: "added1", VideoID: "v", URL: "u", Status: StatusUpcoming}
+	added, err := db.AddJob(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !added {
+		t.Fatal("AddJob returned added=false on a fresh row")
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Job == nil || ev.Job.ID != "added1" {
+			t.Errorf("event Job: want added1, got %+v", ev.Job)
+		}
+		if ev.Job.UpdatedAt == "" {
+			t.Error("event Job.UpdatedAt should be populated post-write")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobAdded did not fire within 2s")
+	}
+}
+
+// TestOnJobAddedFiresAlongsideOnJobsChange locks the migration
+// invariant: AddJob must dispatch BOTH the legacy full-list
+// OnJobsChange and the new targeted OnJobAdded. Removing either
+// before consumers migrate would silently break the other.
+func TestOnJobAddedFiresAlongsideOnJobsChange(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	addedHits := make(chan *JobAdded, 1)
+	listHits := make(chan []*Job, 1)
+
+	uA := db.OnJobAdded(func(ev *JobAdded) { addedHits <- ev })
+	defer uA()
+	uL := db.OnJobsChange(func(jobs []*Job) { listHits <- jobs })
+	defer uL()
+
+	if _, err := db.AddJob(&Job{
+		ID: "dual_add", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-addedHits:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobAdded did not fire")
+	}
+	select {
+	case <-listHits:
+		// good — OnJobsChange runs in its own goroutine, give it room
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobsChange did not fire")
+	}
+}
+
+// TestOnJobAddedDoesNotFireOnDuplicate guards the INSERT OR IGNORE
+// path: when AddJob returns added=false because the row already
+// existed, no OnJobAdded event must escape — subscribers shouldn't
+// see ghost insertions for IDs that didn't actually change.
+func TestOnJobAddedDoesNotFireOnDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// First insert succeeds — drain the event so the channel doesn't
+	// trigger a false positive on the second AddJob.
+	events := make(chan *JobAdded, 4)
+	unsub := db.OnJobAdded(func(ev *JobAdded) { events <- ev })
+	defer unsub()
+
+	if _, err := db.AddJob(&Job{
+		ID: "dup", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-events // first insert's event
+
+	// Second AddJob with the same ID must report added=false and
+	// must NOT fire OnJobAdded.
+	added, err := db.AddJob(&Job{
+		ID: "dup", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	})
+	if err != nil {
+		t.Fatalf("duplicate AddJob returned error: %v", err)
+	}
+	if added {
+		t.Fatal("duplicate AddJob returned added=true")
+	}
+
+	select {
+	case ev := <-events:
+		t.Errorf("OnJobAdded should not fire for a duplicate; got %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+		// expected — no event
+	}
+}
+
+// TestOnJobAddedUnsubscribeStopsCallbacks confirms the returned
+// unsub closure removes the subscriber cleanly.
+func TestOnJobAddedUnsubscribeStopsCallbacks(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	hits := make(chan *JobAdded, 4)
+	unsub := db.OnJobAdded(func(ev *JobAdded) { hits <- ev })
+
+	if _, err := db.AddJob(&Job{
+		ID: "uns_a", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hits:
+	case <-time.After(time.Second):
+		t.Fatal("first event should have fired")
+	}
+
+	unsub()
+	if _, err := db.AddJob(&Job{
+		ID: "uns_b", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-hits:
+		t.Errorf("post-unsubscribe event should NOT fire; got %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+		// expected
+	}
+}
+
+// TestOnJobAddedSurvivesPanic locks safeCallJobAdded's per-callback
+// recover so one panicking subscriber can't break the rest of the
+// fan-out or the writer path.
+func TestOnJobAddedSurvivesPanic(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	panicked := false
+	survived := make(chan struct{}, 1)
+
+	uPanic := db.OnJobAdded(func(*JobAdded) {
+		panicked = true
+		panic("test panic")
+	})
+	defer uPanic()
+	uOK := db.OnJobAdded(func(*JobAdded) { survived <- struct{}{} })
+	defer uOK()
+
+	if _, err := db.AddJob(&Job{
+		ID: "pan_a", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-survived:
+		// good — second subscriber fired despite first one panicking
+	case <-time.After(2 * time.Second):
+		t.Fatal("second subscriber should fire even if first panics")
+	}
+	if !panicked {
+		t.Error("panicking subscriber should have been invoked")
+	}
+}
+
 func TestSubscriberSliceShrinksAfterChurn(t *testing.T) {
 	// Locks down shrinkJobUpdateSubs: after many subscribe/unsubscribe
 	// cycles the underlying slice is rebuilt at smaller capacity so

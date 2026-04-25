@@ -95,9 +95,12 @@ type Database struct {
 	// DECISIONS #21 migration — both fire on every UpdateJobFields,
 	// so callers can opt into the richer JobChange shape (full Job +
 	// changed columns) without disturbing legacy OnJobUpdate
-	// subscribers.
+	// subscribers. onJobAdded is the lifecycle counterpart on the
+	// AddJob writer path; like onJobChange it coexists with the
+	// legacy onJobsChange dispatch until consumers migrate.
 	onJobUpdate  []jobUpdateSub
 	onJobChange  []jobChangeSub
+	onJobAdded   []jobAddedSub
 	onJobsChange []jobsChangeSub
 	nextSubID    uint64
 	subMu        sync.RWMutex
