@@ -347,6 +347,78 @@ name = "Test Channel"
 	}
 }
 
+// TestNetworkAccessExplicitOverridesLegacy guards the audit Finding 8
+// fix: when a user has BOTH a legacy `allow_lan = true` line AND an
+// explicit `[network] network_access = "localhost"`, the explicit
+// new-format value must win. Pre-fix, the legacy migration ran
+// unconditionally when NetworkAccess was "" or "localhost" (the
+// default), so the user's explicit "localhost" got silently
+// overridden to "lan".
+func TestNetworkAccessExplicitOverridesLegacy(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name: "explicit [network] network_access wins over legacy allow_lan",
+			content: `
+allow_lan = true
+[network]
+network_access = "localhost"
+`,
+			want: "localhost",
+		},
+		{
+			name: "explicit top-level network_access wins over legacy allow_lan",
+			content: `
+allow_lan = true
+network_access = "localhost"
+`,
+			want: "localhost",
+		},
+		{
+			name: "no explicit network_access, legacy allow_lan migrates",
+			content: `
+allow_lan = true
+`,
+			want: "lan",
+		},
+		{
+			name: "no explicit network_access, legacy allow_external migrates",
+			content: `
+allow_lan = true
+allow_external = true
+`,
+			want: "external",
+		},
+		{
+			name: "explicit [network] network_access alone (no legacy)",
+			content: `
+[network]
+network_access = "external"
+`,
+			want: "external",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.toml")
+			if err := os.WriteFile(configPath, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Network.NetworkAccess != tt.want {
+				t.Errorf("NetworkAccess = %q, want %q", cfg.Network.NetworkAccess, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidation(t *testing.T) {
 	cfg := Defaults()
 	cfg.Network.Port = -1

@@ -131,8 +131,24 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 // migrateOldFormat handles migration from the old flat config format to the
 // new structured format with TOML tables.
 func migrateOldFormat(cfg *MoomboxConfig, raw map[string]any) {
-	// Legacy allow_lan/allow_external → network_access (matches TS config.ts)
-	if cfg.Network.NetworkAccess == "" || cfg.Network.NetworkAccess == "localhost" {
+	// Legacy allow_lan/allow_external → network_access (matches TS config.ts).
+	//
+	// Skip the migration when the user has EXPLICITLY set network_access
+	// anywhere (in [network], at the top level, or via the new key) —
+	// otherwise the migration silently overrides the explicit choice
+	// when the user kept their old `allow_lan = true` line for backward
+	// compat AND added the new [network] section. Audit reports/config.md
+	// Finding 8.
+	networkAccessExplicit := false
+	if _, ok := raw["network_access"]; ok {
+		networkAccessExplicit = true
+	}
+	if networkSec, ok := raw["network"].(map[string]any); ok {
+		if _, ok := networkSec["network_access"]; ok {
+			networkAccessExplicit = true
+		}
+	}
+	if !networkAccessExplicit && (cfg.Network.NetworkAccess == "" || cfg.Network.NetworkAccess == "localhost") {
 		allowLan, hasLan := raw["allow_lan"].(bool)
 		allowExt, hasExt := raw["allow_external"].(bool)
 		if hasLan || hasExt {
