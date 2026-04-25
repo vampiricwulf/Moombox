@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -151,7 +152,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		data, statusCode, err := d.fetchSegment(ctx, segURL)
 
 		if err != nil || statusCode >= 400 {
-			herr := d.handleDashError(ctx, statusCode, &consecutiveGoneErrors, hasStartedDownloading,
+			herr := d.handleDashError(ctx, statusCode, err, &consecutiveGoneErrors, hasStartedDownloading,
 				&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, delayCap, liveCheckThreshold)
 			if herr == errStreamDone {
 				return nil // Clean exit
@@ -196,11 +197,14 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 }
 
 // handleDashError processes HTTP errors during DASH segment downloads.
-// Returns:
+// fetchErr carries the body snippet that fetchSegment captured on
+// non-2xx responses; it's inspected here to distinguish cipher-related
+// 403s (empty/generic body) from PO-token / bot-challenge 403s (which
+// invalidating the cipher won't fix). Returns:
 //   - nil: retry (continue the loop)
 //   - errStreamDone: clean exit (stream ended or gave up)
 //   - other error: stop with that error (ErrQualityLost, etc.)
-func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
+func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int, fetchErr error,
 	consecutiveGoneErrors *int, hasStartedDownloading bool,
 	sameSegRetries *int, lastRetrySeq *int,
 	sameHeadRetryDelay *int, lastConfirmedHead *int,
@@ -222,6 +226,13 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 		if statusCode == 403 {
 			hasBytes := d.bytesWritten.Load() > 0
 			fireCipher := !hasBytes || *consecutiveGoneErrors >= postBytes403CipherThreshold
+			// Audit engine.md #25: gate the cipher fire on body inspection.
+			// A 403 whose body indicates PO-token rejection or bot detection
+			// is NOT a cipher problem, and reinitialising the solver wastes
+			// ~1s of player-JS recompile work that won't fix anything.
+			if fireCipher && !is403LikelyCipher(fetchErr) {
+				fireCipher = false
+			}
 			if fireCipher && d.cipherFailureFired.CompareAndSwap(false, true) &&
 				d.OnCipherFailure != nil {
 				d.OnCipherFailure()
@@ -243,6 +254,41 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	*consecutiveGoneErrors = 0
 	sleepCtx(ctx, genericRetryDelay)
 	return nil
+}
+
+// non403CipherMarkers lists lower-cased substrings that mean the 403
+// is NOT a cipher failure — invalidating the solver wouldn't help and
+// would waste a ~1s player-JS recompile. Currently covers the PO-token
+// rejection and bot-detection paths YouTube returns when their server
+// classifies the request as untrusted regardless of cipher correctness.
+//
+// New patterns get added here as YouTube's anti-bot prose evolves; the
+// cost of a false negative (treat a real non-cipher 403 as cipher) is
+// one extraneous recompile, so missing entries here are recoverable.
+var non403CipherMarkers = []string{
+	"missing_pot",      // PO token required but absent / rejected
+	"po token",         // upstream prose for the same condition
+	"bot",              // generic bot-detection language
+	"automated",        // "automated requests" prose
+	"captcha",          // explicit CAPTCHA challenge
+}
+
+// is403LikelyCipher returns false when the fetch error's body content
+// matches a known non-cipher 403 signature; true otherwise (including
+// nil err, empty body, or unknown patterns — those default to "cipher
+// problem" because that's the historically dominant 403 cause and
+// recompiling the solver fixes them. Audit engine.md #25.
+func is403LikelyCipher(fetchErr error) bool {
+	if fetchErr == nil {
+		return true
+	}
+	msg := strings.ToLower(fetchErr.Error())
+	for _, marker := range non403CipherMarkers {
+		if strings.Contains(msg, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGoneErrors *int, hasStartedDownloading bool) error {
