@@ -258,11 +258,33 @@ func (l *Logger) log(level slog.Level, msg string, args ...any) {
 	l.broadcast(line)
 }
 
+// logLineBuilderPool reuses strings.Builder instances across formatLogLine
+// calls to avoid allocating a fresh buffer on every log line. Hot path:
+// active downloads emit O(10) lines/second per concurrent job, so cutting
+// the per-line allocation matters at sustained rates.
+//
+// Pre-grown to 256 bytes — typical log lines are 100-200 bytes, so most
+// invocations don't need to grow the underlying slice.
+//
+// Audit reports/small-packages.md (formatLogLine sync.Pool).
+var logLineBuilderPool = sync.Pool{
+	New: func() any {
+		sb := &strings.Builder{}
+		sb.Grow(256)
+		return sb
+	},
+}
+
 func formatLogLine(level slog.Level, msg string, args ...any) string {
+	sb := logLineBuilderPool.Get().(*strings.Builder)
+	defer func() {
+		sb.Reset()
+		logLineBuilderPool.Put(sb)
+	}()
+
 	ts := time.Now().Format("2006-01-02 15:04:05")
 	levelStr := level.String()
 
-	var sb strings.Builder
 	sb.WriteString(ts)
 	sb.WriteString(" ")
 	sb.WriteString(levelStr)
@@ -275,18 +297,23 @@ func formatLogLine(level slog.Level, msg string, args ...any) string {
 	i := 0
 	for i < len(args) {
 		if attr, ok := args[i].(slog.Attr); ok {
-			fmt.Fprintf(&sb, " %s=%v", attr.Key, attr.Value)
+			fmt.Fprintf(sb, " %s=%v", attr.Key, attr.Value)
 			i++
 		} else if i+1 < len(args) {
-			fmt.Fprintf(&sb, " %v=%v", args[i], args[i+1])
+			fmt.Fprintf(sb, " %v=%v", args[i], args[i+1])
 			i += 2
 		} else {
-			fmt.Fprintf(&sb, " %v=!MISSING", args[i])
+			fmt.Fprintf(sb, " %v=!MISSING", args[i])
 			i++
 		}
 	}
 
-	return sb.String()
+	// Copy the bytes into a fresh string. strings.Builder.String() returns
+	// a string that ALIASES the internal buffer via unsafe; if we Put the
+	// builder back to the pool while a caller holds that string, the next
+	// Get+Reset+WriteString would overwrite the returned string's data.
+	// strings.Clone copies once, breaking the alias.
+	return strings.Clone(sb.String())
 }
 
 func (l *Logger) addToRingBuffer(line string) {

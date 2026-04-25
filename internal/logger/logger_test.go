@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -414,6 +415,41 @@ func TestFormatLogLineSlogAttr(t *testing.T) {
 	}
 	if strings.Contains(line2, "!MISSING") {
 		t.Errorf("unexpected '!MISSING' in mixed args, got %q", line2)
+	}
+}
+
+// TestFormatLogLinePoolDoesNotCorruptStrings locks the alias-break in
+// formatLogLine: strings.Builder.String() shares the buffer with the
+// builder. Pooling without strings.Clone would let two concurrent
+// callers see each other's bytes if their builders happened to be the
+// same pooled instance across resets. Run many concurrent formats and
+// confirm each result matches its inputs.
+func TestFormatLogLinePoolDoesNotCorruptStrings(t *testing.T) {
+	const n = 200
+	results := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			// Distinct message + key=value per goroutine — no two
+			// callers should see the same output.
+			results[idx] = formatLogLine(slog.LevelInfo,
+				fmt.Sprintf("msg_%d", idx),
+				fmt.Sprintf("k%d", idx), fmt.Sprintf("v%d", idx))
+		}(i)
+	}
+	wg.Wait()
+
+	for i, line := range results {
+		expectMsg := fmt.Sprintf("msg_%d", i)
+		expectKV := fmt.Sprintf("k%d=v%d", i, i)
+		if !strings.Contains(line, expectMsg) {
+			t.Errorf("[%d] line missing %q (corruption?): %q", i, expectMsg, line)
+		}
+		if !strings.Contains(line, expectKV) {
+			t.Errorf("[%d] line missing %q (corruption?): %q", i, expectKV, line)
+		}
 	}
 }
 
