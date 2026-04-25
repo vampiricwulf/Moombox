@@ -77,8 +77,13 @@ func (db *Database) OnJobsChange(fn func([]*Job)) func() {
 }
 
 // notifyJobUpdate snapshots subscribers and notifies them of a single job
-// update. A top-level recover guards the iteration itself (not just callbacks)
-// so the caller of UpdateJobFields/UpdateJob can never crash on a bad fan-out.
+// update. The caller MUST NOT hold db.mu — subscribers may call back into
+// the Database (db.GetJob, db.UpdateJobFields, …) and a held db.mu would
+// deadlock against any RLock/Lock attempt those callbacks make. Audit
+// reports/database.md C1.
+//
+// A top-level recover guards the iteration itself (not just per-callback)
+// so the caller of UpdateJobFields can never crash on a bad fan-out.
 func (db *Database) notifyJobUpdate(job *Job) {
 	defer func() {
 		if r := recover(); r != nil && db.logger != nil {
@@ -98,16 +103,45 @@ func (db *Database) notifyJobUpdate(job *Job) {
 	}
 }
 
-// notifyJobsChange must be called while db.mu is already held (Lock or RLock).
-// It uses getAllJobsUnlocked to avoid deadlock. A top-level recover guards
-// the snapshot / goroutine-dispatch logic so a panic here can't take down
-// the calling write path (AddJob, DeleteJob, ...).
-func (db *Database) notifyJobsChange() {
-	defer func() {
-		if r := recover(); r != nil && db.logger != nil {
-			db.logger.Error("notifyJobsChange iteration panic", "panic", r)
+// snapshotJobsChange returns the full job list when at least one
+// OnJobsChange subscriber is registered, otherwise nil. The caller MUST
+// hold db.mu (Lock or RLock) — the snapshot uses getAllJobsUnlocked so
+// it must run under the existing critical section to capture state at
+// time-of-write. The returned slice is then handed to dispatchJobsChange
+// AFTER the caller releases db.mu, closing the C2 deadlock window where
+// a subscriber called back into Database.
+//
+// Returns nil when no subscribers are registered so callers can skip the
+// dispatch step (also saves the SELECT cost when no one's listening).
+// Audit reports/database.md C2.
+func (db *Database) snapshotJobsChange() []*Job {
+	db.subMu.RLock()
+	n := len(db.onJobsChange)
+	db.subMu.RUnlock()
+	if n == 0 {
+		return nil
+	}
+	jobs, err := db.getAllJobsUnlocked()
+	if err != nil {
+		if db.logger != nil {
+			db.logger.Error("snapshotJobsChange: failed to read jobs", "err", err)
 		}
-	}()
+		return nil
+	}
+	return jobs
+}
+
+// dispatchJobsChange fans out the OnJobsChange callbacks. Caller MUST
+// NOT hold db.mu — callbacks may acquire other locks or call back into
+// the Database. A nil jobs slice (no subscribers) is a no-op.
+//
+// Per-callback invocations run sequentially in a fresh goroutine so the
+// caller's write path returns immediately. A top-level recover guards
+// the goroutine itself; safeCallJobsChange recovers per-callback panics.
+func (db *Database) dispatchJobsChange(jobs []*Job) {
+	if jobs == nil {
+		return
+	}
 
 	db.subMu.RLock()
 	subs := make([]func([]*Job), 0, len(db.onJobsChange))
@@ -120,18 +154,10 @@ func (db *Database) notifyJobsChange() {
 		return
 	}
 
-	// Use unlocked version since caller already holds db.mu
-	jobs, err := db.getAllJobsUnlocked()
-	if err != nil {
-		if db.logger != nil {
-			db.logger.Error("notifyJobsChange: failed to get jobs", "err", err)
-		}
-		return
-	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil && db.logger != nil {
-				db.logger.Error("notifyJobsChange goroutine panic", "panic", r)
+				db.logger.Error("dispatchJobsChange goroutine panic", "panic", r)
 			}
 		}()
 		for _, fn := range subs {

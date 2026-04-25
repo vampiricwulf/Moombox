@@ -12,7 +12,6 @@ import (
 // AddJob inserts a new job into the database.
 func (db *Database) AddJob(job *Job) (bool, error) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	if job.CreatedAt == "" {
@@ -22,12 +21,14 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 
 	result, err := insertJobExec(db.getCtx(), db.db, job)
 	if err != nil {
+		db.mu.Unlock()
 		return false, fmt.Errorf("failed to insert job: %w", err)
 	}
 
 	// INSERT OR IGNORE returns RowsAffected=0 when the row already exists
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
+		db.mu.Unlock()
 		return false, nil // Duplicate — job already exists
 	}
 
@@ -36,11 +37,14 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 		_, err := db.db.ExecContext(db.getCtx(), `INSERT INTO gaps (job_id, gap_from, gap_to, stream) VALUES (?, ?, ?, ?)`,
 			job.ID, gap.From, gap.To, gap.Stream)
 		if err != nil {
+			db.mu.Unlock()
 			return false, fmt.Errorf("failed to insert gap: %w", err)
 		}
 	}
 
-	db.notifyJobsChange()
+	jobs := db.snapshotJobsChange()
+	db.mu.Unlock()
+	db.dispatchJobsChange(jobs)
 	return true, nil
 }
 
@@ -168,16 +172,15 @@ func (db *Database) BatchSetWatched(jobIDs []string, watched bool) error {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	tx, err := db.db.BeginTx(db.getCtx(), nil)
 	if err != nil {
+		db.mu.Unlock()
 		if db.logger != nil {
 			db.logger.Error("BatchSetWatched: BeginTx failed", "err", err)
 		}
 		return err
 	}
-	defer tx.Rollback()
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -203,6 +206,8 @@ func (db *Database) BatchSetWatched(jobIDs []string, watched bool) error {
 			strings.Join(placeholders, ","),
 		)
 		if _, err := tx.ExecContext(db.getCtx(), query, args...); err != nil {
+			tx.Rollback()
+			db.mu.Unlock()
 			if db.logger != nil {
 				db.logger.Error("BatchSetWatched failed", "err", err)
 			}
@@ -211,27 +216,32 @@ func (db *Database) BatchSetWatched(jobIDs []string, watched bool) error {
 	}
 
 	if err := tx.Commit(); err != nil {
+		db.mu.Unlock()
 		if db.logger != nil {
 			db.logger.Error("BatchSetWatched: commit failed", "err", err)
 		}
 		return err
 	}
 
-	db.notifyJobsChange()
+	jobs := db.snapshotJobsChange()
+	db.mu.Unlock()
+	db.dispatchJobsChange(jobs)
 	return nil
 }
 
 // DeleteJob removes a job and its associated data.
 func (db *Database) DeleteJob(id string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	_, err := db.db.ExecContext(db.getCtx(), "DELETE FROM jobs WHERE id = ?", id)
 	if err != nil {
+		db.mu.Unlock()
 		return err
 	}
 
-	db.notifyJobsChange()
+	jobs := db.snapshotJobsChange()
+	db.mu.Unlock()
+	db.dispatchJobsChange(jobs)
 	return nil
 }
 
@@ -289,28 +299,36 @@ func (db *Database) getGaps(jobID string) ([]Gap, error) {
 // AddTrim adds a trim record for a job.
 func (db *Database) AddTrim(trim *TrimRecord) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	_, err := db.db.ExecContext(db.getCtx(), `INSERT INTO trims (id, job_id, start_time, end_time, filename, created_at, duration, file_size)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		trim.ID, trim.JobID, trim.StartTime, trim.EndTime, trim.Filename,
 		trim.CreatedAt, trim.Duration, trim.FileSize)
-	if err == nil {
-		db.notifyJobsChange()
+	if err != nil {
+		db.mu.Unlock()
+		return err
 	}
-	return err
+
+	jobs := db.snapshotJobsChange()
+	db.mu.Unlock()
+	db.dispatchJobsChange(jobs)
+	return nil
 }
 
 // DeleteTrim removes a trim record.
 func (db *Database) DeleteTrim(trimID string) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	_, err := db.db.ExecContext(db.getCtx(), "DELETE FROM trims WHERE id = ?", trimID)
-	if err == nil {
-		db.notifyJobsChange()
+	if err != nil {
+		db.mu.Unlock()
+		return err
 	}
-	return err
+
+	jobs := db.snapshotJobsChange()
+	db.mu.Unlock()
+	db.dispatchJobsChange(jobs)
+	return nil
 }
 
 // GetTrimsForJob returns all trim records for a given job.

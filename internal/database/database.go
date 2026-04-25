@@ -311,7 +311,6 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	setClauses := make([]string, 0, len(fields)+1)
 	args := make([]any, 0, len(fields)+2)
@@ -329,6 +328,7 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	}
 
 	if len(setClauses) == 0 {
+		db.mu.Unlock()
 		return nil
 	}
 
@@ -340,16 +340,19 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	query := "UPDATE jobs SET " + strings.Join(setClauses, ", ") + " WHERE id=?"
 	_, err := db.db.ExecContext(db.getCtx(), query, args...)
 	if err != nil {
+		db.mu.Unlock()
 		if db.logger != nil {
 			db.logger.Error("UpdateJobFields failed", "jobID", id, "err", err)
 		}
 		return nil
 	}
 
-	// Notify subscribers with the full job object (TUI + WebSocket need all fields).
-	// A full SELECT is required here because UpdateJobFields only writes a subset.
-	// Reuse the prepared stmtGetJob (column list maintained in prepareStatements).
+	// Read back the full job under the same critical section so subscribers
+	// see consistent state. TUI + WebSocket need all fields; UpdateJobFields
+	// only wrote a subset, so a SELECT is required.
 	job, scanErr := scanJob(db.stmtGetJob.QueryRowContext(db.getCtx(), id))
+	db.mu.Unlock() // Release BEFORE notify so subscribers can call back into Database without deadlocking. Audit C1.
+
 	if scanErr != nil {
 		if db.logger != nil {
 			db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)

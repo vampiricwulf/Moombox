@@ -1083,3 +1083,113 @@ func camelToSnake(s string) string {
 	}
 	return b.String()
 }
+
+// TestSubscriberCanCallDatabaseFromCallback locks down the contract that
+// OnJobUpdate / OnJobsChange callbacks may call back into Database APIs
+// without deadlocking. Pre-refactor (audit reports/database.md C1+C2),
+// notify fired while db.mu was held, so a subscriber calling db.GetJob
+// or any other locking method would hang on the same mutex. The fix
+// moves the dispatch to AFTER db.mu.Unlock; this test trips the
+// deadlock by forcing the path and waits with a timeout.
+func TestSubscriberCanCallDatabaseFromCallback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	job := &Job{
+		ID:      "yt_deadlock",
+		VideoID: "deadlock",
+		URL:     "https://www.youtube.com/watch?v=deadlock",
+		Status:  StatusUpcoming,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	// Subscriber callback that hits db.GetJob — under the old
+	// "notify-while-holding-mu" code path, this RLock acquisition would
+	// block on the writer's Lock and the test would time out.
+	var (
+		callbackDone = make(chan struct{}, 1)
+		readBackOK   = make(chan bool, 1)
+	)
+	unsub := db.OnJobUpdate(func(j *Job) {
+		got, gerr := db.GetJob(j.ID)
+		readBackOK <- gerr == nil && got != nil
+		callbackDone <- struct{}{}
+	})
+	defer unsub()
+
+	// Trigger a job update → fires the subscriber → subscriber calls
+	// db.GetJob → must not deadlock.
+	go func() {
+		db.UpdateJobFields("yt_deadlock", map[string]any{"status": StatusDownloading})
+	}()
+
+	select {
+	case <-callbackDone:
+		// Drain the success flag as well so the test fails clearly if the
+		// subscriber's GetJob actually errored.
+		select {
+		case ok := <-readBackOK:
+			if !ok {
+				t.Errorf("subscriber's db.GetJob failed inside callback")
+			}
+		default:
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobUpdate callback did not complete within 2s — likely deadlock on db.mu")
+	}
+}
+
+// TestJobsChangeSubscriberCanCallDatabaseFromCallback mirrors the above
+// for the OnJobsChange path (AddJob/DeleteJob/AddTrim/DeleteTrim/Batch-
+// SetWatched). Same deadlock surface (snapshotJobsChange runs under
+// db.mu, dispatchJobsChange runs after Unlock); the test forces the
+// dispatch path and waits on a timeout.
+func TestJobsChangeSubscriberCanCallDatabaseFromCallback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	callbackDone := make(chan struct{}, 1)
+	readBackOK := make(chan bool, 1)
+	unsub := db.OnJobsChange(func(jobs []*Job) {
+		// Hit a locking method — RLock would block on writer's Lock under
+		// the old code.
+		_, gerr := db.GetAllJobs()
+		readBackOK <- gerr == nil
+		callbackDone <- struct{}{}
+	})
+	defer unsub()
+
+	go func() {
+		db.AddJob(&Job{
+			ID:      "yt_jobschange",
+			VideoID: "jobschange",
+			URL:     "https://www.youtube.com/watch?v=jobschange",
+			Status:  StatusUpcoming,
+		})
+	}()
+
+	select {
+	case <-callbackDone:
+		select {
+		case ok := <-readBackOK:
+			if !ok {
+				t.Errorf("subscriber's db.GetAllJobs failed inside callback")
+			}
+		default:
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobsChange callback did not complete within 2s — likely deadlock on db.mu")
+	}
+}
