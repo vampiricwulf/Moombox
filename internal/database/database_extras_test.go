@@ -1001,6 +1001,45 @@ func TestOnJobDeletedUnsubscribeStopsCallbacks(t *testing.T) {
 	}
 }
 
+// TestOnJobsChangeFiresWhenDeleteEmptiesDB regresses against a quirk
+// where snapshotJobsChange returned nil from getAllJobsUnlocked for an
+// empty DB after the last DELETE — and dispatchJobsChange's nil-check
+// then suppressed OnJobsChange entirely. Subscribers (TUI task list,
+// WS broadcaster) need to know the list is now empty so they can
+// clear their local state. The fix normalises the empty-DB nil to
+// []*Job{} so dispatchJobsChange fires with the empty list.
+func TestOnJobsChangeFiresWhenDeleteEmptiesDB(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "only_job", VideoID: "v", URL: "u", Status: StatusUpcoming,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	listHits := make(chan []*Job, 1)
+	uL := db.OnJobsChange(func(jobs []*Job) { listHits <- jobs })
+	defer uL()
+
+	if err := db.DeleteJob("only_job"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case jobs := <-listHits:
+		if len(jobs) != 0 {
+			t.Errorf("OnJobsChange after empty: want 0 jobs, got %d", len(jobs))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnJobsChange did not fire when delete emptied the DB")
+	}
+}
+
 // TestOnJobDeletedSurvivesPanic locks safeCallJobDeleted's per-callback
 // recover so one panicking subscriber can't break the rest of the
 // fan-out or the writer path.

@@ -314,8 +314,14 @@ func (db *Database) notifyJobUpdate(job *Job, changes []string) {
 // AFTER the caller releases db.mu, closing the C2 deadlock window where
 // a subscriber called back into Database.
 //
-// Returns nil when no subscribers are registered so callers can skip the
-// dispatch step (also saves the SELECT cost when no one's listening).
+// Returns nil when no subscribers are registered (so callers can skip
+// the dispatch step entirely — also saves the SELECT cost when no one's
+// listening) and when the SELECT itself errors. An empty DB with
+// subscribers returns an explicit empty slice, NOT nil — subscribers
+// need to know "the list is now empty" (e.g. when DeleteJob removes the
+// last row) so they can update their views. dispatchJobsChange's
+// nil-check then correctly distinguishes "skip" (nil) from "dispatch
+// the empty list" ([]*Job{}).
 // Audit reports/database.md C2.
 func (db *Database) snapshotJobsChange() []*Job {
 	db.subMu.RLock()
@@ -330,6 +336,12 @@ func (db *Database) snapshotJobsChange() []*Job {
 			db.logger.Error("snapshotJobsChange: failed to read jobs", "err", err)
 		}
 		return nil
+	}
+	if jobs == nil {
+		// getAllJobsUnlocked returns a nil slice when no rows match —
+		// that's "DB is empty", not "skip dispatch". Normalise so the
+		// caller's dispatchJobsChange fires with the empty list.
+		jobs = []*Job{}
 	}
 	return jobs
 }
