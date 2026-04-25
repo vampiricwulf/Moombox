@@ -76,30 +76,11 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 		logger:     logger,
 	}
 
-	// Execute the interpreter JS with a timeout to prevent hangs from malicious/buggy scripts
-	vmDone := make(chan error, 1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				vmDone <- fmt.Errorf("goja panic: %v", r)
-			}
-		}()
-		_, runErr := vm.RunString(interpreterJS)
-		vmDone <- runErr
-	}()
-	timer := time.NewTimer(InterpreterExecutionTimeout)
-	select {
-	case err = <-vmDone:
-		timer.Stop()
-	case <-timer.C:
-		vm.Interrupt(fmt.Sprintf("BotGuard interpreter execution timeout (%v)", InterpreterExecutionTimeout))
-		err = <-vmDone // wait for RunString to return after interrupt
-	case <-ctx.Done():
-		vm.Interrupt("context cancelled")
-		<-vmDone // wait for RunString to return after interrupt
-		err = ctx.Err()
-	}
-	if err != nil {
+	// Execute the interpreter JS with a timeout to prevent hangs from
+	// malicious/buggy scripts. Delegates to gojahelpers.RunStringWithTimeout
+	// which encapsulates the goroutine + select + Interrupt + ClearInterrupt
+	// pattern that this site used to hand-roll. Audit reports/goja.md Q1.
+	if _, err := gojahelpers.RunStringWithTimeout(ctx, vm, interpreterJS, InterpreterExecutionTimeout); err != nil {
 		client.Shutdown()
 		return nil, &BGError{Code: ErrVMInit, Message: fmt.Sprintf("execute interpreter: %v", err)}
 	}

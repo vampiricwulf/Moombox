@@ -1,7 +1,9 @@
 package goja
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/dop251/goja"
 )
@@ -30,4 +32,61 @@ func NewRuntimeWithShims(userAgent string) (*goja.Runtime, *TimerManager, error)
 	}
 
 	return vm, tm, nil
+}
+
+// RunStringWithTimeout runs JavaScript source on the given runtime with
+// a timeout AND context cancellation. On timeout or ctx-cancel,
+// vm.Interrupt is fired to abort the in-flight execution; the helper
+// then waits for the launching goroutine to settle and calls
+// vm.ClearInterrupt so the runtime stays usable for subsequent
+// operations on the same VM. Panics inside the VM are caught and
+// surfaced as errors so the caller doesn't need its own
+// defer/recover.
+//
+// Returns:
+//   - the value from vm.RunString on success
+//   - nil + a "execution timeout" error on timeout
+//   - nil + ctx.Err() on context cancellation
+//   - nil + the underlying error on RunString failure
+//
+// Audit reports/goja.md Q1. Replaces the inline goroutine+select+
+// Interrupt+ClearInterrupt pattern that BotGuardClient construction
+// (and any future caller that wants timeboxed JS execution) was
+// hand-rolling.
+func RunStringWithTimeout(ctx context.Context, vm *goja.Runtime, code string, timeout time.Duration) (goja.Value, error) {
+	type result struct {
+		v   goja.Value
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- result{nil, fmt.Errorf("goja panic: %v", r)}
+			}
+		}()
+		v, runErr := vm.RunString(code)
+		done <- result{v: v, err: runErr}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case r := <-done:
+		return r.v, r.err
+	case <-timer.C:
+		vm.Interrupt(fmt.Sprintf("execution timeout (%v)", timeout))
+		// Wait for the launching goroutine to settle (RunString
+		// returns with an interrupt error) before ClearInterrupt so
+		// no JS is mid-flight when the flag is dropped.
+		<-done
+		vm.ClearInterrupt()
+		return nil, fmt.Errorf("execution timeout (%v)", timeout)
+	case <-ctx.Done():
+		vm.Interrupt("context cancelled")
+		<-done
+		vm.ClearInterrupt()
+		return nil, ctx.Err()
+	}
 }
