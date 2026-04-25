@@ -122,12 +122,44 @@ type SegmentDownloader struct {
 	logger            DownloaderLogger
 	cipherFailureFired atomic.Bool
 
+	// baseURLOverride is set by SetBaseURL when a cipher rotation
+	// requires swapping the stream URL mid-download. nil = use
+	// opts.BaseURL (the construction-time URL); non-nil = use the
+	// override. atomic.Pointer keeps reads lock-free on the hot
+	// segment-fetch path. DECISIONS #7.
+	baseURLOverride atomic.Pointer[string]
+
 	// Callbacks
 	OnStart          func(seq int, resuming bool)
 	OnProgress       func(p DownloadProgress)
 	OnGap            func(g DownloadGap)
 	OnFinish         func()
-	OnCipherFailure  func() // Called once on first 403 before any bytes written (likely cipher issue)
+	// OnCipherFailure is called once on first 403 before any bytes
+	// written (likely cipher rotation). The callback should
+	// invalidate any cached cipher solver and OPTIONALLY return a
+	// freshly-resolved BaseURL. If the return is non-empty, the
+	// engine atomically swaps to the new URL via SetBaseURL and
+	// continues fetching segments. Returning "" preserves the
+	// legacy fall-through to ErrQualityLost.
+	OnCipherFailure func() string
+}
+
+// SetBaseURL atomically replaces the URL used for subsequent segment
+// fetches. Safe to call from any goroutine; reads inside the download
+// loop pick up the new value on the next getBaseURL() call. Nothing
+// in flight is interrupted — the swap is observed at the start of
+// each segment fetch / probe / resume save. DECISIONS #7.
+func (d *SegmentDownloader) SetBaseURL(url string) {
+	d.baseURLOverride.Store(&url)
+}
+
+// getBaseURL returns the override URL if SetBaseURL has been called,
+// otherwise the construction-time opts.BaseURL.
+func (d *SegmentDownloader) getBaseURL() string {
+	if p := d.baseURLOverride.Load(); p != nil {
+		return *p
+	}
+	return d.opts.BaseURL
 }
 
 // NewSegmentDownloader creates a new segment downloader.
@@ -186,9 +218,9 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	state, err := d.loadResume()
 	if err == nil && state != nil {
 		// Validate resume state: base URL must match current download
-		if state.BaseURL != "" && state.BaseURL != d.opts.BaseURL {
+		if state.BaseURL != "" && state.BaseURL != d.getBaseURL() {
 			d.logger.Warn("[Downloader] Resume state URL mismatch, starting fresh",
-				"saved", state.BaseURL, "current", d.opts.BaseURL)
+				"saved", state.BaseURL, "current", d.getBaseURL())
 			state = nil
 		}
 		// Validate resume state: file must exist and be at least as large as saved position
@@ -333,11 +365,11 @@ func (d *SegmentDownloader) setCommonHeaders(req *http.Request, ua string) {
 }
 
 func (d *SegmentDownloader) buildSegmentURL(seq int) string {
-	if strings.Contains(d.opts.BaseURL, "$Number$") {
-		return SegmentURL(d.opts.BaseURL, seq)
+	if strings.Contains(d.getBaseURL(), "$Number$") {
+		return SegmentURL(d.getBaseURL(), seq)
 	}
 	// Append /sq/{seq} for YouTube-style URLs
-	base := strings.TrimRight(d.opts.BaseURL, "/")
+	base := strings.TrimRight(d.getBaseURL(), "/")
 	return fmt.Sprintf("%s/sq/%d", base, seq)
 }
 

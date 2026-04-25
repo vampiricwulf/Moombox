@@ -64,7 +64,7 @@ func (d *SegmentDownloader) saveResume() {
 		LastSeq:      seq - 1,
 		BytesWritten: d.bytesWritten.Load(),
 		Timestamp:    time.Now().Unix(),
-		BaseURL:      d.opts.BaseURL,
+		BaseURL:      d.getBaseURL(),
 	}
 	data, err := json.Marshal(state)
 	if err != nil {

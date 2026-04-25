@@ -237,7 +237,17 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 			}
 			if fireCipher && d.cipherFailureFired.CompareAndSwap(false, true) &&
 				d.OnCipherFailure != nil {
-				d.OnCipherFailure()
+				// Callback returns a freshly-resolved BaseURL (or "")
+				// so the engine can swap mid-download instead of
+				// burning the next batch of fetches against the old
+				// cipher's URL. Empty string falls through to the
+				// pre-existing handleGoneError → ErrQualityLost path
+				// where the strategy refreshes the manifest. DECISIONS #7.
+				if newURL := d.OnCipherFailure(); newURL != "" {
+					d.SetBaseURL(newURL)
+					d.logger.Info("[Cipher] swapping BaseURL after 403 — fresh n-param decryption",
+						"url_prefix", truncateURL(newURL, 120))
+				}
 			}
 		}
 		return d.handleGoneError(ctx, consecutiveGoneErrors, hasStartedDownloading)

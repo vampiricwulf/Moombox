@@ -36,7 +36,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		}
 
 		// Fetch playlist
-		data, plStatus, err := d.fetchSegment(ctx, d.opts.BaseURL)
+		data, plStatus, err := d.fetchSegment(ctx, d.getBaseURL())
 		if err != nil {
 			// 404/410 on playlist fetch -- variant may have been removed
 			if plStatus == 404 || plStatus == 410 {
@@ -84,7 +84,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			continue
 		}
 
-		result := ParseHls(string(data), d.opts.BaseURL)
+		result := ParseHls(string(data), d.getBaseURL())
 		if result == nil || result.Playlist == nil {
 			consecutiveErrors++
 			// Log a snippet of the response so "parse failure" surfaces the

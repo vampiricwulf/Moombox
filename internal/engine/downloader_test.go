@@ -211,6 +211,88 @@ func TestSegmentDownloader_LastSeq(t *testing.T) {
 	}
 }
 
+// TestSetBaseURLOverridesOpts covers the DECISIONS #7 atomic URL
+// swap: getBaseURL returns the override after SetBaseURL is called,
+// and falls back to opts.BaseURL when no override is set. Both
+// states must be lock-free readable from any goroutine.
+func TestSetBaseURLOverridesOpts(t *testing.T) {
+	const orig = "https://example.com/orig/$Number$"
+	const swap = "https://example.com/swapped/$Number$"
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    orig,
+		OutputFile: "test.mp4",
+	})
+
+	if got := d.getBaseURL(); got != orig {
+		t.Errorf("pre-swap getBaseURL: got %q, want %q", got, orig)
+	}
+
+	d.SetBaseURL(swap)
+	if got := d.getBaseURL(); got != swap {
+		t.Errorf("post-swap getBaseURL: got %q, want %q", got, swap)
+	}
+
+	// buildSegmentURL also picks up the override (the segment-fetch hot path).
+	url := d.buildSegmentURL(5)
+	if !contains(url, "swapped") {
+		t.Errorf("buildSegmentURL after swap: got %q, expected to contain 'swapped'", url)
+	}
+}
+
+// TestSetBaseURLConcurrentSwap exercises atomic.Pointer's safety
+// under concurrent reads + writes. Two goroutines repeatedly swap
+// the URL while a third reads — race detector verifies no torn
+// writes / data races.
+func TestSetBaseURLConcurrentSwap(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:    "https://example.com/orig",
+		OutputFile: "test.mp4",
+	})
+
+	const iterations = 1000
+	done := make(chan struct{}, 3)
+
+	go func() {
+		for i := 0; i < iterations; i++ {
+			d.SetBaseURL("https://example.com/swap-A")
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		for i := 0; i < iterations; i++ {
+			d.SetBaseURL("https://example.com/swap-B")
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		for i := 0; i < iterations; i++ {
+			_ = d.getBaseURL()
+		}
+		done <- struct{}{}
+	}()
+
+	for i := 0; i < 3; i++ {
+		<-done
+	}
+
+	final := d.getBaseURL()
+	if final != "https://example.com/swap-A" && final != "https://example.com/swap-B" {
+		t.Errorf("final getBaseURL = %q, expected one of the swap targets", final)
+	}
+}
+
+// contains is a tiny helper to keep the test readable without
+// importing strings.Contains alongside everything else.
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 func TestTruncateURL(t *testing.T) {
 	short := "https://example.com"
 	if got := truncateURL(short, 100); got != short {

@@ -12,6 +12,42 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
+// resolveFreshDashURL re-decrypts the n-param on the original
+// (pre-decryption) DASH stream URL using a freshly-resolved cipher.
+// Called from the OnCipherFailure callback after InvalidateSolver —
+// the next GetSolvers re-runs the player JS to pick up the rotated
+// cipher. Returns the new decrypted URL or "" on failure (which
+// falls through to the engine's legacy ErrQualityLost path so the
+// orchestrator's higher-level retry logic refreshes the manifest).
+//
+// origURL must be the ORIGINAL stream BaseURL (before the initial
+// n-param decryption); otherwise we'd re-decrypt an already-decrypted
+// URL and produce garbage. DECISIONS #7.
+func resolveFreshDashURL(ctx context.Context, cipherSolver *cipher.Solver, playerURL, origURL string, logger interface {
+	Warn(msg string, args ...any)
+	Info(msg string, args ...any)
+}) string {
+	if origURL == "" {
+		return ""
+	}
+	fresh, err := cipherSolver.GetSolvers(ctx, playerURL)
+	if err != nil {
+		logger.Warn("[Cipher] retry: GetSolvers failed", "err", err)
+		return ""
+	}
+	if fresh == nil || fresh.N == nil {
+		logger.Warn("[Cipher] retry: solver missing N callable")
+		return ""
+	}
+	decrypted, err := decryptNParamInURL(origURL, fresh.DecryptN)
+	if err != nil {
+		logger.Warn("[Cipher] retry: n-param decrypt failed", "err", err)
+		return ""
+	}
+	logger.Info("[Cipher] retry: fresh n-param decryption succeeded; engine will swap BaseURL")
+	return decrypted
+}
+
 // DownloadDash sets up DASH segment downloaders for a live/post-live stream.
 // Applies cipher decryption to manifest URL, n-parameter decryption to stream URLs,
 // and injects PO token into the manifest URL path.
@@ -72,7 +108,19 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			"manifestBytes", len(manifestData))
 	}
 
-	// Step 4: Decrypt n-parameter in each stream's BaseURL (prevents throttling/403)
+	// Step 4: Decrypt n-parameter in each stream's BaseURL (prevents throttling/403).
+	//
+	// Snapshot the ORIGINAL (pre-decryption) BaseURL per itag BEFORE the
+	// loop overwrites it — the OnCipherFailure handler below uses these
+	// originals to re-decrypt with a freshly-solved cipher when YouTube
+	// rotates mid-stream. Without the snapshot, the closure would re-decrypt
+	// an already-decrypted URL and produce garbage. DECISIONS #7.
+	originalBaseURLs := make(map[int]string, len(streams))
+	for i := range streams {
+		if streams[i].BaseURL != "" {
+			originalBaseURLs[streams[i].Itag] = streams[i].BaseURL
+		}
+	}
 	if cipherSolver != nil && videoInfo.PlayerURL != "" {
 		solvers, solverErr := cipherSolver.GetSolvers(ctx, videoInfo.PlayerURL)
 		if solverErr != nil {
@@ -216,11 +264,13 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			},
 		})
 		if cipherSolver != nil && videoInfo.PlayerURL != "" {
-			result.VideoDownloader.OnCipherFailure = func() {
+			origURL := originalBaseURLs[videoStream.Itag]
+			result.VideoDownloader.OnCipherFailure = func() string {
 				// Engine fires once per downloader instance on either a
 				// pre-bytes 403 OR a post-bytes 403 burst — see audit F11.
 				job.Logger.Warn("[Cipher] 403 signal — invalidating solver", "playerURL", videoInfo.PlayerURL)
 				cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
+				return resolveFreshDashURL(ctx, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}
 	}
@@ -249,9 +299,11 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			},
 		})
 		if cipherSolver != nil && videoInfo.PlayerURL != "" {
-			result.AudioDownloader.OnCipherFailure = func() {
+			origURL := originalBaseURLs[audioStream.Itag]
+			result.AudioDownloader.OnCipherFailure = func() string {
 				job.Logger.Warn("[Cipher] 403 signal — invalidating solver", "playerURL", videoInfo.PlayerURL)
 				cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
+				return resolveFreshDashURL(ctx, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}
 	}

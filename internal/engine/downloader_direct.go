@@ -80,7 +80,7 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 
 // runDirectDownloadFallback is the streaming fallback when Range requests are not supported.
 func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.opts.BaseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -98,7 +98,7 @@ func (d *SegmentDownloader) runDirectDownloadFallback(ctx context.Context) error
 		n, _ := resp.Body.Read(bodySnippet)
 		d.logger.Debug("[Downloader] direct URL failed",
 			"status", resp.StatusCode,
-			"url_prefix", truncateURL(d.opts.BaseURL, 120),
+			"url_prefix", truncateURL(d.getBaseURL(), 120),
 			"body_snippet", string(bodySnippet[:n]),
 		)
 		return fmt.Errorf("HTTP %d downloading direct URL", resp.StatusCode)

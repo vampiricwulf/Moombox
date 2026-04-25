@@ -264,7 +264,7 @@ func (d *SegmentDownloader) probeFileSize(ctx context.Context) int64 {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.opts.BaseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
 	if err != nil {
 		return 0
 	}
@@ -338,7 +338,7 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 	ctx, cancel := context.WithTimeout(ctx, SegmentTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.opts.BaseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.getBaseURL(), nil)
 	if err != nil {
 		return nil, 0, err
 	}
