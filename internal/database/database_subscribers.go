@@ -47,6 +47,22 @@ type JobDeleted struct {
 	JobID string
 }
 
+// TrimsChanged is the event payload delivered to OnTrimsChanged
+// subscribers when AddTrim or DeleteTrim mutates the trim list for a
+// single job. Carries the parent job's ID — subscribers that maintain
+// per-job trim state can re-fetch via GetTrimsForJob; callers that
+// only need to invalidate a cached row (e.g. TUI detail panel
+// re-renders) just need the ID.
+//
+// Fourth event type in the DECISIONS #21 lifecycle-event set, paired
+// with AddTrim and DeleteTrim. Coexists with OnJobsChange during
+// migration. Unlike JobAdded/JobDeleted, the parent job's lifecycle is
+// untouched — only its trim list changed; subscribers maintaining a
+// jobs-only view can ignore TrimsChanged events.
+type TrimsChanged struct {
+	JobID string
+}
+
 // jobUpdateSub pairs a subscriber ID with its callback function.
 type jobUpdateSub struct {
 	id uint64
@@ -69,6 +85,12 @@ type jobAddedSub struct {
 type jobDeletedSub struct {
 	id uint64
 	fn func(*JobDeleted)
+}
+
+// trimsChangedSub pairs a subscriber ID with its TrimsChanged callback.
+type trimsChangedSub struct {
+	id uint64
+	fn func(*TrimsChanged)
 }
 
 // jobsChangeSub pairs a subscriber ID with its callback function.
@@ -126,6 +148,17 @@ func shrinkJobAddedSubs(s []jobAddedSub) []jobAddedSub {
 func shrinkJobDeletedSubs(s []jobDeletedSub) []jobDeletedSub {
 	if cap(s) > 4*len(s) {
 		shrunk := make([]jobDeletedSub, len(s))
+		copy(shrunk, s)
+		return shrunk
+	}
+	return s
+}
+
+// shrinkTrimsChangedSubs is the trimsChangedSub counterpart for the
+// lifecycle TrimsChanged subscribers added for DECISIONS #21.
+func shrinkTrimsChangedSubs(s []trimsChangedSub) []trimsChangedSub {
+	if cap(s) > 4*len(s) {
+		shrunk := make([]trimsChangedSub, len(s))
 		copy(shrunk, s)
 		return shrunk
 	}
@@ -237,6 +270,35 @@ func (db *Database) OnJobDeleted(fn func(*JobDeleted)) func() {
 			if sub.id == id {
 				db.onJobDeleted = append(db.onJobDeleted[:i], db.onJobDeleted[i+1:]...)
 				db.onJobDeleted = shrinkJobDeletedSubs(db.onJobDeleted)
+				break
+			}
+		}
+	}
+}
+
+// OnTrimsChanged registers a callback for trim mutation events.
+// Fires once per successful AddTrim and once per successful DeleteTrim
+// (does NOT fire when DeleteTrim's lookup of the parent job_id finds
+// no matching trim row). Returns an unsubscribe function.
+//
+// Coexists with OnJobsChange during the DECISIONS #21 migration —
+// AddTrim/DeleteTrim currently fire both. Subscribers that only render
+// trim information for a known job (e.g. TUI detail panel) should
+// prefer OnTrimsChanged so they don't need to re-render unrelated
+// jobs on every trim mutation.
+func (db *Database) OnTrimsChanged(fn func(*TrimsChanged)) func() {
+	db.subMu.Lock()
+	defer db.subMu.Unlock()
+	id := db.nextSubID
+	db.nextSubID++
+	db.onTrimsChanged = append(db.onTrimsChanged, trimsChangedSub{id: id, fn: fn})
+	return func() {
+		db.subMu.Lock()
+		defer db.subMu.Unlock()
+		for i, sub := range db.onTrimsChanged {
+			if sub.id == id {
+				db.onTrimsChanged = append(db.onTrimsChanged[:i], db.onTrimsChanged[i+1:]...)
+				db.onTrimsChanged = shrinkTrimsChangedSubs(db.onTrimsChanged)
 				break
 			}
 		}
@@ -435,6 +497,18 @@ func (db *Database) safeCallJobDeleted(fn func(*JobDeleted), event *JobDeleted) 
 	fn(event)
 }
 
+// safeCallTrimsChanged calls an OnTrimsChanged subscriber with panic
+// recovery. One misbehaving consumer can't take down the rest of the
+// fan-out.
+func (db *Database) safeCallTrimsChanged(fn func(*TrimsChanged), event *TrimsChanged) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("database subscriber panic on trims changed", "jobID", event.JobID, "panic", r)
+		}
+	}()
+	fn(event)
+}
+
 // notifyJobAdded fans out the OnJobAdded callbacks. The caller MUST NOT
 // hold db.mu — subscribers may call back into the Database (e.g. GetJob,
 // UpdateJobFields, AddJobLog) and a held db.mu would deadlock against
@@ -498,5 +572,38 @@ func (db *Database) notifyJobDeleted(jobID string) {
 	event := &JobDeleted{JobID: jobID}
 	for _, fn := range subs {
 		db.safeCallJobDeleted(fn, event)
+	}
+}
+
+// notifyTrimsChanged fans out the OnTrimsChanged callbacks. The caller
+// MUST NOT hold db.mu — subscribers may call back into the Database
+// (e.g. GetTrimsForJob to fetch the new list) and a held db.mu would
+// deadlock against any Lock/RLock attempt.
+//
+// Per-callback invocations run sequentially in the caller's goroutine —
+// trim mutations are user-initiated (Trim creation / deletion via the
+// trim dialog) so they're rare relative to UpdateJobFields. Top-level
+// recover + per-callback safeCallTrimsChanged isolate panics.
+func (db *Database) notifyTrimsChanged(jobID string) {
+	defer func() {
+		if r := recover(); r != nil && db.logger != nil {
+			db.logger.Error("notifyTrimsChanged iteration panic", "panic", r)
+		}
+	}()
+
+	db.subMu.RLock()
+	if len(db.onTrimsChanged) == 0 {
+		db.subMu.RUnlock()
+		return
+	}
+	subs := make([]func(*TrimsChanged), 0, len(db.onTrimsChanged))
+	for _, sub := range db.onTrimsChanged {
+		subs = append(subs, sub.fn)
+	}
+	db.subMu.RUnlock()
+
+	event := &TrimsChanged{JobID: jobID}
+	for _, fn := range subs {
+		db.safeCallTrimsChanged(fn, event)
 	}
 }

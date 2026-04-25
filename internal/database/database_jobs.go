@@ -323,6 +323,11 @@ func (db *Database) AddTrim(trim *TrimRecord) error {
 
 	jobs := db.snapshotJobsChange()
 	db.mu.Unlock()
+	// TrimsChanged fires alongside the legacy OnJobsChange dispatch
+	// during the DECISIONS #21 lifecycle-event migration. Carries the
+	// parent job's ID so subscribers can re-fetch trims (or invalidate
+	// a cached detail panel) without scanning the full job list.
+	db.notifyTrimsChanged(trim.JobID)
 	db.dispatchJobsChange(jobs)
 	return nil
 }
@@ -331,14 +336,31 @@ func (db *Database) AddTrim(trim *TrimRecord) error {
 func (db *Database) DeleteTrim(trimID string) error {
 	db.mu.Lock()
 
-	_, err := db.db.ExecContext(db.getCtx(), "DELETE FROM trims WHERE id = ?", trimID)
+	// Look up the parent job_id BEFORE the DELETE so notifyTrimsChanged
+	// can carry it. ErrNoRows means the trim never existed — silent
+	// success preserves the legacy DeleteTrim contract (no event
+	// fired, OnJobsChange still dispatches via the snapshot path).
+	var jobID string
+	err := db.db.QueryRowContext(db.getCtx(), "SELECT job_id FROM trims WHERE id = ?", trimID).Scan(&jobID)
+	if err == sql.ErrNoRows {
+		jobs := db.snapshotJobsChange()
+		db.mu.Unlock()
+		db.dispatchJobsChange(jobs)
+		return nil
+	}
 	if err != nil {
+		db.mu.Unlock()
+		return err
+	}
+
+	if _, err := db.db.ExecContext(db.getCtx(), "DELETE FROM trims WHERE id = ?", trimID); err != nil {
 		db.mu.Unlock()
 		return err
 	}
 
 	jobs := db.snapshotJobsChange()
 	db.mu.Unlock()
+	db.notifyTrimsChanged(jobID)
 	db.dispatchJobsChange(jobs)
 	return nil
 }

@@ -1083,6 +1083,211 @@ func TestOnJobDeletedSurvivesPanic(t *testing.T) {
 	}
 }
 
+// TestOnTrimsChangedFiresOnAddTrim covers the AddTrim writer path of
+// the TrimsChanged lifecycle event added for DECISIONS #21.
+func TestOnTrimsChangedFiresOnAddTrim(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "trim_parent", VideoID: "v", URL: "u", Status: StatusFinished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan *TrimsChanged, 4)
+	unsub := db.OnTrimsChanged(func(ev *TrimsChanged) { events <- ev })
+	defer unsub()
+
+	if err := db.AddTrim(&TrimRecord{
+		ID:        "trim1",
+		JobID:     "trim_parent",
+		StartTime: 0,
+		EndTime:   10,
+		Filename:  "trim1.mp4",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.JobID != "trim_parent" {
+			t.Errorf("event JobID: want trim_parent, got %q", ev.JobID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnTrimsChanged did not fire on AddTrim within 2s")
+	}
+}
+
+// TestOnTrimsChangedFiresOnDeleteTrim covers the DeleteTrim writer
+// path. The handler must look up the parent job_id BEFORE the DELETE
+// so the targeted event still carries it post-removal.
+func TestOnTrimsChangedFiresOnDeleteTrim(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "trim_parent_d", VideoID: "v", URL: "u", Status: StatusFinished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddTrim(&TrimRecord{
+		ID: "trim_d_1", JobID: "trim_parent_d", StartTime: 0, EndTime: 5,
+		Filename: "d1.mp4", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Subscribe AFTER the AddTrim so the channel doesn't catch its event.
+	events := make(chan *TrimsChanged, 4)
+	unsub := db.OnTrimsChanged(func(ev *TrimsChanged) { events <- ev })
+	defer unsub()
+
+	if err := db.DeleteTrim("trim_d_1"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.JobID != "trim_parent_d" {
+			t.Errorf("event JobID: want trim_parent_d, got %q", ev.JobID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnTrimsChanged did not fire on DeleteTrim within 2s")
+	}
+}
+
+// TestOnTrimsChangedDoesNotFireOnMissingTrim guards the ErrNoRows
+// branch in DeleteTrim. The trim doesn't exist, so the SELECT
+// short-circuits before the DELETE and no targeted event is emitted.
+// (OnJobsChange still dispatches via the snapshot path — that's the
+// existing legacy contract this commit doesn't alter.)
+func TestOnTrimsChangedDoesNotFireOnMissingTrim(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	events := make(chan *TrimsChanged, 4)
+	unsub := db.OnTrimsChanged(func(ev *TrimsChanged) { events <- ev })
+	defer unsub()
+
+	if err := db.DeleteTrim("ghost_trim"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-events:
+		t.Errorf("OnTrimsChanged should not fire for a missing trim; got %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+		// expected — no event
+	}
+}
+
+// TestOnTrimsChangedUnsubscribeStopsCallbacks confirms the returned
+// unsub closure removes the subscriber cleanly across both AddTrim
+// and DeleteTrim writer paths.
+func TestOnTrimsChangedUnsubscribeStopsCallbacks(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "uns_t", VideoID: "v", URL: "u", Status: StatusFinished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hits := make(chan *TrimsChanged, 4)
+	unsub := db.OnTrimsChanged(func(ev *TrimsChanged) { hits <- ev })
+
+	if err := db.AddTrim(&TrimRecord{
+		ID: "uns_t_1", JobID: "uns_t", StartTime: 0, EndTime: 5,
+		Filename: "u1.mp4", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hits:
+	case <-time.After(time.Second):
+		t.Fatal("first AddTrim event should have fired")
+	}
+
+	unsub()
+	if err := db.AddTrim(&TrimRecord{
+		ID: "uns_t_2", JobID: "uns_t", StartTime: 5, EndTime: 10,
+		Filename: "u2.mp4", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-hits:
+		t.Errorf("post-unsubscribe event should NOT fire; got %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+		// expected
+	}
+}
+
+// TestOnTrimsChangedSurvivesPanic locks safeCallTrimsChanged's
+// per-callback recover.
+func TestOnTrimsChangedSurvivesPanic(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.AddJob(&Job{
+		ID: "pan_t", VideoID: "v", URL: "u", Status: StatusFinished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	panicked := false
+	survived := make(chan struct{}, 1)
+
+	uPanic := db.OnTrimsChanged(func(*TrimsChanged) {
+		panicked = true
+		panic("test panic")
+	})
+	defer uPanic()
+	uOK := db.OnTrimsChanged(func(*TrimsChanged) { survived <- struct{}{} })
+	defer uOK()
+
+	if err := db.AddTrim(&TrimRecord{
+		ID: "pan_t_1", JobID: "pan_t", StartTime: 0, EndTime: 5,
+		Filename: "p1.mp4", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-survived:
+		// good — second subscriber fired despite first one panicking
+	case <-time.After(2 * time.Second):
+		t.Fatal("second subscriber should fire even if first panics")
+	}
+	if !panicked {
+		t.Error("panicking subscriber should have been invoked")
+	}
+}
+
 func TestSubscriberSliceShrinksAfterChurn(t *testing.T) {
 	// Locks down shrinkJobUpdateSubs: after many subscribe/unsubscribe
 	// cycles the underlying slice is rebuilt at smaller capacity so

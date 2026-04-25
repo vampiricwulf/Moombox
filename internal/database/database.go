@@ -98,13 +98,14 @@ type Database struct {
 	// subscribers. onJobAdded is the lifecycle counterpart on the
 	// AddJob writer path; like onJobChange it coexists with the
 	// legacy onJobsChange dispatch until consumers migrate.
-	onJobUpdate  []jobUpdateSub
-	onJobChange  []jobChangeSub
-	onJobAdded   []jobAddedSub
-	onJobDeleted []jobDeletedSub
-	onJobsChange []jobsChangeSub
-	nextSubID    uint64
-	subMu        sync.RWMutex
+	onJobUpdate    []jobUpdateSub
+	onJobChange    []jobChangeSub
+	onJobAdded     []jobAddedSub
+	onJobDeleted   []jobDeletedSub
+	onTrimsChanged []trimsChangedSub
+	onJobsChange   []jobsChangeSub
+	nextSubID      uint64
+	subMu          sync.RWMutex
 
 	// Prepared statements
 	stmtGetJob *sql.Stmt
