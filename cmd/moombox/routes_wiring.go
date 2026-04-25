@@ -3,7 +3,6 @@ package main
 import (
 	"log/slog"
 
-	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
@@ -100,11 +99,7 @@ func (s *runState) wireRoutes() func() {
 		OnRestart: func() { s.triggerRestart("setup") },
 	}, s.configStore)
 	routes.FFmpegRoutes(s.r, &routes.FFmpegDeps{
-		Cfg:   s.cfg,
-		CfgMu: s.webServer.CfgMu(),
-		SaveConfig: func(c *config.MoomboxConfig) error {
-			return config.Save(c, s.configPath)
-		},
+		Store:     s.configStore,
 		RateLimit: s.apiRL,
 		Logger:    s.log,
 	})
@@ -114,11 +109,9 @@ func (s *runState) wireRoutes() func() {
 	routes.YtdlpRoutes(s.r, s.cfg.Network.Port, s.cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(s.r, func() { s.triggerRestart("API") })
 	routes.UpdateRoutes(s.r, &routes.UpdateRouteDeps{
-		Updater:    s.upd,
-		Version:    version,
-		Cfg:        s.cfg,
-		ConfigPath: s.configPath,
-		OnRestart:  func() { s.triggerRestart("update") },
+		Updater:   s.upd,
+		Version:   version,
+		OnRestart: func() { s.triggerRestart("update") },
 		OnFound: func(release *updater.ReleaseInfo) {
 			s.wsHub.Broadcast("update_available", release)
 			select {
@@ -130,7 +123,7 @@ func (s *runState) wireRoutes() func() {
 			default:
 			}
 		},
-	}, s.webServer.CfgMu())
+	}, s.configStore)
 	authDeps := &routes.AuthRoutesDeps{
 		Auth:       s.authSvc,
 		DB:         s.db,

@@ -2,7 +2,6 @@ package routes
 
 import (
 	"net/http"
-	"sync"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -20,16 +19,19 @@ var updateInProgress atomic.Bool
 
 // UpdateRouteDeps holds dependencies for the update routes.
 type UpdateRouteDeps struct {
-	Updater    *updater.Updater
-	Version    string
-	Cfg        *config.MoomboxConfig
-	ConfigPath string
-	OnRestart  func()
-	OnFound    func(*updater.ReleaseInfo) // broadcast update to WebSocket + TUI
+	Updater   *updater.Updater
+	Version   string
+	OnRestart func()
+	OnFound   func(*updater.ReleaseInfo) // broadcast update to WebSocket + TUI
 }
 
-// UpdateRoutes registers the update check/apply/dismiss API endpoints.
-func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, cfgMu *sync.RWMutex) {
+// UpdateRoutes registers the update check/apply/dismiss API endpoints. The
+// Store carries the cfg + lock + savePath; /api/update/dismiss flips the
+// AutoCheckUpdates field and persists via store.SaveLocked, rolling back
+// the in-memory mutation if the save fails.
+func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
+	mu := store.RWMutex()
+	cfg := store.Config()
 	// GET /api/update/status — current update status
 	r.Get("/api/update/status", func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
@@ -139,16 +141,16 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, cfgMu *sync.RWMutex) {
 
 	// POST /api/update/dismiss — disable auto-check and clear update info
 	r.Post("/api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
-		cfgMu.Lock()
-		oldVal := deps.Cfg.Updates.AutoCheckUpdates
-		deps.Cfg.Updates.AutoCheckUpdates = false
-		if err := config.Save(deps.Cfg, deps.ConfigPath); err != nil {
-			deps.Cfg.Updates.AutoCheckUpdates = oldVal
-			cfgMu.Unlock()
+		mu.Lock()
+		oldVal := cfg.Updates.AutoCheckUpdates
+		cfg.Updates.AutoCheckUpdates = false
+		if err := store.SaveLocked(); err != nil {
+			cfg.Updates.AutoCheckUpdates = oldVal
+			mu.Unlock()
 			jsonError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
-		cfgMu.Unlock()
+		mu.Unlock()
 		SharedUpdateInfo.Store(nil)
 
 		jsonResponse(w, map[string]any{"success": true})

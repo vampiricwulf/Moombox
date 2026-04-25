@@ -92,11 +92,9 @@ func InvalidateFFmpegCache() {
 
 // FFmpegDeps holds dependencies for FFmpeg validation routes.
 type FFmpegDeps struct {
-	Cfg        *config.MoomboxConfig
-	CfgMu     *sync.RWMutex
-	SaveConfig func(*config.MoomboxConfig) error
-	RateLimit  *web.RateLimiter
-	Logger     interface {
+	Store     *config.Store
+	RateLimit *web.RateLimiter
+	Logger    interface {
 		Info(msg string, args ...any)
 		Error(msg string, args ...any)
 	}
@@ -104,12 +102,16 @@ type FFmpegDeps struct {
 
 // FFmpegRoutes registers FFmpeg validation and installation endpoints.
 func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
-	cfgMu := deps.CfgMu
+	store := deps.Store
+	mu := store.RWMutex()
+	cfg := store.Config()
+
 	// GET /api/ffmpeg/check — check if ffmpeg is available on PATH or configured path
 	r.Get("/api/ffmpeg/check", func(rw http.ResponseWriter, req *http.Request) {
-		cfgMu.RLock()
-		path := deps.Cfg.Paths.FfmpegPath
-		cfgMu.RUnlock()
+		var path string
+		store.Read(func(c *config.MoomboxConfig) {
+			path = c.Paths.FfmpegPath
+		})
 		if path == "" {
 			path = "ffmpeg"
 		}
@@ -156,13 +158,13 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 		}
 
 		valid, version, warning := checkFFmpeg(path)
-		if valid && deps.SaveConfig != nil {
-			cfgMu.Lock()
-			deps.Cfg.Paths.FfmpegPath = path
-			if err := deps.SaveConfig(deps.Cfg); err != nil {
+		if valid {
+			mu.Lock()
+			cfg.Paths.FfmpegPath = path
+			if err := store.SaveLocked(); err != nil {
 				deps.Logger.Error("Failed to save ffmpeg path to config", "error", err.Error())
 			}
-			cfgMu.Unlock()
+			mu.Unlock()
 		}
 
 		jsonResponse(rw, map[string]any{
