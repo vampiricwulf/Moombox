@@ -550,8 +550,10 @@ func TestPotProvider_SessionCacheExpired(t *testing.T) {
 	}
 
 	// Also add a minter so it tries minting (which will fail since MintFunc is nil,
-	// but we can verify the expired session was removed)
-	pp.minterCache[binding] = &TokenMinter{
+	// but we can verify the expired session was removed). Single-minter cache
+	// keys on defaultMinterKey now (CRIT-2), so seed that key — the minter
+	// is reused for whatever contentBinding the caller asks for.
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		MintFunc: func(cb string) (string, error) {
 			return "fresh-token", nil
@@ -579,9 +581,10 @@ func TestPotProvider_BypassCache(t *testing.T) {
 
 	// With bypassCache=true, should skip BOTH session AND minter caches (match TS).
 	// The minter is present but should NOT be used — generateAndMint will fail without
-	// network, confirming the minter cache was correctly skipped.
+	// network, confirming the minter cache was correctly skipped. Single-minter
+	// cache (CRIT-2) keys on defaultMinterKey now.
 	minterUsed := false
-	pp.minterCache[binding] = &TokenMinter{
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		MintFunc: func(cb string) (string, error) {
 			minterUsed = true
@@ -634,12 +637,61 @@ func TestPotProvider_BypassCache_SkipsSession(t *testing.T) {
 // PotProvider.GeneratePoToken — minter cache hit
 // ---------------------------------------------------------------------------
 
+// TestPotProvider_OneMinterServesAllBindings locks the CRIT-2 invariant:
+// the cached minter under defaultMinterKey is reused for ANY content
+// binding the caller asks for. Pre-CRIT-2 the cache was per-binding,
+// so a request for binding-A would miss the binding-B cache and force
+// a new BotGuard VM run — wasted work and a Goja VM leak per binding.
+func TestPotProvider_OneMinterServesAllBindings(t *testing.T) {
+	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
+
+	mintCalls := 0
+	bindingsSeen := []string{}
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		MintFunc: func(cb string) (string, error) {
+			mintCalls++
+			bindingsSeen = append(bindingsSeen, cb)
+			return "tok-for-" + cb, nil
+		},
+	}
+
+	// Three different bindings; all must mint via the SAME cached minter.
+	for _, b := range []string{"channel-a", "channel-b", "channel-c"} {
+		s, err := pp.GeneratePoToken(context.Background(), b, false)
+		if err != nil {
+			t.Fatalf("binding %q: unexpected error: %v", b, err)
+		}
+		if s.PoToken != "tok-for-"+b {
+			t.Errorf("binding %q: PoToken = %q, want %q", b, s.PoToken, "tok-for-"+b)
+		}
+	}
+
+	if mintCalls != 3 {
+		t.Errorf("MintFunc calls: want 3 (one per binding), got %d", mintCalls)
+	}
+	if len(bindingsSeen) != 3 || bindingsSeen[0] != "channel-a" || bindingsSeen[1] != "channel-b" || bindingsSeen[2] != "channel-c" {
+		t.Errorf("bindingsSeen drift: %v", bindingsSeen)
+	}
+
+	// minterCache size MUST stay at 1 — pre-CRIT-2 it would have grown
+	// to 3 (one entry per binding).
+	if got := len(pp.minterCache); got != 1 {
+		t.Errorf("minterCache size = %d, want 1 (single-minter invariant)", got)
+	}
+	if _, ok := pp.minterCache[defaultMinterKey]; !ok {
+		t.Errorf("expected minterCache[defaultMinterKey] to be present")
+	}
+}
+
 func TestPotProvider_MinterCacheHit(t *testing.T) {
 	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
 
 	binding := "minter-binding"
 	mintCalls := 0
-	pp.minterCache[binding] = &TokenMinter{
+	// Single-minter cache (CRIT-2): seed defaultMinterKey, not the
+	// contentBinding. The minter serves any binding the caller asks for.
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		MintFunc: func(cb string) (string, error) {
 			mintCalls++
@@ -670,7 +722,7 @@ func TestPotProvider_MinterCacheExpired(t *testing.T) {
 	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
 
 	binding := "expired-minter"
-	pp.minterCache[binding] = &TokenMinter{
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
 		ExpiresAt: time.Now().Add(-1 * time.Hour), // expired
 		MintFunc: func(cb string) (string, error) {
 			t.Fatal("expired minter should not be called")
@@ -694,7 +746,7 @@ func TestPotProvider_MinterError(t *testing.T) {
 	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
 
 	binding := "error-binding"
-	pp.minterCache[binding] = &TokenMinter{
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		MintFunc: func(cb string) (string, error) {
 			return "", fmt.Errorf("mint failed")
@@ -726,7 +778,7 @@ func TestPotProvider_InflightDedup(t *testing.T) {
 	mintCalls := 0
 	mintCh := make(chan struct{})
 
-	pp.minterCache[binding] = &TokenMinter{
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		MintFunc: func(cb string) (string, error) {
 			mintCalls++
@@ -784,7 +836,7 @@ func TestPotProvider_ContextCancelDuringInflight(t *testing.T) {
 	binding := "cancel-binding"
 	blockCh := make(chan struct{})
 
-	pp.minterCache[binding] = &TokenMinter{
+	pp.minterCache[defaultMinterKey] = &TokenMinter{
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		MintFunc: func(cb string) (string, error) {
 			<-blockCh // block forever

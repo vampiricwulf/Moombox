@@ -16,17 +16,40 @@ type inflightEntry struct {
 	err     error
 }
 
+// defaultMinterKey is the single key under which the PotProvider stores
+// its (one) cached minter. The cache map shape is preserved (to keep the
+// invalidation paths and the /api/pot debug route stable), but the key
+// is no longer the contentBinding — one WebPoMinter can produce tokens
+// for any binding, so caching per-binding wasted a BotGuard run on every
+// new content binding (audit reports/bgutils.md CRIT-2). A future
+// commit may compound the key with proxy/IP for multi-account setups,
+// at which point this constant becomes the "no proxy" default.
+const defaultMinterKey = "default"
+
 // PotProvider manages PO token generation with triple-tier caching:
 // 1. Session cache: quick returns for same content binding
-// 2. Minter cache: avoid re-running BotGuard VM
+// 2. Minter cache: ONE minter per process, reused across bindings
 // 3. Inflight dedup: prevent concurrent generation for same key
 type PotProvider struct {
 	mu           sync.Mutex
 	sessionCache map[string]*SessionData
-	minterCache  map[string]*TokenMinter
-	inflight     map[string]*inflightEntry
-	config       *BgConfig
-	logger       interface {
+	// minterCache holds at most one entry under defaultMinterKey.
+	// Map shape preserved so InvalidateIntegrityTokens / Cleanup /
+	// GetMinterCacheKeys stay structurally identical and a future
+	// proxy/IP-keyed expansion is a one-line change. CRIT-2.
+	minterCache map[string]*TokenMinter
+	inflight    map[string]*inflightEntry
+	// minterCreatingMu serialises minter creation across goroutines
+	// that all see "no minter". Without it, two goroutines requesting
+	// different bindings on a fresh process would each start a
+	// BotGuard VM and the second one's would be replaced + leaked.
+	// Held only during the minter-creation critical section, NEVER
+	// while holding pp.mu — that would deadlock against the
+	// minter-eviction AfterFunc which acquires pp.mu under the same
+	// lock-ordering. CRIT-2.
+	minterCreatingMu sync.Mutex
+	config           *BgConfig
+	logger           interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -97,13 +120,15 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 	entry := &inflightEntry{done: make(chan struct{})}
 	pp.inflight[contentBinding] = entry
 
-	// Check minter cache (unless bypassing — TS skips both caches when bypass_cache=true)
+	// Check minter cache (unless bypassing — TS skips both caches when bypass_cache=true).
+	// Single-minter design: the cached minter (if any) lives under
+	// defaultMinterKey and serves every contentBinding. CRIT-2.
 	var minter *TokenMinter
 	var hasMinter bool
 	if !bypassCache {
-		minter, hasMinter = pp.minterCache[contentBinding]
+		minter, hasMinter = pp.minterCache[defaultMinterKey]
 		if hasMinter && time.Now().After(minter.ExpiresAt) {
-			delete(pp.minterCache, contentBinding)
+			delete(pp.minterCache, defaultMinterKey)
 			hasMinter = false
 		}
 	}
@@ -127,7 +152,7 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 			return pp.mintPoToken(minter, contentBinding)
 		}
 		pp.logger.Debug("[PotProvider] generating new minter", "binding", bindingPrefix)
-		return pp.generateAndMint(ctx, contentBinding)
+		return pp.generateAndMint(ctx, contentBinding, bypassCache)
 	}()
 
 	// Store result on the entry so all waiters can read it, then signal
@@ -241,7 +266,30 @@ func (pp *PotProvider) mintPoToken(minter *TokenMinter, contentBinding string) (
 	}, nil
 }
 
-func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding string) (*SessionData, error) {
+func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding string, bypassCache bool) (*SessionData, error) {
+	// Serialize minter creation across goroutines: every "first request"
+	// goroutine sees an empty minterCache and would otherwise race to
+	// spin up a BotGuard VM, with the losers being replaced + leaked.
+	// Holding minterCreatingMu through the (potentially seconds-long)
+	// VM init is acceptable because the alternative — duplicate BotGuard
+	// runs — is exactly what CRIT-2 is here to prevent.
+	pp.minterCreatingMu.Lock()
+	defer pp.minterCreatingMu.Unlock()
+
+	// Re-check the cache under the creation lock. Another goroutine may
+	// have just stored a minter while we waited. Skip the re-check on
+	// bypassCache=true — the caller explicitly asked us to generate
+	// fresh, and matching upstream's TS bypass_cache semantics means
+	// honouring that even when a cached minter is available.
+	if !bypassCache {
+		pp.mu.Lock()
+		if cached, ok := pp.minterCache[defaultMinterKey]; ok && time.Now().Before(cached.ExpiresAt) {
+			pp.mu.Unlock()
+			return pp.mintPoToken(cached, contentBinding)
+		}
+		pp.mu.Unlock()
+	}
+
 	client := NewWebPoClient(pp.config, pp.logger)
 
 	minter, err := client.GenerateTokenMinter(ctx)
@@ -255,27 +303,28 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	// that re-enter the provider, which would deadlock under pp.mu. Panic
 	// recovery shields the current goroutine from a misbehaving VM teardown.
 	pp.mu.Lock()
-	old := pp.minterCache[contentBinding]
-	pp.minterCache[contentBinding] = minter
+	old := pp.minterCache[defaultMinterKey]
+	pp.minterCache[defaultMinterKey] = minter
 	pp.mu.Unlock()
 	pp.safeCleanup(old, "replaced minter")
 
-	// Schedule automatic eviction so the Goja VM doesn't linger after expiry.
-	// The minter is per-video and won't be reused for different content bindings.
+	// Schedule automatic eviction so the Goja VM doesn't linger after
+	// expiry. ONE minter serves the whole process, so its TTL is the
+	// integrity-token TTL (~6h per upstream).
 	ttl := time.Until(minter.ExpiresAt)
 	if ttl > 0 {
 		time.AfterFunc(ttl, func() {
 			defer func() {
 				if r := recover(); r != nil {
-					pp.logger.Error("minter eviction panic", "binding", contentBinding[:min(len(contentBinding), 20)], "panic", r)
+					pp.logger.Error("minter eviction panic", "panic", r)
 				}
 			}()
 			var cleanup func()
 			pp.mu.Lock()
 			evicted := false
-			if cached, ok := pp.minterCache[contentBinding]; ok && cached == minter {
+			if cached, ok := pp.minterCache[defaultMinterKey]; ok && cached == minter {
 				cleanup = cached.Cleanup
-				delete(pp.minterCache, contentBinding)
+				delete(pp.minterCache, defaultMinterKey)
 				evicted = true
 			}
 			pp.mu.Unlock()
@@ -283,7 +332,7 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 				cleanup()
 			}
 			if evicted {
-				pp.logger.Debug("[PotProvider] evicted expired minter", "binding", contentBinding[:min(len(contentBinding), 20)])
+				pp.logger.Debug("[PotProvider] evicted expired minter")
 			}
 		})
 	}
