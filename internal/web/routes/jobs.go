@@ -14,7 +14,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -82,10 +81,11 @@ type TwitchJobMetadata struct {
 // hide_finished_age_days config setting. Non-finished jobs are always active.
 // Finished jobs are archived when their age exceeds the threshold.
 // If hideAgeDays is 0, all finished jobs are immediately archived.
-func filterJobsByAge(jobs []*database.Job, archived bool, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex) []*database.Job {
-	cfgMu.RLock()
-	hideAgeDays := cfg.Monitors.HideFinishedAgeDays.Value
-	cfgMu.RUnlock()
+func filterJobsByAge(jobs []*database.Job, archived bool, store *config.Store) []*database.Job {
+	var hideAgeDays float64
+	store.Read(func(c *config.MoomboxConfig) {
+		hideAgeDays = c.Monitors.HideFinishedAgeDays.Value
+	})
 
 	// Negative means never hide finished jobs — they all stay in active view
 	if hideAgeDays < 0 {
@@ -184,9 +184,10 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 	}
 }
 
-// JobRoutes registers job-related API routes.
-// cfgMu protects concurrent reads/writes to the shared cfg struct.
-func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager, wsHub *web.WebSocketHub) {
+// JobRoutes registers job-related API routes. The Store carries the cfg
+// pointer + lock; all read sites here go through store.Read so the
+// migration drops the per-route cfgMu plumbing.
+func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager, wsHub *web.WebSocketHub) {
 	// GET /api/jobs
 	r.Get("/api/jobs", func(rw http.ResponseWriter, req *http.Request) {
 		jobs, err := db.GetAllJobs()
@@ -196,7 +197,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		// Filter out finished jobs older than hide_finished_age_days
-		filtered := filterJobsByAge(jobs, false, cfg, cfgMu)
+		filtered := filterJobsByAge(jobs, false, store)
 		sendPaginated(rw, req, filtered)
 	})
 
@@ -209,7 +210,7 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		// Get only finished jobs that are older than the age threshold
-		archived := filterJobsByAge(jobs, true, cfg, cfgMu)
+		archived := filterJobsByAge(jobs, true, store)
 
 		// Sort by updatedAt descending (most recent first)
 		slices.SortFunc(archived, func(a, b *database.Job) int {
@@ -242,9 +243,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		}
 
-		cfgMu.RLock()
-		stagingBase := cfg.Paths.EffectiveStagingDir()
-		cfgMu.RUnlock()
+		var stagingBase string
+		store.Read(func(c *config.MoomboxConfig) {
+			stagingBase = c.Paths.EffectiveStagingDir()
+		})
 
 		jsonResponse(rw, enrichJob(job, stagingBase))
 	})
@@ -264,9 +266,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		// Build file path from output directory + relative filename
-		cfgMu.RLock()
-		cfgOutputDir := cfg.Paths.OutputDirectory
-		cfgMu.RUnlock()
+		var cfgOutputDir string
+		store.Read(func(c *config.MoomboxConfig) {
+			cfgOutputDir = c.Paths.OutputDirectory
+		})
 
 		outputDir := job.OutputDirectory
 		if outputDir == "" {
@@ -410,9 +413,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		// Path traversal guard: resolve symlinks before prefix check
-		cfgMu.RLock()
-		segCfgOutputDir := cfg.Paths.OutputDirectory
-		cfgMu.RUnlock()
+		var segCfgOutputDir string
+		store.Read(func(c *config.MoomboxConfig) {
+			segCfgOutputDir = c.Paths.OutputDirectory
+		})
 
 		outputDir := job.OutputDirectory
 		if outputDir == "" {
@@ -457,9 +461,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 		}
 
 		// Resolve chat file path relative to output directory
-		cfgMu.RLock()
-		chatCfgOutputDir := cfg.Paths.OutputDirectory
-		cfgMu.RUnlock()
+		var chatCfgOutputDir string
+		store.Read(func(c *config.MoomboxConfig) {
+			chatCfgOutputDir = c.Paths.OutputDirectory
+		})
 
 		outputDir := job.OutputDirectory
 		if outputDir == "" {
@@ -947,9 +952,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			return
 		}
 
-		cfgMu.RLock()
-		stagingBase := cfg.Paths.EffectiveStagingDir()
-		cfgMu.RUnlock()
+		var stagingBase string
+		store.Read(func(c *config.MoomboxConfig) {
+			stagingBase = c.Paths.EffectiveStagingDir()
+		})
 
 		if !worker.HasStagingFiles(stagingBase, jobID) {
 			jsonError(rw, "No staging files found — use Reinitialize instead", http.StatusBadRequest)
@@ -1004,9 +1010,10 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			return
 		}
 
-		cfgMu.RLock()
-		stagingBase := cfg.Paths.EffectiveStagingDir()
-		cfgMu.RUnlock()
+		var stagingBase string
+		store.Read(func(c *config.MoomboxConfig) {
+			stagingBase = c.Paths.EffectiveStagingDir()
+		})
 
 		if !worker.HasSegmentFiles(stagingBase, jobID) {
 			jsonError(rw, "No segment files found in staging", http.StatusBadRequest)
@@ -1032,10 +1039,11 @@ func JobRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, c
 			return
 		}
 
-		cfgMu.RLock()
-		openCfgOutputDir := cfg.Paths.OutputDirectory
-		openCfgStagingDir := cfg.Paths.EffectiveStagingDir()
-		cfgMu.RUnlock()
+		var openCfgOutputDir, openCfgStagingDir string
+		store.Read(func(c *config.MoomboxConfig) {
+			openCfgOutputDir = c.Paths.OutputDirectory
+			openCfgStagingDir = c.Paths.EffectiveStagingDir()
+		})
 
 		var dir string
 		if job.Filename != "" {

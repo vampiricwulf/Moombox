@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -27,9 +26,8 @@ var unsafeFilenameRe = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
 
 // ImportRoutes registers import-related API routes.
 // Uses its own 5/min rate limiter per the spec.
-// cfgMu protects concurrent reads/writes to the shared cfg struct.
 // Returns a cleanup function that stops the rate limiter's background goroutine.
-func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig, cfgMu *sync.RWMutex, rl *web.RateLimiter) func() {
+func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, rl *web.RateLimiter) func() {
 	importRL := web.NewRateLimiter(5, time.Minute)
 	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
 		// Max 500MB upload
@@ -252,9 +250,10 @@ func ImportRoutes(r chi.Router, db *database.Database, cfg *config.MoomboxConfig
 		}
 
 		// Output paths
-		cfgMu.RLock()
-		outputDir := cfg.Paths.OutputDirectory
-		cfgMu.RUnlock()
+		var outputDir string
+		store.Read(func(c *config.MoomboxConfig) {
+			outputDir = c.Paths.OutputDirectory
+		})
 		if outputDir == "" {
 			outputDir = "./output"
 		}

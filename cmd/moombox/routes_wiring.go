@@ -19,8 +19,7 @@ func (s *runState) wireRoutes() func() {
 	routes.JobRoutes(
 		s.r,
 		s.db,
-		s.cfg,
-		s.webServer.CfgMu(),
+		s.configStore,
 		s.dlWorker,
 		s.apiRL,
 		&twitchMetadataAdapter{svc: s.twService},
@@ -90,11 +89,7 @@ func (s *runState) wireRoutes() func() {
 		Logger:      s.log,
 	})
 	routes.SetupRoutes(s.r, &routes.SetupDeps{
-		Cfg:  s.cfg,
 		Auth: s.authSvc,
-		SaveConfig: func(c *config.MoomboxConfig) error {
-			return config.Save(c, s.configPath)
-		},
 		OnInstallYtdlp: func(port int, httpsEnabled bool) {
 			if err := routes.InstallYtdlpPlugin(port, httpsEnabled); err != nil {
 				s.log.Error("Failed to install yt-dlp plugin from setup", slog.String("error", err.Error()))
@@ -103,7 +98,7 @@ func (s *runState) wireRoutes() func() {
 			}
 		},
 		OnRestart: func() { s.triggerRestart("setup") },
-	}, s.webServer.CfgMu())
+	}, s.configStore)
 	routes.FFmpegRoutes(s.r, &routes.FFmpegDeps{
 		Cfg:   s.cfg,
 		CfgMu: s.webServer.CfgMu(),
@@ -114,7 +109,7 @@ func (s *runState) wireRoutes() func() {
 		Logger:    s.log,
 	})
 	routes.LogRoutes(s.r, s.log.GetRecentLines)
-	importCleanup := routes.ImportRoutes(s.r, s.db, s.cfg, s.webServer.CfgMu(), s.apiRL)
+	importCleanup := routes.ImportRoutes(s.r, s.db, s.configStore, s.apiRL)
 	routes.CookieRoutes(s.r, s.cookieRefresh, s.autoCookieSvc, s.getActivePlatforms)
 	routes.YtdlpRoutes(s.r, s.cfg.Network.Port, s.cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(s.r, func() { s.triggerRestart("API") })

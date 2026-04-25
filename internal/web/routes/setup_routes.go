@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,22 +14,26 @@ import (
 
 // SetupDeps holds dependencies for setup wizard routes.
 type SetupDeps struct {
-	Cfg            *config.MoomboxConfig
 	Auth           *web.AuthService
-	SaveConfig     func(*config.MoomboxConfig) error
 	OnInstallYtdlp func(port int, httpsEnabled bool)
 	OnRestart      func()
 }
 
-// SetupRoutes registers setup wizard endpoints.
-// cfgMu protects concurrent reads/writes to the shared cfg struct.
-func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
+// SetupRoutes registers setup wizard endpoints. The Store carries cfg
+// and the lock; setup/complete keeps copy-on-write so a save failure
+// never leaks partial mutations into the live config.
+func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
+	mu := store.RWMutex()
+	cfg := store.Config()
+
 	r.Get("/api/setup/status", func(rw http.ResponseWriter, req *http.Request) {
 		// isFirstRun matches TypeScript: !configManager.hasConfig()
-		cfgMu.RLock()
-		configLoaded := deps.Cfg.ConfigLoaded
-		ffmpegPath := deps.Cfg.Paths.FfmpegPath
-		cfgMu.RUnlock()
+		var configLoaded bool
+		var ffmpegPath string
+		store.Read(func(c *config.MoomboxConfig) {
+			configLoaded = c.ConfigLoaded
+			ffmpegPath = c.Paths.FfmpegPath
+		})
 
 		resp := map[string]any{
 			"isFirstRun": !configLoaded,
@@ -52,9 +55,10 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 	// plus an additional "password" field for first-run password setup.
 	r.Post("/api/setup/complete", func(rw http.ResponseWriter, req *http.Request) {
 		// Guard: only allow setup on first run (before config is loaded/saved)
-		cfgMu.RLock()
-		alreadyConfigured := deps.Cfg.ConfigLoaded
-		cfgMu.RUnlock()
+		var alreadyConfigured bool
+		store.Read(func(c *config.MoomboxConfig) {
+			alreadyConfigured = c.ConfigLoaded
+		})
 		if alreadyConfigured {
 			jsonError(rw, "setup already completed", http.StatusBadRequest)
 			return
@@ -65,8 +69,6 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 			jsonError(rw, "invalid request body", http.StatusBadRequest)
 			return
 		}
-
-		cfg := deps.Cfg
 
 		// Extract special fields before validation (not part of updateConfigSchema)
 		password, _ := updates["password"].(string)
@@ -102,7 +104,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 			}
 		}
 
-		cfgMu.Lock()
+		mu.Lock()
 
 		// Work on a copy so the live config isn't modified if save fails
 		cfgCopy := *cfg
@@ -115,7 +117,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 		if net, ok := updates["network"].(map[string]any); ok {
 			if v, ok := net["network_access"].(string); ok && v == "external" {
 				if cfgCopy.Network.PasswordHash == "" {
-					cfgMu.Unlock()
+					mu.Unlock()
 					jsonError(rw, "A password (min 8 characters) is required for external access.", http.StatusBadRequest)
 					return
 				}
@@ -125,13 +127,12 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 		// Apply config updates to copy (same schema as PUT /config)
 		applyConfigUpdates(&cfgCopy, updates)
 
-		// Save the copy
-		if deps.SaveConfig != nil {
-			if err := deps.SaveConfig(&cfgCopy); err != nil {
-				cfgMu.Unlock()
-				jsonError(rw, "failed to save config", http.StatusInternalServerError)
-				return
-			}
+		// Save the copy directly via config.Save so a save failure leaves
+		// the live cfg untouched. Only assign back on success.
+		if err := config.Save(&cfgCopy, store.SavePath()); err != nil {
+			mu.Unlock()
+			jsonError(rw, "failed to save config", http.StatusInternalServerError)
+			return
 		}
 
 		// Save succeeded — apply to live config
@@ -145,7 +146,7 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, cfgMu *sync.RWMutex) {
 		port := cfg.Network.Port
 		httpsEnabled := cfg.Network.HTTPSEnabled
 
-		cfgMu.Unlock()
+		mu.Unlock()
 
 		// Create directories if specified (outside lock — I/O)
 		if outputDir != "" {
