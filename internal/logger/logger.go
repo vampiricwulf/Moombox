@@ -170,7 +170,20 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 	defer l.fileMu.Unlock()
 
 	if l.file == nil {
-		return 0, nil
+		// Retry-on-write: if rotate previously failed to reopen the log
+		// file (transient ENOSPC, file permissions reset, antivirus
+		// holding the file briefly, etc.), try again here so the next
+		// Write recovers automatically instead of silently dropping
+		// every log line until restart. Per-write os.OpenFile is one
+		// syscall — cheap when the failure is transient, harmless when
+		// it persists. Audit reports/small-packages.md (logger.go
+		// rotate reopen-failure sentinel).
+		if err := l.openFile(); err != nil {
+			// Underlying failure persists. Don't log to stderr on every
+			// write (would spam) — rotate already logged the original
+			// failure once when it first hit.
+			return 0, nil
+		}
 	}
 
 	n, err = l.file.Write(p)

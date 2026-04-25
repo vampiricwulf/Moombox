@@ -418,6 +418,57 @@ func TestFormatLogLineSlogAttr(t *testing.T) {
 	}
 }
 
+// TestWriteReopensAfterFileNil locks the rotate-reopen-failure
+// recovery: if rotate previously failed to reopen the log file
+// (transient ENOSPC, AV briefly holding the file, etc.), the next
+// Write must retry openFile so logging recovers automatically rather
+// than silently dropping every line until restart.
+//
+// Simulates the failure mode by manually setting l.file = nil after
+// a successful start, then asserting the next Write reopens and
+// produces a non-zero byte count. Audit reports/small-packages.md.
+func TestWriteReopensAfterFileNil(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "test.log")
+
+	l, err := New(logPath, "DEBUG", 1024*1024, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// Confirm initial state — file is open.
+	l.fileMu.Lock()
+	hadFile := l.file != nil
+	l.fileMu.Unlock()
+	if !hadFile {
+		t.Fatal("setup: l.file should be non-nil after New()")
+	}
+
+	// Simulate a rotate-failed-to-reopen state by closing + nilling
+	// the file directly. Next Write should retry openFile.
+	l.fileMu.Lock()
+	l.file.Close()
+	l.file = nil
+	l.fileMu.Unlock()
+
+	n, err := l.Write([]byte("recovered after reopen\n"))
+	if err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if n == 0 {
+		t.Error("Write returned n=0; expected reopen-and-write recovery")
+	}
+
+	// Verify the file is now open again.
+	l.fileMu.Lock()
+	hasFile := l.file != nil
+	l.fileMu.Unlock()
+	if !hasFile {
+		t.Error("l.file should be non-nil after reopen-on-write")
+	}
+}
+
 // TestFormatLogLinePoolDoesNotCorruptStrings locks the alias-break in
 // formatLogLine: strings.Builder.String() shares the buffer with the
 // builder. Pooling without strings.Clone would let two concurrent
