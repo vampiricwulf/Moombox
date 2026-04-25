@@ -98,16 +98,30 @@ func Load(customPath string) (*MoomboxConfig, error) {
 }
 
 func loadFromFile(path string) (*MoomboxConfig, error) {
+	// Read once and decode twice (struct + raw map) from the same bytes
+	// so we don't pay disk I/O twice or risk the file changing between
+	// reads. Second decode error is now surfaced to the caller; the
+	// pre-fix code silently swallowed it which masked migrations that
+	// failed because the TOML structure couldn't be expressed as a
+	// generic map. Audit reports/config.md Finding 28.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config %s: %w", path, err)
+	}
+
 	cfg := Defaults()
-	if _, err := toml.DecodeFile(path, cfg); err != nil {
+	if _, err := toml.Decode(string(data), cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config %s: %w", path, err)
 	}
 
-	// Migrate legacy/old-format fields by decoding to a raw map.
+	// Migrate legacy/old-format fields by decoding the SAME bytes to a
+	// raw map. Errors propagate — migration is part of correctness, not
+	// a best-effort step.
 	var raw map[string]any
-	if _, err := toml.DecodeFile(path, &raw); err == nil {
-		migrateOldFormat(cfg, raw)
+	if _, err := toml.Decode(string(data), &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse config %s for migration: %w", path, err)
 	}
+	migrateOldFormat(cfg, raw)
 
 	cfg.ConfigLoaded = true
 	Normalize(cfg)
