@@ -125,5 +125,6 @@ type runState struct {
 	// by shutdown to unsubscribe cleanly before the database closes) ---
 	logSub            chan string
 	unsubWSJobUpdate  func()
+	unsubWSJobAdded   func()
 	unsubWSJobsChange func()
 }

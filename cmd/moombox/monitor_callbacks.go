@@ -145,7 +145,9 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		s.db.AddToHistory(videoID)
 		s.dlWorker.EnqueueJob(videoID)
-		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(s.db), s.configStore))
+		// AddJob's OnJobAdded handler (wired below) handles the WS
+		// broadcast for the new job; no explicit BroadcastJobsUpdate
+		// needed here. DECISIONS #21 consumer migration.
 		if s.notifyMgr.HasTargets() {
 			s.notifyMgr.Send("Stream Found",
 				fmt.Sprintf("Found matching stream: %s", title),
@@ -225,7 +227,9 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		s.db.AddToHistory(jobID)
 		s.dlWorker.EnqueueJob(jobID)
-		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(getAllJobsSafe(s.db), s.configStore))
+		// Same as the YouTube path — AddJob's OnJobAdded handler
+		// broadcasts the new job; no explicit BroadcastJobsUpdate
+		// needed. DECISIONS #21 consumer migration.
 		if s.notifyMgr.HasTargets() {
 			twitchFields := []notifications.Field{
 				{Name: "Channel", Value: info.ChannelDisplayName, Inline: true},
@@ -316,6 +320,22 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		s.wsHub.BroadcastJobUpdate(job.ID, job)
 	})
+
+	// OnJobAdded subscriber: AddJob no longer fires OnJobsChange (the
+	// writer-side dispatch was dropped as part of DECISIONS #21
+	// consumer migration). The new-job broadcast goes through
+	// BroadcastJobUpdate — frontend's "job_update" handler already
+	// has a "job not in array yet — add it and re-render" branch
+	// (web/public/app.js around line 1021), so a singular update
+	// for an unknown ID is the right wire shape. We also do the
+	// per-job log tracking here that the OnJobsChange handler used
+	// to do for ALL jobs on every fan-out.
+	s.unsubWSJobAdded = s.db.OnJobAdded(func(ev *database.JobAdded) {
+		job := ev.Job
+		s.db.TrackJobForLogs(job.ID)
+		s.wsHub.BroadcastJobUpdate(job.ID, job)
+	})
+
 	s.unsubWSJobsChange = s.db.OnJobsChange(func(jobs []*database.Job) {
 		// Keep per-job log tracking in sync (matches TS knownJobIds update)
 		activeIDs := make(map[string]struct{}, len(jobs))

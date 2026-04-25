@@ -332,12 +332,13 @@ func (s *runState) runTUI() {
 
 	// Create async update channels for TUI
 	jobUpdateCh := make(chan *database.JobChange, 100)
+	jobAddedCh := make(chan *database.JobAdded, 100)
 	jobsUpdateCh := make(chan []*database.Job, 10)
 	logCh := make(chan string, 200)
 	checkTimersCh := make(chan tui.CheckTimersMsg, 10)
 	cookieStatusCh := make(chan tui.CookieStatusMsg, 5)
 
-	app.SetUpdateChannels(jobUpdateCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, s.tuiDiskStatusCh, s.tuiUpdateStatusCh)
+	app.SetUpdateChannels(jobUpdateCh, jobAddedCh, jobsUpdateCh, logCh, checkTimersCh, cookieStatusCh, s.tuiDiskStatusCh, s.tuiUpdateStatusCh)
 
 	// Dropped-message counters — track silent drops on TUI channels
 	var tuiDroppedJobs, tuiDroppedLogs atomic.Int64
@@ -357,6 +358,18 @@ func (s *runState) runTUI() {
 	unsubTUIJobUpdate := s.db.OnJobChange(func(ev *database.JobChange) {
 		select {
 		case jobUpdateCh <- ev:
+		default:
+			tuiDroppedJobs.Add(1)
+		}
+	})
+	// OnJobAdded subscriber: AddJob no longer fires OnJobsChange (the
+	// writer-side dispatch was dropped); the TUI now learns of new jobs
+	// through this dedicated lifecycle event and the handler appends to
+	// the task list instead of clearing + rebuilding from a fresh
+	// snapshot. DECISIONS #21 consumer migration.
+	unsubTUIJobAdded := s.db.OnJobAdded(func(ev *database.JobAdded) {
+		select {
+		case jobAddedCh <- ev:
 		default:
 			tuiDroppedJobs.Add(1)
 		}
@@ -503,6 +516,7 @@ func (s *runState) runTUI() {
 	s.cancel() // TUI quit triggers shutdown
 	s.log.Unsubscribe(tuiLogSub)
 	unsubTUIJobUpdate()
+	unsubTUIJobAdded()
 	unsubTUIJobsChange()
 	unsubConnTUI()
 

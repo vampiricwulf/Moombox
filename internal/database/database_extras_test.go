@@ -668,11 +668,14 @@ func TestOnJobAddedFires(t *testing.T) {
 	}
 }
 
-// TestOnJobAddedFiresAlongsideOnJobsChange locks the migration
-// invariant: AddJob must dispatch BOTH the legacy full-list
-// OnJobsChange and the new targeted OnJobAdded. Removing either
-// before consumers migrate would silently break the other.
-func TestOnJobAddedFiresAlongsideOnJobsChange(t *testing.T) {
+// TestOnJobAddedFiresAndOnJobsChangeDoesNot locks the post-migration
+// behaviour: AddJob fires OnJobAdded but NO LONGER fires OnJobsChange.
+// The legacy full-list dispatch on insert was dropped as part of
+// DECISIONS #21 consumer migration once the WS broadcaster + TUI
+// both wired OnJobAdded handlers. The OnJobsChange path is still
+// the live writer dispatch for DeleteJob / AddTrim / DeleteTrim /
+// BatchSetWatched, which TestOnJobsChangeSubscriber covers.
+func TestOnJobAddedFiresAndOnJobsChangeDoesNot(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -689,22 +692,27 @@ func TestOnJobAddedFiresAlongsideOnJobsChange(t *testing.T) {
 	defer uL()
 
 	if _, err := db.AddJob(&Job{
-		ID: "dual_add", VideoID: "v", URL: "u", Status: StatusUpcoming,
+		ID: "post_migration", VideoID: "v", URL: "u", Status: StatusUpcoming,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
+	// OnJobAdded must fire.
 	select {
 	case <-addedHits:
 		// good
 	case <-time.After(2 * time.Second):
 		t.Fatal("OnJobAdded did not fire")
 	}
+
+	// OnJobsChange must NOT fire on AddJob any more. A 200ms wait is
+	// enough — dispatchJobsChange's goroutine, if it were going to run,
+	// would have surfaced by now.
 	select {
-	case <-listHits:
-		// good — OnJobsChange runs in its own goroutine, give it room
-	case <-time.After(2 * time.Second):
-		t.Fatal("OnJobsChange did not fire")
+	case jobs := <-listHits:
+		t.Errorf("OnJobsChange should NOT fire on AddJob post-migration; got %d jobs", len(jobs))
+	case <-time.After(200 * time.Millisecond):
+		// expected — OnJobsChange suppressed for AddJob
 	}
 }
 

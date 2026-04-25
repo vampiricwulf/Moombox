@@ -168,6 +168,35 @@ func (m *TaskListModel) SetJobs(jobs []*database.Job) {
 	m.resetMarquee()
 }
 
+// Jobs returns the current job list (caller must NOT mutate the
+// returned slice; it's the live underlying storage). Used by the
+// JobAdded lifecycle handler to feed downstream consumers
+// (statusBar, actionMenu) without re-fetching from the database.
+func (m *TaskListModel) Jobs() []*database.Job {
+	return m.jobs
+}
+
+// AddJob appends a new job to the list and re-sorts. Used by the
+// JobAdded lifecycle handler to apply the database event without a
+// full clear+rebuild — the TUI keeps its existing rows + selection
+// and just slots the new entry in. DECISIONS #21.
+//
+// No-ops if a job with the same ID already exists (the SetJobs /
+// initial-list path may have already inserted it during an earlier
+// snapshot, and AddJob arriving second shouldn't double-insert).
+func (m *TaskListModel) AddJob(job *database.Job) {
+	if job == nil {
+		return
+	}
+	if _, exists := m.jobIndex[job.ID]; exists {
+		return
+	}
+	m.jobs = append(m.jobs, job)
+	m.rebuildJobIndex()
+	m.rebuildVirtualList()
+	m.resetMarquee()
+}
+
 // UpdateJob replaces a single job by ID using the index map (O(1) lookup).
 // Returns true if the job was found and replaced.
 func (m *TaskListModel) UpdateJob(job *database.Job) bool {

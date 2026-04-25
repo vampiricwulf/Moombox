@@ -42,13 +42,14 @@ func (db *Database) AddJob(job *Job) (bool, error) {
 		}
 	}
 
-	jobs := db.snapshotJobsChange()
 	db.mu.Unlock()
-	// JobAdded fires alongside the legacy OnJobsChange dispatch during
-	// the DECISIONS #21 lifecycle-event migration. Both delivered with
-	// db.mu released so subscribers can call back into Database freely.
+	// AddJob fires ONLY OnJobAdded — the legacy OnJobsChange dispatch
+	// was dropped now that the WS broadcaster + TUI both consume the
+	// targeted lifecycle event (DECISIONS #21 consumer migration). The
+	// other OnJobsChange writers (DeleteJob, AddTrim, DeleteTrim,
+	// BatchSetWatched) still fire OnJobsChange for now; their consumer
+	// migrations will land separately.
 	db.notifyJobAdded(job)
-	db.dispatchJobsChange(jobs)
 	return true, nil
 }
 

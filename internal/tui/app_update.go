@@ -86,6 +86,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Name {
 		case "jobUpdate":
 			a.jobUpdateCh = nil
+		case "jobAdded":
+			a.jobAddedCh = nil
 		case "jobsUpdate":
 			a.jobsUpdateCh = nil
 		case "log":
@@ -103,6 +105,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case JobUpdateMsg:
 		a.handleJobUpdate(msg.Change)
+		return a, a.listenForUpdates()
+
+	case JobAddedMsg:
+		a.handleJobAdded(msg.Added)
 		return a, a.listenForUpdates()
 
 	case JobsUpdateMsg:
@@ -587,6 +593,50 @@ func (a *App) handleJobUpdate(ev *database.JobChange) {
 		// Update terminal title on status change
 		a.updateTerminalTitle()
 	}
+}
+
+// handleJobAdded applies a JobAdded lifecycle event from the database.
+// AddJob fires this in place of the legacy OnJobsChange full-list
+// dispatch, so the TUI just appends to its existing state instead of
+// clearing + rebuilding from a fresh snapshot.
+//
+// Initialises the per-job state mirrors that the existing JobsUpdateMsg
+// handler would have set during a full rebuild (statusMap entry,
+// progressStore entry seeded from the job's current fields), then
+// appends the row through TaskListModel.AddJob (a no-op if the row
+// is already present from a prior SetJobs initial-list snapshot).
+// DECISIONS #21 consumer migration.
+func (a *App) handleJobAdded(ev *database.JobAdded) {
+	if ev == nil || ev.Job == nil {
+		return
+	}
+	job := ev.Job
+
+	// Existing app already has data → user has used the app before; the
+	// new-job arrival is enough to dismiss the newcomer hint (matches
+	// the JobsUpdateMsg handler's behaviour for non-empty lists).
+	a.seenChordHint = true
+
+	a.statusMap[job.ID] = job.Status
+	a.progressStore.Set(job.ID, &ProgressData{
+		Progress:          job.Progress,
+		Percent:           job.Percent,
+		Speed:             job.Speed,
+		ETA:               job.ETA,
+		LastVideoSeq:      job.LastVideoSeq,
+		LastAudioSeq:      job.LastAudioSeq,
+		TotalVideoSeq:     job.TotalVideoSeq,
+		TotalAudioSeq:     job.TotalAudioSeq,
+		TotalChatMessages: job.TotalChatMessages,
+		ChatStatus:        job.ChatStatus,
+	})
+	a.taskList.AddJob(job)
+	a.statusBar.SetJobs(a.taskList.Jobs())
+	a.actionMenu.SetJobs(a.taskList.Jobs())
+
+	// Update terminal title — adding a new job may change the
+	// active-stream count shown in the title.
+	a.updateTerminalTitle()
 }
 
 func (a *App) updateSelectedJob() {

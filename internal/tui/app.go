@@ -29,6 +29,10 @@ type (
 	// columns that were actually written. Subscribers gate expensive
 	// re-renders on Change.Changes (DECISIONS #21 / audit tui.md F20).
 	JobUpdateMsg   struct{ Change *database.JobChange }
+	// JobAddedMsg carries a single new job from AddJob. DECISIONS #21
+	// lifecycle event — the TUI handler appends instead of clearing +
+	// rebuilding the whole task list (the legacy OnJobsChange path).
+	JobAddedMsg    struct{ Added *database.JobAdded }
 	JobsUpdateMsg  struct{ Jobs []*database.Job }
 	LogBatchMsg struct{ Lines []string }
 	CheckTimersMsg struct {
@@ -229,6 +233,7 @@ type App struct {
 
 	// Channels for async updates
 	jobUpdateCh      <-chan *database.JobChange
+	jobAddedCh       <-chan *database.JobAdded
 	jobsUpdateCh     <-chan []*database.Job
 	logCh            <-chan string
 	checkTimersCh    <-chan CheckTimersMsg
@@ -420,6 +425,7 @@ func (a *App) SetupWizHashPassword(fn func(string) (string, error)) {
 // SetUpdateChannels configures the async update channels.
 func (a *App) SetUpdateChannels(
 	jobUpdate <-chan *database.JobChange,
+	jobAdded <-chan *database.JobAdded,
 	jobsUpdate <-chan []*database.Job,
 	logCh <-chan string,
 	checkTimers <-chan CheckTimersMsg,
@@ -428,6 +434,7 @@ func (a *App) SetUpdateChannels(
 	updateStatus <-chan UpdateStatusMsg,
 ) {
 	a.jobUpdateCh = jobUpdate
+	a.jobAddedCh = jobAdded
 	a.jobsUpdateCh = jobsUpdate
 	a.logCh = logCh
 	a.checkTimersCh = checkTimers
@@ -487,7 +494,7 @@ func (a *App) marqueeTick() tea.Cmd {
 
 func (a *App) listenForUpdates() tea.Cmd {
 	// If all channels are nil, don't spawn a blocking goroutine
-	if a.jobUpdateCh == nil && a.jobsUpdateCh == nil && a.logCh == nil &&
+	if a.jobUpdateCh == nil && a.jobAddedCh == nil && a.jobsUpdateCh == nil && a.logCh == nil &&
 		a.checkTimersCh == nil && a.cookieStatusCh == nil && a.diskStatusCh == nil &&
 		a.updateStatusCh == nil {
 		return nil
@@ -499,6 +506,11 @@ func (a *App) listenForUpdates() tea.Cmd {
 				return channelClosedMsg{Name: "jobUpdate"}
 			}
 			return JobUpdateMsg{Change: ev}
+		case ev, ok := <-a.jobAddedCh:
+			if !ok {
+				return channelClosedMsg{Name: "jobAdded"}
+			}
+			return JobAddedMsg{Added: ev}
 		case jobs, ok := <-a.jobsUpdateCh:
 			if !ok {
 				return channelClosedMsg{Name: "jobsUpdate"}
