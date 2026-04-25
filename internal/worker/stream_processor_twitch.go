@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -13,6 +14,18 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
+
+// twitchAuthSentinel returns ErrCookiesRequired when err is (or wraps)
+// twitch.ErrTwitchAuthExpired so VOD/HLS errors that lost their wrap
+// via %v formatting still get classified as auth-required by the
+// downstream consumer. Returns nil for non-auth errors so plain
+// failures don't get spuriously routed to StatusCookies.
+func twitchAuthSentinel(err error) error {
+	if errors.Is(err, twitch.ErrTwitchAuthExpired) {
+		return ErrCookiesRequired
+	}
+	return nil
+}
 
 // processTwitch handles Twitch stream/VOD processing.
 func (sp *StreamProcessor) processTwitch(ctx context.Context, job *database.Job) (*StreamProcessResult, error) {
@@ -38,7 +51,12 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 
 	vodInfo, err := sp.tw.GetVodInfo(ctx, vodID)
 	if err != nil {
-		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: fmt.Sprintf("twitch VOD error: %v", err)}, nil
+		return &StreamProcessResult{
+			ShouldDownload: false,
+			IsVod:          true,
+			Error:          fmt.Sprintf("twitch VOD error: %v", err),
+			ErrSentinel:    twitchAuthSentinel(err),
+		}, nil
 	}
 
 	vodUpdates := map[string]any{
@@ -56,7 +74,12 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 
 	variants, err := sp.tw.GetVodHLSPlaylist(ctx, vodID)
 	if err != nil {
-		return &StreamProcessResult{ShouldDownload: false, IsVod: true, Error: fmt.Sprintf("twitch VOD HLS error: %v", err)}, nil
+		return &StreamProcessResult{
+			ShouldDownload: false,
+			IsVod:          true,
+			Error:          fmt.Sprintf("twitch VOD HLS error: %v", err),
+			ErrSentinel:    twitchAuthSentinel(err),
+		}, nil
 	}
 
 	var vodMaxRes int

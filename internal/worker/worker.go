@@ -552,8 +552,13 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	errMsg := err.Error()
 	w.logger.Error("job error", "jobID", job.ID, "err", errMsg)
 
+	// Both worker.ErrCookiesRequired (player-API member/login flags) and
+	// twitch.ErrTwitchAuthExpired (GQL 401/403 after token rotation) mean
+	// the user needs to refresh their cookie session — route both to
+	// StatusCookies so the UI can prompt for re-auth instead of
+	// presenting them as generic failures. Audit reports/twitch.md #8.
 	status := database.StatusError
-	if errors.Is(err, ErrCookiesRequired) {
+	if errors.Is(err, ErrCookiesRequired) || errors.Is(err, twitch.ErrTwitchAuthExpired) {
 		status = database.StatusCookies
 	}
 

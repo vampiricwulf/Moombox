@@ -2,9 +2,11 @@ package worker
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/vampiricwulf/Moombox/internal/twitch"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
@@ -166,5 +168,71 @@ func TestSentinelDistinct(t *testing.T) {
 	}
 	if errors.Is(ErrCookiesRequired, ErrCancelled) {
 		t.Error("ErrCookiesRequired should not match ErrCancelled")
+	}
+}
+
+// TestTwitchAuthSentinel locks down the producer-side helper that
+// translates a twitch.ErrTwitchAuthExpired wrap into the worker's
+// own ErrCookiesRequired classification. VOD paths use %v formatting
+// for the display string (which loses the wrap), so they rely on
+// this helper to attach the sentinel to the StreamProcessResult.
+func TestTwitchAuthSentinel(t *testing.T) {
+	t.Run("nil error → nil sentinel", func(t *testing.T) {
+		if got := twitchAuthSentinel(nil); got != nil {
+			t.Errorf("nil err: want nil sentinel, got %v", got)
+		}
+	})
+
+	t.Run("plain error → nil sentinel", func(t *testing.T) {
+		err := errors.New("network timeout")
+		if got := twitchAuthSentinel(err); got != nil {
+			t.Errorf("plain err: want nil sentinel, got %v", got)
+		}
+	})
+
+	t.Run("wrapped twitch.ErrTwitchAuthExpired → ErrCookiesRequired", func(t *testing.T) {
+		err := fmt.Errorf("gql auth failure: %w", twitch.ErrTwitchAuthExpired)
+		got := twitchAuthSentinel(err)
+		if got != ErrCookiesRequired {
+			t.Errorf("wrapped twitch auth: want ErrCookiesRequired, got %v", got)
+		}
+	})
+
+	t.Run("doubly-wrapped twitch.ErrTwitchAuthExpired → ErrCookiesRequired", func(t *testing.T) {
+		// errors.Is walks the wrap chain; a fmt.Errorf around an
+		// already-wrapped sentinel still resolves correctly.
+		inner := fmt.Errorf("gql auth: %w", twitch.ErrTwitchAuthExpired)
+		outer := fmt.Errorf("twitch VOD error: %w", inner)
+		got := twitchAuthSentinel(outer)
+		if got != ErrCookiesRequired {
+			t.Errorf("doubly-wrapped: want ErrCookiesRequired, got %v", got)
+		}
+	})
+}
+
+// TestStreamProcessResultPropagatesTwitchAuth documents the end-to-end
+// flow: a twitch GQL 401/403 produces ErrTwitchAuthExpired-wrapped
+// errors which the VOD-error producer attaches via ErrSentinel and the
+// AsError consumer surfaces such that worker.setJobError's
+// errors.Is(err, ErrCookiesRequired) routes the job to StatusCookies.
+func TestStreamProcessResultPropagatesTwitchAuth(t *testing.T) {
+	authErr := fmt.Errorf("gql auth failure (401): %w", twitch.ErrTwitchAuthExpired)
+	r := &StreamProcessResult{
+		Error:       fmt.Sprintf("twitch VOD error: %v", authErr),
+		ErrSentinel: twitchAuthSentinel(authErr),
+	}
+	err := r.AsError()
+	if !errors.Is(err, ErrCookiesRequired) {
+		t.Error("twitch auth error should reach setJobError as ErrCookiesRequired via AsError")
+	}
+	// And the underlying twitch sentinel is still present in the chain
+	// for any caller that wants the platform-specific signal.
+	if !errors.Is(err, twitch.ErrTwitchAuthExpired) {
+		// AsError combines the display string with the sentinel via the
+		// new fmt.Errorf("%w (%w)", inner, sentinel) form. The inner
+		// error here is errors.New(r.Error) — a plain error without the
+		// twitch sentinel — so this branch validates that we *don't*
+		// require both. Document the limitation.
+		t.Log("twitch.ErrTwitchAuthExpired does not survive the percent-v formatting in r.Error; rely on ErrCookiesRequired classification")
 	}
 }
