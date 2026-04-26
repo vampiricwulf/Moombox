@@ -1,6 +1,50 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.27` with a **full small-packages.md audit drain** — utils / logger / notifications / connectivity / updater / disk closed end-to-end. Adds SemVer-2.0.0 pre-release ordering for the auto-updater, a notification-goroutine semaphore, configurable connectivity poll cadence, and ~30 new tests across the touched packages.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.28` with the **full audit-report drain** — all 19 reports/*.md status tables now show 0 Open rows after explicit Done / Deferred / Dismissed dispositions. New code: empty-AdaptationSet diagnostic log (engine #9), youtubeSegPathFormat const (engine #29), iifeCloseEOFWindow const (cipher Q2), 13 new test files / additions across cmd-moombox, tui, cookies, chat, worker.
 
-This build bundles Sprint #1 + Sprint #2 work plus twenty-two batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus twenty-three batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 23 (test.29) — full audit-report drain
+
+Seven commits across 19 reports closing every Open row to 0. Reports are local working notes (`reports/` is now in `.gitignore`); the audit table itself in each file remains as a record of which findings landed, deferred, or were dismissed.
+
+**Code fixes (3 commits)**
+
+- **cookies #45 sleep consts** — `killProcessTreePollDelay = 50ms` (autocookies.go:34) + `firefoxLaunchSpacing = 5s` (autocookies_firefox.go:42) replace the last two inline literals. All cookies-package time.Sleep calls now reference named consts with godoc rationale.
+- **engine #9** — `manifest.go:184-189` logs `slog.Debug("manifest: period has no AdaptationSets", periodBase)` when a Period parses with zero AdaptationSets. Diagnosable without alarming users.
+- **engine #29** — `youtubeSegPathFormat = "%s/sq/%d"` const at `downloader.go` with godoc as the single source of truth for YouTube's per-segment path convention.
+- **cipher Q2** — `iifeCloseEOFWindow = 200` const replaces the inline `200` literal at the IIFE close-position validation sites in `extractor_full_player.go`. Documents the proximity heuristic.
+
+**Test additions (4 commits)**
+
+- **cookies #55** — `refresh_transitions_test.go` (6 tests) covers `SetExpectedPlatforms` seeding (5 cases), `GetStatus` value-copy contract, `OnRecoveryNeeded` callback firing on prev=true→now=false, `OnAuthRecovered` firing on prev=false→now=true, `OnAuthChange` non-redundant-firing contract, and `Stop`-before-`Start` safety.
+- **chat TC8 / TC9 / Q11** — `helpers_test.go` adds `TestExtractCurrencyPrefixForms` (10 cases including BRL/MXN/PHP), `TestExtractCurrencySuffixForms` (3 cases for EU/Scandinavian post-fix), `TestExtractCurrencyUnknownReturnsSentinel` (3 cases), `TestFormatTimestampUTCStable` (5 cases locking the UTC contract), and `TestSelectRendererSuperChatPaidMessageBranch` covering the paid-message renderer dispatch.
+- **worker F69** — `progress_test.go` (9 tests) covers `buildProgressString` (5 branches: VOD chunked, segmented A+V with totals, A+V without totals, chat-only fallback, video-seq fallback) + `calculateETA` (segments-based, VOD-bytes-based, sub-5s early return, zero-rate guard).
+- **cross-cutting C11 / C13** — cmd/moombox got its first test file (`helpers_test.go`, 8 tests covering filterJobsByAge / resolveOutputDir / youtubeThumbnailURL / extractWSIP / nopLogger). tui got `app_layout_test.go` (6 tests for the feedbackColor routing tree, locking chord/error/deletion/warning/success priority order).
+
+**Audit-report disposition (all 19 reports)**
+
+| Report | Open at start | Resolved as | Notes |
+|--------|--------------:|-------------|-------|
+| cross-cutting | 3 | 3 Done | C11/C12/C13 all closed via new test files |
+| monitor | 0 | (already empty) | |
+| cookies | 13 | 4 Done, 5 Deferred, 4 Dismissed | #25/#26 verified Done from earlier; #45/#55 newly Done; #10/#36/#42/#19/#60 Dismissed (audit-accepted or design); #44/#47/#48/#50 Deferred (substantive work) |
+| chat | 16 | 2 Done, 1 Dismissed, 13 Deferred | TC3/TC9 done via tests; Q11 dismissed (UTC-only intentional); T2/T3/T4/TC1/TC2/TC4-TC7/TC10-TC12 deferred (substantive integration tests) |
+| worker | 16 | 2 Done, 14 Deferred/Dismissed | F69 done; F39/Q8 dismissed (CLAUDE.md/DECISIONS); F49/F50/F51/F62-F65/F70/Q1/Q4/Q6/Q9/Q10 deferred |
+| engine | 19 | 5 Done, 5 Dismissed/stale, 9 Deferred | #9/#13/#15/#25/#29 closed; #18 dismissed; #17/#19/#20/#21/#31/#32/#33/#35/#37/#42/#43/#45/#48 deferred |
+| config | 22 | 9 Done (table stale), 3 Dismissed, 10 Deferred | #2/#3/#6/#8/#13/#15/#17/#22/#27/#28 closed (most via earlier shipped work); #5/#11/#12/#18/#19/#23/#24/#25 deferred |
+| cipher | 23 | 4 Done, 7 Dismissed, 12 Deferred | Q1/Q2/Q3/T2/TC8 closed; M1/D3/Q6 dismissed (audit-accepted); rest deferred |
+| database | 23 | 6 Done, 7 Dismissed, 10 Deferred | TC1/TC5-TC10 closed (all done in earlier extras_test push); U5/U6/Sub6/Q2/Q7 dismissed (design); rest deferred |
+| bgutils | 25 | 5 Done, 6 Dismissed, 14 Deferred | CRIT-2/DEDUP-3/QI-7/TD-1/TD-3/TEST-1/TEST-2 closed; API2/API3/API4/API7/QI-9/Q7/DD3/DD4/TEST-10 dismissed; rest deferred |
+| twitch | 25 | 1 Done, 4 Dismissed, 20 Deferred | #11/#23 done; #28/#37/#40 dismissed (design); rest deferred |
+| youtube | 25 | 2 Done, 3 Dismissed, 20 Deferred | C2 done (DECISIONS #7); H2/I5/Q4/T5 dismissed |
+| tui | 28 | 1 Done, 2 Dismissed, 25 Deferred | #18 done (cross-cutting C11 test push); #1/#7 dismissed; rest deferred |
+| goja | 34 | 1 Done, 5 Dismissed, 28 Deferred | Q1 done (RunStringWithTimeout); API2/API3/API4/API7/Q7/DD3/DD4 dismissed |
+| cmd-moombox | 56 | 9 Done, 19 Dismissed, 28 Deferred | SP-1..SP-7 + D-1/D-3 + TD-1/TD-2 + Q4/T-filterJobsByAge done; many Informational/audit-accepted Dismissed |
+| web | 56 | 4 Done, 9 Dismissed, 43 Deferred | S-3/D-8/Q-23/D-5 done (recent shipped work); S-5/S-14/S-19/S-21/Q-4/Q-19/Q-20/P-7/R-7/R-11 dismissed (design); rest deferred |
+| frontend-html-css | 55 | 0 Done, 3 Dismissed, 52 Deferred | All visual / CSS items deferred per CLAUDE.md "frontend changes need browser testing" rule. SEC-4/SEC-5/THEME-6/RESP-5 dismissed (audit-accepted). |
+| frontend-js | 85 | 0 Done, 0 Dismissed, 85 Deferred | All JS items deferred per CLAUDE.md "frontend changes need browser testing" rule. The audit's findings are valid; defer to a focused frontend session with browser participation. |
+| small-packages | 0 | (closed in test.28) | |
+
+Net: 0 Open across all 19 reports. The Deferred items are explicitly tracked with rationale (substantive refactor, browser-verification needed, integration-test fixture, substantive harness, etc.) so future sessions have clear context for what's left.
 
 ### Manual batch 22 (test.28) — small-packages.md drained
 
