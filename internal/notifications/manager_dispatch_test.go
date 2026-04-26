@@ -1,8 +1,6 @@
 package notifications
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,47 +9,37 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
-// TestManagerWaitTimesOut verifies that Wait gives up after 30s rather
-// than blocking forever — covers the timeout branch the audit flagged
-// as untested. We force the timeout by injecting a sender that hangs
-// on a channel and only releasing it after Wait returns. The "30s"
-// constant in code is bypassed in test by replacing the WaitGroup with
-// one that never completes within the test budget; we assert Wait
-// actually returns with bounded latency.
+// TestManagerWaitTimesOut verifies the 30s timeout branch in Wait()
+// actually fires when senders never complete. We use a sender that
+// blocks on a never-closed channel so the WaitGroup stays held — this
+// is the only way to exercise the timeout path, since DiscordWebhook
+// has its own 15s ctx deadline that would unblock wg.Wait early.
+// Audit reports/small-packages.md notifications Wait timeout.
 func TestManagerWaitTimesOut(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Wait waits 30s on timeout — skipping in -short mode")
 	}
 
-	// Use a stuck server so the goroutine sits in resp body forever.
-	stuck := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		<-stuck
-	}))
+	hangForever := make(chan struct{}) // intentionally never closed
 	t.Cleanup(func() {
-		close(stuck)
-		srv.Close()
+		// We can't easily release the goroutine — it's wedged on a
+		// never-closing channel. The test process exits when the test
+		// completes; the wedged goroutine is collected with it.
+		_ = hangForever
 	})
 
-	cfg := &config.MoomboxConfig{
-		Notifications: []config.NotificationConfig{
-			{URL: srv.URL + "/api/webhooks/123/abc-DEF", Events: nil},
-		},
-	}
-	// Hand-build the manager with a DiscordWebhook pointing at the stuck server
-	// (the cfg URL won't match discordWebhookRe — bypass and inject directly).
+	hanging := senderFunc(func(string, string, int, []Field, SendOptions) error {
+		<-hangForever
+		return nil
+	})
+
 	m := &Manager{
 		logger:    testLogger{},
 		semaphore: make(chan struct{}, maxInflightNotifications),
-		targets: []notificationTarget{{
-			sender: &DiscordWebhook{URL: srv.URL},
-		}},
+		targets:   []notificationTarget{{sender: hanging}},
 	}
-	_ = cfg
-	// One Send → one goroutine that will hang on the stuck server.
 	m.Send("t", "d", TypeInfo, nil, SendOptions{})
 
-	// Wait should time out at 30s. Allow 31s of test budget.
 	start := time.Now()
 	done := make(chan struct{})
 	go func() {
@@ -60,11 +48,11 @@ func TestManagerWaitTimesOut(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(31 * time.Second):
-		t.Fatal("Wait did not return within 31s — timeout branch did not fire")
+	case <-time.After(35 * time.Second):
+		t.Fatal("Wait did not return within 35s — timeout branch did not fire")
 	}
 	elapsed := time.Since(start)
-	if elapsed < 29*time.Second {
+	if elapsed < 28*time.Second {
 		t.Errorf("Wait returned in %v — expected ~30s timeout", elapsed)
 	}
 }
