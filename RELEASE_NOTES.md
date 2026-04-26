@@ -1,6 +1,38 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.28` with the **full audit-report drain** — all 19 reports/*.md status tables now show 0 Open rows after explicit Done / Deferred / Dismissed dispositions. New code: empty-AdaptationSet diagnostic log (engine #9), youtubeSegPathFormat const (engine #29), iifeCloseEOFWindow const (cipher Q2), 13 new test files / additions across cmd-moombox, tui, cookies, chat, worker.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 1 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
 
-This build bundles Sprint #1 + Sprint #2 work plus twenty-three batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
+
+### Phase 1 (test.30) — quick wins
+
+Six fixes closing the easy wins from the deferred-drain plan:
+
+- **Single-instance enforcement (cmd-moombox TD-5 + W-single-instance)** — Windows named-mutex guard at the top of `launchAndSupervise()`. Second `moombox.exe` in the same Windows session sees `ERROR_ALREADY_EXISTS`, prints a clear message, and exits cleanly instead of fighting the first instance for the port. Mutex is held by the long-lived launcher (not the child) so the exitCodeRestart respawn loop survives without re-acquiring. Crashed launcher releases the mutex via Windows kernel handle cleanup — stale locks impossible. Build-tagged Windows-only with non-Windows no-op stubs.
+
+- **Remove dead bgutils.UseYouTubeAPI flag (DEAD-5)** — the flag and its gated branches in `challenge.go` (lines 30, 49) and `webpo_client.go` (lines 174, 193) existed as scaffolding for a never-shipped owner toggle. Owner confirmed dead; deleted. Always uses Google WAA endpoints. JNN constants (`YouTubeJnnCreateURL` + `YouTubeJnnGenerateITURL`) deleted with the flag.
+
+- **Persist actualPort to disk (cmd-moombox Q2)** — when `network.port = 0` (auto-pick), the OS-assigned port is now written back to config so the next launch reuses it. Predictable port across restarts; users can discover the bound port from the config file. Configured fixed ports are untouched.
+
+- **Twitch StreamType pass-through (twitch #29)** — stop overwriting unknown `StreamType` values as `"live"`. Known values (`"live"`, `"rerun"`) pass through; empty defaults to live; unknown values pass through verbatim with a warn-once log so future Twitch StreamType additions surface rather than silently masquerading. Per-value warn dedup via `unknownStreamTypesSeen` map.
+
+- **VodChatDownloader concurrency contract (twitch #1)** — documented the single-goroutine invariant on the struct. `Start` is the only writer of `messages`; cross-goroutine reads use the atomic counters / dedup mutex / onProgress RWMutex. `Stop` cancels ctx and waits via `running.Load()` — no direct messages access from outside Start's goroutine.
+
+- **ChannelTerms (DECISIONS #11)** — owner uses simple `terms = "regex"` form. Current `ChannelTerms.Simple` field handles this correctly; named-form parser stays for backward compat with hypothetical other users. No code change.
+
+### Phase plan locked
+
+`reports/PHASE-PLAN.md` (gitignored, local working notes) captures all 45 owner decisions and the 12-phase execution plan. Subsequent test.N tags cover:
+
+- **Phase 2 (test.31)** — sentinel migration (cipher / twitch / engine), goja TD-4/TD-5, engine #17 ErrSegmentPermanent, dismissal re-examinations.
+- **Phase 3 (test.32)** — `internal/httpx` package unifying per-package HTTP clients.
+- **Phase 4 (test.33)** — cookies.meta.json sidecar + YouTube interpreter-hash persistence.
+- **Phase 5 (test.34)** — Strategy interface + ChatSource interface + Goja-cipher consolidation.
+- **Phase 6 (test.35)** — engine/protocol perf (VisitorData refetch, proactive IT refresh, cipher disk cache, VM pool, quality-split switch up, DPAPI mtime-half, ProfileInUse).
+- **Phase 7 (test.36)** — web hardening (TLS, chi.RequestID, -EncodedCommand, 256KB WS write cap, LRU rate-limiter, ETag, pagination, AutoCookieReloginRequired struct→map backend, JSON envelope backend, Update-apply Origin tightening).
+- **Phase 8 (test.37)** — owner-decision feature work (chat_status column, moombox add HTTP, IOS+MWEB clients, GetCookieHeader domain param, chat image mirror, restart drain, launcher scheduled task, OnHealthUpdate engine callback, Twitch token bucket).
+- **Phase 9 (test.38)** — TUI overlay interface + redraw caching + persistent restart-required banner.
+- **Phase 10 (test.39)** — frontend pass (tab-hide animation, lazy dialogs, platform CSS vars, CSS dedup, a11y pass, index.html partials, apiFetch wrapper, app.js full split). Browser verification deferred to Phase 12.
+- **Phase 11 (test.40)** — test sprint covering the ~140 missing tests.
+- **Phase 12** — owner runs through every frontend-touching change in a browser session; final tag once verified.
 
 ### Manual batch 23 (test.29) — full audit-report drain
 
