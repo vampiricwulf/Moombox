@@ -1,6 +1,35 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 6 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 7 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
+
+### Phase 7 (test.36) — web hardening
+
+Ten "Deferred" rows closed across the web subsystem. Two items (Q-2 pagination default, R-1/R-10 JSON envelope) bundled with the Phase 10 frontend pass since they change wire shape and need coordinated client updates.
+
+**TLS hardening (web S-19, S-20, S-17)** — three coordinated changes to the TLS path:
+
+- **Curated CipherSuites pin** (S-19) — `tls.Config.CipherSuites` now lists only ECDHE-based AEAD suites (TLS_ECDHE_*_GCM and ChaCha20-Poly1305). Drops Go's default TLS_RSA_* (no forward secrecy) and any 3DES / CBC variants that historically had padding-oracle issues. `PreferServerCipherSuites: true` so the curated order can't be down-negotiated. TLS 1.3 minimum kept Deferred — locking out unpatched non-browser clients was a higher cost than the benefit. (TLS 1.2 minimum stays.)
+- **GetCertificate watcher** (S-20) — new `certWatcher` tracks the cert file's mtime; the `tls.Config.GetCertificate` hook stat's the cert on each handshake and reloads if newer. Replacing cert.pem + key.pem on disk now propagates without a process restart. Parse failures log a warning and keep the previous cert in place so a partial-write replacement can't bring TLS down.
+- **Cert-SAN allowlist** (S-17) — `certWatcher.SANs()` pulls DNS names + IP addresses from the loaded certificate; `allowedOriginPatterns` prefers them over the r.Host-derived host check. r.Host was attacker-controlled (HTTP Host header), so a browser pointed at a malicious DNS entry mapping to 127.0.0.1 could pass the origin check; cert SANs are server-controlled.
+
+**PowerShell -EncodedCommand (web S-10)** — `runElevated` now takes the script content as a string, encodes it as UTF-16LE base64, and passes it via PowerShell's `-EncodedCommand` parameter rather than `-File <path>`. Removes the TOCTOU window where a local attacker could swap the temp script between Moombox writing it and the elevated PowerShell parsing it. `pendingInstall.scriptPath` field removed; the script content lives only in `pi.script` (memory).
+
+**256KB per-client WS write cap (web C-7)** — every WebSocket client now has its own `writes chan []byte` (capacity 16) drained by a dedicated `writePump` goroutine. `Broadcast` enqueues non-blocking; on a full queue, `queueOrDrop` drops the oldest pending frame (stale state for a client already behind) and replaces it with the new one. A single unresponsive client can no longer stall the whole hub for `wsWriteTimeout × N`. New `removeClient` helper consolidates the teardown path that was sprinkled across `Broadcast` + each pump.
+
+**Rate-limiter LRU eviction (web Q-18)** — replaced "evict first map entry found" with a real `container/list` LRU. Each `rateLimiterEntry` carries a back-pointer to its list element; on `AllowWithRetry` the IP is moved to MRU; on cap eviction the front (LRU) is dropped. Closes the audit's stated attack: an adversary churning 10,000 IPs can no longer push the legitimate user out by happening to land on their map key — the active user's MRU position keeps them in.
+
+**ETag /api/config (web Q-1)** — `GET /api/config` computes SHA-256 of the marshaled body, sets `ETag: "<hex>"` and `Cache-Control: private, max-age=0, must-revalidate`. `If-None-Match` short-circuits to 304 with no body. The settings tab opening repeatedly is a meaningful saver — the channels array can be tens of KB.
+
+**AutoCookieReloginRequired struct → map (cookies #44)** — `type AutoCookieReloginRequired = map[string]bool` keyed by lowercase platform name. Always initialised with `youtube` + `twitch` keys at construction so the wire shape stays compatible with consumers that expect `{"youtube": false, "twitch": false}`. Adding a third platform (DECISIONS still says no, but if ever) needs zero schema edits — just push another key. `tui_wiring.go` updated to read via `relogin["youtube"]` / `relogin["twitch"]`.
+
+**Update-apply Origin tightening (web S-8)** — `POST /api/update/apply` now gates on `updateApplyOriginAllowed(r)` in addition to the existing `CSRFMiddleware`. Even when `network_access` is set to `lan` or `external`, only requests with no Origin (same-process token) or Origin from loopback (localhost / 127.0.0.1 / ::1) can trigger the binary swap + restart. Defence-in-depth — replacing the running binary is high-impact enough that the trust boundary is tighter than for ordinary mutating routes.
+
+**S-22 chi.RequestID** — already shipped in earlier audit work; verified `RecoveryMiddleware` includes `reqID` + `method` + `remoteAddr` in panic logs.
+
+### Deferred to Phase 10 (frontend coordination required)
+
+- **Q-2 /api/jobs pagination default** — backend already supports `?limit=&offset=`; defaulting to envelope shape changes wire format for every existing fetch. Bundled with Phase 10 so backend + frontend ship together.
+- **R-1, R-10 JSON envelope** — `{data, error}` rollout touches every route's response shape. Frontend handles ~30 fetch sites; coordinated change ships in Phase 10.
 
 ### Phase 6 (test.35) — engine/protocol perf
 

@@ -97,11 +97,16 @@ func validateBrowserProfileDir(profileDir string) error {
 	return nil
 }
 
-// AutoCookieReloginRequired tracks which platforms need manual re-login.
-type AutoCookieReloginRequired struct {
-	YouTube bool `json:"youtube"`
-	Twitch  bool `json:"twitch"`
-}
+// AutoCookieReloginRequired tracks which platforms need manual re-login,
+// keyed by lowercase platform name ("youtube", "twitch", and any future
+// addition). The JSON wire shape stays compatible with the previous
+// struct form because the consumer reads `obj["youtube"]` / `obj["twitch"]`
+// — adding a third platform now needs zero schema edits. Audit
+// reports/cookies.md #44.
+//
+// Always initialised with both supported platforms by NewAutoCookieService
+// so the JSON output is never an empty `{}` for the existing consumers.
+type AutoCookieReloginRequired map[string]bool
 
 // AutoCookieStatus holds the current status of the auto-cookie service.
 type AutoCookieStatus struct {
@@ -200,7 +205,14 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 		cookiePath:    cookiePath,
 		jar:           jar,
 		profileDirErr: profileDirErr,
-		logger:        logger,
+		// Always populated with both supported platforms so the JSON wire
+		// shape stays {"youtube": false, "twitch": false} even for
+		// fresh-install state. Audit reports/cookies.md #44.
+		needsRelogin: AutoCookieReloginRequired{
+			"youtube": false,
+			"twitch":  false,
+		},
+		logger: logger,
 	}
 	// Restore LastRefresh from the on-disk sidecar so periodic refresh
 	// doesn't fire immediately on every startup. Audit reports/
@@ -261,9 +273,9 @@ func (s *AutoCookieService) FlagManualRelogin(platform string) {
 	defer s.mu.Unlock()
 	switch platform {
 	case "youtube":
-		s.needsRelogin.YouTube = true
+		s.needsRelogin["youtube"] = true
 	case "twitch":
-		s.needsRelogin.Twitch = true
+		s.needsRelogin["twitch"] = true
 	}
 }
 
@@ -408,10 +420,10 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	// Clear re-login flags for verified platforms
 	s.mu.Lock()
 	if ytAuth {
-		s.needsRelogin.YouTube = false
+		s.needsRelogin["youtube"] = false
 	}
 	if twAuth {
-		s.needsRelogin.Twitch = false
+		s.needsRelogin["twitch"] = false
 	}
 	s.mu.Unlock()
 
@@ -580,16 +592,16 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 
 	s.mu.Lock()
 	if !ytAuth && ytHasCookies {
-		s.needsRelogin.YouTube = true
+		s.needsRelogin["youtube"] = true
 	}
 	if !twAuth && twHasCookies {
-		s.needsRelogin.Twitch = true
+		s.needsRelogin["twitch"] = true
 	}
 	if ytAuth {
-		s.needsRelogin.YouTube = false
+		s.needsRelogin["youtube"] = false
 	}
 	if twAuth {
-		s.needsRelogin.Twitch = false
+		s.needsRelogin["twitch"] = false
 	}
 	s.mu.Unlock()
 

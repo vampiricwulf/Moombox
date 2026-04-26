@@ -1,11 +1,49 @@
 package routes
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"syscall"
 	"time"
 	"unsafe"
 )
+
+// encodePowerShellCommand turns a PowerShell script source string into the
+// base64-of-UTF16LE form that powershell.exe's `-EncodedCommand` parameter
+// expects. The TOCTOU benefit of this format is that the script never has
+// to be written to disk between Moombox preparing it and the elevated
+// PowerShell parsing it. Audit reports/web.md S-10.
+func encodePowerShellCommand(script string) (string, error) {
+	utf16 := utf16Encode(script)
+	if len(utf16) == 0 && script != "" {
+		return "", fmt.Errorf("utf-16 encode produced no output")
+	}
+	buf := make([]byte, len(utf16)*2)
+	for i, r := range utf16 {
+		binary.LittleEndian.PutUint16(buf[i*2:], r)
+	}
+	return base64.StdEncoding.EncodeToString(buf), nil
+}
+
+// utf16Encode is a minimal UTF-16 encoder that handles BMP runes inline and
+// supplementary-plane runes via surrogate pairs. Anything outside valid
+// Unicode (lone surrogates, runes above 0x10FFFF) is coerced to U+FFFD.
+func utf16Encode(s string) []uint16 {
+	out := make([]uint16, 0, len(s))
+	for _, r := range s {
+		switch {
+		case r < 0 || r > 0x10FFFF || (r >= 0xD800 && r <= 0xDFFF):
+			out = append(out, 0xFFFD)
+		case r <= 0xFFFF:
+			out = append(out, uint16(r))
+		default:
+			r -= 0x10000
+			out = append(out, 0xD800|uint16(r>>10), 0xDC00|uint16(r&0x3FF))
+		}
+	}
+	return out
+}
 
 var (
 	advapi32          = syscall.NewLazyDLL("advapi32.dll")
@@ -81,7 +119,12 @@ func isElevated() bool {
 // runElevated launches a PowerShell script with UAC elevation ("Run as
 // Administrator") using ShellExecuteExW with the "runas" verb. Returns the
 // process handle for waiting, or an error if the UAC prompt was declined.
-func runElevated(scriptPath string) (syscall.Handle, error) {
+//
+// Audit reports/web.md S-10 — switched from `-File <path>` to
+// `-EncodedCommand <base64-utf16le>` so the script never touches the
+// filesystem. Removes the TOCTOU window where a local attacker could swap
+// the temp file between WriteFile and ShellExecuteEx.
+func runElevated(script string) (syscall.Handle, error) {
 	verb, err := syscall.UTF16PtrFromString("runas")
 	if err != nil {
 		return 0, fmt.Errorf("utf16 verb: %w", err)
@@ -90,8 +133,12 @@ func runElevated(scriptPath string) (syscall.Handle, error) {
 	if err != nil {
 		return 0, fmt.Errorf("utf16 file: %w", err)
 	}
+	encoded, err := encodePowerShellCommand(script)
+	if err != nil {
+		return 0, fmt.Errorf("encode powershell command: %w", err)
+	}
 	params, err := syscall.UTF16PtrFromString(
-		`-NoProfile -ExecutionPolicy Bypass -File "` + scriptPath + `"`,
+		`-NoProfile -ExecutionPolicy Bypass -EncodedCommand ` + encoded,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("utf16 params: %w", err)

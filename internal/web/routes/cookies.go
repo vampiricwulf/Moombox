@@ -35,7 +35,12 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			autoStatus := autoCookieSvc.GetStatus()
 			response["autoCookieReloginRequired"] = autoStatus.NeedsManualRelogin
 		} else {
-			response["autoCookieReloginRequired"] = cookies.AutoCookieReloginRequired{}
+			// Always emit both supported platforms so the frontend doesn't
+			// need to handle a missing-key fallback (audit cookies.md #44).
+			response["autoCookieReloginRequired"] = cookies.AutoCookieReloginRequired{
+				"youtube": false,
+				"twitch":  false,
+			}
 		}
 		if getActivePlatforms != nil {
 			response["activePlatforms"] = getActivePlatforms()
@@ -173,12 +178,17 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 	r.Get("/api/cookies/auto-status", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {
 			jsonResponse(rw, map[string]any{
-				"configured":         false,
-				"setupInProgress":    false,
-				"browser":            nil,
-				"lastRefresh":        nil,
-				"lastError":          nil,
-				"needsManualRelogin": cookies.AutoCookieReloginRequired{},
+				"configured":      false,
+				"setupInProgress": false,
+				"browser":         nil,
+				"lastRefresh":     nil,
+				"lastError":       nil,
+				// Both supported platforms always present — see audit
+				// cookies.md #44.
+				"needsManualRelogin": cookies.AutoCookieReloginRequired{
+					"youtube": false,
+					"twitch":  false,
+				},
 			})
 			return
 		}

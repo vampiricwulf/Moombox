@@ -487,12 +487,13 @@ func (s *runState) runTUI() {
 		if auth.TwitchAuthenticated {
 			tw = tui.CookieStatusOK
 		}
-		// Check auto-cookie relogin state
+		// Check auto-cookie relogin state. As of test.36 the relogin map
+		// is keyed by lowercase platform name (audit cookies.md #44).
 		relogin := s.autoCookieSvc.GetStatus().NeedsManualRelogin
-		if relogin.YouTube {
+		if relogin["youtube"] {
 			yt = tui.CookieStatusRelogin
 		}
-		if relogin.Twitch {
+		if relogin["twitch"] {
 			tw = tui.CookieStatusRelogin
 		}
 		var ytActive, twActive bool

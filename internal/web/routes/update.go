@@ -2,6 +2,8 @@ package routes
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -9,6 +11,36 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/updater"
 )
+
+// updateApplyOriginAllowed gates POST /api/update/apply to loopback callers.
+// Replacing the binary + restarting is a high-impact action; the audit
+// (reports/web.md S-8) explicitly wanted this tightened beyond the generic
+// CSRFMiddleware so a LAN peer can't trigger it even when network_access
+// is "lan" / "external". Returns true when the request originates from
+// loopback (no Origin header set, or Origin host is 127.0.0.1 / ::1 /
+// localhost).
+func updateApplyOriginAllowed(r *http.Request) bool {
+	// No Origin header on a mutating request is normally rejected by
+	// CSRFMiddleware before this handler runs; if we got here, that's a
+	// same-process caller (e.g. TUI presenting InternalToken).
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
 
 // SharedUpdateInfo is the package-level atomic pointer storing the latest
 // available update info. Set by main.go, read by status route and update routes.
@@ -84,6 +116,16 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 	r.Post("/api/update/apply", func(w http.ResponseWriter, r *http.Request) {
 		if deps.Updater == nil {
 			jsonError(w, "updater not available", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Defence-in-depth on top of CSRFMiddleware: replacing the
+		// running binary + restarting is high-impact; only loopback
+		// callers (browser tab on this machine, TUI in-process) may
+		// invoke it, even when network_access is set to lan/external.
+		// Audit reports/web.md S-8.
+		if !updateApplyOriginAllowed(r) {
+			jsonError(w, "update apply restricted to local origins", http.StatusForbidden)
 			return
 		}
 

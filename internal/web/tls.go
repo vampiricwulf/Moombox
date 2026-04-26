@@ -13,8 +13,92 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// certWatcher holds an atomically-swappable *tls.Certificate so the TLS
+// stack can pick up a freshly written cert/key pair without restarting the
+// process. Audit reports/web.md S-20 — "user manually replacing the
+// self-signed with a real LE cert had to restart Moombox to get the
+// rotation".
+type certWatcher struct {
+	certPath, keyPath string
+	cert              atomic.Pointer[tls.Certificate]
+	mu                sync.Mutex
+	lastModTime       time.Time
+	logger            interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
+}
+
+// reloadIfChanged stat's the cert file; on a newer mtime it parses the new
+// pair and atomically swaps it into the watcher. Falls back to the old
+// cert on parse failure (warning logged) so a partially-written replacement
+// can't bring down TLS.
+func (w *certWatcher) reloadIfChanged() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	info, err := os.Stat(w.certPath)
+	if err != nil {
+		return
+	}
+	if !info.ModTime().After(w.lastModTime) {
+		return
+	}
+	cert, err := tls.LoadX509KeyPair(w.certPath, w.keyPath)
+	if err != nil {
+		w.logger.Warn("[TLS] reload skipped — cert/key pair invalid", "err", err)
+		return
+	}
+	w.lastModTime = info.ModTime()
+	w.cert.Store(&cert)
+	w.logger.Info("[TLS] reloaded certificate after on-disk change", "cert", w.certPath)
+}
+
+// getCertificate is the tls.Config.GetCertificate hook. Called once per
+// handshake; the reload check itself is gated by mtime so the cost is a
+// stat + atomic load when nothing has changed.
+func (w *certWatcher) getCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	w.reloadIfChanged()
+	c := w.cert.Load()
+	if c == nil {
+		return nil, fmt.Errorf("no certificate loaded")
+	}
+	return c, nil
+}
+
+// SANs returns the DNS names + IP addresses that appear in the loaded
+// certificate, normalised to lowercase strings (IPs as their canonical
+// form). Used by the WebSocket origin allowlist (audit reports/web.md
+// S-17) to replace the r.Host-derived host check that was vulnerable to
+// Host-header spoofing.
+func (w *certWatcher) SANs() []string {
+	c := w.cert.Load()
+	if c == nil || len(c.Certificate) == 0 {
+		return nil
+	}
+	parsed, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(parsed.DNSNames)+len(parsed.IPAddresses))
+	for _, dns := range parsed.DNSNames {
+		out = append(out, strings.ToLower(dns))
+	}
+	for _, ip := range parsed.IPAddresses {
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+// CurrentCertSANs is the package-level singleton populated by
+// LoadOrGenerateTLSConfig. Nil before the TLS config is built; consumers
+// (websocket.go) call .SANs() defensively.
+var CurrentCertSANs *certWatcher
 
 // LoadOrGenerateTLSConfig returns a TLS configuration using the given cert/key
 // files. If the files don't exist, a self-signed certificate is generated and
@@ -39,15 +123,48 @@ func LoadOrGenerateTLSConfig(certPath, keyPath, networkAccess string, logger int
 
 	logger.Info("[TLS] Loaded certificate", "cert", certPath, "key", keyPath)
 
+	// Watcher allows hot-rotation: replacing cert.pem + key.pem on disk is
+	// picked up on the next handshake without a process restart. Audit
+	// reports/web.md S-20.
+	watcher := &certWatcher{
+		certPath: certPath,
+		keyPath:  keyPath,
+		logger:   logger,
+	}
+	if info, statErr := os.Stat(certPath); statErr == nil {
+		watcher.lastModTime = info.ModTime()
+	}
+	watcher.cert.Store(&cert)
+	CurrentCertSANs = watcher
+
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		// TLS 1.2 minimum — Go's defaults already pin to a modern cipher
-		// suite list, and TLS 1.2 keeps non-browser clients (older curl,
-		// embedded scripts) working. TLS 1.3 ciphers can't be pinned via
-		// CipherSuites by design; bumping MinVersion to VersionTLS13 would
-		// drop everything that hasn't been patched in the last few years.
-		// Audit reports/web.md S-19.
+		Certificates:   []tls.Certificate{cert},
+		GetCertificate: watcher.getCertificate,
+		// TLS 1.2 minimum — TLS 1.3 ciphers can't be pinned via
+		// CipherSuites by design (the TLS 1.3 RFC restricts the suite
+		// list to a fixed set), and TLS 1.2 keeps non-browser clients
+		// (older curl / embedded scripts) working. The audit's S-19
+		// alternative — bumping MinVersion to TLS 1.3 — would lock out
+		// any client that hasn't been patched in the last few years.
 		MinVersion: tls.VersionTLS12,
+		// Curated cipher list for TLS 1.2 only (TLS 1.3 ignores this
+		// field). All ciphers here are ECDHE-based for forward secrecy
+		// and AEAD-mode (GCM / ChaCha20-Poly1305) so a long-lived
+		// session can't be retroactively decrypted if the server key
+		// leaks. Drops Go's default TLS_RSA_* suites (no forward
+		// secrecy) and any 3DES / CBC suites that historically had
+		// padding-oracle issues. Audit reports/web.md S-19.
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+		},
+		// Server picks the cipher to enforce the curated order rather
+		// than letting the client downgrade us to a weaker entry.
+		PreferServerCipherSuites: true,
 	}, nil
 }
 

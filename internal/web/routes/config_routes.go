@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +12,15 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
+
+// configETag returns a stable short ETag for a marshaled-config response
+// body. Hashing the bytes (rather than maintaining a config-mutation
+// counter) keeps the route purely functional in body → header. Audit
+// reports/web.md Q-1.
+func configETag(body []byte) string {
+	sum := sha256.Sum256(body)
+	return `"` + hex.EncodeToString(sum[:8]) + `"`
+}
 
 // ConfigRoutesCallbacks contains optional callbacks invoked when config changes require hot-reload.
 type ConfigRoutesCallbacks struct {
@@ -511,7 +522,26 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			MoomboxConfig: &cfgCopy,
 			HasPassword:   hasPassword,
 		}
-		jsonResponse(rw, resp)
+		// ETag + 304 short-circuit: the config payload includes a large
+		// channels slice that rarely changes; serving 304s when the body
+		// is byte-identical avoids re-shipping it on every settings-tab
+		// open. SHA-256 of the marshalled body is overkill for a TTL-less
+		// cache key but it's quick and gives stable ordering. Audit
+		// reports/web.md Q-1.
+		body, err := json.Marshal(resp)
+		if err != nil {
+			jsonError(rw, "marshal config", http.StatusInternalServerError)
+			return
+		}
+		etag := configETag(body)
+		rw.Header().Set("ETag", etag)
+		rw.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
+		if match := req.Header.Get("If-None-Match"); match != "" && match == etag {
+			rw.WriteHeader(http.StatusNotModified)
+			return
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		rw.Write(body)
 	})
 
 	// PUT /api/config

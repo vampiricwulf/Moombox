@@ -1,6 +1,7 @@
 package web
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"net/http"
@@ -19,10 +20,27 @@ type rateLimiterLogger interface {
 	Error(msg string, args ...any)
 }
 
+// rateLimiterEntry is the value stored in the per-IP map plus the
+// linked-list element so cap-eviction picks the least-recently used IP
+// rather than an arbitrary map entry. Audit reports/web.md Q-18.
+type rateLimiterEntry struct {
+	ip    string
+	times []time.Time
+	elem  *list.Element // points back to the LRU list element holding `ip`
+}
+
 // RateLimiter provides in-memory per-IP sliding window rate limiting.
+//
+// Cap eviction (when entries >= maxRateLimiterEntries) drops the IP at the
+// front of `lruOrder` — the least recently used. The previous map-iteration
+// "drop first key found" was direction-blind: an attacker churning through
+// 10,000 IPs could push the legitimate user out by happening to land on
+// their key. LRU keeps the active user in the map regardless of attacker
+// volume. Audit reports/web.md Q-18.
 type RateLimiter struct {
 	mu       sync.Mutex
-	requests map[string][]time.Time
+	requests map[string]*rateLimiterEntry
+	lruOrder *list.List // values are string (the IP); front = LRU, back = MRU
 	limit    int
 	window   time.Duration
 	cleanup  *time.Ticker
@@ -71,7 +89,8 @@ func NewRateLimiterCtx(ctx context.Context, limit int, window time.Duration) *Ra
 // goroutines. Internal helper shared by the public constructors.
 func newRateLimiterStruct(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
-		requests: make(map[string][]time.Time),
+		requests: make(map[string]*rateLimiterEntry),
+		lruOrder: list.New(),
 		limit:    limit,
 		window:   window,
 		cleanup:  time.NewTicker(time.Minute), // Match TS: 60 second cleanup
@@ -94,32 +113,45 @@ func (rl *RateLimiter) AllowWithRetry(ip string) (bool, int) {
 	now := time.Now()
 	cutoff := now.Add(-rl.window)
 
-	// Max entries protection: evict oldest entry when limit exceeded (match TS)
+	// Cap eviction: drop the least-recently-used IP when at the
+	// per-process limit. Doing this before the lookup means a brand-new
+	// IP under attack churn doesn't squeeze out the active user — the
+	// active user's MRU position keeps them in the map. Audit
+	// reports/web.md Q-18.
 	if len(rl.requests) >= maxRateLimiterEntries {
-		// Evict first key found (like TS Map.keys().next())
-		for k := range rl.requests {
-			delete(rl.requests, k)
-			break
+		if oldest := rl.lruOrder.Front(); oldest != nil {
+			oldestIP := oldest.Value.(string)
+			rl.lruOrder.Remove(oldest)
+			delete(rl.requests, oldestIP)
 		}
 	}
 
+	entry, ok := rl.requests[ip]
+	if !ok {
+		entry = &rateLimiterEntry{ip: ip}
+		entry.elem = rl.lruOrder.PushBack(ip)
+		rl.requests[ip] = entry
+	} else {
+		// Touch — move to MRU (back of list).
+		rl.lruOrder.MoveToBack(entry.elem)
+	}
+
 	// Filter expired entries
-	times := rl.requests[ip]
-	valid := make([]time.Time, 0, len(times))
-	for _, t := range times {
+	valid := make([]time.Time, 0, len(entry.times))
+	for _, t := range entry.times {
 		if t.After(cutoff) {
 			valid = append(valid, t)
 		}
 	}
 
 	if len(valid) >= rl.limit {
-		rl.requests[ip] = valid
+		entry.times = valid
 		// Calculate remaining time until oldest request expires (matching TS: resetTime - now)
 		retryAfter := max(int(valid[0].Add(rl.window).Sub(now).Seconds())+1, 1)
 		return false, retryAfter
 	}
 
-	rl.requests[ip] = append(valid, now)
+	entry.times = append(valid, now)
 	return true, 0
 }
 
@@ -160,17 +192,18 @@ func (rl *RateLimiter) cleanupLoop() {
 		case <-rl.cleanup.C:
 			rl.mu.Lock()
 			cutoff := time.Now().Add(-rl.window)
-			for ip, times := range rl.requests {
+			for ip, entry := range rl.requests {
 				var valid []time.Time
-				for _, t := range times {
+				for _, t := range entry.times {
 					if t.After(cutoff) {
 						valid = append(valid, t)
 					}
 				}
 				if len(valid) == 0 {
+					rl.lruOrder.Remove(entry.elem)
 					delete(rl.requests, ip)
 				} else {
-					rl.requests[ip] = valid
+					entry.times = valid
 				}
 			}
 			rl.mu.Unlock()

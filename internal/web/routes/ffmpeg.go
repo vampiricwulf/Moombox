@@ -440,9 +440,14 @@ func InstallFFmpeg(method string) error {
 
 // pendingInstall holds state for a two-phase elevated install: phase 1 generates
 // the script and returns it for review, phase 2 executes it after user approval.
+//
+// As of test.36 (audit reports/web.md S-10), the script is passed via
+// PowerShell's -EncodedCommand parameter rather than being written to disk
+// and referenced via -File. The scriptPath field is no longer needed — kept
+// removed so a future caller doesn't accidentally re-introduce the
+// write-then-execute TOCTOU.
 type pendingInstall struct {
 	method     string
-	scriptPath string
 	resultPath string
 	script     string
 	createdAt  time.Time
@@ -461,8 +466,9 @@ func cleanExpiredPending() {
 	now := time.Now()
 	for token, pi := range pendingInstalls {
 		if now.Sub(pi.createdAt) > pendingInstallTTL {
-			// scriptPath is only written to disk at ConfirmInstall time,
-			// so it doesn't exist for expired pending installs.
+			// Script content lives only in pi.script (memory) — there's no
+			// temp file to clean. resultPath only materialises if the
+			// elevated process gets to run. Audit reports/web.md S-10.
 			os.Remove(pi.resultPath)
 			delete(pendingInstalls, token)
 		}
@@ -553,13 +559,11 @@ func PrepareInstall(method string) (needsElevation bool, script string, token st
 	if err != nil {
 		return false, "", "", err
 	}
-	scriptPath := filepath.Join(os.TempDir(), "moombox-ffmpeg-install-"+token+".ps1")
 
 	pendingInstallsMu.Lock()
 	cleanExpiredPending()
 	pendingInstalls[token] = &pendingInstall{
 		method:     method,
-		scriptPath: scriptPath,
 		resultPath: resultPath,
 		script:     scriptContent,
 		createdAt:  time.Now(),
@@ -570,8 +574,10 @@ func PrepareInstall(method string) (needsElevation bool, script string, token st
 }
 
 // ConfirmInstall executes a previously prepared elevated install after user
-// approval. Writes the script to a temp file, launches it via UAC, waits for
-// completion, and reads the result.
+// approval. Passes the script directly to PowerShell via -EncodedCommand
+// (audit reports/web.md S-10) — never writes the script to disk so a local
+// attacker can't swap the file between Moombox preparing it and the elevated
+// PowerShell parsing it.
 func ConfirmInstall(token string) error {
 	installMu.Lock()
 	defer installMu.Unlock()
@@ -586,15 +592,11 @@ func ConfirmInstall(token string) error {
 	delete(pendingInstalls, token)
 	pendingInstallsMu.Unlock()
 
-	// Write script to temp file
-	if err := os.WriteFile(pi.scriptPath, []byte(pi.script), 0600); err != nil {
-		return fmt.Errorf("failed to write install script: %w", err)
-	}
-	defer os.Remove(pi.scriptPath)
 	defer os.Remove(pi.resultPath)
 
-	// Execute with elevation
-	handle, err := runElevated(pi.scriptPath)
+	// Execute with elevation. Script content goes through -EncodedCommand
+	// inside runElevated; no temp script file is created.
+	handle, err := runElevated(pi.script)
 	if err != nil {
 		return fmt.Errorf("elevation failed: %w", err)
 	}
@@ -630,9 +632,9 @@ func ConfirmInstall(token string) error {
 func RejectInstall(token string) {
 	pendingInstallsMu.Lock()
 	if pi, ok := pendingInstalls[token]; ok {
-		// scriptPath was never written to disk (only written at ConfirmInstall time).
-		// resultPath also doesn't exist yet, but clean up defensively in case a
-		// stale elevated process created it.
+		// Script content stays in memory only (audit reports/web.md S-10),
+		// so there's no temp script file to clean. resultPath may exist
+		// only if a previous elevated run started; clean defensively.
 		os.Remove(pi.resultPath)
 		delete(pendingInstalls, token)
 	}

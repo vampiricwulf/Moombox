@@ -26,6 +26,14 @@ const (
 	// kernel-level TCP keepalives ACKing past an app-level zombie),
 	// the Read will eventually error out and readPump will tear down.
 	wsReadIdleTimeout = 90 * time.Second
+	// wsWriteQueueSize bounds the per-client outbound queue so a stalled
+	// client can't accumulate unbounded backpressure (memory blow-up plus
+	// a 10s× per-message Broadcast stall on every subsequent send). On
+	// queue overflow the oldest queued frame is dropped with a warn log.
+	// 16 is comfortably above the typical burst (initial state + a couple
+	// of job updates) without letting a slow client buffer megabytes of
+	// stale state. Audit reports/web.md C-7.
+	wsWriteQueueSize = 16
 )
 
 // WSMessage is a WebSocket message sent to clients.
@@ -79,6 +87,11 @@ type wsClient struct {
 	conn   *websocket.Conn
 	ctx    context.Context
 	cancel context.CancelFunc
+	// writes is the per-client outbound queue drained by writePump. A
+	// closed `writes` (set by removeClient) signals the writePump to exit
+	// without depending on ctx cancellation timing. Audit reports/web.md
+	// C-7.
+	writes chan []byte
 }
 
 // NewWebSocketHub creates a new WebSocket hub.
@@ -134,6 +147,7 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
+		writes: make(chan []byte, wsWriteQueueSize),
 	}
 
 	hub.mu.Lock()
@@ -142,6 +156,11 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	hub.mu.Unlock()
 
 	hub.logger.Debug("websocket connected", "clients", clientCount)
+
+	// Per-client write loop drains `writes`. Started before sendInitialState
+	// so the initial-state push goes through the queue like any other
+	// broadcast.
+	go hub.writePump(client)
 
 	// Send initial state immediately
 	hub.sendInitialState(client)
@@ -153,26 +172,129 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	go hub.readPump(client)
 }
 
+// writePump drains client.writes onto the websocket connection one frame
+// at a time. Per-client serialisation lets Broadcast's hot path enqueue
+// non-blocking and decouple slow consumers from fast ones. Audit
+// reports/web.md C-7.
+func (hub *WebSocketHub) writePump(client *wsClient) {
+	defer func() {
+		if r := recover(); r != nil {
+			hub.logger.Error("panic in websocket writePump", "panic", r)
+		}
+	}()
+	for {
+		select {
+		case <-client.ctx.Done():
+			return
+		case msg, ok := <-client.writes:
+			if !ok {
+				return
+			}
+			writeCtx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
+			err := client.conn.Write(writeCtx, websocket.MessageText, msg)
+			cancel()
+			if err != nil {
+				hub.removeClient(client, "write failed")
+				return
+			}
+		}
+	}
+}
+
+// queueOrDrop pushes a marshalled frame into a client's write queue.
+// On a full queue the OLDEST queued frame is dropped (it's stale state
+// for a client that's already behind) and the new frame replaces it.
+// Returns false when the client is gone (channel closed by
+// removeClient). Audit reports/web.md C-7.
+func (hub *WebSocketHub) queueOrDrop(client *wsClient, msg []byte) bool {
+	defer func() {
+		// Recover from a send-on-closed-channel race with removeClient.
+		if r := recover(); r != nil {
+			// Already removed — caller doesn't need to retry.
+		}
+	}()
+	select {
+	case client.writes <- msg:
+		return true
+	default:
+		// Drop oldest, then push the new frame. If we lose another race,
+		// the new frame is dropped silently (caller sees true).
+		select {
+		case <-client.writes:
+			hub.logger.Warn("dropped oldest WS frame; client lagging")
+		default:
+		}
+		select {
+		case client.writes <- msg:
+			return true
+		default:
+			hub.logger.Warn("dropped WS frame; client write queue full")
+			return true
+		}
+	}
+}
+
+// removeClient closes the client's write channel + cancels its ctx,
+// removes it from the hub, and closes the underlying websocket. Safe
+// to call multiple times — idempotent on the closed-channel guard.
+func (hub *WebSocketHub) removeClient(client *wsClient, reason string) {
+	hub.mu.Lock()
+	if _, ok := hub.clients[client]; !ok {
+		hub.mu.Unlock()
+		return
+	}
+	delete(hub.clients, client)
+	hub.mu.Unlock()
+
+	client.cancel()
+	// Close on a closed channel panics; the recover() in queueOrDrop
+	// guards the senders. The drain in writePump exits on `!ok`.
+	defer func() {
+		_ = recover()
+	}()
+	close(client.writes)
+	client.conn.Close(websocket.StatusInternalError, reason)
+}
+
 // allowedOriginPatterns builds a list of host patterns for the WebSocket
-// upgrade. The library already allows same-origin (Origin host == Request host),
-// so these patterns only need to cover cross-origin localhost/LAN aliases.
-// Patterns are matched against the Origin header's host using filepath.Match.
+// upgrade. The library already allows same-origin (Origin host == Request
+// host), so these patterns only need to cover cross-origin localhost/LAN
+// aliases. Patterns are matched against the Origin header's host using
+// filepath.Match.
+//
+// Audit reports/web.md S-17 — when the TLS certificate is loaded, its SANs
+// (DNSNames + IPAddresses) become the trusted hostname allowlist. r.Host
+// is attacker-controlled (HTTP Host header), so falling back to it could
+// let a browser pointed at a malicious DNS entry mapping to 127.0.0.1
+// pass the origin check. Cert SANs are server-controlled, so trusting
+// them is safe.
 func (hub *WebSocketHub) allowedOriginPatterns(r *http.Request) []string {
+	var patterns []string
+
+	// Cert-SAN allowlist — preferred trust source. Only set after
+	// LoadOrGenerateTLSConfig has run; before that we fall back to the
+	// historical r.Host derivation (cert SANs land before the listener
+	// starts so this is only ever nil in test harnesses).
+	if CurrentCertSANs != nil {
+		for _, san := range CurrentCertSANs.SANs() {
+			patterns = append(patterns, san, san+":*")
+			// Loopback aliasing — cert covers 127.0.0.1, browsers may
+			// present "localhost" in the Origin header.
+			if san == "127.0.0.1" || san == "::1" {
+				patterns = append(patterns, "localhost", "localhost:*")
+			}
+		}
+	}
+
 	host := r.Host
 	if host == "" {
-		return nil // no extra patterns; library still allows same-origin
+		return patterns
 	}
-	// Strip port from host
 	hostname := host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		hostname = h
 	}
-
-	// Allow any port on the same hostname (e.g., dev server on a different port)
-	var patterns []string
 	patterns = append(patterns, hostname+":*")
-
-	// For loopback, also allow the localhost/127.0.0.1 aliases
 	if hostname == "127.0.0.1" || hostname == "::1" {
 		patterns = append(patterns, "localhost", "localhost:*")
 	}
@@ -359,16 +481,7 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 	hub.mu.RUnlock()
 
 	for _, client := range clients {
-		ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
-		err := client.conn.Write(ctx, websocket.MessageText, msgBytes)
-		cancel()
-		if err != nil {
-			hub.mu.Lock()
-			delete(hub.clients, client)
-			hub.mu.Unlock()
-			client.cancel()
-			client.conn.Close(websocket.StatusInternalError, "write failed")
-		}
+		hub.queueOrDrop(client, msgBytes)
 	}
 }
 
