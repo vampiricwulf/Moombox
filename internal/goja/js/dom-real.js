@@ -1117,4 +1117,315 @@
 
     globalThis.CSSStyleDeclaration = CSSStyleDeclaration;
     globalThis.getComputedStyle = getComputedStyle;
+
+    // -------------------------------------------------------------------
+    // Day 4: Document / HTMLDocument + Window + real document tree.
+    //
+    // Replaces the test.49 hand-stub document/window with proper class
+    // instances connected to the new Node hierarchy. createElement now
+    // returns real HTMLDivElement / HTMLBodyElement / etc. subclasses so
+    // `document.createElement('div') instanceof HTMLDivElement` works.
+    //
+    // querySelector / querySelectorAll handle a small but practical
+    // selector subset: tag, #id, .class, descendant combinator, simple
+    // attribute selectors. Sufficient for BotGuard's typical probes;
+    // not a full CSS Selectors Level 4 parser.
+    // -------------------------------------------------------------------
+
+    class Document extends Node {
+        constructor() {
+            super();
+            Object.defineProperty(this, '_idIndex', { value: new Map(), writable: false, enumerable: false, configurable: true });
+            this._ownerDocument = null;
+        }
+        get nodeType() { return NODE_TYPE_DOCUMENT; }
+        get nodeName() { return '#document'; }
+
+        createElement(tagName) {
+            const tag = String(tagName || '').toLowerCase();
+            const Ctor = _htmlTagMap[tag] || HTMLUnknownElement;
+            const e = new Ctor(tag);
+            e._ownerDocument = this;
+            return e;
+        }
+        createElementNS(_ns, tagName) {
+            return this.createElement(tagName);
+        }
+        createTextNode(data) {
+            const t = new Text(data);
+            t._ownerDocument = this;
+            return t;
+        }
+        createComment(data) {
+            const c = new Comment(data);
+            c._ownerDocument = this;
+            return c;
+        }
+        createDocumentFragment() {
+            const f = new DocumentFragment();
+            f._ownerDocument = this;
+            return f;
+        }
+        createEvent(type) {
+            // Legacy createEvent factory. The string identifies the kind
+            // of event; we return the appropriate class. Initialised with
+            // empty type; caller must call initEvent() before dispatch.
+            const lc = String(type || '').toLowerCase();
+            if (lc === 'customevent') return new CustomEvent('');
+            if (lc === 'messageevent') return new MessageEvent('');
+            if (lc === 'errorevent') return new ErrorEvent('');
+            return new Event('');
+        }
+        getElementById(id) {
+            const want = String(id);
+            const walk = (n) => {
+                for (const c of n._children) {
+                    if (c.nodeType === NODE_TYPE_ELEMENT && c.id === want) return c;
+                    const found = walk(c);
+                    if (found) return found;
+                }
+                return null;
+            };
+            return walk(this);
+        }
+        querySelector(sel) {
+            return _selectorMatch(this, String(sel || ''), false)[0] || null;
+        }
+        querySelectorAll(sel) {
+            return _selectorMatch(this, String(sel || ''), true);
+        }
+        getElementsByTagName(tag) {
+            return _baseElementProto.getElementsByTagName.call(this, tag);
+        }
+        getElementsByClassName(name) {
+            return _baseElementProto.getElementsByClassName.call(this, name);
+        }
+    }
+    Object.defineProperty(Document.prototype, Symbol.toStringTag, { value: 'Document', configurable: true });
+
+    // Save Element.prototype methods we want to reuse on Document
+    // (Element extends Node; Document extends Node, not Element; share
+    // the lookup methods directly).
+    const _baseElementProto = Element.prototype;
+
+    class HTMLDocument extends Document {
+        constructor() {
+            super();
+            Object.defineProperty(this, '_cookie', { value: '', writable: true, enumerable: false, configurable: true });
+            Object.defineProperty(this, '_title', { value: '', writable: true, enumerable: false, configurable: true });
+            Object.defineProperty(this, '_url', { value: 'https://www.youtube.com/', writable: true, enumerable: false, configurable: true });
+            Object.defineProperty(this, '_referrer', { value: 'https://www.youtube.com/', writable: true, enumerable: false, configurable: true });
+            Object.defineProperty(this, '_documentElement', { value: null, writable: true, enumerable: false, configurable: true });
+            Object.defineProperty(this, '_head', { value: null, writable: true, enumerable: false, configurable: true });
+            Object.defineProperty(this, '_body', { value: null, writable: true, enumerable: false, configurable: true });
+        }
+
+        get documentElement() { return this._documentElement; }
+        get head() { return this._head; }
+        get body() { return this._body; }
+        get title() {
+            // Real browsers walk head for the first <title>; we cache it on
+            // the document for cheap access. Sync if the head's title text
+            // changed underneath us.
+            if (this._head) {
+                const titleEl = this._head._children.find(c => c.nodeType === NODE_TYPE_ELEMENT && c.tagName === 'TITLE');
+                if (titleEl) return titleEl.textContent;
+            }
+            return this._title;
+        }
+        set title(v) {
+            this._title = String(v || '');
+            if (this._head) {
+                let titleEl = this._head._children.find(c => c.nodeType === NODE_TYPE_ELEMENT && c.tagName === 'TITLE');
+                if (!titleEl) {
+                    titleEl = this.createElement('title');
+                    this._head.appendChild(titleEl);
+                }
+                titleEl.textContent = this._title;
+            }
+        }
+        get cookie() { return this._cookie; }
+        set cookie(v) {
+            // Real browsers append cookies to the existing string. For
+            // BotGuard fingerprint purposes, just store verbatim.
+            this._cookie = String(v || '');
+        }
+        get readyState() { return 'complete'; }
+        get visibilityState() { return 'visible'; }
+        get hidden() { return false; }
+        get URL() { return this._url; }
+        get documentURI() { return this._url; }
+        get baseURI() { return this._url; }
+        get domain() { return 'www.youtube.com'; }
+        get referrer() { return this._referrer; }
+        get characterSet() { return 'UTF-8'; }
+        get charset() { return 'UTF-8'; }
+        get inputEncoding() { return 'UTF-8'; }
+        get contentType() { return 'text/html'; }
+        get compatMode() { return 'CSS1Compat'; }
+
+        get nodeName() { return '#document'; }
+    }
+    Object.defineProperty(HTMLDocument.prototype, Symbol.toStringTag, { value: 'HTMLDocument', configurable: true });
+
+    // Selector parser — minimal but covers the BotGuard probe surface.
+    // Supports: 'tag', '#id', '.class', '[attr]', '[attr=value]',
+    // descendant combinator (' '), and conjunction within a single
+    // simple selector (e.g. 'div.foo#bar').
+    function _selectorMatch(root, selector, all) {
+        selector = selector.trim();
+        if (!selector) return [];
+        // Comma-separated selector list -> union.
+        if (selector.indexOf(',') >= 0) {
+            const out = [];
+            const seen = new Set();
+            for (const part of selector.split(',')) {
+                for (const m of _selectorMatch(root, part.trim(), true)) {
+                    if (!seen.has(m)) { seen.add(m); out.push(m); }
+                }
+                if (!all && out.length) return out;
+            }
+            return all ? out : (out.length ? [out[0]] : []);
+        }
+        // Tokenise on whitespace -> descendant combinator chain.
+        const parts = selector.split(/\s+/).filter(Boolean);
+        let current = [root];
+        for (const part of parts) {
+            const next = [];
+            const simple = _parseSimple(part);
+            for (const ctx of current) {
+                _walkDescendants(ctx, (node) => {
+                    if (_matchSimple(node, simple)) next.push(node);
+                });
+            }
+            current = next;
+        }
+        return all ? current : (current.length ? [current[0]] : []);
+    }
+
+    function _parseSimple(s) {
+        // Matches: tag(.class|#id|[attr|=val])*
+        const m = { tag: '', id: '', classes: [], attrs: [] };
+        let i = 0;
+        // Tag (optional)
+        const tagRe = /^([a-zA-Z][a-zA-Z0-9-]*)/.exec(s);
+        if (tagRe) { m.tag = tagRe[1].toUpperCase(); i = tagRe[0].length; }
+        while (i < s.length) {
+            const c = s.charAt(i);
+            if (c === '#') {
+                const idRe = /^#([a-zA-Z0-9_-]+)/.exec(s.slice(i));
+                if (idRe) { m.id = idRe[1]; i += idRe[0].length; continue; }
+            }
+            if (c === '.') {
+                const clsRe = /^\.([a-zA-Z0-9_-]+)/.exec(s.slice(i));
+                if (clsRe) { m.classes.push(clsRe[1]); i += clsRe[0].length; continue; }
+            }
+            if (c === '[') {
+                const attrRe = /^\[([a-zA-Z][a-zA-Z0-9-]*)(?:=("[^"]*"|'[^']*'|[^\]]*))?\]/.exec(s.slice(i));
+                if (attrRe) {
+                    let val = attrRe[2];
+                    if (val && (val.charAt(0) === '"' || val.charAt(0) === "'")) val = val.slice(1, -1);
+                    m.attrs.push({ name: attrRe[1].toLowerCase(), value: val });
+                    i += attrRe[0].length;
+                    continue;
+                }
+            }
+            i++; // skip unknown
+        }
+        return m;
+    }
+
+    function _matchSimple(node, m) {
+        if (node.nodeType !== NODE_TYPE_ELEMENT) return false;
+        if (m.tag && m.tag !== '*' && node.tagName !== m.tag) return false;
+        if (m.id && node.id !== m.id) return false;
+        for (const cls of m.classes) {
+            const nodeClasses = (node._attributes['class'] || '').split(/\s+/);
+            if (!nodeClasses.includes(cls)) return false;
+        }
+        for (const attr of m.attrs) {
+            const v = node._attributes[attr.name];
+            if (v == null) return false;
+            if (attr.value != null && v !== attr.value) return false;
+        }
+        return true;
+    }
+
+    function _walkDescendants(root, fn) {
+        for (const c of root._children) {
+            fn(c);
+            _walkDescendants(c, fn);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Window class extending EventTarget. globalThis already IS the
+    // window in browsers; we put Window in the prototype chain via the
+    // test.49 _Window class bridge. The Window class itself is mostly
+    // for `instanceof Window` / constructor.name fingerprint shape.
+    // -------------------------------------------------------------------
+    class Window extends EventTarget {
+        constructor() {
+            super();
+        }
+    }
+    Object.defineProperty(Window.prototype, Symbol.toStringTag, { value: 'Window', configurable: true });
+
+    // -------------------------------------------------------------------
+    // Build the real document tree and rebind globalThis.document
+    // -------------------------------------------------------------------
+    const _newDoc = new HTMLDocument();
+    const _html = _newDoc.createElement('html');
+    const _head = _newDoc.createElement('head');
+    const _body = _newDoc.createElement('body');
+    _html.appendChild(_head);
+    _html.appendChild(_body);
+    _newDoc.appendChild(_html);
+    _newDoc._documentElement = _html;
+    _newDoc._head = _head;
+    _newDoc._body = _body;
+
+    // Preserve any properties the test.49 hand-stub document had that
+    // BotGuard might have already accessed (cookie, location reference).
+    // The cipher's preprocessed-code-cache references document.location
+    // via globalThis.location which is unchanged; document.location is
+    // a separate accessor that browsers expose -- mirror to global.
+    Object.defineProperty(_newDoc, 'location', {
+        get() { return globalThis.location; },
+        set(v) { globalThis.location = v; },
+        configurable: true, enumerable: true,
+    });
+    Object.defineProperty(_newDoc, 'defaultView', {
+        get() { return globalThis; },
+        configurable: true, enumerable: true,
+    });
+
+    // Bridge: legacy classes from the test.49 IIFE need to chain to the
+    // new Document/HTMLDocument so `document instanceof <legacy>` keeps
+    // passing while gaining `instanceof <new>`.
+    _bridgeProto(globalThis.Document, Document);
+    _bridgeProto(globalThis.HTMLDocument, HTMLDocument);
+    _bridgeProto(globalThis.Window, Window);
+
+    // Replace the test.49 hand-stub document with the new instance.
+    globalThis.document = _newDoc;
+    globalThis.Document = Document;
+    globalThis.HTMLDocument = HTMLDocument;
+    globalThis.Window = Window;
+
+    // Document.prototype.cloneNode wires a new instance; ensure Element
+    // .cloneNode preserves attributes too. (Quick override on Element.)
+    const _origElementClone = Element.prototype.cloneNode;
+    Element.prototype.cloneNode = function(deep) {
+        const clone = new this.constructor(this._tagName);
+        for (const k of Object.keys(this._attributes)) {
+            clone._attributes[k] = this._attributes[k];
+        }
+        if (deep) {
+            for (const c of this._children) {
+                clone.appendChild(c.cloneNode(true));
+            }
+        }
+        return clone;
+    };
 })();
