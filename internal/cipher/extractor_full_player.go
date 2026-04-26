@@ -104,6 +104,12 @@ var alrMarkers = []string{
 // Captures the parameter name and the start of the assignment.
 var alrTransformHeadPattern = regexp.MustCompile(`(\w+)&&\((\w+)=`)
 
+// iifeCloseEOFWindow is the maximum distance (in bytes) the IIFE close
+// pattern `})(` can be from EOF. A match further out is typically inside
+// a string literal or nested function, not the real IIFE close.
+// Audit reports/cipher.md Q2.
+const iifeCloseEOFWindow = 200
+
 // alrProximity is the maximum number of characters after an ALR marker to search
 // for the transform head pattern. The correct match is typically within 15 chars;
 // 200 gives ample room for formatting variations without matching unrelated code.
@@ -229,14 +235,14 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 	// Main variant: var _yt_player={};(function(g){...})(_yt_player);
 	// TV variant: 'use strict';(function(){var window=this;...}).call(this);
 	closeIdx := strings.LastIndex(playerJS, "})(")
-	if closeIdx >= 0 && len(playerJS)-closeIdx > 200 {
+	if closeIdx >= 0 && len(playerJS)-closeIdx > iifeCloseEOFWindow {
 		// Match is too far from EOF — likely inside a string or nested function
 		closeIdx = -1
 	}
 	if closeIdx < 0 {
 		// TV/ES6 variant uses }).call(this) instead of })(arg)
 		closeIdx = strings.LastIndex(playerJS, "}).call(")
-		if closeIdx >= 0 && len(playerJS)-closeIdx > 200 {
+		if closeIdx >= 0 && len(playerJS)-closeIdx > iifeCloseEOFWindow {
 			closeIdx = -1
 		}
 	}
