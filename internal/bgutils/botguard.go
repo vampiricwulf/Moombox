@@ -135,7 +135,16 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 	})
 
 	noOp := vm.ToValue(func(goja.FunctionCall) goja.Value { return goja.Undefined() })
-	emptyArrays := vm.ToValue([][]any{{}, {}})
+	// emptyArrays is the 6th vm.a() arg: upstream passes a JS literal
+	// `[ [], [] ]`. The previous form here was vm.ToValue([][]any{{}, {}}),
+	// which exposes Go-slice-proxies to JS. BotGuard may call .push() / [N]=
+	// on those inner arrays during init; slice proxies silently fail on
+	// length grow (the same reason webPoSignalOutput uses NewArray()) and
+	// can leave BotGuard's internal state misaligned downstream — one
+	// possible reason webPoSignalOutput[0] never gets populated by snapshot.
+	// Build native JS arrays explicitly so BotGuard sees the same shape it
+	// would in a real browser.
+	emptyArrays := vm.NewArray(vm.NewArray(), vm.NewArray())
 
 	// Call vm.a(program, callback, true, undefined, noOp, [[], []])
 	// Return value (upstream's "syncSnapshot" position) is intentionally ignored —
