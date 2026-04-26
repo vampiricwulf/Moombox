@@ -13,7 +13,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
 	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
@@ -451,12 +453,44 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 	// — the previous unbatched fallback GQL call was vestigial and tripled
 	// monitor-cycle latency for any rare miss. Audit-finding twitch.md #10.
 
-	// Normalize stream type
-	if info.StreamType != "rerun" {
-		info.StreamType = "live"
+	// Normalize stream type. Twitch documents "live" and "rerun" but new
+	// values may appear (e.g. "watch_party" historically). Preserve the
+	// original via RawStreamType (already captured above) and warn-once
+	// on truly unknown values so a future stream type doesn't get
+	// silently swallowed as "live". Audit twitch.md #29.
+	switch info.StreamType {
+	case "live", "rerun":
+		// known shapes — no-op
+	case "":
+		info.StreamType = "live" // empty defaults to live
+	default:
+		warnUnknownStreamType(info.StreamType, a.logger)
+		// Pass through verbatim instead of overwriting as "live" so the
+		// downstream classifier can decide.
 	}
 
 	return info, nil
+}
+
+// unknownStreamTypesSeen tracks Twitch StreamType values we've already
+// warn-logged so the per-tick monitor doesn't spam the same value.
+var (
+	unknownStreamTypesMu   sync.Mutex
+	unknownStreamTypesSeen = map[string]struct{}{}
+)
+
+func warnUnknownStreamType(t string, log interface {
+	Warn(msg string, args ...any)
+}) {
+	unknownStreamTypesMu.Lock()
+	_, seen := unknownStreamTypesSeen[t]
+	if !seen {
+		unknownStreamTypesSeen[t] = struct{}{}
+	}
+	unknownStreamTypesMu.Unlock()
+	if !seen && log != nil {
+		log.Warn("twitch: unknown stream type — passing through verbatim", "type", t)
+	}
 }
 
 // GetStreamAccessToken fetches an HLS access token for a live channel.

@@ -21,6 +21,21 @@ const (
 )
 
 // VodChatDownloader downloads chat messages from a Twitch VOD.
+//
+// **Concurrency contract** (audit twitch.md #1):
+//
+//   - Start() owns the long-running goroutine and is the only writer of
+//     `messages`. flush() and writeFullFile() are called only from Start's
+//     goroutine, so the in-memory message slice is single-goroutine by
+//     construction.
+//   - Cross-goroutine reads use the atomic counters: `totalCount` (via
+//     MessageCount), `running` (via IsRunning).
+//   - `dedup` is utils.OrderedDedup which carries its own mutex.
+//   - `onProgress` is guarded by `onProgressMu` (RWMutex; reassign-safe).
+//
+// Stop() cancels the ctx and waits via `running.Load()`; it does NOT
+// touch `messages` directly. Callers must NOT read `messages` from
+// outside Start's goroutine — use MessageCount() instead.
 type VodChatDownloader struct {
 	api           *API
 	vodID         string
@@ -31,7 +46,7 @@ type VodChatDownloader struct {
 	outputPath    string
 	vodDuration   int   // seconds, used for progress % estimation
 	vodStartMs    int64 // epoch ms when VOD started
-	messages      []TwitchChatMessage
+	messages      []TwitchChatMessage // single-writer: Start goroutine only
 	dedup         *utils.OrderedDedup[string]
 	totalCount    atomic.Int64
 	running       atomic.Bool

@@ -300,12 +300,31 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}()
 	}
 
-	// Expose actual bound port for TUI and other components (matches TS: process.env.MOOMBOX_PORT)
+	// Expose actual bound port for TUI and other components (matches TS:
+	// process.env.MOOMBOX_PORT). When the user configured `network.port =
+	// 0` (auto-pick), persist the OS-assigned port back to disk so the
+	// next launch reuses it (predictable port across restarts; users can
+	// discover the port from the config file). Audit cmd-moombox.md Q2.
 	if actualPort := webServer.ActualPort; actualPort > 0 {
+		var configuredPort int
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			configuredPort = c.Network.Port
+		})
 		mu := s.configStore.RWMutex()
 		mu.Lock()
 		cfg.Network.Port = actualPort
 		mu.Unlock()
+		// Only write back when the user requested auto-pick (0). Don't
+		// rewrite a configured fixed port the user explicitly set.
+		if configuredPort == 0 {
+			if err := s.configStore.SaveLocked(); err != nil {
+				log.Warn("could not persist actualPort to config",
+					slog.Int("port", actualPort), slog.String("err", err.Error()))
+			} else {
+				log.Info("persisted auto-assigned port to config",
+					slog.Int("port", actualPort))
+			}
+		}
 	}
 
 	// Initial disk space check (populate immediately so status bar has data).
