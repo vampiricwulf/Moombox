@@ -2,10 +2,20 @@ package goja
 
 import (
 	crand "crypto/rand"
+	_ "embed"
 	"fmt"
 
 	"github.com/dop251/goja"
 )
+
+// domRealJS is the Option-2 hand-rolled real-class DOM (EventTarget,
+// Event, CustomEvent, etc.). Loaded after the legacy hand-stub block so
+// the constructs declared inside override the flat-object stubs while
+// keeping the same global names. See docs/investigations/botguard-
+// option-2-plan.md for the multi-day build-out plan.
+//
+//go:embed js/dom-real.js
+var domRealJS string
 
 // RegisterDOMShim registers minimal DOM stubs on a Goja runtime.
 // This provides just enough browser-like environment for BotGuard and cipher functions.
@@ -685,6 +695,16 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 
 	if _, err := vm.RunString(shimCode); err != nil {
 		return fmt.Errorf("DOM shim execution failed: %w", err)
+	}
+
+	// Option-2 real-class DOM overlay. Loaded AFTER the legacy hand-stub
+	// block so the classes declared inside (EventTarget, Event,
+	// CustomEvent, MessageEvent, ErrorEvent so far; Node/Element/
+	// Document/Window incoming) replace the flat-object stubs that have
+	// the same global names. See docs/investigations/botguard-option-2-
+	// plan.md for the build plan.
+	if _, err := vm.RunString(domRealJS); err != nil {
+		return fmt.Errorf("DOM real-class overlay failed: %w", err)
 	}
 
 	// Leave the __cryptoRandBytes / __cryptoRandomUUID globals in place —
