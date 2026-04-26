@@ -170,10 +170,8 @@ func (wpc *WebPoClient) GenerateTokenMinter(ctx context.Context) (*TokenMinter, 
 
 // generateIntegrityToken posts the BotGuard response to the GenerateIT API.
 func generateIntegrityToken(ctx context.Context, config *BgConfig, botguardResponse string) (*IntegrityTokenData, error) {
+	// Always use the Google WAA GenerateIT endpoint. Audit bgutils DEAD-5.
 	url := GoogleWaaGenerateITURL
-	if config.UseYouTubeAPI {
-		url = YouTubeJnnGenerateITURL
-	}
 
 	body, err := json.Marshal([]any{config.RequestKey, botguardResponse})
 	if err != nil {
@@ -190,9 +188,7 @@ func generateIntegrityToken(ctx context.Context, config *BgConfig, botguardRespo
 
 	req.Header.Set("Content-Type", "application/json+protobuf")
 	req.Header.Set("x-user-agent", "grpc-web-javascript/0.1")
-	if !config.UseYouTubeAPI {
-		req.Header.Set("x-goog-api-key", BotGuardAPIKey)
-	}
+	req.Header.Set("x-goog-api-key", BotGuardAPIKey)
 	req.Header.Set("User-Agent", UserAgentFull)
 
 	resp, err := bgHTTPClient.Do(req)

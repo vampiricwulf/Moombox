@@ -25,11 +25,10 @@ func FetchChallenge(ctx context.Context, config *BgConfig, logger botguardLogger
 		return nil, &BGError{Code: ErrBadConfig, Message: "requestKey is required"}
 	}
 
-	// Build request
+	// Always use the Google WAA endpoint; the YouTube JNN alternative
+	// existed as scaffolding for a never-shipped owner toggle and added
+	// only complexity. Audit bgutils DEAD-5.
 	url := GoogleWaaCreateURL
-	if config.UseYouTubeAPI {
-		url = YouTubeJnnCreateURL
-	}
 
 	body, err := json.Marshal([]string{config.RequestKey})
 	if err != nil {
@@ -46,9 +45,7 @@ func FetchChallenge(ctx context.Context, config *BgConfig, logger botguardLogger
 
 	req.Header.Set("Content-Type", "application/json+protobuf")
 	req.Header.Set("x-user-agent", "grpc-web-javascript/0.1")
-	if !config.UseYouTubeAPI {
-		req.Header.Set("x-goog-api-key", BotGuardAPIKey)
-	}
+	req.Header.Set("x-goog-api-key", BotGuardAPIKey)
 	req.Header.Set("User-Agent", UserAgentFull)
 
 	resp, err := bgHTTPClient.Do(req)

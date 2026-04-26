@@ -6,11 +6,11 @@ import (
 )
 
 const (
-	// BotGuard API endpoints
-	GoogleWaaCreateURL    = "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create"
+	// BotGuard API endpoints. Always use the Google WAA forms; the
+	// YouTube JNN alternatives existed as scaffolding for a never-shipped
+	// owner toggle and were removed for clarity. Audit bgutils DEAD-5.
+	GoogleWaaCreateURL     = "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create"
 	GoogleWaaGenerateITURL = "https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/GenerateIT"
-	YouTubeJnnCreateURL   = "https://www.youtube.com/api/jnn/v1/Create"
-	YouTubeJnnGenerateITURL = "https://www.youtube.com/api/jnn/v1/GenerateIT"
 
 	// API key for BotGuard requests
 	BotGuardAPIKey = "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw"
@@ -59,9 +59,8 @@ const (
 
 // BgConfig holds configuration for BotGuard operations.
 type BgConfig struct {
-	RequestKey    string
-	VisitorData   string
-	UseYouTubeAPI bool // Use YouTube's JNN endpoint instead of Google's
+	RequestKey  string
+	VisitorData string
 
 	// SessionTTL overrides the default session-cache TTL (SessionCacheTTL = 6h)
 	// when set > 0. Mirrors upstream bgutil-ytdlp-pot-provider's TOKEN_TTL env
