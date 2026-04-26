@@ -292,31 +292,17 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	globalThis.MutationObserver = function() { this.observe = function() {}; this.disconnect = function() {}; this.takeRecords = function() { return []; }; };
 	globalThis.IntersectionObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
 	globalThis.ResizeObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
-	// AbortController + AbortSignal — YouTube player.js init touches these.
-	globalThis.AbortController = function() {
-		this.signal = { aborted: false, addEventListener: function() {}, removeEventListener: function() {} };
-		this.abort = function() { this.signal.aborted = true; };
-	};
-	globalThis.ReadableStream = function() { this.cancel = function() { return Promise.resolve(); }; };
-	globalThis.CustomEvent = function(t, o) { this.type = t; this.detail = o && o.detail; };
-	globalThis.CSS = { supports: function() { return false; }, escape: function(s) { return String(s); } };
-	// Intl stubs — formatters return empty/zero values rather than throwing
-	// on missing-method access. BotGuard / player.js init won't crash on a
-	// missing locale.
-	(function() {
-		var _intlProto = { resolvedOptions: function() { return { timeZone: 'UTC', locale: 'en-US' }; }, format: function() { return ''; }, formatToParts: function() { return []; } };
-		var _intlCtor = function() { return Object.create(_intlProto); };
-		_intlCtor.supportedLocalesOf = function() { return []; };
-		globalThis.Intl = globalThis.Intl || {
-			DateTimeFormat: _intlCtor,
-			NumberFormat: _intlCtor,
-			PluralRules: _intlCtor,
-			RelativeTimeFormat: _intlCtor,
-			Collator: _intlCtor,
-			ListFormat: _intlCtor,
-			Segmenter: _intlCtor
-		};
-	})();
+	// AbortController / ReadableStream / CustomEvent / CSS / Intl moved
+	// out (test.42) -- these were briefly added in Phase 5 (test.34) so
+	// cipher could consolidate on the shared dom_shim. The trade-off
+	// surfaced when running test.40: bgutils also pulls this shim, and
+	// BotGuard fingerprints the existence + shape of these globals.
+	// Stub objects pass typeof === function checks but fail BotGuard's
+	// follow-up native-code probe, which can plausibly steer the
+	// integrity token toward the websafe fallback. Keeping them
+	// cipher-only (full_player_setup.js) restores bgutils to its pre-
+	// Phase-5 shim shape while cipher still gets the stubs it needs
+	// for full-player-js execution.
 	// Capture the native CSPRNG bridges into closure-local variables BEFORE
 	// the outer bootstrap clears the globals. Without this capture,
 	// getRandomValues would look up __cryptoRandBytes on globalThis at call
