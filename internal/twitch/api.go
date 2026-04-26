@@ -40,8 +40,25 @@ var (
 	thumbDimRe    = regexp.MustCompile(`[-_]\d+x\d+\.`)
 )
 
+// twitchGQLRatePerSec is the steady-state ceiling for outbound GQL
+// requests. Twitch's documented public limit is generous for our flows
+// (a few req/sec average across all channels), but bursting tens of
+// req/sec while bringing up many channels at startup tripped reactive
+// 429s; a proactive token bucket flattens that. Audit reports/twitch.md
+// #40.
+const twitchGQLRatePerSec = 10
+
 // API provides low-level Twitch GQL and Usher access.
 type API struct {
+	// rateLimiter throttles outbound GQL requests. Process-wide bucket;
+	// per-channel was considered but the existing flows already fan out
+	// concurrently across channels, so a single shared bucket is the
+	// right place to enforce the ceiling. nil disables rate limiting
+	// (used in tests).
+	rateLimiter *time.Ticker
+	rateTokens  chan struct{}
+	rateOnce    sync.Once
+
 	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -58,6 +75,48 @@ func NewAPI(logger interface {
 	Error(msg string, args ...any)
 }) *API {
 	return &API{logger: logger}
+}
+
+// initRateLimiter lazily starts the GQL rate limiter on first use. Tokens
+// are produced at twitchGQLRatePerSec; the channel buffer caps the burst
+// to twitchGQLRatePerSec (so an idle period doesn't hand out a year's
+// worth of tokens at once). Audit reports/twitch.md #40.
+func (a *API) initRateLimiter() {
+	a.rateOnce.Do(func() {
+		a.rateLimiter = time.NewTicker(time.Second / time.Duration(twitchGQLRatePerSec))
+		a.rateTokens = make(chan struct{}, twitchGQLRatePerSec)
+		// Pre-fill the burst capacity so a fresh process can issue up to
+		// twitchGQLRatePerSec without waiting for the first tick.
+		for i := 0; i < twitchGQLRatePerSec; i++ {
+			a.rateTokens <- struct{}{}
+		}
+		go func() {
+			defer func() {
+				if r := recover(); r != nil && a.logger != nil {
+					a.logger.Error("twitch rate limiter goroutine panic", "panic", r)
+				}
+			}()
+			for range a.rateLimiter.C {
+				select {
+				case a.rateTokens <- struct{}{}:
+				default:
+					// Bucket full — drop the token. Burst-cap behaviour.
+				}
+			}
+		}()
+	})
+}
+
+// acquireToken blocks until a rate-limit token is available or ctx is
+// cancelled. Returns ctx.Err() on cancellation.
+func (a *API) acquireToken(ctx context.Context) error {
+	a.initRateLimiter()
+	select {
+	case <-a.rateTokens:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // opLabel returns the operation name or a placeholder when the caller passed
@@ -181,7 +240,14 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 // doGQLOnce performs a single HTTP POST against Twitch GQL. Returns the
 // response body, status code, Retry-After header value, and a transport
 // error if the request couldn't reach the server.
+//
+// Audit reports/twitch.md #40 — acquires a rate-limit token before
+// sending so a multi-channel startup burst doesn't trip Twitch's public
+// 429 ceiling.
 func (a *API) doGQLOnce(ctx context.Context, data []byte, authToken string) ([]byte, int, string, error) {
+	if err := a.acquireToken(ctx); err != nil {
+		return nil, 0, "", err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, constants.TwitchURLs.GQL, bytes.NewReader(data))
 	if err != nil {
 		return nil, 0, "", err

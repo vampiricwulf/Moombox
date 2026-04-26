@@ -5,7 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // launchAndSupervise is the launcher/supervisor loop. It spawns moombox as a
@@ -82,20 +84,49 @@ func launchAndSupervise() {
 	}
 }
 
-// deferDeleteOldLauncher spawns a detached process to delete the .exe~ file
-// after the launcher exits. On Windows, a running exe is locked — we can't
-// delete ourselves, so we schedule a brief delay then delete.
+// deferDeleteOldLauncher schedules deletion of the .exe~ file via a one-shot
+// Windows scheduled task. On Windows a running exe is locked, so we can't
+// delete ourselves directly — we schedule a task to fire ~10 seconds after
+// the launcher exits.
+//
+// Audit reports/cmd-moombox.md TD-4 — replaces the previous
+// `cmd /C ping ... & del` shell-out. schtasks.exe is more robust:
+//
+//   - Survives the launcher process tree being killed; the task runs in
+//     its own elevated-by-default Task Scheduler context.
+//   - Doesn't depend on cmd.exe quoting (the old form had multiple `&`
+//     and `>nul` redirects that subtly broke if the path contained
+//     special characters).
+//   - Falls back gracefully if schtasks is unavailable (older or
+//     locked-down Windows installs).
 func deferDeleteOldLauncher(exePath string) {
 	oldPath := exePath + "~"
 	if _, err := os.Stat(oldPath); err != nil {
 		return // no .exe~ file
 	}
-	// ping localhost is used as a portable delay (timeout doesn't work in
-	// non-interactive contexts). -n 3 ~ 2 seconds, enough for the launcher
-	// to fully exit and release the file lock.
-	cleanup := exec.Command("cmd", "/C",
-		"ping", "127.0.0.1", "-n", "3", ">nul", "2>nul", "&",
-		"del", "/f", "/q", oldPath, ">nul", "2>nul")
+
+	// Compute a fire time ~10s in the future so the launcher has time to
+	// exit and release the file lock before the task tries to delete.
+	fireAt := time.Now().Add(10 * time.Second).Format("15:04:05")
+	taskName := "MoomboxCleanup_" + filepath.Base(oldPath)
+
+	cmd := `del /f /q "` + oldPath + `" & schtasks /delete /tn "` + taskName + `" /f`
+	cleanup := exec.Command("schtasks", "/create", "/f",
+		"/tn", taskName,
+		"/tr", `cmd /c `+cmd,
+		"/sc", "once",
+		"/st", fireAt,
+	)
 	cleanup.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
-	cleanup.Start() // fire and forget
+	if err := cleanup.Start(); err != nil {
+		// Fallback to the legacy ping-based approach so older Windows
+		// versions that block schtasks (very locked-down corporate
+		// images) still get the delayed cleanup.
+		fallback := exec.Command("cmd", "/C",
+			"ping", "127.0.0.1", "-n", "11", ">nul", "2>nul", "&",
+			"del", "/f", "/q", oldPath, ">nul", "2>nul")
+		fallback.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
+		fallback.Start()
+		return
+	}
 }

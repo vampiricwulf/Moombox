@@ -443,13 +443,28 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// Restart dispatcher — used by setup/update/API/TUI to unwind the run()
 	// loop via cancel + quitTUI and return true from run().
+	//
+	// StartDrain flips the web server into a 503-for-new-requests mode
+	// before the context is cancelled, then a 5-second grace timer lets
+	// in-flight setup-wizard / save-config requests complete before the
+	// hard shutdown. Audit reports/cmd-moombox.md C-main:165-166.
 	s.triggerRestart = func(source string) {
 		log.Info("Restart requested", slog.String("source", source))
 		s.restartRequested.Store(true)
-		s.cancel()
-		if s.quitTUI != nil {
-			s.quitTUI()
+		if s.webServer != nil {
+			s.webServer.StartDrain()
 		}
+		time.AfterFunc(5*time.Second, func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("restart drain timer panic", slog.Any("panic", r))
+				}
+			}()
+			s.cancel()
+			if s.quitTUI != nil {
+				s.quitTUI()
+			}
+		})
 	}
 
 	// TUI-only channels created here so routes_wiring can reference

@@ -178,14 +178,19 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 		sameSegRetries = 0
 		hasStartedDownloading = true
 
-		// Emit progress
-		if d.OnProgress != nil {
-			d.OnProgress(DownloadProgress{
-				Seq:     writeSeq,
-				Bytes:   d.bytesWritten.Load(),
-				HeadSeq: int(d.headSeq.Load()),
-			})
+		// Emit progress + aggregate health snapshot. The health update
+		// piggy-backs on the same cadence so the UI sees throughput /
+		// retry counters tick alongside the per-segment counter. Audit
+		// reports/engine.md #31.
+		p := DownloadProgress{
+			Seq:     writeSeq,
+			Bytes:   d.bytesWritten.Load(),
+			HeadSeq: int(d.headSeq.Load()),
 		}
+		if d.OnProgress != nil {
+			d.OnProgress(p)
+		}
+		d.emitHealthUpdate(p)
 
 		d.currentSeq.Add(1)
 		segsSinceResume++

@@ -142,6 +142,42 @@ var AndroidVRClient = YouTubeClientConfig{
 	},
 }
 
+// IOSClient is the iOS native YouTube app client. Returns HLS streams
+// distinct from the WEB DASH manifests, useful as a low-res-live fallback
+// when WEB_SAFARI / WEB_CREATOR / ANDROID_VR all fail or return inadequate
+// formats. Audit reports/youtube.md T2.
+var IOSClient = YouTubeClientConfig{
+	ClientName:    "IOS",
+	ClientVersion: "19.29.1",
+	ClientID:      "5",
+	UserAgent:     UserAgents.IOS,
+	Context: map[string]any{
+		"clientName":     "IOS",
+		"clientVersion":  "19.29.1",
+		"deviceMake":     "Apple",
+		"deviceModel":    "iPhone16,2",
+		"osName":         "iOS",
+		"osVersion":      "17.5.1.21F90",
+		"hl":             "en",
+	},
+}
+
+// WebRemixClient is the YouTube Music / mobile-web client. Useful as a
+// low-priority fallback for VOD lookups when WEB / WEB_SAFARI both fail —
+// returns its own subset of formats and rarely shares the same playability
+// rejection reasons. Audit reports/youtube.md T2.
+var WebRemixClient = YouTubeClientConfig{
+	ClientName:    "WEB_REMIX",
+	ClientVersion: "1.20260120.01.00",
+	ClientID:      "67",
+	UserAgent:     UserAgents.WebSafari,
+	Context: map[string]any{
+		"clientName":    "WEB_REMIX",
+		"clientVersion": "1.20260120.01.00",
+		"hl":            "en",
+	},
+}
+
 // =============================================================================
 // TWITCH CONSTANTS
 // =============================================================================

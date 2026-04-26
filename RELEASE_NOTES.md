@@ -1,6 +1,28 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 7 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 8 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
+
+### Phase 8 (test.37) — owner-decision feature work
+
+Six "Deferred" rows shipped. Three deferred to focused sessions per audit (moombox-add HTTP path, GetCookieHeader domain scoping, chat emote/badge mirror).
+
+**Restart cancel HTTP drain (cmd-moombox C-main:165-166)** — `Server.StartDrain` + `DrainMiddleware` flip the HTTP server into a clean-503 mode for new requests. The `triggerRestart` dispatcher calls `StartDrain` then arms a 5-second grace timer before cancelling the context — in-flight setup-wizard POSTs and config-save requests get to finish on the old process while a re-attempted browser refresh sees `{"error":"Server restarting; retry in a few seconds"}` + `Retry-After: 5` rather than a connection-reset error.
+
+**Launcher scheduled-task self-delete (cmd-moombox TD-4)** — replaced the `cmd /C ping ... & del` shell-out with a Windows `schtasks.exe` one-shot fired ~10s after the launcher exits. More robust: survives launcher process tree being killed (the task runs in its own Task Scheduler context), avoids `cmd.exe` quoting fragility on paths with spaces. Falls back to the legacy ping-based approach if schtasks fails (locked-down corporate Windows).
+
+**OnHealthUpdate engine callback (engine #31)** — new `HealthUpdate` struct (`ThroughputBps`, `ETA`, `RetryCount`, `LastError`) plus `OnHealthUpdate` callback on `SegmentDownloader`. `emitHealthUpdate` helper computes throughput from `bytesWritten / elapsed` since `Run` start; ETA from `Total/Seq` for segment-based downloads or `TotalBytes/Bytes` for direct VOD. `recordTransientErr` increments the retry counter and stashes the last non-terminal error for observability. One wiring site in `downloader_dash.go` ships now; remaining sites (`downloader_hls.go`, `downloader_direct.go`) and the UI consumer arrive in Phase 10.
+
+**Twitch token-bucket rate limiter (twitch #40)** — process-wide 10 req/s bucket on `doGQLOnce`. `acquireToken` blocks until a token is available (or ctx is cancelled); the refill goroutine produces tokens at `time.Second / twitchGQLRatePerSec`. Burst capacity is pre-filled at first use so a fresh process can issue up to `twitchGQLRatePerSec` requests immediately without waiting for the first tick. Per-channel keying was considered but a single shared bucket already smooths the multi-channel startup burst that triggered the 429 incident; keep it simple.
+
+**YouTube IOS + WEB_REMIX clients (youtube T2)** — added `IOSClient` and `WebRemixClient` to `internal/constants/constants.go` with appropriate UAs and Innertube context shapes. The clients are now AVAILABLE for use; wiring them into the rotation order in `player_api_strategy.go` is deferred to youtube T1 (data-driven priority table) since the imperative if/else cascade is hard to extend without that refactor.
+
+**chat_status DB column (worker Q6 + twitch #13)** — verified already complete in the initial schema (column was always present); `fieldToColumn` mapping + orchestrator lifecycle updates already cover every transition (`pending` → `downloading` → `finished` / `unavailable`). Frontend status pill ships with Phase 10.
+
+### Deferred per audit guidance
+
+- **DECISIONS #29 — moombox add HTTP path** — substantial design + implementation: shared internal-token file with user-only DACL, HTTP `POST /api/jobs` with `Bearer` auth, CLI client that reads the token. Multi-day. Defer to a focused session.
+- **youtube I3 — GetCookieHeader domain parameter** — `CookieJar` stores cookies as `map[string]string` with no domain tracking; adding domain-scoped retrieval requires reworking the jar's storage layer. Defer to a cookie-jar refactor.
+- **chat T3 — chat emote/badge image mirroring** — feature work: per-job assets directory layout, download pipeline, replay format extension to read local paths first then URL fallback. Defer to a feature-planning session.
 
 ### Phase 7 (test.36) — web hardening
 

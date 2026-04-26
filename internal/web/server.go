@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"io"
 	"log"
+	"sync/atomic"
 	"net"
 	"net/http"
 	"os/exec"
@@ -48,6 +49,7 @@ type Server struct {
 	wsHandler     http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
 	OpenBrowser   bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
 	ActualPort    int              // Actual bound port after Start (may differ from cfg if probed)
+	draining      atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
 	// Called by AuthMiddleware when the session cookie is missing/invalid.
@@ -92,6 +94,11 @@ func NewServer(store *config.Store, logger interface {
 	// middleware) can correlate log lines back to the originating request
 	// (audit reports/web.md S-22).
 	r.Use(chimiddleware.RequestID)
+	// DrainMiddleware short-circuits with 503 once StartDrain is called
+	// — placed BEFORE RecoveryMiddleware so the 503 path can't be
+	// disturbed by a panic in a later middleware. Audit
+	// reports/cmd-moombox.md C-main:165-166.
+	r.Use(s.DrainMiddleware)
 	r.Use(RecoveryMiddleware(logger))
 	r.Use(CORSMiddleware(store))
 	r.Use(SecurityHeaders)
@@ -405,6 +412,36 @@ func (s *Server) doShutdown() {
 		}
 		s.ws.Close()
 		s.logger.Info("web server stopped")
+	})
+}
+
+// StartDrain marks the server as draining so any new HTTP request gets a
+// clean 503 + Retry-After before the listener is closed. Used by the
+// restart dispatcher (cmd/moombox/services.go) so a setup-wizard POST
+// in flight gets to finish while a re-attempted browser refresh sees
+// "server restarting" rather than a connection reset. Audit
+// reports/cmd-moombox.md C-main:165-166.
+func (s *Server) StartDrain() {
+	s.draining.Store(true)
+}
+
+// DrainMiddleware returns 503 + Retry-After for any request that arrives
+// after StartDrain. Wired in NewServer so every route inherits the
+// behaviour without having to opt in. Loopback /api/restart and similar
+// admin endpoints are NOT exempted — they should already have been
+// initiated before StartDrain fired, and re-issuing during the drain
+// window is exactly the case where the 503 helps the client retry on
+// the new process.
+func (s *Server) DrainMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.draining.Load() {
+			w.Header().Set("Retry-After", "5")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"Server restarting; retry in a few seconds"}`))
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
