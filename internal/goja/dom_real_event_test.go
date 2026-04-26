@@ -212,37 +212,36 @@ func TestEventTargetDuplicateListenerIgnored(t *testing.T) {
 
 // TestEventTargetSignalAbortRemovesListener — AbortSignal-based listener
 // removal removes the listener when the signal aborts.
+//
+// Day-1 shipped this with the documented limitation that the test.49
+// hand-stub AbortController didn't wire signal-abort, so listeners
+// stayed registered. Day 5 replaced AbortController with a real
+// EventTarget-based class, so this test now verifies the WHATWG
+// signal contract: aborting the controller removes any listener
+// registered with {signal: ...}.
 func TestEventTargetSignalAbortRemovesListener(t *testing.T) {
 	vm, _, err := NewRuntimeWithShims(context.Background(), "")
 	if err != nil {
 		t.Fatalf("NewRuntimeWithShims: %v", err)
 	}
 	res, err := vm.RunString(`(function() {
-		// AbortController is the test.49 hand-stub; verify the new
-		// EventTarget honours its 'abort' event for listener removal.
 		const t = new EventTarget();
 		const ctrl = new AbortController();
-		// AbortSignal needs to be an EventTarget for our abort listener
-		// to register. The hand-stub signal has add/remove methods that
-		// no-op; for now skip the strict abort path -- this test will
-		// flip to expecting removal once AbortController is upgraded.
 		let n = 0;
 		t.addEventListener('go', function() { n++; }, { signal: ctrl.signal });
-		t.dispatchEvent(new Event('go'));
-		ctrl.abort();
-		t.dispatchEvent(new Event('go'));
-		return JSON.stringify({ firstFires: n });
+		t.dispatchEvent(new Event('go'));    // listener registered, fires
+		ctrl.abort();                         // signal abort -> remove listener
+		t.dispatchEvent(new Event('go'));    // no listener, no fire
+		return JSON.stringify({
+			firstFires: n,
+			signalIsAborted: ctrl.signal.aborted,
+		});
 	})()`)
 	if err != nil {
 		t.Fatalf("eval: %v", err)
 	}
-	got := res.String()
-	// The hand-stub AbortController doesn't actually wire abort events,
-	// so signal-based removal stays a no-op for now. Listener still fires
-	// on both dispatches. Day-2 will replace AbortController with a real
-	// EventTarget-based one and we'll tighten this expectation.
-	want := `{"firstFires":2}`
-	if got != want {
-		t.Errorf("signal-abort fires = %s, want %s (Day-1: AbortController is still hand-stub)", got, want)
+	want := `{"firstFires":1,"signalIsAborted":true}`
+	if got := res.String(); got != want {
+		t.Errorf("signal-abort fires = %s, want %s", got, want)
 	}
 }

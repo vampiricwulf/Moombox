@@ -1428,4 +1428,417 @@
         }
         return clone;
     };
+
+    // -------------------------------------------------------------------
+    // Day 5: DOMTokenList + URL/URLSearchParams + real AbortController
+    // -------------------------------------------------------------------
+
+    // DOMTokenList — backed by element.attributes.class, kept in sync.
+    class DOMTokenList {
+        constructor(element, attrName) {
+            Object.defineProperty(this, '_el', { value: element, writable: false, enumerable: false, configurable: true });
+            Object.defineProperty(this, '_attr', { value: attrName, writable: false, enumerable: false, configurable: true });
+        }
+        get _tokens() {
+            const v = this._el._attributes[this._attr];
+            return v ? v.split(/\s+/).filter(Boolean) : [];
+        }
+        _setTokens(arr) {
+            const dedup = [];
+            const seen = new Set();
+            for (const t of arr) { if (t && !seen.has(t)) { seen.add(t); dedup.push(t); } }
+            if (dedup.length === 0) {
+                delete this._el._attributes[this._attr];
+            } else {
+                this._el._attributes[this._attr] = dedup.join(' ');
+            }
+        }
+        get length() { return this._tokens.length; }
+        get value() { return this._el._attributes[this._attr] || ''; }
+        set value(v) { this._el._attributes[this._attr] = String(v || ''); }
+        item(i) { return this._tokens[i] || null; }
+        contains(token) { return this._tokens.indexOf(String(token)) >= 0; }
+        add(...tokens) {
+            const list = this._tokens;
+            for (const t of tokens) {
+                const s = String(t);
+                if (s && list.indexOf(s) < 0) list.push(s);
+            }
+            this._setTokens(list);
+        }
+        remove(...tokens) {
+            const drop = new Set(tokens.map(String));
+            this._setTokens(this._tokens.filter(t => !drop.has(t)));
+        }
+        toggle(token, force) {
+            const list = this._tokens;
+            const has = list.indexOf(String(token)) >= 0;
+            if (force === true || (force === undefined && !has)) {
+                if (!has) { list.push(String(token)); this._setTokens(list); return true; }
+                return true;
+            }
+            if (force === false || (force === undefined && has)) {
+                this._setTokens(list.filter(t => t !== String(token)));
+                return false;
+            }
+            return false;
+        }
+        replace(oldToken, newToken) {
+            const list = this._tokens;
+            const i = list.indexOf(String(oldToken));
+            if (i < 0) return false;
+            list[i] = String(newToken);
+            this._setTokens(list);
+            return true;
+        }
+        forEach(cb, thisArg) {
+            this._tokens.forEach((t, i) => cb.call(thisArg, t, i, this));
+        }
+        toString() { return this.value; }
+    }
+    Object.defineProperty(DOMTokenList.prototype, Symbol.toStringTag, { value: 'DOMTokenList', configurable: true });
+    DOMTokenList.prototype[Symbol.iterator] = function*() {
+        for (const t of this._tokens) yield t;
+    };
+
+    // Element.classList (lazy, one DOMTokenList per element).
+    Object.defineProperty(Element.prototype, 'classList', {
+        get() {
+            if (!this._classList) {
+                Object.defineProperty(this, '_classList', {
+                    value: new DOMTokenList(this, 'class'),
+                    writable: false, enumerable: false, configurable: true,
+                });
+            }
+            return this._classList;
+        },
+        configurable: true, enumerable: true,
+    });
+
+    // -------------------------------------------------------------------
+    // URL + URLSearchParams polyfill (minimal WHATWG-shape).
+    //
+    // Goja doesn't ship URL natively; fingerprinters frequently do
+    // `new URL(href)` to validate page origin. The polyfill below
+    // handles the common scheme://host:port/path?query#hash form.
+    // -------------------------------------------------------------------
+
+    const _URL_RE = /^([a-zA-Z][a-zA-Z0-9+\-.]*:)\/\/(?:([^@]+)@)?([^/:?#]+)(?::(\d+))?([^?#]*)(\?[^#]*)?(#.*)?$/;
+
+    class URL {
+        constructor(input, base) {
+            let s = String(input);
+            if (base !== undefined) {
+                // Resolve relative against base
+                const baseURL = new URL(String(base));
+                if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(s)) {
+                    // Absolute
+                } else if (s.startsWith('//')) {
+                    s = baseURL.protocol + s;
+                } else if (s.startsWith('/')) {
+                    s = baseURL.protocol + '//' + baseURL.host + s;
+                } else {
+                    // Path-relative
+                    const basePath = baseURL.pathname.replace(/[^/]*$/, '');
+                    s = baseURL.protocol + '//' + baseURL.host + basePath + s;
+                }
+            }
+            const m = _URL_RE.exec(s);
+            if (!m) throw new TypeError('Invalid URL: ' + input);
+            this._protocol = m[1].toLowerCase();
+            this._username = '';
+            this._password = '';
+            if (m[2]) {
+                const colon = m[2].indexOf(':');
+                if (colon >= 0) {
+                    this._username = m[2].slice(0, colon);
+                    this._password = m[2].slice(colon + 1);
+                } else {
+                    this._username = m[2];
+                }
+            }
+            this._hostname = m[3].toLowerCase();
+            this._port = m[4] || '';
+            this._pathname = m[5] || '/';
+            this._search = m[6] || '';
+            this._hash = m[7] || '';
+        }
+        get protocol() { return this._protocol; }
+        set protocol(v) { this._protocol = String(v).toLowerCase(); if (this._protocol.charAt(this._protocol.length - 1) !== ':') this._protocol += ':'; }
+        get hostname() { return this._hostname; }
+        set hostname(v) { this._hostname = String(v).toLowerCase(); }
+        get port() { return this._port; }
+        set port(v) { this._port = String(v); }
+        get host() {
+            return this._port ? this._hostname + ':' + this._port : this._hostname;
+        }
+        set host(v) {
+            const colon = String(v).indexOf(':');
+            if (colon >= 0) {
+                this._hostname = String(v).slice(0, colon).toLowerCase();
+                this._port = String(v).slice(colon + 1);
+            } else {
+                this._hostname = String(v).toLowerCase();
+                this._port = '';
+            }
+        }
+        get pathname() { return this._pathname; }
+        set pathname(v) { this._pathname = String(v).startsWith('/') ? String(v) : '/' + String(v); }
+        get search() { return this._search; }
+        set search(v) {
+            v = String(v || '');
+            if (v && !v.startsWith('?')) v = '?' + v;
+            this._search = v;
+        }
+        get hash() { return this._hash; }
+        set hash(v) {
+            v = String(v || '');
+            if (v && !v.startsWith('#')) v = '#' + v;
+            this._hash = v;
+        }
+        get origin() { return this._protocol + '//' + this.host; }
+        get href() { return this.toString(); }
+        set href(v) {
+            const u = new URL(String(v));
+            this._protocol = u._protocol;
+            this._username = u._username;
+            this._password = u._password;
+            this._hostname = u._hostname;
+            this._port = u._port;
+            this._pathname = u._pathname;
+            this._search = u._search;
+            this._hash = u._hash;
+        }
+        get searchParams() {
+            if (!this._sp) {
+                Object.defineProperty(this, '_sp', { value: new URLSearchParams(this._search.replace(/^\?/, '')), writable: true, enumerable: false, configurable: true });
+                // Sync writes back to this._search.
+                const url = this;
+                const orig = this._sp;
+                const handler = {
+                    get(t, p) { return t[p]; },
+                };
+                // We don't proxy here; instead provide a sync helper.
+            }
+            return this._sp;
+        }
+        toString() {
+            let s = this._protocol + '//';
+            if (this._username) {
+                s += this._username;
+                if (this._password) s += ':' + this._password;
+                s += '@';
+            }
+            s += this.host + this._pathname;
+            // Sync from URLSearchParams if it was used
+            if (this._sp) {
+                const sp = this._sp.toString();
+                this._search = sp ? '?' + sp : '';
+            }
+            s += this._search + this._hash;
+            return s;
+        }
+    }
+    Object.defineProperty(URL.prototype, Symbol.toStringTag, { value: 'URL', configurable: true });
+
+    class URLSearchParams {
+        constructor(init) {
+            Object.defineProperty(this, '_pairs', { value: [], writable: false, enumerable: false, configurable: true });
+            if (init == null || init === '') return;
+            if (typeof init === 'string') {
+                let s = init;
+                if (s.charAt(0) === '?') s = s.slice(1);
+                if (!s) return;
+                for (const part of s.split('&')) {
+                    if (!part) continue;
+                    const i = part.indexOf('=');
+                    if (i < 0) {
+                        this._pairs.push([decodeURIComponent(part.replace(/\+/g, ' ')), '']);
+                    } else {
+                        this._pairs.push([
+                            decodeURIComponent(part.slice(0, i).replace(/\+/g, ' ')),
+                            decodeURIComponent(part.slice(i + 1).replace(/\+/g, ' ')),
+                        ]);
+                    }
+                }
+            } else if (Array.isArray(init)) {
+                for (const p of init) {
+                    if (Array.isArray(p) && p.length >= 2) this._pairs.push([String(p[0]), String(p[1])]);
+                }
+            } else if (typeof init === 'object') {
+                for (const k of Object.keys(init)) this._pairs.push([k, String(init[k])]);
+            }
+        }
+        append(name, value) { this._pairs.push([String(name), String(value)]); }
+        delete(name) {
+            const want = String(name);
+            for (let i = this._pairs.length - 1; i >= 0; i--) {
+                if (this._pairs[i][0] === want) this._pairs.splice(i, 1);
+            }
+        }
+        get(name) {
+            const want = String(name);
+            for (const p of this._pairs) if (p[0] === want) return p[1];
+            return null;
+        }
+        getAll(name) {
+            const want = String(name);
+            return this._pairs.filter(p => p[0] === want).map(p => p[1]);
+        }
+        has(name) {
+            const want = String(name);
+            return this._pairs.some(p => p[0] === want);
+        }
+        set(name, value) {
+            this.delete(name);
+            this._pairs.push([String(name), String(value)]);
+        }
+        sort() {
+            this._pairs.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+        }
+        forEach(cb, thisArg) {
+            for (const [k, v] of this._pairs) cb.call(thisArg, v, k, this);
+        }
+        keys() { return this._pairs.map(p => p[0])[Symbol.iterator](); }
+        values() { return this._pairs.map(p => p[1])[Symbol.iterator](); }
+        entries() { return this._pairs.map(p => [p[0], p[1]])[Symbol.iterator](); }
+        get size() { return this._pairs.length; }
+        toString() {
+            return this._pairs.map(p => encodeURIComponent(p[0]) + '=' + encodeURIComponent(p[1])).join('&');
+        }
+    }
+    Object.defineProperty(URLSearchParams.prototype, Symbol.toStringTag, { value: 'URLSearchParams', configurable: true });
+    URLSearchParams.prototype[Symbol.iterator] = function*() {
+        for (const p of this._pairs) yield [p[0], p[1]];
+    };
+
+    globalThis.URL = URL;
+    globalThis.URLSearchParams = URLSearchParams;
+
+    // Reseed location with proper URL parsing now that URL exists.
+    if (globalThis.location && typeof globalThis.location === 'object') {
+        try {
+            const u = new URL(globalThis.location.href || 'https://www.youtube.com/');
+            globalThis.location.protocol = u.protocol;
+            globalThis.location.hostname = u.hostname;
+            globalThis.location.port = u.port;
+            globalThis.location.host = u.host;
+            globalThis.location.pathname = u.pathname;
+            globalThis.location.search = u.search;
+            globalThis.location.hash = u.hash;
+            globalThis.location.origin = u.origin;
+            globalThis.location.href = u.href;
+        } catch (e) { /* keep test.49 hand-stub values */ }
+    }
+
+    // -------------------------------------------------------------------
+    // Real AbortController + AbortSignal that ARE EventTargets
+    // -------------------------------------------------------------------
+    class AbortSignal extends EventTarget {
+        constructor() {
+            super();
+            this._aborted = false;
+            this._reason = undefined;
+            this.onabort = null;
+        }
+        get aborted() { return this._aborted; }
+        get reason() { return this._reason; }
+        throwIfAborted() {
+            if (this._aborted) throw this._reason || new Error('AbortError');
+        }
+        static abort(reason) {
+            const s = new AbortSignal();
+            s._aborted = true;
+            s._reason = reason !== undefined ? reason : new Error('AbortError');
+            return s;
+        }
+        static timeout(ms) {
+            const s = new AbortSignal();
+            globalThis.setTimeout(() => {
+                s._aborted = true;
+                s._reason = new Error('TimeoutError');
+                s.dispatchEvent(new Event('abort'));
+            }, ms);
+            return s;
+        }
+    }
+    Object.defineProperty(AbortSignal.prototype, Symbol.toStringTag, { value: 'AbortSignal', configurable: true });
+
+    class AbortController {
+        constructor() {
+            Object.defineProperty(this, 'signal', {
+                value: new AbortSignal(),
+                writable: false, enumerable: true, configurable: false,
+            });
+        }
+        abort(reason) {
+            if (this.signal._aborted) return;
+            this.signal._aborted = true;
+            this.signal._reason = reason !== undefined ? reason : new Error('AbortError');
+            const e = new Event('abort');
+            try {
+                if (typeof this.signal.onabort === 'function') {
+                    this.signal.onabort.call(this.signal, e);
+                }
+            } catch (ex) { /* swallow */ }
+            this.signal.dispatchEvent(e);
+        }
+    }
+    Object.defineProperty(AbortController.prototype, Symbol.toStringTag, { value: 'AbortController', configurable: true });
+
+    globalThis.AbortController = AbortController;
+    globalThis.AbortSignal = AbortSignal;
+
+    // -------------------------------------------------------------------
+    // Wire HTMLElement.dataset as a Proxy so `el.dataset.foo = 'bar'`
+    // mirrors to `el.attributes['data-foo']` like real browsers do.
+    // -------------------------------------------------------------------
+    Object.defineProperty(HTMLElement.prototype, 'dataset', {
+        get() {
+            if (!this._datasetProxy) {
+                const el = this;
+                const proxy = new Proxy({}, {
+                    get(_t, prop) {
+                        if (typeof prop !== 'string') return undefined;
+                        const k = 'data-' + _toDashed(prop);
+                        return el._attributes[k];
+                    },
+                    set(_t, prop, value) {
+                        if (typeof prop !== 'string') return false;
+                        const k = 'data-' + _toDashed(prop);
+                        el._attributes[k] = String(value);
+                        return true;
+                    },
+                    deleteProperty(_t, prop) {
+                        if (typeof prop !== 'string') return false;
+                        const k = 'data-' + _toDashed(prop);
+                        delete el._attributes[k];
+                        return true;
+                    },
+                    has(_t, prop) {
+                        if (typeof prop !== 'string') return false;
+                        return ('data-' + _toDashed(prop)) in el._attributes;
+                    },
+                    ownKeys(_t) {
+                        return Object.keys(el._attributes)
+                            .filter(k => k.startsWith('data-'))
+                            .map(k => _toCamel(k.slice('data-'.length)));
+                    },
+                    getOwnPropertyDescriptor(_t, prop) {
+                        if (typeof prop !== 'string') return undefined;
+                        const k = 'data-' + _toDashed(prop);
+                        if (!(k in el._attributes)) return undefined;
+                        return { value: el._attributes[k], enumerable: true, configurable: true, writable: true };
+                    },
+                });
+                Object.defineProperty(this, '_datasetProxy', {
+                    value: proxy, writable: false, enumerable: false, configurable: true,
+                });
+            }
+            return this._datasetProxy;
+        },
+        configurable: true, enumerable: true,
+    });
+
+    globalThis.DOMTokenList = DOMTokenList;
 })();
