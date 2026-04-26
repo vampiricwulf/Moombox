@@ -674,11 +674,29 @@ func (s *AutoCookieService) Stop() {
 // should be skipped because no active jobs exist. When HasActiveJobs is nil
 // the service refreshes on every tick (legacy behaviour). Audit
 // reports/cookies.md #23.
-func (s *AutoCookieService) shouldSkipPeriodicRefresh() bool {
-	if s.HasActiveJobs == nil {
-		return false
+// shouldSkipPeriodicRefresh decides whether the periodic ticker should fire.
+// Two skip conditions:
+//
+//  1. No active jobs (existing) — when nothing is downloading or live, an
+//     auth-token refresh isn't urgent. Headless Chrome launch is ~1-5s of
+//     CPU + ~150MB RAM; not worth it for an idle session.
+//  2. Recent successful refresh (audit reports/cookies.md #23) — if we
+//     refreshed within `interval/2`, the next tick is too close to be
+//     useful. Trips when the user just-now used "refresh now" or a job-
+//     level recovery path triggered a refresh between ticks.
+//
+// Either condition skips the tick.
+func (s *AutoCookieService) shouldSkipPeriodicRefresh(interval time.Duration) bool {
+	if s.HasActiveJobs != nil && !s.HasActiveJobs() {
+		return true
 	}
-	return !s.HasActiveJobs()
+	s.mu.Lock()
+	last := s.lastRefresh
+	s.mu.Unlock()
+	if last != nil && time.Since(*last) < interval/2 {
+		return true
+	}
+	return false
 }
 
 // StartPeriodicRefresh starts a background goroutine that periodically
@@ -701,8 +719,8 @@ func (s *AutoCookieService) StartPeriodicRefresh(ctx context.Context, interval t
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if s.shouldSkipPeriodicRefresh() {
-					s.logger.Debug("periodic auto-cookie refresh skipped — no active jobs")
+				if s.shouldSkipPeriodicRefresh(interval) {
+					s.logger.Debug("periodic auto-cookie refresh skipped — no active jobs or recent refresh")
 					continue
 				}
 				s.logger.Debug("periodic auto-cookie refresh triggered")

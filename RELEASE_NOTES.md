@@ -1,6 +1,25 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 5 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 6 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
+
+### Phase 6 (test.35) — engine/protocol perf
+
+Five "Deferred" rows closed across YouTube, BgUtils, Cipher, Worker, and Cookies. Two items kept Deferred per audit guidance (VM pool, ProfileInUse).
+
+**VisitorData debounced refetch (youtube I4)** — `Service.Init` was a `sync.Once` one-shot, so any startup-blip failure left the process stuck with empty VisitorData for its lifetime (bad for a 24/7 archiver). Replaced with a debounced retry: `lastInitAt` tracks the last attempt, and Init re-runs when ≥1h has passed. Already-set fields are not clobbered by stale homepage fetches — `OnVisitorData` backfills from normal watch-page traffic continue to win against a slower Init's snapshot.
+
+**Proactive integrity-token refresh (bgutils FRESH-2)** — `PotProvider.generateAndMint` now schedules a `time.AfterFunc(ttl - 5min)` proactive-refresh callback alongside the existing `AfterFunc(ttl)` eviction. The proactive refresh re-mints the BotGuard token in the background before the user-facing first-call-after-expiry would have to wait 2-10s for a fresh BotGuard run — that latency could miss a 5-second segment on a live stream, so the pre-warm directly improves segment continuity. The refresh holds `minterCreatingMu` to serialise against the user-facing path; on race-loss the new minter is cleaned up; on failure the eviction AfterFunc still fires as a fallback.
+
+**Cipher preprocessed-code disk cache (cipher Q4)** — `PlayerCache` gains a second-tier `<key>.preprocessed.js` sidecar (same TTL, same atomic write) so the solver-LRU's evict-then-recompile cycle skips the 200-500ms extraction + preprocessing pass. New methods `GetPreprocessed` / `PutPreprocessed` / `FilePathPreprocessed`; refactored `Put` + new methods share an `atomicWrite` helper. `compileSolver` checks the disk cache before running `preprocessPlayerWithBranch`; on hit, the extraction-branch log line is skipped (it's an artifact of the slow path). `Remove` now cleans both files so an explicit invalidation drops the preprocessed sidecar too.
+
+**Quality-split switch-up (worker Q1)** — owner-decision item from the 45-question pass: when stream quality goes UP mid-flight, should we switch tiers or stay on the original? Owner answered "switch up". The existing `QualityInfo.Changed` already handled this correctly — it's direction-agnostic, so an upgrade triggers the same split-and-resume flow as a downgrade. Documented the policy in `quality.go` so the design rationale survives in code rather than only in the decision log.
+
+**DPAPI mtime-half / refresh-interval skip (cookies #23 follow-on)** — `shouldSkipPeriodicRefresh` now also skips the periodic ticker when the last successful refresh was within `interval/2`. Trips when manual "refresh now" or a job-level recovery refresh happened between ticks; avoids the redundant headless-Chrome launch (~1-5s, ~150MB RAM). The original "no active jobs" skip stays.
+
+### Deferred this phase (per audit guidance)
+
+- **goja Q4 (VM pool)** — bgutils minter cache is already 1-minter-per-process; cipher solver cache is LRU 10. The 50-100ms VM construction isn't on a hot path; defer until profiling shows it.
+- **cookies #50 (ProfileInUse)** — default config uses a moombox-managed profile dir (no conflict surface); proactive `cleanChromiumLockFiles` handles edge cases. Audit explicitly: "defer until a real user incident."
 
 ### Phase 5 (test.34) — Strategy + ChatSource interfaces + Goja-cipher consolidation
 
@@ -81,7 +100,6 @@ Six fixes closing the easy wins from the deferred-drain plan:
 
 - **Phase 2 (test.31)** — sentinel migration (cipher / twitch / engine), goja TD-4/TD-5, engine #17 ErrSegmentPermanent, dismissal re-examinations.
 - **Phase 3 (test.32)** — `internal/httpx` package unifying per-package HTTP clients.
-- **Phase 6 (test.35)** — engine/protocol perf (VisitorData refetch, proactive IT refresh, cipher disk cache, VM pool, quality-split switch up, DPAPI mtime-half, ProfileInUse).
 - **Phase 7 (test.36)** — web hardening (TLS, chi.RequestID, -EncodedCommand, 256KB WS write cap, LRU rate-limiter, ETag, pagination, AutoCookieReloginRequired struct→map backend, JSON envelope backend, Update-apply Origin tightening).
 - **Phase 8 (test.37)** — owner-decision feature work (chat_status column, moombox add HTTP, IOS+MWEB clients, GetCookieHeader domain param, chat image mirror, restart drain, launcher scheduled task, OnHealthUpdate engine callback, Twitch token bucket).
 - **Phase 9 (test.38)** — TUI overlay interface + redraw caching + persistent restart-required banner.

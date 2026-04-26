@@ -17,6 +17,13 @@ type QualityInfo struct {
 // Changed returns true if the quality differs in resolution.
 // FPS-only changes are ignored — splitting for framerate alone adds file
 // overhead without saving storage since the total data volume is the same.
+//
+// Direction-agnostic on purpose: an upgrade (the audit's "switch up" case in
+// reports/worker.md Q1) and a downgrade are both treated as a quality split,
+// because both produce a discontinuity in the encoded bitstream that a single
+// FFmpeg invocation can't represent cleanly. The orchestrator captures the
+// old segment, opens a new staging dir, and resumes at the new tier — same
+// flow either direction.
 func (q QualityInfo) Changed(other QualityInfo) bool {
 	return q.Width != other.Width || q.Height != other.Height
 }

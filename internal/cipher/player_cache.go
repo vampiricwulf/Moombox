@@ -91,6 +91,16 @@ func (pc *PlayerCache) FilePath(playerURL string) string {
 	return filepath.Join(pc.cacheDir, key+".js")
 }
 
+// FilePathPreprocessed returns the disk path for the preprocessed
+// (sig/n binding-injected) form of a player. Audit reports/cipher.md
+// Q4 — second tier disk cache that skips the 200-500 ms extraction +
+// preprocessing pass on solver-LRU eviction. Same key + TTL as the
+// raw cache so both age out together.
+func (pc *PlayerCache) FilePathPreprocessed(playerURL string) string {
+	key := CacheKey(playerURL)
+	return filepath.Join(pc.cacheDir, key+".preprocessed.js")
+}
+
 // Get returns the cached player JS for the given URL, or empty string if not cached/expired.
 //
 // TTL semantics use file ModTime which can drift in a couple of known cases:
@@ -131,21 +141,55 @@ func (pc *PlayerCache) Get(playerURL string) (string, error) {
 
 // Put caches player JS for the given URL. Uses atomic write (tmp + rename).
 func (pc *PlayerCache) Put(playerURL string, js string) error {
+	return pc.atomicWrite(pc.FilePath(playerURL), js)
+}
+
+// GetPreprocessed returns the cached preprocessed (sig/n-binding-injected)
+// player code, or "" if not cached / expired. TTL semantics match Get.
+// Audit reports/cipher.md Q4.
+func (pc *PlayerCache) GetPreprocessed(playerURL string) (string, error) {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+
+	path := pc.FilePathPreprocessed(playerURL)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	if time.Since(info.ModTime()) > playerCacheTTL {
+		os.Remove(path)
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// PutPreprocessed atomically writes the preprocessed player code.
+// Audit reports/cipher.md Q4.
+func (pc *PlayerCache) PutPreprocessed(playerURL string, code string) error {
+	return pc.atomicWrite(pc.FilePathPreprocessed(playerURL), code)
+}
+
+// atomicWrite writes data to path via a temp file + rename. Holds pc.mu.Lock
+// so concurrent writes don't race on the same target.
+func (pc *PlayerCache) atomicWrite(path string, data string) error {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	path := pc.FilePath(playerURL)
 	tmpPath := path + ".tmp"
-
-	if err := os.WriteFile(tmpPath, []byte(js), 0o644); err != nil {
+	if err := os.WriteFile(tmpPath, []byte(data), 0o644); err != nil {
 		return fmt.Errorf("write tmp: %w", err)
 	}
-
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename: %w", err)
 	}
-
 	return nil
 }
 
@@ -211,17 +255,18 @@ func (pc *PlayerCache) Evict() error {
 	return nil
 }
 
-// Remove deletes the cached player JS for a specific URL.
-// Errors are logged but not returned — removal is best-effort
+// Remove deletes the cached player JS (and preprocessed sidecar) for a
+// specific URL. Errors are logged but not returned — removal is best-effort
 // (file may be held by another reader on Windows).
 func (pc *PlayerCache) Remove(playerURL string) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	path := pc.FilePath(playerURL)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		if pc.logger != nil {
-			pc.logger.Debug("cipher: failed to remove cached player", "path", path, "err", err)
+	for _, path := range []string{pc.FilePath(playerURL), pc.FilePathPreprocessed(playerURL)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			if pc.logger != nil {
+				pc.logger.Debug("cipher: failed to remove cached player", "path", path, "err", err)
+			}
 		}
 	}
 }

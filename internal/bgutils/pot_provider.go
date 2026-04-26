@@ -373,6 +373,22 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	// integrity-token TTL (~6h per upstream).
 	ttl := time.Until(minter.ExpiresAt)
 	if ttl > 0 {
+		// Proactive refresh: re-mint shortly before expiry so the
+		// user-facing first-call-after-expiry doesn't pay the 2-10s
+		// BotGuard generation cost (which can miss live-stream segments
+		// on a 5s segment cadence). The refresh runs on a background
+		// ctx; its result atomically replaces the cached minter.
+		// Audit reports/bgutils.md FRESH-2.
+		if refreshAt := ttl - minterRefreshLead; refreshAt > 0 {
+			time.AfterFunc(refreshAt, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						pp.logger.Error("minter proactive refresh panic", "panic", r)
+					}
+				}()
+				pp.proactiveRefreshMinter(minter)
+			})
+		}
 		time.AfterFunc(ttl, func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -399,6 +415,119 @@ func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding strin
 	}
 
 	return pp.mintPoToken(minter, contentBinding)
+}
+
+// minterRefreshLead is how far before a cached minter's expiry the proactive
+// refresh fires. 5 min is comfortably longer than the worst-case BotGuard
+// run (typically 2-10s), so the cached minter still answers user-facing
+// calls during the refresh window. Audit reports/bgutils.md FRESH-2.
+const minterRefreshLead = 5 * time.Minute
+
+// proactiveRefreshMinter regenerates the cached minter shortly before its
+// expiry so the eviction-then-recreate cycle isn't paid by a user-facing
+// GeneratePoToken call. Skips work if the cache no longer holds `original`
+// (already evicted / invalidated / replaced); otherwise generates a fresh
+// minter, swaps it in atomically, and cleans up `original`. Failures only
+// log — the eviction AfterFunc still fires at ttl so a failed refresh
+// doesn't leave a stale minter alive.
+//
+// Runs on its own background ctx (with a hard timeout) since the firing
+// time isn't tied to any user request.
+func (pp *PotProvider) proactiveRefreshMinter(original *TokenMinter) {
+	pp.mu.Lock()
+	cached, ok := pp.minterCache[defaultMinterKey]
+	pp.mu.Unlock()
+	if !ok || cached != original {
+		// Already replaced or evicted; nothing to do.
+		return
+	}
+
+	// Bound the refresh attempt — if BotGuard is misbehaving, fall back
+	// on the eviction AfterFunc rather than wedging a goroutine.
+	refreshCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Take the same creation lock the user-facing path uses so a refresh
+	// can't race with a fresh GeneratePoToken trying to bootstrap a
+	// missing minter (which would happen if eviction fired between the
+	// cache check above and the swap below).
+	pp.minterCreatingMu.Lock()
+	defer pp.minterCreatingMu.Unlock()
+
+	// Re-check under the creation lock — another goroutine may have
+	// already replaced the minter while we waited.
+	pp.mu.Lock()
+	cached, ok = pp.minterCache[defaultMinterKey]
+	pp.mu.Unlock()
+	if !ok || cached != original {
+		return
+	}
+
+	pp.logger.Debug("[PotProvider] proactively refreshing minter pre-expiry")
+
+	client := NewWebPoClient(pp.config, pp.logger)
+	fresh, err := client.GenerateTokenMinter(refreshCtx)
+	if err != nil {
+		pp.logger.Warn("[PotProvider] proactive refresh failed; falling back to eviction", "err", err)
+		return
+	}
+
+	pp.mu.Lock()
+	stillOurs := pp.minterCache[defaultMinterKey] == original
+	if stillOurs {
+		pp.minterCache[defaultMinterKey] = fresh
+	}
+	pp.mu.Unlock()
+
+	if !stillOurs {
+		// Lost the race; discard the fresh minter so we don't leak its VM.
+		pp.safeCleanup(fresh, "refresh-race-loser")
+		return
+	}
+
+	pp.safeCleanup(original, "proactive-refresh")
+	pp.mintersCreated.Add(1)
+	pp.mintersInvalidated.Add(1)
+
+	// Schedule the refresh + eviction chain for the new minter so the
+	// cycle continues. Mirrors the bottom of generateAndMint without
+	// duplicating the rest of the user-facing logic.
+	freshTTL := time.Until(fresh.ExpiresAt)
+	if freshTTL > 0 {
+		if refreshAt := freshTTL - minterRefreshLead; refreshAt > 0 {
+			time.AfterFunc(refreshAt, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						pp.logger.Error("minter proactive refresh panic", "panic", r)
+					}
+				}()
+				pp.proactiveRefreshMinter(fresh)
+			})
+		}
+		time.AfterFunc(freshTTL, func() {
+			defer func() {
+				if r := recover(); r != nil {
+					pp.logger.Error("minter eviction panic", "panic", r)
+				}
+			}()
+			var cleanup func()
+			pp.mu.Lock()
+			evicted := false
+			if cached, ok := pp.minterCache[defaultMinterKey]; ok && cached == fresh {
+				cleanup = cached.Cleanup
+				delete(pp.minterCache, defaultMinterKey)
+				evicted = true
+			}
+			pp.mu.Unlock()
+			if cleanup != nil {
+				cleanup()
+			}
+			if evicted {
+				pp.mintersEvicted.Add(1)
+				pp.logger.Debug("[PotProvider] evicted expired minter")
+			}
+		})
+	}
 }
 
 func (pp *PotProvider) cleanupExpired() {

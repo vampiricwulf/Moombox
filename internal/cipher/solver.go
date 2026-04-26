@@ -171,11 +171,27 @@ func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) 
 		return nil, err
 	}
 
-	preprocessed, branch, err := preprocessPlayerWithBranch(playerJS)
-	if err != nil {
-		return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
+	// Second-tier cache: skip the 200-500ms extraction + preprocessing
+	// pass when the .preprocessed.js sidecar is on disk. Only the slow
+	// path runs preprocessPlayerWithBranch + writes the sidecar back.
+	// Audit reports/cipher.md Q4.
+	preprocessed, ppErr := s.playerCache.GetPreprocessed(playerURL)
+	if ppErr != nil {
+		s.logger.Debug("cipher: preprocessed cache read failed", "playerID", playerID, "err", ppErr)
 	}
-	s.logger.Info("cipher: extraction branch", "playerID", playerID, "branch", branch)
+	if preprocessed != "" {
+		s.logger.Debug("cipher: preprocessed cache hit", "playerID", playerID)
+	} else {
+		var branch string
+		preprocessed, branch, err = preprocessPlayerWithBranch(playerJS)
+		if err != nil {
+			return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
+		}
+		s.logger.Info("cipher: extraction branch", "playerID", playerID, "branch", branch)
+		if putErr := s.playerCache.PutPreprocessed(playerURL, preprocessed); putErr != nil {
+			s.logger.Debug("cipher: preprocessed cache write failed", "playerID", playerID, "err", putErr)
+		}
+	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err

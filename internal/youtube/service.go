@@ -18,6 +18,13 @@ var (
 	homepageApiKeyRe = regexp.MustCompile(`"INNERTUBE_API_KEY":"([^"]+)"`)
 )
 
+// initRetryInterval bounds how often Init re-fetches the homepage. A value
+// here is a balance: too short floods YouTube on a sustained startup blip
+// (anti-bot tripwire); too long means a 24/7 process stays stuck with empty
+// VisitorData if the very first Init failed. 1h matches typical visitor-data
+// rotation cadence on YouTube. Audit reports/youtube.md I4.
+const initRetryInterval = 1 * time.Hour
+
 // Service is the YouTube service facade wrapping player API, auth, and format selection.
 type Service struct {
 	Auth        *Auth
@@ -25,8 +32,13 @@ type Service struct {
 	Cookies     *cookies.CookieJar
 	visitorData string // Cached visitor data from watch page
 	vdMu        sync.RWMutex
-	initOnce    sync.Once
-	logger      interface {
+	// initMu serialises Init runs; lastInitAt is read+written under this lock.
+	// The previous initOnce one-shot meant a transient startup network failure
+	// would leave the process with empty VisitorData forever — bad for a 24/7
+	// archiver. Audit reports/youtube.md I4.
+	initMu     sync.Mutex
+	lastInitAt time.Time
+	logger     interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -59,43 +71,72 @@ func NewService(jar *cookies.CookieJar, logger interface {
 	return svc
 }
 
-// Init performs one-time initialization: fetches YouTube homepage to extract
-// visitor data and API key. Safe to call multiple times (idempotent).
+// Init fetches the YouTube homepage to extract visitor data + API key. Safe
+// to call repeatedly: a debounce window (initRetryInterval) suppresses
+// rapid re-runs, and a successful fetch backfills only the fields that are
+// still empty. Callers can call this defensively from any code path that
+// needs fresh VisitorData; the watch-page OnVisitorData callback continues
+// to backfill from normal traffic regardless.
+//
+// Audit reports/youtube.md I4 — was sync.Once which meant any startup-blip
+// failure left VisitorData empty for the lifetime of a 24/7 process.
 func (s *Service) Init(ctx context.Context) {
-	s.initOnce.Do(func() {
-		// Load/sync cookies
-		if err := s.Auth.SyncCookies(); err != nil {
-			s.logger.Warn("[YouTube] SyncCookies failed during init", "error", err)
-		}
+	s.initMu.Lock()
+	if !s.lastInitAt.IsZero() && time.Since(s.lastInitAt) < initRetryInterval {
+		s.initMu.Unlock()
+		return
+	}
+	// Skip work entirely if both fields are already populated. The lock
+	// covers the read-then-set, which is enough — concurrent successful
+	// OnVisitorData callbacks could land while we're fetching, in which
+	// case we'd waste one homepage fetch but stay correct.
+	s.vdMu.RLock()
+	haveVD := s.visitorData != ""
+	s.vdMu.RUnlock()
+	haveKey := s.PlayerAPI.apiKey != "" && s.PlayerAPI.apiKey != constants.DefaultAPIKey
+	if haveVD && haveKey {
+		s.lastInitAt = time.Now()
+		s.initMu.Unlock()
+		return
+	}
+	s.lastInitAt = time.Now()
+	s.initMu.Unlock()
 
-		// Fetch YouTube homepage for visitor data and API key
-		headers := map[string]string{
-			"User-Agent": constants.UserAgents.Web,
-		}
-		if ch := s.Auth.GetCookieHeader(); ch != "" {
-			headers["Cookie"] = ch
-		}
-		body, err := utils.FetchBody(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
-		if err != nil {
-			s.logger.Warn("[YouTube] Failed to fetch homepage", "error", err)
-			return
-		}
-		html := string(body)
+	// Load/sync cookies
+	if err := s.Auth.SyncCookies(); err != nil {
+		s.logger.Warn("[YouTube] SyncCookies failed during init", "error", err)
+	}
 
-		// Extract visitor data
-		if m := visitorDataRegex.FindStringSubmatch(html); m != nil {
-			s.vdMu.Lock()
+	// Fetch YouTube homepage for visitor data and API key
+	headers := map[string]string{
+		"User-Agent": constants.UserAgents.Web,
+	}
+	if ch := s.Auth.GetCookieHeader(); ch != "" {
+		headers["Cookie"] = ch
+	}
+	body, err := utils.FetchBody(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
+	if err != nil {
+		s.logger.Warn("[YouTube] Failed to fetch homepage", "error", err)
+		return
+	}
+	html := string(body)
+
+	// Extract visitor data (only set if currently empty so a fresher value
+	// from OnVisitorData isn't clobbered by an older homepage fetch).
+	if m := visitorDataRegex.FindStringSubmatch(html); m != nil {
+		s.vdMu.Lock()
+		if s.visitorData == "" {
 			s.visitorData = m[1]
-			s.vdMu.Unlock()
 			s.logger.Debug("[YouTube] Visitor data extracted", "prefix", m[1][:min(30, len(m[1]))])
 		}
+		s.vdMu.Unlock()
+	}
 
-		// Extract API key
-		if m := homepageApiKeyRe.FindStringSubmatch(html); m != nil {
-			s.PlayerAPI.SetAPIKey(m[1])
-			s.logger.Debug("[YouTube] API key extracted", "key", m[1])
-		}
-	})
+	// Extract API key
+	if m := homepageApiKeyRe.FindStringSubmatch(html); m != nil {
+		s.PlayerAPI.SetAPIKey(m[1])
+		s.logger.Debug("[YouTube] API key extracted", "key", m[1])
+	}
 }
 
 // FetchWatchPageHtml fetches the raw HTML of a video's watch page.

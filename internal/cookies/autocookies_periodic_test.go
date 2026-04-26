@@ -2,6 +2,7 @@ package cookies
 
 import (
 	"testing"
+	"time"
 )
 
 // nopAutoCookieLogger is a minimal logger sink for the periodic-refresh tests
@@ -45,7 +46,7 @@ func TestShouldSkipPeriodicRefresh(t *testing.T) {
 			if tc.hook != nil {
 				s.HasActiveJobs = tc.hook
 			}
-			if got := s.shouldSkipPeriodicRefresh(); got != tc.want {
+			if got := s.shouldSkipPeriodicRefresh(10 * time.Minute); got != tc.want {
 				t.Errorf("shouldSkipPeriodicRefresh = %v, want %v", got, tc.want)
 			}
 		})
@@ -144,10 +145,10 @@ func TestShouldSkipPeriodicRefreshCallbackInvocationCount(t *testing.T) {
 		return calls > 1 // first call says "no active", second says "active"
 	}
 
-	if got := s.shouldSkipPeriodicRefresh(); !got {
+	if got := s.shouldSkipPeriodicRefresh(10 * time.Minute); !got {
 		t.Errorf("first call: shouldSkipPeriodicRefresh = false, want true (no active)")
 	}
-	if got := s.shouldSkipPeriodicRefresh(); got {
+	if got := s.shouldSkipPeriodicRefresh(10 * time.Minute); got {
 		t.Errorf("second call: shouldSkipPeriodicRefresh = true, want false (active appeared)")
 	}
 	if calls != 2 {
