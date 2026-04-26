@@ -1426,9 +1426,16 @@ class MoomboxApp {
     const rawVideoId = job.videoId || job.id;
     const ytThumb = `https://i.ytimg.com/vi/${encodeURIComponent(rawVideoId)}/mqdefault.jpg`;
     const twitchAvatarFallback = isTwitch && job.channelAvatarUrl ? job.channelAvatarUrl : "";
-    const thumbnailUrl = job.thumbnailUrl || (isTwitch ? twitchAvatarFallback : ytThumb);
-    const fallbackThumb = isTwitch ? twitchAvatarFallback : ytThumb;
-    const isAvatarThumb = isTwitch && (!job.thumbnailUrl || thumbnailUrl === twitchAvatarFallback);
+    // Prefer the locally-stored thumbnail (downloaded during mux). The
+    // remote URL still feeds the data-fallback so the img onerror
+    // handler can swap in i.ytimg.com / Twitch CDN if the local file is
+    // missing for any reason (mux stage hadn't finished yet, file got
+    // hand-deleted, etc.).
+    const localThumb = job.thumbnailFile ? `/api/jobs/${encodeURIComponent(job.id)}/thumbnail` : "";
+    const remoteThumb = job.thumbnailUrl || (isTwitch ? twitchAvatarFallback : ytThumb);
+    const thumbnailUrl = localThumb || remoteThumb;
+    const fallbackThumb = localThumb ? remoteThumb : (isTwitch ? twitchAvatarFallback : ytThumb);
+    const isAvatarThumb = isTwitch && !localThumb && (!job.thumbnailUrl || thumbnailUrl === twitchAvatarFallback);
     const progress = this.formatProgress(job);
     const progressHtml = this.formatProgressHtml(job);
     const percent = job.percent || 0;
@@ -1477,11 +1484,24 @@ class MoomboxApp {
     const card = document.querySelector(`.video-item[data-job-id="${CSS.escape(job.id)}"]`);
     if (!card) return;
 
-    // Update thumbnail (can change for Twitch: avatar → live thumbnail)
+    // Update thumbnail (can change for Twitch: avatar → live thumbnail,
+    // or null → local file once mux finishes and writes thumbnail_file).
+    // Prefer the local thumbnail route when the job has a thumbnailFile;
+    // fall back to the remote URL.
     const thumbImg = card.querySelector(".thumb img");
-    if (thumbImg && job.thumbnailUrl && thumbImg.src !== job.thumbnailUrl) {
-      thumbImg.src = job.thumbnailUrl;
-      thumbImg.classList.remove("thumb-avatar");
+    if (thumbImg) {
+      const desiredSrc = job.thumbnailFile
+        ? `/api/jobs/${encodeURIComponent(job.id)}/thumbnail`
+        : (job.thumbnailUrl || "");
+      if (desiredSrc && !thumbImg.src.endsWith(desiredSrc)) {
+        thumbImg.src = desiredSrc;
+        thumbImg.classList.remove("thumb-avatar");
+        // Reset the data-fallback so an error on the new src can fall
+        // through to the remote URL, then static thumbnail.
+        if (job.thumbnailFile && job.thumbnailUrl) {
+          thumbImg.dataset.fallback = job.thumbnailUrl;
+        }
+      }
     }
 
     // Update watch indicator

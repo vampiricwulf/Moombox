@@ -338,6 +338,82 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 		http.ServeFile(rw, req, filePath)
 	})
 
+	// GET /api/jobs/:id/thumbnail — serves the locally-stored thumbnail.
+	// Returns 404 when the job has no thumbnail_file (the frontend falls
+	// back to the remote thumbnailUrl in that case via the img onerror
+	// handler in app.js). Audit reports/web.md — owner request: prefer
+	// local-stored thumbnails so the dashboard doesn't keep hitting
+	// i.ytimg.com / static-cdn.jtvnw.net for assets we already downloaded.
+	r.Get("/api/jobs/{id}/thumbnail", func(rw http.ResponseWriter, req *http.Request) {
+		jobID := chi.URLParam(req, "id")
+		job, err := db.GetJob(jobID)
+		if err != nil || job == nil {
+			jsonError(rw, "job not found", http.StatusNotFound)
+			return
+		}
+		if job.ThumbnailFile == "" {
+			jsonError(rw, "no thumbnail file", http.StatusNotFound)
+			return
+		}
+
+		// Resolve path. ThumbnailFile is stored as filepath.Join(outputDir,
+		// filenameBase+ext) — usually that's already an absolute path
+		// (outputDir is absolute on Windows), but we handle relative
+		// inputs by joining with outputDir.
+		var thumbCfgOutputDir string
+		store.Read(func(c *config.MoomboxConfig) {
+			thumbCfgOutputDir = c.Paths.OutputDirectory
+		})
+		outputDir := job.OutputDirectory
+		if outputDir == "" {
+			outputDir = thumbCfgOutputDir
+		}
+		if outputDir == "" {
+			outputDir = "./output"
+		}
+
+		filePath := job.ThumbnailFile
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(outputDir, filePath)
+		}
+		filePath, err = filepath.Abs(filePath)
+		if err != nil {
+			jsonError(rw, "invalid path", http.StatusBadRequest)
+			return
+		}
+
+		// Path traversal guard
+		resolvedPath, ok := validatePathTraversal(filePath, outputDir)
+		if !ok {
+			jsonError(rw, "access denied", http.StatusForbidden)
+			return
+		}
+		filePath = resolvedPath
+
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			jsonError(rw, "thumbnail not found", http.StatusNotFound)
+			return
+		}
+
+		switch strings.ToLower(filepath.Ext(filePath)) {
+		case ".jpg", ".jpeg":
+			rw.Header().Set("Content-Type", "image/jpeg")
+		case ".png":
+			rw.Header().Set("Content-Type", "image/png")
+		case ".webp":
+			rw.Header().Set("Content-Type", "image/webp")
+		default:
+			rw.Header().Set("Content-Type", "application/octet-stream")
+		}
+		// Day-long cache; the file is content-addressable through the
+		// job ID — if the thumbnail changes, it's a new file at the
+		// same path, but the file mtime change isn't observed here so
+		// keep this conservative.
+		rw.Header().Set("Cache-Control", "public, max-age=86400")
+
+		http.ServeFile(rw, req, filePath)
+	})
+
 	// GET /api/jobs/:id/segments — returns segments for multi-segment jobs
 	r.Get("/api/jobs/{id}/segments", func(rw http.ResponseWriter, req *http.Request) {
 		jobID := chi.URLParam(req, "id")
