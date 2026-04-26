@@ -67,6 +67,14 @@ type BgConfig struct {
 	// var. Useful for test rigs and for operators who observe PO tokens lasting
 	// longer than 6h in their environment.
 	SessionTTL time.Duration
+
+	// CacheDir is the directory where bgutils persists its
+	// interpreter-hash sidecar (`bgutils-interpreter-hash.json`). When
+	// set, FetchChallenge sends the cached hash on subsequent calls so
+	// YouTube can skip re-sending the ~1-3 MB BotGuard interpreter
+	// script. Empty disables persistence (in-memory only). Audit
+	// reports/bgutils.md QI-4 / TD-5.
+	CacheDir string
 }
 
 // sessionTTL returns the configured session TTL or the package default.

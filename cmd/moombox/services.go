@@ -185,7 +185,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 7. PO Token provider
 	// =========================================================================
-	potProvider := bgutils.NewPotProvider(&bgutils.BgConfig{}, log)
+	// CacheDir enables the BotGuard interpreter-hash cache so subsequent
+	// challenge calls skip the ~1-3 MB script re-download. Audit
+	// bgutils QI-4 / TD-5.
+	bgCacheDir := filepath.Join(os.TempDir(), "moombox-bgutils")
+	potProvider := bgutils.NewPotProvider(&bgutils.BgConfig{CacheDir: bgCacheDir}, log)
 	s.potProvider = potProvider
 
 	// =========================================================================

@@ -195,13 +195,27 @@ func NewAutoCookieService(profileDir, cookiePath string, jar *CookieJar, logger 
 	if profileDirErr != nil && logger != nil {
 		logger.Error("auto-cookie profile dir rejected at construction", "err", profileDirErr)
 	}
-	return &AutoCookieService{
+	s := &AutoCookieService{
 		profileDir:    profileDir,
 		cookiePath:    cookiePath,
 		jar:           jar,
 		profileDirErr: profileDirErr,
 		logger:        logger,
 	}
+	// Restore LastRefresh from the on-disk sidecar so periodic refresh
+	// doesn't fire immediately on every startup. Audit reports/
+	// cookies.md #48. Missing sidecar (fresh install or pre-#48
+	// version) is silent; load errors are logged but don't fail
+	// construction.
+	if meta, err := LoadMeta(cookiePath); err != nil {
+		if logger != nil {
+			logger.Warn("could not load cookies.meta.json", "err", err)
+		}
+	} else if meta != nil && !meta.LastRefresh.IsZero() {
+		t := meta.LastRefresh
+		s.lastRefresh = &t
+	}
+	return s
 }
 
 // refreshPlatforms returns the platforms that have cookies in the jar and need refreshing.
@@ -413,6 +427,22 @@ func (s *AutoCookieService) FinishSetup(ctx context.Context) (ytAuth, twAuth boo
 	s.mu.Unlock()
 	s.cleanup()
 
+	// Persist LastRefresh to the sidecar so the next launch doesn't
+	// re-run the refresh immediately. Audit reports/cookies.md #48.
+	persistedPlatforms := []string{}
+	if ytAuth {
+		persistedPlatforms = append(persistedPlatforms, "youtube")
+	}
+	if twAuth {
+		persistedPlatforms = append(persistedPlatforms, "twitch")
+	}
+	if metaErr := SaveMeta(s.cookiePath, CookieMeta{
+		LastRefresh: now,
+		Platforms:   persistedPlatforms,
+	}); metaErr != nil && s.logger != nil {
+		s.logger.Warn("could not persist cookies.meta.json", "err", metaErr)
+	}
+
 	var verified []string
 	if ytAuth {
 		verified = append(verified, "YouTube")
@@ -577,6 +607,21 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 		s.lastRefresh = &now
 		s.lastError = nil
 		s.mu.Unlock()
+
+		// Persist LastRefresh to the sidecar (audit cookies.md #48).
+		persistedPlatforms := []string{}
+		if ytAuth {
+			persistedPlatforms = append(persistedPlatforms, "youtube")
+		}
+		if twAuth {
+			persistedPlatforms = append(persistedPlatforms, "twitch")
+		}
+		if metaErr := SaveMeta(s.cookiePath, CookieMeta{
+			LastRefresh: now,
+			Platforms:   persistedPlatforms,
+		}); metaErr != nil && s.logger != nil {
+			s.logger.Warn("could not persist cookies.meta.json", "err", metaErr)
+		}
 
 		var verified []string
 		if ytAuth {

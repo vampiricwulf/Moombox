@@ -33,7 +33,23 @@ func FetchChallenge(ctx context.Context, config *BgConfig, logger botguardLogger
 	// only complexity. Audit bgutils DEAD-5.
 	url := GoogleWaaCreateURL
 
-	body, err := json.Marshal([]string{config.RequestKey})
+	// Load cached interpreter hash. When present, send it in the
+	// request body so YouTube can skip re-sending the ~1-3 MB
+	// interpreter script. Audit reports/bgutils.md QI-4 / TD-5.
+	hashLogger, _ := logger.(interface {
+		Warn(msg string, args ...any)
+	})
+	globalInterpreterHashCache.load(config.CacheDir, hashLogger)
+	cacheKey := hashCacheKey(config.RequestKey, UserAgentFull)
+	cachedHash := globalInterpreterHashCache.get(cacheKey)
+
+	var bodyArr []any
+	if cachedHash != "" {
+		bodyArr = []any{config.RequestKey, cachedHash}
+	} else {
+		bodyArr = []any{config.RequestKey}
+	}
+	body, err := json.Marshal(bodyArr)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
@@ -73,6 +89,14 @@ func FetchChallenge(ctx context.Context, config *BgConfig, logger botguardLogger
 	challenge, err := parseChallengeData(respBody)
 	if err != nil {
 		return nil, err
+	}
+	// Persist the InterpreterHash to the on-disk cache so subsequent
+	// challenge calls send it back to YouTube and skip the script
+	// re-download. Audit bgutils QI-4 / TD-5. Only persist when the
+	// hash differs from what we sent (cachedHash) so we don't churn
+	// the file on every call.
+	if challenge.InterpreterHash != "" && challenge.InterpreterHash != cachedHash {
+		globalInterpreterHashCache.set(cacheKey, challenge.InterpreterHash, hashLogger)
 	}
 	// Diagnostic: which indices yielded usable values? extractStringFromArrayOrValue
 	// silently returns "" on parse failure, so upstream format drift would otherwise
