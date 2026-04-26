@@ -23,6 +23,21 @@ import (
 // CAN be renamed. The .exe~ file is cleaned up on exit via a deferred delete
 // process, or on the next fresh launcher start.
 func launchAndSupervise() {
+	// Single-instance guard. Acquire the named mutex BEFORE any side-
+	// effects so a second moombox.exe in the same Windows session fails
+	// fast with a clear message instead of fighting for the port. Held by
+	// the launcher (not the child) because the launcher is the long-lived
+	// supervisor; the child inherits the launcher's "I am moombox" claim
+	// transitively. A crashed launcher releases the mutex via kernel
+	// handle cleanup — stale locks are impossible. Audit cmd-moombox.md
+	// TD-5 / W-single-instance.
+	if err := acquireSingleInstanceLock(); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintln(os.Stderr, "If you believe this is in error (the previous instance crashed), wait a few seconds and try again — Windows releases the mutex automatically.")
+		os.Exit(1)
+	}
+	defer releaseSingleInstanceLock()
+
 	exePath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to determine executable path: %v\n", err)
