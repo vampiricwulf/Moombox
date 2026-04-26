@@ -499,6 +499,187 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	_nativify(globalThis.ReadableStream, 'ReadableStream');
 	_nativify(globalThis.CustomEvent, 'CustomEvent');
 	_nativify(globalThis.XMLHttpRequest, 'XMLHttpRequest');
+
+	// Browser DOM class hierarchy. Fingerprinters that follow up the
+	// Symbol.toStringTag check with "document instanceof HTMLDocument"
+	// or "Object.getPrototypeOf(document).constructor === HTMLDocument"
+	// failed against our pre-test.49 stubs because we never declared the
+	// classes -- so even after fixing toString, the constructor was Object
+	// and instanceof returned false. Define the minimum hierarchy and
+	// re-parent each global.
+	//
+	// Hierarchy (mirrors the WHATWG / WebIDL spec):
+	//   EventTarget
+	//     -> Node
+	//          -> Document
+	//               -> HTMLDocument
+	//   EventTarget
+	//     -> Window
+	//   Navigator
+	//   Location
+	//   Screen
+	//   History
+	//   Performance        (extends EventTarget per spec)
+	//   Storage
+	//   Crypto
+	//     -> SubtleCrypto  (sibling, not nested)
+	function _defineClass(name, parent) {
+		var proto = parent ? Object.create(parent.prototype) : Object.create(Object.prototype);
+		var ctor = function() {};
+		ctor.prototype = proto;
+		Object.defineProperty(ctor, 'name', { value: name, configurable: true });
+		Object.defineProperty(proto, 'constructor', { value: ctor, configurable: true, writable: true });
+		// Make the function look native rather than empty.
+		try {
+			Object.defineProperty(ctor, 'toString', {
+				value: function() { return 'function ' + name + '() { [native code] }'; },
+				configurable: true, writable: true
+			});
+		} catch (e) { /* skip */ }
+		try {
+			globalThis[name] = ctor;
+		} catch (e) { /* skip */ }
+		return ctor;
+	}
+	var _EventTarget = _defineClass('EventTarget', null);
+	var _Node = _defineClass('Node', _EventTarget);
+	var _Document = _defineClass('Document', _Node);
+	var _HTMLDocument = _defineClass('HTMLDocument', _Document);
+	var _Element = _defineClass('Element', _Node);
+	var _HTMLElement = _defineClass('HTMLElement', _Element);
+	var _Window = _defineClass('Window', _EventTarget);
+	var _Navigator = _defineClass('Navigator', null);
+	var _Location = _defineClass('Location', null);
+	var _Screen = _defineClass('Screen', null);
+	var _History = _defineClass('History', null);
+	var _Performance = _defineClass('Performance', _EventTarget);
+	var _Storage = _defineClass('Storage', null);
+	var _Crypto = _defineClass('Crypto', null);
+	var _SubtleCrypto = _defineClass('SubtleCrypto', null);
+
+	// Re-parent existing instances so instanceof + constructor checks pass.
+	function _reparent(obj, ctor) {
+		if (!obj || !ctor) return;
+		try { Object.setPrototypeOf(obj, ctor.prototype); }
+		catch (e) { /* goja may forbid on certain hosts */ }
+	}
+	_reparent(navigator, _Navigator);
+	_reparent(document, _HTMLDocument);
+	_reparent(location, _Location);
+	_reparent(screen, _Screen);
+	_reparent(history, _History);
+	_reparent(performance, _Performance);
+	_reparent(localStorage, _Storage);
+	_reparent(sessionStorage, _Storage);
+	_reparent(crypto, _Crypto);
+	_reparent(crypto.subtle, _SubtleCrypto);
+	// Window is special -- globalThis IS window, but goja's global
+	// object can't always have setPrototypeOf called on it. Try; if it
+	// throws, the test for "globalThis instanceof Window" stays false
+	// but every other check works.
+	_reparent(globalThis, _Window);
+
+	// Re-apply Symbol.toStringTag on the prototypes so derived instances
+	// keep the correct toString tag even after the prototype change.
+	_setTag(_Navigator.prototype, 'Navigator');
+	_setTag(_HTMLDocument.prototype, 'HTMLDocument');
+	_setTag(_Location.prototype, 'Location');
+	_setTag(_Screen.prototype, 'Screen');
+	_setTag(_History.prototype, 'History');
+	_setTag(_Performance.prototype, 'Performance');
+	_setTag(_Storage.prototype, 'Storage');
+	_setTag(_Crypto.prototype, 'Crypto');
+	_setTag(_SubtleCrypto.prototype, 'SubtleCrypto');
+	_setTag(_Window.prototype, 'Window');
+
+	// Browser globals goja's built-in JS engine doesn't ship: Event /
+	// MessageEvent / ErrorEvent (every browser has them) and the modern-
+	// V8 WeakRef / FinalizationRegistry (Chrome / Edge have them, and
+	// any anti-bot fingerprinter that tests for "modern Chrome" expects
+	// them too). Stubbing these means a fingerprinter probing
+	// "typeof WeakRef === function" or "new Event(foo)" doesn't
+	// immediately trip a "this isn't Chrome" branch.
+	function _EventCtor(type, init) {
+		this.type = String(type || '');
+		this.bubbles = !!(init && init.bubbles);
+		this.cancelable = !!(init && init.cancelable);
+		this.composed = !!(init && init.composed);
+		this.defaultPrevented = false;
+		this.target = null;
+		this.currentTarget = null;
+		this.timeStamp = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+	}
+	_EventCtor.prototype.preventDefault = function() { this.defaultPrevented = true; };
+	_EventCtor.prototype.stopPropagation = function() {};
+	_EventCtor.prototype.stopImmediatePropagation = function() {};
+	Object.defineProperty(_EventCtor, 'name', { value: 'Event', configurable: true });
+	globalThis.Event = _EventCtor;
+	_setTag(_EventCtor.prototype, 'Event');
+	_nativify(_EventCtor, 'Event');
+
+	function _MessageEventCtor(type, init) {
+		_EventCtor.call(this, type, init);
+		this.data = init && init.data;
+		this.origin = init && init.origin || '';
+		this.lastEventId = init && init.lastEventId || '';
+		this.source = init && init.source || null;
+		this.ports = init && init.ports || [];
+	}
+	_MessageEventCtor.prototype = Object.create(_EventCtor.prototype);
+	_MessageEventCtor.prototype.constructor = _MessageEventCtor;
+	Object.defineProperty(_MessageEventCtor, 'name', { value: 'MessageEvent', configurable: true });
+	globalThis.MessageEvent = _MessageEventCtor;
+	_setTag(_MessageEventCtor.prototype, 'MessageEvent');
+	_nativify(_MessageEventCtor, 'MessageEvent');
+
+	function _ErrorEventCtor(type, init) {
+		_EventCtor.call(this, type, init);
+		this.message = init && init.message || '';
+		this.filename = init && init.filename || '';
+		this.lineno = init && init.lineno || 0;
+		this.colno = init && init.colno || 0;
+		this.error = init && init.error || null;
+	}
+	_ErrorEventCtor.prototype = Object.create(_EventCtor.prototype);
+	_ErrorEventCtor.prototype.constructor = _ErrorEventCtor;
+	Object.defineProperty(_ErrorEventCtor, 'name', { value: 'ErrorEvent', configurable: true });
+	globalThis.ErrorEvent = _ErrorEventCtor;
+	_setTag(_ErrorEventCtor.prototype, 'ErrorEvent');
+	_nativify(_ErrorEventCtor, 'ErrorEvent');
+
+	// Re-parent CustomEvent to inherit from Event so
+	// "new CustomEvent('x') instanceof Event" returns true.
+	if (typeof globalThis.CustomEvent === 'function') {
+		try {
+			Object.setPrototypeOf(globalThis.CustomEvent.prototype, _EventCtor.prototype);
+		} catch (e) { /* skip */ }
+	}
+
+	// WeakRef + FinalizationRegistry stubs. The real implementations rely
+	// on GC observation which we can't fake; the stubs hold a strong
+	// reference and never trigger finalization, but typeof and
+	// instanceof checks pass.
+	if (typeof globalThis.WeakRef === 'undefined') {
+		function _WeakRef(target) { this._target = target; }
+		_WeakRef.prototype.deref = function() { return this._target; };
+		Object.defineProperty(_WeakRef, 'name', { value: 'WeakRef', configurable: true });
+		globalThis.WeakRef = _WeakRef;
+		_setTag(_WeakRef.prototype, 'WeakRef');
+		_nativify(_WeakRef, 'WeakRef');
+	}
+	if (typeof globalThis.FinalizationRegistry === 'undefined') {
+		function _FR(cb) { this._cb = cb; this._holdings = []; }
+		_FR.prototype.register = function(target, holding, token) { this._holdings.push({ target: target, holding: holding, token: token }); };
+		_FR.prototype.unregister = function(token) {
+			for (var i = this._holdings.length - 1; i >= 0; i--) {
+				if (this._holdings[i].token === token) this._holdings.splice(i, 1);
+			}
+		};
+		Object.defineProperty(_FR, 'name', { value: 'FinalizationRegistry', configurable: true });
+		globalThis.FinalizationRegistry = _FR;
+		_setTag(_FR.prototype, 'FinalizationRegistry');
+		_nativify(_FR, 'FinalizationRegistry');
+	}
 })();
 `
 
