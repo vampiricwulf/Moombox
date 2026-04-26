@@ -33,22 +33,18 @@ func FetchChallenge(ctx context.Context, config *BgConfig, logger botguardLogger
 	// only complexity. Audit bgutils DEAD-5.
 	url := GoogleWaaCreateURL
 
-	// Load cached interpreter hash. When present, send it in the
-	// request body so YouTube can skip re-sending the ~1-3 MB
-	// interpreter script. Audit reports/bgutils.md QI-4 / TD-5.
-	hashLogger, _ := logger.(interface {
-		Warn(msg string, args ...any)
-	})
-	globalInterpreterHashCache.load(config.CacheDir, hashLogger)
-	cacheKey := hashCacheKey(config.RequestKey, UserAgentFull)
-	cachedHash := globalInterpreterHashCache.get(cacheKey)
-
-	var bodyArr []any
-	if cachedHash != "" {
-		bodyArr = []any{config.RequestKey, cachedHash}
-	} else {
-		bodyArr = []any{config.RequestKey}
-	}
+	// Phase 4 (test.33) shipped an interpreter-hash cache that sent the
+	// last-seen hash with the challenge request so Google could skip
+	// re-shipping the interpreter script. The optimisation was incomplete:
+	// it persisted the hash but NOT the script itself, so when Google
+	// trusted our hash and responded with no interpreterURL / no script
+	// (because it assumed we had it cached), BotGuardClient construction
+	// failed with "BAD_CONFIG: no interpreter URL or script in challenge".
+	// Disabled in test.41 — every challenge now requests the full
+	// interpreter. Re-enabling needs the script persisted alongside the
+	// hash AND a load path inside BotGuard client construction. Audit
+	// reports/bgutils.md QI-4 / TD-5 (re-opened).
+	bodyArr := []any{config.RequestKey}
 	body, err := json.Marshal(bodyArr)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -90,14 +86,11 @@ func FetchChallenge(ctx context.Context, config *BgConfig, logger botguardLogger
 	if err != nil {
 		return nil, err
 	}
-	// Persist the InterpreterHash to the on-disk cache so subsequent
-	// challenge calls send it back to YouTube and skip the script
-	// re-download. Audit bgutils QI-4 / TD-5. Only persist when the
-	// hash differs from what we sent (cachedHash) so we don't churn
-	// the file on every call.
-	if challenge.InterpreterHash != "" && challenge.InterpreterHash != cachedHash {
-		globalInterpreterHashCache.set(cacheKey, challenge.InterpreterHash, hashLogger)
-	}
+	// Hash persistence intentionally NOT happening here — see the
+	// disable note above. Re-enabling this path needs the script
+	// persisted alongside the hash so the cache hit can produce a
+	// runnable interpreter, not just a hash that matches what
+	// Google expected.
 	// Diagnostic: which indices yielded usable values? extractStringFromArrayOrValue
 	// silently returns "" on parse failure, so upstream format drift would otherwise
 	// surface only as a generic "no interpreter URL or script" error downstream.

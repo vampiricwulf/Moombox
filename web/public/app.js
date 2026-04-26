@@ -3632,8 +3632,12 @@ class MoomboxApp {
     countdown.className = "toast-countdown";
     alert.appendChild(countdown);
 
-    // Remove from DOM after hide to prevent leak over long sessions
-    alert.addEventListener("sl-after-hide", () => alert.remove());
+    // Shoelace's `.toast()` already detaches the alert on dismiss
+    // (see Shoelace docs for sl-alert.toast: "when dismissed, it will
+    // be removed from the DOM completely"). Adding our own
+    // `sl-after-hide → alert.remove()` listener races with that
+    // internal cleanup and causes a "Node.removeChild: not a child"
+    // exception inside chunk.XCZS77LP.js. Removed in test.41.
     document.body.append(alert);
     alert.toast();
   }

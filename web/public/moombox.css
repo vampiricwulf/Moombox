@@ -29,16 +29,19 @@
 }
 
 /* Tab-hide animation pause. When app.js sets [data-paused="true"] on the
-   body in response to visibilitychange, suspend every CSS animation +
-   transition globally. The browser already throttles requestAnimationFrame
-   on hidden tabs to 1Hz, but CSS-driven progress shimmers + Shoelace
-   spinner ticks would otherwise keep allocating layer paints under the
-   compositor. Audit reports/frontend-html-css.md CRIT-7 / PERF-1 / PERF-2. */
+   body in response to visibilitychange, suspend CSS animations globally.
+   The browser already throttles requestAnimationFrame on hidden tabs to
+   1Hz, but CSS-driven progress shimmers + Shoelace spinner ticks would
+   otherwise keep allocating layer paints under the compositor. Audit
+   reports/frontend-html-css.md CRIT-7 / PERF-1 / PERF-2.
+   transition: none was attempted in test.39 but caused Shoelace toast/
+   alert hide-transitions to snap-close, racing the internal sl-after-hide
+   DOM cleanup. animation-play-state alone hits the perf goal without
+   disturbing the open/close lifecycle of overlays + toasts. */
 body[data-paused="true"] *,
 body[data-paused="true"] *::before,
 body[data-paused="true"] *::after {
     animation-play-state: paused !important;
-    transition: none !important;
 }
 
 * {
