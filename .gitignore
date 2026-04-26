@@ -57,3 +57,6 @@ browser-profile/
 # Local reference repos (keep the update script tracked)
 references/*/
 !references/update-all.sh
+
+# Audit reports — local working notes + status tables (per RESUME.md Rule 5)
+reports/
