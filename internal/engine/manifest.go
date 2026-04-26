@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/xml"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/url"
 	"regexp"
@@ -180,6 +181,14 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 			}
 		}
 
+		// Empty AdaptationSets is unusual but valid (a Period with no
+		// renderable streams) — log at Debug so a recurring empty-period
+		// pattern is diagnosable without alarming users in production.
+		// Audit reports/engine.md #9.
+		if len(period.AdaptationSets) == 0 {
+			slog.Debug("manifest: period has no AdaptationSets",
+				"periodBase", periodBase)
+		}
 		for _, as := range period.AdaptationSets {
 			for _, rep := range as.Representations {
 				stream := parseDashRepresentation(rep, as, period, periodBase)

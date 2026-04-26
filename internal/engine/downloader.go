@@ -364,13 +364,19 @@ func (d *SegmentDownloader) setCommonHeaders(req *http.Request, ua string) {
 	}
 }
 
+// youtubeSegPathFormat is YouTube's per-segment path convention:
+// `/sq/{seq}` appended to a base manifest URL. Documented as a single
+// source of truth so a future YouTube URL-shape change is one edit
+// rather than a string grep. Audit reports/engine.md #29.
+const youtubeSegPathFormat = "%s/sq/%d"
+
 func (d *SegmentDownloader) buildSegmentURL(seq int) string {
 	if strings.Contains(d.getBaseURL(), "$Number$") {
 		return SegmentURL(d.getBaseURL(), seq)
 	}
 	// Append /sq/{seq} for YouTube-style URLs
 	base := strings.TrimRight(d.getBaseURL(), "/")
-	return fmt.Sprintf("%s/sq/%d", base, seq)
+	return fmt.Sprintf(youtubeSegPathFormat, base, seq)
 }
 
 func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
