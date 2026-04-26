@@ -113,11 +113,12 @@ func (a *App) View() tea.View {
 	)
 
 	// Main content
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		topRow,
-		a.logs.View(),
-		a.statusBar.View(),
-	)
+	mainParts := []string{}
+	if a.restartPending {
+		mainParts = append(mainParts, restartBanner(a.width))
+	}
+	mainParts = append(mainParts, topRow, a.logs.View(), a.statusBar.View())
+	content := lipgloss.JoinVertical(lipgloss.Left, mainParts...)
 
 	// Feedback / confirmation messages
 	if a.feedbackMsg != "" {
@@ -128,6 +129,21 @@ func (a *App) View() tea.View {
 	}
 
 	return a.viewWithMode(content)
+}
+
+// restartBanner renders the persistent "restart required" banner shown above
+// the main TUI content. Stays visible until the process actually restarts —
+// the audit's specific concern is that dismissing the settings modal with
+// Esc previously left a config/runtime mismatch silently. Audit
+// reports/tui.md #26.
+func restartBanner(width int) string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("0")).
+		Background(lipgloss.Color("220")).
+		Bold(true).
+		Padding(0, 1).
+		Width(width)
+	return style.Render("⚠ Restart required — saved config differs from running process. Press ` then Save & Restart, or restart Moombox.")
 }
 
 func addOverlayMessage(content string, width int, msg string) string {

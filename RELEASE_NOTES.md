@@ -1,6 +1,21 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 8 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 9 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
+
+### Phase 9 (test.38) — TUI work (partial)
+
+Two TUI-side wins shipped; deeper refactors (overlay interface, full redraw caching) deferred to a focused TUI session in Phase 11.
+
+**Persistent restart-required banner (tui #26)** — settings save with restart-required changes now flips an app-level `restartPending` flag via a new `SettingsModel.OnRestartRequired` callback. The flag lives until process exit so a user who dismisses the modal with Esc still sees a yellow banner above the main TUI content reminding them that the on-disk config has drifted from the running process. Rendered via a new `restartBanner(width)` helper in `app_layout.go`.
+
+**Job-list virtualIndex (tui #22)** — `TaskListModel.virtualIndex` (`map[string]int`) now mirrors `jobIndex` in sorted-display order; populated inside `rebuildVirtualList`. `UpdateJob`'s post-sort selection-follow walk is now an O(1) map lookup instead of an O(N) scan over `m.list.Items()`. With 100+ active jobs and 100ms progress ticks this measurably reduces allocation churn during sustained downloads.
+
+### Deferred to Phase 11 (focused TUI session)
+
+- **tui #25 / #34 overlay interface** — adding a new overlay still requires editing `app.go` + `app_keys.go` + `app_layout.go` + the overlay file. The audit's `Overlay` interface + slice-of-overlays pattern would centralise this. Working but high-friction; defer to a focused refactor.
+- **tui #19 buildMenuItems cache** — invalidation across selection / filter / view-mode / job-state changes is fragile. Defer until a profiling session shows the rebuild cost matters.
+- **tui #13 style alloc cache** — `settings_view.go`, `job_details.go`, `action_menu.go` build lipgloss styles inline on every render. Pre-allocating to package-level vars is mechanical but touches several files.
+- **tui #32 SetProgress surgical updates** — currently rebuilds all 30-40 `detailRow` objects per 100ms tick; should mutate only progress-relevant rows.
 
 ### Phase 8 (test.37) — owner-decision feature work
 

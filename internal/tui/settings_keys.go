@@ -249,6 +249,13 @@ func (m *SettingsModel) saveAndClose() string {
 		m.originalValues = make(map[string]string, len(m.values))
 		maps.Copy(m.originalValues, m.values)
 		if needsRestart {
+			// Surface a persistent banner so dismissing the modal with
+			// Esc still leaves a visual reminder that the on-disk config
+			// no longer matches the running process. Audit reports/tui.md
+			// #26.
+			if m.OnRestartRequired != nil {
+				m.OnRestartRequired()
+			}
 			m.showRestartOverlay = true
 			return ""
 		}

@@ -238,6 +238,13 @@ type SettingsModel struct {
 	// Callbacks
 	OnSave           func(cfg *config.MoomboxConfig)
 	OnRestart        func()
+	// OnRestartRequired fires when a settings save commits a value
+	// flagged in restartRequiredKeys, regardless of whether the user
+	// then triggers OnRestart from the modal or dismisses it. The App
+	// flips a persistent banner-visible flag so the dismissal case
+	// doesn't leave a config/runtime mismatch with no visual reminder.
+	// Audit reports/tui.md #26.
+	OnRestartRequired func()
 	OnHashPassword   func(password string) string
 	OnVerifyPassword func(password, hash string) bool
 

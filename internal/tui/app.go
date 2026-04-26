@@ -257,6 +257,14 @@ type App struct {
 	updateAvailable *UpdateStatusMsg
 	version         string
 
+	// restartPending stays true once a settings save commits a
+	// restart-required field, until the process actually exits. The
+	// overlay-modal flow lets the user dismiss the prompt with Esc
+	// without restarting; without this flag the dismissal would leave
+	// the on-disk config drifting silently from the running process.
+	// Audit reports/tui.md #26.
+	restartPending bool
+
 	// BubbleTea program reference (set by Run, used by QuitTUI)
 	program *tea.Program
 

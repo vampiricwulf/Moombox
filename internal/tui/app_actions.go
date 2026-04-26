@@ -244,6 +244,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.settings.SetSize(a.width, a.height)
 			a.settings.OnSave = a.OnSaveConfig
 			a.settings.OnRestart = a.OnRestart
+			a.settings.OnRestartRequired = func() { a.restartPending = true }
 			a.settings.OnHashPassword = a.OnHashPassword
 			a.settings.OnVerifyPassword = a.OnVerifyPassword
 			a.settings.Open(a.cfg)

@@ -93,6 +93,12 @@ func (d taskDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 type TaskListModel struct {
 	jobs     []*database.Job
 	jobIndex map[string]int // job ID → index in jobs slice (O(1) lookup)
+	// virtualIndex maps job ID → position in the bubbles/list-level items
+	// slice (sorted order). Populated by rebuildVirtualList; used by
+	// UpdateJob's selection-relocation code path so the post-sort
+	// "follow the selected job" walk is O(1) rather than O(N). Audit
+	// reports/tui.md #22.
+	virtualIndex map[string]int
 	list     list.Model
 
 	width, height       int
@@ -235,6 +241,12 @@ func (m *TaskListModel) RemoveJob(jobID string) {
 
 // UpdateJob replaces a single job by ID using the index map (O(1) lookup).
 // Returns true if the job was found and replaced.
+//
+// Audit reports/tui.md #22 — the previous post-rebuild relocation walked
+// m.list.Items() linearly to follow the selected job's new sorted
+// position. With 100+ active jobs and 60fps progress ticks that O(N)
+// scan was measurable. virtualIndex (built inside rebuildVirtualList)
+// turns the relocation into an O(1) map lookup.
 func (m *TaskListModel) UpdateJob(job *database.Job) bool {
 	if idx, ok := m.jobIndex[job.ID]; ok && idx < len(m.jobs) {
 		// Remember which job was selected so we can follow it after re-sort.
@@ -246,13 +258,11 @@ func (m *TaskListModel) UpdateJob(job *database.Job) bool {
 		m.jobs[idx] = job
 		m.rebuildVirtualList()
 
-		// Follow the previously selected job to its new position.
+		// Follow the previously selected job to its new position via the
+		// virtualIndex map populated by rebuildVirtualList.
 		if prevSelectedID != "" {
-			for i, item := range m.list.Items() {
-				if ti, ok := item.(taskItem); ok && ti.job != nil && ti.job.ID == prevSelectedID {
-					m.list.Select(i)
-					break
-				}
+			if newIdx, ok := m.virtualIndex[prevSelectedID]; ok {
+				m.list.Select(newIdx)
 			}
 		}
 		m.resetMarquee()
@@ -538,9 +548,12 @@ func (m *TaskListModel) rebuildVirtualList() {
 		return 0
 	})
 
-	// Build list items
+	// Build list items + virtualIndex side-table for O(1) post-sort
+	// relocation in UpdateJob (audit reports/tui.md #22).
 	items := make([]list.Item, 0, len(active)+len(archived)+1)
+	m.virtualIndex = make(map[string]int, len(active)+len(archived))
 	for _, j := range active {
+		m.virtualIndex[j.ID] = len(items)
 		items = append(items, taskItem{job: j})
 	}
 
@@ -552,6 +565,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 		})
 		if m.archiveExpanded {
 			for _, j := range archived {
+				m.virtualIndex[j.ID] = len(items)
 				items = append(items, taskItem{job: j, archived: true})
 			}
 		}
