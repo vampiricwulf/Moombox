@@ -332,8 +332,26 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	var _randomUUID = __cryptoRandomUUID;
 	globalThis.crypto = {
 		getRandomValues: function(arr) {
-			var bytes = new Uint8Array(_randBytes(arr.length));
-			for (var i = 0; i < arr.length; i++) { arr[i] = bytes[i]; }
+			// Browser spec: fills arr.byteLength random bytes (NOT
+			// arr.length). For Uint32Array(4) that's 16 bytes total;
+			// our previous impl only generated 4 bytes (one per
+			// element) and assigned each byte as a separate Uint32
+			// value, leaving every Uint32 in 0..255. That's directly
+			// observable from JS and an obvious "this is a stub" tell
+			// for any anti-bot fingerprinter that does
+			//   arr[0] > 255 || arr[1] > 255 || ...
+			// after seeding a Uint32Array. Fix by filling the
+			// underlying ArrayBuffer at the typed-array's byte offset.
+			var byteLen = (typeof arr.byteLength === "number") ? arr.byteLength : arr.length;
+			var bytes = new Uint8Array(_randBytes(byteLen));
+			if (arr.buffer && typeof arr.byteOffset === "number") {
+				var view = new Uint8Array(arr.buffer, arr.byteOffset, byteLen);
+				for (var i = 0; i < byteLen; i++) { view[i] = bytes[i]; }
+			} else {
+				// Plain array fallback (rare; spec only defines
+				// behaviour for ArrayBufferView).
+				for (var i = 0; i < arr.length; i++) { arr[i] = bytes[i]; }
+			}
 			return arr;
 		},
 		// subtle is stubbed to reject async ops with a clear error rather than
@@ -404,6 +422,83 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 
 	// queueMicrotask — used by some Promise implementations and BotGuard internals
 	globalThis.queueMicrotask = globalThis.queueMicrotask || function(fn) { Promise.resolve().then(fn); };
+
+	// Symbol.toStringTag on the browser-equivalent globals. BotGuard-style
+	// fingerprinters routinely call Object.prototype.toString.call(navigator)
+	// expecting "[object Navigator]"; without these tags we return
+	// "[object Object]" for every shim global, which is an obvious "this
+	// isn't a real browser" tell. Setting the tag is the cheapest way to
+	// pass the toString-shape check without faking a full prototype chain.
+	function _setTag(obj, tag) {
+		if (!obj) return;
+		try { Object.defineProperty(obj, Symbol.toStringTag, { value: tag, configurable: true }); }
+		catch (e) { /* some hosts forbid Symbol.toStringTag on certain globals */ }
+	}
+	_setTag(navigator, 'Navigator');
+	_setTag(document, 'HTMLDocument');
+	_setTag(location, 'Location');
+	_setTag(screen, 'Screen');
+	_setTag(history, 'History');
+	_setTag(localStorage, 'Storage');
+	_setTag(sessionStorage, 'Storage');
+	_setTag(performance, 'Performance');
+	_setTag(crypto, 'Crypto');
+	_setTag(crypto.subtle, 'SubtleCrypto');
+
+	// Real browsers expose navigator.userAgent as a non-writable
+	// accessor (getter) rather than a writable data property.
+	// Object.getOwnPropertyDescriptor(navigator, 'userAgent') in Chrome
+	// returns {get: ƒ, set: undefined, enumerable: true, configurable: true}.
+	// Fingerprinters can read this descriptor and detect a writable
+	// data-property as "fake browser". Convert to a getter while keeping
+	// the value identity via a closure-captured copy.
+	(function() {
+		var _ua = navigator.userAgent;
+		try {
+			Object.defineProperty(navigator, 'userAgent', {
+				get: function() { return _ua; },
+				enumerable: true,
+				configurable: true
+			});
+		} catch (e) { /* skip */ }
+	})();
+	// Window itself — globalThis is the closest equivalent.
+	try { Object.defineProperty(globalThis, Symbol.toStringTag, { value: 'Window', configurable: true }); }
+	catch (e) { /* goja may forbid touching globalThis's tag on some builds */ }
+
+	// Make stub functions return "[native code]" from .toString() so a
+	// fingerprinter that does Function.prototype.toString.call(setTimeout)
+	// or similar doesn't see our raw JS source / Go module path. Real
+	// browsers' built-ins always return "function NAME() { [native code] }".
+	function _nativify(fn, name) {
+		if (typeof fn !== 'function') return;
+		var s = 'function ' + (name || fn.name || '') + '() { [native code] }';
+		try { Object.defineProperty(fn, 'toString', { value: function() { return s; }, configurable: true, writable: true }); }
+		catch (e) { /* skip */ }
+	}
+	_nativify(crypto.getRandomValues, 'getRandomValues');
+	_nativify(crypto.randomUUID, 'randomUUID');
+	_nativify(globalThis.setTimeout, 'setTimeout');
+	_nativify(globalThis.clearTimeout, 'clearTimeout');
+	_nativify(globalThis.setInterval, 'setInterval');
+	_nativify(globalThis.clearInterval, 'clearInterval');
+	_nativify(globalThis.addEventListener, 'addEventListener');
+	_nativify(globalThis.removeEventListener, 'removeEventListener');
+	_nativify(globalThis.dispatchEvent, 'dispatchEvent');
+	_nativify(globalThis.requestAnimationFrame, 'requestAnimationFrame');
+	_nativify(globalThis.cancelAnimationFrame, 'cancelAnimationFrame');
+	_nativify(globalThis.fetch, 'fetch');
+	_nativify(globalThis.matchMedia, 'matchMedia');
+	_nativify(globalThis.getComputedStyle, 'getComputedStyle');
+	_nativify(globalThis.queueMicrotask, 'queueMicrotask');
+	_nativify(globalThis.postMessage, 'postMessage');
+	_nativify(globalThis.MutationObserver, 'MutationObserver');
+	_nativify(globalThis.IntersectionObserver, 'IntersectionObserver');
+	_nativify(globalThis.ResizeObserver, 'ResizeObserver');
+	_nativify(globalThis.AbortController, 'AbortController');
+	_nativify(globalThis.ReadableStream, 'ReadableStream');
+	_nativify(globalThis.CustomEvent, 'CustomEvent');
+	_nativify(globalThis.XMLHttpRequest, 'XMLHttpRequest');
 })();
 `
 
