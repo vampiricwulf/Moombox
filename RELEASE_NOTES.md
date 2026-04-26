@@ -1,6 +1,16 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 1 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 4 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
+
+### Phase 4 (test.33) — persistence (cookies meta + interpreter hash)
+
+Two persistence sidecars closing audit rows that hurt restart-warmth.
+
+**`cookies.meta.json` sidecar (cookies #48)** — new `internal/cookies/meta.go` writes a JSON sidecar next to `cookies.txt` tracking `LastRefresh` + verified `Platforms` + schema version. Without it, periodic refresh fired immediately on every Moombox restart — wasting a ~5s headless-Chrome launch (~150 MB of memory) when cookies were already fresh from before the restart. `LoadMeta` returns `(nil, nil)` for missing-file / schema-mismatch (caller writes fresh); genuine read errors return `(nil, err)`. `SaveMeta` normalises platforms (lowercase, dedupe, sort) and writes atomically (tempfile + rename). 8 round-trip / normalisation / corruption / empty-path tests. `NewAutoCookieService` loads on startup; `FinishSetup` + `RefreshCookies` save after success.
+
+**YouTube interpreter-hash persistence (bgutils QI-4/TD-5)** — new `internal/bgutils/interpreter_cache.go` persists the BotGuard interpreter's hash to a sidecar (`bgutils-interpreter-hash.json` in `BgConfig.CacheDir`). When present, `FetchChallenge` sends `[requestKey, cachedHash]` so Google can skip re-shipping the full interpreter; subsequent challenge calls re-use the cached hash. Cache key is `requestKey + "|" + UA-major` (e.g. `Chrome/131.0.0.0` → `131`) — a Chrome major-version bump automatically invalidates the cache without an explicit migration. Stale entries (>30 days `SavedAt`) pruned on load to bound file size. Process-wide singleton, lazy load on first call, atomic write on every `set`. 7 tests covering UA-major extraction, fresh-install empty load, round-trip, stale pruning, idempotent load, thread-safe concurrent set. `cmd/moombox/services.go` wires `BgConfig.CacheDir` to `os.TempDir()/moombox-bgutils`.
+
+**actualPort persistence** — already shipped in Phase 1 (cmd-moombox Q2); covered above.
 
 ### Phase 3 (test.32) — `internal/httpx` unification
 
@@ -55,7 +65,6 @@ Six fixes closing the easy wins from the deferred-drain plan:
 
 - **Phase 2 (test.31)** — sentinel migration (cipher / twitch / engine), goja TD-4/TD-5, engine #17 ErrSegmentPermanent, dismissal re-examinations.
 - **Phase 3 (test.32)** — `internal/httpx` package unifying per-package HTTP clients.
-- **Phase 4 (test.33)** — cookies.meta.json sidecar + YouTube interpreter-hash persistence.
 - **Phase 5 (test.34)** — Strategy interface + ChatSource interface + Goja-cipher consolidation.
 - **Phase 6 (test.35)** — engine/protocol perf (VisitorData refetch, proactive IT refresh, cipher disk cache, VM pool, quality-split switch up, DPAPI mtime-half, ProfileInUse).
 - **Phase 7 (test.36)** — web hardening (TLS, chi.RequestID, -EncodedCommand, 256KB WS write cap, LRU rate-limiter, ETag, pagination, AutoCookieReloginRequired struct→map backend, JSON envelope backend, Update-apply Origin tightening).
