@@ -1,6 +1,25 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 10 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 11 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit. Phase 12 (browser verification + final tag) is the last step; owner runs through every frontend-touching change in a browser session.
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
+
+### Phase 11 (test.40) — test sprint (focused on this arc's new APIs)
+
+Tests added cover items shipped in this 12-phase arc that lacked direct coverage. The broader 140-test backlog (audit-flagged before this arc started) becomes ongoing work — each package's testing roadmap stays in `reports/<package>.md` for incremental closure rather than blocking the test.40 ship.
+
+**internal/web/rate_limiter_lru_test.go** — 3 tests for the Q-18 LRU eviction order shipped in Phase 7:
+- `TestRateLimiterLRUEvictsOldest` — confirms cap eviction drops the least-recently-used IP, not an arbitrary map entry. The previous random-eviction was the audit's stated attack: an adversary churning fresh IPs could push the active user out by happening to land on their map key.
+- `TestRateLimiterTouchPromotesToMRU` — verifies repeated requests from an existing IP move it to the MRU position so subsequent eviction rounds drop other IPs first.
+- `TestRateLimiterCleanupRemovesElement` — guards the periodic cleanup loop's invariant that list element removal stays in sync with map deletion. Without this, the LRU list would grow unbounded vs. the map.
+
+**internal/cipher/player_cache_preprocessed_test.go** — 4 tests for the Q4 preprocessed disk-cache tier shipped in Phase 6:
+- `TestPlayerCachePreprocessedRoundTrip` — `PutPreprocessed` writes; `GetPreprocessed` reads; bytes round-trip.
+- `TestPlayerCachePreprocessedMissingReturnsEmpty` — fresh-cache state returns `""` + nil-error so the caller's "not cached, run the slow path" branch fires correctly.
+- `TestPlayerCacheRemoveCleansBothFiles` — `Remove` drops both the raw `.js` and the `.preprocessed.js` sidecar so an explicit invalidation (cipher solver flagged broken at runtime) doesn't leave a stale sidecar.
+- `TestPlayerCachePreprocessedFilePath` — locks the path-derivation contract: raw + preprocessed live in the same dir, share the cache key.
+
+### Deferred to ongoing test backlog
+
+Each package's `reports/<package>.md` keeps the audit-flagged test gaps as part of normal maintenance — closing them ad-hoc as features touch the relevant code is healthier than a 5+ day spike that rebases against unrelated changes. The full list (cipher TC1-TC7, bgutils TEST-3..9, chat TC1-12, engine #37/#42/#43/#45/#48, goja TC1-10, youtube G1-G6, twitch #47/48/50/51, worker #62-65/#70) stays in `reports/PHASE-PLAN.md` Phase 11 entry.
 
 ### Phase 10 (test.39) — frontend pass (targeted; deeper frontend deferred to owner-followup)
 
