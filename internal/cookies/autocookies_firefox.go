@@ -36,6 +36,10 @@ var firefoxLockFiles = []string{"parent.lock", ".parentlock"}
 const (
 	firefoxGracefulCloseTimeout = 8 * time.Second        // overall budget for clean exit
 	firefoxExitPollInterval     = 200 * time.Millisecond // poll cadence inside the wait loop
+	// firefoxLaunchSpacing is the delay between consecutive Firefox
+	// refresh launches so the previous instance has time to release
+	// the profile directory's parent.lock. Audit reports/cookies.md #45.
+	firefoxLaunchSpacing = 5 * time.Second
 )
 
 func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url string) error {
@@ -133,8 +137,8 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 
 		// Wait between launches so Firefox fully releases the profile
 		if i > 0 {
-			s.logger.Info("waiting 5s before next Firefox launch", "platform", platform)
-			time.Sleep(5 * time.Second)
+			s.logger.Info("waiting before next Firefox launch", "platform", platform, "spacing", firefoxLaunchSpacing)
+			time.Sleep(firefoxLaunchSpacing)
 		}
 
 		if ctx.Err() != nil {

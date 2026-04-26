@@ -31,6 +31,11 @@ const (
 	// the process handle before the next cleanup step inspects state. Replaces
 	// a bare 300ms literal in killSetupProcess (audit reports/cookies.md #45).
 	taskkillDrainDelay = 300 * time.Millisecond
+	// killProcessTreePollDelay is the inner-loop pause inside the
+	// kill-tree's "wait for sentinel to clear" loop. 50ms is fast enough
+	// that a typical Firefox/Chromium teardown completes within 1-2
+	// iterations while not pinning a CPU core. Audit reports/cookies.md #45.
+	killProcessTreePollDelay = 50 * time.Millisecond
 )
 
 // platformRefreshURLs maps platform names to their refresh URLs.
@@ -721,7 +726,7 @@ func (s *AutoCookieService) killRefreshProcess() {
 		if !time.Now().Before(deadline) {
 			return // sentinel still in place — give up rather than block Stop()
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(killProcessTreePollDelay)
 	}
 }
 
