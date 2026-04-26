@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	version = "2.6.0-test.50"
+	version = "2.6.0-test.51"
 	commit  = ""
 )
 
