@@ -372,17 +372,24 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			outputDir = "./output"
 		}
 
-		filePath := job.ThumbnailFile
-		if !filepath.IsAbs(filePath) {
-			filePath = filepath.Join(outputDir, filePath)
-		}
-		filePath, err = filepath.Abs(filePath)
+		// ThumbnailFile is stored as filepath.Join(outputDir, basename+ext)
+		// at mux time. That can be either absolute (typical when
+		// cfg.Paths.OutputDirectory is absolute) or relative (when the
+		// config used "./output" or similar). filepath.Abs handles both
+		// correctly: absolute paths pass through untouched, relative
+		// paths get joined to CWD. The previous IsAbs+Join attempt was
+		// double-counting outputDir for the relative case (resulting in
+		// `outputDir/outputDir/file.jpg`) and producing 404s that the
+		// frontend's onerror handler then misclassified as "fall back to
+		// the channel-avatar URL" -- which is what owner saw render as
+		// 1:1 letterboxed.
+		filePath, err := filepath.Abs(job.ThumbnailFile)
 		if err != nil {
 			jsonError(rw, "invalid path", http.StatusBadRequest)
 			return
 		}
 
-		// Path traversal guard
+		// Path traversal guard against the resolved output dir.
 		resolvedPath, ok := validatePathTraversal(filePath, outputDir)
 		if !ok {
 			jsonError(rw, "access denied", http.StatusForbidden)

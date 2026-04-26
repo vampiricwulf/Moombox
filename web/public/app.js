@@ -436,7 +436,14 @@ class MoomboxApp {
     const updateDismissBtn = document.getElementById("update-dismiss-btn");
     if (updateDismissBtn) updateDismissBtn.addEventListener("click", () => this.dismissUpdate());
 
-    // Thumbnail error handling via event delegation (error events don't bubble, use capture)
+    // Thumbnail error handling via event delegation (error events don't bubble, use capture).
+    // The `thumb-avatar` class only makes sense when the fallback URL is a
+    // square channel avatar (Twitch's pre-stream state). For YouTube, and
+    // for the new test.45+ flow where the primary src is the local file
+    // and the fallback is the YouTube/Twitch CDN thumbnail (16:9), adding
+    // thumb-avatar gives a square 1:1 box -- the "letterboxed in a square
+    // frame" symptom owner reported. Only apply thumb-avatar when the
+    // fallback explicitly opts in via data-fallback-avatar.
     const handleThumbError = (e) => {
       const img = e.target;
       if (img.tagName !== "IMG" || !img.closest(".thumb")) return;
@@ -445,7 +452,9 @@ class MoomboxApp {
         // Remove fallback so we don't loop if it also fails
         delete img.dataset.fallback;
         img.src = fallback;
-        img.classList.add("thumb-avatar");
+        if (img.dataset.fallbackAvatar === "true") {
+          img.classList.add("thumb-avatar");
+        }
       } else {
         img.style.display = "none";
       }
@@ -1435,7 +1444,18 @@ class MoomboxApp {
     const remoteThumb = job.thumbnailUrl || (isTwitch ? twitchAvatarFallback : ytThumb);
     const thumbnailUrl = localThumb || remoteThumb;
     const fallbackThumb = localThumb ? remoteThumb : (isTwitch ? twitchAvatarFallback : ytThumb);
+    // The Twitch channel-avatar fallback is a square image; render it in
+    // a 1:1 box (.thumb-avatar). All other paths -- local file, YouTube
+    // CDN, Twitch live-preview -- are 16:9 and should fill the standard
+    // 16:9 thumb box.
     const isAvatarThumb = isTwitch && !localThumb && (!job.thumbnailUrl || thumbnailUrl === twitchAvatarFallback);
+    // Only mark the fallback as an avatar (triggering thumb-avatar on
+    // load failure) when the FALLBACK itself is a Twitch channel avatar,
+    // not when it's a CDN-served 16:9 thumbnail. Owner report: local
+    // thumbnails were rendering as 1:1 boxes whenever the local route
+    // was slow/transient-fail and the img onerror swapped to remote --
+    // the handler used to add thumb-avatar unconditionally.
+    const fallbackIsAvatar = isTwitch && fallbackThumb === twitchAvatarFallback;
     const progress = this.formatProgress(job);
     const progressHtml = this.formatProgressHtml(job);
     const percent = job.percent || 0;
@@ -1460,7 +1480,8 @@ class MoomboxApp {
           <input type="checkbox" class="job-checkbox" data-job-id="${this.escapeHtml(job.id)}" ${isSelected ? "checked" : ""} aria-label="Select ${this.escapeHtml(job.title)}">
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
-               ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}>` : ""}
+               ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}
+               ${fallbackIsAvatar ? `data-fallback-avatar="true"` : ""}>` : ""}
           ${this.watchIndicatorHtml(job)}
         </div>
         <div class="stream-info">
