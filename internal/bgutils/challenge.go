@@ -9,11 +9,14 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
-// bgHTTPClient is a dedicated HTTP client for BotGuard API requests with an
-// explicit timeout. Avoids http.DefaultClient which has no timeout.
-var bgHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// bgHTTPClient is a dedicated HTTP client for BotGuard API requests.
+// Backed by the shared httpx.Client transport so keep-alive
+// amortisation works across packages that hit jnn-pa.googleapis.com.
+var bgHTTPClient = httpx.Client(30 * time.Second)
 
 // FetchChallenge fetches and descrambles a BotGuard challenge from the WAA API.
 // logger is optional (nil-safe) and receives a debug summary of which challenge

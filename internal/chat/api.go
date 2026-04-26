@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 // ErrAuthRequired is returned from FetchLiveChat / FetchChatReplay when the
@@ -84,27 +85,15 @@ func (api *ChatAPI) logDebug(msg string, args ...any) {
 
 // NewChatAPI creates a new chat API client.
 //
-// Transport tuning: live chat polls every ~5 s for hours at a time. Go's
-// default transport caps idle connections per host at 2, which forces a
-// fresh TCP+TLS handshake on most polls. Bumping idle conns to 6 + 90 s
-// IdleConnTimeout lets keep-alive amortise the handshake (audit chat.md R3).
+// Live chat polls every ~5 s for hours at a time. Backed by the shared
+// httpx transport (MaxIdleConnsPerHost=8) so keep-alive amortises the
+// handshake across the per-poll cadence. Audit chat.md R3.
 func NewChatAPI(apiKey, visitorData, cookieHeader string) *ChatAPI {
 	return &ChatAPI{
 		apiKey:       apiKey,
 		visitorData:  visitorData,
 		cookieHeader: cookieHeader,
-		client: &http.Client{
-			Timeout: chatHTTPTimeout,
-			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
-				MaxIdleConns:          20,
-				MaxIdleConnsPerHost:   6,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-				ForceAttemptHTTP2:     true,
-			},
-		},
+		client:       httpx.Client(chatHTTPTimeout),
 	}
 }
 

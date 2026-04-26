@@ -10,33 +10,19 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/connectivity"
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 // MaxFetchBodySize caps response bodies read by FetchBody. Public so other
 // packages can validate against the same ceiling instead of guessing.
 const MaxFetchBodySize = 50 << 20
 
-// utilsHTTPClient is a shared HTTP client with a long safety-net timeout.
-// FetchWithTimeout creates its own timeout via context.WithTimeout, so the
-// client timeout only guards against truly stuck connections.
-//
-// Transport tuning (audit reports/small-packages.md): the Go default caps
-// idle conns per host at 2, which forces a fresh TCP+TLS handshake under
-// any concurrent fetch pattern. Bumping idle-per-host to 8 + 90 s
-// IdleConnTimeout lets keep-alive amortise handshakes for the monitor
-// fan-out and watch-page polling paths.
-var utilsHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
-	Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,
-	},
-}
+// utilsHTTPClient backs FetchBody / FetchWithTimeout via the shared
+// httpx transport. The 5-minute client-level timeout is a safety net;
+// per-call timeouts come from FetchWithTimeout's ctx.WithTimeout.
+// httpx's transport already carries the keep-alive tuning the audit
+// recommended (MaxIdleConnsPerHost=8, IdleConnTimeout=90s, HTTP/2).
+var utilsHTTPClient = httpx.Client(5 * time.Minute)
 
 // ConnectivityReporter is a type alias to connectivity.Reporter so the HTTP
 // helpers don't carry a separate-but-identical interface that drifts on

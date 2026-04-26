@@ -2,18 +2,21 @@ package youtube
 
 import (
 	"context"
-	"net/http"
 	"regexp"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 var pathNParamRe = regexp.MustCompile(`/n/([a-zA-Z0-9_-]{10,})/`)
 
-// apiClient is a shared HTTP client with a 30s timeout (matching TS fetchWithTimeout).
-var apiClient = &http.Client{Timeout: 30 * time.Second}
+// apiClient is the shared HTTP client for /youtubei player-API calls.
+// Backed by the shared httpx transport for keep-alive amortisation
+// across the 4-5 client variants the strategy may try (WEB, WEB_SAFARI,
+// WEB_CREATOR, WEB_EMBEDDED, ANDROID_VR).
+var apiClient = httpx.Client(30 * time.Second)
 
 // PotTokenProvider generates PO tokens for Innertube player requests.
 // Defined here to avoid an import cycle with the bgutils package; *bgutils.PotProvider

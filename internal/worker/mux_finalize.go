@@ -8,11 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
-// workerHTTPClient is a shared HTTP client for file downloads in the worker package.
-// Uses a generous timeout since files can be up to 2GB (thumbnails, VODs, assets).
-var workerHTTPClient = &http.Client{Timeout: 10 * time.Minute}
+// workerHTTPClient downloads thumbnails / VODs / assets up to ~2GB,
+// backed by the shared httpx transport. The 10-minute timeout is
+// generous to accommodate slow connections on multi-GB VOD pulls.
+var workerHTTPClient = httpx.Client(10 * time.Minute)
 
 // DownloadFile downloads a file from a URL to the output path.
 // Used for VOD direct downloads and thumbnail/asset fetching.

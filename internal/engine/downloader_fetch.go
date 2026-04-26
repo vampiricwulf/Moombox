@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
@@ -27,18 +28,16 @@ import (
 // pathological "ctx never fires AND server keeps the socket open forever"
 // case; 5 minutes is generous enough for multi-MB segments on slow
 // connections without becoming a hang vector.
-var engineHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
-	Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   ParallelDownloads + 2,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,
-	},
-}
+// MaxIdleConnsPerHost is bumped beyond httpx's default of 8 because
+// engine fans out parallel segment fetches at ParallelDownloads + 2.
+// Built via httpx.NewTransport so the keep-alive tuning stays in sync
+// with the rest of the codebase.
+var engineHTTPClient = httpx.ClientWithTransport(
+	5*time.Minute,
+	httpx.NewTransport(httpx.TransportOptions{
+		MaxIdleConnsPerHost: ParallelDownloads + 2,
+	}),
+)
 
 // Segment read limits applied to resp.Body. Both are bounded so a
 // misbehaving server can't force the downloader to allocate unbounded

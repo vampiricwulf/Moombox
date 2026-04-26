@@ -2,6 +2,20 @@
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
 
+### Phase 3 (test.32) — `internal/httpx` unification
+
+Closes the audit's per-package HTTP-client duplication concerns (bgutils DEDUP-2, cipher DU5, plus 11 other call sites with subtly-different transports).
+
+**New `internal/httpx` package** —
+- `Client(timeout)` returns an `*http.Client` backed by a shared keep-alive-tuned transport (MaxIdleConns=100, MaxIdleConnsPerHost=8, IdleConnTimeout=90s, ForceAttemptHTTP2, ProxyFromEnvironment).
+- `ClientWithTransport(timeout, transport)` for callers needing custom tuning (e.g. engine's ParallelDownloads-aware MaxIdleConnsPerHost).
+- `NewTransport(opts)` builds a fresh `*http.Transport` with per-option overrides; zero-valued fields fall back to defaults.
+- 7 unit tests covering shared-transport identity, timeout firing, zero-timeout sentinel, override propagation, default fallback, custom-transport propagation, happy-path round trip.
+
+**Migrations** (10+ packages on the new shared transport): bgutils, cipher (player_cache), cookies (refresh), monitor, notifications/discord, twitch, youtube/player_api, worker/mux_finalize, updater (downloadClient + per-Updater client), utils, chat. Engine uses `httpx.ClientWithTransport` with its ParallelDownloads-aware MaxIdleConnsPerHost. The TUI's `cachedClient` stays as-is (loopback-specific InsecureSkipVerify wrapper).
+
+Net: keep-alive amortisation now works across packages that hit the same upstream hosts (e.g. cookies + monitor + youtube all hitting `*.youtube.com`), and per-package transport drift is eliminated.
+
 ### Phase 2 (test.31) — sentinel migration + small refactors
 
 **Cipher sentinels (cross-cutting C3 follow-on)** — new `internal/cipher/errors.go` with 5 sentinels (`ErrExtractorMismatch`, `ErrPlayerJSFetch`, `ErrSigDecrypt`, `ErrNDecrypt`, `ErrInputRequired`). 12 producer sites wrapped with `%w` across `decrypt.go`, `extractor.go`, `extractor_legacy.go`, `extractor_full_player.go`, `player_cache.go`. Consumers can now route via `errors.Is` to discriminate cipher-rotation (extractor mismatch) from network-blip (PlayerJSFetch) from JS-execution failure (Sig/NDecrypt). 5 sentinel-contract tests.

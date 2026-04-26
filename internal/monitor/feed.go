@@ -14,6 +14,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 const (
@@ -26,8 +27,10 @@ const (
 	feedStagger = 500 * time.Millisecond
 )
 
-// monitorHTTPClient is a shared HTTP client with a timeout for monitor HTTP requests.
-var monitorHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// monitorHTTPClient is a shared HTTP client for monitor HTTP requests.
+// Backed by the shared httpx transport so keep-alive amortises across
+// monitor / cookies / youtube fetches against the same hosts.
+var monitorHTTPClient = httpx.Client(30 * time.Second)
 
 // ConnectivityReporter is the subset of connectivity.Monitor we invoke from
 // monitor HTTP paths. Wiring this into the FeedMonitor and DecapiMonitor lets

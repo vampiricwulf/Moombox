@@ -9,15 +9,18 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 const discordTimeout = 15 * time.Second
 
-// discordHTTPClient is a shared HTTP client for Discord webhook requests.
-// Per-request timeout is enforced by the context; the client-level Timeout
-// is a belt-and-suspenders cap in case a retry/redirect chain slips past
-// the request context.
-var discordHTTPClient = &http.Client{Timeout: 2 * discordTimeout}
+// discordHTTPClient sends Discord webhook requests via the shared
+// httpx transport. Per-request timeout is enforced by the context; the
+// client-level Timeout (2 * discordTimeout = 30s) is a belt-and-
+// suspenders cap in case a retry/redirect chain slips past the
+// request context.
+var discordHTTPClient = httpx.Client(2 * discordTimeout)
 
 // DiscordWebhook sends notifications via Discord webhook.
 type DiscordWebhook struct {

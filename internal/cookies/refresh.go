@@ -13,10 +13,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
-// cookiesHTTPClient is a shared HTTP client with a timeout for cookie refresh requests.
-var cookiesHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// cookiesHTTPClient performs YouTube auth-check + Twitch OAuth refresh
+// against the shared httpx transport. Keep-alive across the auth-check
+// + refresh round trip amortises the TLS handshake.
+var cookiesHTTPClient = httpx.Client(30 * time.Second)
 
 const (
 	defaultRefreshInterval = 30 * time.Minute

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 const (
@@ -18,10 +20,9 @@ const (
 	playerCacheSubdir = "player_cache"
 )
 
-// playerHTTPClient is a dedicated HTTP client for player JS fetches with an
-// explicit timeout. This avoids using http.DefaultClient which has no timeout,
-// preventing potentially unbounded requests.
-var playerHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// playerHTTPClient fetches player.js. Backed by the shared httpx.Client
+// transport for keep-alive amortisation across cipher / youtube / etc.
+var playerHTTPClient = httpx.Client(30 * time.Second)
 
 // PlayerCache manages disk-cached YouTube player JS files.
 type PlayerCache struct {

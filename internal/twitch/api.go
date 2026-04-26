@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/constants"
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 // ErrTwitchAuthExpired signals that Twitch rejected the provided auth-token
@@ -26,8 +27,10 @@ import (
 // browser produced indistinguishable errors from transient network trouble.
 var ErrTwitchAuthExpired = errors.New("twitch auth token expired or invalid")
 
-// twitchHTTPClient is a shared HTTP client with a timeout for all Twitch API requests.
-var twitchHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// twitchHTTPClient is a shared HTTP client for all Twitch GQL + Helix
+// requests. Backed by the shared httpx transport for keep-alive
+// amortisation across the 6-8 GQL calls per monitor cycle.
+var twitchHTTPClient = httpx.Client(30 * time.Second)
 
 var (
 	safeLoginRe   = regexp.MustCompile(`[^a-zA-Z0-9_]`)

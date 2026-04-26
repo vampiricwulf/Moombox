@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
 // logger is a type alias for the anonymous logger interface.
@@ -50,11 +52,12 @@ type Updater struct {
 	verifySignature func(binaryPath, sigPath string) error
 }
 
-// downloadClient is the shared HTTP client used for binary downloads. It
-// gets a generous timeout because update payloads can be 20-30 MB; the
-// per-request u.client (10s timeout) is reserved for quick GitHub API
-// calls. Shared so repeated downloadFile calls reuse idle connections.
-var downloadClient = &http.Client{Timeout: 5 * time.Minute}
+// downloadClient is the shared HTTP client used for binary downloads.
+// Backed by the shared httpx transport. The 5-minute timeout is
+// generous to accommodate slow connections on 20-30 MB update
+// payloads; the per-request u.client (10s timeout) is reserved for
+// quick GitHub API calls.
+var downloadClient = httpx.Client(5 * time.Minute)
 
 // githubRelease is the subset of the GitHub API response we parse.
 type githubRelease struct {
@@ -82,9 +85,7 @@ func New(currentVersion string, log logger) (*Updater, error) {
 		logger:         log,
 		repoOwner:      "vampiricwulf",
 		repoName:       "Moombox",
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		client:          httpx.Client(10 * time.Second),
 		apiBaseURL:      "https://api.github.com",
 		verifySignature: VerifySignature,
 	}, nil
