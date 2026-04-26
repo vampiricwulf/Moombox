@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dop251/goja"
+	mbgoja "github.com/vampiricwulf/Moombox/internal/goja"
 )
 
 func TestExtractFunctionByName(t *testing.T) {
@@ -116,12 +116,10 @@ var nTransFunc=function(a){var b=a.split("");b.reverse();return b.join("")};
 		t.Fatalf("preprocessPlayer: %v", err)
 	}
 
-	// Should contain setup code
-	if !strings.Contains(code, "XMLHttpRequest") {
-		t.Error("expected setup code with XMLHttpRequest")
-	}
-
-	// Should contain result assignments
+	// Should contain result assignments. As of test.34 (cipher.md D1/D4),
+	// browser stubs are provided by goja.NewRuntimeForCipher inside
+	// getFromPrepared rather than prepended setupCode, so the absence of
+	// a "XMLHttpRequest" string here is expected.
 	if !strings.Contains(code, "_result.sig") {
 		t.Error("expected _result.sig assignment")
 	}
@@ -603,76 +601,69 @@ func TestSetupCodeGlobalUnification(t *testing.T) {
 	//
 	// YouTube players (e.g., player_74edf1a3.js line 1201) access
 	// self.location.protocol, so these globals must be unified.
+	//
+	// As of test.34 the unification is done by goja.NewRuntimeForCipher (audit
+	// cipher.md D1/D4); legacy setupCode + fullPlayerSetupCode no longer carry
+	// these stubs. The test exercises the constructor directly so future drift
+	// surfaces here rather than during a real cipher compile.
 
-	tests := []struct {
-		name string
-		code string
-	}{
-		{"legacy_setupCode", setupCode},
-		{"fullPlayerSetupCode", fullPlayerSetupCode},
+	vm, err := mbgoja.NewRuntimeForCipher("")
+	if err != nil {
+		t.Fatalf("NewRuntimeForCipher: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			vm := goja.New()
-			if _, err := vm.RunString(tt.code); err != nil {
-				t.Fatalf("setup code execution failed: %v", err)
-			}
+	// window === globalThis
+	v, err := vm.RunString("window === globalThis")
+	if err != nil {
+		t.Fatalf("window === globalThis: %v", err)
+	}
+	if !v.ToBoolean() {
+		t.Error("window !== globalThis — must be the same object")
+	}
 
-			// window === globalThis
-			v, err := vm.RunString("window === globalThis")
-			if err != nil {
-				t.Fatalf("window === globalThis: %v", err)
-			}
-			if !v.ToBoolean() {
-				t.Error("window !== globalThis — must be the same object")
-			}
+	// self === globalThis
+	v, err = vm.RunString("self === globalThis")
+	if err != nil {
+		t.Fatalf("self === globalThis: %v", err)
+	}
+	if !v.ToBoolean() {
+		t.Error("self !== globalThis — must be the same object")
+	}
 
-			// self === globalThis
-			v, err = vm.RunString("self === globalThis")
-			if err != nil {
-				t.Fatalf("self === globalThis: %v", err)
-			}
-			if !v.ToBoolean() {
-				t.Error("self !== globalThis — must be the same object")
-			}
+	// window === self (transitive, but verify explicitly)
+	v, err = vm.RunString("window === self")
+	if err != nil {
+		t.Fatalf("window === self: %v", err)
+	}
+	if !v.ToBoolean() {
+		t.Error("window !== self — must be the same object")
+	}
 
-			// window === self (transitive, but verify explicitly)
-			v, err = vm.RunString("window === self")
-			if err != nil {
-				t.Fatalf("window === self: %v", err)
-			}
-			if !v.ToBoolean() {
-				t.Error("window !== self — must be the same object")
-			}
+	// self.location.origin — the access pattern YouTube players use
+	v, err = vm.RunString("self.location.origin")
+	if err != nil {
+		t.Fatalf("self.location.origin: %v", err)
+	}
+	if v.String() != "https://www.youtube.com" {
+		t.Errorf("self.location.origin = %q, want %q", v.String(), "https://www.youtube.com")
+	}
 
-			// self.location.origin — the access pattern YouTube players use
-			v, err = vm.RunString("self.location.origin")
-			if err != nil {
-				t.Fatalf("self.location.origin: %v", err)
-			}
-			if v.String() != "https://www.youtube.com" {
-				t.Errorf("self.location.origin = %q, want %q", v.String(), "https://www.youtube.com")
-			}
+	// window.location.origin
+	v, err = vm.RunString("window.location.origin")
+	if err != nil {
+		t.Fatalf("window.location.origin: %v", err)
+	}
+	if v.String() != "https://www.youtube.com" {
+		t.Errorf("window.location.origin = %q, want %q", v.String(), "https://www.youtube.com")
+	}
 
-			// window.location.origin
-			v, err = vm.RunString("window.location.origin")
-			if err != nil {
-				t.Fatalf("window.location.origin: %v", err)
-			}
-			if v.String() != "https://www.youtube.com" {
-				t.Errorf("window.location.origin = %q, want %q", v.String(), "https://www.youtube.com")
-			}
-
-			// self.location.protocol — accessed by real player code
-			v, err = vm.RunString("self.location.protocol")
-			if err != nil {
-				t.Fatalf("self.location.protocol: %v", err)
-			}
-			if v.String() != "https:" {
-				t.Errorf("self.location.protocol = %q, want %q", v.String(), "https:")
-			}
-		})
+	// self.location.protocol — accessed by real player code
+	v, err = vm.RunString("self.location.protocol")
+	if err != nil {
+		t.Fatalf("self.location.protocol: %v", err)
+	}
+	if v.String() != "https:" {
+		t.Errorf("self.location.protocol = %q, want %q", v.String(), "https:")
 	}
 }
 

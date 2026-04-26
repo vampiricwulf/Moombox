@@ -33,18 +33,12 @@ type TwitchVariantInfo struct {
 	MaxResolution   int    // from global config
 }
 
-// TwitchChatDownloader is the interface for Twitch chat downloaders (IRC or VOD).
-type TwitchChatDownloader interface {
-	Start(ctx context.Context) error
-	Stop()
-	MarkStreamEnded()
-	MessageCount() int
-	IsRunning() bool
-}
-
 // ExecuteTwitch runs the Twitch download pipeline (B3).
 // Twitch HLS delivers pre-muxed MPEG-TS, so only one segment downloader is needed.
-func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobContext, variant *TwitchVariantInfo, isVod bool, twitchChatDl TwitchChatDownloader) error {
+// twitchChatDl is the unified ChatSource — concrete type is *twitch.ChatDownloader
+// (live IRC) or *twitch.VodChatDownloader (VOD GQL); ExecuteTwitch type-asserts on
+// the concrete to pull progress wiring.
+func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobContext, variant *TwitchVariantInfo, isVod bool, twitchChatDl ChatSource) error {
 	o.logger.Info("starting Twitch download", "jobID", jobCtx.Job.ID, "isVod", isVod)
 
 	// DB listener for cancellation (B6)

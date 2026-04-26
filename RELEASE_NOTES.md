@@ -1,6 +1,22 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 4 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. **Phase 5 of the 12-phase Deferred-drain arc** — owner pushed back on excessive Deferrals after test.29; locked in 45 owner decisions and a phase-by-phase plan to actually ship every refactor / fix / optimisation flagged by the audit.
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
+
+### Phase 5 (test.34) — Strategy + ChatSource interfaces + Goja-cipher consolidation
+
+Three architectural refactors closing eight "Deferred — substantive refactor" rows.
+
+**Strategy interface (worker F49/Q9)** — new `DownloadStrategy` interface + `StrategyDeps` struct in `internal/worker/strategies.go`. Three zero-sized adapter types (`vodStrategyT`, `dashStrategyT`, `hlsStrategyT`) wrap the existing `DownloadVod` / `DownloadDash` / `DownloadHls` functions; orchestrator.go's three-arm if/else dispatch becomes a single `strategy.Download(ctx, jobCtx, videoInfo, deps)` call. Each strategy uses only the deps it needs (VOD ignores `IsOnline`, HLS ignores `CipherSolver`, etc.); the unified `StrategyDeps` shape replaces three different parameter lists. Mockable via the interface for table-driven strategy tests. youtube T1 (multi-client priority data table in `player_api_strategy.go`) is a distinct refactor — deferred to a later phase.
+
+**ChatSource interface (chat T2 + twitch #20)** — common lifecycle interface in `internal/worker/chat_source.go` covering YouTube polling chat, Twitch IRC live chat, and Twitch VOD GQL chat. Replaces the local `TwitchChatDownloader` interface; `worker.go` and `orchestrator_twitch.go` now reference `ChatSource` everywhere. All three implementations (`*chat.ChatDownloader`, `*twitch.ChatDownloader`, `*twitch.VodChatDownloader`) already satisfied the methods; this commit names the abstraction so future shared-lifecycle helpers don't have to invent a new interface. `MarkStreamEnded` semantics documented per-platform (YouTube real-signal, Twitch IRC stop-alias, Twitch VOD no-op).
+
+**Goja-cipher consolidation (cipher D1/D4 + goja C4/API6/D3)** — cipher's hand-rolled `gojavm.New()` with full_player_setup.js DOM stubs migrated to a new `goja.NewRuntimeForCipher(userAgent string) (*goja.Runtime, error)` constructor in `internal/goja/runtime.go`. The constructor registers encoding (real TextEncoder / TextDecoder / btoa / atob) plus the shared DOM shim; it deliberately omits timer registration since cipher uses `vm.Interrupt()` externally for timeout enforcement. Three concrete fixes:
+
+1. **Real TextEncoder/TextDecoder** — the previous cipher-side stub returned `new Uint8Array(0)` for every call, which would silently miscompute any signature touching `TextEncoder`. Replaced with goja's UTF-8-correct implementations. Audit goja.md API6 explicitly flagged this as a "drift + miscompute risk".
+2. **Shrunk `full_player_setup.js`** — was 108 lines of hand-stubs; now just the cipher-specific `_multiTry` helper used by `buildSolverBindings` for the sig-candidate loop. The DOM stubs (document, navigator, location, screen, performance, storage, XHR, crypto, MutationObserver, etc.) are delegated to `internal/goja`'s `RegisterDOMShim`. Documented at the top of the file.
+3. **Removed legacy `setupCode` constant** in `extractor_legacy.go` — was 26 lines of overlapping stubs prepended to legacy regex-extracted sig/n functions. Now redundant since `getFromPrepared`'s VM already has the shared shim.
+
+`internal/goja/dom_shim.go` gained five missing browser globals that cipher needed but bgutils had been getting away without: `AbortController`, `ReadableStream`, `CustomEvent`, `CSS`, and `Intl` (with safe stub-method semantics matching the existing pattern). `TestSetupCodeGlobalUnification` rewritten to exercise the constructor directly (window === self === globalThis, location.protocol/origin) so future shim drift surfaces in tests rather than during a real cipher compile. `TestPreprocessPlayer`'s "expected XMLHttpRequest in setup code" assertion dropped — that's now a property of the VM constructor, not the preprocessed code.
 
 ### Phase 4 (test.33) — persistence (cookies meta + interpreter hash)
 
@@ -65,7 +81,6 @@ Six fixes closing the easy wins from the deferred-drain plan:
 
 - **Phase 2 (test.31)** — sentinel migration (cipher / twitch / engine), goja TD-4/TD-5, engine #17 ErrSegmentPermanent, dismissal re-examinations.
 - **Phase 3 (test.32)** — `internal/httpx` package unifying per-package HTTP clients.
-- **Phase 5 (test.34)** — Strategy interface + ChatSource interface + Goja-cipher consolidation.
 - **Phase 6 (test.35)** — engine/protocol perf (VisitorData refetch, proactive IT refresh, cipher disk cache, VM pool, quality-split switch up, DPAPI mtime-half, ProfileInUse).
 - **Phase 7 (test.36)** — web hardening (TLS, chi.RequestID, -EncodedCommand, 256KB WS write cap, LRU rate-limiter, ETag, pagination, AutoCookieReloginRequired struct→map backend, JSON envelope backend, Update-apply Origin tightening).
 - **Phase 8 (test.37)** — owner-decision feature work (chat_status column, moombox add HTTP, IOS+MWEB clients, GetCookieHeader domain param, chat image mirror, restart drain, launcher scheduled task, OnHealthUpdate engine callback, Twitch token bucket).

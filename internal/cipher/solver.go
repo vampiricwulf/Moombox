@@ -7,6 +7,7 @@ import (
 	"time"
 
 	gojavm "github.com/dop251/goja"
+	mbgoja "github.com/vampiricwulf/Moombox/internal/goja"
 )
 
 // solverCacheSize caps the in-memory LRU. VM heap is ~30-50MB each × 10 =
@@ -280,7 +281,13 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 		}
 	}()
 
-	vm := gojavm.New()
+	// internal/goja's runtime registers real TextEncoder/TextDecoder and the
+	// shared DOM shim. Empty UA → internal/goja defaults to Chrome 131. Audit
+	// reports/goja.md C4 + cipher.md D1/D4.
+	vm, vmErr := mbgoja.NewRuntimeForCipher("")
+	if vmErr != nil {
+		return nil, fmt.Errorf("init cipher VM: %w", vmErr)
+	}
 
 	// Create result container
 	resultObj := vm.NewObject()

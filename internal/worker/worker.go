@@ -398,7 +398,7 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			}
 		}
 		// Determine which Twitch chat downloader to use
-		var twitchChat TwitchChatDownloader
+		var twitchChat ChatSource
 		if result.TwitchChatDownloader != nil {
 			twitchChat = result.TwitchChatDownloader
 		} else if result.TwitchVodChatDl != nil {

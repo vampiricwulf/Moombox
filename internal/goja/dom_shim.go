@@ -292,6 +292,31 @@ func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	globalThis.MutationObserver = function() { this.observe = function() {}; this.disconnect = function() {}; this.takeRecords = function() { return []; }; };
 	globalThis.IntersectionObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
 	globalThis.ResizeObserver = function() { this.observe = function() {}; this.disconnect = function() {}; };
+	// AbortController + AbortSignal — YouTube player.js init touches these.
+	globalThis.AbortController = function() {
+		this.signal = { aborted: false, addEventListener: function() {}, removeEventListener: function() {} };
+		this.abort = function() { this.signal.aborted = true; };
+	};
+	globalThis.ReadableStream = function() { this.cancel = function() { return Promise.resolve(); }; };
+	globalThis.CustomEvent = function(t, o) { this.type = t; this.detail = o && o.detail; };
+	globalThis.CSS = { supports: function() { return false; }, escape: function(s) { return String(s); } };
+	// Intl stubs — formatters return empty/zero values rather than throwing
+	// on missing-method access. BotGuard / player.js init won't crash on a
+	// missing locale.
+	(function() {
+		var _intlProto = { resolvedOptions: function() { return { timeZone: 'UTC', locale: 'en-US' }; }, format: function() { return ''; }, formatToParts: function() { return []; } };
+		var _intlCtor = function() { return Object.create(_intlProto); };
+		_intlCtor.supportedLocalesOf = function() { return []; };
+		globalThis.Intl = globalThis.Intl || {
+			DateTimeFormat: _intlCtor,
+			NumberFormat: _intlCtor,
+			PluralRules: _intlCtor,
+			RelativeTimeFormat: _intlCtor,
+			Collator: _intlCtor,
+			ListFormat: _intlCtor,
+			Segmenter: _intlCtor
+		};
+	})();
 	// Capture the native CSPRNG bridges into closure-local variables BEFORE
 	// the outer bootstrap clears the globals. Without this capture,
 	// getRandomValues would look up __cryptoRandBytes on globalThis at call

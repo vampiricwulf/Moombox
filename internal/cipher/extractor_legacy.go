@@ -202,11 +202,13 @@ func resolveArrayFunction(js, arrayName, index string) (string, error) {
 }
 
 // preprocessPlayerLegacy is the original regex-based approach for older player.js versions.
+//
+// As of test.34 (audit cipher.md D1/D4 + goja.md C4), browser stubs are provided
+// by goja.NewRuntimeForCipher inside getFromPrepared — no need to prepend a local
+// setupCode block. Extracted sig/n functions can rely on globalThis.{window,self,
+// document,navigator,location,...} being set up by internal/goja's shared shim.
 func preprocessPlayerLegacy(playerJS string) (string, error) {
 	var parts []string
-
-	// Setup: browser stubs for the extracted code
-	parts = append(parts, setupCode)
 
 	// Extract sig function
 	sigCode, sigErr := extractSigFunction(playerJS)
@@ -229,31 +231,3 @@ func preprocessPlayerLegacy(playerJS string) (string, error) {
 	return strings.Join(parts, "\n"), nil
 }
 
-// setupCode provides browser-like stubs to prevent ReferenceError when
-// executing extracted YouTube player functions.
-const setupCode = `
-if (typeof globalThis.XMLHttpRequest === "undefined") {
-    globalThis.XMLHttpRequest = function() {};
-    globalThis.XMLHttpRequest.prototype = {};
-}
-if (typeof globalThis.location === "undefined") {
-    globalThis.location = {
-        hash: "", host: "www.youtube.com", hostname: "www.youtube.com",
-        href: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-        origin: "https://www.youtube.com", pathname: "/watch",
-        port: "", protocol: "https:", search: "?v=dQw4w9WgXcQ"
-    };
-}
-if (typeof globalThis.document === "undefined") {
-    globalThis.document = Object.create(null);
-}
-if (typeof globalThis.navigator === "undefined") {
-    globalThis.navigator = Object.create(null);
-}
-if (typeof globalThis.self === "undefined") {
-    globalThis.self = globalThis;
-}
-if (typeof globalThis.window === "undefined") {
-    globalThis.window = globalThis;
-}
-`

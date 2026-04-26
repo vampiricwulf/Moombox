@@ -211,18 +211,26 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		"hasHls", videoInfo.HlsManifestURL != "",
 		"formatCount", len(videoInfo.Formats),
 		"useDirectVod", useDirectVod)
-	if useDirectVod && len(videoInfo.Formats) > 0 {
-		result, err = DownloadVod(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider)
-	} else if videoInfo.DashManifestURL != "" {
-		result, err = DownloadDash(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
-	} else if videoInfo.HlsManifestURL != "" {
-		result, err = DownloadHls(ctx, jobCtx, videoInfo, o.potProvider, connIsOnline(o.conn))
-	} else if len(videoInfo.Formats) > 0 {
-		// Fallback: no DASH/HLS manifest but formats exist — download directly
-		result, err = DownloadVod(ctx, jobCtx, videoInfo, o.cipherSolver, o.potProvider)
-	} else {
+	deps := &StrategyDeps{
+		CipherSolver: o.cipherSolver,
+		PotProvider:  o.potProvider,
+		IsOnline:     connIsOnline(o.conn),
+	}
+	var strategy DownloadStrategy
+	switch {
+	case useDirectVod && len(videoInfo.Formats) > 0:
+		strategy = VodStrategy
+	case videoInfo.DashManifestURL != "":
+		strategy = DashStrategy
+	case videoInfo.HlsManifestURL != "":
+		strategy = HlsStrategy
+	case len(videoInfo.Formats) > 0:
+		// Fallback: no DASH/HLS manifest but formats exist — download directly.
+		strategy = VodStrategy
+	default:
 		return fmt.Errorf("no download strategy available")
 	}
+	result, err = strategy.Download(ctx, jobCtx, videoInfo, deps)
 
 	if err != nil {
 		return fmt.Errorf("setup download: %w", err)
