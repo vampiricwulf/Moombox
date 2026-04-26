@@ -1,0 +1,9 @@
+# Build outputs (rebuilt by `node build.mjs`; also produced by CI release workflow)
+dist/
+
+# npm install output
+node_modules/
+
+# Optional: package-lock is committed for reproducible builds. If it gets
+# unwieldy, swap to a lock-style of choice and uncomment:
+# package-lock.json

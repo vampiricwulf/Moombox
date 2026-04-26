@@ -1,0 +1,11 @@
+# Build outputs produced by `bgutil-sidecar/build.mjs` and
+# `tools/fetch-node` (Phase 2). Both are large binary blobs regenerated on
+# every build; only version.txt is committed (used as the cache-invalidation
+# key for first-launch extraction).
+*.gz
+*.tar.gz
+node.exe.gz
+sidecar.tar.gz
+
+# Keep version.txt tracked.
+!version.txt
