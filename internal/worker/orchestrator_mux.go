@@ -366,8 +366,15 @@ func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContex
 		}
 	}
 	if !thumbnailSaved && jobCtx.Job.VideoID != "" {
-		// Try YouTube thumbnail quality progression (matching TypeScript assetDownloader)
-		thumbQualities := []string{"maxresdefault", "sddefault", "hqdefault", "mqdefault", "default"}
+		// YouTube thumbnail quality progression. Order matters because
+		// only `maxresdefault` (1280x720) and `mqdefault` (320x180) are
+		// natively 16:9 -- the others (sddefault 640x480, hqdefault
+		// 480x360, default 120x90) are 4:3 with black bars baked into
+		// the image. Once the Web UI prefers the local file, those 4:3
+		// sources letterbox visibly inside the dashboard's 16:9 thumb
+		// box. Try maxres first for quality, mqdefault second for clean
+		// 16:9 framing, only then fall back to the letterboxed sizes.
+		thumbQualities := []string{"maxresdefault", "mqdefault", "hqdefault", "sddefault", "default"}
 		for _, quality := range thumbQualities {
 			thumbURL := fmt.Sprintf("https://i.ytimg.com/vi/%s/%s.jpg", jobCtx.Job.VideoID, quality)
 			thumbDst := filepath.Join(outputDir, filenameBase+".jpg")
