@@ -2,6 +2,23 @@
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
 
+### Phase 2 (test.31) — sentinel migration + small refactors
+
+**Cipher sentinels (cross-cutting C3 follow-on)** — new `internal/cipher/errors.go` with 5 sentinels (`ErrExtractorMismatch`, `ErrPlayerJSFetch`, `ErrSigDecrypt`, `ErrNDecrypt`, `ErrInputRequired`). 12 producer sites wrapped with `%w` across `decrypt.go`, `extractor.go`, `extractor_legacy.go`, `extractor_full_player.go`, `player_cache.go`. Consumers can now route via `errors.Is` to discriminate cipher-rotation (extractor mismatch) from network-blip (PlayerJSFetch) from JS-execution failure (Sig/NDecrypt). 5 sentinel-contract tests.
+
+**Engine sentinel migration (engine #17)** — `fetchSegmentWithRetry` migrated from `(body, permanent bool)` to `(body, error)` with `ErrSegmentPermanent` + `ErrSegmentRetriesExhausted` sentinels. Callers in `downloader_hls.go` + `downloader_parallel.go` use `errors.Is` to differentiate permanent eviction (403/410) vs retries-exhausted vs ctx cancellation. More composable than the boolean flag.
+
+**Goja TD-4 atomic.Bool migration** — `TimerManager.stopped` migrated from `bool`-behind-mutex to `atomic.Bool`. SetTimeout / SetInterval gain a lock-free fast-path early return when the manager is already stopped; the lock-protected slow-path check remains as the correctness gate.
+
+**Goja TD-5 ctx threading** — `NewRuntimeWithShims(ctx, userAgent)` signature. New `NewTimerManagerCtx(ctx, vm)` ties the timer manager's interval goroutines to a parent ctx — when ctx cancels, intervals exit promptly without an explicit `CancelAll()`. bgutils `botguard.go` updated; test files migrated to `t.Context()`.
+
+**Re-examined dismissals** (per owner directive):
+
+- **web Q-20** — `hub.mu sync.Mutex` → `sync.RWMutex`. `Broadcast` snapshot + `ClientCount` use the cheaper RLock path. Matches `logBufMu` shape for consistency.
+- **web Q-19** — `NewRateLimiterCtx(ctx, limit, window)` variant added. Cleanup goroutine ties to parent ctx (testability + composability). Original `NewRateLimiter` retained for backward compat with existing call sites.
+- **bgutils API2/3/4/7** — confirmed Dismissed. Hardcoded fingerprint values (screen/innerWidth/hardwareConcurrency, `XMLHttpRequest.prototype = {}`, `navigator.sendBeacon` returning true, `queueMicrotask` polyfill) are intentional and match the expected BotGuard fingerprint shape. Randomising would be flagged as bot-like.
+- **goja DD3/DD4** — confirmed Dismissed. `HasPendingCallbacks` / `ActiveCount` test-only public methods are an established Go pattern; removing forces tests to inspect package internals.
+
 ### Phase 1 (test.30) — quick wins
 
 Six fixes closing the easy wins from the deferred-drain plan:
