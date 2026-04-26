@@ -19,6 +19,26 @@
 
     /* Toasts must render above the setup/FFmpeg overlays (z-index 10000) */
     --sl-z-index-toast: 10100;
+
+    /* Platform brand colors. Audit reports/frontend-html-css.md THEME-7 —
+       inline #ff0000 / #9146ff in the index.html iconography lock the
+       palette into a single source. CSS vars let a future theme override
+       these without touching templates. */
+    --color-platform-youtube: #ff0000;
+    --color-platform-twitch: #9146ff;
+}
+
+/* Tab-hide animation pause. When app.js sets [data-paused="true"] on the
+   body in response to visibilitychange, suspend every CSS animation +
+   transition globally. The browser already throttles requestAnimationFrame
+   on hidden tabs to 1Hz, but CSS-driven progress shimmers + Shoelace
+   spinner ticks would otherwise keep allocating layer paints under the
+   compositor. Audit reports/frontend-html-css.md CRIT-7 / PERF-1 / PERF-2. */
+body[data-paused="true"] *,
+body[data-paused="true"] *::before,
+body[data-paused="true"] *::after {
+    animation-play-state: paused !important;
+    transition: none !important;
 }
 
 * {

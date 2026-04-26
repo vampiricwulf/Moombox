@@ -4014,3 +4014,13 @@ window.fetch = async function (...args) {
 document.addEventListener("DOMContentLoaded", () => {
   window.app = new MoomboxApp();
 });
+
+// Tab-hide animation pause — Audit reports/frontend-html-css.md CRIT-7,
+// PERF-1, PERF-2. When the tab is hidden, the browser should suspend any
+// CSS animation / requestAnimationFrame loop that's currently driving the
+// in-progress UI. Toggling a `data-paused` attribute on <body> lets CSS
+// rules (e.g. `[data-paused="true"] .progress-bar { animation-play-state:
+// paused; }`) suspend animations declaratively without touching JS state.
+document.addEventListener("visibilitychange", () => {
+  document.body.setAttribute("data-paused", document.hidden ? "true" : "false");
+});
