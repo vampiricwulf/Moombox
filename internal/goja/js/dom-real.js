@@ -842,4 +842,279 @@
 
     // Expose the tag map for createElement (Day 4 will use this).
     Object.defineProperty(globalThis, '__moombox_htmlTagMap', { value: _htmlTagMap, configurable: true });
+
+    // -------------------------------------------------------------------
+    // Day 3: CSSStyleDeclaration + getComputedStyle.
+    //
+    // Inline-style backing store: each HTMLElement gets its own
+    // CSSStyleDeclaration (via lazy getter on `element.style`). Reading
+    // / writing camelCase or dashed property accessors mutates an
+    // internal Map<dashedName, value>. The `cssText` getter / setter
+    // serialises the whole map to/from a "key: value; key2: value2"
+    // string and keeps element.attributes.style in sync.
+    //
+    // getComputedStyle returns a CSSStyleDeclaration that mirrors the
+    // element's inline styles; properties not set inline default per
+    // the property's spec default (we only know the safe defaults --
+    // no real layout, so width/height/top/left default to '0px',
+    // display defaults to 'block' for div / 'inline' for span etc.,
+    // visibility 'visible', opacity '1').
+    // -------------------------------------------------------------------
+
+    // Property spec defaults — values getComputedStyle returns when
+    // the inline style doesn't set them. Real browsers compute these
+    // from the cascade + layout; we pick the spec initial values that
+    // BotGuard fingerprints would reasonably observe on a div.
+    const _CSS_DEFAULTS = {
+        'display': 'block',
+        'visibility': 'visible',
+        'opacity': '1',
+        'color': 'rgb(0, 0, 0)',
+        'background-color': 'rgba(0, 0, 0, 0)',
+        'font-family': 'sans-serif',
+        'font-size': '16px',
+        'font-weight': '400',
+        'font-style': 'normal',
+        'line-height': 'normal',
+        'text-align': 'start',
+        'width': '0px', 'height': '0px',
+        'top': 'auto', 'right': 'auto', 'bottom': 'auto', 'left': 'auto',
+        'margin-top': '0px', 'margin-right': '0px', 'margin-bottom': '0px', 'margin-left': '0px',
+        'padding-top': '0px', 'padding-right': '0px', 'padding-bottom': '0px', 'padding-left': '0px',
+        'border-top-width': '0px', 'border-right-width': '0px', 'border-bottom-width': '0px', 'border-left-width': '0px',
+        'border-top-style': 'none', 'border-right-style': 'none', 'border-bottom-style': 'none', 'border-left-style': 'none',
+        'position': 'static', 'float': 'none', 'clear': 'none',
+        'overflow': 'visible', 'overflow-x': 'visible', 'overflow-y': 'visible',
+        'z-index': 'auto',
+        'cursor': 'auto',
+        'pointer-events': 'auto',
+        'box-sizing': 'content-box',
+        'transform': 'none',
+        'transition': 'all 0s ease 0s',
+        'animation': 'none 0s ease 0s 1 normal none running',
+        'flex': '0 1 auto',
+        'flex-direction': 'row',
+        'flex-wrap': 'nowrap',
+        'justify-content': 'normal',
+        'align-items': 'normal',
+        'align-self': 'auto',
+        'grid-template-columns': 'none',
+        'grid-template-rows': 'none',
+        'gap': 'normal normal',
+        'min-width': 'auto', 'max-width': 'none',
+        'min-height': 'auto', 'max-height': 'none',
+        'background': 'rgba(0, 0, 0, 0)',
+        'background-image': 'none',
+        'background-position': '0% 0%',
+        'background-repeat': 'repeat',
+        'background-size': 'auto',
+        'border-radius': '0px',
+        'box-shadow': 'none',
+        'text-decoration': 'none solid rgb(0, 0, 0)',
+        'white-space': 'normal',
+        'word-break': 'normal',
+        'word-wrap': 'normal',
+        'overflow-wrap': 'normal',
+        'letter-spacing': 'normal',
+        'list-style': 'outside none disc',
+    };
+    // Cached camelCase -> dashed mappings. Built lazily.
+    const _camelToDashed = new Map();
+    const _dashedToCamel = new Map();
+    function _toDashed(name) {
+        if (_camelToDashed.has(name)) return _camelToDashed.get(name);
+        let out = '';
+        for (let i = 0; i < name.length; i++) {
+            const c = name.charAt(i);
+            if (c >= 'A' && c <= 'Z') {
+                if (i > 0) out += '-';
+                out += c.toLowerCase();
+            } else {
+                out += c;
+            }
+        }
+        _camelToDashed.set(name, out);
+        _dashedToCamel.set(out, name);
+        return out;
+    }
+    function _toCamel(name) {
+        if (_dashedToCamel.has(name)) return _dashedToCamel.get(name);
+        let out = '';
+        let upper = false;
+        for (let i = 0; i < name.length; i++) {
+            const c = name.charAt(i);
+            if (c === '-') { upper = true; continue; }
+            out += upper ? c.toUpperCase() : c;
+            upper = false;
+        }
+        _dashedToCamel.set(name, out);
+        _camelToDashed.set(out, name);
+        return out;
+    }
+
+    class CSSStyleDeclaration {
+        constructor(element) {
+            // Internal backing store: dashed -> value
+            Object.defineProperty(this, '_props', { value: new Map(), writable: false, enumerable: false, configurable: true });
+            // Reverse pointer to the owning element so cssText updates can
+            // mirror the element.attributes.style attribute (inline-style
+            // serialisation contract). null when this is a getComputedStyle
+            // result (read-only mirror).
+            Object.defineProperty(this, '_element', { value: element || null, writable: false, enumerable: false, configurable: true });
+            Object.defineProperty(this, '_readOnly', { value: false, writable: true, enumerable: false, configurable: true });
+            // Wrap the instance in a Proxy so el.style.color = 'red' AND
+            // el.style['background-color'] = '#fff' both work transparently.
+            return new Proxy(this, _cssStyleHandler);
+        }
+
+        getPropertyValue(name) {
+            const k = _toDashed(String(name));
+            return this._props.get(k) || '';
+        }
+        setProperty(name, value, _priority) {
+            if (this._readOnly) return;
+            const k = _toDashed(String(name));
+            if (value == null || value === '') {
+                this._props.delete(k);
+            } else {
+                this._props.set(k, String(value));
+            }
+            this._syncToAttribute();
+        }
+        removeProperty(name) {
+            if (this._readOnly) return '';
+            const k = _toDashed(String(name));
+            const old = this._props.get(k) || '';
+            this._props.delete(k);
+            this._syncToAttribute();
+            return old;
+        }
+        item(i) {
+            const keys = Array.from(this._props.keys());
+            return keys[i] || '';
+        }
+        get length() { return this._props.size; }
+
+        get cssText() {
+            const parts = [];
+            for (const [k, v] of this._props) parts.push(k + ': ' + v + ';');
+            return parts.join(' ');
+        }
+        set cssText(v) {
+            if (this._readOnly) return;
+            this._props.clear();
+            const decls = String(v || '').split(';');
+            for (const decl of decls) {
+                const ix = decl.indexOf(':');
+                if (ix < 0) continue;
+                const k = decl.slice(0, ix).trim();
+                const val = decl.slice(ix + 1).trim();
+                if (k && val) this._props.set(_toDashed(k), val);
+            }
+            this._syncToAttribute();
+        }
+
+        _syncToAttribute() {
+            if (!this._element) return;
+            if (this._props.size === 0) {
+                delete this._element._attributes.style;
+            } else {
+                this._element._attributes.style = this.cssText;
+            }
+        }
+    }
+    Object.defineProperty(CSSStyleDeclaration.prototype, Symbol.toStringTag, { value: 'CSSStyleDeclaration', configurable: true });
+
+    // Proxy handler that maps property gets/sets to dashed-name lookups
+    // in _props. Reserved names (the methods above + _props/_element)
+    // pass through to the instance directly.
+    const _CSS_RESERVED = new Set([
+        '_props', '_element', '_readOnly', '_syncToAttribute',
+        'getPropertyValue', 'setProperty', 'removeProperty', 'item', 'length',
+        'cssText', 'constructor',
+    ]);
+    const _cssStyleHandler = {
+        get(target, prop, _receiver) {
+            if (typeof prop === 'symbol') return target[prop];
+            if (_CSS_RESERVED.has(prop)) return target[prop];
+            if (prop in target.constructor.prototype) return target[prop];
+            const dashed = _toDashed(prop);
+            return target._props.get(dashed) || '';
+        },
+        set(target, prop, value, _receiver) {
+            if (typeof prop === 'symbol') { target[prop] = value; return true; }
+            if (_CSS_RESERVED.has(prop)) { target[prop] = value; return true; }
+            if (target._readOnly) return true;
+            const dashed = _toDashed(prop);
+            if (value == null || value === '') {
+                target._props.delete(dashed);
+            } else {
+                target._props.set(dashed, String(value));
+            }
+            target._syncToAttribute();
+            return true;
+        },
+        has(target, prop) {
+            if (typeof prop === 'symbol') return prop in target;
+            if (_CSS_RESERVED.has(prop)) return true;
+            if (prop in target.constructor.prototype) return true;
+            return target._props.has(_toDashed(prop));
+        },
+    };
+
+    // Bind .style on every HTMLElement via lazy getter -- one
+    // CSSStyleDeclaration per element, created on first access.
+    Object.defineProperty(HTMLElement.prototype, 'style', {
+        get() {
+            if (!this._style) {
+                Object.defineProperty(this, '_style', {
+                    value: new CSSStyleDeclaration(this),
+                    writable: false, enumerable: false, configurable: true,
+                });
+                // If the element already has an inline style attribute
+                // (e.g. parser-set), seed the CSSStyleDeclaration from it.
+                const seed = this._attributes.style;
+                if (seed) this._style.cssText = seed;
+            }
+            return this._style;
+        },
+        configurable: true,
+        enumerable: true,
+    });
+
+    // getComputedStyle(element[, pseudo]) returns a read-only mirror of
+    // the element's inline styles, falling back to spec defaults for
+    // properties that aren't inline-set. Real browsers compute these
+    // from the cascade + layout; we have neither, so the mirror is
+    // necessarily approximate. BotGuard's fingerprint surface mostly
+    // checks property existence + format, not specific layout values.
+    function getComputedStyle(element, _pseudo) {
+        if (!(element instanceof Element)) {
+            throw new TypeError('getComputedStyle: argument must be an Element');
+        }
+        const out = new CSSStyleDeclaration(null);
+        // Seed from inline styles (if any).
+        const inline = element._style ? element._style._props : null;
+        if (inline) {
+            for (const [k, v] of inline) out._props.set(k, v);
+        } else if (element._attributes.style) {
+            out.cssText = element._attributes.style;
+        }
+        // Fill spec defaults for properties not set inline.
+        for (const k of Object.keys(_CSS_DEFAULTS)) {
+            if (!out._props.has(k)) out._props.set(k, _CSS_DEFAULTS[k]);
+        }
+        // Spec-default `display` per element type. Inline elements default
+        // to `inline`; the rest default to `block` per CSS spec.
+        if (!inline || !inline.has('display')) {
+            const tag = element.tagName.toLowerCase();
+            const inlineSet = new Set(['span', 'a', 'img', 'b', 'i', 'em', 'strong', 'small', 'code', 'sup', 'sub', 'u', 'mark', 'time', 'cite', 'q', 'abbr', 'label', 'input', 'button', 'select']);
+            if (inlineSet.has(tag)) out._props.set('display', 'inline');
+        }
+        out._readOnly = true;
+        return out;
+    }
+
+    globalThis.CSSStyleDeclaration = CSSStyleDeclaration;
+    globalThis.getComputedStyle = getComputedStyle;
 })();
