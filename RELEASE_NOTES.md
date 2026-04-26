@@ -1,6 +1,74 @@
-> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.26` with the **DPAPI cookie fallback** arc (DECISIONS #6 done), **proactive cipher retry** (DECISIONS #7 done), **bgutils single-minter cache** (CRIT-2 done), the **DECISIONS #21 consumer migration** (writer + primary consumers complete), and a hardening sweep across cookies / web / config / logger.
+> **Pre-release for validation.** Production users should stay on [v2.5.2](https://github.com/vampiricwulf/Moombox/releases/tag/v2.5.2); the `/releases/latest` endpoint continues to point at the stable line. Extends `v2.6.0-test.27` with a **full small-packages.md audit drain** — utils / logger / notifications / connectivity / updater / disk closed end-to-end. Adds SemVer-2.0.0 pre-release ordering for the auto-updater, a notification-goroutine semaphore, configurable connectivity poll cadence, and ~30 new tests across the touched packages.
 
-This build bundles Sprint #1 + Sprint #2 work plus twenty-one batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+This build bundles Sprint #1 + Sprint #2 work plus twenty-two batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test -race ./...` plus the frontend JS test suite.
+
+### Manual batch 22 (test.28) — small-packages.md drained
+
+Eight commits closing every actionable Open row in `reports/small-packages.md` — utils, logger, notifications, connectivity, updater, disk are all at zero open items.
+
+**utils package**
+
+- **ConnectivityReporter type alias** — `internal/utils/http.go` now declares `type ConnectivityReporter = connectivity.Reporter` so the HTTP helpers don't carry a structurally-identical-but-syntactically-distinct interface that drifts on future renames.
+- **FormatSpeed merged into format.go** — the leftover `time_format.go` (41 lines holding only FormatSpeed + formatBytesForSpeed) is deleted. Both functions now live next to FormatFileSize / FormatDurationHuman in format.go. `time_format_test.go` merged into `format_test.go`.
+- **ResolveYouTubeChannel retry** — wraps the single FetchBody in a 3-attempt loop with 1s/2s exponential backoff. 4xx errors fast-fail (deterministic — won't fix themselves). Ctx cancellation short-circuits both the wait and the next attempt.
+- **utils tests** — 6 new http_test.go tests, 5 new ResolveYouTubeChannel tests, 4 new ResolveChannelInput tests. http_test.go covers FetchBody happy path + HTTP error + timeout + ctx cancel + body cap + atomic reporter swap. The youtube tests use a `youtubeBaseURL` package var stub to point at httptest instead of the real YouTube origin.
+
+**logger package — concurrency stress coverage**
+
+Five new tests in `logger_stress_test.go`:
+
+- **TestConcurrentWriteAndRotate** — 8 goroutines × 200 writes at minimum maxSize so rotation fires repeatedly mid-storm. Race detector catches any unguarded access to l.file / l.currentSize.
+- **TestRotateRenameFailureKeepsLoggerUsable** — pre-creates a directory at logPath+".1" so `os.Rename` fails with the non-IsNotExist branch. Verifies post-rotate writes still land — recovery path must reopen even on partial failure.
+- **TestRotateOpenFileFailureRecoversOnNextWrite** — chmods the parent dir read-only mid-rotation so openFile() fails. Restores permissions, writes one more line, asserts it lands — exercises the retry-on-write branch shipped in 786487b. Skipped on Windows (file-permissions semantics differ).
+- **TestSubscriberDropDoesNotBlockBroadcast** — saturates a wedged 100-buffer subscriber by sending 200 lines while a parallel fast subscriber drains. The fast subscriber must receive all 200 within 3s; otherwise broadcast was blocking instead of taking the select-default branch.
+- **TestLogForJobConcurrentSameJobID** — 8 × 100 writes targeting one jobID. Validates the double-checked-lock init pattern doesn't lose lines AND the prune trigger keeps the buffer ≤ maxJobLogLines.
+
+**notifications package**
+
+- **Bounded sender goroutines (manager.go)** — Send try-acquires a maxInflightNotifications=16 semaphore. Discord rate-limits each webhook to 30 req/min anyway; beyond a small concurrent ceiling, extra goroutines just queue waiting for the rate-limiter. On overflow the call drops the notification with a Warn log; notifications are non-critical and dropping is preferable to blocking the caller (often a worker on a hot path).
+- **discord_test.go (new)** — 4 httptest tests covering payload encoding (title/description/color/fields/embed URL/footer), HTTP-error wrapping, one-retry-on-429 with Retry-After, and the unreasonable Retry-After (>30s) ceiling rejection.
+- **manager_dispatch_test.go (new)** —
+  - TestManagerWaitTimesOut exercises the 30s timeout branch via a senderFunc that blocks on a never-closed channel (the previous httptest version unblocked at 15s due to DiscordWebhook's own context deadline).
+  - TestManagerSemaphoreBoundsConcurrency — sends 32 events through a hanging fake sender, asserts peak in-flight stays ≤ 16.
+  - TestNewManagerRejectsDiscordSchemeEdgeCases — 6 cases for `discord://` URL parsing edges: missing token, empty ID, three-segment, trailing slash.
+
+**connectivity package**
+
+- **Configurable poll interval** — `NewMonitor` keeps the 5s default. New `NewMonitorWithInterval(log, interval)` lets callers (tests, power-constrained hosts) override. Values <100ms clamp up to 100ms since the underlying syscall takes tens of ms; tighter loops just saturate the polling goroutine without catching transitions any faster.
+- **TestMonitor_StopBeforeStartIsSafe** — Stop with nil cancel must not panic; double-Stop is a no-op.
+- **TestMonitor_PassiveAndActiveIntegrated** — end-to-end "two tags trip offline → success restores" scenario. Two subsystems each fire 3 failures within the passive window, monitor flips offline, ReportSuccess on each tag brings IsOnline back to true with both transition callbacks firing.
+
+**updater package — SemVer-2.0.0 pre-release ordering**
+
+`ParseVersion` previously rejected any tag with a pre-release suffix (`v2.6.0-test.27`) or build metadata (`+build.7`), falling back to lexical strings.Compare in CompareVersions. That ordering is plain wrong: lexically v2.6.0-test.10 < v2.6.0-test.2.
+
+- **ParseVersionFull** — parses MAJOR.MINOR.PATCH plus dot-separated pre-release identifiers and a build-metadata segment per SemVer 2.0.0. ParseVersion is preserved as a backwards-compatible wrapper that returns just the numeric components.
+- **CompareVersions** — implements the spec's pre-release ordering: pre-release < same-MMP release; numeric identifiers compare numerically; alphanumeric compare lexically; numeric < alphanumeric; shorter list is less than a longer one when prefixes match; build metadata captured but ignored for ordering.
+- **Real impact for Moombox** — every test.N tag has been compared lexically up to now, and the auto-update flow has been showing wrong "newer" answers between adjacent test tags. With pre-release support landed, /releases/latest endpoint comparisons line up with intent.
+
+**updater test coverage push (8 new tests)** via two new test seams (`apiBaseURL` for httptest GitHub origin, `verifySignature` for stubbing the embedded-key check):
+
+- TestCheckForUpdateRateLimited — 403/429 → friendly rate-limit error
+- TestCheckForUpdateOtherHTTPError — 503 → status-coded error (not classified as rate-limit)
+- TestCheckForUpdateNoMoomboxAsset — release without Moombox.exe
+- TestCheckForUpdateUpToDateReturnsNil — same MMP returns nil
+- TestCheckForUpdatePrereleaseOrdering — test.10 → test.27 detected
+- TestDownloadFileRejectsOversize — 201 MB body trips the 200 MB cap
+- TestDownloadFileHTTPError — 404 surfaces in the error
+- TestCleanupOldBinaryRemovesStaleArtifacts — sweeps .old/.new/.new.sig/.sig, preserves .update-broken
+- TestApplyUpdateEndToEnd — happy path: download → verify → swap → cleanup; original at .old, new at exePath
+- TestApplyUpdateRollbackOnVerifyFailure — failed verify cleans .new + .sig, leaves original exe untouched
+- TestApplyUpdateRefusesMissingSignature — never apply unsigned binaries
+
+**disk package — Windows test coverage**
+
+5 new build-tagged tests in `disk_windows_test.go` (the audit's "no tests" gap):
+
+- Local smoke: t.TempDir() returns plausible Total / Free / UsedPct
+- Relative path resolves via filepath.Abs before the syscall
+- Non-existent path still returns volume stats — the syscall queries the volume, not the file (locks the invariant the audit's UNC / extended-path guidance relies on, without needing a UNC mount in CI)
+- `\\?\<drive>:\...` extended-path form is accepted (skipped if the OS rejects it)
+- Path with embedded NUL byte errors cleanly via UTF16PtrFromString
 
 ### Manual batch 21 (test.27)
 
