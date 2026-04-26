@@ -165,12 +165,12 @@ func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, err
 
 	resp, err := playerHTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetch player JS: %w", err)
+		return "", fmt.Errorf("%w: %v", ErrPlayerJSFetch, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetch player JS: status %d", resp.StatusCode)
+		return "", fmt.Errorf("%w: status %d", ErrPlayerJSFetch, resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB max player JS

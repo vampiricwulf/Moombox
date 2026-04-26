@@ -38,7 +38,7 @@ func TestNewRuntimeFieldMapper(t *testing.T) {
 // --- NewRuntimeWithShims tests ---
 
 func TestNewRuntimeWithShimsCreatesRuntime(t *testing.T) {
-	vm, tm, err := NewRuntimeWithShims("TestAgent/1.0")
+	vm, tm, err := NewRuntimeWithShims(t.Context(), "TestAgent/1.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestNewRuntimeWithShimsCreatesRuntime(t *testing.T) {
 }
 
 func TestNewRuntimeWithShimsBtoaAtob(t *testing.T) {
-	vm, _, err := NewRuntimeWithShims("TestAgent/1.0")
+	vm, _, err := NewRuntimeWithShims(t.Context(), "TestAgent/1.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestNewRuntimeWithShimsBtoaAtob(t *testing.T) {
 }
 
 func TestNewRuntimeWithShimsDOMDocument(t *testing.T) {
-	vm, _, err := NewRuntimeWithShims("TestAgent/1.0")
+	vm, _, err := NewRuntimeWithShims(t.Context(), "TestAgent/1.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestNewRuntimeWithShimsDOMDocument(t *testing.T) {
 
 func TestNewRuntimeWithShimsNavigatorUserAgent(t *testing.T) {
 	ua := "MoomboxTest/2.0"
-	vm, _, err := NewRuntimeWithShims(ua)
+	vm, _, err := NewRuntimeWithShims(t.Context(), ua)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestNewRuntimeWithShimsNavigatorUserAgent(t *testing.T) {
 }
 
 func TestNewRuntimeWithShimsSetTimeout(t *testing.T) {
-	vm, tm, err := NewRuntimeWithShims("TestAgent/1.0")
+	vm, tm, err := NewRuntimeWithShims(t.Context(), "TestAgent/1.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -15,11 +15,16 @@ func NewRuntime() *goja.Runtime {
 	return vm
 }
 
-// NewRuntimeWithShims creates a new Goja runtime with DOM shims, encoding, and timer support.
-// Returns the runtime and a TimerManager for cleanup.
-func NewRuntimeWithShims(userAgent string) (*goja.Runtime, *TimerManager, error) {
+// NewRuntimeWithShims creates a new Goja runtime with DOM shims, encoding,
+// and timer support. The ctx is threaded into the TimerManager so that
+// when ctx cancels, in-flight timer/interval goroutines exit promptly
+// rather than waiting for an explicit CancelAll() call. Returns the
+// runtime and the TimerManager (caller still owns Shutdown / CancelAll).
+//
+// Audit reports/goja.md TD-5 — ctx threading.
+func NewRuntimeWithShims(ctx context.Context, userAgent string) (*goja.Runtime, *TimerManager, error) {
 	vm := NewRuntime()
-	tm := NewTimerManager(vm)
+	tm := NewTimerManagerCtx(ctx, vm)
 
 	if err := RegisterEncoding(vm); err != nil {
 		return nil, nil, fmt.Errorf("register encoding: %w", err)

@@ -1,6 +1,7 @@
 package goja
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sync"
@@ -21,12 +22,17 @@ const maxTimerDelayMs = math.MaxInt64 / int64(time.Millisecond)
 // IMPORTANT: Goja runtimes are NOT goroutine-safe. Timer callbacks are queued
 // and must be drained on the same goroutine that owns the VM via DrainCallbacks().
 type TimerManager struct {
-	vm      *goja.Runtime
-	logger  timerLogger // may be nil
-	mu      sync.Mutex
-	timers  map[int64]*timerEntry
-	nextID  atomic.Int64
-	stopped bool
+	vm     *goja.Runtime
+	logger timerLogger // may be nil
+	mu     sync.Mutex
+	timers map[int64]*timerEntry
+	nextID atomic.Int64
+	// stopped is atomic so a fast-path early return in
+	// Set{Timeout,Interval} doesn't need to acquire tm.mu first. Writes
+	// to stopped happen under tm.mu (paired with timer-map cleanup) so
+	// the "stopped + map-empty" invariant remains observable. Audit
+	// reports/goja.md TD-4.
+	stopped atomic.Bool
 	done    chan struct{} // closed by CancelAll to unblock interval goroutines
 
 	// Callback queue — timer/interval callbacks are enqueued here instead of
@@ -69,6 +75,34 @@ func NewTimerManager(vm *goja.Runtime) *TimerManager {
 		timers: make(map[int64]*timerEntry),
 		done:   make(chan struct{}),
 	}
+}
+
+// NewTimerManagerCtx creates a timer manager wired to a parent context.
+// When ctx cancels, in-flight interval goroutines exit promptly without
+// the caller needing to invoke CancelAll() — useful when the goroutine
+// owning the VM is already ctx-aware. Audit reports/goja.md TD-5.
+//
+// nil ctx falls back to context.Background() so the helper remains
+// safe to call from non-ctx-aware code.
+func NewTimerManagerCtx(ctx context.Context, vm *goja.Runtime) *TimerManager {
+	tm := NewTimerManager(vm)
+	if ctx == nil {
+		return tm
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tm.logWarn("goja: panic in ctx-watcher goroutine", "panic", r)
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			tm.CancelAll()
+		case <-tm.done:
+			// Already cancelled via explicit CancelAll
+		}
+	}()
+	return tm
 }
 
 // SetLogger wires an optional logger used for goroutine-boundary diagnostics
@@ -140,8 +174,14 @@ func (tm *TimerManager) HasPendingCallbacks() bool {
 func (tm *TimerManager) SetTimeout(fn goja.Callable, delayMs int64) int64 {
 	id := tm.nextID.Add(1)
 
+	// Fast path: lock-free check before acquiring tm.mu so a stopped
+	// manager rejects new timers without contending on the lock.
+	if tm.stopped.Load() {
+		return id
+	}
+
 	tm.mu.Lock()
-	if tm.stopped {
+	if tm.stopped.Load() {
 		tm.mu.Unlock()
 		return id
 	}
@@ -181,8 +221,13 @@ func (tm *TimerManager) SetTimeout(fn goja.Callable, delayMs int64) int64 {
 func (tm *TimerManager) SetInterval(fn goja.Callable, delayMs int64) int64 {
 	id := tm.nextID.Add(1)
 
+	// Fast path: lock-free check (see SetTimeout for rationale).
+	if tm.stopped.Load() {
+		return id
+	}
+
 	tm.mu.Lock()
-	if tm.stopped {
+	if tm.stopped.Load() {
 		tm.mu.Unlock()
 		return id
 	}
@@ -273,7 +318,7 @@ func (tm *TimerManager) CancelAll() {
 		close(tm.done)
 	}
 
-	tm.stopped = true
+	tm.stopped.Store(true)
 	for _, entry := range tm.timers {
 		if entry.timer != nil {
 			entry.timer.Stop()

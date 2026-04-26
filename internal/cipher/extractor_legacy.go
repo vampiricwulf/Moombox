@@ -79,7 +79,7 @@ func extractSigFunction(playerJS string) (string, error) {
 		}
 	}
 	if funcName == "" {
-		return "", fmt.Errorf("could not find signature function name")
+		return "", fmt.Errorf("%w: could not find signature function name", ErrExtractorMismatch)
 	}
 
 	// Step 2: Extract the function body using generated patterns (no backreferences)
@@ -107,7 +107,7 @@ func extractSigFunction(playerJS string) (string, error) {
 	helperPattern := legacySigHelperPattern
 	helperMatch := helperPattern.FindStringSubmatch(funcBody)
 	if helperMatch == nil {
-		return "", fmt.Errorf("could not find helper object in sig function")
+		return "", fmt.Errorf("%w: could not find helper object in sig function", ErrExtractorMismatch)
 	}
 	helperName := helperMatch[1]
 
@@ -144,7 +144,7 @@ func extractNFunction(playerJS string) (string, error) {
 		}
 	}
 	if funcName == "" {
-		return "", fmt.Errorf("could not find n-parameter function name")
+		return "", fmt.Errorf("%w: could not find n-parameter function name", ErrExtractorMismatch)
 	}
 
 	// If there's an array index, we need to find the actual function name from the array
@@ -183,7 +183,7 @@ func resolveArrayFunction(js, arrayName, index string) (string, error) {
 
 	m := re.FindStringSubmatch(js)
 	if m == nil {
-		return "", fmt.Errorf("array %q not found", arrayName)
+		return "", fmt.Errorf("%w: array %q not found", ErrExtractorMismatch, arrayName)
 	}
 
 	elements := strings.Split(m[1], ",")
@@ -195,7 +195,7 @@ func resolveArrayFunction(js, arrayName, index string) (string, error) {
 	}
 
 	if idx < 0 || idx >= len(elements) {
-		return "", fmt.Errorf("array index %d out of range (len=%d)", idx, len(elements))
+		return "", fmt.Errorf("%w: array index %d out of range (len=%d)", ErrExtractorMismatch, idx, len(elements))
 	}
 
 	return strings.TrimSpace(elements[idx]), nil

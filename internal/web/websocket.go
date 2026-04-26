@@ -39,8 +39,12 @@ type WSMessage struct {
 type InitialStateProvider func() map[string]any
 
 // WebSocketHub manages WebSocket connections and broadcasts.
+//
+// hub.mu protects the clients map and closed flag. RWMutex matches
+// logBufMu's shape for consistency, and lets Broadcast's snapshot and
+// ClientCount use the cheaper RLock path. Audit reports/web.md Q-20.
 type WebSocketHub struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
 	closed  bool
 
@@ -334,9 +338,9 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 
 // Broadcast sends a message to all connected clients.
 func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
-	hub.mu.Lock()
+	hub.mu.RLock()
 	n := len(hub.clients)
-	hub.mu.Unlock()
+	hub.mu.RUnlock()
 	if n == 0 {
 		return
 	}
@@ -347,12 +351,12 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 		return
 	}
 
-	hub.mu.Lock()
+	hub.mu.RLock()
 	clients := make([]*wsClient, 0, len(hub.clients))
 	for c := range hub.clients {
 		clients = append(clients, c)
 	}
-	hub.mu.Unlock()
+	hub.mu.RUnlock()
 
 	for _, client := range clients {
 		ctx, cancel := context.WithTimeout(client.ctx, wsWriteTimeout)
@@ -512,8 +516,8 @@ func (hub *WebSocketHub) GetLogBuffer() []string {
 
 // ClientCount returns the number of connected clients.
 func (hub *WebSocketHub) ClientCount() int {
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
+	hub.mu.RLock()
+	defer hub.mu.RUnlock()
 	return len(hub.clients)
 }
 

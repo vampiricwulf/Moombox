@@ -62,9 +62,11 @@ func NewBotGuardClient(ctx context.Context, challenge *DescrambledChallenge, log
 		return nil, &BGError{Code: ErrBadConfig, Message: "no interpreter URL or script in challenge"}
 	}
 
-	// Create runtime with full shims
+	// Create runtime with full shims. Thread the parent ctx so an early
+	// shutdown (caller cancels) propagates into the timer manager
+	// without needing an explicit Shutdown() call. Audit goja TD-5.
 	userAgent := UserAgentFull
-	vm, tm, err := gojahelpers.NewRuntimeWithShims(userAgent)
+	vm, tm, err := gojahelpers.NewRuntimeWithShims(ctx, userAgent)
 	if err != nil {
 		return nil, &BGError{Code: ErrVMInit, Message: fmt.Sprintf("create runtime: %v", err)}
 	}

@@ -253,7 +253,7 @@ func extractFunctionByName(js, name string) (string, error) {
 		return js[start:end], nil
 	}
 
-	return "", fmt.Errorf("function %q not found", name)
+	return "", fmt.Errorf("%w: function %q not found", ErrExtractorMismatch, name)
 }
 
 // extractObjectByName extracts an object literal definition by name using balanced brace matching.
@@ -268,20 +268,20 @@ func extractObjectByName(js, name string) (string, error) {
 
 	loc := re.FindStringIndex(js)
 	if loc == nil {
-		return "", fmt.Errorf("object %q not found", name)
+		return "", fmt.Errorf("%w: object %q not found", ErrExtractorMismatch, name)
 	}
 
 	start := loc[0]
 	// Find the opening brace
 	braceStart := strings.Index(js[loc[0]:], "{")
 	if braceStart < 0 {
-		return "", fmt.Errorf("object %q: no opening brace", name)
+		return "", fmt.Errorf("%w: object %q has no opening brace", ErrExtractorMismatch, name)
 	}
 	braceStart += loc[0]
 
 	end := findMatchingBrace(js, braceStart)
 	if end < 0 {
-		return "", fmt.Errorf("object %q: unbalanced braces", name)
+		return "", fmt.Errorf("%w: object %q has unbalanced braces", ErrExtractorMismatch, name)
 	}
 	end++ // include closing brace
 

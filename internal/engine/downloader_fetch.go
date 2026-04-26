@@ -161,31 +161,38 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 }
 
 // fetchSegmentWithRetry attempts to fetch a segment with retries and exponential backoff.
-// Returns (data, permanent):
-//   - data != nil: success.
-//   - data == nil, permanent == true: segment is gone for good (403/410). Don't bother retrying.
-//   - data == nil, permanent == false: transient failure (timeout, 5xx, retries exhausted).
-//     Caller may try again later, or treat as a gap.
+// Returns:
+//   - (data, nil): success.
+//   - (nil, ErrSegmentPermanent): segment is gone for good (403/410). Don't retry.
+//   - (nil, ErrSegmentRetriesExhausted): transient failure (timeout, 5xx, retries exhausted).
+//   - (nil, ctx.Err()): caller's context was cancelled or downloader was cancelled.
 //
-// Audit reports/engine.md #17: previously the function collapsed both cases to
-// a bare nil, so callers couldn't distinguish "CDN returned 410 forever" from
-// "we got network jitter for 25 s and gave up". The caller's gap reporting is
-// now able to log the distinction even though no retry-once-at-end logic exists yet.
-func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string) (data []byte, permanent bool) {
+// Consumers use `errors.Is(err, ErrSegmentPermanent)` to distinguish the
+// permanent vs transient cases. Audit reports/engine.md #17: previously
+// the function returned `(body, permanent bool)` which forced every
+// caller to handle nil-vs-flag explicitly; the sentinel form is more
+// composable and lets callers route through `errors.Is`.
+func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string) ([]byte, error) {
 	for attempt := range MaxSegmentRetries {
-		if d.isCancelled() || ctx.Err() != nil {
-			return nil, false
+		if d.isCancelled() {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, cerr
+			}
+			return nil, context.Canceled
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 		body, status, err := d.fetchSegment(ctx, segURL)
 		if err == nil && status < 400 {
-			return body, false
+			return body, nil
 		}
 		if status == 403 || status == 410 {
-			return nil, true // Segment gone permanently — don't retry.
+			return nil, ErrSegmentPermanent
 		}
 		utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
 	}
-	return nil, false
+	return nil, ErrSegmentRetriesExhausted
 }
 
 // probeHeadSequence discovers the current live head segment using a high sequence GET probe.

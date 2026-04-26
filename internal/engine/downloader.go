@@ -18,6 +18,18 @@ import (
 // quality variant/format has become unavailable (e.g. transcode removed).
 var ErrQualityLost = errors.New("stream quality became unavailable")
 
+// ErrSegmentPermanent signals that a segment has been permanently
+// evicted from the CDN (HTTP 403/410). Distinct from a transient
+// retry-exhausted state: the caller should not bother retrying.
+// Returned by fetchSegmentWithRetry when the underlying fetcher gets
+// a definitive "gone forever" response. Audit reports/engine.md #17.
+var ErrSegmentPermanent = errors.New("segment permanently unavailable")
+
+// ErrSegmentRetriesExhausted signals that a segment fetch ran through
+// all MaxSegmentRetries attempts without success. Caller may treat as
+// a gap and continue. Audit reports/engine.md #17.
+var ErrSegmentRetriesExhausted = errors.New("segment retries exhausted")
+
 const (
 	CatchupThreshold    = 10
 	MaxSegmentRetries   = 5

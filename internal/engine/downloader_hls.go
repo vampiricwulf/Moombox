@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -305,8 +306,8 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				if d.isCancelled() || ctx.Err() != nil {
 					continue // drain channel
 				}
-				data, permanent := d.fetchSegmentWithRetry(ctx, item.segURL)
-				if data != nil {
+				data, fetchErr := d.fetchSegmentWithRetry(ctx, item.segURL)
+				if fetchErr == nil {
 					select {
 					case results <- segResult{idx: item.idx, data: data}:
 					case <-done:
@@ -316,10 +317,11 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				}
 				// Audit reports/engine.md #17: distinguish CDN-evicted segments
 				// from retries-exhausted so debugging silent gaps is tractable.
-				if permanent {
+				switch {
+				case errors.Is(fetchErr, ErrSegmentPermanent):
 					d.logger.Debug("[Downloader] HLS VOD segment permanently gone (403/410)",
 						"idx", item.idx)
-				} else {
+				case errors.Is(fetchErr, ErrSegmentRetriesExhausted):
 					d.logger.Debug("[Downloader] HLS VOD segment retries exhausted",
 						"idx", item.idx)
 				}

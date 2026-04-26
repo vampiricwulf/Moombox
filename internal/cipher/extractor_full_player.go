@@ -228,7 +228,7 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 	}
 
 	if len(nGenerators) == 0 && len(sigGenerators) == 0 && urlClassName == "" {
-		return "", fmt.Errorf("no n-param or sig candidates found in player JS (size=%d)", len(playerJS))
+		return "", fmt.Errorf("%w: no n-param or sig candidates found in player JS (size=%d)", ErrExtractorMismatch, len(playerJS))
 	}
 
 	// Find the IIFE closing point to insert bindings inside the function scope.
@@ -247,7 +247,7 @@ func preprocessPlayerFull(playerJS string) (string, error) {
 		}
 	}
 	if closeIdx < 0 {
-		return "", fmt.Errorf("could not find IIFE closing bracket")
+		return "", fmt.Errorf("%w: could not find IIFE closing bracket", ErrExtractorMismatch)
 	}
 
 	// Build solver binding code

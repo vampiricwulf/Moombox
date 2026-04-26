@@ -8,7 +8,7 @@ import (
 // DecryptSignature decrypts the signature and n-parameter for a stream URL.
 func (s *Solver) DecryptSignature(ctx context.Context, req SignatureRequest) (*SignatureResponse, error) {
 	if req.PlayerURL == "" {
-		return nil, fmt.Errorf("player URL is required")
+		return nil, fmt.Errorf("player URL: %w", ErrInputRequired)
 	}
 
 	solvers, err := s.GetSolvers(ctx, req.PlayerURL)
@@ -22,7 +22,7 @@ func (s *Solver) DecryptSignature(ctx context.Context, req SignatureRequest) (*S
 	if req.EncryptedSignature != "" && solvers.Sig != nil {
 		decrypted, err := solvers.DecryptSig(req.EncryptedSignature)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt signature: %w", err)
+			return nil, fmt.Errorf("%w: %v", ErrSigDecrypt, err)
 		}
 		resp.DecryptedSignature = decrypted
 	}
@@ -31,7 +31,7 @@ func (s *Solver) DecryptSignature(ctx context.Context, req SignatureRequest) (*S
 	if req.NParam != "" && solvers.N != nil {
 		decrypted, err := solvers.DecryptN(req.NParam)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt n-parameter: %w", err)
+			return nil, fmt.Errorf("%w: %v", ErrNDecrypt, err)
 		}
 		resp.DecryptedNSig = decrypted
 	}

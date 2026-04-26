@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -29,18 +30,53 @@ type RateLimiter struct {
 	logger   rateLimiterLogger // optional; may be nil
 }
 
-// NewRateLimiter creates a new rate limiter.
+// NewRateLimiter creates a new rate limiter and starts its background
+// cleanup loop. Caller must invoke Close() when done to stop the
+// goroutine.
+//
+// For ctx-aware lifecycle (cleanup goroutine exits when ctx cancels),
+// use NewRateLimiterCtx instead. Audit reports/web.md Q-19.
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
-	rl := &RateLimiter{
+	rl := newRateLimiterStruct(limit, window)
+	go rl.cleanupLoop()
+	return rl
+}
+
+// NewRateLimiterCtx creates a rate limiter whose cleanup goroutine is
+// tied to the parent ctx — when ctx cancels, the cleanup loop exits
+// without needing an explicit Close() call. Useful for tests and for
+// services that already own a long-lived ctx.
+func NewRateLimiterCtx(ctx context.Context, limit int, window time.Duration) *RateLimiter {
+	rl := newRateLimiterStruct(limit, window)
+	go rl.cleanupLoop()
+	if ctx != nil {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil && rl.logger != nil {
+					rl.logger.Error("rate limiter ctx watcher panic", "panic", r)
+				}
+			}()
+			select {
+			case <-ctx.Done():
+				rl.Close()
+			case <-rl.done:
+				// Already closed via explicit Close()
+			}
+		}()
+	}
+	return rl
+}
+
+// newRateLimiterStruct constructs the struct without starting any
+// goroutines. Internal helper shared by the public constructors.
+func newRateLimiterStruct(limit int, window time.Duration) *RateLimiter {
+	return &RateLimiter{
 		requests: make(map[string][]time.Time),
 		limit:    limit,
 		window:   window,
 		cleanup:  time.NewTicker(time.Minute), // Match TS: 60 second cleanup
 		done:     make(chan struct{}),
 	}
-
-	go rl.cleanupLoop()
-	return rl
 }
 
 // SetLogger attaches a logger used to report panics from the cleanup
