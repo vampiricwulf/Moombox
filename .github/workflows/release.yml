@@ -26,10 +26,13 @@ jobs:
         # Produces internal/bgutils/embed/sidecar.tar.gz from
         # bgutil-sidecar/ (production node_modules + src/server.js).
         # The Go side embeds this via go:embed at compile time.
+        # --ignore-scripts: a compromised dep's postinstall could
+        # exfiltrate GITHUB_TOKEN; jsdom + bgutils-js have no install
+        # scripts we depend on, so ignoring is safe.
         shell: bash
         run: |
           cd bgutil-sidecar
-          npm ci --omit=dev --no-audit --no-fund
+          npm ci --omit=dev --no-audit --no-fund --ignore-scripts
           node build.mjs
           cd ..
 

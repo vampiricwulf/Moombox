@@ -221,6 +221,18 @@ func AuthRoutes(r chi.Router, deps *AuthRoutesDeps, store *config.Store) {
 				jsonError(rw, "Current password is incorrect", http.StatusUnauthorized)
 				return
 			}
+		} else if !isAuthenticated && !web.IsLoopbackRequest(req) {
+			// First-run set-password (no existing hash) is only allowed
+			// from loopback when no session exists. Without this gate, a
+			// LAN peer reaching a network_access=lan deployment could
+			// claim the admin password before the user does. The earlier
+			// IsLocalOrPrivateRequest gate covered authenticated change-
+			// password from LAN; this stricter check applies only to the
+			// "no password set yet" branch where there's no
+			// proof-of-physical-access signal.
+			mu.Unlock()
+			jsonError(rw, "first-time password setup must be from localhost", http.StatusUnauthorized)
+			return
 		}
 		cfg.Network.PasswordHash = hash
 		if err := store.SaveLocked(); err != nil {
@@ -421,7 +433,7 @@ func setAuthCookie(w http.ResponseWriter, r *http.Request, name, value string, m
 		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   web.IsRequestSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }

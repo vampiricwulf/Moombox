@@ -198,7 +198,12 @@ func (s *Sidecar) Start(ctx context.Context) error {
 }
 
 // Stop gracefully shuts down the sidecar. Sends a shutdown JSON-RPC,
-// waits up to 5s, then hard-kills + closes the Job Object.
+// waits briefly, then hard-kills + closes the Job Object.
+//
+// Total wall-time bound: ~3s (1s for the JSON-RPC bye response, 2s for
+// the process to exit on its own, then Kill). This stays well below the
+// shutdown.go force-exit budget so a hung sidecar can't starve the rest
+// of Moombox's shutdown sequence (web server, DB unsubscribe, DB close).
 //
 // Safe to call multiple times; subsequent calls are no-ops.
 func (s *Sidecar) Stop() error {
@@ -217,18 +222,20 @@ func (s *Sidecar) Stop() error {
 
 		// Best-effort graceful shutdown via JSON-RPC. The sidecar JS
 		// writes its "bye" response and then process.exit(0)s on the
-		// next tick.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		// next tick. 1s is generous for that round-trip; longer just
+		// extends shutdown latency for no benefit.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		_ = s.callRaw(shutdownCtx, "shutdown", nil)
+		cancel()
 
 		// Now stop accepting new work; any inflight requests waiting on
 		// channels will be drained below.
 		s.healthy.Store(false)
 
-		// Wait briefly for the process to exit on its own. Bound by 5s
-		// (independent of StartupTimeout) -- the Node side already
-		// scheduled process.exit(0) so this is just signal latency.
+		// Wait briefly for the process to exit on its own. The Node side
+		// already scheduled process.exit(0) so this is just signal
+		// latency -- 2s covers a slow tick + kernel reap, beyond which
+		// we kill rather than starve the wider shutdown budget.
 		done := make(chan error, 1)
 		go func() { done <- s.cmd.Wait() }()
 		select {
@@ -236,7 +243,7 @@ func (s *Sidecar) Stop() error {
 			if err != nil {
 				s.cfg.Logger.Debug("sidecar exited", "err", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(2 * time.Second):
 			s.cfg.Logger.Warn("sidecar shutdown timed out, killing process", "pid", s.cmd.Process.Pid)
 			if killErr := s.cmd.Process.Kill(); killErr != nil {
 				firstErr = killErr

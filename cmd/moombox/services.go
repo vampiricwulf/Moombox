@@ -136,6 +136,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 		fmt.Println("Starting services...")
 	}
 	jar := cookies.NewCookieJar()
+	jar.SetLogger(log)
 	if cfg.Cookies.CookieFile != "" {
 		if err := jar.Load(cfg.Cookies.CookieFile); err != nil {
 			log.Warn("Failed to load cookies", slog.String("error", err.Error()))
@@ -186,11 +187,13 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 7. PO Token provider
 	// =========================================================================
-	// CacheDir enables the BotGuard interpreter-hash cache so subsequent
-	// challenge calls skip the ~1-3 MB script re-download. Audit
-	// bgutils QI-4 / TD-5.
-	bgCacheDir := filepath.Join(os.TempDir(), "moombox-bgutils")
-	potProvider := bgutils.NewPotProvider(&bgutils.BgConfig{CacheDir: bgCacheDir}, log)
+	// The interpreter-hash disk cache that previously lived in BgConfig
+	// was removed (test.41) -- it sent cached hashes back to YouTube but
+	// didn't actually cache the interpreter SCRIPT, so YouTube responded
+	// with BAD_CONFIG. Phase 1 of the sidecar arc deleted the dead code
+	// outright; the goja-fallback path now always fetches a fresh
+	// interpreter, and the sidecar path runs entirely inside Node.
+	potProvider := bgutils.NewPotProvider(&bgutils.BgConfig{}, log)
 	s.potProvider = potProvider
 
 	// =========================================================================
@@ -227,17 +230,22 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 8. Cipher solver
 	// =========================================================================
+	// Failure to init the cipher solver is fatal: NewSolver only errors
+	// on os.MkdirAll of %TEMP%/yt-cipher, and without cipher solving
+	// most YouTube format URLs (sig + n-param ciphered) cannot be
+	// decrypted. The previous "will retry on demand" warning was
+	// misleading — there is no retry-on-demand path; PlayerAPI never
+	// got a solver attached and downloads silently degraded for the
+	// rest of the process lifetime.
 	cacheDir := filepath.Join(os.TempDir(), "yt-cipher")
 	cipherSolver, err := cipher.NewSolver(cacheDir, log)
 	if err != nil {
-		log.Warn("Failed to init cipher solver, will retry on demand", slog.String("error", err.Error()))
+		return fmt.Errorf("init cipher solver (cacheDir=%q): %w", cacheDir, err)
 	}
 	s.cipherSolver = cipherSolver
 
-	// Wire cipher solver to YouTube service for format decryption
-	if cipherSolver != nil {
-		ytService.PlayerAPI.SetCipherSolver(cipherSolver)
-	}
+	// Wire cipher solver to YouTube service for format decryption.
+	ytService.PlayerAPI.SetCipherSolver(cipherSolver)
 
 	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
 	ytService.PlayerAPI.SetPotProvider(potProvider)
@@ -266,6 +274,24 @@ func (s *runState) initServices(logLevelOverride string) error {
 	trimSvc := worker.NewTrimService(db, cfg.Paths.FfmpegPath, log)
 	trimSvc.SetNotifier(notifyMgr)
 	s.trimSvc = trimSvc
+
+	// Sweep orphaned trim/two-pass tempdirs from %TEMP% on startup.
+	// `defer os.RemoveAll(tempDir)` inside the trim path covers the
+	// happy case; a hard process abort (panic in a sibling goroutine,
+	// OS kill, power loss) bypasses the defer and leaks the dir. 24h
+	// age threshold keeps concurrent trims' in-flight tempdirs safe.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("trim-tempdir cleanup panic", slog.Any("panic", r))
+			}
+		}()
+		if removed, err := engine.CleanupOldTrimTempDirs(); err != nil {
+			log.Debug("trim-tempdir cleanup", slog.String("error", err.Error()))
+		} else if removed > 0 {
+			log.Info("trim-tempdir cleanup", slog.Int("removed", removed))
+		}
+	}()
 
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
@@ -418,6 +444,14 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 16. Web server
 	// =========================================================================
 	s.startTime = time.Now()
+
+	// Configure cookie Secure-flag policy based on
+	// trust_forwarded_proto. Default false: directly-exposed Moombox
+	// MUST NOT trust the X-Forwarded-Proto header. Reverse-proxy
+	// deployments that strip client-supplied X-Forwarded-Proto opt in
+	// via the config flag.
+	web.SetTrustForwardedProto(cfg.Network.TrustForwardedProto)
+
 	webServer := web.NewServer(s.configStore, log)
 	webServer.SetCommit(commit)
 	s.webServer = webServer

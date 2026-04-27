@@ -643,8 +643,14 @@ func RecoveryMiddleware(logger interface {
 
 // openBrowserURL opens the default browser to the given URL.
 // Windows-only: uses explorer.exe to launch the URL.
+//
+// Process.Release() returns the OS handle to the kernel so we don't
+// leak one process handle per Moombox lifetime. Symmetric with the
+// open-folder handler's Q-6 fix (audit reports/web.md).
 func openBrowserURL(url string) {
 	cmd := exec.Command("explorer.exe", url)
-	cmd.Start()
+	if err := cmd.Start(); err == nil && cmd.Process != nil {
+		_ = cmd.Process.Release()
+	}
 }
 

@@ -834,7 +834,17 @@ func isWindows() bool {
 }
 
 // writeFileAtomic writes data to a temp file then renames it to the target path,
-// preventing corruption on partial failure.
+// preventing corruption on partial failure. Applies
+// utils.ApplyUserOnlyDACL ONCE per parent directory across the process
+// lifetime so the highest-value secret in the app (auth-token + SAPISID
+// for the user's session) doesn't sit on disk with a parent-inherited
+// world-readable ACL when the cookie file lives outside the config dir
+// (e.g. default `./cookies.txt` in the project root). The DACL is
+// applied to the parent dir rather than the file because (a) icacls
+// /inheritance:r on individual files has corner cases where the new
+// ACL ends up over-restrictive, and (b) propagating from the dir
+// covers any future writes (rotated cookies, side-files) without
+// per-write icacls latency. No-op on non-Windows; idempotent.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, perm); err != nil {
@@ -844,5 +854,27 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename temp cookie file: %w", err)
 	}
+	tightenCookieDirOnce(filepath.Dir(path))
 	return nil
+}
+
+// tightenCookieDirOnce applies utils.ApplyUserOnlyDACL to the given
+// parent dir at most once per process. Memoised because icacls is a
+// ~30-80ms shell-out that would otherwise fire on every cookie write.
+var (
+	tightenedCookieDirsMu sync.Mutex
+	tightenedCookieDirs   = make(map[string]struct{})
+)
+
+func tightenCookieDirOnce(dir string) {
+	tightenedCookieDirsMu.Lock()
+	defer tightenedCookieDirsMu.Unlock()
+	if _, ok := tightenedCookieDirs[dir]; ok {
+		return
+	}
+	tightenedCookieDirs[dir] = struct{}{}
+	go func() {
+		defer func() { _ = recover() }()
+		_ = utils.ApplyUserOnlyDACL(dir)
+	}()
 }

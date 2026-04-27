@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/scrypt"
@@ -320,6 +321,29 @@ func VerifyToken(token, storedHash string) bool {
 	return subtle.ConstantTimeCompare(hash, expectedHash) == 1
 }
 
+// trustForwardedProto governs whether IsRequestSecure trusts the
+// X-Forwarded-Proto header. Off by default; set via SetTrustForwardedProto
+// from cmd/moombox/services.go after config load. See NetworkConfig
+// doc for the security rationale.
+var trustForwardedProto atomic.Bool
+
+// SetTrustForwardedProto enables/disables X-Forwarded-Proto trust at
+// startup. Only call once during service init.
+func SetTrustForwardedProto(trust bool) { trustForwardedProto.Store(trust) }
+
+// IsRequestSecure returns true when the request arrived over TLS, or
+// (when trustForwardedProto is enabled) when X-Forwarded-Proto is
+// "https". Used to set the Secure flag on cookies.
+func IsRequestSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if trustForwardedProto.Load() && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	return false
+}
+
 // SetSessionCookie sets the moombox_session cookie on the response.
 func SetSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
@@ -328,7 +352,7 @@ func SetSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 		Path:     "/",
 		MaxAge:   86400, // 24 hours
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   IsRequestSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }

@@ -18,12 +18,18 @@ var (
 	homepageApiKeyRe = regexp.MustCompile(`"INNERTUBE_API_KEY":"([^"]+)"`)
 )
 
-// initRetryInterval bounds how often Init re-fetches the homepage. A value
-// here is a balance: too short floods YouTube on a sustained startup blip
-// (anti-bot tripwire); too long means a 24/7 process stays stuck with empty
-// VisitorData if the very first Init failed. 1h matches typical visitor-data
-// rotation cadence on YouTube. Audit reports/youtube.md I4.
+// initRetryInterval bounds how often Init re-fetches the homepage AFTER
+// a successful fetch. 1h matches typical visitor-data rotation cadence
+// on YouTube and avoids hammering the homepage on every job. Audit
+// reports/youtube.md I4.
 const initRetryInterval = 1 * time.Hour
+
+// initFastRetryInterval is the shorter floor used after a FAILED fetch.
+// Without a separate failure interval, a startup network blip would set
+// lastInitAt eagerly and lock the process out for the full 1h with
+// empty VisitorData. 60s lets the next pulled job recover quickly while
+// still rate-limiting a sustained outage.
+const initFastRetryInterval = 60 * time.Second
 
 // Service is the YouTube service facade wrapping player API, auth, and format selection.
 type Service struct {
@@ -36,8 +42,9 @@ type Service struct {
 	// The previous initOnce one-shot meant a transient startup network failure
 	// would leave the process with empty VisitorData forever — bad for a 24/7
 	// archiver. Audit reports/youtube.md I4.
-	initMu     sync.Mutex
-	lastInitAt time.Time
+	initMu        sync.Mutex
+	lastInitAt    time.Time
+	initSucceeded bool // true after the most recent Init fetched the homepage cleanly
 	logger     interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -82,9 +89,17 @@ func NewService(jar *cookies.CookieJar, logger interface {
 // failure left VisitorData empty for the lifetime of a 24/7 process.
 func (s *Service) Init(ctx context.Context) {
 	s.initMu.Lock()
-	if !s.lastInitAt.IsZero() && time.Since(s.lastInitAt) < initRetryInterval {
-		s.initMu.Unlock()
-		return
+	if !s.lastInitAt.IsZero() {
+		// initSucceeded gates which interval applies: a successful
+		// fetch debounces for 1h, a failed fetch debounces for 60s.
+		interval := initRetryInterval
+		if !s.initSucceeded {
+			interval = initFastRetryInterval
+		}
+		if time.Since(s.lastInitAt) < interval {
+			s.initMu.Unlock()
+			return
+		}
 	}
 	// Skip work entirely if both fields are already populated. The lock
 	// covers the read-then-set, which is enough — concurrent successful
@@ -96,10 +111,10 @@ func (s *Service) Init(ctx context.Context) {
 	haveKey := s.PlayerAPI.apiKey != "" && s.PlayerAPI.apiKey != constants.DefaultAPIKey
 	if haveVD && haveKey {
 		s.lastInitAt = time.Now()
+		s.initSucceeded = true
 		s.initMu.Unlock()
 		return
 	}
-	s.lastInitAt = time.Now()
 	s.initMu.Unlock()
 
 	// Load/sync cookies
@@ -117,6 +132,10 @@ func (s *Service) Init(ctx context.Context) {
 	body, err := utils.FetchBody(ctx, constants.YouTubeURLs.Base, 15*time.Second, headers)
 	if err != nil {
 		s.logger.Warn("[YouTube] Failed to fetch homepage", "error", err)
+		s.initMu.Lock()
+		s.lastInitAt = time.Now()
+		s.initSucceeded = false
+		s.initMu.Unlock()
 		return
 	}
 	html := string(body)
@@ -137,6 +156,14 @@ func (s *Service) Init(ctx context.Context) {
 		s.PlayerAPI.SetAPIKey(m[1])
 		s.logger.Debug("[YouTube] API key extracted", "key", m[1])
 	}
+
+	// Mark this Init successful. Set lastInitAt here (not at function
+	// entry) so a failed fetch is debounced by the shorter
+	// initFastRetryInterval rather than the 1h success interval.
+	s.initMu.Lock()
+	s.lastInitAt = time.Now()
+	s.initSucceeded = true
+	s.initMu.Unlock()
 }
 
 // FetchWatchPageHtml fetches the raw HTML of a video's watch page.

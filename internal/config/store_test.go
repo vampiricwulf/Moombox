@@ -87,6 +87,7 @@ func TestStoreUpdateAppliesAndValidates(t *testing.T) {
 
 func TestStoreUpdateRejectsInvalid(t *testing.T) {
 	cfg := Defaults()
+	originalPort := cfg.Network.Port
 	s := NewStore(cfg, "")
 
 	err := s.Update(func(c *MoomboxConfig) {
@@ -98,10 +99,12 @@ func TestStoreUpdateRejectsInvalid(t *testing.T) {
 	if !strings.Contains(err.Error(), "network.port") {
 		t.Errorf("expected error about network.port, got %q", err.Error())
 	}
-	// No auto-rollback contract — port is mutated even though Save was
-	// skipped. Callers wanting transactional semantics must deep-copy.
-	if cfg.Network.Port != 70000 {
-		t.Errorf("fn's mutation should remain visible; got %d", cfg.Network.Port)
+	// F17 fix: validation failure rolls back fn's mutation so the
+	// in-memory cfg matches the (untouched) on-disk view. Pre-fix,
+	// the mutation remained visible and subsequent Read() leaked the
+	// bad value into monitors / web responses.
+	if cfg.Network.Port != originalPort {
+		t.Errorf("expected validation failure to roll back fn's mutation: cfg.Network.Port want=%d got=%d", originalPort, cfg.Network.Port)
 	}
 }
 

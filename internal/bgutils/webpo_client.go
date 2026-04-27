@@ -247,8 +247,11 @@ func parseIntegrityTokenResponse(raw []byte) (*IntegrityTokenData, error) {
 	}
 
 	// Parse optional fields: websafeFallbackToken (index 3).
-	// index 2 is mintRefreshThreshold upstream but we don't implement
-	// proactive mint refresh (see reports/bgutils.md FRESH-2); skip it.
+	// index 2 is mintRefreshThreshold (server-suggested seconds before
+	// expiry to refresh). PotProvider's proactive refresh (FRESH-2)
+	// uses a hardcoded 5min lead (minterRefreshLead) instead of the
+	// server-provided threshold; if YouTube ever rotates this
+	// aggressively we'll need to wire arr[2] through.
 	if len(arr) > 3 {
 		var fallback string
 		if json.Unmarshal(arr[3], &fallback) == nil {

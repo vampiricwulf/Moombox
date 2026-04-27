@@ -37,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Pinned Node.js Windows x64 release. Bump quarterly or on critical CVE.
@@ -150,7 +151,11 @@ func findRepoRoot() (string, error) {
 }
 
 func download(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	// 5-minute timeout: typical Node release ZIP is ~30 MB, slow
+	// CI/dev networks fetch in <60s, 5min covers worst-case without
+	// letting a hung nodejs.org block CI forever.
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +163,10 @@ func download(url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	// Cap at 200 MB: pinned Node is <50 MB compressed; anything an
+	// order of magnitude larger is a malicious redirect or a typo'd
+	// URL pointing at something else. Avoids unbounded RAM growth.
+	return io.ReadAll(io.LimitReader(resp.Body, 200<<20))
 }
 
 func sha256Sum(b []byte) []byte {

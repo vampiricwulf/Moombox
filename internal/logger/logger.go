@@ -181,8 +181,11 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 		if err := l.openFile(); err != nil {
 			// Underlying failure persists. Don't log to stderr on every
 			// write (would spam) — rotate already logged the original
-			// failure once when it first hit.
-			return 0, nil
+			// failure once when it first hit. Return (len(p), nil) to
+			// satisfy the io.Writer contract ("Write must return a non-nil
+			// error if it returns n < len(p)") and to keep slog's
+			// MultiWriter from short-circuiting on the failed sink.
+			return len(p), nil
 		}
 	}
 

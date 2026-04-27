@@ -22,9 +22,11 @@ import (
 )
 
 // ImportRoutes registers import-related API routes.
-// Uses its own 5/min rate limiter per the spec.
+// Uses its own 5/min rate limiter per the spec — the global API
+// limiter passed via routes_wiring is intentionally NOT applied here
+// (audit Q-21/U-2); imports are rare, large, and need a tighter cap.
 // Returns a cleanup function that stops the rate limiter's background goroutine.
-func ImportRoutes(r chi.Router, db *database.Database, store *config.Store, rl *web.RateLimiter) func() {
+func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func() {
 	importRL := web.NewRateLimiter(5, time.Minute)
 	r.With(importRL.Middleware).Post("/api/import", func(rw http.ResponseWriter, req *http.Request) {
 		// Max 500MB upload

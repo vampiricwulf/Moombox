@@ -9,13 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
-	"github.com/vampiricwulf/Moombox/internal/web"
 )
 
 type importFixture struct {
@@ -41,11 +39,8 @@ func newImportFixture(t *testing.T) *importFixture {
 	cfg.Paths.OutputDirectory = outputDir
 	store := config.NewStore(cfg, filepath.Join(dir, "config.toml"))
 
-	apiRL := web.NewRateLimiter(100, time.Minute)
-	t.Cleanup(apiRL.Close)
-
 	r := chi.NewRouter()
-	cleanup := ImportRoutes(r, db, store, apiRL)
+	cleanup := ImportRoutes(r, db, store)
 	t.Cleanup(cleanup)
 
 	return &importFixture{router: r, store: store, db: db, outputDir: outputDir, cleanup: cleanup}

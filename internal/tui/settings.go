@@ -316,24 +316,28 @@ func (m *SettingsModel) Open(cfg *config.MoomboxConfig) {
 	m.closeConfirm = false
 	m.buttonFocus = -1
 
-	// Snapshot config under read lock
+	// Snapshot config under read lock. Use the closure-scoped `c`
+	// (the locked snapshot) consistently — `cfg` is the outer store
+	// pointer and reading it outside the callback would not respect
+	// Store.Read's RLock contract even though today they reference the
+	// same memory.
 	m.configStore.Read(func(c *config.MoomboxConfig) {
 		// Channel editor
 		m.channelIndex = 0
 		m.channelMode = "list"
 		m.channelDeleteConf = false
-		m.channels = make([]config.ChannelConfig, len(cfg.Channels))
-		copy(m.channels, cfg.Channels)
+		m.channels = make([]config.ChannelConfig, len(c.Channels))
+		copy(m.channels, c.Channels)
 
 		// Notification editor
 		m.notifIndex = 0
 		m.notifMode = "list"
 		m.notifDeleteConf = false
-		m.notifications = make([]config.NotificationConfig, len(cfg.Notifications))
-		copy(m.notifications, cfg.Notifications)
+		m.notifications = make([]config.NotificationConfig, len(c.Notifications))
+		copy(m.notifications, c.Notifications)
 
 		// Load values
-		m.loadValues(cfg)
+		m.loadValues(c)
 	})
 
 	// Security

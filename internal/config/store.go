@@ -78,18 +78,23 @@ func (s *Store) Read(fn func(*MoomboxConfig)) {
 }
 
 // Update runs fn with the write lock held, then validates the result,
-// normalizes, and saves to disk when savePath is set. On validation failure
-// the in-memory config is NOT rolled back automatically (fn may have
-// mutated it) but the error is returned and the saved file is unchanged.
-// Callers that need transactional semantics should deep-copy before
-// calling fn and re-apply on error.
-//
-// Returns a joined error when validation fails, a save error otherwise.
+// normalizes, and saves to disk when savePath is set. On validation OR
+// save failure the in-memory config is rolled back to its pre-fn state,
+// keeping the in-memory and on-disk views consistent. Returns the error
+// from validation (joined) or save.
 func (s *Store) Update(fn func(*MoomboxConfig)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Snapshot the current cfg so we can roll back on validation/save
+	// failure. Without this, a failed Update leaves the in-memory cfg
+	// mutated by fn while disk stays unchanged -- subsequent Read()
+	// calls leak the bad value into monitors / web responses.
+	snapshot := *s.cfg
+
 	fn(s.cfg)
 	if errs := Validate(s.cfg); len(errs) > 0 {
+		*s.cfg = snapshot
 		return errors.Join(errs...)
 	}
 	Normalize(s.cfg)
@@ -97,7 +102,11 @@ func (s *Store) Update(fn func(*MoomboxConfig)) error {
 	if path == "" {
 		return nil
 	}
-	return Save(s.cfg, path)
+	if err := Save(s.cfg, path); err != nil {
+		*s.cfg = snapshot
+		return err
+	}
+	return nil
 }
 
 // SetSavePath installs or overrides the path used by Update for auto-save.

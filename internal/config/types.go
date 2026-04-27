@@ -29,6 +29,20 @@ type NetworkConfig struct {
 	TLSKeyPath         string `toml:"tls_key_path,omitempty" json:"tls_key_path,omitempty"`
 	PasswordHash       string `toml:"password_hash,omitempty" json:"-"`
 	ClientTokenTTLDays int    `toml:"client_token_ttl_days,omitempty" json:"client_token_ttl_days,omitempty"`
+
+	// TrustForwardedProto enables setting the Secure cookie flag based
+	// on the X-Forwarded-Proto header instead of solely on r.TLS.
+	// Default false: a directly-exposed Moombox MUST NOT trust this
+	// header because clients can spoof it and then session cookies
+	// would travel in plaintext over HTTP.
+	//
+	// Set to true ONLY when Moombox sits behind a reverse proxy that
+	// terminates TLS (nginx, Caddy, Traefik) AND the proxy strips any
+	// client-supplied X-Forwarded-Proto before adding its own. Without
+	// this flag, reverse-proxy deployments end up with non-Secure
+	// session cookies because Moombox sees plaintext HTTP from the
+	// proxy.
+	TrustForwardedProto bool `toml:"trust_forwarded_proto,omitempty" json:"trust_forwarded_proto,omitempty"`
 }
 
 // PathsConfig holds file and directory path settings.
@@ -84,12 +98,21 @@ type DownloaderConfig struct {
 
 // CookiesConfig holds cookie file and auto-cookie acquisition settings.
 type CookiesConfig struct {
-	CookieFile        string       `toml:"cookie_file" json:"cookie_file"`
-	AutoEnabled       bool         `toml:"auto_enabled" json:"auto_enabled"`
-	BrowserProfileDir string       `toml:"browser_profile_dir,omitempty" json:"browser_profile_dir,omitempty"`
-	Platforms         []string     `toml:"platforms,omitempty" json:"platforms,omitempty"`
-	ActivePlatforms   []string     `toml:"active_platforms,omitempty" json:"active_platforms,omitempty"`
-	RefreshInterval   FlexDuration `toml:"refresh_interval" json:"refresh_interval"`
+	CookieFile        string `toml:"cookie_file" json:"cookie_file"`
+	AutoEnabled       bool   `toml:"auto_enabled" json:"auto_enabled"`
+	BrowserProfileDir string `toml:"browser_profile_dir,omitempty" json:"browser_profile_dir,omitempty"`
+
+	// Platforms is the auto-detected platform list — populated at
+	// startup from cookie file inspection (HasYouTubeAuthCookies /
+	// HasTwitchAuthCookies). Treat as read-only-from-config.
+	Platforms []string `toml:"platforms,omitempty" json:"platforms,omitempty"`
+
+	// ActivePlatforms is the user's explicit override. Takes precedence
+	// over Platforms when set. Read via GetActivePlatforms() which
+	// falls back to Platforms then to channel inference.
+	ActivePlatforms []string `toml:"active_platforms,omitempty" json:"active_platforms,omitempty"`
+
+	RefreshInterval FlexDuration `toml:"refresh_interval" json:"refresh_interval"`
 
 	// DpapiFallback enables a Windows-only fallback path: if the
 	// CDP-based refresh launch fails (e.g. the user has Chrome open

@@ -138,4 +138,12 @@ func (pt *PassiveTracker) pruneOld() {
 	if i > 0 {
 		pt.failures = pt.failures[i:]
 	}
+	// Clear the latch when pruning has dropped the surviving failure
+	// count back below the trigger threshold. Without this, an idle
+	// Moombox that goes quiet after a brief failure burst keeps
+	// reporting IsTriggered()=true forever (no ReportSuccess fires
+	// because no HTTP request runs to clear it).
+	if pt.triggered && len(pt.failures) < pt.minFails {
+		pt.triggered = false
+	}
 }

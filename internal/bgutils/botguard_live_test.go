@@ -29,8 +29,6 @@ func TestBotGuardLiveFingerprint(t *testing.T) {
 	logger := &testBGLogger{t: t}
 	cfg := &BgConfig{
 		RequestKey: DefaultRequestKey,
-		// CacheDir intentionally empty -- the interpreter-hash cache was
-		// disabled in test.41; we always fetch the full interpreter.
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

@@ -117,9 +117,10 @@ func TestSidecarConcurrentRequests(t *testing.T) {
 }
 
 // TestSidecarGracefulShutdown verifies Stop returns promptly when the
-// sidecar has nothing inflight. Threshold is loose (15s) because the
-// process needs to fully exit and the readPump must finish draining
-// stdout, which on a slow Windows VM can take a couple seconds.
+// sidecar has nothing inflight. Stop's worst-case is now ~3s (1s
+// shutdown-RPC + 2s wait + Kill on timeout); 5s ceiling here accounts
+// for Windows process-reap latency without crossing into "we're
+// silently leaking the shutdown budget" territory.
 func TestSidecarGracefulShutdown(t *testing.T) {
 	s := startSidecar(t)
 
@@ -128,8 +129,8 @@ func TestSidecarGracefulShutdown(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 	elapsed := time.Since(start)
-	if elapsed > 15*time.Second {
-		t.Errorf("Stop took too long: %v", elapsed)
+	if elapsed > 5*time.Second {
+		t.Errorf("Stop took too long (must stay well under shutdown.go force-exit budget): %v", elapsed)
 	}
 	if s.IsHealthy() {
 		t.Errorf("expected unhealthy after Stop")
@@ -144,11 +145,10 @@ func TestSidecarHardKill(t *testing.T) {
 	if s.cmd == nil || s.cmd.Process == nil {
 		t.Fatalf("sidecar process unexpectedly nil")
 	}
-	pid := s.cmd.Process.Pid
-	t.Logf("killing sidecar pid=%d to simulate crash", pid)
+	t.Logf("killing sidecar pid=%d to simulate crash", s.cmd.Process.Pid)
 
-	if err := s.cmd.Process.Kill(); err != nil {
-		t.Fatalf("Kill: %v", err)
+	if err := s.KillForTest(); err != nil {
+		t.Fatalf("KillForTest: %v", err)
 	}
 
 	// readPump should observe EOF on stdout shortly and call markUnhealthy.

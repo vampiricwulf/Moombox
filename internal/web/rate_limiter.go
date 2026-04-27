@@ -38,14 +38,15 @@ type rateLimiterEntry struct {
 // their key. LRU keeps the active user in the map regardless of attacker
 // volume. Audit reports/web.md Q-18.
 type RateLimiter struct {
-	mu       sync.Mutex
-	requests map[string]*rateLimiterEntry
-	lruOrder *list.List // values are string (the IP); front = LRU, back = MRU
-	limit    int
-	window   time.Duration
-	cleanup  *time.Ticker
-	done     chan struct{}
-	logger   rateLimiterLogger // optional; may be nil
+	mu        sync.Mutex
+	requests  map[string]*rateLimiterEntry
+	lruOrder  *list.List // values are string (the IP); front = LRU, back = MRU
+	limit     int
+	window    time.Duration
+	cleanup   *time.Ticker
+	done      chan struct{}
+	closeOnce sync.Once // guards close(done) so double-Close doesn't panic
+	logger    rateLimiterLogger // optional; may be nil
 }
 
 // NewRateLimiter creates a new rate limiter and starts its background
@@ -211,8 +212,14 @@ func (rl *RateLimiter) cleanupLoop() {
 	}
 }
 
-// Close stops the cleanup goroutine.
+// Close stops the cleanup goroutine. Idempotent: subsequent calls are
+// no-ops thanks to the internal sync.Once guarding close(rl.done).
+// Production wiring already routes through cmd/moombox/services.go's
+// own sync.Once so today there's no double-Close path, but the guard
+// makes the contract safe by construction for future callers.
 func (rl *RateLimiter) Close() {
-	rl.cleanup.Stop()
-	close(rl.done)
+	rl.closeOnce.Do(func() {
+		rl.cleanup.Stop()
+		close(rl.done)
+	})
 }

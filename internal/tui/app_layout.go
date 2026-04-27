@@ -137,9 +137,12 @@ func (a *App) View() tea.View {
 // Esc previously left a config/runtime mismatch silently. Audit
 // reports/tui.md #26.
 func restartBanner(width int) string {
+	if width <= 0 {
+		return ""
+	}
 	style := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("0")).
-		Background(lipgloss.Color("220")).
+		Foreground(lipgloss.Color("#000000")).
+		Background(ColorYellow).
 		Bold(true).
 		Padding(0, 1).
 		Width(width)

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	bgembed "github.com/vampiricwulf/Moombox/internal/bgutils/embed"
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // extractIfNeeded compares the on-disk version.txt against the embedded
@@ -34,6 +35,14 @@ func extractIfNeeded(cacheDir string) error {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir cache dir: %w", err)
 	}
+
+	// Apply user-only DACL so node.exe + extracted node_modules don't
+	// inherit a world-readable parent ACL. Same posture as the config
+	// dir (commit d667436). Failure is logged-and-continue elsewhere
+	// in the codebase; we ignore the error here too -- a failure means
+	// the cache stays usable but with the parent's ACL, which is the
+	// pre-fix baseline.
+	_ = utils.ApplyUserOnlyDACL(cacheDir)
 
 	// 1. Gunzip-extract node.exe into cacheDir/node.exe.
 	nodePath := filepath.Join(cacheDir, "node.exe")
@@ -129,7 +138,14 @@ func extractTarGz(destDir string, gzData []byte) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode&0o777))
+			// Clamp mode to 0o644 minimum -- a tar header with mode=0
+			// (some bsdtar variants on Windows emit no mode info) would
+			// otherwise produce an unreadable file.
+			mode := os.FileMode(hdr.Mode & 0o777)
+			if mode == 0 {
+				mode = 0o644
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 			if err != nil {
 				return err
 			}

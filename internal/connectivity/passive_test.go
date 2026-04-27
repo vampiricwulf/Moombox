@@ -117,3 +117,41 @@ func TestPassiveTracker_WindowExpiry(t *testing.T) {
 		t.Fatal("should not trigger after window expiry")
 	}
 }
+
+// TestPassiveTracker_LatchClearsOnIdlePrune locks in the F19 fix:
+// after a brief failure burst trips the latch, an idle Moombox (no
+// further failures, no ReportSuccess) must see IsTriggered()=false
+// once the failure window has aged out. Pre-fix, pruneOld trimmed
+// the slice but never cleared `triggered`, so IsTriggered() reported
+// true forever until the next HTTP success fired ReportSuccess.
+func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
+	pt := &PassiveTracker{
+		window:   100 * time.Millisecond,
+		minFails: 3,
+		minTags:  2,
+	}
+	pt.ReportFailure("a")
+	pt.ReportFailure("a")
+	pt.ReportFailure("b")
+
+	if !pt.ShouldTriggerOffline() {
+		t.Fatal("expected initial failure burst to trigger offline")
+	}
+	if !pt.IsTriggered() {
+		t.Fatal("expected latch to be set after ShouldTriggerOffline returned true")
+	}
+
+	// Sleep past the failure window — failures age out, no new
+	// failures arrive, no ReportSuccess fires.
+	time.Sleep(150 * time.Millisecond)
+
+	// IsTriggered alone doesn't prune (it just reads the flag).
+	// ShouldTriggerOffline does prune AND now also clears the latch
+	// when failures fall below threshold.
+	if pt.ShouldTriggerOffline() {
+		t.Error("expected no trigger after window expiry (failures all aged out)")
+	}
+	if pt.IsTriggered() {
+		t.Error("expected latch cleared by pruneOld once failures fell below threshold; got still-triggered")
+	}
+}

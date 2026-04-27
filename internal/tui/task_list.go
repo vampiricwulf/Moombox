@@ -229,11 +229,12 @@ func (m *TaskListModel) RemoveJob(jobID string) {
 	m.rebuildVirtualList()
 
 	if prevSelectedID != "" && prevSelectedID != jobID {
-		for i, item := range m.list.Items() {
-			if ti, ok := item.(taskItem); ok && ti.job != nil && ti.job.ID == prevSelectedID {
-				m.list.Select(i)
-				break
-			}
+		// Use virtualIndex (built by rebuildVirtualList) for O(1)
+		// follow-the-selection. Audit reports/tui.md #22 fixed the
+		// equivalent post-rebuild scan in UpdateJob; this is the same
+		// pattern.
+		if newIdx, ok := m.virtualIndex[prevSelectedID]; ok {
+			m.list.Select(newIdx)
 		}
 	}
 	m.resetMarquee()

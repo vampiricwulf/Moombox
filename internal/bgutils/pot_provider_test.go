@@ -81,6 +81,115 @@ func TestPotProvider_CacheCleanup(t *testing.T) {
 	}
 }
 
+// TestPotProvider_CleanupExpiredReturnsMintersForOutOfLockCleanup locks in
+// the C3 fix from the pre-2.6.0 review: cleanupExpired must drop expired
+// minters from the cache map under pp.mu but return them so the caller
+// can run safeCleanup OUTSIDE the lock. Holding pp.mu across m.Cleanup()
+// (which acquires WebPoMinter.mu and runs goja shutdown) was a deadlock
+// risk under concurrent mintPoToken — same anti-pattern CRIT-6 fixed in
+// InvalidateCaches/InvalidateIntegrityTokens.
+func TestPotProvider_CleanupExpiredReturnsMintersForOutOfLockCleanup(t *testing.T) {
+	config := &BgConfig{RequestKey: DefaultRequestKey}
+	pp := NewPotProvider(config, &testLogger{})
+
+	// Seed minterCache with one expired and one fresh minter. Track
+	// whether each Cleanup runs by setting a bool from the closure.
+	expiredCleaned := false
+	freshCleaned := false
+	pp.minterCache["expired"] = &TokenMinter{
+		ExpiresAt: time.Now().Add(-1 * time.Hour),
+		Cleanup:   func() { expiredCleaned = true },
+	}
+	pp.minterCache["fresh"] = &TokenMinter{
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+		Cleanup:   func() { freshCleaned = true },
+	}
+
+	pp.mu.Lock()
+	expired := pp.cleanupExpired()
+	pp.mu.Unlock()
+
+	// Caller must run safeCleanup outside the lock (this is the contract
+	// generateAndMint and the GeneratePoToken callsite implement).
+	for _, m := range expired {
+		pp.safeCleanup(m, "test")
+	}
+
+	if len(expired) != 1 {
+		t.Fatalf("expected 1 expired minter returned, got %d", len(expired))
+	}
+	if !expiredCleaned {
+		t.Errorf("expected expired minter's Cleanup to be invoked outside the lock")
+	}
+	if freshCleaned {
+		t.Errorf("did not expect fresh minter's Cleanup to be invoked")
+	}
+	if _, ok := pp.minterCache["expired"]; ok {
+		t.Errorf("expected expired minter to be dropped from cache")
+	}
+	if _, ok := pp.minterCache["fresh"]; !ok {
+		t.Errorf("expected fresh minter to remain in cache")
+	}
+}
+
+// TestPotProvider_CleanupExpiredDoesNotHoldLockDuringCleanup asserts the
+// lock-release pattern in GeneratePoToken: when an expired minter is
+// found, pp.mu is released before m.Cleanup() runs. Constructed by
+// blocking the Cleanup callback on a channel and verifying that a
+// second goroutine can grab pp.mu (via Stats) while that Cleanup is in
+// flight.
+func TestPotProvider_CleanupExpiredDoesNotHoldLockDuringCleanup(t *testing.T) {
+	config := &BgConfig{RequestKey: DefaultRequestKey}
+	pp := NewPotProvider(config, &testLogger{})
+
+	releaseCleanup := make(chan struct{})
+	cleanupRunning := make(chan struct{})
+	pp.minterCache["expired"] = &TokenMinter{
+		ExpiresAt: time.Now().Add(-1 * time.Hour),
+		Cleanup: func() {
+			close(cleanupRunning)
+			<-releaseCleanup
+		},
+	}
+
+	// Drive the cleanup-then-out-of-lock dance directly. (We can't call
+	// GeneratePoToken in a unit test because it talks to network.)
+	cleanupDone := make(chan struct{})
+	go func() {
+		pp.mu.Lock()
+		expired := pp.cleanupExpired()
+		pp.mu.Unlock()
+		for _, m := range expired {
+			pp.safeCleanup(m, "test")
+		}
+		close(cleanupDone)
+	}()
+
+	// Wait for cleanup to be running INSIDE the user's Cleanup callback.
+	select {
+	case <-cleanupRunning:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Cleanup callback never started")
+	}
+
+	// While cleanup is blocked, Stats() must NOT block on pp.mu — the
+	// whole point of the C3 fix.
+	statsDone := make(chan struct{})
+	go func() {
+		_ = pp.Stats()
+		close(statsDone)
+	}()
+	select {
+	case <-statsDone:
+		// Good — Stats finished while Cleanup is still blocked.
+	case <-time.After(1 * time.Second):
+		t.Fatal("Stats() blocked while Cleanup was in flight — pp.mu is held across Cleanup")
+	}
+
+	close(releaseCleanup)
+	<-cleanupDone
+}
+
 func TestPotProvider_InvalidateCaches(t *testing.T) {
 	config := &BgConfig{RequestKey: DefaultRequestKey}
 	pp := NewPotProvider(config, &testLogger{})

@@ -7,11 +7,21 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
+)
+
+// dacledDirs memoises the set of dirs that have had their DACL tightened
+// this process lifetime. icacls shells out (~30-80ms on Windows); without
+// memoisation every config Save under Store.Update's write lock pays that
+// latency on a no-op. The set lives for the process — restart re-applies.
+var (
+	dacledDirsMu sync.Mutex
+	dacledDirs   = make(map[string]struct{})
 )
 
 // Defaults returns a new MoomboxConfig with all default values applied.
@@ -559,7 +569,17 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
 		fail("disk.critical_percent %d must be > disk.warn_percent %d", cfg.Disk.CriticalPercent, cfg.Disk.WarnPercent)
 		if !reportOnly {
-			cfg.Disk.CriticalPercent = min(cfg.Disk.WarnPercent+5, 99)
+			// Clamp WarnPercent down by enough to fit a 5-point critical
+			// buffer below 99. WarnPercent=99/CriticalPercent=99 used to
+			// round-trip with persistent error because we'd pin
+			// CriticalPercent to min(99+5, 99) = 99 — the same broken
+			// pair. Reset to defaults if the cap doesn't fit.
+			if cfg.Disk.WarnPercent >= 95 {
+				cfg.Disk.WarnPercent = defaults.Disk.WarnPercent
+				cfg.Disk.CriticalPercent = defaults.Disk.CriticalPercent
+			} else {
+				cfg.Disk.CriticalPercent = min(cfg.Disk.WarnPercent+5, 99)
+			}
 		}
 	}
 
@@ -608,10 +628,19 @@ func Save(cfg *MoomboxConfig, path string) error {
 	// the restrictive ACL so the password hash + cookie paths +
 	// auth tokens aren't readable by other non-admin users on a
 	// shared host. No-op on non-Windows; idempotent if the dir
-	// already has the right ACL. Failures are logged-but-survived
-	// at the caller level — config save still proceeds. Audit
-	// reports/config.md Finding 22.
-	_ = utils.ApplyUserOnlyDACL(dir)
+	// already has the right ACL. Memoised across Save calls because
+	// icacls shell-out is ~30-80ms and otherwise blocks every config
+	// save under Store.Update's write lock for no benefit. Failures
+	// are logged-but-survived at the caller level — config save still
+	// proceeds. Audit reports/config.md Finding 22.
+	dacledDirsMu.Lock()
+	if _, ok := dacledDirs[dir]; !ok {
+		dacledDirsMu.Unlock()
+		_ = utils.ApplyUserOnlyDACL(dir)
+		dacledDirsMu.Lock()
+		dacledDirs[dir] = struct{}{}
+	}
+	dacledDirsMu.Unlock()
 
 	tmpPath := path + ".tmp"
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)

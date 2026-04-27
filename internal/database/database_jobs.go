@@ -171,6 +171,15 @@ func (db *Database) UpdateJobSync(job *Job) error {
 //
 // jobIDs is chunked to stay under SQLITE_MAX_VARIABLE_NUMBER and all chunks
 // run inside a single outer transaction so the update is atomic.
+//
+// BatchSetWatched is the lone holdout still firing OnJobsChange (a full
+// jobs+trims+gaps re-scan) rather than per-event notifications. Migration
+// rationale: a batch can flip 100+ jobs at once and per-event dispatch
+// would amplify into 100+ subscriber callbacks, each running their own
+// re-render. The single full re-scan is cheaper for the consumer side
+// even though it's heavier in the DB. AddJob/DeleteJob/AddTrim/DeleteTrim
+// all migrated to per-event notifications (OnJobAdded / OnJobDeleted /
+// OnTrimsChanged) which don't have this fan-out concern.
 func (db *Database) BatchSetWatched(jobIDs []string, watched bool) error {
 	if len(jobIDs) == 0 {
 		return nil

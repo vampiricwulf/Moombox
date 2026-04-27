@@ -194,10 +194,15 @@ type SegmentDownloader struct {
 }
 
 // SetBaseURL atomically replaces the URL used for subsequent segment
-// fetches. Safe to call from any goroutine; reads inside the download
-// loop pick up the new value on the next getBaseURL() call. Nothing
-// in flight is interrupted — the swap is observed at the start of
-// each segment fetch / probe / resume save. DECISIONS #7.
+// fetches. Safe to call from any goroutine AFTER Start has returned
+// from its resume-validation setup (a SetBaseURL racing with Start's
+// initial getBaseURL() read for resume validation is technically
+// allowed by atomic semantics but loses the validation's intent --
+// callers should wait for Start to finish before invoking SetBaseURL).
+// Reads inside the download loop pick up the new value on the next
+// getBaseURL() call. Nothing in flight is interrupted — the swap is
+// observed at the start of each segment fetch / probe / resume save.
+// DECISIONS #7.
 func (d *SegmentDownloader) SetBaseURL(url string) {
 	d.baseURLOverride.Store(&url)
 }

@@ -88,6 +88,16 @@ type PotProvider struct {
 // PotStats is a snapshot of PotProvider counters. The numeric fields are
 // monotonically increasing — operators compute deltas externally. The
 // CachedMinters field is the live cache size, not a counter.
+//
+// Observability surfaces overlap deliberately:
+//   - SidecarMintsHit / SidecarMintsErr count *attempts* through the
+//     sidecar path. A sidecar failure increments SidecarMintsErr AND
+//     causes a fall-through to the goja path; if THAT path also fails
+//     GenerateErrors increments too. So a single end-user request that
+//     fails via both paths produces +1 SidecarMintsErr and +1
+//     GenerateErrors. Read SidecarMintsErr as "how often did the
+//     preferred path fail and we fell back" and GenerateErrors as
+//     "how often did the user-facing call ultimately error".
 type PotStats struct {
 	SessionHits        uint64 `json:"session_hits"`
 	MinterHits         uint64 `json:"minter_hits"`
@@ -97,6 +107,8 @@ type PotStats struct {
 	GenerateErrors     uint64 `json:"generate_errors"`
 	InflightWaits      uint64 `json:"inflight_waits"`
 	CachedMinters      int    `json:"cached_minters"`
+	SidecarMintsHit    uint64 `json:"sidecar_mints_hit"`
+	SidecarMintsErr    uint64 `json:"sidecar_mints_err"`
 }
 
 // Stats returns a snapshot of the provider's observability counters.
@@ -117,6 +129,8 @@ func (pp *PotProvider) Stats() PotStats {
 		GenerateErrors:     pp.generateErrors.Load(),
 		InflightWaits:      pp.inflightWaits.Load(),
 		CachedMinters:      cached,
+		SidecarMintsHit:    pp.sidecarMintsHit.Load(),
+		SidecarMintsErr:    pp.sidecarMintsErr.Load(),
 	}
 }
 
@@ -160,8 +174,18 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 
 	pp.mu.Lock()
 
-	// Cleanup expired entries
-	pp.cleanupExpired()
+	// Cleanup expired entries. cleanupExpired drops them from the maps
+	// under pp.mu, but returns evicted minters whose Cleanup we must run
+	// outside the lock (Cleanup acquires WebPoMinter.mu and would
+	// deadlock against concurrent mintPoToken).
+	expiredMinters := pp.cleanupExpired()
+	if len(expiredMinters) > 0 {
+		pp.mu.Unlock()
+		for _, m := range expiredMinters {
+			pp.safeCleanup(m, "expired")
+		}
+		pp.mu.Lock()
+	}
 
 	bindingPrefix := contentBinding[:min(len(contentBinding), 20)]
 
@@ -605,22 +629,31 @@ func (pp *PotProvider) proactiveRefreshMinter(original *TokenMinter) {
 	}
 }
 
-func (pp *PotProvider) cleanupExpired() {
+// cleanupExpired drops expired sessionCache and minterCache entries from
+// pp under the caller-held pp.mu, and returns the minters that were
+// evicted. Caller MUST run safeCleanup on each returned minter AFTER
+// releasing pp.mu -- m.Cleanup() routes to WebPoMinter.Shutdown which
+// acquires WebPoMinter.mu and runs the goja shutdown function. Holding
+// pp.mu across that path can deadlock against a concurrent
+// pp.mintPoToken (which holds WebPoMinter.mu and may queue on pp.mu via
+// the inflight cleanup at line ~244). Same anti-pattern that CRIT-6
+// fixed in InvalidateCaches/InvalidateIntegrityTokens.
+func (pp *PotProvider) cleanupExpired() []*TokenMinter {
 	now := time.Now()
 	for k, s := range pp.sessionCache {
 		if now.After(s.ExpiresAt) {
 			delete(pp.sessionCache, k)
 		}
 	}
+	var toCleanup []*TokenMinter
 	for k, m := range pp.minterCache {
 		if now.After(m.ExpiresAt) {
-			if m.Cleanup != nil {
-				m.Cleanup()
-			}
+			toCleanup = append(toCleanup, m)
 			delete(pp.minterCache, k)
 			pp.mintersEvicted.Add(1)
 		}
 	}
+	return toCleanup
 }
 
 const alphaNum = "abcdefghijklmnopqrstuvwxyz0123456789"
