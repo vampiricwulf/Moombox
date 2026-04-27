@@ -144,6 +144,8 @@ func main() {
 // run initializes and runs the full application. Returns true if a restart was
 // requested (config change, update applied, or via web API).
 func run(configPath string, logLevelOverride string, useTUI bool) bool {
+	startPprofIfRequested()
+
 	// Graceful shutdown context (also stored on runState so every extracted
 	// phase sees the same cancellation).
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -23,6 +23,29 @@ go vet ./...                                        # Static analysis
 
 Runtime requires FFmpeg on PATH. CI (`.github/workflows/release.yml`) builds Windows exe on tag push, reads `RELEASE_NOTES.md` for GitHub release body.
 
+### Profiling (pprof)
+
+For memory/CPU/goroutine investigations, run the binary with `MOOMBOX_PPROF=1` in the environment. The child process binds the standard `net/http/pprof` handlers on `localhost:6060` (loopback-only, no auth). Disabled by default — adds zero overhead when the env var is unset.
+
+```powershell
+$env:MOOMBOX_PPROF = "1"
+.\moombox.exe
+# In another terminal:
+go tool pprof http://localhost:6060/debug/pprof/heap     # live heap
+go tool pprof http://localhost:6060/debug/pprof/allocs   # cumulative allocs since start
+go tool pprof http://localhost:6060/debug/pprof/profile  # 30s CPU profile
+curl http://localhost:6060/debug/pprof/goroutine?debug=2 # goroutine dump (text)
+```
+
+Diff two snapshots to isolate growth from steady-state heap:
+```powershell
+Invoke-WebRequest http://localhost:6060/debug/pprof/heap -OutFile heap-t0.pprof
+# wait N minutes
+Invoke-WebRequest http://localhost:6060/debug/pprof/heap -OutFile heap-t1.pprof
+go tool pprof -inuse_space -base heap-t0.pprof heap-t1.pprof
+# (pprof) top 30 -cum
+```
+
 ### BotGuard sidecar embed prerequisites
 
 `go build ./cmd/moombox` requires two embed blobs to be present in `internal/bgutils/embed/` before compilation. Without them the `go:embed` directives in `internal/bgutils/embed/embed.go` fail.

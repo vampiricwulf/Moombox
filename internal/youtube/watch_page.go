@@ -37,14 +37,31 @@ var (
 		regexp.MustCompile(`(?s)window\["ytInitialPlayerResponse"\]\s*=\s*({.+?});`),
 		regexp.MustCompile(`(?s)ytInitialPlayerResponse\s*=\s*({.+?});`),
 	}
+	// ytInitialDataRegex extracts the ytInitialData JSON blob used for chat
+	// continuation token extraction. Mirrors the same regex used by
+	// internal/chat/api.go for its standalone watch-page fetch path.
+	ytInitialDataRegex = regexp.MustCompile(`(?s)var ytInitialData = ({.+?});</script>`)
 )
 
 // WatchPageResult contains data extracted from a YouTube watch page.
+//
+// The raw HTML is intentionally NOT a field. Watch-page responses for popular
+// live streams routinely exceed 5 MB, and quality-monitor polling fetches the
+// page every interval — keeping HTML on the result struct produced a ~5 MB/min
+// leak (every poll's HTML pinned in the heap, observed in pprof). All
+// downstream needs (ytcfg fields, player response, chat continuation) are
+// extracted at parse time so the body string can be GC'd as soon as
+// FetchWatchPage returns.
 type WatchPageResult struct {
-	HTML           string
-	Ytcfg          *YtcfgData
-	IsLoggedIn     bool
-	PlayerResponse map[string]any
+	Ytcfg            *YtcfgData
+	IsLoggedIn       bool
+	PlayerResponse   map[string]any
+	ChatContinuation string
+	ChatIsReplay     bool
+	// ChatErr captures any failure encountered while extracting the chat
+	// continuation token. Non-nil + empty ChatContinuation means "no chat
+	// available" with diagnostic context for the caller's debug log.
+	ChatErr error
 }
 
 // FetchWatchPage fetches and parses a YouTube watch page.
@@ -69,13 +86,73 @@ func FetchWatchPage(ctx context.Context, videoID string, cookieHeader string) (*
 	isLoggedIn := strings.Contains(html, `"LOGGED_IN":true`) || strings.Contains(html, `"isLoggedIn":true`)
 
 	ytcfg, playerResponse := extractYtcfgAndPlayerResponse(html)
+	chatContinuation, chatIsReplay, chatErr := extractChatContinuation(html)
 
 	return &WatchPageResult{
-		HTML:           html,
-		Ytcfg:          ytcfg,
-		IsLoggedIn:     isLoggedIn,
-		PlayerResponse: playerResponse,
+		Ytcfg:            ytcfg,
+		IsLoggedIn:       isLoggedIn,
+		PlayerResponse:   playerResponse,
+		ChatContinuation: chatContinuation,
+		ChatIsReplay:     chatIsReplay,
+		ChatErr:          chatErr,
 	}, nil
+}
+
+// extractChatContinuation pulls the live-chat continuation token (and its
+// isReplay flag) out of a watch page's ytInitialData blob. Returns an empty
+// token + descriptive error when chat isn't available (most non-live videos,
+// streams with chat disabled, etc.) — callers treat that as "no chat" rather
+// than a hard failure. Shape mirrors chat.ExtractChatContinuation; duplicated
+// here so the youtube package owns its own extraction and watch_page.go can
+// drop the raw HTML before returning. json.Unmarshal allocates fresh strings,
+// so the returned token does not alias the html backing array.
+func extractChatContinuation(html string) (string, bool, error) {
+	m := ytInitialDataRegex.FindStringSubmatch(html)
+	if m == nil {
+		return "", false, fmt.Errorf("ytInitialData not found")
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal([]byte(m[1]), &data); err != nil {
+		return "", false, fmt.Errorf("parse ytInitialData: %w", err)
+	}
+
+	contents, _ := data["contents"].(map[string]any)
+	twoCol, _ := contents["twoColumnWatchNextResults"].(map[string]any)
+	convBar, _ := twoCol["conversationBar"].(map[string]any)
+	chatRenderer, _ := convBar["liveChatRenderer"].(map[string]any)
+	if chatRenderer == nil {
+		return "", false, fmt.Errorf("no liveChatRenderer found")
+	}
+
+	isReplay, _ := chatRenderer["isReplay"].(bool)
+
+	conts, _ := chatRenderer["continuations"].([]any)
+	if len(conts) == 0 {
+		return "", false, fmt.Errorf("no continuations found")
+	}
+
+	contKeys := []string{
+		"reloadContinuationData",
+		"invalidationContinuationData",
+		"timedContinuationData",
+		"liveChatReplayContinuationData",
+	}
+	for _, cont := range conts {
+		contMap, _ := cont.(map[string]any)
+		if contMap == nil {
+			continue
+		}
+		for _, key := range contKeys {
+			if contData, ok := contMap[key].(map[string]any); ok {
+				if token, ok := contData["continuation"].(string); ok && token != "" {
+					return token, isReplay, nil
+				}
+			}
+		}
+	}
+
+	return "", false, fmt.Errorf("no continuation token found")
 }
 
 // normalizePlayerJSURL un-escapes a JSON-encoded URL (YouTube emits forward
@@ -98,9 +175,13 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
 		ytcfg.PlayerURL = normalizePlayerJSURL(m[1])
 	}
 
-	// Extract visitor data
+	// Extract visitor data. strings.Clone breaks the substring→backing-array
+	// alias: regexp.FindStringSubmatch returns substrings of `html` (the full
+	// ~5 MB watch-page response). Without Clone, storing m[1] anywhere
+	// persistent (Service.visitorData, sessionCache keys, etc.) pins the
+	// entire HTML in memory. Per-poll leak observed at ~5 MB/min in pprof.
 	if m := visitorDataRegex.FindStringSubmatch(html); m != nil {
-		ytcfg.VisitorData = m[1]
+		ytcfg.VisitorData = strings.Clone(m[1])
 	}
 
 	// Extract session index
@@ -110,14 +191,14 @@ func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {
 		}
 	}
 
-	// Extract delegated session ID
+	// Extract delegated session ID (Clone — see VisitorData comment).
 	if m := delegatedSessionRegex.FindStringSubmatch(html); m != nil {
-		ytcfg.DelegatedSessionID = m[1]
+		ytcfg.DelegatedSessionID = strings.Clone(m[1])
 	}
 
-	// Extract datasync ID
+	// Extract datasync ID (Clone — see VisitorData comment).
 	if m := dataSyncIDRegex.FindStringSubmatch(html); m != nil {
-		ytcfg.DataSyncID = m[1]
+		ytcfg.DataSyncID = strings.Clone(m[1])
 	}
 
 	// Extract ytInitialPlayerResponse (try multiple patterns)

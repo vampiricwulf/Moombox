@@ -166,16 +166,6 @@ func (s *Service) Init(ctx context.Context) {
 	s.initMu.Unlock()
 }
 
-// FetchWatchPageHtml fetches the raw HTML of a video's watch page.
-// Used for chat continuation token extraction.
-func (s *Service) FetchWatchPageHtml(ctx context.Context, videoID string) (string, error) {
-	result, err := FetchWatchPage(ctx, videoID, s.Auth.GetCookieHeader())
-	if err != nil {
-		return "", err
-	}
-	return result.HTML, nil
-}
-
 // GetApiKey returns the current Innertube API key.
 func (s *Service) GetApiKey() string {
 	return s.PlayerAPI.apiKey

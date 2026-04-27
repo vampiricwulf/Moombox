@@ -168,6 +168,27 @@ go test -v -run TestName ./internal/package/...  # Single test
 go vet ./...              # Static analysis
 ```
 
+### Profiling (diagnostic builds)
+
+For memory or CPU investigations, set `MOOMBOX_PPROF=1` before launching. Moombox then exposes the standard Go `net/http/pprof` endpoints on `localhost:6060` (loopback-only). Off by default with zero overhead when unset.
+
+```powershell
+$env:MOOMBOX_PPROF = "1"
+.\moombox.exe
+# Then, in another terminal:
+go tool pprof http://localhost:6060/debug/pprof/heap     # live heap
+go tool pprof http://localhost:6060/debug/pprof/profile  # 30s CPU profile
+```
+
+To diff two heap snapshots (useful for finding leaks):
+```powershell
+Invoke-WebRequest http://localhost:6060/debug/pprof/heap -OutFile heap-t0.pprof
+# wait N minutes for the suspected leak to grow
+Invoke-WebRequest http://localhost:6060/debug/pprof/heap -OutFile heap-t1.pprof
+go tool pprof -inuse_space -base heap-t0.pprof heap-t1.pprof
+# at the (pprof) prompt:  top 30 -cum
+```
+
 ## Terminal UI
 
 The TUI displays a three-panel layout: task list + job details (top) and live log viewer (bottom). Tab switches focus between panels — the focused panel expands to take more space.

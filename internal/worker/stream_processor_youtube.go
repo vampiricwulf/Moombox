@@ -320,9 +320,10 @@ func (sp *StreamProcessor) tryStartEarlyChat(ctx context.Context, job *database.
 		return nil
 	}
 
-	continuation, isReplay, err := chat.ExtractChatContinuation(watchResult.HTML)
-	if err != nil || continuation == "" {
-		sp.logger.Debug("no chat continuation for early chat", "videoID", job.VideoID, "err", err)
+	continuation := watchResult.ChatContinuation
+	isReplay := watchResult.ChatIsReplay
+	if continuation == "" {
+		sp.logger.Debug("no chat continuation for early chat", "videoID", job.VideoID, "err", watchResult.ChatErr)
 		return nil
 	}
 

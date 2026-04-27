@@ -29,10 +29,13 @@ func (o *DownloadOrchestrator) setupChatDownloader(ctx context.Context, jobCtx *
 		return nil
 	}
 
-	// Extract chat continuation from the watch page HTML
-	continuation, isReplay, err := chat.ExtractChatContinuation(watchResult.HTML)
-	if err != nil || continuation == "" {
-		o.logger.Debug("no chat continuation available", "videoID", jobCtx.Job.VideoID, "err", err)
+	// Chat continuation is extracted at watch-page parse time (see watch_page.go);
+	// reading from the result avoids re-parsing the 5 MB HTML and lets the body
+	// string be GC'd before this point.
+	continuation := watchResult.ChatContinuation
+	isReplay := watchResult.ChatIsReplay
+	if continuation == "" {
+		o.logger.Debug("no chat continuation available", "videoID", jobCtx.Job.VideoID, "err", watchResult.ChatErr)
 		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 			"chat_status": "unavailable",
 		})
