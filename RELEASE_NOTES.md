@@ -2,6 +2,31 @@
 
 This build bundles Sprint #1 + Sprint #2 work plus twenty-four batches from the multi-report audit. All commits since `f3ac3fb` (v2.5.2) build clean and pass `go test ./...` plus the frontend JS test suite.
 
+### BotGuard PO-token sidecar (Phases 1–5)
+
+Embeds a Node.js + JSDOM + bgutils-js subprocess into Moombox.exe so PO tokens generate end-to-end against Google's WAA endpoint. Replaces the goja-only path that produced only websafe-fallback tokens (Option 2 / test.50–test.55 hand-rolled DOM hit a hard ceiling: goja's interpreter runs ~100× faster than V8's JIT, which BotGuard uses as a "this isn't a real browser" timing fingerprint). Sidecar uses real V8 + JSDOM + the upstream `bgutils-js` library, which is the same combination that ships in production at `bgutil-ytdlp-pot-provider/server/`.
+
+**Result**: real 152-char PO tokens instead of websafe-only fallback. Live test against Google's WAA endpoint produces a fresh integrity token in ~460 ms; subsequent mints with the same binding hit the sidecar's internal minter cache in ~500 µs (~1000× speedup).
+
+**Binary impact**: Moombox.exe grows by ~36 MB (~33 MB gzipped Node.js v22.22.2 binary + ~3.5 MB gzipped sidecar JS payload). First-launch extracts to `%LOCALAPPDATA%/Moombox/sidecar/` (~3-5 s on SSD); subsequent launches reuse the cached extraction (sub-second). Set `[bgutils] use_sidecar = false` in `config.toml` to disable and fall back to goja-only.
+
+Implementation in five phases (commits 191820c → 7b8d023 → a888b23 → a29a590 → 895ee6e):
+- **Phase 1** — `bgutil-sidecar/` JS source (~250-line stdin/stdout JSON-RPC server + `build.mjs` tarball pipeline). Deps are MIT-clean (`bgutils-js` + `jsdom`); deliberately not `bgutil-ytdlp-pot-provider` (GPL-3.0-only would force Moombox to GPL).
+- **Phase 2** — `tools/fetch-node` Go tool that downloads + SHA-verifies the pinned Node v22 LTS release for the build pipeline.
+- **Phase 3** — `internal/bgutils/sidecar/` Go package: `go:embed`'d blobs, pure-Go tar+gzip extraction (end users do NOT need a system tar binary), Windows Job Object pinning so the child dies with Moombox, JSON-RPC reqID multiplexing for concurrent mints, readPump-driven crash detection.
+- **Phase 4** — `PotProvider.generateAndMint` branches to the sidecar when healthy, falls through to goja on any error so PO-token generation never goes completely dark. `[bgutils] use_sidecar` config flag (default true).
+- **Phase 5** — Live integration tests gated on `MOOMBOX_LIVE_BG_TEST=1`: real-mint test (passes against Google's WAA), kill-mid-flight fallback test (verifies the goja path engages when sidecar dies).
+
+Build prerequisites (CI handles automatically; local devs run once after fresh checkout):
+
+```bash
+go run ./tools/fetch-node                     # ~33 MB Node binary
+cd bgutil-sidecar && npm ci --omit=dev && node build.mjs && cd ..
+go build -o moombox.exe ./cmd/moombox
+```
+
+See `docs/investigations/botguard-sidecar-design.md` for the full architecture.
+
 ### Phase 11 (test.40) — test sprint (focused on this arc's new APIs)
 
 Tests added cover items shipped in this 12-phase arc that lacked direct coverage. The broader 140-test backlog (audit-flagged before this arc started) becomes ongoing work — each package's testing roadmap stays in `reports/<package>.md` for incremental closure rather than blocking the test.40 ship.

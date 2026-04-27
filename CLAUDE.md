@@ -23,6 +23,28 @@ go vet ./...                                        # Static analysis
 
 Runtime requires FFmpeg on PATH. CI (`.github/workflows/release.yml`) builds Windows exe on tag push, reads `RELEASE_NOTES.md` for GitHub release body.
 
+### BotGuard sidecar embed prerequisites
+
+`go build ./cmd/moombox` requires two embed blobs to be present in `internal/bgutils/embed/` before compilation. Without them the `go:embed` directives in `internal/bgutils/embed/embed.go` fail.
+
+```bash
+# 1. Fetch + gzip the pinned Node.js Windows x64 binary (~33 MB blob):
+go run ./tools/fetch-node                 # idempotent; skips on version match
+
+# 2. Build the JS sidecar payload (~3.5 MB tarball):
+cd bgutil-sidecar
+npm ci --omit=dev                         # production deps only (jsdom + bgutils-js)
+node build.mjs                            # tars node_modules + src/ to ../internal/bgutils/embed/
+cd ..
+
+# 3. Now build Moombox normally:
+go build -o moombox.exe ./cmd/moombox
+```
+
+CI runs steps 1+2 automatically (see `.github/workflows/release.yml`). For local builds, run them once after fresh checkout; subsequent `go build` calls reuse the embedded blobs until `version.txt` drifts (Node version bump or sidecar JS change).
+
+To skip the sidecar entirely (smaller binary, falls back to goja-only PO tokens), set `[bgutils] use_sidecar = false` in `config.toml`. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
+
 ### Windows resource embedding
 
 Exe icon and version info via `.syso` files from `cmd/moombox/winres/`. CI generates at build time — none committed. Local builds with icon: `go install github.com/tc-hib/go-winres@latest && cd cmd/moombox && go-winres make`.

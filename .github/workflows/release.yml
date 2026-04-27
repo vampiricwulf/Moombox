@@ -18,6 +18,27 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build BotGuard sidecar payload
+        # Produces internal/bgutils/embed/sidecar.tar.gz from
+        # bgutil-sidecar/ (production node_modules + src/server.js).
+        # The Go side embeds this via go:embed at compile time.
+        shell: bash
+        run: |
+          cd bgutil-sidecar
+          npm ci --omit=dev --no-audit --no-fund
+          node build.mjs
+          cd ..
+
+      - name: Fetch embedded Node binary
+        # Downloads the pinned Node v22 LTS Windows x64 release, verifies
+        # SHA-256, gzips node.exe to internal/bgutils/embed/node.exe.gz.
+        # Idempotent: skips re-download if version.txt already matches.
+        run: go run ./tools/fetch-node
+
       - name: Generate Windows resources
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
