@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 )
 
 // inflightEntry holds the result of an inflight PO token generation.
@@ -67,6 +69,20 @@ type PotProvider struct {
 	mintersEvicted     atomic.Uint64
 	generateErrors     atomic.Uint64
 	inflightWaits      atomic.Uint64
+
+	// sidecar, when non-nil and healthy, is the preferred PO-token mint
+	// path: a real Node + V8 + JSDOM subprocess runs BotGuard end-to-end
+	// and returns real integrity tokens (not the websafe fallback the
+	// goja path is limited to). On any sidecar error we fall through to
+	// the goja minterCache flow so PO-token generation never goes
+	// completely dark.
+	//
+	// Set via SetSidecar (cmd/moombox wires it up after Start). Nil in
+	// unit tests so existing PotProvider* tests keep exercising the
+	// goja path without dragging in subprocess/embed dependencies.
+	sidecar         *sidecar.Sidecar
+	sidecarMintsHit atomic.Uint64
+	sidecarMintsErr atomic.Uint64
 }
 
 // PotStats is a snapshot of PotProvider counters. The numeric fields are
@@ -121,6 +137,16 @@ func NewPotProvider(config *BgConfig, logger interface {
 		config:       config,
 		logger:       logger,
 	}
+}
+
+// SetSidecar attaches a started BotGuard sidecar to the provider. Call once
+// after the subprocess handshake succeeds in cmd/moombox/services.go.
+// Passing nil reverts to the goja-only path (useful for tests that want to
+// exercise the fallback).
+func (pp *PotProvider) SetSidecar(s *sidecar.Sidecar) {
+	pp.mu.Lock()
+	pp.sidecar = s
+	pp.mu.Unlock()
 }
 
 // GeneratePoToken generates or retrieves a cached PO token for the given content binding.
@@ -226,6 +252,8 @@ func (pp *PotProvider) GeneratePoToken(ctx context.Context, contentBinding strin
 
 // InvalidateCaches clears all cached data. Minter Cleanup runs outside pp.mu
 // so a slow VM teardown can't block concurrent GeneratePoToken callers.
+// Also fans out to the sidecar (when attached) so its internal minter +
+// session caches drop in lockstep.
 func (pp *PotProvider) InvalidateCaches() {
 	pp.mu.Lock()
 	toCleanup := make([]*TokenMinter, 0, len(pp.minterCache))
@@ -234,16 +262,29 @@ func (pp *PotProvider) InvalidateCaches() {
 	}
 	pp.sessionCache = make(map[string]*SessionData)
 	pp.minterCache = make(map[string]*TokenMinter)
+	sc := pp.sidecar
 	pp.mu.Unlock()
 
 	for _, m := range toCleanup {
 		pp.safeCleanup(m, "InvalidateCaches")
 	}
 	pp.mintersInvalidated.Add(uint64(len(toCleanup)))
+
+	if sc != nil {
+		// Bound the sidecar IPC by 5s so a hung child can't wedge an
+		// operator-driven invalidate.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := sc.InvalidateCaches(ctx); err != nil {
+			pp.logger.Warn("[PotProvider] sidecar InvalidateCaches failed", "err", err)
+		}
+	}
 }
 
 // InvalidateIntegrityTokens clears minter cache (forces BotGuard re-run).
 // Minter Cleanup runs outside pp.mu (see InvalidateCaches rationale).
+// Also tells the sidecar to drop its internal minter so the next mint
+// re-runs BotGuard end-to-end.
 func (pp *PotProvider) InvalidateIntegrityTokens() {
 	pp.mu.Lock()
 	toCleanup := make([]*TokenMinter, 0, len(pp.minterCache))
@@ -251,12 +292,21 @@ func (pp *PotProvider) InvalidateIntegrityTokens() {
 		toCleanup = append(toCleanup, m)
 	}
 	pp.minterCache = make(map[string]*TokenMinter)
+	sc := pp.sidecar
 	pp.mu.Unlock()
 
 	for _, m := range toCleanup {
 		pp.safeCleanup(m, "InvalidateIntegrityTokens")
 	}
 	pp.mintersInvalidated.Add(uint64(len(toCleanup)))
+
+	if sc != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := sc.InvalidateIT(ctx); err != nil {
+			pp.logger.Warn("[PotProvider] sidecar InvalidateIT failed", "err", err)
+		}
+	}
 }
 
 // GetMinterCacheKeys returns the content binding keys in the minter cache.
@@ -323,12 +373,37 @@ func (pp *PotProvider) mintPoToken(minter *TokenMinter, contentBinding string) (
 }
 
 func (pp *PotProvider) generateAndMint(ctx context.Context, contentBinding string, bypassCache bool) (*SessionData, error) {
-	// Serialize minter creation across goroutines: every "first request"
-	// goroutine sees an empty minterCache and would otherwise race to
-	// spin up a BotGuard VM, with the losers being replaced + leaked.
-	// Holding minterCreatingMu through the (potentially seconds-long)
-	// VM init is acceptable because the alternative — duplicate BotGuard
-	// runs — is exactly what CRIT-2 is here to prevent.
+	// Sidecar path: a real Node + V8 + JSDOM subprocess that passes
+	// BotGuard's timing fingerprint and returns real integrity tokens.
+	// Bypasses the goja minterCache entirely (the sidecar maintains its
+	// own internal minter cache, ~6h TTL). On any sidecar error we fall
+	// through to the goja path so token generation never goes dark.
+	pp.mu.Lock()
+	sc := pp.sidecar
+	pp.mu.Unlock()
+	if sc != nil && sc.IsHealthy() {
+		bindingPrefix := contentBinding[:min(len(contentBinding), 20)]
+		pp.logger.Debug("[PotProvider] minting via sidecar", "binding", bindingPrefix)
+		token, err := sc.GeneratePoToken(ctx, contentBinding)
+		if err == nil {
+			pp.sidecarMintsHit.Add(1)
+			return &SessionData{
+				PoToken:        token,
+				ContentBinding: contentBinding,
+				ExpiresAt:      time.Now().Add(pp.config.sessionTTL()),
+			}, nil
+		}
+		pp.sidecarMintsErr.Add(1)
+		pp.logger.Warn("[PotProvider] sidecar mint failed; falling through to goja", "err", err)
+	}
+
+	// Goja fallback path. Serialize minter creation across goroutines:
+	// every "first request" goroutine sees an empty minterCache and
+	// would otherwise race to spin up a BotGuard VM, with the losers
+	// being replaced + leaked. Holding minterCreatingMu through the
+	// (potentially seconds-long) VM init is acceptable because the
+	// alternative — duplicate BotGuard runs — is exactly what CRIT-2 is
+	// here to prevent.
 	pp.minterCreatingMu.Lock()
 	defer pp.minterCreatingMu.Unlock()
 

@@ -134,6 +134,18 @@
 # auto_enabled = false
 # browser_profile_dir = "./browser-profile"
 
+# ─── BotGuard PO Token Sidecar ─────────────────────────────────────────────
+# Moombox bundles a Node.js + JSDOM + bgutils-js subprocess that produces
+# real PO tokens for YouTube. The sidecar binds locally only and runs
+# automatically when needed; first launch extracts ~36 MB of embedded
+# blobs to %LOCALAPPDATA%/Moombox/sidecar (one-time, ~3-5s).
+#
+# Disable to fall back to the in-process goja-only path. The fallback
+# still works for most YouTube content but cannot pass BotGuard's timing
+# fingerprint check, so PO-token-gated formats become unavailable.
+# [bgutils]
+# use_sidecar = true                         # Default: true. Set to false to disable.
+
 # ─── Webhook Notifications ──────────────────────────────────────────────────
 # Send webhook notifications for stream events.
 # Works with Discord, Slack, ntfy, or any service that accepts POST webhooks.

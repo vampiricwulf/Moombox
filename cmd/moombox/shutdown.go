@@ -66,6 +66,14 @@ func (s *runState) shutdown() bool {
 	// 5. Cleanup PO token provider
 	stopService("PotProvider", s.potProvider.Cleanup)
 
+	// 5b. Stop BotGuard sidecar subprocess (when running). Job Object
+	// pinning means the child dies regardless if Moombox is killed
+	// hard, but a graceful shutdown lets us drain stdout cleanly and
+	// avoid an unsightly EOF warning in the logs.
+	if s.bgSidecar != nil {
+		stopService("BgSidecar", func() { _ = s.bgSidecar.Stop() })
+	}
+
 	// 6. Stop web server
 	stopService("WebServer", s.webServer.Stop)
 

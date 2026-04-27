@@ -60,6 +60,9 @@ func Defaults() *MoomboxConfig {
 		Updates: UpdatesConfig{
 			AutoCheckUpdates: true,
 		},
+		Bgutils: BgutilsConfig{
+			UseSidecar: true,
+		},
 	}
 }
 

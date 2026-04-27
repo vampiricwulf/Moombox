@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
+	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/connectivity"
@@ -191,6 +192,37 @@ func (s *runState) initServices(logLevelOverride string) error {
 	bgCacheDir := filepath.Join(os.TempDir(), "moombox-bgutils")
 	potProvider := bgutils.NewPotProvider(&bgutils.BgConfig{CacheDir: bgCacheDir}, log)
 	s.potProvider = potProvider
+
+	// =========================================================================
+	// 7b. BotGuard sidecar (Node + JSDOM + bgutils-js subprocess)
+	// =========================================================================
+	// The sidecar produces real PO tokens that pass BotGuard's timing
+	// fingerprint (which the goja-only path can't, see
+	// docs/investigations/botguard-option-2-results.md). On any failure
+	// we log a warning and PotProvider falls through to its goja path
+	// which still produces websafe-fallback tokens -- downloads keep
+	// working, but PO-token-gated formats may be unavailable.
+	//
+	// First launch extracts ~36 MB of embedded blobs to
+	// %LOCALAPPDATA%/Moombox/sidecar (one-time, ~3-5s); subsequent
+	// launches reuse the cached extraction (sub-second).
+	//
+	// Set [bgutils] use_sidecar = false in config.toml to disable.
+	if cfg.Bgutils.UseSidecar {
+		bgSidecar := sidecar.New(sidecar.Config{Logger: log})
+		sCtx, sCancel := context.WithTimeout(s.ctx, 60*time.Second)
+		startErr := bgSidecar.Start(sCtx)
+		sCancel()
+		if startErr != nil {
+			log.Warn("BotGuard sidecar failed to start; falling back to goja", slog.String("error", startErr.Error()))
+		} else {
+			s.bgSidecar = bgSidecar
+			potProvider.SetSidecar(bgSidecar)
+			log.Info("BotGuard sidecar ready", slog.String("cacheDir", bgSidecar.CacheDir()))
+		}
+	} else {
+		log.Info("BotGuard sidecar disabled in config; using goja fallback only")
+	}
 
 	// =========================================================================
 	// 8. Cipher solver

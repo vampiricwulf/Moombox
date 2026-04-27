@@ -11,6 +11,7 @@ type MoomboxConfig struct {
 	Cookies       CookiesConfig        `toml:"cookies" json:"cookies"`
 	Disk          DiskConfig           `toml:"disk" json:"disk"`
 	Updates       UpdatesConfig        `toml:"updates" json:"updates"`
+	Bgutils       BgutilsConfig        `toml:"bgutils" json:"bgutils"`
 	Channels      []ChannelConfig      `toml:"channels,omitempty" json:"channels,omitempty"`
 	Notifications []NotificationConfig `toml:"notifications,omitempty" json:"notifications,omitempty"`
 
@@ -110,6 +111,18 @@ type DiskConfig struct {
 // UpdatesConfig holds auto-update settings.
 type UpdatesConfig struct {
 	AutoCheckUpdates bool `toml:"auto_check_updates" json:"auto_check_updates"`
+}
+
+// BgutilsConfig holds BotGuard sidecar settings. Defaults applied via
+// config.Defaults() so a config file with no [bgutils] section gets a
+// working sidecar enabled out of the box.
+type BgutilsConfig struct {
+	// UseSidecar enables the embedded Node + JSDOM + bgutils-js
+	// subprocess that produces real PO tokens via BotGuard. Defaults to
+	// true on Windows. When false (or when the sidecar fails to start),
+	// PotProvider falls back to the goja-only path which produces only
+	// websafe-fallback tokens.
+	UseSidecar bool `toml:"use_sidecar" json:"use_sidecar"`
 }
 
 // ChannelConfig holds channel-specific monitoring settings.
