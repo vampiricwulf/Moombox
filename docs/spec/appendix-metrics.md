@@ -40,7 +40,9 @@
 | database/ | ~1,850 | 7 | 1 | SQLite/WAL, batch updates, pub/sub |
 | cipher/ | ~1,500 | 9 | 2 | YouTube signature cipher: AST + regex, 3-VM LRU |
 | monitor/ | ~1,450 | 4 | 1 | Feed (RSS), DECAPI, Twitch monitors |
-| bgutils/ | ~1,400 | 7 | 1 | PO token: challenge, BotGuard VM (Goja), mint |
+| bgutils/ | ~1,800 | 10 | 3 | PO token: PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter (sidecar primary, goja fallback) |
+| bgutils/sidecar/ | ~700 | 5 | 1 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |
+| bgutils/embed/ | ~30 | 1 | 0 | go:embed boundary for node.exe.gz + sidecar.tar.gz + version.txt |
 | chat/ | ~1,400 | 3 | 1 | YouTube live chat downloader (polling + batching) |
 | utils/ | ~1,150 | 14 | 14 | HTTP helpers, formatters, YouTube URL parsing, JSON |
 | config/ | ~850 | 4 | 1 | TOML config, FlexDuration, channel terms |

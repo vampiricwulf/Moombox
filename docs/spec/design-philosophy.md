@@ -57,7 +57,8 @@ Moombox runs 24/7 on the user's personal machine, not a server farm. It shares r
 
 What this means in practice:
 - **Signal-driven concurrency over polling.** The database batch update system sleeps until signaled — it performs zero IO when nothing is changing. This is preferred everywhere: don't poll on a timer when you can wait for a signal.
-- **Goja VMs auto-evict when idle.** BotGuard and cipher VMs hold multi-MB JavaScript runtimes in memory. These are expensive to keep around. BotGuard minters evict themselves via `time.AfterFunc` when their TTL expires. Cipher VMs use a 3-VM LRU cache, so at most three player.js runtimes exist simultaneously.
+- **Goja VMs auto-evict when idle.** Cipher VMs hold multi-MB JavaScript runtimes in memory. These are expensive to keep around. Cipher VMs use a 3-VM LRU cache, so at most three player.js runtimes exist simultaneously. The fallback BotGuard goja-VM (when the sidecar is unavailable) evicts itself via `time.AfterFunc` when its TTL expires.
+- **BotGuard sidecar is one long-running subprocess, not per-request.** The Node + JSDOM sidecar starts once at Moombox launch and serves every PO-token request from the same V8 instance. Per-request subprocess spawning would cost 200-500ms cold-start per token; the long-running model amortises that to a one-time startup cost. The subprocess is pinned to a Windows Job Object so it dies with Moombox even on hard parent crashes.
 - **Database batch coalescing.** Updates within a 100ms window are flushed in a single transaction rather than individually. This reduces disk IO by orders of magnitude during active downloads (when many progress updates fire per second) while adding negligible latency.
 - **WebSocket broadcast throttling.** Job update broadcasts use a 100ms leading/trailing edge throttle. The first update sends immediately; subsequent updates within the window are batched. This prevents flooding connected clients during high-activity periods.
 - **TUI non-blocking sends.** Channel sends to the TUI use non-blocking operations with drop counters. If the TUI's event loop is busy, updates are dropped rather than blocking the sender. The drop counter tracks how many were missed so the next successful send can trigger a full refresh.
@@ -231,10 +232,10 @@ In these cases, the polling interval is tuned to balance responsiveness against 
 
 ### Memory Management for Expensive Objects
 
-Goja JavaScript VMs are the most expensive objects in the application. Each VM holds a multi-megabyte JavaScript runtime in memory. Two subsystems use them:
+JavaScript runtimes are the most expensive objects in the application. Two subsystems run JS:
 
-- **BotGuard** uses a triple-layer cache: session tokens (6-hour TTL), minter VMs (dynamic TTL with `time.AfterFunc` auto-eviction), and inflight deduplication (prevents multiple goroutines from creating the same minter simultaneously). When a minter's TTL expires, it is evicted automatically — the VM and its memory are freed.
-- **Cipher** uses a 3-VM LRU cache keyed by player.js URL. When a fourth unique player.js is encountered, the least-recently-used VM is evicted. Compilation of new VMs is mutex-serialized to prevent thundering herd (multiple goroutines all trying to compile the same player.js simultaneously).
+- **BotGuard** runs primarily under an embedded Node.js + JSDOM sidecar (real V8) — one long-running subprocess for the lifetime of Moombox. The sidecar's V8 heap is the largest single JS allocation in the system but it sits in a separate process so it does not compete with Go's GC for the main heap. PotProvider keeps a triple-layer in-process cache (session tokens 6h TTL, single goja-fallback minter VM with proactive refresh + auto-eviction, inflight dedup) on top of the sidecar's own internal minter cache. When the sidecar is disabled or unhealthy, the goja-VM fallback path keeps token generation working at reduced fidelity (websafe-fallback only).
+- **Cipher** uses a 3-VM Goja LRU cache keyed by player.js URL. When a fourth unique player.js is encountered, the least-recently-used VM is evicted. Compilation of new VMs is mutex-serialized to prevent thundering herd (multiple goroutines all trying to compile the same player.js simultaneously).
 
 ### Bounded Buffers
 

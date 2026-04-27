@@ -84,7 +84,7 @@ Beyond the core download workflow:
 - **Terminal UI** — A bubbletea-based TUI provides the same capabilities as the web dashboard: job monitoring, log viewing, channel management, settings, and all operational controls. The TUI uses a chord-based keyboard system for efficient navigation.
 - **Self-Updating** — Moombox checks GitHub releases for new versions, downloads updates, verifies Ed25519 signatures, and performs a three-step binary swap (`.new` -> current -> `.old`). The launcher/supervisor pattern allows graceful restarts after updates.
 - **Cookie Management** — Moombox manages browser cookies for YouTube authentication, supporting automatic extraction from Firefox and Chromium browsers, periodic refresh, and manual import.
-- **BotGuard/PO Token** — Moombox implements YouTube's BotGuard challenge flow using a Goja JavaScript VM to generate Proof of Origin tokens required for API access.
+- **BotGuard/PO Token** — Moombox runs YouTube's BotGuard challenge under an embedded Node.js + JSDOM + bgutils-js sidecar (real V8, real DOM) to generate Proof of Origin tokens. The Node binary and JS payload are embedded into the Moombox.exe via `go:embed` and extracted on first launch — users do not need a Node install. A goja-VM fallback path is retained for environments where the sidecar fails to start; it produces websafe-fallback tokens which work for most YouTube content but not for PO-token-gated formats.
 - **Signature Cipher** — Moombox solves YouTube's signature cipher for format URL decryption using AST analysis with regex fallback, maintaining a 3-VM LRU cache keyed by player.js URL.
 
 ## What Moombox Is NOT
@@ -104,7 +104,7 @@ This point deserves emphasis because it is a common source of confusion. Moombox
 
 - Implements YouTube's Innertube Player API directly (multiple client types, format selection, auth handling).
 - Implements YouTube's DASH and HLS manifest parsing and segment download.
-- Implements YouTube's BotGuard challenge/response flow using a JavaScript VM (Goja).
+- Implements YouTube's BotGuard challenge/response flow primarily via an embedded Node.js + JSDOM sidecar (real V8 engine), with a Goja-VM fallback path.
 - Implements YouTube's signature cipher solving using AST analysis of player.js.
 - Implements Twitch's GQL API for stream discovery and HLS playlist retrieval.
 - Implements Twitch IRC for live chat capture.

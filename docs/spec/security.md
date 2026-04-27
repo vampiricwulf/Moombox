@@ -301,7 +301,7 @@ All rate limiters use a 60-second sliding window. The limits are configured in `
 |-------|-------|--------|---------|
 | Login (`/api/auth/login`) | 5 | 60s | Brute-force protection |
 | Password set/remove | 3 | 60s | Prevents rapid password changes |
-| POT generation (`/get_pot`) | 10 | 60s | Limits BotGuard VM usage (expensive) |
+| POT generation (`/get_pot`) | 10 | 60s | Limits BotGuard work (sidecar IPC + Google WAA round-trip on cache miss) |
 | Import (`/api/import`) | 5 | 60s | Limits resource-intensive archive imports |
 | API general | 20 | 60s | Broad rate limit on API endpoints |
 

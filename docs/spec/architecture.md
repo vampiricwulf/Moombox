@@ -101,8 +101,8 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 ### 7. Twitch Service
 `twitch.NewService(jar, log)` creates the Twitch service. Initializes GQL API authentication from cookies (looks for `auth-token` cookie). Logs auth status at startup.
 
-### 8. PO Token Provider
-`bgutils.NewPotProvider()` creates the BotGuard PO token provider. Manages a triple-layer cache: session cache (6h TTL), minter cache (dynamic TTL from BotGuard response), and inflight dedup (concurrent requests share a single generation via channel synchronization).
+### 8. PO Token Provider + BotGuard Sidecar
+`bgutils.NewPotProvider()` creates the BotGuard PO token provider with its triple-layer cache: session cache (6h TTL), minter cache (single-minter design, dynamic TTL from BotGuard response), and inflight dedup (concurrent requests share a single generation via channel synchronization). Immediately after, when `cfg.Bgutils.UseSidecar` is true (default), `sidecar.New(...)` constructs a `Sidecar` and `Start(ctx)` launches the embedded Node.js subprocess: extract `node.exe.gz` + `sidecar.tar.gz` from `go:embed` to `%LOCALAPPDATA%/Moombox/sidecar/`, apply user-only DACL, spawn `node src/server.js` pinned to a Windows Job Object, ping/pong handshake. On success, `potProvider.SetSidecar(s)` attaches it; `PotProvider.generateAndMint` then prefers the sidecar path and falls through to the goja-only path on any sidecar error so PO-token generation never goes completely dark. Failure to start the sidecar is non-fatal — Moombox logs a warning and continues with goja-fallback.
 
 ### 9. Cipher Solver
 `cipher.NewSolver(cacheDir, log)` creates the YouTube signature cipher solver. Cache directory is `%TEMP%/yt-cipher`. Manages a 3-VM LRU cache keyed by `player.js` URL. Wired to `ytService.PlayerAPI.SetCipherSolver()` so format URL decryption is transparent. Uses full AST parsing with regex fallback for extraction.
@@ -179,7 +179,9 @@ internal/database   (7 files, ~1,850)  -- SQLite/WAL, batch updates (100ms coale
 internal/cookies    (9 files, ~2,700)  -- jar, refresh, auto-cookie (Firefox/Chromium)
 internal/youtube    (8 files, ~1,950)  -- Service, PlayerAPI, Auth, watch page, format selector
 internal/twitch    (10 files, ~3,200)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
-internal/bgutils    (7 files, ~1,400)  -- PO token: challenge -> BotGuard VM (Goja) -> mint
+internal/bgutils   (~10 files, ~1,800)  -- PO token: PotProvider + WebPoClient (sidecar primary, goja fallback)
+internal/bgutils/sidecar (5 files,~700) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
+internal/bgutils/embed   (1 file)       -- go:embed boundary for node.exe.gz + sidecar.tar.gz + version.txt
 internal/cipher     (9 files, ~1,500)  -- YouTube signature cipher: AST + regex, 3-VM LRU
 internal/engine    (12 files, ~2,850)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
 internal/chat       (3 files, ~1,400)  -- YouTube live chat downloader (polling + batching)
@@ -554,10 +556,10 @@ The TUI uses non-blocking channel sends to prevent the event loop from blocking:
 
 ### BotGuard Triple Cache
 
-The PO token system uses three cache layers to minimize expensive BotGuard VM operations:
+The PO token system uses three in-process cache layers to minimize expensive BotGuard operations. Caches are agnostic to which path (sidecar primary, goja fallback) produced the token:
 
-1. **Session cache (6h TTL):** Caches the complete PO token for a given content binding. Avoids the entire BotGuard flow.
-2. **Minter cache (dynamic TTL):** Caches the compiled BotGuard VM ("minter") which can stamp multiple tokens. TTL comes from the BotGuard challenge response.
+1. **Session cache (6h TTL):** Caches the complete PO token for a given content binding. Avoids both the sidecar IPC and the goja flow entirely on hits. Single source of truth for "is this token still fresh."
+2. **Minter cache (dynamic TTL, single-minter design):** Caches the compiled BotGuard "minter" which can stamp multiple tokens. TTL comes from the BotGuard challenge response. Effectively unused under sidecar mode (the sidecar maintains its own internal minter cache inside the Node process). Populated only when the sidecar fails and the goja path generates a minter. CRIT-2 audit fix: ONE minter under `defaultMinterKey="default"` serves every binding for its TTL — the per-binding cache that pre-existed wasted a BotGuard run on every new content binding. FRESH-2 audit fix: a `time.AfterFunc` 5min before expiry proactively regenerates so user-facing calls don't pay the 2-10s BotGuard cost.
 3. **Inflight dedup:** When multiple goroutines request a PO token simultaneously, the first one starts generation and all others wait on the same channel. Prevents thundering herd.
 
 Each cache layer uses `time.AfterFunc` for automatic eviction on TTL expiry. The session cache key is the content binding string. The minter cache key is the challenge hash.

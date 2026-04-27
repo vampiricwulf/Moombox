@@ -896,6 +896,40 @@ All log lines use `2006-01-02 15:04:05` format (Go reference time). This applies
 
 ---
 
+## BotGuard Sidecar Cache (`%LOCALAPPDATA%/Moombox/sidecar/`)
+
+Moombox extracts the embedded Node.js binary and BotGuard sidecar payload to a per-user cache directory on first launch. This is the only on-disk artifact Moombox produces outside its working directory.
+
+### Path
+
+`os.UserCacheDir() + "/Moombox/sidecar"`. On Windows: `%LOCALAPPDATA%/Moombox/sidecar`. Chosen over `%TEMP%` because Defender heuristics treat `%TEMP%` extractions of executables as more suspicious than `%LOCALAPPDATA%`.
+
+### Contents
+
+```
+%LOCALAPPDATA%/Moombox/sidecar/
+├── node.exe                         (~83 MB extracted from embed's gzipped 33 MB)
+├── package.json
+├── package-lock.json
+├── version.txt                      ("node@vX.Y.Z sha256@<sha>" — cache-invalidation key)
+├── src/
+│   └── server.js                    (~250 lines, JSON-RPC server)
+└── node_modules/                    (production deps: bgutils-js, jsdom, transitives — ~17 MB)
+```
+
+### Lifecycle
+
+- **First launch:** `extractIfNeeded(cacheDir)` creates the dir, applies `utils.ApplyUserOnlyDACL` to tighten permissions to current-user-only (matches the config-dir hardening), gunzips `node.exe.gz`, gunzip+tar-extracts `sidecar.tar.gz` using stdlib `archive/tar` + `compress/gzip` (no system tar required), writes `version.txt` last.
+- **Subsequent launches:** Compares the on-disk `version.txt` against the embedded `bgembed.Version`. On match AND key files present, skips extraction. On mismatch (Node version bump, sidecar JS update), re-extracts the whole payload.
+- **Tar-slip defense:** Rejects any tar entry whose target path escapes `cacheDir`.
+- **DACL hoist:** Runs even on cache-hit so users upgrading from v2.5.x (whose pre-existing dir was created with the looser inherited ACL) get the tightened DACL on the next launch.
+
+### Cleanup
+
+Not currently auto-cleaned. The cache survives Moombox uninstall — operators wanting to reclaim the ~100 MB can manually delete the dir. A `moombox uninstall-data` CLI subcommand is planned but not in v2.6.0.
+
+---
+
 ## Cross-References
 
 - **[architecture.md](architecture.md)** -- Batch coalescing as a concurrency pattern; pub/sub as an inter-component communication mechanism; service initialization order (Config -> Logger -> Database -> ...).

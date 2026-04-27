@@ -601,21 +601,117 @@ After chat download completes, `EnrichWithEmotes` reads the chat JSON file, adds
 
 ### Purpose
 
-YouTube's BotGuard is a client verification system that generates Proof of Origin (PO) tokens. These tokens prove that a request originates from a legitimate browser environment. Without them, certain YouTube API responses may be degraded or blocked.
+YouTube's BotGuard is a client verification system that generates Proof of Origin (PO) tokens. These tokens prove that a request originates from a legitimate browser environment. Without them, certain YouTube API responses (premium-quality formats, live streams) may be degraded or blocked.
 
-### Token Generation Flow
+### Why a Sidecar
 
-The full PO token generation is orchestrated by `WebPoClient.GenerateTokenMinter`:
+BotGuard inspects the JS runtime's wall-clock timing as part of its fingerprint — its snapshot routine runs a sequence of operations and measures how long they take. Real Chrome + V8 takes 50–200 ms. The Goja interpreter, being a non-JIT pure-Go implementation, completes the same operations in ~552 µs — about 100× faster. BotGuard treats this speed disparity as a "this isn't a real browser" signal and refuses to mint a real `integrityToken`, returning only a `websafeFallbackToken`.
+
+The hand-rolled real-class DOM shim work (test.50–test.55) raised the goja runtime's API fidelity to browser parity (`document instanceof HTMLDocument`, real event dispatch with capture/bubble, real `CSSStyleDeclaration`, real `URL`/`AbortController`, etc.) but couldn't bridge the timing gap because the gap is below the JS API surface — it lives in the V8-vs-interpreter speed difference itself.
+
+The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v22 binary plus `bgutils-js` + `jsdom` (both MIT-licensed) and runs them as a subprocess. This is the same combination `bgutil-ytdlp-pot-provider/server/` ships in production.
+
+### Architecture
+
+```
+                  yt-dlp + bgutil-ytdlp-pot-provider plugin
+                                  │
+                                  │ HTTP GET http://localhost:774/get_pot
+                                  ↓
+                  ┌────────────────────────────────────────┐
+                  │ Moombox HTTP server :774                │
+                  │ /get_pot, /invalidate_caches,           │
+                  │ /invalidate_it -- LoopbackOnly,         │
+                  │ CSRF-exempt                             │
+                  └────────────────┬───────────────────────┘
+                                   ↓
+                  ┌────────────────────────────────────────┐
+                  │ internal/bgutils/PotProvider            │
+                  │  ├── sessionCache (Go map)              │
+                  │  ├── minterCache (Go map; goja-only)    │
+                  │  ├── inflightDedup (Go sync.Map)        │
+                  │  └── sidecar *Sidecar                   │
+                  └────────────────┬───────────────────────┘
+                                   ↓ (when sidecar healthy)
+                  ┌────────────────────────────────────────┐
+                  │ internal/bgutils/sidecar.Sidecar        │
+                  │  ├── go:embed node.exe.gz               │
+                  │  ├── go:embed sidecar.tar.gz            │
+                  │  ├── extract-on-first-launch logic      │
+                  │  ├── exec.Cmd + Job Object pinning      │
+                  │  ├── stdin/stdout JSON-RPC channel      │
+                  │  └── reqID -> chan response mux         │
+                  └────────────────┬───────────────────────┘
+                                   ↓ stdin/stdout pipes
+                  ┌────────────────────────────────────────┐
+                  │ Bundled node.exe                        │
+                  │  └── bgutil-sidecar/src/server.js       │
+                  │       └── BgUtils SessionManager        │
+                  │             └── BgUtils +              │
+                  │                 JSDOM +                │
+                  │                 V8 (real)              │
+                  └────────────────────────────────────────┘
+```
+
+`PotProvider.generateAndMint` branches on `pp.sidecar != nil && pp.sidecar.IsHealthy()`. On success, it caches the result in the session cache and returns. On any sidecar error, it logs a warning and falls through to the legacy goja-only path so token generation never goes completely dark.
+
+### Sidecar lifecycle (`internal/bgutils/sidecar/`)
+
+**Embed:** `internal/bgutils/embed/` is a standalone package exposing three `go:embed`'d package vars:
+- `NodeExeGz []byte` — gzipped Node.js v22 Windows x64 binary (~33 MB), produced by `tools/fetch-node`.
+- `SidecarTarGz []byte` — gzipped tarball of `bgutil-sidecar/` production deps + JS source (~3.5 MB), produced by `bgutil-sidecar/build.mjs`.
+- `Version string` — content of `internal/bgutils/embed/version.txt`, format `node@vX.Y.Z sha256@<sha>`. Used as the cache-invalidation key.
+
+**First-launch extraction:** `extractIfNeeded(cacheDir)` resolves `cacheDir = os.UserCacheDir() + "/Moombox/sidecar"` (Windows: `%LOCALAPPDATA%/Moombox/sidecar`), tightens the dir's ACL via `utils.ApplyUserOnlyDACL` (always — even on cache-hit, so users upgrading from v2.5.x get the security benefit), then compares on-disk `version.txt` against the embedded `Version`. On match + key files present, the function returns immediately. On mismatch, it gunzip-extracts `node.exe`, gunzip+tar-extracts the sidecar payload using stdlib `archive/tar` + `compress/gzip` (end users do NOT need a system `tar` binary — that's a build-time-only requirement for `bgutil-sidecar/build.mjs`), and writes the new `version.txt` LAST so a partial extraction next time forces a redo. Tar-slip defense rejects entries whose target escapes `cacheDir`. File modes are clamped to `0o644` minimum to defend against tar variants that emit zero-mode headers.
+
+**Subprocess:** `exec.Command(cacheDir+"/node.exe", cacheDir+"/src/server.js")` with `cmd.Dir = cacheDir`. Stdin/stdout are piped for JSON-RPC; stderr is piped to a goroutine that routes lines to Moombox's logger at Debug. The process is pinned to a Windows Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so the child + any grandchildren die when Moombox exits — even on a hard parent crash. (Same pattern as `internal/cookies/job_windows.go`.)
+
+**Handshake:** After `cmd.Start()`, the manager spawns `readPump` (consumes stdout JSON-RPC responses, routes to per-request channels via `reqID`) and `stderrPump` (logs at Debug). It then sends `{"id":1,"method":"ping"}` and waits up to `StartupTimeout` (default 5s on warm cache, 60s on first launch including extraction) for the `{"id":1,"result":"pong"}` reply. Failure here marks the sidecar unhealthy and falls back to goja.
+
+**Per-request flow:** `Sidecar.GeneratePoToken(ctx, binding)` allocates a `reqID`, registers a buffered channel in `s.pending`, writes `{"id":N,"method":"generatePoToken","params":{"binding":"..."}}` to stdin under `s.writeMu`, then waits on either the channel or `ctx.Done()`. The readPump matches the response by `id` and forwards to the channel. Concurrent calls multiplex cleanly because each request has its own channel.
+
+**Crash recovery:** If `readPump` observes stdout EOF (parent's view of child death), it calls `markUnhealthy("stdout EOF")` which atomically flips `s.healthy` to false and drains every pending request channel with an error. Subsequent `IsHealthy()` checks return false until either `Start` is re-attempted or the process restarts (a future enhancement; not in v2.6.0).
+
+**Graceful shutdown:** `Sidecar.Stop()` is bounded at ~3 s total — 1 s for the JSON-RPC `shutdown` round-trip + 2 s for the process to exit on its own + Kill on timeout. The bound stays well under `cmd/moombox/shutdown.go`'s 10-s force-exit budget so a hung sidecar can't starve web-server / DB-close / pump-drain shutdown steps.
+
+### IPC protocol
+
+JSON-RPC-style, line-delimited (one JSON object per line, separated by `\n`). All fields ASCII-safe.
+
+| Method | Params | Result | Notes |
+|---|---|---|---|
+| `ping` | (none) | `"pong"` | startup health check |
+| `generatePoToken` | `{binding}` | `{poToken, binding, expiresAt}` | hot path |
+| `invalidateCaches` | (none) | `"ok"` | wipes sidecar's session + minter caches |
+| `invalidateIT` | (none) | `"ok"` | wipes only minter cache (force fresh BotGuard) |
+| `getStats` | (none) | `{cachedMinters, cachedSessions, mintsTotal, mintsErrored}` | observability |
+| `shutdown` | (none) | `"bye"` | graceful exit; sidecar JS calls `process.exit(0)` on next tick |
+
+Errors are returned as `{"id":N,"error":"<message>"}`. Parse failures on stdout are logged at Warn and the line is dropped (defensive against partial writes during a parent crash).
+
+### Sidecar JS (`bgutil-sidecar/`)
+
+Lives at the repo root (peer to `cmd/`, `internal/`, `web/`). Production node_modules and `src/server.js` are tarred by `build.mjs` into the embed blob; the tarball is what gets shipped.
+
+`src/server.js` is ~250 lines:
+- Bootstrap JSDOM on `globalThis` (matching `bgutil-ytdlp-pot-provider/server/src/session_manager.ts`'s setup).
+- Read JSON-RPC requests line-by-line from stdin via `readline`.
+- Track inflight async dispatches so the process drains pending responses before exiting on stdin close (otherwise smoke tests would hang waiting for a response that never arrives because the parent already EOF'd stdin).
+- Implement each method against `bgutils-js` directly (the actual BotGuard implementation by LuanRT; MIT-licensed). We deliberately do NOT depend on `bgutil-ytdlp-pot-provider` itself because that wrapper package is GPL-3.0-only and embedding it would force Moombox to GPL-3.0; we re-implement the ~100-line wrapper inline.
+- Single-minter cache (mirrors PotProvider's CRIT-2 pattern) — one minter serves every binding until its TTL expires.
+
+### Goja fallback path
+
+When `[bgutils] use_sidecar = false` in config OR the sidecar fails to start OR `Sidecar.IsHealthy()` returns false mid-flight, `PotProvider.generateAndMint` falls through to the in-process flow:
 
 1. **Fetch Challenge** (`challenge.go`):
    - POST to `https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create` (primary) or `https://www.youtube.com/api/jnn/v1/Create` (fallback, controlled by `config.UseYouTubeAPI`).
    - Request body: `["{requestKey}"]` where requestKey defaults to `O43z0dpjhgX20SCx4KAo`.
    - Headers: `Content-Type: application/json+protobuf`, `x-user-agent: grpc-web-javascript/0.1`, `x-goog-api-key: AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw` (Google endpoint only).
-   - Response: JSON array. Element [1] may be a base64-encoded scrambled string. Descramble algorithm: base64 decode, add 97 to each byte, interpret as UTF-8 string, parse as JSON.
-   - Result: `DescrambledChallenge` containing `MessageID` (index 0), `InterpreterScript` (index 1, fallback), `InterpreterURL` (index 2, primary), `InterpreterHash` (index 3), `Program` (index 4), `GlobalName` (index 5), `ClientExperimentsBlob` (index 7).
+   - Result: `DescrambledChallenge` containing `Program`, `GlobalName`, `InterpreterScript`/`InterpreterURL`, `InterpreterHash`.
 
 2. **Create BotGuard VM** (`botguard.go`):
-   - Creates a new Goja runtime with full DOM shims, TextEncoder/TextDecoder, timers.
+   - Creates a new Goja runtime with the real-class DOM shim from `internal/goja/dom-real.js`, TextEncoder/TextDecoder, timers.
    - Fetches the interpreter JavaScript from `InterpreterURL` (or uses inline `InterpreterScript`).
    - Executes the interpreter in the VM. The interpreter registers a function on `globalThis[globalName]`.
    - Timeout: 10 seconds for BotGuard load.
@@ -631,18 +727,17 @@ The full PO token generation is orchestrated by `WebPoClient.GenerateTokenMinter
 4. **Generate Integrity Token** (`webpo_client.go`):
    - POST to `https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/GenerateIT` (or YouTube variant).
    - Request body: `["{requestKey}", "{botguardResponse}"]`.
-   - Same headers as the challenge request.
    - Response format: `[integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken]`.
-   - `integrityToken` may be null if BotGuard could not fully verify the environment (expected with Goja VM).
+   - On the goja path, `integrityToken` is typically null because BotGuard's timing fingerprint rejects the goja runtime — that's the whole reason the sidecar exists.
 
 5. **Create Minter**:
-   - **Path A (full)**: If `integrityToken` is present AND `webPoSignalOutput[0]` was populated by BotGuard, create a `WebPoMinter` that uses the callback to mint per-binding tokens. The Goja VM must stay alive for the minter's lifetime.
-   - **Path B (fallback)**: If `integrityToken` is null but `websafeFallbackToken` is present, use the fallback token directly as a static PO token for all content bindings. The VM is shut down immediately since it is not needed.
+   - **Path A (full)**: If `integrityToken` is present AND `webPoSignalOutput[0]` was populated by BotGuard, create a `WebPoMinter` that uses the callback to mint per-binding tokens. The Goja VM must stay alive for the minter's lifetime. Rare on the goja path.
+   - **Path B (fallback)**: If `integrityToken` is null but `websafeFallbackToken` is present, use the fallback token directly as a static PO token for all content bindings. The VM is shut down immediately. This is the typical outcome on the goja-only path; works for most YouTube content but PO-token-gated formats may be unavailable.
    - Minter timeout for each mint operation: 3 seconds.
 
 ### Triple Cache (`pot_provider.go`)
 
-`PotProvider` manages three cache tiers:
+`PotProvider` manages three in-process cache tiers that wrap both the sidecar and goja paths. The caches are agnostic to which path produced a token — once a session is cached, subsequent requests skip both paths entirely.
 
 #### Session Cache
 - **Type**: `map[string]*SessionData`
@@ -650,20 +745,34 @@ The full PO token generation is orchestrated by `WebPoClient.GenerateTokenMinter
 - **TTL**: 6 hours (`SessionCacheTTL`)
 - **Content**: Complete `SessionData` with PO token, content binding, and expiry time.
 - **Lookup**: Checked first on every `GeneratePoToken` call (unless `bypassCache` is true).
+- **Authority**: Single source of truth for "is this token still fresh." Both the sidecar and goja paths populate this cache on success.
 
 #### Minter Cache
 - **Type**: `map[string]*TokenMinter`
-- **Key**: `contentBinding`
+- **Key**: `defaultMinterKey = "default"` (single-minter design — CRIT-2 audit fix; one minter serves every binding for its TTL).
 - **TTL**: Dynamic, set by Google's `estimatedTtlSecs` in the GenerateIT response.
 - **Content**: `TokenMinter` struct with `MintFunc` (closure over Goja VM), `ExpiresAt`, and `Cleanup` function.
-- **Auto-eviction**: `time.AfterFunc(ttl, ...)` schedules automatic cleanup. When the timer fires, it acquires the mutex, checks that the minter at that key is still the same instance (pointer comparison), removes it from the map, and calls `Cleanup()` to shut down the BotGuard VM.
-- **Lookup**: Checked second (after session cache miss) unless `bypassCache` is true.
-- **VM lifetime**: The `Cleanup` function is critical. The minter's `MintFunc` is a closure over the Goja runtime state. Calling `Cleanup()` shuts down the VM, invalidating the closure. This is why minter eviction is the only correct place to call it.
+- **Auto-eviction**: `time.AfterFunc(ttl, ...)` schedules exact-TTL cleanup. A second `time.AfterFunc(ttl - minterRefreshLead, ...)` fires 5 minutes before expiry to proactively regenerate the minter so user-facing calls don't pay the 2-10s BotGuard cost (FRESH-2 audit fix). When either AfterFunc fires, it acquires `pp.mu`, checks that the cached minter is still the same instance (pointer comparison), removes / replaces, then calls `Cleanup()` outside the lock to shut down the Goja VM.
+- **Sidecar interaction**: Effectively unused under sidecar mode. The sidecar maintains its own internal minter cache inside the Node process; `PotProvider`'s minter cache is populated only when the sidecar path fails and the goja path generates a minter.
+- **VM lifetime**: The `Cleanup` function is critical. The minter's `MintFunc` is a closure over the Goja runtime state. Calling `Cleanup()` shuts down the VM, invalidating the closure. This is why minter eviction is the only correct place to call it. `cleanupExpired` returns the slice of evicted minters and the caller (`GeneratePoToken`) runs `safeCleanup` outside `pp.mu` — holding the lock across `m.Cleanup()` could deadlock against a concurrent `mintPoToken` (CRIT-6 audit fix; same anti-pattern that was previously fixed in `InvalidateCaches` / `InvalidateIntegrityTokens`).
 
 #### Inflight Dedup
 - **Type**: `map[string]*inflightEntry`
 - **Key**: `contentBinding`
-- **Mechanism**: When a generation starts, an `inflightEntry` with a `done chan struct{}` is placed in the map. Concurrent requests for the same key block on `<-entry.done`. When generation completes, the result is stored on the entry, then `close(entry.done)` unblocks all waiters. Context cancellation is respected via `select`.
+- **Mechanism**: When a generation starts, an `inflightEntry` with a `done chan struct{}` is placed in the map. Concurrent requests for the same key block on `<-entry.done`. When generation completes, the result is stored on the entry, then `close(entry.done)` unblocks all waiters. Context cancellation is respected via `select`. Prevents thundering herd when many goroutines request the same binding simultaneously.
+
+#### Cleanup fan-out
+
+`InvalidateCaches()` and `InvalidateIntegrityTokens()` both call into the sidecar (when attached) via `Sidecar.InvalidateCaches(ctx)` / `Sidecar.InvalidateIT(ctx)` (5s ctx) so the sidecar's internal caches drop in lockstep with Moombox's. This is what backs the operator-facing `/invalidate_caches` and `/invalidate_it` HTTP routes used by yt-dlp's bgutil-pot-provider plugin.
+
+#### Configuration
+
+```toml
+[bgutils]
+use_sidecar = true   # default: true on Windows. Set to false to force goja-only.
+```
+
+Disabling the sidecar reverts to the websafe-fallback-only path. Most YouTube content keeps working but PO-token-gated formats become unavailable.
 
 #### Cleanup Lifecycle
 
@@ -879,8 +988,10 @@ Resume state is saved after each disk flush. On restart, the downloader loads th
 | Cipher (Disk) | Disk files | 14 days | Unbounded | File age check on read; startup sweep | SHA256(playerURL) |
 | Cipher (Memory) | Memory LRU | Unbounded (no expiry) | 3 solvers | Oldest by insertion order | SHA256(playerURL) |
 | BotGuard Session | Memory map | 6 hours | Unbounded | TTL check at start of each generation | contentBinding |
-| BotGuard Minter | Memory map | Dynamic (from API) | Unbounded | TTL via `time.AfterFunc` auto-eviction | contentBinding |
+| BotGuard Minter | Memory map (single-minter design) | Dynamic (from API) | 1 entry | TTL via `time.AfterFunc`; proactive refresh 5min before expiry | `defaultMinterKey` |
 | BotGuard Inflight | Memory map | Request scope | Per-request | Removed on completion | contentBinding |
+| Sidecar minter (in-Node) | Memory inside sidecar process | Dynamic (from API) | 1 entry | Restart on `invalidateIT` | (none — single-minter inside Node) |
+| Sidecar extraction | Disk: `%LOCALAPPDATA%/Moombox/sidecar/` | Until `version.txt` mismatch | 1 install | Re-extract on Node-version bump | `version.txt` content |
 | YouTube Chat Dedup | Memory set + ordered slice | Session lifetime | 5000 IDs | Oldest by insertion order | messageId |
 | Twitch IRC Dedup | Memory set + ordered slice | Session lifetime | 5000 IDs | Oldest by insertion order | messageId |
 | Twitch VOD Chat Dedup | Memory set + ordered slice | Session lifetime | 5000 IDs | Oldest by insertion order | commentId |

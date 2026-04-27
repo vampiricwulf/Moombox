@@ -28,13 +28,16 @@ The application listens on port 774 by default. Configuration lives in `config.t
 |---------|---------|
 | `go-chi/chi/v5` | HTTP router with middleware chaining |
 | `charm.land/bubbletea/v2` + `bubbles/v2` + `huh/v2` + `lipgloss/v2` | TUI framework (Charm ecosystem) |
-| `dop251/goja` | Pure-Go JavaScript engine (BotGuard VM, cipher solving) |
+| `dop251/goja` | Pure-Go JavaScript engine (cipher solving, BotGuard fallback) |
 | `modernc.org/sqlite` | Pure-Go SQLite driver (no CGo) |
 | `nhooyr.io/websocket` | WebSocket (RFC 6455 compliant) |
 | `BurntSushi/toml` | TOML config parsing |
 | `golang.org/x/crypto/scrypt` | Password hashing |
 | `golang.org/x/sync/errgroup` | Concurrent download coordination |
 | Shoelace v2.16 (CDN) | Web UI component library |
+| Node.js v22 LTS (embedded) | Real V8 + JSDOM for the BotGuard sidecar. Pinned `node.exe` is `go:embed`'d into Moombox.exe and extracted on first launch — users do not need a Node install. |
+| `bgutils-js` (npm, embedded) | LuanRT's BotGuard JS implementation (MIT). Bundled inside the sidecar payload. Used directly; the higher-level `bgutil-ytdlp-pot-provider` wrapper is GPL-3.0 and deliberately not depended on. |
+| `jsdom` (npm, embedded) | DOM implementation for the sidecar's globalThis bootstrap. Bundled inside the sidecar payload. |
 
 **Deep-dive:** [docs/spec/vision-and-purpose.md](docs/spec/vision-and-purpose.md)
 
@@ -50,7 +53,7 @@ Moombox follows a strict priority hierarchy for all design decisions. When two c
 
 2. **Reliability** — The application must not crash, must not silently lose data, and must recover from transient failures automatically. Every goroutine has inline `defer/recover`. Network errors trigger exponential backoff with jitter. Stream-end detection uses a verification loop (up to 6 checks at 5-minute intervals) rather than trusting a single API response. Cookie auth loss triggers automatic refresh attempts.
 
-3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. Goja VMs (BotGuard, cipher) auto-evict when idle because each holds multi-MB of JavaScript runtime state. The cipher solver caps at 3 cached VMs via LRU eviction. WebSocket broadcasts use 100ms leading/trailing-edge throttling. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
+3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (3-VM LRU cap). WebSocket broadcasts use 100ms leading/trailing-edge throttling. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
 
 4. **Simple Deployment & UX** — Single binary, no containers, no service managers. FFmpeg is the only runtime dependency. A first-run wizard handles initial setup. Sensible defaults mean the app works out of the box for the common case. Configuration changes that require restart are handled via exit code 42 and the launcher respawns automatically.
 
@@ -109,7 +112,7 @@ Services are initialized sequentially in `run()` inside `cmd/moombox/main.go`. T
 5. **CookieJar** — Netscape cookie file parsing, in-memory cookie store
 6. **YouTube Service** — PlayerAPI + Auth + format selector, fetches homepage for visitor data and API key
 7. **Twitch Service** — GQL API + Auth + EmoteResolver
-8. **PotProvider** — BotGuard/PO token generation with triple cache
+8. **PotProvider + Sidecar** — BotGuard/PO token generation. Primary path via embedded Node.js + JSDOM + bgutils-js subprocess (real integrity tokens); goja-only fallback when sidecar disabled or unhealthy. Triple in-process cache (session, minter, inflight).
 9. **CipherSolver** — YouTube signature/n-parameter decryption, 3-VM LRU, disk cache
 10. **NotificationManager** — Discord webhook dispatch
 11. **DownloadWorker** — Job queue (100 lifecycle + N download slots), stream processor, orchestrator
@@ -137,7 +140,11 @@ internal/
   cookies/         <- Netscape jar, refresh service, auto-cookie (Firefox/Chromium/DPAPI)
   youtube/         <- Service facade, PlayerAPI, Auth, watch page, format selector
   twitch/          <- Service facade, GQL API, Auth, HLS, IRC chat, VOD chat, emotes
-  bgutils/         <- BotGuard challenge -> Goja VM -> snapshot -> integrity token -> mint
+  bgutils/         <- PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter
+                  -- triple cache (session/minter/inflight) wrapping both paths
+    sidecar/       <- Node + JSDOM + bgutils-js subprocess manager: extraction,
+                  -- Job Object pinning, JSON-RPC mux (primary PO-token path)
+    embed/         <- go:embed of node.exe.gz + sidecar.tar.gz + version.txt
   cipher/          <- Signature + n-param decryption: AST + regex, 3-VM LRU, disk cache
   engine/          <- SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer
   chat/            <- YouTube live chat downloader (polling + batching + resume)
@@ -264,7 +271,7 @@ The worker also runs a 60-second heartbeat poll (`heartbeatInterval`) as a safet
 | Database | Signal-driven batch coalesce | 100ms window, zero idle I/O |
 | TUI | Non-blocking sends | Drop counters for diagnostics |
 | TUI logs | Batched flush | 250ms flush interval |
-| BotGuard | Triple cache | Session (6h TTL), minter (dynamic TTL), inflight dedup |
+| BotGuard | Sidecar + triple cache | Sidecar minter (internal, ~6h TTL); session cache (6h TTL); minter cache (dynamic TTL, goja-fallback only); inflight dedup |
 | Cipher | LRU with mutex | 3-VM cache, mutex-serialized compilation |
 | Cookie refresh | Periodic | 30-minute interval with immediate-check capability |
 | Update check | Periodic | 5s initial delay, then 24-hour interval |
@@ -365,27 +372,36 @@ Twitch integration uses the GQL API with persisted query hashes (SHA256). No RES
 
 ### Goja Runtime Shims
 
-BotGuard and cipher solving require executing YouTube's JavaScript in a Goja VM. YouTube's code expects browser APIs that do not exist in a bare JS runtime. The `internal/goja/` package provides minimal shims:
+Cipher solving runs YouTube's `player.js` in a Goja VM, and the goja-fallback BotGuard path also executes the BotGuard interpreter under Goja. YouTube's code expects browser APIs that don't exist in a bare JS runtime. The `internal/goja/` package provides a real-class DOM shim embedded as `dom-real.js`:
 
-- **DOM shims** — Fake `document` object with `createElement()`, `getElementById()`, basic element properties. Just enough to prevent "document is not defined" errors — the elements do nothing.
-- **TextEncoder/TextDecoder** — UTF-8 encoding/decoding, required by BotGuard's integrity token generation.
+- **DOM class hierarchy** — Real `EventTarget`, `Node`, `Element`, `HTMLElement` + 25 specific subclasses (HTMLDivElement, HTMLBodyElement, etc.) so `instanceof` chains return true. Tree-aware `dispatchEvent` with full capture → target → bubble propagation. Supports the full WHATWG event model including `preventDefault` / `stopPropagation` / signals / once / passive.
+- **Document + Window** — Real `Document` / `HTMLDocument` / `Window` classes with `createElement` (returns the right HTML subclass per `_htmlTagMap`), `querySelector` / `querySelectorAll` (small selector parser: tag/#id/.class/[attr]/conjunction), `getElementById`, initial `<html><head/><body/></html>` tree at startup.
+- **CSS** — `CSSStyleDeclaration` (Proxy-wrapped for camelCase ↔ dashed property accessors) with ~70 spec defaults baked in. `getComputedStyle` returning a read-only mirror.
+- **Web platform** — `URL` + `URLSearchParams` (WHATWG-shape), real `AbortController` + `AbortSignal` as proper `EventTarget` subclasses, `DOMTokenList` for `classList`, `dataset` Proxy with camelCase ↔ dashed mirroring.
+- **TextEncoder/TextDecoder** — UTF-8 encoding/decoding.
 - **Timers** — `setTimeout`/`setInterval` implemented via goroutines. The timer goroutine fires into a channel that the VM polls during execution.
-- **Navigator** — Minimal `navigator.userAgent` to satisfy browser detection code.
+- **Navigator** — `navigator.userAgent` matching Chrome's UA string.
 
-These shims are intentionally minimal. They implement only what YouTube's code actually calls, not the full Web API surface. When YouTube updates their JS to call new APIs, the shims must be extended.
+The DOM shim is ~1500 lines of JavaScript (test.50–test.55 milestone work). It's API-complete enough that BotGuard's fingerprint probes pass, but the goja interpreter still completes BotGuard's snapshot in ~552 µs vs Chrome's 50–200 ms — real V8 timing characteristics aren't reachable without a real V8, which is why the production path is the Node sidecar. The shim is retained because cipher player.js execution does not have BotGuard's timing fingerprint problem.
 
 ### BotGuard / PO Tokens
 
-YouTube requires Proof of Origin (PO) tokens for certain requests. The generation pipeline:
+YouTube requires Proof of Origin (PO) tokens for certain requests, particularly for premium-quality formats and live streams. Moombox runs BotGuard via an **embedded Node.js sidecar** that produces real integrity tokens — the goja-only path is kept as a fallback for environments where the sidecar fails to start.
 
-1. **Challenge fetch** — GET challenge endpoint, receive challenge script + request key
-2. **Interpreter load** — Fetch the BotGuard interpreter JavaScript
-3. **Goja VM execution** — Run the interpreter in a Goja VM with DOM shims (minimal `document`, `navigator`, `TextEncoder`, `setTimeout`)
-4. **Snapshot** — Execute the challenge to produce a BotGuard snapshot
-5. **Integrity token** — POST snapshot to Google's attestation endpoint
-6. **Mint** — Use the minter function (from the VM) to produce a PO token bound to specific content
+**Architecture (sidecar primary, goja fallback):**
 
-**Triple cache:** Session cache (6-hour TTL, keyed by content binding), minter cache (dynamic TTL from the VM), inflight dedup (prevents concurrent generation for the same key). Cache misses cascade: session miss checks minter, minter miss runs the full VM pipeline.
+1. **Sidecar path (preferred)** — A bundled Node.js v22 binary plus `bgutils-js` + JSDOM are extracted from `go:embed`'d blobs to `%LOCALAPPDATA%/Moombox/sidecar/` on first launch (~36 MB embed: ~33 MB gzipped node.exe + ~3.5 MB tarball of production node_modules + src/server.js). Moombox spawns the subprocess pinned to a Windows Job Object (so the child dies with the parent), pipes JSON-RPC requests over stdin/stdout, and consumes real PO tokens. First mint hits Google's WAA endpoint in ~460 ms; subsequent mints with the same binding hit the sidecar's internal minter cache in ~500 µs.
+
+2. **Goja fallback path** — When the sidecar is disabled (`[bgutils] use_sidecar = false` in config), fails to start, or dies mid-flight, `PotProvider` falls through to the legacy in-process flow:
+   1. Fetch challenge (POST to `jnn-pa.googleapis.com` or YouTube fallback)
+   2. Load BotGuard interpreter JavaScript
+   3. Execute the interpreter in a Goja VM with full DOM shims (real-class hierarchy: `EventTarget`, `Node`, `Element`, `Document`, `Window`, `CSSStyleDeclaration`, `URL`, `AbortController`, `DOMTokenList`)
+   4. Take a snapshot, POST to `GenerateIT`
+   5. Mint per-binding tokens via the returned minter callback (Path A) or fall back to the websafe-fallback token (Path B). The websafe-fallback works for most YouTube content but PO-token-gated formats may be unavailable.
+
+**Why the sidecar exists:** The goja interpreter runs ~100× faster than V8's JIT, and BotGuard uses snapshot wall-time as a "this isn't a real browser" signal. The hand-rolled real-class DOM shimming (test.50–test.55) raised goja's API fidelity to browser parity but couldn't bridge the timing gap. Real Node + V8 + JSDOM passes the timing fingerprint.
+
+**Triple cache (in-process, applies to both paths):** Session cache (6-hour TTL, keyed by content binding) caches the final PO token. Minter cache (single minter per process, dynamic TTL from BotGuard response) caches the goja-side minter — effectively unused under sidecar mode since the sidecar has its own internal minter cache. Inflight dedup (concurrent requests for the same key share a channel) prevents thundering herd. The session cache is the authoritative "is this token still fresh" surface; the sidecar's internal caches handle BotGuard VM reuse.
 
 ### Cipher Solver
 
