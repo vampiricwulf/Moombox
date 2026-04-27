@@ -50,8 +50,8 @@ func TestUpdateJobMetadata_FillBlanks(t *testing.T) {
 		ThumbnailURL:       "https://example.com/thumb.jpg",
 		Description:        "A description",
 		ScheduledStartTime: "2026-04-10T12:00:00Z",
-		EndTimestamp:        "2026-04-10T14:00:00Z",
-		LengthSeconds:      intPtr(7200),
+		EndTimestamp:       "2026-04-10T14:00:00Z",
+		LengthSeconds:      new(7200),
 		IsUpcoming:         true,
 	}
 
@@ -96,7 +96,7 @@ func TestUpdateJobMetadata_FillBlanksDoesNotOverwrite(t *testing.T) {
 	info := &youtube.VideoInfo{
 		Title:              "New Title",
 		ScheduledStartTime: "2026-04-10T15:00:00Z",
-		EndTimestamp:        "2026-04-10T17:00:00Z",
+		EndTimestamp:       "2026-04-10T17:00:00Z",
 	}
 
 	sp.updateJobMetadata(job, info, false)
@@ -124,7 +124,7 @@ func TestUpdateJobMetadata_OverwriteDetectsChanges(t *testing.T) {
 		Description:     "Old description",
 		StreamStartTime: "2026-04-10T10:00:00Z",
 		StreamEndTime:   "2026-04-10T12:00:00Z",
-		LengthSeconds:   intPtr(3600),
+		LengthSeconds:   new(3600),
 	})
 
 	info := &youtube.VideoInfo{
@@ -133,8 +133,8 @@ func TestUpdateJobMetadata_OverwriteDetectsChanges(t *testing.T) {
 		ThumbnailURL:       "https://example.com/new.jpg",
 		Description:        "New description",
 		ScheduledStartTime: "2026-04-10T15:00:00Z",
-		EndTimestamp:        "2026-04-10T17:00:00Z",
-		LengthSeconds:      intPtr(7200),
+		EndTimestamp:       "2026-04-10T17:00:00Z",
+		LengthSeconds:      new(7200),
 	}
 
 	sp.updateJobMetadata(job, info, true)
@@ -176,7 +176,7 @@ func TestUpdateJobMetadata_OverwriteSkipsUnchanged(t *testing.T) {
 		Description:     "Same description",
 		StreamStartTime: "2026-04-10T10:00:00Z",
 		StreamEndTime:   "2026-04-10T12:00:00Z",
-		LengthSeconds:   intPtr(3600),
+		LengthSeconds:   new(3600),
 	})
 
 	// Record the updatedAt before calling update
@@ -188,8 +188,8 @@ func TestUpdateJobMetadata_OverwriteSkipsUnchanged(t *testing.T) {
 		ThumbnailURL:       "https://example.com/same.jpg",
 		Description:        "Same description",
 		ScheduledStartTime: "2026-04-10T10:00:00Z",
-		EndTimestamp:        "2026-04-10T12:00:00Z",
-		LengthSeconds:      intPtr(3600),
+		EndTimestamp:       "2026-04-10T12:00:00Z",
+		LengthSeconds:      new(3600),
 	}
 
 	sp.updateJobMetadata(job, info, true)
@@ -241,7 +241,7 @@ func TestUpdateJobMetadata_SyncsLocalJobObject(t *testing.T) {
 		ChannelName:        "Updated Channel",
 		ThumbnailURL:       "https://example.com/updated.jpg",
 		ScheduledStartTime: "2026-04-10T12:00:00Z",
-		EndTimestamp:        "2026-04-10T14:00:00Z",
+		EndTimestamp:       "2026-04-10T14:00:00Z",
 	}
 
 	sp.updateJobMetadata(job, info, false)

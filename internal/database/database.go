@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -153,9 +154,7 @@ func Open(dbPath string, logger ...dbLogger) (*Database, error) {
 	// Snapshot the package-level fieldToColumn map into the instance so that
 	// the package-level map is effectively immutable once any Database is open.
 	ftc := make(map[string]string, len(fieldToColumn))
-	for k, v := range fieldToColumn {
-		ftc[k] = v
-	}
+	maps.Copy(ftc, fieldToColumn)
 
 	db := &Database{
 		db:            sqlDB,
@@ -474,4 +473,3 @@ func scanJob(row *sql.Row) (*Job, error) { return scanJobRow(row) }
 
 // scanJobRows is a thin wrapper for multi-row iteration scans.
 func scanJobRows(rows *sql.Rows) (*Job, error) { return scanJobRow(rows) }
-

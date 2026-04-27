@@ -283,11 +283,11 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 // cost of a false negative (treat a real non-cipher 403 as cipher) is
 // one extraneous recompile, so missing entries here are recoverable.
 var non403CipherMarkers = []string{
-	"missing_pot",      // PO token required but absent / rejected
-	"po token",         // upstream prose for the same condition
-	"bot",              // generic bot-detection language
-	"automated",        // "automated requests" prose
-	"captcha",          // explicit CAPTCHA challenge
+	"missing_pot", // PO token required but absent / rejected
+	"po token",    // upstream prose for the same condition
+	"bot",         // generic bot-detection language
+	"automated",   // "automated requests" prose
+	"captcha",     // explicit CAPTCHA challenge
 }
 
 // is403LikelyCipher returns false when the fetch error's body content
@@ -356,17 +356,11 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 	// YouTube's token bucket is fully depleted (audit reports/engine.md #15).
 	// Shift count is clamped so the int64 cast can't overflow.
 	const maxShift = 6 // 1<<6 == 64s — beyond delayCap default of 60s
-	shift := *sameHeadRetryDelay - 1
-	if shift < 0 {
-		shift = 0
-	}
+	shift := max(*sameHeadRetryDelay-1, 0)
 	if shift > maxShift {
 		shift = maxShift
 	}
-	backoff := time.Duration(int64(1)<<uint(shift)) * time.Second
-	if backoff > time.Duration(delayCap)*time.Second {
-		backoff = time.Duration(delayCap) * time.Second
-	}
+	backoff := min(time.Duration(int64(1)<<uint(shift))*time.Second, time.Duration(delayCap)*time.Second)
 	d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq.Load(), "delay", backoff)
 	utils.Sleep(ctx, backoff)
 	return nil // Continue loop

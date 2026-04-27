@@ -30,10 +30,10 @@ func TestConcurrentWriteAndRotate(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(writers)
-	for w := 0; w < writers; w++ {
+	for w := range writers {
 		go func(id int) {
 			defer wg.Done()
-			for i := 0; i < perWriter; i++ {
+			for i := range perWriter {
 				l.Info("stress write", "writer", id, "i", i, "filler", "padding text to grow line size")
 			}
 		}(w)
@@ -75,7 +75,7 @@ func TestRotateRenameFailureKeepsLoggerUsable(t *testing.T) {
 	}
 
 	// Force enough writes to trigger rotation.
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		l.Info("write that will exceed maxSize and trigger rotation", "i", i, "padding", "filler")
 	}
 
@@ -121,7 +121,7 @@ func TestRotateOpenFileFailureRecoversOnNextWrite(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0o755) })
 
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		l.Info("write that triggers rotation but reopen fails", "i", i, "padding", "filler")
 	}
 
@@ -181,7 +181,7 @@ func TestSubscriberDropDoesNotBlockBroadcast(t *testing.T) {
 		}
 	}()
 
-	for i := 0; i < lines; i++ {
+	for i := range lines {
 		l.Info("broadcast line", "i", i)
 	}
 
@@ -221,10 +221,10 @@ func TestLogForJobConcurrentSameJobID(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(writers)
-	for w := 0; w < writers; w++ {
+	for w := range writers {
 		go func(id int) {
 			defer wg.Done()
-			for i := 0; i < perWriter; i++ {
+			for i := range perWriter {
 				l.LogForJob(jobID, slog.LevelInfo, "stress", "writer", id, "i", i)
 			}
 		}(w)
@@ -252,7 +252,7 @@ func contains(haystack, needle []byte) bool {
 	}
 	for i := 0; i+len(needle) <= len(haystack); i++ {
 		match := true
-		for j := 0; j < len(needle); j++ {
+		for j := range needle {
 			if haystack[i+j] != needle[j] {
 				match = false
 				break

@@ -143,7 +143,7 @@ func TestHashCacheSetIsThreadSafe(t *testing.T) {
 	c.load(dir, nil)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -152,7 +152,7 @@ func TestHashCacheSetIsThreadSafe(t *testing.T) {
 	}
 	wg.Wait()
 
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		key := "k" + string(rune('a'+i))
 		if got := c.get(key); got == "" {
 			t.Errorf("missing key %q after concurrent set", key)

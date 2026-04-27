@@ -177,14 +177,12 @@ func TestGetJobStatsConcurrent(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
+	for range 16 {
+		wg.Go(func() {
+			for range 50 {
 				_, _ = db.GetJobStats()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -256,7 +254,7 @@ func TestAddToHistoryDeduplicates(t *testing.T) {
 	}
 	defer db.Close()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if err := db.AddToHistory("dedup-vid"); err != nil {
 			t.Fatalf("AddToHistory iter %d: %v", i, err)
 		}
@@ -379,7 +377,7 @@ func TestConcurrentReadsAndWrites(t *testing.T) {
 	}
 	defer db.Close()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := db.AddJob(&Job{
 			ID: fmt.Sprintf("seed%d", i), VideoID: fmt.Sprintf("v%d", i),
 			URL: "u", Status: StatusFinished,
@@ -392,10 +390,8 @@ func TestConcurrentReadsAndWrites(t *testing.T) {
 	stop := make(chan struct{})
 
 	// Readers: GetJob + GetAllJobs + HasActiveJob
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -406,11 +402,11 @@ func TestConcurrentReadsAndWrites(t *testing.T) {
 				_, _ = db.GetAllJobs()
 				_, _ = db.HasActiveJob("v0")
 			}
-		}()
+		})
 	}
 
 	// Writer: UpdateJobFields tickles every seed
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		id := fmt.Sprintf("seed%d", i%5)
 		_ = db.UpdateJobFields(id, map[string]any{
 			"progress": fmt.Sprintf("iter %d", i),
@@ -1316,10 +1312,10 @@ func TestSubscriberSliceShrinksAfterChurn(t *testing.T) {
 
 	// Subscribe 32 callbacks, then unsubscribe 30 of them.
 	unsubs := make([]func(), 0, 32)
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		unsubs = append(unsubs, db.OnJobUpdate(func(*Job) {}))
 	}
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		unsubs[i]()
 	}
 

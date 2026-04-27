@@ -190,10 +190,7 @@ func (db *Database) BatchSetWatched(jobIDs []string, watched bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	for start := 0; start < len(jobIDs); start += idChunkSize {
-		end := start + idChunkSize
-		if end > len(jobIDs) {
-			end = len(jobIDs)
-		}
+		end := min(start+idChunkSize, len(jobIDs))
 		chunk := jobIDs[start:end]
 
 		placeholders := make([]string, len(chunk))
@@ -475,10 +472,7 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 	segMap := make(map[string][]Segment, len(jobs))
 
 	for start := 0; start < len(ids); start += idChunkSize {
-		end := start + idChunkSize
-		if end > len(ids) {
-			end = len(ids)
-		}
+		end := min(start+idChunkSize, len(ids))
 		chunk := ids[start:end]
 		placeholders := strings.Repeat("?,", len(chunk))
 		placeholders = placeholders[:len(placeholders)-1] // drop trailing ","

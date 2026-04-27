@@ -118,7 +118,7 @@ func TestStatsSessionHitIncrementsCounter(t *testing.T) {
 func TestStatsCountersAreMonotonic(t *testing.T) {
 	pp := NewPotProvider(&BgConfig{RequestKey: DefaultRequestKey}, &testLogger{})
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		pp.minterCache[defaultMinterKey] = &TokenMinter{ExpiresAt: time.Now().Add(1 * time.Hour)}
 		pp.InvalidateIntegrityTokens()
 	}

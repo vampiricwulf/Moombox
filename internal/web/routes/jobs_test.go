@@ -46,14 +46,14 @@ func (f *fakeYouTubeFetcher) FetchMetadata(ctx context.Context, videoID string) 
 }
 
 type jobsFixture struct {
-	router    chi.Router
-	db        *database.Database
-	store     *config.Store
-	outputDir string
+	router     chi.Router
+	db         *database.Database
+	store      *config.Store
+	outputDir  string
 	stagingDir string
-	tw        *fakeTwitchFetcher
-	yt        *fakeYouTubeFetcher
-	wsHub     *web.WebSocketHub
+	tw         *fakeTwitchFetcher
+	yt         *fakeYouTubeFetcher
+	wsHub      *web.WebSocketHub
 }
 
 // newJobsFixture wires JobRoutes against real DB + temp filesystem +
@@ -221,7 +221,7 @@ func TestJobsListPagination(t *testing.T) {
 	// Without pagination params the response is a flat array, so this
 	// test specifically requests pagination to exercise that branch.
 	f := newJobsFixture(t)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		f.addJob(t, fmt.Sprintf("job%d", i), func(j *database.Job) { j.Status = database.StatusDownloading })
 	}
 

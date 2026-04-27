@@ -3,6 +3,7 @@ package cipher
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -272,12 +273,7 @@ func (s *Solver) touchLRU(key string) {
 }
 
 func containsKey(order []string, key string) bool {
-	for _, k := range order {
-		if k == key {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(order, key)
 }
 
 // getFromPrepared executes preprocessed JS code in a Goja VM and extracts sig/n functions.

@@ -200,10 +200,10 @@ func TestComputeWarnLevel(t *testing.T) {
 		{0.0, "ok"},
 		{50.0, "ok"},
 		{79.999, "ok"},
-		{80.0, "warn"},        // boundary — equal to threshold trips
+		{80.0, "warn"}, // boundary — equal to threshold trips
 		{90.0, "warn"},
 		{94.999, "warn"},
-		{95.0, "critical"},    // boundary
+		{95.0, "critical"}, // boundary
 		{99.9, "critical"},
 		{100.0, "critical"},
 	}
@@ -220,7 +220,7 @@ func TestComputeWarnLevelZeroThresholdsDisabled(t *testing.T) {
 	// the implementation). Use case: a user who only wants critical
 	// alerts can set warn=0 and only get the red banner.
 	cfg := &config.MoomboxConfig{}
-	cfg.Disk.WarnPercent = 0     // disabled
+	cfg.Disk.WarnPercent = 0 // disabled
 	cfg.Disk.CriticalPercent = 95
 
 	if got := ComputeWarnLevel(80.0, cfg); got != "ok" {
@@ -232,4 +232,6 @@ func TestComputeWarnLevelZeroThresholdsDisabled(t *testing.T) {
 }
 
 // int64Ptr returns a pointer to v — for setting FileSize *int64 fields.
-func int64Ptr(v int64) *int64 { return &v }
+//
+//go:fix inline
+func int64Ptr(v int64) *int64 { return new(v) }

@@ -87,7 +87,7 @@ func (a *API) initRateLimiter() {
 		a.rateTokens = make(chan struct{}, twitchGQLRatePerSec)
 		// Pre-fill the burst capacity so a fresh process can issue up to
 		// twitchGQLRatePerSec without waiting for the first tick.
-		for i := 0; i < twitchGQLRatePerSec; i++ {
+		for range twitchGQLRatePerSec {
 			a.rateTokens <- struct{}{}
 		}
 		go func() {
@@ -161,12 +161,10 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 	var lastErr error
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
 		if attempt > 0 {
-			// Compute backoff for this retry. retryAfter takes precedence
-			// when the previous response was a 429 with a usable header.
-			delay := gqlBaseRetryDelay << (attempt - 1) // 1s, 2s, 4s, …
-			if delay > gqlMaxRetryDelay {
-				delay = gqlMaxRetryDelay
-			}
+			// Compute backoff for this retry — 1s, 2s, 4s, … capped at
+			// gqlMaxRetryDelay. retryAfter takes precedence when the
+			// previous response was a 429 with a usable header.
+			delay := min(gqlBaseRetryDelay<<(attempt-1), gqlMaxRetryDelay)
 			if a.logger != nil {
 				a.logger.Debug("twitch gql retry", "op", opLabel(opName), "attempt", attempt, "delay", delay.String(), "prev_err", lastErr)
 			}
@@ -402,12 +400,12 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 			"includeIsDJ":  true,
 		}),
 		newPersistedQuery("ComscoreStreamingQuery", constants.TwitchGQLHashes.ComscoreStreamingQuery, map[string]any{
-			"channel":            channelLogin,
-			"clipSlug":           "",
-			"isClip":             false,
-			"isLive":             true,
-			"isVodOrCollection":  false,
-			"vodID":              "",
+			"channel":           channelLogin,
+			"clipSlug":          "",
+			"isClip":            false,
+			"isLive":            true,
+			"isVodOrCollection": false,
+			"vodID":             "",
 		}),
 	}
 
@@ -434,12 +432,12 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 				Login           string `json:"login"`
 				ProfileImageURL string `json:"profileImageURL"`
 				Stream          *struct {
-					ID         string `json:"id"`
-					Title      string `json:"title"`
-					Type       string `json:"type"`
-					ViewersCount int  `json:"viewersCount"`
-					CreatedAt  string `json:"createdAt"`
-					Game       *struct {
+					ID           string `json:"id"`
+					Title        string `json:"title"`
+					Type         string `json:"type"`
+					ViewersCount int    `json:"viewersCount"`
+					CreatedAt    string `json:"createdAt"`
+					Game         *struct {
 						DisplayName string `json:"displayName"`
 					} `json:"game"`
 				} `json:"stream"`
@@ -690,14 +688,14 @@ func (a *API) GetVodInfo(ctx context.Context, vodID, authToken string) (*TwitchV
 
 	v := resp.Data.Video
 	info := &TwitchVodInfo{
-		VodID:        v.ID,
-		Title:        v.Title,
-		ChannelLogin: v.Owner.Login,
+		VodID:              v.ID,
+		Title:              v.Title,
+		ChannelLogin:       v.Owner.Login,
 		ChannelDisplayName: v.Owner.DisplayName,
-		ChannelID:    v.Owner.ID,
-		Duration:     v.LengthSeconds,
-		CreatedAt:    v.CreatedAt,
-		ViewCount:    v.ViewCount,
+		ChannelID:          v.Owner.ID,
+		Duration:           v.LengthSeconds,
+		CreatedAt:          v.CreatedAt,
+		ViewCount:          v.ViewCount,
 	}
 
 	if v.PreviewURL != "" {

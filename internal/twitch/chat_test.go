@@ -1,7 +1,6 @@
 package twitch
 
 import (
-	"context"
 	"reflect"
 	"strconv"
 	"testing"
@@ -351,8 +350,7 @@ func TestChatDownloaderStartDoubleCallRejected(t *testing.T) {
 	cd.running = true
 	cd.mu.Unlock()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	err := cd.Start(ctx)
 	if err == nil {

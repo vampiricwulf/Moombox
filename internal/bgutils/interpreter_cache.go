@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -138,9 +139,7 @@ func (c *interpreterHashCache) set(key, hash string, logger interface {
 	}
 	cacheDir := c.cacheDir
 	snapshot := make(map[string]interpreterHashEntry, len(c.hashes))
-	for k, v := range c.hashes {
-		snapshot[k] = v
-	}
+	maps.Copy(snapshot, c.hashes)
 	c.mu.Unlock()
 
 	if cacheDir == "" {

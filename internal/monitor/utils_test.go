@@ -475,7 +475,7 @@ func TestProbeCooldownEvictsExcess(t *testing.T) {
 	// uptime with many distinct video IDs.
 	cd := NewProbeCooldown(time.Hour)
 
-	for i := 0; i < probeCooldownMaxSize+50; i++ {
+	for i := range probeCooldownMaxSize + 50 {
 		cd.Record(fmt.Sprintf("vid-%d", i))
 	}
 
@@ -495,11 +495,11 @@ func TestProbeCooldownConcurrentSafe(t *testing.T) {
 	cd := NewProbeCooldown(time.Hour)
 
 	var wg sync.WaitGroup
-	for w := 0; w < 8; w++ {
+	for w := range 8 {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			for i := 0; i < 100; i++ {
+			for i := range 100 {
 				id := fmt.Sprintf("vid-%d-%d", workerID, i)
 				cd.ShouldProbe(id)
 				cd.Record(id)

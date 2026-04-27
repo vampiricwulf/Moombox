@@ -111,7 +111,7 @@ func TestCookieHeaderDeterministicOrder(t *testing.T) {
 	}
 
 	// Repeated calls must return the byte-identical header.
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		if got := jar.GetCookieHeader(); got != first {
 			t.Fatalf("cookie header order drifted on iteration %d:\n first: %s\n   got: %s", i, first, got)
 		}

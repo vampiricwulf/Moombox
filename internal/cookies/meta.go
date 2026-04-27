@@ -24,7 +24,7 @@ type CookieMeta struct {
 	// LastRefresh is the wall-clock time of the most recent successful
 	// refresh (or initial setup). Empty when the meta file has never
 	// been written or loaded (treated as zero-value time).
-	LastRefresh time.Time `json:"lastRefresh,omitempty"`
+	LastRefresh time.Time `json:"lastRefresh"`
 
 	// Platforms records which platforms verified at LastRefresh time.
 	// Keyed by lowercase platform name ("youtube", "twitch").

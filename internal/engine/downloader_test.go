@@ -175,7 +175,6 @@ func TestSegmentDownloader_DoubleStart(t *testing.T) {
 	d.running = true
 	d.mu.Unlock()
 
-
 	err := d.Start(context.Background())
 	if err == nil || err.Error() != "already running" {
 		t.Errorf("expected 'already running' error, got %v", err)
@@ -254,25 +253,25 @@ func TestSetBaseURLConcurrentSwap(t *testing.T) {
 	done := make(chan struct{}, 3)
 
 	go func() {
-		for i := 0; i < iterations; i++ {
+		for range iterations {
 			d.SetBaseURL("https://example.com/swap-A")
 		}
 		done <- struct{}{}
 	}()
 	go func() {
-		for i := 0; i < iterations; i++ {
+		for range iterations {
 			d.SetBaseURL("https://example.com/swap-B")
 		}
 		done <- struct{}{}
 	}()
 	go func() {
-		for i := 0; i < iterations; i++ {
+		for range iterations {
 			_ = d.getBaseURL()
 		}
 		done <- struct{}{}
 	}()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		<-done
 	}
 
@@ -637,7 +636,7 @@ func TestStreamEnded_AtomicAccess(t *testing.T) {
 }
 
 type fakeReporter struct {
-	fails    int
+	fails     int
 	successes int
 }
 

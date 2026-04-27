@@ -479,7 +479,7 @@ func TestFormatLogLinePoolDoesNotCorruptStrings(t *testing.T) {
 	const n = 200
 	results := make([]string, n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()

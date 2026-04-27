@@ -19,7 +19,7 @@ func TestRateLimiterLRUEvictsOldest(t *testing.T) {
 	rl := newRateLimiterStruct(100, time.Minute)
 
 	// Insert maxRateLimiterEntries IPs.
-	for i := 0; i < maxRateLimiterEntries; i++ {
+	for i := range maxRateLimiterEntries {
 		rl.AllowWithRetry("ip-" + strconv.Itoa(i))
 	}
 
@@ -54,7 +54,7 @@ func TestRateLimiterTouchPromotesToMRU(t *testing.T) {
 	rl := newRateLimiterStruct(100, time.Minute)
 
 	rl.AllowWithRetry("victim")
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		rl.AllowWithRetry("filler-" + strconv.Itoa(i))
 	}
 	rl.AllowWithRetry("victim") // touch — moves to MRU

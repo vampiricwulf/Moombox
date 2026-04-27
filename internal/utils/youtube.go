@@ -208,7 +208,7 @@ func ResolveYouTubeChannel(ctx context.Context, urlPath string) (*YouTubeChannel
 
 	var body []byte
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		if attempt > 0 {
 			delay := time.Duration(1<<(attempt-1)) * time.Second
 			select {

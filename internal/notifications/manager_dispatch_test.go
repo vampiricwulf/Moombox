@@ -88,7 +88,7 @@ func TestManagerSemaphoreBoundsConcurrency(t *testing.T) {
 
 	// Send 2× the cap so the semaphore must drop excess.
 	const send = maxInflightNotifications * 2
-	for i := 0; i < send; i++ {
+	for range send {
 		m.Send("t", "d", TypeInfo, nil, SendOptions{})
 	}
 

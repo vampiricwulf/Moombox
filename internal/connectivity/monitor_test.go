@@ -1,7 +1,6 @@
 package connectivity
 
 import (
-	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -97,8 +96,7 @@ func TestMonitor_DebouncePreventsSinglePollFlap(t *testing.T) {
 
 func TestMonitor_StartIsIdempotent(t *testing.T) {
 	m := newTestMonitor(func() bool { return true })
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m.Start(ctx)
 	firstCancel := m.cancel
@@ -116,8 +114,7 @@ func TestMonitor_StartIsIdempotent(t *testing.T) {
 
 func TestMonitor_StartInitialOfflineProbe(t *testing.T) {
 	m := newTestMonitor(func() bool { return false })
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	m.Start(ctx)
 	defer m.Stop()
@@ -172,10 +169,10 @@ func TestMonitor_PassiveAndActiveIntegrated(t *testing.T) {
 	// Fire 3 failures from each of two distinct subsystems within the
 	// passive window. ShouldTriggerOffline latches; the next
 	// ReportFailure call after threshold flips the monitor to offline.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		m.ReportFailure("utils/http")
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		m.ReportFailure("monitor/feed")
 	}
 
@@ -205,9 +202,9 @@ func TestMonitor_PassiveAndActiveIntegrated(t *testing.T) {
 // configurable poll interval — values below 100ms get clamped up.
 func TestNewMonitorWithIntervalClamps(t *testing.T) {
 	tests := []struct {
-		name     string
-		given    time.Duration
-		wantMin  time.Duration
+		name    string
+		given   time.Duration
+		wantMin time.Duration
 	}{
 		{"zero clamps up", 0, 100 * time.Millisecond},
 		{"negative clamps up", -1 * time.Second, 100 * time.Millisecond},
