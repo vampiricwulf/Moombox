@@ -275,6 +275,16 @@ func (s *Sidecar) IsHealthy() bool { return s.healthy.Load() }
 // diagnostics and tests.
 func (s *Sidecar) CacheDir() string { return s.cacheDir }
 
+// KillForTest hard-kills the underlying Node process. Tests use this to
+// simulate a crash so the fallback path can be exercised. Not for use
+// in production code -- the production shutdown path is Stop().
+func (s *Sidecar) KillForTest() error {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return errors.New("sidecar: not started")
+	}
+	return s.cmd.Process.Kill()
+}
+
 // GeneratePoToken asks the sidecar to mint a PO token for the given
 // content binding. Returns the websafe-encoded token string on success.
 //
