@@ -634,13 +634,21 @@ func Save(cfg *MoomboxConfig, path string) error {
 	// are logged-but-survived at the caller level — config save still
 	// proceeds. Audit reports/config.md Finding 22.
 	dacledDirsMu.Lock()
-	if _, ok := dacledDirs[dir]; !ok {
-		dacledDirsMu.Unlock()
-		_ = utils.ApplyUserOnlyDACL(dir)
-		dacledDirsMu.Lock()
+	_, alreadyApplied := dacledDirs[dir]
+	if !alreadyApplied {
+		// Insert the marker BEFORE releasing the lock + invoking
+		// icacls. This matches the F13 pattern in cookies/autocookies.go
+		// and ensures concurrent Save callers for the same dir cannot
+		// both miss the cache and both shell out. Today's only caller
+		// path is Store.Update under a write lock so the race cannot
+		// fire, but this future-proofs against any caller that bypasses
+		// the Store.
 		dacledDirs[dir] = struct{}{}
 	}
 	dacledDirsMu.Unlock()
+	if !alreadyApplied {
+		_ = utils.ApplyUserOnlyDACL(dir)
+	}
 
 	tmpPath := path + ".tmp"
 	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)

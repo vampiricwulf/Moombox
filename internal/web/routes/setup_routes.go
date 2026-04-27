@@ -64,6 +64,19 @@ func SetupRoutes(r chi.Router, deps *SetupDeps, store *config.Store) {
 			return
 		}
 
+		// First-run setup must come from loopback. Without this gate,
+		// a LAN peer reaching a `network_access=lan`-deployed-but-
+		// unconfigured Moombox could complete the setup wizard
+		// (including claiming the admin password) before the legitimate
+		// user does — bypassing the F25 gate on /api/auth/set-password.
+		// Default network_access=localhost makes this redundant out of
+		// the box; the gate matters when the operator pre-flips to lan
+		// before completing setup.
+		if !web.IsLoopbackRequest(req) {
+			jsonError(rw, "first-time setup must be from localhost", http.StatusUnauthorized)
+			return
+		}
+
 		var updates map[string]any
 		if err := json.NewDecoder(req.Body).Decode(&updates); err != nil {
 			jsonError(rw, "invalid request body", http.StatusBadRequest)

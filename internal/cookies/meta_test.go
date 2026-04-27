@@ -151,3 +151,42 @@ func TestSaveMetaEmptyCookiePathErrors(t *testing.T) {
 		t.Error("SaveMeta(\"\"): want error, got nil")
 	}
 }
+
+// TestSaveMetaOmitsZeroLastRefresh locks F31: a CookieMeta whose
+// LastRefresh is the zero time.Time should serialise WITHOUT a
+// "lastRefresh" key in the JSON output (omitempty). Pre-fix, the
+// 2026-04-26 go-fix pass stripped omitempty and zero-time wrote as
+// "0001-01-01T00:00:00Z", bloating the sidecar and confusing
+// downstream readers that distinguished "never set" from "explicit
+// epoch".
+func TestSaveMetaOmitsZeroLastRefresh(t *testing.T) {
+	dir := t.TempDir()
+	cookiePath := filepath.Join(dir, "cookies.txt")
+
+	if err := SaveMeta(cookiePath, CookieMeta{
+		Platforms: []string{"youtube"},
+		// LastRefresh deliberately omitted — its zero value should not
+		// produce a "lastRefresh" key in the serialised JSON.
+	}); err != nil {
+		t.Fatalf("SaveMeta: %v", err)
+	}
+
+	raw, err := os.ReadFile(MetaPath(cookiePath))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if got := string(raw); got != "" && containsKey(got, "lastRefresh") {
+		t.Errorf("expected lastRefresh key absent for zero-time; got JSON: %s", got)
+	}
+}
+
+// containsKey is a tiny JSON key probe -- avoids the cost of a full
+// json.Unmarshal-into-map for a one-shot membership check.
+func containsKey(jsonStr, key string) bool {
+	for i := 0; i < len(jsonStr)-len(key)-2; i++ {
+		if jsonStr[i] == '"' && jsonStr[i+1+len(key)] == '"' && jsonStr[i+1:i+1+len(key)] == key {
+			return true
+		}
+	}
+	return false
+}

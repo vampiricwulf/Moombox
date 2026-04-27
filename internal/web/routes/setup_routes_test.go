@@ -97,6 +97,35 @@ func TestSetupStatusAfterAlreadyConfigured(t *testing.T) {
 
 // --- /api/setup/complete ---
 
+// TestSetupCompleteRejectsNonLoopback locks the round-2 security fix
+// (parallel to F25 on /api/auth/set-password): first-time setup from
+// a LAN/private IP must be rejected so a LAN peer can't claim the
+// admin password before the legitimate user when the operator has
+// pre-flipped network_access=lan but not yet completed the setup
+// wizard.
+func TestSetupCompleteRejectsNonLoopback(t *testing.T) {
+	f := newSetupFixture(t)
+
+	body, _ := json.Marshal(map[string]any{"password": "first-time-secret-2026"})
+	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	// LAN peer (RFC1918 private). DefaultRemoteAddr from httptest is
+	// "192.0.2.1:1234" which is also non-loopback — this assignment
+	// is just explicit.
+	req.RemoteAddr = "192.168.1.42:54321"
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("LAN setup: want 401, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	// Live config must NOT have been touched.
+	var hash string
+	f.store.Read(func(c *config.MoomboxConfig) { hash = c.Network.PasswordHash })
+	if hash != "" {
+		t.Errorf("password hash leaked through despite loopback rejection: %q", hash)
+	}
+}
+
 func TestSetupCompleteRejectsAfterAlreadyCompleted(t *testing.T) {
 	// The /complete endpoint guards against re-running setup so a
 	// stale frontend tab can't reset the user's password / paths.
@@ -109,6 +138,7 @@ func TestSetupCompleteRejectsAfterAlreadyCompleted(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]any{"password": "newsecret123"})
 	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 
@@ -121,6 +151,7 @@ func TestSetupCompleteRejectsInvalidJSON(t *testing.T) {
 	f := newSetupFixture(t)
 
 	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader([]byte("not-json")))
+	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 
@@ -136,6 +167,7 @@ func TestSetupCompleteRejectsValidationFailure(t *testing.T) {
 		"network": map[string]any{"port": 99999}, // out of range
 	})
 	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 
@@ -154,6 +186,7 @@ func TestSetupCompleteRejectsShortPassword(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]any{"password": "short"})
 	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 
@@ -174,6 +207,7 @@ func TestSetupCompleteRequiresPasswordForExternal(t *testing.T) {
 		// no password
 	})
 	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 
@@ -199,6 +233,7 @@ func TestSetupCompleteHashesAndPersistsPassword(t *testing.T) {
 		},
 	})
 	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 
@@ -251,6 +286,7 @@ func TestSetupCompletePersistsNetworkConfig(t *testing.T) {
 		},
 	})
 	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -296,6 +332,7 @@ func TestSetupCompleteStripsInstallYtdlpKeyBeforeValidation(t *testing.T) {
 		"network":              map[string]any{"port": 1234},
 	})
 	req := httptest.NewRequest("POST", "/api/setup/complete", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
 

@@ -123,6 +123,12 @@ func (pt *PassiveTracker) ShouldTriggerOffline() bool {
 	return true
 }
 
+// IsTriggered reads the cached latch state without pruning. Callers
+// that have NOT recently invoked ShouldTriggerOffline() / ReportFailure()
+// / ReportSuccess() may see a stale `true` for some time after the
+// failure window has aged out — pruneOld is the only path that clears
+// the latch on idle, and it runs only from those three methods. For
+// fresh state, prefer ShouldTriggerOffline() (which prunes first).
 func (pt *PassiveTracker) IsTriggered() bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()

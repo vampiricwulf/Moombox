@@ -28,21 +28,23 @@ import (
 func extractIfNeeded(cacheDir string) error {
 	wantStamp := strings.TrimSpace(bgembed.Version)
 	stampPath := filepath.Join(cacheDir, "version.txt")
-	if cacheLooksGood(cacheDir, stampPath, wantStamp) {
-		return nil
-	}
 
+	// Always ensure the cache dir exists AND has a tightened DACL,
+	// even on the cache-hit path. Users upgrading from v2.5.x already
+	// have %LOCALAPPDATA%/Moombox/sidecar populated with the looser
+	// inherited ACL; without re-applying here, their pre-existing
+	// extraction would never get the security benefit because
+	// cacheLooksGood would short-circuit before any DACL call. icacls
+	// is one-shot per process startup; idempotent. Failure is
+	// log-and-continue: the cache stays usable, just less locked-down.
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir cache dir: %w", err)
 	}
-
-	// Apply user-only DACL so node.exe + extracted node_modules don't
-	// inherit a world-readable parent ACL. Same posture as the config
-	// dir (commit d667436). Failure is logged-and-continue elsewhere
-	// in the codebase; we ignore the error here too -- a failure means
-	// the cache stays usable but with the parent's ACL, which is the
-	// pre-fix baseline.
 	_ = utils.ApplyUserOnlyDACL(cacheDir)
+
+	if cacheLooksGood(cacheDir, stampPath, wantStamp) {
+		return nil
+	}
 
 	// 1. Gunzip-extract node.exe into cacheDir/node.exe.
 	nodePath := filepath.Join(cacheDir, "node.exe")

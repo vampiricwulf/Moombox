@@ -24,7 +24,14 @@ type CookieMeta struct {
 	// LastRefresh is the wall-clock time of the most recent successful
 	// refresh (or initial setup). Empty when the meta file has never
 	// been written or loaded (treated as zero-value time).
-	LastRefresh time.Time `json:"lastRefresh"`
+	// `omitzero` (Go 1.24+) actually drops the zero time.Time from
+	// the JSON output -- `omitempty` does NOT, because time.Time is a
+	// struct and encoding/json's omitempty only triggers on
+	// false/0/nil/empty-collection/empty-string values, never on a
+	// struct's zero value. We deliberately use omitzero here so a
+	// fresh sidecar that has never been refreshed produces a clean
+	// JSON file without the misleading "0001-01-01T00:00:00Z".
+	LastRefresh time.Time `json:"lastRefresh,omitzero"`
 
 	// Platforms records which platforms verified at LastRefresh time.
 	// Keyed by lowercase platform name ("youtube", "twitch").

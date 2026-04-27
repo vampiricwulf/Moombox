@@ -82,6 +82,16 @@ func (s *Store) Read(fn func(*MoomboxConfig)) {
 // save failure the in-memory config is rolled back to its pre-fn state,
 // keeping the in-memory and on-disk views consistent. Returns the error
 // from validation (joined) or save.
+//
+// Rollback caveat: the snapshot is a SHALLOW copy of *s.cfg. If fn
+// mutates slice ELEMENTS in place (e.g. `c.Channels[i].Name = "x"`) or
+// appends/sorts the underlying array, the rollback restores only the
+// slice header — the element mutations survive because both the
+// snapshot and the live cfg share the same backing array. Today's
+// callers all assign whole-slice replacements
+// (`c.Cookies.Platforms = platforms`, `c.Channels = newChannels`),
+// which works correctly with shallow rollback. New callers that need
+// to mutate elements in place must deep-copy the slice first.
 func (s *Store) Update(fn func(*MoomboxConfig)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -89,7 +99,8 @@ func (s *Store) Update(fn func(*MoomboxConfig)) error {
 	// Snapshot the current cfg so we can roll back on validation/save
 	// failure. Without this, a failed Update leaves the in-memory cfg
 	// mutated by fn while disk stays unchanged -- subsequent Read()
-	// calls leak the bad value into monitors / web responses.
+	// calls leak the bad value into monitors / web responses. See the
+	// godoc above for the shallow-copy caveat.
 	snapshot := *s.cfg
 
 	fn(s.cfg)
