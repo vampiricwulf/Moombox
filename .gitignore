@@ -47,6 +47,9 @@ browser-profile/
 # Brainstorm session files
 .superpowers/
 
+# Claude Code session state (per-machine, never commit)
+.claude/
+
 # Git worktrees
 .worktrees/
 
