@@ -4,6 +4,12 @@
 import { formatMsToTime, formatTimestamp, isTypingInInput } from "./utils.js";
 import { SegmentPlayer } from "./segments.js";
 
+const ANNOUNCEMENT_COLORS = new Set(["primary", "blue", "green", "orange", "purple"]);
+
+function announcementColorClass(color) {
+  return ANNOUNCEMENT_COLORS.has(color) ? color : "primary";
+}
+
 export class PlayerController {
   constructor(app) {
     this.app = app;
@@ -748,6 +754,11 @@ export class PlayerController {
         div.classList.add("superchat");
       }
 
+      if (msg.messageType === "announcement") {
+        div.classList.add("announcement");
+        div.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
+      }
+
       // Timestamp
       const timeSpan = document.createElement("span");
       timeSpan.className = "chat-msg-time";
@@ -953,6 +964,10 @@ export class PlayerController {
       // Create element off-screen to measure its actual height
       const el = document.createElement("div");
       el.className = "nico-message";
+      if (msg.messageType === "announcement") {
+        el.classList.add("announcement");
+        el.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
+      }
       this.appendChatContent(el, msg.message || [], msg.emotes);
       if (!el.hasChildNodes()) continue;
       // Nico emotes must load immediately — override the default lazy loading

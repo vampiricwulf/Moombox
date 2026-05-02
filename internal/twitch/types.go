@@ -62,12 +62,13 @@ type TwitchChatMessage struct {
 	Message      string            `json:"message"`
 	Emotes       []TwitchEmoteRef  `json:"emotes,omitempty"`
 	Bits         int               `json:"bits,omitempty"`
-	MessageType    string            `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "bits", "system"
-	SystemMsg      string            `json:"systemMsg,omitempty"`
-	SubPlan        string            `json:"subPlan,omitempty"`       // C1: "1000", "2000", "3000", "Prime"
-	GiftRecipient  string            `json:"giftRecipient,omitempty"` // C1: msg-param-recipient-display-name
-	ViewerCount    int               `json:"viewerCount,omitempty"`   // C1: msg-param-viewerCount (raids)
-	Raw            string            `json:"raw,omitempty"`           // Lossless raw IRC line
+	MessageType       string         `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system"
+	SystemMsg         string         `json:"systemMsg,omitempty"`
+	SubPlan           string         `json:"subPlan,omitempty"`           // C1: "1000", "2000", "3000", "Prime"
+	GiftRecipient     string         `json:"giftRecipient,omitempty"`     // C1: msg-param-recipient-display-name
+	ViewerCount       int            `json:"viewerCount,omitempty"`       // C1: msg-param-viewerCount (raids)
+	AnnouncementColor string         `json:"announcementColor,omitempty"` // msg-param-color for announcements: "primary"|"blue"|"green"|"orange"|"purple"
+	Raw               string         `json:"raw,omitempty"`               // Lossless raw IRC line
 }
 
 // TwitchEmoteRef references an emote within a message.

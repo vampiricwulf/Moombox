@@ -443,6 +443,52 @@ func TestParseLineUsernotice(t *testing.T) {
 	}
 }
 
+func TestParseLineUsernoticeAnnouncement(t *testing.T) {
+	cd := &ChatDownloader{
+		channelLogin: "testchannel",
+		dedup:        utils.NewOrderedDedup[string](),
+		logger:       &testLogger{},
+	}
+
+	line := `@badges=broadcaster/1;color=#1E90FF;display-name=StreamerName;id=ann-456;msg-id=announcement;msg-param-color=PURPLE;system-msg=;tmi-sent-ts=1678900000000;user-id=12345 :streamername!streamername@streamername.tmi.twitch.tv USERNOTICE #testchannel :Tournament starts in 10 minutes!`
+
+	msg := cd.parseLine(line)
+	if msg == nil {
+		t.Fatal("expected non-nil message from announcement USERNOTICE")
+	}
+	if msg.MessageType != "announcement" {
+		t.Errorf("MessageType = %q, want %q", msg.MessageType, "announcement")
+	}
+	if msg.AnnouncementColor != "purple" {
+		t.Errorf("AnnouncementColor = %q, want %q", msg.AnnouncementColor, "purple")
+	}
+	if msg.Message != "Tournament starts in 10 minutes!" {
+		t.Errorf("Message = %q, want %q", msg.Message, "Tournament starts in 10 minutes!")
+	}
+}
+
+func TestParseLineUsernoticeAnnouncementNoColor(t *testing.T) {
+	cd := &ChatDownloader{
+		channelLogin: "testchannel",
+		dedup:        utils.NewOrderedDedup[string](),
+		logger:       &testLogger{},
+	}
+
+	// msg-param-color absent → AnnouncementColor empty (semantically "primary")
+	line := `@badges=broadcaster/1;display-name=StreamerName;id=ann-789;msg-id=announcement;system-msg=;tmi-sent-ts=1678900000000;user-id=12345 :streamername!streamername@streamername.tmi.twitch.tv USERNOTICE #testchannel :be right back`
+
+	msg := cd.parseLine(line)
+	if msg == nil {
+		t.Fatal("expected non-nil message from announcement USERNOTICE")
+	}
+	if msg.MessageType != "announcement" {
+		t.Errorf("MessageType = %q, want %q", msg.MessageType, "announcement")
+	}
+	if msg.AnnouncementColor != "" {
+		t.Errorf("AnnouncementColor = %q, want empty", msg.AnnouncementColor)
+	}
+}
+
 func TestParseLineNoID(t *testing.T) {
 	cd := &ChatDownloader{
 		channelLogin: "testchannel",

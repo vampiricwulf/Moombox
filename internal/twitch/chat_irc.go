@@ -264,6 +264,8 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 		normalizedType = "subgift"
 	case "raid":
 		normalizedType = "raid"
+	case "announcement":
+		normalizedType = "announcement"
 	}
 
 	// System message (unescape \s to space)
@@ -321,6 +323,9 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 	}
 	if v, err := strconv.Atoi(tags["msg-param-viewerCount"]); err == nil && v > 0 {
 		msg.ViewerCount = v
+	}
+	if msgID == "announcement" {
+		msg.AnnouncementColor = strings.ToLower(tags["msg-param-color"])
 	}
 
 	return msg

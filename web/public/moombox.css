@@ -1533,6 +1533,39 @@ sl-progress-bar {
     border-left: 3px solid var(--sl-color-warning-500);
 }
 
+.chat-msg.announcement {
+    border-left: 4px solid var(--announcement-accent, var(--sl-color-purple-500));
+    background-color: color-mix(in srgb, var(--announcement-accent, var(--sl-color-purple-500)) 8%, transparent);
+}
+
+.chat-msg.announcement:nth-child(odd),
+.chat-msg.announcement:nth-child(even) {
+    background-color: color-mix(in srgb, var(--announcement-accent, var(--sl-color-purple-500)) 8%, transparent);
+}
+
+.chat-msg.announcement-primary { --announcement-accent: var(--sl-color-purple-500); }
+.chat-msg.announcement-blue    { --announcement-accent: var(--sl-color-blue-500); }
+.chat-msg.announcement-green   { --announcement-accent: var(--sl-color-green-500); }
+.chat-msg.announcement-orange  { --announcement-accent: var(--sl-color-orange-500); }
+.chat-msg.announcement-purple  { --announcement-accent: var(--sl-color-purple-500); }
+
+.nico-message.announcement {
+    --nico-accent: var(--announcement-accent, #9147ff);
+    text-shadow:
+        -1px -1px 0 var(--nico-accent),
+         1px -1px 0 var(--nico-accent),
+        -1px  1px 0 var(--nico-accent),
+         1px  1px 0 var(--nico-accent),
+         0 0 6px var(--nico-accent),
+         0 0 10px var(--nico-accent);
+}
+
+.nico-message.announcement-primary { --announcement-accent: #9147ff; }
+.nico-message.announcement-blue    { --announcement-accent: #1f69ff; }
+.nico-message.announcement-green   { --announcement-accent: #00db84; }
+.nico-message.announcement-orange  { --announcement-accent: #ff6905; }
+.nico-message.announcement-purple  { --announcement-accent: #9147ff; }
+
 .chat-msg-superchat {
     font-weight: var(--sl-font-weight-bold);
     color: var(--sl-color-warning-600);
