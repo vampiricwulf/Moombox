@@ -437,6 +437,80 @@ Sections:
   ```
 - Move detailed build steps from "Building from Source" to BUILDING.md, leave a 2-line pointer in README
 
+### 11. Release notes & in-app rendering
+
+Two improvements bundled because they touch the same release/update flow:
+
+#### A. Add Linux download links to GitHub release body
+
+The release body currently puts a single Windows download link at the top:
+```
+[**`Download Moombox.exe for Windows (x64)`**](.../Moombox.exe)
+
+---
+
+<RELEASE_NOTES.md content>
+```
+
+Update `.github/workflows/release.yml`'s "Build release body" step to emit all three platform download links:
+```bash
+WIN_LINK="[**\`Download Moombox.exe for Windows (x64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/Moombox.exe)"
+LIN_AMD_LINK="[**\`Download moombox-linux-amd64 for Linux (x64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/moombox-linux-amd64)"
+LIN_ARM_LINK="[**\`Download moombox-linux-arm64 for Linux (arm64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/moombox-linux-arm64)"
+
+{
+  echo "$WIN_LINK"
+  echo "$LIN_AMD_LINK"
+  echo "$LIN_ARM_LINK"
+  echo ""
+  echo "---"
+  echo ""
+  cat RELEASE_NOTES.md
+} > release_body.md
+```
+
+The body construction step belongs in whichever job runs `softprops/action-gh-release` to create the release. With the parallel windows/linux job split, the Windows job creates the release with the body, and the Linux job uploads its assets to the existing release (action-gh-release v2 handles incremental asset uploads against the same tag).
+
+#### B. Strip download links + render markdown in app
+
+**Problem 1**: The Web UI's update dialog (`app.js:819`) sets `notes.textContent = releaseNotes`, displaying the full GitHub body including the now-redundant download links at the top.
+
+**Problem 2**: The body is markdown but rendered as plain text — `### Features`, `**bold**`, `[link](url)` all show as literal syntax characters.
+
+**Server-side changes (`internal/updater/updater.go`):**
+
+- Strip the download-link section from `release.Body` before exposing as `ReleaseNotes`. Split on `\n---\n`; keep only what comes after:
+  ```go
+  body := release.Body
+  if i := strings.Index(body, "\n---\n"); i >= 0 {
+      body = strings.TrimSpace(body[i+len("\n---\n"):])
+  }
+  ```
+- Add a new `ReleaseNotesHtml` field to `ReleaseInfo`. Render the stripped markdown to sanitized HTML:
+  ```go
+  type ReleaseInfo struct {
+      // ... existing fields
+      ReleaseNotes     string `json:"releaseNotes"`     // stripped raw markdown (for TUI)
+      ReleaseNotesHtml string `json:"releaseNotesHtml"` // sanitized HTML (for web UI)
+  }
+  ```
+- Use `github.com/yuin/goldmark` for markdown→HTML conversion and `github.com/microcosm-cc/bluemonday` (UGC policy) for HTML sanitization. Both are stable, well-maintained, no CGo. Combined add ~600 KB to binary.
+
+**Web UI changes (`web/public/app.js:819` and `index.html:1680`):**
+
+- Swap `notes.textContent = ...` for `notes.innerHTML = data.releaseNotesHtml || ""`. The HTML is sanitized server-side via bluemonday, so direct innerHTML assignment is safe.
+- Add a small CSS section in `moombox.css` for `#update-release-notes h1, h2, h3, ul, li, code, a` so the rendered markdown actually looks styled. Use existing Shoelace tokens (`--sl-color-primary-600`, `--sl-spacing-small`) so it matches the rest of the UI.
+
+**TUI changes (`internal/tui/app.go` and update-display screen):**
+
+- TUI receives `releaseNotes` (stripped raw markdown), renders via `github.com/charmbracelet/glamour` to ANSI:
+  ```go
+  rendered, _ := glamour.Render(releaseNotes, "auto")  // auto-detects light/dark terminal
+  ```
+- Glamour is part of the charmbracelet ecosystem already in use (Bubble Tea + Bubbles + Huh + Lip Gloss), so it's a natural fit. Adds ~200 KB.
+
+**API stability:** the new `releaseNotesHtml` field is additive. The existing `releaseNotes` field stays (now contains stripped raw markdown — the previous "raw GitHub body with download links" was rarely useful anyway). Existing 2.6.2 clients hitting the new releases endpoint receive both fields; their UI ignores `releaseNotesHtml` (unknown field) and continues using `releaseNotes` as before. They'll see the stripped version (no download links) which is a strict improvement.
+
 ## Component summary
 
 | Component | Files touched | Change shape |
@@ -451,6 +525,8 @@ Sections:
 | Updater cleanup sweep | `internal/updater/updater.go` | Add `~` for Windows |
 | FFmpeg distro suggestion | `internal/web/routes/ffmpeg.go`, `web/public/modules/setup.js`, TUI setup screen | New endpoint + UI |
 | Browser dropdown | `internal/cookies/autocookies_detect.go`, `internal/cookies/autocookies.go`, `internal/config/config.go`, web routes, frontend modules, TUI settings | New `DetectBrowsers()`, config fields, validation endpoint, UI components |
+| Release body Linux links | `.github/workflows/release.yml` | Add Linux x64 + arm64 download links to body |
+| Release notes rendering | `internal/updater/updater.go`, `internal/web/routes/update.go`, `internal/web/routes/jobs.go`, `web/public/app.js`, `web/public/moombox.css`, `internal/tui/app.go`, TUI update screen | Strip download links, server-side goldmark+bluemonday → HTML for web UI, glamour → ANSI for TUI |
 | Documentation | New `BUILDING.md`, updated `README.md` | Linux-specific install + build steps |
 
 ## Compatibility
@@ -458,6 +534,7 @@ Sections:
 - **Existing Windows 2.6.2 users**: zero impact at update time. `Moombox.exe` / `Moombox.exe.sig` asset names stay byte-identical, so the existing exact-match asset lookup finds them. New Linux assets are silently ignored by the old client. Auto-update from 2.6.2 → next-version proceeds normally.
 - **Browser dropdown**: new `cookies.browser_path` and `browser_type` fields are optional (empty defaults to current auto-detect behavior). No migration needed for existing configs.
 - **Updater asset matching**: the new platform-aware lookup table includes Windows entry mapping `windows/amd64 → Moombox.exe`. So even after the user updates to the new version, Windows updates continue working.
+- **Release notes API**: `releaseNotesHtml` is a new additive field. Existing 2.6.2 clients ignore unknown fields and continue using `releaseNotes`, which now contains the stripped raw markdown — strict UX improvement (no more redundant download-link clutter for them either).
 
 ## Risks and mitigations
 
@@ -469,6 +546,8 @@ Sections:
 | Restored ping/timeout deferred cleanup spawns visible cmd window on some systems | `createNoWindow` flag suppresses it. Behavior matches the pre-schtasks era which worked for users for a long time. |
 | Linux distro detection fails for unusual distros | Fall back to generic ffmpeg.org link. No blocker — user can install however they want. |
 | arm64 cross-compile produces broken binary on edge cases | `linux-test` workflow runs `go build ./...` for both arches on every PR. Detects compile failures pre-tag. |
+| goldmark/bluemonday/glamour deps add ~600 KB to binary | One-time cost; no runtime overhead. Markdown rendering is sub-millisecond per release. Acceptable for the polish gain. |
+| Markdown XSS via crafted RELEASE_NOTES.md | Bluemonday UGC policy strips scripts, event handlers, and dangerous protocols. Source is our own RELEASE_NOTES.md, but defense-in-depth applies. |
 
 ## Implementation order suggestion
 
@@ -483,4 +562,5 @@ The implementation plan (separate doc, written next) will sequence these. Rough 
 7. CI workflow split + linux-test workflow — ties everything together
 8. Browser dropdown UX (independent, can be parallelized)
 9. FFmpeg distro suggestion (independent)
-10. Documentation
+10. Release notes rendering — workflow change for Linux download links + server-side markdown render + web UI/TUI display update (independent)
+11. Documentation
