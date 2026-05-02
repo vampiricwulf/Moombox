@@ -501,13 +501,24 @@ The body construction step belongs in whichever job runs `softprops/action-gh-re
 - Swap `notes.textContent = ...` for `notes.innerHTML = data.releaseNotesHtml || ""`. The HTML is sanitized server-side via bluemonday, so direct innerHTML assignment is safe.
 - Add a small CSS section in `moombox.css` for `#update-release-notes h1, h2, h3, ul, li, code, a` so the rendered markdown actually looks styled. Use existing Shoelace tokens (`--sl-color-primary-600`, `--sl-spacing-small`) so it matches the rest of the UI.
 
-**TUI changes (`internal/tui/app.go` and update-display screen):**
+**TUI changes (new overlay component):**
 
-- TUI receives `releaseNotes` (stripped raw markdown), renders via `github.com/charmbracelet/glamour` to ANSI:
+The TUI today has no display surface for release notes — only a `⬆ Update!` indicator next to the version (`internal/tui/job_details.go:670`) and a feedback toast `Update available: <tag> — press R U to install` (`internal/tui/app_update.go:212`). `R U` triggers `ApplyUpdate` directly with no notes preview, so users update blind. We need to add the surface, not just the renderer.
+
+- New file `internal/tui/release_notes_overlay.go` — modal overlay component modeled after `internal/tui/help.go`'s pattern: embedded `bubbles/viewport` for scrolling (with `helpViewportKeyMap()` to disable letter-key bindings that conflict with chords), lipgloss-bordered frame with title bar and footer.
+- New chord `R N` (Request → Release Notes) added to `buildMenuItems()` and `dispatchAction()` in `internal/tui/app_actions.go`. Conditional on `updateAvailable != nil`.
+- Inside the overlay: `U` applies the update directly (delegates to the same `OnApplyUpdate` callback used by `R U`), `Esc`/`Q` closes without applying, arrow/PgUp/PgDn scrolls the rendered notes.
+- Body content rendered via `github.com/charmbracelet/glamour`:
   ```go
-  rendered, _ := glamour.Render(releaseNotes, "auto")  // auto-detects light/dark terminal
+  r, _ := glamour.NewTermRenderer(
+      glamour.WithAutoStyle(),       // auto-detects light/dark terminal
+      glamour.WithWordWrap(width),   // size-aware word wrap
+  )
+  rendered, _ := r.Render(rawMarkdown)
   ```
 - Glamour is part of the charmbracelet ecosystem already in use (Bubble Tea + Bubbles + Huh + Lip Gloss), so it's a natural fit. Adds ~200 KB.
+
+This brings the TUI to feature parity with the web UI's existing update dialog: both surfaces now show the rendered notes before the user commits to applying an update.
 
 **API stability:** the new `releaseNotesHtml` field is additive. The existing `releaseNotes` field stays (now contains stripped raw markdown — the previous "raw GitHub body with download links" was rarely useful anyway). Existing 2.6.2 clients hitting the new releases endpoint receive both fields; their UI ignores `releaseNotesHtml` (unknown field) and continues using `releaseNotes` as before. They'll see the stripped version (no download links) which is a strict improvement.
 
@@ -526,7 +537,7 @@ The body construction step belongs in whichever job runs `softprops/action-gh-re
 | FFmpeg distro suggestion | `internal/web/routes/ffmpeg.go`, `web/public/modules/setup.js`, TUI setup screen | New endpoint + UI |
 | Browser dropdown | `internal/cookies/autocookies_detect.go`, `internal/cookies/autocookies.go`, `internal/config/config.go`, web routes, frontend modules, TUI settings | New `DetectBrowsers()`, config fields, validation endpoint, UI components |
 | Release body Linux links | `.github/workflows/release.yml` | Add Linux x64 + arm64 download links to body |
-| Release notes rendering | `internal/updater/updater.go`, `internal/web/routes/update.go`, `internal/web/routes/jobs.go`, `web/public/app.js`, `web/public/moombox.css`, `internal/tui/app.go`, TUI update screen | Strip download links, server-side goldmark+bluemonday → HTML for web UI, glamour → ANSI for TUI |
+| Release notes rendering | `internal/updater/updater.go`, `internal/web/routes/update.go`, `internal/web/routes/jobs.go`, `web/public/app.js`, `web/public/moombox.css`, new `internal/tui/release_notes_overlay.go`, `internal/tui/app.go`, `internal/tui/app_actions.go`, `internal/tui/app_keys.go`, `internal/tui/app_layout.go`, `README.md` (chord doc) | Strip download links, server-side goldmark+bluemonday → HTML for web UI, new TUI overlay (bubbles/viewport + glamour) opened via R N chord with U-to-apply / Esc-to-close |
 | Documentation | New `BUILDING.md`, updated `README.md` | Linux-specific install + build steps |
 
 ## Compatibility

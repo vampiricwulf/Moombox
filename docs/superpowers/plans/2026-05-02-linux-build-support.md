@@ -3119,13 +3119,20 @@ tokens."
 
 ---
 
-### Task 20: TUI renders markdown via glamour
+### Task 20: TUI release-notes overlay with glamour rendering
 
 **Files:**
-- Modify: `internal/tui/app.go` or wherever release notes are displayed
+- Create: `internal/tui/release_notes_overlay.go`
+- Create: `internal/tui/release_notes_overlay_test.go`
+- Modify: `internal/tui/app.go` (add overlay state field)
+- Modify: `internal/tui/app_actions.go` (add `R N` chord, handle overlay key routing)
+- Modify: `internal/tui/app_layout.go` (render the overlay when active)
+- Modify: `internal/tui/app_keys.go` (route keys to overlay when open)
 - Modify: `go.mod` (add glamour)
 
-**Goal:** TUI uses `charmbracelet/glamour` to render the stripped markdown to ANSI for terminal display, instead of showing raw markdown syntax.
+**Goal:** Add a release-notes overlay (no equivalent exists today — TUI users currently update blind). New chord `R N` opens a scrollable bordered modal showing the release notes rendered via `charmbracelet/glamour`. From within the overlay, `U` applies the update directly; `Esc` / `Q` closes without applying. Modeled after the existing help overlay (`internal/tui/help.go`) which uses `bubbles/viewport` for scroll.
+
+**Why this task got bigger:** the original plan assumed a TUI display surface for release notes existed. Investigation showed only a "⬆ Update!" version-bumped indicator and a feedback toast — the actual notes were stored but never displayed. This task adds the missing surface.
 
 - [ ] **Step 1: Add the glamour dependency**
 
@@ -3133,64 +3140,379 @@ tokens."
 go get github.com/charmbracelet/glamour
 go mod tidy
 ```
-
-- [ ] **Step 2: Find where release notes are displayed in the TUI**
-
+Verify:
 ```bash
-grep -n "ReleaseNotes\|updateAvailableMsg" internal/tui/
+grep glamour go.mod
 ```
-Locate the rendering site (likely in an update dialog or status panel).
 
-- [ ] **Step 3: Render via glamour**
+- [ ] **Step 2: Write the failing test for the overlay component**
 
-At the render site, replace the raw string display with:
+Create `internal/tui/release_notes_overlay_test.go`:
 ```go
-import "github.com/charmbracelet/glamour"
+package tui
 
-func renderReleaseNotes(rawMarkdown string, width int) string {
-    if rawMarkdown == "" {
-        return "No release notes available."
-    }
-    rendered, err := glamour.Render(rawMarkdown, "auto") // auto-detects light/dark terminal
-    if err != nil {
-        return rawMarkdown // fallback to raw on render failure
-    }
-    return rendered
+import (
+	"strings"
+	"testing"
+)
+
+func TestReleaseNotesOverlayInitiallyClosed(t *testing.T) {
+	o := newReleaseNotesOverlay()
+	if o.isOpen() {
+		t.Error("new overlay should not be open")
+	}
+}
+
+func TestReleaseNotesOverlayOpenStores(t *testing.T) {
+	o := newReleaseNotesOverlay()
+	o.open("v2.7.0", "## Features\n- thing", 80, 24)
+	if !o.isOpen() {
+		t.Error("overlay should be open after open()")
+	}
+	if o.tag != "v2.7.0" {
+		t.Errorf("tag: got %q, want v2.7.0", o.tag)
+	}
+}
+
+func TestReleaseNotesOverlayCloseClears(t *testing.T) {
+	o := newReleaseNotesOverlay()
+	o.open("v2.7.0", "x", 80, 24)
+	o.close()
+	if o.isOpen() {
+		t.Error("overlay should be closed after close()")
+	}
+}
+
+func TestReleaseNotesOverlayRenderRendersHeading(t *testing.T) {
+	o := newReleaseNotesOverlay()
+	o.open("v2.7.0", "## Features\n- thing\n\n## Bug Fixes\n- another", 80, 24)
+	view := o.View()
+	if view == "" {
+		t.Fatal("View returned empty string")
+	}
+	// Glamour replaces "## Features" with stylized text — we don't assert
+	// on exact ANSI, just that the original raw markdown isn't passed
+	// through unchanged.
+	if strings.Contains(view, "## Features") {
+		t.Errorf("View still contains raw markdown ##: %q", view)
+	}
+	// The tag should appear in the title bar.
+	if !strings.Contains(view, "v2.7.0") {
+		t.Errorf("View missing tag in title: %q", view)
+	}
+}
+
+func TestReleaseNotesOverlayRenderEmptyNotes(t *testing.T) {
+	o := newReleaseNotesOverlay()
+	o.open("v2.7.0", "", 80, 24)
+	view := o.View()
+	if !strings.Contains(view, "No release notes") {
+		t.Errorf("expected 'No release notes' fallback, got: %q", view)
+	}
 }
 ```
 
-If width-aware rendering is needed (release notes panel has a known width):
+- [ ] **Step 3: Run test to verify it fails**
+
+```bash
+go test -v ./internal/tui/ -run TestReleaseNotesOverlay
+```
+Expected: build error (`undefined: newReleaseNotesOverlay`).
+
+- [ ] **Step 4: Create the overlay component**
+
+Create `internal/tui/release_notes_overlay.go`:
 ```go
-r, _ := glamour.NewTermRenderer(
-    glamour.WithAutoStyle(),
-    glamour.WithWordWrap(width),
+package tui
+
+import (
+	"strings"
+
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/glamour"
 )
-rendered, _ := r.Render(rawMarkdown)
+
+// releaseNotesOverlay is a modal that shows release notes for a pending
+// update. Scrollable via arrow keys / pgup-pgdn (handled by the
+// embedded viewport; letter-key bindings disabled to avoid conflict
+// with app chords). The overlay is opened from the R N chord and from
+// within the overlay the user can press U to apply the update or
+// Esc/Q to close.
+type releaseNotesOverlay struct {
+	open_    bool
+	tag      string // version tag, e.g. "v2.7.0"
+	rawNotes string // stripped raw markdown
+	width    int
+	height   int
+	vp       viewport.Model
+}
+
+// newReleaseNotesOverlay returns a closed overlay.
+func newReleaseNotesOverlay() *releaseNotesOverlay {
+	vp := viewport.New(80, 20)
+	vp.KeyMap = helpViewportKeyMap() // reuse help.go's safe keymap
+	return &releaseNotesOverlay{vp: vp}
+}
+
+// isOpen reports whether the overlay is currently visible.
+func (o *releaseNotesOverlay) isOpen() bool { return o.open_ }
+
+// open prepares and shows the overlay. width/height are the terminal
+// dimensions; the overlay sizes itself to ~80% of those.
+func (o *releaseNotesOverlay) open(tag, rawNotes string, width, height int) {
+	o.open_ = true
+	o.tag = tag
+	o.rawNotes = rawNotes
+	o.width = width
+	o.height = height
+
+	// Size the viewport to leave room for borders + title + footer.
+	vpWidth := max(40, width*8/10-4)
+	vpHeight := max(8, height*8/10-6)
+	o.vp.Width = vpWidth
+	o.vp.Height = vpHeight
+
+	o.vp.SetContent(o.renderBody(vpWidth))
+	o.vp.GotoTop()
+}
+
+// close hides the overlay and clears its state.
+func (o *releaseNotesOverlay) close() {
+	o.open_ = false
+	o.tag = ""
+	o.rawNotes = ""
+}
+
+// Update routes a tea.Msg to the embedded viewport for scroll handling.
+// Returns the tea.Cmd from the viewport (typically nil).
+func (o *releaseNotesOverlay) Update(msg tea.Msg) tea.Cmd {
+	if !o.open_ {
+		return nil
+	}
+	var cmd tea.Cmd
+	o.vp, cmd = o.vp.Update(msg)
+	return cmd
+}
+
+// View returns the rendered overlay frame. Empty string when closed.
+func (o *releaseNotesOverlay) View() string {
+	if !o.open_ {
+		return ""
+	}
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorGreen).
+		Padding(0, 1)
+	footerStyle := lipgloss.NewStyle().Faint(true).Padding(0, 1)
+	borderStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorGreen)
+
+	title := titleStyle.Render("Release Notes — " + o.tag)
+	footer := footerStyle.Render("U: Apply update  ↑/↓: Scroll  Esc/Q: Close")
+
+	body := o.vp.View()
+	inner := lipgloss.JoinVertical(lipgloss.Left, title, body, footer)
+	return borderStyle.Render(inner)
+}
+
+// renderBody runs glamour over the raw markdown to produce ANSI text
+// sized to the given width. Returns a fallback message for empty notes.
+func (o *releaseNotesOverlay) renderBody(width int) string {
+	if strings.TrimSpace(o.rawNotes) == "" {
+		return "No release notes available for this update."
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return o.rawNotes // fall back to raw markdown
+	}
+	rendered, err := r.Render(o.rawNotes)
+	if err != nil {
+		return o.rawNotes
+	}
+	return rendered
+}
 ```
 
-Wire this into the existing display path. The exact integration depends on the TUI's structure — read the file around where `ReleaseNotes` is currently shown and adapt.
-
-- [ ] **Step 4: Run tests + build**
+- [ ] **Step 5: Run test to verify it passes**
 
 ```bash
-go test ./internal/tui/...
+go test -v ./internal/tui/ -run TestReleaseNotesOverlay
+```
+Expected: all 5 tests PASS.
+
+- [ ] **Step 6: Wire overlay state into the app**
+
+Open `internal/tui/app.go`. Find the app struct (around line 240-260 where `updateAvailable` is declared). Add the overlay field next to it:
+```go
+// Update status
+updateAvailable    *UpdateStatusMsg
+version            string
+releaseNotesPopup  *releaseNotesOverlay  // shown when R N is pressed
+```
+
+In the app constructor (where the app struct is initialized), add:
+```go
+releaseNotesPopup: newReleaseNotesOverlay(),
+```
+
+- [ ] **Step 7: Add `R N` chord to the action menu**
+
+Open `internal/tui/app_actions.go`. Find the section that builds Request-prefixed menu items (around line 446-449 where `R V` and `R U` are added). Add `R N` between them, conditional on an update being available:
+```go
+if a.updateAvailable != nil {
+    items = append(items, ActionMenuItem{
+        Chord: "R N", Label: "View Release Notes " + a.updateAvailable.TagName,
+        HintLabel: "Notes", Category: "Request",
+    })
+}
+if a.updateAvailable != nil && a.OnApplyUpdate != nil {
+    items = append(items, ActionMenuItem{
+        Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName,
+        HintLabel: "Update", Category: "Request",
+    })
+}
+```
+
+In the same file, find the chord dispatcher (the `case "R U":` block around line 175). Add a `case "R N":` block above it:
+```go
+case "R N":
+    if a.updateAvailable != nil {
+        a.releaseNotesPopup.open(
+            a.updateAvailable.TagName,
+            a.updateAvailable.ReleaseNotes,
+            a.width, a.height,
+        )
+        return a, nil
+    }
+    a.setFeedback("No update available — release notes unavailable")
+    return a, nil
+```
+
+(`a.width` and `a.height` are existing fields on the app model from the bubbletea WindowSizeMsg handler. If they're named differently, grep the existing code for the actual field names and use those.)
+
+- [ ] **Step 8: Route keys to overlay when open + add U/Esc/Q handlers**
+
+Open `internal/tui/app_keys.go`. Find the main key handler. Add a check at the very top — if the overlay is open, route specific keys there and consume others:
+```go
+// When the release-notes overlay is open, intercept keys before the
+// main chord/dispatch loop so the overlay's scroll bindings work and
+// the user can confirm/cancel the update directly.
+if a.releaseNotesPopup.isOpen() {
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch msg.String() {
+        case "esc", "q", "Q":
+            a.releaseNotesPopup.close()
+            return a, nil
+        case "u", "U":
+            // Apply the update from inside the overlay
+            if a.updateAvailable != nil && a.OnApplyUpdate != nil {
+                a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
+                ver := a.updateAvailable.Version
+                applyFn := a.OnApplyUpdate
+                a.releaseNotesPopup.close()
+                return a, safeCmd(func() tea.Msg {
+                    if err := applyFn(); err != nil {
+                        return updateAppliedMsg{Err: err.Error()}
+                    }
+                    return updateAppliedMsg{Version: ver}
+                })
+            }
+            return a, nil
+        }
+    }
+    // Forward scroll-related messages to the viewport
+    cmd := a.releaseNotesPopup.Update(msg)
+    return a, cmd
+}
+```
+
+The exact placement depends on the existing key handler structure; insert this as the FIRST check inside the handler so overlay keys take precedence over chord matching.
+
+- [ ] **Step 9: Render overlay in app View**
+
+Open `internal/tui/app_layout.go`. Find the main `View()` function. Near the end, before returning the final composed string, add overlay rendering:
+```go
+// Composite the overlay on top of the base view if it's open.
+if a.releaseNotesPopup.isOpen() {
+    base := <existing base view assembly>
+    overlay := a.releaseNotesPopup.View()
+    return lipgloss.Place(
+        a.width, a.height,
+        lipgloss.Center, lipgloss.Center,
+        overlay,
+        lipgloss.WithWhitespaceChars(" "),
+    )
+}
+return <existing base view>
+```
+
+(If the existing layout already uses a `lipgloss.Place` pattern for help/menu overlays, follow that exact pattern instead. Read `app_layout.go` for the conventions before editing.)
+
+- [ ] **Step 10: Update CLAUDE.md chord doc**
+
+In `CLAUDE.md`, find the chord prefixes documentation and add `R N` to the Request examples list. Specifically, the line around "Prefixes: A (Action), R (Request)..." doesn't list every chord, but if there's a more detailed table elsewhere, add the entry there.
+
+If there's no detailed list (just the prefix description), this step is a no-op.
+
+- [ ] **Step 11: Update README.md keyboard controls table**
+
+In `README.md`, find the "**Request (R)**" table:
+```markdown
+**Request (R)**
+
+| Chord | Action |
+|-------|--------|
+| R C | Recheck cookie authentication |
+| R F | Force browser cookie refresh |
+| R V | Check for updates |
+| R U | Apply pending update |
+| R P P | Restart program (confirm) |
+```
+
+Add `R N` between `R V` and `R U`:
+```markdown
+| R V | Check for updates |
+| R N | View release notes for pending update |
+| R U | Apply pending update |
+```
+
+- [ ] **Step 12: Build and visually verify**
+
+```bash
 go build ./cmd/moombox
+./moombox.exe   # Windows; or ./moombox-linux-amd64 on Linux
 ```
 
-- [ ] **Step 5: Visual verification**
+In the running app:
+- Trigger an update check (`R V`) — wait for one to be detected, or temporarily inject a fake `updateAvailable` for testing.
+- Press `R N` — the overlay should appear, showing the release notes rendered with colored headings.
+- Use ↑/↓/PgUp/PgDn to scroll if notes are long.
+- Press `Esc` — overlay closes, base UI restored.
+- Re-open with `R N`, press `U` — should trigger the update apply (same as `R U` from outside the overlay).
 
-Run Moombox in a terminal with a fake update available (or wait for an actual update). Verify the release notes panel shows formatted output (colored headings, bullets, etc.) instead of raw `### Heading` text.
+If you can't run an interactive TUI, at minimum verify `go test ./internal/tui/...` passes and `go vet ./internal/tui/...` is clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 13: Commit**
 
 ```bash
-git add internal/tui/ go.mod go.sum
-git commit -m "feat(tui): render release notes via glamour
+git add internal/tui/release_notes_overlay.go internal/tui/release_notes_overlay_test.go internal/tui/app.go internal/tui/app_actions.go internal/tui/app_keys.go internal/tui/app_layout.go README.md go.mod go.sum
+git commit -m "feat(tui): release-notes overlay with glamour rendering
 
-TUI update display uses charmbracelet/glamour to render the stripped
-raw markdown (sent in the releaseNotes API field) to ANSI with
-auto-detected light/dark theme. Headings, lists, code, and emphasis
-all render properly in-terminal."
+Adds a release_notes_overlay component (modeled after the help overlay's
+viewport pattern) that renders update notes via charmbracelet/glamour.
+New chord R N opens the overlay; from within, U applies the update
+directly and Esc/Q closes.
+
+Previously the TUI displayed nothing for release notes — only a small
+'⬆ Update!' indicator and a feedback toast — so users updated blind.
+This adds the missing surface and gives Linux/Windows TUI users feature
+parity with the web UI's update dialog."
 ```
 
 ---
