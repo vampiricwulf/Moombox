@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // configETag returns a stable short ETag for a marshaled-config response
@@ -226,6 +227,20 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["cookies.browser_profile_dir"] = "Path cannot contain .. or be absolute"
 			}
 		}
+		// browser_path: must be empty (auto-detect) or pass the static
+		// browser-validation checks (absolute, exists, executable, known type).
+		// Full --version check is intentionally NOT run here to avoid blocking
+		// the request handler; that's done by /api/auto-cookies/validate-browser-path.
+		if pathRaw, hasPath := ck["browser_path"].(string); hasPath {
+			path := strings.TrimSpace(pathRaw)
+			if path != "" {
+				typ, _ := ck["browser_type"].(string)
+				if err := cookies.ValidateBrowserPathQuick(path, strings.TrimSpace(typ)); err != nil {
+					errs["cookies.browser_path"] = err.Error()
+				}
+			}
+		}
+		// browser_type alone (without browser_path) is allowed but unused — no validation needed
 		if v, ok := ck["refresh_interval"].(float64); ok {
 			if v < 10 {
 				errs["cookies.refresh_interval"] = "refresh_interval must be at least 10"
@@ -404,6 +419,12 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 		if v, ok := ck["browser_profile_dir"].(string); ok {
 			cfg.Cookies.BrowserProfileDir = v
+		}
+		if v, ok := ck["browser_path"].(string); ok {
+			cfg.Cookies.BrowserPath = strings.TrimSpace(v)
+		}
+		if v, ok := ck["browser_type"].(string); ok {
+			cfg.Cookies.BrowserType = strings.TrimSpace(v)
 		}
 		if v, ok := ck["platforms"].([]any); ok {
 			var platforms []string

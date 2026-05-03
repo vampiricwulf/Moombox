@@ -16,7 +16,7 @@ import (
 
 // errElevationNotSupported is returned by runElevated on non-Windows.
 // Defined as a package-level var so tests within the package can assert with errors.Is.
-var errElevationNotSupported = errors.New("UAC elevation is not supported on this platform")
+var errElevationNotSupported = errors.New("programmatic privilege elevation is not supported on this platform (Linux/macOS use sudo or pkexec at the user's discretion)")
 
 // isElevated returns true when running as root on Unix-like systems.
 // Used by ffmpeg.go's PrepareInstall, which already short-circuits on

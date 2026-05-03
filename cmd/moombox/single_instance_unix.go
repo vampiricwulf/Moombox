@@ -12,6 +12,12 @@ import (
 // lockFile holds the open file handle whose flock we own. Kept at
 // package scope so releaseSingleInstanceLock can close it. nil when no
 // lock is currently held.
+//
+// Not thread-safe: acquireSingleInstanceLock and releaseSingleInstanceLock
+// must be called from a single goroutine. Currently both are called only
+// from launchAndSupervise() in launcher.go, which is a single-goroutine
+// caller. Adding additional callers requires either a mutex here or a
+// guarantee of caller serialization.
 var lockFile *os.File
 
 // lockDirFor returns the directory in which the lock file should live.
@@ -54,10 +60,13 @@ func acquireSingleInstanceLock() error {
 	}
 
 	// Truncate and write our PID for human debugging. The lock is on the
-	// file descriptor, not the contents, so this doesn't affect locking.
-	f.Truncate(0)
-	f.Seek(0, 0)
-	fmt.Fprintf(f, "%d\n", os.Getpid())
+	// file descriptor, not the contents, so write failures don't affect
+	// locking. Errors silenced because PID file is purely diagnostic —
+	// the user can always check `ps`/`pidof moombox` to find the running
+	// process if the file ends up empty or stale.
+	_ = f.Truncate(0)
+	_, _ = f.Seek(0, 0)
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
 
 	lockFile = f
 	return nil

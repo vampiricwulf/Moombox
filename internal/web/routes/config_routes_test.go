@@ -359,6 +359,53 @@ func TestConfigPutChannelsRejectsUnknownPlatform(t *testing.T) {
 	}
 }
 
+// --- PUT /api/config — browser_path / browser_type persistence (Critical fix) ---
+
+func TestConfigPutPersistsBrowserPath(t *testing.T) {
+	// browser_path and browser_type were previously silently dropped by
+	// applyConfigUpdates. This test guards against regression.
+	cfg := &config.MoomboxConfig{}
+	updates := map[string]any{
+		"cookies": map[string]any{
+			"browser_path": "/usr/bin/firefox",
+			"browser_type": "firefox",
+		},
+	}
+	applyConfigUpdates(cfg, updates)
+	if cfg.Cookies.BrowserPath != "/usr/bin/firefox" {
+		t.Errorf("BrowserPath: got %q, want /usr/bin/firefox", cfg.Cookies.BrowserPath)
+	}
+	if cfg.Cookies.BrowserType != "firefox" {
+		t.Errorf("BrowserType: got %q, want firefox", cfg.Cookies.BrowserType)
+	}
+}
+
+func TestConfigPutValidationRejectsRelativeBrowserPath(t *testing.T) {
+	updates := map[string]any{
+		"cookies": map[string]any{
+			"browser_path": "./firefox", // relative path
+			"browser_type": "firefox",
+		},
+	}
+	errs := validateConfigUpdates(updates)
+	if _, found := errs["cookies.browser_path"]; !found {
+		t.Errorf("expected validation error for relative browser_path, got: %v", errs)
+	}
+}
+
+func TestConfigPutValidationRejectsUnknownBrowserType(t *testing.T) {
+	updates := map[string]any{
+		"cookies": map[string]any{
+			"browser_path": "/some/path",
+			"browser_type": "not-a-browser",
+		},
+	}
+	errs := validateConfigUpdates(updates)
+	if _, found := errs["cookies.browser_path"]; !found {
+		t.Errorf("expected validation error for unknown browser_type, got: %v", errs)
+	}
+}
+
 // --- isSafePath unit (used by validateConfigUpdates path fields) ---
 
 func TestIsSafePath(t *testing.T) {

@@ -1910,12 +1910,16 @@ export class SettingsController {
 
         const infoEl = document.getElementById("auto-cookie-browser-info");
         if (infoEl) {
+          const available = status.availableBrowsers || [];
+          const parts = [];
+          if (available.length === 0) {
+            parts.push("No supported browser detected — choose Custom path…");
+          }
           if (status.lastRefresh) {
             const d = new Date(status.lastRefresh);
-            infoEl.textContent = `Last refresh: ${d.toLocaleString()}`;
-          } else {
-            infoEl.textContent = "";
+            parts.push(`Last refresh: ${d.toLocaleString()}`);
           }
+          infoEl.textContent = parts.join(" | ");
         }
 
         // If setup is in progress, show the dialog
