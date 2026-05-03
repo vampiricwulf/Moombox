@@ -4,14 +4,7 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
-	"unsafe"
-)
-
-var (
-	wininet                  = syscall.NewLazyDLL("wininet.dll")
-	procInternetGetConnected = wininet.NewProc("InternetGetConnectedState")
 )
 
 // defaultPollInterval is the production poll cadence. NewMonitor uses this;
@@ -206,13 +199,4 @@ func (m *Monitor) transition(online bool) {
 	for _, fn := range cbs {
 		fn(online)
 	}
-}
-
-func checkInternetConnected() bool {
-	var flags uint32
-	ret, _, _ := procInternetGetConnected.Call(
-		uintptr(unsafe.Pointer(&flags)),
-		0,
-	)
-	return ret != 0
 }
