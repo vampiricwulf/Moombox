@@ -89,33 +89,38 @@ func linuxFFmpegInstallSuggestion() string {
 		return ""
 	}
 	data, _ := os.ReadFile("/etc/os-release")
-	content := string(data)
-	var detectedID string
+	return linuxFFmpegInstallSuggestionFromOSRelease(string(data))
+}
+
+// linuxFFmpegInstallSuggestionFromOSRelease is the testable seam over
+// /etc/os-release contents. Iterates ID then ID_LIKE tokens so a
+// derivative distro (Mint, Pop!_OS, Elementary) inherits the parent
+// family's install command.
+func linuxFFmpegInstallSuggestionFromOSRelease(content string) string {
+	var id, idLike string
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "ID="):
-			detectedID = strings.Trim(strings.TrimPrefix(line, "ID="), `"`)
+			id = strings.Trim(strings.TrimPrefix(line, "ID="), `"`)
 		case strings.HasPrefix(line, "ID_LIKE="):
-			// Take the first space-separated token as the family hint
-			// only if we haven't found a direct ID yet.
-			rest := strings.Trim(strings.TrimPrefix(line, "ID_LIKE="), `"`)
-			if detectedID == "" && rest != "" {
-				detectedID = strings.Fields(rest)[0]
-			}
+			idLike = strings.Trim(strings.TrimPrefix(line, "ID_LIKE="), `"`)
 		}
 	}
-	switch detectedID {
-	case "debian", "ubuntu":
-		return "sudo apt install ffmpeg"
-	case "fedora", "rhel", "centos":
-		return "sudo dnf install ffmpeg"
-	case "arch", "manjaro":
-		return "sudo pacman -S ffmpeg"
-	case "alpine":
-		return "sudo apk add ffmpeg"
-	case "opensuse", "opensuse-tumbleweed", "opensuse-leap", "suse":
-		return "sudo zypper install ffmpeg"
+	candidates := append([]string{id}, strings.Fields(idLike)...)
+	for _, c := range candidates {
+		switch strings.TrimSpace(c) {
+		case "debian", "ubuntu":
+			return "sudo apt install ffmpeg"
+		case "fedora", "rhel", "centos":
+			return "sudo dnf install ffmpeg"
+		case "arch", "manjaro":
+			return "sudo pacman -S ffmpeg"
+		case "alpine":
+			return "sudo apk add ffmpeg"
+		case "opensuse", "opensuse-tumbleweed", "opensuse-leap", "suse":
+			return "sudo zypper install ffmpeg"
+		}
 	}
 	return "Install FFmpeg via your package manager (see https://ffmpeg.org/download.html)"
 }
