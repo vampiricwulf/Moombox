@@ -14,6 +14,7 @@ require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mattn/go-runewidth v0.0.21
+	github.com/ulikunitz/xz v0.5.15
 	golang.org/x/crypto v0.49.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/text v0.35.0
