@@ -217,6 +217,7 @@ The TUI uses a two-key chord system. Press a prefix key, then the action key wit
 | R C | Recheck cookie authentication |
 | R F | Force browser cookie refresh |
 | R V | Check for updates |
+| R N | View release notes for pending update |
 | R U | Apply pending update |
 | R P P | Restart program (confirm) |
 

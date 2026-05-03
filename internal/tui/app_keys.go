@@ -49,6 +49,32 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// Release-notes overlay intercepts keys when open. Scroll is handled by
+	// routeComponentMsg forwarding to the embedded viewport; here we only
+	// handle the close/apply bindings.
+	if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
+		switch key {
+		case keyEsc, "q", "Q":
+			a.releaseNotesPopup.close()
+			return a, nil
+		case "u", "U":
+			if a.updateAvailable != nil && a.OnApplyUpdate != nil {
+				a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
+				ver := a.updateAvailable.Version
+				applyFn := a.OnApplyUpdate
+				a.releaseNotesPopup.close()
+				return a, safeCmd(func() tea.Msg {
+					errStr := applyFn(ver)
+					return updateApplyResultMsg{Err: errStr}
+				})
+			}
+			return a, nil
+		}
+		// All other keys (arrows, pgup/pgdn) are forwarded to the viewport via
+		// routeComponentMsg — nothing to do here.
+		return a, nil
+	}
+
 	// FFmpeg check overlay takes priority over all other dialogs
 	if a.ffmpegCheck.IsVisible() {
 		// Allow Ctrl+C even during install/check (HandleKey blocks all input

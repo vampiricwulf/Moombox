@@ -77,6 +77,9 @@ func (a *App) View() tea.View {
 	if a.help.IsVisible() {
 		return a.viewWithMode(a.help.View())
 	}
+	if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
+		return a.viewWithMode(a.releaseNotesPopup.View())
+	}
 	if a.ffmpegCheck.IsVisible() {
 		return a.viewWithMode(a.ffmpegCheck.View())
 	}
