@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"runtime"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -75,6 +77,47 @@ type FFmpegCheckModel struct {
 	// Callbacks — only OnCheckPrereqs runs synchronously (fast LookPath),
 	// the others are dispatched as tea.Cmd by App.
 	OnCheckPrereqs func() (bool, bool)
+}
+
+// linuxFFmpegInstallSuggestion returns a distro-appropriate install
+// command for FFmpeg on Linux. Mirrors the logic in
+// internal/web/routes/ffmpeg_distro_other.go but lives here to avoid
+// a layering violation (web routes shouldn't be imported by TUI).
+// On Windows returns empty (caller handles the Windows path separately).
+func linuxFFmpegInstallSuggestion() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	data, _ := os.ReadFile("/etc/os-release")
+	content := string(data)
+	var detectedID string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "ID="):
+			detectedID = strings.Trim(strings.TrimPrefix(line, "ID="), `"`)
+		case strings.HasPrefix(line, "ID_LIKE="):
+			// Take the first space-separated token as the family hint
+			// only if we haven't found a direct ID yet.
+			rest := strings.Trim(strings.TrimPrefix(line, "ID_LIKE="), `"`)
+			if detectedID == "" && rest != "" {
+				detectedID = strings.Fields(rest)[0]
+			}
+		}
+	}
+	switch detectedID {
+	case "debian", "ubuntu":
+		return "sudo apt install ffmpeg"
+	case "fedora", "rhel", "centos":
+		return "sudo dnf install ffmpeg"
+	case "arch", "manjaro":
+		return "sudo pacman -S ffmpeg"
+	case "alpine":
+		return "sudo apk add ffmpeg"
+	case "opensuse", "opensuse-tumbleweed", "opensuse-leap", "suse":
+		return "sudo zypper install ffmpeg"
+	}
+	return "Install FFmpeg via your package manager (see https://ffmpeg.org/download.html)"
 }
 
 // NewFFmpegCheckModel creates a new FFmpeg check model.
@@ -307,19 +350,25 @@ func (m *FFmpegCheckModel) buildMainForm() tea.Cmd {
 func (m *FFmpegCheckModel) buildInstallForm() tea.Cmd {
 	m.values["method"] = ""
 
-	chocoAvail, wingetAvail := false, false
-	if m.OnCheckPrereqs != nil {
-		chocoAvail, wingetAvail = m.OnCheckPrereqs()
-	}
-
 	var opts []huh.Option[string]
-	if chocoAvail {
-		opts = append(opts, huh.NewOption("Install via Chocolatey", "choco"))
+	if runtime.GOOS == "windows" {
+		chocoAvail, wingetAvail := false, false
+		if m.OnCheckPrereqs != nil {
+			chocoAvail, wingetAvail = m.OnCheckPrereqs()
+		}
+		if chocoAvail {
+			opts = append(opts, huh.NewOption("Install via Chocolatey", "choco"))
+		} else {
+			opts = append(opts, huh.NewOption("Install Chocolatey + FFmpeg", "choco-install"))
+		}
+		if wingetAvail {
+			opts = append(opts, huh.NewOption("Install via Winget", "winget"))
+		}
 	} else {
-		opts = append(opts, huh.NewOption("Install Chocolatey + FFmpeg", "choco-install"))
-	}
-	if wingetAvail {
-		opts = append(opts, huh.NewOption("Install via Winget", "winget"))
+		// On Linux/macOS, package manager installation must be done outside
+		// the TUI. Show a single option that reveals the distro-appropriate
+		// command in the manual install view.
+		opts = append(opts, huh.NewOption("View install instructions", "manual"))
 	}
 	opts = append(opts, huh.NewOption("Cancel", ""))
 
@@ -351,6 +400,12 @@ func (m *FFmpegCheckModel) handleInstallKey(key string) string {
 			// Cancel option
 			m.mode = ffmpegMain
 			m.formInit = m.buildMainForm()
+			return ""
+		}
+		if method == "manual" {
+			// Non-Windows: switch to manual install view which shows the
+			// distro-appropriate install command.
+			m.ShowManual()
 			return ""
 		}
 		// Signal the install to run async — App handles via tea.Cmd
@@ -613,11 +668,19 @@ func (m *FFmpegCheckModel) View() string {
 	case ffmpegManual:
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Manual FFmpeg Install"))
 		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render("Download from:"))
-		lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("  https://www.gyan.dev/ffmpeg/builds/"))
-		lines = append(lines, "")
-		lines = append(lines, DimStyle.Render("Recommended: ffmpeg-release-full-shared.7z"))
-		lines = append(lines, DimStyle.Render("(under \"release builds\")"))
+		if runtime.GOOS == "windows" {
+			lines = append(lines, DimStyle.Render("Download from:"))
+			lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("  https://www.gyan.dev/ffmpeg/builds/"))
+			lines = append(lines, "")
+			lines = append(lines, DimStyle.Render("Recommended: ffmpeg-release-full-shared.7z"))
+			lines = append(lines, DimStyle.Render("(under \"release builds\")"))
+		} else {
+			lines = append(lines, DimStyle.Render("Run in your terminal:"))
+			lines = append(lines, lipgloss.NewStyle().Foreground(ColorCyan).Render("  "+linuxFFmpegInstallSuggestion()))
+			lines = append(lines, "")
+			lines = append(lines, DimStyle.Render("Then enter the FFmpeg path below, or restart Moombox"))
+			lines = append(lines, DimStyle.Render("(FFmpeg is usually at /usr/bin/ffmpeg after installation)."))
+		}
 		lines = append(lines, "")
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWhite).Bold(true).Render("Enter FFmpeg path:"))
 		lines = append(lines, m.textInput.View())

@@ -187,7 +187,7 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 			jsonError(rw, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if err := cookies.ValidateBrowserPath(body.Path, body.Type); err != nil {
+		if err := cookies.ValidateBrowserPath(req.Context(), body.Path, body.Type); err != nil {
 			jsonResponse(rw, map[string]any{"valid": false, "error": err.Error()})
 			return
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 )
@@ -19,18 +20,16 @@ var knownBrowserTypes = map[string]struct{}{
 
 // ValidateBrowserPath does the full validation including a 10-second
 // `--version` smoke test. Suitable for HTTP endpoints (async) where
-// blocking is acceptable.
-//
-// Used by the /api/auto-cookies/validate-browser-path endpoint before
-// saving the user's config selection. Returns nil when the path is good.
-func ValidateBrowserPath(path, browserType string) error {
+// blocking is acceptable. Pass req.Context() so subprocess cleanup
+// follows request cancellation.
+func ValidateBrowserPath(ctx context.Context, path, browserType string) error {
 	if err := ValidateBrowserPathQuick(path, browserType); err != nil {
 		return err
 	}
-	// Run --version with a short timeout. Any non-error exit means the
-	// binary at least starts up; we don't parse the output because each
-	// browser formats it differently.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Compose the request context with a 10s ceiling. If the caller
+	// cancels (HTTP request aborted), the subprocess is killed within
+	// the next syscall by exec.CommandContext.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--version")
 	if err := cmd.Run(); err != nil {
@@ -46,6 +45,9 @@ func ValidateBrowserPath(path, browserType string) error {
 func ValidateBrowserPathQuick(path, browserType string) error {
 	if path == "" {
 		return fmt.Errorf("browser path is empty")
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("browser path must be absolute, got %q", path)
 	}
 	if _, ok := knownBrowserTypes[browserType]; !ok {
 		return fmt.Errorf("unknown browser type %q (must be one of: firefox, waterfox, librewolf, zen, chrome, brave, edge, vivaldi, thorium, opera)", browserType)

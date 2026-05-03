@@ -1,6 +1,7 @@
 package cookies
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8,13 +9,13 @@ import (
 )
 
 func TestValidateBrowserPathRejectsEmpty(t *testing.T) {
-	if err := ValidateBrowserPath("", "firefox"); err == nil {
+	if err := ValidateBrowserPath(context.Background(), "", "firefox"); err == nil {
 		t.Error("expected error for empty path, got nil")
 	}
 }
 
 func TestValidateBrowserPathRejectsNonexistent(t *testing.T) {
-	if err := ValidateBrowserPath("/this/does/not/exist/anywhere", "firefox"); err == nil {
+	if err := ValidateBrowserPath(context.Background(), "/this/does/not/exist/anywhere", "firefox"); err == nil {
 		t.Error("expected error for nonexistent path, got nil")
 	}
 }
@@ -24,7 +25,7 @@ func TestValidateBrowserPathRejectsUnknownType(t *testing.T) {
 	if err != nil {
 		t.Skipf("os.Executable: %v", err)
 	}
-	if err := ValidateBrowserPath(exe, "not-a-real-browser"); err == nil {
+	if err := ValidateBrowserPath(context.Background(), exe, "not-a-real-browser"); err == nil {
 		t.Error("expected error for unknown browser type, got nil")
 	}
 }
@@ -38,7 +39,7 @@ func TestValidateBrowserPathRejectsNonExecutable(t *testing.T) {
 	if err := os.WriteFile(plain, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateBrowserPath(plain, "firefox"); err == nil {
+	if err := ValidateBrowserPath(context.Background(), plain, "firefox"); err == nil {
 		t.Error("expected error for non-executable file, got nil")
 	}
 }
@@ -48,6 +49,15 @@ func TestValidateBrowserPathRejectsNonExecutable(t *testing.T) {
 func TestValidateBrowserPathQuickRejectsEmpty(t *testing.T) {
 	if err := ValidateBrowserPathQuick("", "firefox"); err == nil {
 		t.Error("expected error for empty path")
+	}
+}
+
+func TestValidateBrowserPathQuickRejectsRelativePath(t *testing.T) {
+	if err := ValidateBrowserPathQuick("./firefox", "firefox"); err == nil {
+		t.Error("expected error for relative path, got nil")
+	}
+	if err := ValidateBrowserPathQuick("../bin/firefox", "firefox"); err == nil {
+		t.Error("expected error for relative path, got nil")
 	}
 }
 
