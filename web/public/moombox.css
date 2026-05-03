@@ -2572,7 +2572,16 @@ html.sl-theme-light {
 #theme-toggle { font-size: 0.85rem; color: var(--sl-color-neutral-500); margin: 0 -4px; }
 #theme-toggle::part(base) { padding: 0; min-height: auto; min-width: auto; }
 #theme-toggle:hover { color: var(--sl-color-neutral-700); }
-#update-release-notes { max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; font-size: 0.9em; }
+#update-release-notes { max-height: 400px; overflow-y: auto; word-break: break-word; font-size: 0.95em; line-height: 1.5; }
+#update-release-notes h1, #update-release-notes h2, #update-release-notes h3 { margin: 1em 0 0.4em; font-weight: 600; }
+#update-release-notes h1 { font-size: 1.3em; }
+#update-release-notes h2 { font-size: 1.15em; }
+#update-release-notes h3 { font-size: 1em; color: var(--sl-color-primary-600); }
+#update-release-notes ul, #update-release-notes ol { margin: 0.4em 0 0.4em 1.5em; padding: 0; }
+#update-release-notes li { margin: 0.2em 0; }
+#update-release-notes code { background: var(--sl-color-neutral-100); padding: 0.1em 0.3em; border-radius: 3px; font-family: var(--sl-font-mono); font-size: 0.9em; }
+#update-release-notes a { color: var(--sl-color-primary-600); text-decoration: underline; }
+#update-release-notes p { margin: 0.5em 0; }
 
 /* Respect reduced motion preferences */
 @media (prefers-reduced-motion: reduce) {
