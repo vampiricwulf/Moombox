@@ -8,19 +8,30 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	bgembed "github.com/vampiricwulf/Moombox/internal/bgutils/embed"
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
+// nodeBinaryName returns the runtime filename for the extracted Node
+// binary: "node.exe" on Windows (where the extension matters for some
+// tooling and matches user expectations) and "node" elsewhere.
+func nodeBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "node.exe"
+	}
+	return "node"
+}
+
 // extractIfNeeded compares the on-disk version.txt against the embedded
 // stamp; if they differ (or the cache dir is incomplete), gunzip-extracts
-// node.exe and tar-extracts sidecar.tar.gz into cacheDir, then writes the
-// new version.txt.
+// the Node binary and tar-extracts sidecar.tar.gz into cacheDir, then writes
+// the new version.txt.
 //
 // Idempotent: a no-op when cacheDir already has the correct version
-// stamp AND the key files (node.exe, src/server.js) are present.
+// stamp AND the key files (Node binary, src/server.js) are present.
 //
 // Pure Go: uses archive/tar + compress/gzip from stdlib. End users do
 // NOT need a system tar binary -- that's only required at build time
@@ -46,10 +57,10 @@ func extractIfNeeded(cacheDir string) error {
 		return nil
 	}
 
-	// 1. Gunzip-extract node.exe into cacheDir/node.exe.
-	nodePath := filepath.Join(cacheDir, "node.exe")
+	// 1. Gunzip-extract the Node binary into cacheDir.
+	nodePath := filepath.Join(cacheDir, nodeBinaryName())
 	if err := writeGunzipped(nodePath, bgembed.EmbeddedNode, 0o755); err != nil {
-		return fmt.Errorf("extract node.exe: %w", err)
+		return fmt.Errorf("extract Node binary: %w", err)
 	}
 
 	// 2. Gunzip+tar-extract sidecar.tar.gz into cacheDir.
@@ -74,7 +85,7 @@ func cacheLooksGood(cacheDir, stampPath, wantStamp string) bool {
 		return false
 	}
 	for _, mustExist := range []string{
-		filepath.Join(cacheDir, "node.exe"),
+		filepath.Join(cacheDir, nodeBinaryName()),
 		filepath.Join(cacheDir, "src", "server.js"),
 	} {
 		if _, err := os.Stat(mustExist); err != nil {
