@@ -8,17 +8,59 @@ on:
 permissions:
   contents: write
 
-# Three jobs: a fast `release` job creates the empty GitHub release with
-# the multi-platform download body, then `windows` and `linux` build their
-# binaries in parallel and append assets to the existing release. This
-# trades ~30s of release-job overhead for ~3-5min of parallelism between
-# the two heavy build jobs.
+# Three jobs: a `release` job builds the embed blobs (sidecar.tar.gz +
+# the three Node binaries) ONCE, uploads them as an artifact, builds
+# the body, and creates the GitHub release. Then `windows` and `linux`
+# jobs run in parallel: each downloads the embed artifact (saves a
+# duplicate npm ci + fetch-node round trip), builds + signs its
+# binaries, and appends them to the release.
+#
+# Net: one nodejs.org fetch + one npm ci instead of two of each.
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Build BotGuard sidecar payload
+        # Produces internal/bgutils/embed/sidecar.tar.gz from
+        # bgutil-sidecar/ (production node_modules + src/server.js).
+        # The Go side embeds this via go:embed at compile time.
+        # --ignore-scripts: a compromised dep's postinstall could
+        # exfiltrate GITHUB_TOKEN; jsdom + bgutils-js have no install
+        # scripts we depend on, so ignoring is safe.
+        run: |
+          cd bgutil-sidecar
+          npm ci --omit=dev --no-audit --no-fund --ignore-scripts
+          node build.mjs
+          cd ..
+
+      - name: Fetch embedded Node binaries (all platforms)
+        # Downloads pinned Node v22 LTS binaries for Windows x64, Linux x64,
+        # and Linux arm64; verifies SHA-256; gzips to per-platform embed
+        # files. Idempotent: skips re-download if version.txt matches.
+        run: go run ./tools/fetch-node
+
+      - name: Upload embed blobs as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: embed-blobs
+          path: |
+            internal/bgutils/embed/sidecar.tar.gz
+            internal/bgutils/embed/node-windows-amd64.gz
+            internal/bgutils/embed/node-linux-amd64.gz
+            internal/bgutils/embed/node-linux-arm64.gz
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Build release body
         shell: bash
@@ -65,7 +107,7 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    needs: release  # release must exist before we upload assets to it
+    needs: release
     steps:
       - uses: actions/checkout@v6
 
@@ -73,29 +115,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v6
+      - name: Download embed blobs from release job
+        uses: actions/download-artifact@v7
         with:
-          node-version: '22'
-
-      - name: Build BotGuard sidecar payload
-        # Produces internal/bgutils/embed/sidecar.tar.gz from
-        # bgutil-sidecar/ (production node_modules + src/server.js).
-        # The Go side embeds this via go:embed at compile time.
-        # --ignore-scripts: a compromised dep's postinstall could
-        # exfiltrate GITHUB_TOKEN; jsdom + bgutils-js have no install
-        # scripts we depend on, so ignoring is safe.
-        shell: bash
-        run: |
-          cd bgutil-sidecar
-          npm ci --omit=dev --no-audit --no-fund --ignore-scripts
-          node build.mjs
-          cd ..
-
-      - name: Fetch embedded Node binaries (all platforms)
-        # Downloads pinned Node v22 LTS binaries for Windows x64, Linux x64,
-        # and Linux arm64; verifies SHA-256; gzips to per-platform embed
-        # files. Idempotent: skips re-download if version.txt matches.
-        run: go run ./tools/fetch-node
+          name: embed-blobs
+          path: internal/bgutils/embed/
 
       - name: Generate Windows resources
         run: |
@@ -148,7 +172,7 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
-    needs: release  # release must exist before we upload assets to it
+    needs: release
     steps:
       - uses: actions/checkout@v6
 
@@ -156,19 +180,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v6
+      - name: Download embed blobs from release job
+        uses: actions/download-artifact@v7
         with:
-          node-version: '22'
-
-      - name: Build BotGuard sidecar payload
-        run: |
-          cd bgutil-sidecar
-          npm ci --omit=dev --no-audit --no-fund --ignore-scripts
-          node build.mjs
-          cd ..
-
-      - name: Fetch embedded Node binaries (all platforms)
-        run: go run ./tools/fetch-node
+          name: embed-blobs
+          path: internal/bgutils/embed/
 
       - name: Build Linux amd64 executable
         env:
