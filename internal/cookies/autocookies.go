@@ -110,12 +110,15 @@ type AutoCookieReloginRequired map[string]bool
 
 // AutoCookieStatus holds the current status of the auto-cookie service.
 type AutoCookieStatus struct {
-	Configured         bool                      `json:"configured"`
-	SetupInProgress    bool                      `json:"setupInProgress"`
-	Browser            *DetectedBrowser          `json:"browser"`
-	LastRefresh        *string                   `json:"lastRefresh"`
-	LastError          *string                   `json:"lastError"`
-	NeedsManualRelogin AutoCookieReloginRequired `json:"needsManualRelogin"`
+	Configured            bool                      `json:"configured"`
+	SetupInProgress       bool                      `json:"setupInProgress"`
+	Browser               *DetectedBrowser          `json:"browser"`
+	AvailableBrowsers     []DetectedBrowser         `json:"availableBrowsers"`
+	ConfiguredBrowserPath string                    `json:"configuredBrowserPath,omitempty"`
+	ConfiguredBrowserType string                    `json:"configuredBrowserType,omitempty"`
+	LastRefresh           *string                   `json:"lastRefresh"`
+	LastError             *string                   `json:"lastError"`
+	NeedsManualRelogin    AutoCookieReloginRequired `json:"needsManualRelogin"`
 }
 
 // AutoCookieService manages automatic browser-based cookie extraction.
@@ -159,6 +162,14 @@ type AutoCookieService struct {
 	// opt into. When true, RefreshCookies tries DPAPI as a backstop
 	// once the primary CDP launch returns an error. DECISIONS #6.
 	DpapiFallback bool
+
+	// ConfiguredBrowserOverride, when set, returns the user's configured
+	// browser_path and browser_type from the active config. Empty values
+	// mean "no override; use auto-detect". Used by GetStatus to surface
+	// the configured selection in the UI dropdown. nil leaves
+	// ConfiguredBrowserPath/Type empty in the status response, which the
+	// UI treats as "auto-detect selected".
+	ConfiguredBrowserOverride func() (path, browserType string)
 
 	// profileDirErr captures any validation failure on the configured
 	// profile directory (e.g. it points at a real browser's profile
@@ -245,8 +256,14 @@ func (s *AutoCookieService) refreshPlatforms() []string {
 
 // GetStatus returns the current auto-cookie status.
 func (s *AutoCookieService) GetStatus() AutoCookieStatus {
-	// DetectBrowser does filesystem I/O and registry queries — call outside the lock.
+	// DetectBrowser/DetectBrowsers do filesystem I/O and registry queries —
+	// call outside the lock to avoid holding it while doing slow I/O.
 	browser := DetectBrowser()
+	available := DetectBrowsers()
+	var cfgPath, cfgType string
+	if s.ConfiguredBrowserOverride != nil {
+		cfgPath, cfgType = s.ConfiguredBrowserOverride()
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -258,12 +275,15 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 	}
 
 	return AutoCookieStatus{
-		Configured:         s.profileDir != "",
-		SetupInProgress:    s.setupProcess != nil,
-		Browser:            browser,
-		LastRefresh:        lastRefreshStr,
-		LastError:          s.lastError,
-		NeedsManualRelogin: s.needsRelogin,
+		Configured:            s.profileDir != "",
+		SetupInProgress:       s.setupProcess != nil,
+		Browser:               browser,
+		AvailableBrowsers:     available,
+		ConfiguredBrowserPath: cfgPath,
+		ConfiguredBrowserType: cfgType,
+		LastRefresh:           lastRefreshStr,
+		LastError:             s.lastError,
+		NeedsManualRelogin:    s.needsRelogin,
 	}
 }
 
