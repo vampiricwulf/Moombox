@@ -4,6 +4,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -79,17 +80,26 @@ type FFmpegCheckModel struct {
 	OnCheckPrereqs func() (bool, bool)
 }
 
+var (
+	linuxFFmpegSuggestionOnce  sync.Once
+	linuxFFmpegSuggestionCache string
+)
+
 // linuxFFmpegInstallSuggestion returns a distro-appropriate install
 // command for FFmpeg on Linux. Mirrors the logic in
 // internal/web/routes/ffmpeg_distro_other.go but lives here to avoid
 // a layering violation (web routes shouldn't be imported by TUI).
 // On Windows returns empty (caller handles the Windows path separately).
+// /etc/os-release is read once and the result cached for process lifetime.
 func linuxFFmpegInstallSuggestion() string {
 	if runtime.GOOS == "windows" {
 		return ""
 	}
-	data, _ := os.ReadFile("/etc/os-release")
-	return linuxFFmpegInstallSuggestionFromOSRelease(string(data))
+	linuxFFmpegSuggestionOnce.Do(func() {
+		data, _ := os.ReadFile("/etc/os-release")
+		linuxFFmpegSuggestionCache = linuxFFmpegInstallSuggestionFromOSRelease(string(data))
+	})
+	return linuxFFmpegSuggestionCache
 }
 
 // linuxFFmpegInstallSuggestionFromOSRelease is the testable seam over

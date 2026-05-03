@@ -44,7 +44,7 @@ func suggestFFmpegInstallFromOSRelease(osRelease string) string {
 			return "sudo zypper install ffmpeg"
 		}
 	}
-	return "Visit https://ffmpeg.org/download.html for installation instructions"
+	return "Install FFmpeg via your package manager (see https://ffmpeg.org/download.html)"
 }
 
 // parseOSReleaseIDs extracts ID= and ID_LIKE= from /etc/os-release contents.
