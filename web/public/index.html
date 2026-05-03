@@ -913,6 +913,31 @@
                                     style="margin-left: 0.5em; color: var(--sl-color-neutral-500)"
                                 ></span>
                             </div>
+                            <div id="auto-cookie-browser-selector" style="display: none; margin-top: 0.75em;">
+                                <sl-select
+                                    id="cfg-cookies-browser-select"
+                                    label="Browser for cookie extraction"
+                                    help-text="Choose which browser Moombox uses to extract cookies. Auto-detect picks the best available."
+                                    value=""
+                                ></sl-select>
+                                <div id="custom-browser-fields" style="display: none; margin-top: 0.5em; padding-left: 1em; border-left: 2px solid var(--sl-color-neutral-200);">
+                                    <sl-input
+                                        id="cfg-cookies-browser-path"
+                                        label="Browser executable path"
+                                        placeholder="/path/to/browser/binary"
+                                    ></sl-input>
+                                    <sl-select
+                                        id="cfg-cookies-browser-type"
+                                        label="Browser type"
+                                        value="firefox"
+                                        style="margin-top: 0.4em;"
+                                    >
+                                        <sl-option value="firefox">Firefox-family (firefox, waterfox, librewolf, zen)</sl-option>
+                                        <sl-option value="chrome">Chromium-family (chrome, brave, edge, vivaldi, thorium, opera)</sl-option>
+                                    </sl-select>
+                                    <div id="custom-browser-validation-msg" style="margin-top: 0.4em; font-size: var(--sl-font-size-small);"></div>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Disk Settings -->

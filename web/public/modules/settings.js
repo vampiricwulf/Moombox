@@ -577,6 +577,11 @@ export class SettingsController {
     const autoCookiesProfileDir = this.app.getInputValue("cfg-auto-cookies-profile-dir");
     const cookieRefreshInterval = this.app.getInputNumber("cfg-cookie-refresh-interval");
 
+    // Browser selection — resolved later after payload is built so we can
+    // validate and potentially throw before the fetch
+    const browserSelectEl = document.getElementById("cfg-cookies-browser-select");
+    const browserSelectVal = browserSelectEl?.value || "";
+
     const diskWarnPercent = this.app.getInputNumber("cfg-disk-warn-percent");
     const diskCriticalPercent = this.app.getInputNumber("cfg-disk-critical-percent");
 
@@ -627,6 +632,7 @@ export class SettingsController {
         auto_enabled: autoEnabled,
         browser_profile_dir: autoCookiesProfileDir,
         refresh_interval: cookieRefreshInterval ?? null,
+        // browser_path / browser_type resolved below after validation
       },
       disk: {
         disk_warn_percent: diskWarnPercent,
@@ -641,6 +647,46 @@ export class SettingsController {
     // concurrent modification risk (unlike channels which the TUI can edit).
     if (config.notifications) {
       payload.notifications = config.notifications;
+    }
+
+    // Resolve browser selection into payload.cookies.browser_path / browser_type.
+    // Must happen before the fetch so validation errors can abort early.
+    if (browserSelectVal === "__custom__") {
+      const path = document.getElementById("cfg-cookies-browser-path")?.value || "";
+      const type = document.getElementById("cfg-cookies-browser-type")?.value || "firefox";
+      const msgEl = document.getElementById("custom-browser-validation-msg");
+      // Clear any previous validation message
+      if (msgEl) { msgEl.textContent = ""; msgEl.style.color = ""; }
+      const validateResp = await fetch("/api/auto-cookies/validate-browser-path", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, type }),
+      });
+      const validateResult = await validateResp.json();
+      if (!validateResult.valid) {
+        if (msgEl) {
+          msgEl.textContent = `Invalid browser: ${validateResult.error}`;
+          msgEl.style.color = "var(--sl-color-danger-600)";
+        }
+        const saveBtn = document.getElementById("save-config-btn");
+        if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
+        return;
+      }
+      if (msgEl) {
+        msgEl.textContent = "Path validated.";
+        msgEl.style.color = "var(--sl-color-success-600)";
+      }
+      payload.cookies.browser_path = path;
+      payload.cookies.browser_type = type;
+    } else if (browserSelectVal === "") {
+      // Auto-detect — clear any explicit browser selection
+      payload.cookies.browser_path = "";
+      payload.cookies.browser_type = "";
+    } else {
+      // A detected browser was chosen — value is the path, data-type holds the family
+      const opt = browserSelectEl?.querySelector(`sl-option[value="${CSS.escape(browserSelectVal)}"]`);
+      payload.cookies.browser_path = browserSelectVal;
+      payload.cookies.browser_type = opt?.dataset.type || "";
     }
 
     try {
@@ -1772,6 +1818,10 @@ export class SettingsController {
     if (actionsDiv) {
       actionsDiv.style.display = enabled ? "" : "none";
     }
+    const selectorDiv = document.getElementById("auto-cookie-browser-selector");
+    if (selectorDiv) {
+      selectorDiv.style.display = enabled ? "" : "none";
+    }
     // Show/hide per-platform setup buttons based on active toggles
     const ytActive = document.getElementById("cfg-active-youtube")?.checked;
     const twActive = document.getElementById("cfg-active-twitch")?.checked;
@@ -1785,22 +1835,86 @@ export class SettingsController {
     }
   }
 
+  populateBrowserSelector(status) {
+    const select = document.getElementById("cfg-cookies-browser-select");
+    if (!select) return;
+
+    // Clear existing options
+    select.innerHTML = "";
+
+    // Auto-detect option first
+    const autoOpt = document.createElement("sl-option");
+    autoOpt.value = "";
+    autoOpt.textContent = "Auto-detect (recommended)";
+    select.appendChild(autoOpt);
+
+    // Detected browsers
+    const available = status.availableBrowsers || [];
+    for (const b of available) {
+      const opt = document.createElement("sl-option");
+      opt.value = b.path;
+      opt.dataset.type = b.type;
+      opt.textContent = b.name;
+      opt.title = b.path;
+      select.appendChild(opt);
+    }
+
+    // Custom path entry
+    const customOpt = document.createElement("sl-option");
+    customOpt.value = "__custom__";
+    customOpt.textContent = "Custom path…";
+    select.appendChild(customOpt);
+
+    // Pre-select based on configuredBrowserPath
+    const cfgPath = status.configuredBrowserPath || "";
+    const cfgType = status.configuredBrowserType || "";
+    const customWrap = document.getElementById("custom-browser-fields");
+    const pathInput = document.getElementById("cfg-cookies-browser-path");
+    const typeInput = document.getElementById("cfg-cookies-browser-type");
+
+    const detectedPaths = new Set(available.map((b) => b.path));
+    if (cfgPath && !detectedPaths.has(cfgPath)) {
+      // Custom path configured — show custom fields
+      select.value = "__custom__";
+      if (customWrap) customWrap.style.display = "block";
+      if (pathInput) pathInput.value = cfgPath;
+      if (typeInput) {
+        const ft = cfgType.toLowerCase();
+        const familyValue = ["firefox", "waterfox", "librewolf", "zen"].includes(ft)
+          ? "firefox"
+          : "chrome";
+        typeInput.value = familyValue;
+      }
+    } else {
+      select.value = cfgPath; // empty string = auto-detect
+      if (customWrap) customWrap.style.display = "none";
+    }
+
+    // Wire change listener once (idempotent)
+    if (!select._customListenerAttached) {
+      select.addEventListener("sl-change", () => {
+        if (customWrap) {
+          customWrap.style.display = select.value === "__custom__" ? "block" : "none";
+        }
+      });
+      select._customListenerAttached = true;
+    }
+  }
+
   async loadAutoCookieStatus() {
     try {
       const response = await fetch("/api/cookies/auto-status");
       if (response.ok) {
         const status = await response.json();
+        this.populateBrowserSelector(status);
+
         const infoEl = document.getElementById("auto-cookie-browser-info");
         if (infoEl) {
-          if (status.browser) {
-            let info = `Detected: ${status.browser.name || status.browser.type}`;
-            if (status.lastRefresh) {
-              const d = new Date(status.lastRefresh);
-              info += ` | Last refresh: ${d.toLocaleString()}`;
-            }
-            infoEl.textContent = info;
+          if (status.lastRefresh) {
+            const d = new Date(status.lastRefresh);
+            infoEl.textContent = `Last refresh: ${d.toLocaleString()}`;
           } else {
-            infoEl.textContent = "No supported browser found";
+            infoEl.textContent = "";
           }
         }
 
