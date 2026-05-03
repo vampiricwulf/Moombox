@@ -472,8 +472,14 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})
 	}
+	// R N: View release notes. Pending-update notes when an update is
+	// available; otherwise fetches the current running version's notes
+	// from GitHub. Registered whenever we have either source available
+	// so the chord parser doesn't reject it as invalid.
 	if a.updateAvailable != nil {
 		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes " + a.updateAvailable.TagName, HintLabel: "Notes", Category: "Request"})
+	} else if a.OnFetchReleaseNotes != nil {
+		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes (current version)", HintLabel: "Notes", Category: "Request"})
 	}
 	if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName, HintLabel: "Update", Category: "Request"})
