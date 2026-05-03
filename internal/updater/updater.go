@@ -29,8 +29,8 @@ type logger = interface {
 type ReleaseInfo struct {
 	Version      string `json:"version"`                // "2.0.16" (stripped "v" prefix)
 	TagName      string `json:"tagName"`                // "v2.0.16"
-	DownloadURL  string `json:"downloadUrl"`            // asset browser_download_url for Moombox.exe
-	SignatureURL string `json:"signatureUrl,omitempty"` // asset browser_download_url for Moombox.exe.sig
+	DownloadURL  string `json:"downloadUrl"`            // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
+	SignatureURL string `json:"signatureUrl,omitempty"` // asset browser_download_url for the matching .sig
 	ReleaseNotes string `json:"releaseNotes"`           // body from GitHub release
 	PublishedAt  string `json:"publishedAt"`
 }
