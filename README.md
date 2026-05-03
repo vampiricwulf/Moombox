@@ -70,7 +70,7 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 ## Requirements
 
 **Running the pre-built executable:**
-- Windows (x64)
+- Windows x64, **or** Linux x64, **or** Linux arm64
 - [FFmpeg](https://ffmpeg.org/download.html) in your PATH (for muxing video + audio)
 
 **Building from source:**
@@ -79,9 +79,27 @@ I kept the Moom because of Nanashi Mumei being my oshi. I might change it to a d
 
 ## Quick Start
 
+### Windows
+
 1. Download `Moombox.exe` from the [latest release](https://github.com/vampiricwulf/Moombox/releases/latest)
 2. Place it in a directory of your choice
 3. Run `Moombox.exe`
+
+### Linux (x64)
+
+```bash
+wget https://github.com/vampiricwulf/Moombox/releases/latest/download/moombox-linux-amd64
+chmod +x moombox-linux-amd64
+./moombox-linux-amd64
+```
+
+### Linux (arm64)
+
+```bash
+wget https://github.com/vampiricwulf/Moombox/releases/latest/download/moombox-linux-arm64
+chmod +x moombox-linux-arm64
+./moombox-linux-arm64
+```
 
 A built-in setup wizard walks you through first-time configuration on launch. The TUI opens by default — press **W** to open the web dashboard in your browser.
 
@@ -148,46 +166,7 @@ Template variables for `output_template`: `${title}`, `${id}`, `${channel}`, `${
 
 ## Building from Source
 
-```bash
-git clone https://github.com/vampiricwulf/Moombox.git
-cd Moombox
-go build -o moombox ./cmd/moombox
-./moombox
-```
-
-Build with version info (for releases):
-```bash
-go build -ldflags "-s -w -X main.version=1.0.0 -X main.commit=$(git rev-parse --short HEAD)" -o moombox ./cmd/moombox
-```
-
-To run tests:
-```bash
-go test ./...             # Run all tests
-go test -v ./...          # Verbose output
-go test -v -run TestName ./internal/package/...  # Single test
-go vet ./...              # Static analysis
-```
-
-### Profiling (diagnostic builds)
-
-For memory or CPU investigations, set `MOOMBOX_PPROF=1` before launching. Moombox then exposes the standard Go `net/http/pprof` endpoints on `localhost:6060` (loopback-only). Off by default with zero overhead when unset.
-
-```powershell
-$env:MOOMBOX_PPROF = "1"
-.\moombox.exe
-# Then, in another terminal:
-go tool pprof http://localhost:6060/debug/pprof/heap     # live heap
-go tool pprof http://localhost:6060/debug/pprof/profile  # 30s CPU profile
-```
-
-To diff two heap snapshots (useful for finding leaks):
-```powershell
-Invoke-WebRequest http://localhost:6060/debug/pprof/heap -OutFile heap-t0.pprof
-# wait N minutes for the suspected leak to grow
-Invoke-WebRequest http://localhost:6060/debug/pprof/heap -OutFile heap-t1.pprof
-go tool pprof -inuse_space -base heap-t0.pprof heap-t1.pprof
-# at the (pprof) prompt:  top 30 -cum
-```
+See [BUILDING.md](BUILDING.md) for prerequisites and build commands for Windows, Linux x64, and Linux arm64.
 
 ## Terminal UI
 
