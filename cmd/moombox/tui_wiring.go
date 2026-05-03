@@ -209,6 +209,15 @@ func (s *runState) runTUI() {
 		app.OnVerifySignature = func() error {
 			return s.upd.VerifyCurrentSignature(context.Background())
 		}
+		app.OnFetchReleaseNotes = func(version string) (string, string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			info, err := s.upd.FetchReleaseNotes(ctx, version)
+			if err != nil {
+				return "", "", err
+			}
+			return info.TagName, info.ReleaseNotes, nil
+		}
 	}
 	app.OnRecheckCookies = func() (bool, bool) {
 		s.log.Info("Cookie recheck requested from TUI")

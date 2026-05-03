@@ -230,6 +230,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case releaseNotesFetchedMsg:
+		if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
+			if msg.Err != "" {
+				a.releaseNotesPopup.open(msg.Tag, "Failed to fetch release notes: "+msg.Err, a.width, a.height)
+			} else {
+				a.releaseNotesPopup.open(msg.Tag, msg.Notes, a.width, a.height)
+			}
+		}
+		return a, nil
+
 	case cookieRecheckResultMsg:
 		var parts []string
 		if a.statusBar.ytActive {

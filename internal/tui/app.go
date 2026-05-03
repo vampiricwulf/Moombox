@@ -83,6 +83,14 @@ type (
 	signatureVerifyResultMsg struct {
 		Err string // empty on success
 	}
+	// releaseNotesFetchedMsg is the async result of OnFetchReleaseNotes,
+	// dispatched by the R N chord when no update is pending. Err empty
+	// means success; Tag + Notes are populated on success.
+	releaseNotesFetchedMsg struct {
+		Tag   string
+		Notes string
+		Err   string
+	}
 
 	// Async results for AddVideo dialog
 	fetchFormatsAutoAdvanceMsg struct{} // timer msg to auto-skip format on error
@@ -332,6 +340,10 @@ type App struct {
 	OnCheckUpdate       func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
 	OnApplyUpdate       func(version string) string      // returns error string (empty on success, process exits)
 	OnVerifySignature   func() error                     // verify current binary's signature
+	// OnFetchReleaseNotes fetches release notes for a specific version from GitHub.
+	// Used by R N chord when no update is available — shows the CURRENT version's
+	// notes in the same overlay used for pending-update notes.
+	OnFetchReleaseNotes func(version string) (tag, notes string, err error)
 
 	// Cookie refresh callbacks
 	OnRecheckCookies      func() (ytAuth bool, twAuth bool)

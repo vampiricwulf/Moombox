@@ -159,6 +159,60 @@ func New(currentVersion string, log logger) (*Updater, error) {
 	}, nil
 }
 
+// CurrentVersion returns the version string this Updater was initialized
+// with (without the "v" prefix).
+func (u *Updater) CurrentVersion() string {
+	return u.currentVersion
+}
+
+// FetchReleaseNotes downloads the release notes for a specific version
+// from GitHub. version should be without the "v" prefix (e.g. "2.6.3").
+// Used to display current-version notes when there's no pending update.
+// The body is stripped of download links and rendered to HTML the same
+// way as ReleaseInfo populated by CheckForUpdate.
+func (u *Updater) FetchReleaseNotes(ctx context.Context, version string) (*ReleaseInfo, error) {
+	tag := "v" + strings.TrimPrefix(version, "v")
+	url := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s",
+		u.apiBaseURL, u.repoOwner, u.repoName, tag)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Moombox/"+u.currentVersion)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch release notes: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("no release found for %s (local/dev build?)", tag)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("GitHub API rate limit exceeded (HTTP %d) — try again later", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+	}
+
+	var release githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return nil, fmt.Errorf("failed to parse release: %w", err)
+	}
+
+	strippedBody := stripDownloadLinks(release.Body)
+	return &ReleaseInfo{
+		Version:          strings.TrimPrefix(release.TagName, "v"),
+		TagName:          release.TagName,
+		ReleaseNotes:     strippedBody,
+		ReleaseNotesHtml: renderReleaseNotesHtml(strippedBody),
+		PublishedAt:      release.PublishedAt,
+	}, nil
+}
+
 // CheckForUpdate queries GitHub for the latest release. Returns nil if
 // already up-to-date, or a ReleaseInfo if a newer version exists.
 func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {

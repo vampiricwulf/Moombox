@@ -183,6 +183,30 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		jsonResponse(w, map[string]any{"verified": true})
 	})
 
+	// GET /api/update/release-notes?version=X.Y.Z fetches release notes
+	// for a specific version. Defaults to the running version if no query
+	// param. Returns { tagName, releaseNotes (raw markdown), releaseNotesHtml }.
+	r.Get("/api/update/release-notes", func(w http.ResponseWriter, r *http.Request) {
+		if deps.Updater == nil {
+			jsonError(w, "updater not configured", http.StatusServiceUnavailable)
+			return
+		}
+		version := r.URL.Query().Get("version")
+		if version == "" {
+			version = deps.Updater.CurrentVersion()
+		}
+		info, err := deps.Updater.FetchReleaseNotes(r.Context(), version)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		jsonResponse(w, map[string]any{
+			"tagName":          info.TagName,
+			"releaseNotes":     info.ReleaseNotes,
+			"releaseNotesHtml": info.ReleaseNotesHtml,
+		})
+	})
+
 	// POST /api/update/dismiss — disable auto-check and clear update info
 	r.Post("/api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()

@@ -248,6 +248,47 @@ export class SettingsController {
       btn.loading = false;
     });
 
+    // View Release Notes button
+    const viewNotesBtn = document.getElementById("btn-view-release-notes");
+    if (viewNotesBtn) {
+      viewNotesBtn.addEventListener("click", async () => {
+        viewNotesBtn.loading = true;
+        try {
+          const resp = await fetch("/api/update/release-notes");
+          if (!resp.ok) {
+            const err = await resp.text();
+            alert("Failed to fetch release notes: " + err);
+            return;
+          }
+          const data = await resp.json();
+          // Reuse the existing update-dialog to display the notes
+          const dlg = document.getElementById("update-dialog");
+          const notes = document.getElementById("update-release-notes");
+          if (dlg && notes) {
+            dlg.label = "Release Notes — " + data.tagName;
+            if (data.releaseNotesHtml) {
+              notes.innerHTML = data.releaseNotesHtml;
+            } else {
+              notes.textContent = data.releaseNotes || "No release notes available.";
+            }
+            // Hide the "Update Now" button since this is just a viewer
+            const updateBtn = document.getElementById("update-now-btn");
+            const dismissBtn = document.getElementById("update-dismiss-btn");
+            if (updateBtn) updateBtn.style.display = "none";
+            if (dismissBtn) dismissBtn.textContent = "Close";
+            dlg.show();
+            // Restore the original buttons when the dialog closes
+            dlg.addEventListener("sl-after-hide", () => {
+              if (updateBtn) updateBtn.style.display = "";
+              if (dismissBtn) dismissBtn.textContent = "Don't ask again";
+            }, { once: true });
+          }
+        } finally {
+          viewNotesBtn.loading = false;
+        }
+      });
+    }
+
     // Verify Signature button
     document
       .getElementById("btn-verify-signature")
@@ -1845,7 +1886,10 @@ export class SettingsController {
     // Auto-detect option first
     const autoOpt = document.createElement("sl-option");
     autoOpt.value = "";
-    autoOpt.textContent = "Auto-detect (recommended)";
+    const detectedName = status.browser ? status.browser.name : null;
+    autoOpt.textContent = detectedName
+      ? `Auto-detect (currently: ${detectedName})`
+      : "Auto-detect (no browser found)";
     select.appendChild(autoOpt);
 
     // Detected browsers

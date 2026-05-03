@@ -173,10 +173,10 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			})
 		}
 	case "R N":
+		if a.releaseNotesPopup == nil {
+			a.releaseNotesPopup = newReleaseNotesOverlay()
+		}
 		if a.updateAvailable != nil {
-			if a.releaseNotesPopup == nil {
-				a.releaseNotesPopup = newReleaseNotesOverlay()
-			}
 			a.releaseNotesPopup.open(
 				a.updateAvailable.TagName,
 				a.updateAvailable.ReleaseNotes,
@@ -184,8 +184,21 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			)
 			return a, nil
 		}
-		a.setFeedback("No update available — release notes unavailable")
-		return a, nil
+		if a.OnFetchReleaseNotes == nil || a.version == "" {
+			a.setFeedback("Cannot fetch release notes (offline build or unconfigured)")
+			return a, nil
+		}
+		// No pending update — fetch current version's notes asynchronously.
+		a.releaseNotesPopup.open("v"+a.version, "Loading release notes…", a.width, a.height)
+		fetchFn := a.OnFetchReleaseNotes
+		ver := a.version
+		return a, safeCmd(func() tea.Msg {
+			tag, notes, err := fetchFn(ver)
+			if err != nil {
+				return releaseNotesFetchedMsg{Tag: tag, Err: err.Error()}
+			}
+			return releaseNotesFetchedMsg{Tag: tag, Notes: notes}
+		})
 	case "R U":
 		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))

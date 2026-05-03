@@ -489,6 +489,53 @@ func TestAssetsForPlatformKnownPlatforms(t *testing.T) {
 	}
 }
 
+// --- FetchReleaseNotes ---
+
+func TestFetchReleaseNotesStripsAndRenders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/releases/tags/v2.6.3") {
+			t.Errorf("unexpected URL: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(githubRelease{
+			TagName:     "v2.6.3",
+			Body:        "[**`Download`**](url)\n\n---\n\n## Features\n- Linux support",
+			PublishedAt: "2026-05-03T00:00:00Z",
+		})
+	}))
+	t.Cleanup(srv.Close)
+	u, _ := newTestUpdater(t, "2.6.3", srv, nil)
+
+	info, err := u.FetchReleaseNotes(context.Background(), "2.6.3")
+	if err != nil {
+		t.Fatalf("FetchReleaseNotes: %v", err)
+	}
+	if info.TagName != "v2.6.3" {
+		t.Errorf("TagName: got %q, want v2.6.3", info.TagName)
+	}
+	if strings.Contains(info.ReleaseNotes, "Download") {
+		t.Errorf("download link should be stripped: %q", info.ReleaseNotes)
+	}
+	if !strings.Contains(info.ReleaseNotesHtml, "<h2>") {
+		t.Errorf("HTML should contain rendered heading: %q", info.ReleaseNotesHtml)
+	}
+}
+
+func TestFetchReleaseNotesNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	}))
+	t.Cleanup(srv.Close)
+	u, _ := newTestUpdater(t, "0.0.1", srv, nil)
+
+	_, err := u.FetchReleaseNotes(context.Background(), "0.0.1")
+	if err == nil {
+		t.Fatal("expected error for 404, got nil")
+	}
+	if !strings.Contains(err.Error(), "no release found") {
+		t.Errorf("error should mention 'no release found', got %v", err)
+	}
+}
+
 // TestAssetsForPlatformUnknown verifies that unsupported OS/arch combinations
 // return !ok rather than panicking or returning garbage.
 func TestAssetsForPlatformUnknown(t *testing.T) {
