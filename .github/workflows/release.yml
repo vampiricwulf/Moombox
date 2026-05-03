@@ -115,10 +115,26 @@ jobs:
           go-winres make --arch amd64
           cd ../..
 
+      - name: Pre-download Go modules
+        # Three concurrent go build invocations would each race to
+        # populate the module cache from scratch, redundantly fetching
+        # every dependency three times (observed: chi, isatty, goja,
+        # etc. each downloaded 3x in v2.6.6 logs). Module cache
+        # population isn't synchronized between parallel `go` invocations.
+        # Pre-downloading once serializes the network fetch so the
+        # parallel builds all hit warm cache.
+        #
+        # GOOS=linux is implicit on the runner; modules are platform-
+        # neutral source code so this single download serves all 3
+        # cross-compile targets that follow.
+        run: go mod download
+
       - name: Build all 3 binaries in parallel
         # All cross-compiled from Linux. Three concurrent go build
-        # invocations share the build cache safely. ubuntu-latest has
-        # 4 vCPUs so 3 builds fit without significant contention.
+        # invocations share the build cache safely (file-locked) and
+        # the module cache is now warm from the pre-download step.
+        # ubuntu-latest has 4 vCPUs so 3 builds fit without
+        # significant contention.
         # Fail-fast on any failure: if one build errors, the wait
         # exits non-zero and the job fails — no partial release.
         run: |
