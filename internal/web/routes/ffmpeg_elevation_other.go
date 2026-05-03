@@ -15,7 +15,7 @@ import (
 // panic.
 
 // errElevationNotSupported is returned by runElevated on non-Windows.
-// Exported as a package-level var so tests can assert with errors.Is.
+// Defined as a package-level var so tests within the package can assert with errors.Is.
 var errElevationNotSupported = errors.New("UAC elevation is not supported on this platform")
 
 // isElevated returns true when running as root on Unix-like systems.
