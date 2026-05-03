@@ -1,0 +1,57 @@
+name: Linux Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build BotGuard sidecar payload
+        run: |
+          cd bgutil-sidecar
+          npm ci --omit=dev --no-audit --no-fund --ignore-scripts
+          node build.mjs
+          cd ..
+
+      - name: Fetch embedded Node binaries
+        run: go run ./tools/fetch-node
+
+      - name: Build for linux/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./...
+
+      - name: Vet
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet ./...
+
+      # Tests only run for amd64 because arm64 needs QEMU on x86 runners.
+      # The build step above proves arm64 compiles; behaviour is verified
+      # via the amd64 test run.
+      - name: Test (amd64 only)
+        if: matrix.goarch == 'amd64'
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: go test ./...
