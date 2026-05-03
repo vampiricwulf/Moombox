@@ -153,9 +153,9 @@ func (m *Monitor) ReportSuccess(tag string) {
 }
 
 func (m *Monitor) poll() {
-	windowsOnline := m.checkFn()
+	online := m.checkFn()
 	passiveOffline := m.passive.IsTriggered()
-	nowOnline := windowsOnline && !passiveOffline
+	nowOnline := online && !passiveOffline
 
 	wasOnline := m.online.Load()
 
