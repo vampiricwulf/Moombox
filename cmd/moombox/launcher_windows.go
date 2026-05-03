@@ -14,8 +14,8 @@ const createNoWindow = 0x08000000
 // cleanupOrphans removes any stale `~` files left over from a prior
 // session. Runs once at launcher startup, before the supervised child
 // is spawned. The .exe~ may exist if a prior launcher exited before
-// the deferred timeout/del fired (system shutdown during the 11s
-// window, antivirus blocked the cmd, etc.). Now-unlocked, removable.
+// the deferred ping/del fired (system shutdown during the 11s window,
+// antivirus blocked the cmd, etc.). Now-unlocked, removable.
 func cleanupOrphans(exePath string) {
 	os.Remove(exePath + "~")
 }
@@ -39,23 +39,28 @@ func setSysProcAttr(cmd *exec.Cmd) {
 }
 
 // deferDeleteOldLauncher schedules deletion of the .exe~ file via a
-// detached cmd /c invocation that uses timeout.exe (Windows Vista+)
-// to wait 11 seconds, then runs del. The 11s window covers normal
-// launcher exit-and-handle-release time. The launcher's startup
-// cleanupOrphans is the safety net if this somehow doesn't fire.
+// detached cmd /c invocation that uses ping as a sleep mechanism,
+// then runs del. The ~11s wait covers normal launcher exit-and-
+// handle-release time. The launcher's startup cleanupOrphans is the
+// safety net if this somehow doesn't fire.
 //
-// History: previous schtasks-based approach was fragile (task name
-// containing ~, no exit-code check, /st time wraparound, /tr quoting,
-// permission context mismatches) and rarely actually deleted the
-// orphan. Reverted to a single timeout/del invocation which is what
-// worked historically.
+// History: tried timeout.exe earlier — it errors out unconditionally
+// when stdin is redirected (per Microsoft docs), which it always is
+// for a Go-spawned cmd subprocess. The `& del` then ran immediately,
+// before the launcher had released the file lock. ping has no stdin
+// dependency: 12 pings × 1s default interval = 11s of wall-clock
+// delay. This was the original approach pre-schtasks era.
+//
+// Earlier history: also tried schtasks (task name containing ~ was
+// rejected, /st time wraparound, /tr quoting fragility, no exit-code
+// check). ping is the simplest reliable option.
 func deferDeleteOldLauncher(exePath string) {
 	oldPath := exePath + "~"
 	if _, err := os.Stat(oldPath); err != nil {
 		return // no .exe~ file to clean up
 	}
 	delayedDel := fmt.Sprintf(
-		`timeout /t 11 /nobreak >nul & del /f /q "%s" >nul 2>nul`, oldPath)
+		`ping 127.0.0.1 -n 12 >nul & del /f /q "%s" >nul 2>nul`, oldPath)
 	cleanup := exec.Command("cmd", "/C", delayedDel)
 	setSysProcAttr(cleanup)
 	cleanup.Start() // fire-and-forget; we exit shortly anyway
