@@ -463,7 +463,10 @@ func (m *SettingsModel) applyValues() {
 		return
 	}
 
-	// Validate browser_path if set (uses same validation as web UI)
+	// Validate browser_path if set.
+	// Static checks only — the full ValidateBrowserPath spawns a subprocess
+	// and waits up to 10s for --version, which would freeze the BubbleTea
+	// event loop. The web UI runs the full check via the async HTTP endpoint.
 	browserPath := strings.TrimSpace(m.values["browser_path"])
 	browserType := strings.TrimSpace(m.values["browser_type"])
 	if browserPath != "" {
@@ -472,7 +475,7 @@ func (m *SettingsModel) applyValues() {
 			m.status = saveError
 			return
 		}
-		if err := cookies.ValidateBrowserPath(browserPath, browserType); err != nil {
+		if err := cookies.ValidateBrowserPathQuick(browserPath, browserType); err != nil {
 			m.errorMsg = "Invalid browser: " + err.Error()
 			m.status = saveError
 			return

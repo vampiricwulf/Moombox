@@ -5,22 +5,25 @@ package routes
 import (
 	"os"
 	"strings"
+	"sync"
 )
 
 // suggestFFmpegInstall returns a copy-pasteable shell command (or a
 // fallback URL) for installing FFmpeg on the user's Linux distro.
-// Reads /etc/os-release at process start; the result is cached in
-// suggestFFmpegInstallCache.
+// Reads /etc/os-release once at first call; the result is cached for
+// process lifetime via sync.Once.
 func suggestFFmpegInstall() string {
-	if cached := suggestFFmpegInstallCache; cached != "" {
-		return cached
-	}
-	data, _ := os.ReadFile("/etc/os-release")
-	suggestFFmpegInstallCache = suggestFFmpegInstallFromOSRelease(string(data))
+	suggestFFmpegInstallOnce.Do(func() {
+		data, _ := os.ReadFile("/etc/os-release")
+		suggestFFmpegInstallCache = suggestFFmpegInstallFromOSRelease(string(data))
+	})
 	return suggestFFmpegInstallCache
 }
 
-var suggestFFmpegInstallCache string
+var (
+	suggestFFmpegInstallOnce  sync.Once
+	suggestFFmpegInstallCache string
+)
 
 // suggestFFmpegInstallFromOSRelease is the testable seam — pure function
 // over the contents of /etc/os-release.

@@ -42,3 +42,22 @@ func TestValidateBrowserPathRejectsNonExecutable(t *testing.T) {
 		t.Error("expected error for non-executable file, got nil")
 	}
 }
+
+// --- ValidateBrowserPathQuick ---
+
+func TestValidateBrowserPathQuickRejectsEmpty(t *testing.T) {
+	if err := ValidateBrowserPathQuick("", "firefox"); err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestValidateBrowserPathQuickAcceptsValidExe(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("os.Executable: %v", err)
+	}
+	// Should pass static checks but does NOT call --version
+	if err := ValidateBrowserPathQuick(exe, "firefox"); err != nil {
+		t.Errorf("expected nil error for the test binary: %v", err)
+	}
+}
