@@ -141,6 +141,75 @@ func detectBrowserUncached() *DetectedBrowser {
 	return nil
 }
 
+// DetectBrowsers enumerates every browser the package can find, in the
+// same priority order as DetectBrowser (system default first if known,
+// then knownBrowsers list with Firefox-family before Chromium-family).
+// Returns an empty (non-nil) slice when none are detected so callers
+// can range without nil-checks.
+//
+// Unlike DetectBrowser, the result is NOT cached — callers asking for
+// the full list typically render a UI on top, where freshness is more
+// important than the ~ms cost of re-scanning.
+func DetectBrowsers() []DetectedBrowser {
+	out := make([]DetectedBrowser, 0, 4)
+
+	// Build search order: default browser first, then remaining.
+	order := knownBrowsers
+	if defType := detectDefaultBrowserType(); defType != "" && defType != "edge" {
+		reordered := make([]browserInfo, 0, len(knownBrowsers))
+		for _, b := range knownBrowsers {
+			if b.typ == defType {
+				reordered = append([]browserInfo{b}, reordered...)
+			} else {
+				reordered = append(reordered, b)
+			}
+		}
+		order = reordered
+	}
+
+	// Build Windows install path roots once.
+	var windowsRoots []string
+	if runtime.GOOS == "windows" {
+		if pf := os.Getenv("PROGRAMFILES"); pf != "" {
+			windowsRoots = append(windowsRoots, pf)
+		}
+		if pf86 := os.Getenv("PROGRAMFILES(X86)"); pf86 != "" {
+			windowsRoots = append(windowsRoots, pf86)
+		}
+		if localApp := os.Getenv("LOCALAPPDATA"); localApp != "" {
+			windowsRoots = append(windowsRoots, localApp)
+		}
+	}
+
+	seen := map[string]struct{}{} // dedupe by absolute path
+
+	addIfNew := func(b DetectedBrowser) {
+		if _, dup := seen[b.Path]; dup {
+			return
+		}
+		seen[b.Path] = struct{}{}
+		out = append(out, b)
+	}
+
+	for _, b := range order {
+		for _, name := range b.pathsFn() {
+			if path, err := exec.LookPath(name); err == nil {
+				addIfNew(DetectedBrowser{Type: b.typ, Path: path, Name: b.name})
+			}
+		}
+		for _, relPath := range b.windowsPaths {
+			for _, root := range windowsRoots {
+				fullPath := filepath.Join(root, relPath)
+				if _, err := os.Stat(fullPath); err == nil {
+					addIfNew(DetectedBrowser{Type: b.typ, Path: fullPath, Name: b.name})
+				}
+			}
+		}
+	}
+
+	return out
+}
+
 // detectDefaultBrowserType returns the type of the system's default browser
 // or "" if detection fails or the browser is unknown.
 func detectDefaultBrowserType() string {
