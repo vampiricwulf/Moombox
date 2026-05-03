@@ -30,10 +30,6 @@ var (
 // that it should respawn. Used for both config restarts and update restarts.
 const exitCodeRestart = 42
 
-// createNoWindow prevents a console window from appearing when spawning
-// detached processes on Windows (passed to SysProcAttr.CreationFlags).
-const createNoWindow = 0x08000000
-
 func init() {
 	// Strip "v" prefix from version if set via -ldflags (tag name includes it)
 	version = strings.TrimPrefix(version, "v")
