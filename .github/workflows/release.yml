@@ -8,24 +8,24 @@ on:
 permissions:
   contents: write
 
-# Three jobs, all on ubuntu-latest:
+# Two jobs, both on ubuntu-latest:
 #
 #   release  builds the embed blobs (sidecar + 3 Node binaries) once,
 #            cached across runs by version.txt + sidecar manifest +
 #            fetch-node source. Uploads them as the embed-blobs
 #            artifact and creates the empty GitHub release.
 #
-#   windows  cross-compiles Moombox.exe on Linux via go-winres
-#            (which works on any host OS), signs it, uploads to the
-#            release.
+#   build    cross-compiles all 3 binaries (Windows amd64 via
+#            go-winres + GOOS=windows, Linux amd64, Linux arm64) in
+#            parallel via shell job control. Signs all 3, uploads
+#            all 6 assets to the release in one action call.
 #
-#   linux    builds linux-amd64 + linux-arm64 in parallel within a
-#            single shell, signs both, uploads to the release.
-#
-# windows + linux run in parallel after release. No more windows-latest
-# runner — go-winres + go cross-compile produce identical Windows
-# binaries from a Linux host (.syso files use filename build
-# constraints, so go build picks them up under GOOS=windows).
+# build runs after release. Only one build job is needed because
+# go-winres + go cross-compile produce identical Windows binaries
+# from a Linux host (.syso files use filename build constraints, so
+# go build picks them up under GOOS=windows). Avoiding the
+# windows/linux split saves duplicate checkout + setup-go +
+# download-artifact overhead.
 
 jobs:
   release:
@@ -133,7 +133,7 @@ jobs:
           # No files yet — the windows and linux jobs upload to this release
           # via tag-match in subsequent action-gh-release calls.
 
-  windows:
+  build:
     runs-on: ubuntu-latest
     needs: release
     steps:
@@ -182,77 +182,47 @@ jobs:
           go-winres make --arch amd64
           cd ../..
 
-      - name: Build Windows executable (cross-compile from Linux)
-        env:
-          CGO_ENABLED: 0
-          GOOS: windows
-          GOARCH: amd64
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          COMMIT=$(git rev-parse --short HEAD)
-          go build -ldflags "-s -w -X main.version=$VERSION -X main.commit=$COMMIT" -o Moombox.exe ./cmd/moombox
-
-      - name: Sign binary
-        env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        run: go run ./cmd/sign Moombox.exe
-
-      - name: Upload Windows assets to release
-        uses: softprops/action-gh-release@v3
-        with:
-          # Append to the release the `release` job created. Don't pass
-          # body_path/prerelease/make_latest here — they would overwrite the
-          # values set by the release job.
-          files: |
-            Moombox.exe
-            Moombox.exe.sig
-
-  linux:
-    runs-on: ubuntu-latest
-    needs: release
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      - name: Download embed blobs from release job
-        uses: actions/download-artifact@v7
-        with:
-          name: embed-blobs
-          path: internal/bgutils/embed/
-
-      - name: Build Linux executables in parallel
-        # Both arches build concurrently via shell job control. Go's
-        # build cache handles concurrent invocations correctly and the
-        # cross-compile is CPU-bound enough to benefit from parallelism
-        # on the runner's 4 cores.
+      - name: Build all 3 binaries in parallel
+        # All cross-compiled from Linux. Three concurrent go build
+        # invocations share the build cache safely. ubuntu-latest has
+        # 4 vCPUs so 3 builds fit without significant contention.
+        # Fail-fast on any failure: if one build errors, the wait
+        # exits non-zero and the job fails — no partial release.
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           COMMIT=$(git rev-parse --short HEAD)
           LDFLAGS="-s -w -X main.version=$VERSION -X main.commit=$COMMIT"
 
+          (CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o Moombox.exe ./cmd/moombox) &
+          PID_WIN=$!
           (CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o moombox-linux-amd64 ./cmd/moombox) &
-          PID_AMD64=$!
+          PID_LIN_AMD64=$!
           (CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o moombox-linux-arm64 ./cmd/moombox) &
-          PID_ARM64=$!
-          wait $PID_AMD64
-          wait $PID_ARM64
+          PID_LIN_ARM64=$!
+          wait $PID_WIN
+          wait $PID_LIN_AMD64
+          wait $PID_LIN_ARM64
 
-      - name: Sign Linux binaries
+      - name: Sign all 3 binaries in parallel
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: |
+          set -euo pipefail
+          go run ./cmd/sign Moombox.exe &
           go run ./cmd/sign moombox-linux-amd64 &
           go run ./cmd/sign moombox-linux-arm64 &
           wait
 
-      - name: Upload Linux assets to release
+      - name: Upload all 6 assets to release
         uses: softprops/action-gh-release@v3
         with:
+          # Append to the release the `release` job created. Don't pass
+          # body_path/prerelease/make_latest here — they would overwrite
+          # the values set by the release job.
           files: |
+            Moombox.exe
+            Moombox.exe.sig
             moombox-linux-amd64
             moombox-linux-amd64.sig
             moombox-linux-arm64
