@@ -175,6 +175,15 @@ func FFmpegRoutes(r chi.Router, deps *FFmpegDeps) {
 		})
 	})
 
+	// GET /api/ffmpeg/install-suggestion — distro-appropriate install command for Linux.
+	// On Windows returns empty string; the install-options endpoint handles Choco/winget there.
+	r.Get("/api/ffmpeg/install-suggestion", func(rw http.ResponseWriter, req *http.Request) {
+		jsonResponse(rw, map[string]any{
+			"platform":   runtime.GOOS,
+			"suggestion": suggestFFmpegInstall(),
+		})
+	})
+
 	// GET /api/ffmpeg/install-options — check which package managers are available
 	r.Get("/api/ffmpeg/install-options", func(rw http.ResponseWriter, req *http.Request) {
 		chocoAvail := false
