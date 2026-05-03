@@ -17,15 +17,15 @@ permissions:
 #      (~55s saved). On miss: build them, cache stores for next run.
 #   3. go-winres setup — generates Windows .syso resources from
 #      bash + jq + go-winres (which works on any host OS).
-#   4. Cross-compile all 3 binaries SEQUENTIALLY (Win amd64, Linux
-#      amd64, Linux arm64). Earlier attempt at 3-way parallel saved
-#      only ~8s on a 4-vCPU runner because each build was already
-#      CPU-saturating, and introduced footguns (parallel sign's bare
-#      `wait` swallowed exit codes; parallel build raced on module
-#      cache and re-downloaded every dep 3x). Sequential gives clean
-#      per-binary logs and the first build naturally warms the module
-#      cache for the next two.
-#   5. Sign all 3 binaries sequentially (each is sub-second).
+#   4. Cross-compile all 3 binaries SEQUENTIALLY, each in its own
+#      named step (Win amd64, Linux amd64, Linux arm64). Earlier
+#      attempt at 3-way parallel saved only ~8s on a 4-vCPU runner
+#      because each build was already CPU-saturating, and introduced
+#      footguns (parallel sign's bare `wait` swallowed exit codes;
+#      parallel build raced on module cache and re-downloaded every
+#      dep 3x). Per-step naming gives per-binary timing in the
+#      Actions UI and easier failure attribution.
+#   5. Sign all 3 binaries sequentially, each in its own named step.
 #   6. Single softprops/action-gh-release@v3 call publishes the
 #      release with body + all 6 assets in one shot.
 #
@@ -119,38 +119,68 @@ jobs:
           go-winres make --arch amd64
           cd ../..
 
-      - name: Build all 3 binaries
-        # Sequential cross-compile. Tried 3-way parallel earlier; on
-        # ubuntu-latest (4 vCPUs) each go build was already CPU-saturating
-        # alone, so 3 concurrent builds just contended for cores —
-        # observed wall-clock saving was ~8s vs sequential. Not worth the
-        # PID-juggling complexity or the latent footguns (parallel
-        # signing's bare `wait` silently swallowed exit codes; parallel
-        # `go build` raced on module-cache population and re-downloaded
-        # every dep 3x). Sequential gives clean per-binary logs and
-        # the first build naturally warms the module cache for the next
-        # two — no separate pre-download step needed.
+      - name: Compute version + ldflags
+        # Computed once and exported via $GITHUB_ENV so each per-binary
+        # build step references the same VERSION/COMMIT/LDFLAGS without
+        # re-running git rev-parse three times. Tag-derived; pre-release
+        # suffixes (-test.N, -rc.N) are preserved in main.version since
+        # Go's main.version isn't constrained to numeric like the
+        # Windows resource metadata is.
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           COMMIT=$(git rev-parse --short HEAD)
-          LDFLAGS="-s -w -X main.version=$VERSION -X main.commit=$COMMIT"
+          {
+            echo "VERSION=$VERSION"
+            echo "COMMIT=$COMMIT"
+            echo "LDFLAGS=-s -w -X main.version=$VERSION -X main.commit=$COMMIT"
+          } >> "$GITHUB_ENV"
 
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o Moombox.exe ./cmd/moombox
-          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o moombox-linux-amd64 ./cmd/moombox
-          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o moombox-linux-arm64 ./cmd/moombox
+      # Sequential cross-compiles, each in its own step. Tried 3-way
+      # parallel earlier — on ubuntu-latest (4 vCPUs) each go build was
+      # already CPU-saturating alone, so concurrent builds just contended
+      # for cores (~8s saved, not worth the complexity / latent
+      # footguns). Sequential gives clean per-binary logs and the first
+      # build naturally warms the module cache for the next two.
+      - name: Build Moombox.exe (windows/amd64)
+        env:
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -ldflags "$LDFLAGS" -o Moombox.exe ./cmd/moombox
 
-      - name: Sign all 3 binaries
+      - name: Build moombox-linux-amd64
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -ldflags "$LDFLAGS" -o moombox-linux-amd64 ./cmd/moombox
+
+      - name: Build moombox-linux-arm64
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: arm64
+        run: go build -ldflags "$LDFLAGS" -o moombox-linux-arm64 ./cmd/moombox
+
+      # Sequential sign, each in its own step. Each go run ./cmd/sign
+      # invocation is sub-second; the overhead of three steps is small
+      # and per-binary failure attribution is easier to read in the
+      # Actions UI.
+      - name: Sign Moombox.exe
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        # Sequential sign. Each invocation is sub-second; serial removes
-        # any chance of `wait`-pattern footguns silently swallowing
-        # signing failures.
-        run: |
-          set -euo pipefail
-          go run ./cmd/sign Moombox.exe
-          go run ./cmd/sign moombox-linux-amd64
-          go run ./cmd/sign moombox-linux-arm64
+        run: go run ./cmd/sign Moombox.exe
+
+      - name: Sign moombox-linux-amd64
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: go run ./cmd/sign moombox-linux-amd64
+
+      - name: Sign moombox-linux-arm64
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: go run ./cmd/sign moombox-linux-arm64
 
       - name: Build release body
         shell: bash
