@@ -400,6 +400,65 @@ var _ = func() string {
 	return hex.EncodeToString(pub)
 }
 
+// --- stripDownloadLinks ---
+
+func TestStripDownloadLinks(t *testing.T) {
+	cases := []struct {
+		name, input, want string
+	}{
+		{
+			name:  "with separator",
+			input: "[**`Download Foo`**](url)\n\n---\n\n## Features\n- thing",
+			want:  "## Features\n- thing",
+		},
+		{
+			name:  "with multiple links",
+			input: "[A](u)\n[B](u2)\n\n---\n\n# Notes",
+			want:  "# Notes",
+		},
+		{
+			name:  "no separator returns unchanged",
+			input: "## Just notes\n- thing",
+			want:  "## Just notes\n- thing",
+		},
+		{
+			name:  "empty",
+			input: "",
+			want:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripDownloadLinks(tc.input)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// --- renderReleaseNotesHtml ---
+
+func TestRenderReleaseNotesHtmlSanitizesScripts(t *testing.T) {
+	html := renderReleaseNotesHtml("## OK\n\n<script>alert(1)</script>")
+	if strings.Contains(html, "<script>") {
+		t.Errorf("script tag survived sanitization: %s", html)
+	}
+	if !strings.Contains(html, "OK") {
+		t.Errorf("legitimate content stripped: %s", html)
+	}
+}
+
+func TestRenderReleaseNotesHtmlRendersHeading(t *testing.T) {
+	html := renderReleaseNotesHtml("## Heading\n- bullet")
+	if !strings.Contains(html, "<h2>") {
+		t.Errorf("expected <h2> in rendered output: %s", html)
+	}
+	if !strings.Contains(html, "<li>") {
+		t.Errorf("expected <li> in rendered output: %s", html)
+	}
+}
+
 // --- assetsForPlatform / releaseAssetMap ---
 
 // TestAssetsForPlatformKnownPlatforms verifies the lookup table covers all

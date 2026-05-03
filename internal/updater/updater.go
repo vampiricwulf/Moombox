@@ -2,9 +2,11 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"os"
@@ -12,8 +14,43 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microcosm-cc/bluemonday"
+	"github.com/yuin/goldmark"
+
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
+
+// markdownPolicy is the bluemonday HTML sanitizer policy applied to
+// rendered release notes. UGCPolicy permits common formatting (headings,
+// lists, links, code, emphasis) but strips scripts, event handlers, and
+// dangerous protocols. Source markdown comes from our own RELEASE_NOTES.md
+// but we sanitize anyway as defense-in-depth.
+var markdownPolicy = bluemonday.UGCPolicy()
+
+// stripDownloadLinks removes the leading download-link section from a
+// GitHub release body. Our release workflow puts download links above a
+// `\n---\n` separator and the actual changelog below; this returns just
+// the changelog. Bodies without a separator are returned unchanged.
+func stripDownloadLinks(body string) string {
+	if i := strings.Index(body, "\n---\n"); i >= 0 {
+		return strings.TrimSpace(body[i+len("\n---\n"):])
+	}
+	return body
+}
+
+// renderReleaseNotesHtml converts markdown release notes to sanitized HTML
+// suitable for direct innerHTML assignment in the web UI.
+func renderReleaseNotesHtml(markdown string) string {
+	if markdown == "" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := goldmark.Convert([]byte(markdown), &buf); err != nil {
+		// Fall back to escaped plain text on render failure.
+		return "<pre>" + html.EscapeString(markdown) + "</pre>"
+	}
+	return markdownPolicy.Sanitize(buf.String())
+}
 
 // logger is a type alias for the anonymous logger interface.
 // Per CLAUDE.md convention, this avoids a named exported interface while
@@ -27,12 +64,13 @@ type logger = interface {
 
 // ReleaseInfo holds information about an available update.
 type ReleaseInfo struct {
-	Version      string `json:"version"`                // "2.0.16" (stripped "v" prefix)
-	TagName      string `json:"tagName"`                // "v2.0.16"
-	DownloadURL  string `json:"downloadUrl"`            // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
-	SignatureURL string `json:"signatureUrl,omitempty"` // asset browser_download_url for the matching .sig
-	ReleaseNotes string `json:"releaseNotes"`           // body from GitHub release
-	PublishedAt  string `json:"publishedAt"`
+	Version          string `json:"version"`                // "2.0.16" (stripped "v" prefix)
+	TagName          string `json:"tagName"`                // "v2.0.16"
+	DownloadURL      string `json:"downloadUrl"`            // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
+	SignatureURL      string `json:"signatureUrl,omitempty"` // asset browser_download_url for the matching .sig
+	ReleaseNotes     string `json:"releaseNotes"`           // stripped raw markdown (for TUI glamour rendering)
+	ReleaseNotesHtml string `json:"releaseNotesHtml"`       // sanitized HTML (for web UI innerHTML)
+	PublishedAt      string `json:"publishedAt"`
 }
 
 // assetNames bundles the GitHub release asset names for one platform.
@@ -187,13 +225,15 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		"latest", remoteVersion,
 	)
 
+	strippedBody := stripDownloadLinks(release.Body)
 	return &ReleaseInfo{
-		Version:      remoteVersion,
-		TagName:      release.TagName,
-		DownloadURL:  downloadURL,
-		SignatureURL: signatureURL,
-		ReleaseNotes: release.Body,
-		PublishedAt:  release.PublishedAt,
+		Version:          remoteVersion,
+		TagName:          release.TagName,
+		DownloadURL:      downloadURL,
+		SignatureURL:     signatureURL,
+		ReleaseNotes:     strippedBody,
+		ReleaseNotesHtml: renderReleaseNotesHtml(strippedBody),
+		PublishedAt:      release.PublishedAt,
 	}, nil
 }
 

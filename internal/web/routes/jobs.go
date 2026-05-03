@@ -1338,10 +1338,11 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 		// Update status from shared atomic
 		if ui := SharedUpdateInfo.Load(); ui != nil {
 			resp["updateAvailable"] = map[string]any{
-				"version":      ui.Version,
-				"tagName":      ui.TagName,
-				"releaseNotes": ui.ReleaseNotes,
-				"publishedAt":  ui.PublishedAt,
+				"version":          ui.Version,
+				"tagName":          ui.TagName,
+				"releaseNotes":     ui.ReleaseNotes,
+				"releaseNotesHtml": ui.ReleaseNotesHtml,
+				"publishedAt":      ui.PublishedAt,
 			}
 		}
 
