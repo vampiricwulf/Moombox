@@ -46,15 +46,15 @@ func utf16Encode(s string) []uint16 {
 }
 
 var (
-	advapi32          = syscall.NewLazyDLL("advapi32.dll")
-	openProcessToken  = advapi32.NewProc("OpenProcessToken")
-	getTokenInfo      = advapi32.NewProc("GetTokenInformation")
+	advapi32         = syscall.NewLazyDLL("advapi32.dll")
+	openProcessToken = advapi32.NewProc("OpenProcessToken")
+	getTokenInfo     = advapi32.NewProc("GetTokenInformation")
 
-	shell32           = syscall.NewLazyDLL("shell32.dll")
-	shellExecuteExW   = shell32.NewProc("ShellExecuteExW")
+	shell32         = syscall.NewLazyDLL("shell32.dll")
+	shellExecuteExW = shell32.NewProc("ShellExecuteExW")
 
-	kernel32Elev      = syscall.NewLazyDLL("kernel32.dll")
-	waitForSingleObj  = kernel32Elev.NewProc("WaitForSingleObject")
+	kernel32Elev     = syscall.NewLazyDLL("kernel32.dll")
+	waitForSingleObj = kernel32Elev.NewProc("WaitForSingleObject")
 )
 
 // shellExecuteInfo mirrors the Windows SHELLEXECUTEINFOW structure.
@@ -80,9 +80,9 @@ type shellExecuteInfo struct {
 
 const (
 	seeMaskNoCloseProcess = 0x00000040
-	swHide               = 0
-	tokenQuery           = 0x0008
-	tokenElevation       = 20 // TokenElevation information class
+	swHide                = 0
+	tokenQuery            = 0x0008
+	tokenElevation        = 20 // TokenElevation information class
 )
 
 // isElevated returns true if the current process is running with administrator
@@ -124,7 +124,7 @@ func isElevated() bool {
 // `-EncodedCommand <base64-utf16le>` so the script never touches the
 // filesystem. Removes the TOCTOU window where a local attacker could swap
 // the temp file between WriteFile and ShellExecuteEx.
-func runElevated(script string) (syscall.Handle, error) {
+func runElevated(script string) (uintptr, error) {
 	verb, err := syscall.UTF16PtrFromString("runas")
 	if err != nil {
 		return 0, fmt.Errorf("utf16 verb: %w", err)
@@ -157,13 +157,13 @@ func runElevated(script string) (syscall.Handle, error) {
 	if ret == 0 {
 		return 0, fmt.Errorf("ShellExecuteEx failed (UAC declined?): %w", callErr)
 	}
-	return syscall.Handle(sei.hProcess), nil
+	return sei.hProcess, nil
 }
 
 // waitForProcess waits for a process handle to exit within the given timeout.
 // Closes the handle when done. Returns nil on success, or an error on timeout or failure.
-func waitForProcess(handle syscall.Handle, timeout time.Duration) error {
-	defer syscall.CloseHandle(handle)
+func waitForProcess(handle uintptr, timeout time.Duration) error {
+	defer syscall.CloseHandle(syscall.Handle(handle))
 	millis := uint32(timeout.Milliseconds())
 	ret, _, err := waitForSingleObj.Call(
 		uintptr(handle),
