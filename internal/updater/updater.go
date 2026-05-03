@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -32,6 +33,35 @@ type ReleaseInfo struct {
 	SignatureURL string `json:"signatureUrl,omitempty"` // asset browser_download_url for Moombox.exe.sig
 	ReleaseNotes string `json:"releaseNotes"`           // body from GitHub release
 	PublishedAt  string `json:"publishedAt"`
+}
+
+// assetNames bundles the GitHub release asset names for one platform.
+// binary is the runnable executable; sig is its Ed25519 signature.
+type assetNames struct {
+	binary, sig string
+}
+
+// releaseAssetMap maps GOOS/GOARCH to the asset names CI publishes.
+// Adding a new platform: extend this map AND ensure the release workflow
+// uploads matching artifacts. The Windows entry keeps the historical
+// Moombox.exe name so existing 2.6.2 clients continue to find it.
+var releaseAssetMap = map[string]assetNames{
+	"windows/amd64": {binary: "Moombox.exe", sig: "Moombox.exe.sig"},
+	"linux/amd64":   {binary: "moombox-linux-amd64", sig: "moombox-linux-amd64.sig"},
+	"linux/arm64":   {binary: "moombox-linux-arm64", sig: "moombox-linux-arm64.sig"},
+}
+
+// assetsForPlatform looks up the asset names for an explicit goos/goarch
+// (used by tests). Production code calls currentPlatformAssets() below.
+func assetsForPlatform(goos, goarch string) (assetNames, bool) {
+	a, ok := releaseAssetMap[goos+"/"+goarch]
+	return a, ok
+}
+
+// currentPlatformAssets returns the asset names for the running build's
+// GOOS/GOARCH, sourced from runtime.GOOS and runtime.GOARCH.
+func currentPlatformAssets() (assetNames, bool) {
+	return assetsForPlatform(runtime.GOOS, runtime.GOARCH)
 }
 
 // Updater checks for and applies updates from GitHub Releases.
@@ -131,18 +161,22 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		return nil, nil
 	}
 
-	// Find the Moombox.exe and Moombox.exe.sig assets
+	// Find the platform-appropriate binary and sig assets.
+	assets, ok := currentPlatformAssets()
+	if !ok {
+		return nil, fmt.Errorf("auto-update unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
 	var downloadURL, signatureURL string
 	for _, asset := range release.Assets {
 		switch {
-		case strings.EqualFold(asset.Name, "Moombox.exe"):
+		case strings.EqualFold(asset.Name, assets.binary):
 			downloadURL = asset.BrowserDownloadURL
-		case strings.EqualFold(asset.Name, "Moombox.exe.sig"):
+		case strings.EqualFold(asset.Name, assets.sig):
 			signatureURL = asset.BrowserDownloadURL
 		}
 	}
 	if downloadURL == "" {
-		return nil, fmt.Errorf("no Moombox.exe asset found in release %s", release.TagName)
+		return nil, fmt.Errorf("no %s asset found in release %s", assets.binary, release.TagName)
 	}
 	if signatureURL == "" {
 		return nil, fmt.Errorf("no signature file found in release %s", release.TagName)
@@ -287,10 +321,14 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 		return fmt.Errorf("failed to parse release: %w", err)
 	}
 
-	// Find the .sig asset
+	// Find the platform-appropriate sig asset.
+	assets, ok := currentPlatformAssets()
+	if !ok {
+		return fmt.Errorf("signature verification unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
 	var signatureURL string
 	for _, asset := range release.Assets {
-		if strings.EqualFold(asset.Name, "Moombox.exe.sig") {
+		if strings.EqualFold(asset.Name, assets.sig) {
 			signatureURL = asset.BrowserDownloadURL
 			break
 		}
@@ -325,11 +363,20 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 // verification), and .sig (VerifyCurrentSignature intermediate that may be
 // left behind if ApplyUpdate was interrupted between its write and rename).
 //
+// On Windows, also sweeps `~` (orphaned by the launcher's deferred cleanup
+// or by a prior installation that lacked the launcher startup sweep). The
+// runtime.GOOS guard prevents accidentally targeting an editor backup file
+// on Linux/macOS where `<name>~` is a legitimate file pattern.
+//
 // .update-broken markers from a failed double-rename rollback are
 // intentionally NOT cleaned here — they are evidence for the user that
 // manual recovery may be needed and should be deleted explicitly.
 func (u *Updater) CleanupOldBinary() {
-	for _, suffix := range []string{".old", ".new", ".new.sig", ".sig"} {
+	suffixes := []string{".old", ".new", ".new.sig", ".sig"}
+	if runtime.GOOS == "windows" {
+		suffixes = append(suffixes, "~")
+	}
+	for _, suffix := range suffixes {
 		path := u.exePath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {
