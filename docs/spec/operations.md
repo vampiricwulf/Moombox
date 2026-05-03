@@ -6,7 +6,7 @@ This document covers building, testing, releasing, updating, and running Moombox
 
 ## Rules and Constraints
 
-- Build requires **Go 1.25** (see `go.mod` for exact patch version). Produces a single Windows `amd64` binary.
+- Build requires **Go 1.25** (see `go.mod` for exact patch version). Produces binaries for Windows x64, Linux x64, and Linux arm64 (cross-compiled via `GOOS`/`GOARCH` env vars; no CGo means the toolchain handles the rest transparently).
 - **FFmpeg is required at runtime** — must be on PATH or configured via `cfg.Paths.FFmpegPath`. The first-run setup wizard validates FFmpeg availability and can install it via chocolatey or winget.
 - **CI builds on tag push only** (tags matching `v*`). The workflow reads `RELEASE_NOTES.md` from the repository root for the GitHub release body.
 - **Ed25519 signature verification is mandatory** before any binary swap during self-update. Updates without a valid `.sig` file are rejected.
@@ -31,14 +31,14 @@ go test -v -run TestParseDash ./internal/engine/... # Single test
 go vet ./...                                        # Static analysis
 ```
 
-All commands target Windows. `GOOS=windows` and `GOARCH=amd64` are the assumed defaults. Cross-compilation from other platforms requires setting these explicitly.
+These commands default to the host OS and architecture. For cross-compilation (e.g., building Linux binaries from Windows), set `GOOS` and `GOARCH` explicitly — `CGO_ENABLED=0` means no C toolchain is required regardless of target platform. See BUILDING.md for per-platform build commands.
 
 ### BotGuard Sidecar Embed Prerequisites
 
 Two embed blobs must be present in `internal/bgutils/embed/` before `go build` will succeed (the `//go:embed` directives in `internal/bgutils/embed/embed.go` reference files that don't exist on a fresh checkout):
 
 ```bash
-# 1. Fetch + gzip the pinned Node.js Windows x64 binary (~33 MB blob).
+# 1. Fetch + gzip the pinned Node.js binaries for all 3 platforms (~150 MB total).
 go run ./tools/fetch-node                 # idempotent; skips on version match.
 
 # 2. Build the JS sidecar payload (~3.5 MB tarball).
@@ -54,7 +54,7 @@ go build -o moombox.exe ./cmd/moombox
 CI runs steps 1 and 2 automatically (see `.github/workflows/release.yml`). For local builds, run them once after fresh checkout; subsequent `go build` calls reuse the embedded blobs until `version.txt` drifts (Node version bump or sidecar JS change).
 
 The two embed sources are independent:
-- `tools/fetch-node/main.go` is a Go tool that downloads the pinned Node release from `nodejs.org/dist/`, SHA-256 verifies against a hardcoded constant in the source, gzips `node.exe` to `internal/bgutils/embed/node.exe.gz`, and updates `internal/bgutils/embed/version.txt` (committed file used as the cache-invalidation key for first-launch extraction). 5-minute HTTP timeout + 200 MB body cap.
+- `tools/fetch-node/main.go` is a Go tool that downloads the pinned Node release from `nodejs.org/dist/` for all three platforms (Windows x64, Linux x64, Linux arm64), SHA-256 verifies each against hardcoded constants in the source, gzips them to `internal/bgutils/embed/node-windows-amd64.gz`, `node-linux-amd64.gz`, and `node-linux-arm64.gz`, and updates `internal/bgutils/embed/version.txt` (committed file used as the cache-invalidation key for first-launch extraction). 5-minute HTTP timeout + 200 MB body cap per file.
 - `bgutil-sidecar/build.mjs` is a Node.js script that `tar -czf` packages the production-only `node_modules/` + `src/server.js` + `package*.json` into `dist/sidecar.tar.gz` and copies the result to `internal/bgutils/embed/sidecar.tar.gz`. Build-time `tar` is required (system binary; available on Windows 10+, all Linux distros, and macOS) but the runtime extraction inside Moombox uses pure Go (`archive/tar` + `compress/gzip` from stdlib) — end users do NOT need a system tar.
 
 To skip the sidecar entirely (smaller binary, but PO tokens fall back to websafe-only), set `[bgutils] use_sidecar = false` in `config.toml`. The embed blobs are still required at build time though — they're either present or the binary doesn't compile.
@@ -95,29 +95,30 @@ The first-run setup wizard checks for FFmpeg and offers to install it via chocol
 ### Workflow
 
 **File:** `.github/workflows/release.yml`
-**Trigger:** Tag push matching `v*` (e.g., `v2.3.20`)
-**Runner:** `windows-latest`
+**Trigger:** Tag push matching `v*` (e.g., `v2.6.3`)
+**Runner:** `ubuntu-latest` (single job; cross-compiles all platforms from Linux)
 **Permissions:** `contents: write` (to create releases and upload assets)
 
 ### Steps
 
-1. **Checkout** — `actions/checkout@v4`
-2. **Set up Go** — `actions/setup-go@v5` with version from `go.mod`
-3. **Generate Windows resources** — Patches `winres.json` with tag version and commit hash, then runs `go-winres make --arch amd64` in `cmd/moombox/`
-4. **Build binary** — `go build` with ldflags:
-   ```
-   -ldflags "-s -w -X main.version=$version -X main.commit=$commit"
-   ```
-   - `-s -w` strips debug info and DWARF symbols (smaller binary)
-   - `-X main.version` injects the semver from the tag (without `v` prefix)
-   - `-X main.commit` injects the short commit hash
-   - Output: `Moombox.exe`
-   - Environment: `CGO_ENABLED=0`, `GOOS=windows`, `GOARCH=amd64`
-5. **Sign binary** — `go run ./cmd/sign Moombox.exe` using `SIGNING_KEY` secret. Produces `Moombox.exe.sig`
-6. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends a download link and uses it as the release body. Otherwise, falls back to GitHub's auto-generated release notes
-7. **Create GitHub Release** — `softprops/action-gh-release@v2` with:
-   - Body from step 6
-   - Assets: `Moombox.exe` + `Moombox.exe.sig`
+1. **Checkout** — `actions/checkout@v6`
+2. **Restore embed blob cache** — `actions/cache@v5` keyed by hash of `version.txt` + sidecar `package-lock.json` + `build.mjs` + `tools/fetch-node/main.go`. On cache hit, the sidecar build and Node fetch are skipped entirely (~55s saved). Cache evicts after 7 days of disuse.
+3. **Set up Go** — `actions/setup-go@v6` with version from `go.mod`
+4. **Set up Node** — `actions/setup-node@v6` (only when cache missed)
+5. **Build BotGuard sidecar payload** — `npm ci --omit=dev --ignore-scripts && node build.mjs` (only when cache missed)
+6. **Fetch embedded Node binaries** — `go run ./tools/fetch-node` — downloads pinned Node v22 LTS for all 3 platforms, SHA-256 verifies, gzips to per-platform embed files (only when cache missed)
+7. **Generate Windows resources** — Patches `winres.json` with tag version + commit hash via `jq`, runs `go-winres make --arch amd64` in `cmd/moombox/`. `go-winres` runs on any host OS; the resulting `.syso` uses filename build constraints so it's included only under `GOOS=windows`.
+8. **Compute version + ldflags** — Exports `VERSION`, `COMMIT`, `LDFLAGS` to `$GITHUB_ENV` once so all per-binary steps reference the same values.
+9. **Build Moombox.exe** — `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS"`
+10. **Build moombox-linux-amd64** — `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS"`
+11. **Build moombox-linux-arm64** — `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS"`
+12. **Sign Moombox.exe** — `go run ./cmd/sign Moombox.exe` → `Moombox.exe.sig`
+13. **Sign moombox-linux-amd64** → `moombox-linux-amd64.sig`
+14. **Sign moombox-linux-arm64** → `moombox-linux-arm64.sig`
+15. **Build release body** — If `RELEASE_NOTES.md` exists and is non-empty, prepends three download links and uses the file as the release body. Otherwise, falls back to GitHub's auto-generated release notes.
+16. **Create GitHub Release** — `softprops/action-gh-release@v3` with body from step 15 and 6 assets: `Moombox.exe` + `.sig`, `moombox-linux-amd64` + `.sig`, `moombox-linux-arm64` + `.sig`. Tags containing `-` (e.g. `-rc.1`, `-test.1`) are marked as pre-releases.
+
+Steps 9–11 are sequential (not parallel). On a 4-vCPU runner each `go build` saturates the CPU, so concurrent builds contend for cores and re-download every module dep three times. Sequential is faster end-to-end; the first build also warms the module cache for the next two.
 
 ### Release Body Format
 
@@ -125,6 +126,8 @@ When `RELEASE_NOTES.md` is present, the release body is assembled as:
 
 ```
 [**`Download Moombox.exe for Windows (x64)`**](download-url)
+[**`Download moombox-linux-amd64 for Linux (x64)`**](download-url)
+[**`Download moombox-linux-arm64 for Linux (arm64)`**](download-url)
 
 ---
 
@@ -453,7 +456,8 @@ The script pulls each repository, displays new commits since the last pull, and 
 | `internal/updater/signing.go` | Ed25519 verification, embedded public key |
 | `internal/notifications/manager.go` | Notification dispatch, event filtering, target management |
 | `internal/notifications/discord.go` | Discord webhook sender |
-| `internal/disk/disk_windows.go` | Disk space queries via kernel32 |
+| `internal/disk/disk_windows.go` | Disk space queries via kernel32 (Windows) |
+| `internal/disk/disk_unix.go` | Disk space queries via statfs (Linux) |
 | `internal/config/config.go` | Default values, validation (including disk thresholds) |
 | `.github/workflows/release.yml` | CI pipeline definition |
 | `cmd/moombox/winres/winres.json` | Windows resource metadata template |

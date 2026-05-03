@@ -4,7 +4,7 @@ Control prompts for Claude Code. For architecture, design, and implementation de
 
 ## What This Is
 
-Moombox is a YouTube/Twitch live stream archiver written in Go — single binary, Windows-only. Feature work, bug fixes, and improvements are the primary focus. See `SPEC.md` for full project specification.
+Moombox is a YouTube/Twitch live stream archiver written in Go — single binary. Windows x64 + Linux x64 + Linux arm64 supported. Pragmatic parity: core download pipeline / web dashboard / TUI / sidecar work identically across platforms; Windows-specific features (UAC elevation, DPAPI cookie reading) degrade gracefully on Linux with clear UI messaging. Feature work, bug fixes, and improvements are the primary focus. See `SPEC.md` for full project specification.
 
 ## Working Style
 
@@ -21,7 +21,7 @@ go test -v -run TestParseDash ./internal/engine/... # Single test
 go vet ./...                                        # Static analysis
 ```
 
-Runtime requires FFmpeg on PATH. CI (`.github/workflows/release.yml`) builds Windows exe on tag push, reads `RELEASE_NOTES.md` for GitHub release body.
+Runtime requires FFmpeg on PATH. CI (`.github/workflows/release.yml`) cross-compiles all 3 platform binaries (Windows x64, Linux x64, Linux arm64) from a single ubuntu-latest job on tag push, reads `RELEASE_NOTES.md` for GitHub release body.
 
 ### Profiling (pprof)
 
@@ -51,7 +51,7 @@ go tool pprof -inuse_space -base heap-t0.pprof heap-t1.pprof
 `go build ./cmd/moombox` requires two embed blobs to be present in `internal/bgutils/embed/` before compilation. Without them the `go:embed` directives in `internal/bgutils/embed/embed.go` fail.
 
 ```bash
-# 1. Fetch + gzip the pinned Node.js Windows x64 binary (~33 MB blob):
+# 1. Fetch + gzip the pinned Node.js binaries for all 3 platforms (~150 MB total):
 go run ./tools/fetch-node                 # idempotent; skips on version match
 
 # 2. Build the JS sidecar payload (~3.5 MB tarball):
@@ -105,7 +105,7 @@ Error paths: any → `Error`, `Cancelled`, or `COOKIES?`
 ### TUI chord system
 `buildMenuItems()` in `app.go` = single source of truth for chords, action menu, hints, and help. `dispatchAction(chord, job)` = unified handler. Adding a chord: one entry in `buildMenuItems()` + one case in `dispatchAction()`.
 
-Prefixes: **A** (Action), **R** (Request), **O** (Open), **Q** (Quit). Single keys: **F** (Filter), **M** (Menu), **`** (Settings), **?** (Help), **/** (Search logs — log panel only; `n`/`N` navigate matches, `Esc` clears). **O** chords include `O C` (Copy Stream URL to clipboard via OSC 52). Confirm chords require a third keypress within 3s.
+Prefixes: **A** (Action), **R** (Request), **O** (Open), **Q** (Quit). Single keys: **F** (Filter), **M** (Menu), **`** (Settings), **?** (Help), **/** (Search logs — log panel only; `n`/`N` navigate matches, `Esc` clears). **O** chords include `O C` (Copy Stream URL to clipboard via OSC 52). Confirm chords require a third keypress within 3s. **R** chords include `R N` (View Release Notes — shows pending-update notes when an update is available, otherwise fetches current version's notes from GitHub; from inside the overlay `U` applies the update).
 
 ### Config migrations
 `migrateOldFormat()` in `config/config.go` handles backward compat — migrates flat fields into current sections, converts legacy flags. Non-destructive (only applies when new section doesn't exist). Add migration logic for any renamed/relocated fields.

@@ -233,6 +233,7 @@ The chord system is a three-state finite automaton:
 | `R C` | Recheck Cookies | Cookie recheck callback is configured |
 | `R F` | Force Cookie Refresh | Cookie force-refresh callback is configured |
 | `R V` | Check for Updates | Update check callback is configured |
+| `R N` | View Release Notes | Always available. Shows pending-update notes when an update is available; otherwise fetches current version's notes from GitHub. From inside the overlay: `U` applies the update, `Esc`/`Q` closes. |
 | `R U` | Apply Update | An update is available and apply callback is configured |
 | `R S` | Verify Signature | Signature verification callback is configured |
 | `R P` | Restart Program | Restart callback is configured. Requires confirmation. |
@@ -277,7 +278,8 @@ Overlays are full-screen or near-full-screen modal views that take over keyboard
 | Client Tokens | `A K` | List of persistent client authentication tokens. Delete individual tokens. |
 | Settings | `` ` `` | Full config editor built with the `huh` form framework. Supports full mouse interaction (click tabs, fields, toggles, cycle options, and action buttons). Action buttons at the bottom: `[ Save & Return ]` / `[ Return Without Saving ]` (when dirty), or `[ Return ]` (when clean). Presents a close confirmation when there are unsaved changes and the user attempts to dismiss. Smart dirty tracking: reverting a field back to its original value clears the dirty flag. Job detail panel renders clickable hyperlinks (OSC 8) for stream URLs and output paths. |
 | Setup Wizard | First run | Multi-step initial setup: configuration, FFmpeg check/install, yt-dlp plugin, cookie capture. Built with `huh`. |
-| FFmpeg Check | Setup flow | Validates FFmpeg is on PATH. Offers installation options if missing. |
+| FFmpeg Check | Setup flow | Validates FFmpeg is on PATH. Offers installation options if missing. On Linux, also shows the distro-appropriate package manager command (`apt`, `dnf`, `pacman`, etc.) from `GET /api/ffmpeg/install-suggestion`. |
+| Release Notes | `R N` | Shows release notes for the pending update (when an update is available) or the current version (fetched from GitHub). Rendered via `glamour` in the TUI. From inside: `U` applies the update, `Esc`/`Q` closes. Uses `bubbles/viewport` for scrolling. |
 
 ### Async Message Types
 
@@ -545,6 +547,7 @@ All routes use the `/api/` prefix unless otherwise noted. PO Token routes use ba
 | Method | Path | Notes |
 |--------|------|-------|
 | `GET` | `/api/update/status` | Get current update status (available version, if any). |
+| `GET` | `/api/update/release-notes` | Fetch release notes for a version. Query param `version=X.Y.Z`; defaults to current version. Returns sanitized HTML rendered from GitHub release body via goldmark + bluemonday (download-link section stripped). Used by the Web UI "View Release Notes" button. |
 | `POST` | `/api/update/check` | Manually check for updates. |
 | `POST` | `/api/update/apply` | Download and apply an available update. Triggers restart. |
 | `POST` | `/api/update/verify` | Verify the Ed25519 signature of the current binary. |
@@ -555,6 +558,7 @@ All routes use the `/api/` prefix unless otherwise noted. PO Token routes use ba
 | Method | Path | Notes |
 |--------|------|-------|
 | `GET` | `/api/ffmpeg/check` | Check if FFmpeg is on PATH and return version info. |
+| `GET` | `/api/ffmpeg/install-suggestion` | Returns the distro-appropriate package manager command for FFmpeg installation (e.g., `apt install ffmpeg`, `dnf install ffmpeg`, `pacman -S ffmpeg`). Linux only; returns empty on Windows. |
 | `POST` | `/api/ffmpeg/check` | Re-check FFmpeg availability. Rate limited. |
 | `GET` | `/api/ffmpeg/install-options` | Get available FFmpeg installation options (download sources). |
 | `POST` | `/api/ffmpeg/install` | Begin FFmpeg download/installation. Rate limited. |

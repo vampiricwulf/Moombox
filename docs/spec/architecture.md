@@ -14,7 +14,7 @@ These are hard requirements that must be followed in all code changes:
 - **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** Pass a `map[string]any` of field names to values. The method dynamically builds the SQL SET clause, auto-updates `updated_at`, and triggers `OnJobUpdate` subscribers. Never write raw UPDATE SQL for job fields outside this pattern.
 - **Callback closures for cross-cutting service wiring, NOT interfaces.** Services are wired together in `main.go` using function closures (`OnVideoFound`, `OnStreamFound`, `OnSchedule`, `OnCookieRefreshNeeded`, etc.) and struct-based dependency injection. There are no service registry patterns or interface-based DI containers.
 - **JobStatus is `type JobStatus string`.** Timestamps are ISO 8601 strings (RFC3339). Optional numeric fields (sequence numbers, dimensions, file sizes) use pointers (`*int`, `*int64`, `*float64`) where nil means "not set." Boolean fields in the database use integer 0/1 but are exposed as Go `bool` in the `Job` struct.
-- **Windows-only target.** All path handling, process management, and system calls assume Windows. The `createNoWindow = 0x08000000` flag is used for detached process spawning. Disk space queries use kernel32 syscalls.
+- **Cross-platform via build tags.** Windows x64, Linux x64, and Linux arm64 are supported. Platform-specific behavior is isolated in per-package `_windows.go` / `_unix.go` files: `createNoWindow = 0x08000000` (launcher, Windows only), kernel32 disk queries (`internal/disk/disk_windows.go` vs `disk_unix.go` via statfs), TCP-dial connectivity monitor (`monitor_unix.go`), flock-based single-instance locking (`single_instance_unix.go`), and the ping-based `.exe~` cleanup (`launcher_windows.go`). Linux stubs produce correct no-op or functional fallback behavior; Windows-only features degrade with clear UI messaging.
 
 ## Process Model
 
@@ -102,7 +102,7 @@ Auto-converts plaintext password to scrypt hash if detected (one-time migration 
 `twitch.NewService(jar, log)` creates the Twitch service. Initializes GQL API authentication from cookies (looks for `auth-token` cookie). Logs auth status at startup.
 
 ### 8. PO Token Provider + BotGuard Sidecar
-`bgutils.NewPotProvider()` creates the BotGuard PO token provider with its triple-layer cache: session cache (6h TTL), minter cache (single-minter design, dynamic TTL from BotGuard response), and inflight dedup (concurrent requests share a single generation via channel synchronization). Immediately after, when `cfg.Bgutils.UseSidecar` is true (default), `sidecar.New(...)` constructs a `Sidecar` and `Start(ctx)` launches the embedded Node.js subprocess: extract `node.exe.gz` + `sidecar.tar.gz` from `go:embed` to `%LOCALAPPDATA%/Moombox/sidecar/`, apply user-only DACL, spawn `node src/server.js` pinned to a Windows Job Object, ping/pong handshake. On success, `potProvider.SetSidecar(s)` attaches it; `PotProvider.generateAndMint` then prefers the sidecar path and falls through to the goja-only path on any sidecar error so PO-token generation never goes completely dark. Failure to start the sidecar is non-fatal — Moombox logs a warning and continues with goja-fallback.
+`bgutils.NewPotProvider()` creates the BotGuard PO token provider with its triple-layer cache: session cache (6h TTL), minter cache (single-minter design, dynamic TTL from BotGuard response), and inflight dedup (concurrent requests share a single generation via channel synchronization). Immediately after, when `cfg.Bgutils.UseSidecar` is true (default), `sidecar.New(...)` constructs a `Sidecar` and `Start(ctx)` launches the embedded Node.js subprocess: extract `node.exe.gz` + `sidecar.tar.gz` from `go:embed` to `%LOCALAPPDATA%/Moombox/sidecar/`, apply user-only DACL, spawn `node src/server.js` pinned to a Windows Job Object, ping/pong handshake. On success, `potProvider.SetSidecar(s)` attaches it; `PotProvider.generateAndMint` then prefers the sidecar path and falls through to the goja-only path on any sidecar error so PO-token generation never goes completely dark. Failure to start the sidecar is non-fatal — Moombox logs a warning and continues with goja-fallback. On Linux the per-platform blob (`node-linux-amd64.gz` or `node-linux-arm64.gz`) is selected at runtime; the extraction directory is platform-appropriate (e.g. `~/.local/share/moombox/sidecar/` on Linux).
 
 ### 9. Cipher Solver
 `cipher.NewSolver(cacheDir, log)` creates the YouTube signature cipher solver. Cache directory is `%TEMP%/yt-cipher`. Manages a 3-VM LRU cache keyed by `player.js` URL. Wired to `ytService.PlayerAPI.SetCipherSolver()` so format URL decryption is transparent. Uses full AST parsing with regex fallback for extraction.
@@ -181,7 +181,7 @@ internal/youtube    (8 files, ~1,950)  -- Service, PlayerAPI, Auth, watch page, 
 internal/twitch    (10 files, ~3,200)  -- Service, GQL API, auth, HLS, IRC chat, VOD chat, emotes
 internal/bgutils   (~10 files, ~1,800)  -- PO token: PotProvider + WebPoClient (sidecar primary, goja fallback)
 internal/bgutils/sidecar (5 files,~700) -- Node subprocess manager: extract, JSON-RPC mux, Job Object
-internal/bgutils/embed   (1 file)       -- go:embed boundary for node.exe.gz + sidecar.tar.gz + version.txt
+internal/bgutils/embed   (1 file)       -- go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
 internal/cipher     (9 files, ~1,500)  -- YouTube signature cipher: AST + regex, 3-VM LRU
 internal/engine    (12 files, ~2,850)  -- SegmentDownloader (DASH/HLS/VOD), manifest, FFmpeg muxer
 internal/chat       (3 files, ~1,400)  -- YouTube live chat downloader (polling + batching)
@@ -191,7 +191,7 @@ internal/notif.     (2 files, ~330)    -- Manager + Discord webhook
 internal/web       (21 files, ~6,600)  -- chi router, WebSocket hub, auth, middleware, routes
 internal/tui       (33 files, ~13,100) -- 2-over-1 panel layout, overlays, chord system
 internal/goja       (4 files, ~800)    -- JS runtime shims (minimal DOM, TextEncoder, timers)
-internal/disk       (1 file,  ~60)     -- Windows disk space queries (kernel32)
+internal/disk       (2 files, ~60)     -- Disk space queries: kernel32 on Windows, statfs on Linux
 internal/errors     (1 file,  ~230)    -- Typed error hierarchy, sentinel codes
 internal/constants  (1 file,  ~400)    -- Hardcoded values (API keys, URLs, timeouts)
 internal/utils     (14 files, ~1,150)  -- HTTP helpers, formatters, YouTube URL parsing
@@ -844,7 +844,7 @@ Callback fields:
 
 ## Cross-references
 
-- [design-philosophy.md](design-philosophy.md) -- Why these architectural patterns exist (loose coupling rationale, Windows-only justification, no-CGo constraint)
+- [design-philosophy.md](design-philosophy.md) -- Why these architectural patterns exist (loose coupling rationale, cross-platform build-tag approach, no-CGo constraint)
 - [platform-services.md](platform-services.md) -- YouTube multi-client auth, Twitch GQL, BotGuard/PO tokens, cipher solving details
 - [data-and-storage.md](data-and-storage.md) -- Database schema, migrations, config format, batch update internals
 - [security.md](security.md) -- Middleware stack, CSRF, auth flow, Ed25519 update verification

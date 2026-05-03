@@ -42,7 +42,7 @@
 | monitor/ | ~1,450 | 4 | 1 | Feed (RSS), DECAPI, Twitch monitors |
 | bgutils/ | ~1,800 | 10 | 3 | PO token: PotProvider, WebPoClient, Challenge, BotGuard, WebPoMinter (sidecar primary, goja fallback) |
 | bgutils/sidecar/ | ~700 | 5 | 1 | Node subprocess manager: extract, JSON-RPC mux, Job Object pinning |
-| bgutils/embed/ | ~30 | 1 | 0 | go:embed boundary for node.exe.gz + sidecar.tar.gz + version.txt |
+| bgutils/embed/ | ~30 | 1 | 0 | go:embed boundary for node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt |
 | chat/ | ~1,400 | 3 | 1 | YouTube live chat downloader (polling + batching) |
 | utils/ | ~1,150 | 14 | 14 | HTTP helpers, formatters, YouTube URL parsing, JSON |
 | config/ | ~850 | 4 | 1 | TOML config, FlexDuration, channel terms |
@@ -52,7 +52,7 @@
 | constants/ | ~400 | 1 | 0 | Hardcoded values (API keys, URLs, timeouts) |
 | notifications/ | ~330 | 2 | 1 | Manager + Discord webhook |
 | errors/ | ~230 | 1 | 1 | Typed error hierarchy, sentinel codes |
-| disk/ | ~60 | 1 | 0 | Windows disk space queries (kernel32) |
+| disk/ | ~60 | 2 | 0 | Disk space queries: kernel32 on Windows, statfs on Linux |
 
 ### Totals
 

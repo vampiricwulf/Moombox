@@ -9,7 +9,7 @@ This document defines the design priorities, platform constraints, code complexi
 These are hard rules. They are not guidelines, suggestions, or aspirations. An AI assisting with Moombox development must follow these without exception:
 
 - **Priority ordering is absolute.** Correctness beats reliability. Reliability beats resource efficiency. The full ordering is defined in the Priority Ordering section below. When two priorities conflict, the higher one wins. There are no exceptions.
-- **Windows-only unless explicitly requested.** All code, paths, system calls, and assumptions target Windows 11. Do not add Linux or macOS support unless the user specifically asks for it.
+- **Cross-platform via build tags.** Windows x64 and Linux x64/arm64 are supported. macOS is deferred. Platform-specific code lives in `_windows.go` / `_unix.go` / `_other.go` files per package. Do not add macOS support unless explicitly requested.
 - **No CGo.** Every dependency must be pure Go. No C bindings, no shared libraries, no native extensions. This is non-negotiable — it ensures single-binary distribution with zero system dependencies beyond Go itself (and FFmpeg at runtime).
 - **Single binary deployment.** The entire application compiles to one `.exe`. Web assets are embedded via `go:embed`. No installer, no external config files required, no runtime file extraction.
 - **Resource efficiency is a design constraint, not an optimization.** Moombox runs 24/7. Every constant allocation, every polling loop, every idle goroutine is a cost the user pays continuously. Design for zero-cost-when-idle from the start.
@@ -170,18 +170,18 @@ The test is: does this abstraction make the code easier to understand, or does i
 
 ## Platform Constraints
 
-### Windows-Only
+### Cross-Platform via Build Tags
 
-Moombox targets Windows 11. All development, testing, and deployment assumptions are Windows-specific. This is not a temporary limitation or a "we'll add Linux later" situation — it is a deliberate design choice that simplifies the codebase and matches the target user's environment.
+Moombox supports Windows x64, Linux x64, and Linux arm64. macOS is not supported (deferred). Platform-specific behavior is isolated in per-package `_windows.go` / `_unix.go` files using Go build constraints:
 
-What this means concretely:
-- **File paths** use Windows conventions. Backslash separators are handled correctly. Long path support is assumed.
-- **Disk space queries** use kernel32 syscalls (`GetDiskFreeSpaceExW`) via the `internal/disk` package.
-- **Cookie extraction** uses Windows-specific browser paths and DPAPI decryption for Chromium-based browsers. Browser detection uses the Windows registry.
-- **Process creation** uses `CREATE_NO_WINDOW` flags for detached child processes (the launcher pattern).
-- **Self-update** uses the Windows-specific three-step rename dance (`.new` → current → `.old`) because Windows does not allow overwriting a running executable directly.
+- **Disk space queries** — kernel32 `GetDiskFreeSpaceExW` on Windows (`internal/disk/disk_windows.go`); `statfs` syscall on Linux (`internal/disk/disk_unix.go`).
+- **Cookie extraction** — DPAPI decryption and Windows registry-based browser detection on Windows; graceful degradation with UI messaging on Linux (manual cookie file path or browser-selection dropdown).
+- **Process creation** — `CREATE_NO_WINDOW` (`0x08000000`) for detached child processes on Windows (`launcher_windows.go`); standard exec on Linux (`launcher_unix.go`).
+- **Single-instance locking** — `CreateMutex` on Windows; `flock` on Linux.
+- **Self-update cleanup** — the `.exe~` ping-based deferred delete is Windows-only (`launcher_windows.go`); Linux has no equivalent constraint since running binaries can be replaced in-place.
+- **Connectivity monitor** — ICMP-free TCP dial on Linux (`monitor_unix.go`); similar approach on Windows.
 
-If Linux or macOS support is ever requested, it would require platform-specific implementations of: disk space queries, cookie decryption, browser detection, process creation flags, and the binary update mechanism.
+The core download pipeline, web dashboard, TUI, BotGuard sidecar, and all business logic are identical across platforms. Windows-specific features degrade gracefully on Linux with clear UI messaging rather than silently failing.
 
 ### No CGo
 
@@ -194,7 +194,7 @@ Every dependency must be pure Go. This rules out:
 The benefits of this constraint:
 - **Single binary distribution.** No shared libraries to ship, no DLL hell, no "works on my machine."
 - **Simple build chain.** `go build` is the only tool needed (plus `go-winres` for the Windows icon/version info, which is optional).
-- **Cross-compilation friendly.** Though not currently needed (Windows-only), the pure-Go constraint means cross-compilation would work if ever needed.
+- **Cross-compilation friendly.** The pure-Go constraint enables cross-compilation from any host OS. CI cross-compiles all three platform binaries (Windows x64, Linux x64, Linux arm64) from a single ubuntu-latest runner.
 - **Reproducible builds.** No dependency on system-installed C libraries or compiler versions.
 
 The cost is occasionally lower performance compared to CGo alternatives (e.g., `modernc.org/sqlite` is slower than `mattn/go-sqlite3`). This is an acceptable tradeoff given the priority ordering — resource efficiency matters, but deployment simplicity ranks higher, and the performance difference is not meaningful for Moombox's workload.
@@ -202,10 +202,10 @@ The cost is occasionally lower performance compared to CGo alternatives (e.g., `
 ### Single Binary
 
 Everything compiles into one executable:
-- All Go code compiles to a single `.exe`.
+- All Go code compiles to a single binary (`Moombox.exe` on Windows, `moombox-linux-amd64` / `moombox-linux-arm64` on Linux).
 - All web assets (HTML, CSS, JavaScript, images) are embedded via `go:embed` in `web/embed.go`.
 - No external configuration files are required at startup — sensible defaults are applied, and a configuration file is created during the first-run wizard.
-- No installer is needed. The user downloads the `.exe` and runs it.
+- No installer is needed. The user downloads the binary and runs it.
 - Self-updates replace the binary in-place (with signature verification).
 
 The only external runtime dependency is FFmpeg, which must be on PATH or configured in the settings. Both UIs include a setup flow to help the user install FFmpeg if it is not found.

@@ -2,7 +2,7 @@
 
 Comprehensive AI-first reference for the Moombox project. Written for machine comprehension — explicit, unambiguous, no assumed context. Each section stands alone; an LLM reading just one section should understand that subsystem well enough to modify its code correctly. For deeper implementation details, follow the deep-dive pointer at the end of each section.
 
-Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary, Windows-only.
+Module: `github.com/vampiricwulf/Moombox` — Go 1.25, single binary. Windows x64 + Linux x64 + Linux arm64.
 
 ---
 
@@ -14,7 +14,7 @@ The full workflow is: monitors detect new streams via RSS feeds, DECAPI polling,
 
 Moombox is a standalone Go reimplementation. It is not a yt-dlp wrapper — it reimplements YouTube extraction, cipher decryption, BotGuard/PO token generation, format selection, and Twitch GQL/HLS/IRC from scratch. It tracks upstream changes in yt-dlp, BgUtils, and ejs for awareness, porting relevant logic when YouTube or Twitch change their protocols. The `references/` directory (gitignored) holds clones of these upstream repos for diffing.
 
-What Moombox is not: it is not a general-purpose video downloader (it handles YouTube and Twitch only), not cross-platform by default (Windows-only unless explicitly requested), not a hosted/multi-user service (single-operator deployment), and not designed for massive scale (it is a 24/7 appliance, not a batch processing system).
+What Moombox is not: it is not a general-purpose video downloader (it handles YouTube and Twitch only), not a hosted/multi-user service (single-operator deployment), and not designed for massive scale (it is a 24/7 appliance, not a batch processing system). macOS is not supported (deferred); Windows x64 and Linux x64/arm64 are the supported platforms.
 
 Deployment is a single binary plus FFmpeg on PATH. First-run triggers a setup wizard (web-based) that walks through FFmpeg installation, cookie configuration, channel setup, and optional password. Self-updates check GitHub Releases daily, verify Ed25519 signatures, apply a three-step binary swap, and restart via exit code 42. The launcher/supervisor pattern ensures clean restarts without process chain buildup.
 
@@ -35,7 +35,7 @@ The application listens on port 774 by default. Configuration lives in `config.t
 | `golang.org/x/crypto/scrypt` | Password hashing |
 | `golang.org/x/sync/errgroup` | Concurrent download coordination |
 | Shoelace v2.16 (CDN) | Web UI component library |
-| Node.js v22 LTS (embedded) | Real V8 + JSDOM for the BotGuard sidecar. Pinned `node.exe` is `go:embed`'d into Moombox.exe and extracted on first launch — users do not need a Node install. |
+| Node.js v22 LTS (embedded) | Real V8 + JSDOM for the BotGuard sidecar. Pinned per-platform Node binaries (`node-windows-amd64.gz`, `node-linux-amd64.gz`, `node-linux-arm64.gz`) are `go:embed`'d and extracted on first launch — users do not need a Node install. |
 | `bgutils-js` (npm, embedded) | LuanRT's BotGuard JS implementation (MIT). Bundled inside the sidecar payload. Used directly; the higher-level `bgutil-ytdlp-pot-provider` wrapper is GPL-3.0 and deliberately not depended on. |
 | `jsdom` (npm, embedded) | DOM implementation for the sidecar's globalThis bootstrap. Bundled inside the sidecar payload. |
 
@@ -69,7 +69,7 @@ Complexity is acceptable when the solution demands it — YouTube's cipher obfus
 
 ### Platform Constraints
 
-- **Windows-only** — All file paths, process management (CreateNoWindow), disk space queries (kernel32 GetDiskFreeSpaceExW), and auto-cookie extraction (DPAPI decryption) assume Windows. Linux/Mac support is only added when explicitly requested.
+- **Cross-platform via build tags** — Windows x64, Linux x64, and Linux arm64 are supported. Platform-specific behavior (CreateNoWindow process spawning, kernel32 disk queries, DPAPI cookie decryption) is isolated in `_windows.go` / `_unix.go` / `_other.go` files per package. Linux gets functional fallbacks; Windows-only features degrade gracefully with clear UI messaging. macOS is deferred.
 - **No CGo** — Pure Go dependencies only. This means modernc.org/sqlite instead of mattn/go-sqlite3, and dop251/goja instead of V8 bindings. The tradeoff is simpler cross-compilation and build toolchain at the cost of raw performance.
 - **Single binary** — Web assets are embedded via `go:embed`. No external templates, no asset directories to manage.
 
@@ -144,7 +144,7 @@ internal/
                   -- triple cache (session/minter/inflight) wrapping both paths
     sidecar/       <- Node + JSDOM + bgutils-js subprocess manager: extraction,
                   -- Job Object pinning, JSON-RPC mux (primary PO-token path)
-    embed/         <- go:embed of node.exe.gz + sidecar.tar.gz + version.txt
+    embed/         <- go:embed of node-windows-amd64.gz + node-linux-amd64.gz + node-linux-arm64.gz + sidecar.tar.gz + version.txt
   cipher/          <- Signature + n-param decryption: AST + regex, 3-VM LRU, disk cache
   engine/          <- SegmentDownloader (DASH/HLS/VOD), manifest parser, FFmpeg muxer
   chat/            <- YouTube live chat downloader (polling + batching + resume)
@@ -156,7 +156,7 @@ internal/
   web/routes/      <- HTTP route handlers (jobs, auth, config, cookies, update, etc.)
   tui/             <- 2-over-1 panel layout, 10 overlays, chord system, Charm ecosystem
   goja/            <- JS runtime shims (minimal DOM, TextEncoder, timers)
-  disk/            <- Windows disk space queries (kernel32 GetDiskFreeSpaceExW)
+  disk/            <- Disk space queries: kernel32 GetDiskFreeSpaceExW on Windows, statfs on Linux
   errors/          <- Typed error hierarchy with Expected/internal distinction
   constants/       <- Hardcoded values (API keys, URLs, client configs, user agents)
   utils/           <- HTTP helpers, formatters, YouTube/Twitch URL parsing, sanitization

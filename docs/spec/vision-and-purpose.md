@@ -7,7 +7,7 @@ This document defines what Moombox is, why it exists, who it is for, and what it
 ## Rules and Constraints
 
 - Moombox is a **YouTube/Twitch live stream archiver**. That is its primary identity. All features serve this purpose.
-- Moombox is **Windows-only** unless Linux or macOS support is explicitly requested for a specific feature. Always assume Windows as the target platform.
+- Moombox supports **Windows x64, Linux x64, and Linux arm64**. macOS is not supported (deferred). Core functionality is identical across platforms; Windows-specific features (UAC elevation, DPAPI cookie extraction) degrade gracefully on Linux with clear UI messaging.
 - Moombox is a **standalone Go program**. It does not shell out to yt-dlp, streamlink, or any other external download tool. The only external runtime dependency is FFmpeg.
 - Moombox is a **single-binary application**. There is no installer, no service framework, no daemon manager. The user runs an executable.
 - Moombox is a **personal tool built to product-level quality**. The owner/developer's needs drive every decision. Other users benefit from the polish, but the owner is the primary stakeholder.
