@@ -347,6 +347,16 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// Wire auth verification callbacks so AutoCookieService can verify via real API
 	autoCookieSvc.VerifyYouTubeAuth = cookieRefresh.CheckYouTubeAuth
 	autoCookieSvc.VerifyTwitchAuth = cookieRefresh.CheckTwitchAuth
+	// Wire configured-browser-override callback so GetStatus surfaces the
+	// user's chosen browser_path/browser_type (if any) for the dropdown UI.
+	autoCookieSvc.ConfiguredBrowserOverride = func() (string, string) {
+		var path, btype string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			path = c.Cookies.BrowserPath
+			btype = c.Cookies.BrowserType
+		})
+		return path, btype
+	}
 	s.autoCookieSvc = autoCookieSvc
 
 	// OnAuthChange is fired from the cookie-refresh goroutine; set its plain
