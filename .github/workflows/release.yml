@@ -12,15 +12,15 @@ jobs:
   windows:
     runs-on: windows-latest
     # No outputs declared: the linux job locates the release via tag-match
-    # (softprops/action-gh-release@v2 default behaviour) rather than by ID.
+    # (softprops/action-gh-release@v3 default behaviour) rather than by ID.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -115,7 +115,7 @@ jobs:
 
       - name: Create GitHub Release
         id: create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: release_body.md
           generate_release_notes: ${{ env.use_github_notes == 'true' }}
@@ -132,13 +132,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: windows  # release must exist before linux uploads to it
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -180,7 +180,7 @@ jobs:
           go run ./cmd/sign moombox-linux-arm64
 
       - name: Upload Linux assets to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # Reuse the existing release created by the windows job; don't
           # overwrite the body or release_notes flags here. action-gh-release
