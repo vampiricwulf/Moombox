@@ -658,7 +658,7 @@ The fix is to run BotGuard under real V8 + JSDOM. Moombox embeds a Node.js v22 b
 ### Sidecar lifecycle (`internal/bgutils/sidecar/`)
 
 **Embed:** `internal/bgutils/embed/` is a standalone package exposing three `go:embed`'d package vars:
-- `NodeExeGz []byte` — gzipped Node.js v22 Windows x64 binary (~33 MB), produced by `tools/fetch-node`.
+- `EmbeddedNode []byte` — gzipped Node.js v22 binary for the build's GOOS/GOARCH (~33-43 MB), produced by `tools/fetch-node` and selected via per-platform `embed_<goos>_<goarch>.go` build tags.
 - `SidecarTarGz []byte` — gzipped tarball of `bgutil-sidecar/` production deps + JS source (~3.5 MB), produced by `bgutil-sidecar/build.mjs`.
 - `Version string` — content of `internal/bgutils/embed/version.txt`, format `node@vX.Y.Z sha256@<sha>`. Used as the cache-invalidation key.
 

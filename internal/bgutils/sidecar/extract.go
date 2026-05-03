@@ -48,7 +48,7 @@ func extractIfNeeded(cacheDir string) error {
 
 	// 1. Gunzip-extract node.exe into cacheDir/node.exe.
 	nodePath := filepath.Join(cacheDir, "node.exe")
-	if err := writeGunzipped(nodePath, bgembed.NodeExeGz, 0o755); err != nil {
+	if err := writeGunzipped(nodePath, bgembed.EmbeddedNode, 0o755); err != nil {
 		return fmt.Errorf("extract node.exe: %w", err)
 	}
 

@@ -37,7 +37,7 @@ func TestSidecarFallsBackOnDeath(t *testing.T) {
 	if os.Getenv("MOOMBOX_LIVE_BG_TEST") != "1" {
 		t.Skip("set MOOMBOX_LIVE_BG_TEST=1 to run the sidecar fallback live test")
 	}
-	if len(bgembed.NodeExeGz) == 0 || len(bgembed.SidecarTarGz) == 0 {
+	if len(bgembed.EmbeddedNode) == 0 || len(bgembed.SidecarTarGz) == 0 {
 		t.Skip("sidecar embed blobs missing")
 	}
 
