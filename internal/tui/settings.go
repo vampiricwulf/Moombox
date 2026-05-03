@@ -551,8 +551,13 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Cookies.ActivePlatforms = activePlats
 	m.cfg.Cookies.AutoEnabled = m.values["auto_enabled"] == "Yes"
 	m.cfg.Cookies.BrowserProfileDir = m.values["browser_profile_dir"]
-	m.cfg.Cookies.BrowserPath = m.values["browser_path"]
-	m.cfg.Cookies.BrowserType = m.values["browser_type"]
+	// TrimSpace matches what validateConfigUpdates does for the web path
+	// (config_routes.go:424,427). Without trimming here, a user pasting
+	// "  /usr/bin/firefox  " would pass the trimmed validation above but
+	// persist whitespace into config — exec.Command would then fail with
+	// "fork/exec  /usr/bin/firefox  : no such file or directory".
+	m.cfg.Cookies.BrowserPath = strings.TrimSpace(m.values["browser_path"])
+	m.cfg.Cookies.BrowserType = strings.TrimSpace(m.values["browser_type"])
 	refreshMin, _ := strconv.Atoi(m.values["refresh_interval"])
 	m.cfg.Cookies.RefreshInterval = config.FlexDuration{Value: float64(refreshMin)}
 
