@@ -11,8 +11,8 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    outputs:
-      release_id: ${{ steps.create_release.outputs.id }}
+    # No outputs declared: the linux job locates the release via tag-match
+    # (softprops/action-gh-release@v2 default behaviour) rather than by ID.
     steps:
       - uses: actions/checkout@v4
 
