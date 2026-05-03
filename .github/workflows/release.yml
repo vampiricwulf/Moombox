@@ -8,11 +8,64 @@ on:
 permissions:
   contents: write
 
+# Three jobs: a fast `release` job creates the empty GitHub release with
+# the multi-platform download body, then `windows` and `linux` build their
+# binaries in parallel and append assets to the existing release. This
+# trades ~30s of release-job overhead for ~3-5min of parallelism between
+# the two heavy build jobs.
+
 jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build release body
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          WIN_LINK="[**\`Download Moombox.exe for Windows (x64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/Moombox.exe)"
+          LIN_AMD_LINK="[**\`Download moombox-linux-amd64 for Linux (x64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/moombox-linux-amd64)"
+          LIN_ARM_LINK="[**\`Download moombox-linux-arm64 for Linux (arm64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/moombox-linux-arm64)"
+
+          if [ -f RELEASE_NOTES.md ] && [ -s RELEASE_NOTES.md ]; then
+            {
+              echo "$WIN_LINK"
+              echo "$LIN_AMD_LINK"
+              echo "$LIN_ARM_LINK"
+              echo ""
+              echo "---"
+              echo ""
+              cat RELEASE_NOTES.md
+            } > release_body.md
+            echo "use_github_notes=false" >> "$GITHUB_ENV"
+          else
+            {
+              echo "$WIN_LINK"
+              echo "$LIN_AMD_LINK"
+              echo "$LIN_ARM_LINK"
+            } > release_body.md
+            echo "use_github_notes=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create GitHub Release (assets uploaded by parallel jobs)
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: release_body.md
+          generate_release_notes: ${{ env.use_github_notes == 'true' }}
+          # Tags containing '-' (e.g. v2.6.0-test.1, v2.6.0-beta.2, v2.6.0-rc.1)
+          # are treated as pre-releases: GitHub won't mark them "Latest" and the
+          # /releases/latest endpoint continues to point at the last stable tag.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+          # No files yet — the windows and linux jobs upload to this release
+          # via tag-match in subsequent action-gh-release calls.
+
   windows:
     runs-on: windows-latest
-    # No outputs declared: the linux job locates the release via tag-match
-    # (softprops/action-gh-release@v3 default behaviour) rather than by ID.
+    needs: release  # release must exist before we upload assets to it
     steps:
       - uses: actions/checkout@v6
 
@@ -83,54 +136,19 @@ jobs:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
         run: go run ./cmd/sign Moombox.exe
 
-      - name: Build release body
-        shell: bash
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
-        run: |
-          WIN_LINK="[**\`Download Moombox.exe for Windows (x64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/Moombox.exe)"
-          LIN_AMD_LINK="[**\`Download moombox-linux-amd64 for Linux (x64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/moombox-linux-amd64)"
-          LIN_ARM_LINK="[**\`Download moombox-linux-arm64 for Linux (arm64)\`**](https://github.com/${REPO}/releases/download/${TAG_NAME}/moombox-linux-arm64)"
-
-          if [ -f RELEASE_NOTES.md ] && [ -s RELEASE_NOTES.md ]; then
-            {
-              echo "$WIN_LINK"
-              echo "$LIN_AMD_LINK"
-              echo "$LIN_ARM_LINK"
-              echo ""
-              echo "---"
-              echo ""
-              cat RELEASE_NOTES.md
-            } > release_body.md
-            echo "use_github_notes=false" >> "$GITHUB_ENV"
-          else
-            {
-              echo "$WIN_LINK"
-              echo "$LIN_AMD_LINK"
-              echo "$LIN_ARM_LINK"
-            } > release_body.md
-            echo "use_github_notes=true" >> "$GITHUB_ENV"
-          fi
-
-      - name: Create GitHub Release
-        id: create_release
+      - name: Upload Windows assets to release
         uses: softprops/action-gh-release@v3
         with:
-          body_path: release_body.md
-          generate_release_notes: ${{ env.use_github_notes == 'true' }}
-          # Tags containing '-' (e.g. v2.6.0-test.1, v2.6.0-beta.2, v2.6.0-rc.1)
-          # are treated as pre-releases: GitHub won't mark them "Latest" and the
-          # /releases/latest endpoint continues to point at the last stable tag.
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+          # Append to the release the `release` job created. Don't pass
+          # body_path/prerelease/make_latest here — they would overwrite the
+          # values set by the release job.
           files: |
             Moombox.exe
             Moombox.exe.sig
 
   linux:
     runs-on: ubuntu-latest
-    needs: windows  # release must exist before linux uploads to it
+    needs: release  # release must exist before we upload assets to it
     steps:
       - uses: actions/checkout@v6
 
@@ -182,9 +200,6 @@ jobs:
       - name: Upload Linux assets to release
         uses: softprops/action-gh-release@v3
         with:
-          # Reuse the existing release created by the windows job; don't
-          # overwrite the body or release_notes flags here. action-gh-release
-          # appends new files to the matching tag.
           files: |
             moombox-linux-amd64
             moombox-linux-amd64.sig
