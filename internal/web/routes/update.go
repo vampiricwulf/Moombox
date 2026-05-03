@@ -75,6 +75,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			resp["version"] = ui.Version
 			resp["tagName"] = ui.TagName
 			resp["releaseNotes"] = ui.ReleaseNotes
+			resp["releaseNotesHtml"] = ui.ReleaseNotesHtml
 			resp["publishedAt"] = ui.PublishedAt
 		}
 		jsonResponse(w, resp)
@@ -106,6 +107,7 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 			resp["version"] = release.Version
 			resp["tagName"] = release.TagName
 			resp["releaseNotes"] = release.ReleaseNotes
+			resp["releaseNotesHtml"] = release.ReleaseNotesHtml
 			resp["publishedAt"] = release.PublishedAt
 		}
 

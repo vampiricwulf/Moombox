@@ -254,8 +254,9 @@ type App struct {
 	updateStatusCh   <-chan UpdateStatusMsg
 
 	// Update status
-	updateAvailable *UpdateStatusMsg
-	version         string
+	updateAvailable    *UpdateStatusMsg
+	version            string
+	releaseNotesPopup  *releaseNotesOverlay
 
 	// restartPending stays true once a settings save commits a
 	// restart-required field, until the process actually exits. The
@@ -355,24 +356,25 @@ func NewApp() *App {
 	tl.progressStore = ps
 
 	return &App{
-		taskList:        tl,
-		details:         NewJobDetailsModel(),
-		logs:            NewLogViewerModel(),
-		statusBar:       NewStatusBarModel(),
-		help:            NewHelpModel(),
-		addVideo:        NewAddVideoModel(),
-		importDlg:       NewImportDialogModel(),
-		trimDlg:         NewTrimDialogModel(),
-		filesDlg:        NewFilesDialogModel(),
-		clientTokensDlg: NewClientTokensDialogModel(),
-		setupWiz:        NewSetupWizardModel(),
-		settings:        NewSettingsModel(),
-		ffmpegCheck:     NewFFmpegCheckModel(),
-		actionMenu:      NewActionMenuModel(),
-		progressStore:   ps,
-		statusMap:       make(map[string]database.JobStatus),
-		isDark:          true,                      // default to dark; updated by BackgroundColorMsg
-		colorProfile:    colorprofile.TrueColor,    // default; updated by ColorProfileMsg
+		taskList:          tl,
+		details:           NewJobDetailsModel(),
+		logs:              NewLogViewerModel(),
+		statusBar:         NewStatusBarModel(),
+		help:              NewHelpModel(),
+		addVideo:          NewAddVideoModel(),
+		importDlg:         NewImportDialogModel(),
+		trimDlg:           NewTrimDialogModel(),
+		filesDlg:          NewFilesDialogModel(),
+		clientTokensDlg:   NewClientTokensDialogModel(),
+		setupWiz:          NewSetupWizardModel(),
+		settings:          NewSettingsModel(),
+		ffmpegCheck:       NewFFmpegCheckModel(),
+		actionMenu:        NewActionMenuModel(),
+		releaseNotesPopup: newReleaseNotesOverlay(),
+		progressStore:     ps,
+		statusMap:         make(map[string]database.JobStatus),
+		isDark:            true,                   // default to dark; updated by BackgroundColorMsg
+		colorProfile:      colorprofile.TrueColor, // default; updated by ColorProfileMsg
 	}
 }
 
@@ -599,6 +601,7 @@ func (a *App) listenForUpdates() tea.Cmd {
 func (a *App) hasActiveOverlay() bool {
 	return a.settings.IsVisible() ||
 		a.help.IsVisible() ||
+		(a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen()) ||
 		a.importDlg.IsVisible() ||
 		a.addVideo.IsVisible() ||
 		a.trimDlg.IsVisible() ||

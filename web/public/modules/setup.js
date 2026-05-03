@@ -955,18 +955,90 @@ export class SetupController {
     optionsEl.innerHTML = '<sl-spinner></sl-spinner> Checking available installers...';
 
     try {
-      const resp = await fetch("/api/ffmpeg/install-options");
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = await resp.json();
+      // On non-Windows, skip package manager buttons and show a distro-aware
+      // copy-pasteable command + recheck button instead.
+      const optsResp = await fetch("/api/ffmpeg/install-options");
+      if (!optsResp.ok) throw new Error(`HTTP ${optsResp.status}`);
+      const opts = await optsResp.json();
 
+      if (opts.platform !== "windows") {
+        const sugResp = await fetch("/api/ffmpeg/install-suggestion");
+        if (!sugResp.ok) throw new Error(`HTTP ${sugResp.status}`);
+        const sug = await sugResp.json();
+
+        optionsEl.innerHTML = "";
+
+        const intro = document.createElement("p");
+        intro.style.cssText = "margin: 0 0 0.5em;";
+        intro.textContent = "FFmpeg is not installed. Run this command in your terminal to install it:";
+        optionsEl.appendChild(intro);
+
+        const cmdInput = document.createElement("sl-input");
+        cmdInput.id = "ffmpeg-install-cmd";
+        cmdInput.setAttribute("readonly", "");
+        cmdInput.value = sug.suggestion;
+        cmdInput.style.cssText = "width: 100%; font-family: monospace;";
+        optionsEl.appendChild(cmdInput);
+
+        const btnRow = document.createElement("div");
+        btnRow.style.cssText = "display: flex; gap: 0.5em; margin-top: 0.5em; flex-wrap: wrap;";
+
+        const copyBtn = document.createElement("sl-button");
+        copyBtn.variant = "default";
+        copyBtn.size = "small";
+        copyBtn.textContent = "Copy command";
+        copyBtn.addEventListener("click", () => {
+          navigator.clipboard.writeText(sug.suggestion).catch(() => {});
+        });
+
+        const recheckBtn = document.createElement("sl-button");
+        recheckBtn.variant = "primary";
+        recheckBtn.size = "small";
+        recheckBtn.textContent = "I've installed FFmpeg, recheck";
+        recheckBtn.addEventListener("click", async () => {
+          recheckBtn.loading = true;
+          recheckBtn.disabled = true;
+          try {
+            const check = await fetch("/api/ffmpeg/check").then((r) => r.json());
+            if (check.valid) {
+              document.getElementById("ffmpeg-overlay").style.display = "none";
+              this.initializeApp();
+            } else {
+              cmdInput.setAttribute("help-text", "FFmpeg still not detected — check installation and PATH");
+            }
+          } catch {
+            cmdInput.setAttribute("help-text", "Check failed — try running 'ffmpeg -version' in a terminal");
+          } finally {
+            recheckBtn.loading = false;
+            recheckBtn.disabled = false;
+          }
+        });
+
+        const cancelBtn = document.createElement("sl-button");
+        cancelBtn.variant = "text";
+        cancelBtn.size = "small";
+        cancelBtn.textContent = "Back";
+        cancelBtn.addEventListener("click", () => {
+          document.getElementById("ffmpeg-main-view").style.display = "";
+          installView.style.display = "none";
+        });
+
+        btnRow.appendChild(copyBtn);
+        btnRow.appendChild(recheckBtn);
+        btnRow.appendChild(cancelBtn);
+        optionsEl.appendChild(btnRow);
+        return;
+      }
+
+      // Windows: render Chocolatey/winget install buttons as before.
       optionsEl.innerHTML = "";
 
-      if (data.chocoAvailable) {
+      if (opts.chocoAvailable) {
         this.addInstallButton(optionsEl, "Install via Chocolatey", "choco");
       } else {
         this.addInstallButton(optionsEl, "Install Chocolatey + FFmpeg", "choco-install");
       }
-      if (data.wingetAvailable) {
+      if (opts.wingetAvailable) {
         this.addInstallButton(optionsEl, "Install via Winget", "winget");
       }
 

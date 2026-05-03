@@ -398,6 +398,18 @@ Default selection logic: use configured `browser_path` if set; otherwise use the
 
 Settings/setup screen gets a matching `huh.NewSelect[string]()`. Same option list as web UI. Custom path entry uses a text input that follows the select.
 
+### Wiring (post-implementation note)
+
+The configured browser flows from config → service via a callback bridge:
+
+1. User saves `cookies.browser_path` and `cookies.browser_type` via PUT `/api/config` (web) or settings save (TUI).
+2. The handler validates with `cookies.ValidateBrowserPathQuick` and persists to `cfg.Cookies` under the configStore lock.
+3. At service init (`cmd/moombox/services.go`), `AutoCookieService.ConfiguredBrowserOverride` is set to a closure over `s.configStore.Read(...)` that returns the current values.
+4. `AutoCookieService.resolvedBrowser()` consults the override before falling back to `DetectBrowser()`. Both `StartSetup` and `RefreshCookies` use `resolvedBrowser()` instead of `DetectBrowser()` directly.
+5. Because `ConfiguredBrowserOverride` reads via `configStore.Read` on every call (no captured snapshot), config changes take effect on the next refresh tick without requiring a service restart.
+
+This wiring was not in the original spec but emerged during round-2 review (which discovered the override mechanism was needed but missing) and round-4 review (which discovered the PUT /api/config handler was silently dropping the new fields).
+
 ### 9. Config defaults on Linux
 
 Confirm the existing config-load lookup (`internal/config/config.go`) works on Linux:

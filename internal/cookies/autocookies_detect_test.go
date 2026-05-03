@@ -98,3 +98,31 @@ func TestParseDefaultBrowserProgID(t *testing.T) {
 		})
 	}
 }
+
+func TestDetectBrowsersReturnsSliceNeverNil(t *testing.T) {
+	browsers := DetectBrowsers()
+	if browsers == nil {
+		t.Fatal("DetectBrowsers returned nil; expected empty slice")
+	}
+	// On a CI runner without browsers installed this may be empty.
+	// We only assert non-nil to make ranges safe in callers.
+	for _, b := range browsers {
+		if b.Type == "" || b.Name == "" || b.Path == "" {
+			t.Errorf("incomplete browser entry: %+v", b)
+		}
+	}
+}
+
+func TestDetectBrowsersDeduplicates(t *testing.T) {
+	// DetectBrowsers should never return the same Path twice — both
+	// the PATH lookup and Windows install-dir search may surface the
+	// same binary, so the implementation must dedupe.
+	browsers := DetectBrowsers()
+	seen := map[string]struct{}{}
+	for _, b := range browsers {
+		if _, dup := seen[b.Path]; dup {
+			t.Errorf("duplicate path returned: %s", b.Path)
+		}
+		seen[b.Path] = struct{}{}
+	}
+}

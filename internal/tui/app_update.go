@@ -209,7 +209,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.Info != nil {
 			a.updateAvailable = msg.Info
 			a.details.updateInfo = msg.Info
-			a.setFeedback(fmt.Sprintf("Update available: %s — press R U to install", msg.Info.TagName))
+			a.setFeedback(fmt.Sprintf("Update available: %s — R N for notes, R U to install", msg.Info.TagName))
 		} else {
 			a.setFeedback("Already up to date")
 		}
@@ -711,6 +711,10 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	// Help overlay viewport (priority matches handleKey order)
 	if a.help.IsVisible() {
 		return a.help.UpdateViewport(msg)
+	}
+	// Release-notes overlay viewport
+	if a.releaseNotesPopup != nil && a.releaseNotesPopup.isOpen() {
+		return a.releaseNotesPopup.Update(msg)
 	}
 	if a.ffmpegCheck.IsVisible() {
 		return a.ffmpegCheck.UpdateComponents(msg)

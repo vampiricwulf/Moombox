@@ -24,7 +24,7 @@ func (l *testLogger) Error(msg string, args ...any) { l.t.Logf("[ERROR] "+msg+" 
 // the package compiles but the sidecar can't start.
 func requireBlobs(t *testing.T) {
 	t.Helper()
-	if len(bgembed.NodeExeGz) == 0 || len(bgembed.SidecarTarGz) == 0 {
+	if len(bgembed.EmbeddedNode) == 0 || len(bgembed.SidecarTarGz) == 0 {
 		t.Skip("sidecar embed blobs missing; run `go run ./tools/fetch-node` and `node bgutil-sidecar/build.mjs` first")
 	}
 }

@@ -2,17 +2,55 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/microcosm-cc/bluemonday"
+	"github.com/yuin/goldmark"
+
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
+
+// markdownPolicy is the bluemonday HTML sanitizer policy applied to
+// rendered release notes. UGCPolicy permits common formatting (headings,
+// lists, links, code, emphasis) but strips scripts, event handlers, and
+// dangerous protocols. Source markdown comes from our own RELEASE_NOTES.md
+// but we sanitize anyway as defense-in-depth.
+var markdownPolicy = bluemonday.UGCPolicy()
+
+// stripDownloadLinks removes the leading download-link section from a
+// GitHub release body. Our release workflow puts download links above a
+// `\n---\n` separator and the actual changelog below; this returns just
+// the changelog. Bodies without a separator are returned unchanged.
+func stripDownloadLinks(body string) string {
+	if i := strings.Index(body, "\n---\n"); i >= 0 {
+		return strings.TrimSpace(body[i+len("\n---\n"):])
+	}
+	return body
+}
+
+// renderReleaseNotesHtml converts markdown release notes to sanitized HTML
+// suitable for direct innerHTML assignment in the web UI.
+func renderReleaseNotesHtml(markdown string) string {
+	if markdown == "" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := goldmark.Convert([]byte(markdown), &buf); err != nil {
+		// Fall back to escaped plain text on render failure.
+		return "<pre>" + html.EscapeString(markdown) + "</pre>"
+	}
+	return markdownPolicy.Sanitize(buf.String())
+}
 
 // logger is a type alias for the anonymous logger interface.
 // Per CLAUDE.md convention, this avoids a named exported interface while
@@ -26,12 +64,42 @@ type logger = interface {
 
 // ReleaseInfo holds information about an available update.
 type ReleaseInfo struct {
-	Version      string `json:"version"`                // "2.0.16" (stripped "v" prefix)
-	TagName      string `json:"tagName"`                // "v2.0.16"
-	DownloadURL  string `json:"downloadUrl"`            // asset browser_download_url for Moombox.exe
-	SignatureURL string `json:"signatureUrl,omitempty"` // asset browser_download_url for Moombox.exe.sig
-	ReleaseNotes string `json:"releaseNotes"`           // body from GitHub release
-	PublishedAt  string `json:"publishedAt"`
+	Version          string `json:"version"`                // "2.0.16" (stripped "v" prefix)
+	TagName          string `json:"tagName"`                // "v2.0.16"
+	DownloadURL      string `json:"downloadUrl"`            // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
+	SignatureURL      string `json:"signatureUrl,omitempty"` // asset browser_download_url for the matching .sig
+	ReleaseNotes     string `json:"releaseNotes"`           // stripped raw markdown (for TUI glamour rendering)
+	ReleaseNotesHtml string `json:"releaseNotesHtml"`       // sanitized HTML (for web UI innerHTML)
+	PublishedAt      string `json:"publishedAt"`
+}
+
+// assetNames bundles the GitHub release asset names for one platform.
+// binary is the runnable executable; sig is its Ed25519 signature.
+type assetNames struct {
+	binary, sig string
+}
+
+// releaseAssetMap maps GOOS/GOARCH to the asset names CI publishes.
+// Adding a new platform: extend this map AND ensure the release workflow
+// uploads matching artifacts. The Windows entry keeps the historical
+// Moombox.exe name so existing 2.6.2 clients continue to find it.
+var releaseAssetMap = map[string]assetNames{
+	"windows/amd64": {binary: "Moombox.exe", sig: "Moombox.exe.sig"},
+	"linux/amd64":   {binary: "moombox-linux-amd64", sig: "moombox-linux-amd64.sig"},
+	"linux/arm64":   {binary: "moombox-linux-arm64", sig: "moombox-linux-arm64.sig"},
+}
+
+// assetsForPlatform looks up the asset names for an explicit goos/goarch
+// (used by tests). Production code calls currentPlatformAssets() below.
+func assetsForPlatform(goos, goarch string) (assetNames, bool) {
+	a, ok := releaseAssetMap[goos+"/"+goarch]
+	return a, ok
+}
+
+// currentPlatformAssets returns the asset names for the running build's
+// GOOS/GOARCH, sourced from runtime.GOOS and runtime.GOARCH.
+func currentPlatformAssets() (assetNames, bool) {
+	return assetsForPlatform(runtime.GOOS, runtime.GOARCH)
 }
 
 // Updater checks for and applies updates from GitHub Releases.
@@ -131,18 +199,22 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		return nil, nil
 	}
 
-	// Find the Moombox.exe and Moombox.exe.sig assets
+	// Find the platform-appropriate binary and sig assets.
+	assets, ok := currentPlatformAssets()
+	if !ok {
+		return nil, fmt.Errorf("auto-update unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
 	var downloadURL, signatureURL string
 	for _, asset := range release.Assets {
 		switch {
-		case strings.EqualFold(asset.Name, "Moombox.exe"):
+		case strings.EqualFold(asset.Name, assets.binary):
 			downloadURL = asset.BrowserDownloadURL
-		case strings.EqualFold(asset.Name, "Moombox.exe.sig"):
+		case strings.EqualFold(asset.Name, assets.sig):
 			signatureURL = asset.BrowserDownloadURL
 		}
 	}
 	if downloadURL == "" {
-		return nil, fmt.Errorf("no Moombox.exe asset found in release %s", release.TagName)
+		return nil, fmt.Errorf("no %s asset found in release %s", assets.binary, release.TagName)
 	}
 	if signatureURL == "" {
 		return nil, fmt.Errorf("no signature file found in release %s", release.TagName)
@@ -153,13 +225,15 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		"latest", remoteVersion,
 	)
 
+	strippedBody := stripDownloadLinks(release.Body)
 	return &ReleaseInfo{
-		Version:      remoteVersion,
-		TagName:      release.TagName,
-		DownloadURL:  downloadURL,
-		SignatureURL: signatureURL,
-		ReleaseNotes: release.Body,
-		PublishedAt:  release.PublishedAt,
+		Version:          remoteVersion,
+		TagName:          release.TagName,
+		DownloadURL:      downloadURL,
+		SignatureURL:     signatureURL,
+		ReleaseNotes:     strippedBody,
+		ReleaseNotesHtml: renderReleaseNotesHtml(strippedBody),
+		PublishedAt:      release.PublishedAt,
 	}, nil
 }
 
@@ -287,10 +361,14 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 		return fmt.Errorf("failed to parse release: %w", err)
 	}
 
-	// Find the .sig asset
+	// Find the platform-appropriate sig asset.
+	assets, ok := currentPlatformAssets()
+	if !ok {
+		return fmt.Errorf("signature verification unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
 	var signatureURL string
 	for _, asset := range release.Assets {
-		if strings.EqualFold(asset.Name, "Moombox.exe.sig") {
+		if strings.EqualFold(asset.Name, assets.sig) {
 			signatureURL = asset.BrowserDownloadURL
 			break
 		}
@@ -325,11 +403,20 @@ func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 // verification), and .sig (VerifyCurrentSignature intermediate that may be
 // left behind if ApplyUpdate was interrupted between its write and rename).
 //
+// On Windows, also sweeps `~` (orphaned by the launcher's deferred cleanup
+// or by a prior installation that lacked the launcher startup sweep). The
+// runtime.GOOS guard prevents accidentally targeting an editor backup file
+// on Linux/macOS where `<name>~` is a legitimate file pattern.
+//
 // .update-broken markers from a failed double-rename rollback are
 // intentionally NOT cleaned here — they are evidence for the user that
 // manual recovery may be needed and should be deleted explicitly.
 func (u *Updater) CleanupOldBinary() {
-	for _, suffix := range []string{".old", ".new", ".new.sig", ".sig"} {
+	suffixes := []string{".old", ".new", ".new.sig", ".sig"}
+	if runtime.GOOS == "windows" {
+		suffixes = append(suffixes, "~")
+	}
+	for _, suffix := range suffixes {
 		path := u.exePath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {

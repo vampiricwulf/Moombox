@@ -174,6 +174,26 @@ func CookieRoutes(r chi.Router, refreshSvc *cookies.RefreshService, autoCookieSv
 		jsonResponse(rw, map[string]any{"success": true})
 	})
 
+	// POST /api/auto-cookies/validate-browser-path validates a user-specified
+	// browser executable for the auto-cookies extraction. Used by the setup
+	// UI's "Custom path…" dropdown option to give immediate feedback before
+	// save. Rate-limited because it triggers a subprocess (--version).
+	heavy.Post("/api/auto-cookies/validate-browser-path", func(rw http.ResponseWriter, req *http.Request) {
+		var body struct {
+			Path string `json:"path"`
+			Type string `json:"type"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			jsonError(rw, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if err := cookies.ValidateBrowserPath(req.Context(), body.Path, body.Type); err != nil {
+			jsonResponse(rw, map[string]any{"valid": false, "error": err.Error()})
+			return
+		}
+		jsonResponse(rw, map[string]any{"valid": true})
+	})
+
 	// GET /api/cookies/auto-status
 	r.Get("/api/cookies/auto-status", func(rw http.ResponseWriter, req *http.Request) {
 		if autoCookieSvc == nil {

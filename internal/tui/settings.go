@@ -5,10 +5,12 @@ import (
 	"image/color"
 	"maps"
 	"strconv"
+	"strings"
 
 	"charm.land/bubbles/v2/textinput"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
 
 // fieldType identifies how a settings field is edited.
@@ -116,6 +118,8 @@ var sections = []settingsSection{
 			{"active_twitch", "Twitch cookies", fieldToggle, nil, "Twitch cookie indicator in status bar", nil},
 			{"auto_enabled", "Auto-cookie", fieldToggle, nil, "browser-based cookie acquisition", nil},
 			{"browser_profile_dir", "Browser profile dir", fieldText, nil, "for auto-cookie browser data", nil},
+			{"browser_path", "Browser path", fieldText, nil, "override (empty = auto-detect)", nil},
+			{"browser_type", "Browser type", fieldText, nil, "firefox/chrome/brave/edge/etc. (required if path set)", nil},
 			{"refresh_interval", "Refresh interval", fieldNumber, nil, "minutes (default: 360 = 6h)", nil},
 		},
 	},
@@ -423,6 +427,8 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["active_twitch"] = boolToDisplay(twActive)
 	m.values["auto_enabled"] = boolToDisplay(cfg.Cookies.AutoEnabled)
 	m.values["browser_profile_dir"] = cfg.Cookies.BrowserProfileDir
+	m.values["browser_path"] = cfg.Cookies.BrowserPath
+	m.values["browser_type"] = cfg.Cookies.BrowserType
 	m.values["refresh_interval"] = fmt.Sprintf("%.0f", cfg.Cookies.RefreshInterval.Minutes())
 
 	// Disk
@@ -455,6 +461,25 @@ func (m *SettingsModel) applyValues() {
 		m.errorMsg = "Password required for external access. Set password in Network section."
 		m.status = saveError
 		return
+	}
+
+	// Validate browser_path if set.
+	// Static checks only — the full ValidateBrowserPath spawns a subprocess
+	// and waits up to 10s for --version, which would freeze the BubbleTea
+	// event loop. The web UI runs the full check via the async HTTP endpoint.
+	browserPath := strings.TrimSpace(m.values["browser_path"])
+	browserType := strings.TrimSpace(m.values["browser_type"])
+	if browserPath != "" {
+		if browserType == "" {
+			m.errorMsg = "browser_type required when browser_path is set"
+			m.status = saveError
+			return
+		}
+		if err := cookies.ValidateBrowserPathQuick(browserPath, browserType); err != nil {
+			m.errorMsg = "Invalid browser: " + err.Error()
+			m.status = saveError
+			return
+		}
 	}
 
 	// Lock for all config writes
@@ -526,6 +551,13 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Cookies.ActivePlatforms = activePlats
 	m.cfg.Cookies.AutoEnabled = m.values["auto_enabled"] == "Yes"
 	m.cfg.Cookies.BrowserProfileDir = m.values["browser_profile_dir"]
+	// TrimSpace matches what validateConfigUpdates does for the web path
+	// (config_routes.go:424,427). Without trimming here, a user pasting
+	// "  /usr/bin/firefox  " would pass the trimmed validation above but
+	// persist whitespace into config — exec.Command would then fail with
+	// "fork/exec  /usr/bin/firefox  : no such file or directory".
+	m.cfg.Cookies.BrowserPath = strings.TrimSpace(m.values["browser_path"])
+	m.cfg.Cookies.BrowserType = strings.TrimSpace(m.values["browser_type"])
 	refreshMin, _ := strconv.Atoi(m.values["refresh_interval"])
 	m.cfg.Cookies.RefreshInterval = config.FlexDuration{Value: float64(refreshMin)}
 

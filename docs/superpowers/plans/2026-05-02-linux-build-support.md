@@ -1,6 +1,6 @@
 # Linux Build Support Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Compile, ship, and run Moombox on Linux x64 + arm64 alongside the existing Windows x64 target, with pragmatic feature parity. Bundle two opportunistic improvements: browser-selection dropdown for auto-cookies setup, and a fix for the broken `~` cleanup that switched from ping to schtasks.
 
@@ -38,7 +38,7 @@ These get the codebase compiling on Linux. Without these, `GOOS=linux go build .
 
 **Goal:** Add a `syscall.Statfs`-based implementation of `GetDiskSpace` for non-Windows platforms, mirroring the existing Windows API.
 
-- [ ] **Step 1: Verify file naming conventions**
+- [x] **Step 1: Verify file naming conventions**
 
 The existing file is `disk_windows.go`. Go's filename build constraints already restrict it to Windows builds — no change needed. Verify with:
 ```bash
@@ -46,7 +46,7 @@ grep -l "^//go:build" internal/disk/disk_windows.go || echo "Uses filename const
 ```
 Expected output: `Uses filename constraint only` (the file's name `_windows.go` is sufficient).
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `internal/disk/disk_unix_test.go`:
 ```go
@@ -92,14 +92,14 @@ func TestGetDiskSpaceUnixNonexistentPath(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test on Linux to verify it fails**
+- [x] **Step 3: Run test on Linux to verify it fails**
 
 ```bash
 GOOS=linux go test -v ./internal/disk/...
 ```
 Expected: build error (`undefined: GetDiskSpace`) because no implementation exists for non-Windows.
 
-- [ ] **Step 4: Create the Linux implementation**
+- [x] **Step 4: Create the Linux implementation**
 
 Create `internal/disk/disk_unix.go`:
 ```go
@@ -148,7 +148,7 @@ func GetDiskSpace(path string) (*DiskSpace, error) {
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 ```bash
 GOOS=linux go test -v ./internal/disk/...
@@ -159,7 +159,7 @@ GOOS=windows go build ./internal/disk/...
 ```
 Expected: build succeeds (existing Windows test only runs natively, so we're verifying compile-only).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/disk/disk_unix.go internal/disk/disk_unix_test.go
@@ -180,14 +180,14 @@ the Windows freeBytesAvailable semantics."
 
 **Goal:** Provide non-Windows stubs for `isElevated`, `runElevated`, and `waitForProcess` so the package compiles on Linux. The existing `runtime.GOOS != "windows"` guards in `ffmpeg.go` already prevent install endpoints from firing on non-Windows; these stubs just need to compile.
 
-- [ ] **Step 1: Read existing Windows file to understand the API**
+- [x] **Step 1: Read existing Windows file to understand the API**
 
 ```bash
 head -30 internal/web/routes/ffmpeg_elevation_windows.go
 ```
 Note the three functions to stub: `isElevated() bool`, `runElevated(script string) (syscall.Handle, error)`, `waitForProcess(handle syscall.Handle, timeout time.Duration) error`.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `internal/web/routes/ffmpeg_elevation_other_test.go`:
 ```go
@@ -218,14 +218,14 @@ func TestIsElevatedReportsRoot(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 ```bash
 GOOS=linux go test -v ./internal/web/routes/ -run "TestRunElevatedNotSupported|TestIsElevatedReportsRoot"
 ```
 Expected: build error (`undefined: runElevated, isElevated`).
 
-- [ ] **Step 4: Create the stub file**
+- [x] **Step 4: Create the stub file**
 
 Create `internal/web/routes/ffmpeg_elevation_other.go`:
 ```go
@@ -272,7 +272,7 @@ func waitForProcess(handle uintptr, timeout time.Duration) error {
 }
 ```
 
-- [ ] **Step 5: Update Windows file's runElevated/waitForProcess signatures to match**
+- [x] **Step 5: Update Windows file's runElevated/waitForProcess signatures to match**
 
 The Windows file currently uses `syscall.Handle` types. Since `syscall.Handle` only exists on Windows (it's `uintptr` underneath), and our stub uses `uintptr`, we need both files to agree. Open `internal/web/routes/ffmpeg_elevation_windows.go` and change the signatures:
 
@@ -291,7 +291,7 @@ grep -n "runElevated\|waitForProcess" internal/web/routes/ffmpeg.go
 ```
 Both calls already pass/receive what looks like a handle. Change `var handle syscall.Handle` declarations in `ffmpeg.go` to `var handle uintptr` if any exist; the call patterns should otherwise work unchanged.
 
-- [ ] **Step 6: Run tests on both platforms**
+- [x] **Step 6: Run tests on both platforms**
 
 ```bash
 GOOS=linux go build ./internal/web/routes/...
@@ -300,7 +300,7 @@ GOOS=windows go build ./internal/web/routes/...
 ```
 Expected: All pass. Linux test reports PASS for both new tests.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/web/routes/ffmpeg_elevation_other.go internal/web/routes/ffmpeg_elevation_other_test.go internal/web/routes/ffmpeg_elevation_windows.go internal/web/routes/ffmpeg.go
@@ -332,14 +332,14 @@ The launcher is the most Windows-coupled file in the codebase (uses `syscall.Sys
 
 **Goal:** Split the launcher so the build succeeds on both Windows and Linux. Define platform-specific helpers (`cleanupOrphans`, `handleUpdateRestart`, `setSysProcAttr`) and call them from the shared core in `launcher.go`.
 
-- [ ] **Step 1: Read current launcher to identify split points**
+- [x] **Step 1: Read current launcher to identify split points**
 
 ```bash
 cat cmd/moombox/launcher.go
 ```
 Identify Windows-coupled code: the `os.Remove(exePath + "~")` at line 50 (cleanup orphans), the `os.Rename(.old → ~)` block in the loop (handle update restart), the `deferDeleteOldLauncher` function (deferred cleanup), and the `cmd.SysProcAttr = ...` calls inside that function.
 
-- [ ] **Step 2: Extract Windows-specific code into `launcher_windows.go`**
+- [x] **Step 2: Extract Windows-specific code into `launcher_windows.go`**
 
 Create `cmd/moombox/launcher_windows.go`:
 ```go
@@ -409,7 +409,7 @@ func deferDeleteOldLauncher(exePath string) {
 }
 ```
 
-- [ ] **Step 3: Extract Unix-specific code into `launcher_unix.go`**
+- [x] **Step 3: Extract Unix-specific code into `launcher_unix.go`**
 
 Create `cmd/moombox/launcher_unix.go`:
 ```go
@@ -444,7 +444,7 @@ func setSysProcAttr(cmd *exec.Cmd) {}
 func deferDeleteOldLauncher(exePath string) {}
 ```
 
-- [ ] **Step 4: Refactor `launcher.go` to use the platform helpers**
+- [x] **Step 4: Refactor `launcher.go` to use the platform helpers**
 
 Modify `cmd/moombox/launcher.go`:
 ```go
@@ -523,7 +523,7 @@ func launchAndSupervise() {
 
 The original `deferDeleteOldLauncher` function and its `schtasks`/`ping` fallback code is now in `launcher_windows.go`. Remove the entire `deferDeleteOldLauncher` body and the `import "syscall"` and `import "path/filepath"` and `import "time"` from `launcher.go` — those are no longer needed in the shared file.
 
-- [ ] **Step 5: Move `createNoWindow` out of `main.go`**
+- [x] **Step 5: Move `createNoWindow` out of `main.go`**
 
 In `cmd/moombox/main.go`, find and remove:
 ```go
@@ -537,7 +537,7 @@ grep -n "createNoWindow" cmd/moombox/main.go
 ```
 Expected: no matches.
 
-- [ ] **Step 6: Verify build on both platforms**
+- [x] **Step 6: Verify build on both platforms**
 
 ```bash
 GOOS=windows go build ./cmd/moombox/...
@@ -551,7 +551,7 @@ go test -v ./cmd/moombox/...
 ```
 Expected: all existing tests still pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add cmd/moombox/launcher.go cmd/moombox/launcher_windows.go cmd/moombox/launcher_unix.go cmd/moombox/main.go
@@ -578,14 +578,14 @@ binary directly; the child's CleanupOldBinary at startup handles
 
 This was already done in Task 3 above (the new `launcher_windows.go` uses `timeout /t 11 /nobreak & del`). This task is just a verification placeholder — confirming the intent.
 
-- [ ] **Step 1: Verify the new deferDeleteOldLauncher uses timeout**
+- [x] **Step 1: Verify the new deferDeleteOldLauncher uses timeout**
 
 ```bash
 grep -n "timeout /t\|schtasks" cmd/moombox/launcher_windows.go
 ```
 Expected: one match for `timeout /t`, zero matches for `schtasks`.
 
-- [ ] **Step 2: Acknowledge — no separate commit**
+- [x] **Step 2: Acknowledge — no separate commit**
 
 The schtasks→timeout swap was bundled into Task 3's commit. No additional work.
 
@@ -602,7 +602,7 @@ The schtasks→timeout swap was bundled into Task 3's commit. No additional work
 
 **Goal:** Real single-instance enforcement on Linux via `syscall.Flock`. Same lifetime guarantees as the Windows mutex (kernel releases on process death, no stale locks possible).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `cmd/moombox/single_instance_unix_test.go`:
 ```go
@@ -671,20 +671,20 @@ func TestSingleInstanceLockWritesPidFile(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 GOOS=linux go test -v ./cmd/moombox/ -run TestSingleInstance
 ```
 Expected: build error or test failure (current `single_instance_other.go` is a no-op stub that always returns nil and writes no file).
 
-- [ ] **Step 3: Delete the old no-op stub**
+- [x] **Step 3: Delete the old no-op stub**
 
 ```bash
 rm cmd/moombox/single_instance_other.go
 ```
 
-- [ ] **Step 4: Create the flock-based implementation**
+- [x] **Step 4: Create the flock-based implementation**
 
 Create `cmd/moombox/single_instance_unix.go`:
 ```go
@@ -765,7 +765,7 @@ func releaseSingleInstanceLock() {
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 ```bash
 GOOS=linux go test -v ./cmd/moombox/ -run TestSingleInstance
@@ -778,7 +778,7 @@ GOOS=windows go build ./cmd/moombox/...
 ```
 Expected: build succeeds.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add cmd/moombox/single_instance_unix.go cmd/moombox/single_instance_unix_test.go
@@ -807,7 +807,7 @@ file contains the PID for human debugging."
 
 **Goal:** Fetch Windows x64, Linux x64, and Linux arm64 Node binaries in a single run. Each platform's binary is gzipped to its own embed file. Linux releases use `.tar.xz` archives so we need an xz reader.
 
-- [ ] **Step 1: Add the xz dependency**
+- [x] **Step 1: Add the xz dependency**
 
 ```bash
 go get github.com/ulikunitz/xz
@@ -818,7 +818,7 @@ Verify it appears:
 grep ulikunitz go.mod
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `tools/fetch-node/main_test.go`:
 ```go
@@ -862,14 +862,14 @@ func TestNodeTargetsCoverAllPlatforms(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 ```bash
 go test -v ./tools/fetch-node/...
 ```
 Expected: build error (`undefined: nodeTargets`) or test failure.
 
-- [ ] **Step 4: Rewrite `tools/fetch-node/main.go` with multi-platform support**
+- [x] **Step 4: Rewrite `tools/fetch-node/main.go` with multi-platform support**
 
 Replace the body of `tools/fetch-node/main.go`:
 ```go
@@ -1168,7 +1168,7 @@ func writeGzipped(outPath string, raw []byte) error {
 }
 ```
 
-- [ ] **Step 5: Look up real SHAs and replace placeholders**
+- [x] **Step 5: Look up real SHAs and replace placeholders**
 
 ```bash
 curl https://nodejs.org/dist/v22.22.2/SHASUMS256.txt | grep -E "linux-x64\.tar\.xz|linux-arm64\.tar\.xz"
@@ -1179,7 +1179,7 @@ go test -v ./tools/fetch-node/...
 ```
 Expected: `TestNodeTargetsCoverAllPlatforms` and `TestVersionStampIncludesAllPlatforms` both PASS.
 
-- [ ] **Step 6: Run fetch-node end-to-end to populate embeds**
+- [x] **Step 6: Run fetch-node end-to-end to populate embeds**
 
 ```bash
 go run ./tools/fetch-node
@@ -1192,7 +1192,7 @@ ls -la internal/bgutils/embed/*.gz
 cat internal/bgutils/embed/version.txt
 ```
 
-- [ ] **Step 7: Verify .gitignore excludes the new gz files**
+- [x] **Step 7: Verify .gitignore excludes the new gz files**
 
 ```bash
 cat internal/bgutils/embed/.gitignore
@@ -1208,7 +1208,7 @@ sidecar.tar.gz
 ```
 The old `node.exe.gz` line is kept for backward compat with any leftover from before this change.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add tools/fetch-node/main.go tools/fetch-node/main_test.go go.mod go.sum
@@ -1236,7 +1236,7 @@ all three SHAs so cache invalidation triggers on any platform's bump."
 
 **Goal:** Replace the single hardcoded `//go:embed node.exe.gz` with per-platform embeds behind build tags. The exported `EmbeddedNode` variable stays the same shape so downstream consumers don't need to change.
 
-- [ ] **Step 1: Read current embed.go**
+- [x] **Step 1: Read current embed.go**
 
 ```bash
 cat internal/bgutils/embed/embed.go
@@ -1250,7 +1250,7 @@ var EmbeddedNode []byte
 var EmbeddedSidecar []byte
 ```
 
-- [ ] **Step 2: Refactor `embed.go` to keep only platform-agnostic embeds**
+- [x] **Step 2: Refactor `embed.go` to keep only platform-agnostic embeds**
 
 Edit `internal/bgutils/embed/embed.go` so it only declares what's shared (`EmbeddedSidecar` for the JS sidecar tarball — that's platform-agnostic). Move `EmbeddedNode` declaration out — it'll be defined per-platform. Keep package documentation:
 
@@ -1267,7 +1267,7 @@ import _ "embed"
 var EmbeddedSidecar []byte
 ```
 
-- [ ] **Step 3: Create per-platform embed files**
+- [x] **Step 3: Create per-platform embed files**
 
 Create `internal/bgutils/embed/embed_windows_amd64.go`:
 ```go
@@ -1305,7 +1305,7 @@ import _ "embed"
 var EmbeddedNode []byte
 ```
 
-- [ ] **Step 4: Verify build on all three platforms**
+- [x] **Step 4: Verify build on all three platforms**
 
 ```bash
 GOOS=windows GOARCH=amd64 go build ./internal/bgutils/embed/
@@ -1320,7 +1320,7 @@ go test ./internal/bgutils/embed/...
 ```
 Expected: PASS.
 
-- [ ] **Step 5: Verify downstream consumers still compile**
+- [x] **Step 5: Verify downstream consumers still compile**
 
 The runtime extraction code in the bgutils package should consume `embed.EmbeddedNode` as a `[]byte`. Verify it builds on all three:
 ```bash
@@ -1330,7 +1330,7 @@ GOOS=linux GOARCH=arm64 go build ./internal/bgutils/...
 ```
 Expected: all succeed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/bgutils/embed/embed.go internal/bgutils/embed/embed_windows_amd64.go internal/bgutils/embed/embed_linux_amd64.go internal/bgutils/embed/embed_linux_arm64.go
@@ -1356,14 +1356,14 @@ Downstream consumers see the same []byte variable name; no API change."
 
 **Goal:** Catch any orphaned `~` files that escaped the launcher's startup sweep AND the deferred timeout/del. Belt-and-suspenders. Windows-only because Linux has no `~` orphans (and `moombox~` could be a legitimate editor backup file there).
 
-- [ ] **Step 1: Read existing CleanupOldBinary and its test**
+- [x] **Step 1: Read existing CleanupOldBinary and its test**
 
 ```bash
 grep -n "CleanupOldBinary" internal/updater/updater.go
 grep -n "TestCleanupOldBinaryRemovesStaleArtifacts" internal/updater/updater_test.go
 ```
 
-- [ ] **Step 2: Extend the existing test to cover `~` on Windows**
+- [x] **Step 2: Extend the existing test to cover `~` on Windows**
 
 Find `TestCleanupOldBinaryRemovesStaleArtifacts` in `internal/updater/updater_test.go`. Modify the `stale` slice to conditionally include `~`:
 
@@ -1399,14 +1399,14 @@ func TestCleanupOldBinaryRemovesStaleArtifacts(t *testing.T) {
 
 Add `"runtime"` to the test file's imports if not already present.
 
-- [ ] **Step 3: Run test to verify it fails on Windows**
+- [x] **Step 3: Run test to verify it fails on Windows**
 
 ```bash
 GOOS=windows go test -v ./internal/updater/ -run TestCleanupOldBinaryRemovesStaleArtifacts
 ```
 Expected: FAIL on Windows with "stale file not removed: ...~". On Linux: still passes (no `~` added to stale list).
 
-- [ ] **Step 4: Update CleanupOldBinary to sweep `~` on Windows**
+- [x] **Step 4: Update CleanupOldBinary to sweep `~` on Windows**
 
 Edit `internal/updater/updater.go` around line 331:
 ```go
@@ -1446,7 +1446,7 @@ func (u *Updater) CleanupOldBinary() {
 
 Add `"runtime"` to the import block if not already imported.
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 ```bash
 GOOS=windows go test -v ./internal/updater/ -run TestCleanupOldBinaryRemovesStaleArtifacts
@@ -1454,7 +1454,7 @@ GOOS=linux go test -v ./internal/updater/ -run TestCleanupOldBinaryRemovesStaleA
 ```
 Both: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/updater/updater.go internal/updater/updater_test.go
@@ -1476,14 +1476,14 @@ backup pattern on Linux/macOS."
 
 **Goal:** Replace the hardcoded `Moombox.exe` / `Moombox.exe.sig` asset matching with a platform-aware lookup table so Linux clients can find their own assets. Windows entry stays mapped to `Moombox.exe` so existing 2.6.2 clients continue to work.
 
-- [ ] **Step 1: Read existing asset matching code**
+- [x] **Step 1: Read existing asset matching code**
 
 ```bash
 grep -n "Moombox.exe" internal/updater/updater.go
 ```
 Note the two locations: in the release-fetching code (sets `downloadURL` and `signatureURL`), and in `VerifyCurrentSignature` (sets `signatureURL` only).
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Add to `internal/updater/updater_test.go`:
 ```go
@@ -1523,14 +1523,14 @@ func TestCurrentPlatformAssetsUnknown(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 ```bash
 go test -v ./internal/updater/ -run TestCurrentPlatformAssets
 ```
 Expected: build error (`undefined: assetsForPlatform, currentPlatformAssets`).
 
-- [ ] **Step 4: Add the platform lookup table**
+- [x] **Step 4: Add the platform lookup table**
 
 In `internal/updater/updater.go`, add near the top (below the `ReleaseInfo` type):
 ```go
@@ -1564,7 +1564,7 @@ func currentPlatformAssets() (assetNames, bool) {
 }
 ```
 
-- [ ] **Step 5: Replace the hardcoded asset matching in `getRelease`**
+- [x] **Step 5: Replace the hardcoded asset matching in `getRelease`**
 
 Find the loop that picks `downloadURL` and `signatureURL` (around lines 134-142):
 ```go
@@ -1598,7 +1598,7 @@ for _, asset := range release.Assets {
 }
 ```
 
-- [ ] **Step 6: Replace the hardcoded asset matching in `VerifyCurrentSignature`**
+- [x] **Step 6: Replace the hardcoded asset matching in `VerifyCurrentSignature`**
 
 Find the similar block around line 290-296:
 ```go
@@ -1628,7 +1628,7 @@ for _, asset := range release.Assets {
 }
 ```
 
-- [ ] **Step 7: Run all updater tests on both platforms**
+- [x] **Step 7: Run all updater tests on both platforms**
 
 ```bash
 GOOS=windows go test -v ./internal/updater/...
@@ -1638,7 +1638,7 @@ Expected: all PASS, including the new `TestCurrentPlatformAssetsKnownPlatforms` 
 
 The existing tests that mock GitHub releases with `Moombox.exe` assets continue to work on Windows because the lookup table maps `windows/amd64 → Moombox.exe`. On Linux those tests would fail because the mocks return Windows asset names — verify the existing tests use `runtime.GOOS == "windows"` skip guards or update them to test against the platform-appropriate asset name. Inspect any test failures and either adapt the mock data to match the test platform or add a build constraint (`//go:build windows`) to tests that are inherently Windows-flow specific.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add internal/updater/updater.go internal/updater/updater_test.go
@@ -1662,14 +1662,14 @@ to find their own platform's binary."
 
 **Goal:** Add a Linux job that builds amd64 and arm64 binaries, signs them, and uploads to the same GitHub release. Windows job continues to build the body and create the release; Linux job appends its assets.
 
-- [ ] **Step 1: Read current release.yml end-to-end**
+- [x] **Step 1: Read current release.yml end-to-end**
 
 ```bash
 cat .github/workflows/release.yml
 ```
 Note the existing job structure: single `release` job on `windows-latest`, with steps for sidecar build, fetch-node, go-winres, build, sign, build release body, create release.
 
-- [ ] **Step 2: Restructure into two parallel jobs**
+- [x] **Step 2: Restructure into two parallel jobs**
 
 Replace the entire `jobs:` section in `.github/workflows/release.yml`:
 ```yaml
@@ -1842,7 +1842,7 @@ jobs:
             moombox-linux-arm64.sig
 ```
 
-- [ ] **Step 3: Verify the workflow YAML parses**
+- [x] **Step 3: Verify the workflow YAML parses**
 
 ```bash
 # yamllint or just visual inspection
@@ -1850,7 +1850,7 @@ grep -c "^  windows:\|^  linux:" .github/workflows/release.yml
 ```
 Expected output: `2` (one for each job).
 
-- [ ] **Step 4: Commit (CI verification happens at next tag push)**
+- [x] **Step 4: Commit (CI verification happens at next tag push)**
 
 ```bash
 git add .github/workflows/release.yml
@@ -1874,7 +1874,7 @@ the existing Windows link."
 
 **Goal:** Run `go build ./...` and `go test ./...` for both Linux arches on every PR/push so cross-platform regressions are caught before tagging a release.
 
-- [ ] **Step 1: Create the workflow**
+- [x] **Step 1: Create the workflow**
 
 Create `.github/workflows/linux-test.yml`:
 ```yaml
@@ -1937,14 +1937,14 @@ jobs:
         run: go test ./...
 ```
 
-- [ ] **Step 2: Verify YAML parses**
+- [x] **Step 2: Verify YAML parses**
 
 ```bash
 grep -c "matrix:" .github/workflows/linux-test.yml
 ```
 Expected: `1`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add .github/workflows/linux-test.yml
@@ -1974,14 +1974,14 @@ This phase is independent of phases 1-6 and can be implemented in parallel by a 
 
 **Goal:** Add a function that returns ALL detected browsers (not just the best match), and add config fields for user-overridden browser path/type.
 
-- [ ] **Step 1: Read existing DetectBrowser and detectBrowserUncached**
+- [x] **Step 1: Read existing DetectBrowser and detectBrowserUncached**
 
 ```bash
 grep -n "DetectBrowser\|detectBrowserUncached" internal/cookies/autocookies_detect.go
 ```
 Note the existing single-result function structure.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Add to `internal/cookies/autocookies_detect_test.go`:
 ```go
@@ -2000,14 +2000,14 @@ func TestDetectBrowsersReturnsSliceNeverNil(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 ```bash
 go test -v ./internal/cookies/ -run TestDetectBrowsersReturnsSliceNeverNil
 ```
 Expected: build error (`undefined: DetectBrowsers`).
 
-- [ ] **Step 4: Add `DetectBrowsers()` (plural)**
+- [x] **Step 4: Add `DetectBrowsers()` (plural)**
 
 In `internal/cookies/autocookies_detect.go`, below the existing `DetectBrowser()` function, add:
 ```go
@@ -2081,7 +2081,7 @@ func DetectBrowsers() []DetectedBrowser {
 }
 ```
 
-- [ ] **Step 5: Add config fields**
+- [x] **Step 5: Add config fields**
 
 Find the `[cookies]` config struct in `internal/config/config.go`. Add fields:
 ```go
@@ -2094,7 +2094,7 @@ If there's a config validation function for the cookies section, add:
 - If `BrowserPath != ""` then `BrowserType` must also be set
 - `BrowserType` must be in the known list: firefox, waterfox, librewolf, zen, chrome, brave, edge, vivaldi, thorium, opera
 
-- [ ] **Step 6: Run test to verify it passes**
+- [x] **Step 6: Run test to verify it passes**
 
 ```bash
 go test -v ./internal/cookies/ -run TestDetectBrowsersReturnsSliceNeverNil
@@ -2103,7 +2103,7 @@ go test ./internal/config/...
 ```
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/cookies/autocookies_detect.go internal/cookies/autocookies_detect_test.go internal/config/config.go
@@ -2130,7 +2130,7 @@ choice overrides DetectBrowser. Validated at config-load time."
 
 **Goal:** Server-side validation that a user-specified browser path exists, is executable, and responds to `--version`. Used by the frontend before saving config.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `internal/cookies/browser_validate_test.go`:
 ```go
@@ -2181,14 +2181,14 @@ func TestValidateBrowserPathRejectsNonExecutable(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 go test -v ./internal/cookies/ -run TestValidateBrowserPath
 ```
 Expected: build error (`undefined: ValidateBrowserPath`).
 
-- [ ] **Step 3: Implement ValidateBrowserPath**
+- [x] **Step 3: Implement ValidateBrowserPath**
 
 Create `internal/cookies/browser_validate.go`:
 ```go
@@ -2251,7 +2251,7 @@ func ValidateBrowserPath(path, browserType string) error {
 }
 ```
 
-- [ ] **Step 4: Add the validation endpoint**
+- [x] **Step 4: Add the validation endpoint**
 
 In `internal/web/routes/cookies.go` (or wherever auto-cookies endpoints live — locate by grep if unsure):
 ```bash
@@ -2283,7 +2283,7 @@ rl.Post("/api/auto-cookies/validate-browser-path", func(rw http.ResponseWriter, 
 
 Register on the rate-limited routes group (`rl`) since this triggers a subprocess. If unsure which group to use, check how other auto-cookies endpoints are wired.
 
-- [ ] **Step 5: Extend AutoCookieStatus to include AvailableBrowsers**
+- [x] **Step 5: Extend AutoCookieStatus to include AvailableBrowsers**
 
 In `internal/cookies/autocookies.go`, modify `AutoCookieStatus`:
 ```go
@@ -2322,7 +2322,7 @@ configStore.Read(func(c *config.MoomboxConfig) {
 ```
 Add the configStore as a dependency on AutoCookieService if it isn't already.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 ```bash
 go test ./internal/cookies/...
@@ -2331,7 +2331,7 @@ go build ./...
 ```
 Expected: PASS / clean build.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/cookies/browser_validate.go internal/cookies/browser_validate_test.go internal/cookies/autocookies.go internal/web/routes/cookies.go
@@ -2357,7 +2357,7 @@ a dropdown with the user's current selection highlighted."
 
 **Goal:** Replace the current "detected browser" display with a Shoelace `<sl-select>` dropdown listing all detected browsers + a "Custom path…" option. On custom-path selection, reveal text inputs for path and type.
 
-- [ ] **Step 1: Find the existing auto-cookies setup display**
+- [x] **Step 1: Find the existing auto-cookies setup display**
 
 ```bash
 grep -n "browser\|auto-cookie\|autoCookie" web/public/modules/setup.js
@@ -2365,7 +2365,7 @@ grep -n "browser\|auto-cookie\|autoCookie" web/public/modules/settings.js
 ```
 Identify the function(s) that render the current single-browser display.
 
-- [ ] **Step 2: Add the dropdown component to setup.js**
+- [x] **Step 2: Add the dropdown component to setup.js**
 
 In the auto-cookies setup step's render function, replace the existing browser display with:
 ```javascript
@@ -2438,7 +2438,7 @@ function renderBrowserSelector(status) {
 }
 ```
 
-- [ ] **Step 3: Add save logic with validation**
+- [x] **Step 3: Add save logic with validation**
 
 When the user clicks "Save" (or moves to next setup step), before PUT `/api/config`, validate the custom path:
 ```javascript
@@ -2474,11 +2474,11 @@ async function collectBrowserSelection(rootEl) {
 }
 ```
 
-- [ ] **Step 4: Add settings.js parity**
+- [x] **Step 4: Add settings.js parity**
 
 Mirror the same dropdown component in `web/public/modules/settings.js` for the live settings panel. The render+collect logic is the same; just wire to the settings save flow.
 
-- [ ] **Step 5: Visual verification**
+- [x] **Step 5: Visual verification**
 
 Build and run Moombox locally:
 ```bash
@@ -2494,7 +2494,7 @@ Open http://localhost:774 in a browser. Trigger setup wizard or open Settings. V
 
 If you can't run a browser test, at minimum confirm `go vet ./...` passes and the code blocks load without console errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/public/modules/setup.js web/public/modules/settings.js web/public/index.html
@@ -2518,13 +2518,13 @@ shows 'Auto-detect (recommended)' as the explicit zero-state."
 
 **Goal:** Mirror the web UI's dropdown in the TUI setup/settings screens using `huh.NewSelect[string]()`.
 
-- [ ] **Step 1: Locate the TUI auto-cookies setup screen**
+- [x] **Step 1: Locate the TUI auto-cookies setup screen**
 
 ```bash
 grep -rn "auto-cookie\|AutoCookie\|browser" internal/tui/ | grep -i "select\|setup\|browser"
 ```
 
-- [ ] **Step 2: Add a browser-selection field to the TUI**
+- [x] **Step 2: Add a browser-selection field to the TUI**
 
 Use `huh.NewSelect[string]()` with options built from `cookies.DetectBrowsers()`:
 ```go
@@ -2551,7 +2551,7 @@ If the user picks `"__custom__"`, follow with a `huh.NewInput()` for path and a 
 
 The exact integration point depends on how the existing TUI setup screen is structured — read the relevant file first, then adapt the pattern. If the existing screen uses huh forms, add the new fields to the same form. If it's a custom bubbletea model, add a new view state.
 
-- [ ] **Step 3: Verify build and tests**
+- [x] **Step 3: Verify build and tests**
 
 ```bash
 go build ./internal/tui/...
@@ -2559,7 +2559,7 @@ go test ./internal/tui/...
 ```
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/tui/
@@ -2585,7 +2585,7 @@ chains into a path input and type select. Same validation helper
 
 **Goal:** Add a new endpoint that returns a distro-appropriate FFmpeg install command for Linux users. Existing Chocolatey/winget logic on Windows stays unchanged.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `internal/web/routes/ffmpeg_distro_unix_test.go`:
 ```go
@@ -2623,14 +2623,14 @@ func TestSuggestFFmpegInstallByOSRelease(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 GOOS=linux go test -v ./internal/web/routes/ -run TestSuggestFFmpegInstallByOSRelease
 ```
 Expected: build error.
 
-- [ ] **Step 3: Implement the Unix file**
+- [x] **Step 3: Implement the Unix file**
 
 Create `internal/web/routes/ffmpeg_distro_unix.go`:
 ```go
@@ -2695,7 +2695,7 @@ func parseOSReleaseIDs(content string) (id, idLike string) {
 }
 ```
 
-- [ ] **Step 4: Implement the Windows stub**
+- [x] **Step 4: Implement the Windows stub**
 
 Create `internal/web/routes/ffmpeg_distro_other.go`:
 ```go
@@ -2711,7 +2711,7 @@ func suggestFFmpegInstall() string {
 }
 ```
 
-- [ ] **Step 5: Add the endpoint**
+- [x] **Step 5: Add the endpoint**
 
 In `internal/web/routes/ffmpeg.go`, add to the route registration:
 ```go
@@ -2724,7 +2724,7 @@ r.Get("/api/ffmpeg/install-suggestion", func(rw http.ResponseWriter, req *http.R
 })
 ```
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 ```bash
 GOOS=linux go test -v ./internal/web/routes/ -run TestSuggestFFmpegInstallByOSRelease
@@ -2732,7 +2732,7 @@ GOOS=windows go build ./internal/web/routes/...
 ```
 Expected: PASS / clean build on both.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/web/routes/ffmpeg_distro_unix.go internal/web/routes/ffmpeg_distro_other.go internal/web/routes/ffmpeg.go internal/web/routes/ffmpeg_distro_unix_test.go
@@ -2754,13 +2754,13 @@ to https://ffmpeg.org/download.html."
 
 **Goal:** When the user is on Linux, replace the Chocolatey/winget install buttons with a copy-pasteable command displayed via `<sl-input readonly>` plus a "Copy" and "I've installed FFmpeg, recheck" button.
 
-- [ ] **Step 1: Locate the FFmpeg setup step in setup.js**
+- [x] **Step 1: Locate the FFmpeg setup step in setup.js**
 
 ```bash
 grep -n "ffmpeg\|chocolatey\|winget" web/public/modules/setup.js
 ```
 
-- [ ] **Step 2: Branch on platform in the FFmpeg step**
+- [x] **Step 2: Branch on platform in the FFmpeg step**
 
 In `setup.js`, where the FFmpeg install options are rendered, fetch the platform via `/api/ffmpeg/install-options` (existing) AND `/api/ffmpeg/install-suggestion` (new). Render Linux differently:
 
@@ -2795,7 +2795,7 @@ async function renderFFmpegInstallStep(container) {
 }
 ```
 
-- [ ] **Step 3: TUI parity**
+- [x] **Step 3: TUI parity**
 
 In the TUI FFmpeg setup screen, render an analogous text block + recheck action when not running on Windows:
 ```go
@@ -2807,11 +2807,11 @@ if runtime.GOOS != "windows" {
 }
 ```
 
-- [ ] **Step 4: Visual verification**
+- [x] **Step 4: Visual verification**
 
 Build and run on Linux (or use a Linux VM/WSL). Open setup wizard. Verify the FFmpeg step shows the apt/dnf/pacman command instead of the Choco/winget buttons. Click "Copy command" — check clipboard.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add web/public/modules/setup.js internal/tui/
@@ -2836,7 +2836,7 @@ terminal, then clicks 'recheck' to verify."
 
 **Goal:** Strip the download-link section from the GitHub release body before exposing it, and add a server-side rendered HTML version for the web UI.
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 ```bash
 go get github.com/yuin/goldmark
@@ -2844,7 +2844,7 @@ go get github.com/microcosm-cc/bluemonday
 go mod tidy
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Add to `internal/updater/updater_test.go`:
 ```go
@@ -2904,14 +2904,14 @@ func TestRenderReleaseNotesHtmlRendersHeading(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 ```bash
 go test -v ./internal/updater/ -run "TestStripDownloadLinks|TestRenderReleaseNotesHtml"
 ```
 Expected: build error (`undefined: stripDownloadLinks, renderReleaseNotesHtml`).
 
-- [ ] **Step 4: Add the strip + render functions**
+- [x] **Step 4: Add the strip + render functions**
 
 In `internal/updater/updater.go`, add near the top (after imports):
 ```go
@@ -2957,7 +2957,7 @@ func renderReleaseNotesHtml(markdown string) string {
 
 Add `"html"` to the import list.
 
-- [ ] **Step 5: Wire stripping + rendering into getRelease**
+- [x] **Step 5: Wire stripping + rendering into getRelease**
 
 In `getRelease()` (around line 159 where `ReleaseInfo` is constructed):
 ```go
@@ -2986,14 +2986,14 @@ type ReleaseInfo struct {
 }
 ```
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 ```bash
 go test -v ./internal/updater/...
 ```
 Expected: all PASS, including the new ones.
 
-- [ ] **Step 7: Update routes that pass through ReleaseNotes**
+- [x] **Step 7: Update routes that pass through ReleaseNotes**
 
 Find the routes that serialize `ReleaseInfo` to JSON for the web UI:
 ```bash
@@ -3004,7 +3004,7 @@ In each handler, add the new field to the response map:
 resp["releaseNotesHtml"] = ui.ReleaseNotesHtml
 ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add internal/updater/updater.go internal/updater/updater_test.go internal/web/routes/update.go internal/web/routes/jobs.go go.mod go.sum
@@ -3030,13 +3030,13 @@ markdown for glamour rendering."
 
 **Goal:** Web UI uses `innerHTML` with the server-rendered HTML so headings/lists/code render properly.
 
-- [ ] **Step 1: Read the current display logic**
+- [x] **Step 1: Read the current display logic**
 
 ```bash
 sed -n '810,830p' web/public/app.js
 ```
 
-- [ ] **Step 2: Swap textContent for innerHTML**
+- [x] **Step 2: Swap textContent for innerHTML**
 
 In `web/public/app.js`, find:
 ```javascript
@@ -3055,7 +3055,7 @@ if (html) {
 
 The fallback to `textContent` is a safety net in case the server didn't render (e.g., older API response without the field).
 
-- [ ] **Step 3: Add styles for rendered markdown**
+- [x] **Step 3: Add styles for rendered markdown**
 
 In `web/public/moombox.css`, find the existing `#update-release-notes` rule (around line 2575). Replace and extend:
 ```css
@@ -3101,11 +3101,11 @@ In `web/public/moombox.css`, find the existing `#update-release-notes` rule (aro
 
 Note: removed `white-space: pre-wrap` because rendered HTML handles whitespace naturally.
 
-- [ ] **Step 4: Visual verification**
+- [x] **Step 4: Visual verification**
 
 Run Moombox locally with a release that has formatted notes. Trigger the update dialog (or temporarily call `showUpdateDialog` from the dev console with a fake `_updateAvailable`). Verify headings render as headings, bullets as bullets, no markdown syntax characters visible.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add web/public/app.js web/public/moombox.css
@@ -3134,7 +3134,7 @@ tokens."
 
 **Why this task got bigger:** the original plan assumed a TUI display surface for release notes existed. Investigation showed only a "⬆ Update!" version-bumped indicator and a feedback toast — the actual notes were stored but never displayed. This task adds the missing surface.
 
-- [ ] **Step 1: Add the glamour dependency**
+- [x] **Step 1: Add the glamour dependency**
 
 ```bash
 go get github.com/charmbracelet/glamour
@@ -3145,7 +3145,7 @@ Verify:
 grep glamour go.mod
 ```
 
-- [ ] **Step 2: Write the failing test for the overlay component**
+- [x] **Step 2: Write the failing test for the overlay component**
 
 Create `internal/tui/release_notes_overlay_test.go`:
 ```go
@@ -3212,14 +3212,14 @@ func TestReleaseNotesOverlayRenderEmptyNotes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 ```bash
 go test -v ./internal/tui/ -run TestReleaseNotesOverlay
 ```
 Expected: build error (`undefined: newReleaseNotesOverlay`).
 
-- [ ] **Step 4: Create the overlay component**
+- [x] **Step 4: Create the overlay component**
 
 Create `internal/tui/release_notes_overlay.go`:
 ```go
@@ -3338,14 +3338,14 @@ func (o *releaseNotesOverlay) renderBody(width int) string {
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 ```bash
 go test -v ./internal/tui/ -run TestReleaseNotesOverlay
 ```
 Expected: all 5 tests PASS.
 
-- [ ] **Step 6: Wire overlay state into the app**
+- [x] **Step 6: Wire overlay state into the app**
 
 Open `internal/tui/app.go`. Find the app struct (around line 240-260 where `updateAvailable` is declared). Add the overlay field next to it:
 ```go
@@ -3360,7 +3360,7 @@ In the app constructor (where the app struct is initialized), add:
 releaseNotesPopup: newReleaseNotesOverlay(),
 ```
 
-- [ ] **Step 7: Add `R N` chord to the action menu**
+- [x] **Step 7: Add `R N` chord to the action menu**
 
 Open `internal/tui/app_actions.go`. Find the section that builds Request-prefixed menu items (around line 446-449 where `R V` and `R U` are added). Add `R N` between them, conditional on an update being available:
 ```go
@@ -3395,7 +3395,7 @@ case "R N":
 
 (`a.width` and `a.height` are existing fields on the app model from the bubbletea WindowSizeMsg handler. If they're named differently, grep the existing code for the actual field names and use those.)
 
-- [ ] **Step 8: Route keys to overlay when open + add U/Esc/Q handlers**
+- [x] **Step 8: Route keys to overlay when open + add U/Esc/Q handlers**
 
 Open `internal/tui/app_keys.go`. Find the main key handler. Add a check at the very top — if the overlay is open, route specific keys there and consume others:
 ```go
@@ -3434,7 +3434,7 @@ if a.releaseNotesPopup.isOpen() {
 
 The exact placement depends on the existing key handler structure; insert this as the FIRST check inside the handler so overlay keys take precedence over chord matching.
 
-- [ ] **Step 9: Render overlay in app View**
+- [x] **Step 9: Render overlay in app View**
 
 Open `internal/tui/app_layout.go`. Find the main `View()` function. Near the end, before returning the final composed string, add overlay rendering:
 ```go
@@ -3454,13 +3454,13 @@ return <existing base view>
 
 (If the existing layout already uses a `lipgloss.Place` pattern for help/menu overlays, follow that exact pattern instead. Read `app_layout.go` for the conventions before editing.)
 
-- [ ] **Step 10: Update CLAUDE.md chord doc**
+- [x] **Step 10: Update CLAUDE.md chord doc**
 
 In `CLAUDE.md`, find the chord prefixes documentation and add `R N` to the Request examples list. Specifically, the line around "Prefixes: A (Action), R (Request)..." doesn't list every chord, but if there's a more detailed table elsewhere, add the entry there.
 
 If there's no detailed list (just the prefix description), this step is a no-op.
 
-- [ ] **Step 11: Update README.md keyboard controls table**
+- [x] **Step 11: Update README.md keyboard controls table**
 
 In `README.md`, find the "**Request (R)**" table:
 ```markdown
@@ -3482,7 +3482,7 @@ Add `R N` between `R V` and `R U`:
 | R U | Apply pending update |
 ```
 
-- [ ] **Step 12: Build and visually verify**
+- [x] **Step 12: Build and visually verify**
 
 ```bash
 go build ./cmd/moombox
@@ -3498,7 +3498,7 @@ In the running app:
 
 If you can't run an interactive TUI, at minimum verify `go test ./internal/tui/...` passes and `go vet ./internal/tui/...` is clean.
 
-- [ ] **Step 13: Commit**
+- [x] **Step 13: Commit**
 
 ```bash
 git add internal/tui/release_notes_overlay.go internal/tui/release_notes_overlay_test.go internal/tui/app.go internal/tui/app_actions.go internal/tui/app_keys.go internal/tui/app_layout.go README.md go.mod go.sum
@@ -3526,7 +3526,7 @@ parity with the web UI's update dialog."
 
 **Goal:** A focused build doc covering all the prerequisites and per-platform commands needed to build Moombox from source.
 
-- [ ] **Step 1: Create the file**
+- [x] **Step 1: Create the file**
 
 Create `BUILDING.md`:
 ```markdown
@@ -3642,7 +3642,7 @@ go tool pprof http://localhost:6060/debug/pprof/profile  # 30s CPU profile
 ```
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add BUILDING.md
@@ -3666,7 +3666,7 @@ README.md."
 
 **Goal:** Add Linux to the requirements/quick-start sections; trim the build-from-source section to a pointer to BUILDING.md.
 
-- [ ] **Step 1: Update Requirements section**
+- [x] **Step 1: Update Requirements section**
 
 Find the "Requirements" section in `README.md`. Replace:
 ```markdown
@@ -3682,7 +3682,7 @@ With:
 - [FFmpeg](https://ffmpeg.org/download.html) in your PATH (for muxing video + audio)
 ```
 
-- [ ] **Step 2: Update Quick Start with Linux instructions**
+- [x] **Step 2: Update Quick Start with Linux instructions**
 
 Find the "Quick Start" section. Replace the Windows-only instructions with a tabbed/collapsible pair:
 
@@ -3714,7 +3714,7 @@ chmod +x moombox-linux-arm64
 A built-in setup wizard walks you through first-time configuration on launch. The TUI opens by default — press **W** to open the web dashboard in your browser.
 ```
 
-- [ ] **Step 3: Replace the "Building from Source" section with a pointer**
+- [x] **Step 3: Replace the "Building from Source" section with a pointer**
 
 Find the "Building from Source" section. Replace its entire body with:
 ```markdown
@@ -3723,11 +3723,11 @@ Find the "Building from Source" section. Replace its entire body with:
 See [BUILDING.md](BUILDING.md) for prerequisites and build commands for Windows, Linux x64, and Linux arm64.
 ```
 
-- [ ] **Step 4: Verify rendering**
+- [x] **Step 4: Verify rendering**
 
 Open `README.md` in a markdown previewer (or just visual inspect). Make sure section headings flow correctly and no orphaned references remain.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md
@@ -3745,7 +3745,7 @@ focused on user-facing info."
 
 ### Task 23: End-to-end smoke test
 
-- [ ] **Step 1: Cross-platform build sanity**
+- [x] **Step 1: Cross-platform build sanity**
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/moombox-test.exe ./cmd/moombox
@@ -3754,7 +3754,7 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/moombox-test-linux-arm64 
 ```
 All three must succeed.
 
-- [ ] **Step 2: Full test suite**
+- [x] **Step 2: Full test suite**
 
 ```bash
 go test ./...
@@ -3762,7 +3762,7 @@ GOOS=linux go test ./...
 ```
 Expected: all PASS on both.
 
-- [ ] **Step 3: Vet**
+- [x] **Step 3: Vet**
 
 ```bash
 go vet ./...
@@ -3770,7 +3770,7 @@ GOOS=linux go vet ./...
 ```
 Expected: no warnings.
 
-- [ ] **Step 4: Run native binary, exercise key paths**
+- [x] **Step 4: Run native binary, exercise key paths**
 
 On Windows:
 ```bash
@@ -3787,23 +3787,23 @@ On Linux (if available):
 # Same checks
 ```
 
-- [ ] **Step 5: Cleanup test artifacts**
+- [x] **Step 5: Cleanup test artifacts**
 
 ```bash
 rm -f /tmp/moombox-test*
 ```
 
-- [ ] **Step 6: No commit needed for verification**
+- [x] **Step 6: No commit needed for verification**
 
 ---
 
 ## Plan completion checklist
 
 After running through all tasks:
-- [ ] All builds pass on Windows + Linux amd64 + Linux arm64
-- [ ] All tests pass on Windows + Linux amd64
-- [ ] `go vet ./...` clean on both
-- [ ] CI workflows committed and ready to run on the next tag push
-- [ ] Documentation reflects the new platform support
+- [x] All builds pass on Windows + Linux amd64 + Linux arm64
+- [x] All tests pass on Windows + Linux amd64
+- [x] `go vet ./...` clean on both
+- [x] CI workflows committed and ready to run on the next tag push
+- [x] Documentation reflects the new platform support
 
 When ready to release, follow the existing release process documented in CLAUDE.md (bump version in `cmd/moombox/main.go`, write `RELEASE_NOTES.md`, commit, tag, push). CI will produce all three signed binaries and create the GitHub release with the multi-platform download links.

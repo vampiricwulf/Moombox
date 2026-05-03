@@ -102,6 +102,21 @@ type CookiesConfig struct {
 	AutoEnabled       bool   `toml:"auto_enabled" json:"auto_enabled"`
 	BrowserProfileDir string `toml:"browser_profile_dir,omitempty" json:"browser_profile_dir,omitempty"`
 
+	// BrowserPath overrides the auto-detected browser. When empty
+	// (default), the auto-cookies service uses DetectBrowser to pick
+	// the best available browser. When set, the auto-cookies service
+	// uses this exact executable path and BrowserType to drive
+	// extraction. Setting BrowserPath without BrowserType is a config
+	// error caught at validation.
+	BrowserPath string `toml:"browser_path,omitempty" json:"browser_path,omitempty"`
+
+	// BrowserType identifies which extraction path applies to BrowserPath
+	// (firefox/chrome/brave/edge/etc.). Required when BrowserPath is set
+	// because the path alone doesn't tell us which extraction backend
+	// (Firefox cookies.sqlite vs Chromium CDP) to use. Validated against
+	// the same identifier list used by DetectBrowser.
+	BrowserType string `toml:"browser_type,omitempty" json:"browser_type,omitempty"`
+
 	// Platforms is the auto-detected platform list — populated at
 	// startup from cookie file inspection (HasYouTubeAuthCookies /
 	// HasTwitchAuthCookies). Treat as read-only-from-config.

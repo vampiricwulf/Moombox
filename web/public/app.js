@@ -816,7 +816,15 @@ class MoomboxApp {
     const notes = document.getElementById("update-release-notes");
     if (!dlg || !this._updateAvailable) return;
     dlg.label = `Update to v${this._updateAvailable.version}`;
-    notes.textContent = this._updateAvailable.releaseNotes || "No release notes available.";
+    // Prefer the server-rendered HTML (sanitized via bluemonday); fall back
+    // to the raw stripped markdown as text if an older server didn't send
+    // the html field, and finally to a generic message.
+    const html = this._updateAvailable.releaseNotesHtml || "";
+    if (html) {
+      notes.innerHTML = html;
+    } else {
+      notes.textContent = this._updateAvailable.releaseNotes || "No release notes available.";
+    }
     dlg.show();
   }
 

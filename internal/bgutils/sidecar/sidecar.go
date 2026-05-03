@@ -135,7 +135,7 @@ func (s *Sidecar) Start(ctx context.Context) error {
 		return fmt.Errorf("extract sidecar payload: %w", err)
 	}
 
-	nodeExe := filepath.Join(cacheDir, "node.exe")
+	nodeExe := filepath.Join(cacheDir, nodeBinaryName())
 	serverJS := filepath.Join(cacheDir, "src", "server.js")
 
 	cmd := exec.CommandContext(context.Background(), nodeExe, serverJS)
@@ -277,7 +277,7 @@ func (s *Sidecar) Stop() error {
 // stdout EOF (parent crash recovery).
 func (s *Sidecar) IsHealthy() bool { return s.healthy.Load() }
 
-// CacheDir returns the directory where the sidecar's node.exe and JS
+// CacheDir returns the directory where the sidecar's Node binary and JS
 // source live, or empty string if Start has not been called. Useful for
 // diagnostics and tests.
 func (s *Sidecar) CacheDir() string { return s.cacheDir }

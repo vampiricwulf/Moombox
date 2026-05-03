@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -235,6 +236,9 @@ func TestCleanupOldBinaryRemovesStaleArtifacts(t *testing.T) {
 	u, exePath := newTestUpdater(t, "1.0.0", srv, nil)
 
 	stale := []string{exePath + ".old", exePath + ".new", exePath + ".new.sig", exePath + ".sig"}
+	if runtime.GOOS == "windows" {
+		stale = append(stale, exePath+"~")
+	}
 	preserved := exePath + ".update-broken"
 	for _, p := range append(stale, preserved) {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
@@ -246,11 +250,11 @@ func TestCleanupOldBinaryRemovesStaleArtifacts(t *testing.T) {
 
 	for _, p := range stale {
 		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("stale file %s not removed: %v", p, err)
+			t.Errorf("stale file not removed: %s", p)
 		}
 	}
 	if _, err := os.Stat(preserved); err != nil {
-		t.Errorf("preserved marker %s should still exist: %v", preserved, err)
+		t.Errorf("preserved marker was deleted: %v", err)
 	}
 }
 
@@ -394,4 +398,104 @@ func TestApplyUpdateRefusesMissingSignature(t *testing.T) {
 var _ = func() string {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	return hex.EncodeToString(pub)
+}
+
+// --- stripDownloadLinks ---
+
+func TestStripDownloadLinks(t *testing.T) {
+	cases := []struct {
+		name, input, want string
+	}{
+		{
+			name:  "with separator",
+			input: "[**`Download Foo`**](url)\n\n---\n\n## Features\n- thing",
+			want:  "## Features\n- thing",
+		},
+		{
+			name:  "with multiple links",
+			input: "[A](u)\n[B](u2)\n\n---\n\n# Notes",
+			want:  "# Notes",
+		},
+		{
+			name:  "no separator returns unchanged",
+			input: "## Just notes\n- thing",
+			want:  "## Just notes\n- thing",
+		},
+		{
+			name:  "empty",
+			input: "",
+			want:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripDownloadLinks(tc.input)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// --- renderReleaseNotesHtml ---
+
+func TestRenderReleaseNotesHtmlSanitizesScripts(t *testing.T) {
+	html := renderReleaseNotesHtml("## OK\n\n<script>alert(1)</script>")
+	if strings.Contains(html, "<script>") {
+		t.Errorf("script tag survived sanitization: %s", html)
+	}
+	if !strings.Contains(html, "OK") {
+		t.Errorf("legitimate content stripped: %s", html)
+	}
+}
+
+func TestRenderReleaseNotesHtmlRendersHeading(t *testing.T) {
+	html := renderReleaseNotesHtml("## Heading\n- bullet")
+	if !strings.Contains(html, "<h2>") {
+		t.Errorf("expected <h2> in rendered output: %s", html)
+	}
+	if !strings.Contains(html, "<li>") {
+		t.Errorf("expected <li> in rendered output: %s", html)
+	}
+}
+
+// --- assetsForPlatform / releaseAssetMap ---
+
+// TestAssetsForPlatformKnownPlatforms verifies the lookup table covers all
+// three supported platforms with the correct binary and sig asset names.
+func TestAssetsForPlatformKnownPlatforms(t *testing.T) {
+	cases := []struct {
+		goos, goarch string
+		wantBinary   string
+		wantSig      string
+	}{
+		{"windows", "amd64", "Moombox.exe", "Moombox.exe.sig"},
+		{"linux", "amd64", "moombox-linux-amd64", "moombox-linux-amd64.sig"},
+		{"linux", "arm64", "moombox-linux-arm64", "moombox-linux-arm64.sig"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.goos+"/"+tc.goarch, func(t *testing.T) {
+			a, ok := assetsForPlatform(tc.goos, tc.goarch)
+			if !ok {
+				t.Fatalf("expected assets for %s/%s, got !ok", tc.goos, tc.goarch)
+			}
+			if a.binary != tc.wantBinary {
+				t.Errorf("binary: got %q, want %q", a.binary, tc.wantBinary)
+			}
+			if a.sig != tc.wantSig {
+				t.Errorf("sig: got %q, want %q", a.sig, tc.wantSig)
+			}
+		})
+	}
+}
+
+// TestAssetsForPlatformUnknown verifies that unsupported OS/arch combinations
+// return !ok rather than panicking or returning garbage.
+func TestAssetsForPlatformUnknown(t *testing.T) {
+	if _, ok := assetsForPlatform("plan9", "amd64"); ok {
+		t.Error("expected !ok for unknown platform")
+	}
+	if _, ok := assetsForPlatform("linux", "mips"); ok {
+		t.Error("expected !ok for unsupported arch")
+	}
 }

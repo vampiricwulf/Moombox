@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -356,6 +357,97 @@ func TestConfigPutChannelsRejectsUnknownPlatform(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("kick platform: want 400, got %d", rec.Code)
+	}
+}
+
+// --- PUT /api/config — browser_path / browser_type persistence (Critical fix) ---
+
+func TestConfigPutPersistsBrowserPath(t *testing.T) {
+	// browser_path and browser_type were previously silently dropped by
+	// applyConfigUpdates. This test guards against regression.
+	cfg := &config.MoomboxConfig{}
+	updates := map[string]any{
+		"cookies": map[string]any{
+			"browser_path": "/usr/bin/firefox",
+			"browser_type": "firefox",
+		},
+	}
+	applyConfigUpdates(cfg, updates)
+	if cfg.Cookies.BrowserPath != "/usr/bin/firefox" {
+		t.Errorf("BrowserPath: got %q, want /usr/bin/firefox", cfg.Cookies.BrowserPath)
+	}
+	if cfg.Cookies.BrowserType != "firefox" {
+		t.Errorf("BrowserType: got %q, want firefox", cfg.Cookies.BrowserType)
+	}
+}
+
+func TestConfigPutValidationRejectsRelativeBrowserPath(t *testing.T) {
+	updates := map[string]any{
+		"cookies": map[string]any{
+			"browser_path": "./firefox", // relative path
+			"browser_type": "firefox",
+		},
+	}
+	errs := validateConfigUpdates(updates)
+	if _, found := errs["cookies.browser_path"]; !found {
+		t.Errorf("expected validation error for relative browser_path, got: %v", errs)
+	}
+}
+
+func TestConfigPutValidationRejectsUnknownBrowserType(t *testing.T) {
+	updates := map[string]any{
+		"cookies": map[string]any{
+			"browser_path": "/some/path",
+			"browser_type": "not-a-browser",
+		},
+	}
+	errs := validateConfigUpdates(updates)
+	if _, found := errs["cookies.browser_path"]; !found {
+		t.Errorf("expected validation error for unknown browser_type, got: %v", errs)
+	}
+}
+
+func TestConfigPutBrowserPathPersistsViaHTTP(t *testing.T) {
+	// E2E: exercises the full PUT /api/config → validate → apply → configStore.Read
+	// chain for browser_path/browser_type. The earlier TestConfigPutPersistsBrowserPath
+	// only tests applyConfigUpdates in isolation; this test catches regressions in the
+	// HTTP route layer (e.g. the round-4 bug where the handler silently dropped the
+	// fields before calling applyConfigUpdates).
+	//
+	// ValidateBrowserPathQuick checks that the path exists and is a regular
+	// file, so we need a real path. os.Executable() gives us the test binary —
+	// guaranteed absolute, existing, and executable on any OS.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("os.Executable: %v", err)
+	}
+
+	f := newConfigRoutesFixture(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"cookies": map[string]any{
+			"browser_path": exe,
+			"browser_type": "firefox",
+		},
+	})
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT cookies.browser_path: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	var browserPath, browserType string
+	f.store.Read(func(c *config.MoomboxConfig) {
+		browserPath = c.Cookies.BrowserPath
+		browserType = c.Cookies.BrowserType
+	})
+	if browserPath != exe {
+		t.Errorf("BrowserPath: got %q, want %q", browserPath, exe)
+	}
+	if browserType != "firefox" {
+		t.Errorf("BrowserType: got %q, want firefox", browserType)
 	}
 }
 

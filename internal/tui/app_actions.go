@@ -172,6 +172,20 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return updateCheckResultMsg{Info: info}
 			})
 		}
+	case "R N":
+		if a.updateAvailable != nil {
+			if a.releaseNotesPopup == nil {
+				a.releaseNotesPopup = newReleaseNotesOverlay()
+			}
+			a.releaseNotesPopup.open(
+				a.updateAvailable.TagName,
+				a.updateAvailable.ReleaseNotes,
+				a.width, a.height,
+			)
+			return a, nil
+		}
+		a.setFeedback("No update available — release notes unavailable")
+		return a, nil
 	case "R U":
 		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
@@ -444,6 +458,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	}
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})
+	}
+	if a.updateAvailable != nil {
+		items = append(items, ActionMenuItem{Chord: "R N", Label: "View Release Notes " + a.updateAvailable.TagName, HintLabel: "Notes", Category: "Request"})
 	}
 	if a.updateAvailable != nil && a.OnApplyUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R U", Label: "Apply Update " + a.updateAvailable.TagName, HintLabel: "Update", Category: "Request"})
