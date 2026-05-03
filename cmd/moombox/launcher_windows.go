@@ -40,16 +40,16 @@ func setSysProcAttr(cmd *exec.Cmd) {
 
 // deferDeleteOldLauncher schedules deletion of the .exe~ file via a
 // detached cmd /c invocation that uses ping as a sleep mechanism,
-// then runs del. The ~11s wait covers normal launcher exit-and-
-// handle-release time. The launcher's startup cleanupOrphans is the
-// safety net if this somehow doesn't fire.
+// then runs del. The ~4s wait covers normal launcher exit-and-
+// handle-release time (os.Exit releases handles within milliseconds;
+// 4s is generous headroom). The launcher's startup cleanupOrphans
+// is the safety net if this somehow doesn't fire.
 //
 // History: tried timeout.exe earlier — it errors out unconditionally
 // when stdin is redirected (per Microsoft docs), which it always is
 // for a Go-spawned cmd subprocess. The `& del` then ran immediately,
 // before the launcher had released the file lock. ping has no stdin
-// dependency: 12 pings × 1s default interval = 11s of wall-clock
-// delay. This was the original approach pre-schtasks era.
+// dependency: 5 pings × 1s default interval = 4s of wall-clock delay.
 //
 // Earlier history: also tried schtasks (task name containing ~ was
 // rejected, /st time wraparound, /tr quoting fragility, no exit-code
@@ -60,7 +60,7 @@ func deferDeleteOldLauncher(exePath string) {
 		return // no .exe~ file to clean up
 	}
 	delayedDel := fmt.Sprintf(
-		`ping 127.0.0.1 -n 12 >nul & del /f /q "%s" >nul 2>nul`, oldPath)
+		`ping 127.0.0.1 -n 5 >nul & del /f /q "%s" >nul 2>nul`, oldPath)
 	cleanup := exec.Command("cmd", "/C", delayedDel)
 	setSysProcAttr(cleanup)
 	cleanup.Start() // fire-and-forget; we exit shortly anyway
