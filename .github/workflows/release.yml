@@ -17,11 +17,15 @@ permissions:
 #      (~55s saved). On miss: build them, cache stores for next run.
 #   3. go-winres setup — generates Windows .syso resources from
 #      bash + jq + go-winres (which works on any host OS).
-#   4. Cross-compile all 3 binaries in parallel via shell job control
-#      (Win amd64, Linux amd64, Linux arm64). Three concurrent
-#      go build invocations share the build cache safely and fit
-#      comfortably on ubuntu-latest's 4 vCPUs.
-#   5. Sign all 3 binaries in parallel.
+#   4. Cross-compile all 3 binaries SEQUENTIALLY (Win amd64, Linux
+#      amd64, Linux arm64). Earlier attempt at 3-way parallel saved
+#      only ~8s on a 4-vCPU runner because each build was already
+#      CPU-saturating, and introduced footguns (parallel sign's bare
+#      `wait` swallowed exit codes; parallel build raced on module
+#      cache and re-downloaded every dep 3x). Sequential gives clean
+#      per-binary logs and the first build naturally warms the module
+#      cache for the next two.
+#   5. Sign all 3 binaries sequentially (each is sub-second).
 #   6. Single softprops/action-gh-release@v3 call publishes the
 #      release with body + all 6 assets in one shot.
 #
@@ -115,69 +119,38 @@ jobs:
           go-winres make --arch amd64
           cd ../..
 
-      - name: Pre-download Go modules
-        # Three concurrent go build invocations would each race to
-        # populate the module cache from scratch, redundantly fetching
-        # every dependency three times (observed: chi, isatty, goja,
-        # etc. each downloaded 3x in v2.6.6 logs). Module cache
-        # population isn't synchronized between parallel `go` invocations.
-        # Pre-downloading once serializes the network fetch so the
-        # parallel builds all hit warm cache.
-        #
-        # GOOS=linux is implicit on the runner; modules are platform-
-        # neutral source code so this single download serves all 3
-        # cross-compile targets that follow.
-        run: go mod download
-
-      - name: Build all 3 binaries in parallel
-        # All cross-compiled from Linux. Three concurrent go build
-        # invocations share the build cache safely (file-locked) and
-        # the module cache is now warm from the pre-download step.
-        # ubuntu-latest has 4 vCPUs so 3 builds fit without
-        # significant contention.
-        # Fail-fast on any failure: if one build errors, the wait
-        # exits non-zero and the job fails — no partial release.
+      - name: Build all 3 binaries
+        # Sequential cross-compile. Tried 3-way parallel earlier; on
+        # ubuntu-latest (4 vCPUs) each go build was already CPU-saturating
+        # alone, so 3 concurrent builds just contended for cores —
+        # observed wall-clock saving was ~8s vs sequential. Not worth the
+        # PID-juggling complexity or the latent footguns (parallel
+        # signing's bare `wait` silently swallowed exit codes; parallel
+        # `go build` raced on module-cache population and re-downloaded
+        # every dep 3x). Sequential gives clean per-binary logs and
+        # the first build naturally warms the module cache for the next
+        # two — no separate pre-download step needed.
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           COMMIT=$(git rev-parse --short HEAD)
           LDFLAGS="-s -w -X main.version=$VERSION -X main.commit=$COMMIT"
 
-          (CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o Moombox.exe ./cmd/moombox) &
-          PID_WIN=$!
-          (CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o moombox-linux-amd64 ./cmd/moombox) &
-          PID_LIN_AMD64=$!
-          (CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o moombox-linux-arm64 ./cmd/moombox) &
-          PID_LIN_ARM64=$!
-          wait $PID_WIN
-          wait $PID_LIN_AMD64
-          wait $PID_LIN_ARM64
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o Moombox.exe ./cmd/moombox
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o moombox-linux-amd64 ./cmd/moombox
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o moombox-linux-arm64 ./cmd/moombox
 
-      - name: Sign all 3 binaries in parallel
+      - name: Sign all 3 binaries
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        # Capture each PID and wait individually. Bare `wait` returns 0
-        # regardless of background exit codes (only the LAST waited PID's
-        # exit propagates), which would silently swallow signing failures
-        # and ship a release with broken sigs. wait $PID returns the
-        # specific process's exit; set -e then fails the step.
-        #
-        # Pre-compile cmd/sign once to /tmp/sign — three concurrent
-        # `go run` calls would serialize on the build cache lockfile,
-        # defeating the point of running them in parallel.
+        # Sequential sign. Each invocation is sub-second; serial removes
+        # any chance of `wait`-pattern footguns silently swallowing
+        # signing failures.
         run: |
           set -euo pipefail
-          go build -o /tmp/sign ./cmd/sign
-
-          /tmp/sign Moombox.exe &
-          PID_WIN=$!
-          /tmp/sign moombox-linux-amd64 &
-          PID_LIN_AMD64=$!
-          /tmp/sign moombox-linux-arm64 &
-          PID_LIN_ARM64=$!
-          wait $PID_WIN
-          wait $PID_LIN_AMD64
-          wait $PID_LIN_ARM64
+          go run ./cmd/sign Moombox.exe
+          go run ./cmd/sign moombox-linux-amd64
+          go run ./cmd/sign moombox-linux-arm64
 
       - name: Build release body
         shell: bash
