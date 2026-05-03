@@ -140,12 +140,28 @@ jobs:
       - name: Sign all 3 binaries in parallel
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        # Capture each PID and wait individually. Bare `wait` returns 0
+        # regardless of background exit codes (only the LAST waited PID's
+        # exit propagates), which would silently swallow signing failures
+        # and ship a release with broken sigs. wait $PID returns the
+        # specific process's exit; set -e then fails the step.
+        #
+        # Pre-compile cmd/sign once to /tmp/sign — three concurrent
+        # `go run` calls would serialize on the build cache lockfile,
+        # defeating the point of running them in parallel.
         run: |
           set -euo pipefail
-          go run ./cmd/sign Moombox.exe &
-          go run ./cmd/sign moombox-linux-amd64 &
-          go run ./cmd/sign moombox-linux-arm64 &
-          wait
+          go build -o /tmp/sign ./cmd/sign
+
+          /tmp/sign Moombox.exe &
+          PID_WIN=$!
+          /tmp/sign moombox-linux-amd64 &
+          PID_LIN_AMD64=$!
+          /tmp/sign moombox-linux-arm64 &
+          PID_LIN_ARM64=$!
+          wait $PID_WIN
+          wait $PID_LIN_AMD64
+          wait $PID_LIN_ARM64
 
       - name: Build release body
         shell: bash
