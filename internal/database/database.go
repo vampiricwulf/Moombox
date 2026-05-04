@@ -64,6 +64,7 @@ var fieldToColumn = map[string]string{
 	"watched":             "watched",
 	"resume_position":     "resume_position",
 	"chat_offset":         "chat_offset",
+	"auto_retry_count":   "auto_retry_count",
 }
 
 // dbLogger is the interface for database error logging.
@@ -203,7 +204,8 @@ func (db *Database) prepareStatements() error {
 		chat_status, total_chat_messages, chat_filename, chat_file, thumbnail_file, description_file,
 		twitch_quality, twitch_category,
 		channel_avatar_url, selected_video_itag, selected_audio_itag, start_time, end_time,
-		last_recheck_at, quality_preference, watched, resume_position, chat_offset
+		last_recheck_at, quality_preference, watched, resume_position, chat_offset,
+		auto_retry_count
 		FROM jobs WHERE id = ?`)
 	if err != nil {
 		return err
@@ -257,7 +259,8 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 		thumbnail_file=?, description_file=?,
 		twitch_quality=?, twitch_category=?, channel_avatar_url=?,
 		selected_video_itag=?, selected_audio_itag=?, start_time=?, end_time=?,
-		last_recheck_at=?, quality_preference=?, watched=?, resume_position=?, chat_offset=?
+		last_recheck_at=?, quality_preference=?, watched=?, resume_position=?, chat_offset=?,
+		auto_retry_count=?
 		WHERE id=?`,
 		job.VideoID, job.URL, job.Title, job.ChannelName, job.Platform, job.Status,
 		job.Progress, job.Percent, job.ETA, job.Speed, job.Error, job.UpdatedAt,
@@ -271,7 +274,7 @@ func updateJobExec(ctx context.Context, exec executor, job *Job) error {
 		job.TwitchQuality, job.TwitchCategory, job.ChannelAvatarURL,
 		job.SelectedVideoItag, job.SelectedAudioItag, job.StartTime, job.EndTime,
 		job.LastRecheckAt, job.QualityPreference, boolToInt(job.Watched), job.ResumePosition,
-		job.ChatOffset, job.ID)
+		job.ChatOffset, job.AutoRetryCount, job.ID)
 	return err
 }
 
@@ -456,6 +459,7 @@ func scanJobRow(r rowScanner) (*Job, error) {
 		&j.TwitchQuality, &j.TwitchCategory, &j.ChannelAvatarURL,
 		&j.SelectedVideoItag, &j.SelectedAudioItag, &j.StartTime, &j.EndTime,
 		&j.LastRecheckAt, &j.QualityPreference, &watched, &j.ResumePosition, &j.ChatOffset,
+		&j.AutoRetryCount,
 	)
 	if err != nil {
 		return nil, err

@@ -80,6 +80,8 @@ type Job struct {
 	Watched           bool       `json:"watched"`
 	ResumePosition    *float64   `json:"resumePosition,omitempty"`
 	ChatOffset        float64    `json:"chatOffset"`
+	// Auto-recovery
+	AutoRetryCount    int        `json:"autoRetryCount,omitempty"`
 	// Trims (loaded via join)
 	Trims             []TrimRecord `json:"trims,omitempty"`
 	// Segments (loaded via join, for multi-segment quality-split jobs)
