@@ -48,6 +48,13 @@ var ErrCancelled = errors.New("cancelled")
 // Normal job discovery is signal-driven via NotifyNewJob.
 const heartbeatInterval = 60 * time.Second
 
+// MaxTwitchAutoRetries caps how many times the Twitch monitor's auto-recovery
+// will re-enqueue an errored "twitch channel is offline" job before giving up.
+// 2 retries (3 total attempts including the original) handles transient GQL
+// flaps measured in seconds without looping indefinitely on a persistent
+// issue. User-driven Reinit always resets this counter (see ReinitializeJob).
+const MaxTwitchAutoRetries = 2
+
 // logger is the anonymous interface for logging — intentionally not exported.
 // Each struct repeats this inline per CLAUDE.md convention.
 type logger = interface {
