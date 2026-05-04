@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -45,6 +44,17 @@ func setSysProcAttr(cmd *exec.Cmd) {
 // 4s is generous headroom). The launcher's startup cleanupOrphans
 // is the safety net if this somehow doesn't fire.
 //
+// Args are passed variadically — NOT joined into a single string —
+// because Go's syscall.EscapeArg targets CRT-style parsing (compatible
+// with CommandLineToArgvW), which disagrees with cmd.exe on quotes.
+// Joining `... & del /f /q "%s" ...` into one arg makes Go wrap the
+// whole string in quotes and escape the inner literal " as \", which
+// cmd then mis-parses (cmd uses "" for embedded quotes, not \"). del
+// receives a mangled path and >nul 2>nul swallows the failure. With
+// variadic args, tokens like `>nul`, `&`, `2>nul` go through unquoted
+// as bare cmd operators, and oldPath only gets quoted by Go if it
+// actually contains spaces — both cases cmd parses correctly.
+//
 // History: tried timeout.exe earlier — it errors out unconditionally
 // when stdin is redirected (per Microsoft docs), which it always is
 // for a Go-spawned cmd subprocess. The `& del` then ran immediately,
@@ -59,9 +69,9 @@ func deferDeleteOldLauncher(exePath string) {
 	if _, err := os.Stat(oldPath); err != nil {
 		return // no .exe~ file to clean up
 	}
-	delayedDel := fmt.Sprintf(
-		`ping 127.0.0.1 -n 5 >nul & del /f /q "%s" >nul 2>nul`, oldPath)
-	cleanup := exec.Command("cmd", "/C", delayedDel)
+	cleanup := exec.Command("cmd", "/C",
+		"ping", "127.0.0.1", "-n", "5", ">nul", "&",
+		"del", "/f", "/q", oldPath, ">nul", "2>nul")
 	setSysProcAttr(cleanup)
 	cleanup.Start() // fire-and-forget; we exit shortly anyway
 }
