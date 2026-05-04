@@ -225,6 +225,16 @@ func (w *DownloadWorker) EnqueueJob(jobID string) {
 	}
 }
 
+// StashTwitchStreamInfo forwards a fresh Twitch stream info hint to the
+// underlying StreamProcessor. Called by cmd/moombox's OnStreamFound /
+// OnStreamRecover monitor callbacks so the processor doesn't re-fetch what
+// the monitor just successfully fetched.
+func (w *DownloadWorker) StashTwitchStreamInfo(jobID string, info *twitch.TwitchStreamInfo) {
+	if w.streamProc != nil {
+		w.streamProc.StashTwitchStreamInfo(jobID, info)
+	}
+}
+
 // CancelJob cancels a running job and updates its status.
 func (w *DownloadWorker) CancelJob(jobID string) {
 	w.queue.Cancel(jobID)
