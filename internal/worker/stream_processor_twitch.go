@@ -15,6 +15,13 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
+// TwitchOfflineErrMsg is the literal error string emitted when a non-manual
+// Twitch job's GetStreamInfo returns nil/!IsLive. Exported so the monitor's
+// auto-recovery predicate can match on it without drifting from the producer.
+// Keep these two sites aligned — a regression test in internal/monitor checks
+// the predicate accepts exactly this string.
+const TwitchOfflineErrMsg = "twitch channel is offline"
+
 // twitchAuthSentinel returns ErrCookiesRequired when err is (or wraps)
 // twitch.ErrTwitchAuthExpired so VOD/HLS errors that lost their wrap
 // via %v formatting still get classified as auth-required by the
@@ -153,25 +160,48 @@ func (sp *StreamProcessor) processTwitchVod(ctx context.Context, job *database.J
 }
 
 func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.Job, login string) (*StreamProcessResult, error) {
-	streamInfo, err := sp.tw.GetStreamInfo(ctx, login)
-	if err != nil {
-		return nil, fmt.Errorf("twitch stream info: %w", err)
+	// Consume any monitor-stashed hint first — avoids a redundant GetStreamInfo
+	// call that exposed us to transient Twitch StreamMetadata flaps where the
+	// API briefly returned Stream=nil between two consecutive requests for the
+	// same channel. take() is a no-op if no hint exists (manual add, user
+	// reinit, app restart, etc.) and we fall back to a fresh fetch.
+	streamInfo := sp.twitchHints.take(job.ID)
+	if streamInfo != nil && !streamInfo.IsLive {
+		// Defense-in-depth: producer should only stash live infos, but if a
+		// non-live one slips through we'd rather refetch than log a misleading
+		// "using hint" line and fall straight into the offline branch.
+		sp.logger.Warn("twitch stashed hint is not live; refetching",
+			"jobID", job.ID, "streamID", streamInfo.StreamID, "channel", login)
+		streamInfo = nil
+	}
+	if streamInfo != nil {
+		sp.logger.Debug("twitch using stashed monitor hint",
+			"jobID", job.ID, "streamID", streamInfo.StreamID, "channel", login)
+	}
+
+	if streamInfo == nil {
+		fetched, err := sp.tw.GetStreamInfo(ctx, login)
+		if err != nil {
+			return nil, fmt.Errorf("twitch stream info: %w", err)
+		}
+		streamInfo = fetched
 	}
 
 	if streamInfo == nil || !streamInfo.IsLive {
 		if job.ManuallyAdded {
 			sp.logger.Info("twitch channel is offline, waiting for stream", "channel", login)
-			streamInfo, err = sp.waitForTwitchLive(ctx, job, login)
+			waitInfo, err := sp.waitForTwitchLive(ctx, job, login)
 			if err != nil {
 				return nil, err
 			}
-			if streamInfo == nil {
+			if waitInfo == nil {
 				return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
 			}
+			streamInfo = waitInfo
 			// Fall through to existing live handling below
 		} else {
-			sp.logger.Info("twitch channel is offline", "channel", login)
-			return &StreamProcessResult{ShouldDownload: false, Error: "twitch channel is offline"}, nil
+			sp.logger.Info(TwitchOfflineErrMsg, "channel", login)
+			return &StreamProcessResult{ShouldDownload: false, Error: TwitchOfflineErrMsg}, nil
 		}
 	}
 

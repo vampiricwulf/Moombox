@@ -368,6 +368,63 @@ func TestUpdateJobFieldsEmpty(t *testing.T) {
 	}
 }
 
+// TestUpdateJobFieldsAutoRetryCount verifies the new auto_retry_count column
+// can be read and written via UpdateJobFields. Locks down the column-plumbing
+// done in Phase 1 of the Twitch flap auto-recovery feature.
+func TestUpdateJobFieldsAutoRetryCount(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	job := &Job{
+		ID:      "tw_retry1",
+		VideoID: "retry1",
+		URL:     "https://twitch.tv/somestreamer",
+		Status:  StatusError,
+	}
+	if _, err := db.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default value on insert
+	got, err := db.GetJob("tw_retry1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AutoRetryCount != 0 {
+		t.Errorf("default AutoRetryCount: want 0, got %d", got.AutoRetryCount)
+	}
+
+	// Update via UpdateJobFields
+	db.UpdateJobFields("tw_retry1", map[string]any{
+		"auto_retry_count": 1,
+	})
+	got, err = db.GetJob("tw_retry1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AutoRetryCount != 1 {
+		t.Errorf("after update: want 1, got %d", got.AutoRetryCount)
+	}
+
+	// Update again
+	db.UpdateJobFields("tw_retry1", map[string]any{
+		"auto_retry_count": 2,
+	})
+	got, err = db.GetJob("tw_retry1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AutoRetryCount != 2 {
+		t.Errorf("after second update: want 2, got %d", got.AutoRetryCount)
+	}
+}
+
 func TestOnJobUpdateSubscriber(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

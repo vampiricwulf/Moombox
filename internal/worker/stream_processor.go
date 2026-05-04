@@ -75,13 +75,22 @@ type StreamProcessor struct {
 	logger      logger
 	isOnline    func() bool
 
+	twitchHints *twitchHintCache // populated by OnStreamFound; consumed by processTwitchLive
+
 	mu          sync.Mutex
 	activeChats []*chat.ChatDownloader // Track active chat downloaders for cleanup
 }
 
 // NewStreamProcessor creates a new stream processor.
 func NewStreamProcessor(yt *youtube.Service, tw *twitch.Service, cfg *config.MoomboxConfig, db *database.Database, logger logger) *StreamProcessor {
-	return &StreamProcessor{yt: yt, tw: tw, cfg: cfg, db: db, logger: logger}
+	return &StreamProcessor{
+		yt:          yt,
+		tw:          tw,
+		cfg:         cfg,
+		db:          db,
+		logger:      logger,
+		twitchHints: newTwitchHintCache(),
+	}
 }
 
 // SetConfigStore wires the shared *config.Store onto the stream processor.
@@ -466,4 +475,15 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 			},
 		)
 	}
+}
+
+// StashTwitchStreamInfo records a freshly-fetched Twitch stream info under
+// the given jobID. The next processTwitchLive call for that jobID will use
+// this info instead of re-querying Twitch — eliminating the duplicate GQL
+// call that exposed the worker to transient StreamMetadata flaps.
+//
+// Take-once: the hint is removed on consumption. If never consumed, it
+// expires after twitchHintTTL.
+func (sp *StreamProcessor) StashTwitchStreamInfo(jobID string, info *twitch.TwitchStreamInfo) {
+	sp.twitchHints.stash(jobID, info)
 }

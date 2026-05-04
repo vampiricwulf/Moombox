@@ -48,6 +48,13 @@ var ErrCancelled = errors.New("cancelled")
 // Normal job discovery is signal-driven via NotifyNewJob.
 const heartbeatInterval = 60 * time.Second
 
+// MaxTwitchAutoRetries caps how many times the Twitch monitor's auto-recovery
+// will re-enqueue an errored "twitch channel is offline" job before giving up.
+// 2 retries (3 total attempts including the original) handles transient GQL
+// flaps measured in seconds without looping indefinitely on a persistent
+// issue. User-driven Reinit always resets this counter (see ReinitializeJob).
+const MaxTwitchAutoRetries = 2
+
 // logger is the anonymous interface for logging — intentionally not exported.
 // Each struct repeats this inline per CLAUDE.md convention.
 type logger = interface {
@@ -222,6 +229,16 @@ func (w *DownloadWorker) EnqueueJob(jobID string) {
 	select {
 	case w.notifyJob <- struct{}{}:
 	default:
+	}
+}
+
+// StashTwitchStreamInfo forwards a fresh Twitch stream info hint to the
+// underlying StreamProcessor. Called by cmd/moombox's OnStreamFound /
+// OnStreamRecover monitor callbacks so the processor doesn't re-fetch what
+// the monitor just successfully fetched.
+func (w *DownloadWorker) StashTwitchStreamInfo(jobID string, info *twitch.TwitchStreamInfo) {
+	if w.streamProc != nil {
+		w.streamProc.StashTwitchStreamInfo(jobID, info)
 	}
 }
 
@@ -570,7 +587,10 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Suppress notifications for non-actionable errors (matches TS behavior):
 	// - Age-restricted content: nothing user can do
 	// - Probe timeout: transient, stream may have ended naturally
-	suppressNotification := errors.Is(err, ErrNonActionable)
+	// - Twitch monitor-driven retries (auto_retry_count > 0): user already
+	//   got the original error notification; subsequent retry-failure
+	//   notifications would be noise on the same job.
+	suppressNotification := errors.Is(err, ErrNonActionable) || job.AutoRetryCount > 0
 
 	// Send error/auth notification
 	if w.notifier != nil && !suppressNotification {
@@ -696,11 +716,14 @@ func (w *DownloadWorker) SetParallelDownloads(n int) {
 }
 
 // ResumeJob resumes a cancelled/errored YouTube job from its saved state.
-// Preserves staging files, progress, and seq numbers.
+// Preserves staging files, progress, and seq numbers. Resets auto_retry_count
+// so any future error fires its notification — Resume is user-driven, so the
+// "suppress retry-failure notifications" guard in setJobError must not apply.
 func (w *DownloadWorker) ResumeJob(jobID string) {
 	w.db.UpdateJobFields(jobID, map[string]any{
-		"status": database.StatusDownloading,
-		"error":  "",
+		"status":           database.StatusDownloading,
+		"error":            "",
+		"auto_retry_count": 0,
 	})
 	w.EnqueueJob(jobID)
 }
@@ -720,7 +743,11 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 		w.logger.Warn("failed to remove staging directory on reinitialize", "path", stagingDir, "err", err)
 	}
 
-	// Clear all non-input fields
+	// Clear all non-input fields. auto_retry_count resets here because
+	// user-driven reinit grants the job a fresh budget; auto-recovery
+	// uses AutoReinitializeJob (sibling method) which increments instead.
+	// KEEP IN SYNC with AutoReinitializeJob below — same reset map, the
+	// only difference is the auto_retry_count value (0 vs newCount).
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status":              database.StatusUpcoming,
 		"error":               "",
@@ -749,6 +776,71 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 		"length_seconds":      nil,
 		"selected_video_itag": nil,
 		"selected_audio_itag": nil,
+		"auto_retry_count":    0,
+	})
+	w.EnqueueJob(jobID)
+}
+
+// AutoReinitializeJob is the auto-recovery sibling of ReinitializeJob: same
+// state reset (clears progress fields, deletes staging dir, sets status to
+// Upcoming, re-enqueues), but increments auto_retry_count instead of
+// resetting it. Called by the Twitch monitor's OnStreamRecover callback
+// when an errored job's underlying broadcast is still live and the error
+// matches a recoverable shape.
+//
+// Capped at MaxTwitchAutoRetries (the caller is expected to pre-check the
+// budget; this method blindly increments).
+func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
+	prev, err := w.db.GetJob(jobID)
+	if err != nil || prev == nil {
+		w.logger.Warn("AutoReinitializeJob: job not found", "jobID", jobID, "err", err)
+		return
+	}
+	newCount := prev.AutoRetryCount + 1
+
+	// Read config for staging path
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) {
+		stagingBase = c.Paths.EffectiveStagingDir()
+	})
+
+	// Delete staging directory
+	stagingDir := filepath.Join(stagingBase, jobID)
+	if err := os.RemoveAll(stagingDir); err != nil {
+		w.logger.Warn("AutoReinitializeJob: staging cleanup failed", "path", stagingDir, "err", err)
+	}
+
+	// Same field reset as ReinitializeJob, but auto_retry_count INCREMENTS.
+	// KEEP IN SYNC with ReinitializeJob above if reset fields are added.
+	w.db.UpdateJobFields(jobID, map[string]any{
+		"status":              database.StatusUpcoming,
+		"error":               "",
+		"progress":            "",
+		"percent":             0,
+		"speed":               "",
+		"eta":                 "",
+		"last_video_seq":      nil,
+		"last_audio_seq":      nil,
+		"total_video_seq":     nil,
+		"total_audio_seq":     nil,
+		"chat_status":         "",
+		"total_chat_messages": nil,
+		"download_started_at": "",
+		"stream_end_time":     "",
+		"output_file":         "",
+		"filename":            "",
+		"file_size":           nil,
+		"chat_file":           "",
+		"chat_filename":       "",
+		"description_file":    "",
+		"thumbnail_file":      "",
+		"video_width":         nil,
+		"video_height":        nil,
+		"video_fps":           nil,
+		"length_seconds":      nil,
+		"selected_video_itag": nil,
+		"selected_audio_itag": nil,
+		"auto_retry_count":    newCount,
 	})
 	w.EnqueueJob(jobID)
 }

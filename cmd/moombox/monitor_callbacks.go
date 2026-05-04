@@ -225,6 +225,11 @@ func (s *runState) wireMonitorCallbacks() {
 		if !added {
 			return // Duplicate job
 		}
+		// Stash the monitor's fresh streamInfo for processTwitchLive to consume,
+		// so it doesn't immediately re-query Twitch GQL (which has been observed
+		// to return Stream=nil for ~1s after StreamMetadata reports a stream as
+		// live, manifesting as a false "twitch channel is offline" error).
+		s.dlWorker.StashTwitchStreamInfo(jobID, info)
 		s.db.AddToHistory(jobID)
 		s.dlWorker.EnqueueJob(jobID)
 		// Same as the YouTube path — AddJob's OnJobAdded handler
@@ -250,6 +255,28 @@ func (s *runState) wireMonitorCallbacks() {
 					Thumbnail: info.ThumbnailURL,
 				})
 		}
+	}
+
+	s.twitchMon.OnStreamRecover = func(info *twitch.TwitchStreamInfo, ch *config.ChannelConfig, jobID string) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("Panic in OnStreamRecover (twitch)", slog.Any("panic", r))
+			}
+		}()
+
+		// Stash the fresh streamInfo so processTwitchLive consumes it instead
+		// of re-querying GQL — same flap-prevention as the OnStreamFound path.
+		s.dlWorker.StashTwitchStreamInfo(jobID, info)
+
+		// AutoReinitializeJob increments auto_retry_count, clears state, and
+		// re-enqueues. The cap (worker.MaxTwitchAutoRetries) is enforced by
+		// the monitor's predicate before we even get here.
+		s.dlWorker.AutoReinitializeJob(jobID)
+
+		s.log.Info("auto-recovered twitch job",
+			slog.String("jobID", jobID),
+			slog.String("channel", info.ChannelDisplayName),
+			slog.String("streamID", info.StreamID))
 	}
 
 	// Monitor -> WebSocket: broadcast timer updates. TypeScript broadcasts

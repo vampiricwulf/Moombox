@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 // createSchema defines the full schema for new databases. It includes all tables
 // and indexes from the start. The incremental migrations below handle upgrading
@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     quality_preference TEXT DEFAULT '',
     watched INTEGER DEFAULT 0,
     resume_position REAL,
-    chat_offset REAL NOT NULL DEFAULT 0
+    chat_offset REAL NOT NULL DEFAULT 0,
+    auto_retry_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS gaps (
@@ -480,6 +481,23 @@ func (db *Database) migrate() error {
 		}
 
 		if err := db.writeUserVersion(12); err != nil {
+			return err
+		}
+	}
+
+	if version < 13 {
+		// auto_retry_count tracks how many times the monitor's auto-recovery
+		// has re-enqueued this job after a transient "twitch channel is offline"
+		// flap. Capped at 2 (see worker.MaxTwitchAutoRetries) so persistent
+		// issues don't loop forever. Reset to 0 by user-driven ReinitializeJob.
+		if _, err := db.db.ExecContext(db.getCtx(),
+			`ALTER TABLE jobs ADD COLUMN auto_retry_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+			if !isDuplicateColumnErr(err) {
+				return err
+			}
+		}
+
+		if err := db.writeUserVersion(13); err != nil {
 			return err
 		}
 	}
