@@ -82,7 +82,7 @@ func TestIsRecoverableTwitchError(t *testing.T) {
 		},
 	}
 
-	const maxRetries = 2
+	maxRetries := worker.MaxTwitchAutoRetries
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := isRecoverableTwitchError(tt.job, maxRetries)
