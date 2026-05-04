@@ -84,3 +84,26 @@ func TestTwitchHintCacheOverwriteOnDoubleStash(t *testing.T) {
 		t.Errorf("StreamID: want v2 (last write wins), got %q", got.StreamID)
 	}
 }
+
+// TestProcessorStashAndTake verifies a stashed hint short-circuits the
+// GetStreamInfo call. We can't easily inject a fake Twitch service without
+// substantially refactoring StreamProcessor, so this test focuses on the
+// observable side-effect: after stashing and a single take, the cache is
+// empty (take-once). The end-to-end path is covered by the integration
+// scenario in Phase 10.
+func TestProcessorStashAndTake(t *testing.T) {
+	sp := &StreamProcessor{twitchHints: newTwitchHintCache()}
+	info := &twitch.TwitchStreamInfo{StreamID: "abc", IsLive: true}
+
+	sp.StashTwitchStreamInfo("tw_abc", info)
+
+	got := sp.twitchHints.take("tw_abc")
+	if got == nil || got.StreamID != "abc" {
+		t.Fatalf("expected stashed info to be retrievable, got %+v", got)
+	}
+
+	// take-once: second take is empty
+	if got := sp.twitchHints.take("tw_abc"); got != nil {
+		t.Errorf("second take after stash: want nil, got %+v", got)
+	}
+}
