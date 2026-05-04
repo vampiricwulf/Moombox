@@ -225,6 +225,11 @@ func (s *runState) wireMonitorCallbacks() {
 		if !added {
 			return // Duplicate job
 		}
+		// Stash the monitor's fresh streamInfo for processTwitchLive to consume,
+		// so it doesn't immediately re-query Twitch GQL (which has been observed
+		// to return Stream=nil for ~1s after StreamMetadata reports a stream as
+		// live, manifesting as a false "twitch channel is offline" error).
+		s.dlWorker.StashTwitchStreamInfo(jobID, info)
 		s.db.AddToHistory(jobID)
 		s.dlWorker.EnqueueJob(jobID)
 		// Same as the YouTube path — AddJob's OnJobAdded handler
