@@ -716,11 +716,14 @@ func (w *DownloadWorker) SetParallelDownloads(n int) {
 }
 
 // ResumeJob resumes a cancelled/errored YouTube job from its saved state.
-// Preserves staging files, progress, and seq numbers.
+// Preserves staging files, progress, and seq numbers. Resets auto_retry_count
+// so any future error fires its notification — Resume is user-driven, so the
+// "suppress retry-failure notifications" guard in setJobError must not apply.
 func (w *DownloadWorker) ResumeJob(jobID string) {
 	w.db.UpdateJobFields(jobID, map[string]any{
-		"status": database.StatusDownloading,
-		"error":  "",
+		"status":           database.StatusDownloading,
+		"error":            "",
+		"auto_retry_count": 0,
 	})
 	w.EnqueueJob(jobID)
 }
