@@ -64,7 +64,7 @@ var fieldToColumn = map[string]string{
 	"watched":             "watched",
 	"resume_position":     "resume_position",
 	"chat_offset":         "chat_offset",
-	"auto_retry_count":   "auto_retry_count",
+	"auto_retry_count":    "auto_retry_count",
 }
 
 // dbLogger is the interface for database error logging.
