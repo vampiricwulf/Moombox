@@ -587,7 +587,10 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Suppress notifications for non-actionable errors (matches TS behavior):
 	// - Age-restricted content: nothing user can do
 	// - Probe timeout: transient, stream may have ended naturally
-	suppressNotification := errors.Is(err, ErrNonActionable)
+	// - Twitch monitor-driven retries (auto_retry_count > 0): user already
+	//   got the original error notification; subsequent retry-failure
+	//   notifications would be noise on the same job.
+	suppressNotification := errors.Is(err, ErrNonActionable) || job.AutoRetryCount > 0
 
 	// Send error/auth notification
 	if w.notifier != nil && !suppressNotification {
