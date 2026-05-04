@@ -242,6 +242,17 @@ func (w *DownloadWorker) StashTwitchStreamInfo(jobID string, info *twitch.Twitch
 	}
 }
 
+// TwitchHintStats forwards the underlying StreamProcessor's hint cache
+// counters. Returns zero values if streamProc isn't wired (early-init test
+// harness paths). Exposed so the /api/stats endpoint can render hit/miss
+// rates without reaching through the StreamProcessor directly.
+func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
+	if w.streamProc == nil {
+		return TwitchHintStats{}
+	}
+	return w.streamProc.TwitchHintStats()
+}
+
 // CancelJob cancels a running job and updates its status.
 func (w *DownloadWorker) CancelJob(jobID string) {
 	w.queue.Cancel(jobID)
@@ -450,6 +461,10 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 // User-initiated cancels update status to Cancelled.
 // Shutdown cancels preserve original status so jobs resume on restart (matches TS).
 func (w *DownloadWorker) handleCancellation(job *database.Job, stagingDir string) {
+	// Free the queue slot before any DB writes — symmetric with setJobError
+	// (see I2 race comment there). Idempotent against the deferred Complete.
+	w.queue.Complete(job.ID)
+
 	if w.queue.WasCancelled(job.ID) {
 		// User-initiated cancel: update status, notify
 		w.logger.Info("job cancelled by user", "jobID", job.ID)
@@ -566,6 +581,13 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 }
 
 func (w *DownloadWorker) setJobError(job *database.Job, err error) {
+	// Free the queue slot BEFORE committing the error to DB so a concurrent
+	// monitor-driven AutoReinitializeJob can re-enqueue without hitting the
+	// IsProcessing dedup. processJob's deferred Complete is idempotent and
+	// remains as a safety net (covers panics that bypass this helper).
+	// Closes the I2 race documented in the v2.6.10 final review.
+	w.queue.Complete(job.ID)
+
 	errMsg := err.Error()
 	w.logger.Error("job error", "jobID", job.ID, "err", errMsg)
 

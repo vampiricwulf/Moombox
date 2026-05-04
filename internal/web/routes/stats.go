@@ -9,6 +9,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/disk"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 // DiskStatus holds the latest disk space reading and warn level.
@@ -62,8 +63,9 @@ func UpdateDiskStatus(outputDir string, store *config.Store) *DiskStatus {
 
 // StatsRouteDeps holds dependencies for the stats route.
 type StatsRouteDeps struct {
-	DB  *database.Database
-	Cfg *config.MoomboxConfig
+	DB     *database.Database
+	Cfg    *config.MoomboxConfig
+	Worker *worker.DownloadWorker // optional; surfaces Twitch hint cache hit/miss
 }
 
 // StatsRoutes registers the /api/stats endpoint.
@@ -121,10 +123,23 @@ func StatsRoutes(r chi.Router, deps *StatsRouteDeps) {
 			}
 		}
 
-		jsonResponse(rw, map[string]any{
+		resp := map[string]any{
 			"disk":     diskResp,
 			"storage":  storageResp,
 			"activity": activityResp,
-		})
+		}
+
+		// Twitch hint-cache observability — surfaces whether the monitor →
+		// processor pass-through is firing in production. A drop to zero hits
+		// after a refactor would otherwise be invisible.
+		if deps.Worker != nil {
+			hs := deps.Worker.TwitchHintStats()
+			resp["twitchHints"] = map[string]uint64{
+				"hits":   hs.Hits,
+				"misses": hs.Misses,
+			}
+		}
+
+		jsonResponse(rw, resp)
 	})
 }

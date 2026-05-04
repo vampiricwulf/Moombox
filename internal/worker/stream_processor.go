@@ -487,3 +487,11 @@ func (sp *StreamProcessor) updateJobMetadata(job *database.Job, info *youtube.Vi
 func (sp *StreamProcessor) StashTwitchStreamInfo(jobID string, info *twitch.TwitchStreamInfo) {
 	sp.twitchHints.stash(jobID, info)
 }
+
+// TwitchHintStats returns a snapshot of hit/miss counters for the take-once
+// hint cache. Exposed so the stats endpoint can surface whether the
+// monitor → processor pass-through is actually firing in production. A drop
+// to zero after a refactor would otherwise be invisible.
+func (sp *StreamProcessor) TwitchHintStats() TwitchHintStats {
+	return sp.twitchHints.Stats()
+}

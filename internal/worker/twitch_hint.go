@@ -2,6 +2,7 @@ package worker
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/twitch"
@@ -31,10 +32,32 @@ type twitchHintEntry struct {
 type twitchHintCache struct {
 	mu      sync.Mutex
 	entries map[string]twitchHintEntry
+
+	// Observability counters — atomic so reads from the stats endpoint don't
+	// contend with stash/take. hits = take returned non-nil; misses = take
+	// returned nil (no entry, or entry was expired).
+	hits   atomic.Uint64
+	misses atomic.Uint64
 }
 
 func newTwitchHintCache() *twitchHintCache {
 	return &twitchHintCache{entries: map[string]twitchHintEntry{}}
+}
+
+// TwitchHintStats is the snapshot returned by Stats. Exported so it can
+// round-trip cleanly through the JSON stats endpoint.
+type TwitchHintStats struct {
+	Hits   uint64 `json:"hits"`
+	Misses uint64 `json:"misses"`
+}
+
+// Stats returns a snapshot of the cache's hit/miss counters. Safe to call
+// on a nil receiver (returns zero values).
+func (c *twitchHintCache) Stats() TwitchHintStats {
+	if c == nil {
+		return TwitchHintStats{}
+	}
+	return TwitchHintStats{Hits: c.hits.Load(), Misses: c.misses.Load()}
 }
 
 // stash records a fresh TwitchStreamInfo for the given jobID. Safe to call
@@ -58,14 +81,18 @@ func (c *twitchHintCache) take(jobID string) *twitch.TwitchStreamInfo {
 		return nil
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	entry, ok := c.entries[jobID]
 	if !ok {
+		c.mu.Unlock()
+		c.misses.Add(1)
 		return nil
 	}
 	delete(c.entries, jobID)
+	c.mu.Unlock()
 	if time.Since(entry.stashedAt) > twitchHintTTL {
+		c.misses.Add(1)
 		return nil
 	}
+	c.hits.Add(1)
 	return entry.info
 }

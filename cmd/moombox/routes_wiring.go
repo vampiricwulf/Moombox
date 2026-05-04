@@ -78,8 +78,9 @@ func (s *runState) wireRoutes() func() {
 	})
 	routes.TrimRoutes(s.r, s.db, s.trimSvc)
 	routes.StatsRoutes(s.r, &routes.StatsRouteDeps{
-		DB:  s.db,
-		Cfg: s.cfg,
+		DB:     s.db,
+		Cfg:    s.cfg,
+		Worker: s.dlWorker,
 	})
 	routes.PotRoutes(s.r, &routes.PotRoutesDeps{
 		PotProvider: s.potProvider,

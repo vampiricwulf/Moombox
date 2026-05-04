@@ -66,6 +66,49 @@ func TestTwitchHintCacheNilSafe(t *testing.T) {
 	if got := c.take("tw_nil"); got != nil {
 		t.Errorf("take on nil cache: want nil, got %+v", got)
 	}
+	if s := c.Stats(); s.Hits != 0 || s.Misses != 0 {
+		t.Errorf("Stats on nil cache: want zero, got %+v", s)
+	}
+}
+
+func TestTwitchHintCacheStatsCounter(t *testing.T) {
+	c := newTwitchHintCache()
+	info := &twitch.TwitchStreamInfo{StreamID: "stat", IsLive: true}
+
+	// 1 hit: stash + take
+	c.stash("tw_stat", info)
+	if got := c.take("tw_stat"); got == nil {
+		t.Fatal("first take after stash: want non-nil")
+	}
+
+	// 2 misses: take of unknown ID twice
+	c.take("tw_unknown_a")
+	c.take("tw_unknown_b")
+
+	// 1 miss via expiry: backdate then take
+	c.mu.Lock()
+	c.entries["tw_expired"] = twitchHintEntry{
+		info:      info,
+		stashedAt: time.Now().Add(-2 * twitchHintTTL),
+	}
+	c.mu.Unlock()
+	if got := c.take("tw_expired"); got != nil {
+		t.Fatal("expired take: want nil")
+	}
+
+	// 1 more hit: fresh stash + take
+	c.stash("tw_stat2", info)
+	if got := c.take("tw_stat2"); got == nil {
+		t.Fatal("second take after stash: want non-nil")
+	}
+
+	s := c.Stats()
+	if s.Hits != 2 {
+		t.Errorf("Hits: want 2, got %d", s.Hits)
+	}
+	if s.Misses != 3 {
+		t.Errorf("Misses: want 3, got %d", s.Misses)
+	}
 }
 
 func TestTwitchHintCacheOverwriteOnDoubleStash(t *testing.T) {
