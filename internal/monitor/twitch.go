@@ -10,6 +10,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/twitch"
+	"github.com/vampiricwulf/Moombox/internal/worker"
 )
 
 const (
@@ -36,9 +37,10 @@ type TwitchMonitor struct {
 		Error(msg string, args ...any)
 	}
 
-	OnSchedule    func(nextCheckAt int64)
-	OnStreamFound func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig)
-	IsOnline      func() bool // nil = always online
+	OnSchedule      func(nextCheckAt int64)
+	OnStreamFound   func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig)
+	OnStreamRecover func(info *twitch.TwitchStreamInfo, channel *config.ChannelConfig, jobID string)
+	IsOnline        func() bool // nil = always online
 }
 
 // NewTwitchMonitor creates a new Twitch monitor. The Store carries the
@@ -258,6 +260,24 @@ func (tm *TwitchMonitor) checkChannel(ctx context.Context, ch *config.ChannelCon
 		tm.logger.Debug("HasProcessed query failed", "jobID", jobID, "err", hpErr)
 	}
 	if processed {
+		// Check whether the existing job is in a recoverable error state —
+		// i.e. the SAME broadcast is still live (we got a hit on the same
+		// streamID that produced this jobID) and the prior error matches
+		// a transient Twitch GQL flap. If so, dispatch to OnStreamRecover.
+		if tm.OnStreamRecover != nil {
+			existing, getErr := tm.db.GetJob(jobID)
+			if getErr != nil {
+				tm.logger.Debug("recover check: GetJob failed", "jobID", jobID, "err", getErr)
+			} else if isRecoverableTwitchError(existing, worker.MaxTwitchAutoRetries) {
+				tm.logger.Info("twitch recoverable error — re-enqueueing job",
+					"jobID", jobID,
+					"channel", info.ChannelDisplayName,
+					"streamID", info.StreamID,
+					"prevRetries", existing.AutoRetryCount)
+				tm.OnStreamRecover(info, ch, jobID)
+				return nil
+			}
+		}
 		return nil
 	}
 	active, haErr := tm.db.HasActiveJob(info.StreamID)
