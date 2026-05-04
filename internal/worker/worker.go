@@ -730,7 +730,9 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 		w.logger.Warn("failed to remove staging directory on reinitialize", "path", stagingDir, "err", err)
 	}
 
-	// Clear all non-input fields
+	// Clear all non-input fields. auto_retry_count resets here because
+	// user-driven reinit grants the job a fresh budget; auto-recovery
+	// uses AutoReinitializeJob (sibling method) which increments instead.
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status":              database.StatusUpcoming,
 		"error":               "",
@@ -759,6 +761,7 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 		"length_seconds":      nil,
 		"selected_video_itag": nil,
 		"selected_audio_itag": nil,
+		"auto_retry_count":    0,
 	})
 	w.EnqueueJob(jobID)
 }
