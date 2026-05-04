@@ -773,6 +773,69 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 	w.EnqueueJob(jobID)
 }
 
+// AutoReinitializeJob is the auto-recovery sibling of ReinitializeJob: same
+// state reset (clears progress fields, deletes staging dir, sets status to
+// Upcoming, re-enqueues), but increments auto_retry_count instead of
+// resetting it. Called by the Twitch monitor's OnStreamRecover callback
+// when an errored job's underlying broadcast is still live and the error
+// matches a recoverable shape.
+//
+// Capped at MaxTwitchAutoRetries (the caller is expected to pre-check the
+// budget; this method blindly increments).
+func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
+	prev, err := w.db.GetJob(jobID)
+	if err != nil || prev == nil {
+		w.logger.Warn("AutoReinitializeJob: job not found", "jobID", jobID, "err", err)
+		return
+	}
+	newCount := prev.AutoRetryCount + 1
+
+	// Read config for staging path
+	var stagingBase string
+	w.readConfig(func(c *config.MoomboxConfig) {
+		stagingBase = c.Paths.EffectiveStagingDir()
+	})
+
+	// Delete staging directory
+	stagingDir := filepath.Join(stagingBase, jobID)
+	if err := os.RemoveAll(stagingDir); err != nil {
+		w.logger.Warn("AutoReinitializeJob: staging cleanup failed", "path", stagingDir, "err", err)
+	}
+
+	// Same field reset as ReinitializeJob, but auto_retry_count INCREMENTS.
+	w.db.UpdateJobFields(jobID, map[string]any{
+		"status":              database.StatusUpcoming,
+		"error":               "",
+		"progress":            "",
+		"percent":             0,
+		"speed":               "",
+		"eta":                 "",
+		"last_video_seq":      nil,
+		"last_audio_seq":      nil,
+		"total_video_seq":     nil,
+		"total_audio_seq":     nil,
+		"chat_status":         "",
+		"total_chat_messages": nil,
+		"download_started_at": "",
+		"stream_end_time":     "",
+		"output_file":         "",
+		"filename":            "",
+		"file_size":           nil,
+		"chat_file":           "",
+		"chat_filename":       "",
+		"description_file":    "",
+		"thumbnail_file":      "",
+		"video_width":         nil,
+		"video_height":        nil,
+		"video_fps":           nil,
+		"length_seconds":      nil,
+		"selected_video_itag": nil,
+		"selected_audio_itag": nil,
+		"auto_retry_count":    newCount,
+	})
+	w.EnqueueJob(jobID)
+}
+
 // MuxJob force-muxes a cancelled/errored job's staging files.
 // Bypasses the download queue — runs directly in a wg-tracked goroutine.
 func (w *DownloadWorker) MuxJob(jobID string) error {
