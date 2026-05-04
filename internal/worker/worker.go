@@ -740,6 +740,8 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 	// Clear all non-input fields. auto_retry_count resets here because
 	// user-driven reinit grants the job a fresh budget; auto-recovery
 	// uses AutoReinitializeJob (sibling method) which increments instead.
+	// KEEP IN SYNC with AutoReinitializeJob below — same reset map, the
+	// only difference is the auto_retry_count value (0 vs newCount).
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status":              database.StatusUpcoming,
 		"error":               "",
@@ -803,6 +805,7 @@ func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
 	}
 
 	// Same field reset as ReinitializeJob, but auto_retry_count INCREMENTS.
+	// KEEP IN SYNC with ReinitializeJob above if reset fields are added.
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status":              database.StatusUpcoming,
 		"error":               "",
