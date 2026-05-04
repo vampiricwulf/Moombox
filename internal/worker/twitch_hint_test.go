@@ -67,3 +67,20 @@ func TestTwitchHintCacheNilSafe(t *testing.T) {
 		t.Errorf("take on nil cache: want nil, got %+v", got)
 	}
 }
+
+func TestTwitchHintCacheOverwriteOnDoubleStash(t *testing.T) {
+	c := newTwitchHintCache()
+	first := &twitch.TwitchStreamInfo{StreamID: "v1", IsLive: true}
+	second := &twitch.TwitchStreamInfo{StreamID: "v2", IsLive: true}
+
+	c.stash("tw_overwrite", first)
+	c.stash("tw_overwrite", second)
+
+	got := c.take("tw_overwrite")
+	if got == nil {
+		t.Fatal("take after double stash: want non-nil")
+	}
+	if got.StreamID != "v2" {
+		t.Errorf("StreamID: want v2 (last write wins), got %q", got.StreamID)
+	}
+}
