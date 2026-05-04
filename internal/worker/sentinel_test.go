@@ -111,13 +111,13 @@ func TestStreamProcessResultAsError(t *testing.T) {
 	})
 
 	t.Run("plain error (no sentinel)", func(t *testing.T) {
-		r := &StreamProcessResult{Error: "twitch channel is offline"}
+		r := &StreamProcessResult{Error: TwitchOfflineErrMsg}
 		err := r.AsError()
 		if err == nil {
 			t.Fatal("AsError: want non-nil")
 		}
-		if err.Error() != "twitch channel is offline" {
-			t.Errorf("display: want %q, got %q", "twitch channel is offline", err.Error())
+		if err.Error() != TwitchOfflineErrMsg {
+			t.Errorf("display: want %q, got %q", TwitchOfflineErrMsg, err.Error())
 		}
 		if errors.Is(err, ErrCookiesRequired) {
 			t.Error("plain error should NOT match ErrCookiesRequired")
