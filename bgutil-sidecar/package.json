@@ -17,6 +17,6 @@
         "jsdom": "^27.4.0"
     },
     "devDependencies": {
-        "esbuild": "^0.24.0"
+        "esbuild": "^0.28.0"
     }
 }
