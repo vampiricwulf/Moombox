@@ -6,7 +6,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/glamour"
+	"charm.land/glamour/v2"
 )
 
 // releaseNotesOverlay is a modal that shows release notes for a pending
