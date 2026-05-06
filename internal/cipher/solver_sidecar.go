@@ -83,9 +83,11 @@ func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []s
 			// Sidecar still doesn't recognise the player even after we
 			// attached the JS. This isn't a transient cache miss — the
 			// sidecar dropped or rejected the JS, or it's crashed
-			// mid-flight. Wrap so callers can't mistake this for a
-			// recoverable retry-with-JS condition.
-			return result, fmt.Errorf("sidecar: player not loaded after retry-with-JS: %w", err)
+			// mid-flight. Use %v (not %w) so errors.Is on
+			// ErrPlayerNotLoaded no longer matches: this is a permanent
+			// failure, not a recoverable cache miss that a caller should
+			// re-try with JS.
+			return result, fmt.Errorf("sidecar: player not loaded after retry-with-JS: %v", err)
 		}
 	}
 	return result, err
@@ -139,6 +141,19 @@ func (s *sidecarSolver) Batch(ctx context.Context, playerID string, sigs, ns []s
 	res, err := s.solve(ctx, playerID, sigs, ns)
 	if err != nil {
 		return nil, nil, err
+	}
+	// Validate completeness: every requested challenge must appear in
+	// the result map. A partial map would otherwise produce empty-string
+	// "decrypted" values that silently 403 at the CDN.
+	for _, sig := range sigs {
+		if _, ok := res.SigResults[sig]; !ok {
+			return nil, nil, fmt.Errorf("cipher: sidecar Batch missing sig result for input")
+		}
+	}
+	for _, n := range ns {
+		if _, ok := res.NResults[n]; !ok {
+			return nil, nil, fmt.Errorf("cipher: sidecar Batch missing n result for input")
+		}
 	}
 	return res.SigResults, res.NResults, nil
 }

@@ -98,6 +98,28 @@ func TestSidecarSolverRetriesOnPlayerNotLoaded(t *testing.T) {
 	}
 }
 
+func TestSidecarSolverBatchPartialResponse(t *testing.T) {
+	fake := &fakeSidecar{
+		respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			// Return a partial map: sig "A" answered, sig "B" omitted
+			return sidecar.SolveCipherResult{
+				SigResults: map[string]string{"A": "decoded-A"},
+				NResults:   map[string]string{},
+			}, nil
+		},
+	}
+	src := &fakePlayerSource{playerID: "P1", js: "JS"}
+	s := newSidecarSolverWith(fake, src)
+
+	_, _, err := s.Batch(context.Background(), "P1", []string{"A", "B"}, nil)
+	if err == nil {
+		t.Fatal("expected error on partial sidecar Batch response")
+	}
+	if !strings.Contains(err.Error(), "missing sig result") {
+		t.Errorf("error should name the missing-result condition; got: %v", err)
+	}
+}
+
 func TestSidecarSolverDoubleNotLoadedReturnsWrappedError(t *testing.T) {
 	fake := &fakeSidecar{
 		respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {

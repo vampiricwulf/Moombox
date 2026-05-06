@@ -3,6 +3,7 @@ package cipher
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // ErrSidecarUnavailable is returned by the composite solver when sig is
@@ -72,6 +73,14 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 		if err != nil {
 			return nil, nil, err
 		}
+		// Validate sig completeness: composite sig is sidecar-only with no
+		// fallback, so a partial map here is a hard failure not a quiet
+		// success.
+		for _, sig := range sigs {
+			if _, ok := sr[sig]; !ok {
+				return nil, nil, fmt.Errorf("cipher: composite Batch missing sig result for input")
+			}
+		}
 		sigResults = sr
 	}
 
@@ -80,6 +89,11 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 		if c.sidecar != nil {
 			_, nr, err := c.sidecar.Batch(ctx, playerID, nil, ns)
 			if err == nil {
+				for _, n := range ns {
+					if _, ok := nr[n]; !ok {
+						return nil, nil, fmt.Errorf("cipher: composite Batch missing n result for input")
+					}
+				}
 				nResults = nr
 			} else if c.goja == nil {
 				return nil, nil, err

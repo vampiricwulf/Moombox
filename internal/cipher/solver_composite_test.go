@@ -176,6 +176,47 @@ func TestCompositeBatch_MixedAllSidecarHealthy(t *testing.T) {
 	}
 }
 
+func TestCompositeBatchSigPartialFromSidecar(t *testing.T) {
+	// Sidecar returns A but not B. Use a custom fake to drive that.
+	side := &partialBatchSolver{sigs: map[string]string{"A": "sideA"}}
+	goja := &staticSolver{}
+	c := newCompositeSolverWith(side, goja)
+
+	_, _, err := c.Batch(context.Background(), "P1", []string{"A", "B"}, nil)
+	if err == nil {
+		t.Fatal("expected error on partial sig batch (composite sig has no fallback)")
+	}
+}
+
+// partialBatchSolver: helper for the partial-response test. Returns only
+// the sigs/ns it knows about — no error, just gaps.
+type partialBatchSolver struct {
+	sigs map[string]string
+	ns   map[string]string
+}
+
+func (p *partialBatchSolver) Sig(_ context.Context, _, k string) (string, error) {
+	return p.sigs[k], nil
+}
+func (p *partialBatchSolver) N(_ context.Context, _, k string) (string, error) {
+	return p.ns[k], nil
+}
+func (p *partialBatchSolver) Batch(_ context.Context, _ string, sigs, ns []string) (map[string]string, map[string]string, error) {
+	sr := map[string]string{}
+	for _, k := range sigs {
+		if v, ok := p.sigs[k]; ok {
+			sr[k] = v
+		}
+	}
+	nr := map[string]string{}
+	for _, k := range ns {
+		if v, ok := p.ns[k]; ok {
+			nr[k] = v
+		}
+	}
+	return sr, nr, nil
+}
+
 func TestCompositeBatch_MixedSidecarNFailsGojaFallback(t *testing.T) {
 	side := &staticSolver{
 		sig:  map[string]string{"X": "sideX"},
