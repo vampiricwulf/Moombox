@@ -583,9 +583,11 @@ func (s *Sidecar) readPump() {
 }
 
 // stderrPump pipes the sidecar's stderr line-by-line into the Moombox logger
-// at Debug level. Useful for surfacing JSDOM warnings ("Not implemented:
-// HTMLCanvasElement.getContext()") and BotGuard error traces during
-// development.
+// at Debug level. Useful for surfacing real BotGuard error traces during
+// development. Filters out known-harmless JSDOM warnings that fire many
+// times per BotGuard run and have no diagnostic value (we can't fix them
+// without adding a native canvas dependency, which we deliberately avoid
+// for cross-platform builds).
 func (s *Sidecar) stderrPump() {
 	defer s.pumpsDone.Done()
 	scanner := bufio.NewScanner(s.stderr)
@@ -595,8 +597,26 @@ func (s *Sidecar) stderrPump() {
 		if line == "" {
 			continue
 		}
+		if isHarmlessSidecarStderr(line) {
+			continue
+		}
 		s.cfg.Logger.Debug("sidecar stderr", "line", line)
 	}
+}
+
+// isHarmlessSidecarStderr reports whether a stderr line is a known
+// recurring JSDOM warning we deliberately ignore. Lines matched here
+// fire on every BotGuard run because YouTube's player JS probes
+// browser features for fingerprinting; the missing implementations
+// don't break BotGuard / sig / n solving and the warnings just
+// clutter the log.
+func isHarmlessSidecarStderr(line string) bool {
+	// JSDOM emits this when the player JS calls canvas.getContext().
+	// JSDOM ships without a canvas implementation by design — the npm
+	// `canvas` package is a native C++ binding we can't ship cross-platform.
+	// Match by suffix so any "Not implemented: HTMLCanvasElement..." variant
+	// is covered without regex overhead.
+	return strings.Contains(line, "Not implemented: HTMLCanvasElement")
 }
 
 // markUnhealthy flips the healthy flag and drains pending requests with an
