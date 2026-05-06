@@ -18,13 +18,27 @@ import (
 )
 
 // nodeBinaryName returns the runtime filename for the extracted Node
-// binary: "node.exe" on Windows (where the extension matters for some
-// tooling and matches user expectations) and "node" elsewhere.
+// binary. Prefixed with "moombox-sidecar" rather than the bare "node"
+// so it's identifiable in Task Manager / `ps` / Process Explorer
+// (otherwise it groups with any other Node process the user has —
+// VS Code, npm dev servers, etc.).
 func nodeBinaryName() string {
 	if runtime.GOOS == "windows" {
-		return "node.exe"
+		return "moombox-sidecar.exe"
 	}
-	return "node"
+	return "moombox-sidecar"
+}
+
+// staleNodeBinaryNames returns historical names the binary may have
+// been extracted as. Used to clean up orphan binaries left over from
+// pre-rename installs that won't otherwise be removed (the cache key
+// invalidation drops only the version.txt + re-extracts the current
+// names; orphans linger forever without explicit removal).
+func staleNodeBinaryNames() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"node.exe"}
+	}
+	return []string{"node"}
 }
 
 // buildCacheStamp combines the Node-binary version manifest with a runtime
@@ -82,6 +96,21 @@ func extractIfNeeded(cacheDir string) error {
 	// 2. Gunzip+tar-extract sidecar.tar.gz into cacheDir.
 	if err := extractTarGz(cacheDir, bgembed.SidecarTarGz); err != nil {
 		return fmt.Errorf("extract sidecar tarball: %w", err)
+	}
+
+	// 2b. Remove any stale orphan binaries from prior versions that
+	// had different naming (e.g., the bare "node.exe" before the
+	// moombox-sidecar rename). Cache invalidation refreshes the
+	// current binary but doesn't remove orphans, so do it here.
+	for _, stale := range staleNodeBinaryNames() {
+		stalePath := filepath.Join(cacheDir, stale)
+		if stalePath == nodePath {
+			continue // current name; never delete
+		}
+		if err := os.Remove(stalePath); err != nil && !os.IsNotExist(err) {
+			// Non-fatal: orphan stays on disk, slightly wasteful but harmless.
+			_ = err
+		}
 	}
 
 	// 3. Write version.txt LAST so a partial extraction next time forces a
