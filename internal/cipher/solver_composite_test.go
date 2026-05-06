@@ -217,7 +217,14 @@ func (p *partialBatchSolver) Batch(_ context.Context, _ string, sigs, ns []strin
 	return sr, nr, nil
 }
 
-func TestCompositeBatch_MixedSidecarNFailsGojaFallback(t *testing.T) {
+func TestCompositeBatch_MixedSidecarFailsEntireBatch(t *testing.T) {
+	// With the single-round-trip design, a mixed batch (sigs+ns) is issued
+	// as one sidecar call. If the sidecar fails and sigs were requested
+	// there is no fallback — the entire batch fails. The previous two-call
+	// design allowed goja to pick up n even when sidecar n failed, but only
+	// if sig had already succeeded in the first call. The new design accepts
+	// that tradeoff: one round-trip instead of two, hard failure on sidecar
+	// error when sigs are in the batch.
 	side := &staticSolver{
 		sig:  map[string]string{"X": "sideX"},
 		nErr: errors.New("sidecar n down"),
@@ -227,14 +234,46 @@ func TestCompositeBatch_MixedSidecarNFailsGojaFallback(t *testing.T) {
 	}
 	c := newCompositeSolverWith(side, goja)
 
-	sigs, ns, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"A", "B"})
+	_, _, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"A", "B"})
+	if err == nil {
+		t.Fatal("expected error: sidecar failed on mixed batch and sig has no fallback")
+	}
+}
+
+func TestCompositeBatch_MixedSinglesidecarRoundTrip(t *testing.T) {
+	// Wrap staticSolver to count Batch calls.
+	callCount := 0
+	side := &countingBatchSolver{
+		inner: &staticSolver{
+			sig: map[string]string{"X": "sideX"},
+			n:   map[string]string{"A": "sideA"},
+		},
+		onBatch: func() { callCount++ },
+	}
+	goja := &staticSolver{}
+	c := newCompositeSolverWith(side, goja)
+
+	_, _, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"A"})
 	if err != nil {
 		t.Fatalf("Batch: %v", err)
 	}
-	if sigs["X"] != "sideX" {
-		t.Errorf("expected sidecar sig; got %v", sigs)
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 sidecar Batch call for mixed batch; got %d", callCount)
 	}
-	if ns["A"] != "gojaA" || ns["B"] != "gojaB" {
-		t.Errorf("expected goja n fallback; got %v", ns)
-	}
+}
+
+type countingBatchSolver struct {
+	inner   Solver
+	onBatch func()
+}
+
+func (c *countingBatchSolver) Sig(ctx context.Context, p, k string) (string, error) {
+	return c.inner.Sig(ctx, p, k)
+}
+func (c *countingBatchSolver) N(ctx context.Context, p, k string) (string, error) {
+	return c.inner.N(ctx, p, k)
+}
+func (c *countingBatchSolver) Batch(ctx context.Context, p string, sigs, ns []string) (map[string]string, map[string]string, error) {
+	c.onBatch()
+	return c.inner.Batch(ctx, p, sigs, ns)
 }

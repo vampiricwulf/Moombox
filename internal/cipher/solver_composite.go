@@ -61,62 +61,47 @@ func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (s
 }
 
 func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns []string) (map[string]string, map[string]string, error) {
-	// Sig batch goes to sidecar (or fails); n batch falls back to goja
-	// per-element on failure. Two passes keep the routing policy clear,
-	// at the cost of a second round-trip when sidecar n succeeds.
 	sigResults := map[string]string{}
-	if len(sigs) > 0 {
-		if c.sidecar == nil {
-			return nil, nil, ErrSidecarUnavailable
+	nResults := map[string]string{}
+
+	if c.sidecar != nil {
+		sr, nr, err := c.sidecar.Batch(ctx, playerID, sigs, ns)
+		if err == nil {
+			// Validate completeness — partial map = silent data loss.
+			for _, sig := range sigs {
+				if _, ok := sr[sig]; !ok {
+					return nil, nil, fmt.Errorf("cipher: composite Batch missing sig result for input")
+				}
+			}
+			for _, n := range ns {
+				if _, ok := nr[n]; !ok {
+					return nil, nil, fmt.Errorf("cipher: composite Batch missing n result for input")
+				}
+			}
+			return sr, nr, nil
 		}
-		sr, _, err := c.sidecar.Batch(ctx, playerID, sigs, nil)
-		if err != nil {
+		// Sidecar failed. Sig is sidecar-only; if any sigs were
+		// requested, surface the error. n falls back to goja per-element.
+		if len(sigs) > 0 {
 			return nil, nil, err
 		}
-		// Validate sig completeness: composite sig is sidecar-only with no
-		// fallback, so a partial map here is a hard failure not a quiet
-		// success.
-		for _, sig := range sigs {
-			if _, ok := sr[sig]; !ok {
-				return nil, nil, fmt.Errorf("cipher: composite Batch missing sig result for input")
-			}
-		}
-		sigResults = sr
+	} else if len(sigs) > 0 {
+		// No sidecar configured but sig requested.
+		return nil, nil, ErrSidecarUnavailable
 	}
 
-	nResults := map[string]string{}
+	// We're here because: sidecar nil with no sigs, OR sidecar n-batch failed.
+	// Either way, n has to come from goja.
 	if len(ns) > 0 {
-		if c.sidecar != nil {
-			_, nr, err := c.sidecar.Batch(ctx, playerID, nil, ns)
-			if err == nil {
-				for _, n := range ns {
-					if _, ok := nr[n]; !ok {
-						return nil, nil, fmt.Errorf("cipher: composite Batch missing n result for input")
-					}
-				}
-				nResults = nr
-			} else if c.goja == nil {
-				return nil, nil, err
-			} else {
-				// fall through to per-element goja N
-				for _, n := range ns {
-					out, err := c.goja.N(ctx, playerID, n)
-					if err != nil {
-						return nil, nil, err
-					}
-					nResults[n] = out
-				}
-			}
-		} else if c.goja != nil {
-			for _, n := range ns {
-				out, err := c.goja.N(ctx, playerID, n)
-				if err != nil {
-					return nil, nil, err
-				}
-				nResults[n] = out
-			}
-		} else {
+		if c.goja == nil {
 			return nil, nil, errors.New("cipher: no solver available for n batch")
+		}
+		for _, n := range ns {
+			out, err := c.goja.N(ctx, playerID, n)
+			if err != nil {
+				return nil, nil, err
+			}
+			nResults[n] = out
 		}
 	}
 
