@@ -70,6 +70,9 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 		if err != nil {
 			// Sig via routed solver failed — fall through to full legacy path
 			// which also handles n-param so we don't partial-apply.
+			if gojaResolver == nil {
+				return nil, fmt.Errorf("cipher: routed sig failed and no goja fallback: %w", err)
+			}
 			return gojaResolver.ResolveURL(ctx, req)
 		}
 		sigKey := req.SignatureKey
