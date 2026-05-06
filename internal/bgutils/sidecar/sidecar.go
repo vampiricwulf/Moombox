@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -385,10 +386,18 @@ type SolveCipherResult struct {
 	NResults   map[string]string `json:"nResults"`
 }
 
+// playerNotLoadedSentinel is the JSON-RPC error body the JS sidecar
+// emits when SolveCipher is called for a playerID it has no cached
+// preprocessed source for. The Go side detects this via suffix-match
+// (the call() helper adds a "sidecar: " prefix) so the prefix can
+// evolve without silently breaking sentinel detection.
+const playerNotLoadedSentinel = "player not loaded"
+
 // ErrPlayerNotLoaded indicates the sidecar discarded the player JS
 // (LRU eviction or restart). The caller should retry SolveCipher with
-// PlayerJS populated. Detected by exact error message match against
-// the sidecar's "player not loaded" sentinel.
+// PlayerJS populated. Detected via strings.HasSuffix on
+// playerNotLoadedSentinel so a future change to the call() error
+// prefix doesn't break detection.
 var ErrPlayerNotLoaded = errors.New("sidecar: player not loaded")
 
 // SolveCipher solves YouTube sig and/or n cipher challenges against
@@ -407,9 +416,9 @@ func (s *Sidecar) SolveCipher(ctx context.Context, req SolveCipherRequest) (Solv
 
 	var result SolveCipherResult
 	if err := s.call(ctx, "solveCipher", params, &result); err != nil {
-		// Match the sidecar's verbatim sentinel string. The "sidecar: "
-		// prefix is added by call() when wrapping non-context errors.
-		if err.Error() == "sidecar: player not loaded" {
+		// Match the sidecar's sentinel via suffix so the call() error
+		// prefix can evolve without silently breaking detection.
+		if strings.HasSuffix(err.Error(), playerNotLoadedSentinel) {
 			return SolveCipherResult{}, ErrPlayerNotLoaded
 		}
 		return SolveCipherResult{}, err
