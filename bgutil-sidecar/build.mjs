@@ -32,6 +32,7 @@ import { spawnSync } from "node:child_process";
 import { statSync, readdirSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import * as esbuild from "esbuild";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -55,8 +56,9 @@ try {
     process.exit(1);
 }
 
-const productionEntries = ["package.json", "package-lock.json", "src", "node_modules"];
+const productionEntries = ["package.json", "package-lock.json", "src", "node_modules", "vendor/ejs.bundle.js"];
 for (const entry of productionEntries) {
+    if (entry === "vendor/ejs.bundle.js") continue; // freshly written by esbuild step above
     try {
         statSync(resolve(__dirname, entry));
     } catch {
@@ -67,6 +69,35 @@ for (const entry of productionEntries) {
 
 mkdirSync(distDir, { recursive: true });
 mkdirSync(embedDir, { recursive: true });
+
+// ---------------------------------------------------------------------------
+// 1b. Bundle vendored ejs into a single ESM file using esbuild.
+//
+// ejs is a TypeScript project under vendor/ejs/. The sidecar imports it
+// as a single bundle to avoid shipping the .ts source + transpiling at
+// runtime. esbuild handles TypeScript natively — no separate tsc pass.
+//
+// Output: vendor/ejs.bundle.js. Gitignored; regenerated on every build.
+// Included in the production tarball (see step 2 below).
+// ---------------------------------------------------------------------------
+const ejsEntry = resolve(__dirname, "vendor", "ejs", "src", "yt", "solver", "main.ts");
+const ejsBundle = resolve(__dirname, "vendor", "ejs.bundle.js");
+const buildResult = await esbuild.build({
+    entryPoints: [ejsEntry],
+    bundle: true,
+    format: "esm",
+    platform: "neutral",
+    target: "node20",
+    outfile: ejsBundle,
+    minify: true,
+    legalComments: "none",
+});
+if (buildResult.errors.length > 0) {
+    console.error("ejs bundle errors:", buildResult.errors);
+    process.exit(1);
+}
+const ejsSize = statSync(ejsBundle).size;
+console.log(`ejs bundle    ${(ejsSize / 1024).toFixed(1)} KB  vendor/ejs.bundle.js`);
 
 // ---------------------------------------------------------------------------
 // 2. Tar.
