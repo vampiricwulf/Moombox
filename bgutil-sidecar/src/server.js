@@ -10,11 +10,12 @@
 //   Response: {"id":<int>,"result":<any>}    | {"id":<int>,"error":<str>}
 //
 // Methods: ping, generatePoToken, invalidateCaches, invalidateIT,
-// getStats, shutdown.
+// getStats, solveCipher, shutdown.
 
 import { JSDOM } from "jsdom";
 import { BG, USER_AGENT, buildURL, getHeaders } from "bgutils-js";
 import { createInterface } from "node:readline";
+import { solveCipher } from "./cipher.js";
 
 // ---------------------------------------------------------------------------
 // One-time DOM bootstrap. Must run before any module that inspects globalThis
@@ -219,6 +220,27 @@ async function dispatch(req) {
 
             case "getStats":
                 return writeResponse({ id, result: { ...stats } });
+
+            case "solveCipher": {
+                const params = req.params || {};
+                try {
+                    const result = solveCipher({
+                        playerID: params.playerID,
+                        playerJS: params.playerJS,
+                        sigChallenges: params.sigChallenges || [],
+                        nChallenges: params.nChallenges || [],
+                    });
+                    return writeResponse({ id, result });
+                } catch (e) {
+                    // Surface the PLAYER_NOT_LOADED sentinel verbatim so the Go side
+                    // can recognise it and retry with playerJS attached. Other errors
+                    // pass through as generic strings.
+                    const msg = e && e.code === "PLAYER_NOT_LOADED"
+                        ? "player not loaded"
+                        : (e && e.message ? e.message : String(e));
+                    return writeResponse({ id, error: msg });
+                }
+            }
 
             case "shutdown":
                 writeResponse({ id, result: "bye" });
