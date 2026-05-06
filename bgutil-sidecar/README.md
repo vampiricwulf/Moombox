@@ -16,6 +16,17 @@ npm ci --omit=dev   # production deps only (jsdom + bgutils-js + transitives)
 node build.mjs      # creates dist/sidecar.tar.gz and copies it to ../internal/bgutils/embed/
 ```
 
+## Vendored sources
+
+This sidecar embeds two upstream libraries:
+
+- **bgutils-js** (npm dep, MIT, [LuanRT/BgUtils](https://github.com/LuanRT/BgUtils)) — BotGuard PO token implementation. Pinned in `package.json`.
+- **ejs** (vendored source under `vendor/ejs/`, Unlicense, [yt-dlp/ejs](https://github.com/yt-dlp/ejs)) — YouTube cipher (sig + n) solver. Pinned via the SHA in `vendor/ejs/VERSION`.
+
+Both upstreams are also referenced under `references/` (gitignored) for change tracking. When either ships a fix, the sidecar's vendored copy needs to be updated AND the corresponding goja fallback in `internal/cipher/` (ejs) or `internal/bgutils/` (bgutils-js) needs to be considered. See `.claude/skills/moombox-upstream-porting/SKILL.md` for the procedure.
+
+The `[bgutils]` config section's `use_sidecar = true` (default) makes this sidecar primary; setting it to `false` falls back to the in-process goja implementations.
+
 ## Smoke test (without Moombox)
 
 ```bash

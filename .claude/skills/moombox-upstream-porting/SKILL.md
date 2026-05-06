@@ -12,10 +12,26 @@ Moombox tracks upstream repos in `references/` (gitignored) for YouTube/Twitch e
 | Repo | Tracks | Maps To |
 |------|--------|---------|
 | **yt-dlp** | YouTube extraction, format selection, auth, HLS/DASH, Twitch extractor | `internal/youtube/`, `internal/twitch/`, `internal/engine/` |
-| **ejs** | YouTube signature cipher, n-challenge solving | `internal/cipher/` |
-| **BgUtils** | BotGuard protocol, PO token generation | `internal/bgutils/` |
+| **ejs** | YouTube signature cipher, n-challenge solving | `bgutil-sidecar/vendor/ejs/` (primary) + `internal/cipher/` (fallback) |
+| **BgUtils** | BotGuard protocol, PO token generation | `bgutil-sidecar/` via `bgutils-js` npm dep (primary) + `internal/bgutils/` (fallback) |
 
 Supporting repos: `bgutil-ytdlp-pot-provider` (PO token plugin), `moonarchive` (segment strategies), `chatterino7` (Twitch chat/emotes), `moombox` (original Python version).
+
+## Vendored Sources (sidecar)
+
+Moombox vendors two upstream JS libraries into the BotGuard sidecar:
+
+| Source | Vendored At | How | Pin Mechanism |
+|---|---|---|---|
+| **yt-dlp/ejs** | `bgutil-sidecar/vendor/ejs/` | Source files copied in (Unlicense, public-domain) | `bgutil-sidecar/vendor/ejs/VERSION` (commit SHA) |
+| **bgutils-js** | `bgutil-sidecar/node_modules/bgutils-js` | npm dep | `bgutil-sidecar/package.json` (exact version) |
+
+The sidecar's V8 path is the **primary** cipher (ejs) and BotGuard (bgutils-js) implementation in v2.6.16+. The Go-side `internal/cipher/` and `internal/bgutils/` packages are the **fallback** when the sidecar is disabled or down — they reimplement the same algorithms in goja.
+
+**Dual-update obligation:** When upstream ships a fix:
+- **ejs fix** → re-vendor `bgutil-sidecar/vendor/ejs/` to the new commit, bump `VERSION`, run `node build.mjs` to regenerate the bundle. Consider porting the equivalent change to `internal/cipher/` if the goja fallback path needs it (n-decryption mostly; sig is sidecar-only).
+- **bgutils-js fix** → bump pin in `bgutil-sidecar/package.json`, run `npm install`, run `node build.mjs`. Consider porting to `internal/bgutils/botguard.go` and friends.
+- **yt-dlp fix** → port to `internal/youtube/` or `internal/twitch/`. No sidecar mirror.
 
 ## File Mappings
 
@@ -33,18 +49,22 @@ Supporting repos: `bgutil-ytdlp-pot-provider` (PO token plugin), `moonarchive` (
 | `downloader/` | `engine/manifest.go` | DASH manifest parsing |
 
 ### ejs → Moombox
-| ejs Component | Moombox File | What It Covers |
-|---------------|-------------|----------------|
-| Cipher algorithm | `cipher/extractor.go` | Regex extraction of solver candidates from player.js |
-| N-challenge | `cipher/solver.go` | Compiles full player.js in Goja VM, 3-slot LRU cache |
-| Transform functions | `cipher/decrypt.go` | Decrypts signature and n-parameter |
+| ejs Component | Sidecar File | Fallback (Goja) | What It Covers |
+|---------------|-------------|----------------|----------------|
+| Cipher algorithm | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/extractor.go` | Regex extraction of solver candidates from player.js |
+| N-challenge | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/solver.go` | Compiles full player.js in Goja VM, 3-slot LRU cache |
+| Transform functions | `bgutil-sidecar/vendor/ejs/` (bundled via esbuild) | `cipher/decrypt.go` | Decrypts signature and n-parameter |
+
+The sidecar runs ejs in V8 (Node.js). The `internal/cipher/` goja implementation is the fallback path when `use_sidecar = false` or the sidecar process is down. Vendored source pinned to commit SHA in `bgutil-sidecar/vendor/ejs/VERSION`.
 
 ### BgUtils → Moombox
-| BgUtils Component | Moombox File | What It Covers |
-|--------------------|-------------|----------------|
-| Challenge handling | `bgutils/challenge.go` | Challenge descrambling |
-| BotGuard runtime | `bgutils/botguard.go` | Goja VM execution |
-| Token minting | `bgutils/webpo_minter.go` | PO token generation |
+| BgUtils Component | Sidecar | Fallback (Goja) | What It Covers |
+|--------------------|---------|----------------|----------------|
+| Challenge handling | `bgutils-js` npm dep in `bgutil-sidecar/` | `bgutils/challenge.go` | Challenge descrambling |
+| BotGuard runtime | `bgutils-js` npm dep in `bgutil-sidecar/` | `bgutils/botguard.go` | Goja VM execution |
+| Token minting | `bgutils-js` npm dep in `bgutil-sidecar/` | `bgutils/webpo_minter.go` | PO token generation |
+
+The sidecar uses `bgutils-js` (the consumable npm package from LuanRT/BgUtils) running in Node.js. The `internal/bgutils/` goja implementation is the fallback. npm pin in `bgutil-sidecar/package.json`.
 
 ## Analysis Workflow
 
@@ -94,3 +114,69 @@ Changes often cascade:
 - Translating Python regex directly — Go `regexp` doesn't support lookahead/lookbehind
 - Not testing with both authenticated and unauthenticated flows after porting auth changes
 - Treating cipher as "regex fallback" — it's regex extraction + full player.js compilation, not two separate strategies
+- Updating only the sidecar's vendored copy without considering the goja fallback path (or vice versa)
+- Forgetting to bump `bgutil-sidecar/vendor/ejs/VERSION` after re-vendoring ejs source files
+
+## Vendored-Source Update Procedures
+
+### Updating vendored ejs
+
+```bash
+# 1. Update upstream cache and inspect changes:
+bash references/update-all.sh           # see what's new in references/ejs/
+cd references/ejs && git log --oneline   # check current upstream HEAD
+
+# 2. Re-vendor the source files matching `bgutil-sidecar/vendor/ejs/`:
+cd D:/Git/Moombox
+cp references/ejs/src/yt/solver/solvers.ts bgutil-sidecar/vendor/ejs/src/yt/solver/
+cp references/ejs/src/yt/solver/nsig.ts    bgutil-sidecar/vendor/ejs/src/yt/solver/
+cp references/ejs/src/yt/solver/setup.ts   bgutil-sidecar/vendor/ejs/src/yt/solver/
+cp references/ejs/src/yt/solver/main.ts    bgutil-sidecar/vendor/ejs/src/yt/solver/
+cp references/ejs/src/types.ts             bgutil-sidecar/vendor/ejs/src/
+cp references/ejs/src/utils.ts             bgutil-sidecar/vendor/ejs/src/
+cp references/ejs/LICENSE                  bgutil-sidecar/vendor/ejs/
+
+# 3. Update the SHA pin:
+(cd references/ejs && git rev-parse HEAD) > bgutil-sidecar/vendor/ejs/VERSION
+
+# 4. Lockstep meriyah/astring versions if upstream changed them:
+diff <(cd references/ejs && cat package.json) <(cat bgutil-sidecar/package.json)
+# If meriyah or astring versions differ, update bgutil-sidecar/package.json
+# to match exactly, then `cd bgutil-sidecar && npm install`.
+
+# 5. Rebuild the sidecar:
+cd bgutil-sidecar && node build.mjs
+
+# 6. Run the cipher test suite:
+cd D:/Git/Moombox && go test -count=1 ./internal/cipher/...
+MOOMBOX_LIVE_CIPHER_TEST=1 go test -count=1 -timeout 180s -run "TestSidecarSolver" ./internal/cipher/...
+
+# 7. If the goja fallback path (internal/cipher/extractor*.go) needs a
+#    parallel change, port it. The sidecar parity test
+#    (TestSidecarSolverGojaParity) catches output divergence on any
+#    fixture goja can statically handle.
+```
+
+### Updating bgutils-js
+
+```bash
+# 1. Check upstream:
+bash references/update-all.sh   # references/BgUtils gets pulled
+
+# 2. Bump the npm pin:
+# Edit bgutil-sidecar/package.json — change the bgutils-js version.
+# Match upstream as closely as possible; pin exactly if upstream is
+# pre-1.0 (current pin: bgutils-js: ^3.2.0).
+
+cd bgutil-sidecar && npm install
+cd .. && cd bgutil-sidecar && node build.mjs
+
+# 3. Run BotGuard test suite:
+cd D:/Git/Moombox && go test -count=1 ./internal/bgutils/...
+MOOMBOX_LIVE_BG_TEST=1 go test -count=1 -timeout 180s -run "TestBotGuardLive\|TestSidecarLive" ./internal/bgutils/...
+
+# 4. Port equivalent changes to internal/bgutils/{botguard,webpo_client,
+#    webpo_minter}.go if the BotGuard protocol changed. The goja
+#    fallback path needs to track bgutils-js's protocol changes
+#    independently of the sidecar's version pin.
+```

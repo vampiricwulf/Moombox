@@ -123,8 +123,8 @@ Static assets in `web/public/`, embedded via `go:embed` in `web/embed.go`. Chang
 
 The local `references/` folder (gitignored) contains upstream repos:
 - **`yt-dlp`** — YouTube format/cipher/extraction, Twitch extractor, PO tokens, cookies
-- **`BgUtils`** — BotGuard/PO token generation
-- **`ejs`** — yt-dlp external JS for cipher solving
+- **`BgUtils`** — BotGuard/PO token generation; consumed as `bgutils-js` npm dep in the sidecar (`bgutil-sidecar/package.json`), with `internal/bgutils/` as the goja fallback
+- **`ejs`** — yt-dlp external JS for cipher solving; vendored into `bgutil-sidecar/vendor/ejs/` (pinned via `VERSION`), with `internal/cipher/` as the goja fallback
 - **`chatterino7`** — Twitch chat (IRC, emotes, badges)
 - `bgutil-ytdlp-pot-provider` — yt-dlp PO token plugin
 - `moonarchive` — Python stream archiver (segment strategies)
