@@ -276,15 +276,16 @@ func (w *DownloadWorker) CancelJob(jobID string) {
 // timeout. Used by delete paths to ensure the worker drains before the DB
 // row is removed (prevents orphaned goroutines that spam UpdateJobFields
 // against a deleted row).
+//
+// Signal-driven: the queue closes a per-job channel when processJob returns,
+// so this select wakes immediately on exit rather than polling every 100ms.
 func (w *DownloadWorker) WaitForJobExit(jobID string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !w.queue.IsProcessing(jobID) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
+	select {
+	case <-w.queue.Done(jobID):
+		return true
+	case <-time.After(timeout):
+		return !w.queue.IsProcessing(jobID)
 	}
-	return !w.queue.IsProcessing(jobID)
 }
 
 func (w *DownloadWorker) enqueueExistingJobs() {

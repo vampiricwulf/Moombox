@@ -41,13 +41,14 @@ type JobQueue struct {
 	activeLifecycle int
 	activeDownloads int
 	pending         []pendingJob
-	pendingSet      map[string]struct{} // O(1) duplicate detection for pending queue
+	pendingSet      map[string]struct{}   // O(1) duplicate detection for pending queue
 	processing      map[string]context.CancelFunc
-	holdingDlSlot   map[string]bool // tracks which jobs hold download slots
-	cancelled       map[string]bool // tracks user-initiated cancellations (vs shutdown)
+	done            map[string]chan struct{} // closed when the job's processing goroutine returns
+	holdingDlSlot   map[string]bool       // tracks which jobs hold download slots
+	cancelled       map[string]bool       // tracks user-initiated cancellations (vs shutdown)
 	notify          chan struct{}
 	dlNotify        chan struct{} // signaling for download slot availability
-	logger          logger        // optional logger for warnings
+	logger          logger       // optional logger for warnings
 }
 
 // NewJobQueue creates a new job queue.
@@ -60,6 +61,7 @@ func NewJobQueue(maxDownloads int) *JobQueue {
 		maxLifecycle:  100,
 		pendingSet:    make(map[string]struct{}),
 		processing:    make(map[string]context.CancelFunc),
+		done:          make(map[string]chan struct{}),
 		holdingDlSlot: make(map[string]bool),
 		cancelled:     make(map[string]bool),
 		notify:        make(chan struct{}, 1),
@@ -126,6 +128,7 @@ func (q *JobQueue) Dequeue(ctx context.Context) (string, context.Context, bool) 
 			q.activeLifecycle++
 			jobCtx, cancel := context.WithCancel(ctx)
 			q.processing[jobID] = cancel
+			q.done[jobID] = make(chan struct{})
 			q.mu.Unlock()
 			return jobID, jobCtx, true
 		}
@@ -191,6 +194,13 @@ func (q *JobQueue) Complete(jobID string) {
 		cancel()
 		delete(q.processing, jobID)
 		q.activeLifecycle--
+
+		// Signal that the processing goroutine has returned.
+		ch := q.done[jobID]
+		delete(q.done, jobID)
+		if ch != nil {
+			close(ch)
+		}
 
 		// Also release download slot if still held
 		if q.holdingDlSlot[jobID] {
@@ -287,6 +297,23 @@ func (q *JobQueue) IsProcessing(jobID string) bool {
 	defer q.mu.Unlock()
 	_, ok := q.processing[jobID]
 	return ok
+}
+
+// Done returns a channel that is closed when the job's processing goroutine
+// returns. If the jobID isn't currently in flight (already finished or never
+// started), a pre-closed channel is returned so callers can select on
+// Done(id) without checking IsProcessing first.
+func (q *JobQueue) Done(jobID string) <-chan struct{} {
+	q.mu.Lock()
+	ch, ok := q.done[jobID]
+	q.mu.Unlock()
+	if !ok {
+		// Already done (or never started). Return a pre-closed channel.
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	return ch
 }
 
 // ShouldProcess returns true if the job's status indicates it should be processed.
