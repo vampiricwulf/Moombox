@@ -99,7 +99,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		return nil
 	}
 
-	// Subscribe to job status changes for cancellation
+	// Subscribe to job status changes for cancellation. Job deletion is
+	// handled upstream in processJob (OnJobDeleted registered there covers the
+	// full job lifecycle including this function); cancel() here propagates
+	// through the parent context automatically.
 	jobCtx2, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -110,20 +113,6 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}
 	})
 	defer unsubscribe()
-
-	// Job row vanished — either DeleteJob fired directly or UpdateJobFields
-	// observed sql.ErrNoRows on its post-write read-back (delete-during-mux
-	// race window). Both paths call notifyJobDeleted, so a single listener
-	// here covers every UpdateJobFields call site without opt-in plumbing.
-	// Duplicate-fire (DeleteJob + in-flight UpdateJobFields hitting ErrNoRows)
-	// is benign: cancel() is idempotent.
-	unsubscribeDel := o.db.OnJobDeleted(func(deleted *database.JobDeleted) {
-		if deleted.JobID == jobCtx.Job.ID {
-			o.logger.Debug("job row deleted; cancelling orchestrator", "jobID", jobCtx.Job.ID)
-			cancel()
-		}
-	})
-	defer unsubscribeDel()
 
 	ctx = jobCtx2
 

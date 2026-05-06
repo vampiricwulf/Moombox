@@ -373,6 +373,28 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
+	// Create a per-job context so we can cancel the full lifecycle (stream
+	// processing, slot wait, download, mux) on a job-deleted event — not just
+	// the post-AcquireDownloadSlot phases that ExecuteWithChat covers.
+	// cancel() is idempotent; ExecuteWithChat and ExecuteTwitch derive their
+	// own child contexts from this one, so the cancellation propagates.
+	jobLifecycleCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Subscribe to job deletion for the full lifecycle. Job row vanishing
+	// (DeleteJob or UpdateJobFields hitting sql.ErrNoRows mid-write) calls
+	// notifyJobDeleted; this covers every delete path rather than just the
+	// UI's cancel-then-delete sequence. Duplicate fires are benign: cancel() is idempotent.
+	unsubscribeDel := w.db.OnJobDeleted(func(deleted *database.JobDeleted) {
+		if deleted.JobID == jobID {
+			w.logger.Debug("job row deleted; cancelling processJob", "jobID", jobID)
+			cancel()
+		}
+	})
+	defer unsubscribeDel()
+
+	ctx = jobLifecycleCtx
+
 	w.logger.Info("processing job", "jobID", jobID, "videoID", job.VideoID)
 
 	// Process stream (probe, wait for live, etc.)
