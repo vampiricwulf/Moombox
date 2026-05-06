@@ -2,6 +2,7 @@ package cipher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -356,6 +357,76 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 
 	return solvers, nil
 }
+
+// playerURLForID rebuilds the canonical YouTube player JS URL from an
+// 11-character playerID. The URL shape is stable across the player
+// versions Moombox supports; the cipher.Solver interface speaks in
+// playerIDs (matching how the JS sidecar identifies players) while
+// the in-process GojaResolver internals key on URLs (matching how
+// they appear in YouTube responses). Reconstructing here keeps the
+// internals untouched.
+func playerURLForID(playerID string) string {
+	return "https://www.youtube.com/s/player/" + playerID + "/player_ias.vflset/en_US/base.js"
+}
+
+// Sig satisfies cipher.Solver. Returns ErrSigUnavailable when the
+// player's sig algorithm could not be extracted by the goja patterns
+// (typical on current YouTube players where sig is no longer
+// statically representable — see the cipher-via-ejs-sidecar spec).
+func (s *GojaResolver) Sig(ctx context.Context, playerID, encryptedSig string) (string, error) {
+	solvers, err := s.GetSolvers(ctx, playerURLForID(playerID))
+	if err != nil {
+		return "", err
+	}
+	if !solvers.HasSig() {
+		return "", ErrSigUnavailable
+	}
+	return solvers.DecryptSig(encryptedSig)
+}
+
+// N satisfies cipher.Solver. Returns a non-sentinel error when the
+// goja extractor failed to extract an n algorithm; callers should
+// treat that as a hard failure rather than substituting a fallback.
+func (s *GojaResolver) N(ctx context.Context, playerID, encryptedN string) (string, error) {
+	solvers, err := s.GetSolvers(ctx, playerURLForID(playerID))
+	if err != nil {
+		return "", err
+	}
+	if !solvers.HasN() {
+		return "", fmt.Errorf("cipher: n unavailable for player %s", playerID)
+	}
+	return solvers.DecryptN(encryptedN)
+}
+
+// Batch satisfies cipher.Solver. Goja has no round-trip overhead so
+// the implementation is a straight loop. ErrSigUnavailable on a sig
+// challenge skips the entry rather than failing the batch — composite
+// solvers above this layer can route around an unavailable sig.
+func (s *GojaResolver) Batch(ctx context.Context, playerID string, sigs, ns []string) (map[string]string, map[string]string, error) {
+	sigResults := make(map[string]string, len(sigs))
+	for _, sig := range sigs {
+		out, err := s.Sig(ctx, playerID, sig)
+		if err != nil {
+			if errors.Is(err, ErrSigUnavailable) {
+				continue
+			}
+			return nil, nil, err
+		}
+		sigResults[sig] = out
+	}
+	nResults := make(map[string]string, len(ns))
+	for _, n := range ns {
+		out, err := s.N(ctx, playerID, n)
+		if err != nil {
+			return nil, nil, err
+		}
+		nResults[n] = out
+	}
+	return sigResults, nResults, nil
+}
+
+// Compile-time check: GojaResolver satisfies the cipher.Solver interface.
+var _ Solver = (*GojaResolver)(nil)
 
 // callWithTimeout invokes a goja callable under CipherTimeout and safely resets
 // the VM's interrupt flag after the call returns.
