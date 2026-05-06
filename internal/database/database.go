@@ -381,18 +381,22 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 	db.mu.Unlock() // Release BEFORE notify so subscribers can call back into Database without deadlocking. Audit C1.
 
 	if scanErr != nil {
-		if db.logger != nil {
-			if errors.Is(scanErr, sql.ErrNoRows) {
-				// Row was deleted between the UPDATE and the read-back.
-				// This is the normal outcome when a user deletes a job whose
-				// worker is still draining; the worker's defensive exit relies
-				// on the nil return below. Debug-level so it's not noise.
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			// Row was deleted between the UPDATE and the read-back.
+			// Fire notifyJobDeleted so the orchestrator's OnJobDeleted
+			// listener can cancel the per-job context — same signal the
+			// explicit DeleteJob path emits. Duplicate-fire is benign:
+			// subscribers (WS hub, orchestrator) are idempotent on
+			// "already gone." Debug-level since this is an expected
+			// outcome of delete-while-active, not an error.
+			if db.logger != nil {
 				db.logger.Debug("UpdateJobFields: row gone after update", "jobID", id, "err", scanErr)
-			} else {
-				// Anything else (DB corruption, schema drift, transient I/O)
-				// is a real failure operators need to see.
-				db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)
 			}
+			db.notifyJobDeleted(id)
+		} else if db.logger != nil {
+			// Anything else (DB corruption, schema drift, transient I/O)
+			// is a real failure operators need to see.
+			db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)
 		}
 		return nil
 	}

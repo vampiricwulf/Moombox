@@ -81,25 +81,6 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath 
 	}
 }
 
-// updateOrExit calls UpdateJobFields and returns the updated job. If the
-// call returns nil and the job context is still live (i.e. not already
-// cancelled by the normal cancel path), this means the DB row was deleted
-// while the worker was running. In that case the job's queue entry is
-// cancelled so all downstream operations see a cancelled context and
-// the goroutine exits cleanly. Logs at Debug since this is an expected
-// outcome of delete-while-active, not an error.
-func (o *DownloadOrchestrator) updateOrExit(ctx context.Context, jobID string, fields map[string]any) *database.Job {
-	job := o.db.UpdateJobFields(jobID, fields)
-	if job == nil && ctx.Err() == nil {
-		// Row vanished (deleted by user) — cancel the job context so the
-		// goroutine exits on the next ctx.Err() check.
-		o.logger.Debug("orchestrator: job row gone, cancelling context", "jobID", jobID)
-		if o.queue != nil {
-			o.queue.Cancel(jobID)
-		}
-	}
-	return job
-}
 
 // Execute runs the full download pipeline for a YouTube job.
 func (o *DownloadOrchestrator) Execute(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool) error {
@@ -130,6 +111,20 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	})
 	defer unsubscribe()
 
+	// Job row vanished — either DeleteJob fired directly or UpdateJobFields
+	// observed sql.ErrNoRows on its post-write read-back (delete-during-mux
+	// race window). Both paths call notifyJobDeleted, so a single listener
+	// here covers every UpdateJobFields call site without opt-in plumbing.
+	// Duplicate-fire (DeleteJob + in-flight UpdateJobFields hitting ErrNoRows)
+	// is benign: cancel() is idempotent.
+	unsubscribeDel := o.db.OnJobDeleted(func(deleted *database.JobDeleted) {
+		if deleted.JobID == jobCtx.Job.ID {
+			o.logger.Debug("job row deleted; cancelling orchestrator", "jobID", jobCtx.Job.ID)
+			cancel()
+		}
+	})
+	defer unsubscribeDel()
+
 	ctx = jobCtx2
 
 	// Update status
@@ -139,7 +134,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	if jobCtx.Job.DownloadStartedAt == "" {
 		updates["download_started_at"] = time.Now().UTC().Format(time.RFC3339)
 	}
-	o.updateOrExit(ctx, jobCtx.Job.ID, updates)
+	o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
 	// Send "Download Starting" notification
 	if o.notifier != nil {
@@ -320,7 +315,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 					progressStr += fmt.Sprintf(" C: %d", chatCount)
 				}
 			}
-			o.updateOrExit(ctx, jobCtx.Job.ID, map[string]any{
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 				"progress": progressStr,
 				"percent":  100.0,
 			})
@@ -366,7 +361,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}
 	}
 	if len(syncUpdates) > 0 {
-		o.updateOrExit(ctx, jobCtx.Job.ID, syncUpdates)
+		o.db.UpdateJobFields(jobCtx.Job.ID, syncUpdates)
 	}
 
 	// Signal chat to finish and wait.
@@ -384,7 +379,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		if chatCount == 0 {
 			chatStatus = "unavailable"
 		}
-		o.updateOrExit(ctx, jobCtx.Job.ID, map[string]any{
+		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 			"chat_status":         chatStatus,
 			"total_chat_messages": chatCount,
 		})
@@ -399,7 +394,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	// live don't have a meaningful stream end time, so leave it empty.
 	if !isVod && jobCtx.Job.StreamEndTime == "" {
 		endTime := computeStreamEndFallback(jobCtx.Job)
-		o.updateOrExit(ctx, jobCtx.Job.ID, map[string]any{
+		o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
 			"stream_end_time": endTime,
 		})
 		jobCtx.Job.StreamEndTime = endTime
