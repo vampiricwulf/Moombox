@@ -361,7 +361,7 @@ Monitors (RSS/DECAPI/Twitch) -> Job Database (SQLite) -> Download Worker -> YouT
 ```
 
 Key components:
-- **YouTube engine** — Multi-client Innertube API strategy with native signature decryption (AST-based cipher solver via [Goja](https://github.com/dop251/goja)) and BotGuard PO Token generation
+- **YouTube engine** — Multi-client Innertube API strategy. Cipher (sig + n) and BotGuard PO Token solving primarily flow through an embedded Node + V8 sidecar that wraps [yt-dlp/ejs](https://github.com/yt-dlp/ejs) (vendored, public-domain) and [bgutils-js](https://github.com/LuanRT/BgUtils). An in-process [Goja](https://github.com/dop251/goja) implementation serves as a fallback when the sidecar is disabled or down.
 - **Twitch engine** — GQL-based stream metadata, HLS segment downloading, IRC live chat, and VOD chat replay
 - **Download pipeline** — SegmentDownloader with parallel catch-up mode (6 concurrent segments), head sequence tracking, resume state, and gap detection
 - **Chat system** — YouTube live chat polling + Twitch IRC with memory bounding, stale continuation recovery, and replay support
