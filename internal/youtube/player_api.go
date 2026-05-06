@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"time"
 
@@ -30,7 +31,17 @@ type PlayerAPI struct {
 	auth         *Auth
 	apiKey       string
 	cipherSolver *cipher.GojaResolver
-	potProvider  PotTokenProvider
+	// cipher is the routed Solver for sig/n decryption. When non-nil,
+	// PlayerAPI uses this for cipher solving (sig flows through the
+	// sidecar via the composite policy; n falls back to goja if the
+	// sidecar is down). When nil, PlayerAPI degrades to goja-only via
+	// cipherSolver.GetSolvers (the legacy path) — same observable
+	// behaviour as before this migration.
+	//
+	// cipherSolver (above) stays around for GetSts (signature timestamp
+	// lookup) which isn't part of the Solver interface.
+	cipher      cipher.Solver
+	potProvider PotTokenProvider
 	// OnVisitorData is called when visitor data is extracted from a watch page.
 	OnVisitorData func(visitorData string)
 	logger        interface {
@@ -55,9 +66,84 @@ func NewPlayerAPI(auth *Auth, logger interface {
 	}
 }
 
-// SetCipherSolver sets the cipher solver for signature/n-param decryption.
+// SetCipherSolver sets the goja cipher resolver. Kept for GetSts (signature
+// timestamp lookup), which is not part of the cipher.Solver interface.
 func (p *PlayerAPI) SetCipherSolver(solver *cipher.GojaResolver) {
 	p.cipherSolver = solver
+}
+
+// SetCipher wires a routed cipher.Solver for sig/n decryption.
+// Optional; when nil, PlayerAPI falls back to the legacy
+// GetSolvers/DecryptSig/DecryptN path on cipherSolver.
+func (p *PlayerAPI) SetCipher(s cipher.Solver) {
+	p.cipher = s
+}
+
+// hasCipher returns true when either the routed Solver or the legacy goja
+// resolver is available. Used by format-parsing guards.
+func (p *PlayerAPI) hasCipher() bool {
+	return p.cipher != nil || p.cipherSolver != nil
+}
+
+// decryptSig solves sig via the routed cipher.Solver if set, falling
+// back to the legacy goja path (GetSolvers + Solvers.DecryptSig) otherwise.
+// Returns the decrypted value or an error when no solver can produce a sig
+// (e.g. goja extraction failed AND no sidecar is configured).
+func (p *PlayerAPI) decryptSig(ctx context.Context, playerURL, encrypted string) (string, error) {
+	if p.cipher != nil {
+		playerID := cipher.PlayerIDFromURL(playerURL)
+		out, err := p.cipher.Sig(ctx, playerID, encrypted)
+		if err == nil {
+			return out, nil
+		}
+		// Fall through to legacy on any error so a transient sidecar
+		// failure doesn't take sig down completely. The composite solver
+		// already routes around fixable errors internally; reaching here
+		// means both sidecar and composite-internal fallback failed.
+	}
+	return p.decryptSigLegacy(ctx, playerURL, encrypted)
+}
+
+func (p *PlayerAPI) decryptSigLegacy(ctx context.Context, playerURL, encrypted string) (string, error) {
+	if p.cipherSolver == nil {
+		return "", cipher.ErrSigUnavailable
+	}
+	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
+	if err != nil {
+		return "", err
+	}
+	if !solvers.HasSig() {
+		return "", cipher.ErrSigUnavailable
+	}
+	return solvers.DecryptSig(encrypted)
+}
+
+// decryptN solves the n-param via the routed cipher.Solver if set, falling
+// back to the legacy goja path otherwise.
+func (p *PlayerAPI) decryptN(ctx context.Context, playerURL, encrypted string) (string, error) {
+	if p.cipher != nil {
+		playerID := cipher.PlayerIDFromURL(playerURL)
+		out, err := p.cipher.N(ctx, playerID, encrypted)
+		if err == nil {
+			return out, nil
+		}
+		// fall through to legacy
+	}
+	return p.decryptNLegacy(ctx, playerURL, encrypted)
+}
+
+func (p *PlayerAPI) decryptNLegacy(ctx context.Context, playerURL, encrypted string) (string, error) {
+	if p.cipherSolver == nil {
+		return "", fmt.Errorf("cipher: n unavailable for player %s", playerURL)
+	}
+	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
+	if err != nil {
+		return "", err
+	}
+	if !solvers.HasN() {
+		return "", fmt.Errorf("cipher: n unavailable for player %s", playerURL)
+	}
+	return solvers.DecryptN(encrypted)
 }
 
 // SetPotProvider sets the PO token provider used to inject tokens into WEB-family

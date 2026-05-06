@@ -163,12 +163,12 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 
 			// Handle signatureCipher (older format without direct URL)
 			if formatURL == "" && sigCipher != "" {
-				if playerURL != "" && p.cipherSolver != nil {
+				if playerURL != "" && p.hasCipher() {
 					decrypted := p.decryptSignatureCipher(ctx, sigCipher, playerURL)
 					if decrypted != "" {
 						formatURL = decrypted
 					}
-				} else if p.cipherSolver == nil {
+				} else if !p.hasCipher() {
 					// Caller did not wire a cipher solver, but this response
 					// shipped ciphered URLs — every such format will be
 					// dropped. Surface a single Warn so a silently-broken
@@ -187,7 +187,7 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 			// will return HTTP 403 on a throttled URL that carries an
 			// encrypted n-value the player can't solve, so keeping the raw
 			// URL would just waste retries and produce misleading errors.
-			if playerURL != "" && p.cipherSolver != nil {
+			if playerURL != "" && p.hasCipher() {
 				decrypted, ok := p.decryptNParamStrict(ctx, formatURL, playerURL)
 				if !ok {
 					continue
@@ -246,18 +246,7 @@ func (p *PlayerAPI) decryptSignatureCipher(ctx context.Context, sigCipher, playe
 		return ""
 	}
 
-	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
-	if err != nil {
-		p.logger.Warn("[PlayerApi] Failed to get cipher solvers", slog.String("error", err.Error()))
-		return ""
-	}
-
-	if solvers.Sig == nil {
-		p.logger.Debug("[PlayerApi] No signature solver available")
-		return ""
-	}
-
-	decryptedSig, err := solvers.DecryptSig(encSig)
+	decryptedSig, err := p.decryptSig(ctx, playerURL, encSig)
 	if err != nil {
 		p.logger.Warn("[PlayerApi] Signature decryption failed", slog.String("error", err.Error()))
 		return ""
@@ -316,13 +305,7 @@ func (p *PlayerAPI) decryptNParamStrict(ctx context.Context, rawURL, playerURL s
 		return rawURL, true
 	}
 
-	solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
-	if err != nil {
-		p.logger.Warn("[PlayerApi] N-param solver unavailable", slog.String("error", err.Error()))
-		return "", false
-	}
-
-	decryptedN, err := solvers.DecryptN(nParam)
+	decryptedN, err := p.decryptN(ctx, playerURL, nParam)
 	if err != nil {
 		p.logger.Warn("[PlayerApi] N-param decryption failed", slog.String("error", err.Error()))
 		return "", false
@@ -346,7 +329,7 @@ func (p *PlayerAPI) decryptNParamStrict(ctx context.Context, rawURL, playerURL s
 
 // DecryptDashManifestUrl decrypts the n-parameter in a DASH manifest URL.
 func (p *PlayerAPI) DecryptDashManifestUrl(ctx context.Context, dashURL, playerURL string) string {
-	if playerURL == "" || p.cipherSolver == nil {
+	if playerURL == "" || !p.hasCipher() {
 		return dashURL
 	}
 	return p.decryptNParam(ctx, dashURL, playerURL)
@@ -355,19 +338,16 @@ func (p *PlayerAPI) DecryptDashManifestUrl(ctx context.Context, dashURL, playerU
 // DecryptNParamInUrl decrypts the n-parameter in any URL.
 // Handles both path-based /n/{value}/ format and query string ?n= format.
 func (p *PlayerAPI) DecryptNParamInUrl(ctx context.Context, rawURL, playerURL string) string {
-	if playerURL == "" || p.cipherSolver == nil {
+	if playerURL == "" || !p.hasCipher() {
 		return rawURL
 	}
 
 	// Check for n parameter in path: /n/{encrypted_value}/
 	if m := pathNParamRe.FindStringSubmatch(rawURL); m != nil {
 		encryptedN := m[1]
-		solvers, err := p.cipherSolver.GetSolvers(ctx, playerURL)
-		if err == nil && solvers.N != nil {
-			decryptedN, err := solvers.DecryptN(encryptedN)
-			if err == nil && decryptedN != encryptedN {
-				return strings.Replace(rawURL, "/n/"+encryptedN+"/", "/n/"+decryptedN+"/", 1)
-			}
+		decryptedN, err := p.decryptN(ctx, playerURL, encryptedN)
+		if err == nil && decryptedN != encryptedN {
+			return strings.Replace(rawURL, "/n/"+encryptedN+"/", "/n/"+decryptedN+"/", 1)
 		}
 	}
 
