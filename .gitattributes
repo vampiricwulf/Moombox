@@ -1,2 +1,23 @@
 *.syso binary
 *.ico binary
+
+# Go source files always use LF, even on Windows checkouts with
+# core.autocrlf=true. Without this, gofmt's CRLF→LF normalisation
+# fights the Git filter on every save and produces noisy diffs.
+*.go text eol=lf
+
+# JS/TS, JSON, and config we control are LF too — same reasoning.
+*.js text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+
+# Windows-only batch and PowerShell scripts: keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
