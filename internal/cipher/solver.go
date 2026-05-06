@@ -365,6 +365,13 @@ func getFromPrepared(code string) (solvers *Solvers, err error) {
 // the in-process GojaResolver internals key on URLs (matching how
 // they appear in YouTube responses). Reconstructing here keeps the
 // internals untouched.
+//
+// TODO: this URL shape is asserted to be stable across Moombox-
+// supported player versions. If YouTube ever serves players from a
+// different path (e.g., a regionalised CDN host or a versioned
+// path scheme), this helper and any cache identity that flows through
+// it (CacheKey playerID-hash, sidecar's per-player cache keyed on
+// playerID) will need to learn about the new shape.
 func playerURLForID(playerID string) string {
 	return "https://www.youtube.com/s/player/" + playerID + "/player_ias.vflset/en_US/base.js"
 }
@@ -400,8 +407,13 @@ func (s *GojaResolver) N(ctx context.Context, playerID, encryptedN string) (stri
 
 // Batch satisfies cipher.Solver. Goja has no round-trip overhead so
 // the implementation is a straight loop. ErrSigUnavailable on a sig
-// challenge skips the entry rather than failing the batch — composite
-// solvers above this layer can route around an unavailable sig.
+// challenge skips the entry rather than failing the batch — the
+// missing key in the result map signals "unavailable for this
+// player" to callers that handle that case (today: the composite
+// solver routes around an unavailable sig). Direct callers of
+// GojaResolver.Batch (rare; composite is the typical entry point)
+// must not assume every input has an output entry; check len(sigs)
+// vs len(sigResults) if a fully-populated map is required.
 func (s *GojaResolver) Batch(ctx context.Context, playerID string, sigs, ns []string) (map[string]string, map[string]string, error) {
 	sigResults := make(map[string]string, len(sigs))
 	for _, sig := range sigs {

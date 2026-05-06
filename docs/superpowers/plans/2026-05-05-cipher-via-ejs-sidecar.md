@@ -1761,3 +1761,25 @@ After completing all tasks, the implementation should satisfy the spec sections 
 **Open questions deferred to follow-up:**
 - Spec §10 Phase 5 (observability — `/api/cipher/stats` or extending `/api/pot`) is not implemented in this plan. Add as a follow-up after the core path is validated.
 - Spec §9 (CI job to check for ejs updates) is not implemented; this is a process improvement, not a code change.
+
+---
+
+## Post-implementation appendix (2026-05-06)
+
+All 13 tasks landed but with several deliberate deviations:
+
+- **Task 7 (Solver interface) ate Task 8's rename.** The interface and the
+  existing concrete `Solver` struct collided; the rename to `GojaResolver`
+  happened during Task 7 to make room. Task 8 was then a smaller follow-up
+  (just adding the `Sig`/`N`/`Batch` wrappers).
+- **Task 11 wiring was incomplete at v2.6.15.** The composite solver was
+  constructed but only wired into `PlayerAPI` — the worker strategies
+  continued using the goja resolver directly. Closed in v2.6.16 work
+  (`internal/cipher/decrypt.go::RoutedResolveURL` / `RoutedDecryptNInURL`).
+- **Task 12 single-fixture parity expanded to all-fixture iteration in v2.6.16.**
+- **`playerURLForID` cache split** discovered post-Task 11; fixed by
+  changing CacheKey to hash playerID instead of full URL.
+- **Worker UpdateJobFields plumbing** moved from per-call-site `updateOrExit`
+  to a centralised `OnJobDeleted` subscriber on the orchestrator. The plan
+  didn't anticipate the centralised approach; it fell out of the v2.6.15
+  retrospective once we counted the call sites.

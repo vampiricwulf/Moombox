@@ -31,7 +31,8 @@
 - Vendored yt-dlp/ejs source under `bgutil-sidecar/vendor/ejs/` (Unlicense, public domain) pinned to commit `2231f1f`. Bundled via esbuild to a single ~159 KB ESM file at build time.
 - New `meriyah` 6.1.4 and `astring` 1.9.0 npm dependencies (exact pins matching ejs's own pins to avoid AST API drift).
 - `*GojaResolver` (renamed from `Solver`) now satisfies the new `cipher.Solver` interface via Sig/N/Batch wrappers. `playerURLForID` helper bridges interface playerIDs to the goja resolver's URL-keyed cache.
-- `internal/cipher/solver_sidecar.go` and `solver_composite.go` added with full unit test coverage (mock sidecar; routing policy assertions). `solver_sidecar_live_test.go` (gated on `MOOMBOX_LIVE_CIPHER_TEST=1`) drives the full path end-to-end against the cb017549 fixture.
+- `internal/cipher/solver_sidecar.go` and `solver_composite.go` added with full unit test coverage (mock sidecar; routing policy assertions). `solver_sidecar_live_test.go` validated locally on the cb017549 fixture via the gated
+  TestSidecarSolverLive (MOOMBOX_LIVE_CIPHER_TEST=1; not in CI by default).
 - `TestSidecarSolverGojaParity74edf1a3` proves byte-for-byte equality between the goja and EJS-via-sidecar outputs on a player goja can statically handle, validating that EJS isn't approximating the sig/n algorithm — it's reproducing the player's authoritative output exactly.
 - `cb017549.js` added as a testdata fixture (gitignored per project convention; tests `t.Skip` when missing).
 - Removed unused helpers flagged by staticcheck: `SegmentDownloader.recordTransientErr` / `emitProgress`, `filterUniqueDescriptionLines`, and a pair of unused test helpers.

@@ -121,10 +121,17 @@ type ResolveURLResponse struct {
 // ErrSigUnavailable from Sig; the composite solver routes around such
 // solvers for sig.
 //
-// Batch is a hint that callers can use to amortise sidecar round-trips
-// when a manifest yields multiple sig and/or n challenges at once.
-// Implementations that don't benefit from batching may simply call
-// Sig/N in a loop internally.
+// Batch is a hint that callers can use to amortise per-implementation
+// overhead when a manifest yields multiple sig and/or n challenges
+// at once. Each implementation chooses how (or whether) to amortise:
+// the goja-backed solver runs a straight loop because solver
+// invocation is in-process and has no batch advantage; the
+// sidecar-backed solver issues a single JSON-RPC for both sig and n.
+// The composite solver routes through one or the other.
+//
+// Implementations MUST return a result for every input in sigs and
+// ns on success, or return an error. Partial maps are a contract
+// violation.
 type Solver interface {
 	Sig(ctx context.Context, playerID, encryptedSig string) (string, error)
 	N(ctx context.Context, playerID, encryptedN string) (string, error)

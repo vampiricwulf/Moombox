@@ -12,7 +12,7 @@
 
 import ejsMain from "../vendor/ejs.bundle.js";
 
-const MAX_PLAYERS = 3;
+const MAX_PLAYERS = 2;
 const MAX_CHALLENGES_PER_PLAYER = 1000;
 
 // playerID -> { preprocessed, sigCache, nCache, lastUsed }

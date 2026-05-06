@@ -251,3 +251,40 @@ The "sig fails" path is observable through the same `solver ready hasSig=false` 
 5. **Phase 5 — observability.** Update the existing `cipher: solver ready hasSig=...` log line to reflect that sig comes from the sidecar; add a `/api/cipher/stats` endpoint or extend `/api/pot` with cipher counters mirroring the BotGuard sidecar's existing counters (preprocessed players cached, challenges solved, fallbacks taken).
 
 Each phase is independently mergeable. Phase 1 + 2 together are testable in the sidecar without touching Moombox; phase 3 onward is the user-visible change.
+
+## Post-implementation notes (2026-05-06)
+
+The shipped v2.6.15 + v2.6.16-prep code diverges from the original
+spec in several places. These deviations are intentional but worth
+recording so future readers don't get confused:
+
+- **Goja resolver renamed to `GojaResolver`.** The original spec
+  kept the existing `Solver` struct name. To make room for the new
+  `cipher.Solver` interface without a name collision, the concrete
+  type was renamed eagerly during Task 7 of the implementation plan.
+  All 13 affected call sites updated in the same commit.
+- **`PlayerSource` interface is exported.** The plan called for an
+  unexported `playerJSSource`. Promoted to exported `PlayerSource`
+  so the worker package can satisfy it without importing internal
+  type names.
+- **`PlayerAPI` keeps both `*GojaResolver` and `cipher.Solver`.**
+  The spec's "wire the composite solver into PlayerAPI" implied a
+  single field. In practice PlayerAPI keeps `cipherSolver
+  *cipher.GojaResolver` for `GetSts` (signature timestamp lookup,
+  not part of the Solver interface) and adds a separate `cipher
+  cipher.Solver` field for the routed sig/n decryption.
+- **DASH worker plumbing followed in v2.6.16, not v2.6.15.** The
+  initial cipher migration only covered the format-parsing path
+  (PlayerAPI). The actual download path (worker strategies) still
+  used the goja resolver directly through v2.6.15. Routed via
+  composite in a follow-up commit using new helpers
+  `RoutedResolveURL` and `RoutedDecryptNInURL` in
+  `internal/cipher/decrypt.go`.
+- **Cache key changed to playerID-hash.** Original implementation
+  hashed the full player URL, which split the cache when the routed
+  path's synthetic `en_US` URL and the legacy path's
+  watch-page-supplied URL had different locales. Switched to
+  `extractPlayerIDFromURL` + SHA256 of just the playerID.
+- **Goja-vs-EJS parity test iterates all fixtures.** Plan had a
+  single-fixture parity test; the multi-fixture iteration via
+  `filepath.Glob` lands as part of the v2.6.16 retrospective work.
