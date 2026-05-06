@@ -66,7 +66,16 @@ const stats = {
 };
 
 function logErr(msg) {
-    process.stderr.write(`[bgutil-sidecar] ${msg}\n`);
+    // Errors from server.js own logic — distinct from raw JSDOM stderr
+    // chatter, which doesn't get our prefix. Go-side stderrPump routes
+    // these to Warn level.
+    process.stderr.write(`[bgutil-sidecar:error] ${msg}\n`);
+}
+
+function logWarn(msg) {
+    // Server-recoverable warnings from server.js. Go-side routes these
+    // to Debug.
+    process.stderr.write(`[bgutil-sidecar:warn] ${msg}\n`);
 }
 
 // ---------------------------------------------------------------------------
