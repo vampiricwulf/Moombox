@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/cipher"
@@ -42,6 +43,11 @@ type PlayerAPI struct {
 	// lookup) which isn't part of the Solver interface.
 	cipher      cipher.Solver
 	potProvider PotTokenProvider
+	// loggedSigRoutes tracks which (playerID, route) tuples we've already
+	// logged "sig decrypted" for. Prevents 20-50 lines per video probe;
+	// operators only need to see the route the FIRST time it succeeds for
+	// a given player.
+	loggedSigRoutes sync.Map // map[string]struct{} keyed by "<playerID>|<route>"
 	// OnVisitorData is called when visitor data is extracted from a watch page.
 	OnVisitorData func(visitorData string)
 	logger        interface {
@@ -94,7 +100,10 @@ func (p *PlayerAPI) decryptSig(ctx context.Context, playerURL, encrypted string)
 		playerID := cipher.PlayerIDFromURL(playerURL)
 		out, err := p.cipher.Sig(ctx, playerID, encrypted)
 		if err == nil {
-			p.logger.Info("[Cipher] sig decrypted via sidecar", "playerID", playerID)
+			key := playerID + "|sidecar"
+			if _, loaded := p.loggedSigRoutes.LoadOrStore(key, struct{}{}); !loaded {
+				p.logger.Info("[Cipher] sig decrypted via sidecar", "playerID", playerID)
+			}
 			return out, nil
 		}
 		// Fall through to legacy on any error so a transient sidecar
@@ -104,7 +113,11 @@ func (p *PlayerAPI) decryptSig(ctx context.Context, playerURL, encrypted string)
 	}
 	out, err := p.decryptSigLegacy(ctx, playerURL, encrypted)
 	if err == nil {
-		p.logger.Info("[Cipher] sig decrypted via goja fallback")
+		playerID := cipher.PlayerIDFromURL(playerURL)
+		key := playerID + "|goja"
+		if _, loaded := p.loggedSigRoutes.LoadOrStore(key, struct{}{}); !loaded {
+			p.logger.Info("[Cipher] sig decrypted via goja fallback", "playerID", playerID)
+		}
 		return out, nil
 	}
 	return "", err
