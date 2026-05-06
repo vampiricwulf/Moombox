@@ -280,8 +280,14 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 				// Engine fires once per downloader instance on either a
 				// pre-bytes 403 OR a post-bytes 403 burst — see audit F11.
 				job.Logger.Warn("[Cipher] 403 signal — invalidating solver", "playerURL", videoInfo.PlayerURL)
+				playerID := cipher.PlayerIDFromURL(videoInfo.PlayerURL)
 				if cipherSolver != nil {
 					cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
+				}
+				// Clear the sig-route log dedup so the "sig decrypted via …"
+				// Info fires once on recovery rather than staying silent.
+				if job.YT != nil {
+					job.YT.PlayerAPI.ClearLoggedRoutes(playerID)
 				}
 				return resolveFreshDashURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
@@ -315,8 +321,14 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			origURL := originalBaseURLs[audioStream.Itag]
 			result.AudioDownloader.OnCipherFailure = func() string {
 				job.Logger.Warn("[Cipher] 403 signal — invalidating solver", "playerURL", videoInfo.PlayerURL)
+				playerID := cipher.PlayerIDFromURL(videoInfo.PlayerURL)
 				if cipherSolver != nil {
 					cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
+				}
+				// Clear the sig-route log dedup so the "sig decrypted via …"
+				// Info fires once on recovery rather than staying silent.
+				if job.YT != nil {
+					job.YT.PlayerAPI.ClearLoggedRoutes(playerID)
 				}
 				return resolveFreshDashURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}

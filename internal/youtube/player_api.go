@@ -91,6 +91,21 @@ func (p *PlayerAPI) hasCipher() bool {
 	return p.cipher != nil || p.cipherSolver != nil
 }
 
+// ClearLoggedRoutes drops the per-route log dedup state for a player.
+// Call this whenever the goja solver cache for that player is invalidated
+// (cipher rotation detected), so the next successful sig decrypt emits
+// the "sig decrypted via …" Info log once per recovery cycle rather than
+// only once per process lifetime.
+//
+// The invalidation itself lives in the cipher package
+// (cipher.GojaResolver.InvalidateSolver); callers that observe a cipher
+// rotation should call both InvalidateSolver and ClearLoggedRoutes so the
+// recovery signal is visible in the log.
+func (p *PlayerAPI) ClearLoggedRoutes(playerID string) {
+	p.loggedSigRoutes.Delete(playerID + "|sidecar")
+	p.loggedSigRoutes.Delete(playerID + "|goja")
+}
+
 // decryptSig solves sig via the routed cipher.Solver if set, falling
 // back to the legacy goja path (GetSolvers + Solvers.DecryptSig) otherwise.
 // Returns the decrypted value or an error when no solver can produce a sig
