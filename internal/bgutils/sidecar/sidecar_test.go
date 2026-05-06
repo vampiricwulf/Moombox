@@ -2,6 +2,8 @@ package sidecar
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -172,6 +174,59 @@ func TestSidecarHardKill(t *testing.T) {
 	err := s.ping(ctx)
 	if err == nil {
 		t.Errorf("expected ping after kill to error, got nil")
+	}
+}
+
+// TestSidecarSolveCipher exercises the JSON-RPC round-trip for sig+n
+// cipher solving. Uses the cb017549 player fixture which is structurally
+// representative of YouTube's current obfuscation pattern (no static
+// helper-object sig algorithm; URL passthrough required).
+func TestSidecarSolveCipher(t *testing.T) {
+	requireBlobs(t)
+	playerJS, err := os.ReadFile(filepath.Join("..", "..", "cipher", "testdata", "player_cb017549.js"))
+	if err != nil {
+		t.Skipf("cipher fixture missing: %v (run task 6.1 to download)", err)
+	}
+
+	s := startSidecar(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Distinguishable challenges so we can assert on transformation.
+	sigA := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_"
+	nA := "abcdefghij_12345"
+
+	res, err := s.SolveCipher(ctx, SolveCipherRequest{
+		PlayerID:      "cb017549",
+		PlayerJS:      string(playerJS),
+		SigChallenges: []string{sigA},
+		NChallenges:   []string{nA},
+	})
+	if err != nil {
+		t.Fatalf("SolveCipher: %v", err)
+	}
+	gotSig := res.SigResults[sigA]
+	gotN := res.NResults[nA]
+
+	if gotSig == "" || gotSig == sigA {
+		t.Errorf("sig: expected non-empty transformation; got %q", gotSig)
+	}
+	if gotN == "" || gotN == nA {
+		t.Errorf("n: expected non-empty transformation; got %q", gotN)
+	}
+	t.Logf("sig: %q -> %q", sigA, gotSig)
+	t.Logf("n:   %q -> %q", nA, gotN)
+
+	// Second call without playerJS should hit the player cache.
+	res2, err := s.SolveCipher(ctx, SolveCipherRequest{
+		PlayerID:      "cb017549",
+		SigChallenges: []string{sigA},
+	})
+	if err != nil {
+		t.Fatalf("SolveCipher (cache hit): %v", err)
+	}
+	if res2.SigResults[sigA] != gotSig {
+		t.Errorf("cache-hit sig differs: %q vs %q", res2.SigResults[sigA], gotSig)
 	}
 }
 

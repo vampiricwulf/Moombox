@@ -366,6 +366,63 @@ func (s *Sidecar) GetStats(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
+// SolveCipherRequest is the parameter payload for the solveCipher JSON-RPC
+// method. PlayerJS is optional after the first call for a given PlayerID
+// in the sidecar's lifetime; subsequent calls may omit it. If the sidecar
+// reports "player not loaded", callers should retry with PlayerJS attached.
+type SolveCipherRequest struct {
+	PlayerID      string   `json:"playerID"`
+	PlayerJS      string   `json:"playerJS,omitempty"`
+	SigChallenges []string `json:"sigChallenges,omitempty"`
+	NChallenges   []string `json:"nChallenges,omitempty"`
+}
+
+// SolveCipherResult is the response payload. Result maps are keyed by the
+// input challenge string. If a request specified empty challenge slices
+// for a type, the corresponding result map is empty (not nil).
+type SolveCipherResult struct {
+	SigResults map[string]string `json:"sigResults"`
+	NResults   map[string]string `json:"nResults"`
+}
+
+// ErrPlayerNotLoaded indicates the sidecar discarded the player JS
+// (LRU eviction or restart). The caller should retry SolveCipher with
+// PlayerJS populated. Detected by exact error message match against
+// the sidecar's "player not loaded" sentinel.
+var ErrPlayerNotLoaded = errors.New("sidecar: player not loaded")
+
+// SolveCipher solves YouTube sig and/or n cipher challenges against
+// the loaded player JS. PlayerJS can be omitted on warm calls; on
+// ErrPlayerNotLoaded the caller should re-issue the call with PlayerJS
+// populated.
+func (s *Sidecar) SolveCipher(ctx context.Context, req SolveCipherRequest) (SolveCipherResult, error) {
+	params := map[string]any{
+		"playerID":      req.PlayerID,
+		"sigChallenges": req.SigChallenges,
+		"nChallenges":   req.NChallenges,
+	}
+	if req.PlayerJS != "" {
+		params["playerJS"] = req.PlayerJS
+	}
+
+	var result SolveCipherResult
+	if err := s.call(ctx, "solveCipher", params, &result); err != nil {
+		// Match the sidecar's verbatim sentinel string. The "sidecar: "
+		// prefix is added by call() when wrapping non-context errors.
+		if err.Error() == "sidecar: player not loaded" {
+			return SolveCipherResult{}, ErrPlayerNotLoaded
+		}
+		return SolveCipherResult{}, err
+	}
+	if result.SigResults == nil {
+		result.SigResults = map[string]string{}
+	}
+	if result.NResults == nil {
+		result.NResults = map[string]string{}
+	}
+	return result, nil
+}
+
 // ping exercises the JSON-RPC round-trip. Kept as an unexported method
 // for tests after Start switched to the ready-event handshake; production
 // code does not call ping directly anymore.
