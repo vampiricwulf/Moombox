@@ -60,6 +60,26 @@ func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (s
 	return c.goja.N(ctx, playerID, encryptedN)
 }
 
+// Batch combines sig and n decryption into a single solver call where
+// possible. The composite issues ONE sidecar call for both arrays;
+// only on sidecar failure do we fall through to per-element goja for
+// the n entries. Sig has no goja fallback (sidecar-only routing
+// policy from the spec).
+//
+// TRADE-OFF: when both sigs and ns are non-empty and the sidecar call
+// fails, the n entries that goja could have served are lost too —
+// the entire batch errors. The pre-5cc4e5b two-call design avoided
+// this at the cost of a second round-trip on every healthy mixed
+// batch. The single-call design is correct for the steady state
+// (sidecar healthy → one round-trip) but trades resilience: a
+// transient sidecar hiccup with mixed input fails the whole batch.
+// Callers that want max resilience should call Sig and N separately;
+// Batch is for callers that prioritise round-trip count.
+//
+// Implementations MUST return a result for every input in sigs and
+// ns on success, or return an error. Partial maps are a contract
+// violation — both this composite and the underlying sidecarSolver
+// validate completeness post-call.
 func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns []string) (map[string]string, map[string]string, error) {
 	sigResults := map[string]string{}
 	nResults := map[string]string{}
