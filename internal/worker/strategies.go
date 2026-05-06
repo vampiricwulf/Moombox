@@ -19,10 +19,18 @@ import (
 //
 // Audit reports/worker.md F49/Q9.
 type StrategyDeps struct {
-	// CipherSolver is required by VOD (signature/n-param decryption on
-	// direct formats) and DASH (manifest-time decryption). HLS does
-	// not need it. nil disables cipher work.
+	// CipherSolver is the legacy *cipher.GojaResolver.  Kept for
+	// GetSts, InvalidateSolver, and any goja-internal operations that
+	// the cipher.Solver interface doesn't expose.  Sig/n-param URL
+	// decryption should use RoutedCipherSolver instead.
 	CipherSolver *cipher.GojaResolver
+
+	// RoutedCipherSolver is the composite cipher.Solver (sidecar
+	// primary, goja fallback).  DASH and HLS strategies call this for
+	// sig and n-param decryption so the work flows through the V8 ejs
+	// path on cb017549-family players.  nil falls back to CipherSolver
+	// directly (pre-sidecar behaviour).
+	RoutedCipherSolver cipher.Solver
 
 	// PotProvider mints PO tokens for GVS (Google Video Server) requests.
 	// All YouTube strategies use it when non-nil.
@@ -68,7 +76,7 @@ func (vodStrategyT) Download(ctx context.Context, job *JobContext, info *youtube
 }
 
 func (dashStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
-	return DownloadDash(ctx, job, info, deps.CipherSolver, deps.PotProvider, deps.IsOnline)
+	return DownloadDash(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider, deps.IsOnline)
 }
 
 func (hlsStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {

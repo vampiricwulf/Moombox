@@ -49,25 +49,31 @@ func connIsOnline(c Connectivity) func() bool {
 
 // DownloadOrchestrator coordinates the full download lifecycle for a job.
 type DownloadOrchestrator struct {
-	muxer        *engine.Muxer
-	ffmpegPath   string
-	db           *database.Database
-	queue        *JobQueue
-	cipherSolver *cipher.GojaResolver
-	potProvider  *bgutils.PotProvider
-	notifier     *notifications.Manager
-	conn         Connectivity
-	logger       logger
+	muxer         *engine.Muxer
+	ffmpegPath    string
+	db            *database.Database
+	queue         *JobQueue
+	cipherSolver  *cipher.GojaResolver
+	routedCipher  cipher.Solver
+	potProvider   *bgutils.PotProvider
+	notifier      *notifications.Manager
+	conn          Connectivity
+	logger        logger
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.
-func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.GojaResolver, pp *bgutils.PotProvider, nm *notifications.Manager, conn Connectivity) *DownloadOrchestrator {
+// routedCs is the composite cipher.Solver (sidecar primary, goja fallback)
+// used for sig/n-param URL decryption in download strategies.  cs
+// (*GojaResolver) is kept for GetSts, InvalidateSolver, and other
+// goja-internal operations.
+func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.GojaResolver, routedCs cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager, conn Connectivity) *DownloadOrchestrator {
 	return &DownloadOrchestrator{
 		muxer:        engine.NewMuxer(ffmpegPath, logger),
 		ffmpegPath:   ffmpegPath,
 		db:           db,
 		queue:        queue,
 		cipherSolver: cs,
+		routedCipher: routedCs,
 		potProvider:  pp,
 		notifier:     nm,
 		conn:         conn,
@@ -232,9 +238,10 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		"formatCount", len(videoInfo.Formats),
 		"useDirectVod", useDirectVod)
 	deps := &StrategyDeps{
-		CipherSolver: o.cipherSolver,
-		PotProvider:  o.potProvider,
-		IsOnline:     connIsOnline(o.conn),
+		CipherSolver:       o.cipherSolver,
+		RoutedCipherSolver: o.routedCipher,
+		PotProvider:        o.potProvider,
+		IsOnline:           connIsOnline(o.conn),
 	}
 	var strategy DownloadStrategy
 	switch {

@@ -61,6 +61,7 @@ type runState struct {
 	potProvider  *bgutils.PotProvider
 	bgSidecar    *sidecar.Sidecar
 	cipherSolver *cipher.GojaResolver
+	routedCipher cipher.Solver
 
 	// --- Worker + notifications ---
 	notifyMgr *notifications.Manager

@@ -258,6 +258,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	}
 	cipherSolver := cipher.NewCompositeSolver(sidecarCipher, gojaSolver)
 	s.cipherSolver = gojaSolver
+	s.routedCipher = cipherSolver
 
 	// Wire goja resolver for GetSts (signature timestamp lookup, not part of
 	// the cipher.Solver interface) and the composite Solver for sig/n decryption.
@@ -279,11 +280,12 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 10. Download worker
 	// =========================================================================
 	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
-		CipherSolver:  gojaSolver,
-		PotProvider:   potProvider,
-		TwitchService: twService,
-		Notifier:      notifyMgr,
-		Conn:          s.connMon,
+		CipherSolver:       gojaSolver,
+		RoutedCipherSolver: cipherSolver,
+		PotProvider:        potProvider,
+		TwitchService:      twService,
+		Notifier:           notifyMgr,
+		Conn:               s.connMon,
 	})
 	s.dlWorker = dlWorker
 

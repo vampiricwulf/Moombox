@@ -131,7 +131,15 @@ func (w *DownloadWorker) readConfig(fn func(*config.MoomboxConfig)) {
 // can pass a real *connectivity.Monitor or a fake without the two-func dance
 // (audit reports/worker.md F54).
 type DownloadWorkerDeps struct {
-	CipherSolver  *cipher.GojaResolver
+	// CipherSolver is the legacy *GojaResolver; kept for GetSts,
+	// InvalidateSolver, and goja-internal call sites.
+	CipherSolver *cipher.GojaResolver
+
+	// RoutedCipherSolver is the composite cipher.Solver (sidecar
+	// primary, goja fallback) used for sig/n-param URL decryption in
+	// download strategies.  nil falls back to CipherSolver.
+	RoutedCipherSolver cipher.Solver
+
 	PotProvider   *bgutils.PotProvider
 	TwitchService *twitch.Service
 	Notifier      *notifications.Manager
@@ -150,12 +158,14 @@ func NewDownloadWorker(
 	queue.SetLogger(logger)
 
 	var cs *cipher.GojaResolver
+	var routedCs cipher.Solver
 	var pp *bgutils.PotProvider
 	var tw *twitch.Service
 	var nm *notifications.Manager
 	var conn Connectivity
 	if deps != nil {
 		cs = deps.CipherSolver
+		routedCs = deps.RoutedCipherSolver
 		pp = deps.PotProvider
 		tw = deps.TwitchService
 		nm = deps.Notifier
@@ -176,7 +186,7 @@ func NewDownloadWorker(
 		tw:           tw,
 		cfg:          cfg,
 		queue:        queue,
-		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, pp, nm, conn),
+		orchestrator: NewDownloadOrchestrator(db, queue, cfg.Paths.FfmpegPath, logger, cs, routedCs, pp, nm, conn),
 		streamProc:   sp,
 		notifier:     nm,
 		logger:       logger,

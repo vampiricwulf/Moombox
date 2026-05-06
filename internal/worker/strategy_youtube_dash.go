@@ -23,26 +23,37 @@ import (
 // origURL must be the ORIGINAL stream BaseURL (before the initial
 // n-param decryption); otherwise we'd re-decrypt an already-decrypted
 // URL and produce garbage. DECISIONS #7.
-func resolveFreshDashURL(ctx context.Context, cipherSolver *cipher.GojaResolver, playerURL, origURL string, logger interface {
+//
+// routedSolver is the composite cipher.Solver; it is tried first so
+// the sidecar V8 ejs path handles n on cb017549-family players.
+// Falls back to the goja resolver (cipherSolver) if nil or on error.
+func resolveFreshDashURL(ctx context.Context, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, playerURL, origURL string, logger interface {
 	Warn(msg string, args ...any)
 	Info(msg string, args ...any)
 }) string {
 	if origURL == "" {
 		return ""
 	}
-	fresh, err := cipherSolver.GetSolvers(ctx, playerURL)
-	if err != nil {
-		logger.Warn("[Cipher] retry: GetSolvers failed", "err", err)
-		return ""
-	}
-	if fresh == nil || fresh.N == nil {
-		logger.Warn("[Cipher] retry: solver missing N callable")
-		return ""
-	}
-	decrypted, err := decryptNParamInURL(origURL, fresh.DecryptN)
-	if err != nil {
-		logger.Warn("[Cipher] retry: n-param decrypt failed", "err", err)
-		return ""
+	decrypted := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, playerURL, origURL)
+	if decrypted == origURL {
+		// No change means decryption either was a no-op (no n param) or
+		// failed.  Fall back to the legacy GetSolvers path so we get the
+		// same warning coverage as before.
+		fresh, err := cipherSolver.GetSolvers(ctx, playerURL)
+		if err != nil {
+			logger.Warn("[Cipher] retry: GetSolvers failed", "err", err)
+			return ""
+		}
+		if fresh == nil || fresh.N == nil {
+			logger.Warn("[Cipher] retry: solver missing N callable")
+			return ""
+		}
+		var decErr error
+		decrypted, decErr = decryptNParamInURL(origURL, fresh.DecryptN)
+		if decErr != nil {
+			logger.Warn("[Cipher] retry: n-param decrypt failed", "err", decErr)
+			return ""
+		}
 	}
 	logger.Info("[Cipher] retry: fresh n-param decryption succeeded; engine will swap BaseURL")
 	return decrypted
@@ -51,16 +62,23 @@ func resolveFreshDashURL(ctx context.Context, cipherSolver *cipher.GojaResolver,
 // DownloadDash sets up DASH segment downloaders for a live/post-live stream.
 // Applies cipher decryption to manifest URL, n-parameter decryption to stream URLs,
 // and injects PO token into the manifest URL path.
-func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
+//
+// routedSolver is the composite cipher.Solver (sidecar primary, goja fallback)
+// and is used for all sig/n-param URL decryption.  cipherSolver (*GojaResolver)
+// is kept for InvalidateSolver and GetSolvers in the OnCipherFailure retry path.
+func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.DashManifestURL == "" {
 		return nil, fmt.Errorf("no DASH manifest URL available")
 	}
 
 	dashURL := videoInfo.DashManifestURL
 
-	// Step 1: Decrypt the DASH manifest URL itself (signature cipher)
-	if cipherSolver != nil && videoInfo.PlayerURL != "" {
-		resolved, err := cipherSolver.ResolveURL(ctx, cipher.ResolveURLRequest{
+	// Step 1: Decrypt the DASH manifest URL itself (signature cipher).
+	// Route through the composite solver (sidecar primary; goja fallback)
+	// so sig decryption works on cb017549-family players where the goja
+	// extractor cannot produce a sig algorithm.
+	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
+		resolved, err := cipher.RoutedResolveURL(ctx, routedSolver, cipherSolver, cipher.ResolveURLRequest{
 			StreamURL: dashURL,
 			PlayerURL: videoInfo.PlayerURL,
 		})
@@ -121,26 +139,19 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 			originalBaseURLs[streams[i].Itag] = streams[i].BaseURL
 		}
 	}
-	if cipherSolver != nil && videoInfo.PlayerURL != "" {
-		solvers, solverErr := cipherSolver.GetSolvers(ctx, videoInfo.PlayerURL)
-		if solverErr != nil {
-			job.Logger.Warn("[Cipher] failed to get solvers for n-param decryption", "err", solverErr)
-		} else if solvers != nil && solvers.N != nil {
-			decryptCount := 0
-			for i := range streams {
-				if streams[i].BaseURL == "" {
-					continue
-				}
-				decrypted, err := decryptNParamInURL(streams[i].BaseURL, solvers.DecryptN)
-				if err != nil {
-					job.Logger.Warn("[Cipher] n-param decrypt failed", "itag", streams[i].Itag, "err", err)
-					continue
-				}
+	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
+		decryptCount := 0
+		for i := range streams {
+			if streams[i].BaseURL == "" {
+				continue
+			}
+			decrypted := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, streams[i].BaseURL)
+			if decrypted != streams[i].BaseURL {
 				streams[i].BaseURL = decrypted
 				decryptCount++
 			}
-			job.Logger.Debug("[Cipher] DASH n-param decryption complete", "decrypted", decryptCount, "total", len(streams))
 		}
+		job.Logger.Debug("[Cipher] DASH n-param decryption complete", "decrypted", decryptCount, "total", len(streams))
 	}
 
 	// dashPoToken from step 2 is reused for segment URLs via DownloaderOptions.
@@ -263,14 +274,16 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 				return info.StreamStatus != youtube.StreamLive, nil
 			},
 		})
-		if cipherSolver != nil && videoInfo.PlayerURL != "" {
+		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
 			origURL := originalBaseURLs[videoStream.Itag]
 			result.VideoDownloader.OnCipherFailure = func() string {
 				// Engine fires once per downloader instance on either a
 				// pre-bytes 403 OR a post-bytes 403 burst — see audit F11.
 				job.Logger.Warn("[Cipher] 403 signal — invalidating solver", "playerURL", videoInfo.PlayerURL)
-				cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
-				return resolveFreshDashURL(ctx, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
+				if cipherSolver != nil {
+					cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
+				}
+				return resolveFreshDashURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}
 	}
@@ -298,12 +311,14 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 				return info.StreamStatus != youtube.StreamLive, nil
 			},
 		})
-		if cipherSolver != nil && videoInfo.PlayerURL != "" {
+		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
 			origURL := originalBaseURLs[audioStream.Itag]
 			result.AudioDownloader.OnCipherFailure = func() string {
 				job.Logger.Warn("[Cipher] 403 signal — invalidating solver", "playerURL", videoInfo.PlayerURL)
-				cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
-				return resolveFreshDashURL(ctx, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
+				if cipherSolver != nil {
+					cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
+				}
+				return resolveFreshDashURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}
 	}
