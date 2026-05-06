@@ -124,3 +124,76 @@ func TestCompositeWithoutSidecar_GojaOnly(t *testing.T) {
 		t.Errorf("N goja-only: got %q, want gojaY", got)
 	}
 }
+
+func TestCompositeBatch_SigOnlyRoutesToSidecar(t *testing.T) {
+	side := &staticSolver{sig: map[string]string{"X": "sideX", "Y": "sideY"}}
+	goja := &staticSolver{sig: map[string]string{"X": "gojaX", "Y": "gojaY"}}
+	c := newCompositeSolverWith(side, goja)
+
+	sigs, ns, err := c.Batch(context.Background(), "P1", []string{"X", "Y"}, nil)
+	if err != nil {
+		t.Fatalf("Batch: %v", err)
+	}
+	if len(ns) != 0 {
+		t.Errorf("expected empty n results; got %v", ns)
+	}
+	if sigs["X"] != "sideX" || sigs["Y"] != "sideY" {
+		t.Errorf("expected sidecar values; got %v", sigs)
+	}
+}
+
+func TestCompositeBatch_NOnlyFallsBackToGojaOnSidecarError(t *testing.T) {
+	side := &staticSolver{nErr: errors.New("sidecar n down")}
+	goja := &staticSolver{n: map[string]string{"A": "gojaA", "B": "gojaB"}}
+	c := newCompositeSolverWith(side, goja)
+
+	_, ns, err := c.Batch(context.Background(), "P1", nil, []string{"A", "B"})
+	if err != nil {
+		t.Fatalf("Batch: %v", err)
+	}
+	if ns["A"] != "gojaA" || ns["B"] != "gojaB" {
+		t.Errorf("expected goja fallback values; got %v", ns)
+	}
+}
+
+func TestCompositeBatch_MixedAllSidecarHealthy(t *testing.T) {
+	side := &staticSolver{
+		sig: map[string]string{"X": "sideX"},
+		n:   map[string]string{"A": "sideA"},
+	}
+	goja := &staticSolver{}
+	c := newCompositeSolverWith(side, goja)
+
+	sigs, ns, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"A"})
+	if err != nil {
+		t.Fatalf("Batch: %v", err)
+	}
+	if sigs["X"] != "sideX" {
+		t.Errorf("expected sidecar sig; got %v", sigs)
+	}
+	if ns["A"] != "sideA" {
+		t.Errorf("expected sidecar n; got %v", ns)
+	}
+}
+
+func TestCompositeBatch_MixedSidecarNFailsGojaFallback(t *testing.T) {
+	side := &staticSolver{
+		sig:  map[string]string{"X": "sideX"},
+		nErr: errors.New("sidecar n down"),
+	}
+	goja := &staticSolver{
+		n: map[string]string{"A": "gojaA", "B": "gojaB"},
+	}
+	c := newCompositeSolverWith(side, goja)
+
+	sigs, ns, err := c.Batch(context.Background(), "P1", []string{"X"}, []string{"A", "B"})
+	if err != nil {
+		t.Fatalf("Batch: %v", err)
+	}
+	if sigs["X"] != "sideX" {
+		t.Errorf("expected sidecar sig; got %v", sigs)
+	}
+	if ns["A"] != "gojaA" || ns["B"] != "gojaB" {
+		t.Errorf("expected goja n fallback; got %v", ns)
+	}
+}
