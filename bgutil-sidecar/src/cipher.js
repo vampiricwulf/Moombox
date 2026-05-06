@@ -71,7 +71,10 @@ function solveOne(entry, type, challenge) {
     if (result.type === "error") {
         throw new Error(`ejs solve: ${result.error}`);
     }
-    const response = result.responses[0];
+    const response = result.responses?.[0];
+    if (!response) {
+        throw new Error(`ejs solve ${type}: no response for challenge`);
+    }
     if (response.type === "error") {
         throw new Error(`ejs solve ${type}: ${response.error}`);
     }
@@ -81,7 +84,8 @@ function solveOne(entry, type, challenge) {
     }
 
     if (cache.size >= MAX_CHALLENGES_PER_PLAYER) {
-        // Cheap LRU: drop oldest insertion. Map iteration order is insertion order.
+        // Cheap FIFO: evict the oldest-inserted entry. Acceptable for this workload —
+        // challenges are mostly one-shot, so true LRU's bookkeeping cost would not pay back.
         const firstKey = cache.keys().next().value;
         cache.delete(firstKey);
     }
