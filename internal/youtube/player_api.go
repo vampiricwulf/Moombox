@@ -125,23 +125,22 @@ func (p *PlayerAPI) decryptSigLegacy(ctx context.Context, playerURL, encrypted s
 }
 
 // decryptN solves the n-param via the routed cipher.Solver if set, falling
-// back to the legacy goja path otherwise.
+// back to the legacy goja path otherwise. No per-call success log — n is
+// decrypted once per format URL (often dozens per stream) and per-call
+// chatter swamps the rest of the log without diagnostic value. The DASH
+// path emits a batch summary in strategy_youtube_dash.go for the bulk
+// of n decryptions; format-URL path success is implicit (the URL gets
+// used). Failures still log via the caller (decryptNParamStrict).
 func (p *PlayerAPI) decryptN(ctx context.Context, playerURL, encrypted string) (string, error) {
 	if p.cipher != nil {
 		playerID := cipher.PlayerIDFromURL(playerURL)
 		out, err := p.cipher.N(ctx, playerID, encrypted)
 		if err == nil {
-			p.logger.Debug("[Cipher] n decrypted via sidecar", "playerID", playerID)
 			return out, nil
 		}
 		// fall through to legacy
 	}
-	out, err := p.decryptNLegacy(ctx, playerURL, encrypted)
-	if err == nil {
-		p.logger.Debug("[Cipher] n decrypted via goja fallback")
-		return out, nil
-	}
-	return "", err
+	return p.decryptNLegacy(ctx, playerURL, encrypted)
 }
 
 func (p *PlayerAPI) decryptNLegacy(ctx context.Context, playerURL, encrypted string) (string, error) {
