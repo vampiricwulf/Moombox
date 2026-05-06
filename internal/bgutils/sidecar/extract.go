@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +27,20 @@ func nodeBinaryName() string {
 	return "node"
 }
 
+// buildCacheStamp combines the Node-binary version manifest with a runtime
+// SHA256 of the embedded sidecar tarball. This makes the cache stamp
+// reflect both Node identity (via the existing version.txt format) and
+// sidecar source identity (via the tarball hash) so any change to either
+// triggers a re-extract on next launch.
+//
+// Format: "<bgembed.Version>\nsidecar@<hex-sha256-of-SidecarTarGz>"
+//
+// Pure runtime computation — no build-time changes needed.
+func buildCacheStamp() string {
+	sum := sha256.Sum256(bgembed.SidecarTarGz)
+	return strings.TrimSpace(bgembed.Version) + "\nsidecar@" + hex.EncodeToString(sum[:])
+}
+
 // extractIfNeeded compares the on-disk version.txt against the embedded
 // stamp; if they differ (or the cache dir is incomplete), gunzip-extracts
 // the Node binary and tar-extracts sidecar.tar.gz into cacheDir, then writes
@@ -37,7 +53,7 @@ func nodeBinaryName() string {
 // NOT need a system tar binary -- that's only required at build time
 // (by bgutil-sidecar/build.mjs).
 func extractIfNeeded(cacheDir string) error {
-	wantStamp := strings.TrimSpace(bgembed.Version)
+	wantStamp := buildCacheStamp()
 	stampPath := filepath.Join(cacheDir, "version.txt")
 
 	// Always ensure the cache dir exists AND has a tightened DACL,
