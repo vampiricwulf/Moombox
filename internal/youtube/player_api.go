@@ -94,6 +94,7 @@ func (p *PlayerAPI) decryptSig(ctx context.Context, playerURL, encrypted string)
 		playerID := cipher.PlayerIDFromURL(playerURL)
 		out, err := p.cipher.Sig(ctx, playerID, encrypted)
 		if err == nil {
+			p.logger.Info("[Cipher] sig decrypted via sidecar", "playerID", playerID)
 			return out, nil
 		}
 		// Fall through to legacy on any error so a transient sidecar
@@ -101,7 +102,12 @@ func (p *PlayerAPI) decryptSig(ctx context.Context, playerURL, encrypted string)
 		// already routes around fixable errors internally; reaching here
 		// means both sidecar and composite-internal fallback failed.
 	}
-	return p.decryptSigLegacy(ctx, playerURL, encrypted)
+	out, err := p.decryptSigLegacy(ctx, playerURL, encrypted)
+	if err == nil {
+		p.logger.Info("[Cipher] sig decrypted via goja fallback")
+		return out, nil
+	}
+	return "", err
 }
 
 func (p *PlayerAPI) decryptSigLegacy(ctx context.Context, playerURL, encrypted string) (string, error) {
@@ -125,11 +131,17 @@ func (p *PlayerAPI) decryptN(ctx context.Context, playerURL, encrypted string) (
 		playerID := cipher.PlayerIDFromURL(playerURL)
 		out, err := p.cipher.N(ctx, playerID, encrypted)
 		if err == nil {
+			p.logger.Debug("[Cipher] n decrypted via sidecar", "playerID", playerID)
 			return out, nil
 		}
 		// fall through to legacy
 	}
-	return p.decryptNLegacy(ctx, playerURL, encrypted)
+	out, err := p.decryptNLegacy(ctx, playerURL, encrypted)
+	if err == nil {
+		p.logger.Debug("[Cipher] n decrypted via goja fallback")
+		return out, nil
+	}
+	return "", err
 }
 
 func (p *PlayerAPI) decryptNLegacy(ctx context.Context, playerURL, encrypted string) (string, error) {

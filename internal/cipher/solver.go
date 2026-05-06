@@ -132,7 +132,7 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 	}
 
 	s.cacheSolvers(key, solvers)
-	s.logger.Info("cipher: solver ready", "playerID", playerID,
+	s.logger.Debug("cipher: solver ready", "playerID", playerID,
 		"hasSig", solvers.Sig != nil, "hasN", solvers.N != nil)
 	return solvers, nil
 }
@@ -166,7 +166,7 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 			"playerID", playerID)
 	}
 	if len(sigOldCands) == 0 && len(alrSigChains) == 0 {
-		s.logger.Warn("cipher: no sig strategy succeeded (ALR chains + old candidates)",
+		s.logger.Debug("cipher: no sig strategy succeeded (ALR chains + old candidates)",
 			"playerID", playerID)
 	}
 
@@ -190,7 +190,7 @@ func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID st
 		if err != nil {
 			return nil, fmt.Errorf("preprocess player %s: %w", playerID, err)
 		}
-		s.logger.Info("cipher: extraction branch", "playerID", playerID, "branch", branch)
+		s.logger.Debug("cipher: extraction branch", "playerID", playerID, "branch", branch)
 		if putErr := s.playerCache.PutPreprocessed(playerURL, preprocessed); putErr != nil {
 			s.logger.Debug("cipher: preprocessed cache write failed", "playerID", playerID, "err", putErr)
 		}
