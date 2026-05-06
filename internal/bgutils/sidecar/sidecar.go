@@ -48,7 +48,10 @@ type Logger interface {
 
 // Config configures a sidecar instance. CacheDir defaults to
 // os.UserCacheDir()/Moombox/sidecar when empty. StartupTimeout defaults
-// to 5s; RequestTimeout defaults to 30s.
+// to 60s and is a backstop for a genuinely wedged sidecar — the sidecar
+// emits a `ready` notification when its synchronous init completes, so
+// healthy startup latency does not race against this deadline.
+// RequestTimeout defaults to 30s.
 type Config struct {
 	CacheDir       string
 	StartupTimeout time.Duration
@@ -83,6 +86,16 @@ type Sidecar struct {
 	// Health.
 	healthy atomic.Bool
 
+	// Startup handshake. The sidecar emits {"event":"ready"} on stdout once
+	// server.js finishes its synchronous init (jsdom + bgutils-js module
+	// load + JSDOM construction). readPump closes readyCh on the first
+	// ready event, OR on stdout EOF before ready (recording readyErr) so
+	// Start can distinguish "wedged sidecar" (StartupTimeout fires) from
+	// "sidecar exited before ready" (immediate failure).
+	readyOnce sync.Once
+	readyCh   chan struct{}
+	readyErr  error // set inside readyOnce.Do before close(readyCh)
+
 	// Lifecycle. closed signals to readPump/stderrPump that Stop() was
 	// called and they should exit silently rather than mark unhealthy.
 	stopOnce  sync.Once
@@ -105,7 +118,7 @@ type rpcResponse struct {
 // New constructs a Sidecar. Does not start the subprocess; call Start.
 func New(cfg Config) *Sidecar {
 	if cfg.StartupTimeout == 0 {
-		cfg.StartupTimeout = 5 * time.Second
+		cfg.StartupTimeout = 60 * time.Second
 	}
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = 30 * time.Second
@@ -117,8 +130,10 @@ func New(cfg Config) *Sidecar {
 }
 
 // Start extracts the embedded blobs (if needed), launches the Node
-// subprocess pinned to a Windows Job Object, and waits for a ping/pong
-// handshake. Returns an error if extraction, launch, or handshake fails;
+// subprocess pinned to a Windows Job Object, and waits for the sidecar
+// to emit a `ready` notification on stdout signaling that server.js has
+// finished its synchronous init (jsdom module load + JSDOM construction).
+// Returns an error if extraction, launch, or the ready handshake fails;
 // the caller should fall back to the goja path on error.
 func (s *Sidecar) Start(ctx context.Context) error {
 	if s.cmd != nil {
@@ -161,6 +176,7 @@ func (s *Sidecar) Start(ctx context.Context) error {
 	s.stdin = stdin
 	s.stdout = stdout
 	s.stderr = stderr
+	s.readyCh = make(chan struct{})
 
 	// Pin the child to a Job Object so it dies when Moombox dies. On
 	// non-Windows builds processJob is a no-op (the package is currently
@@ -181,18 +197,27 @@ func (s *Sidecar) Start(ctx context.Context) error {
 	go s.readPump()
 	go s.stderrPump()
 
-	// Mark healthy BEFORE the ping so the call() check passes; reverted on
-	// handshake failure.
-	s.healthy.Store(true)
-
-	pingCtx, cancel := context.WithTimeout(ctx, s.cfg.StartupTimeout)
+	// Wait for server.js to emit `{"event":"ready"}` after its synchronous
+	// init finishes. Replaces a prior ping/pong handshake with a 5s deadline
+	// that started racing jsdom cold-start after the v2.6.14 jsdom 27→29
+	// bump (module parse + DOM construction can exceed 5s on Windows even
+	// with a warm filesystem cache, leaving every PO-token request to fall
+	// through to the goja path). The deadline below is now a backstop for
+	// a hung sidecar, not a metronome operators must keep retuning.
+	readyCtx, cancel := context.WithTimeout(ctx, s.cfg.StartupTimeout)
 	defer cancel()
-	if err := s.ping(pingCtx); err != nil {
-		s.healthy.Store(false)
+	select {
+	case <-s.readyCh:
+		if s.readyErr != nil {
+			_ = s.Stop()
+			return fmt.Errorf("ready: %w", s.readyErr)
+		}
+	case <-readyCtx.Done():
 		_ = s.Stop()
-		return fmt.Errorf("ping: %w", err)
+		return fmt.Errorf("ready: %w", readyCtx.Err())
 	}
 
+	s.healthy.Store(true)
 	s.cfg.Logger.Info("sidecar started", "cacheDir", cacheDir, "pid", cmd.Process.Pid)
 	return nil
 }
@@ -341,8 +366,9 @@ func (s *Sidecar) GetStats(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
-// ping is the startup health check; not exported because the only legitimate
-// use is during Start.
+// ping exercises the JSON-RPC round-trip. Kept as an unexported method
+// for tests after Start switched to the ready-event handshake; production
+// code does not call ping directly anymore.
 func (s *Sidecar) ping(ctx context.Context) error {
 	var result string
 	if err := s.call(ctx, "ping", nil, &result); err != nil {
@@ -412,9 +438,14 @@ func (s *Sidecar) writeRequest(req rpcRequest) error {
 	return nil
 }
 
-// readPump drains stdout line-by-line, decodes each as a JSON-RPC response,
-// and routes it to the pending channel keyed by request ID. Exits on EOF
-// or stdout close, marking the sidecar unhealthy unless Stop has been called.
+// readPump drains stdout line-by-line. Each line is either a notification
+// (no `id`, has `event`) or a JSON-RPC response (has `id`). The only
+// notification today is `ready`, which closes readyCh so Start can unblock.
+// Responses are routed to the pending channel keyed by request ID. Exits
+// on EOF or stdout close, marking the sidecar unhealthy unless Stop has
+// been called; also signals readyCh with an error if EOF arrives before
+// the ready event so a Start that's still waiting fails fast instead of
+// hanging until StartupTimeout.
 func (s *Sidecar) readPump() {
 	defer s.pumpsDone.Done()
 
@@ -426,6 +457,25 @@ func (s *Sidecar) readPump() {
 		if len(line) == 0 {
 			continue
 		}
+
+		// Notifications: no `id` field (use *uint64 to detect absence) plus
+		// an `event` discriminator. Distinguished from responses before the
+		// generic response-decode path so a malformed `event` line doesn't
+		// trip the "stdout JSON parse failed" warning.
+		var probe struct {
+			ID    *uint64 `json:"id"`
+			Event string  `json:"event"`
+		}
+		if err := json.Unmarshal(line, &probe); err == nil && probe.ID == nil && probe.Event != "" {
+			switch probe.Event {
+			case "ready":
+				s.readyOnce.Do(func() { close(s.readyCh) })
+			default:
+				s.cfg.Logger.Debug("sidecar: unknown event", "event", probe.Event)
+			}
+			continue
+		}
+
 		var resp rpcResponse
 		if err := json.Unmarshal(line, &resp); err != nil {
 			s.cfg.Logger.Warn("sidecar: stdout JSON parse failed", "err", err, "line", truncate(string(line), 200))
@@ -452,6 +502,14 @@ func (s *Sidecar) readPump() {
 	if err := scanner.Err(); err != nil && !s.stopping.Load() {
 		s.cfg.Logger.Warn("sidecar: stdout scanner error", "err", err)
 	}
+
+	// If stdout EOF'd before the sidecar emitted ready, unblock Start with
+	// an explicit error rather than letting it hang until StartupTimeout.
+	// readyOnce makes this a no-op when ready was already signaled.
+	s.readyOnce.Do(func() {
+		s.readyErr = errors.New("sidecar exited before ready")
+		close(s.readyCh)
+	})
 
 	if !s.stopping.Load() {
 		s.markUnhealthy("stdout EOF")

@@ -52,12 +52,15 @@ func startSidecar(t *testing.T) *Sidecar {
 	return s
 }
 
-// TestSidecarPingPong verifies the basic round-trip: extract, launch, ping,
-// pong. Does not hit network.
+// TestSidecarPingPong verifies the basic JSON-RPC round-trip: extract,
+// launch, ready handshake, then a one-shot ping/pong. Start gates the
+// handshake on the sidecar's `ready` notification, so by the time we get
+// here the JSON-RPC layer is already known to work; the explicit ping
+// here is a regression check on the round-trip plumbing itself, not the
+// startup handshake. Does not hit network.
 func TestSidecarPingPong(t *testing.T) {
 	s := startSidecar(t)
 
-	// Extra ping after Start (Start already did one to gate the handshake).
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.ping(ctx); err != nil {

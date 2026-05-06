@@ -284,3 +284,12 @@ rl.on("close", () => {
 // Belt-and-suspenders: signal handlers in case the parent kills us hard.
 process.on("SIGINT", () => process.exit(0));
 process.on("SIGTERM", () => process.exit(0));
+
+// Signal to the parent that synchronous init is complete and the readline
+// interface is wired up. The parent waits for this line before treating the
+// sidecar as healthy, instead of polling with a fixed-deadline ping. The
+// previous ping-based handshake started racing against jsdom's cold-start
+// time after the jsdom 27→29 bump in v2.6.14 (module load + DOM construction
+// can exceed 5s on Windows even with a warm filesystem cache). Notifications
+// are distinguished from JSON-RPC responses by the absence of an `id` field.
+process.stdout.write('{"event":"ready"}\n');
