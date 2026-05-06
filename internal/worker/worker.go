@@ -261,6 +261,22 @@ func (w *DownloadWorker) CancelJob(jobID string) {
 	})
 }
 
+// WaitForJobExit blocks until the job's orchestrator goroutine has returned,
+// or the timeout expires. Returns true if the job exited cleanly within the
+// timeout. Used by delete paths to ensure the worker drains before the DB
+// row is removed (prevents orphaned goroutines that spam UpdateJobFields
+// against a deleted row).
+func (w *DownloadWorker) WaitForJobExit(jobID string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !w.queue.IsProcessing(jobID) {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return !w.queue.IsProcessing(jobID)
+}
+
 func (w *DownloadWorker) enqueueExistingJobs() {
 	jobs, err := w.db.GetAllJobs()
 	if err != nil {

@@ -381,7 +381,11 @@ func (db *Database) UpdateJobFields(id string, fields map[string]any) *Job {
 
 	if scanErr != nil {
 		if db.logger != nil {
-			db.logger.Error("UpdateJobFields: failed to read back job", "jobID", id, "err", scanErr)
+			// Row was deleted between the UPDATE and the read-back; this happens
+			// when a user deletes a job whose worker is still draining (the
+			// worker's defensive exit relies on the nil return below). Log at
+			// Debug since this is no longer an exceptional condition.
+			db.logger.Debug("UpdateJobFields: row gone after update", "jobID", id, "err", scanErr)
 		}
 		return nil
 	}

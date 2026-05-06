@@ -47,6 +47,18 @@ func (s *runState) runTUI() {
 		s.dlWorker.CancelJob(jobID)
 	}
 	app.OnDeleteJob = func(jobID string) {
+		job, err := s.db.GetJob(jobID)
+		if err != nil || job == nil {
+			// Already gone; nothing to do.
+			return
+		}
+		switch job.Status {
+		case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing:
+			s.dlWorker.CancelJob(jobID)
+			if !s.dlWorker.WaitForJobExit(jobID, 5*time.Second) {
+				s.log.Warn("TUI delete: job did not exit within timeout; removing anyway", "jobID", jobID)
+			}
+		}
 		if err := s.db.DeleteJob(jobID); err != nil {
 			s.log.Error("Failed to delete job", slog.String("error", err.Error()))
 		}

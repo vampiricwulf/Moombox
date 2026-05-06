@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1192,13 +1193,17 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		// Only allow deletion of terminal states + COOKIES (matching TypeScript)
+		// If the job is in an active state, auto-cancel and wait for the worker
+		// to drain before removing the row. Cancel-then-delete is a single
+		// user-facing action so the caller does not need to issue two requests.
 		switch job.Status {
-		case database.StatusFinished, database.StatusError, database.StatusCancelled, database.StatusCookies:
-			// Allowed
-		default:
-			jsonError(rw, "can only delete finished, error, cancelled, or cookies jobs", http.StatusBadRequest)
-			return
+		case database.StatusDownloading, database.StatusLive, database.StatusUpcoming, database.StatusMuxing:
+			if w != nil {
+				w.CancelJob(jobID)
+				if !w.WaitForJobExit(jobID, 5*time.Second) {
+					slog.Warn("delete: job did not exit within timeout; removing row anyway", "jobID", jobID)
+				}
+			}
 		}
 
 		if err := db.DeleteJob(jobID); err != nil {

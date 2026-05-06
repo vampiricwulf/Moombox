@@ -735,13 +735,19 @@ func TestJobDeleteAllowsCookiesState(t *testing.T) {
 	}
 }
 
-func TestJobDeleteRejectsActiveState(t *testing.T) {
+func TestJobDeleteActiveStateAutoDeletes(t *testing.T) {
+	// Active-state jobs are now auto-cancelled (or just deleted when no worker
+	// is wired) rather than rejected with 400. Verify the row is removed and
+	// 200 is returned.
 	f := newJobsFixture(t)
 	f.addJob(t, "yt_dl_del", func(j *database.Job) { j.Status = database.StatusDownloading })
 
 	rec := doRequest(t, f.router, "DELETE", "/api/jobs/yt_dl_del", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("delete downloading: want 400, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("delete downloading: want 200, got %d", rec.Code)
+	}
+	if got, _ := f.db.GetJob("yt_dl_del"); got != nil {
+		t.Error("delete downloading: row still present after delete")
 	}
 }
 
