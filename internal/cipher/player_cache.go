@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,6 +24,12 @@ const (
 // playerHTTPClient fetches player.js. Backed by the shared httpx.Client
 // transport for keep-alive amortisation across cipher / youtube / etc.
 var playerHTTPClient = httpx.Client(30 * time.Second)
+
+// fallbackLoggedURLs tracks URLs we've already warned about for the
+// extract-fallback case. Bounded by the set of unique URLs Moombox
+// sees in a single process (handful per session), so the map size
+// is fine without explicit eviction.
+var fallbackLoggedURLs sync.Map // map[string]struct{}
 
 // PlayerCache manages disk-cached YouTube player JS files.
 type PlayerCache struct {
@@ -116,10 +123,20 @@ func CacheKey(playerURL string) string {
 //
 // Falls back to the URL hash (via CacheKey) on malformed inputs — safe here
 // because CacheKey's fallback path uses URL-hash directly (no extraction),
-// so there is no recursion.
+// so there is no recursion. Logs once per URL when the fallback fires so
+// operators see the regression early; without this signal a bogus
+// playerID-as-hash routes to the sidecar's unfetchable URL builder
+// (playerURLForID) and fails the retry-with-JS path silently.
 func PlayerIDFromURL(playerURL string) string {
 	if id := extractPlayerIDFromURL(playerURL); id != "" {
 		return id
+	}
+
+	// Fallback: URL doesn't match the canonical /s/player/<id>/... shape.
+	// Warn once per URL so operators see the regression early.
+	if _, loaded := fallbackLoggedURLs.LoadOrStore(playerURL, struct{}{}); !loaded {
+		slog.Warn("PlayerIDFromURL: URL doesn't match canonical /s/player/<id>/ shape, falling back to URL hash; cipher routing through sidecar will fail for this player",
+			"playerURL", playerURL)
 	}
 	return CacheKey(playerURL)
 }

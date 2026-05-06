@@ -3,7 +3,6 @@ package cipher
 import (
 	"context"
 	"errors"
-	"fmt"
 )
 
 // ErrSidecarUnavailable is returned by the composite solver when sig is
@@ -78,8 +77,14 @@ func (c *compositeSolver) N(ctx context.Context, playerID, encryptedN string) (s
 //
 // Implementations MUST return a result for every input in sigs and
 // ns on success, or return an error. Partial maps are a contract
-// violation — both this composite and the underlying sidecarSolver
-// validate completeness post-call.
+// violation — the underlying sidecarSolver validates completeness
+// post-call; this composite trusts that inner validation.
+//
+// "Single round-trip" applies per-Batch-invocation. Callers that
+// loop over per-element decryption (e.g., the DASH worker's
+// per-stream RoutedDecryptNInURL) still pay one round-trip per
+// element and don't benefit from this optimisation. Future
+// work: gather per-stream n-params and call Batch once.
 func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns []string) (map[string]string, map[string]string, error) {
 	sigResults := map[string]string{}
 	nResults := map[string]string{}
@@ -87,17 +92,7 @@ func (c *compositeSolver) Batch(ctx context.Context, playerID string, sigs, ns [
 	if c.sidecar != nil {
 		sr, nr, err := c.sidecar.Batch(ctx, playerID, sigs, ns)
 		if err == nil {
-			// Validate completeness — partial map = silent data loss.
-			for _, sig := range sigs {
-				if _, ok := sr[sig]; !ok {
-					return nil, nil, fmt.Errorf("cipher: composite Batch missing sig result for input")
-				}
-			}
-			for _, n := range ns {
-				if _, ok := nr[n]; !ok {
-					return nil, nil, fmt.Errorf("cipher: composite Batch missing n result for input")
-				}
-			}
+			// sidecarSolver.Batch already validated completeness; trust it.
 			return sr, nr, nil
 		}
 		// Sidecar failed. Sig is sidecar-only; if any sigs were

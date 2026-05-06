@@ -3,6 +3,7 @@ package cipher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -212,6 +213,20 @@ func (p *partialBatchSolver) Batch(_ context.Context, _ string, sigs, ns []strin
 	for _, k := range ns {
 		if v, ok := p.ns[k]; ok {
 			nr[k] = v
+		}
+	}
+	// Mimic inner sidecarSolver completeness validation: return an error if
+	// any requested key is absent from the result map. The composite no longer
+	// re-validates completeness itself (M3 cleanup); the inner solver is the
+	// single source of that check.
+	for _, k := range sigs {
+		if _, ok := sr[k]; !ok {
+			return nil, nil, fmt.Errorf("partialBatchSolver: missing sig result for %q", k)
+		}
+	}
+	for _, k := range ns {
+		if _, ok := nr[k]; !ok {
+			return nil, nil, fmt.Errorf("partialBatchSolver: missing n result for %q", k)
 		}
 	}
 	return sr, nr, nil
