@@ -230,22 +230,38 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 8. Cipher solver
 	// =========================================================================
-	// Failure to init the cipher solver is fatal: NewGojaResolver only errors
+	// gojaSolver provides in-process n decryption (and historically sig,
+	// though sig is broken on current YouTube players — see
+	// docs/superpowers/specs/2026-05-05-cipher-via-ejs-sidecar-design.md).
+	// sidecarSolver routes sig + n to the BotGuard sidecar via ejs; it's
+	// only constructed when the sidecar is healthy. compositeSolver
+	// applies the routing policy (sig: sidecar-only; n: sidecar primary,
+	// goja fallback). PlayerAPI continues to take *GojaResolver directly
+	// so its existing GetSolvers/GetSts call sites work unchanged; the
+	// composite is constructed for downstream callers that take the
+	// cipher.Solver interface (currently a placeholder until those
+	// call sites migrate).
+	//
+	// Failure to init the goja resolver is fatal: NewGojaResolver only errors
 	// on os.MkdirAll of %TEMP%/yt-cipher, and without cipher solving
 	// most YouTube format URLs (sig + n-param ciphered) cannot be
-	// decrypted. The previous "will retry on demand" warning was
-	// misleading — there is no retry-on-demand path; PlayerAPI never
-	// got a solver attached and downloads silently degraded for the
-	// rest of the process lifetime.
+	// decrypted.
 	cacheDir := filepath.Join(os.TempDir(), "yt-cipher")
-	cipherSolver, err := cipher.NewGojaResolver(cacheDir, log)
+	gojaSolver, err := cipher.NewGojaResolver(cacheDir, log)
 	if err != nil {
-		return fmt.Errorf("init cipher solver (cacheDir=%q): %w", cacheDir, err)
+		return fmt.Errorf("init goja cipher solver (cacheDir=%q): %w", cacheDir, err)
 	}
-	s.cipherSolver = cipherSolver
+
+	var sidecarCipher cipher.Solver
+	if s.bgSidecar != nil {
+		sidecarCipher = cipher.NewSidecarSolver(s.bgSidecar, gojaSolver)
+	}
+	cipherSolver := cipher.NewCompositeSolver(sidecarCipher, gojaSolver)
+	_ = cipherSolver // composite is plumbing-ready; PlayerAPI still uses goja directly until next task
+	s.cipherSolver = gojaSolver
 
 	// Wire cipher solver to YouTube service for format decryption.
-	ytService.PlayerAPI.SetCipherSolver(cipherSolver)
+	ytService.PlayerAPI.SetCipherSolver(gojaSolver)
 
 	// Wire PO token provider into Innertube player requests (audit youtube.md C1).
 	ytService.PlayerAPI.SetPotProvider(potProvider)
@@ -260,7 +276,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 10. Download worker
 	// =========================================================================
 	dlWorker := worker.NewDownloadWorker(db, ytService, cfg, log, &worker.DownloadWorkerDeps{
-		CipherSolver:  cipherSolver,
+		CipherSolver:  gojaSolver,
 		PotProvider:   potProvider,
 		TwitchService: twService,
 		Notifier:      notifyMgr,

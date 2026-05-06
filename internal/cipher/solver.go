@@ -425,8 +425,25 @@ func (s *GojaResolver) Batch(ctx context.Context, playerID string, sigs, ns []st
 	return sigResults, nResults, nil
 }
 
+// PlayerJS satisfies cipher.PlayerSource. Returns the raw player JS
+// source for the given playerID by reusing the goja path's existing
+// player_cache.go fetch + cache. Translates playerID → canonical URL
+// internally so the cache identity is the same as for in-process
+// solving — one fetch serves both the goja extractor and the sidecar
+// solver.
+func (s *GojaResolver) PlayerJS(playerID string) (string, error) {
+	js, err := s.playerCache.Fetch(context.Background(), playerURLForID(playerID))
+	if err != nil {
+		return "", err
+	}
+	return js, nil
+}
+
 // Compile-time check: GojaResolver satisfies the cipher.Solver interface.
 var _ Solver = (*GojaResolver)(nil)
+
+// Compile-time check: GojaResolver satisfies cipher.PlayerSource.
+var _ PlayerSource = (*GojaResolver)(nil)
 
 // callWithTimeout invokes a goja callable under CipherTimeout and safely resets
 // the VM's interrupt flag after the call returns.
