@@ -223,18 +223,24 @@ async function dispatch(req) {
 
             case "solveCipher": {
                 const params = req.params || {};
+                const coerceArray = (v, name) => {
+                    if (v == null) return [];
+                    if (Array.isArray(v)) return v;
+                    throw new Error(`solveCipher: ${name} must be an array, got ${typeof v}`);
+                };
                 try {
                     const result = solveCipher({
                         playerID: params.playerID,
                         playerJS: params.playerJS,
-                        sigChallenges: params.sigChallenges || [],
-                        nChallenges: params.nChallenges || [],
+                        sigChallenges: coerceArray(params.sigChallenges, "sigChallenges"),
+                        nChallenges: coerceArray(params.nChallenges, "nChallenges"),
                     });
                     return writeResponse({ id, result });
                 } catch (e) {
                     // Surface the PLAYER_NOT_LOADED sentinel verbatim so the Go side
                     // can recognise it and retry with playerJS attached. Other errors
-                    // pass through as generic strings.
+                    // (including coerceArray validation failures) pass through as
+                    // generic strings.
                     const msg = e && e.code === "PLAYER_NOT_LOADED"
                         ? "player not loaded"
                         : (e && e.message ? e.message : String(e));
