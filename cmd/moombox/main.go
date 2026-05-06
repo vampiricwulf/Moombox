@@ -392,14 +392,34 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 					delta = fmt.Sprintf(" (%s%.1f)", sign, diff)
 				}
 				prevHeapMB = heapMB
-				log.Debug(fmt.Sprintf(
+				// Build the base Go-runtime line.
+				line := fmt.Sprintf(
 					"[Memory] Sys: %.1fMB, Heap: %.1f%s/%.1fMB, Stack: %.1fMB, GC: %d",
 					float64(m.Sys)/1048576,
 					heapMB, delta,
 					float64(m.HeapSys)/1048576,
 					float64(m.StackInuse)/1048576,
 					m.NumGC,
-				))
+				)
+
+				// Append sidecar memory if it's running and reachable. Brief
+				// 1s timeout — if the sidecar is hung or dead we don't want
+				// the every-2-minutes memory log to wedge on it.
+				if s.bgSidecar != nil && s.bgSidecar.IsHealthy() {
+					sideCtx, sideCancel := context.WithTimeout(ctx, 1*time.Second)
+					sideStats, sideErr := s.bgSidecar.MemoryStats(sideCtx)
+					sideCancel()
+					if sideErr == nil {
+						line += fmt.Sprintf(
+							" | Sidecar: RSS %.1fMB (V8 Heap %.1f/%.1fMB)",
+							float64(sideStats.RSS)/1048576,
+							float64(sideStats.HeapUsed)/1048576,
+							float64(sideStats.HeapTotal)/1048576,
+						)
+					}
+				}
+
+				log.Debug(line)
 
 				// Disk space check every ~5th tick (~10 minutes at 2min interval,
 				// close enough to the 5-min target while reusing the existing ticker).

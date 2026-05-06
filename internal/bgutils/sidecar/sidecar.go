@@ -349,6 +349,32 @@ func (s *Sidecar) InvalidateIT(ctx context.Context) error {
 	return s.call(ctx, "invalidateIT", nil, nil)
 }
 
+// MemoryStats holds the sidecar Node process's self-reported memory
+// numbers. RSS is the resident set size (the OS-level "how much RAM
+// this process is using" number — what Task Manager shows in the
+// Memory column). The V8 heap fields reveal pressure on the JS engine
+// itself: HeapUsed is what's currently allocated, HeapTotal is what
+// V8 has reserved.
+type MemoryStats struct {
+	RSS          int64 `json:"rss"`
+	HeapTotal    int64 `json:"heapTotal"`
+	HeapUsed     int64 `json:"heapUsed"`
+	External     int64 `json:"external"`
+	ArrayBuffers int64 `json:"arrayBuffers"`
+}
+
+// MemoryStats fetches the sidecar Node process's self-reported memory
+// numbers. Useful for cumulative memory diagnostics that combine
+// Moombox's Go-runtime stats with the sidecar's V8 stats in a single
+// log line.
+func (s *Sidecar) MemoryStats(ctx context.Context) (MemoryStats, error) {
+	var stats MemoryStats
+	if err := s.call(ctx, "getMemoryStats", nil, &stats); err != nil {
+		return MemoryStats{}, err
+	}
+	return stats, nil
+}
+
 // Stats holds the sidecar's internal counters. Useful for diagnostics
 // surfaced in /api/pot.
 type Stats struct {

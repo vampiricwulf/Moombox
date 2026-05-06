@@ -9,8 +9,8 @@
 //   Request:  {"id":<int>,"method":<str>,"params":<obj>}
 //   Response: {"id":<int>,"result":<any>}    | {"id":<int>,"error":<str>}
 //
-// Methods: ping, generatePoToken, invalidateCaches, invalidateIT,
-// getStats, solveCipher, shutdown.
+// Methods: getMemoryStats, generatePoToken, getStats, invalidateCaches,
+// invalidateIT, ping, solveCipher, shutdown.
 
 import { JSDOM } from "jsdom";
 import { BG, USER_AGENT, buildURL, getHeaders } from "bgutils-js";
@@ -215,6 +215,14 @@ async function dispatch(req) {
                     throw e;
                 }
             }
+
+            case "getMemoryStats":
+                // process.memoryUsage() returns { rss, heapTotal, heapUsed,
+                // external, arrayBuffers }. RSS is the resident set size — the
+                // user-facing "this Node process is using N MB of RAM" number.
+                // V8 heap inuse/total reveals what's pressure on the JS engine
+                // (large preprocessed players, BotGuard runtime, etc.).
+                return writeResponse({ id, result: process.memoryUsage() });
 
             case "invalidateCaches":
                 cachedMinter = null;
