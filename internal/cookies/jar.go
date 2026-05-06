@@ -270,10 +270,10 @@ func (j *CookieJar) GetSapisidCookies() (sapisid, sapisid1p, sapisid3p string) {
 // in-tree callers only pass https://www.youtube.com, so tightening to an
 // allowlist is zero-regression.
 var allowedSAPISIDHASHOrigins = map[string]struct{}{
-	"https://www.youtube.com":    {},
-	"https://youtube.com":        {},
-	"https://studio.youtube.com": {},
-	"https://music.youtube.com":  {},
+	"https://www.youtube.com":     {},
+	"https://youtube.com":         {},
+	"https://studio.youtube.com":  {},
+	"https://music.youtube.com":   {},
 	"https://www.youtubekids.com": {},
 }
 

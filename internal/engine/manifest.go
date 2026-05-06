@@ -27,7 +27,7 @@ type DashStream struct {
 	Codecs         string
 	Width          int
 	Height         int
-	FPS            int           // From frameRate attribute (0 if not present)
+	FPS            int // From frameRate attribute (0 if not present)
 	Bandwidth      int
 	BaseURL        string        // Template URL with $Number$ placeholder
 	StartNumber    int           // First segment sequence number

@@ -230,4 +230,3 @@ func preprocessPlayerLegacy(playerJS string) (string, error) {
 
 	return strings.Join(parts, "\n"), nil
 }
-

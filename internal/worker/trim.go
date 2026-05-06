@@ -21,12 +21,12 @@ const defaultTrimCRF = 18
 
 // TrimService handles creating and deleting trim records.
 type TrimService struct {
-	muxer      *engine.Muxer
-	db         *database.Database
-	notifier   *notifications.Manager
-	activeMu   sync.Mutex
-	activeOps  map[string]bool // tracks in-flight trim operations per job
-	logger     interface {
+	muxer     *engine.Muxer
+	db        *database.Database
+	notifier  *notifications.Manager
+	activeMu  sync.Mutex
+	activeOps map[string]bool // tracks in-flight trim operations per job
+	logger    interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -272,7 +272,7 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 
 	// Calculate cumulative time offsets for each segment
 	type segmentRange struct {
-		Segment    *database.Segment
+		Segment     *database.Segment
 		GlobalStart float64 // cumulative start in global timeline
 		GlobalEnd   float64 // cumulative end in global timeline
 	}
@@ -282,7 +282,7 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 	for i := range job.Segments {
 		seg := &job.Segments[i]
 		r := segmentRange{
-			Segment:    seg,
+			Segment:     seg,
 			GlobalStart: cumulative,
 			GlobalEnd:   cumulative + seg.DurationSeconds,
 		}

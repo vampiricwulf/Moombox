@@ -127,13 +127,13 @@ func (e *BGError) Error() string {
 
 // Error codes
 const (
-	ErrBadConfig     = "BAD_CONFIG"
-	ErrRequestFailed = "REQUEST_FAILED"
+	ErrBadConfig      = "BAD_CONFIG"
+	ErrRequestFailed  = "REQUEST_FAILED"
 	ErrChallengeParse = "CHALLENGE_PARSE"
-	ErrVMInit        = "VM_INIT"
-	ErrVMError       = "VM_ERROR"
-	ErrTimeout       = "TIMEOUT"
-	ErrIntegrity     = "INTEGRITY_ERROR"
-	ErrAsyncSnapshot = "ASYNC_SNAPSHOT"
-	ErrSyncSnapshot  = "SYNC_SNAPSHOT"
+	ErrVMInit         = "VM_INIT"
+	ErrVMError        = "VM_ERROR"
+	ErrTimeout        = "TIMEOUT"
+	ErrIntegrity      = "INTEGRITY_ERROR"
+	ErrAsyncSnapshot  = "ASYNC_SNAPSHOT"
+	ErrSyncSnapshot   = "SYNC_SNAPSHOT"
 )

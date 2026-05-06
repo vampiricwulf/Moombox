@@ -84,8 +84,8 @@ func TestCheckPlayabilityNoErrorWhenPlayable(t *testing.T) {
 	sp := &StreamProcessor{}
 
 	tests := []*youtube.VideoInfo{
-		{PlayabilityError: ""},                      // not set
-		{PlayabilityError: youtube.PlayabilityOK},   // explicit OK
+		{PlayabilityError: ""},                    // not set
+		{PlayabilityError: youtube.PlayabilityOK}, // explicit OK
 	}
 	for _, info := range tests {
 		msg, sentinel := sp.checkPlayability(info)

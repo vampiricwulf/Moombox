@@ -19,8 +19,8 @@ const emoteTimeout = 8 * time.Second
 type EmoteResolver struct {
 	mu         sync.Mutex
 	cache      map[string]*TwitchEmoteData // channelLogin (lowered) -> emotes
-	cacheOrder []string                     // insertion order for LRU eviction
-	inflight   map[string]chan struct{}      // dedup concurrent fetches for same key
+	cacheOrder []string                    // insertion order for LRU eviction
+	inflight   map[string]chan struct{}    // dedup concurrent fetches for same key
 
 	logger interface {
 		Debug(msg string, args ...any)

@@ -149,7 +149,9 @@ func (a *App) addVideoCmd(input string) tea.Cmd {
 			return addVideoResultMsg{Feedback: "Job already exists"}
 		}
 		if resp.StatusCode >= 400 {
-			var errResp struct{ Error string `json:"error"` }
+			var errResp struct {
+				Error string `json:"error"`
+			}
 			if decErr := json.NewDecoder(resp.Body).Decode(&errResp); decErr != nil {
 				return addVideoResultMsg{Feedback: fmt.Sprintf("Failed to add job (HTTP %d)", resp.StatusCode)}
 			}
@@ -256,7 +258,9 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 
 		if resp.StatusCode >= 400 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			var errResp struct{ Error string `json:"error"` }
+			var errResp struct {
+				Error string `json:"error"`
+			}
 			if unmarshalErr := json.Unmarshal(body, &errResp); unmarshalErr != nil {
 				return importResultMsg{Err: fmt.Sprintf("Import failed (HTTP %d)", resp.StatusCode)}
 			}
@@ -267,7 +271,9 @@ func (a *App) importFileCmd(path string) tea.Cmd {
 			return importResultMsg{Err: msg}
 		}
 
-		var result struct{ Title string `json:"title"` }
+		var result struct {
+			Title string `json:"title"`
+		}
 		if decErr := json.NewDecoder(resp.Body).Decode(&result); decErr != nil {
 			// Non-fatal: we got a 2xx, just can't parse the title
 			return importResultMsg{Title: "archive"}

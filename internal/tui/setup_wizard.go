@@ -47,7 +47,7 @@ const (
 type setupFieldType int
 
 const (
-	setupFieldText     setupFieldType = iota
+	setupFieldText setupFieldType = iota
 	setupFieldNumber
 	setupFieldToggle
 	setupFieldCycle
@@ -160,8 +160,8 @@ type SetupWizardModel struct {
 
 	mode       setupMode
 	modeChoice int // 0=Quick, 1=Advanced on mode selection screen
-	values   map[string]string
-	errorMsg string
+	values     map[string]string
+	errorMsg   string
 
 	// Advanced setup huh form
 	advancedForm     *huh.Form
@@ -169,7 +169,7 @@ type SetupWizardModel struct {
 	advancedInitCmd  tea.Cmd // pending Init cmd from buildAdvancedForm
 
 	// Simplified setup state
-	simpleStage  setupSimpleStage
+	simpleStage     setupSimpleStage
 	cookieFocus     int  // 0=YouTube, 1=Twitch, 2=Skip
 	cookieActive    bool // true when browser is open
 	cookieFinishing bool // true while async cookie extraction runs
@@ -199,7 +199,7 @@ type SetupWizardModel struct {
 	// Saving state (async save in progress)
 	saving        bool
 	pendingConfig *config.MoomboxConfig // config to save asynchronously
-	pendingYtdlp  bool                 // install yt-dlp plugin after save
+	pendingYtdlp  bool                  // install yt-dlp plugin after save
 
 	// Shared text input component (holds the currently-active text field)
 	textInput textinput.Model
@@ -1351,8 +1351,8 @@ func (m *SetupWizardModel) viewSimpleCookies() string {
 	} else {
 		// Platform selection
 		options := []struct {
-			label  string
-			done   bool
+			label string
+			done  bool
 		}{
 			{"YouTube", m.cookieYTDone},
 			{"Twitch", m.cookieTWDone},
@@ -1774,4 +1774,3 @@ func renderSetupOptionSelector(options []string, selected string, focused bool) 
 	}
 	return strings.Join(parts, DimStyle.Render(" / "))
 }
-

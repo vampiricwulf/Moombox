@@ -373,13 +373,13 @@ func TestCSRFMiddleware(t *testing.T) {
 	})
 
 	tests := []struct {
-		name           string
-		networkAccess  string
-		method         string
-		path           string
-		headers        map[string]string
-		wantStatus     int
-		wantReasonSub  string // substring expected in body on reject
+		name          string
+		networkAccess string
+		method        string
+		path          string
+		headers       map[string]string
+		wantStatus    int
+		wantReasonSub string // substring expected in body on reject
 	}{
 		{
 			name:          "GET passes without Origin",

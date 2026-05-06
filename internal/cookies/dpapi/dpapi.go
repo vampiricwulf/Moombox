@@ -31,7 +31,7 @@ type ChromeCookie struct {
 	Name     string
 	Value    string
 	Path     string
-	Expires  int64  // unix seconds; 0 = session cookie
+	Expires  int64 // unix seconds; 0 = session cookie
 	Secure   bool
 	HttpOnly bool
 	SameSite string // "None" | "Lax" | "Strict" | "Unspecified"

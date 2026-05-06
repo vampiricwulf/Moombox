@@ -18,53 +18,53 @@ const (
 type PlayabilityError string
 
 const (
-	PlayabilityOK             PlayabilityError = "ok"
-	PlayabilityMembersOnly    PlayabilityError = "members_only"
-	PlayabilityLoginRequired  PlayabilityError = "login_required"
-	PlayabilityAgeRestricted  PlayabilityError = "age_restricted"
-	PlayabilityUnavailable    PlayabilityError = "unavailable"
-	PlayabilityPrivate        PlayabilityError = "private"
-	PlayabilityRegionBlocked  PlayabilityError = "region_blocked"
-	PlayabilityUnknown        PlayabilityError = "unknown"
+	PlayabilityOK            PlayabilityError = "ok"
+	PlayabilityMembersOnly   PlayabilityError = "members_only"
+	PlayabilityLoginRequired PlayabilityError = "login_required"
+	PlayabilityAgeRestricted PlayabilityError = "age_restricted"
+	PlayabilityUnavailable   PlayabilityError = "unavailable"
+	PlayabilityPrivate       PlayabilityError = "private"
+	PlayabilityRegionBlocked PlayabilityError = "region_blocked"
+	PlayabilityUnknown       PlayabilityError = "unknown"
 )
 
 // VideoInfo contains complete video information from YouTube.
 type VideoInfo struct {
-	Title              string       `json:"title"`
-	ChannelName        string       `json:"channelName"`
-	ChannelID          string       `json:"channelId"`
-	Description        string       `json:"description"`
-	ThumbnailURL       string       `json:"thumbnailUrl,omitempty"`
-	Formats            []Format     `json:"formats"`
-	PlayerURL          string       `json:"playerUrl"`
-	StreamStatus       StreamStatus `json:"streamStatus"`
-	IsLive             bool         `json:"isLive"`
-	IsUpcoming         bool         `json:"isUpcoming"`
-	IsPostLiveDVR      bool         `json:"isPostLiveDVR"`
-	LengthSeconds      *int         `json:"lengthSeconds,omitempty"`
-	EndTimestamp       string       `json:"endTimestamp,omitempty"`
-	ScheduledStartTime string       `json:"scheduledStartTime,omitempty"`
-	DashManifestURL    string       `json:"dashManifestUrl,omitempty"`
-	HlsManifestURL     string       `json:"hlsManifestUrl,omitempty"`
+	Title              string           `json:"title"`
+	ChannelName        string           `json:"channelName"`
+	ChannelID          string           `json:"channelId"`
+	Description        string           `json:"description"`
+	ThumbnailURL       string           `json:"thumbnailUrl,omitempty"`
+	Formats            []Format         `json:"formats"`
+	PlayerURL          string           `json:"playerUrl"`
+	StreamStatus       StreamStatus     `json:"streamStatus"`
+	IsLive             bool             `json:"isLive"`
+	IsUpcoming         bool             `json:"isUpcoming"`
+	IsPostLiveDVR      bool             `json:"isPostLiveDVR"`
+	LengthSeconds      *int             `json:"lengthSeconds,omitempty"`
+	EndTimestamp       string           `json:"endTimestamp,omitempty"`
+	ScheduledStartTime string           `json:"scheduledStartTime,omitempty"`
+	DashManifestURL    string           `json:"dashManifestUrl,omitempty"`
+	HlsManifestURL     string           `json:"hlsManifestUrl,omitempty"`
 	PlayabilityError   PlayabilityError `json:"playabilityError,omitempty"`
-	PlayabilityReason  string       `json:"playabilityReason,omitempty"`
+	PlayabilityReason  string           `json:"playabilityReason,omitempty"`
 }
 
 // Format contains video/audio format information from YouTube API.
 type Format struct {
-	Itag           int    `json:"itag"`
-	URL            string `json:"url,omitempty"`
-	MimeType       string `json:"mimeType"`
-	Bitrate        int    `json:"bitrate"`
-	Width          *int   `json:"width,omitempty"`
-	Height         *int   `json:"height,omitempty"`
-	ContentLength  string `json:"contentLength,omitempty"`
-	QualityLabel   string `json:"qualityLabel,omitempty"`
-	AudioQuality   string `json:"audioQuality,omitempty"`
+	Itag            int    `json:"itag"`
+	URL             string `json:"url,omitempty"`
+	MimeType        string `json:"mimeType"`
+	Bitrate         int    `json:"bitrate"`
+	Width           *int   `json:"width,omitempty"`
+	Height          *int   `json:"height,omitempty"`
+	ContentLength   string `json:"contentLength,omitempty"`
+	QualityLabel    string `json:"qualityLabel,omitempty"`
+	AudioQuality    string `json:"audioQuality,omitempty"`
 	AudioSampleRate string `json:"audioSampleRate,omitempty"`
-	Fps            *int   `json:"fps,omitempty"`
-	Source         string `json:"source,omitempty"`
-	AuthLevel      *int   `json:"authLevel,omitempty"`
+	Fps             *int   `json:"fps,omitempty"`
+	Source          string `json:"source,omitempty"`
+	AuthLevel       *int   `json:"authLevel,omitempty"`
 }
 
 // IsVideo returns true if this format contains video.
@@ -115,15 +115,15 @@ type YtcfgData struct {
 // rank ahead of authenticated watch-page formats so cookie-bearing fetches
 // can win the dedup against a stray un-cookied parse (audit I5).
 const (
-	AuthLevelAndroidVR        = 0
-	AuthLevelWatchPagePublic  = 1
-	AuthLevelWatchPageAuth    = 2
-	AuthLevelTVPublic         = 3
-	AuthLevelTVAuth           = 4
-	AuthLevelWebSafari        = 5
-	AuthLevelWeb              = 6
-	AuthLevelWebEmbedded      = 7
-	AuthLevelWebCreator       = 8
+	AuthLevelAndroidVR       = 0
+	AuthLevelWatchPagePublic = 1
+	AuthLevelWatchPageAuth   = 2
+	AuthLevelTVPublic        = 3
+	AuthLevelTVAuth          = 4
+	AuthLevelWebSafari       = 5
+	AuthLevelWeb             = 6
+	AuthLevelWebEmbedded     = 7
+	AuthLevelWebCreator      = 8
 )
 
 // Sentinel values written by parsePlayerResponse when metadata is missing.
@@ -134,4 +134,3 @@ const (
 	UnknownTitleSentinel   = "Unknown Title"
 	UnknownChannelSentinel = "Unknown Channel"
 )
-

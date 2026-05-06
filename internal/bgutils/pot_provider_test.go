@@ -1099,4 +1099,3 @@ func TestBGError_WithInfo(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, err.Error())
 	}
 }
-

@@ -338,7 +338,7 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 
 	browser := s.resolvedBrowser()
 	if browser == nil {
-		return fmt.Errorf("Firefox, Chrome, Brave, Edge, Opera, or Waterfox required: %w", ErrNoBrowserFound)
+		return fmt.Errorf("supported browser (Firefox, Chrome, Brave, Edge, Opera, or Waterfox) required: %w", ErrNoBrowserFound)
 	}
 
 	if err := os.MkdirAll(s.profileDir, 0o755); err != nil {

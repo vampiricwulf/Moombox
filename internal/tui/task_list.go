@@ -99,7 +99,7 @@ type TaskListModel struct {
 	// "follow the selected job" walk is O(1) rather than O(N). Audit
 	// reports/tui.md #22.
 	virtualIndex map[string]int
-	list     list.Model
+	list         list.Model
 
 	width, height       int
 	focused             bool

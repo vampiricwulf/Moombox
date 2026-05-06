@@ -45,7 +45,7 @@ type RateLimiter struct {
 	window    time.Duration
 	cleanup   *time.Ticker
 	done      chan struct{}
-	closeOnce sync.Once // guards close(done) so double-Close doesn't panic
+	closeOnce sync.Once         // guards close(done) so double-Close doesn't panic
 	logger    rateLimiterLogger // optional; may be nil
 }
 

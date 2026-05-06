@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	decapiRequestTimeout  = 15 * time.Second
-	decapiStagger         = 1 * time.Second
-	decapiMinInterval     = 15 * time.Second
+	decapiRequestTimeout   = 15 * time.Second
+	decapiStagger          = 1 * time.Second
+	decapiMinInterval      = 15 * time.Second
 	decapiDefaultRateLimit = 60
 )
 

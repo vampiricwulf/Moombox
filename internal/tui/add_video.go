@@ -577,7 +577,7 @@ func (m *AddVideoModel) View() string {
 		return ""
 	}
 
-	boxW := max(min(80, m.width-4), 30)  // match TS: min(width, 80)
+	boxW := max(min(80, m.width-4), 30) // match TS: min(width, 80)
 	boxH := max(min(30, m.height-4), 8) // match TS: min(height-4, 30)
 
 	contentW := boxW - 2

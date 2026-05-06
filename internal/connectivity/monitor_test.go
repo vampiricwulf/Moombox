@@ -105,10 +105,10 @@ func TestMonitor_StartIsIdempotent(t *testing.T) {
 	if m.cancel == nil {
 		t.Fatal("cancel went nil after second Start")
 	}
-	// Same function pointer as after the first Start.
-	if &firstCancel == nil || m.cancel == nil {
-		t.Fatal("cancel should remain set")
-	}
+	// Note: Go function values aren't comparable beyond nil-checks, so we
+	// can't directly assert cancel is the same closure as firstCancel.
+	// The non-nil check above is the strongest invariant we can express.
+	_ = firstCancel
 	m.Stop()
 }
 

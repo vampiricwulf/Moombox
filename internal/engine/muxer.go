@@ -15,13 +15,13 @@ const muxTimeout = 10 * time.Minute
 
 // TrimOptions configures trimming and encoding during muxing.
 type TrimOptions struct {
-	TrimStartOffset float64 // Seconds into first segment
-	TrimDuration    float64 // Total duration from trim start
-	VideoBitrate    int     // kbps for ABR mode (0 = no target)
-	AudioBitrate    int     // kbps
-	CRF             int     // 0-51, 18 = perceptually lossless (0 = copy)
-	UsePreciseTrim  bool    // Default true
-	TwoPass         bool    // Only for ABR with VideoBitrate
+	TrimStartOffset float64               // Seconds into first segment
+	TrimDuration    float64               // Total duration from trim start
+	VideoBitrate    int                   // kbps for ABR mode (0 = no target)
+	AudioBitrate    int                   // kbps
+	CRF             int                   // 0-51, 18 = perceptually lossless (0 = copy)
+	UsePreciseTrim  bool                  // Default true
+	TwoPass         bool                  // Only for ABR with VideoBitrate
 	ProgressFn      func(percent float64) // Optional: called with 0-100 as FFmpeg encodes
 }
 

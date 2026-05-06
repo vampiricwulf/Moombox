@@ -107,7 +107,7 @@ func loadChromeMasterKey(profilePath string) ([]byte, error) {
 		return nil, fmt.Errorf("parse Local State JSON: %w", err)
 	}
 	if ls.OsCrypt.EncryptedKey == "" {
-		return nil, fmt.Errorf("Local State has no os_crypt.encrypted_key (browser may be too old or first-run)")
+		return nil, fmt.Errorf("local State has no os_crypt.encrypted_key (browser may be too old or first-run)")
 	}
 
 	raw, err := base64.StdEncoding.DecodeString(ls.OsCrypt.EncryptedKey)
@@ -152,7 +152,7 @@ func ReadChromeCookies(profilePath, originFilter string) ([]ChromeCookie, error)
 		if _, altErr := os.Stat(alt); altErr == nil {
 			cookiesPath = alt
 		} else {
-			return nil, fmt.Errorf("Cookies file not found at %q (and not at Network/Cookies)", cookiesPath)
+			return nil, fmt.Errorf("cookies file not found at %q (and not at Network/Cookies)", cookiesPath)
 		}
 	}
 

@@ -10,8 +10,8 @@ import (
 
 func TestNewJobQueue(t *testing.T) {
 	tests := []struct {
-		name             string
-		maxDownloads     int
+		name              string
+		maxDownloads      int
 		expectedDownloads int
 	}{
 		{"positive value", 5, 5},

@@ -1097,15 +1097,15 @@ func TestFreshInstallUsesPragma(t *testing.T) {
 // through UpdateJobFields — don't just delete the map entry.
 func TestFieldToColumnCoverage(t *testing.T) {
 	excluded := map[string]bool{
-		"id":         true, // primary key, set at insert
-		"videoId":    true, // set at insert
-		"url":        true, // set at insert
-		"platform":   true, // set at insert
-		"createdAt":  true, // set at insert
-		"updatedAt":  true, // auto-managed by UpdateJobFields itself
-		"gaps":       true, // loaded via join
-		"trims":      true, // loaded via join
-		"segments":   true, // loaded via join
+		"id":        true, // primary key, set at insert
+		"videoId":   true, // set at insert
+		"url":       true, // set at insert
+		"platform":  true, // set at insert
+		"createdAt": true, // set at insert
+		"updatedAt": true, // auto-managed by UpdateJobFields itself
+		"gaps":      true, // loaded via join
+		"trims":     true, // loaded via join
+		"segments":  true, // loaded via join
 	}
 
 	for field := range reflect.TypeFor[Job]().Fields() {

@@ -45,7 +45,7 @@ type Service struct {
 	initMu        sync.Mutex
 	lastInitAt    time.Time
 	initSucceeded bool // true after the most recent Init fetched the homepage cleanly
-	logger     interface {
+	logger        interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)

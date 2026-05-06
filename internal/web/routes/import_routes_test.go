@@ -238,7 +238,7 @@ func TestImportUsesChatMetadataAsFallback(t *testing.T) {
 		"messages":    []map[string]any{{"offsetMs": 0, "message": "x"}},
 	})
 	zipBytes := makeImportZip(t, map[string][]byte{
-		"plain-video.mp4":   []byte("fake mp4"),
+		"plain-video.mp4":       []byte("fake mp4"),
 		"plain-video.chat.json": chatJSON,
 	})
 
@@ -276,7 +276,7 @@ func TestImportTitleAndChannelHeadersOverrideMetadata(t *testing.T) {
 		"messages":    []map[string]any{{"offsetMs": 0, "message": "x"}},
 	})
 	zipBytes := makeImportZip(t, map[string][]byte{
-		"src [header_test].mp4":     []byte("fake"),
+		"src [header_test].mp4":       []byte("fake"),
 		"src [header_test].chat.json": chatJSON,
 	})
 

@@ -32,15 +32,15 @@ type discordPayload struct {
 }
 
 type discordEmbed struct {
-	Title       string              `json:"title,omitempty"`
-	Description string              `json:"description,omitempty"`
-	Color       int                 `json:"color,omitempty"`
-	URL         string              `json:"url,omitempty"`
-	Fields      []discordField      `json:"fields,omitempty"`
-	Thumbnail   *discordImage       `json:"thumbnail,omitempty"`
-	Image       *discordImage       `json:"image,omitempty"`
-	Footer      *discordFooter      `json:"footer,omitempty"`
-	Timestamp   string              `json:"timestamp,omitempty"`
+	Title       string         `json:"title,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Color       int            `json:"color,omitempty"`
+	URL         string         `json:"url,omitempty"`
+	Fields      []discordField `json:"fields,omitempty"`
+	Thumbnail   *discordImage  `json:"thumbnail,omitempty"`
+	Image       *discordImage  `json:"image,omitempty"`
+	Footer      *discordFooter `json:"footer,omitempty"`
+	Timestamp   string         `json:"timestamp,omitempty"`
 }
 
 // discordField is a type alias for Field so the Discord JSON encoder can

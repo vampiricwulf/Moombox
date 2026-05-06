@@ -8,7 +8,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
-
 func TestIsTerminalStatus(t *testing.T) {
 	tests := []struct {
 		status   database.JobStatus

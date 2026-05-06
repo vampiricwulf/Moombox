@@ -58,10 +58,10 @@ func TestExtractVideoID(t *testing.T) {
 
 func TestParseYouTubeChannelURL(t *testing.T) {
 	tests := []struct {
-		input     string
-		wantNil   bool
-		wantID    string // expected ChannelID (direct extraction)
-		wantPath  string // expected Path (needs resolution)
+		input    string
+		wantNil  bool
+		wantID   string // expected ChannelID (direct extraction)
+		wantPath string // expected Path (needs resolution)
 	}{
 		// /channel/UCxxx → direct extraction
 		{"https://www.youtube.com/channel/UCxxxxxxxxxxxxxxxxxxxxxx", false, "UCxxxxxxxxxxxxxxxxxxxxxx", ""},

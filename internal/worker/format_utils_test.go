@@ -6,9 +6,6 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-//go:fix inline
-func intPtr(v int) *int { return new(v) }
-
 func TestIsProgressiveFormat(t *testing.T) {
 	tests := []struct {
 		name     string

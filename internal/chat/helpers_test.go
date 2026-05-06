@@ -110,7 +110,7 @@ func TestFormatTimestampUTCStable(t *testing.T) {
 func TestSelectRendererSuperChatPaidMessageBranch(t *testing.T) {
 	item := map[string]any{
 		"liveChatPaidMessageRenderer": map[string]any{
-			"id":              "ChwKGkNNWHAtT2J1OFlNREZRRTVGZ2tkOENRSVNLZw",
+			"id":                 "ChwKGkNNWHAtT2J1OFlNREZRRTVGZ2tkOENRSVNLZw",
 			"purchaseAmountText": map[string]any{"simpleText": "$5.00"},
 		},
 	}

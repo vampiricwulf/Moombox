@@ -59,9 +59,9 @@ type TrimDialogModel struct {
 	fileSize      int64
 
 	// Delete mode state
-	trims            []TrimInfo
-	selectedTrimIdx  int
-	deleteConfirmID  string
+	trims           []TrimInfo
+	selectedTrimIdx int
+	deleteConfirmID string
 
 	// Parsed values (after validation)
 	parsedStart float64

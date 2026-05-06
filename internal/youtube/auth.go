@@ -55,10 +55,10 @@ func (a *Auth) GenerateAPIHeaders(client constants.YouTubeClientConfig, ytcfg *Y
 
 	headers := map[string]string{
 		"Content-Type":             "application/json",
-		"User-Agent":              client.UserAgent,
-		"X-YouTube-Client-Name":   client.ClientID,
+		"User-Agent":               client.UserAgent,
+		"X-YouTube-Client-Name":    client.ClientID,
 		"X-YouTube-Client-Version": client.ClientVersion,
-		"Origin":                  origin,
+		"Origin":                   origin,
 	}
 
 	cookieHeader := a.jar.GetCookieHeader()

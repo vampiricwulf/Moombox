@@ -525,16 +525,6 @@ func filterUniqueDescriptionLinesPrecomputed(description string, olderLineSets [
 	return strings.Join(unique, "\n")
 }
 
-// filterUniqueDescriptionLines is retained for backwards-compat (and tests)
-// but now routes through the precomputed-set implementation.
-func filterUniqueDescriptionLines(description string, olderEntries []atomEntry) string {
-	sets := make([]map[string]struct{}, len(olderEntries))
-	for i := range olderEntries {
-		sets[i] = descriptionLineSet(olderEntries[i].MediaGroup.Description)
-	}
-	return filterUniqueDescriptionLinesPrecomputed(description, sets)
-}
-
 // getYouTubeChannels returns a copy of the YouTube channel list under
 // configStore.Read so doCheck can iterate freely without holding the lock
 // across network calls. Closes the cfgMu race flagged in

@@ -28,24 +28,24 @@ type (
 	// JobUpdateMsg carries a single-job update, including the list of
 	// columns that were actually written. Subscribers gate expensive
 	// re-renders on Change.Changes (DECISIONS #21 / audit tui.md F20).
-	JobUpdateMsg   struct{ Change *database.JobChange }
+	JobUpdateMsg struct{ Change *database.JobChange }
 	// JobAddedMsg carries a single new job from AddJob. DECISIONS #21
 	// lifecycle event — the TUI handler appends instead of clearing +
 	// rebuilding the whole task list (the legacy OnJobsChange path).
-	JobAddedMsg    struct{ Added *database.JobAdded }
+	JobAddedMsg struct{ Added *database.JobAdded }
 	// JobDeletedMsg carries the ID of a removed job. DECISIONS #21
 	// lifecycle event — the TUI handler removes the row from local
 	// state instead of re-loading a fresh full-list snapshot.
-	JobDeletedMsg  struct{ Deleted *database.JobDeleted }
+	JobDeletedMsg struct{ Deleted *database.JobDeleted }
 	// TrimsChangedMsg carries a refreshed Job snapshot whose Trims
 	// field reflects the post-AddTrim/DeleteTrim state. The forwarder
 	// in tui_wiring re-fetches via db.GetJob so the handler can apply
 	// the new trim list to the cached row + (if selected) the detail
 	// panel. DECISIONS #21 lifecycle event.
 	TrimsChangedMsg struct{ Job *database.Job }
-	JobsUpdateMsg  struct{ Jobs []*database.Job }
-	LogBatchMsg struct{ Lines []string }
-	CheckTimersMsg struct {
+	JobsUpdateMsg   struct{ Jobs []*database.Job }
+	LogBatchMsg     struct{ Lines []string }
+	CheckTimersMsg  struct {
 		NextFeedCheck   time.Time
 		NextDecapiCheck time.Time
 		NextTwitchCheck time.Time
@@ -69,8 +69,8 @@ type (
 	channelClosedMsg struct{ Name string }
 	tickMsg          struct{}
 	progressTickMsg  struct{}
-	logFlushMsg     struct{} // 250ms log batching flush
-	marqueeTickMsg  struct{} // 150ms marquee scroll tick
+	logFlushMsg      struct{} // 250ms log batching flush
+	marqueeTickMsg   struct{} // 150ms marquee scroll tick
 
 	// Async results for update check/apply
 	updateCheckResultMsg struct {
@@ -94,7 +94,7 @@ type (
 
 	// Async results for AddVideo dialog
 	fetchFormatsAutoAdvanceMsg struct{} // timer msg to auto-skip format on error
-	addVideoResultMsg         struct {
+	addVideoResultMsg          struct {
 		Feedback string
 	}
 	fetchFormatsResultMsg struct {
@@ -218,8 +218,8 @@ type App struct {
 
 	// Trim progress (async encoding)
 	trimInProgress  bool
-	trimStartedAt  time.Time
-	trimProgressMu sync.Mutex
+	trimStartedAt   time.Time
+	trimProgressMu  sync.Mutex
 	trimProgressPct float64
 
 	// Progress
@@ -250,21 +250,21 @@ type App struct {
 	logBuffer []string
 
 	// Channels for async updates
-	jobUpdateCh        <-chan *database.JobChange
-	jobAddedCh         <-chan *database.JobAdded
-	jobDeletedCh       <-chan *database.JobDeleted
-	jobTrimsChangedCh  <-chan *database.Job
-	jobsUpdateCh       <-chan []*database.Job
-	logCh            <-chan string
-	checkTimersCh    <-chan CheckTimersMsg
-	cookieStatusCh   <-chan CookieStatusMsg
-	diskStatusCh     <-chan DiskStatusMsg
-	updateStatusCh   <-chan UpdateStatusMsg
+	jobUpdateCh       <-chan *database.JobChange
+	jobAddedCh        <-chan *database.JobAdded
+	jobDeletedCh      <-chan *database.JobDeleted
+	jobTrimsChangedCh <-chan *database.Job
+	jobsUpdateCh      <-chan []*database.Job
+	logCh             <-chan string
+	checkTimersCh     <-chan CheckTimersMsg
+	cookieStatusCh    <-chan CookieStatusMsg
+	diskStatusCh      <-chan DiskStatusMsg
+	updateStatusCh    <-chan UpdateStatusMsg
 
 	// Update status
-	updateAvailable    *UpdateStatusMsg
-	version            string
-	releaseNotesPopup  *releaseNotesOverlay
+	updateAvailable   *UpdateStatusMsg
+	version           string
+	releaseNotesPopup *releaseNotesOverlay
 
 	// restartPending stays true once a settings save commits a
 	// restart-required field, until the process actually exits. The
@@ -312,34 +312,34 @@ type App struct {
 	seenChordHint bool
 
 	// Callbacks for actions
-	OnAddVideo   func(url string)
-	OnCancelJob  func(jobID string)
-	OnDeleteJob  func(jobID string)
+	OnAddVideo        func(url string)
+	OnCancelJob       func(jobID string)
+	OnDeleteJob       func(jobID string)
 	OnResumeJob       func(jobID string)
 	OnReinitializeJob func(jobID string)
 	OnMuxJob          func(jobID string) error
 	HasStagingFiles   func(jobID string) bool // checks if staging dir has files
 	HasSegmentFiles   func(jobID string) bool // checks if staging dir has segment files
-	OnCreateTrim func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
-	OnDeleteTrim func(jobID, trimID string) error
-	OnOpenFolder func(jobID string)
-	OnSaveConfig     func(cfg *config.MoomboxConfig)
-	OnRestart        func()
-	OnHashPassword   func(password string) string
-	OnVerifyPassword func(password, hash string) bool
-	OnFetchFormats   func(videoID string) (*FormatsData, error)          // optional: fetch formats via service
-	OnImportFile     func(path, title, channel string) (string, error)  // optional: import zip, returns title
-	OnListOrphans    func() ([]OrphanedFileEntry, error)                // list orphaned files
-	OnDeleteOrphan   func(path string) error                            // delete orphaned file
+	OnCreateTrim      func(jobID string, startSec, endSec float64, onProgress func(float64)) (filename string, errMsg string)
+	OnDeleteTrim      func(jobID, trimID string) error
+	OnOpenFolder      func(jobID string)
+	OnSaveConfig      func(cfg *config.MoomboxConfig)
+	OnRestart         func()
+	OnHashPassword    func(password string) string
+	OnVerifyPassword  func(password, hash string) bool
+	OnFetchFormats    func(videoID string) (*FormatsData, error)        // optional: fetch formats via service
+	OnImportFile      func(path, title, channel string) (string, error) // optional: import zip, returns title
+	OnListOrphans     func() ([]OrphanedFileEntry, error)               // list orphaned files
+	OnDeleteOrphan    func(path string) error                           // delete orphaned file
 
 	// Client token callbacks
 	OnListClientTokens  func() ([]*database.ClientToken, error)
 	OnDeleteClientToken func(id string) error
 
 	// Update callbacks
-	OnCheckUpdate       func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
-	OnApplyUpdate       func(version string) string      // returns error string (empty on success, process exits)
-	OnVerifySignature   func() error                     // verify current binary's signature
+	OnCheckUpdate     func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
+	OnApplyUpdate     func(version string) string      // returns error string (empty on success, process exits)
+	OnVerifySignature func() error                     // verify current binary's signature
 	// OnFetchReleaseNotes fetches release notes for a specific version from GitHub.
 	// Used by R N chord when no update is available — shows the CURRENT version's
 	// notes in the same overlay used for pending-update notes.
@@ -350,11 +350,11 @@ type App struct {
 	OnForceRefreshCookies func() (ok bool, err error) // nil if auto-cookies not configured
 
 	// FFmpeg check callbacks
-	OnCheckFFmpeg    func(path string) (bool, string, string)                                    // check if ffmpeg path is valid → (valid, version, warning)
-	OnCheckPrereqs   func() (bool, bool)                                                         // returns (chocoAvail, wingetAvail)
-	OnPrepareInstall func(method string) (needsElevation bool, script, token string, err error)  // elevation check + prepare
-	OnConfirmInstall func(token string) error                                                    // execute reviewed elevated install
-	OnRejectInstall  func(token string)                                                          // decline pending elevated install
+	OnCheckFFmpeg    func(path string) (bool, string, string)                                   // check if ffmpeg path is valid → (valid, version, warning)
+	OnCheckPrereqs   func() (bool, bool)                                                        // returns (chocoAvail, wingetAvail)
+	OnPrepareInstall func(method string) (needsElevation bool, script, token string, err error) // elevation check + prepare
+	OnConfirmInstall func(token string) error                                                   // execute reviewed elevated install
+	OnRejectInstall  func(token string)                                                         // decline pending elevated install
 
 	// FFmpeg check overlay
 	ffmpegCheck *FFmpegCheckModel

@@ -194,8 +194,8 @@ func (m *ActionMenuModel) Open(items []ActionMenuItem) {
 				listItems = append(listItems, menuActionItem{isBlank: true, actionIdx: -1})
 			}
 			listItems = append(listItems, menuActionItem{
-				isHeader: true,
-				category: items[i].Category,
+				isHeader:  true,
+				category:  items[i].Category,
 				actionIdx: -1,
 			})
 			lastCat = items[i].Category

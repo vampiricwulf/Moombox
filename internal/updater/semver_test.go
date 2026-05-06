@@ -4,9 +4,9 @@ import "testing"
 
 func TestParseVersion(t *testing.T) {
 	tests := []struct {
-		input                  string
-		major, minor, patch    int
-		wantErr                bool
+		input               string
+		major, minor, patch int
+		wantErr             bool
 	}{
 		{"2.0.15", 2, 0, 15, false},
 		{"v2.0.15", 2, 0, 15, false},
@@ -59,12 +59,12 @@ func TestCompareVersions(t *testing.T) {
 // tags. Build metadata is parsed but does NOT participate in ordering.
 func TestParseVersionFullPreReleaseAndBuild(t *testing.T) {
 	tests := []struct {
-		input         string
-		major, minor  int
-		patch         int
-		wantPre       []string
-		wantBuild     string
-		wantErr       bool
+		input        string
+		major, minor int
+		patch        int
+		wantPre      []string
+		wantBuild    string
+		wantErr      bool
 	}{
 		{"2.6.0-test.27", 2, 6, 0, []string{"test", "27"}, "", false},
 		{"v2.6.0-test.27", 2, 6, 0, []string{"test", "27"}, "", false},

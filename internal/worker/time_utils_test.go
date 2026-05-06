@@ -44,11 +44,11 @@ func TestParseTimeToSeconds_EdgeCases(t *testing.T) {
 		expected float64
 		err      bool
 	}{
-		{"1:2:3:4", 0, true},      // Too many colons
-		{"  120  ", 120, false},    // Whitespace trimming
-		{"-5", -5, false},         // Negative (accepted — caller validates)
-		{"1.5", 1.5, false},       // Fractional seconds
-		{"1:30.5", 90.5, false},   // Fractional MM:SS
+		{"1:2:3:4", 0, true},        // Too many colons
+		{"  120  ", 120, false},     // Whitespace trimming
+		{"-5", -5, false},           // Negative (accepted — caller validates)
+		{"1.5", 1.5, false},         // Fractional seconds
+		{"1:30.5", 90.5, false},     // Fractional MM:SS
 		{"1:0:30.5", 3630.5, false}, // Fractional HH:MM:SS
 	}
 

@@ -38,37 +38,37 @@ type TwitchHLSVariant struct {
 
 // TwitchVodInfo contains VOD metadata from Twitch GQL.
 type TwitchVodInfo struct {
-	VodID        string `json:"vodId"`
-	Title        string `json:"title"`
-	ChannelLogin string `json:"channelLogin"`
+	VodID              string `json:"vodId"`
+	Title              string `json:"title"`
+	ChannelLogin       string `json:"channelLogin"`
 	ChannelDisplayName string `json:"channelDisplayName"`
-	ChannelID    string `json:"channelId,omitempty"`
-	Duration     int    `json:"duration"` // seconds
-	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
-	CreatedAt    string `json:"createdAt,omitempty"`
-	ViewCount    int    `json:"viewCount,omitempty"`
-	GameCategory string `json:"gameCategory,omitempty"`
+	ChannelID          string `json:"channelId,omitempty"`
+	Duration           int    `json:"duration"` // seconds
+	ThumbnailURL       string `json:"thumbnailUrl,omitempty"`
+	CreatedAt          string `json:"createdAt,omitempty"`
+	ViewCount          int    `json:"viewCount,omitempty"`
+	GameCategory       string `json:"gameCategory,omitempty"`
 }
 
 // TwitchChatMessage represents a single Twitch chat message.
 type TwitchChatMessage struct {
-	ID           string            `json:"id"`
-	TimestampMs  int64             `json:"timestampMs"`
-	OffsetMs     int64             `json:"offsetMs"`
-	AuthorName   string            `json:"authorName"`
-	AuthorID     string            `json:"authorId"`
-	AuthorBadges []string          `json:"authorBadges,omitempty"`
-	AuthorColor  string            `json:"authorColor,omitempty"`
-	Message      string            `json:"message"`
-	Emotes       []TwitchEmoteRef  `json:"emotes,omitempty"`
-	Bits         int               `json:"bits,omitempty"`
-	MessageType       string         `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system"
-	SystemMsg         string         `json:"systemMsg,omitempty"`
-	SubPlan           string         `json:"subPlan,omitempty"`           // C1: "1000", "2000", "3000", "Prime"
-	GiftRecipient     string         `json:"giftRecipient,omitempty"`     // C1: msg-param-recipient-display-name
-	ViewerCount       int            `json:"viewerCount,omitempty"`       // C1: msg-param-viewerCount (raids)
-	AnnouncementColor string         `json:"announcementColor,omitempty"` // msg-param-color for announcements: "primary"|"blue"|"green"|"orange"|"purple"
-	Raw               string         `json:"raw,omitempty"`               // Lossless raw IRC line
+	ID                string           `json:"id"`
+	TimestampMs       int64            `json:"timestampMs"`
+	OffsetMs          int64            `json:"offsetMs"`
+	AuthorName        string           `json:"authorName"`
+	AuthorID          string           `json:"authorId"`
+	AuthorBadges      []string         `json:"authorBadges,omitempty"`
+	AuthorColor       string           `json:"authorColor,omitempty"`
+	Message           string           `json:"message"`
+	Emotes            []TwitchEmoteRef `json:"emotes,omitempty"`
+	Bits              int              `json:"bits,omitempty"`
+	MessageType       string           `json:"messageType"` // "chat", "sub", "resub", "subgift", "raid", "announcement", "bits", "system"
+	SystemMsg         string           `json:"systemMsg,omitempty"`
+	SubPlan           string           `json:"subPlan,omitempty"`           // C1: "1000", "2000", "3000", "Prime"
+	GiftRecipient     string           `json:"giftRecipient,omitempty"`     // C1: msg-param-recipient-display-name
+	ViewerCount       int              `json:"viewerCount,omitempty"`       // C1: msg-param-viewerCount (raids)
+	AnnouncementColor string           `json:"announcementColor,omitempty"` // msg-param-color for announcements: "primary"|"blue"|"green"|"orange"|"purple"
+	Raw               string           `json:"raw,omitempty"`               // Lossless raw IRC line
 }
 
 // TwitchEmoteRef references an emote within a message.

@@ -34,25 +34,25 @@ var (
 	// are site navigation / product pages rather than channel logins, so we
 	// must not treat them as channel names when parsing /<slug>.
 	twitchReservedPaths = map[string]bool{
-		"directory":   true,
-		"downloads":   true,
-		"jobs":        true,
-		"settings":    true,
-		"videos":      true,
-		"search":      true,
-		"p":           true, // /p/... promotional/product pages
-		"store":       true,
-		"tag":         true, // legacy tag browsing
-		"tags":        true,
-		"turbo":       true,
-		"drops":       true,
-		"wallet":      true,
-		"prime":       true,
-		"subs":        true,
+		"directory":     true,
+		"downloads":     true,
+		"jobs":          true,
+		"settings":      true,
+		"videos":        true,
+		"search":        true,
+		"p":             true, // /p/... promotional/product pages
+		"store":         true,
+		"tag":           true, // legacy tag browsing
+		"tags":          true,
+		"turbo":         true,
+		"drops":         true,
+		"wallet":        true,
+		"prime":         true,
+		"subs":          true,
 		"subscriptions": true,
-		"friends":     true,
-		"inventory":   true,
-		"payments":    true,
+		"friends":       true,
+		"inventory":     true,
+		"payments":      true,
 	}
 )
 

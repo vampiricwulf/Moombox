@@ -9,10 +9,10 @@ import (
 
 // Service is the Twitch service facade wrapping API, auth, chat, HLS, and emotes.
 type Service struct {
-	API           *API
-	Auth          *Auth
-	Emotes        *EmoteResolver
-	logger        interface {
+	API    *API
+	Auth   *Auth
+	Emotes *EmoteResolver
+	logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)

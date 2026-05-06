@@ -368,10 +368,10 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 
 	headers := map[string]string{
 		"Content-Type":             "application/json",
-		"User-Agent":              constants.AndroidVRClient.UserAgent,
-		"X-YouTube-Client-Name":   constants.AndroidVRClient.ClientID,
+		"User-Agent":               constants.AndroidVRClient.UserAgent,
+		"X-YouTube-Client-Name":    constants.AndroidVRClient.ClientID,
 		"X-YouTube-Client-Version": constants.AndroidVRClient.ClientVersion,
-		"Origin":                  "https://www.youtube.com",
+		"Origin":                   "https://www.youtube.com",
 	}
 	if visitorData != "" {
 		headers["X-Goog-Visitor-Id"] = visitorData

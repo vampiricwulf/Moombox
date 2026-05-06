@@ -40,7 +40,7 @@ type authLogger interface {
 type AuthService struct {
 	mu       sync.RWMutex
 	sessions map[string]sessionEntry
-	logger   authLogger // set via SetLogger; may be nil
+	logger   authLogger    // set via SetLogger; may be nil
 	done     chan struct{} // closed by Stop() to exit cleanup goroutine
 }
 

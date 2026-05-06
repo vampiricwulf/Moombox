@@ -23,12 +23,12 @@ const labelWidth = 14
 
 // JobDetailsModel renders details for a selected job.
 type JobDetailsModel struct {
-	job           *database.Job
-	viewport      viewport.Model
-	progress      progress.Model
-	width, height int
-	focused       bool
-	rows          []detailRow
+	job             *database.Job
+	viewport        viewport.Model
+	progress        progress.Model
+	width, height   int
+	focused         bool
+	rows            []detailRow
 	hideDescription bool
 
 	// Marquee for scrolling the title value when it overflows.
@@ -752,7 +752,6 @@ func (m *JobDetailsModel) renderRow(r detailRow, maxW int) string {
 	}
 	return ""
 }
-
 
 // progressGradient returns gradient start/end colors for a progress bar based on job status.
 // The bar blends from the previous phase color into the current status color.

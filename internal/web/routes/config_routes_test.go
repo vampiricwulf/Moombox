@@ -19,12 +19,12 @@ import (
 // configRoutesFixture wires ConfigRoutes against a fresh temp store.
 // The Callbacks atomics let tests verify which hot-reload paths fired.
 type configRoutesFixture struct {
-	router    chi.Router
-	store     *config.Store
-	logLevel  atomic.Pointer[string] // last value passed to OnLogLevelChange
-	parallel  atomic.Int32           // last value passed to OnMaxParallelChange
-	hideAge   atomic.Bool            // OnHideFinishedAgeChanged was invoked
-	channels  atomic.Bool            // OnChannelChange was invoked
+	router   chi.Router
+	store    *config.Store
+	logLevel atomic.Pointer[string] // last value passed to OnLogLevelChange
+	parallel atomic.Int32           // last value passed to OnMaxParallelChange
+	hideAge  atomic.Bool            // OnHideFinishedAgeChanged was invoked
+	channels atomic.Bool            // OnChannelChange was invoked
 }
 
 func newConfigRoutesFixture(t *testing.T) *configRoutesFixture {

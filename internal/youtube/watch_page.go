@@ -18,15 +18,15 @@ var (
 	// YouTube has historically used several names for the same value
 	// ("jsUrl", "PLAYER_JS_URL", and more recently "scriptSrc"); match any
 	// of them so a rename doesn't quietly disable cipher compilation.
-	jsURLRegex             = regexp.MustCompile(`"(?:jsUrl|PLAYER_JS_URL|scriptSrc)":"([^"]+)"`)
+	jsURLRegex = regexp.MustCompile(`"(?:jsUrl|PLAYER_JS_URL|scriptSrc)":"([^"]+)"`)
 	// visitorDataRegex matches both the camel-case form seen on watch pages
 	// and the snake-case form the homepage has historically used. Kept in
 	// sync with service.go's homepage extraction so a single rename only
 	// has to be edited in one place.
-	visitorDataRegex       = regexp.MustCompile(`"(?:visitorData|visitor_data)":"([^"]+)"`)
-	sessionIndexRegex      = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
-	delegatedSessionRegex  = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
-	dataSyncIDRegex        = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
+	visitorDataRegex      = regexp.MustCompile(`"(?:visitorData|visitor_data)":"([^"]+)"`)
+	sessionIndexRegex     = regexp.MustCompile(`"SESSION_INDEX":"?(\d+)"?`)
+	delegatedSessionRegex = regexp.MustCompile(`"DELEGATED_SESSION_ID":"([^"]+)"`)
+	dataSyncIDRegex       = regexp.MustCompile(`"datasyncId":"([^"]+)"`)
 	// Matches encryptedHostFlags in flat JSON objects. May fail if nested objects
 	// precede the field (YouTube's embed page config is typically flat here).
 	encryptedHostFlagsRegex = regexp.MustCompile(`"WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER":\{[^}]*"encryptedHostFlags":"([^"]+)"`)

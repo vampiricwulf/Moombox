@@ -44,8 +44,8 @@ type VodChatDownloader struct {
 	channelID     string
 	authToken     string
 	outputPath    string
-	vodDuration   int   // seconds, used for progress % estimation
-	vodStartMs    int64 // epoch ms when VOD started
+	vodDuration   int                 // seconds, used for progress % estimation
+	vodStartMs    int64               // epoch ms when VOD started
 	messages      []TwitchChatMessage // single-writer: Start goroutine only
 	dedup         *utils.OrderedDedup[string]
 	totalCount    atomic.Int64

@@ -176,16 +176,16 @@ func (cd *ProbeCooldown) evictExcess() {
 
 // ProcessYouTubeVideoParams holds the dependencies for ProcessYouTubeVideo.
 type ProcessYouTubeVideoParams struct {
-	Ctx      context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
-	VideoID  string
-	Title    string
-	Channel  *config.ChannelConfig
-	ProbeVideo VideoProbeFunc
+	Ctx          context.Context // forwarded to ProbeVideo so shutdown cancels in-flight probes
+	VideoID      string
+	Title        string
+	Channel      *config.ChannelConfig
+	ProbeVideo   VideoProbeFunc
 	AddToHistory func(videoID string) error
-	Tracker  *MetadataFailureTracker
-	Cooldown *ProbeCooldown // optional: skips re-probes within the cooldown window
-	IsReprobe bool          // true if re-checking a previously processed video (logs demoted to Debug)
-	Logger   interface {
+	Tracker      *MetadataFailureTracker
+	Cooldown     *ProbeCooldown // optional: skips re-probes within the cooldown window
+	IsReprobe    bool           // true if re-checking a previously processed video (logs demoted to Debug)
+	Logger       interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)

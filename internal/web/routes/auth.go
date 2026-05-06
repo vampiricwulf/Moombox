@@ -388,7 +388,6 @@ func ClientTokenRoutes(r chi.Router, deps *AuthRoutesDeps) {
 	})
 }
 
-
 // redactIP truncates an IPv4 to /24 ("a.b.c.0") and IPv6 to /64.
 // Empty input returns empty string. Malformed input returns "" rather
 // than leaking the unparseable original.

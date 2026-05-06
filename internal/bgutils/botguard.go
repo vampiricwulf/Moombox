@@ -222,10 +222,10 @@ func (c *BotGuardClient) Snapshot(ctx context.Context, timeout time.Duration) (s
 	// Build args array: [contentBinding, signedTimestamp, webPoSignalOutput, skipPrivacyBuffer]
 	// BotGuard expects a flat array, not an object
 	argsArr := c.vm.NewArray(
-		goja.Undefined(),      // contentBinding (nil for PO token)
-		goja.Undefined(),      // signedTimestamp
-		webPoSignalOutput,     // native JS array for BotGuard to populate
-		goja.Undefined(),      // skipPrivacyBuffer
+		goja.Undefined(),  // contentBinding (nil for PO token)
+		goja.Undefined(),  // signedTimestamp
+		webPoSignalOutput, // native JS array for BotGuard to populate
+		goja.Undefined(),  // skipPrivacyBuffer
 	)
 
 	// Call asyncSnapshotFunction(callback, args)

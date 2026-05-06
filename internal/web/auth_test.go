@@ -67,10 +67,10 @@ func TestVerifyPassword(t *testing.T) {
 	as := NewAuthService()
 
 	tests := []struct {
-		name       string
-		password   string
-		setupHash  func() string // returns stored hash
-		expected   bool
+		name      string
+		password  string
+		setupHash func() string // returns stored hash
+		expected  bool
 	}{
 		{
 			name:     "correct password",
@@ -109,34 +109,34 @@ func TestVerifyPassword(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:       "malformed hash - missing prefix",
-			password:   "test",
-			setupHash:  func() string { return "bcrypt:abc:def" },
-			expected:   false,
+			name:      "malformed hash - missing prefix",
+			password:  "test",
+			setupHash: func() string { return "bcrypt:abc:def" },
+			expected:  false,
 		},
 		{
-			name:       "malformed hash - too few parts",
-			password:   "test",
-			setupHash:  func() string { return "scrypt:abc" },
-			expected:   false,
+			name:      "malformed hash - too few parts",
+			password:  "test",
+			setupHash: func() string { return "scrypt:abc" },
+			expected:  false,
 		},
 		{
-			name:       "malformed hash - empty string",
-			password:   "test",
-			setupHash:  func() string { return "" },
-			expected:   false,
+			name:      "malformed hash - empty string",
+			password:  "test",
+			setupHash: func() string { return "" },
+			expected:  false,
 		},
 		{
-			name:       "malformed hash - invalid salt hex",
-			password:   "test",
-			setupHash:  func() string { return "scrypt:ZZZZ:abcdef" },
-			expected:   false,
+			name:      "malformed hash - invalid salt hex",
+			password:  "test",
+			setupHash: func() string { return "scrypt:ZZZZ:abcdef" },
+			expected:  false,
 		},
 		{
-			name:       "malformed hash - invalid hash hex",
-			password:   "test",
-			setupHash:  func() string { return "scrypt:abcdef:ZZZZ" },
-			expected:   false,
+			name:      "malformed hash - invalid hash hex",
+			password:  "test",
+			setupHash: func() string { return "scrypt:abcdef:ZZZZ" },
+			expected:  false,
 		},
 	}
 

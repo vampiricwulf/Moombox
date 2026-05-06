@@ -12,6 +12,6 @@ import "os"
 // to plug in a Cgroup-based or SetPgid-based equivalent.
 type processJob struct{}
 
-func newProcessJob() (*processJob, error)  { return &processJob{}, nil }
+func newProcessJob() (*processJob, error)      { return &processJob{}, nil }
 func (j *processJob) assign(*os.Process) error { return nil }
-func (j *processJob) close()               {}
+func (j *processJob) close()                   {}

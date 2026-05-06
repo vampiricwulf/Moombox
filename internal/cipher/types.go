@@ -105,7 +105,7 @@ type ResolveURLRequest struct {
 	StreamURL          string
 	PlayerURL          string
 	EncryptedSignature string
-	SignatureKey        string // default "sig"
+	SignatureKey       string // default "sig"
 	NParam             string
 }
 

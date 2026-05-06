@@ -204,7 +204,6 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	// wiring — see monitor_callbacks.go.
 	s.wireMonitorCallbacks()
 
-
 	// =========================================================================
 	// Start services (consumers first)
 	// =========================================================================

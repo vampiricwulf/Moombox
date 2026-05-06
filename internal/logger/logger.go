@@ -42,18 +42,18 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 // then publishes to ring/jobs/subscribers (each under its own mutex) without
 // holding fileMu. Audit reports/small-packages.md.
 type Logger struct {
-	slog    *slog.Logger
-	level   *slog.LevelVar
-	file    *os.File
-	fileMu  sync.Mutex
+	slog   *slog.Logger
+	level  *slog.LevelVar
+	file   *os.File
+	fileMu sync.Mutex
 
 	// Toggleable stdout writer (disabled during TUI)
 	stdout *switchableWriter
 
 	// File rotation
-	filePath   string
-	maxSize    int
-	maxFiles   int
+	filePath    string
+	maxSize     int
+	maxFiles    int
 	currentSize int64
 
 	// Ring buffer for recent log lines
@@ -104,12 +104,12 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 		maxFiles = 1
 	}
 	l := &Logger{
-		filePath: filePath,
-		maxSize:  maxSize,
-		maxFiles: maxFiles,
-		ringSize: defaultRingSize,
+		filePath:   filePath,
+		maxSize:    maxSize,
+		maxFiles:   maxFiles,
+		ringSize:   defaultRingSize,
 		ringBuffer: make([]string, defaultRingSize),
-		jobLogs:  make(map[string]*jobLogBuffer),
+		jobLogs:    make(map[string]*jobLogBuffer),
 	}
 
 	// Set up log level

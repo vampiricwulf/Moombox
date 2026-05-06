@@ -106,4 +106,3 @@ func FetchBody(ctx context.Context, url string, timeout time.Duration, headers m
 
 	return io.ReadAll(io.LimitReader(resp.Body, MaxFetchBodySize))
 }
-

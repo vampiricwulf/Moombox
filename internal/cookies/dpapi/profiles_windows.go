@@ -59,4 +59,3 @@ func findBrowserProfilesIn(localAppData string) []BrowserProfile {
 	}
 	return out
 }
-

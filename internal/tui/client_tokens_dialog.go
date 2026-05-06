@@ -59,7 +59,7 @@ func (d clientTokenDelegate) Render(w io.Writer, m list.Model, index int, item l
 	// BEFORE assembling with styled parts — truncateString uses runewidth
 	// which miscounts ANSI escape sequences from DimStyle.Render).
 	suffixW := 2 + lipgloss.Width(lastUsed) + 2 + lipgloss.Width(ipStr) // "  " + lastUsed + "  " + ipStr
-	maxLabelW := max(m.Width()-2-suffixW, 10) // 2 for prefix
+	maxLabelW := max(m.Width()-2-suffixW, 10)                           // 2 for prefix
 	label := truncateString(ct.Label, maxLabelW)
 
 	var style lipgloss.Style

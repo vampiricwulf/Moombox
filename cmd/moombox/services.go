@@ -52,7 +52,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	cfg, err := config.Load(s.configPath)
 	if err != nil {
-		return fmt.Errorf("Failed to load config: %w", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 	s.cfg = cfg
 	// configStore owns the synchronising mutex (no external cfgMu — every
@@ -68,7 +68,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	log, err := logger.New(cfg.Paths.LogFilePath, cfg.Logs.LogLevel, cfg.Logs.LogMaxFileSize, cfg.Logs.LogMaxFiles)
 	if err != nil {
-		return fmt.Errorf("Failed to initialize logger: %w", err)
+		return fmt.Errorf("initialize logger: %w", err)
 	}
 	s.log = log
 	// Close the logger at most once — the deferred close at the bottom of
@@ -112,7 +112,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	}
 	db, err := database.Open(cfg.Paths.DatabasePath, log)
 	if err != nil {
-		return fmt.Errorf("Failed to open database: %w", err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	s.db = db
 	// Database Close is wrapped in sync.Once so both the orderly shutdown
@@ -570,4 +570,3 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	return nil
 }
-

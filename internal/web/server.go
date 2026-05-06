@@ -10,16 +10,16 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
 	"io"
+	"io/fs"
 	"log"
-	"sync/atomic"
 	"net"
 	"net/http"
 	"os/exec"
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -653,4 +653,3 @@ func openBrowserURL(url string) {
 		_ = cmd.Process.Release()
 	}
 }
-

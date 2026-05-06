@@ -133,12 +133,12 @@ var AndroidVRClient = YouTubeClientConfig{
 	ClientID:      "28",
 	UserAgent:     UserAgents.AndroidVR,
 	Context: map[string]any{
-		"clientName":       "ANDROID_VR",
-		"clientVersion":    "1.65.10",
+		"clientName":        "ANDROID_VR",
+		"clientVersion":     "1.65.10",
 		"androidSdkVersion": 32,
-		"osVersion":        "12L",
-		"deviceMake":       "Oculus",
-		"deviceModel":      "Quest 3",
+		"osVersion":         "12L",
+		"deviceMake":        "Oculus",
+		"deviceModel":       "Quest 3",
 	},
 }
 
@@ -152,13 +152,13 @@ var IOSClient = YouTubeClientConfig{
 	ClientID:      "5",
 	UserAgent:     UserAgents.IOS,
 	Context: map[string]any{
-		"clientName":     "IOS",
-		"clientVersion":  "19.29.1",
-		"deviceMake":     "Apple",
-		"deviceModel":    "iPhone16,2",
-		"osName":         "iOS",
-		"osVersion":      "17.5.1.21F90",
-		"hl":             "en",
+		"clientName":    "IOS",
+		"clientVersion": "19.29.1",
+		"deviceMake":    "Apple",
+		"deviceModel":   "iPhone16,2",
+		"osName":        "iOS",
+		"osVersion":     "17.5.1.21F90",
+		"hl":            "en",
 	},
 }
 
@@ -221,14 +221,14 @@ const TwitchGQLClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 // schema changes, so a stale hash returns a "PersistedQueryNotFound"
 // error and breaks the relevant code path silently. Audit-finding #33.
 var TwitchGQLHashes = struct {
-	StreamMetadata               string
-	ComscoreStreamingQuery       string
-	VideoMetadata                string
+	StreamMetadata                string
+	ComscoreStreamingQuery        string
+	VideoMetadata                 string
 	VideoCommentsByOffsetOrCursor string
 }{
-	StreamMetadata:               "ad022ca32220d5523d03a23cbcb5beaa1e0999889c1f8f78f9f2520dafb5cae6",
-	ComscoreStreamingQuery:       "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
-	VideoMetadata:                "45111672eea2e507f8ba44d101a61862f9c56b11dee09a15634cb75cb9b9084d",
+	StreamMetadata:                "ad022ca32220d5523d03a23cbcb5beaa1e0999889c1f8f78f9f2520dafb5cae6",
+	ComscoreStreamingQuery:        "e1edae8122517d013405f237ffcc124515dc6ded82480a88daef69c83b53ac01",
+	VideoMetadata:                 "45111672eea2e507f8ba44d101a61862f9c56b11dee09a15634cb75cb9b9084d",
 	VideoCommentsByOffsetOrCursor: "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a",
 }
 

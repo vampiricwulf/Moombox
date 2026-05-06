@@ -6,7 +6,7 @@ import (
 )
 
 type fakeReporter struct {
-	failures atomic.Int64
+	failures  atomic.Int64
 	successes atomic.Int64
 	lastTag   atomic.Value // string
 }

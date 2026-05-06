@@ -67,7 +67,7 @@ type ReleaseInfo struct {
 	Version          string `json:"version"`                // "2.0.16" (stripped "v" prefix)
 	TagName          string `json:"tagName"`                // "v2.0.16"
 	DownloadURL      string `json:"downloadUrl"`            // asset browser_download_url for the platform binary (Moombox.exe / moombox-linux-{amd64,arm64})
-	SignatureURL      string `json:"signatureUrl,omitempty"` // asset browser_download_url for the matching .sig
+	SignatureURL     string `json:"signatureUrl,omitempty"` // asset browser_download_url for the matching .sig
 	ReleaseNotes     string `json:"releaseNotes"`           // stripped raw markdown (for TUI glamour rendering)
 	ReleaseNotesHtml string `json:"releaseNotesHtml"`       // sanitized HTML (for web UI innerHTML)
 	PublishedAt      string `json:"publishedAt"`
@@ -148,11 +148,11 @@ func New(currentVersion string, log logger) (*Updater, error) {
 		return nil, fmt.Errorf("cannot determine executable path: %w", err)
 	}
 	return &Updater{
-		currentVersion: strings.TrimPrefix(currentVersion, "v"),
-		exePath:        exePath,
-		logger:         log,
-		repoOwner:      "vampiricwulf",
-		repoName:       "Moombox",
+		currentVersion:  strings.TrimPrefix(currentVersion, "v"),
+		exePath:         exePath,
+		logger:          log,
+		repoOwner:       "vampiricwulf",
+		repoName:        "Moombox",
 		client:          httpx.Client(10 * time.Second),
 		apiBaseURL:      "https://api.github.com",
 		verifySignature: VerifySignature,

@@ -311,9 +311,9 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 			notifications.TypeSuccess,
 			finFields,
 			notifications.SendOptions{
-				URL:       jobCtx.Job.URL,
-				Image:     jobCtx.Job.ThumbnailURL,
-				Event:     "finished",
+				URL:   jobCtx.Job.URL,
+				Image: jobCtx.Job.ThumbnailURL,
+				Event: "finished",
 			},
 		)
 	}

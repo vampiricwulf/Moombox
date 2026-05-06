@@ -17,7 +17,7 @@ import (
 type fieldType int
 
 const (
-	fieldText   fieldType = iota
+	fieldText fieldType = iota
 	fieldNumber
 	fieldToggle
 	fieldCycle
@@ -222,8 +222,8 @@ type SettingsModel struct {
 	// Values
 	values         map[string]string
 	originalValues map[string]string
-	dirty       bool
-	structDirty bool // set by channel/notification/security edits (not clearable by recheckDirty)
+	dirty          bool
+	structDirty    bool // set by channel/notification/security edits (not clearable by recheckDirty)
 
 	// Layout state (set during View, read by mouse handler)
 	lastButtonContentY int // contentY where buttons were rendered (-1 = not rendered)
@@ -240,8 +240,8 @@ type SettingsModel struct {
 	configStore *config.Store
 
 	// Callbacks
-	OnSave           func(cfg *config.MoomboxConfig)
-	OnRestart        func()
+	OnSave    func(cfg *config.MoomboxConfig)
+	OnRestart func()
 	// OnRestartRequired fires when a settings save commits a value
 	// flagged in restartRequiredKeys, regardless of whether the user
 	// then triggers OnRestart from the modal or dismisses it. The App
@@ -249,8 +249,8 @@ type SettingsModel struct {
 	// doesn't leave a config/runtime mismatch with no visual reminder.
 	// Audit reports/tui.md #26.
 	OnRestartRequired func()
-	OnHashPassword   func(password string) string
-	OnVerifyPassword func(password, hash string) bool
+	OnHashPassword    func(password string) string
+	OnVerifyPassword  func(password, hash string) bool
 
 	// Channel sub-editor state
 	channelIndex      int
@@ -271,14 +271,14 @@ type SettingsModel struct {
 	notifications   []config.NotificationConfig
 
 	// Security sub-editor state
-	secMode          securityMode
-	secMessage       string
-	secMessageColor  color.Color
-	secCurrentPw     string
-	secNewPw         string
-	secConfirmPw     string
-	secRemovePw      string
-	secFieldIndex    int
+	secMode         securityMode
+	secMessage      string
+	secMessageColor color.Color
+	secCurrentPw    string
+	secNewPw        string
+	secConfirmPw    string
+	secRemovePw     string
+	secFieldIndex   int
 
 	// Restart overlay
 	showRestartOverlay bool

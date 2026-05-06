@@ -47,7 +47,7 @@ type JobQueue struct {
 	cancelled       map[string]bool // tracks user-initiated cancellations (vs shutdown)
 	notify          chan struct{}
 	dlNotify        chan struct{} // signaling for download slot availability
-	logger          logger       // optional logger for warnings
+	logger          logger        // optional logger for warnings
 }
 
 // NewJobQueue creates a new job queue.

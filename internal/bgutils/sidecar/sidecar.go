@@ -105,8 +105,8 @@ type Sidecar struct {
 }
 
 type rpcRequest struct {
-	ID     uint64                 `json:"id"`
-	Method string                 `json:"method"`
+	ID     uint64         `json:"id"`
+	Method string         `json:"method"`
 	Params map[string]any `json:"params,omitempty"`
 }
 

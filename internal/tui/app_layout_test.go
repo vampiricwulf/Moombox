@@ -89,7 +89,7 @@ func TestFeedbackColorDefaultGreen(t *testing.T) {
 		"",
 	}
 	for _, msg := range tests {
-		t.Run("[" + msg + "]", func(t *testing.T) {
+		t.Run("["+msg+"]", func(t *testing.T) {
 			if got := feedbackColor(msg); got != ColorGreen {
 				t.Errorf("feedbackColor(%q): want green, got %v", msg, got)
 			}

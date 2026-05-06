@@ -96,7 +96,7 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		IsUpcoming:         isUpcoming,
 		IsPostLiveDVR:      isPostLiveDVR,
 		LengthSeconds:      lengthSeconds,
-		EndTimestamp:        endTimestamp,
+		EndTimestamp:       endTimestamp,
 		ScheduledStartTime: scheduledStartTime,
 		DashManifestURL:    getStr(streamingData, "dashManifestUrl"),
 		HlsManifestURL:     getStr(streamingData, "hlsManifestUrl"),

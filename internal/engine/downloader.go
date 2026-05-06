@@ -31,19 +31,19 @@ var ErrSegmentPermanent = errors.New("segment permanently unavailable")
 var ErrSegmentRetriesExhausted = errors.New("segment retries exhausted")
 
 const (
-	CatchupThreshold    = 10
-	MaxSegmentRetries   = 5
-	ParallelDownloads   = 6  // Bounded parallel downloads during catch-up
-	DefaultRetryDelayCap = 60 // seconds
-	HeadProbeInterval   = 5 * time.Second
-	SegmentTimeout      = 30 * time.Second
-	NoSegmentTimeout    = 10 * time.Minute
-	ResumeSeqInterval   = 50 // Save resume state every N sequential segments
+	CatchupThreshold      = 10
+	MaxSegmentRetries     = 5
+	ParallelDownloads     = 6  // Bounded parallel downloads during catch-up
+	DefaultRetryDelayCap  = 60 // seconds
+	HeadProbeInterval     = 5 * time.Second
+	SegmentTimeout        = 30 * time.Second
+	NoSegmentTimeout      = 10 * time.Minute
+	ResumeSeqInterval     = 50 // Save resume state every N sequential segments
 	ResumeCatchupInterval = 10 // Save resume state every N catch-up segments
 	// DownloadChunkSize is sourced from the central constants catalog (5 MB).
-	DownloadChunkSize   = constants.DownloadChunkSize
-	MaxChunkRetries     = 3                      // Per-chunk retry limit
-	ProgressThrottle    = 500 * time.Millisecond // Throttle VOD progress emission
+	DownloadChunkSize = constants.DownloadChunkSize
+	MaxChunkRetries   = 3                      // Per-chunk retry limit
+	ProgressThrottle  = 500 * time.Millisecond // Throttle VOD progress emission
 
 	// stayBehindSegments is the number of segments to stay behind the live edge
 	// during parallel catch-up, avoiding download of in-flight segments.
@@ -56,23 +56,23 @@ const (
 
 // DownloaderOptions configures a SegmentDownloader.
 type DownloaderOptions struct {
-	BaseURL            string
-	OutputFile         string
-	StartSeq           int
-	EndSeq             int // -1 for unlimited
-	PoToken            string
-	CookieHeader       string // Cookie header for authenticated downloads
-	IsHls              bool
-	IsDirectURL        bool // Direct URL download (not segmented)
-	MaxRetries         int
-	InitURL            string
-	ForceStartSeq      bool   // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
-	ResumeFile         string
-	RetryDelayCap      int // seconds
-	LiveCheckRetries   int
-	CheckStreamStatus  func(ctx context.Context) (bool, error) // Returns true if stream ended
-	IsOnline           func() bool                             // Returns false if device has no internet
-	Logger             DownloaderLogger
+	BaseURL           string
+	OutputFile        string
+	StartSeq          int
+	EndSeq            int // -1 for unlimited
+	PoToken           string
+	CookieHeader      string // Cookie header for authenticated downloads
+	IsHls             bool
+	IsDirectURL       bool // Direct URL download (not segmented)
+	MaxRetries        int
+	InitURL           string
+	ForceStartSeq     bool // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
+	ResumeFile        string
+	RetryDelayCap     int // seconds
+	LiveCheckRetries  int
+	CheckStreamStatus func(ctx context.Context) (bool, error) // Returns true if stream ended
+	IsOnline          func() bool                             // Returns false if device has no internet
+	Logger            DownloaderLogger
 }
 
 // DownloadProgress holds progress information for event callbacks.
@@ -138,25 +138,31 @@ func (nopLogger) Error(string, ...any) {}
 // The zero value represents a zero time (IsZero() returns true from Load()).
 type atomicTime struct{ v atomic.Int64 }
 
-func (a *atomicTime) Store(t time.Time)          { a.v.Store(t.UnixNano()) }
-func (a *atomicTime) Load() time.Time            { n := a.v.Load(); if n == 0 { return time.Time{} }; return time.Unix(0, n) }
-func (a *atomicTime) StoreNow()                  { a.v.Store(time.Now().UnixNano()) }
-func (a *atomicTime) Since() time.Duration       { return time.Since(a.Load()) }
+func (a *atomicTime) Store(t time.Time) { a.v.Store(t.UnixNano()) }
+func (a *atomicTime) Load() time.Time {
+	n := a.v.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+func (a *atomicTime) StoreNow()            { a.v.Store(time.Now().UnixNano()) }
+func (a *atomicTime) Since() time.Duration { return time.Since(a.Load()) }
 
 // SegmentDownloader downloads DASH or HLS segments sequentially/in parallel.
 type SegmentDownloader struct {
-	opts              DownloaderOptions
-	mu                sync.Mutex
-	running           bool
-	cancelled         atomic.Bool
-	streamEnded       atomic.Bool
-	outputFile        *os.File
-	bytesWritten      atomic.Int64
-	currentSeq        atomic.Int64
-	headSeq           atomic.Int64
-	lastSegTime       atomicTime
-	lastHeadProbeTime atomicTime
-	logger            DownloaderLogger
+	opts               DownloaderOptions
+	mu                 sync.Mutex
+	running            bool
+	cancelled          atomic.Bool
+	streamEnded        atomic.Bool
+	outputFile         *os.File
+	bytesWritten       atomic.Int64
+	currentSeq         atomic.Int64
+	headSeq            atomic.Int64
+	lastSegTime        atomicTime
+	lastHeadProbeTime  atomicTime
+	logger             DownloaderLogger
 	cipherFailureFired atomic.Bool
 
 	// baseURLOverride is set by SetBaseURL when a cipher rotation
@@ -170,15 +176,15 @@ type SegmentDownloader struct {
 	// snapshots. transientRetries / lastTransientErrMu are read-mostly
 	// in the segment fetcher (each non-terminal error is one increment
 	// + one store), so a plain mutex is fine.
-	startedAt           atomicTime
-	transientRetries    atomic.Int64
-	lastTransientErr    atomic.Pointer[string]
+	startedAt        atomicTime
+	transientRetries atomic.Int64
+	lastTransientErr atomic.Pointer[string]
 
 	// Callbacks
-	OnStart          func(seq int, resuming bool)
-	OnProgress       func(p DownloadProgress)
-	OnGap            func(g DownloadGap)
-	OnFinish         func()
+	OnStart    func(seq int, resuming bool)
+	OnProgress func(p DownloadProgress)
+	OnGap      func(g DownloadGap)
+	OnFinish   func()
 	// OnHealthUpdate is called with an aggregate-metrics snapshot
 	// alongside each OnProgress emission. Audit reports/engine.md #31.
 	// Optional; nil to opt out.
@@ -205,29 +211,6 @@ type SegmentDownloader struct {
 // DECISIONS #7.
 func (d *SegmentDownloader) SetBaseURL(url string) {
 	d.baseURLOverride.Store(&url)
-}
-
-// recordTransientErr increments the retry counter and stores the error
-// message for the next HealthUpdate emission. Safe to call from any
-// goroutine. Audit reports/engine.md #31.
-func (d *SegmentDownloader) recordTransientErr(err error) {
-	if err == nil {
-		return
-	}
-	d.transientRetries.Add(1)
-	msg := err.Error()
-	d.lastTransientErr.Store(&msg)
-}
-
-// emitProgress fires both OnProgress (segment-level metrics) and
-// OnHealthUpdate (aggregate metrics). Centralised so any future caller
-// site only has to call one helper to keep the two callbacks in sync.
-// Nil-callback safe on both.
-func (d *SegmentDownloader) emitProgress(p DownloadProgress) {
-	if d.OnProgress != nil {
-		d.OnProgress(p)
-	}
-	d.emitHealthUpdate(p)
 }
 
 // emitHealthUpdate fires OnHealthUpdate with a snapshot of the current
@@ -512,4 +495,3 @@ func truncateURL(u string, maxLen int) string {
 	}
 	return u[:maxLen] + "..."
 }
-

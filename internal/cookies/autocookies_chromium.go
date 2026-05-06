@@ -20,10 +20,10 @@ import (
 // place rather than scattered across every CDP helper (audit
 // reports/cookies.md #38).
 const (
-	cdpPollTimeout     = 15 * time.Second      // wait for /json/version readiness
-	cdpExtractTimeout  = 30 * time.Second      // total budget for extractChromiumCookies
-	cdpRefreshTimeout  = 30 * time.Second      // total budget for refreshChromium CDP work
-	cdpNavigateTimeout = 30 * time.Second      // single Page.navigate + loadEventFired wait
+	cdpPollTimeout     = 15 * time.Second // wait for /json/version readiness
+	cdpExtractTimeout  = 30 * time.Second // total budget for extractChromiumCookies
+	cdpRefreshTimeout  = 30 * time.Second // total budget for refreshChromium CDP work
+	cdpNavigateTimeout = 30 * time.Second // single Page.navigate + loadEventFired wait
 	// cdpCloseFlushDelay is the post-Browser.close pause that lets Chromium
 	// flush cookies to disk before our defer kills the process tree. Replaces
 	// a bare 500ms literal (audit reports/cookies.md #45).

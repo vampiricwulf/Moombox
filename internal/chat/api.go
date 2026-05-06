@@ -790,4 +790,3 @@ func generateMessageID() string {
 	}
 	return fmt.Sprintf("gen-%d-%s", time.Now().UnixMicro(), string(suffix[:]))
 }
-
