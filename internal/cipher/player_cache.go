@@ -60,27 +60,66 @@ func NewPlayerCache(cacheDir string, logger interface {
 	return &PlayerCache{cacheDir: dir, logger: logger}, nil
 }
 
-// CacheKey returns a short hex digest of the player URL for use as a cache
-// key. Full 64-char SHA-256 was overkill for this domain (a few thousand
-// entries at most) and hit Windows MAX_PATH limits faster when combined with
-// a long cacheDir. 16 hex chars = 64 bits of hash space; collision probability
-// across thousands of entries is ~1 in 2^50 — negligible for cache keys.
+// extractPlayerIDFromURL extracts the player ID from a player URL without
+// any fallback — returns "" when the URL doesn't match the expected shape.
+// Shared by CacheKey and PlayerIDFromURL to avoid a circular dependency
+// (PlayerIDFromURL formerly fell back to CacheKey; CacheKey now needs
+// extraction to derive a playerID-stable key).
 //
-// Existing 64-char cached files from prior versions become unreachable and
-// are harmlessly eviction-swept by the background 24h tick.
-func CacheKey(playerURL string) string {
-	h := sha256.Sum256([]byte(playerURL))
-	return fmt.Sprintf("%x", h[:8]) // 8 bytes = 16 hex chars
-}
-
-// PlayerIDFromURL extracts the player ID from a player URL.
 // e.g. "https://www.youtube.com/s/player/abcdef12/player_ias.vflset/en_US/base.js" -> "abcdef12"
-func PlayerIDFromURL(playerURL string) string {
+func extractPlayerIDFromURL(playerURL string) string {
 	parts := strings.Split(playerURL, "/")
 	for i, p := range parts {
 		if p == "player" && i+1 < len(parts) {
 			return parts[i+1]
 		}
+	}
+	return ""
+}
+
+// CacheKey returns a short hex digest for use as a solver/disk cache key.
+// The key is derived from the playerID segment of the URL (the 8-ish char
+// segment after /s/player/ in the canonical URL shape) so two URLs that
+// differ only in their locale segment (e.g. en_US vs en_GB vs de) hash to
+// the same key.
+//
+// This prevents the in-memory solver cache from holding two ~44 MB compiled
+// goja Runtimes for the same player when the routed and legacy code paths
+// reach GetSolvers via URLs with different locale segments (the routed path
+// constructs synthetic en_US URLs via playerURLForID; the legacy path uses
+// the watch-page playerURL which can carry any locale).
+//
+// Full 64-char SHA-256 was overkill for this domain (a few thousand entries
+// at most) and hit Windows MAX_PATH limits faster when combined with a long
+// cacheDir. 16 hex chars = 64 bits of hash space; collision probability
+// across thousands of entries is ~1 in 2^50 — negligible for cache keys.
+//
+// Falls back to hashing the full URL for malformed inputs where the playerID
+// can't be extracted (preserves a stable key even on unusual URL shapes).
+//
+// Existing disk-cached files from prior versions become unreachable and are
+// harmlessly eviction-swept by the background 24h tick.
+func CacheKey(playerURL string) string {
+	id := extractPlayerIDFromURL(playerURL)
+	if id == "" {
+		// Malformed URL — fall back to hashing the full URL so callers
+		// still get a stable, deterministic key.
+		h := sha256.Sum256([]byte(playerURL))
+		return fmt.Sprintf("%x", h[:8])
+	}
+	h := sha256.Sum256([]byte(id))
+	return fmt.Sprintf("%x", h[:8]) // 8 bytes = 16 hex chars
+}
+
+// PlayerIDFromURL extracts the player ID from a player URL.
+// e.g. "https://www.youtube.com/s/player/abcdef12/player_ias.vflset/en_US/base.js" -> "abcdef12"
+//
+// Falls back to the URL hash (via CacheKey) on malformed inputs — safe here
+// because CacheKey's fallback path uses URL-hash directly (no extraction),
+// so there is no recursion.
+func PlayerIDFromURL(playerURL string) string {
+	if id := extractPlayerIDFromURL(playerURL); id != "" {
+		return id
 	}
 	return CacheKey(playerURL)
 }

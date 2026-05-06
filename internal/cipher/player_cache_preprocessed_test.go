@@ -6,6 +6,39 @@ import (
 	"testing"
 )
 
+// TestCacheKey_LocaleInsensitive verifies that CacheKey produces the same
+// result for URLs that differ only in their locale segment (en_US, en_GB,
+// de, etc.). This is the key invariant that prevents the solver LRU from
+// holding two ~44 MB compiled goja Runtimes for the same player when the
+// routed path (synthetic en_US URL) and the legacy path (watch-page URL
+// with an arbitrary locale) both call GetSolvers.
+func TestCacheKey_LocaleInsensitive(t *testing.T) {
+	const playerID = "cb017549"
+	urls := []string{
+		"https://www.youtube.com/s/player/" + playerID + "/player_ias.vflset/en_US/base.js",
+		"https://www.youtube.com/s/player/" + playerID + "/player_ias.vflset/en_GB/base.js",
+		"https://www.youtube.com/s/player/" + playerID + "/player_ias.vflset/de/base.js",
+	}
+
+	want := CacheKey(urls[0])
+	for _, u := range urls[1:] {
+		got := CacheKey(u)
+		if got != want {
+			t.Errorf("CacheKey(%q) = %q; want %q (same as en_US)", u, got, want)
+		}
+	}
+}
+
+// TestCacheKey_DistinctPlayers verifies that two different playerIDs produce
+// different cache keys — i.e. the playerID-only hashing is still discriminating.
+func TestCacheKey_DistinctPlayers(t *testing.T) {
+	keyA := CacheKey("https://www.youtube.com/s/player/cb017549/player_ias.vflset/en_US/base.js")
+	keyB := CacheKey("https://www.youtube.com/s/player/74edf1a3/player_ias.vflset/en_US/base.js")
+	if keyA == keyB {
+		t.Errorf("CacheKey collision: different playerIDs produced the same key %q", keyA)
+	}
+}
+
 // nopLogger is a minimal logger sink for player_cache tests that don't
 // exercise log output.
 type nopPlayerCacheLogger struct{}
