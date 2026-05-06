@@ -32,7 +32,6 @@ import { spawnSync } from "node:child_process";
 import { statSync, readdirSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import * as esbuild from "esbuild";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -79,25 +78,56 @@ mkdirSync(embedDir, { recursive: true });
 //
 // Output: vendor/ejs.bundle.js. Gitignored; regenerated on every build.
 // Included in the production tarball (see step 2 below).
+//
+// We invoke esbuild as a CLI subprocess rather than using the JS API so
+// that esbuild.exe is a child process that exits immediately after
+// bundling. This is necessary on Windows: the JS API loads esbuild.exe
+// in-process via a native binding, and Windows holds a file lock on it
+// for the life of the Node.js process, which would prevent the npm prune
+// step (1c) from deleting the @esbuild/win32-x64 package.
 // ---------------------------------------------------------------------------
 const ejsEntry = resolve(__dirname, "vendor", "ejs", "src", "yt", "solver", "main.ts");
 const ejsBundle = resolve(__dirname, "vendor", "ejs.bundle.js");
-const buildResult = await esbuild.build({
-    entryPoints: [ejsEntry],
-    bundle: true,
-    format: "esm",
-    platform: "neutral",
-    target: "node20",
-    outfile: ejsBundle,
-    minify: true,
-    legalComments: "none",
-});
-if (buildResult.errors.length > 0) {
-    console.error("ejs bundle errors:", buildResult.errors);
-    process.exit(1);
+const esbuildResult = spawnSync(
+    "npx",
+    [
+        "--no-install",
+        "esbuild",
+        ejsEntry,
+        "--bundle",
+        "--format=esm",
+        "--platform=neutral",
+        "--target=node20",
+        `--outfile=${ejsBundle}`,
+        "--minify",
+        "--legal-comments=none",
+    ],
+    { cwd: __dirname, stdio: "inherit", shell: true },
+);
+if (esbuildResult.status !== 0) {
+    console.error(`esbuild exited with status ${esbuildResult.status}`);
+    process.exit(esbuildResult.status ?? 1);
 }
 const ejsSize = statSync(ejsBundle).size;
 console.log(`ejs bundle    ${(ejsSize / 1024).toFixed(1)} KB  vendor/ejs.bundle.js`);
+
+// ---------------------------------------------------------------------------
+// 1c. Prune devDeps from node_modules so the tarball ships only runtime
+// dependencies. esbuild (used in step 1b) is a devDep weighing ~12 MB —
+// without this prune the tarball roughly doubles in size for no runtime
+// benefit. We do this AFTER bundling so the bundle has access to
+// esbuild, and step 3b below restores devDeps so further development
+// isn't blocked.
+// ---------------------------------------------------------------------------
+const pruneResult = spawnSync(
+    "npm",
+    ["prune", "--omit=dev", "--no-audit", "--no-fund"],
+    { cwd: __dirname, stdio: "inherit", shell: true },
+);
+if (pruneResult.status !== 0) {
+    console.error(`npm prune --omit=dev exited with status ${pruneResult.status}`);
+    process.exit(pruneResult.status ?? 1);
+}
 
 // ---------------------------------------------------------------------------
 // 2. Tar.
@@ -122,6 +152,21 @@ if (result.status !== 0) {
 // ---------------------------------------------------------------------------
 copyFileSync(distTar, embedTar);
 try { rmSync(stale); } catch { /* not present, fine */ }
+
+// ---------------------------------------------------------------------------
+// 3b. Restore devDeps so subsequent development (running `node build.mjs`
+// again, npm scripts, etc.) isn't blocked by missing tools. Idempotent:
+// if devDeps are already present, npm install is a near-no-op.
+// ---------------------------------------------------------------------------
+const restoreResult = spawnSync(
+    "npm",
+    ["install", "--no-audit", "--no-fund", "--ignore-scripts"],
+    { cwd: __dirname, stdio: "inherit", shell: true },
+);
+if (restoreResult.status !== 0) {
+    console.error(`npm install (devDep restore) exited with status ${restoreResult.status}`);
+    process.exit(restoreResult.status ?? 1);
+}
 
 // ---------------------------------------------------------------------------
 // 4. Report.

@@ -75,7 +75,7 @@ jobs:
         if: steps.cache-embed.outputs.cache-hit != 'true'
         run: |
           cd bgutil-sidecar
-          npm ci --omit=dev --no-audit --no-fund --ignore-scripts
+          npm ci --no-audit --no-fund --ignore-scripts
           node build.mjs
           cd ..
 
