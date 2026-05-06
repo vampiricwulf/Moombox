@@ -53,7 +53,7 @@ type DownloadOrchestrator struct {
 	ffmpegPath   string
 	db           *database.Database
 	queue        *JobQueue
-	cipherSolver *cipher.Solver
+	cipherSolver *cipher.GojaResolver
 	potProvider  *bgutils.PotProvider
 	notifier     *notifications.Manager
 	conn         Connectivity
@@ -61,7 +61,7 @@ type DownloadOrchestrator struct {
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.
-func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.Solver, pp *bgutils.PotProvider, nm *notifications.Manager, conn Connectivity) *DownloadOrchestrator {
+func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath string, logger logger, cs *cipher.GojaResolver, pp *bgutils.PotProvider, nm *notifications.Manager, conn Connectivity) *DownloadOrchestrator {
 	return &DownloadOrchestrator{
 		muxer:        engine.NewMuxer(ffmpegPath, logger),
 		ffmpegPath:   ffmpegPath,

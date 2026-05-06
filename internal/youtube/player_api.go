@@ -29,7 +29,7 @@ type PotTokenProvider interface {
 type PlayerAPI struct {
 	auth         *Auth
 	apiKey       string
-	cipherSolver *cipher.Solver
+	cipherSolver *cipher.GojaResolver
 	potProvider  PotTokenProvider
 	// OnVisitorData is called when visitor data is extracted from a watch page.
 	OnVisitorData func(visitorData string)
@@ -56,7 +56,7 @@ func NewPlayerAPI(auth *Auth, logger interface {
 }
 
 // SetCipherSolver sets the cipher solver for signature/n-param decryption.
-func (p *PlayerAPI) SetCipherSolver(solver *cipher.Solver) {
+func (p *PlayerAPI) SetCipherSolver(solver *cipher.GojaResolver) {
 	p.cipherSolver = solver
 }
 

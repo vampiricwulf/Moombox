@@ -22,7 +22,7 @@ type StrategyDeps struct {
 	// CipherSolver is required by VOD (signature/n-param decryption on
 	// direct formats) and DASH (manifest-time decryption). HLS does
 	// not need it. nil disables cipher work.
-	CipherSolver *cipher.Solver
+	CipherSolver *cipher.GojaResolver
 
 	// PotProvider mints PO tokens for GVS (Google Video Server) requests.
 	// All YouTube strategies use it when non-nil.

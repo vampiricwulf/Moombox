@@ -60,7 +60,7 @@ type runState struct {
 	twService    *twitch.Service
 	potProvider  *bgutils.PotProvider
 	bgSidecar    *sidecar.Sidecar
-	cipherSolver *cipher.Solver
+	cipherSolver *cipher.GojaResolver
 
 	// --- Worker + notifications ---
 	notifyMgr *notifications.Manager

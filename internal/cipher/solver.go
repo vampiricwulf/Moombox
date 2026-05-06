@@ -17,8 +17,9 @@ import (
 // probed. 10 leaves comfortable headroom while still bounding memory.
 const solverCacheSize = 10
 
-// Solver manages 2-tier caching (disk -> solver) for cipher decryption.
-type Solver struct {
+// GojaResolver manages 2-tier caching (disk -> solver) for cipher decryption.
+// It implements the Solver interface using in-process Goja VMs.
+type GojaResolver struct {
 	playerCache *PlayerCache
 	stsCache    *StsCache
 	solverMu    sync.RWMutex
@@ -37,19 +38,19 @@ type Solver struct {
 	}
 }
 
-// NewSolver creates a new cipher solver with the given cache directory.
-func NewSolver(cacheDir string, logger interface {
+// NewGojaResolver creates a new GojaResolver with the given cache directory.
+func NewGojaResolver(cacheDir string, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
 	Warn(msg string, args ...any)
 	Error(msg string, args ...any)
-}) (*Solver, error) {
+}) (*GojaResolver, error) {
 	pc, err := NewPlayerCache(cacheDir, logger)
 	if err != nil {
 		return nil, fmt.Errorf("create player cache: %w", err)
 	}
 
-	s := &Solver{
+	s := &GojaResolver{
 		playerCache: pc,
 		stsCache:    NewStsCache(),
 		solverData:  make(map[string]*Solvers),
@@ -61,7 +62,7 @@ func NewSolver(cacheDir string, logger interface {
 		logger.Debug("[Cipher] player cache eviction skipped", "err", err)
 	}
 
-	// Background sweep: Solver lives for the process lifetime. The 14-day
+	// Background sweep: GojaResolver lives for the process lifetime. The 14-day
 	// TTL on disk entries means a long-running 24/7 process would never
 	// evict without this — startup-only eviction leaves entries for the
 	// full window. Goroutine runs forever; panic recovery per CLAUDE.md
@@ -87,7 +88,7 @@ func NewSolver(cacheDir string, logger interface {
 // GetSolvers returns the sig/n solver functions for a player URL.
 // Uses 2-tier caching: solver cache (compiled Goja VMs) -> disk cache (raw JS).
 // Serializes compilation so only one goroutine compiles per player URL.
-func (s *Solver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, error) {
+func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, error) {
 	key := CacheKey(playerURL)
 	playerID := PlayerIDFromURL(playerURL)
 
@@ -135,7 +136,7 @@ func (s *Solver) GetSolvers(ctx context.Context, playerURL string) (*Solvers, er
 	return solvers, nil
 }
 
-func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) (*Solvers, error) {
+func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID string) (*Solvers, error) {
 	s.logger.Debug("cipher: fetching player JS", "playerID", playerID)
 	playerJS, err := s.playerCache.Fetch(ctx, playerURL)
 	if err != nil {
@@ -212,7 +213,7 @@ func (s *Solver) compileSolver(ctx context.Context, playerURL, playerID string) 
 // (e.g., producing 403 errors at runtime). The STS cache keyed on the same
 // player is also dropped — if we keep the stale signatureTimestamp and pair
 // it with a freshly-compiled solver, we can hit an invalidation loop.
-func (s *Solver) InvalidateSolver(playerURL string) {
+func (s *GojaResolver) InvalidateSolver(playerURL string) {
 	key := CacheKey(playerURL)
 
 	s.solverMu.Lock()
@@ -239,7 +240,7 @@ func (s *Solver) InvalidateSolver(playerURL string) {
 	s.logger.Info("cipher: invalidated solver", "playerID", PlayerIDFromURL(playerURL))
 }
 
-func (s *Solver) cacheSolvers(key string, solvers *Solvers) {
+func (s *GojaResolver) cacheSolvers(key string, solvers *Solvers) {
 	s.solverMu.Lock()
 	defer s.solverMu.Unlock()
 
@@ -263,7 +264,7 @@ func (s *Solver) cacheSolvers(key string, solvers *Solvers) {
 // touchLRU moves key to the end of solverOrder so the LRU window reflects
 // the most-recently-USED entries, not the most-recently-INSERTED ones.
 // Caller must hold s.solverMu.Lock() (not RLock — this mutates).
-func (s *Solver) touchLRU(key string) {
+func (s *GojaResolver) touchLRU(key string) {
 	for i, k := range s.solverOrder {
 		if k == key {
 			s.solverOrder = append(append(s.solverOrder[:i], s.solverOrder[i+1:]...), key)

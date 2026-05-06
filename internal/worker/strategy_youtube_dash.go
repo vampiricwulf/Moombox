@@ -23,7 +23,7 @@ import (
 // origURL must be the ORIGINAL stream BaseURL (before the initial
 // n-param decryption); otherwise we'd re-decrypt an already-decrypted
 // URL and produce garbage. DECISIONS #7.
-func resolveFreshDashURL(ctx context.Context, cipherSolver *cipher.Solver, playerURL, origURL string, logger interface {
+func resolveFreshDashURL(ctx context.Context, cipherSolver *cipher.GojaResolver, playerURL, origURL string, logger interface {
 	Warn(msg string, args ...any)
 	Info(msg string, args ...any)
 }) string {
@@ -51,7 +51,7 @@ func resolveFreshDashURL(ctx context.Context, cipherSolver *cipher.Solver, playe
 // DownloadDash sets up DASH segment downloaders for a live/post-live stream.
 // Applies cipher decryption to manifest URL, n-parameter decryption to stream URLs,
 // and injects PO token into the manifest URL path.
-func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, cipherSolver *cipher.Solver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
+func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.DashManifestURL == "" {
 		return nil, fmt.Errorf("no DASH manifest URL available")
 	}

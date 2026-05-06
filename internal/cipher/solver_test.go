@@ -160,9 +160,9 @@ func (testLogger) Error(string, ...any) {}
 func TestInvalidateSolver(t *testing.T) {
 	dir := t.TempDir()
 	logger := &testLogger{}
-	s, err := NewSolver(dir, logger)
+	s, err := NewGojaResolver(dir, logger)
 	if err != nil {
-		t.Fatalf("NewSolver: %v", err)
+		t.Fatalf("NewGojaResolver: %v", err)
 	}
 
 	// Manually cache a player file and solver

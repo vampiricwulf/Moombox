@@ -131,7 +131,7 @@ func (w *DownloadWorker) readConfig(fn func(*config.MoomboxConfig)) {
 // can pass a real *connectivity.Monitor or a fake without the two-func dance
 // (audit reports/worker.md F54).
 type DownloadWorkerDeps struct {
-	CipherSolver  *cipher.Solver
+	CipherSolver  *cipher.GojaResolver
 	PotProvider   *bgutils.PotProvider
 	TwitchService *twitch.Service
 	Notifier      *notifications.Manager
@@ -149,7 +149,7 @@ func NewDownloadWorker(
 	queue := NewJobQueue(cfg.Downloader.NumParallelDownloads)
 	queue.SetLogger(logger)
 
-	var cs *cipher.Solver
+	var cs *cipher.GojaResolver
 	var pp *bgutils.PotProvider
 	var tw *twitch.Service
 	var nm *notifications.Manager

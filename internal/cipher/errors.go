@@ -37,3 +37,11 @@ var (
 	// empty player URL or stream URL where one is required.
 	ErrInputRequired = errors.New("required cipher input is missing")
 )
+
+// ErrSigUnavailable indicates the underlying solver could not extract or
+// run a sig algorithm for the requested player. Returned by solvers that
+// support the cipher.Solver interface but cannot fulfil sig specifically
+// (e.g., the legacy goja extractor on a player whose sig is no longer
+// pattern-matchable). Composite solvers may surface this verbatim or
+// substitute a higher-quality alternative.
+var ErrSigUnavailable = errors.New("cipher: sig unavailable for this player")

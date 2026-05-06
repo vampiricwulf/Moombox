@@ -230,7 +230,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// =========================================================================
 	// 8. Cipher solver
 	// =========================================================================
-	// Failure to init the cipher solver is fatal: NewSolver only errors
+	// Failure to init the cipher solver is fatal: NewGojaResolver only errors
 	// on os.MkdirAll of %TEMP%/yt-cipher, and without cipher solving
 	// most YouTube format URLs (sig + n-param ciphered) cannot be
 	// decrypted. The previous "will retry on demand" warning was
@@ -238,7 +238,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// got a solver attached and downloads silently degraded for the
 	// rest of the process lifetime.
 	cacheDir := filepath.Join(os.TempDir(), "yt-cipher")
-	cipherSolver, err := cipher.NewSolver(cacheDir, log)
+	cipherSolver, err := cipher.NewGojaResolver(cacheDir, log)
 	if err != nil {
 		return fmt.Errorf("init cipher solver (cacheDir=%q): %w", cacheDir, err)
 	}

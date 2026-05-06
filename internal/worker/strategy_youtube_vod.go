@@ -15,7 +15,7 @@ import (
 // DownloadVod downloads a VOD using direct format URLs.
 // For YouTube VODs, format URLs point to complete files (not segmented).
 // Downloads video and audio streams as whole files via HTTP GET.
-func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, _ *cipher.Solver, potProvider *bgutils.PotProvider) (*DownloadResult, error) {
+func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, _ *cipher.GojaResolver, potProvider *bgutils.PotProvider) (*DownloadResult, error) {
 	selected := youtube.SelectBestFormatsWithLogger(videoInfo.Formats, job.Config.MaxVideoResolution, job.Config.Prefer60fps, job.Logger)
 
 	// Per-job itag overrides (from manual format selection in the UI).

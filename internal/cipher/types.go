@@ -1,6 +1,7 @@
 package cipher
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -113,3 +114,19 @@ type ResolveURLResponse struct {
 	URL string
 }
 
+// Solver is the contract for cipher solving. Sig and N each take the
+// encrypted parameter value plus the playerID that produced it; both
+// return the decrypted value. A solver that cannot serve sig (e.g., a
+// legacy in-process extractor on a current player) returns
+// ErrSigUnavailable from Sig; the composite solver routes around such
+// solvers for sig.
+//
+// Batch is a hint that callers can use to amortise sidecar round-trips
+// when a manifest yields multiple sig and/or n challenges at once.
+// Implementations that don't benefit from batching may simply call
+// Sig/N in a loop internally.
+type Solver interface {
+	Sig(ctx context.Context, playerID, encryptedSig string) (string, error)
+	N(ctx context.Context, playerID, encryptedN string) (string, error)
+	Batch(ctx context.Context, playerID string, sigs, ns []string) (sigResults, nResults map[string]string, err error)
+}

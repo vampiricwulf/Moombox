@@ -32,7 +32,7 @@ func TestCipherSentinelsAreDistinct(t *testing.T) {
 // TestDecryptSignatureMissingPlayerURL covers the empty-input branch
 // at decrypt.go — must wrap ErrInputRequired so callers can match.
 func TestDecryptSignatureMissingPlayerURL(t *testing.T) {
-	s := &Solver{}
+	s := &GojaResolver{}
 	_, err := s.DecryptSignature(context.Background(), SignatureRequest{
 		PlayerURL: "",
 	})

@@ -6,7 +6,7 @@ import (
 )
 
 // DecryptSignature decrypts the signature and n-parameter for a stream URL.
-func (s *Solver) DecryptSignature(ctx context.Context, req SignatureRequest) (*SignatureResponse, error) {
+func (s *GojaResolver) DecryptSignature(ctx context.Context, req SignatureRequest) (*SignatureResponse, error) {
 	if req.PlayerURL == "" {
 		return nil, fmt.Errorf("player URL: %w", ErrInputRequired)
 	}
@@ -40,7 +40,7 @@ func (s *Solver) DecryptSignature(ctx context.Context, req SignatureRequest) (*S
 }
 
 // GetSts returns the signatureTimestamp for a player URL.
-func (s *Solver) GetSts(ctx context.Context, playerURL string) (string, error) {
+func (s *GojaResolver) GetSts(ctx context.Context, playerURL string) (string, error) {
 	if s.stsCache == nil {
 		s.stsCache = NewStsCache()
 	}

@@ -11,7 +11,7 @@ import (
 // Uses string manipulation to preserve original URL parameter order —
 // Go's url.Values.Encode() sorts parameters alphabetically, which breaks
 // YouTube's URL signature verification and causes HTTP 403.
-func (s *Solver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*ResolveURLResponse, error) {
+func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*ResolveURLResponse, error) {
 	if req.StreamURL == "" {
 		return nil, fmt.Errorf("stream URL is required")
 	}
