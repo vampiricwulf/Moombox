@@ -3,6 +3,7 @@ package cipher
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils/sidecar"
@@ -94,5 +95,29 @@ func TestSidecarSolverRetriesOnPlayerNotLoaded(t *testing.T) {
 	}
 	if fake.calls[1].PlayerJS == "" {
 		t.Errorf("retry should include PlayerJS")
+	}
+}
+
+func TestSidecarSolverDoubleNotLoadedReturnsWrappedError(t *testing.T) {
+	fake := &fakeSidecar{
+		respond: func(req sidecar.SolveCipherRequest) (sidecar.SolveCipherResult, error) {
+			return sidecar.SolveCipherResult{}, sidecar.ErrPlayerNotLoaded
+		},
+	}
+	src := &fakePlayerSource{playerID: "P1", js: "JS"}
+	s := newSidecarSolverWith(fake, src)
+
+	_, err := s.Sig(context.Background(), "P1", "in")
+	if err == nil {
+		t.Fatal("expected error on double ErrPlayerNotLoaded")
+	}
+	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
+		t.Errorf("error should NOT match ErrPlayerNotLoaded sentinel anymore (it's now a permanent failure, not a recoverable cache miss): %v", err)
+	}
+	if !strings.Contains(err.Error(), "after retry-with-JS") {
+		t.Errorf("error should mention 'after retry-with-JS' so logs distinguish from transient miss; got: %v", err)
+	}
+	if got, want := len(fake.calls), 2; got != want {
+		t.Errorf("expected exactly 2 calls (initial + retry); got %d", got)
 	}
 }

@@ -79,6 +79,14 @@ func (s *sidecarSolver) solve(ctx context.Context, playerID string, sigs, ns []s
 	if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
 		s.clearPlayerSent(playerID)
 		result, err = s.callOnce(ctx, playerID, true, sigs, ns)
+		if errors.Is(err, sidecar.ErrPlayerNotLoaded) {
+			// Sidecar still doesn't recognise the player even after we
+			// attached the JS. This isn't a transient cache miss — the
+			// sidecar dropped or rejected the JS, or it's crashed
+			// mid-flight. Wrap so callers can't mistake this for a
+			// recoverable retry-with-JS condition.
+			return result, fmt.Errorf("sidecar: player not loaded after retry-with-JS: %w", err)
+		}
 	}
 	return result, err
 }
