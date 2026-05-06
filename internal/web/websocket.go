@@ -589,6 +589,14 @@ func (hub *WebSocketHub) BroadcastJobsUpdate(data any) {
 	hub.Broadcast("jobs_update", data)
 }
 
+// BroadcastJobDeleted notifies all connected clients that a job was removed.
+// The frontend uses this to drop the row from its local state immediately,
+// without waiting for a full-list rebroadcast (which races against pending
+// job_update messages and can leave stale "Cancelled" rows visible).
+func (hub *WebSocketHub) BroadcastJobDeleted(jobID string) {
+	hub.Broadcast("job_deleted", map[string]any{"id": jobID})
+}
+
 // BroadcastCheckTimers sends next check times for monitors.
 func (hub *WebSocketHub) BroadcastCheckTimers(data any) {
 	hub.Broadcast("check_timers", data)

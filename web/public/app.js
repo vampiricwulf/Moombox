@@ -1043,6 +1043,27 @@ class MoomboxApp {
         break;
       }
 
+      case "job_deleted": {
+        // Remove the deleted job from local state without waiting for a
+        // full-list rebroadcast. Backend sends this from the OnJobDeleted
+        // subscriber as a discrete event, so the upsert-only job_update
+        // handler no longer leaves a stale "Cancelled" row visible after delete.
+        const deletedId = p?.id;
+        if (!deletedId) break;
+        const deletedIdx = this.jobs.findIndex(j => j.id === deletedId);
+        if (deletedIdx !== -1) {
+          this.jobs.splice(deletedIdx, 1);
+          this.renderJobs();
+        }
+        // Close the details dialog if the deleted job is currently selected.
+        if (this.selectedJobId === deletedId) {
+          const dlg = document.getElementById("details-dialog");
+          if (dlg?.open) dlg.hide();
+          this.selectedJobId = null;
+        }
+        break;
+      }
+
       case "log":
         if (p) this.addLog(p);
         break;
