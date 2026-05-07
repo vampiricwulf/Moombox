@@ -193,13 +193,32 @@ func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoI
 	return s.PlayerAPI.ProbeVideoStatus(ctx, videoID, vd)
 }
 
-// SetVisitorData stores visitor data extracted from a watch page for use in probes.
+// SetVisitorData stores visitor data extracted from a watch page. Sticky:
+// only writes when no value is cached, so callers that re-fetch the watch
+// page repeatedly (quality probes, full-fetches) don't trigger a fresh
+// visitor data on every call. YouTube rotates VisitorData on each watch
+// page response, but the previously-issued value remains valid for the
+// session — using it consistently lets the POT session cache hit and avoids
+// a sidecar mint per probe. To force a refresh after a downstream failure
+// (HTTP 403 burst suggesting POT expiry), call InvalidateVisitorData.
 func (s *Service) SetVisitorData(vd string) {
-	if vd != "" {
-		s.vdMu.Lock()
-		s.visitorData = vd
-		s.vdMu.Unlock()
+	if vd == "" {
+		return
 	}
+	s.vdMu.Lock()
+	defer s.vdMu.Unlock()
+	if s.visitorData == "" {
+		s.visitorData = vd
+	}
+}
+
+// InvalidateVisitorData clears the cached visitor data so the next watch-page
+// fetch will install a fresh value. Call this when a downstream HTTP error
+// (403 burst, POT-rejected response) suggests the bound POT is stale.
+func (s *Service) InvalidateVisitorData() {
+	s.vdMu.Lock()
+	s.visitorData = ""
+	s.vdMu.Unlock()
 }
 
 // ProbeVideoStatusAuthenticated performs an authenticated probe using TV_DOWNGRADED.
