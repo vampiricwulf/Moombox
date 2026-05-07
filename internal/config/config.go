@@ -147,6 +147,21 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 	}
 	migrateOldFormat(cfg, raw)
 
+	// Auto-populate sections introduced after this config file was
+	// originally written. The user's config might be from an older
+	// Moombox version with no [memory] block; without this, the fields
+	// would be invisible in the TUI/Web UI's "current values" view until
+	// the user manually saved (since the encoder writes the full struct,
+	// any save would persist defaults). Mark the file as needing a
+	// rewrite; the caller (services.go) issues the actual SaveLocked
+	// after wiring up the configStore.
+	if _, hasMemory := raw["memory"]; !hasMemory {
+		cfg.NeedsAutoPersist = true
+	}
+	if _, hasBgutils := raw["bgutils"]; !hasBgutils {
+		cfg.NeedsAutoPersist = true
+	}
+
 	cfg.ConfigLoaded = true
 	Normalize(cfg)
 	return cfg, nil

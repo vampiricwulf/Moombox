@@ -19,6 +19,13 @@ type MoomboxConfig struct {
 	// ConfigLoaded is true when the config was read from an existing file on
 	// disk (vs falling back to defaults). Not serialized.
 	ConfigLoaded bool `toml:"-" json:"-"`
+	// NeedsAutoPersist signals that loadFromFile detected one or more
+	// new top-level sections missing from the user's TOML (e.g., [memory]
+	// added in 2.6.21). The struct is already populated with defaults
+	// for those sections; the caller can SaveLocked() after store wiring
+	// to flush them to disk so they show up in the user's config.toml.
+	// Excluded from TOML and JSON marshalling (in-memory signal only).
+	NeedsAutoPersist bool `toml:"-" json:"-"`
 }
 
 // NetworkConfig holds server and network access settings.

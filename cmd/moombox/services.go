@@ -89,6 +89,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 		log.Info("Go soft memory limit applied", slog.Int("mb", mb))
 	}
 
+	// Auto-persist newly-introduced config sections so they appear in the
+	// user's config.toml on first run after upgrade. The Defaults() struct
+	// already populated the new fields; this just flushes them to disk so
+	// the TUI/Web UI's "current value" view doesn't look empty.
+	if cfg.NeedsAutoPersist && cfg.ConfigLoaded {
+		if err := s.configStore.SaveLocked(); err != nil {
+			log.Warn("Auto-persist of new config sections failed", slog.String("error", err.Error()))
+		} else {
+			log.Info("Auto-persisted new config sections to disk")
+		}
+		cfg.NeedsAutoPersist = false
+	}
+
 	// Updater: create instance and clean up .old binary from previous update
 	upd, updErr := updater.New(version, log)
 	if updErr != nil {
