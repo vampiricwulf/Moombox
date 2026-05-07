@@ -215,6 +215,27 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 		}
 	}
 
+	// Memory sub-fields. 0 disables a given knob; any other value must be
+	// a sensible MB number. Hard sidecar limit must sit above the soft
+	// trigger or the GC fires constantly without ever reclaiming.
+	if mk, ok := updates["memory"].(map[string]any); ok {
+		goSoft, hasGoSoft := mk["go_soft_limit_mb"].(float64)
+		sideSoft, hasSideSoft := mk["sidecar_soft_limit_mb"].(float64)
+		sideHard, hasSideHard := mk["sidecar_hard_limit_mb"].(float64)
+		if hasGoSoft && (goSoft < 0 || goSoft > 65536) {
+			errs["memory.go_soft_limit_mb"] = "go_soft_limit_mb must be between 0 and 65536"
+		}
+		if hasSideSoft && (sideSoft < 0 || sideSoft > 65536) {
+			errs["memory.sidecar_soft_limit_mb"] = "sidecar_soft_limit_mb must be between 0 and 65536"
+		}
+		if hasSideHard && (sideHard < 0 || sideHard > 65536) {
+			errs["memory.sidecar_hard_limit_mb"] = "sidecar_hard_limit_mb must be between 0 and 65536"
+		}
+		if hasSideSoft && hasSideHard && sideSoft > 0 && sideHard > 0 && sideHard <= sideSoft {
+			errs["memory.sidecar_hard_limit_mb"] = "hard limit must be higher than soft limit"
+		}
+	}
+
 	// Cookies sub-fields
 	if ck, ok := updates["cookies"].(map[string]any); ok {
 		if v, ok := ck["cookie_file"].(string); ok {
@@ -307,6 +328,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		}
 		if v, ok := net["client_token_ttl_days"].(float64); ok {
 			cfg.Network.ClientTokenTTLDays = int(v)
+		}
+		if v, ok := net["trust_forwarded_proto"].(bool); ok {
+			cfg.Network.TrustForwardedProto = v
 		}
 	}
 
@@ -454,6 +478,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 				cfg.Cookies.RefreshInterval = config.FlexDuration{}
 			}
 		}
+		if v, ok := ck["dpapi_fallback"].(bool); ok {
+			cfg.Cookies.DpapiFallback = v
+		}
 	}
 
 	// Disk
@@ -470,6 +497,26 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 	if upd, ok := updates["updates"].(map[string]any); ok {
 		if v, ok := upd["auto_check_updates"].(bool); ok {
 			cfg.Updates.AutoCheckUpdates = v
+		}
+	}
+
+	// Memory
+	if mk, ok := updates["memory"].(map[string]any); ok {
+		if v, ok := mk["go_soft_limit_mb"].(float64); ok {
+			cfg.Memory.GoSoftLimitMB = int(v)
+		}
+		if v, ok := mk["sidecar_soft_limit_mb"].(float64); ok {
+			cfg.Memory.SidecarSoftLimitMB = int(v)
+		}
+		if v, ok := mk["sidecar_hard_limit_mb"].(float64); ok {
+			cfg.Memory.SidecarHardLimitMB = int(v)
+		}
+	}
+
+	// Bgutils
+	if bg, ok := updates["bgutils"].(map[string]any); ok {
+		if v, ok := bg["use_sidecar"].(bool); ok {
+			cfg.Bgutils.UseSidecar = v
 		}
 	}
 

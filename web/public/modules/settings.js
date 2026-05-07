@@ -501,6 +501,27 @@ export class SettingsController {
       autoCheckSwitch.checked = config.updates?.auto_check_updates !== false;
     }
 
+    // Memory settings
+    this.app.setInputValue("cfg-memory-go-soft-limit-mb", config.memory?.go_soft_limit_mb);
+    this.app.setInputValue("cfg-memory-sidecar-soft-limit-mb", config.memory?.sidecar_soft_limit_mb);
+    this.app.setInputValue("cfg-memory-sidecar-hard-limit-mb", config.memory?.sidecar_hard_limit_mb);
+
+    // BotGuard sidecar
+    const useSidecarSwitch = document.getElementById("cfg-bgutils-use-sidecar");
+    if (useSidecarSwitch) {
+      useSidecarSwitch.checked = config.bgutils?.use_sidecar !== false;
+    }
+
+    // Reverse-proxy / DPAPI toggles
+    const trustForwardedProtoSwitch = document.getElementById("cfg-trust-forwarded-proto");
+    if (trustForwardedProtoSwitch) {
+      trustForwardedProtoSwitch.checked = !!config.network?.trust_forwarded_proto;
+    }
+    const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
+    if (dpapiFallbackSwitch) {
+      dpapiFallbackSwitch.checked = !!config.cookies?.dpapi_fallback;
+    }
+
     // Track dirty state
     this._dirty = false;
     this._updateUnsavedIndicator();
@@ -629,6 +650,19 @@ export class SettingsController {
     const autoCheckUpdatesSwitch = document.getElementById("cfg-auto-check-updates");
     const autoCheckUpdates = autoCheckUpdatesSwitch ? autoCheckUpdatesSwitch.checked : true;
 
+    const memoryGoSoftMB = this.app.getInputNumber("cfg-memory-go-soft-limit-mb");
+    const memorySidecarSoftMB = this.app.getInputNumber("cfg-memory-sidecar-soft-limit-mb");
+    const memorySidecarHardMB = this.app.getInputNumber("cfg-memory-sidecar-hard-limit-mb");
+
+    const useSidecarSwitch = document.getElementById("cfg-bgutils-use-sidecar");
+    const useSidecar = useSidecarSwitch ? useSidecarSwitch.checked : true;
+
+    const trustForwardedProtoSwitch = document.getElementById("cfg-trust-forwarded-proto");
+    const trustForwardedProto = trustForwardedProtoSwitch ? trustForwardedProtoSwitch.checked : false;
+
+    const dpapiFallbackSwitch = document.getElementById("cfg-cookies-dpapi-fallback");
+    const dpapiFallback = dpapiFallbackSwitch ? dpapiFallbackSwitch.checked : false;
+
     // Build payload with only form-managed sections (don't include channels
     // to avoid overwriting concurrent changes from TUI).
     const payload = {
@@ -638,6 +672,7 @@ export class SettingsController {
         https_enabled: httpsEnabled,
         tls_cert_path: tlsCertPath,
         tls_key_path: tlsKeyPath,
+        trust_forwarded_proto: trustForwardedProto,
       },
       paths: {
         database_path: database,
@@ -673,6 +708,7 @@ export class SettingsController {
         auto_enabled: autoEnabled,
         browser_profile_dir: autoCookiesProfileDir,
         refresh_interval: cookieRefreshInterval ?? null,
+        dpapi_fallback: dpapiFallback,
         // browser_path / browser_type resolved below after validation
       },
       disk: {
@@ -681,6 +717,14 @@ export class SettingsController {
       },
       updates: {
         auto_check_updates: autoCheckUpdates,
+      },
+      memory: {
+        go_soft_limit_mb: memoryGoSoftMB,
+        sidecar_soft_limit_mb: memorySidecarSoftMB,
+        sidecar_hard_limit_mb: memorySidecarHardMB,
+      },
+      bgutils: {
+        use_sidecar: useSidecar,
       },
     };
 

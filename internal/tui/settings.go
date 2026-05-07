@@ -61,6 +61,7 @@ var sections = []settingsSection{
 			{"https_enabled", "HTTPS enabled", fieldToggle, nil, "serve over HTTPS, needs TLS cert + key (requires restart)", nil},
 			{"tls_cert_path", "TLS cert path", fieldText, nil, "PEM format certificate file (requires restart)", nil},
 			{"tls_key_path", "TLS key path", fieldText, nil, "PEM format private key file (requires restart)", nil},
+			{"trust_forwarded_proto", "Trust forwarded proto", fieldToggle, nil, "ONLY enable behind a TLS-terminating reverse proxy that strips client X-Forwarded-Proto", nil},
 		},
 	},
 	{
@@ -121,6 +122,7 @@ var sections = []settingsSection{
 			{"browser_path", "Browser path", fieldText, nil, "override (empty = auto-detect)", nil},
 			{"browser_type", "Browser type", fieldText, nil, "firefox/chrome/brave/edge/etc. (required if path set)", nil},
 			{"refresh_interval", "Refresh interval", fieldNumber, nil, "minutes (default: 360 = 6h)", nil},
+			{"dpapi_fallback", "DPAPI fallback (Windows)", fieldToggle, nil, "fallback: read REAL browser cookies via DPAPI when CDP refresh fails (privacy: reads your signed-in session)", nil},
 		},
 	},
 	{
@@ -134,6 +136,20 @@ var sections = []settingsSection{
 		name: "Updates",
 		fields: []fieldDef{
 			{"auto_check_updates", "Auto-check updates", fieldToggle, nil, "check GitHub on startup + daily", nil},
+		},
+	},
+	{
+		name: "BotGuard Sidecar",
+		fields: []fieldDef{
+			{"use_sidecar", "Enable sidecar", fieldToggle, nil, "Node + JSDOM + bgutils-js for real BotGuard PO tokens (default: on; falls back to goja-only when off)", nil},
+		},
+	},
+	{
+		name: "Memory",
+		fields: []fieldDef{
+			{"go_soft_limit_mb", "Go soft limit (MB)", fieldNumber, nil, "soft cap; GC ramps up but no OOM (default: 256, 0 disables)", nil},
+			{"sidecar_soft_limit_mb", "Sidecar soft limit (MB)", fieldNumber, nil, "RSS threshold to trigger V8 GC (default: 200, 0 disables)", nil},
+			{"sidecar_hard_limit_mb", "Sidecar hard limit (MB)", fieldNumber, nil, "V8 --max-old-space-size; OOMs on hit, must exceed soft (default: 512, 0 = V8 default)", nil},
 		},
 	},
 	{
@@ -383,6 +399,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["https_enabled"] = boolToDisplay(cfg.Network.HTTPSEnabled)
 	m.values["tls_cert_path"] = cfg.Network.TLSCertPath
 	m.values["tls_key_path"] = cfg.Network.TLSKeyPath
+	m.values["trust_forwarded_proto"] = boolToDisplay(cfg.Network.TrustForwardedProto)
 
 	// Paths
 	m.values["database_path"] = cfg.Paths.DatabasePath
@@ -430,6 +447,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["browser_path"] = cfg.Cookies.BrowserPath
 	m.values["browser_type"] = cfg.Cookies.BrowserType
 	m.values["refresh_interval"] = fmt.Sprintf("%.0f", cfg.Cookies.RefreshInterval.Minutes())
+	m.values["dpapi_fallback"] = boolToDisplay(cfg.Cookies.DpapiFallback)
 
 	// Disk
 	m.values["disk_warn_percent"] = strconv.Itoa(cfg.Disk.WarnPercent)
@@ -437,6 +455,14 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 
 	// Updates
 	m.values["auto_check_updates"] = boolToDisplay(cfg.Updates.AutoCheckUpdates)
+
+	// BotGuard sidecar
+	m.values["use_sidecar"] = boolToDisplay(cfg.Bgutils.UseSidecar)
+
+	// Memory
+	m.values["go_soft_limit_mb"] = strconv.Itoa(cfg.Memory.GoSoftLimitMB)
+	m.values["sidecar_soft_limit_mb"] = strconv.Itoa(cfg.Memory.SidecarSoftLimitMB)
+	m.values["sidecar_hard_limit_mb"] = strconv.Itoa(cfg.Memory.SidecarHardLimitMB)
 }
 
 func (m *SettingsModel) applyValues() {
@@ -492,6 +518,7 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Network.HTTPSEnabled = m.values["https_enabled"] == "Yes"
 	m.cfg.Network.TLSCertPath = m.values["tls_cert_path"]
 	m.cfg.Network.TLSKeyPath = m.values["tls_key_path"]
+	m.cfg.Network.TrustForwardedProto = m.values["trust_forwarded_proto"] == "Yes"
 
 	// Paths
 	m.cfg.Paths.DatabasePath = m.values["database_path"]
@@ -560,6 +587,7 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Cookies.BrowserType = strings.TrimSpace(m.values["browser_type"])
 	refreshMin, _ := strconv.Atoi(m.values["refresh_interval"])
 	m.cfg.Cookies.RefreshInterval = config.FlexDuration{Value: float64(refreshMin)}
+	m.cfg.Cookies.DpapiFallback = m.values["dpapi_fallback"] == "Yes"
 
 	// Disk
 	m.cfg.Disk.WarnPercent, _ = strconv.Atoi(m.values["disk_warn_percent"])
@@ -567,6 +595,14 @@ func (m *SettingsModel) applyValues() {
 
 	// Updates
 	m.cfg.Updates.AutoCheckUpdates = m.values["auto_check_updates"] == "Yes"
+
+	// BotGuard sidecar
+	m.cfg.Bgutils.UseSidecar = m.values["use_sidecar"] == "Yes"
+
+	// Memory
+	m.cfg.Memory.GoSoftLimitMB, _ = strconv.Atoi(m.values["go_soft_limit_mb"])
+	m.cfg.Memory.SidecarSoftLimitMB, _ = strconv.Atoi(m.values["sidecar_soft_limit_mb"])
+	m.cfg.Memory.SidecarHardLimitMB, _ = strconv.Atoi(m.values["sidecar_hard_limit_mb"])
 
 	// Apply channels and notifications
 	m.cfg.Channels = m.channels

@@ -508,6 +508,20 @@
                                 ></sl-icon>
                                 Updates
                             </sl-menu-item>
+                            <sl-menu-item value="bgutils">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="shield-shaded"
+                                ></sl-icon>
+                                BotGuard
+                            </sl-menu-item>
+                            <sl-menu-item value="memory">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="cpu"
+                                ></sl-icon>
+                                Memory
+                            </sl-menu-item>
                             <sl-menu-item value="channels">
                                 <sl-icon
                                     slot="prefix"
@@ -573,6 +587,19 @@
                                 placeholder="./key.pem"
                                 help-text="Path to TLS private key file (PEM format). Requires restart."
                             ></sl-input>
+                            <sl-switch id="cfg-trust-forwarded-proto">
+                                Trust X-Forwarded-Proto header
+                                <span slot="help-text">
+                                    Set the Secure cookie flag based on the
+                                    X-Forwarded-Proto header. Enable ONLY
+                                    when Moombox sits behind a TLS-terminating
+                                    reverse proxy (nginx/Caddy/Traefik) that
+                                    strips client-supplied X-Forwarded-Proto
+                                    before adding its own. Default off
+                                    (directly-exposed Moombox MUST NOT trust
+                                    this header).
+                                </span>
+                            </sl-switch>
 
                             <sl-divider></sl-divider>
                             <h4>Password</h4>
@@ -938,6 +965,19 @@
                                     <div id="custom-browser-validation-msg" style="margin-top: 0.4em; font-size: var(--sl-font-size-small);"></div>
                                 </div>
                             </div>
+                            <sl-divider></sl-divider>
+                            <sl-switch id="cfg-cookies-dpapi-fallback">
+                                DPAPI fallback (Windows only)
+                                <span slot="help-text">
+                                    When the CDP-based refresh fails, fall back
+                                    to reading cookies directly from your real
+                                    Chromium-family browser profile via the
+                                    Windows DPAPI. This reads your actually-
+                                    signed-in session cookies — opt in only if
+                                    you're comfortable with that privacy
+                                    surface. Default off.
+                                </span>
+                            </sl-switch>
                         </div>
 
                         <!-- Disk Settings -->
@@ -1033,6 +1073,72 @@
                                     "
                                 ></span>
                             </div>
+                        </div>
+
+                        <!-- BotGuard Sidecar Settings -->
+                        <div
+                            id="settings-bgutils"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>BotGuard Sidecar</h3>
+                            <p class="settings-help">
+                                The BotGuard sidecar is an embedded Node + JSDOM +
+                                bgutils-js subprocess that produces real PO tokens
+                                Google's BotGuard challenge accepts. When disabled,
+                                Moombox falls back to an in-process goja-only path
+                                that produces only websafe-fallback tokens — most
+                                YouTube content still works, but PO-token-gated
+                                formats (some live streams, age-restricted, etc.)
+                                become unavailable. Toggle requires restart.
+                            </p>
+                            <sl-switch id="cfg-bgutils-use-sidecar">
+                                Enable sidecar
+                                <span slot="help-text">Use the embedded Node sidecar for real BotGuard PO tokens (default: on).</span>
+                            </sl-switch>
+                        </div>
+
+                        <!-- Memory Settings -->
+                        <div
+                            id="settings-memory"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>Memory</h3>
+                            <p class="settings-help">
+                                Soft caps on steady-state memory. Defaults sit
+                                above normal operating ranges so GC fires only
+                                on real growth, not routine streaming work.
+                                Set any field to 0 to disable that specific
+                                cap. See operations docs for tuning guidance.
+                            </p>
+                            <sl-input
+                                id="cfg-memory-go-soft-limit-mb"
+                                type="number"
+                                min="0"
+                                max="65536"
+                                label="Go soft limit (MB)"
+                                placeholder="256"
+                                help-text="debug.SetMemoryLimit. Soft cap — Go GC ramps up near the limit but allocations succeed beyond it (no OOM). 0 disables. Default: 256."
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-memory-sidecar-soft-limit-mb"
+                                type="number"
+                                min="0"
+                                max="65536"
+                                label="Sidecar soft limit (MB)"
+                                placeholder="200"
+                                help-text="RSS threshold. When the sidecar exceeds this, Moombox tells it to run a full V8 GC. 0 disables. Default: 200."
+                            ></sl-input>
+                            <sl-input
+                                id="cfg-memory-sidecar-hard-limit-mb"
+                                type="number"
+                                min="0"
+                                max="65536"
+                                label="Sidecar hard limit (MB)"
+                                placeholder="512"
+                                help-text="V8 --max-old-space-size for the sidecar. Hitting this OOM-aborts the sidecar (no graceful soft stop). Must be comfortably above the soft limit. 0 uses V8's default (~512–1500 MB). Default: 512."
+                            ></sl-input>
                         </div>
 
                         <!-- Channels Settings -->
