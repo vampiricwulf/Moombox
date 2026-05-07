@@ -154,6 +154,37 @@ func decryptNParamInURL(rawURL string, nDecrypt func(string) (string, error)) (s
 	return result, nil
 }
 
+// invalidate403Caches clears cipher solver state, POT caches, and visitor data
+// after a 403 burst. Cipher rotation and POT expiry both surface as 403 from
+// segment fetches; without distinguishing signal, invalidate everything that
+// could be stale and let the next manifest refresh repopulate.
+//
+// Order matters: POT caches wipe BEFORE visitor data invalidation. A
+// concurrent goroutine that observed empty visitor data after invalidation
+// would otherwise fetch a fresh watch page, install fresh visitor data, and
+// mint a POT bound to that new value — which the subsequent
+// PotProvider.InvalidateCaches() would then wipe. Empty cache → fresh visitor
+// data → fresh mint is the cheaper sequence.
+//
+// `tag` is a short label included in the log line for triage (e.g. "DASH
+// video", "DASH audio", "HLS").
+func invalidate403Caches(job *JobContext, playerURL string, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, tag string) {
+	job.Logger.Warn("[Cipher] "+tag+" 403 signal — invalidating solver and POT", "playerURL", playerURL)
+	playerID := cipher.PlayerIDFromURL(playerURL)
+	if cipherSolver != nil {
+		cipherSolver.InvalidateSolver(playerURL)
+	}
+	if potProvider != nil {
+		potProvider.InvalidateCaches()
+	}
+	if job.YT != nil {
+		// Clear the sig-route log dedup so the "sig decrypted via …" Info
+		// fires once on recovery rather than staying silent.
+		job.YT.PlayerAPI.ClearLoggedRoutes(playerID)
+		job.YT.InvalidateVisitorData()
+	}
+}
+
 // poTokenBinding returns the content binding value to pass to the PO token provider.
 // Prefers visitorData (matches yt-dlp and bgutil-ytdlp-pot-provider upstream), falling
 // back to ChannelID if visitor data extraction failed. Logs a warning on fallback so

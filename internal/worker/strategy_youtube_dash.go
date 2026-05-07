@@ -277,27 +277,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
 			origURL := originalBaseURLs[videoStream.Itag]
 			result.VideoDownloader.OnCipherFailure = func() string {
-				// Engine fires once per downloader instance on either a
-				// pre-bytes 403 OR a post-bytes 403 burst — see audit F11.
-				// 403s can mean cipher rotation OR POT expiry; we don't know
-				// which, so invalidate both. Cipher reinvalidation is cheap
-				// (one player JS solve); POT/visitor invalidation forces the
-				// next manifest refresh to re-fetch the watch page and mint
-				// a fresh POT bound to the new visitor data.
-				job.Logger.Warn("[Cipher] 403 signal — invalidating solver and POT", "playerURL", videoInfo.PlayerURL)
-				playerID := cipher.PlayerIDFromURL(videoInfo.PlayerURL)
-				if cipherSolver != nil {
-					cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
-				}
-				// Clear the sig-route log dedup so the "sig decrypted via …"
-				// Info fires once on recovery rather than staying silent.
-				if job.YT != nil {
-					job.YT.PlayerAPI.ClearLoggedRoutes(playerID)
-					job.YT.InvalidateVisitorData()
-				}
-				if potProvider != nil {
-					potProvider.InvalidateCaches()
-				}
+				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "DASH video")
 				return resolveFreshDashURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}
@@ -329,19 +309,7 @@ func DownloadDash(ctx context.Context, job *JobContext, videoInfo *youtube.Video
 		if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
 			origURL := originalBaseURLs[audioStream.Itag]
 			result.AudioDownloader.OnCipherFailure = func() string {
-				// See VideoDownloader.OnCipherFailure above for rationale.
-				job.Logger.Warn("[Cipher] 403 signal — invalidating solver and POT", "playerURL", videoInfo.PlayerURL)
-				playerID := cipher.PlayerIDFromURL(videoInfo.PlayerURL)
-				if cipherSolver != nil {
-					cipherSolver.InvalidateSolver(videoInfo.PlayerURL)
-				}
-				if job.YT != nil {
-					job.YT.PlayerAPI.ClearLoggedRoutes(playerID)
-					job.YT.InvalidateVisitorData()
-				}
-				if potProvider != nil {
-					potProvider.InvalidateCaches()
-				}
+				invalidate403Caches(job, videoInfo.PlayerURL, cipherSolver, potProvider, "DASH audio")
 				return resolveFreshDashURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, origURL, job.Logger)
 			}
 		}

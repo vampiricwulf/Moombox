@@ -154,8 +154,24 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				return d.cancelErr(ctx)
 			}
 
-			segData, _, segErr := d.fetchSegment(ctx, seg.URL)
+			segData, segStatus, segErr := d.fetchSegment(ctx, seg.URL)
 			if segErr != nil {
+				// HLS 403s commonly indicate cipher rotation or POT expiry.
+				// Fire OnCipherFailure once per downloader so the strategy can
+				// invalidate cipher / POT / visitor-data caches; the next
+				// orchestrator-driven refresh (quality monitor, stream-status
+				// escalation) will then rebuild the variant URL with fresh
+				// values. Mirrors the DASH path; HLS variant URL has POT in
+				// its path so we can't hot-swap mid-loop, hence the empty
+				// return is treated as a no-op here.
+				if segStatus == 403 && d.cipherFailureFired.CompareAndSwap(false, true) &&
+					d.OnCipherFailure != nil {
+					if newURL := d.OnCipherFailure(); newURL != "" {
+						d.SetBaseURL(newURL)
+						d.logger.Info("[Cipher] HLS swapping BaseURL after 403",
+							"url_prefix", truncateURL(newURL, 120))
+					}
+				}
 				// Track repeated failures of the same sequence so we can
 				// escalate when a permanently-unavailable segment is
 				// stuck in the playlist.
