@@ -419,6 +419,29 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 							float64(sideStats.HeapUsed)/1048576,
 							float64(sideStats.HeapTotal)/1048576,
 						)
+						// Soft sidecar memory limit: V8 has no native soft
+						// cap, so when RSS exceeds the configured threshold
+						// we ask the sidecar to run global.gc(). Combined
+						// with --max-old-space-size as a hard ceiling, this
+						// gives soft-limit semantics without OOM aborts.
+						var sidecarSoftMB int
+						s.configStore.Read(func(c *config.MoomboxConfig) {
+							sidecarSoftMB = c.Memory.SidecarSoftLimitMB
+						})
+						if sidecarSoftMB > 0 && sideStats.RSS >= int64(sidecarSoftMB)<<20 {
+							gcCtx, gcCancel := context.WithTimeout(ctx, 5*time.Second)
+							gcResult, gcErr := s.bgSidecar.TriggerGC(gcCtx)
+							gcCancel()
+							if gcErr != nil {
+								log.Debug("[Memory] sidecar TriggerGC failed", slog.String("err", gcErr.Error()))
+							} else {
+								reclaimed := gcResult.Before.RSS - gcResult.After.RSS
+								log.Info("[Memory] sidecar soft limit hit; ran GC",
+									slog.Int("threshold_mb", sidecarSoftMB),
+									slog.Float64("reclaimed_mb", float64(reclaimed)/1048576),
+								)
+							}
+						}
 					} else {
 						line += " | Sidecar: stats unavailable"
 					}

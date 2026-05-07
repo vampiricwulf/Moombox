@@ -73,6 +73,11 @@ func Defaults() *MoomboxConfig {
 		Bgutils: BgutilsConfig{
 			UseSidecar: true,
 		},
+		Memory: MemoryConfig{
+			GoSoftLimitMB:      100,
+			SidecarSoftLimitMB: 100,
+			SidecarHardLimitMB: 256,
+		},
 	}
 }
 

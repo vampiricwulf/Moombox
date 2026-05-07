@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -78,6 +79,15 @@ func (s *runState) initServices(logLevelOverride string) error {
 	s.closeLog = func() { logCloseOnce.Do(func() { log.Close() }) }
 
 	log.Info("Starting Moombox", slog.String("version", version), slog.String("commit", commit))
+
+	// Apply Go runtime soft memory limit. SetMemoryLimit is a SOFT cap:
+	// Go's GC runs more aggressively as the heap approaches the limit, but
+	// allocations that genuinely need more memory still succeed (vs OOM).
+	// Zero or negative disables (Go uses its default unbounded behaviour).
+	if mb := cfg.Memory.GoSoftLimitMB; mb > 0 {
+		debug.SetMemoryLimit(int64(mb) << 20)
+		log.Info("Go soft memory limit applied", slog.Int("mb", mb))
+	}
 
 	// Updater: create instance and clean up .old binary from previous update
 	upd, updErr := updater.New(version, log)
@@ -212,7 +222,15 @@ func (s *runState) initServices(logLevelOverride string) error {
 	//
 	// Set [bgutils] use_sidecar = false in config.toml to disable.
 	if cfg.Bgutils.UseSidecar {
-		bgSidecar := sidecar.New(sidecar.Config{Logger: log})
+		bgSidecar := sidecar.New(sidecar.Config{
+			Logger:        log,
+			V8HardLimitMB: cfg.Memory.SidecarHardLimitMB,
+			// ExposeGC is required for the periodic TriggerGC call that
+			// enforces the soft sidecar limit. Always on when the sidecar
+			// is enabled — the cost is a function global no caller invokes
+			// unless we ask for it.
+			ExposeGC: true,
+		})
 		sCtx, sCancel := context.WithTimeout(s.ctx, 60*time.Second)
 		startErr := bgSidecar.Start(sCtx)
 		sCancel()

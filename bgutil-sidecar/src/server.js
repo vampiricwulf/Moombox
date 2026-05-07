@@ -10,7 +10,7 @@
 //   Response: {"id":<int>,"result":<any>}    | {"id":<int>,"error":<str>}
 //
 // Methods: getMemoryStats, generatePoToken, getStats, invalidateCaches,
-// invalidateIT, ping, solveCipher, shutdown.
+// invalidateIT, ping, solveCipher, shutdown, triggerGC.
 
 import { JSDOM } from "jsdom";
 import { BG, USER_AGENT, buildURL, getHeaders } from "bgutils-js";
@@ -223,6 +223,33 @@ async function dispatch(req) {
                 // V8 heap inuse/total reveals what's pressure on the JS engine
                 // (large preprocessed players, BotGuard runtime, etc.).
                 return writeResponse({ id, result: process.memoryUsage() });
+
+            case "triggerGC": {
+                // Force a full V8 GC cycle. Requires Node to be launched with
+                // --expose-gc (Sidecar.Config.ExposeGC). Used by Moombox to
+                // give the sidecar soft-limit semantics: when RSS exceeds the
+                // configured threshold, parent calls triggerGC instead of
+                // letting V8's hard --max-old-space-size kick in (which would
+                // OOM-abort the process). Returns memory stats before/after
+                // so the parent can log the effect.
+                if (typeof globalThis.gc !== "function") {
+                    return writeResponse({
+                        id,
+                        error: "triggerGC: --expose-gc not enabled in this sidecar",
+                    });
+                }
+                const before = process.memoryUsage();
+                try {
+                    globalThis.gc();
+                } catch (e) {
+                    return writeResponse({
+                        id,
+                        error: `triggerGC: ${e && e.message ? e.message : String(e)}`,
+                    });
+                }
+                const after = process.memoryUsage();
+                return writeResponse({ id, result: { before, after } });
+            }
 
             case "invalidateCaches":
                 cachedMinter = null;

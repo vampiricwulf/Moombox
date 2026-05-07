@@ -53,10 +53,21 @@ type Logger interface {
 // emits a `ready` notification when its synchronous init completes, so
 // healthy startup latency does not race against this deadline.
 // RequestTimeout defaults to 30s.
+//
+// V8HardLimitMB sets V8's --max-old-space-size; hitting this DOES OOM-abort
+// the sidecar (V8 has no graceful soft stop). Set it well above the soft
+// threshold the parent enforces via TriggerGC. Zero leaves V8's default
+// (~512-1500 MB depending on host).
+//
+// ExposeGC enables Node's --expose-gc so the sidecar can run global.gc()
+// on demand. Required for the TriggerGC RPC; harmless when no caller fires
+// it.
 type Config struct {
 	CacheDir       string
 	StartupTimeout time.Duration
 	RequestTimeout time.Duration
+	V8HardLimitMB  int
+	ExposeGC       bool
 	Logger         Logger
 }
 
@@ -154,7 +165,20 @@ func (s *Sidecar) Start(ctx context.Context) error {
 	nodeExe := filepath.Join(cacheDir, nodeBinaryName())
 	serverJS := filepath.Join(cacheDir, "src", "server.js")
 
-	cmd := exec.CommandContext(context.Background(), nodeExe, serverJS)
+	// Build node args: V8 flags first (must come before the script path),
+	// then the script. --max-old-space-size is V8's hard ceiling on the
+	// old-generation heap (in MB); --expose-gc lets server.js call
+	// global.gc() in response to the triggerGC RPC.
+	nodeArgs := []string{}
+	if s.cfg.V8HardLimitMB > 0 {
+		nodeArgs = append(nodeArgs, fmt.Sprintf("--max-old-space-size=%d", s.cfg.V8HardLimitMB))
+	}
+	if s.cfg.ExposeGC {
+		nodeArgs = append(nodeArgs, "--expose-gc")
+	}
+	nodeArgs = append(nodeArgs, serverJS)
+
+	cmd := exec.CommandContext(context.Background(), nodeExe, nodeArgs...)
 	cmd.Dir = cacheDir
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -373,6 +397,26 @@ func (s *Sidecar) MemoryStats(ctx context.Context) (MemoryStats, error) {
 		return MemoryStats{}, err
 	}
 	return stats, nil
+}
+
+// TriggerGCResult is the before/after memory snapshot returned by the
+// triggerGC RPC. Helpful for logging "GC reclaimed N MB" without a separate
+// MemoryStats round-trip.
+type TriggerGCResult struct {
+	Before MemoryStats `json:"before"`
+	After  MemoryStats `json:"after"`
+}
+
+// TriggerGC asks the sidecar to run a full V8 GC cycle. Requires
+// Config.ExposeGC = true at startup; otherwise the sidecar returns an
+// error that this method propagates. Used by Moombox to enforce a soft
+// memory limit on the sidecar (V8 has no native soft-limit primitive).
+func (s *Sidecar) TriggerGC(ctx context.Context) (TriggerGCResult, error) {
+	var result TriggerGCResult
+	if err := s.call(ctx, "triggerGC", nil, &result); err != nil {
+		return TriggerGCResult{}, err
+	}
+	return result, nil
 }
 
 // Stats holds the sidecar's internal counters. Useful for diagnostics
