@@ -429,6 +429,20 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 			return nil, err
 		}
 
+		// Recovery: ANDROID_VR usually returns DASH for public streams, but
+		// YouTube's account-based experiments could plausibly extend to it
+		// (already strips DASH from cookied clients — yt-dlp issue #15274).
+		// If the cookieless probe lacks a DASH URL, fall back once to the
+		// authenticated path so quality changes don't go silently undetected.
+		// Auth-required streams already use GetVideoInfo, so the fallback is
+		// a no-op for them.
+		if info.DashManifestURL == "" && !requiresAuth {
+			info, err = jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+			if err != nil {
+				return nil, fmt.Errorf("probe fallback to authenticated: %w", err)
+			}
+		}
+
 		if info.DashManifestURL == "" {
 			return nil, fmt.Errorf("no DASH manifest URL")
 		}

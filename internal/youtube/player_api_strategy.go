@@ -273,6 +273,26 @@ func (p *PlayerAPI) GetVideoInfoPublic(ctx context.Context, videoID string) (*Vi
 		}
 	}
 
+	// DASH-only enrichment via ANDROID_VR — mirrors the authenticated path.
+	// Public live streams hit by the YouTube account-based experiment that
+	// strips dashManifestUrl from the cookied/TV path also land here.
+	if result.DashManifestURL == "" &&
+		(result.StreamStatus == StreamLive || result.StreamStatus == StreamUpcoming) &&
+		result.PlayabilityError != PlayabilityMembersOnly &&
+		result.PlayabilityError != PlayabilityAgeRestricted &&
+		result.PlayabilityError != PlayabilityLoginRequired {
+		vrResult, vrErr := p.fetchWithAndroidVR(ctx, videoID, wp.Ytcfg.VisitorData)
+		if vrErr != nil {
+			p.logger.Debug("[PlayerApi] ANDROID_VR DASH fallback (public) failed",
+				slog.String("error", vrErr.Error()))
+		} else if vrResult.PlayabilityError == PlayabilityOK && vrResult.DashManifestURL != "" {
+			p.logger.Info("[PlayerApi] DASH manifest sourced via ANDROID_VR fallback (public)",
+				"videoID", videoID, "vrFormats", len(vrResult.Formats))
+			result.DashManifestURL = vrResult.DashManifestURL
+			collectFormats(&formatPool, vrResult.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
+		}
+	}
+
 	return finalizeVideoInfo(result, wpParsed, formatPool), nil
 }
 
