@@ -1,13 +1,23 @@
 ## Features
 
-- **Settings UI parity for memory + BotGuard + reverse-proxy + DPAPI**. Audit pass exposed several `MoomboxConfig` fields that were settable via `config.toml` but invisible from the TUI and Web UI:
-  - **BotGuard Sidecar** — new section with an enable/disable toggle (`bgutils.use_sidecar`).
-  - **Memory** — new section surfacing the `[memory]` knobs shipped in v2.6.21 (`go_soft_limit_mb`, `sidecar_soft_limit_mb`, `sidecar_hard_limit_mb`).
-  - **Trust forwarded proto** — new toggle in the Network section (`network.trust_forwarded_proto`) for setting the Secure cookie flag based on `X-Forwarded-Proto` when running behind a TLS-terminating reverse proxy.
-  - **DPAPI fallback (Windows)** — new toggle in the Cookies section (`cookies.dpapi_fallback`) for reading real Chromium browser cookies via Windows DPAPI when the CDP refresh path fails.
-- **Auto-persist new config sections on first load**. When a user upgrades and `loadFromFile` detects an expected section missing from their existing `config.toml` (e.g., `[memory]` after upgrading from 2.6.20 → 2.6.21), Moombox now flushes the full struct — defaults included — back to disk on startup. Previously the new section stayed invisible until the user saved something through the UI; now it appears automatically.
+- **Manifest-free DASH strategy** — covers the case the v2.6.18 ANDROID_VR fallback couldn't reach. YouTube has been running an account-based experiment that strips `dashManifestUrl` from cookied client responses (yt-dlp issue #15274). For *public* streams under the experiment, we already fall back to ANDROID_VR (cookieless, unaffected by the experiment). For *members-only / age-restricted / login-required* streams, ANDROID_VR returns "Private video" — those genuinely need cookied auth, which is exactly the path the experiment is pruning.
+  - The watch-page player response still ships `streamingData.adaptiveFormats[]` with full per-itag URLs even when the top-level `dashManifestUrl` is missing. The new strategy fetches each itag's URL with `&sq=N` from broadcast start, same shape moonarchive uses.
+  - n-param decryption routes through `cipher.RoutedDecryptNInURL` — EJS sidecar primary, goja fallback (same composite policy as everything else).
+  - POT is bound to videoID rather than visitor data — the experiment switches GVS POT enforcement to video-id-binding for cookied clients (yt-dlp logs "Detected experiment to bind GVS PO Token to video id").
+  - `OnCipherFailure` invalidation chain wired identically to the manifest-driven DASH path; shared `invalidate403Caches` helper wipes cipher solver, POT cache, and visitor data on a 403 burst.
+  - Verified end-to-end against a real members-only stream: sq=0 returns HTTP 200 with valid DASH MP4 (ftyp dash iso6 avc1 mp41 box header).
 
 ## Internal
 
-- New `MoomboxConfig.NeedsAutoPersist` in-memory flag (excluded from TOML/JSON marshalling) signals between `loadFromFile` and `cmd/moombox/services.go`'s init path.
-- API route updates handler (`config_routes.go`) now applies `bgutils`, `network.trust_forwarded_proto`, `cookies.dpapi_fallback`, and validates `memory.*` ranges + sidecar soft-vs-hard ordering.
+- `engine.SegmentDownloader.buildSegmentURL` auto-detects URL shape: query-style URLs (the manifest-free adaptive case) get `&sq=N`; path-style URLs (manifest-driven) keep `/sq/N`. One unit test covers the new branch.
+- New `HasManifestlessDashFormats(formats []youtube.Format) bool` exported from `internal/worker` — orchestrator strategy switch uses it to pick the new strategy when `!isVod && DashManifestURL == ""` and the format pool contains both video and audio adaptive entries.
+- Strategy hierarchy is now:
+  ```
+  useDirectVod && len(Formats) > 0       → VOD (direct VOD download)
+  DashManifestURL != ""                  → DASH (manifest-driven)
+  !isVod && HasManifestlessDashFormats() → ManifestlessDASH (new)
+  HlsManifestURL != ""                   → HLS (consolation)
+  len(Formats) > 0                       → VOD-fallback
+  ```
+  Manifest-free DASH preempts HLS because DASH gives us per-itag selection, separate audio (cleaner mux), and live-from-start segment addressability that YouTube live HLS cannot do. Auth-level dedup of the format pool happens during PlayerAPI parsing as before — the new strategy consumes the already-finalized pool, no change to "lowest auth wins per itag" merge semantics.
+- New `tools/manifestless-dash-probe` diagnostic — kept in tree for future regression testing of the recipe.
