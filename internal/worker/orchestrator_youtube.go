@@ -47,7 +47,16 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	if monitoringEnabled {
 		monitorCtx, mc := context.WithCancel(ctx)
 		monitorCancel = mc
-		probeFn := o.buildYouTubeProbeFn(jobCtx)
+		// Quality probes route through ANDROID_VR by default (cookieless,
+		// no POT, no watch-page fetch — bypasses the visitor-data rotation
+		// that was causing a sidecar mint every 30s). Streams that
+		// genuinely need authentication (members-only, age-restricted,
+		// login-required) keep using the authenticated GetVideoInfo path
+		// since ANDROID_VR will 401 on those.
+		requiresAuthProbe := videoInfo.PlayabilityError == youtube.PlayabilityMembersOnly ||
+			videoInfo.PlayabilityError == youtube.PlayabilityAgeRestricted ||
+			videoInfo.PlayabilityError == youtube.PlayabilityLoginRequired
+		probeFn := o.buildYouTubeProbeFn(jobCtx, requiresAuthProbe)
 		monitor = NewQualityMonitor(qualityMonitorInterval, currentQuality, probeFn, o.logger)
 		go monitor.Run(monitorCtx, qualityChangeCh)
 	}
@@ -395,13 +404,27 @@ streamEnded:
 // buildYouTubeProbeFn creates a quality probe function for YouTube streams.
 // The probe re-fetches the DASH manifest and selects the best stream, returning
 // the quality that would be selected under current preferences.
-func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext) func(context.Context) (*QualityInfo, error) {
+//
+// requiresAuth: when true, the probe uses GetVideoInfo (full authenticated
+// path with cookies + POT) — required for members-only, age-restricted, and
+// login-required streams. When false, the probe uses ProbeVideoStatus
+// (ANDROID_VR, cookieless, no POT) which is much cheaper and avoids the
+// per-probe sidecar mint. ANDROID_VR returns DashManifestURL for any
+// publicly accessible stream, which covers the vast majority of monitored
+// content.
+func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresAuth bool) func(context.Context) (*QualityInfo, error) {
 	maxRes := jobCtx.Config.MaxVideoResolution
 	videoItag := jobCtx.Config.VideoItag
 	qualityPref := jobCtx.Job.QualityPreference
 
 	return func(ctx context.Context) (*QualityInfo, error) {
-		info, err := jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+		var info *youtube.VideoInfo
+		var err error
+		if requiresAuth {
+			info, err = jobCtx.YT.GetVideoInfo(ctx, jobCtx.Job.VideoID)
+		} else {
+			info, err = jobCtx.YT.ProbeVideoStatus(ctx, jobCtx.Job.VideoID)
+		}
 		if err != nil {
 			return nil, err
 		}
