@@ -3,8 +3,29 @@ package engine
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"time"
 )
+
+// streamIdentityRe extracts (videoID, itag) from a YouTube media URL path.
+// Both DASH videoplayback URLs and HLS variant playlist URLs share the
+// `/id/<videoID>.<streamNumber>/itag/<itag>/` pattern. Capturing those two
+// values gives a stable identity that survives every-fetch session rotations
+// (expire, ei, ip, ns, n, sig, pot, mt, mh, …) — the parts that cause a
+// naïve full-URL equality check to fire "URL mismatch, starting fresh" on
+// every restart during an active live download.
+var streamIdentityRe = regexp.MustCompile(`/id/([\w-]+)\.\d+/itag/(\d+)/`)
+
+// streamIdentity returns the videoID + itag fingerprint for a YouTube media
+// URL, or "" when the URL doesn't match the expected pattern. Two URLs with
+// the same fingerprint refer to the same logical stream variant even when
+// every other path component has rotated.
+func streamIdentity(rawURL string) string {
+	if m := streamIdentityRe.FindStringSubmatch(rawURL); m != nil {
+		return m[1] + "/" + m[2]
+	}
+	return ""
+}
 
 // maxResumeStateAge is the oldest resume state we'll trust. Beyond this, we
 // treat the file as stale (the downloader likely changed URL/quality since

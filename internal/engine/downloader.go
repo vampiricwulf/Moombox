@@ -309,11 +309,26 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	resuming := false
 	state, err := d.loadResume()
 	if err == nil && state != nil {
-		// Validate resume state: base URL must match current download
-		if state.BaseURL != "" && state.BaseURL != d.getBaseURL() {
-			d.logger.Warn("[Downloader] Resume state URL mismatch, starting fresh",
-				"saved", state.BaseURL, "current", d.getBaseURL())
-			state = nil
+		// Validate resume state: stream identity (videoID + itag) must match.
+		// YouTube rotates session params (expire, ei, ns, n, sig, pot, …) on
+		// every fresh manifest fetch, so the saved BaseURL string never
+		// equals the current one across restarts. Compare on the stable
+		// identity instead, falling back to full-URL equality only when the
+		// pattern doesn't extract (e.g., non-YouTube hosts in tests).
+		if state.BaseURL != "" {
+			savedID := streamIdentity(state.BaseURL)
+			currentID := streamIdentity(d.getBaseURL())
+			mismatch := false
+			if savedID != "" && currentID != "" {
+				mismatch = savedID != currentID
+			} else {
+				mismatch = state.BaseURL != d.getBaseURL()
+			}
+			if mismatch {
+				d.logger.Warn("[Downloader] Resume state stream identity mismatch, starting fresh",
+					"savedID", savedID, "currentID", currentID)
+				state = nil
+			}
 		}
 		// Validate resume state: file must exist and be at least as large as saved position
 		if state != nil && state.BytesWritten > 0 {
