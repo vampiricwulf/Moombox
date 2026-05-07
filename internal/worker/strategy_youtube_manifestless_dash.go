@@ -146,19 +146,16 @@ func DownloadManifestlessDash(
 		"audioItag", itagOf(audioStream),
 		"videoQuality", qualityOf(videoStream))
 
-	// Re-decrypt n in each selected URL through the routed cipher path.
-	// parseFormatsWithCipher already decrypted at parse time; doing it
-	// again here is cheap (cache hit on the composite solver) and ensures
-	// the URL we're about to download from is current — useful if cipher
-	// rotation happened between parse and now.
-	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
-		if videoStream != nil {
-			videoStream.BaseURL = cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, videoStream.BaseURL)
-		}
-		if audioStream != nil {
-			audioStream.BaseURL = cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, audioStream.BaseURL)
-		}
-	}
+	// NOTE: do NOT re-decrypt n here. parseFormatsWithCipher already
+	// decrypted n on every URL during player-response parsing
+	// (player_api_parsing.go:185-195). Running RoutedDecryptNInURL on an
+	// already-decrypted URL would put the result through the n cipher a
+	// second time, producing garbage that YouTube 403s on every fetch.
+	// The composite solver has no idempotency guard; the contract here
+	// is "URLs from videoInfo.Formats[] are already cipher-resolved."
+	// Cipher rotation mid-stream is handled via the OnCipherFailure
+	// callback below, which invalidates the solver and triggers a
+	// manifest refresh through the orchestrator.
 
 	// Mint a POT bound to the videoID rather than visitor data. The
 	// experiment that strips dashManifestUrl from cookied clients also
