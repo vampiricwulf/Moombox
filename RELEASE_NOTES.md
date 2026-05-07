@@ -1,12 +1,15 @@
 ## Bug Fixes
 
-- HLS strategy now decrypts the throttling `n` parameter on the master URL via the routed cipher solver before fetching, matching what yt-dlp does in `extractor/youtube/_video.py:3684–3690`. On `cb017549`-family streams whose master URL ships with `/n/<encrypted>/` in its path, master/variant playlist fetches succeed (YouTube only enforces `n` on segment requests), but every segment 403'd. The bug had been latent since HLS-only streams were rare in practice — DASH was the usual path.
+- Visitor data is now sticky in `youtube.Service` — `SetVisitorData` only writes when no value is cached, so watch-page fetches on the hot path no longer overwrite it with each YouTube-rotated value. Previously, every quality probe / periodic full fetch produced a new POT content binding and missed the session cache, triggering a sidecar mint per probe. YouTube rotates `VisitorData` per response but the previously-issued value remains valid; pinning one per session matches yt-dlp's behaviour and lets the POT cache do its job.
+- DASH 403 bursts now also invalidate POT caches and visitor data, not just the cipher solver. The `OnCipherFailure` callback can't distinguish cipher rotation from POT expiry, so it now handles both. Without this, sticky visitor data could keep a stale POT alive indefinitely.
 
 ## Improvements
 
-- **ANDROID_VR DASH fallback** for the YouTube account experiment that strips `dashManifestUrl` from authenticated clients (yt-dlp issue #15274). When `TV_DOWNGRADED` and `WEB_SAFARI`/`WEB` both return no DASH manifest on a live or upcoming stream, Moombox now falls back to the cookieless `ANDROID_VR` client to source DASH. Skipped for members-only / age-restricted / login-required streams (which would 401 on the anonymous client). Live-from-start segment addressability — which HLS in YouTube live cannot do — is preserved on affected accounts.
-- ANDROID_VR formats from the fallback are merged into the format pool with auth-level dedup; cookied formats win same-itag ties so any Premium-tier formats from the authenticated path are preserved.
+- **Quality probe via ANDROID_VR for public streams.** The 30-second quality monitor was calling `GetVideoInfo` (full authenticated player API: cookies + POT) just to read `DashManifestURL` and discard everything else. `buildYouTubeProbeFn` now takes `requiresAuth`, derived from `videoInfo.PlayabilityError` at construction time:
+  - members-only / age-restricted / login-required → `GetVideoInfo` (authenticated)
+  - everything else → `ProbeVideoStatus` via ANDROID_VR (cookieless, no POT, no watch-page fetch)
+  - Public streams (the vast majority) now run the 30-second probe at effectively zero sidecar cost. Auth-required streams still pay the full cost, but POT cache hits make repeat calls cheap.
 
 ## Internal
 
-- `DownloadHls` signature now takes the routed `cipher.Solver` and `*cipher.GojaResolver` alongside `PotProvider` and `IsOnline`. Wired through `StrategyDeps`, `hlsStrategyT.Download`, and the three quality-recovery / quality-split call sites in `orchestrator_youtube.go`.
+- New `youtube.Service.InvalidateVisitorData()` method.
