@@ -80,7 +80,7 @@ func (dashStrategyT) Download(ctx context.Context, job *JobContext, info *youtub
 }
 
 func (hlsStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
-	return DownloadHls(ctx, job, info, deps.PotProvider, deps.IsOnline)
+	return DownloadHls(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider, deps.IsOnline)
 }
 
 // VodStrategy / DashStrategy / HlsStrategy are the package-level

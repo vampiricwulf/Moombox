@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
+	"github.com/vampiricwulf/Moombox/internal/cipher"
 	"github.com/vampiricwulf/Moombox/internal/engine"
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
@@ -16,12 +17,33 @@ import (
 // Fetches the HLS master playlist, selects the best variant based on
 // max_video_resolution config, and passes the selected variant's playlist URL
 // to the SegmentDownloader.
-func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
+//
+// routedSolver is the composite cipher.Solver (sidecar primary, goja fallback);
+// cipherSolver is the legacy *GojaResolver. Both are used to decrypt the `/n/`
+// throttling parameter in the master URL before fetching — yt-dlp does the
+// same in extractor/youtube/_video.py:3684-3690. Without this, YouTube's CDN
+// returns HTTP 403 on every segment for streams whose master URL ships with
+// an encrypted n in its path (cb017549-family players).
+func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider, isOnline func() bool) (*DownloadResult, error) {
 	if videoInfo.HlsManifestURL == "" {
 		return nil, fmt.Errorf("no HLS manifest URL available")
 	}
 
 	hlsURL := videoInfo.HlsManifestURL
+
+	// Decrypt /n/<encrypted>/ in master URL before fetching. Mirrors
+	// yt-dlp's HLS path: the master URL ships with a throttled n value
+	// that the CDN rejects on segments unless replaced with a player-JS-
+	// solved n. Master playlist fetch may succeed with the encrypted n
+	// (YouTube only enforces n on /videoplayback segment requests), but
+	// every segment returned by the variant playlist will then 403.
+	if videoInfo.PlayerURL != "" && (routedSolver != nil || cipherSolver != nil) {
+		decrypted := cipher.RoutedDecryptNInURL(ctx, routedSolver, cipherSolver, videoInfo.PlayerURL, hlsURL)
+		if decrypted != hlsURL {
+			hlsURL = decrypted
+			job.Logger.Debug("[Cipher] decrypted n-param in HLS manifest URL")
+		}
+	}
 
 	// Generate PO token once and reuse for master URL, variant URL, and
 	// segment URLs (audit reports/worker.md F30; same dedup as F29 for DASH).
