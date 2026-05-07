@@ -25,7 +25,7 @@ These are hard rules that govern all platform service integrations:
 
 The YouTube integration is a three-layer facade:
 
-1. **Service** (`service.go`) -- Top-level API. Wraps PlayerAPI, Auth, and FormatSelector. Holds cached visitor data with RWMutex protection. Provides `GetVideoInfo`, `ProbeVideoStatus`, `GetFormats`, and cipher decryption pass-throughs.
+1. **Service** (`service.go`) -- Top-level API. Wraps PlayerAPI, Auth, and FormatSelector. Holds cached visitor data with RWMutex protection. Visitor data is sticky-with-TTL: writes are accepted only when no value is cached or the cached value is older than `visitorDataTTL` (6 h). Sticky semantics keep the POT session cache hitting across the per-30s quality probe; the TTL acts as a safety net for long-running 24/7 sessions. `InvalidateVisitorData()` forces an immediate refresh after a downstream 403 burst suggesting POT expiry. Provides `GetVideoInfo`, `ProbeVideoStatus`, `GetFormats`, and cipher decryption pass-throughs.
 2. **PlayerAPI** (`player_api.go`) -- Innertube protocol handler. Makes HTTP POST requests to the player endpoint, manages multi-client fallback, parses responses, decrypts signatures and n-parameters.
 3. **Auth** (`auth.go`) -- Cookie-based authentication. Generates SAPISIDHASH Authorization headers, manages YouTube session headers, and syncs cookies from the CookieJar.
 
@@ -133,9 +133,10 @@ All client configs are defined in `internal/constants/constants.go`:
    a. **Try WEB_CREATOR** -- POST with WEB_CREATOR client. Collect formats with `AuthLevelWebCreator`.
    b. **If WEB_CREATOR also fails** (and the error is not `members_only`): **Try ANDROID_VR** -- POST without cookies but with visitorData. Collect formats with `AuthLevelAndroidVR`.
    c. **If all API clients fail**: Fall back to the watch page player response if available.
-7. **Stream classification override** -- If TV says `not_a_stream` but the watch page disagrees, override the stream status while keeping TV's formats if they are adequate (have both video and audio).
-8. **Merge metadata** -- Fill in missing fields (title, channel, description, thumbnails, timestamps) from the watch page response.
-9. **Deduplicate formats** -- Across all collected format pools, deduplicate by itag. When the same itag appears from multiple clients, keep the one with the lowest auth level.
+7. **ANDROID_VR DASH-only enrichment** -- If, after TV+WEB, no client returned a `DashManifestURL` and the stream is live or upcoming AND not members-only / age-restricted / login-required, fetch ANDROID_VR (cookieless). On success, adopt its `DashManifestURL` and merge its formats into the pool with auth-level dedup. This is a workaround for the YouTube account-based experiment that strips `dashManifestUrl` from cookied clients (yt-dlp issue #15274).
+8. **Stream classification override** -- If TV says `not_a_stream` but the watch page disagrees, override the stream status while keeping TV's formats if they are adequate (have both video and audio).
+9. **Merge metadata** -- Fill in missing fields (title, channel, description, thumbnails, timestamps) from the watch page response.
+10. **Deduplicate formats** -- Across all collected format pools, deduplicate by itag. When the same itag appears from multiple clients, keep the one with the lowest auth level.
 
 #### Public Fallback Flow
 
@@ -144,7 +145,8 @@ All client configs are defined in `internal/constants/constants.go`:
 1. Fetch watch page (no cookies) and extract ytcfg + player response.
 2. Try TV_DOWNGRADED (public, with STS).
 3. If TV fails or returns inadequate formats, try ANDROID_VR.
-4. Fall back to watch page response.
+4. Apply the same DASH-only ANDROID_VR enrichment as the authenticated path when TV returned no `DashManifestURL` for a live/upcoming stream.
+5. Fall back to watch page response.
 
 #### Retry Policy
 

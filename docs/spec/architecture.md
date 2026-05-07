@@ -357,7 +357,7 @@ else:
 ```
 
 **Live stream download loop (`runLiveStreamDownload`):**
-1. Starts quality monitor (30-second probe interval) if user hasn't manually selected itags
+1. Starts quality monitor (30-second probe interval) if user hasn't manually selected itags. The probe routes through `ProbeVideoStatus` (ANDROID_VR, cookieless, no POT) for public streams; members-only / age-restricted / login-required streams use the authenticated `GetVideoInfo` path. If the cookieless probe returns successfully without a `DashManifestURL` (e.g., a YouTube experiment stripped DASH from ANDROID_VR), the probe falls back once to the authenticated path so quality changes don't go undetected.
 2. Runs segment downloaders in a goroutine
 3. Simultaneously listens for quality change signals on `qualityChangeCh`
 4. When quality changes mid-stream:
