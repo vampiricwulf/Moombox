@@ -233,6 +233,17 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		strategy = VodStrategy
 	case videoInfo.DashManifestURL != "":
 		strategy = DashStrategy
+	case !isVod && HasManifestlessDashFormats(videoInfo.Formats):
+		// Manifest-free DASH: live stream where YouTube withheld
+		// dashManifestUrl from cookied clients (yt-dlp issue #15274
+		// experiment) but still shipped split video+audio adaptive
+		// formats with direct URLs in streamingData.adaptiveFormats[].
+		// We can fetch each itag's URL with `&sq=N` from broadcast
+		// start, same shape as the manifest-driven DASH downloader.
+		// Preempts HLS because DASH gives us per-itag selection,
+		// separate audio (cleaner mux), and live-from-start segment
+		// addressability that HLS in YouTube live cannot do.
+		strategy = ManifestlessDashStrategy
 	case videoInfo.HlsManifestURL != "":
 		strategy = HlsStrategy
 	case len(videoInfo.Formats) > 0:

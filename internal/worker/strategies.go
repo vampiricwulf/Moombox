@@ -65,11 +65,13 @@ type DownloadStrategy interface {
 // runtime.
 type vodStrategyT struct{}
 type dashStrategyT struct{}
+type manifestlessDashStrategyT struct{}
 type hlsStrategyT struct{}
 
-func (vodStrategyT) Kind() string  { return "vod" }
-func (dashStrategyT) Kind() string { return "dash" }
-func (hlsStrategyT) Kind() string  { return "hls" }
+func (vodStrategyT) Kind() string                { return "vod" }
+func (dashStrategyT) Kind() string               { return "dash" }
+func (manifestlessDashStrategyT) Kind() string   { return "manifestless_dash" }
+func (hlsStrategyT) Kind() string                { return "hls" }
 
 func (vodStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
 	return DownloadVod(ctx, job, info, deps.CipherSolver, deps.PotProvider)
@@ -79,17 +81,23 @@ func (dashStrategyT) Download(ctx context.Context, job *JobContext, info *youtub
 	return DownloadDash(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider, deps.IsOnline)
 }
 
+func (manifestlessDashStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
+	return DownloadManifestlessDash(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider, deps.IsOnline)
+}
+
 func (hlsStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
 	return DownloadHls(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider, deps.IsOnline)
 }
 
-// VodStrategy / DashStrategy / HlsStrategy are the package-level
-// singletons used by the orchestrator's strategy-selection switch.
-// Tests can substitute their own DownloadStrategy implementations.
+// VodStrategy / DashStrategy / ManifestlessDashStrategy / HlsStrategy
+// are the package-level singletons used by the orchestrator's
+// strategy-selection switch. Tests can substitute their own
+// DownloadStrategy implementations.
 var (
-	VodStrategy  DownloadStrategy = vodStrategyT{}
-	DashStrategy DownloadStrategy = dashStrategyT{}
-	HlsStrategy  DownloadStrategy = hlsStrategyT{}
+	VodStrategy               DownloadStrategy = vodStrategyT{}
+	DashStrategy              DownloadStrategy = dashStrategyT{}
+	ManifestlessDashStrategy  DownloadStrategy = manifestlessDashStrategyT{}
+	HlsStrategy               DownloadStrategy = hlsStrategyT{}
 )
 
 // nPathRe matches n-parameter encoded in URL path: /n/{encrypted_value}/
