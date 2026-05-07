@@ -475,18 +475,34 @@ func (d *SegmentDownloader) setCommonHeaders(req *http.Request, ua string) {
 	}
 }
 
-// youtubeSegPathFormat is YouTube's per-segment path convention:
-// `/sq/{seq}` appended to a base manifest URL. Documented as a single
-// source of truth so a future YouTube URL-shape change is one edit
-// rather than a string grep. Audit reports/engine.md #29.
+// youtubeSegPathFormat is YouTube's per-segment path convention for
+// path-style videoplayback URLs (typical DASH manifest output):
+// `/sq/{seq}` appended to the base manifest URL.
 const youtubeSegPathFormat = "%s/sq/%d"
 
+// youtubeSegQueryFormat is YouTube's per-segment QUERY convention for
+// adaptiveFormat URLs (manifest-free DASH path): `&sq={seq}` appended
+// to the base URL that already carries query parameters from the
+// player API. Both styles coexist because DASH manifest URLs come back
+// path-style while watch-page `streamingData.adaptiveFormats[].url`
+// values come back query-style.
+const youtubeSegQueryFormat = "%s&sq=%d"
+
 func (d *SegmentDownloader) buildSegmentURL(seq int) string {
-	if strings.Contains(d.getBaseURL(), "$Number$") {
-		return SegmentURL(d.getBaseURL(), seq)
+	base := d.getBaseURL()
+	if strings.Contains(base, "$Number$") {
+		return SegmentURL(base, seq)
 	}
-	// Append /sq/{seq} for YouTube-style URLs
-	base := strings.TrimRight(d.getBaseURL(), "/")
+	// Auto-detect URL shape: query-style URLs (manifest-free DASH from
+	// `streamingData.adaptiveFormats[].url`) carry their parameters in
+	// the query string, so we append `&sq=N`. Path-style URLs (DASH
+	// manifest output) get the conventional `/sq/N`. The separator is
+	// the discriminator: `?` present means we're looking at a query-
+	// style URL.
+	if strings.Contains(base, "?") {
+		return fmt.Sprintf(youtubeSegQueryFormat, base, seq)
+	}
+	base = strings.TrimRight(base, "/")
 	return fmt.Sprintf(youtubeSegPathFormat, base, seq)
 }
 

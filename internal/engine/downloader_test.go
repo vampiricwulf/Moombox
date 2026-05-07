@@ -144,6 +144,15 @@ func TestSegmentDownloader_BuildSegmentURL(t *testing.T) {
 			seq:     0,
 			want:    "https://example.com/videoplayback/sq/0",
 		},
+		{
+			// Manifest-free DASH adaptiveFormat URL — query-style, must
+			// append &sq=N rather than /sq/N (would otherwise corrupt
+			// the URL by inserting path between the query string).
+			name:    "query-style adaptiveFormat URL appends &sq=N",
+			baseURL: "https://rr1---xx.c.youtube.com/videoplayback?expire=1&itag=299&n=DECRYPTED&sig=ABC",
+			seq:     5,
+			want:    "https://rr1---xx.c.youtube.com/videoplayback?expire=1&itag=299&n=DECRYPTED&sig=ABC&sq=5",
+		},
 	}
 
 	for _, tt := range tests {
