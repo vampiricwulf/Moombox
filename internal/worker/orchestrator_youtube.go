@@ -428,6 +428,14 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 		if err != nil {
 			return nil, err
 		}
+		// Defensive: GetVideoInfo / ProbeVideoStatus can return (nil, nil)
+		// when fetchWatchPage and every Innertube client fail without
+		// surfacing a hard error (notably during a context-cancel shutdown
+		// race). Treat that as a transient probe error rather than letting
+		// the next dereference panic the goroutine.
+		if info == nil {
+			return nil, fmt.Errorf("probe returned nil info without error")
+		}
 
 		// Recovery: ANDROID_VR usually returns DASH for public streams, but
 		// YouTube's account-based experiments could plausibly extend to it
@@ -441,6 +449,37 @@ func (o *DownloadOrchestrator) buildYouTubeProbeFn(jobCtx *JobContext, requiresA
 			if err != nil {
 				return nil, fmt.Errorf("probe fallback to authenticated: %w", err)
 			}
+			if info == nil {
+				return nil, fmt.Errorf("probe fallback returned nil info")
+			}
+		}
+
+		// Manifestless DASH path: when the experiment strips
+		// dashManifestUrl from the response but the format pool still
+		// contains split video+audio adaptive entries, pick the best
+		// video format directly from the pool. Skips the manifest
+		// fetch entirely — the format metadata (width/height/fps) is
+		// already in videoInfo.Formats[], so a quality probe on a
+		// manifestless DASH stream is just an in-memory selection.
+		if info.DashManifestURL == "" && HasManifestlessDashFormats(info.Formats) {
+			var streamInfos []DashStreamInfo
+			for i := range info.Formats {
+				f := &info.Formats[i]
+				if f.IsAudio() || f.URL == "" {
+					continue
+				}
+				streamInfos = append(streamInfos, formatToDashStreamInfo(f))
+			}
+			best := SelectBestDashStream(streamInfos, videoItag, maxRes, true, qualityPref)
+			if best == nil {
+				return nil, fmt.Errorf("manifestless DASH probe: no video stream selected")
+			}
+			return &QualityInfo{
+				Width:  best.Width,
+				Height: best.Height,
+				FPS:    best.FPS,
+				Label:  FormatQualityLabel(best.Height, best.FPS),
+			}, nil
 		}
 
 		if info.DashManifestURL == "" {
