@@ -404,7 +404,10 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 
 				// Append sidecar memory if it's running and reachable. Brief
 				// 1s timeout — if the sidecar is hung or dead we don't want
-				// the every-2-minutes memory log to wedge on it.
+				// the every-2-minutes memory log to wedge on it. When the
+				// sidecar is configured but unreachable, append a marker so
+				// the log distinguishes "sidecar disabled" (no suffix) from
+				// "sidecar present but not responding" (suffix says so).
 				if s.bgSidecar != nil && s.bgSidecar.IsHealthy() {
 					sideCtx, sideCancel := context.WithTimeout(ctx, 1*time.Second)
 					sideStats, sideErr := s.bgSidecar.MemoryStats(sideCtx)
@@ -416,6 +419,8 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 							float64(sideStats.HeapUsed)/1048576,
 							float64(sideStats.HeapTotal)/1048576,
 						)
+					} else {
+						line += " | Sidecar: stats unavailable"
 					}
 				}
 
