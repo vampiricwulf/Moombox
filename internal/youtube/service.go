@@ -31,13 +31,22 @@ const initRetryInterval = 1 * time.Hour
 // still rate-limiting a sustained outage.
 const initFastRetryInterval = 60 * time.Second
 
+// visitorDataTTL caps how long a single cached visitor data is reused. The
+// sticky-write semantics in SetVisitorData prevent per-call rotation from
+// thrashing the POT cache, but a 24/7 archiver session can outlive whatever
+// session lifetime YouTube assumed when issuing the value. Six hours matches
+// the integrity-token TTL in PotProvider — when the next minter rotation
+// happens, fresh visitor data lines up with it.
+const visitorDataTTL = 6 * time.Hour
+
 // Service is the YouTube service facade wrapping player API, auth, and format selection.
 type Service struct {
-	Auth        *Auth
-	PlayerAPI   *PlayerAPI
-	Cookies     *cookies.CookieJar
-	visitorData string // Cached visitor data from watch page
-	vdMu        sync.RWMutex
+	Auth             *Auth
+	PlayerAPI        *PlayerAPI
+	Cookies          *cookies.CookieJar
+	visitorData      string    // Cached visitor data from watch page
+	visitorDataSetAt time.Time // When visitorData was last (re)populated; gates TTL-based refresh
+	vdMu             sync.RWMutex
 	// initMu serialises Init runs; lastInitAt is read+written under this lock.
 	// The previous initOnce one-shot meant a transient startup network failure
 	// would leave the process with empty VisitorData forever — bad for a 24/7
@@ -146,6 +155,7 @@ func (s *Service) Init(ctx context.Context) {
 		s.vdMu.Lock()
 		if s.visitorData == "" {
 			s.visitorData = m[1]
+			s.visitorDataSetAt = time.Now()
 			s.logger.Debug("[YouTube] Visitor data extracted", "prefix", m[1][:min(30, len(m[1]))])
 		}
 		s.vdMu.Unlock()
@@ -193,22 +203,28 @@ func (s *Service) ProbeVideoStatus(ctx context.Context, videoID string) (*VideoI
 	return s.PlayerAPI.ProbeVideoStatus(ctx, videoID, vd)
 }
 
-// SetVisitorData stores visitor data extracted from a watch page. Sticky:
-// only writes when no value is cached, so callers that re-fetch the watch
-// page repeatedly (quality probes, full-fetches) don't trigger a fresh
-// visitor data on every call. YouTube rotates VisitorData on each watch
-// page response, but the previously-issued value remains valid for the
-// session — using it consistently lets the POT session cache hit and avoids
-// a sidecar mint per probe. To force a refresh after a downstream failure
-// (HTTP 403 burst suggesting POT expiry), call InvalidateVisitorData.
+// SetVisitorData stores visitor data extracted from a watch page. Sticky
+// with a TTL: writes when no value is cached OR when the cached value is
+// older than visitorDataTTL. Callers that re-fetch the watch page on the hot
+// path (quality probes, full fetches) don't trigger a fresh visitor data on
+// every call, but a long-running session still rotates eventually so a
+// stale value can't pin the POT cache to a dead binding indefinitely.
+//
+// YouTube rotates VisitorData on each watch-page response, but the
+// previously-issued value remains valid for some session window. Pinning
+// one VD per session lets the POT session cache hit and avoids a sidecar
+// mint per probe; the TTL acts as a safety net against pathological
+// stickiness. To force a refresh after a downstream failure (403 burst
+// suggesting POT expiry), call InvalidateVisitorData.
 func (s *Service) SetVisitorData(vd string) {
 	if vd == "" {
 		return
 	}
 	s.vdMu.Lock()
 	defer s.vdMu.Unlock()
-	if s.visitorData == "" {
+	if s.visitorData == "" || time.Since(s.visitorDataSetAt) > visitorDataTTL {
 		s.visitorData = vd
+		s.visitorDataSetAt = time.Now()
 	}
 }
 
@@ -218,6 +234,7 @@ func (s *Service) SetVisitorData(vd string) {
 func (s *Service) InvalidateVisitorData() {
 	s.vdMu.Lock()
 	s.visitorData = ""
+	s.visitorDataSetAt = time.Time{}
 	s.vdMu.Unlock()
 }
 
