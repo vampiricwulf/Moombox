@@ -110,6 +110,39 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 		}
 	}
 
+	// ANDROID_VR DASH workaround for the YouTube account experiment that
+	// strips dashManifestUrl from cookied clients (yt-dlp issue #15274).
+	// Symptom: TV+WEB return formats and HLS but no DASH; users on the
+	// affected account experiment see this consistently. ANDROID_VR is
+	// cookieless and unaffected by the experiment, so it serves as a
+	// DASH-only enrichment source.
+	//
+	// Live/upcoming only — DASH on those streams unlocks --live-from-start
+	// segment addressability, which HLS in YouTube live cannot do. VOD
+	// already works fine via the format pool. Skip on members-only and
+	// age-restricted (anonymous android_vr would 401; age-restricted has
+	// its own web_embedded path below).
+	if result.DashManifestURL == "" &&
+		webResult.DashManifestURL == "" &&
+		(result.StreamStatus == StreamLive || result.StreamStatus == StreamUpcoming) &&
+		result.PlayabilityError != PlayabilityMembersOnly &&
+		result.PlayabilityError != PlayabilityAgeRestricted &&
+		result.PlayabilityError != PlayabilityLoginRequired {
+
+		vrResult, vrErr := p.fetchWithAndroidVR(ctx, videoID, ytcfg.VisitorData)
+		if vrErr != nil {
+			p.logger.Debug("[PlayerApi] ANDROID_VR DASH fallback failed",
+				slog.String("error", vrErr.Error()))
+		} else if vrResult.PlayabilityError == PlayabilityOK && vrResult.DashManifestURL != "" {
+			p.logger.Info("[PlayerApi] DASH manifest sourced via ANDROID_VR fallback",
+				"videoID", videoID, "vrFormats", len(vrResult.Formats))
+			result.DashManifestURL = vrResult.DashManifestURL
+			// Merge ANDROID_VR formats with auth-level dedup; cookied
+			// formats win same-itag ties via deduplicateFormats.
+			collectFormats(&formatPool, vrResult.Formats, "android_vr_dash_fallback", AuthLevelAndroidVR)
+		}
+	}
+
 	// Try web_embedded for age-restricted content
 	if result.PlayabilityError == PlayabilityAgeRestricted {
 		p.logger.Info("[PlayerApi] Age-restricted content detected, trying web_embedded", "videoID", videoID)
