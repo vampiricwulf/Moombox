@@ -51,3 +51,38 @@ func TestStreamIdentity_NoMatch(t *testing.T) {
 		t.Errorf("expected empty identity for non-YouTube URL, got %q", got)
 	}
 }
+
+func TestStreamIdentity_QueryStyleAdaptiveFormatURL(t *testing.T) {
+	// Manifestless DASH URLs from streamingData.adaptiveFormats[].url are
+	// query-style — id and itag are query parameters, not path segments.
+	// Path-style regex misses these entirely; the query fallback matches.
+	url := "https://rr1---xx.c.youtube.com/videoplayback?expire=1778192158&ei=abc&ip=2601&id=3IyCk5NPX3M.1&itag=299&aitags=133,134,135&source=yt_live_broadcast&n=DECRYPTED&sig=ABC"
+	got := streamIdentity(url)
+	want := "3IyCk5NPX3M/299"
+	if got != want {
+		t.Errorf("streamIdentity(query) = %q, want %q", got, want)
+	}
+}
+
+func TestStreamIdentity_QueryStyle_RotatedSessionParams_SameIdentity(t *testing.T) {
+	// Two query-style URLs with the same id+itag but different rotated
+	// session params (expire/ei/ip/n/sig) must report identical identities.
+	// This is the failure case from the field log where every restart of
+	// a manifestless DASH download produced a "stream identity mismatch"
+	// warning because both savedID and currentID extracted as "" and the
+	// fallback compared full URLs.
+	saved := "https://rr1---xx.c.youtube.com/videoplayback?expire=1000&ei=old&ip=1.1.1.1&id=foo123.1&itag=140&n=OLD&sig=OLD"
+	current := "https://rr2---yy.c.youtube.com/videoplayback?expire=2000&ei=new&ip=2.2.2.2&id=foo123.1&itag=140&n=NEW&sig=NEW"
+	if streamIdentity(saved) != streamIdentity(current) {
+		t.Errorf("expected matching identities; saved=%q current=%q",
+			streamIdentity(saved), streamIdentity(current))
+	}
+}
+
+func TestStreamIdentity_QueryStyle_DifferentItag(t *testing.T) {
+	a := "https://x/videoplayback?id=foo.1&itag=140"
+	b := "https://x/videoplayback?id=foo.1&itag=299"
+	if streamIdentity(a) == streamIdentity(b) {
+		t.Errorf("expected different identities for different query itags")
+	}
+}

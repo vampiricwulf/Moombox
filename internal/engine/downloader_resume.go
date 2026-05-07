@@ -7,22 +7,38 @@ import (
 	"time"
 )
 
-// streamIdentityRe extracts (videoID, itag) from a YouTube media URL path.
-// Both DASH videoplayback URLs and HLS variant playlist URLs share the
-// `/id/<videoID>.<streamNumber>/itag/<itag>/` pattern. Capturing those two
-// values gives a stable identity that survives every-fetch session rotations
-// (expire, ei, ip, ns, n, sig, pot, mt, mh, …) — the parts that cause a
-// naïve full-URL equality check to fire "URL mismatch, starting fresh" on
-// every restart during an active live download.
-var streamIdentityRe = regexp.MustCompile(`/id/([\w-]+)\.\d+/itag/(\d+)/`)
+// streamIdentityPathRe extracts (videoID, itag) from a path-style YouTube
+// media URL — DASH manifest output and HLS variant playlists share the
+// `/id/<videoID>.<streamNumber>/itag/<itag>/` shape.
+var streamIdentityPathRe = regexp.MustCompile(`/id/([\w-]+)\.\d+/itag/(\d+)/`)
+
+// streamIdentityQueryIDRe / streamIdentityQueryItagRe extract id and itag
+// from a query-style YouTube media URL — manifestless DASH adaptiveFormat
+// URLs ship as `videoplayback?expire=...&id=<videoID>.<n>&itag=<itag>&...`.
+// Both parameters appear at arbitrary positions in the query, so we match
+// each independently rather than constraining adjacency.
+var streamIdentityQueryIDRe = regexp.MustCompile(`[?&]id=([\w-]+)\.\d+`)
+var streamIdentityQueryItagRe = regexp.MustCompile(`[?&]itag=(\d+)`)
 
 // streamIdentity returns the videoID + itag fingerprint for a YouTube media
-// URL, or "" when the URL doesn't match the expected pattern. Two URLs with
-// the same fingerprint refer to the same logical stream variant even when
-// every other path component has rotated.
+// URL, or "" when neither URL shape matches. Two URLs with the same
+// fingerprint refer to the same logical stream variant even when every
+// other path or query component has rotated (expire, ei, ip, ns, n, sig,
+// pot, mt, mh, …).
+//
+// Tries path-style first (the manifest-driven DASH and HLS variant case),
+// then falls back to query-style (manifestless DASH adaptiveFormat URLs).
+// The fallback exists because the format pool URLs straight out of
+// streamingData.adaptiveFormats[] are query-style, while
+// engine.ParseDash output for manifest-driven streams is path-style.
 func streamIdentity(rawURL string) string {
-	if m := streamIdentityRe.FindStringSubmatch(rawURL); m != nil {
+	if m := streamIdentityPathRe.FindStringSubmatch(rawURL); m != nil {
 		return m[1] + "/" + m[2]
+	}
+	idMatch := streamIdentityQueryIDRe.FindStringSubmatch(rawURL)
+	itagMatch := streamIdentityQueryItagRe.FindStringSubmatch(rawURL)
+	if idMatch != nil && itagMatch != nil {
+		return idMatch[1] + "/" + itagMatch[1]
 	}
 	return ""
 }
