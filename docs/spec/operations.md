@@ -90,6 +90,38 @@ The first-run setup wizard checks for FFmpeg and offers to install it via chocol
 
 ---
 
+## Memory Limits
+
+Moombox bounds steady-state memory for both the Go process and the embedded BotGuard sidecar. Configured via `[memory]` in `config.toml`:
+
+```toml
+[memory]
+go_soft_limit_mb = 256        # Go runtime soft cap (debug.SetMemoryLimit)
+sidecar_soft_limit_mb = 200   # RSS threshold to fire sidecar GC
+sidecar_hard_limit_mb = 512   # V8 --max-old-space-size for the sidecar
+```
+
+### Go Process
+
+`debug.SetMemoryLimit(GoSoftLimitMB << 20)` is applied at startup. It is a *soft* limit: as the heap approaches the cap, Go's GC runs more aggressively and returns memory to the OS more eagerly. Allocations that genuinely need more memory still succeed beyond the cap — the runtime never OOM-aborts on this knob alone. Setting `0` disables the call (Go uses its default unbounded behaviour).
+
+Default 256 MB sits ~10% above the observed p99 active-download Sys (~238 MB), so GC fires only on real growth, not on routine streaming work.
+
+### Sidecar (V8)
+
+V8 has no soft-limit primitive, so the sidecar combines a hard ceiling with proactive GC triggers:
+
+1. **Hard ceiling**: launched with `--max-old-space-size=<SidecarHardLimitMB>`. Hitting this OOM-aborts the sidecar (V8 has no graceful soft stop). The launcher auto-respawns it on the next call, but in-flight requests get errors. Set `0` to use V8's default (~512–1500 MB depending on host).
+2. **Proactive GC**: launched with `--expose-gc`. The 2-minute memory-log loop in `cmd/moombox/main.go` reads sidecar RSS via `Sidecar.MemoryStats()` and, when RSS exceeds `SidecarSoftLimitMB`, fires `Sidecar.TriggerGC()` (a `triggerGC` JSON-RPC method that runs `globalThis.gc()` and returns before/after stats). Set `0` to disable.
+
+Default 200 MB soft / 512 MB hard. The soft sits above the post-mint plateau (~150 MB) so GC fires only when something is genuinely growing; the hard sits above the historical peak observed during BotGuard processing bursts (~544 MB during the leak that prompted these limits, ~400-500 MB normally) so legitimate work doesn't trigger an OOM.
+
+### Tuning
+
+Lower the soft caps to trade CPU for memory; raise them when GC pressure becomes visible (look for `[Memory] sidecar soft limit hit; ran GC` log lines repeatedly reclaiming little). The hard sidecar cap should always sit above the soft cap by a comfortable margin — 2x is a good rule of thumb. Setting the hard cap below observed BotGuard peaks (~500 MB) will manifest as the sidecar process restarting under load.
+
+---
+
 ## CI Pipeline
 
 ### Workflow

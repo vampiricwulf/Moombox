@@ -142,6 +142,9 @@ For advanced users, a [`config.example.toml`](config.example.toml) reference is 
 | `feed_check_interval` | `10` | Minutes between RSS feed checks (also accepts `"10m"`) |
 | `twitch_check_interval` | `15` | Seconds between Twitch GQL live-status checks (with jitter) |
 | `tasklist.hide_finished_age_days` | `30` | Days before finished jobs move to Archived (also accepts `"30d"`) |
+| `memory.go_soft_limit_mb` | `256` | Soft memory cap for the Go process (no OOM; just GC pressure as memory approaches it) |
+| `memory.sidecar_soft_limit_mb` | `200` | RSS threshold at which Moombox tells the sidecar to run a full V8 GC |
+| `memory.sidecar_hard_limit_mb` | `512` | Sidecar V8 `--max-old-space-size` ceiling (does OOM if hit; set well above the soft cap) |
 
 ### Channel Monitoring
 

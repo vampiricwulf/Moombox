@@ -74,9 +74,13 @@ func Defaults() *MoomboxConfig {
 			UseSidecar: true,
 		},
 		Memory: MemoryConfig{
-			GoSoftLimitMB:      100,
-			SidecarSoftLimitMB: 100,
-			SidecarHardLimitMB: 256,
+			// Defaults derived from observed steady-state usage in the
+			// field (see docs/spec/operations.md "Memory limits"). Each
+			// threshold sits above the relevant working set so GC only
+			// fires on actual growth, not normal operation.
+			GoSoftLimitMB:      256, // p99 active-download Sys ≈ 238 MB
+			SidecarSoftLimitMB: 200, // post-mint plateau ≈ 150 MB
+			SidecarHardLimitMB: 512, // BotGuard bursts ≈ 400-500 MB
 		},
 	}
 }

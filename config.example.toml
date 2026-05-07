@@ -146,6 +146,20 @@
 # [bgutils]
 # use_sidecar = true                         # Default: true. Set to false to disable.
 
+# ─── Memory Limits ──────────────────────────────────────────────────────────
+# Soft caps on steady-state memory for the Go process and the BotGuard
+# sidecar. See docs/spec/operations.md "Memory Limits" for the design.
+#
+# Defaults are tuned to sit ABOVE normal operating ranges so GC fires only
+# on real growth, not routine streaming work. Lower these to trade CPU for
+# memory; raise them when GC pressure becomes visible. Set any field to 0
+# to disable that specific cap (Go uses unbounded behaviour; sidecar uses
+# V8's ~512-1500 MB default ceiling).
+# [memory]
+# go_soft_limit_mb = 256                     # debug.SetMemoryLimit; soft, no OOM.
+# sidecar_soft_limit_mb = 200                # RSS threshold to fire sidecar GC.
+# sidecar_hard_limit_mb = 512                # V8 --max-old-space-size; OOMs on hit.
+
 # ─── Webhook Notifications ──────────────────────────────────────────────────
 # Send webhook notifications for stream events.
 # Works with Discord, Slack, ntfy, or any service that accepts POST webhooks.
