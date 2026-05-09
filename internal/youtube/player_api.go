@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sync"
 	"time"
@@ -125,6 +126,22 @@ func (p *PlayerAPI) decryptSig(ctx context.Context, playerURL, encrypted string)
 		// failure doesn't take sig down completely. The composite solver
 		// already routes around fixable errors internally; reaching here
 		// means both sidecar and composite-internal fallback failed.
+		// Log once per (playerID, error-prefix) so we surface why sig is
+		// failing (the warning that fires next would otherwise just say
+		// "sig unavailable for this player" — the goja-fallback symptom,
+		// not the sidecar-failure root cause). The dedup key uses the
+		// first 60 chars of the error so a transient blip doesn't spam
+		// while a persistent failure is still loud-once.
+		errSnip := err.Error()
+		if len(errSnip) > 60 {
+			errSnip = errSnip[:60]
+		}
+		key := playerID + "|sidecar-err|" + errSnip
+		if _, loaded := p.loggedSigRoutes.LoadOrStore(key, struct{}{}); !loaded {
+			p.logger.Warn("[Cipher] sidecar sig failed; falling back to goja",
+				slog.String("playerID", playerID),
+				slog.String("err", err.Error()))
+		}
 	}
 	out, err := p.decryptSigLegacy(ctx, playerURL, encrypted)
 	if err == nil {
