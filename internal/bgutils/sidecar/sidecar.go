@@ -441,11 +441,20 @@ func (s *Sidecar) GetStats(ctx context.Context) (Stats, error) {
 // method. PlayerJS is optional after the first call for a given PlayerID
 // in the sidecar's lifetime; subsequent calls may omit it. If the sidecar
 // reports "player not loaded", callers should retry with PlayerJS attached.
+//
+// ForceReload tells the sidecar to drop any cached preprocessed solver
+// for PlayerID before loading the attached PlayerJS. Set when the caller
+// has detected that the sidecar's cached JS is stale (e.g. an
+// "ejs solve sig: no solutions" error after a YouTube-side player
+// rotation). Without ForceReload, the sidecar's `if (!entry)` cache
+// guard would silently ignore freshly-attached PlayerJS for an already
+// known PlayerID.
 type SolveCipherRequest struct {
 	PlayerID      string   `json:"playerID"`
 	PlayerJS      string   `json:"playerJS,omitempty"`
 	SigChallenges []string `json:"sigChallenges,omitempty"`
 	NChallenges   []string `json:"nChallenges,omitempty"`
+	ForceReload   bool     `json:"forceReload,omitempty"`
 }
 
 // SolveCipherResult is the response payload. Result maps are keyed by the
@@ -482,6 +491,9 @@ func (s *Sidecar) SolveCipher(ctx context.Context, req SolveCipherRequest) (Solv
 	}
 	if req.PlayerJS != "" {
 		params["playerJS"] = req.PlayerJS
+	}
+	if req.ForceReload {
+		params["forceReload"] = true
 	}
 
 	var result SolveCipherResult

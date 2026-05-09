@@ -51,6 +51,19 @@ type VideoInfo struct {
 }
 
 // Format contains video/audio format information from YouTube API.
+//
+// URL holds either a fully-resolved direct URL (when the YouTube response
+// shipped one inline) OR the raw `url=` value parsed out of a
+// signatureCipher entry — in the latter case EncryptedSig is set and the
+// format is not fetchable until cipher.ResolveFormatURL has been called
+// to append the decrypted signature and decrypt the n-param. Both URL
+// shapes also carry an encrypted n-param that ResolveFormatURL must
+// decrypt before the URL can be used.
+//
+// Stage 3 of the cipher pipeline rework defers cipher decryption from
+// parse-time to post-selection so we don't pay for decrypting 7-26
+// formats per stream when only 1-2 will actually be used. See
+// docs/plans/cipher-pipeline-rework.md.
 type Format struct {
 	Itag            int    `json:"itag"`
 	URL             string `json:"url,omitempty"`
@@ -65,6 +78,16 @@ type Format struct {
 	Fps             *int   `json:"fps,omitempty"`
 	Source          string `json:"source,omitempty"`
 	AuthLevel       *int   `json:"authLevel,omitempty"`
+
+	// EncryptedSig is the `s` field from a signatureCipher entry, captured
+	// at parse-time and decrypted on demand by cipher.ResolveFormatURL.
+	// Empty when the format originated from a direct URL response (no sig
+	// needed).
+	EncryptedSig string `json:"encryptedSig,omitempty"`
+	// SigKey is the `sp` field from a signatureCipher entry, defaulting to
+	// "signature" when absent. Used as the URL parameter name when
+	// appending the decrypted sig.
+	SigKey string `json:"sigKey,omitempty"`
 }
 
 // IsVideo returns true if this format contains video.

@@ -93,7 +93,14 @@ function solveOne(entry, type, challenge) {
     return solved;
 }
 
-export function solveCipher({ playerID, playerJS, sigChallenges, nChallenges }) {
+export function solveCipher({ playerID, playerJS, sigChallenges, nChallenges, forceReload }) {
+    // forceReload: caller has detected stale-JS errors against a cached
+    // entry (Moombox cipher.ErrPlayerJSStale path). Drop our cache and
+    // re-load from the attached playerJS so the next solve runs against
+    // the rotated player.
+    if (forceReload && playerCache.has(playerID)) {
+        playerCache.delete(playerID);
+    }
     let entry = playerCache.get(playerID);
     if (!entry) {
         if (!playerJS) {

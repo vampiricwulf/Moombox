@@ -146,16 +146,35 @@ func DownloadManifestlessDash(
 		"audioItag", itagOf(audioStream),
 		"videoQuality", qualityOf(videoStream))
 
-	// NOTE: do NOT re-decrypt n here. parseFormatsWithCipher already
-	// decrypted n on every URL during player-response parsing
-	// (player_api_parsing.go:185-195). Running RoutedDecryptNInURL on an
-	// already-decrypted URL would put the result through the n cipher a
-	// second time, producing garbage that YouTube 403s on every fetch.
-	// The composite solver has no idempotency guard; the contract here
-	// is "URLs from videoInfo.Formats[] are already cipher-resolved."
-	// Cipher rotation mid-stream is handled via the OnCipherFailure
-	// callback below, which invalidates the solver and triggers a
-	// manifest refresh through the orchestrator.
+	// Stage 3 of the cipher pipeline rework deferred sig+n decryption
+	// from parse-time to here: parseFormats leaves Format.URL raw (with
+	// EncryptedSig captured for sigCipher entries), and we resolve the
+	// chosen video + audio URLs right before constructing the segment
+	// downloader. Bound the re-selection to one fallback so a fully
+	// broken cipher state surfaces as a clean setup error rather than
+	// looping every itag.
+	excludedVideoItags := map[int]bool{}
+	excludedAudioItags := map[int]bool{}
+	if videoStream != nil {
+		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, videoStreams, videoStream, videoItag, job.Config.MaxVideoResolution, true, job.Job.QualityPreference, routedSolver, cipherSolver, videoInfo.PlayerURL, excludedVideoItags, job.Logger)
+		if err != nil {
+			return nil, fmt.Errorf("manifestless DASH: resolve video URL: %w", err)
+		}
+		if retryStream != nil {
+			videoStream = retryStream
+		}
+		videoStream.BaseURL = resolved
+	}
+	if audioStream != nil {
+		resolved, retryStream, err := resolveManifestlessStream(ctx, videoInfo.Formats, audioStreams, audioStream, audioItag, 0, false, "", routedSolver, cipherSolver, videoInfo.PlayerURL, excludedAudioItags, job.Logger)
+		if err != nil {
+			return nil, fmt.Errorf("manifestless DASH: resolve audio URL: %w", err)
+		}
+		if retryStream != nil {
+			audioStream = retryStream
+		}
+		audioStream.BaseURL = resolved
+	}
 
 	// Mint a POT bound to the videoID rather than visitor data. The
 	// experiment that strips dashManifestUrl from cookied clients also

@@ -139,11 +139,19 @@ func (s *GojaResolver) GetSolvers(ctx context.Context, playerURL string) (*Solve
 
 func (s *GojaResolver) compileSolver(ctx context.Context, playerURL, playerID string) (*Solvers, error) {
 	s.logger.Debug("cipher: fetching player JS", "playerID", playerID)
-	playerJS, err := s.playerCache.Fetch(ctx, playerURL)
+	playerJS, changed, err := s.playerCache.Fetch(ctx, playerURL)
 	if err != nil {
 		// PlayerCache.Fetch already includes "fetch player JS" in its message;
 		// wrap with a different verb to avoid "fetch player JS: fetch player JS: ..."
 		return nil, fmt.Errorf("compile solver for %s: %w", playerID, err)
+	}
+	// Fetch already removed the preprocessed.js sidecar on changed=true; we
+	// only need to drop in-memory solverData here. compileSolver is normally
+	// called when solverData has no entry, so this is mostly defensive against
+	// future call sites and against the path where Fetch coincidentally
+	// rotates the JS while compileSolver is racing in.
+	if changed {
+		s.dropSolverData(CacheKey(playerURL))
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -443,12 +451,56 @@ func (s *GojaResolver) Batch(ctx context.Context, playerID string, sigs, ns []st
 // internally so the cache identity is the same as for in-process
 // solving — one fetch serves both the goja extractor and the sidecar
 // solver.
+//
+// When Fetch detects a content change (proactive revalidation, Stage 1)
+// the in-memory compiled solver for this player is dropped too — without
+// that, the goja fallback path would happily keep serving the old solver
+// against fresh JS from YouTube and produce 403s at the CDN.
 func (s *GojaResolver) PlayerJS(playerID string) (string, error) {
-	js, err := s.playerCache.Fetch(context.Background(), playerURLForID(playerID))
+	playerURL := playerURLForID(playerID)
+	js, changed, err := s.playerCache.Fetch(context.Background(), playerURL)
 	if err != nil {
 		return "", err
 	}
+	if changed {
+		s.dropSolverData(CacheKey(playerURL))
+	}
 	return js, nil
+}
+
+// RemovePlayerJS satisfies cipher.PlayerSource. Drops every cache layer
+// for the given playerID — disk raw + preprocessed + meta, in-memory
+// compiled solver, STS entry — so the next solver request re-fetches
+// from YouTube. Equivalent to InvalidateSolver but expressed in
+// playerID terms (matching the sidecar's identity model).
+func (s *GojaResolver) RemovePlayerJS(playerID string) error {
+	s.InvalidateSolver(playerURLForID(playerID))
+	return nil
+}
+
+// dropSolverData evicts the compiled solver entry for a given cache key
+// without touching disk caches (Fetch owns its own files). Called when
+// the underlying player JS is known to have rotated — see compileSolver
+// and PlayerJS. Mirrors the in-memory portion of InvalidateSolver but
+// without the disk-side Remove (which Fetch has already handled
+// surgically: only the preprocessed sidecar, not the freshly-written
+// raw JS we still want).
+func (s *GojaResolver) dropSolverData(key string) {
+	s.solverMu.Lock()
+	defer s.solverMu.Unlock()
+	if _, ok := s.solverData[key]; !ok {
+		return
+	}
+	delete(s.solverData, key)
+	for i, k := range s.solverOrder {
+		if k == key {
+			newOrder := make([]string, 0, len(s.solverOrder)-1)
+			newOrder = append(newOrder, s.solverOrder[:i]...)
+			newOrder = append(newOrder, s.solverOrder[i+1:]...)
+			s.solverOrder = newOrder
+			break
+		}
+	}
 }
 
 // Compile-time check: GojaResolver satisfies the cipher.Solver interface.

@@ -199,6 +199,13 @@ func (f *fixedPlayerSource) PlayerJS(playerID string) (string, error) {
 	return f.js, nil
 }
 
+// RemovePlayerJS satisfies cipher.PlayerSource. The live sidecar tests
+// don't exercise the reactive-invalidation path; this is a no-op so the
+// interface stays satisfied.
+func (f *fixedPlayerSource) RemovePlayerJS(playerID string) error {
+	return nil
+}
+
 type liveLogger struct{ t *testing.T }
 
 func (l *liveLogger) Debug(msg string, args ...any) { l.t.Logf("[DEBUG] "+msg+" %v", args) }

@@ -410,6 +410,99 @@ func TestDeduplicateFormats(t *testing.T) {
 	}
 }
 
+// TestParseFormats_DefersCipherDecryption verifies the Stage 3 contract:
+// parseFormats captures the raw URL + EncryptedSig/SigKey from a
+// signatureCipher entry without invoking any cipher solver. The actual
+// resolution happens in worker strategies via cipher.ResolveFormatURL.
+func TestParseFormats_DefersCipherDecryption(t *testing.T) {
+	logger := noopLogger{}
+	pa := NewPlayerAPI(nil, logger)
+	// No cipher solver wired — parseFormats must NOT call one.
+
+	streamingData := map[string]any{
+		"adaptiveFormats": []any{
+			map[string]any{
+				"itag":             float64(137),
+				"mimeType":         `video/mp4; codecs="avc1.640028"`,
+				"bitrate":          float64(2500000),
+				"width":            float64(1920),
+				"height":           float64(1080),
+				"signatureCipher":  "url=https%3A%2F%2Fr1---sn-test.googlevideo.com%2Fvideoplayback%3Fexpire%3D123%26n%3DENC_N%26itag%3D137&s=ENC_SIG&sp=signature",
+			},
+			map[string]any{
+				"itag":     float64(140),
+				"mimeType": `audio/mp4; codecs="mp4a.40.2"`,
+				"bitrate":  float64(128000),
+				"url":      "https://r1---sn-test.googlevideo.com/videoplayback?expire=123&n=ENC&itag=140",
+			},
+		},
+	}
+
+	got := pa.parseFormats(streamingData)
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 formats, got %d", len(got))
+	}
+
+	// First format: sigCipher entry. URL should be the bare URL (sig
+	// not yet appended); EncryptedSig + SigKey populated.
+	video := got[0]
+	if video.Itag != 137 {
+		t.Errorf("video itag: want 137 got %d", video.Itag)
+	}
+	if video.URL == "" {
+		t.Errorf("video URL should be set (raw URL part), got empty")
+	}
+	if video.EncryptedSig != "ENC_SIG" {
+		t.Errorf("video EncryptedSig: want ENC_SIG got %q", video.EncryptedSig)
+	}
+	if video.SigKey != "signature" {
+		t.Errorf("video SigKey: want signature got %q", video.SigKey)
+	}
+	// URL must not yet contain the decrypted sig — the strategy resolves
+	// it later via cipher.ResolveFormatURL.
+	if got, want := video.URL, "https://r1---sn-test.googlevideo.com/videoplayback?expire=123&n=ENC_N&itag=137"; got != want {
+		t.Errorf("video URL: want %q got %q", want, got)
+	}
+
+	// Second format: direct URL. EncryptedSig should be empty.
+	audio := got[1]
+	if audio.Itag != 140 {
+		t.Errorf("audio itag: want 140 got %d", audio.Itag)
+	}
+	if audio.EncryptedSig != "" {
+		t.Errorf("direct URL audio should have empty EncryptedSig, got %q", audio.EncryptedSig)
+	}
+	if audio.SigKey != "" {
+		t.Errorf("direct URL audio should have empty SigKey, got %q", audio.SigKey)
+	}
+}
+
+// TestParseFormats_DefaultsSigKey — when sp is missing from the
+// signatureCipher (older players), default to "signature".
+func TestParseFormats_DefaultsSigKey(t *testing.T) {
+	pa := NewPlayerAPI(nil, noopLogger{})
+
+	streamingData := map[string]any{
+		"adaptiveFormats": []any{
+			map[string]any{
+				"itag":            float64(137),
+				"mimeType":        `video/mp4`,
+				"signatureCipher": "url=https%3A%2F%2Fexample.com%2F&s=ENC",
+				// no sp
+			},
+		},
+	}
+
+	got := pa.parseFormats(streamingData)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 format, got %d", len(got))
+	}
+	if got[0].SigKey != "signature" {
+		t.Errorf("default SigKey: want signature got %q", got[0].SigKey)
+	}
+}
+
 func TestDeduplicateFormats_SameAuthPrefersFirstInsertion(t *testing.T) {
 	// When two formats share the same itag AND auth level, the first one
 	// inserted into the pool wins. This is the guarantee

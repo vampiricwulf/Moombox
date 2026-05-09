@@ -193,6 +193,52 @@ func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver 
 	return result
 }
 
+// ResolveFormatRequest carries the parsed components of a YouTube Format
+// that ResolveFormatURL needs to produce a fetchable URL. URL is the raw
+// stream URL (either a direct URL from streamingData.formats[].url or
+// the `url=` value parsed out of a signatureCipher entry).
+// EncryptedSig + SigKey describe the sigCipher contribution; both are
+// empty when the format shipped with a direct URL.
+type ResolveFormatRequest struct {
+	URL          string
+	EncryptedSig string
+	SigKey       string // defaults to "signature" when empty
+}
+
+// ResolveFormatURL turns a parsed YouTube Format into a fetchable URL by
+// combining sig-decryption (when EncryptedSig is set) with n-param
+// decryption (always, since YouTube format URLs always carry an
+// encrypted n).
+//
+// This was previously done eagerly in parseFormatsWithCipher for every
+// format in the response (7-26 calls per stream setup); deferring to
+// post-selection means only the chosen format(s) pay the cost. See
+// docs/plans/cipher-pipeline-rework.md Stage 3.
+//
+// On error the caller (worker strategy) should mark this format as
+// broken in its in-memory exclusion set and re-run selection. This
+// function is stateless — it has no knowledge of what alternatives
+// exist or what "broken" means in the strategy context.
+func ResolveFormatURL(ctx context.Context, routedSolver Solver, gojaResolver *GojaResolver, playerURL string, req ResolveFormatRequest) (string, error) {
+	if req.URL == "" {
+		return "", fmt.Errorf("cipher: resolve format: empty URL")
+	}
+	urlReq := ResolveURLRequest{
+		StreamURL:          req.URL,
+		PlayerURL:          playerURL,
+		EncryptedSignature: req.EncryptedSig,
+		SignatureKey:       req.SigKey,
+	}
+	if req.EncryptedSig != "" && urlReq.SignatureKey == "" {
+		urlReq.SignatureKey = "signature"
+	}
+	resp, err := RoutedResolveURL(ctx, routedSolver, gojaResolver, urlReq)
+	if err != nil {
+		return "", err
+	}
+	return resp.URL, nil
+}
+
 // GetSts returns the signatureTimestamp for a player URL.
 func (s *GojaResolver) GetSts(ctx context.Context, playerURL string) (string, error) {
 	if s.stsCache == nil {

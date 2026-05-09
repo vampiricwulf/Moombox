@@ -39,6 +39,7 @@ var (
 
 func main() {
 	wpPath := flag.String("wp", "", "watch-page HTML path")
+	playerJSOverride := flag.String("player-js", "", "use this local file as the player JS instead of fetching")
 	flag.Parse()
 	if *wpPath == "" {
 		fail("usage: -wp PATH_TO_WATCH_PAGE.html")
@@ -88,8 +89,21 @@ func main() {
 	}
 	fmt.Printf("encrypted sig (len=%d): %s\n", len(encS), encS[:min(60, len(encS))]+"...")
 
-	// Fetch player JS
-	playerJS := fetchPlayerJS(playerURL)
+	// Fetch player JS — or use a local override (useful for replaying a
+	// stale cached version against the current sidecar to test whether
+	// the failure is content-mismatch).
+	var playerJS string
+	if *playerJSOverride != "" {
+		b, err := os.ReadFile(*playerJSOverride)
+		if err != nil {
+			fail("read player-js override: %v", err)
+		}
+		playerJS = string(b)
+		fmt.Printf("player JS source: file %s\n", *playerJSOverride)
+	} else {
+		playerJS = fetchPlayerJS(playerURL)
+		fmt.Printf("player JS source: fetched\n")
+	}
 	fmt.Printf("player JS size: %d bytes\n", len(playerJS))
 
 	// Spawn an isolated sidecar

@@ -22,8 +22,13 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// Parse playability
 	playErr, playReason := parsePlayabilityStatus(playabilityStatus)
 
-	// Parse formats (with cipher decryption if available)
-	formats := p.parseFormatsWithCipher(ctx, streamingData, playerURL)
+	// Parse formats. Cipher decryption is deferred to post-selection by
+	// the worker strategies (Stage 3 of the cipher pipeline rework) — see
+	// docs/plans/cipher-pipeline-rework.md. The returned formats may
+	// carry EncryptedSig populated and a raw `url=` value in URL; the
+	// strategy resolves them via cipher.ResolveFormatURL right before
+	// constructing SegmentDownloaders.
+	formats := p.parseFormats(streamingData)
 
 	// Stream classification
 	streamStatus, isLive, isUpcoming, isPostLiveDVR := classifyStream(videoDetails, playabilityStatus, microformat, len(formats) > 0)
@@ -132,15 +137,26 @@ func extractScheduledStartTime(microformat, playabilityStatus map[string]any) st
 	return ""
 }
 
-// parseFormatsWithCipher parses formats from streaming data, decrypting signatures and
-// n-parameters using the cipher solver when available.
-func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData map[string]any, playerURL string) []Format {
+// parseFormats extracts format metadata + raw stream URLs from a
+// streamingData map. Cipher decryption (sig + n) is intentionally NOT
+// performed here — strategies do it post-selection via
+// cipher.ResolveFormatURL on the chosen format(s) only. This avoids
+// the 7-26 cipher calls per stream setup that the previous
+// parseFormatsWithCipher implementation paid even though most formats
+// were discarded by selection.
+//
+// For sigCipher entries, the raw `url=` part of the cipher string is
+// stored in Format.URL and the `s` / `sp` parts in EncryptedSig /
+// SigKey. For direct entries, Format.URL holds the inline URL and
+// EncryptedSig is empty. Selection still uses Format.URL != "" as
+// the "format has a URL" signal — we always set URL to something
+// fetchable-after-resolve.
+func (p *PlayerAPI) parseFormats(streamingData map[string]any) []Format {
 	if streamingData == nil {
 		return nil
 	}
 
 	var formats []Format
-	cipherNeededButMissing := false
 	// adaptiveFormats is iterated first so that when an itag appears in both
 	// arrays the DASH/adaptive entry lands in the pool first and wins the
 	// same-auth-level tiebreak in deduplicateFormats. adaptiveFormats carry
@@ -160,21 +176,26 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 
 			formatURL := getStr(f, "url")
 			sigCipher := getStr(f, "signatureCipher")
+			var encSig, sigKey string
 
-			// Handle signatureCipher (older format without direct URL)
+			// Handle signatureCipher (entry without direct URL) by parsing
+			// out the raw URL + sig material; defer the actual sig
+			// decryption to the strategy's post-selection resolve step.
 			if formatURL == "" && sigCipher != "" {
-				if playerURL != "" && p.hasCipher() {
-					decrypted := p.decryptSignatureCipher(ctx, sigCipher, playerURL)
-					if decrypted != "" {
-						formatURL = decrypted
-					}
-				} else if !p.hasCipher() {
-					// Caller did not wire a cipher solver, but this response
-					// shipped ciphered URLs — every such format will be
-					// dropped. Surface a single Warn so a silently-broken
-					// init (no cipher cache dir, disabled pipeline, etc.)
-					// is visible.
-					cipherNeededButMissing = true
+				params, parseErr := url.ParseQuery(sigCipher)
+				if parseErr != nil {
+					p.logger.Debug("[PlayerApi] Failed to parse signatureCipher",
+						slog.String("error", parseErr.Error()))
+					continue
+				}
+				formatURL = params.Get("url")
+				encSig = params.Get("s")
+				sigKey = params.Get("sp")
+				if sigKey == "" {
+					sigKey = "signature"
+				}
+				if formatURL == "" || encSig == "" {
+					continue
 				}
 			}
 
@@ -182,24 +203,13 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 				continue
 			}
 
-			// Decrypt n-parameter to avoid throttling. If decryption is
-			// attempted and fails, drop the format entirely — YouTube's CDN
-			// will return HTTP 403 on a throttled URL that carries an
-			// encrypted n-value the player can't solve, so keeping the raw
-			// URL would just waste retries and produce misleading errors.
-			if playerURL != "" && p.hasCipher() {
-				decrypted, ok := p.decryptNParamStrict(ctx, formatURL, playerURL)
-				if !ok {
-					continue
-				}
-				formatURL = decrypted
-			}
-
 			format := Format{
-				Itag:     getInt(f, "itag"),
-				URL:      formatURL,
-				MimeType: getStr(f, "mimeType"),
-				Bitrate:  getInt(f, "bitrate"),
+				Itag:         getInt(f, "itag"),
+				URL:          formatURL,
+				MimeType:     getStr(f, "mimeType"),
+				Bitrate:      getInt(f, "bitrate"),
+				EncryptedSig: encSig,
+				SigKey:       sigKey,
 			}
 
 			if w := getInt(f, "width"); w > 0 {
@@ -220,53 +230,7 @@ func (p *PlayerAPI) parseFormatsWithCipher(ctx context.Context, streamingData ma
 			formats = append(formats, format)
 		}
 	}
-	if cipherNeededButMissing {
-		p.logger.Warn("[PlayerApi] Response contained signatureCipher formats but no cipher solver is wired; ciphered formats were dropped")
-	}
 	return formats
-}
-
-// decryptSignatureCipher decodes a signatureCipher string, decrypts the signature,
-// and returns the fully resolved URL.
-func (p *PlayerAPI) decryptSignatureCipher(ctx context.Context, sigCipher, playerURL string) string {
-	params, err := url.ParseQuery(sigCipher)
-	if err != nil {
-		p.logger.Debug("[PlayerApi] Failed to parse signatureCipher", slog.String("error", err.Error()))
-		return ""
-	}
-
-	streamURL := params.Get("url")
-	encSig := params.Get("s")
-	sigKey := params.Get("sp")
-	if sigKey == "" {
-		sigKey = "signature"
-	}
-
-	if streamURL == "" || encSig == "" {
-		return ""
-	}
-
-	decryptedSig, err := p.decryptSig(ctx, playerURL, encSig)
-	if err != nil {
-		p.logger.Warn("[PlayerApi] Signature decryption failed", slog.String("error", err.Error()))
-		return ""
-	}
-
-	// Append the decrypted signature to the stream URL using string append
-	// to preserve original parameter order (Go's url.Values.Encode() sorts
-	// parameters alphabetically, which breaks YouTube's URL signature).
-	sep := "&"
-	if !strings.Contains(streamURL, "?") {
-		sep = "?"
-	}
-	finalURL := streamURL + sep + url.QueryEscape(sigKey) + "=" + url.QueryEscape(decryptedSig)
-
-	// NOTE: Do NOT decrypt the n-parameter here — the caller
-	// (parseFormatsWithCipher) always calls decryptNParam() on the returned
-	// URL. Decrypting here would cause double-decryption, corrupting the
-	// n-param and triggering HTTP 403 from YouTube's CDN.
-
-	return finalURL
 }
 
 // decryptNParam decrypts the n-parameter in a URL to avoid throttling.

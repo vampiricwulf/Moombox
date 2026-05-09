@@ -104,17 +104,39 @@ we'll happily ship the stale solver to the sidecar and get
 `"ejs solve sig: no solutions"`. Currently swallowed; falls through to
 goja; user sees `ErrSigUnavailable` warning.
 
+**Sidecar protocol gap (must fix as part of Stage 2).** The Node sidecar
+in `bgutil-sidecar/src/cipher.js:96-105` uses `if (!entry)` semantics:
+once a `playerID` is cached, subsequent calls with fresh `playerJS` are
+silently ignored. Resending the same playerID with new bytes is a no-op,
+so a naive "retry with fresh JS" cannot work. Two options:
+
+1. Add `forceReload: true` field to the `solveCipher` JSON-RPC request.
+   When set, sidecar deletes the cached entry before the `if (!entry)`
+   check. Smallest protocol delta; preferred.
+2. Add a separate `forgetPlayer(playerID)` JSON-RPC method. Cleaner
+   semantically but adds a round-trip.
+
+Going with option 1.
+
 **Fix:** in `sidecarSolver.solve`:
 - Recognize stale-JS sidecar errors. New sentinel `cipher.ErrPlayerJSStale`.
   Match on substrings `"ejs solve sig: no solutions"` and `"ejs preprocess"`.
 - On stale: `playerCache.Remove(playerURL)` (wipes both raw + preprocessed
   files), `gojaResolver.InvalidateSolver(playerURL)` (wipes in-memory
-  solverData), retry `callOnce` once with fresh JS attached.
+  solverData), `clearPlayerSent(playerID)`, retry `callOnce` once with
+  fresh JS attached AND `forceReload=true` so sidecar evicts its V8 cache.
 - If retry still fails: surface as `ErrPlayerJSStale` (permanent — likely
   a real Moombox bug, not a transient state issue).
 
-This needs `cipher.PlayerSource` to grow a `RemovePlayerJS(playerID)`
-method, and `GojaResolver` to expose it (already has `InvalidateSolver`).
+This needs:
+- `cipher.PlayerSource` to grow a `RemovePlayerJS(playerID)` method,
+  with `GojaResolver` providing the implementation (already has
+  `InvalidateSolver` internally).
+- `sidecar.SolveCipherRequest` (Go) and the JSON-RPC schema in
+  `bgutil-sidecar/src/server.js` + `cipher.js` to grow `forceReload bool`.
+- `cipher.js:96` becomes `if (!entry || forceReload) { ... }` with an
+  explicit `playerCache.delete(playerID)` before re-loading when
+  `forceReload && entry` to drop the old sig/n binding caches too.
 
 ### Change B — Conditional-GET revalidation in `PlayerCache.Fetch`
 
@@ -124,15 +146,42 @@ hours; cache happily serves stale.
 
 **Fix:** in `PlayerCache.Fetch(ctx, playerURL) (js string, changed bool, err error)`:
 - If disk cache present:
-  - Send HTTP GET with `If-Modified-Since: <cached file mtime>`
-  - On 304: return `(cached, false, nil)`, touch the file mtime
-  - On 200: write new file, return `(new, true, nil)`. Compare
-    `Content-Length` against cached size as secondary confirmation —
-    YouTube CDN's `Last-Modified` is occasionally split-cached and
-    lies; size is reliable.
-- If no disk cache: full GET, return `(new, true, nil)`.
-- **Singleflight coalescing** by `playerURL` so concurrent
-  GetSolvers calls for the same player share one round-trip.
+  - Read companion `<key>.meta.json` (captured below) for last-known
+    `Last-Modified` / `ETag` / `Content-Length` from YouTube
+  - Send HTTP GET with `If-Modified-Since: <stored Last-Modified>` and
+    `If-None-Match: <stored ETag>` if present (replay YouTube's own
+    timestamps — file mtime is *our* write time, which is later than
+    YouTube's `Last-Modified` and would cause some CDN edges to return
+    304 indefinitely under strict comparison)
+  - On 304: return `(cached, false, nil)`, refresh file mtime so the
+    24h TTL backstop doesn't expire revalidated content
+  - On 200: write new file + new `<key>.meta.json`, return `(new, true, nil)`.
+    If the response `Content-Length` matches stored size, treat as
+    unchanged regardless of `Last-Modified` value (YouTube CDN's
+    `Last-Modified` is occasionally split-cached and lies; size is
+    reliable). When meta is missing (post-upgrade migration), fall
+    back to mtime as `If-Modified-Since` for the first revalidation —
+    next 200 response captures real metadata.
+- If no disk cache: full GET, persist meta, return `(new, true, nil)`.
+- **Network-error behavior during revalidation.** If the conditional
+  GET fails (DNS, TCP, TLS, timeout) AND a non-expired disk cache exists,
+  return `(cached, false, nil)` with a Debug-level log. Mirrors how
+  yt-dlp tolerates transient CDN failures and prevents a momentary
+  network blip from forcing every concurrent stream-setup to fail.
+  If no disk cache exists, the network error is fatal as today.
+- When `Fetch` writes a new raw file, it MUST also remove
+  `<key>.preprocessed.js` — single ownership of cache invalidation
+  inside `PlayerCache`, not split between cache and solver.
+- **Singleflight coalescing** keyed on `CacheKey(playerURL)` (NOT raw
+  playerURL) so two callers passing the same player via different
+  locale URL shapes share one round-trip. The locale-collapse rationale
+  is the same one driving the existing in-memory solver cache key.
+
+New `<key>.meta.json` schema:
+```json
+{ "lastModified": "...", "etag": "...", "contentLength": 2750557 }
+```
+All fields optional; absence means "no header from YouTube last time."
 
 Use `golang.org/x/sync/singleflight`.
 
@@ -169,10 +218,35 @@ Each strategy (`strategy_youtube_dash.go`, `strategy_youtube_hls.go`,
 `ResolveFormatURL` for the chosen format(s) right before constructing
 the SegmentDownloader.
 
-Drop the n-fail-as-filter from parsing. Post-selection cipher failures
-are surfaced as setup errors; the selector can fall back to next-best
-format on retry. (In practice this rarely fires because n-decrypt either
-works for all formats from a given player or for none.)
+Drop the n-fail-as-filter from parsing. Today, formats whose n fails
+silently disappear before selection; after Stage 3 they'd survive parse,
+get selected, and 403 at runtime — strictly worse than today unless
+selection retries.
+
+**Required: re-selection fallback.** When `ResolveFormatURL` returns an
+error during strategy setup, the strategy must re-run format selection
+excluding the failed itag before bubbling up. Use an exclusion set
+passed to the selector (NOT mutating Format — `Format` is value-typed
+and slices hold copies; mutation wouldn't propagate). Roughly:
+```go
+exclude := map[int]bool{}
+chosen := SelectBestDashStream(formats, exclude, …)
+resolved, err := cipher.ResolveFormatURL(ctx, …, chosen)
+if err != nil {
+    exclude[chosen.Itag] = true
+    chosen2 := SelectBestDashStream(formats, exclude, …)
+    if chosen2 == nil { return err }
+    resolved, err = cipher.ResolveFormatURL(ctx, …, chosen2)
+    // bubble err if still failing — bounded to two attempts so a fully
+    // broken cipher state surfaces as a real setup error rather than
+    // looping through every format
+}
+```
+Bound to two attempts; we don't need full retry-everything because in
+practice n-decrypt either works for all formats from a player or none,
+and Stage 1+2 catch the "none" case structurally. The shared helper
+in `internal/worker/format_selection.go` should encapsulate the
+exclusion-set plumbing so each strategy stays clean.
 
 ### Composition
 
@@ -181,8 +255,8 @@ After all three:
 | | Before | After |
 |---|---|---|
 | Cipher calls per stream setup | 7-26 | 1-2 |
-| HTTP fetches of player JS per stream lifetime | 0-1 | 0 (HEAD only after first) |
-| HEAD round-trips per stream lifetime | 0 | 1 (singleflight-coalesced) |
+| Full player JS body downloads | 0-1 per setup | 0 when unchanged, 1 on rotation |
+| Conditional GET round-trips per setup | 0 | 1 (singleflight-coalesced; 304 = no body) |
 | Stale-cache failure recovery | manual restart | reactive within one cipher call |
 | Steady-state download cipher work | 0 | 0 |
 
@@ -194,65 +268,141 @@ attack surface for both.
 
 Stage so each commit is independently reviewable and shippable:
 
-### Stage 1 — Conditional-GET in PlayerCache (~80 lines)
+### Stage 1 — Conditional-GET in PlayerCache (~110 lines)
 
 Files:
-- `internal/cipher/player_cache.go` — modify `Fetch` to return `(string, bool, error)`, add If-Modified-Since logic, add singleflight coalescing
-- `internal/cipher/solver.go` — `compileSolver` updated to handle new return signature; on `changed=true`, also remove the `<key>.preprocessed.js` file
-- `internal/cipher/player_cache_test.go` — three new tests:
-  - 304 path: cached returned, mtime touched, no content rewrite
-  - 200 path with different size: cache evicted, new content stored, `changed=true`
-  - Singleflight: 5 concurrent fetches for same URL → 1 round-trip
+- `internal/cipher/player_cache.go`:
+  - Modify `Fetch` to return `(string, bool, error)`
+  - Persist `<key>.meta.json` with `Last-Modified` / `ETag` / `Content-Length`
+    from each 200 response; load it before each Fetch
+  - Replay stored `Last-Modified` / `ETag` as `If-Modified-Since` /
+    `If-None-Match` (NOT file mtime — see Change B rationale)
+  - On 200, remove `<key>.preprocessed.js` so the solver layer doesn't
+    have to know about the staleness; cache owns its invalidation
+  - Singleflight keyed on `CacheKey(playerURL)`
+- `internal/cipher/solver.go` — `compileSolver` consumes the new
+  `changed bool`. On `changed=true`, also drop the in-memory
+  `solverData` entry for this CacheKey so the next call recompiles
+  from the fresh JS. (The preprocessed.js removal lives in `Fetch`,
+  not here.)
+- `internal/cipher/player_cache_test.go` — six new tests:
+  - 304 path: cached returned, no content rewrite, mtime refreshed,
+    meta unchanged
+  - 200 with different `Content-Length`: cache evicted, new content
+    stored, meta updated, `changed=true`, `<key>.preprocessed.js`
+    removed if present
+  - 200 with identical `Content-Length`: treated as unchanged
+    (Last-Modified flap defense), meta refreshed, `changed=false`
+  - **Migration**: cached file present, no `<key>.meta.json` →
+    conditional GET uses file mtime as `If-Modified-Since` fallback;
+    next 200 captures real headers into meta
+  - **Network failure during revalidation**: cached present, server
+    unreachable → returns cached with `changed=false`, no error
+  - Singleflight: 5 concurrent fetches for same URL → 1 round-trip;
+    5 concurrent fetches for two locale variants of the same playerID
+    → 1 round-trip
 - Drop `playerCacheTTL` from `14 * 24 * time.Hour` to `24 * time.Hour`
-  as backstop (TTL only matters when offline; conditional GET handles
-  the steady-state case)
+  (NOT optional — with conditional-GET in place the TTL only matters
+  offline, and 14d offline is useless anyway since the player has
+  rotated)
 
-### Stage 2 — Reactive invalidation in sidecarSolver (~60 lines)
+### Stage 2 — Reactive invalidation in sidecarSolver (~100 lines)
 
 Files:
+- `bgutil-sidecar/src/cipher.js` — `solveCipher` accepts `forceReload`;
+  when truthy AND an entry exists, `playerCache.delete(playerID)` before
+  the existing `if (!entry)` load path. Bump sidecar version constant
+  if there is one so a Moombox build mismatch is visible.
+- `bgutil-sidecar/src/server.js` — surface the new field through
+  whatever JSON-RPC dispatcher lives there (passthrough; no logic change)
+- `internal/bgutils/sidecar/types.go` (or wherever `SolveCipherRequest`
+  is defined Go-side) — add `ForceReload bool` field, JSON tag
 - `internal/cipher/errors.go` — new `ErrPlayerJSStale` sentinel
-- `internal/cipher/solver_sidecar.go` — modify `solve` to recognize stale-JS error patterns, evict caches, retry once
+- `internal/cipher/solver_sidecar.go`:
+  - Recognize stale-JS error patterns (`"ejs solve sig: no solutions"`,
+    `"ejs preprocess"`); promote to `ErrPlayerJSStale` internally
+  - On stale: call `src.RemovePlayerJS(playerID)`, `clearPlayerSent`,
+    retry `callOnce` once with `includeJS=true` AND `forceReload=true`
+  - If retry still fails: return `ErrPlayerJSStale` to the caller
+  - Order: stale-JS handling sits alongside the existing
+    `ErrPlayerNotLoaded` retry — both are "evict + retry once" patterns
+    on different error classes; keep them as parallel `if errors.Is(...)`
+    branches in `solve`, not nested
 - `internal/cipher/types.go` — extend `PlayerSource` interface with
   `RemovePlayerJS(playerID string) error`
-- `internal/cipher/solver.go` — `GojaResolver.RemovePlayerJS` implementation
-  (reuse existing `playerCache.Remove` + `solverData` eviction)
-- `internal/cipher/solver_sidecar_test.go` — two new tests:
-  - sidecar returns `"ejs solve sig: no solutions"` → cache wiped, retry
-    with fresh JS → success
+- `internal/cipher/solver.go` — `GojaResolver.RemovePlayerJS`:
+  - Calls `pc.Remove(playerURLForID(playerID))` to wipe disk
+  - Drops the in-memory `solverData[CacheKey]` entry
+- `internal/cipher/solver_sidecar_test.go` — three new tests:
+  - sidecar returns `"ejs solve sig: no solutions"` → cache wiped,
+    retry with `forceReload=true` + fresh JS → success
   - sidecar returns same error twice (after fresh JS) → permanent
     `ErrPlayerJSStale`
+  - **`forceReload` round-trip**: when set, the fake sidecar drops its
+    in-memory entry; without it, the second call hits the cached
+    (broken) JS again. Pins the protocol contract.
 
-### Stage 3 — Defer per-format cipher decryption (~150 lines)
+### Stage 3 — Defer per-format cipher decryption (~180 lines)
 
 Files:
 - `internal/youtube/types.go` — `Format` struct gains `EncryptedSig`,
-  `SigKey` fields (both omitempty)
+  `SigKey` fields (both `,omitempty`). Document that `Format.URL` is now
+  "may be ciphered; resolve via `cipher.ResolveFormatURL` before use."
+- **Pre-task: `Format.URL` reader sweep.** Before changing parse,
+  `grep -rn 'Format' internal/ web/ cmd/` for callers reading `.URL`
+  outside the strategy/resolver path. Known suspects:
+    - Engine quality probe / dashboard JSON (display only — fine to
+      show "ciphered" placeholder, but verify it doesn't try to fetch)
+    - Any test fixtures that hard-code resolved URLs (update or accept
+      that fixture URLs will need cipher resolution too)
+  Findings drive whether additional consumer-side changes are needed.
 - `internal/youtube/player_api_parsing.go` — `parseFormatsWithCipher`
-  → `parseFormats`. Remove sig + n decrypt loops. Store sigCipher URL
-  component in `Format.URL` and the `s`/`sp` parts in `EncryptedSig`/
-  `SigKey`. The "drop on n-fail" filter goes; the
-  `cipherNeededButMissing` warn path is dropped.
-- `internal/cipher/decrypt.go` — new `ResolveFormatURL` and
-  `ResolveFormatRequest`
-- `internal/worker/strategy_youtube_dash.go` — call `ResolveFormatURL`
-  on the chosen video + audio streams before constructing
-  SegmentDownloader
-- `internal/worker/strategy_youtube_hls.go` — call `ResolveFormatURL`
-  on the master URL only (per-segment URLs come from playlist parsing)
-- `internal/worker/strategy_youtube_manifestless_dash.go` — call
-  `ResolveFormatURL` on the chosen video + audio adaptive format URLs
-  (currently does nothing because parse pre-decrypted; after this
-  change, parse leaves URLs raw and strategy resolves them)
-- `internal/worker/strategy_youtube_vod.go` — `DownloadVod` resolves
-  the chosen format's URL before passing to engine
+  → `parseFormats`. Remove sig + n decrypt loops. For sigCipher-only
+  entries, store the URL part (sigCipher's `url` query param) in
+  `Format.URL`, and `s` / `sp` parts in `EncryptedSig` / `SigKey`.
+  Direct-URL entries leave `EncryptedSig` empty.
+- `internal/cipher/decrypt.go` — new free function (consistent with
+  `RoutedDecryptNInURL` / `RoutedResolveURL`):
+  ```go
+  func ResolveFormatURL(ctx context.Context, routed Solver,
+      goja *GojaResolver, playerURL string,
+      req ResolveFormatRequest) (string, error)
+  ```
+  Behaviour: solve sig (if `EncryptedSig != ""`), append
+  `&{SigKey or "signature"}={decrypted}`, then run n-decryption on
+  the result.
+- Strategy call sites (each adds ~5-10 lines for resolve + fallback):
+  - `internal/worker/strategy_youtube_dash.go` — resolve chosen video
+    + audio streams pre-SegmentDownloader; on failure mark broken,
+    re-select once
+  - `internal/worker/strategy_youtube_hls.go` — resolve master URL
+    only (segment URLs come from playlist parsing); same fallback
+  - `internal/worker/strategy_youtube_manifestless_dash.go` — resolve
+    chosen adaptiveFormat URLs; same fallback. Currently a no-op
+    because parse pre-decrypted; after this change parse leaves URLs
+    raw and strategy resolves them
+  - `internal/worker/strategy_youtube_vod.go` — `DownloadVod` resolves
+    chosen format pre-engine
+  - The re-selection helper (~15 lines) lives in
+    `internal/worker/format_selection.go` (new file or extend existing
+    selector) so all four strategies share one fallback impl
+- `cipherNeededButMissing` warn — relocated to strategy phase. Each
+  strategy that detects `EncryptedSig != ""` on the chosen format AND
+  no cipher wired emits a single Warn per process (sync.Once-style),
+  same observability as today but at the right semantic point.
 - Tests:
   - `parseFormats` collects all formats including sigCipher-only,
-    populates EncryptedSig + SigKey correctly
+    populates `EncryptedSig` + `SigKey` correctly
   - `ResolveFormatURL` with sigCipher entry produces URL with
     `&signature=DECRYPTED` appended
   - `ResolveFormatURL` with already-resolved URL just runs n-decrypt
+  - `ResolveFormatURL` failure on chosen format → strategy re-selects
+    excluding it → second resolve succeeds (DASH and manifestless DASH
+    each)
+  - `ResolveFormatURL` failure twice → strategy bubbles error (bound
+    holds)
   - Strategy build path correctly resolves chosen format(s) only;
-    other formats stay raw
+    other formats stay raw in the `[]Format` slice the dashboard sees
 
 ## 7. Tests + verification
 
@@ -282,10 +432,8 @@ a non-empty decrypted sig regardless of cache state.
 - **YouTube returns 200 with same content** (Last-Modified flap). Stage 1's
   Content-Length comparison catches this — if size matches, treat as
   unchanged regardless of `Last-Modified` value.
-- **Singleflight key collision.** `playerURL` is the key — fine because
-  `playerURLForID` constructs deterministic URLs. If we ever pass two
-  different URLs that resolve to the same player, we'd want to coalesce
-  on `CacheKey(playerURL)` instead. Not currently a concern.
+- **Singleflight key.** Resolved in design: key on `CacheKey(playerURL)`
+  so locale-variant URLs collapse, matching the existing solver-cache key.
 - **Stage 3 changes the `Format` JSON shape** (new EncryptedSig/SigKey
   fields). Add `omitempty` so existing JSON consumers don't see noise on
   resolved formats.
@@ -308,21 +456,28 @@ a non-empty decrypted sig regardless of cache state.
   (one tag per stage, or a single rollup tag — ship's call)
 - All three stages have been designed, no implementation started
 
-## 10. Open questions to ask if any ambiguity arises
+## 10. Decisions baked in (no longer open)
 
-1. **Should the `playerCacheTTL` drop to 24h** as part of Stage 1, or
-   leave at 14d and rely on conditional GET? Recommend 24h (defense in
-   depth) but it's optional.
-2. **Should `ResolveFormatURL` be a method on `cipher.Solver` or a free
-   function?** Free function (`cipher.ResolveFormatURL`) is consistent
-   with `RoutedDecryptNInURL` / `RoutedResolveURL`. Recommend free function.
-3. **Do we need to retain the `cipherNeededButMissing` warning** that
-   fires when no cipher is wired but ciphered formats are present? Today
-   it fires on goja-disabled startups. Probably keep but move into the
-   strategy phase (warn at format-resolution time, not parse).
+These were open questions in earlier drafts; resolved here so a
+post-compact session doesn't relitigate them:
 
-If anything else unclear during implementation, the user has been very
-willing to clarify; ask via AskUserQuestion before guessing.
+1. **TTL drop to 24h** — required, not optional. With conditional-GET
+   in place, TTL only matters offline; 14d offline is meaningless because
+   the player has rotated.
+2. **`ResolveFormatURL` shape** — free function `cipher.ResolveFormatURL`,
+   matching `RoutedDecryptNInURL` / `RoutedResolveURL` conventions.
+3. **`cipherNeededButMissing` warning** — keep, relocate to strategy
+   phase. Sync.Once-style emission per strategy when a chosen format has
+   `EncryptedSig != ""` AND no cipher is wired.
+4. **Sidecar protocol change** — `forceReload` flag added to
+   `solveCipher` JSON-RPC. Smallest delta vs adding a separate
+   `forgetPlayer` method.
+5. **Conditional-GET headers source** — replay YouTube's own
+   `Last-Modified` / `ETag` from `<key>.meta.json` (NOT file mtime).
+
+If something genuinely new comes up during implementation, ask via
+AskUserQuestion before guessing — Wolf has been responsive about
+mid-implementation clarifications.
 
 ---
 

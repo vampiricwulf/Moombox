@@ -104,7 +104,12 @@ func (sc *StsCache) GetSts(ctx context.Context, playerCache *PlayerCache, player
 // fetchAndExtract runs the cache miss path: download (via PlayerCache) +
 // regex-scan for the signature timestamp.
 func (sc *StsCache) fetchAndExtract(ctx context.Context, playerCache *PlayerCache, playerURL string) (string, error) {
-	playerJS, err := playerCache.Fetch(ctx, playerURL)
+	// STS extraction doesn't care about the changed flag: the StsCache is
+	// keyed on player and gets explicitly invalidated by the cipher solver
+	// (InvalidateKey, see InvalidateSolver). When Fetch returns changed=true
+	// here, the upstream caller (compileSolver / PlayerJS) will have already
+	// invalidated derivative state via dropSolverData.
+	playerJS, _, err := playerCache.Fetch(ctx, playerURL)
 	if err != nil {
 		return "", fmt.Errorf("fetch player for STS: %w", err)
 	}

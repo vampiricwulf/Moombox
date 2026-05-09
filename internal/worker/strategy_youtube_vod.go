@@ -15,7 +15,13 @@ import (
 // DownloadVod downloads a VOD using direct format URLs.
 // For YouTube VODs, format URLs point to complete files (not segmented).
 // Downloads video and audio streams as whole files via HTTP GET.
-func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, _ *cipher.GojaResolver, potProvider *bgutils.PotProvider) (*DownloadResult, error) {
+//
+// routedSolver is the composite cipher.Solver used for sig + n
+// decryption on the chosen format URL(s). cipherSolver is the legacy
+// goja resolver used as the n-fallback path. Both are accepted (rather
+// than only routedSolver) so the wiring stays consistent with the
+// other YouTube strategies — the orchestrator passes whatever it has.
+func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoInfo, routedSolver cipher.Solver, cipherSolver *cipher.GojaResolver, potProvider *bgutils.PotProvider) (*DownloadResult, error) {
 	selected := youtube.SelectBestFormatsWithLogger(videoInfo.Formats, job.Config.MaxVideoResolution, job.Config.Prefer60fps, job.Logger)
 
 	// Per-job itag overrides (from manual format selection in the UI).
@@ -113,9 +119,48 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		return nil, fmt.Errorf("no suitable formats found for VOD download")
 	}
 
-	// NOTE: n-param decryption is already done during format extraction in
-	// parseFormatsWithCipher (player_api.go). Do NOT decrypt again here —
-	// double-decrypting corrupts the n-param and causes HTTP 403.
+	// Stage 3 of the cipher pipeline rework: parseFormats leaves URLs raw
+	// (with sigCipher entries carrying EncryptedSig + the bare `url=`
+	// value). Resolve sig + n on the chosen video / audio formats now so
+	// we send fetchable URLs to the engine. Bound to two attempts via
+	// re-selection so a fully broken cipher state surfaces cleanly.
+	videoResolved, audioResolved := "", ""
+	if result.HasVideo && result.VideoFormat != nil {
+		resolvedURL, err := resolveFormatURL(ctx, result.VideoFormat, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger)
+		if err != nil {
+			job.Logger.Warn("[Cipher] VOD video resolve failed; trying re-selection",
+				"itag", result.VideoFormat.Itag, "err", err)
+			retry := pickAlternateVodFormat(videoInfo.Formats, true, result.VideoFormat.Itag)
+			if retry == nil {
+				return nil, fmt.Errorf("VOD: video URL resolve failed and no alternate format: %w", err)
+			}
+			resolvedURL, err = resolveFormatURL(ctx, retry, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger)
+			if err != nil {
+				return nil, fmt.Errorf("VOD: video URL resolve failed for primary and alternate: %w", err)
+			}
+			result.VideoFormat = retry
+			job.Logger.Info("[Cipher] VOD video re-selection succeeded", "newItag", retry.Itag)
+		}
+		videoResolved = resolvedURL
+	}
+	if result.HasAudio && result.AudioFormat != nil {
+		resolvedURL, err := resolveFormatURL(ctx, result.AudioFormat, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger)
+		if err != nil {
+			job.Logger.Warn("[Cipher] VOD audio resolve failed; trying re-selection",
+				"itag", result.AudioFormat.Itag, "err", err)
+			retry := pickAlternateVodFormat(videoInfo.Formats, false, result.AudioFormat.Itag)
+			if retry == nil {
+				return nil, fmt.Errorf("VOD: audio URL resolve failed and no alternate format: %w", err)
+			}
+			resolvedURL, err = resolveFormatURL(ctx, retry, routedSolver, cipherSolver, videoInfo.PlayerURL, job.Logger)
+			if err != nil {
+				return nil, fmt.Errorf("VOD: audio URL resolve failed for primary and alternate: %w", err)
+			}
+			result.AudioFormat = retry
+			job.Logger.Info("[Cipher] VOD audio re-selection succeeded", "newItag", retry.Itag)
+		}
+		audioResolved = resolvedURL
+	}
 
 	// NOTE: Do NOT apply PO token to VOD format URLs. The TS implementation's
 	// PoTokenGenerator.getPoToken() returns empty for VOD downloads (BotGuard
@@ -144,10 +189,12 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	// format URLs are obtained via cookies in the API call but the CDN
 	// download itself does not require cookies.
 
-	// Create downloaders for direct URLs
-	if result.HasVideo && result.VideoPath != "" && selected.Video.URL != "" {
+	// Create downloaders for direct URLs. videoResolved / audioResolved are
+	// the post-cipher-resolution URLs; these (not the raw Format.URL) are
+	// what the engine fetches.
+	if result.HasVideo && result.VideoPath != "" && videoResolved != "" {
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:     selected.Video.URL,
+			BaseURL:     videoResolved,
 			OutputFile:  result.VideoPath,
 			StartSeq:    0,
 			EndSeq:      0, // Single file download
@@ -156,9 +203,9 @@ func DownloadVod(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		})
 	}
 
-	if result.HasAudio && result.AudioPath != "" && selected.Audio != nil && selected.Audio.URL != "" {
+	if result.HasAudio && result.AudioPath != "" && audioResolved != "" {
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:     selected.Audio.URL,
+			BaseURL:     audioResolved,
 			OutputFile:  result.AudioPath,
 			StartSeq:    0,
 			EndSeq:      0,

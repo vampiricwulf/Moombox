@@ -278,6 +278,7 @@ async function dispatch(req) {
                         playerJS: params.playerJS,
                         sigChallenges: coerceArray(params.sigChallenges, "sigChallenges"),
                         nChallenges: coerceArray(params.nChallenges, "nChallenges"),
+                        forceReload: !!params.forceReload,
                     });
                     return writeResponse({ id, result });
                 } catch (e) {

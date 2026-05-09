@@ -74,7 +74,7 @@ func (manifestlessDashStrategyT) Kind() string   { return "manifestless_dash" }
 func (hlsStrategyT) Kind() string                { return "hls" }
 
 func (vodStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
-	return DownloadVod(ctx, job, info, deps.CipherSolver, deps.PotProvider)
+	return DownloadVod(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider)
 }
 
 func (dashStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
