@@ -12,9 +12,6 @@ import (
 // runFFmpegWithProgress runs FFmpeg, parsing stderr for time= progress lines.
 // progressFn is called with 0-100 based on currentTime/totalDuration.
 func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalDuration float64, progressFn func(float64)) error {
-	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
-	defer cancel()
-
 	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
 	cmd.Stdout = nil
 
@@ -45,7 +42,7 @@ func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalD
 
 	if err := cmd.Wait(); err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("ffmpeg timed out: %w", ctx.Err())
+			return fmt.Errorf("ffmpeg cancelled: %w", ctx.Err())
 		}
 		m.logger.Error("ffmpeg failed", "stderr", lastErr)
 		return fmt.Errorf("ffmpeg: %w (stderr: %s)", err, lastErr)

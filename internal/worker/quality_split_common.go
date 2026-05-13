@@ -63,12 +63,14 @@ func (o *DownloadOrchestrator) awaitDownloadOrQualityChange(
 }
 
 // launchBackgroundSegmentMux runs o.muxSegment for a completed quality-split
-// segment in a goroutine with panic recovery and a detached 5-minute context.
+// segment in a goroutine with panic recovery and a detached 2-hour context.
 // Increments wg so the caller can wait for all background muxes at end of
 // stream.
 //
 // Detached context rationale: user-cancel must not orphan a partial output
-// mid-FFmpeg. The 5-min ceiling keeps a stuck FFmpeg from pinning shutdown
+// mid-FFmpeg. The ceiling is generous (codec-copy of a multi-GB segment on
+// slow disk/USB/NAS with antivirus scanning can legitimately exceed tens of
+// minutes) but bounded so a truly stuck FFmpeg can't pin shutdown
 // indefinitely (defer wg.Wait() in the caller means worker.Stop()'s 10s
 // grace otherwise can't override the wait).
 //
@@ -94,7 +96,7 @@ func (o *DownloadOrchestrator) launchBackgroundSegmentMux(
 			}
 		}()
 		defer wg.Done()
-		muxCtx, muxCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		muxCtx, muxCancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer muxCancel()
 		seg, muxErr := o.muxSegment(muxCtx, jobCtx, segIdx, startTime, endTime, quality, muxResult)
 		if muxErr != nil {

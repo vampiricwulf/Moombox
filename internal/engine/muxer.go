@@ -8,10 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
-
-const muxTimeout = 10 * time.Minute
 
 // TrimOptions configures trimming and encoding during muxing.
 type TrimOptions struct {
@@ -201,9 +198,6 @@ func (m *Muxer) appendEncodeArgs(args []string, audioPath string, opts *TrimOpti
 }
 
 func (m *Muxer) runFFmpeg(ctx context.Context, args []string) error {
-	ctx, cancel := context.WithTimeout(ctx, muxTimeout)
-	defer cancel()
-
 	cmd := exec.CommandContext(ctx, m.ffmpegPath, args...)
 	cmd.Stdout = nil
 
@@ -214,7 +208,7 @@ func (m *Muxer) runFFmpeg(ctx context.Context, args []string) error {
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("ffmpeg timed out: %w", ctx.Err())
+			return fmt.Errorf("ffmpeg cancelled: %w", ctx.Err())
 		}
 		stderr := stderrBuf.String()
 		// Log last 500 chars of stderr for debugging
