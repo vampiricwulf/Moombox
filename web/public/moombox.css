@@ -2705,3 +2705,555 @@ html.sl-theme-light {
     justify-content: center;
     flex-wrap: wrap;
 }
+
+/* The mobile overflow trigger is rendered for every row but hidden on
+   wider viewports — desktop uses the inline icon buttons instead. */
+.video-item-overflow {
+    display: none;
+}
+
+/* ================================================================
+   Mobile refinements (≤ 768px). Source-ordered last so any rules
+   here override earlier @media (max-width: 992px) blocks for the
+   same components.
+
+   Honors the OK list: stats bar, tab bar, player, filter, settings
+   tab content. Tightens everything else.
+   ================================================================ */
+@media only screen and (max-width: 768px) {
+    /* Tab panels: tighter content padding */
+    sl-tab-panel {
+        --padding: var(--sl-spacing-small);
+    }
+
+    /* ---------- Tasks / Archived: compact horizontal row ---------- */
+    /* Outer table collapses to a single-column stack so each compact
+       row fills the viewport width. Earlier @media (max-width: 768px)
+       rules sized this at 2-up; this stack overrides them via source
+       order. */
+    #video-table,
+    .archived-table {
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--sl-spacing-x-small);
+    }
+
+    .video-item {
+        display: grid;
+        grid-template-columns: 84px minmax(0, 1fr) auto;
+        grid-template-rows: auto auto auto;
+        column-gap: 0.65rem;
+        row-gap: 0.25rem;
+        align-items: center;
+        padding: 0.5rem;
+        background-color: var(--sl-color-neutral-50);
+        border-radius: var(--sl-border-radius-medium);
+    }
+
+    .video-item > .thumb {
+        grid-column: 1;
+        grid-row: 1 / -1;
+        align-self: start;
+        width: 84px;
+        margin: 0;
+    }
+
+    .video-item > .thumb img {
+        width: 84px;
+        height: auto;
+        aspect-ratio: 16 / 9;
+        margin: 0;
+        border-radius: var(--sl-border-radius-small);
+    }
+
+    .video-item > .thumb img.thumb-avatar {
+        width: 56px;
+        height: 56px;
+        margin: 0;
+    }
+
+    .video-item > .thumb .job-checkbox {
+        width: 14px;
+        height: 14px;
+        top: 2px;
+        left: 2px;
+    }
+
+    .video-item > .thumb .watch-indicator {
+        bottom: 2px;
+        right: 2px;
+        padding: 1px 4px;
+    }
+
+    .video-item > .thumb .watch-indicator svg {
+        width: 10px;
+        height: 10px;
+    }
+
+    .video-item > .stream-info {
+        grid-column: 2;
+        grid-row: 1;
+        min-width: 0;
+        width: 100%;
+    }
+
+    .video-item .stream-title {
+        font-size: 0.85rem;
+        margin-bottom: 0.1rem;
+        line-height: 1.25;
+    }
+
+    .video-item .stream-author {
+        font-size: 0.7rem;
+        line-height: 1.2;
+    }
+
+    .video-item > .job-status-cell {
+        grid-column: 2;
+        grid-row: 2;
+        justify-self: start;
+    }
+
+    .video-item sl-badge.status::part(base) {
+        font-size: 0.6rem;
+        padding: 0.15em 0.5em;
+        line-height: 1.2;
+    }
+
+    .video-item > .job-progress {
+        grid-column: 2;
+        grid-row: 3;
+        min-width: 0;
+        gap: 0.15rem;
+    }
+
+    .video-item .job-progress-text {
+        font-size: 0.7rem;
+        line-height: 1.25;
+    }
+
+    .video-item .job-progress-bar {
+        --height: 3px;
+    }
+
+    /* Inline icon buttons collapse into a single overflow trigger */
+    .video-item > .job-quick-actions {
+        display: none;
+    }
+
+    .video-item > .video-item-overflow {
+        display: inline-block;
+        grid-column: 3;
+        grid-row: 1 / -1;
+        align-self: center;
+    }
+
+    .video-item-overflow sl-icon-button::part(base) {
+        padding: 0.25rem;
+        font-size: 1.15rem;
+    }
+
+    /* Overflow menu items: keep readable, not jumbo */
+    .video-item-overflow sl-menu-item::part(base) {
+        font-size: 0.85rem;
+    }
+
+    /* ---------- Settings sidebar nav: dense horizontal strip ----- */
+    /* User flagged the settings menu items as too big specifically. */
+    .settings-menu {
+        position: static;
+    }
+
+    .settings-menu sl-menu {
+        display: flex;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        gap: 0.25rem;
+        padding: 0.25rem;
+        scrollbar-width: thin;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .settings-menu sl-menu-item {
+        flex: 0 0 auto;
+        min-width: 0;
+    }
+
+    .settings-menu sl-menu-item::part(base) {
+        padding: 0.3rem 0.65rem;
+        font-size: 0.75rem;
+        min-height: auto;
+        white-space: nowrap;
+    }
+
+    .settings-menu sl-menu-item::part(prefix) {
+        font-size: 0.9rem;
+        margin-right: 0.25rem;
+    }
+
+    /* ---------- Imports tab: tighter dropzone, compact list ------ */
+    #import-dropzone {
+        padding: var(--sl-spacing-large);
+    }
+
+    /* ---------- Logs entries: denser ----------------------------- */
+    .log-line {
+        font-size: 0.72rem;
+        line-height: 1.35;
+        padding: 0.05rem 0.4rem;
+    }
+
+    /* ---------- Generic chrome: smaller dialog/sl-button --------- */
+    /* Note: stats bar + tab bar + player + filter + settings content
+       are intentionally NOT touched here — user said those are fine. */
+    sl-dialog::part(body) {
+        padding: var(--sl-spacing-small);
+    }
+
+    sl-dialog::part(footer) {
+        padding: var(--sl-spacing-x-small) var(--sl-spacing-small);
+    }
+
+    sl-dialog::part(header) {
+        padding: var(--sl-spacing-small);
+    }
+
+    sl-dialog::part(title) {
+        font-size: 1rem;
+    }
+
+    /* ---------- Touch targets: smaller than the 44px legacy rule -- */
+    /* The earlier @media (max-width: 768px) block forced every button
+       to a 44px square (iOS HIG). The user wants denser UI, so dial
+       this back: 40px for text buttons (still comfortably tappable),
+       32px for icon buttons. Specific contexts can shrink further. */
+    sl-button::part(base) {
+        min-height: 40px;
+        min-width: 0;
+    }
+
+    sl-icon-button::part(base) {
+        min-height: 32px;
+        min-width: 32px;
+    }
+
+    /* Drop the .video-item min-height — the new compact grid is self-
+       sizing and the prior 56px floor adds wasted whitespace. */
+    .video-item {
+        min-height: 0;
+    }
+
+    /* Earlier block bumped logs to font-size-medium with 1.8 line height
+       "for readability"; user wants density. Restore the smaller size. */
+    #logs-viewer {
+        font-size: var(--sl-font-size-x-small);
+        line-height: 1.45;
+    }
+
+    /* ---------- Stats cards: tighter padding + smaller numbers ---- */
+    .stats-grid {
+        gap: var(--sl-spacing-x-small);
+    }
+
+    .stat-card {
+        padding: 0.4rem 0.5rem;
+    }
+
+    .stat-value {
+        font-size: 1rem;
+    }
+
+    .stat-label {
+        font-size: 0.65rem;
+    }
+
+    /* ---------- Files table: compact card-per-row ---------------- */
+    /* Each row becomes a tight flex card: badge + path on the top
+       line, size/time/job-info wrapping below, trash button pinned
+       to the right and vertically centered. Replaces the 1-up grid
+       (576px breakpoint) which dropped each child onto its own line. */
+    .files-table {
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--sl-spacing-x-small);
+    }
+
+    .files-table .files-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        column-gap: 0.4rem;
+        row-gap: 0.1rem;
+        padding: 0.4rem 0.5rem;
+        background-color: var(--sl-color-neutral-50);
+        border-radius: var(--sl-border-radius-medium);
+        border-bottom: none;
+        grid-column: initial;
+    }
+
+    .files-table .files-row > .files-type-badge {
+        order: 1;
+    }
+
+    .files-table .files-row > .files-path {
+        order: 2;
+        flex: 1 1 0;
+        min-width: 0;
+        font-size: 0.75rem;
+    }
+
+    .files-table .files-row > .files-delete-btn {
+        order: 3;
+        margin-left: auto;
+        align-self: center;
+    }
+
+    /* Force a line break after badge/path/delete by inserting a zero-
+       height full-width spacer at order 4. Meta items at order 5 land
+       on the second visual line. */
+    .files-table .files-row::after {
+        content: "";
+        order: 4;
+        flex-basis: 100%;
+        width: 0;
+        height: 0;
+    }
+
+    .files-table .files-row > :nth-child(3),
+    .files-table .files-row > :nth-child(4),
+    .files-table .files-row > .files-job-info {
+        order: 5;
+        font-size: 0.65rem;
+        color: var(--sl-color-neutral-500);
+        white-space: nowrap;
+    }
+
+    .files-table .files-row > :nth-child(3)::after,
+    .files-table .files-row > :nth-child(4)::after {
+        content: " · ";
+        opacity: 0.6;
+        margin: 0 0.15rem;
+    }
+
+    .files-type-badge {
+        font-size: 0.6rem;
+        padding: 1px 5px;
+    }
+
+    /* ---------- Job Details modal: stack labels, compact rows ---- */
+    /* The desktop layout puts a 6rem-wide label column next to each
+       value; on a phone that wastes screen and crowds the value.
+       Stack them and downsize the label into a small uppercase header. */
+    #job-details-content {
+        gap: var(--sl-spacing-small);
+    }
+
+    .details-section {
+        gap: 0.5rem;
+    }
+
+    .details-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.1rem;
+        margin: 0;
+    }
+
+    .details-label {
+        min-width: 0;
+        font-size: 0.65rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--sl-color-neutral-500);
+        font-weight: 600;
+    }
+
+    .details-value {
+        width: 100%;
+        font-size: 0.85rem;
+        line-height: 1.35;
+    }
+
+    .details-value sl-badge::part(base) {
+        font-size: 0.65rem;
+    }
+
+    /* Empty labels (used as spacer for action rows) stay invisible. */
+    .details-label:empty {
+        display: none;
+    }
+
+    /* Footer with up to 9 action buttons: single horizontal scroll
+       row instead of wrapping into a tall stack. Buttons sized small
+       so 5-6 fit visibly before scrolling. Override the prior
+       576px column-stack rule via source-order. */
+    .details-footer {
+        flex-direction: row;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+        padding-bottom: 0.25rem;
+        gap: 0.4rem;
+    }
+
+    .details-footer sl-button {
+        flex: 0 0 auto;
+    }
+
+    .details-footer sl-button::part(base) {
+        min-height: 36px;
+        padding: 0 0.6rem;
+        font-size: 0.78rem;
+    }
+
+    .details-footer sl-button::part(prefix) {
+        margin-right: 0.25rem;
+        font-size: 0.9rem;
+    }
+
+    /* Details dialog uses min(50rem, 90vw); on a phone the bottom-
+       sheet rule (set elsewhere in the 768px block) takes over and
+       full-widths the panel — but explicitly clear the desktop width
+       so the panel doesn't fight the sheet layout. */
+    #details-dialog::part(panel) {
+        width: 100%;
+    }
+
+    /* ---------- Logs panel: tight header + dense viewer ---------- */
+    .logs-header {
+        gap: 0.35rem;
+        margin-bottom: var(--sl-spacing-x-small);
+    }
+
+    #log-count {
+        font-size: 0.7rem;
+        color: var(--sl-color-neutral-500);
+        order: 1;
+    }
+
+    .log-filters {
+        order: 2;
+        flex: 1 0 100%;
+        gap: 0.25rem;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+
+    .log-filters::-webkit-scrollbar {
+        display: none;
+    }
+
+    .log-filters sl-button {
+        flex: 0 0 auto;
+    }
+
+    .log-filters sl-button::part(base) {
+        min-height: 28px;
+        padding: 0 0.5rem;
+        font-size: 0.7rem;
+    }
+
+    #log-search {
+        order: 3;
+        flex: 1 1 auto;
+        max-width: none !important;
+    }
+
+    #log-search::part(form-control) {
+        font-size: 0.8rem;
+    }
+
+    #log-search::part(base) {
+        min-height: 32px;
+    }
+
+    #clear-logs-btn {
+        order: 4;
+    }
+
+    #clear-logs-btn::part(base) {
+        min-height: 32px;
+        padding: 0 0.55rem;
+        font-size: 0.7rem;
+    }
+
+    /* Reclaim more height for the log viewer: bottom status bar
+       already accounts for the offset, but the chrome above is now
+       tighter so we can grow the viewer. */
+    #logs-container {
+        height: calc(100dvh - 9rem);
+    }
+
+    /* ---------- Polish refinements ------------------------------- */
+    /* Empty state — desktop uses 3x-large padding which leaves a
+       phone screen mostly blank. Trim back. */
+    #empty-state {
+        padding: var(--sl-spacing-large);
+    }
+
+    #empty-state sl-icon {
+        font-size: 2rem;
+    }
+
+    #empty-state p {
+        font-size: 0.85rem;
+        margin: var(--sl-spacing-x-small) 0;
+    }
+
+    .empty-state-subtext {
+        font-size: 0.75rem;
+    }
+
+    /* Section headers (Files / Imports / Stats) are h3 — desktop
+       reads them as primary, on mobile they crowd the layout. */
+    .files-header h3,
+    #imports-container h3,
+    .stats-section h3 {
+        font-size: 0.95rem;
+        margin-bottom: var(--sl-spacing-x-small);
+    }
+
+    /* Files header (h3 + actions) tends to wrap awkwardly when the
+       action buttons can't fit on the same line. Allow wrapping and
+       align everything left so the second-line buttons line up with
+       the heading. */
+    .files-header {
+        flex-wrap: wrap;
+        gap: var(--sl-spacing-x-small);
+    }
+
+    /* Job-details embed: on the bottom-sheet panel a full-width 16:9
+       iframe at common phone widths is ~200px tall, which is fine,
+       but on a tall device with a wide panel it can dominate the
+       sheet. Cap height so info + footer stay visible without scrolling. */
+    .details-embed {
+        max-height: 35vh;
+        max-height: 35dvh;
+    }
+
+    /* Bump details labels back up slightly — 0.65rem is below the
+       comfortable mobile reading floor. */
+    .details-label {
+        font-size: 0.7rem;
+    }
+}
+
+/* Touch devices have no real hover. The .video-item :hover background
+   + box-shadow + translateY gets STUCK on the last-tapped row until
+   another tap clears it — same problem on .files-row. Neutralise the
+   hover styles on touch, and explicitly preserve the .selected state
+   so a selected job doesn't visually lose its selection after tap. */
+@media (hover: none) {
+    .video-item:hover {
+        background-color: var(--sl-color-neutral-50);
+        box-shadow: none;
+        transform: none;
+    }
+    .video-item.selected:hover {
+        background-color: var(--sl-color-primary-50);
+    }
+    .files-row:hover {
+        background: transparent;
+    }
+}

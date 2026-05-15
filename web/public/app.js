@@ -527,12 +527,27 @@ class MoomboxApp {
           this.quickAction(action, jobId);
           return;
         }
+        // Don't open the details dialog when the tap landed on the overflow
+        // trigger or its menu — the dropdown handles its own interaction.
+        if (e.target.closest(".video-item-overflow")) return;
         const videoItem = e.target.closest(".video-item");
         if (videoItem) {
           const jobId = videoItem.dataset.jobId;
           const job = jobSource().find((j) => j.id === jobId);
           if (job) this.showJobDetails(job);
         }
+      });
+      // sl-menu-item selections from the mobile overflow dropdown dispatch
+      // the same quickAction as the inline icon buttons. The menu items
+      // carry `value="cancel|reinitialize|delete"` (rather than the
+      // `data-quick-action` attribute the click handler matches) so a
+      // menu-item tap doesn't trigger BOTH this listener and the click
+      // delegate above.
+      container.addEventListener("sl-select", (e) => {
+        const item = e.detail?.item;
+        const action = item?.value;
+        const jobId = item?.dataset?.jobId;
+        if (action && jobId) this.quickAction(action, jobId);
       });
     };
 
@@ -1580,16 +1595,36 @@ class MoomboxApp {
     const canReinit = REINIT_STATUSES.has(job.status);
     const canDelete = DELETE_STATUSES.has(job.status);
 
+    const escId = this.escapeHtml(job.id);
     let actionsHtml = "";
-    if (canCancel) actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
-    if (canReinit) actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Reinitialize" data-quick-action="reinitialize" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
-    if (canDelete) actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${this.escapeHtml(job.id)}"></sl-icon-button>`;
+    const overflowItems = [];
+    // Note: the overflow menu items use `value="..."` rather than
+    // `data-quick-action` because both the row's click handler (which
+    // matches `[data-quick-action]`) AND the sl-select handler would
+    // otherwise fire on a menu-item tap and run the action twice.
+    if (canCancel) {
+      actionsHtml += `<sl-icon-button name="x-circle" label="Cancel" data-quick-action="cancel" data-job-id="${escId}"></sl-icon-button>`;
+      overflowItems.push(`<sl-menu-item value="cancel" data-job-id="${escId}"><sl-icon slot="prefix" name="x-circle"></sl-icon>Cancel</sl-menu-item>`);
+    }
+    if (canReinit) {
+      actionsHtml += `<sl-icon-button name="arrow-clockwise" label="Reinitialize" data-quick-action="reinitialize" data-job-id="${escId}"></sl-icon-button>`;
+      overflowItems.push(`<sl-menu-item value="reinitialize" data-job-id="${escId}"><sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>Reinitialize</sl-menu-item>`);
+    }
+    if (canDelete) {
+      actionsHtml += `<sl-icon-button name="trash" label="Delete" data-quick-action="delete" data-job-id="${escId}"></sl-icon-button>`;
+      overflowItems.push(`<sl-menu-item value="delete" data-job-id="${escId}"><sl-icon slot="prefix" name="trash"></sl-icon>Delete</sl-menu-item>`);
+    }
+    // Compact-row overflow menu. Only the desktop inline icons render on
+    // wide viewports; CSS swaps them for this single trigger on phones.
+    const overflowHtml = overflowItems.length
+      ? `<sl-dropdown class="video-item-overflow"><sl-icon-button slot="trigger" name="three-dots-vertical" label="More actions"></sl-icon-button><sl-menu>${overflowItems.join("")}</sl-menu></sl-dropdown>`
+      : "";
 
     const isSelected = this._selectedTaskJobs.has(job.id) || this._selectedArchivedJobs.has(job.id);
     return `
-      <div class="video-item${isSelected ? " selected" : ""}" data-job-id="${this.escapeHtml(job.id)}" data-status="${this.escapeHtml(statusClass)}">
+      <div class="video-item${isSelected ? " selected" : ""}" data-job-id="${escId}" data-status="${this.escapeHtml(statusClass)}">
         <div class="thumb">
-          <input type="checkbox" class="job-checkbox" data-job-id="${this.escapeHtml(job.id)}" ${isSelected ? "checked" : ""} aria-label="Select ${this.escapeHtml(job.title)}">
+          <input type="checkbox" class="job-checkbox" data-job-id="${escId}" ${isSelected ? "checked" : ""} aria-label="Select ${this.escapeHtml(job.title)}">
           ${(thumbnailUrl || fallbackThumb) ? `<img src="${this.escapeHtml(thumbnailUrl || fallbackThumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"
                class="${isAvatarThumb ? "thumb-avatar" : ""}"
                ${fallbackThumb ? `data-fallback="${this.escapeHtml(fallbackThumb)}"` : ""}
@@ -1600,7 +1635,7 @@ class MoomboxApp {
           <div class="stream-title" title="${this.escapeHtml(job.title)}">${platformBadge}${this.escapeHtml(job.title)}</div>
           <div class="stream-author">${this.escapeHtml(job.channelName)}</div>
         </div>
-        <div>
+        <div class="job-status-cell">
           <sl-badge class="status ${this.escapeHtml(statusClass)}" variant="primary">${this.escapeHtml(this.displayStatus(job.status))}</sl-badge>
         </div>
         <div class="job-progress">
@@ -1608,6 +1643,7 @@ class MoomboxApp {
           ${percent > 0 ? `<sl-progress-bar class="job-progress-bar" value="${this.escapeHtml(percent)}"></sl-progress-bar>` : ""}
         </div>
         <div class="job-quick-actions">${actionsHtml}</div>
+        ${overflowHtml}
       </div>
     `;
   }
