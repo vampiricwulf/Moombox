@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
@@ -63,7 +64,17 @@ func (s *runState) wireRoutes() func() {
 			s.dlWorker.SetParallelDownloads(n)
 		},
 		OnHideFinishedAgeChanged: func() {
-			// Re-broadcast job list with updated archive threshold
+			// Send config_update FIRST so the Web UI's hideFinishedAgeDays is
+			// already up to date by the time the jobs_update payload (filtered
+			// with the new threshold) arrives. Otherwise the per-client FIFO
+			// queue would deliver jobs_update first, and the Web UI's archive
+			// re-eval would run with the stale threshold and undo the server's
+			// widening on a threshold increase.
+			var hideAge float64
+			s.configStore.Read(func(c *config.MoomboxConfig) {
+				hideAge = c.Monitors.HideFinishedAgeDays.Value
+			})
+			s.wsHub.Broadcast("config_update", map[string]any{"hideFinishedAgeDays": hideAge})
 			jobs, _ := s.db.GetAllJobs()
 			s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 		},

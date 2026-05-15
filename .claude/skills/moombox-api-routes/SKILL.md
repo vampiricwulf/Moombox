@@ -65,7 +65,7 @@ Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`.
 - **Log subscriber**: `log.Subscribe()` channel → `BroadcastLog()`
 
 ### 3. Frontend Handler
-`web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types: `initial_state`, `jobs_update`, `job_update`, `job_deleted`, `log`, `check_timers`, `disk_status`, `update_available`, `connectivity`, `pong`.
+`web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types: `initial_state`, `jobs_update`, `job_update`, `job_deleted`, `config_update`, `log`, `check_timers`, `disk_status`, `update_available`, `connectivity`, `pong`.
 
 ### 4. TUI Handler
 TUI does **not** receive WebSocket messages. Instead, it gets data via:

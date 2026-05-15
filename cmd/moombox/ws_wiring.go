@@ -90,13 +90,18 @@ func (s *runState) wireWebSocket() {
 			jobs = []*database.Job{} // Send empty array, not null
 		}
 		jobs = filterJobsByAge(jobs, s.configStore)
+		var hideAge float64
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			hideAge = c.Monitors.HideFinishedAgeDays.Value
+		})
 		return map[string]any{
-			"jobs":            jobs,
-			"logs":            s.log.GetRecentLines(),
-			"nextFeedCheck":   s.feedMon.GetNextCheckAt(),
-			"nextDecapiCheck": s.decapiMon.GetNextCheckAt(),
-			"nextTwitchCheck": s.twitchMon.GetNextCheckAt(),
-			"connectivity":    s.connMon.IsOnline(),
+			"jobs":                jobs,
+			"logs":                s.log.GetRecentLines(),
+			"nextFeedCheck":       s.feedMon.GetNextCheckAt(),
+			"nextDecapiCheck":     s.decapiMon.GetNextCheckAt(),
+			"nextTwitchCheck":     s.twitchMon.GetNextCheckAt(),
+			"connectivity":        s.connMon.IsOnline(),
+			"hideFinishedAgeDays": hideAge,
 		}
 	}
 

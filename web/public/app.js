@@ -34,7 +34,12 @@ class MoomboxApp {
     this.nextFeedCheck = 0;
     this.nextDecapiCheck = 0;
     this.nextTwitchCheck = 0;
+    // Threshold (days) for moving Finished jobs from Tasks into Archived.
+    // -1 = never archive, 0 = archive immediately, >0 = archive after N days.
+    // Provided by the server in `initial_state` and refreshed via `config_update`.
+    this.hideFinishedAgeDays = -1;
     this._countdownInterval = null;
+    this._archiveSweepInterval = null;
     this.logFilter = "all";
     this._logAutoScroll = true;
     this._logSearchQuery = "";
@@ -99,6 +104,10 @@ class MoomboxApp {
     this.loadConfig();
     this.loadStatus();
     this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);
+    // Idle-tick sweep: re-evaluate archive boundary in case no job_update
+    // arrives but enough time has passed for a Finished job to cross the
+    // hide_finished_age_days threshold.
+    this._archiveSweepInterval = setInterval(() => this._evaluateArchiveBoundary(), 60_000);
 
     // Track OS theme changes mid-session — only applied while the user
     // has not yet made an explicit choice via the theme toggle.
@@ -966,14 +975,19 @@ class MoomboxApp {
   handleMessage(message) {
     const p = message.payload;
     switch (message.type) {
-      case "initial_state":
+      case "initial_state": {
         if (!p) break;
         this.jobs = p.jobs || [];
         this.logs = p.logs || [];
         this.nextFeedCheck = p.nextFeedCheck || 0;
         this.nextDecapiCheck = p.nextDecapiCheck || 0;
         this.nextTwitchCheck = p.nextTwitchCheck || 0;
+        if (typeof p.hideFinishedAgeDays === "number") {
+          this.hideFinishedAgeDays = p.hideFinishedAgeDays;
+        }
+        const archivedMoved = this._evaluateArchiveBoundary({ silent: true });
         this.renderJobs();
+        if (archivedMoved) this.renderArchivedJobs();
         this.renderLogs();
         this.updateCheckCountdown();
         if (p.connectivity !== undefined) {
@@ -989,11 +1003,14 @@ class MoomboxApp {
           }
         }
         break;
+      }
 
-      case "jobs_update":
+      case "jobs_update": {
         this._preserveStagingFields(this.jobs, p || []);
         this.jobs = p || [];
+        const archivedMoved = this._evaluateArchiveBoundary({ silent: true });
         this.renderJobs();
+        if (archivedMoved) this.renderArchivedJobs();
         // Update details dialog if open (but don't reload logs)
         if (this.selectedJobId) {
           const job = this.jobs.find((j) => j.id === this.selectedJobId);
@@ -1006,6 +1023,7 @@ class MoomboxApp {
           }
         }
         break;
+      }
 
       case "job_update": {
         // Single job update - update in place, or full re-render if status changed
@@ -1040,8 +1058,29 @@ class MoomboxApp {
           this.jobs.push(updatedJob);
           this.renderJobs();
         }
+        // Any per-job update is a good moment to re-check whether other
+        // finished jobs have aged past the archive threshold (mirrors the
+        // TUI, which reclassifies the whole list on every event).
+        this._evaluateArchiveBoundary();
         break;
       }
+
+      case "config_update":
+        if (!p) break;
+        if (typeof p.hideFinishedAgeDays === "number") {
+          const prev = this.hideFinishedAgeDays;
+          this.hideFinishedAgeDays = p.hideFinishedAgeDays;
+          // Decrease (or stayed): sweep active → archived for newly-aged jobs.
+          // Increase: previously-archived jobs may now belong in active. The
+          // server's accompanying jobs_update already widened this.jobs to
+          // include them, so just refresh archivedJobs so the Archived panel
+          // drops the rows that moved back into active.
+          this._evaluateArchiveBoundary();
+          if (p.hideFinishedAgeDays > prev) {
+            this.fetchArchivedJobs();
+          }
+        }
+        break;
 
       case "job_deleted": {
         // Remove the deleted job from local state without waiting for a
@@ -1327,6 +1366,50 @@ class MoomboxApp {
       }
     });
     this.updateBatchActionBar();
+  }
+
+  /**
+   * Move Finished jobs in `this.jobs` that have aged past hideFinishedAgeDays
+   * into `this.archivedJobs`. Mirrors the server's filterJobsByAge logic and
+   * the TUI's isJobArchived check so the active panel reclassifies as time
+   * passes without waiting for the user to refresh.
+   *
+   * Threshold semantics (match server in internal/web/routes/jobs.go):
+   *   < 0 : never archive
+   *   = 0 : archive immediately on Finished
+   *   > 0 : archive Finished older than N days
+   *
+   * Options:
+   *   silent: skip the post-move re-render (caller will render).
+   */
+  _evaluateArchiveBoundary({ silent = false } = {}) {
+    const ageDays = this.hideFinishedAgeDays;
+    if (ageDays < 0 || !this.jobs.length) return false;
+    const cutoffMs = ageDays * 86400 * 1000;
+    const nowMs = Date.now();
+    let moved = 0;
+    for (let i = this.jobs.length - 1; i >= 0; i--) {
+      const j = this.jobs[i];
+      if (j.status !== "Finished" || !j.updatedAt) continue;
+      const t = Date.parse(j.updatedAt);
+      if (Number.isNaN(t)) continue;
+      // ageDays === 0 archives every Finished job (cutoff 0, age >= 0).
+      if (nowMs - t > cutoffMs || ageDays === 0) {
+        this.jobs.splice(i, 1);
+        const existingIdx = this.archivedJobs.findIndex(a => a.id === j.id);
+        if (existingIdx !== -1) {
+          this.archivedJobs[existingIdx] = j;
+        } else {
+          this.archivedJobs.push(j);
+        }
+        moved++;
+      }
+    }
+    if (moved && !silent) {
+      this.renderJobs();
+      this.renderArchivedJobs();
+    }
+    return moved > 0;
   }
 
   async fetchArchivedJobs() {

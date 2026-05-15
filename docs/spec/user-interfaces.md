@@ -403,10 +403,11 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 
 | Type | Payload | When Sent |
 |------|---------|-----------|
-| `initial_state` | `{ jobs, logs, config, monitors, ... }` | Once, immediately after WebSocket connection is accepted |
+| `initial_state` | `{ jobs, logs, config, monitors, hideFinishedAgeDays, ... }` | Once, immediately after WebSocket connection is accepted |
 | `job_update` | Single job object | When any field of a single job changes |
 | `jobs_update` | Full job array | When a job is added or deleted (full list, not incremental) |
 | `job_deleted` | `{ id }` | When a job row is removed from the database |
+| `config_update` | Partial config (currently `{ hideFinishedAgeDays }`) | When a config setting that affects client-side rendering changes |
 | `log` | Log line string | When a new log line is emitted |
 | `check_timers` | `{ feed, decapi, twitch }` timestamps | When monitor check schedules change |
 | `pong` | Empty | Response to client `ping` messages |

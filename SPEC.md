@@ -486,12 +486,15 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `job_update` — Single job changed (payload: job object with job ID as key)
 - `jobs_update` — Full job list refresh (payload: array of all visible jobs)
 - `job_deleted` — A job row was removed (payload: `{id}`)
+- `config_update` — A config setting that affects client-side rendering changed (payload: partial config; currently `{hideFinishedAgeDays}`)
 - `log` — Log line (payload: string)
 - `check_timers` — Monitor schedule update (payload: `{nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
-- `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
+- `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck, hideFinishedAgeDays}`)
 - `update_available` — New version found (payload: release info)
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
 - `cookie_status` — Cookie auth change (payload: auth status)
+
+The `hideFinishedAgeDays` field in `initial_state` and `config_update` drives the Web UI's client-side archive re-evaluation: on every `job_update`/`jobs_update` and on a 60-second idle sweep, the Web UI moves Finished jobs that have aged past the threshold from the active panel into the Archived panel. This mirrors the TUI's `isJobArchived` reclassification (`internal/tui/task_list.go`) so the active panel stays in sync with wall-clock time without a page refresh.
 
 **Broadcast rate:** No hub-level throttle. The high-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by `progressUpdateInterval` (16 ms gate in `internal/worker/progress.go`); the other callers are event-driven, not loops. A previous per-job throttle in the hub was removed because it raced against the (unthrottled) `BroadcastJobDeleted` and could resurrect deleted rows on the trailing edge.
 
