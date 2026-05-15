@@ -53,7 +53,6 @@ type jobsFixture struct {
 	stagingDir string
 	tw         *fakeTwitchFetcher
 	yt         *fakeYouTubeFetcher
-	wsHub      *web.WebSocketHub
 }
 
 // newJobsFixture wires JobRoutes against real DB + temp filesystem +
@@ -88,10 +87,9 @@ func newJobsFixture(t *testing.T) *jobsFixture {
 
 	tw := &fakeTwitchFetcher{}
 	yt := &fakeYouTubeFetcher{}
-	wsHub := web.NewWebSocketHub(silentLogger{})
 
 	r := chi.NewRouter()
-	JobRoutes(r, db, store, nil, apiRL, tw, yt, nil, wsHub)
+	JobRoutes(r, db, store, nil, apiRL, tw, yt, nil)
 
 	return &jobsFixture{
 		router:     r,
@@ -101,7 +99,6 @@ func newJobsFixture(t *testing.T) *jobsFixture {
 		stagingDir: stagingDir,
 		tw:         tw,
 		yt:         yt,
-		wsHub:      wsHub,
 	}
 }
 

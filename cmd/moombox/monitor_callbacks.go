@@ -323,15 +323,14 @@ func (s *runState) wireMonitorCallbacks() {
 	}
 
 	// Database -> WebSocket: broadcast job updates. Uses the
-	// fine-grained OnJobChange API so we can skip broadcasts that
-	// only touched silent columns (resume_position, chat_offset —
-	// see silentColumns in database/database.go) — those are
-	// player-state writes that happen ~10/sec while the user
-	// scrubs and don't merit a WebSocket frame each.
+	// fine-grained OnJobChange API. silentColumns (resume_position,
+	// chat_offset) bypass OnJobChange entirely at the writer side,
+	// so player-state scrubs don't reach this subscriber.
 	//
-	// DECISIONS #21 first migrated subscriber: this is the proof-
-	// of-concept that the new event API delivers a real perf win.
-	// Future work: migrate TUI's job-list redraw similarly.
+	// No per-job throttle here: progress writes are already capped to
+	// ~60Hz/job upstream by ProgressTracker.maybeUpdate (16ms gate in
+	// internal/worker/progress.go), and every other UpdateJobFields
+	// caller is event-driven (state transitions, not loops).
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
 		// Skip broadcasting updates for archived (old finished) jobs
@@ -345,7 +344,7 @@ func (s *runState) wireMonitorCallbacks() {
 				return
 			}
 		}
-		s.wsHub.BroadcastJobUpdate(job.ID, job)
+		s.wsHub.BroadcastJobUpdate(job)
 	})
 
 	// OnJobAdded subscriber: AddJob no longer fires OnJobsChange (the
@@ -360,7 +359,7 @@ func (s *runState) wireMonitorCallbacks() {
 	s.unsubWSJobAdded = s.db.OnJobAdded(func(ev *database.JobAdded) {
 		job := ev.Job
 		s.db.TrackJobForLogs(job.ID)
-		s.wsHub.BroadcastJobUpdate(job.ID, job)
+		s.wsHub.BroadcastJobUpdate(job)
 	})
 
 	// OnTrimsChanged subscriber: AddTrim/DeleteTrim no longer fire
@@ -374,7 +373,7 @@ func (s *runState) wireMonitorCallbacks() {
 		if err != nil || job == nil {
 			return
 		}
-		s.wsHub.BroadcastJobUpdate(job.ID, job)
+		s.wsHub.BroadcastJobUpdate(job)
 	})
 
 	// OnJobDeleted subscriber: send a targeted job_deleted WS event so the

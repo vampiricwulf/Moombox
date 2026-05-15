@@ -24,7 +24,6 @@ func (s *runState) wireRoutes() func() {
 		&twitchMetadataAdapter{svc: s.twService},
 		&youtubeMetadataAdapter{svc: s.ytService},
 		s.notifyMgr,
-		s.wsHub,
 	)
 	routes.FormatRoutes(s.r, &routes.FormatRoutesDeps{
 		DB:  s.db,

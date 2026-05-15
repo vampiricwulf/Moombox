@@ -51,20 +51,21 @@ If this endpoint triggers state changes that clients need to see in real-time, a
 
 ### 1. Choose Broadcast Method
 `internal/web/websocket.go`:
-- `Broadcast(type, payload)` — immediate, unthrottled (for infrequent events)
-- `BroadcastJobUpdate(jobID, data)` — 100ms leading+trailing edge throttle (for frequent per-job updates)
-- `BroadcastJobsUpdate(data)` — unthrottled full job list (add/delete)
+- `Broadcast(type, payload)` — immediate, generic broadcast
+- `BroadcastJobUpdate(data)` — per-job update; no hub-level throttle (upstream rate is bounded by `ProgressTracker.maybeUpdate`'s 16ms gate for the high-frequency path)
+- `BroadcastJobsUpdate(data)` — full job list (add/delete, threshold changes)
+- `BroadcastJobDeleted(jobID)` — targeted row removal; clients drop the row immediately
 - `BroadcastCheckTimers(data)` — next monitor check times
 - `BroadcastLog(line)` — log line + ring buffer storage (200 lines)
 
 ### 2. Wire the Source
-Connect the event source to the broadcast in `main.go`. Common patterns:
-- **Database subscriber**: `db.OnJobUpdate(func(job) { wsHub.BroadcastJobUpdate(job.ID, job) })`
+Connect the event source to the broadcast in `cmd/moombox/monitor_callbacks.go`. Common patterns:
+- **Database subscriber**: `db.OnJobChange(func(ev) { wsHub.BroadcastJobUpdate(ev.Job) })`
 - **Direct call**: From a service callback (e.g., disk status, update check)
 - **Log subscriber**: `log.Subscribe()` channel → `BroadcastLog()`
 
 ### 3. Frontend Handler
-`web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types: `initial_state`, `jobs_update`, `job_update`, `log`, `check_timers`, `disk_status`, `update_available`, `pong`.
+`web/public/app.js` — Add case in WebSocket message handler switch on `msg.type`. Existing types: `initial_state`, `jobs_update`, `job_update`, `job_deleted`, `log`, `check_timers`, `disk_status`, `update_available`, `connectivity`, `pong`.
 
 ### 4. TUI Handler
 TUI does **not** receive WebSocket messages. Instead, it gets data via:
@@ -89,6 +90,6 @@ type WSMessage struct {
 
 - Forgetting to wire deps in `main.go` — route registers but deps are nil
 - Adding per-route auth/CSRF when it's already applied globally
-- Using throttled broadcast for infrequent events (adds latency for no benefit)
+- Calling `BroadcastJobUpdate` after `BroadcastJobDeleted` for the same ID — the late update will re-add the row via the client's upsert handler
 - Not including new event in initial state — clients that connect after the event miss it
 - Wiring TUI via WebSocket instead of database callbacks — TUI uses direct subscriptions

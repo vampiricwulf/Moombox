@@ -15,7 +15,6 @@ import (
 const (
 	wsWriteTimeout   = 10 * time.Second
 	wsPingInterval   = 30 * time.Second
-	wsThrottleWindow = 100 * time.Millisecond
 	wsMaxMessageSize = 1024 * 1024 // 1MB (match TS maxPayload)
 	maxLogBuffer     = 200         // Trim log ring buffer to this size
 	// wsReadIdleTimeout bounds how long a single Conn.Read may block
@@ -55,12 +54,6 @@ type WebSocketHub struct {
 	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
 	closed  bool
-
-	// Per-job throttle state (leading + trailing edge)
-	throttleMu         sync.Mutex
-	throttleTimers     map[string]*time.Timer
-	throttleTimestamps map[string]time.Time
-	throttlePending    map[string]any // Latest pending data for trailing edge
 
 	// Initial state provider (set by main.go)
 	InitialState InitialStateProvider
@@ -102,11 +95,8 @@ func NewWebSocketHub(logger interface {
 	Error(msg string, args ...any)
 }) *WebSocketHub {
 	return &WebSocketHub{
-		clients:            make(map[*wsClient]struct{}),
-		throttleTimers:     make(map[string]*time.Timer),
-		throttleTimestamps: make(map[string]time.Time),
-		throttlePending:    make(map[string]any),
-		logger:             logger,
+		clients: make(map[*wsClient]struct{}),
+		logger:  logger,
 	}
 }
 
@@ -388,21 +378,8 @@ func (hub *WebSocketHub) readPump(client *wsClient) {
 		if !hub.closed {
 			delete(hub.clients, client)
 		}
-		remaining := len(hub.clients)
 		hub.mu.Unlock()
 		client.conn.Close(websocket.StatusNormalClosure, "")
-
-		// If no clients remain, clear all pending throttle timers
-		if remaining == 0 {
-			hub.throttleMu.Lock()
-			for _, timer := range hub.throttleTimers {
-				timer.Stop()
-			}
-			hub.throttleTimers = make(map[string]*time.Timer)
-			hub.throttleTimestamps = make(map[string]time.Time)
-			hub.throttlePending = make(map[string]any)
-			hub.throttleMu.Unlock()
-		}
 	}()
 
 	for {
@@ -485,103 +462,15 @@ func (hub *WebSocketHub) Broadcast(msgType string, payload any) {
 	}
 }
 
-// BroadcastJobUpdate sends a throttled job update with leading + trailing edge.
-// Leading edge: sends immediately if 100ms since last send.
-// Trailing edge: schedules a timer to ensure the final state is always delivered.
-func (hub *WebSocketHub) BroadcastJobUpdate(jobID string, data any) {
-	hub.throttleMu.Lock()
-	defer hub.throttleMu.Unlock()
-
-	now := time.Now()
-	lastUpdate, exists := hub.throttleTimestamps[jobID]
-
-	if !exists || now.Sub(lastUpdate) >= wsThrottleWindow {
-		// Leading edge: enough time has passed, send immediately
-		hub.throttleTimestamps[jobID] = now
-
-		// Cancel any pending trailing-edge timer
-		if timer, ok := hub.throttleTimers[jobID]; ok {
-			timer.Stop()
-			delete(hub.throttleTimers, jobID)
-		}
-		delete(hub.throttlePending, jobID)
-
-		// Snapshot the prior state so a panic in Broadcast can restore
-		// it (audit P-2). Otherwise, the timestamp moves forward without
-		// a successful send and subsequent updates within the window
-		// silently route to the trailing edge.
-		prevTS, prevExists := lastUpdate, exists
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					hub.logger.Error("panic in job update broadcast", "panic", r)
-					hub.throttleMu.Lock()
-					if hub.throttleTimestamps != nil {
-						if prevExists {
-							hub.throttleTimestamps[jobID] = prevTS
-						} else {
-							delete(hub.throttleTimestamps, jobID)
-						}
-					}
-					hub.throttleMu.Unlock()
-				}
-			}()
-			hub.Broadcast("job_update", data)
-		}()
-	} else {
-		// Trailing edge: schedule/reschedule the final send
-		hub.throttlePending[jobID] = data
-
-		if timer, ok := hub.throttleTimers[jobID]; ok {
-			timer.Stop()
-		}
-		hub.throttleTimers[jobID] = time.AfterFunc(wsThrottleWindow, func() {
-			defer func() {
-				if r := recover(); r != nil {
-					hub.logger.Error("panic in throttle trailing edge", "panic", r)
-				}
-			}()
-			hub.throttleMu.Lock()
-			// If Close() ran between scheduling and firing, the maps are
-			// nil; bail out before touching them to avoid the otherwise-
-			// guaranteed nil-map assign panic (which the recover above
-			// would catch, but that's a bug waiting to happen).
-			if hub.throttlePending == nil {
-				hub.throttleMu.Unlock()
-				return
-			}
-			pending := hub.throttlePending[jobID]
-			delete(hub.throttlePending, jobID)
-			delete(hub.throttleTimers, jobID)
-			hub.throttleTimestamps[jobID] = time.Now()
-			hub.throttleMu.Unlock()
-
-			if pending != nil {
-				hub.Broadcast("job_update", pending)
-			}
-
-			// Clean up the timestamp after the throttle window so the map
-			// doesn't grow unbounded over the process lifetime.
-			time.AfterFunc(wsThrottleWindow, func() {
-				defer func() {
-					if r := recover(); r != nil {
-						hub.logger.Error("panic in throttle cleanup", "panic", r)
-					}
-				}()
-				hub.throttleMu.Lock()
-				// Same guard as above: Close() may have nilled the map.
-				if hub.throttleTimestamps == nil {
-					hub.throttleMu.Unlock()
-					return
-				}
-				// Only delete if no new activity has occurred since our trailing send
-				if t, ok := hub.throttleTimestamps[jobID]; ok && time.Since(t) >= wsThrottleWindow {
-					delete(hub.throttleTimestamps, jobID)
-				}
-				hub.throttleMu.Unlock()
-			})
-		})
-	}
+// BroadcastJobUpdate sends a single-job update to all clients. No per-job
+// throttle: the high-frequency caller (OnJobChange via ProgressTracker.maybeUpdate)
+// is already bounded to ~60Hz/job by progressUpdateInterval (16ms), and the
+// other callers (OnJobAdded, OnTrimsChanged) are event-driven and low rate.
+// An earlier per-job throttle here raced against the unthrottled
+// BroadcastJobDeleted: a trailing-edge job_update could arrive after a delete
+// and resurrect the row via the client's upsert handler.
+func (hub *WebSocketHub) BroadcastJobUpdate(data any) {
+	hub.Broadcast("job_update", data)
 }
 
 // BroadcastJobsUpdate sends the full job list (on add/delete).
@@ -642,21 +531,6 @@ func (hub *WebSocketHub) ClientCount() int {
 	return len(hub.clients)
 }
 
-// CleanupJob removes all throttle state for a specific job ID.
-// Call when a job is deleted or reaches a terminal state to prevent
-// the throttle maps from growing unbounded over the process lifetime.
-func (hub *WebSocketHub) CleanupJob(jobID string) {
-	hub.throttleMu.Lock()
-	defer hub.throttleMu.Unlock()
-
-	if timer, ok := hub.throttleTimers[jobID]; ok {
-		timer.Stop()
-		delete(hub.throttleTimers, jobID)
-	}
-	delete(hub.throttleTimestamps, jobID)
-	delete(hub.throttlePending, jobID)
-}
-
 // Close disconnects all clients.
 func (hub *WebSocketHub) Close() {
 	hub.mu.Lock()
@@ -667,13 +541,4 @@ func (hub *WebSocketHub) Close() {
 		delete(hub.clients, client)
 	}
 	hub.mu.Unlock()
-
-	hub.throttleMu.Lock()
-	for _, timer := range hub.throttleTimers {
-		timer.Stop()
-	}
-	hub.throttleTimers = nil
-	hub.throttleTimestamps = nil
-	hub.throttlePending = nil
-	hub.throttleMu.Unlock()
 }

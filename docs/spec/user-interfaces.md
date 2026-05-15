@@ -404,8 +404,9 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 | Type | Payload | When Sent |
 |------|---------|-----------|
 | `initial_state` | `{ jobs, logs, config, monitors, ... }` | Once, immediately after WebSocket connection is accepted |
-| `job_update` | Single job object | When any field of a single job changes (throttled) |
+| `job_update` | Single job object | When any field of a single job changes |
 | `jobs_update` | Full job array | When a job is added or deleted (full list, not incremental) |
+| `job_deleted` | `{ id }` | When a job row is removed from the database |
 | `log` | Log line string | When a new log line is emitted |
 | `check_timers` | `{ feed, decapi, twitch }` timestamps | When monitor check schedules change |
 | `pong` | Empty | Response to client `ping` messages |
@@ -416,18 +417,9 @@ The `type` field is a string discriminator. The `payload` field varies by type.
 |------|---------|---------|
 | `ping` | Empty | Client-initiated keepalive. Server responds with `pong`. |
 
-### Broadcast Throttling
+### Broadcast Rate
 
-Job update broadcasts use a **100ms leading/trailing edge** throttle, applied per job ID:
-
-1. **Leading edge:** When a `job_update` arrives and the last broadcast for that job ID was more than 100ms ago, the update is broadcast immediately. The timestamp is recorded.
-2. **Trailing edge:** When a `job_update` arrives within the 100ms window, it is stored as "pending." A timer is scheduled for 100ms after the last broadcast. When the timer fires, the most recent pending state is broadcast.
-3. **Cleanup:** Throttle state (timestamps, timers, pending data) for a job ID is purged 100ms after the trailing edge send completes.
-
-This ensures:
-- The first update is never delayed (immediate leading-edge send).
-- Rapid-fire updates (e.g., progress ticks during active download) are collapsed to at most one broadcast per 100ms per job.
-- The final state is always delivered (trailing-edge guarantees the last update is not lost).
+Job update broadcasts are not throttled in the WebSocket hub. The only high-frequency caller is `OnJobChange` driven by `ProgressTracker.maybeUpdate`, which is already gated to ~60 Hz per job by `progressUpdateInterval = 16ms` (see `internal/worker/progress.go`); every other `UpdateJobFields` caller is event-driven (state transitions, not loops). A previous per-job throttle in the hub created an ordering race — because `BroadcastJobDeleted` is not throttled, the trailing edge could arrive after a delete and resurrect the row via the client's upsert handler.
 
 ### Connection Parameters
 

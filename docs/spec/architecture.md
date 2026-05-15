@@ -274,7 +274,7 @@ Database.UpdateJobFields (batched via 100ms coalesce window)
 OnJobUpdate subscribers
     |
     v
-WebSocket hub (100ms leading/trailing edge throttle per job)
+WebSocket hub (no per-job throttle — ProgressTracker's 16ms gate caps the rate upstream)
     |
     v
 Web UI / TUI (render updated progress)
@@ -532,13 +532,9 @@ Two update mechanisms serve different needs:
 
 This pattern reduces SQLite write transactions from potentially hundreds per second (during active downloads) to approximately 10 per second.
 
-### WebSocket Throttling
+### WebSocket Broadcast Rate
 
-The WebSocket hub uses per-job leading/trailing edge throttling at 100ms:
-
-- **Leading edge:** If 100ms or more has elapsed since the last broadcast for a given job, broadcast immediately
-- **Trailing edge:** Schedule a timer to fire at the 100ms mark, ensuring the final state is always delivered
-- This prevents overwhelming browser clients with rapid updates while ensuring they see every state transition
+The WebSocket hub does not throttle `job_update` broadcasts. The highest-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by `progressUpdateInterval = 16ms`; the other callers (`OnJobAdded`, `OnTrimsChanged`) are event-driven. A previous per-job throttle in the hub created an ordering race where the trailing edge could arrive after a `BroadcastJobDeleted` and resurrect a deleted row via the client's upsert handler.
 
 ### TUI Async Updates
 

@@ -188,7 +188,7 @@ func sendPaginated(rw http.ResponseWriter, req *http.Request, items []*database.
 // JobRoutes registers job-related API routes. The Store carries the cfg
 // pointer + lock; all read sites here go through store.Read so the
 // migration drops the per-route cfgMu plumbing.
-func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager, wsHub *web.WebSocketHub) {
+func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *worker.DownloadWorker, rl *web.RateLimiter, twitchFetcher TwitchMetadataFetcher, ytFetcher YouTubeMetadataFetcher, notifier *notifications.Manager) {
 	// GET /api/jobs
 	r.Get("/api/jobs", func(rw http.ResponseWriter, req *http.Request) {
 		jobs, err := db.GetAllJobs()
@@ -1213,11 +1213,6 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 
 		// Clean up per-job logs (match TS: ctx.jobLogs.delete(job.id))
 		db.ClearJobLogs(jobID)
-
-		// Clean up WebSocket throttle state for deleted job
-		if wsHub != nil {
-			wsHub.CleanupJob(jobID)
-		}
 
 		jsonResponse(rw, map[string]any{"success": true})
 	})

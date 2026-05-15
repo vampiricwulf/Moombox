@@ -3,7 +3,6 @@ package web
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 type testWSLogger struct{}
@@ -13,73 +12,11 @@ func (l testWSLogger) Info(msg string, args ...any)  {}
 func (l testWSLogger) Warn(msg string, args ...any)  {}
 func (l testWSLogger) Error(msg string, args ...any) {}
 
-func TestWebSocketHubCleanupJob(t *testing.T) {
-	hub := NewWebSocketHub(testWSLogger{})
-
-	// Simulate throttle state for a job
-	hub.throttleMu.Lock()
-	hub.throttleTimestamps["job1"] = time.Now()
-	hub.throttlePending["job1"] = "pending_data"
-	hub.throttleTimers["job1"] = time.AfterFunc(time.Hour, func() {})
-	hub.throttleMu.Unlock()
-
-	// Verify state exists
-	hub.throttleMu.Lock()
-	if _, ok := hub.throttleTimestamps["job1"]; !ok {
-		t.Fatal("expected throttleTimestamps to have job1")
-	}
-	hub.throttleMu.Unlock()
-
-	// Clean up
-	hub.CleanupJob("job1")
-
-	// Verify state is gone
-	hub.throttleMu.Lock()
-	if _, ok := hub.throttleTimestamps["job1"]; ok {
-		t.Error("expected throttleTimestamps to not have job1 after cleanup")
-	}
-	if _, ok := hub.throttlePending["job1"]; ok {
-		t.Error("expected throttlePending to not have job1 after cleanup")
-	}
-	if _, ok := hub.throttleTimers["job1"]; ok {
-		t.Error("expected throttleTimers to not have job1 after cleanup")
-	}
-	hub.throttleMu.Unlock()
-}
-
-func TestWebSocketHubCleanupJobNonExistent(t *testing.T) {
-	hub := NewWebSocketHub(testWSLogger{})
-
-	// Should not panic on non-existent job
-	hub.CleanupJob("nonexistent")
-}
-
 func TestWebSocketHubClose(t *testing.T) {
 	hub := NewWebSocketHub(testWSLogger{})
 
-	// Add some throttle state
-	hub.throttleMu.Lock()
-	hub.throttleTimestamps["job1"] = time.Now()
-	hub.throttlePending["job1"] = "data"
-	hub.throttleTimers["job1"] = time.AfterFunc(time.Hour, func() {})
-	hub.throttleMu.Unlock()
-
 	hub.Close()
 
-	// Verify all maps are nil/cleared
-	hub.throttleMu.Lock()
-	if hub.throttleTimers != nil {
-		t.Error("expected throttleTimers to be nil after Close")
-	}
-	if hub.throttleTimestamps != nil {
-		t.Error("expected throttleTimestamps to be nil after Close")
-	}
-	if hub.throttlePending != nil {
-		t.Error("expected throttlePending to be nil after Close")
-	}
-	hub.throttleMu.Unlock()
-
-	// Verify hub is marked closed
 	hub.mu.Lock()
 	if !hub.closed {
 		t.Error("expected hub to be marked closed")
@@ -92,7 +29,7 @@ func TestWebSocketHubBroadcastNoClients(t *testing.T) {
 
 	// Should not panic with no clients
 	hub.Broadcast("test", map[string]string{"key": "value"})
-	hub.BroadcastJobUpdate("job1", map[string]string{"key": "value"})
+	hub.BroadcastJobUpdate(map[string]string{"key": "value"})
 	hub.BroadcastJobsUpdate([]string{})
 	hub.BroadcastCheckTimers(map[string]any{})
 }
@@ -164,21 +101,3 @@ func TestWebSocketHubClientCount(t *testing.T) {
 	}
 }
 
-func TestWebSocketHubThrottleLeadingEdge(t *testing.T) {
-	hub := NewWebSocketHub(testWSLogger{})
-
-	// First call should send immediately (leading edge)
-	hub.BroadcastJobUpdate("job1", "data1")
-
-	hub.throttleMu.Lock()
-	_, hasTimestamp := hub.throttleTimestamps["job1"]
-	_, hasTimer := hub.throttleTimers["job1"]
-	hub.throttleMu.Unlock()
-
-	if !hasTimestamp {
-		t.Error("expected throttle timestamp to be set after leading edge")
-	}
-	if hasTimer {
-		t.Error("expected no trailing timer after leading edge send")
-	}
-}

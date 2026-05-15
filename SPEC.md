@@ -53,7 +53,7 @@ Moombox follows a strict priority hierarchy for all design decisions. When two c
 
 2. **Reliability** — The application must not crash, must not silently lose data, and must recover from transient failures automatically. Every goroutine has inline `defer/recover`. Network errors trigger exponential backoff with jitter. Stream-end detection uses a verification loop (up to 6 checks at 5-minute intervals) rather than trusting a single API response. Cookie auth loss triggers automatic refresh attempts.
 
-3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (3-VM LRU cap). WebSocket broadcasts use 100ms leading/trailing-edge throttling. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
+3. **Resource Efficiency** — Moombox runs 24/7 unattended. All concurrency is signal-driven rather than polling-driven. The database uses 100ms batch coalescing so idle periods produce zero I/O. The BotGuard sidecar runs as a single long-lived Node subprocess (one V8 heap, not per-request); the goja cipher VMs auto-evict when idle (3-VM LRU cap). WebSocket broadcasts rely on upstream rate-limiting (ProgressTracker's 16ms gate caps progress writes at ~60 Hz/job) — no extra hub-level throttle. The TUI uses non-blocking channel sends with drop counters to prevent event loop blocking.
 
 4. **Simple Deployment & UX** — Single binary, no containers, no service managers. FFmpeg is the only runtime dependency. A first-run wizard handles initial setup. Sensible defaults mean the app works out of the box for the common case. Configuration changes that require restart are handled via exit code 42 and the launcher respawns automatically.
 
@@ -267,7 +267,7 @@ The worker also runs a 60-second heartbeat poll (`heartbeatInterval`) as a safet
 | Component | Pattern | Parameters |
 |-----------|---------|------------|
 | Worker | Dual semaphore | 100 lifecycle slots + 2 download slots (configurable) |
-| WebSocket | Leading/trailing throttle | 100ms window, per-job dedup |
+| WebSocket | No hub throttle | Rate bounded upstream by ProgressTracker (~60 Hz/job) |
 | Database | Signal-driven batch coalesce | 100ms window, zero idle I/O |
 | TUI | Non-blocking sends | Drop counters for diagnostics |
 | TUI logs | Batched flush | 250ms flush interval |
@@ -485,6 +485,7 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 **Server-to-client message types:**
 - `job_update` — Single job changed (payload: job object with job ID as key)
 - `jobs_update` — Full job list refresh (payload: array of all visible jobs)
+- `job_deleted` — A job row was removed (payload: `{id}`)
 - `log` — Log line (payload: string)
 - `check_timers` — Monitor schedule update (payload: `{nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
 - `initial_state` — Sent on connect (payload: `{jobs, logs, nextFeedCheck, nextDecapiCheck, nextTwitchCheck}`)
@@ -492,7 +493,7 @@ The WebSocket connects on any path (upgrade handler intercepts before static fil
 - `disk_status` — Disk space update (payload: `{free, total, usedPct, warnLevel}`)
 - `cookie_status` — Cookie auth change (payload: auth status)
 
-**Throttling:** 100ms leading/trailing edge per job ID. The leading edge fires immediately; the trailing edge fires 100ms after the last update in a burst. This prevents UI flooding during rapid segment progress updates.
+**Broadcast rate:** No hub-level throttle. The high-frequency caller (`OnJobChange` driven by `ProgressTracker.maybeUpdate`) is already capped to ~60 Hz per job by `progressUpdateInterval` (16 ms gate in `internal/worker/progress.go`); the other callers are event-driven, not loops. A previous per-job throttle in the hub was removed because it raced against the (unthrottled) `BroadcastJobDeleted` and could resurrect deleted rows on the trailing edge.
 
 **Connection management:** 30-second ping interval, 10-second write timeout, 1MB max message size, 256KB backpressure limit.
 
