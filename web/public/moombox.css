@@ -2858,9 +2858,27 @@ html.sl-theme-light {
     }
 
     /* ---------- Settings sidebar nav: dense horizontal strip ----- */
-    /* User flagged the settings menu items as too big specifically. */
+    /* User flagged the settings menu items as too big specifically.
+       Flex-column items default to `min-width: auto` which lets them
+       grow to fit their content — that's what pushed the strip off-
+       screen instead of clipping it to the viewport. min-width: 0 +
+       max-width: 100% on both the wrapper and the sl-menu forces
+       them to respect the container width so overflow-x: auto can
+       actually scroll. */
+    .settings-container {
+        min-width: 0;
+    }
+
+    .settings-content {
+        min-width: 0;
+        max-width: 100%;
+    }
+
     .settings-menu {
         position: static;
+        min-width: 0;
+        max-width: 100%;
+        width: 100%;
     }
 
     .settings-menu sl-menu {
@@ -2870,6 +2888,9 @@ html.sl-theme-light {
         overflow-y: hidden;
         gap: 0.25rem;
         padding: 0.25rem;
+        max-width: 100%;
+        width: 100%;
+        box-sizing: border-box;
         scrollbar-width: thin;
         -webkit-overflow-scrolling: touch;
     }
