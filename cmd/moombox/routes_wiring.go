@@ -70,13 +70,18 @@ func (s *runState) wireRoutes() func() {
 			// queue would deliver jobs_update first, and the Web UI's archive
 			// re-eval would run with the stale threshold and undo the server's
 			// widening on a threshold increase.
+			// Capture the threshold ONCE and reuse it for both the
+			// config_update payload and the job filtering below. Re-reading
+			// the store for the filter (via filterJobsByAge) would race a
+			// concurrent config change and could broadcast a hideFinishedAgeDays
+			// that disagrees with the threshold the jobs_update was filtered by.
 			var hideAge float64
 			s.configStore.Read(func(c *config.MoomboxConfig) {
 				hideAge = c.Monitors.HideFinishedAgeDays.Value
 			})
 			s.wsHub.Broadcast("config_update", map[string]any{"hideFinishedAgeDays": hideAge})
 			jobs, _ := s.db.GetAllJobs()
-			s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
+			s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
 		},
 		OnChannelChange: s.kickMonitors,
 	})

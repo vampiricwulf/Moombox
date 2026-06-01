@@ -119,15 +119,36 @@ func extractWSIP(r *http.Request) string {
 }
 
 // filterJobsByAge removes finished jobs older than hide_finished_age_days from
-// the slice. When ageDays is 0, the cutoff is "now" so all finished jobs are
-// hidden (any finished job's updated_at will be before the current moment).
-// Returns the original slice unchanged when no jobs are filtered out.
+// the slice, reading the threshold from the config store. Convenience wrapper
+// around filterJobsByAgeThreshold for callers that don't already hold the value.
 func filterJobsByAge(jobs []*database.Job, store *config.Store) []*database.Job {
-	var ageDays int
+	var hideAgeDays float64
 	store.Read(func(c *config.MoomboxConfig) {
-		ageDays = int(c.Monitors.HideFinishedAgeDays.Value)
+		hideAgeDays = c.Monitors.HideFinishedAgeDays.Value
 	})
-	cutoff := time.Now().AddDate(0, 0, -ageDays)
+	return filterJobsByAgeThreshold(jobs, hideAgeDays)
+}
+
+// filterJobsByAgeThreshold removes finished jobs older than hideAgeDays from the
+// slice using the same float-precision, strict-greater-than semantics as the
+// REST archived filter (internal/web/routes/jobs.go filterJobsByAge) and the
+// Web UI (_evaluateArchiveBoundary in app.js), so all three classify a given
+// job identically:
+//   - hideAgeDays < 0 : never archive (returns the slice unchanged)
+//   - hideAgeDays == 0: archive every finished job whose updated_at is strictly
+//     in the past (cutoff == now)
+//   - hideAgeDays > 0 : archive finished jobs whose age exceeds the threshold
+//
+// Callers that broadcast hideFinishedAgeDays alongside the filtered list MUST
+// pass the same captured value here rather than re-reading the store, so the
+// config_update and jobs_update payloads can never disagree. Returns the
+// original slice unchanged when no jobs are filtered out.
+func filterJobsByAgeThreshold(jobs []*database.Job, hideAgeDays float64) []*database.Job {
+	// Negative means never hide finished jobs — they all stay active.
+	if hideAgeDays < 0 {
+		return jobs
+	}
+	cutoff := time.Now().Add(-time.Duration(hideAgeDays*24) * time.Hour)
 	anyFiltered := false
 	for _, j := range jobs {
 		if j.Status == database.StatusFinished && j.UpdatedAt != "" {

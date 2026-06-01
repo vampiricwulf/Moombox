@@ -148,6 +148,69 @@ func TestFilterJobsByAgeMalformedTimestampsAreKept(t *testing.T) {
 	}
 }
 
+// TestFilterJobsByAgeThresholdNegativeNeverArchives locks the "never archive"
+// contract shared with the REST filter, the TUI, and the Web UI: a negative
+// threshold keeps every finished job in the active list regardless of age.
+// (The old AddDate-based implementation inverted this and archived them all.)
+func TestFilterJobsByAgeThresholdNegativeNeverArchives(t *testing.T) {
+	veryOld := time.Now().Add(-365 * 24 * time.Hour).Format(time.RFC3339)
+	jobs := []*database.Job{
+		{ID: "ancient-finished", Status: database.StatusFinished, UpdatedAt: veryOld},
+		{ID: "live", Status: database.StatusLive, UpdatedAt: veryOld},
+	}
+	got := filterJobsByAgeThreshold(jobs, -1)
+	if len(got) != 2 {
+		t.Fatalf("hideAgeDays<0 must keep all jobs active, got %d of 2", len(got))
+	}
+}
+
+// TestFilterJobsByAgeThresholdZeroArchivesPastFinished verifies the boundary at
+// hideAgeDays==0: every finished job with a past updated_at is archived, while
+// non-finished jobs stay active (strict age > 0, matching the REST filter).
+func TestFilterJobsByAgeThresholdZeroArchivesPastFinished(t *testing.T) {
+	past := time.Now().Add(-1 * time.Second).Format(time.RFC3339)
+	jobs := []*database.Job{
+		{ID: "finished", Status: database.StatusFinished, UpdatedAt: past},
+		{ID: "live", Status: database.StatusLive, UpdatedAt: past},
+	}
+	got := filterJobsByAgeThreshold(jobs, 0)
+	if len(got) != 1 || got[0].ID != "live" {
+		t.Fatalf("hideAgeDays==0 must archive past finished and keep live, got %v", idsOf(got))
+	}
+}
+
+// TestFilterJobsByAgeThresholdFractionalPrecision verifies fractional-day
+// thresholds are honored at full precision rather than truncated to a whole
+// day. With 1.5 days, a job aged ~1.6 days archives while one aged ~1.4 days
+// stays — the old int(value) cast collapsed both to "1 day" and disagreed with
+// the REST filter and the Web UI.
+func TestFilterJobsByAgeThresholdFractionalPrecision(t *testing.T) {
+	// Use a runtime conversion (matching filterJobsByAgeThreshold itself) so the
+	// fractional day count is truncated to whole hours exactly as production
+	// does — 1.6d→38h, 1.4d→33h — bracketing the 1.5d (36h) cutoff.
+	daysAgo := func(d float64) string {
+		return time.Now().Add(-time.Duration(d*24) * time.Hour).Format(time.RFC3339)
+	}
+	aged := daysAgo(1.6)
+	fresh := daysAgo(1.4)
+	jobs := []*database.Job{
+		{ID: "aged", Status: database.StatusFinished, UpdatedAt: aged},
+		{ID: "fresh", Status: database.StatusFinished, UpdatedAt: fresh},
+	}
+	got := filterJobsByAgeThreshold(jobs, 1.5)
+	if len(got) != 1 || got[0].ID != "fresh" {
+		t.Fatalf("hideAgeDays==1.5 must archive the 1.6d job and keep the 1.4d job, got %v", idsOf(got))
+	}
+}
+
+func idsOf(jobs []*database.Job) []string {
+	ids := make([]string, len(jobs))
+	for i, j := range jobs {
+		ids[i] = j.ID
+	}
+	return ids
+}
+
 // TestExtractWSIPHostOnly covers the happy path — a host:port
 // RemoteAddr returns just the host.
 func TestExtractWSIPHostOnly(t *testing.T) {

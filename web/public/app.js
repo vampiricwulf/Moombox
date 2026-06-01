@@ -1000,9 +1000,12 @@ class MoomboxApp {
         if (typeof p.hideFinishedAgeDays === "number") {
           this.hideFinishedAgeDays = p.hideFinishedAgeDays;
         }
+        // On a reconnect the archived list may carry rows the fresh active
+        // list now owns again — prune them so neither panel double-counts.
+        const archivedPruned = this._pruneArchivedAgainstActive();
         const archivedMoved = this._evaluateArchiveBoundary({ silent: true });
         this.renderJobs();
-        if (archivedMoved) this.renderArchivedJobs();
+        if (archivedMoved || archivedPruned) this.renderArchivedJobs();
         this.renderLogs();
         this.updateCheckCountdown();
         if (p.connectivity !== undefined) {
@@ -1023,9 +1026,13 @@ class MoomboxApp {
       case "jobs_update": {
         this._preserveStagingFields(this.jobs, p || []);
         this.jobs = p || [];
+        // Drop any archived rows the server just promoted back to active
+        // (threshold increase) before re-evaluating, so a job is never shown
+        // in both panels while the async fetchArchivedJobs() catches up.
+        const archivedPruned = this._pruneArchivedAgainstActive();
         const archivedMoved = this._evaluateArchiveBoundary({ silent: true });
         this.renderJobs();
-        if (archivedMoved) this.renderArchivedJobs();
+        if (archivedMoved || archivedPruned) this.renderArchivedJobs();
         // Update details dialog if open (but don't reload logs)
         if (this.selectedJobId) {
           const job = this.jobs.find((j) => j.id === this.selectedJobId);
@@ -1069,8 +1076,14 @@ class MoomboxApp {
             this.updateJobDetails(updatedJob);
           }
         } else {
-          // Job not in array yet — add it and do a full re-render
+          // Job not in the active array — either brand new, or one that had
+          // aged into archivedJobs and just had a field change that bumped its
+          // updated_at back inside the active window (UpdateJobFields touches
+          // updated_at on every change). Push it active, then drop any stale
+          // archived copy so it isn't shown in both panels. If it's still aged,
+          // the _evaluateArchiveBoundary() below re-archives it.
           this.jobs.push(updatedJob);
+          if (this._pruneArchivedAgainstActive()) this.renderArchivedJobs();
           this.renderJobs();
         }
         // Any per-job update is a good moment to re-check whether other
@@ -1108,6 +1121,14 @@ class MoomboxApp {
         if (deletedIdx !== -1) {
           this.jobs.splice(deletedIdx, 1);
           this.renderJobs();
+        }
+        // A Finished job may have aged into the archived list (client-side
+        // sweep or a prior fetch); drop it there too, or a server-side delete
+        // leaves a stale, still-clickable row in the Archived panel.
+        const deletedArchivedIdx = this.archivedJobs.findIndex(j => j.id === deletedId);
+        if (deletedArchivedIdx !== -1) {
+          this.archivedJobs.splice(deletedArchivedIdx, 1);
+          this.renderArchivedJobs();
         }
         // Close the details dialog if the deleted job is currently selected.
         if (this.selectedJobId === deletedId) {
@@ -1389,9 +1410,10 @@ class MoomboxApp {
    * the TUI's isJobArchived check so the active panel reclassifies as time
    * passes without waiting for the user to refresh.
    *
-   * Threshold semantics (match server in internal/web/routes/jobs.go):
+   * Threshold semantics (match server filterJobsByAge in
+   * internal/web/routes/jobs.go and cmd/moombox/helpers.go):
    *   < 0 : never archive
-   *   = 0 : archive immediately on Finished
+   *   = 0 : archive every Finished job whose updatedAt is strictly in the past
    *   > 0 : archive Finished older than N days
    *
    * Options:
@@ -1408,8 +1430,11 @@ class MoomboxApp {
       if (j.status !== "Finished" || !j.updatedAt) continue;
       const t = Date.parse(j.updatedAt);
       if (Number.isNaN(t)) continue;
-      // ageDays === 0 archives every Finished job (cutoff 0, age >= 0).
-      if (nowMs - t > cutoffMs || ageDays === 0) {
+      // Strict age > threshold, matching the server's `age > hideAge`. When
+      // ageDays === 0 cutoffMs is 0, so this archives every Finished job with
+      // a past updatedAt — without the always-true `|| ageDays === 0` clause
+      // that previously also swept a job aged exactly 0ms (server keeps it).
+      if (nowMs - t > cutoffMs) {
         this.jobs.splice(i, 1);
         const existingIdx = this.archivedJobs.findIndex(a => a.id === j.id);
         if (existingIdx !== -1) {
@@ -1425,6 +1450,21 @@ class MoomboxApp {
       this.renderArchivedJobs();
     }
     return moved > 0;
+  }
+
+  /**
+   * Drop archived entries that now also appear in `this.jobs` — the server
+   * promoted them back to active (e.g. the user raised hideFinishedAgeDays and
+   * the widened jobs_update re-included them). Without this, a job briefly
+   * shows in BOTH the Tasks and Archived panels until the async
+   * fetchArchivedJobs() replaces the archived list. Returns true if it changed.
+   */
+  _pruneArchivedAgainstActive() {
+    if (!this.archivedJobs.length) return false;
+    const activeIds = new Set(this.jobs.map(j => j.id));
+    const before = this.archivedJobs.length;
+    this.archivedJobs = this.archivedJobs.filter(j => !activeIds.has(j.id));
+    return this.archivedJobs.length !== before;
   }
 
   async fetchArchivedJobs() {

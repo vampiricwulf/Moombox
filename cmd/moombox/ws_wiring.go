@@ -89,11 +89,16 @@ func (s *runState) wireWebSocket() {
 		if err != nil {
 			jobs = []*database.Job{} // Send empty array, not null
 		}
-		jobs = filterJobsByAge(jobs, s.configStore)
+		// Capture the threshold ONCE so the filtered job list and the
+		// hideFinishedAgeDays we return to the client are guaranteed to agree
+		// (a concurrent config change between two separate store reads could
+		// otherwise hand the client a list filtered by a different threshold
+		// than the one its _evaluateArchiveBoundary is told to use).
 		var hideAge float64
 		s.configStore.Read(func(c *config.MoomboxConfig) {
 			hideAge = c.Monitors.HideFinishedAgeDays.Value
 		})
+		jobs = filterJobsByAgeThreshold(jobs, hideAge)
 		return map[string]any{
 			"jobs":                jobs,
 			"logs":                s.log.GetRecentLines(),
