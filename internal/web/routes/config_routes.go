@@ -161,8 +161,12 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 			}
 		}
 		if v, ok := mon["hide_finished_age_days"].(float64); ok {
-			if v < 0 {
-				errs["monitors.hide_finished_age_days"] = "hide_finished_age_days must be at least 0"
+			// Match the canonical 0..365 range enforced by config.Validate.
+			// Without the upper bound here, an over-range value passed the API
+			// validator and only failed later in config.Save with an opaque
+			// 500 "failed to save config" instead of a clean 400.
+			if v < 0 || v > 365 {
+				errs["monitors.hide_finished_age_days"] = "hide_finished_age_days must be between 0 and 365"
 			}
 		}
 	}

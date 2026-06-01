@@ -153,6 +153,62 @@ func TestConfigPutValidationErrorIncludesDetails(t *testing.T) {
 	}
 }
 
+func TestConfigPutHideFinishedAgeRange(t *testing.T) {
+	// The API validator must enforce the same inclusive 0..365 range as
+	// config.Validate (config.go ~line 465). Values OUTSIDE the range get a
+	// clean 400 + per-field detail; before the upper bound was added here an
+	// over-range value slipped past validation and failed later in config.Save
+	// with an opaque 500 "failed to save config". The boundaries 0 and 365 are
+	// accepted.
+	t.Run("out-of-range rejected", func(t *testing.T) {
+		for _, v := range []float64{-1, 366, 400} {
+			f := newConfigRoutesFixture(t)
+			var before float64
+			f.store.Read(func(c *config.MoomboxConfig) { before = c.Monitors.HideFinishedAgeDays.Value })
+
+			body, _ := json.Marshal(map[string]any{"monitors": map[string]any{"hide_finished_age_days": v}})
+			req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("hide_finished_age_days=%v: want 400, got %d (body: %s)", v, rec.Code, rec.Body.String())
+			}
+			var resp map[string]any
+			json.NewDecoder(rec.Body).Decode(&resp)
+			details, _ := resp["details"].(map[string]any)
+			if _, ok := details["monitors.hide_finished_age_days"]; !ok {
+				t.Errorf("hide_finished_age_days=%v: expected details key, got %v", v, resp["details"])
+			}
+			// A rejected update must not mutate the live config.
+			var after float64
+			f.store.Read(func(c *config.MoomboxConfig) { after = c.Monitors.HideFinishedAgeDays.Value })
+			if after != before {
+				t.Errorf("hide_finished_age_days=%v: live config changed %v -> %v on a rejected request", v, before, after)
+			}
+		}
+	})
+
+	t.Run("inclusive boundaries accepted", func(t *testing.T) {
+		for _, v := range []float64{0, 365} {
+			f := newConfigRoutesFixture(t)
+			body, _ := json.Marshal(map[string]any{"monitors": map[string]any{"hide_finished_age_days": v}})
+			req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			f.router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("hide_finished_age_days=%v: want 200, got %d (body: %s)", v, rec.Code, rec.Body.String())
+			}
+			var got float64
+			f.store.Read(func(c *config.MoomboxConfig) { got = c.Monitors.HideFinishedAgeDays.Value })
+			if got != v {
+				t.Errorf("hide_finished_age_days=%v: live config = %v, want %v", v, got, v)
+			}
+		}
+	})
+}
+
 func TestConfigPutRejectsExternalWithoutPassword(t *testing.T) {
 	// Cross-cutting safeguard — prevents "I made my Moombox public but
 	// forgot to set a password" foot-guns. Defense in depth alongside
