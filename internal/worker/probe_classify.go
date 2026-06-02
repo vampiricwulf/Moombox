@@ -89,6 +89,20 @@ const (
 	reportSuccess             // ReportSuccess: the request reached the service
 )
 
+// reportFetchOutcome reports a confirmatory/secondary full-fetch error's
+// reachability signal to the passive oracle (network-class → failure;
+// server-class → success, since the request reached the service) WITHOUT
+// touching the wait loop's give-up counter, which the lightweight probe owns.
+// A cancelled context is not a connectivity signal, so it is not reported.
+func reportFetchOutcome(err error, tag string) {
+	switch classifyProbeErr(err) {
+	case classNetwork:
+		reportProbeResult(tag, true)
+	case classServer:
+		reportProbeResult(tag, false)
+	}
+}
+
 // applyProbeError folds a probe error into the wait loop's running error count.
 // It returns the new count, whether the loop should give up (definitive
 // failures reached maxConsecutiveProbeErrors), how to feed the passive tracker,

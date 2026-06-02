@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +13,28 @@ type fakeReporter struct{ fails, oks int }
 
 func (f *fakeReporter) ReportFailure(string) { f.fails++ }
 func (f *fakeReporter) ReportSuccess(string) { f.oks++ }
+
+// TestReportFetchOutcome verifies the confirmatory/secondary full-fetch error
+// reporter feeds the oracle by reachability class — network-class → failure,
+// server-class → success (reached the service) — and stays silent on cancel.
+func TestReportFetchOutcome(t *testing.T) {
+	t.Cleanup(func() { SetConnectivityReporter(nil) })
+	f := &fakeReporter{}
+	SetConnectivityReporter(f)
+
+	reportFetchOutcome(&net.DNSError{Err: "no such host"}, "probe/youtube")
+	if f.fails != 1 || f.oks != 0 {
+		t.Fatalf("network err: want fails=1 oks=0, got fails=%d oks=%d", f.fails, f.oks)
+	}
+	reportFetchOutcome(fmt.Errorf("WEB API error: HTTP 404"), "probe/youtube")
+	if f.fails != 1 || f.oks != 1 {
+		t.Fatalf("server err: want fails=1 oks=1, got fails=%d oks=%d", f.fails, f.oks)
+	}
+	reportFetchOutcome(context.Canceled, "probe/youtube")
+	if f.fails != 1 || f.oks != 1 {
+		t.Fatalf("cancelled: want unchanged fails=1 oks=1, got fails=%d oks=%d", f.fails, f.oks)
+	}
+}
 
 type atomicCountingReporter struct{ fails, oks atomic.Int64 }
 

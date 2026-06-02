@@ -238,6 +238,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				}
 				sp.logger.Debug("periodic full fetch completed", "videoID", job.VideoID)
 			} else {
+				reportFetchOutcome(err, "probe/youtube")
 				sp.logger.Debug("periodic full fetch failed, will retry later", "videoID", job.VideoID, "err", err)
 			}
 			lastFullFetch = time.Now()
@@ -268,8 +269,15 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			sp.logger.Info("stream is now live (probe)", "videoID", job.VideoID)
 			fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
 			if err != nil {
-				sp.stopEarlyChat(chatDl)
-				return nil, fmt.Errorf("full fetch on live: %w", err)
+				// Confirmatory full fetch failed — most likely a transient
+				// connectivity blip in the brief window after a successful probe.
+				// Do NOT error the stream (that would lose a live recording over a
+				// blip); report reachability to the oracle and keep polling — the
+				// lightweight probe loop owns the give-up budget, and the next poll
+				// re-attempts the fetch once connectivity returns.
+				reportFetchOutcome(err, "probe/youtube")
+				sp.logger.Debug("full fetch on live failed; will retry next poll", "videoID", job.VideoID, "err", err)
+				continue
 			}
 			// Cross-check: if full WEB fetch says still upcoming, the probe was
 			// fooled by YouTube's waiting room / offline slate. Keep polling.
@@ -289,8 +297,12 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			sp.logger.Info("stream became VOD (probe)", "videoID", job.VideoID)
 			fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
 			if err != nil {
-				sp.stopEarlyChat(chatDl)
-				return nil, fmt.Errorf("full fetch on VOD: %w", err)
+				// Same connectivity-resilience as the live case: don't error the
+				// stream on a transient confirmatory-fetch failure; report
+				// reachability and keep polling (re-attempt on the next poll).
+				reportFetchOutcome(err, "probe/youtube")
+				sp.logger.Debug("full fetch on VOD failed; will retry next poll", "videoID", job.VideoID, "err", err)
+				continue
 			}
 			// Cross-check: if full WEB fetch says still upcoming, keep polling.
 			if fullInfo.StreamStatus == youtube.StreamUpcoming {
@@ -317,6 +329,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					"status", probeInfo.StreamStatus, "videoID", job.VideoID)
 				fullInfo, err := sp.yt.GetVideoInfo(ctx, job.VideoID)
 				if err != nil {
+					reportFetchOutcome(err, "probe/youtube")
 					sp.logger.Warn("full fetch after unclear auth probe failed", "err", err)
 					continue // Retry on next iteration
 				}
