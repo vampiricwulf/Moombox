@@ -334,6 +334,10 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
 		})
 
+		// When the oracle reports offline, still probe occasionally (floor) so a
+		// wrongly-offline oracle can't strand a waiting stream. Safe because
+		// network-class errors no longer count (see applyProbeError), and a
+		// success self-corrects the oracle via reportProbeResult.
 		if sp.isOnline != nil && !sp.isOnline() {
 			if time.Since(lastOfflineProbe) < offlineProbeFloor {
 				sp.logger.Debug("skipping Twitch probe — device offline (within floor)", "login", login)
@@ -356,9 +360,9 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			}
 			consecutiveErrors = newCount // unchanged for network-class failures
 			if report == reportFailure {
-				sp.logger.Debug("twitch network error — not counting, still waiting", "channel", login, "err", err)
+				sp.logger.Debug("probe network error — not counting, still waiting", "channel", login, "err", err)
 			} else {
-				sp.logger.Warn("twitch poll error (definitive)", "channel", login, "err", err, "consecutive", consecutiveErrors)
+				sp.logger.Warn("probe error (definitive)", "channel", login, "err", err, "consecutive", consecutiveErrors)
 			}
 			if giveUp {
 				// Wrap with ErrNonActionable so worker.setJobError suppresses
@@ -369,6 +373,8 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 			continue
 		}
 		consecutiveErrors = 0
+		// Successful poll reached Twitch — feed the oracle (Layer 4).
+		reportProbeResult("probe/twitch", false)
 
 		if streamInfo != nil && streamInfo.IsLive {
 			sp.logger.Info("twitch channel is now live", "channel", login)

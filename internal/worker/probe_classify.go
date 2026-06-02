@@ -63,6 +63,8 @@ func classifyProbeErr(err error) probeErrClass {
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "http 429"), // rate limited — transient
+		strings.Contains(msg, "http 401"), // auth expired — cookie refresh can remediate; keep waiting
+		strings.Contains(msg, "http 403"), // forbidden — often transient (bot / rate-limit); keep waiting
 		strings.Contains(msg, "http 5"), // 5xx — server transient
 		strings.Contains(msg, "tls"),
 		strings.Contains(msg, "timeout"),
@@ -71,7 +73,7 @@ func classifyProbeErr(err error) probeErrClass {
 		strings.Contains(msg, "no such host"),
 		strings.Contains(msg, "eof"):
 		return classNetwork
-	case strings.Contains(msg, "http 4"): // 4xx (non-429) — definitive client error
+	case strings.Contains(msg, "http 4"): // other 4xx (404/410/...) — definitive, terminal
 		return classServer
 	}
 	return classNetwork // asymmetric default

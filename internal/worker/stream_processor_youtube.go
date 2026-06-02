@@ -18,6 +18,21 @@ import (
 
 // waitForLive polls until a stream goes live or is cancelled.
 // B2: Starts early chat downloader during upcoming phase to capture pre-stream chat.
+// isTerminalPlayability reports whether a YouTube playability error means the
+// video will not become available by waiting — so the upcoming-wait loop should
+// give up. Deliberately narrow: members-only / login-required are excluded
+// (B1 switches to the authenticated probe) and age-restricted is excluded
+// (handled at initial Process / resolvable with auth). Only states that no
+// amount of waiting or re-auth can fix are terminal.
+func isTerminalPlayability(p youtube.PlayabilityError) bool {
+	switch p {
+	case youtube.PlayabilityPrivate, youtube.PlayabilityUnavailable, youtube.PlayabilityRegionBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
 func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, initialInfo *youtube.VideoInfo) (*StreamProcessResult, error) {
 	sp.logger.Info("waiting for stream to go live", "videoID", job.VideoID)
 
@@ -125,7 +140,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 
 		// When the oracle reports offline, still probe occasionally (floor) so
 		// a wrongly-offline oracle can't strand a waiting stream. Safe because
-		// network-class errors no longer count (see probeErrorDecision), and a
+		// network-class errors no longer count (see applyProbeError), and a
 		// success self-corrects the oracle via reportProbeResult.
 		if sp.isOnline != nil && !sp.isOnline() {
 			if time.Since(lastOfflineProbe) < offlineProbeFloor {
@@ -173,6 +188,9 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			continue
 		}
 		consecutiveErrors = 0
+		// Successful probe (HTTP 200 reached the service) — feed the oracle so a
+		// wrongly-offline passive latch can self-correct (Layer 4).
+		reportProbeResult("probe/youtube", false)
 
 		// Update local scheduledStartTime for interval calculation
 		if probeInfo.ScheduledStartTime != "" {
@@ -189,6 +207,29 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 				sp.updateJobMetadata(job, fullInfo, true)
 				if fullInfo.ScheduledStartTime != "" {
 					scheduledStartTime = fullInfo.ScheduledStartTime
+				}
+				// A scheduled stream can be made private / removed / region-blocked
+				// while still reporting StreamUpcoming (videoDetails.isUpcoming
+				// stays true even as playabilityStatus flips terminal). The
+				// authoritative full WEB fetch surfaces that terminal playability —
+				// give up rather than polling forever. Decided ONLY on the full
+				// fetch (never the lightweight probe) so a misclassification can't
+				// wrongly error a waiting stream. Members-only / login are NOT
+				// terminal here — B1 above switches to the authenticated probe.
+				if isTerminalPlayability(fullInfo.PlayabilityError) {
+					sp.stopEarlyChat(chatDl)
+					reason := fullInfo.PlayabilityReason
+					if reason == "" {
+						reason = string(fullInfo.PlayabilityError)
+					}
+					sp.logger.Info("upcoming stream became unavailable — giving up",
+						"videoID", job.VideoID, "playability", fullInfo.PlayabilityError, "reason", reason)
+					return &StreamProcessResult{
+						VideoInfo:      fullInfo,
+						ShouldDownload: false,
+						Error:          fmt.Sprintf("stream unavailable: %s", reason),
+						ErrSentinel:    ErrNonActionable,
+					}, nil
 				}
 				sp.logger.Debug("periodic full fetch completed", "videoID", job.VideoID)
 			} else {
