@@ -23,6 +23,12 @@ const (
 	fullFetchInterval         = 30 * time.Minute // Periodic full WEB fetch for metadata ANDROID_VR can't see
 	twitchPollInterval        = 15 * time.Second
 	twitchPollJitterMax       = 5 * time.Second
+
+	// offlineProbeFloor throttles probing while the oracle reports offline.
+	// We probe anyway (not skip) so a wrongly-offline oracle can't strand a
+	// waiting stream — network errors no longer count — but no faster than
+	// this to avoid hammering during a real outage / chat-surge early wakes.
+	offlineProbeFloor = 60 * time.Second
 )
 
 // StreamProcessResult contains the result of processing a stream.

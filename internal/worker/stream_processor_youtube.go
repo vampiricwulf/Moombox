@@ -27,6 +27,7 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 	})
 
 	consecutiveErrors := 0
+	var lastOfflineProbe time.Time // zero ⇒ first offline encounter probes immediately
 	scheduledStartTime := initialInfo.ScheduledStartTime
 	membersOnly := false
 	lastFullFetch := time.Now() // Initial full fetch just happened in Process()
@@ -122,10 +123,16 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			"last_recheck_at": time.Now().UTC().Format(time.RFC3339),
 		})
 
-		// Skip probe when offline — don't burn error counter
+		// When the oracle reports offline, still probe occasionally (floor) so
+		// a wrongly-offline oracle can't strand a waiting stream. Safe because
+		// network-class errors no longer count (see probeErrorDecision), and a
+		// success self-corrects the oracle via reportProbeResult.
 		if sp.isOnline != nil && !sp.isOnline() {
-			sp.logger.Debug("skipping probe — device offline", "videoID", job.VideoID)
-			continue
+			if time.Since(lastOfflineProbe) < offlineProbeFloor {
+				sp.logger.Debug("skipping probe — device offline (within floor)", "videoID", job.VideoID)
+				continue
+			}
+			lastOfflineProbe = time.Now()
 		}
 
 		// Probe — use lightweight authenticated probe if members-only was detected
@@ -136,16 +143,32 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 		} else {
 			probeInfo, probeErr = sp.yt.ProbeVideoStatus(ctx, job.VideoID)
 		}
-		if err := probeErr; err != nil {
-			consecutiveErrors++
-			sp.logger.Warn("probe error", "videoID", job.VideoID, "err", err, "consecutive", consecutiveErrors)
-			if consecutiveErrors >= maxConsecutiveProbeErrors {
+		if probeErr != nil {
+			d := probeErrorDecision(probeErr)
+			switch d.report {
+			case reportFailure:
+				reportProbeResult("probe/youtube", true)
+			case reportSuccess:
+				reportProbeResult("probe/youtube", false)
+			}
+			if d.cancelled {
 				sp.stopEarlyChat(chatDl)
-				// Wrap with ErrNonActionable so worker.setJobError suppresses
-				// the user notification — exhausted probe retries mean the
-				// stream isn't going to come up regardless of further work
-				// (audit cross-cutting.md C3 follow-up).
-				return nil, fmt.Errorf("max probe errors: %w (%w)", err, ErrNonActionable)
+				return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
+			}
+			if d.count {
+				consecutiveErrors++
+				sp.logger.Warn("probe error (definitive)", "videoID", job.VideoID, "err", probeErr, "consecutive", consecutiveErrors)
+				if consecutiveErrors >= maxConsecutiveProbeErrors {
+					sp.stopEarlyChat(chatDl)
+					// Wrap with ErrNonActionable so worker.setJobError suppresses
+					// the user notification — exhausted DEFINITIVE retries mean
+					// the stream isn't coming up regardless of further work.
+					return nil, fmt.Errorf("max probe errors: %w (%w)", probeErr, ErrNonActionable)
+				}
+			} else {
+				// Network-class failure: the internet/service is unreachable.
+				// Keep waiting through the outage — do not burn the budget.
+				sp.logger.Debug("probe network error — not counting, still waiting", "videoID", job.VideoID, "err", probeErr)
 			}
 			continue
 		}
