@@ -154,7 +154,13 @@ func (m *Monitor) ReportSuccess(tag string) {
 
 func (m *Monitor) poll() {
 	online := m.checkFn()
-	passiveOffline := m.passive.IsTriggered()
+	// IsTriggeredPruned (not IsTriggered) so aged-out failures clear the latch
+	// here in the polling loop. During an outage every subsystem gates off its
+	// network I/O once we go offline, so nothing else ever feeds the passive
+	// tracker again — poll() is the only live path, and a non-pruning read
+	// would keep the latch stuck true forever, pinning us offline even after
+	// the active probe recovers.
+	passiveOffline := m.passive.IsTriggeredPruned()
 	nowOnline := online && !passiveOffline
 
 	wasOnline := m.online.Load()

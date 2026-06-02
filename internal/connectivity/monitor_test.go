@@ -221,3 +221,53 @@ func TestNewMonitorWithIntervalClamps(t *testing.T) {
 		})
 	}
 }
+
+// TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet locks in the
+// offline-recovery fix. It reproduces the production deadlock: during an
+// outage the passive tracker latches offline, then every subsystem gates off
+// its network I/O — so no ReportSuccess / ReportFailure ever fires again and
+// poll() is the only live path. Pre-fix, poll() read the non-pruning
+// IsTriggered() and stayed offline forever even after the active probe
+// recovered. Post-fix, poll() uses IsTriggeredPruned(), so the aged-out latch
+// clears and the monitor returns online once the active probe agrees.
+func TestMonitor_RecoversAfterPassiveLatchWhenSubsystemsGoQuiet(t *testing.T) {
+	var checkOnline atomic.Bool
+	checkOnline.Store(true)
+	m := newTestMonitor(func() bool { return checkOnline.Load() })
+	// Tight passive window so failures age out within the test rather than 30s.
+	m.passive = &PassiveTracker{window: 40 * time.Millisecond, minFails: 5, minTags: 2}
+
+	// Outage begins: the active probe drops AND subsystems pile up cross-tag
+	// failures, latching the passive tracker offline. ReportFailure trips the
+	// transition once the threshold is met.
+	checkOnline.Store(false)
+	for range 3 {
+		m.ReportFailure("monitor/feed")
+	}
+	for range 3 {
+		m.ReportFailure("engine/fetch")
+	}
+	if m.IsOnline() {
+		t.Fatal("expected offline after outage + cross-tag passive latch")
+	}
+	if !m.passive.IsTriggered() {
+		t.Fatal("expected passive latch to be set during the outage")
+	}
+
+	// Subsystems gate off — NO further ReportSuccess / ReportFailure fires.
+	// Wait for the failure window to age out so a pruning poll can clear it.
+	time.Sleep(70 * time.Millisecond)
+
+	// Internet returns; the active probe recovers. The next poll must restore
+	// online purely via the pruning read of the passive latch — there is no
+	// success report to lean on.
+	checkOnline.Store(true)
+	m.poll()
+
+	if !m.IsOnline() {
+		t.Fatal("monitor stuck offline after recovery — poll() never pruned the stale passive latch")
+	}
+	if m.passive.IsTriggered() {
+		t.Fatal("passive latch should have been cleared by the pruning poll")
+	}
+}

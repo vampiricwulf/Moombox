@@ -155,3 +155,44 @@ func TestPassiveTracker_LatchClearsOnIdlePrune(t *testing.T) {
 		t.Error("expected latch cleared by pruneOld once failures fell below threshold; got still-triggered")
 	}
 }
+
+// TestPassiveTracker_LatchClearsViaPruneOnMinTagsDrop locks in the second
+// offline-recovery fix: pruneOld must clear the latch when the surviving
+// failures drop below minTags, not only below minFails. Pre-fix, pruneOld
+// checked minFails alone, so a set that aged down to a single tag (still
+// >= minFails) kept IsTriggered()=true even though ShouldTriggerOffline would
+// no longer trigger.
+func TestPassiveTracker_LatchClearsViaPruneOnMinTagsDrop(t *testing.T) {
+	pt := &PassiveTracker{window: 120 * time.Millisecond, minFails: 3, minTags: 2}
+
+	// Tag "a" fails first; later, tag "b" fails enough to keep len >= minFails
+	// after "a" ages out — but leaving only a single distinct tag.
+	pt.ReportFailure("a")
+	time.Sleep(80 * time.Millisecond)
+	pt.ReportFailure("b")
+	pt.ReportFailure("b")
+	pt.ReportFailure("b")
+	if !pt.ShouldTriggerOffline() {
+		t.Fatal("expected trigger: 4 failures across 2 tags within window")
+	}
+
+	// Let "a" age past the 120ms window while the "b" burst stays inside it.
+	time.Sleep(80 * time.Millisecond)
+
+	// A pruning read now drops "a", leaving 3 "b" failures: still >= minFails
+	// but only one tag (< minTags), so the latch must clear.
+	if pt.IsTriggeredPruned() {
+		t.Error("latch should clear once survivors drop below minTags, even with len >= minFails")
+	}
+	if pt.IsTriggered() {
+		t.Error("latch should remain cleared after pruning")
+	}
+
+	// Sanity: the "b" failures survived — we did not wipe everything.
+	pt.mu.Lock()
+	remaining := len(pt.failures)
+	pt.mu.Unlock()
+	if remaining != 3 {
+		t.Errorf("expected 3 surviving 'b' failures, got %d", remaining)
+	}
+}

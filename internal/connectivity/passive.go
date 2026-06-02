@@ -75,21 +75,10 @@ func (pt *PassiveTracker) ReportSuccess(tag string) {
 	}
 	pt.failures = filtered
 
-	// If the remaining failures no longer meet the trigger threshold, clear
-	// the triggered flag so consumers that poll IsTriggered don't see
-	// stale positives.
-	if !pt.triggered {
-		return
-	}
-	if len(pt.failures) < pt.minFails {
-		pt.triggered = false
-		return
-	}
-	tags := make(map[string]struct{})
-	for _, f := range pt.failures {
-		tags[f.tag] = struct{}{}
-	}
-	if len(tags) < pt.minTags {
+	// Clear the latch once the surviving failures can no longer meet the
+	// trigger threshold so consumers polling IsTriggered() don't see stale
+	// positives. meetsThresholdLocked checks BOTH minFails and minTags.
+	if pt.triggered && !pt.meetsThresholdLocked() {
 		pt.triggered = false
 	}
 }
@@ -107,15 +96,7 @@ func (pt *PassiveTracker) ShouldTriggerOffline() bool {
 	defer pt.mu.Unlock()
 	pt.pruneOld()
 
-	if len(pt.failures) < pt.minFails {
-		return false
-	}
-
-	tags := make(map[string]struct{})
-	for _, f := range pt.failures {
-		tags[f.tag] = struct{}{}
-	}
-	if len(tags) < pt.minTags {
+	if !pt.meetsThresholdLocked() {
 		return false
 	}
 
@@ -128,10 +109,27 @@ func (pt *PassiveTracker) ShouldTriggerOffline() bool {
 // / ReportSuccess() may see a stale `true` for some time after the
 // failure window has aged out — pruneOld is the only path that clears
 // the latch on idle, and it runs only from those three methods. For
-// fresh state, prefer ShouldTriggerOffline() (which prunes first).
+// fresh state without the trigger side-effect, use IsTriggeredPruned()
+// (ShouldTriggerOffline() also prunes but latches `triggered` true when
+// the threshold is met, which a read-only caller does not want).
 func (pt *PassiveTracker) IsTriggered() bool {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
+	return pt.triggered
+}
+
+// IsTriggeredPruned prunes aged-out failures — which clears the latch when
+// the survivors no longer meet the trigger threshold — and then returns the
+// latch state. This is the correct call for a background poller
+// (Monitor.poll) that does not otherwise feed the tracker: IsTriggered()
+// reads the cached latch WITHOUT pruning, so a latch set during an outage
+// would never clear once every subsystem gates off its network I/O (no
+// ReportSuccess / ReportFailure / ShouldTriggerOffline fires) — pinning the
+// monitor offline forever even after the active probe recovers.
+func (pt *PassiveTracker) IsTriggeredPruned() bool {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.pruneOld()
 	return pt.triggered
 }
 
@@ -144,12 +142,30 @@ func (pt *PassiveTracker) pruneOld() {
 	if i > 0 {
 		pt.failures = pt.failures[i:]
 	}
-	// Clear the latch when pruning has dropped the surviving failure
-	// count back below the trigger threshold. Without this, an idle
-	// Moombox that goes quiet after a brief failure burst keeps
-	// reporting IsTriggered()=true forever (no ReportSuccess fires
-	// because no HTTP request runs to clear it).
-	if pt.triggered && len(pt.failures) < pt.minFails {
+	// Clear the latch when pruning has dropped the surviving failures back
+	// below the trigger threshold — checking BOTH minFails and minTags via
+	// meetsThresholdLocked. Without this, an idle Moombox that goes quiet
+	// after a brief failure burst keeps reporting IsTriggered()=true forever
+	// (no ReportSuccess fires because no HTTP request runs to clear it), and
+	// a set that aged down to a single tag would stay latched even though
+	// ShouldTriggerOffline would no longer trigger.
+	if pt.triggered && !pt.meetsThresholdLocked() {
 		pt.triggered = false
 	}
+}
+
+// meetsThresholdLocked reports whether the current failure set satisfies BOTH
+// the minFails and minTags trigger conditions. The caller must hold pt.mu and
+// is responsible for pruning aged-out entries first when a time-fresh answer
+// is required. Centralising the predicate keeps the trigger condition and the
+// latch-clear condition from drifting apart.
+func (pt *PassiveTracker) meetsThresholdLocked() bool {
+	if len(pt.failures) < pt.minFails {
+		return false
+	}
+	tags := make(map[string]struct{}, pt.minTags)
+	for _, f := range pt.failures {
+		tags[f.tag] = struct{}{}
+	}
+	return len(tags) >= pt.minTags
 }
