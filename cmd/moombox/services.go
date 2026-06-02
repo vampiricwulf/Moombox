@@ -147,6 +147,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// 3b. Connectivity monitor
 	// =========================================================================
 	s.connMon = connectivity.NewMonitor(log)
+	s.connMon.SetProbeTargets(s.cfg.Connectivity.ProbeTargets) // before Start: poll goroutine reads targets
 	s.connMon.Start(s.ctx)
 	utils.SetConnectivityReporter(s.connMon)
 	engine.SetConnectivityReporter(s.connMon)
