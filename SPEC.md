@@ -558,7 +558,7 @@ All API routes use the `/api/` prefix (no version). Non-API routes exist for POT
 - `GET /api/setup/status` — First-run wizard state
 - `POST /api/setup/complete` — Complete first-run setup
 - `GET /api/logs` — Recent log lines
-- `POST /api/restart` — Restart application (loopback only)
+- `POST /api/restart` — Restart application (any client allowed by `network_access` + auth; not loopback-restricted, unlike `/api/update/apply`)
 - `POST /api/import` — Import zip archive
 - `GET /api/stats` — Statistics data
 - `GET /api/ffmpeg/check` — Check FFmpeg availability

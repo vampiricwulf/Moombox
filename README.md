@@ -271,7 +271,7 @@ All endpoints are available under `/api/`. Real-time updates are delivered via W
 | GET | `/api/config` | Get configuration |
 | PUT | `/api/config` | Update configuration |
 | GET | `/api/status` | Server status |
-| POST | `/api/restart` | Restart server (loopback only) |
+| POST | `/api/restart` | Restart server (authorized clients per `network_access` + auth) |
 | POST | `/api/auth/login` | Authenticate with password |
 | POST | `/api/auth/set-password` | Set or change password |
 | GET | `/api/auth/status` | Check auth status |

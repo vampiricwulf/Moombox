@@ -606,7 +606,7 @@ These routes provide PO token generation for external yt-dlp instances. They use
 
 | Method | Path | Access | Notes |
 |--------|------|--------|-------|
-| `POST` | `/api/restart` | Loopback only | Trigger application restart (exit code 42). |
+| `POST` | `/api/restart` | Per `network_access` + auth | Trigger application restart (exit code 42). Gated only by the standard stack (IPGate + CSRF + AuthMiddleware), so any connection the operator allows — local, LAN, or authenticated external — may restart. Unlike `/api/update/apply`, it is intentionally **not** loopback-restricted (it relaunches the same binary, not a new one). |
 
 ---
 
@@ -694,7 +694,7 @@ The middleware is applied in this exact order (defined in `server.go`). Order ma
 7. **CompressionMiddleware** — Gzip compression for responses. Skips WebSocket upgrades and responses that should not be compressed (video streams, already-compressed content).
 
 Some routes apply additional per-route middleware:
-- **LoopbackOnly** — Restricts access to loopback addresses (127.0.0.1, ::1). Used for `open-folder`, PO token routes, and `restart`.
+- **LoopbackOnly** — Restricts access to loopback addresses (127.0.0.1, ::1). Used for `open-folder` and the PO token routes. (`/api/restart` no longer uses it — it relies on the standard IPGate + CSRF + Auth stack so authorized LAN/external clients can also restart.)
 - **Rate limiters** — Per-endpoint rate limiting (e.g., 5 login attempts per 60 seconds). Applied via `r.With(rl.Middleware)`.
 
 ---

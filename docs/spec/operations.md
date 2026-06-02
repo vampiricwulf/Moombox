@@ -264,7 +264,7 @@ All restart triggers call `triggerRestart(source)`, which:
 
 | Source | Trigger |
 |--------|---------|
-| `"API"` | `POST /api/restart` (loopback-only endpoint) |
+| `"API"` | `POST /api/restart` (gated by `network_access` + CSRF + auth) |
 | `"setup"` | Setup wizard completion |
 | `"update"` | Update applied via API |
 | `"TUI settings"` | Config change saved from TUI |

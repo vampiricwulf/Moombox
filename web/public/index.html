@@ -508,6 +508,13 @@
                                 ></sl-icon>
                                 Updates
                             </sl-menu-item>
+                            <sl-menu-item value="system">
+                                <sl-icon
+                                    slot="prefix"
+                                    name="power"
+                                ></sl-icon>
+                                System
+                            </sl-menu-item>
                             <sl-menu-item value="bgutils">
                                 <sl-icon
                                     slot="prefix"
@@ -1073,6 +1080,42 @@
                                     "
                                 ></span>
                             </div>
+                        </div>
+
+                        <!-- System Settings -->
+                        <div
+                            id="settings-system"
+                            class="settings-section"
+                            style="display: none"
+                        >
+                            <h3>System</h3>
+                            <p class="settings-help">
+                                Restart the Moombox process. The launcher
+                                relaunches it automatically; in-progress
+                                downloads are saved on shutdown and resume on
+                                startup. Available to any connection you allow
+                                access to — local, LAN, or authenticated
+                                external.
+                            </p>
+                            <sl-button
+                                id="btn-restart-now"
+                                variant="danger"
+                                size="small"
+                            >
+                                <sl-icon
+                                    slot="prefix"
+                                    name="arrow-clockwise"
+                                ></sl-icon>
+                                Restart Moombox
+                            </sl-button>
+                            <span
+                                id="restart-result"
+                                style="
+                                    margin-left: 0.75em;
+                                    font-size: 0.9em;
+                                    color: var(--sl-color-neutral-500);
+                                "
+                            ></span>
                         </div>
 
                         <!-- BotGuard Sidecar Settings -->

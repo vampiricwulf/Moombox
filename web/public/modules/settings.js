@@ -248,6 +248,9 @@ export class SettingsController {
       btn.loading = false;
     });
 
+    // Restart Moombox button (System settings section)
+    document.getElementById("btn-restart-now")?.addEventListener("click", () => this.restartNow());
+
     // View Release Notes button
     const viewNotesBtn = document.getElementById("btn-view-release-notes");
     if (viewNotesBtn) {
@@ -895,6 +898,55 @@ export class SettingsController {
       .catch(() => {
         // Connection will drop during restart — expected
       });
+  }
+
+  /**
+   * Manual restart triggered by the "Restart Moombox" button in the System
+   * settings section. Confirms, then POSTs /api/restart. Server-side access
+   * control (IPGate by network_access + CSRF + session auth for external
+   * clients) governs who may call it, so this works for any connection the
+   * operator allows — local, LAN, or authenticated external.
+   */
+  async restartNow() {
+    const confirmed = await this.app.showConfirm(
+      "Restart Moombox now? In-progress downloads are saved on shutdown and resume automatically once it comes back up.",
+      { okLabel: "Restart", okVariant: "danger", title: "Restart Moombox" },
+    );
+    if (!confirmed) return;
+
+    const btn = document.getElementById("btn-restart-now");
+    const result = document.getElementById("restart-result");
+    const setResult = (text, color) => {
+      if (result) { result.textContent = text; result.style.color = color; }
+    };
+    const resetButton = () => { if (btn) { btn.loading = false; btn.disabled = false; } };
+
+    if (btn) { btn.loading = true; btn.disabled = true; }
+    setResult("Restarting…", "var(--sl-color-neutral-500)");
+    this.app.showToast("Restarting Moombox…", "primary");
+
+    try {
+      const resp = await fetch("/api/restart", { method: "POST" });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({ error: resp.statusText }));
+        const msg = "Failed to restart: " + (data.error || resp.statusText);
+        this.app.showToast(msg, "danger");
+        setResult(msg, "var(--sl-color-danger-500)");
+        resetButton();
+        return;
+      }
+    } catch {
+      // A connection reset mid-request is expected once the server begins
+      // shutting down — fall through to the reconnect path below.
+    }
+
+    // Success (or the socket dropped as the server began shutting down). The
+    // server replies first, then drains and exits ~0.5s later; the WebSocket
+    // reconnect logic restores the UI once the new process is up. Reset the
+    // button as a fallback in case the page outlives the restart (same
+    // host:port — there is no navigation/reload).
+    setResult("Reconnecting once Moombox is back…", "var(--sl-color-neutral-500)");
+    setTimeout(() => { resetButton(); setResult("", ""); }, 10000);
   }
 
   _markDirty() {

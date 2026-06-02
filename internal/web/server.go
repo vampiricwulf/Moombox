@@ -427,7 +427,7 @@ func (s *Server) StartDrain() {
 
 // DrainMiddleware returns 503 + Retry-After for any request that arrives
 // after StartDrain. Wired in NewServer so every route inherits the
-// behaviour without having to opt in. Loopback /api/restart and similar
+// behaviour without having to opt in. /api/restart and similar
 // admin endpoints are NOT exempted — they should already have been
 // initiated before StartDrain fired, and re-issuing during the drain
 // window is exactly the case where the 503 helps the client retry on

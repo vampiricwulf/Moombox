@@ -869,3 +869,38 @@ func TestJobCreateRejectsDuplicate(t *testing.T) {
 		t.Errorf("duplicate create: want 409, got %d (body: %s)", rec2.Code, rec2.Body.String())
 	}
 }
+
+// TestRestartRoute_NotLoopbackGated locks in the access-model change for the
+// Web UI restart button: /api/restart no longer carries the route-level
+// web.LoopbackOnly gate, so a non-loopback caller reaches the handler. (The
+// global IPGate / CSRF / Auth middleware applied by the real server is what
+// governs access — "whatever we allow access to".) It also confirms the
+// onRestart callback fires after the response is sent.
+func TestRestartRoute_NotLoopbackGated(t *testing.T) {
+	restarted := make(chan struct{}, 1)
+	r := chi.NewRouter()
+	RestartRoute(r, func() { restarted <- struct{}{} })
+
+	req := httptest.NewRequest("POST", "/api/restart", nil)
+	req.RemoteAddr = "203.0.113.7:55555" // non-loopback (TEST-NET-3)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restart from non-loopback: want 200 (no loopback gate), got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["success"] != true {
+		t.Errorf("want success:true, got %v", body)
+	}
+
+	// The handler sleeps 500ms before invoking onRestart.
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onRestart callback never fired")
+	}
+}

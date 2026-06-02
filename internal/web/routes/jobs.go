@@ -1400,11 +1400,20 @@ func LogRoutes(r chi.Router, getRecentLogs func() []string) {
 	})
 }
 
-// RestartRoute registers the restart endpoint (loopback only).
-// The onRestart callback is invoked after the HTTP response is sent.
-// It should spawn a new process and then trigger graceful shutdown.
+// RestartRoute registers the restart endpoint. The onRestart callback is
+// invoked after the HTTP response is sent; it triggers graceful shutdown and
+// a launcher respawn.
+//
+// Unlike /api/update/apply (which is deliberately loopback-only because
+// replacing the binary is higher-impact), restart only relaunches the SAME
+// binary, so it is intentionally NOT loopback-gated: it relies on the standard
+// middleware stack — IPGateMiddleware (network_access), CSRFMiddleware
+// (Origin/Referer or internal token) and AuthMiddleware (session for external
+// clients). That makes restart available to any connection the operator has
+// already chosen to allow — local, LAN, or authenticated external — i.e.
+// "based on whatever we allow access to."
 func RestartRoute(r chi.Router, onRestart func()) {
-	r.With(web.LoopbackOnly).Post("/api/restart", func(rw http.ResponseWriter, req *http.Request) {
+	r.Post("/api/restart", func(rw http.ResponseWriter, req *http.Request) {
 		jsonResponse(rw, map[string]any{"success": true, "message": "Restarting..."})
 
 		go func() {
