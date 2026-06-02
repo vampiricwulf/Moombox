@@ -144,31 +144,31 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			probeInfo, probeErr = sp.yt.ProbeVideoStatus(ctx, job.VideoID)
 		}
 		if probeErr != nil {
-			d := probeErrorDecision(probeErr)
-			switch d.report {
+			newCount, giveUp, report, cancelled := applyProbeError(probeErr, consecutiveErrors)
+			switch report {
 			case reportFailure:
 				reportProbeResult("probe/youtube", true)
 			case reportSuccess:
 				reportProbeResult("probe/youtube", false)
 			}
-			if d.cancelled {
+			if cancelled {
 				sp.stopEarlyChat(chatDl)
 				return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
 			}
-			if d.count {
-				consecutiveErrors++
-				sp.logger.Warn("probe error (definitive)", "videoID", job.VideoID, "err", probeErr, "consecutive", consecutiveErrors)
-				if consecutiveErrors >= maxConsecutiveProbeErrors {
-					sp.stopEarlyChat(chatDl)
-					// Wrap with ErrNonActionable so worker.setJobError suppresses
-					// the user notification — exhausted DEFINITIVE retries mean
-					// the stream isn't coming up regardless of further work.
-					return nil, fmt.Errorf("max probe errors: %w (%w)", probeErr, ErrNonActionable)
-				}
-			} else {
+			consecutiveErrors = newCount // unchanged for network-class failures
+			if report == reportFailure {
 				// Network-class failure: the internet/service is unreachable.
-				// Keep waiting through the outage — do not burn the budget.
+				// Keep waiting through the outage — the count did not advance.
 				sp.logger.Debug("probe network error — not counting, still waiting", "videoID", job.VideoID, "err", probeErr)
+			} else {
+				sp.logger.Warn("probe error (definitive)", "videoID", job.VideoID, "err", probeErr, "consecutive", consecutiveErrors)
+			}
+			if giveUp {
+				sp.stopEarlyChat(chatDl)
+				// Wrap with ErrNonActionable so worker.setJobError suppresses
+				// the user notification — exhausted DEFINITIVE retries mean
+				// the stream isn't coming up regardless of further work.
+				return nil, fmt.Errorf("max probe errors: %w (%w)", probeErr, ErrNonActionable)
 			}
 			continue
 		}

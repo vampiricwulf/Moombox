@@ -344,27 +344,27 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 
 		streamInfo, err := sp.tw.GetStreamInfo(ctx, login)
 		if err != nil {
-			d := probeErrorDecision(err)
-			switch d.report {
+			newCount, giveUp, report, cancelled := applyProbeError(err, consecutiveErrors)
+			switch report {
 			case reportFailure:
 				reportProbeResult("probe/twitch", true)
 			case reportSuccess:
 				reportProbeResult("probe/twitch", false)
 			}
-			if d.cancelled {
+			if cancelled {
 				return nil, nil
 			}
-			if d.count {
-				consecutiveErrors++
-				sp.logger.Warn("twitch poll error (definitive)", "channel", login, "err", err, "consecutive", consecutiveErrors)
-				if consecutiveErrors >= maxConsecutiveProbeErrors {
-					// Wrap with ErrNonActionable so worker.setJobError suppresses
-					// the user notification — exhausted DEFINITIVE retries mean
-					// the stream isn't coming up regardless of further probes.
-					return nil, fmt.Errorf("max probe errors: %w (%w)", err, ErrNonActionable)
-				}
-			} else {
+			consecutiveErrors = newCount // unchanged for network-class failures
+			if report == reportFailure {
 				sp.logger.Debug("twitch network error — not counting, still waiting", "channel", login, "err", err)
+			} else {
+				sp.logger.Warn("twitch poll error (definitive)", "channel", login, "err", err, "consecutive", consecutiveErrors)
+			}
+			if giveUp {
+				// Wrap with ErrNonActionable so worker.setJobError suppresses
+				// the user notification — exhausted DEFINITIVE retries mean
+				// the stream isn't coming up regardless of further probes.
+				return nil, fmt.Errorf("max probe errors: %w (%w)", err, ErrNonActionable)
 			}
 			continue
 		}

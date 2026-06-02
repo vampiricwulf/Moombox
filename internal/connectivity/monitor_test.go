@@ -1,10 +1,44 @@
 package connectivity
 
 import (
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// TestMonitor_RealProbeReflectsReachability wires the production reachability
+// probe (the default checkFn installed by NewMonitor) through a Monitor and
+// asserts it reflects ACTUAL TCP reachability: a live local listener reads as
+// online, a closed port as offline. This guards the platform-shared probe that
+// replaced the old Windows InternetGetConnectedState heuristic — the root cause
+// of the monitor reporting "online" during a real outage.
+func TestMonitor_RealProbeReflectsReachability(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	m := NewMonitor(nil) // default checkFn = reachabilityProbe(m.probeTargets)
+	m.SetProbeTargets([]string{ln.Addr().String()})
+	if !m.checkFn() {
+		t.Fatal("expected online: real probe to a live listener should succeed")
+	}
+	m.SetProbeTargets([]string{"127.0.0.1:1"}) // reserved/closed port
+	if m.checkFn() {
+		t.Fatal("expected offline: real probe to a closed port should fail")
+	}
+}
 
 func newTestMonitor(checkFn func() bool) *Monitor {
 	m := &Monitor{

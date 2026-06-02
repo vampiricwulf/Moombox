@@ -48,16 +48,11 @@ func classifyProbeErr(err error) probeErrClass {
 		return classifyProbeErr(urlErr.Err)
 	}
 
+	// net.Error is an interface; *net.OpError and *net.DNSError both implement
+	// it, so this single errors.As covers dial / timeout / DNS / connection
+	// failures without needing separate concrete-type checks.
 	var netErr net.Error
 	if errors.As(err, &netErr) {
-		return classNetwork
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return classNetwork
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
 		return classNetwork
 	}
 	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
@@ -92,21 +87,24 @@ const (
 	reportSuccess             // ReportSuccess: the request reached the service
 )
 
-// probeDecision is the pure decision the wait loops act on for a probe error.
-type probeDecision struct {
-	count     bool        // increment consecutiveErrors (only definitive failures)
-	cancelled bool        // ctx cancelled → return cancelled
-	report    probeReport // how to feed the passive tracker
-}
-
-// probeErrorDecision maps a probe error to the loop's reaction.
-func probeErrorDecision(err error) probeDecision {
+// applyProbeError folds a probe error into the wait loop's running error count.
+// It returns the new count, whether the loop should give up (definitive
+// failures reached maxConsecutiveProbeErrors), how to feed the passive tracker,
+// and whether the context was cancelled.
+//
+// Network-class failures NEVER advance the count — they are transient, so the
+// loop keeps waiting through an outage; only definitive (server-class) failures
+// count toward give-up. Centralising this keeps the YouTube and Twitch wait
+// loops identical and makes the give-up threshold unit-testable without driving
+// the full polling loop (timers + live API).
+func applyProbeError(err error, consecutiveErrors int) (count int, giveUp bool, report probeReport, cancelled bool) {
 	switch classifyProbeErr(err) {
 	case classCancelled:
-		return probeDecision{cancelled: true, report: reportNone}
+		return consecutiveErrors, false, reportNone, true
 	case classNetwork:
-		return probeDecision{count: false, report: reportFailure}
+		return consecutiveErrors, false, reportFailure, false
 	default: // classServer
-		return probeDecision{count: true, report: reportSuccess}
+		count = consecutiveErrors + 1
+		return count, count >= maxConsecutiveProbeErrors, reportSuccess, false
 	}
 }

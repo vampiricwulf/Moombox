@@ -160,6 +160,7 @@ func classifyProbeErr(err error) probeErrClass {
         strings.Contains(msg, "tls"),
         strings.Contains(msg, "timeout"),
         strings.Contains(msg, "connection reset"),
+        strings.Contains(msg, "connection refused"), // ECONNREFUSED — transient
         strings.Contains(msg, "no such host"),
         strings.Contains(msg, "eof"):
         return classNetwork
@@ -281,9 +282,14 @@ probe_targets = ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"]
   `*net.DNSError`, `context.DeadlineExceeded`, `io.ErrUnexpectedEOF`, "HTTP 429",
   "HTTP 503", "HTTP 404", "tls: ...", and an unknown error → asymmetric default
   (`classNetwork`); definitive 4xx → `classServer`; cancelled → `classCancelled`.
-- `stream_processor_*_test.go`: **regression** — feed N network-class probe errors and
-  assert the job is NOT errored and `consecutiveErrors` stays 0; feed
-  `maxConsecutiveProbeErrors` server-class errors and assert it errors. Same for Twitch.
+- **regression for the wait loops:** the give-up logic is folded into the pure
+  `applyProbeError(err, consecutiveErrors) -> (count, giveUp, report, cancelled)` helper,
+  which both the YouTube and Twitch loops delegate to. `TestApplyProbeError` exhaustively
+  asserts the spec's regression contract — feeding N network-class errors keeps the count
+  at 0 and never gives up, while `maxConsecutiveProbeErrors` server-class errors advance
+  the count and trigger give-up — without driving the full polling loop (timers + live
+  API). The loops are thin wrappers that apply the helper's return values, so this is the
+  authoritative regression coverage for both platforms.
 - `monitor_test.go`: existing injected-`checkFn` tests stay green; add a test wiring the
   real probe via a stubbed dialer/loopback listener.
 - Full suite green: `go build ./...`, `go vet ./...`, `go test ./...`, plus `-race` on

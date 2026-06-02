@@ -17,6 +17,12 @@ var connReporter atomic.Pointer[ConnectivityReporter]
 
 // SetConnectivityReporter wires the package-wide connectivity reporter for the
 // worker's probe loops. Safe to call concurrently; nil clears it.
+//
+// Storing &r is safe Go, not a dangling stack pointer: escape analysis
+// heap-allocates r because its address outlives this call (it is kept in the
+// package-level atomic), and the GC keeps that backing alive as long as the
+// atomic references it. This mirrors the established reporter pattern in
+// internal/utils, internal/engine, and internal/monitor.
 func SetConnectivityReporter(r ConnectivityReporter) {
 	if r == nil {
 		connReporter.Store(nil)
