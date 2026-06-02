@@ -1,11 +1,43 @@
 package worker
 
-import "testing"
+import (
+	"sync"
+	"sync/atomic"
+	"testing"
+)
 
 type fakeReporter struct{ fails, oks int }
 
 func (f *fakeReporter) ReportFailure(string) { f.fails++ }
 func (f *fakeReporter) ReportSuccess(string) { f.oks++ }
+
+type atomicCountingReporter struct{ fails, oks atomic.Int64 }
+
+func (a *atomicCountingReporter) ReportFailure(string) { a.fails.Add(1) }
+func (a *atomicCountingReporter) ReportSuccess(string) { a.oks.Add(1) }
+
+// TestSetConnectivityReporter_ConcurrentRaceFree proves the atomic.Pointer
+// reporter storage is race-free under concurrent Set + read/dispatch. The
+// `connReporter.Store(&r)` pattern is safe Go: `go build -gcflags=-m` reports
+// "moved to heap: r", i.e. the compiler heap-allocates r because its address
+// escapes into the package-level atomic — so &r is a valid heap pointer, not a
+// dangling stack pointer. This test guards that under the race detector.
+func TestSetConnectivityReporter_ConcurrentRaceFree(t *testing.T) {
+	t.Cleanup(func() { SetConnectivityReporter(nil) })
+	rep := &atomicCountingReporter{}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); SetConnectivityReporter(rep) }()
+		go func() { defer wg.Done(); reportProbeResult("probe/test", true) }()
+	}
+	wg.Wait()
+	// No exact-count assertion: setters race the readers, so early reads may
+	// observe nil and no-op. The guarantees under test are (1) -race is clean
+	// and (2) no panic from dereferencing the stored &r. The reporter's own
+	// counters are atomic, so any observed forwarding is itself race-free.
+}
 
 func TestWorkerConnectivityReporterRoundTrip(t *testing.T) {
 	t.Cleanup(func() { SetConnectivityReporter(nil) })

@@ -158,7 +158,14 @@ func (m *Monitor) ReportFailure(tag string) {
 func (m *Monitor) ReportSuccess(tag string) {
 	wasPassiveOffline := m.passive.IsTriggered()
 	m.passive.ReportSuccess(tag)
-	if wasPassiveOffline && !m.passive.IsTriggered() && m.checkFn() {
+	// A real successful request is direct proof of connectivity, so once it
+	// clears the passive latch we transition online immediately — without an
+	// extra active probe. Calling checkFn() here would block the CALLER's
+	// goroutine (e.g. a wait loop via reportProbeResult, or any HTTP-success
+	// path) for up to probeRaceTimeout, and is redundant: the 5s poll loop
+	// re-confirms reachability via the active probe regardless. Speed-first
+	// recovery (design Layer 2).
+	if wasPassiveOffline && !m.passive.IsTriggered() {
 		m.transition(true)
 	}
 }
