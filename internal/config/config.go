@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,10 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
+
+// DefaultProbeTargets is the user-facing default for connectivity.probe_targets.
+// Kept in sync with connectivity/probe.go's in-package fallback.
+var DefaultProbeTargets = []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
 
 // dacledDirs memoises the set of dirs that have had their DACL tightened
 // this process lifetime. icacls shells out (~30-80ms on Windows); without
@@ -81,6 +86,9 @@ func Defaults() *MoomboxConfig {
 			GoSoftLimitMB:      256, // p99 active-download Sys ≈ 238 MB
 			SidecarSoftLimitMB: 200, // post-mint plateau ≈ 150 MB
 			SidecarHardLimitMB: 512, // BotGuard bursts ≈ 400-500 MB
+		},
+		Connectivity: ConnectivityConfig{
+			ProbeTargets: DefaultProbeTargets,
 		},
 	}
 }
@@ -159,6 +167,9 @@ func loadFromFile(path string) (*MoomboxConfig, error) {
 		cfg.NeedsAutoPersist = true
 	}
 	if _, hasBgutils := raw["bgutils"]; !hasBgutils {
+		cfg.NeedsAutoPersist = true
+	}
+	if _, hasConnectivity := raw["connectivity"]; !hasConnectivity {
 		cfg.NeedsAutoPersist = true
 	}
 
@@ -431,6 +442,25 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		fail("network.client_token_ttl_days %d out of range 1..3650", cfg.Network.ClientTokenTTLDays)
 		if !reportOnly {
 			cfg.Network.ClientTokenTTLDays = defaults.Network.ClientTokenTTLDays
+		}
+	}
+	// connectivity.probe_targets: each entry must be host:port. Empty list or
+	// any malformed entry falls back to the defaults (Normalize); Validate
+	// reports each malformed entry.
+	if len(cfg.Connectivity.ProbeTargets) == 0 {
+		fail("connectivity.probe_targets is empty")
+		if !reportOnly {
+			cfg.Connectivity.ProbeTargets = defaults.Connectivity.ProbeTargets
+		}
+	} else {
+		for _, t := range cfg.Connectivity.ProbeTargets {
+			if _, _, err := net.SplitHostPort(t); err != nil {
+				fail("connectivity.probe_targets entry %q must be host:port: %v", t, err)
+				if !reportOnly {
+					cfg.Connectivity.ProbeTargets = defaults.Connectivity.ProbeTargets
+					break
+				}
+			}
 		}
 	}
 	switch strings.ToUpper(cfg.Logs.LogLevel) {

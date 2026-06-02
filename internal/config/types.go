@@ -13,6 +13,7 @@ type MoomboxConfig struct {
 	Updates       UpdatesConfig        `toml:"updates" json:"updates"`
 	Bgutils       BgutilsConfig        `toml:"bgutils" json:"bgutils"`
 	Memory        MemoryConfig         `toml:"memory" json:"memory"`
+	Connectivity  ConnectivityConfig   `toml:"connectivity" json:"connectivity"`
 	Channels      []ChannelConfig      `toml:"channels,omitempty" json:"channels,omitempty"`
 	Notifications []NotificationConfig `toml:"notifications,omitempty" json:"notifications,omitempty"`
 
@@ -186,6 +187,15 @@ type MemoryConfig struct {
 	// 0 disables (V8 uses its default ~512-1500 MB depending on host).
 	// Default 256.
 	SidecarHardLimitMB int `toml:"sidecar_hard_limit_mb" json:"sidecar_hard_limit_mb"`
+}
+
+// ConnectivityConfig holds internet-reachability probe settings.
+type ConnectivityConfig struct {
+	// ProbeTargets are host:port endpoints the connectivity monitor TCP-dials
+	// to verify real internet reachability (first success wins). Defaults to
+	// public anycast resolvers on :443. Override if your network blocks
+	// outbound connections to them.
+	ProbeTargets []string `toml:"probe_targets" json:"probe_targets"`
 }
 
 // BgutilsConfig holds BotGuard sidecar settings. Defaults applied via

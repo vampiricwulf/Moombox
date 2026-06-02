@@ -683,3 +683,32 @@ func TestValidationQualityPreference(t *testing.T) {
 		t.Errorf("expected best, got %s", cfg.Channels[2].QualityPreference)
 	}
 }
+
+func TestValidate_ConnectivityProbeTargets(t *testing.T) {
+	cfg := Defaults()
+	if len(cfg.Connectivity.ProbeTargets) == 0 {
+		t.Fatal("defaults must populate connectivity.probe_targets")
+	}
+
+	// Malformed entry is reported by Validate.
+	bad := Defaults()
+	bad.Connectivity.ProbeTargets = []string{"not-a-host-port"}
+	errs := Validate(bad)
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "connectivity.probe_targets") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a probe_targets validation error, got %v", errs)
+	}
+
+	// Normalize replaces a malformed list with defaults.
+	norm := Defaults()
+	norm.Connectivity.ProbeTargets = []string{"not-a-host-port"}
+	Normalize(norm)
+	if len(norm.Connectivity.ProbeTargets) == 0 || norm.Connectivity.ProbeTargets[0] == "not-a-host-port" {
+		t.Fatalf("Normalize should restore defaults, got %v", norm.Connectivity.ProbeTargets)
+	}
+}
