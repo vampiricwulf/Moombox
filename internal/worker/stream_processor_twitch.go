@@ -305,6 +305,7 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 	})
 
 	consecutiveErrors := 0
+	var lastOfflineProbe time.Time
 
 	for {
 		select {
@@ -334,20 +335,36 @@ func (sp *StreamProcessor) waitForTwitchLive(ctx context.Context, job *database.
 		})
 
 		if sp.isOnline != nil && !sp.isOnline() {
-			sp.logger.Debug("skipping Twitch probe — device offline", "login", login)
-			continue
+			if time.Since(lastOfflineProbe) < offlineProbeFloor {
+				sp.logger.Debug("skipping Twitch probe — device offline (within floor)", "login", login)
+				continue
+			}
+			lastOfflineProbe = time.Now()
 		}
 
 		streamInfo, err := sp.tw.GetStreamInfo(ctx, login)
 		if err != nil {
-			consecutiveErrors++
-			sp.logger.Warn("twitch poll error", "channel", login, "err", err, "consecutive", consecutiveErrors)
-			if consecutiveErrors >= maxConsecutiveProbeErrors {
-				// Wrap with ErrNonActionable so worker.setJobError suppresses
-				// the user notification — the retry budget exhausted means
-				// the stream isn't going to come up regardless of further
-				// probes (audit cross-cutting.md C3 follow-up).
-				return nil, fmt.Errorf("max probe errors: %w (%w)", err, ErrNonActionable)
+			d := probeErrorDecision(err)
+			switch d.report {
+			case reportFailure:
+				reportProbeResult("probe/twitch", true)
+			case reportSuccess:
+				reportProbeResult("probe/twitch", false)
+			}
+			if d.cancelled {
+				return nil, nil
+			}
+			if d.count {
+				consecutiveErrors++
+				sp.logger.Warn("twitch poll error (definitive)", "channel", login, "err", err, "consecutive", consecutiveErrors)
+				if consecutiveErrors >= maxConsecutiveProbeErrors {
+					// Wrap with ErrNonActionable so worker.setJobError suppresses
+					// the user notification — exhausted DEFINITIVE retries mean
+					// the stream isn't coming up regardless of further probes.
+					return nil, fmt.Errorf("max probe errors: %w (%w)", err, ErrNonActionable)
+				}
+			} else {
+				sp.logger.Debug("twitch network error — not counting, still waiting", "channel", login, "err", err)
 			}
 			continue
 		}
