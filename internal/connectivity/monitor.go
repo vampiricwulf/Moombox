@@ -24,6 +24,7 @@ type Monitor struct {
 	checkFn      func() bool
 	pollInterval time.Duration
 	passive      *PassiveTracker
+	probeTargets []string // reachability-probe targets; nil → defaultProbeTargets
 	logger       logger
 }
 
@@ -57,11 +58,14 @@ func NewMonitorWithInterval(log logger, interval time.Duration) *Monitor {
 	}
 	m := &Monitor{
 		callbacks:    make(map[uint64]func(online bool)),
-		checkFn:      checkInternetConnected,
 		pollInterval: interval,
 		passive:      NewPassiveTracker(),
 		logger:       log,
 	}
+	// Default probe: a real multi-target TCP reachability check (shared across
+	// platforms). Reads m.probeTargets dynamically so SetProbeTargets can
+	// override it during init. Injectable for tests via newTestMonitor.
+	m.checkFn = func() bool { return reachabilityProbe(context.Background(), m.probeTargets) }
 	m.online.Store(true)
 	return m
 }
@@ -113,6 +117,13 @@ func (m *Monitor) Stop() {
 
 func (m *Monitor) IsOnline() bool {
 	return m.online.Load()
+}
+
+// SetProbeTargets overrides the reachability-probe targets (wired from config).
+// Call once during init, BEFORE Start(); not safe to call concurrently with
+// the poll goroutine. An empty/nil slice falls back to defaultProbeTargets.
+func (m *Monitor) SetProbeTargets(targets []string) {
+	m.probeTargets = targets
 }
 
 // OnStateChange registers a callback invoked whenever connectivity transitions
