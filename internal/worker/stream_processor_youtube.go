@@ -224,6 +224,11 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 					}
 					sp.logger.Info("upcoming stream became unavailable — giving up",
 						"videoID", job.VideoID, "playability", fullInfo.PlayabilityError, "reason", reason)
+					// The full fetch reached the service (HTTP 200) — report
+					// reachability to the oracle even though the video itself is
+					// terminal; a terminal playability is an application-level
+					// verdict, not a connectivity failure (Layer 4).
+					reportProbeResult("probe/youtube", false)
 					return &StreamProcessResult{
 						VideoInfo:      fullInfo,
 						ShouldDownload: false,
