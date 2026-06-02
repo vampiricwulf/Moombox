@@ -152,6 +152,7 @@ func (s *runState) initServices(logLevelOverride string) error {
 	utils.SetConnectivityReporter(s.connMon)
 	engine.SetConnectivityReporter(s.connMon)
 	monitor.SetConnectivityReporter(s.connMon)
+	worker.SetConnectivityReporter(s.connMon)
 
 	// =========================================================================
 	// 4. Load cookies
