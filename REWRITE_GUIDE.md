@@ -81,7 +81,7 @@ YouTube requires a "Proof of Origin" token for video playback. The flow:
 - GenerateIT API: `https://jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/GenerateIT`
 - YouTube variant: `https://www.youtube.com/api/jnn/v1/Create` and `/GenerateIT`
 - Headers: `content-type: application/json+protobuf`, `x-goog-api-key: AIzaSyDyT68fXzCCl80aj_EK1VPRk4piVVYIT4I`
-- User-Agent for requests: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36`
+- User-Agent for requests: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36`
 
 **Challenge descramble algorithm** (from `challengeFetcher.ts`):
 ```
@@ -198,7 +198,7 @@ Request body format:
 
 **User-Agents:**
 ```
-WEB:        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+WEB:        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 ANDROID_VR: "com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
 TV:         "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
 ```
@@ -800,7 +800,7 @@ All hardcoded values from `src/constants.ts`:
 ```go
 const (
     // HTTP
-    UserAgentWeb       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    UserAgentWeb       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
     UserAgentAndroidVR = "com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
     UserAgentTV        = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version"
 

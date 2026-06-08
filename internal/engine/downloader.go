@@ -48,10 +48,14 @@ const (
 	// stayBehindSegments is the number of segments to stay behind the live edge
 	// during parallel catch-up, avoiding download of in-flight segments.
 	stayBehindSegments = 30
+)
 
-	// User-Agent strings for download requests.
-	uaWeb     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	uaAndroid = "com.google.android.youtube/19.09.37 (Linux; U; Android 14; en_US) gzip"
+// uaWeb and uaAndroid are the User-Agents for download requests, sourced
+// from the central UA constants so version bumps stay in lockstep with the
+// rest of the codebase.
+var (
+	uaWeb     = constants.UserAgents.Web
+	uaAndroid = constants.UserAgents.Android
 )
 
 // DownloaderOptions configures a SegmentDownloader.

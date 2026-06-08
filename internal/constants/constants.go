@@ -14,12 +14,16 @@ var UserAgents = struct {
 	TV        string
 	IOS       string
 }{
-	Web:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	// Keep the Chrome major within yt-dlp's current random_user_agent()
+	// window (142-148 as of 2026-05) so live Google/Twitch endpoints don't
+	// see an implausibly stale browser. This is the single source of truth
+	// for the desktop Web UA — every other site references it.
+	Web:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
 	WebSafari: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
-	Android:   "com.google.android.youtube/19.09.37 (Linux; U; Android 14; en_US) gzip",
+	Android:   "com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip",
 	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 	TV:        "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
-	IOS:       "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
+	IOS:       "com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
 }
 
 // =============================================================================
@@ -148,16 +152,16 @@ var AndroidVRClient = YouTubeClientConfig{
 // formats. Audit reports/youtube.md T2.
 var IOSClient = YouTubeClientConfig{
 	ClientName:    "IOS",
-	ClientVersion: "19.29.1",
+	ClientVersion: "21.02.3",
 	ClientID:      "5",
 	UserAgent:     UserAgents.IOS,
 	Context: map[string]any{
 		"clientName":    "IOS",
-		"clientVersion": "19.29.1",
+		"clientVersion": "21.02.3",
 		"deviceMake":    "Apple",
 		"deviceModel":   "iPhone16,2",
-		"osName":        "iOS",
-		"osVersion":     "17.5.1.21F90",
+		"osName":        "iPhone",
+		"osVersion":     "18.3.2.22D82",
 		"hl":            "en",
 	},
 }

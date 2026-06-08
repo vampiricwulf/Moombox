@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/httpx"
 )
 
@@ -307,7 +308,7 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 // setYouTubeHeaders applies the standard YouTube API headers for cookie-authenticated requests.
 func setYouTubeHeaders(req *http.Request, cookieHeader, origin, authHeader string) {
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", constants.UserAgents.Web)
 	req.Header.Set("Cookie", cookieHeader)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")

@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/dop251/goja"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
 // domRealJS is the Option-2 hand-rolled real-class DOM (EventTarget,
@@ -21,7 +23,7 @@ var domRealJS string
 // This provides just enough browser-like environment for BotGuard and cipher functions.
 func RegisterDOMShim(vm *goja.Runtime, userAgent string) error {
 	if userAgent == "" {
-		userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+		userAgent = constants.UserAgents.Web
 	}
 
 	// CSPRNG byte source for crypto.getRandomValues (replaces the

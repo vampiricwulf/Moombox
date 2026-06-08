@@ -3,6 +3,8 @@ package bgutils
 import (
 	"fmt"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/constants"
 )
 
 const (
@@ -17,12 +19,6 @@ const (
 
 	// Default request key for PO token generation
 	DefaultRequestKey = "O43z0dpjhgX20SCx4KAo"
-
-	// UserAgentFull is used for BOTH the JS DOM shim navigator.userAgent AND
-	// every HTTP request this package makes. Upstream bgutils-js uses a single
-	// UA across both surfaces — split UAs give an inconsistent fingerprint
-	// between the VM's self-view and the server's view of the client.
-	UserAgentFull = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 	// Timeouts. Names reflect what each actually bounds — earlier names
 	// (BotGuardLoadTimeout for the callback wait, SnapshotTimeout for the
@@ -56,6 +52,14 @@ const (
 	// Cache TTLs
 	SessionCacheTTL = 6 * time.Hour
 )
+
+// UserAgentFull is used for BOTH the JS DOM shim navigator.userAgent AND
+// every HTTP request this package makes. Upstream bgutils-js uses a single
+// UA across both surfaces — split UAs give an inconsistent fingerprint
+// between the VM's self-view and the server's view of the client. Sourced
+// from the central UA constant so a Chrome-version bump stays in lockstep
+// with the rest of the codebase.
+var UserAgentFull = constants.UserAgents.Web
 
 // BgConfig holds configuration for BotGuard operations.
 type BgConfig struct {
