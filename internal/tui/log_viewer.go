@@ -148,37 +148,48 @@ func (m *LogViewerModel) SetFocused(f bool) {
 	if !f && m.searching {
 		m.searching = false
 		m.searchInput.SetValue("")
-		m.resizeViewport()
 	}
+	// Focus affects whether the pause hint is rendered — resize always.
+	m.resizeViewport()
+}
+
+// setAutoScroll updates the auto-scroll flag, resizing the viewport when it
+// flips — the pause hint occupies a content row while paused and focused.
+func (m *LogViewerModel) setAutoScroll(v bool) {
+	if m.autoScroll == v {
+		return
+	}
+	m.autoScroll = v
+	m.resizeViewport()
 }
 
 // ScrollUp scrolls up by one line via the viewport.
 func (m *LogViewerModel) ScrollUp() {
 	m.viewport.ScrollUp(1)
-	m.autoScroll = m.viewport.AtBottom()
+	m.setAutoScroll(m.viewport.AtBottom())
 }
 
 // ScrollDown scrolls down by one line via the viewport.
 func (m *LogViewerModel) ScrollDown() {
 	m.viewport.ScrollDown(1)
-	m.autoScroll = m.viewport.AtBottom()
+	m.setAutoScroll(m.viewport.AtBottom())
 }
 
 // PageUp scrolls up by a page via the viewport.
 func (m *LogViewerModel) PageUp() {
 	m.viewport.HalfPageUp()
-	m.autoScroll = m.viewport.AtBottom()
+	m.setAutoScroll(m.viewport.AtBottom())
 }
 
 // PageDown scrolls down by a page via the viewport.
 func (m *LogViewerModel) PageDown() {
 	m.viewport.HalfPageDown()
-	m.autoScroll = m.viewport.AtBottom()
+	m.setAutoScroll(m.viewport.AtBottom())
 }
 
 // ReEnableAutoScroll re-enables auto-scroll (called when clicking away from logs panel).
 func (m *LogViewerModel) ReEnableAutoScroll() {
-	m.autoScroll = true
+	m.setAutoScroll(true)
 	m.viewport.GotoBottom()
 }
 
@@ -186,14 +197,14 @@ func (m *LogViewerModel) ReEnableAutoScroll() {
 func (m *LogViewerModel) UpdateViewport(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
-	m.autoScroll = m.viewport.AtBottom()
+	m.setAutoScroll(m.viewport.AtBottom())
 	return cmd
 }
 
 // CycleLevel cycles the log level filter.
 func (m *LogViewerModel) CycleLevel() {
 	m.level = m.level.Next()
-	m.autoScroll = true
+	m.setAutoScroll(true)
 	m.rebuildFiltered()
 	m.viewport.GotoBottom()
 }
@@ -332,7 +343,7 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			m.resizeViewport()
 			// Jump to first match
 			m.viewport.HighlightNext()
-			m.autoScroll = m.viewport.AtBottom()
+			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
 
 		case keyEsc:
@@ -362,11 +373,11 @@ func (m *LogViewerModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			return nil, true
 		case "n":
 			m.viewport.HighlightNext()
-			m.autoScroll = m.viewport.AtBottom()
+			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
 		case "N":
 			m.viewport.HighlightPrevious()
-			m.autoScroll = m.viewport.AtBottom()
+			m.setAutoScroll(m.viewport.AtBottom())
 			return nil, true
 		}
 	}
@@ -399,11 +410,15 @@ func (m *LogViewerModel) applySearchHighlights() {
 	}
 }
 
-// resizeViewport recalculates viewport height accounting for the search bar.
+// resizeViewport recalculates viewport height accounting for the search bar
+// and the auto-scroll pause hint.
 func (m *LogViewerModel) resizeViewport() {
 	contentH := max(m.height-3, 1)
 	if m.searching {
 		contentH = max(contentH-1, 1) // search bar takes 1 line
+	}
+	if m.focused && !m.autoScroll {
+		contentH = max(contentH-1, 1) // pause hint takes 1 line (see View)
 	}
 	m.viewport.SetHeight(contentH)
 }
@@ -446,12 +461,11 @@ func (m *LogViewerModel) View() string {
 	// Suffixes are only appended if they fit within contentW to prevent
 	// header wrapping (which adds an extra line and causes vertical shifting).
 	header := titleStyle.Render(fmt.Sprintf("Logs (%d)", len(m.filtered)))
-	// Search query indicator (when search is active but not typing)
+	// Search query indicator (when search is active but not typing).
+	// truncateString is rune/width-aware — byte-slicing would split
+	// multi-byte runes in the user's query.
 	if !m.searching && m.searchQuery != "" {
-		queryDisplay := m.searchQuery
-		if len(queryDisplay) > 20 {
-			queryDisplay = queryDisplay[:20] + "..."
-		}
+		queryDisplay := truncateString(m.searchQuery, 20)
 		matchSuffix := fmt.Sprintf(" [/%s] (%d matches)", queryDisplay, m.matchCount)
 		suffix := " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaa00")).Render(matchSuffix)
 		if lipgloss.Width(header)+lipgloss.Width(suffix) <= contentW {

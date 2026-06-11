@@ -159,11 +159,14 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 	}
 
 	var lastErr error
+	skipBackoff := false
 	for attempt := 0; attempt <= gqlMaxRetries; attempt++ {
-		if attempt > 0 {
+		if attempt > 0 && !skipBackoff {
 			// Compute backoff for this retry — 1s, 2s, 4s, … capped at
 			// gqlMaxRetryDelay. retryAfter takes precedence when the
-			// previous response was a 429 with a usable header.
+			// previous response was a 429 with a usable header (the 429
+			// branch below sleeps Retry-After itself and sets skipBackoff
+			// so the two delays don't stack).
 			delay := min(gqlBaseRetryDelay<<(attempt-1), gqlMaxRetryDelay)
 			if a.logger != nil {
 				a.logger.Debug("twitch gql retry", "op", opLabel(opName), "attempt", attempt, "delay", delay.String(), "prev_err", lastErr)
@@ -174,6 +177,7 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 			case <-time.After(delay):
 			}
 		}
+		skipBackoff = false
 
 		respData, statusCode, hdrRetryAfter, doErr := a.doGQLOnce(ctx, data, authToken)
 		if doErr != nil {
@@ -197,6 +201,9 @@ func (a *API) gqlRequest(ctx context.Context, opName string, body any, authToken
 					return nil, ctx.Err()
 				case <-time.After(ra):
 				}
+				// Retry-After already served as this retry's delay — don't
+				// stack the exponential backoff on top of it.
+				skipBackoff = true
 			}
 			lastErr = fmt.Errorf("gql rate limited (429) (%s): %s", opLabel(opName), string(respData))
 			continue

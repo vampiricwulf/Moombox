@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
@@ -23,6 +24,28 @@ var discordWebhookPath = regexp.MustCompile(`(?i)(discord\.com/api/webhooks)/[^\
 // copying the secret portion verbatim.
 func redactDiscordWebhookURL(url string) string {
 	return discordWebhookPath.ReplaceAllString(url, "$1/<redacted>")
+}
+
+// redactURLForLog reduces an arbitrary notification URL to scheme://host for
+// log lines. Webhook URLs routinely embed secrets in their path or query
+// (Discord tokens, Slack /services/ paths, ntfy tokens) — a rejection log
+// that copies one verbatim ends up in every store that tails the log file.
+func redactURLForLog(raw string) string {
+	scheme, rest, ok := strings.Cut(raw, "://")
+	if !ok {
+		// No scheme — show only a short prefix, cut on a rune boundary so a
+		// multi-byte character at the edge doesn't log invalid UTF-8.
+		if len(raw) > 16 {
+			cut := 16
+			for cut > 0 && !utf8.RuneStart(raw[cut]) {
+				cut--
+			}
+			return raw[:cut] + "…<redacted>"
+		}
+		return raw
+	}
+	host, _, _ := strings.Cut(rest, "/")
+	return scheme + "://" + host + "/…<redacted>"
 }
 
 // NotificationType represents the visual style of a notification.
@@ -189,7 +212,9 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 			// Only use the first two path segments (ID/TOKEN), matching TS behavior
 			segments := strings.SplitN(raw, "/", 3)
 			if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
-				logger.Warn("invalid discord:// URL: expected discord://ID/TOKEN", "url", url)
+				// Redacted: a malformed discord:// URL can still carry a
+				// real token (e.g. discord:///TOKEN with an empty ID).
+				logger.Warn("invalid discord:// URL: expected discord://ID/TOKEN", "url", redactURLForLog(url))
 				continue
 			}
 			parts := strings.Join(segments[:2], "/")
@@ -207,7 +232,9 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 			continue
 
 		default:
-			logger.Warn("unsupported notification URL scheme", "url", url)
+			// Redacted: users paste full webhook URLs from other services
+			// (Slack, ntfy) here — those paths are secrets too.
+			logger.Warn("unsupported notification URL scheme", "url", redactURLForLog(url))
 			continue
 		}
 

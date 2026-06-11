@@ -367,11 +367,22 @@ func matchTerm(text, pattern string) bool {
 }
 
 // matchTermNormalized is like matchTerm but takes pre-normalized text to avoid redundant work.
+//
+// The pattern must be transformed to correspond to the normalized text it
+// runs against: normText is diacritic-stripped AND lowercased, so patterns
+// get their literals diacritic-stripped (via normalizePattern) and case is
+// handled by always compiling with the `i` flag. Lowercasing the pattern
+// itself would be wrong — it corrupts escape classes (`\W` → `\w` inverts
+// the match). Without this, `/Minecraft/` (uppercase, no flags) and any
+// term containing a diacritic (`café`) could never match.
 func matchTermNormalized(normText, rawText, pattern string) bool {
 	// Check for /pattern/flags syntax
 	if isRegexPattern(pattern) {
 		inner, flags := parseRegexPattern(pattern)
-		re, err := getCachedRegex("(?" + flags + ")" + inner)
+		if !strings.Contains(flags, "i") {
+			flags += "i"
+		}
+		re, err := getCachedRegex("(?" + flags + ")" + normalizePattern(inner))
 		if err != nil {
 			return fuzzyMatch(rawText, pattern)
 		}
@@ -381,7 +392,7 @@ func matchTermNormalized(normText, rawText, pattern string) bool {
 	// Try as regex first (TS always uses new RegExp(pattern)).
 	// Always case-insensitive — strip redundant (?i) prefix if present.
 	finalPattern := strings.TrimPrefix(pattern, "(?i)")
-	re, err := getCachedRegex("(?i)" + finalPattern)
+	re, err := getCachedRegex("(?i)" + normalizePattern(finalPattern))
 	if err != nil {
 		// Invalid regex — fall back to fuzzy substring match
 		return fuzzyMatch(rawText, pattern)
@@ -415,9 +426,12 @@ func fuzzyMatch(text, needle string) bool {
 	return strings.Contains(normText, normNeedle)
 }
 
-// normalizeText applies NFD normalization, strips diacritics, and lowercases.
-func normalizeText(s string) string {
-	// Fast path: ASCII-only strings don't need NFD decomposition or diacritic stripping
+// stripDiacritics NFD-decomposes s and removes combining marks. ASCII-only
+// strings take a fast path with no decomposition or allocation. This is the
+// shared core of normalizeText and normalizePattern — the two MUST transform
+// characters identically, or patterns stop corresponding to the text they
+// are matched against.
+func stripDiacritics(s string) string {
 	isASCII := true
 	for i := range len(s) {
 		if s[i] >= 0x80 {
@@ -426,19 +440,29 @@ func normalizeText(s string) string {
 		}
 	}
 	if isASCII {
-		return strings.ToLower(s)
+		return s
 	}
 
-	// NFD decompose
 	decomposed := norm.NFD.String(s)
-
-	// Strip combining marks (diacritics)
 	var b strings.Builder
 	for _, r := range decomposed {
 		if !unicode.Is(unicode.Mn, r) {
 			b.WriteRune(r)
 		}
 	}
+	return b.String()
+}
 
-	return strings.ToLower(b.String())
+// normalizePattern strips diacritics from a regex pattern's literal
+// characters so they correspond to the diacritic-stripped text the compiled
+// regex runs against. Deliberately does NOT lowercase — see
+// matchTermNormalized (ToLower would corrupt escape classes like \W → \w).
+// Regex metacharacters are ASCII and unaffected by the transform.
+func normalizePattern(s string) string {
+	return stripDiacritics(s)
+}
+
+// normalizeText applies NFD normalization, strips diacritics, and lowercases.
+func normalizeText(s string) string {
+	return strings.ToLower(stripDiacritics(s))
 }

@@ -163,11 +163,23 @@ async function generateMinter() {
     };
 }
 
+// In-flight dedup for minter regeneration. Each generateMinter() run is a
+// full multi-second BotGuard pass that installs its interpreter onto the
+// shared globalThis — two interleaved runs (concurrent mints on a cold or
+// just-expired cache) can capture each other's VM mid-flight and
+// cross-contaminate the resulting minter.
+let minterPromise = null;
+
 async function getOrCreateMinter() {
     if (cachedMinter && Date.now() < cachedMinter.expiresAt) {
         return cachedMinter;
     }
-    cachedMinter = await generateMinter();
+    if (!minterPromise) {
+        minterPromise = generateMinter().finally(() => {
+            minterPromise = null;
+        });
+    }
+    cachedMinter = await minterPromise;
     stats.cachedMinters = 1;
     return cachedMinter;
 }

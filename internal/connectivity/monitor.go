@@ -14,8 +14,11 @@ import (
 const defaultPollInterval = 5 * time.Second
 
 type Monitor struct {
-	online       atomic.Bool
-	offlinePolls int
+	online atomic.Bool
+	// offlinePolls is atomic: poll() increments it on the ticker goroutine
+	// while transition(true) — reachable from ReportSuccess on arbitrary
+	// HTTP-caller goroutines — resets it.
+	offlinePolls atomic.Int32
 	mu           sync.Mutex
 	callbacks    map[uint64]func(online bool)
 	nextID       uint64
@@ -84,7 +87,7 @@ func (m *Monitor) Start(ctx context.Context) {
 	// the first tick fires 5 seconds later. Without this, a machine that boots
 	// with no network will report online=true for up to 5 seconds.
 	if !m.checkFn() {
-		m.offlinePolls = 2 // skip the debounce — we already know we are offline
+		m.offlinePolls.Store(2) // skip the debounce — we already know we are offline
 		m.poll()
 	}
 
@@ -184,13 +187,12 @@ func (m *Monitor) poll() {
 	wasOnline := m.online.Load()
 
 	if nowOnline {
-		m.offlinePolls = 0
+		m.offlinePolls.Store(0)
 		if !wasOnline {
 			m.transition(true)
 		}
 	} else {
-		m.offlinePolls++
-		if wasOnline && m.offlinePolls >= 2 {
+		if polls := m.offlinePolls.Add(1); wasOnline && polls >= 2 {
 			m.transition(false)
 		}
 	}
@@ -202,7 +204,7 @@ func (m *Monitor) transition(online bool) {
 		return
 	}
 	if online {
-		m.offlinePolls = 0
+		m.offlinePolls.Store(0)
 	}
 
 	if m.logger != nil {

@@ -631,6 +631,9 @@ export class PlayerController {
         const ws = await wsRes.json();
         this.playerJob.watched = ws.watched;
         this.playerJob.resumePosition = ws.resumePosition;
+        // The chat-offset input is restored from playerJob.chatOffset — copy
+        // the fresh value too, or a stale cached offset gets re-applied.
+        if (ws.chatOffset !== undefined) this.playerJob.chatOffset = ws.chatOffset;
       }
     } catch { /* proceed with cached values */ }
 

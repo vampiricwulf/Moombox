@@ -3,6 +3,7 @@ package twitch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -213,7 +214,12 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 			vcd.messages = append(vcd.messages, msg)
 			vcd.totalCount.Add(1)
 			newCount++
+		}
 
+		// Once per page, not per message — reportProgress logs an Info line,
+		// and per-message it floods the log with thousands of identical
+		// entries on comment-heavy VODs.
+		if newCount > 0 {
 			vcd.reportProgress(contentOffset)
 		}
 
@@ -264,6 +270,19 @@ func (vcd *VodChatDownloader) Start(ctx context.Context) error {
 		}
 	}
 
+	// Distinguish Stop() (orchestrator's post-video chat timeout — pagination
+	// forcibly cut short) from natural completion (loop exits via break when
+	// the server has no more pages). On Stop, preserve the resume state so a
+	// retry continues from this offset, and skip enrichment — the chat is
+	// incomplete and an enriched-then-resumed file must not be re-appended.
+	if !vcd.running.Load() {
+		vcd.flush()
+		vcd.saveResumeState(contentOffset)
+		vcd.logger.Info("VOD chat download stopped before completion; resume state preserved",
+			"vodID", vcd.vodID, "offset", contentOffset, "messages", vcd.totalCount.Load())
+		return nil
+	}
+
 	vcd.flush()
 
 	// Resolve and inject third-party emotes (7TV, BTTV, FFZ).
@@ -302,22 +321,40 @@ func (vcd *VodChatDownloader) flush() {
 
 	if isFirstFlush {
 		// First flush: write complete file
-		if err := vcd.writeFullFile(); err != nil {
+		if err := vcd.writeFullFile(vcd.messages); err != nil {
 			vcd.logger.Error("write vod chat file", "err", err)
 			return
 		}
 	} else {
 		// Subsequent flushes: append new messages to existing file
 		count := int(vcd.totalCount.Load())
-		if err := utils.AppendChatMessages(vcd.outputPath, vcd.messages, vcd.logger); err != nil {
-			vcd.logger.Error("append vod chat file", "err", err)
-			// Fallback: full rewrite
-			if err2 := vcd.writeFullFile(); err2 != nil {
-				vcd.logger.Error("fallback full write failed", "err", err2)
-			}
-		} else {
+		appendErr := utils.AppendChatMessages(vcd.outputPath, vcd.messages, vcd.logger)
+		switch {
+		case appendErr == nil:
 			if err := utils.UpdateChatFileHeaderFields(vcd.outputPath, count); err != nil {
 				vcd.logger.Warn("update vod chat header", "err", err)
+			}
+		case errors.Is(appendErr, utils.ErrChatFilePartialWrite):
+			// Truncated-then-failed write: the on-disk tail is broken, and a
+			// merge would parse-fail (dropping history). Per the sentinel's
+			// contract, advance past the batch.
+			vcd.logger.Error("partial vod chat append; advancing past batch", "err", appendErr)
+		default:
+			// Merge-and-rewrite fallback (mirrors the IRC path): rewriting
+			// with only the current batch would replace hours of flushed
+			// comments with the last few seconds' worth.
+			vcd.logger.Warn("append failed, merging existing file with current batch", "err", appendErr)
+			existing, readErr := readChatFileMessages(vcd.outputPath)
+			if readErr != nil {
+				// Can't recover without destroying data — keep the batch in
+				// memory and retry on the next flush.
+				vcd.logger.Error("append failed and cannot read existing file for merge; preserving file, retrying next flush", "err", readErr)
+				return
+			}
+			merged := append(existing, vcd.messages...)
+			if err := vcd.writeFullFile(merged); err != nil {
+				vcd.logger.Error("fallback merged write failed", "err", err)
+				return
 			}
 		}
 	}
@@ -327,7 +364,7 @@ func (vcd *VodChatDownloader) flush() {
 }
 
 // writeFullFile writes the complete file atomically using the shared helper.
-func (vcd *VodChatDownloader) writeFullFile() error {
+func (vcd *VodChatDownloader) writeFullFile(msgs []TwitchChatMessage) error {
 	chatData := TwitchChatData{
 		Platform:           "twitch",
 		ChannelLogin:       vcd.channelLogin,
@@ -335,7 +372,7 @@ func (vcd *VodChatDownloader) writeFullFile() error {
 		StreamID:           vcd.vodID,
 		DownloadedAt:       time.Now().UTC().Format(time.RFC3339),
 		MessageCount:       int(vcd.totalCount.Load()),
-		Messages:           vcd.messages,
+		Messages:           msgs,
 	}
 	return utils.WriteChatFileAtomic(vcd.outputPath, &chatData)
 }

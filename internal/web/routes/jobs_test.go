@@ -329,9 +329,11 @@ func TestJobGetByIDReturnsJob(t *testing.T) {
 		t.Fatalf("get by id: want 200, got %d", rec.Code)
 	}
 
-	// Finished jobs get long-cache headers
-	if cc := rec.Header().Get("Cache-Control"); cc == "" || cc == "no-cache, must-revalidate" {
-		t.Errorf("Cache-Control for finished: want immutable, got %q", cc)
+	// Finished jobs must ALSO revalidate: watched / resumePosition /
+	// chatOffset / trims keep mutating after completion, so an immutable
+	// long-cache header here served stale job state for up to a year.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache, must-revalidate" {
+		t.Errorf("Cache-Control for finished: want no-cache must-revalidate, got %q", cc)
 	}
 }
 

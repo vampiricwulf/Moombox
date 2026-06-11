@@ -55,7 +55,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 16ms ticks; all other jobs still get 500ms ticks which is enough for
 		// chat count updates on Upcoming jobs with early chat running.
 		if sel := a.taskList.SelectedJob(); sel != nil {
-			if p := a.progressStore.Get(sel.ID); p != nil {
+			p := a.progressStore.Get(sel.ID)
+			if p != nil || a.details.HasProgress() {
+				// A nil p while an overlay is showing means the store entry
+				// was deleted (terminal status) — push the nil through so
+				// the stale overlay clears; SetJob no longer resets it on
+				// same-job refreshes.
 				a.details.SetProgress(p)
 			}
 		}
@@ -342,6 +347,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.setFeedback(fmt.Sprintf("Trim deleted: %s", msg.Filename))
 		return a, nil
 
+	case deleteJobsResultMsg:
+		// Row removal + selection refresh already happened via the
+		// JobDeleted lifecycle events; this just reports completion.
+		if msg.Title != "" {
+			a.setFeedback("Deleted: " + msg.Title)
+		} else {
+			a.setFeedback(fmt.Sprintf("Deleted %d jobs", msg.Count))
+		}
+		return a, nil
+
 	case fetchOrphansResultMsg:
 		if msg.Err != "" {
 			a.filesDlg.SetError(msg.Err)
@@ -398,6 +413,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.installing = false
 			a.ffmpegCheck.installResult = "Verifying installation..."
 			return a, a.ffmpegCheckCmd("")
+		}
+		return a, nil
+
+	case ffmpegMenuActionMsg:
+		// Menu action resolved from huh form completion on a non-key cycle —
+		// dispatch exactly like the equivalent HandleKey action string.
+		switch {
+		case msg.Action == "skip":
+			a.ffmpegCheck.Close()
+		case msg.Action == "quit":
+			return a, tea.Quit
+		case strings.HasPrefix(msg.Action, "prepare:"):
+			method := strings.TrimPrefix(msg.Action, "prepare:")
+			return a, tea.Batch(a.ffmpegPrepareCmd(method), spinnerTickCmd(a.ffmpegCheck.spinner))
 		}
 		return a, nil
 
@@ -597,9 +626,10 @@ func (a *App) handleJobUpdate(ev *database.JobChange) {
 	// downloads) flow through progressStore and don't need list rebuilds.
 	if hasDisplayChange(ev.Changes) {
 		a.taskList.UpdateJob(job)
-		if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
-			a.details.SetJob(job)
-		}
+		// Refresh details from whatever is selected now — the update may
+		// have moved the job out of the visible (filtered) set, landing
+		// the selection on a different row.
+		a.updateSelectedJob()
 	}
 
 	// Only run status-transition logic when status actually changed
@@ -655,6 +685,9 @@ func (a *App) handleJobAdded(ev *database.JobAdded) {
 	a.taskList.AddJob(job)
 	a.statusBar.SetJobs(a.taskList.Jobs())
 	a.actionMenu.SetJobs(a.taskList.Jobs())
+	// The insert re-sorts the list — refresh the detail panel from the
+	// (possibly relocated) selection like the other lifecycle handlers.
+	a.updateSelectedJob()
 
 	// Update terminal title — adding a new job may change the
 	// active-stream count shown in the title.
@@ -705,6 +738,12 @@ func (a *App) handleTrimsChanged(job *database.Job) {
 	if sel := a.taskList.SelectedJob(); sel != nil && sel.ID == job.ID {
 		a.details.SetJob(job)
 	}
+	// Refresh the trim dialog's list when it's open for this job (mirrors
+	// the JobsUpdateMsg handler) — otherwise an open dialog shows stale
+	// trims after an add/delete lands through this path.
+	if a.trimDlg.IsVisible() && a.trimDlg.JobID() == job.ID {
+		a.refreshTrimList(job)
+	}
 }
 
 func (a *App) updateSelectedJob() {
@@ -732,7 +771,12 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	if a.setupWiz.IsVisible() {
 		return a.setupWiz.UpdateComponents(msg)
 	}
-	// actionMenu has no component routing
+	// actionMenu has no embedded components, but it must still block the
+	// fallthrough — otherwise keys pressed while the menu is open also
+	// scroll the hidden logs/details viewport underneath.
+	if a.actionMenu.IsVisible() {
+		return nil
+	}
 	if a.importDlg.IsVisible() {
 		return a.importDlg.UpdateComponents(msg)
 	}

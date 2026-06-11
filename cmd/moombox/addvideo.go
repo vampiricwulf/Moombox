@@ -25,6 +25,28 @@ func addVideo(input string) {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	if !cfg.ConfigLoaded {
+		// config.Load falls back to Defaults() without error when no config
+		// file exists — proceeding would silently create a fresh
+		// ./moombox.db in the CURRENT directory and report success while
+		// the daemon's real database never sees the job.
+		fmt.Fprintln(os.Stderr, "No config.toml found — run `moombox add` from the Moombox daemon's directory so the job lands in the daemon's database.")
+		os.Exit(1)
+	}
+
+	// Refuse a schema-version mismatch instead of migrating: database.Open
+	// migrates unconditionally, and doing that to the daemon's live DB from
+	// this side process (e.g. when the on-disk binary is newer than the
+	// running daemon during an update window) would leave the daemon's old
+	// code writing against a new schema. Also catches a missing DB file —
+	// the daemon, not `add`, should create it.
+	if v, verr := database.FileSchemaVersion(cfg.Paths.DatabasePath); verr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to inspect database %s: %v\nStart the Moombox daemon first.\n", cfg.Paths.DatabasePath, verr)
+		os.Exit(1)
+	} else if v != database.CurrentSchemaVersion() {
+		fmt.Fprintf(os.Stderr, "Database schema v%d does not match this binary (v%d) — start the Moombox daemon to migrate, then retry.\n", v, database.CurrentSchemaVersion())
+		os.Exit(1)
+	}
 
 	db, err := database.Open(cfg.Paths.DatabasePath)
 	if err != nil {

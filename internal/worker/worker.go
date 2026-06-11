@@ -366,6 +366,11 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		w.logger.Error("get job failed", "jobID", jobID, "err", err)
 		return
 	}
+	if job == nil {
+		// Row deleted between enqueue and processing — nothing to do.
+		w.logger.Debug("job vanished before processing", "jobID", jobID)
+		return
+	}
 
 	// Check if job is already in a terminal state (stale check)
 	if isTerminalStatus(job.Status) {
@@ -460,6 +465,13 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 			QualityPref:   job.QualityPreference,
 			MaxResolution: maxRes,
 		}
+		// Stable broadcast identity for engine resume validation: the live
+		// stream ID when known, else the job's video/VOD ID.
+		if result.TwitchStreamInfo != nil && result.TwitchStreamInfo.StreamID != "" {
+			variant.StreamID = result.TwitchStreamInfo.StreamID
+		} else {
+			variant.StreamID = job.VideoID
+		}
 		// For live streams, provide a stream-end check function and quality probe
 		if !result.IsVod && result.TwitchStreamInfo != nil && w.tw != nil {
 			login := result.TwitchStreamInfo.ChannelLogin
@@ -510,11 +522,16 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 // User-initiated cancels update status to Cancelled.
 // Shutdown cancels preserve original status so jobs resume on restart (matches TS).
 func (w *DownloadWorker) handleCancellation(job *database.Job, stagingDir string) {
+	// Consume the user-cancel flag BEFORE Complete — Complete clears any
+	// leftover flag as part of slot cleanup. Reading the flag is lock-only
+	// (no DB write), so the free-slot-before-DB-writes ordering below holds.
+	userCancelled := w.queue.WasCancelled(job.ID)
+
 	// Free the queue slot before any DB writes — symmetric with setJobError
 	// (see I2 race comment there). Idempotent against the deferred Complete.
 	w.queue.Complete(job.ID)
 
-	if w.queue.WasCancelled(job.ID) {
+	if userCancelled {
 		// User-initiated cancel: update status, notify
 		w.logger.Info("job cancelled by user", "jobID", job.ID)
 
@@ -951,6 +968,12 @@ func (w *DownloadWorker) MuxJob(jobID string) error {
 				"status": database.StatusError,
 				"error":  fmt.Sprintf("mux setup failed: %v", err),
 			})
+			return
+		}
+		if job == nil {
+			// Row deleted while the mux was queued — nothing to do (and no
+			// row left to flag as errored).
+			w.logger.Debug("MuxJob: job vanished before muxing", "jobID", jobID)
 			return
 		}
 

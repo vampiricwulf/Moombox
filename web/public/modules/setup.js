@@ -988,7 +988,9 @@ export class SetupController {
         copyBtn.size = "small";
         copyBtn.textContent = "Copy command";
         copyBtn.addEventListener("click", () => {
-          navigator.clipboard.writeText(sug.suggestion).catch(() => {});
+          // Shared helper: navigator.clipboard is undefined on plain-HTTP
+          // LAN origins (a direct call would throw, copying nothing).
+          this.app.copyTextToClipboard(sug.suggestion);
         });
 
         const recheckBtn = document.createElement("sl-button");

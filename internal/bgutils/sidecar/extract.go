@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -81,7 +82,12 @@ func extractIfNeeded(cacheDir string) error {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir cache dir: %w", err)
 	}
-	_ = utils.ApplyUserOnlyDACL(cacheDir)
+	// Warn on failure (the comment above promises log-and-continue): a
+	// silent miss leaves the extracted sidecar + Node binary with the
+	// looser inherited ACL and gives the operator no signal.
+	if daclErr := utils.ApplyUserOnlyDACL(cacheDir); daclErr != nil {
+		slog.Warn("could not restrict sidecar cache dir to current user", "dir", cacheDir, "err", daclErr)
+	}
 
 	if cacheLooksGood(cacheDir, stampPath, wantStamp) {
 		return nil

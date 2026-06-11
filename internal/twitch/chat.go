@@ -21,7 +21,12 @@ const (
 
 // ChatDownloader connects to Twitch IRC and records live chat messages.
 type ChatDownloader struct {
-	mu               sync.Mutex
+	mu sync.Mutex
+	// flushMu serializes flush() — it's called from the session goroutine
+	// (reconnect/exit paths) and from the periodic flusher goroutine; two
+	// interleaved flushes would snapshot overlapping batches and
+	// double-append them to the chat file.
+	flushMu          sync.Mutex
 	channelLogin     string
 	channelDisplay   string
 	channelID        string
@@ -34,6 +39,7 @@ type ChatDownloader struct {
 	dedup            *utils.OrderedDedup[string]
 	outputPath       string
 	running          bool
+	streamEnded      bool // set by MarkStreamEnded — distinguishes drain from interruption
 	totalCount       int
 	lastTimestampMs  int64 // Last message timestamp (epoch ms) for resume state
 	flushedToDisk    bool
@@ -222,6 +228,7 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 
 		cd.mu.Lock()
 		cd.running = false
+		streamEnded := cd.streamEnded
 		cd.mu.Unlock()
 		cd.flush()
 
@@ -230,7 +237,18 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 			return
 		}
 
-		// Clean exit: clear resume state
+		if !streamEnded {
+			// Interrupted exit (Stop() on shutdown/user-cancel, ctx
+			// cancellation, reconnect exhaustion) — NOT the end of the
+			// stream. Preserve resume state so the resumed session appends
+			// to chat.json instead of rewriting it from scratch (clearing
+			// here used to destroy all previously archived chat), and skip
+			// emote enrichment: enriched files must not receive appends.
+			cd.saveResumeState()
+			return
+		}
+
+		// Stream-over drain: clear resume state
 		cd.clearResumeState()
 
 		// Inject third-party emotes (7TV, BTTV, FFZ) after final flush.
@@ -345,13 +363,14 @@ func (cd *ChatDownloader) Stop() {
 }
 
 // MarkStreamEnded signals that the upstream live stream has ended and the
-// chat downloader should drain. For IRC this is identical to Stop — both
-// flip `running=false` and let the session loop unwind. The wrapper exists
-// for symmetry with VodChatDownloader.MarkStreamEnded (which is a no-op
-// because VOD pagination terminates on its own when the server says
-// hasNextPage=false). Keeping both methods on the TwitchChatDownloader
-// interface lets the orchestrator call MarkStreamEnded on either flavour
-// without type-asserting. Audit-finding twitch.md #45.
+// chat downloader should drain. Unlike Stop (an interruption — shutdown or
+// user cancel — after which the session must be resumable), MarkStreamEnded
+// is a CLEAN end: Start's exit path clears the resume state and runs emote
+// enrichment only on this flavour of shutdown. Audit-finding twitch.md #45 /
+// full-project review 2026-06-09 (resume state destroyed on restart).
 func (cd *ChatDownloader) MarkStreamEnded() {
-	cd.Stop()
+	cd.mu.Lock()
+	cd.streamEnded = true
+	cd.running = false
+	cd.mu.Unlock()
 }

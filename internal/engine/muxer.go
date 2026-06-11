@@ -64,7 +64,15 @@ func deriveFFprobePath(ffmpegPath string) string {
 	}
 	dir := filepath.Dir(ffmpegPath)
 	base := filepath.Base(ffmpegPath)
-	return filepath.Join(dir, strings.Replace(base, "ffmpeg", "ffprobe", 1))
+	// Case-insensitive match: Windows paths commonly carry arbitrary casing
+	// ("FFmpeg.exe"), and a failed replacement would silently point the
+	// ffprobe path at the ffmpeg binary itself.
+	if idx := strings.Index(strings.ToLower(base), "ffmpeg"); idx >= 0 {
+		return filepath.Join(dir, base[:idx]+"ffprobe"+base[idx+len("ffmpeg"):])
+	}
+	// Base name doesn't contain "ffmpeg" at all (renamed binary): fall back
+	// to an ffprobe sibling in the same directory, preserving the extension.
+	return filepath.Join(dir, "ffprobe"+filepath.Ext(base))
 }
 
 // MuxCopy muxes video and audio streams using codec copy (fast, no re-encoding).

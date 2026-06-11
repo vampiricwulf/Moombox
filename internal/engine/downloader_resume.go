@@ -56,6 +56,9 @@ type ResumeState struct {
 	BytesWritten int64  `json:"bytesWritten"`
 	Timestamp    int64  `json:"timestamp"`
 	BaseURL      string `json:"baseUrl"`
+	// StreamID mirrors DownloaderOptions.StreamID at save time; empty in
+	// legacy state files and for platforms that rely on URL identity.
+	StreamID string `json:"streamId,omitempty"`
 }
 
 func (d *SegmentDownloader) loadResume() (*ResumeState, error) {
@@ -102,6 +105,7 @@ func (d *SegmentDownloader) saveResume() {
 		BytesWritten: d.bytesWritten.Load(),
 		Timestamp:    time.Now().Unix(),
 		BaseURL:      d.getBaseURL(),
+		StreamID:     d.opts.StreamID,
 	}
 	data, err := json.Marshal(state)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error) {
 	curSeq := int(d.currentSeq.Load())
 	head := int(d.headSeq.Load())
+	// targetSeq is EXCLUSIVE: the catch-up downloads seqs [curSeq, targetSeq).
 	targetSeq := head - stayBehindSegments
 	targetSeq = max(targetSeq, curSeq+1) // At least catch up 1 segment
 	// Respect endSeq limit (for timestamp-based trimming)
@@ -87,20 +88,26 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 		})
 	}
 
-	// Feed work to workers
+	// Feed work to workers. The send must select on done: when the consumer
+	// below returns early (write error), the workers drain away and nothing
+	// reads work anymore — a bare send would block this goroutine forever.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil && d.logger != nil {
 				d.logger.Error("catch-up feeder goroutine panic", "panic", r)
 			}
 		}()
-		for seq := curSeq; seq <= targetSeq; seq++ {
+		defer close(work)
+		for seq := curSeq; seq < targetSeq; seq++ {
 			if d.isCancelled() || ctx.Err() != nil {
-				break
+				return
 			}
-			work <- segWork{seq: seq}
+			select {
+			case work <- segWork{seq: seq}:
+			case <-done:
+				return
+			}
 		}
-		close(work)
 	}()
 
 	// Close results when all workers complete
@@ -178,12 +185,12 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// fetchSegmentWithRetry used by catch-up workers. We still report the
 	// gap range so callers can track what's about to be retried.
 	// (Audit reports/engine.md Finding 4.)
-	if nextSeq <= targetSeq {
+	if nextSeq < targetSeq {
 		// Find how far the gap extends so the gap event covers the whole
 		// contiguous missing range up to the next buffered segment (or the
 		// end of the catch-up target if the tail is all missing).
 		gapEnd := nextSeq
-		for gapEnd <= targetSeq {
+		for gapEnd < targetSeq {
 			if _, ok := buffer[gapEnd]; ok {
 				break
 			}

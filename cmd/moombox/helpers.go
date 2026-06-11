@@ -151,13 +151,9 @@ func filterJobsByAgeThreshold(jobs []*database.Job, hideAgeDays float64) []*data
 	cutoff := time.Now().Add(-time.Duration(hideAgeDays*24) * time.Hour)
 	anyFiltered := false
 	for _, j := range jobs {
-		if j.Status == database.StatusFinished && j.UpdatedAt != "" {
-			if t, err := time.Parse(time.RFC3339, j.UpdatedAt); err == nil {
-				if t.Before(cutoff) {
-					anyFiltered = true
-					break
-				}
-			}
+		if jobArchivedAt(j, cutoff) {
+			anyFiltered = true
+			break
 		}
 	}
 	if !anyFiltered {
@@ -165,14 +161,25 @@ func filterJobsByAgeThreshold(jobs []*database.Job, hideAgeDays float64) []*data
 	}
 	filtered := make([]*database.Job, 0, len(jobs))
 	for _, j := range jobs {
-		if j.Status == database.StatusFinished && j.UpdatedAt != "" {
-			if t, err := time.Parse(time.RFC3339, j.UpdatedAt); err == nil {
-				if t.Before(cutoff) {
-					continue
-				}
-			}
+		if jobArchivedAt(j, cutoff) {
+			continue
 		}
 		filtered = append(filtered, j)
 	}
 	return filtered
+}
+
+// jobArchivedAt is the single-job archive classification shared by
+// filterJobsByAgeThreshold and the WS job_update broadcast gate. Keeping one
+// predicate prevents the two from drifting (an earlier int-truncated copy of
+// this logic suppressed broadcasts for jobs the list filter still showed).
+func jobArchivedAt(j *database.Job, cutoff time.Time) bool {
+	if j.Status != database.StatusFinished || j.UpdatedAt == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, j.UpdatedAt)
+	if err != nil {
+		return false
+	}
+	return t.Before(cutoff)
 }

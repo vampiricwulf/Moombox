@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -114,6 +115,14 @@ type (
 		Filename string
 		Err      string
 	}
+	// deleteJobsResultMsg reports completion of an async job delete.
+	// OnDeleteJob blocks in WaitForJobExit (up to 5s per job), so deletes
+	// run off the update loop and report back here. Title is set for the
+	// single-job path; batch deletes report Count only.
+	deleteJobsResultMsg struct {
+		Count int
+		Title string
+	}
 	fetchOrphansResultMsg struct {
 		Files []OrphanedFileEntry
 		Err   string
@@ -138,6 +147,14 @@ type (
 	}
 	ffmpegConfirmResultMsg struct {
 		Err string
+	}
+	// ffmpegMenuActionMsg carries a main/install menu action resolved when
+	// the huh form completes on a non-key cycle (huh finishes a selection
+	// via a follow-up message that only routeComponentMsg sees, never
+	// HandleKey). App handles it exactly like the equivalent HandleKey
+	// action string.
+	ffmpegMenuActionMsg struct {
+		Action string
 	}
 
 	// Async results for cookie refresh
@@ -274,8 +291,9 @@ type App struct {
 	// Audit reports/tui.md #26.
 	restartPending bool
 
-	// BubbleTea program reference (set by Run, used by QuitTUI)
-	program *tea.Program
+	// BubbleTea program reference (set by Run on the main goroutine;
+	// Send/QuitTUI read it from other goroutines — atomic for race safety)
+	program atomic.Pointer[tea.Program]
 
 	// windowTitle holds the current terminal window title, set by updateTerminalTitle()
 	// and applied via View()'s tea.View return value.

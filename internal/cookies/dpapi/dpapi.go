@@ -52,6 +52,14 @@ var ErrNotSupported = errors.New("DPAPI cookie extraction is Windows-only")
 const chromeV10Prefix = "v10"
 const chromeV11Prefix = "v11"
 
+// chromeV20Prefix tags Chrome's App-Bound Encryption cookies (Chrome 127+,
+// July 2024; Edge followed). Their key is bound to the browser via a
+// SYSTEM-level service and is NOT recoverable with a plain CURRENT_USER
+// CryptUnprotectData, so this fallback cannot decrypt them — but the prefix
+// must be recognized so the error explains WHY the fallback yields nothing
+// on current Chrome/Edge profiles (Brave kept v10 and still works).
+const chromeV20Prefix = "v20"
+
 // decryptV10Cookie decrypts a Chrome v10+ encrypted cookie value:
 //
 //	"v10" || nonce(12) || ciphertext || tag(16)
@@ -70,6 +78,8 @@ func decryptV10Cookie(masterKey, encrypted []byte) (string, error) {
 		prefix = chromeV10Prefix
 	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV11Prefix:
 		prefix = chromeV11Prefix
+	case len(encrypted) >= 3 && string(encrypted[:3]) == chromeV20Prefix:
+		return "", fmt.Errorf("cookie uses App-Bound Encryption (v20, Chrome 127+) which the DPAPI fallback cannot decrypt — use the auto-cookie browser setup instead")
 	default:
 		return "", fmt.Errorf("encrypted_value missing v10/v11 prefix (legacy DPAPI cookies are not supported)")
 	}

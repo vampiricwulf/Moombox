@@ -25,15 +25,25 @@ function matchTerm(term, job) {
       break;
     }
     case "status": {
-      const allowed = STATUS_FILTER_MAP[term.value];
-      result = allowed ? allowed.includes(job.status) : false;
+      // Case-insensitive like every other term type (the dropdown inserts
+      // lowercase, but hand-typed status:Active must work too). Unknown
+      // group keys fall back to a direct status-name comparison so real
+      // statuses (status:live, status:downloading) match instead of
+      // silently emptying the list.
+      const key = term.value.toLowerCase();
+      const allowed = STATUS_FILTER_MAP[key];
+      if (allowed) {
+        result = allowed.includes(job.status);
+      } else {
+        result = (job.status || "").toLowerCase() === key;
+      }
       break;
     }
     case "channel":
       result = (job.channelName || "").toLowerCase() === term.value.toLowerCase();
       break;
     case "platform":
-      result = (job.platform || "") === term.value;
+      result = (job.platform || "").toLowerCase() === term.value.toLowerCase();
       break;
     default:
       result = true;

@@ -2,13 +2,20 @@ package goja
 
 import (
 	"encoding/base64"
+	"fmt"
 
 	"github.com/dop251/goja"
 )
 
 // RegisterEncoding registers TextEncoder, TextDecoder, atob, and btoa on a Goja runtime.
+//
+// atob/btoa use browser "binary string" semantics: one UTF-16 code unit per
+// byte (Latin-1), NOT UTF-8. Obfuscated Google JS routinely round-trips raw
+// binary through these — a UTF-8 round-trip would collapse multi-byte
+// sequences (0xC3 0xB7 → one char instead of two) and mangle invalid ones to
+// U+FFFD, silently corrupting BotGuard/cipher payloads.
 func RegisterEncoding(vm *goja.Runtime) error {
-	// atob: base64 string -> decoded string
+	// atob: base64 string -> binary string (one code unit per byte)
 	if err := vm.Set("atob", func(call goja.FunctionCall) goja.Value {
 		encoded := call.Argument(0).String()
 		decoded, err := base64.StdEncoding.DecodeString(encoded)
@@ -19,16 +26,27 @@ func RegisterEncoding(vm *goja.Runtime) error {
 				panic(vm.NewGoError(err))
 			}
 		}
-		return vm.ToValue(string(decoded))
+		units := make([]rune, len(decoded))
+		for i, b := range decoded {
+			units[i] = rune(b)
+		}
+		return vm.ToValue(string(units))
 	}); err != nil {
 		return err
 	}
 
-	// btoa: string -> base64 encoded string
+	// btoa: binary string -> base64. Each code unit is one byte; units above
+	// 0xFF throw, matching the browser's InvalidCharacterError.
 	if err := vm.Set("btoa", func(call goja.FunctionCall) goja.Value {
 		input := call.Argument(0).String()
-		encoded := base64.StdEncoding.EncodeToString([]byte(input))
-		return vm.ToValue(encoded)
+		buf := make([]byte, 0, len(input))
+		for _, r := range input {
+			if r > 0xFF {
+				panic(vm.NewGoError(fmt.Errorf("btoa: invalid character %q (code unit > 0xFF)", r)))
+			}
+			buf = append(buf, byte(r))
+		}
+		return vm.ToValue(base64.StdEncoding.EncodeToString(buf))
 	}); err != nil {
 		return err
 	}

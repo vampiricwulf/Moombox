@@ -337,6 +337,17 @@ func (m *SettingsModel) ensureFieldVisible() {
 	}
 }
 
+// settingsContentHeight returns the number of content rows the current
+// section actually renders. Single source of truth shared by View()'s
+// renderFields/renderChannels/renderNotifications calls, ensureFieldVisible,
+// and mouse hit-testing — if the scroll-keeper assumed a taller window than
+// View renders, the focused field could sit permanently off-screen.
 func (m *SettingsModel) settingsContentHeight() int {
-	return max(m.height-10, 5) // borders, header, tabs, status, footer
+	h := max(m.height-2, 10) // matches View()'s box height
+	buttonLine := 1
+	if sections[m.sectionIndex].name == "Network" {
+		// Network reserves 4 extra lines for the compact security block.
+		return max(h-12-buttonLine, 1)
+	}
+	return max(h-8-buttonLine, 1)
 }

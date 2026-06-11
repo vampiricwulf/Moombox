@@ -591,8 +591,8 @@ func (s *runState) initServices(logLevelOverride string) error {
 				}
 			}()
 			s.cancel()
-			if s.quitTUI != nil {
-				s.quitTUI()
+			if quit := s.quitTUI.Load(); quit != nil {
+				(*quit)()
 			}
 		})
 	}

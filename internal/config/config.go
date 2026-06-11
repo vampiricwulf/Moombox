@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -701,7 +702,12 @@ func Save(cfg *MoomboxConfig, path string) error {
 	}
 	dacledDirsMu.Unlock()
 	if !alreadyApplied {
-		_ = utils.ApplyUserOnlyDACL(dir)
+		// Warn on failure (the comment above promises "logged-but-survived"):
+		// this protects the config file's password hash, and a silent miss
+		// gives the operator no signal that it stayed world-readable.
+		if daclErr := utils.ApplyUserOnlyDACL(dir); daclErr != nil {
+			slog.Warn("could not restrict config dir to current user", "dir", dir, "err", daclErr)
+		}
 	}
 
 	tmpPath := path + ".tmp"

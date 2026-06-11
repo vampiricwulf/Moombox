@@ -25,7 +25,14 @@ type ResumeStore[T any] struct {
 }
 
 // Save marshals state to JSON and writes it atomically to s.Path via a .tmp
-// intermediate + os.Rename. Returns nil when Path is empty (no-op).
+// intermediate + fsync + os.Rename. Returns nil when Path is empty (no-op).
+//
+// The fsync before rename matters (mirrors WriteChatFileAtomic): without it,
+// an OS crash / power loss can journal the rename while the data pages never
+// hit disk, leaving a zero-length/corrupt sidecar. Consumers treat any Load
+// failure as "no resume" and start fresh — for the YouTube chat downloader a
+// fresh start full-rewrites chat.json, so a corrupt sidecar would destroy
+// previously archived chat.
 func (s ResumeStore[T]) Save(state T) error {
 	if s.Path == "" {
 		return nil
@@ -35,8 +42,23 @@ func (s ResumeStore[T]) Save(state T) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	tmp := s.Path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open tmp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("fsync tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close tmp: %w", err)
 	}
 	if err := os.Rename(tmp, s.Path); err != nil {
 		os.Remove(tmp)

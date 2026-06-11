@@ -265,10 +265,15 @@ func (rs *RefreshService) doRefresh(ctx context.Context) {
 
 	changed := rs.status.YouTubeAuthenticated != prevStatus.YouTubeAuthenticated ||
 		rs.status.TwitchAuthenticated != prevStatus.TwitchAuthenticated
+	// Snapshot under the lock: a concurrent doRefresh (ticker vs CheckNow)
+	// writes rs.status under rs.mu, so reading it after Unlock is a race —
+	// and the callback could observe a status newer than the transition
+	// that triggered it.
+	statusCopy := rs.status
 	rs.mu.Unlock()
 
 	if changed && rs.OnAuthChange != nil {
-		rs.OnAuthChange(rs.status)
+		rs.OnAuthChange(statusCopy)
 	}
 
 	// Detect auth loss transitions: previously authenticated -> not authenticated,
@@ -695,14 +700,12 @@ func (rs *RefreshService) updateCookieFile(updates map[string]cookieUpdate) erro
 		updated[name] = true
 	}
 
-	// Write via temp file + rename to prevent corruption on partial failure
-	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(result.String()), 0o600); err != nil {
-		return fmt.Errorf("write temp cookie file: %w", err)
-	}
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename cookie file: %w", err)
+	// Atomic write via the shared same-package helper — it uses a unique
+	// temp name (the AutoCookieService writes the same cookies.txt, so a
+	// fixed ".tmp" would let the two writers interleave) and applies the
+	// memoized parent-dir DACL tightening.
+	if err := writeFileAtomic(filePath, []byte(result.String()), 0o600); err != nil {
+		return err
 	}
 
 	if len(updated) > 0 {

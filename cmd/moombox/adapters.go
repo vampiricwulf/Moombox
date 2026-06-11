@@ -14,12 +14,20 @@ import (
 
 // ytFormatAdapter adapts the YouTube service to the FormatRoutesDeps interface.
 type ytFormatAdapter struct {
-	svc *youtube.Service
-	cfg *config.MoomboxConfig
+	svc   *youtube.Service
+	store *config.Store
 }
 
 func (a *ytFormatAdapter) GetFormats(ctx context.Context, videoID string) (map[string]any, error) {
-	info, _, err := a.svc.GetFormats(ctx, videoID, a.cfg.Downloader.MaxVideoResolution, a.cfg.Downloader.Prefer60fps)
+	// Snapshot under the store lock — raw per-request field reads race
+	// config.Store.Update, which mutates the shared struct in place.
+	var maxRes int
+	var prefer60 bool
+	a.store.Read(func(c *config.MoomboxConfig) {
+		maxRes = c.Downloader.MaxVideoResolution
+		prefer60 = c.Downloader.Prefer60fps
+	})
+	info, _, err := a.svc.GetFormats(ctx, videoID, maxRes, prefer60)
 	if err != nil {
 		return nil, err
 	}

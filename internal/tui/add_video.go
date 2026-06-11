@@ -861,6 +861,13 @@ func extractMediaID(input string) (string, string) {
 		}
 	}
 
+	// Explicit Twitch VOD id ("v" + digits) before the YouTube check —
+	// current VOD ids are 10 digits, so "v" + 10 digits is 11 chars and
+	// would otherwise match the generic 11-char YouTube id pattern.
+	if len(input) >= 2 && len(input) <= 13 && input[0] == 'v' && isNumeric(input[1:]) {
+		return "tw_v" + input[1:], "twitch"
+	}
+
 	// Try YouTube
 	vid := extractYouTubeVideoID(input)
 	if vid != "" {

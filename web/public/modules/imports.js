@@ -174,10 +174,25 @@ export class ImportController {
     const channel = document.getElementById("import-channel").value.trim();
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/import");
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
-    if (title) xhr.setRequestHeader("X-Import-Title", title);
-    if (channel) xhr.setRequestHeader("X-Import-Channel", channel);
+    try {
+      xhr.open("POST", "/api/import");
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      // HTTP headers are Latin-1 only — setRequestHeader throws synchronously
+      // for CJK/emoji titles and mangles é-style chars. Percent-encode; the
+      // server decodes (url.QueryUnescape in import_routes.go).
+      if (title) xhr.setRequestHeader("X-Import-Title", encodeURIComponent(title));
+      if (channel) xhr.setRequestHeader("X-Import-Channel", encodeURIComponent(channel));
+    } catch (e) {
+      // Reset upload state — a throw here would otherwise wedge the tab
+      // (button stuck loading, cancel a no-op) until reload.
+      this.importUploading = false;
+      submitBtn.disabled = false;
+      submitBtn.loading = false;
+      this._hideCancelButton();
+      statusText.textContent = "Upload failed";
+      this.app.showToast("Upload failed: " + e.message, "danger");
+      return;
+    }
 
     xhr.upload.addEventListener("progress", (e) => {
       if (e.lengthComputable) {

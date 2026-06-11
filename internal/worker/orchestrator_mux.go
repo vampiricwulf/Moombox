@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -594,41 +596,152 @@ func (o *DownloadOrchestrator) muxSegment(
 func (o *DownloadOrchestrator) muxFromStaging(ctx context.Context, jobCtx *JobContext) error {
 	stagingDir := jobCtx.StagingDir
 
+	// Recover quality-split segment dirs (seg_N) that were never muxed —
+	// e.g. the job errored or was cancelled after a split. Without this,
+	// muxAndFinalize would see the existing DB segments and finalize while
+	// silently dropping the newest segment's data.
+	o.muxUnrecordedSegments(ctx, jobCtx)
+
 	// Discover segment files in priority order (DASH > HLS > VOD)
+	result := discoverStagingMedia(stagingDir)
+	if result == nil {
+		// No root media. A post-split job keeps its newest data in seg_N —
+		// if the recovery above (or earlier background muxes) produced DB
+		// segments, finalize from those.
+		if segments, err := o.db.GetSegments(jobCtx.Job.ID); err == nil && len(segments) > 0 {
+			return o.finalizeMultiSegmentJob(ctx, jobCtx, segments)
+		}
+		return fmt.Errorf("no segment files found in staging directory")
+	}
+
+	return o.muxAndFinalize(ctx, jobCtx, result)
+}
+
+// discoverStagingMedia returns a DownloadResult pointing at the recognized
+// media files inside dir (DASH > HLS > VOD priority), or nil when dir holds
+// no media.
+func discoverStagingMedia(dir string) *DownloadResult {
 	result := &DownloadResult{}
 
 	// DASH segments
-	if fileExists(filepath.Join(stagingDir, "video_stream")) {
-		result.VideoPath = filepath.Join(stagingDir, "video_stream")
+	if fileExists(filepath.Join(dir, "video_stream")) {
+		result.VideoPath = filepath.Join(dir, "video_stream")
 		result.HasVideo = true
 	}
-	if fileExists(filepath.Join(stagingDir, "audio_stream")) {
-		result.AudioPath = filepath.Join(stagingDir, "audio_stream")
+	if fileExists(filepath.Join(dir, "audio_stream")) {
+		result.AudioPath = filepath.Join(dir, "audio_stream")
 		result.HasAudio = true
 	}
 
 	// HLS (single muxed stream)
-	if !result.HasVideo && fileExists(filepath.Join(stagingDir, "video.ts")) {
-		result.VideoPath = filepath.Join(stagingDir, "video.ts")
+	if !result.HasVideo && fileExists(filepath.Join(dir, "video.ts")) {
+		result.VideoPath = filepath.Join(dir, "video.ts")
 		result.HasVideo = true
 		result.IsHls = true
 	}
 
 	// VOD
-	if !result.HasVideo && fileExists(filepath.Join(stagingDir, "video.mp4")) {
-		result.VideoPath = filepath.Join(stagingDir, "video.mp4")
+	if !result.HasVideo && fileExists(filepath.Join(dir, "video.mp4")) {
+		result.VideoPath = filepath.Join(dir, "video.mp4")
 		result.HasVideo = true
 	}
-	if !result.HasAudio && fileExists(filepath.Join(stagingDir, "audio.m4a")) {
-		result.AudioPath = filepath.Join(stagingDir, "audio.m4a")
+	if !result.HasAudio && fileExists(filepath.Join(dir, "audio.m4a")) {
+		result.AudioPath = filepath.Join(dir, "audio.m4a")
 		result.HasAudio = true
 	}
 
 	if !result.HasVideo && !result.HasAudio {
-		return fmt.Errorf("no segment files found in staging directory")
+		return nil
+	}
+	return result
+}
+
+// muxUnrecordedSegments muxes any quality-split staging segment whose index
+// has no row in the segments table. Times and quality are derived post-hoc:
+// the media file's mtime approximates the segment end, and an ffprobe of the
+// raw stream supplies dimensions and duration. Best-effort — individual
+// failures are logged and skipped so the rest of the recovery proceeds.
+func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx *JobContext) {
+	entries, err := os.ReadDir(jobCtx.StagingDir)
+	if err != nil {
+		return
 	}
 
-	return o.muxAndFinalize(ctx, jobCtx, result)
+	type stagedSeg struct {
+		idx int
+		dir string
+	}
+	var segDirs []stagedSeg
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "seg_") {
+			continue
+		}
+		n, convErr := strconv.Atoi(strings.TrimPrefix(e.Name(), "seg_"))
+		if convErr != nil || n < 0 {
+			continue
+		}
+		segDirs = append(segDirs, stagedSeg{idx: n, dir: filepath.Join(jobCtx.StagingDir, e.Name())})
+	}
+	if len(segDirs) == 0 {
+		return // no quality splits — nothing to recover
+	}
+	sort.Slice(segDirs, func(i, j int) bool { return segDirs[i].idx < segDirs[j].idx })
+
+	recorded := map[int]bool{}
+	segments, err := o.db.GetSegments(jobCtx.Job.ID)
+	if err != nil {
+		// Can't tell what's already muxed — bail rather than risk duplicate
+		// segment rows; muxAndFinalize degrades the same way on this error.
+		o.logger.Warn("segment recovery: failed to read segments", "err", err, "jobID", jobCtx.Job.ID)
+		return
+	}
+	for _, s := range segments {
+		recorded[s.SegmentIndex] = true
+	}
+
+	// Root staging files are segment 0 — unless seg_0 exists, in which case
+	// the root data was a short segment the pipeline deliberately skipped.
+	if segDirs[0].idx != 0 && !recorded[0] && discoverStagingMedia(jobCtx.StagingDir) != nil {
+		segDirs = append([]stagedSeg{{idx: 0, dir: jobCtx.StagingDir}}, segDirs...)
+	}
+
+	for _, sd := range segDirs {
+		if recorded[sd.idx] {
+			continue
+		}
+		media := discoverStagingMedia(sd.dir)
+		if media == nil {
+			continue
+		}
+		mediaPath := media.VideoPath
+		if mediaPath == "" {
+			mediaPath = media.AudioPath
+		}
+		unixEnd := time.Now().Unix()
+		if info, statErr := os.Stat(mediaPath); statErr == nil {
+			unixEnd = info.ModTime().Unix()
+		}
+		unixStart := unixEnd
+		quality := QualityInfo{Label: "unknown"}
+		if probe := o.runFFprobe(ctx, mediaPath); probe != nil {
+			if probe.Height > 0 {
+				quality = QualityInfo{
+					Width:  probe.Width,
+					Height: probe.Height,
+					FPS:    probe.Fps,
+					Label:  FormatQualityLabel(probe.Height, probe.Fps),
+				}
+			}
+			if probe.DurationSec > 0 {
+				unixStart = unixEnd - int64(probe.DurationSec)
+			}
+		}
+		if seg, muxErr := o.muxSegment(ctx, jobCtx, sd.idx, unixStart, unixEnd, quality, media); muxErr != nil {
+			o.logger.Error("failed to mux recovered segment", "segment", sd.idx, "err", muxErr, "jobID", jobCtx.Job.ID)
+		} else if seg != nil {
+			o.logger.Info("recovered unmuxed quality segment", "segment", sd.idx, "file", seg.Filename, "jobID", jobCtx.Job.ID)
+		}
+	}
 }
 
 func fileExists(path string) bool {

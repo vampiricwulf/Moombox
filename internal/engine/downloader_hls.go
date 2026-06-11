@@ -259,6 +259,29 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 						return nil
 					}
 				}
+				// Stream is live but our position sits FAR beyond the
+				// playlist's entire window: the media-sequence numbering
+				// restarted under us (e.g. a resumed job whose channel ended
+				// one broadcast and started another while we were down). The
+				// margin matters — a lagging CDN replica can legitimately
+				// serve a window a few segments behind our edge position for
+				// several refreshes, and ending the recording on that
+				// transient would permanently lose the rest of the stream.
+				// A genuine numbering restart overshoots by hundreds of
+				// segments, not a handful. End cleanly so the recording
+				// muxes; the monitor picks the new broadcast up as a fresh
+				// job.
+				const seqRegressionMargin = 60 // ~2 min of 2s segments
+				if curSeq > pl.MediaSequence+len(pl.Segments)+seqRegressionMargin {
+					d.logger.Warn("[Downloader] HLS media sequence regressed far below resume position, ending recording",
+						"curSeq", curSeq, "playlistEnd", pl.MediaSequence+len(pl.Segments))
+					d.streamEnded.Store(true)
+					return nil
+				}
+				// Reset so the next status probe waits another full stale
+				// window instead of firing on every playlist refresh (~2s)
+				// for as long as the stall lasts.
+				staleCount = 0
 			}
 		} else {
 			staleCount = 0
@@ -345,20 +368,26 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 		})
 	}
 
-	// Feed work to workers
+	// Feed work to workers. The send must select on done: when the consumer
+	// below returns early (write error), the workers drain away and nothing
+	// reads work anymore — a bare send would block this goroutine forever.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil && d.logger != nil {
 				d.logger.Error("VOD feeder goroutine panic", "panic", r)
 			}
 		}()
+		defer close(work)
 		for i, seg := range pl.Segments {
 			if d.isCancelled() || ctx.Err() != nil {
-				break
+				return
 			}
-			work <- segWork{idx: i, segURL: seg.URL}
+			select {
+			case work <- segWork{idx: i, segURL: seg.URL}:
+			case <-done:
+				return
+			}
 		}
-		close(work)
 	}()
 
 	// Close results when all workers done

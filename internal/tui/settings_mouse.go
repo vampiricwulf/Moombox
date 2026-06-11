@@ -88,6 +88,9 @@ func (m *SettingsModel) handleMouseScroll(down bool) {
 				m.channelIndex--
 			}
 		}
+		// Moving the selection invalidates a pending delete confirm —
+		// keyboard nav and clicks already clear it.
+		m.channelDeleteConf = false
 	case "Integrations":
 		if m.notifMode == "edit" {
 			if down {
@@ -113,6 +116,8 @@ func (m *SettingsModel) handleMouseScroll(down bool) {
 				m.notifIndex--
 			}
 		}
+		// See the Channels branch — confirm must not carry over.
+		m.notifDeleteConf = false
 	case "Network":
 		if m.secMode != securityStatus {
 			return // No scrolling in security editor
@@ -359,9 +364,10 @@ func (m *SettingsModel) handleMouseChannelClick(contentY int) {
 		return
 	}
 
-	// List mode: line 0 is action bar, then channels start at line 1
-	chIdx := contentY - 1
-	if chIdx >= 0 && chIdx < len(m.channels) {
+	// List mode: line 0 is action bar, then channels start at line 1.
+	// The list renders a window around the selection — offset by its start.
+	chIdx := listWindowStart(m.channelIndex, m.settingsContentHeight()) + contentY - 1
+	if contentY >= 1 && chIdx < len(m.channels) {
 		m.channelIndex = chIdx
 		m.channelDeleteConf = false
 	}
@@ -389,9 +395,10 @@ func (m *SettingsModel) handleMouseNotifClick(contentY int) {
 		return
 	}
 
-	// List mode: line 0 is action bar, then notifications start at line 1
-	nIdx := contentY - 1
-	if nIdx >= 0 && nIdx < len(m.notifications) {
+	// List mode: line 0 is action bar, then notifications start at line 1.
+	// The list renders a window around the selection — offset by its start.
+	nIdx := listWindowStart(m.notifIndex, m.settingsContentHeight()) + contentY - 1
+	if contentY >= 1 && nIdx < len(m.notifications) {
 		m.notifIndex = nIdx
 		m.notifDeleteConf = false
 	}

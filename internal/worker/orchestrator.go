@@ -91,8 +91,9 @@ func (o *DownloadOrchestrator) Execute(ctx context.Context, jobCtx *JobContext, 
 func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool, existingChat *chat.ChatDownloader) error {
 	o.logger.Info("starting download", "videoID", jobCtx.Job.VideoID, "isVod", isVod)
 
-	// Pre-execution cancellation check — if job was cancelled between queuing and execution
-	if freshJob, err := o.db.GetJob(jobCtx.Job.ID); err == nil && freshJob.Status == database.StatusCancelled {
+	// Pre-execution cancellation check — if job was cancelled between queuing and execution.
+	// GetJob returns (nil, nil) when the row was deleted out from under us.
+	if freshJob, err := o.db.GetJob(jobCtx.Job.ID); err == nil && freshJob != nil && freshJob.Status == database.StatusCancelled {
 		if existingChat != nil {
 			existingChat.Stop()
 		}
@@ -428,16 +429,19 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		if jobCtx.Job.StartTime != nil {
 			startSec = *jobCtx.Job.StartTime
 		}
-		endSec := 0.0
-		if jobCtx.Job.EndTime != nil {
-			endSec = *jobCtx.Job.EndTime
-		} else if jobCtx.Job.LengthSeconds != nil {
-			endSec = float64(*jobCtx.Job.LengthSeconds)
-		}
-		if endSec > startSec {
-			// Re-fetch job to get updated fields (output_file set by muxAndFinalize)
-			freshJob, _ := o.db.GetJob(jobCtx.Job.ID)
-			if freshJob != nil && freshJob.Status == database.StatusFinished {
+		// Re-fetch job FIRST: muxAndFinalize set output_file and probed
+		// length_seconds after jobCtx.Job was last refreshed, so for a live
+		// recording with only StartTime set, the stale row would compute
+		// endSec == 0 and silently skip the requested trim.
+		freshJob, _ := o.db.GetJob(jobCtx.Job.ID)
+		if freshJob != nil && freshJob.Status == database.StatusFinished {
+			endSec := 0.0
+			if jobCtx.Job.EndTime != nil {
+				endSec = *jobCtx.Job.EndTime
+			} else if freshJob.LengthSeconds != nil {
+				endSec = float64(*freshJob.LengthSeconds)
+			}
+			if endSec > startSec {
 				_, trimErr := trimService.CreateTrim(ctx, freshJob, startSec, endSec, nil)
 				if trimErr != nil {
 					o.logger.Error("post-download trim failed", "err", trimErr, "jobID", jobCtx.Job.ID)

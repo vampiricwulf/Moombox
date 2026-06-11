@@ -236,13 +236,12 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			return
 		}
 
-		// Cache headers: only truly finished jobs get long-lived cache.
-		// Error/Cancelled may be retried, so they need no-cache.
-		if job.Status == database.StatusFinished {
-			rw.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		}
+		// Cache headers: always revalidate. Even Finished jobs mutate after
+		// completion (watched, resumePosition, chatOffset, trims), so an
+		// immutable year-long cache here served stale state to any consumer
+		// that didn't explicitly bypass the browser cache. Long-lived
+		// immutable caching belongs on the media/thumbnail file routes only.
+		rw.Header().Set("Cache-Control", "no-cache, must-revalidate")
 
 		var stagingBase string
 		store.Read(func(c *config.MoomboxConfig) {
@@ -808,6 +807,10 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 					},
 				)
 			}
+			// Content-Type must be set before the explicit WriteHeader —
+			// headers set afterwards are silently dropped for non-gzip
+			// clients (jsonResponse's own Set comes too late here).
+			rw.Header().Set("Content-Type", "application/json")
 			rw.WriteHeader(http.StatusCreated)
 			jsonResponse(rw, job)
 			return
@@ -931,6 +934,8 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			)
 		}
 
+		// Set before WriteHeader — see the Twitch-create path above.
+		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusCreated)
 		jsonResponse(rw, job)
 	})
@@ -1221,15 +1226,26 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 
 var (
 	youtubeURLRe = regexp.MustCompile(`(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/live/)([a-zA-Z0-9_-]{11})`)
-	twitchURLRe  = regexp.MustCompile(`(?:twitch\.tv/)([a-zA-Z0-9_]+)`)
-	bracketIDRe  = regexp.MustCompile(`\[([a-zA-Z0-9_-]{11})\]`)
+	// Anchored to the channel-URL host shape: a bare substring match would
+	// capture "videos" from twitch.tv/videos/<id> (creating a bogus
+	// "videos" channel job) and the clip slug from clips.twitch.tv/<slug>.
+	// VOD/clip URLs are deliberately NOT matched here — callers without a
+	// videoId get an error instead of a wrong job type.
+	twitchURLRe = regexp.MustCompile(`(?:^|/)(?:www\.|m\.)?twitch\.tv/([a-zA-Z0-9_]+)(?:[/?#]|$)`)
+	bracketIDRe = regexp.MustCompile(`\[([a-zA-Z0-9_-]{11})\]`)
 )
 
 func extractVideoIDFromURL(url string) string {
-	for _, re := range []*regexp.Regexp{youtubeURLRe, twitchURLRe} {
-		if m := re.FindStringSubmatch(url); m != nil {
-			return m[1]
+	if m := youtubeURLRe.FindStringSubmatch(url); m != nil {
+		return m[1]
+	}
+	if m := twitchURLRe.FindStringSubmatch(url); m != nil {
+		// Reserved path segments are not channel logins.
+		switch strings.ToLower(m[1]) {
+		case "videos", "directory", "clip", "clips", "settings", "subscriptions":
+			return ""
 		}
+		return m[1]
 	}
 	return ""
 }

@@ -91,7 +91,11 @@ type runState struct {
 
 	// --- Lifecycle control ---
 	restartRequested atomic.Bool
-	quitTUI          func() // set by TUI section; called by triggerRestart
+	// quitTUI is written by runTUI on the main goroutine and read by
+	// triggerRestart's grace-timer goroutine — atomic (like the callback
+	// slots below) so a restart-triggering request that lands before
+	// runTUI starts neither races nor is silently dropped.
+	quitTUI atomic.Pointer[func()]
 
 	// --- Shared closures (populated by initServices) ---
 	triggerRestart     func(source string)

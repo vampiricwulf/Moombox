@@ -99,6 +99,14 @@ func (m *StatusBarModel) View() string {
 
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
+
+	// If both sides don't fit, drop the left controls so the disk/cookie
+	// indicators stay visible (mirrors the task-list header overflow drop).
+	if leftW+1+rightW > m.width {
+		left = ""
+		leftW = 0
+	}
+
 	padding := max(m.width-leftW-rightW, 1)
 
 	bar := left + strings.Repeat(" ", padding) + right

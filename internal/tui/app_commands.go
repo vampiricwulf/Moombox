@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -453,34 +454,40 @@ func (a *App) resolveChannelCmd(input string) tea.Cmd {
 	})
 }
 
-// openBrowser launches the default browser for the given URL.
-// Moombox is Windows-only (see CLAUDE.md), so this uses the Windows shell's
-// `start` command. Other-OS branches were removed as dead code per audit
-// reports/tui.md Finding 33.
+// openBrowser launches the default browser for the given URL using the
+// platform-appropriate opener (mirrors OnOpenFolder in cmd/moombox/tui_wiring.go).
 func openBrowser(url string) {
-	cmd := exec.Command("cmd", "/c", "start", "", url)
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
 	_ = cmd.Start()
 }
 
 // Run starts the TUI program.
 func Run(app *App) error {
 	p := tea.NewProgram(app)
-	app.program = p
+	app.program.Store(p)
 	_, err := p.Run()
 	return err
 }
 
 // QuitTUI programmatically exits the TUI (used by restart to unblock Run).
 func (a *App) QuitTUI() {
-	if a.program != nil {
-		a.program.Quit()
+	if p := a.program.Load(); p != nil {
+		p.Quit()
 	}
 }
 
 // Send delivers an external message into the TUI's Update loop.
 // Safe to call from any goroutine. No-op if the program hasn't started yet.
 func (a *App) Send(msg tea.Msg) {
-	if a.program != nil {
-		a.program.Send(msg)
+	if p := a.program.Load(); p != nil {
+		p.Send(msg)
 	}
 }

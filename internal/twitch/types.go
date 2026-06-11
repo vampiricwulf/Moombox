@@ -89,8 +89,12 @@ type TwitchChatData struct {
 	RecordingStartTime string              `json:"recordingStartTime,omitempty"`
 	DownloadedAt       string              `json:"downloadedAt"`
 	MessageCount       int                 `json:"messageCount"`
-	Messages           []TwitchChatMessage `json:"messages"`
-	Emotes             *TwitchEmoteData    `json:"emotes,omitempty"`
+	// Emotes must serialize BEFORE Messages: AppendChatMessages locates the
+	// messages array via "last ] in the file tail", so the messages array has
+	// to stay the final field. With emotes trailing, any append after emote
+	// enrichment would splice chat into the emotes block and corrupt the JSON.
+	Emotes   *TwitchEmoteData    `json:"emotes,omitempty"`
+	Messages []TwitchChatMessage `json:"messages"`
 }
 
 // TwitchEmoteData holds resolved third-party emotes.

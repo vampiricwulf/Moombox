@@ -223,8 +223,12 @@ func ResolveYouTubeChannel(ctx context.Context, urlPath string) (*YouTubeChannel
 		}
 		// Don't retry 4xx — those are deterministic ("not found", auth
 		// missing, etc.) and won't fix themselves with a second try.
+		// EXCEPT 429/408: rate-limiting and request-timeout are transient
+		// by definition — exactly what this retry loop exists for (adding
+		// several channels back-to-back can draw a 429 from YouTube).
 		es := err.Error()
-		if strings.Contains(es, "HTTP 4") {
+		if strings.Contains(es, "HTTP 4") &&
+			!strings.Contains(es, "HTTP 429") && !strings.Contains(es, "HTTP 408") {
 			return nil, fmt.Errorf("failed to fetch channel page: %w", err)
 		}
 		if ctx.Err() != nil {

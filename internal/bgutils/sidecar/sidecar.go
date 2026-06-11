@@ -52,7 +52,7 @@ type Logger interface {
 // to 60s and is a backstop for a genuinely wedged sidecar — the sidecar
 // emits a `ready` notification when its synchronous init completes, so
 // healthy startup latency does not race against this deadline.
-// RequestTimeout defaults to 30s.
+// RequestTimeout defaults to 90s (sized for a cold-path PO-token mint).
 //
 // V8HardLimitMB sets V8's --max-old-space-size; hitting this DOES OOM-abort
 // the sidecar (V8 has no graceful soft stop). Set it well above the soft
@@ -133,7 +133,13 @@ func New(cfg Config) *Sidecar {
 		cfg.StartupTimeout = 60 * time.Second
 	}
 	if cfg.RequestTimeout == 0 {
-		cfg.RequestTimeout = 30 * time.Second
+		// Generous enough for the cold-path mint — a cache-miss
+		// generatePoToken runs two network round-trips (challenge fetch +
+		// GenerateIT) plus a full BotGuard interpreter pass inside the
+		// sidecar, which can take tens of seconds on slow hardware — while
+		// still bounding a genuinely wedged V8 (the failure this timeout
+		// exists for, where previously callers hung for the job lifetime).
+		cfg.RequestTimeout = 90 * time.Second
 	}
 	return &Sidecar{
 		cfg:     cfg,
@@ -287,7 +293,16 @@ func (s *Sidecar) Stop() error {
 		// latency -- 2s covers a slow tick + kernel reap, beyond which
 		// we kill rather than starve the wider shutdown budget.
 		done := make(chan error, 1)
-		go func() { done <- s.cmd.Wait() }()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Must still deliver — a lost send would deadlock the
+					// receive below.
+					done <- fmt.Errorf("sidecar wait panic: %v", r)
+				}
+			}()
+			done <- s.cmd.Wait()
+		}()
 		select {
 		case err := <-done:
 			if err != nil {
@@ -535,6 +550,17 @@ func (s *Sidecar) call(ctx context.Context, method string, params map[string]any
 		return errors.New("sidecar: unhealthy")
 	}
 
+	// Bound every RPC with RequestTimeout. Callers pass long-lived job
+	// contexts (live streams run for days), and the sidecar's JS event loop
+	// is single-threaded — one request wedged inside V8 would otherwise
+	// hang its caller indefinitely while the process still looks healthy
+	// (stdout stays open, so readPump never EOFs).
+	if s.cfg.RequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.cfg.RequestTimeout)
+		defer cancel()
+	}
+
 	id := s.nextReqID.Add(1)
 	ch := make(chan rpcResponse, 1)
 	s.pendingMu.Lock()
@@ -596,6 +622,20 @@ func (s *Sidecar) writeRequest(req rpcRequest) error {
 // hanging until StartupTimeout.
 func (s *Sidecar) readPump() {
 	defer s.pumpsDone.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			s.cfg.Logger.Error("sidecar: readPump panic", "panic", fmt.Sprint(r))
+			// With the pump dead no response will ever arrive: unblock a
+			// Start still waiting on ready and fail pending callers.
+			s.readyOnce.Do(func() {
+				s.readyErr = fmt.Errorf("sidecar readPump panic: %v", r)
+				close(s.readyCh)
+			})
+			if !s.stopping.Load() {
+				s.markUnhealthy("readPump panic")
+			}
+		}
+	}()
 
 	scanner := bufio.NewScanner(s.stdout)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1 MiB max line; PO tokens are << 1 KiB
@@ -673,6 +713,11 @@ func (s *Sidecar) readPump() {
 //   - everything else        → Debug  (unknown unprefixed stderr)
 func (s *Sidecar) stderrPump() {
 	defer s.pumpsDone.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			s.cfg.Logger.Error("sidecar: stderrPump panic", "panic", fmt.Sprint(r))
+		}
+	}()
 	scanner := bufio.NewScanner(s.stderr)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {

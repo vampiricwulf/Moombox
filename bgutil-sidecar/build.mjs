@@ -86,6 +86,30 @@ mkdirSync(embedDir, { recursive: true });
 // for the life of the Node.js process, which would prevent the npm prune
 // step (1c) from deleting the @esbuild/win32-x64 package.
 // ---------------------------------------------------------------------------
+// esbuild is a devDependency, but the documented production install for a
+// fresh checkout is `npm ci --omit=dev` (CLAUDE.md) — which omits it and
+// used to fail this step on the first build. Self-heal by restoring devDeps
+// (same command as step 3b) when esbuild is missing.
+const esbuildPkg = resolve(nmDir, "esbuild", "package.json");
+let haveEsbuild = true;
+try {
+    statSync(esbuildPkg);
+} catch {
+    haveEsbuild = false;
+}
+if (!haveEsbuild) {
+    console.log("esbuild devDependency missing (production-only install) — restoring devDeps...");
+    const devInstall = spawnSync(
+        "npm",
+        ["install", "--no-audit", "--no-fund", "--ignore-scripts"],
+        { cwd: __dirname, stdio: "inherit", shell: true },
+    );
+    if (devInstall.status !== 0) {
+        console.error(`npm install (devDep restore) exited with status ${devInstall.status}`);
+        process.exit(devInstall.status ?? 1);
+    }
+}
+
 const ejsEntry = resolve(__dirname, "vendor", "ejs", "src", "yt", "solver", "main.ts");
 const ejsBundle = resolve(__dirname, "vendor", "ejs.bundle.js");
 const esbuildResult = spawnSync(
@@ -134,14 +158,23 @@ if (pruneResult.status !== 0) {
 // ---------------------------------------------------------------------------
 // Use cwd=__dirname + relative entries so paths inside the archive are
 // relative to the sidecar root (no `bgutil-sidecar/` prefix).
-// Also pass --force-local so GNU tar on Git Bash doesn't misread the
-// `D:` drive prefix as a `host:path` remote-server reference.
+// GNU tar needs --force-local so the `D:` drive prefix isn't misread as a
+// `host:path` remote-server reference; bsdtar (Windows' system tar.exe)
+// rejects that flag but handles drive paths natively — retry without it.
 const tarOut = `dist/sidecar.tar.gz`;
-const result = spawnSync(
+let result = spawnSync(
     "tar",
     ["--force-local", "-czf", tarOut, ...productionEntries],
     { cwd: __dirname, stdio: "inherit" },
 );
+if (result.status !== 0) {
+    console.log("tar with --force-local failed; retrying without (bsdtar)");
+    result = spawnSync(
+        "tar",
+        ["-czf", tarOut, ...productionEntries],
+        { cwd: __dirname, stdio: "inherit" },
+    );
+}
 if (result.status !== 0) {
     console.error(`tar exited with status ${result.status}`);
     process.exit(result.status ?? 1);

@@ -49,6 +49,12 @@ type Logger struct {
 
 	// Toggleable stdout writer (disabled during TUI)
 	stdout *switchableWriter
+	// stderrGate mirrors stdout suppression for the logger's own
+	// diagnostics (rotation failures, slow-subscriber drops): while the
+	// TUI owns the terminal, a raw stderr write scribbles over the
+	// alternate screen, so diagf reroutes those lines into the ring
+	// buffer + subscribers (the TUI log panel) instead.
+	stderrGate *switchableWriter
 
 	// File rotation
 	filePath    string
@@ -133,6 +139,8 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	// when the TUI is running (the TUI log panel uses Subscribe() instead).
 	l.stdout = &switchableWriter{w: os.Stdout}
 	l.stdout.enabled.Store(true)
+	l.stderrGate = &switchableWriter{w: os.Stderr}
+	l.stderrGate.enabled.Store(true)
 	var writers []io.Writer
 	writers = append(writers, l.stdout)
 	if l.file != nil {
@@ -149,7 +157,11 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	opts := &slog.HandlerOptions{
 		Level: l.level,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
+			// The Kind check is load-bearing: ReplaceAttr also runs for USER
+			// attributes, and Value.Time() panics on non-KindTime values —
+			// a caller writing log.Info("x", "time", "12:30") would
+			// otherwise crash inside the handler.
+			if a.Key == slog.TimeKey && len(groups) == 0 && a.Value.Kind() == slog.KindTime {
 				t := a.Value.Time()
 				if t.IsZero() {
 					t = time.Now()
@@ -170,6 +182,12 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 	defer l.fileMu.Unlock()
 
 	if l.file == nil {
+		// A goroutine that passed log()'s closed-check but lost the fileMu
+		// race against Close must not REOPEN the file after close — that
+		// would leave an fd nobody owns.
+		if l.closed.Load() {
+			return len(p), nil
+		}
 		// Retry-on-write: if rotate previously failed to reopen the log
 		// file (transient ENOSPC, file permissions reset, antivirus
 		// holding the file briefly, etc.), try again here so the next
@@ -235,24 +253,24 @@ func (l *Logger) rotate() {
 		src := fmt.Sprintf("%s.%d", l.filePath, i)
 		dst := fmt.Sprintf("%s.%d", l.filePath, i+1)
 		if err := os.Rename(src, dst); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "logger: rotation rename %s -> %s failed: %v\n", src, dst, err)
+			l.diagf("logger: rotation rename %s -> %s failed: %v", src, dst, err)
 		}
 	}
 
 	// Rename current to .1
 	if err := os.Rename(l.filePath, l.filePath+".1"); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "logger: rotation rename current log failed: %v\n", err)
+		l.diagf("logger: rotation rename current log failed: %v", err)
 	}
 
 	// Remove excess files
 	excess := fmt.Sprintf("%s.%d", l.filePath, l.maxFiles+1)
 	if err := os.Remove(excess); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "logger: rotation remove excess file failed: %v\n", err)
+		l.diagf("logger: rotation remove excess file failed: %v", err)
 	}
 
-	// Open fresh file — if this fails, log to stderr so we don't silently lose all logging
+	// Open fresh file — if this fails, surface it so we don't silently lose all logging
 	if err := l.openFile(); err != nil {
-		fmt.Fprintf(os.Stderr, "logger: rotation failed to open new log file: %v\n", err)
+		l.diagf("logger: rotation failed to open new log file: %v", err)
 	}
 }
 
@@ -361,7 +379,16 @@ func (l *Logger) broadcast(line string) {
 			last := l.dropWarnLast.Load()
 			if now-last >= int64(time.Second) {
 				if l.dropWarnLast.CompareAndSwap(last, now) {
-					fmt.Fprintf(os.Stderr, "logger: dropped log line for slow subscriber\n")
+					// NOT diagf: we're inside broadcast holding subMu.RLock,
+					// and diagf's suppressed path re-enters broadcast —
+					// recursive RLock deadlocks against a queued writer.
+					// Ring-append directly when the console is suppressed.
+					if l.stderrGate == nil || l.stderrGate.enabled.Load() {
+						fmt.Fprintf(os.Stderr, "logger: dropped log line for slow subscriber\n")
+					} else {
+						l.addToRingBuffer(time.Now().Format("2006-01-02 15:04:05") +
+							" WARN logger: dropped log line for slow subscriber")
+					}
 				}
 			}
 		}
@@ -389,6 +416,12 @@ func (l *Logger) Error(msg string, args ...any) {
 }
 
 // LogForJob logs a message and also stores it in the per-job buffer.
+//
+// Deprecated: nothing in production wires this — the live per-job log
+// pipeline is db.RouteLogToJobs (fed via Subscribe) and db.GetJobLogs, with
+// its own caps. These logger-side buffers stay permanently empty at runtime;
+// kept only because tests exercise them. New consumers must use the database
+// pipeline. (Same applies to GetJobLogs / ClearJobLogs / PruneJobLogs.)
 func (l *Logger) LogForJob(jobID string, level slog.Level, msg string, args ...any) {
 	l.log(level, msg, args...)
 
@@ -534,21 +567,48 @@ func (l *Logger) SetLevel(level string) bool {
 		l.level.Set(slog.LevelError)
 	default:
 		l.level.Set(slog.LevelInfo)
-		fmt.Fprintf(os.Stderr, "logger: unrecognized log level %q, falling back to INFO\n", level)
+		l.diagf("logger: unrecognized log level %q, falling back to INFO", level)
 		return false
 	}
 	return true
 }
 
-// SuppressStdout disables stdout logging. Call this when the TUI starts
+// SuppressStdout disables stdout logging (and reroutes the logger's own
+// stderr diagnostics into the ring buffer). Call this when the TUI starts
 // so raw log writes don't corrupt BubbleTea's alternate screen.
 func (l *Logger) SuppressStdout() {
 	l.stdout.enabled.Store(false)
+	if l.stderrGate != nil {
+		l.stderrGate.enabled.Store(false)
+	}
 }
 
 // RestoreStdout re-enables stdout logging. Call this after the TUI exits.
 func (l *Logger) RestoreStdout() {
 	l.stdout.enabled.Store(true)
+	if l.stderrGate != nil {
+		l.stderrGate.enabled.Store(true)
+	}
+}
+
+// diagf emits a logger-internal diagnostic. On a normal console it goes to
+// stderr; while the TUI owns the terminal (SuppressStdout) it is rerouted
+// into the ring buffer + subscribers so it surfaces in the TUI log panel
+// instead of scribbling over the alternate screen. Deliberately does NOT go
+// through slog/l.Write: rotate() calls this while holding fileMu, and the
+// multi-writer path would re-enter Write and deadlock. MUST NOT be called
+// from inside broadcast (it re-enters broadcast on the suppressed path, and
+// a recursive subMu.RLock deadlocks against a queued writer) — the
+// broadcast-drop warning ring-appends directly instead.
+func (l *Logger) diagf(format string, args ...any) {
+	msg := strings.TrimRight(fmt.Sprintf(format, args...), "\n")
+	if l.stderrGate == nil || l.stderrGate.enabled.Load() {
+		fmt.Fprintln(os.Stderr, msg)
+		return
+	}
+	line := time.Now().Format("2006-01-02 15:04:05") + " WARN " + msg
+	l.addToRingBuffer(line)
+	l.broadcast(line)
 }
 
 // Close flushes and closes the logger.

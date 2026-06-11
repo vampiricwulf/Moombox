@@ -346,7 +346,12 @@ type FetchResult struct {
 func (pc *PlayerCache) Fetch(ctx context.Context, playerURL string) (string, bool, error) {
 	key := CacheKey(playerURL)
 	res, err, _ := pc.fetchSF.Do(key, func() (any, error) {
-		return pc.fetchInternal(ctx, playerURL)
+		// Detach from the leader's context: coalesced waiters arrive from
+		// independent jobs, and a leader cancelled mid-fetch would poison
+		// every waiter with context.Canceled even though their own contexts
+		// are live. playerHTTPClient's own 30s timeout still bounds the
+		// round-trip.
+		return pc.fetchInternal(context.WithoutCancel(ctx), playerURL)
 	})
 	if err != nil {
 		return "", false, err

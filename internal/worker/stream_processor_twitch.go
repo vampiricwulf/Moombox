@@ -205,6 +205,33 @@ func (sp *StreamProcessor) processTwitchLive(ctx context.Context, job *database.
 		}
 	}
 
+	// A Downloading job resumed after a restart belongs to a specific
+	// broadcast. If the channel is now live with a DIFFERENT broadcast (the
+	// old one ended while Moombox was down), do not attach: the engine
+	// would discard the old broadcast's resume state and truncate its
+	// staging data, and the new broadcast would record under the old job's
+	// metadata. stream_start_time is the stable cross-restart identity —
+	// it is written once per job (guarded by `job.StreamStartTime == ""`
+	// below) for monitor-created and manually-added jobs alike. The minute
+	// of tolerance absorbs any API formatting jitter; distinct broadcasts
+	// differ by far more. The captured data stays recoverable via the Mux
+	// action, and the monitor picks the new broadcast up as its own job.
+	if job.Status == database.StatusDownloading && job.StreamStartTime != "" && streamInfo.StartedAt != "" {
+		oldStart, errOld := time.Parse(time.RFC3339, job.StreamStartTime)
+		newStart, errNew := time.Parse(time.RFC3339, streamInfo.StartedAt)
+		if errOld == nil && errNew == nil {
+			if diff := newStart.Sub(oldStart); diff > time.Minute || diff < -time.Minute {
+				sp.logger.Warn("twitch broadcast changed while job was interrupted; not attaching to the new broadcast",
+					"jobID", job.ID, "channel", login,
+					"oldStart", job.StreamStartTime, "newStart", streamInfo.StartedAt)
+				return &StreamProcessResult{
+					ShouldDownload: false,
+					Error:          "stream ended while Moombox was offline; a new broadcast is live — captured data can be muxed via the Mux action",
+				}, nil
+			}
+		}
+	}
+
 	// Update job metadata from stream info
 	updates := map[string]any{}
 	if streamInfo.Title != "" {

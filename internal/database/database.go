@@ -140,10 +140,34 @@ func (db *Database) getCtx() context.Context {
 // cache before another full-table scan is required.
 const jobStatsCacheTTL = 5 * time.Second
 
+// FileSchemaVersion reads PRAGMA user_version from a database file WITHOUT
+// running migrations (read-only open). Side processes use it to refuse a
+// database whose schema doesn't match their binary — Open migrates
+// unconditionally, and migrating the daemon's live DB from a second process
+// (e.g. a newer on-disk binary during the staged-update window) would leave
+// the running daemon's old code writing against a new schema.
+func FileSchemaVersion(dbPath string) (int, error) {
+	sqlDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", dbPath))
+	if err != nil {
+		return 0, err
+	}
+	defer sqlDB.Close()
+	var v int
+	if err := sqlDB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
 // Open creates or opens a SQLite database at the given path.
 // The logger parameter is optional; if nil, database errors will be silently dropped.
 func Open(dbPath string, logger ...dbLogger) (*Database, error) {
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", dbPath)
+	// modernc.org/sqlite only honors `_pragma=...` query parameters — the
+	// mattn-style `_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on`
+	// form was silently ignored, leaving foreign keys OFF (the child tables'
+	// ON DELETE CASCADE never fired), journal mode DELETE, and busy timeout
+	// 0 (the `moombox add` second process got immediate SQLITE_BUSY).
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", dbPath)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)

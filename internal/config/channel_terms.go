@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/BurntSushi/toml"
 )
@@ -35,21 +37,47 @@ func (t ChannelTerms) Patterns() []string {
 }
 
 // MarshalTOML serializes ChannelTerms back to its original TOML format.
-// Simple terms are serialized as a quoted string, named terms as a TOML table.
+// Simple terms are serialized as a quoted string, named terms as an INLINE
+// table. The inline form is required: this marshaler's output lands at the
+// value position (`terms = <bytes>`), so the multi-line `k = "v"` document a
+// plain map encode produces would corrupt the saved config into
+// `terms = k = "v"` — unparseable TOML that prevents the next startup.
 func (ct ChannelTerms) MarshalTOML() ([]byte, error) {
 	if ct.IsMap {
+		// Sorted keys for deterministic config files across saves.
+		keys := slices.Sorted(maps.Keys(ct.Named))
 		var buf bytes.Buffer
-		if err := toml.NewEncoder(&buf).Encode(ct.Named); err != nil {
-			return nil, err
+		buf.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			keyBytes, err := encodeTOMLString(k)
+			if err != nil {
+				return nil, err
+			}
+			valBytes, err := encodeTOMLString(ct.Named[k])
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(keyBytes)
+			buf.WriteString(" = ")
+			buf.Write(valBytes)
 		}
+		buf.WriteByte('}')
 		return buf.Bytes(), nil
 	}
-	// Use the TOML encoder to properly escape backslashes, quotes, etc.
-	// Trim only the trailing newline the encoder appends — bytes.TrimSpace
-	// would also strip meaningful leading/trailing space inside a quoted
-	// string literal the user configured on purpose.
+	return encodeTOMLString(ct.Simple)
+}
+
+// encodeTOMLString renders s as a quoted TOML string with proper escaping
+// (backslashes, quotes, control chars). Trims only the trailing newline the
+// encoder appends — bytes.TrimSpace would also strip meaningful
+// leading/trailing space inside a quoted string the user configured on
+// purpose.
+func encodeTOMLString(s string) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(ct.Simple); err != nil {
+	if err := toml.NewEncoder(&buf).Encode(s); err != nil {
 		return nil, err
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil

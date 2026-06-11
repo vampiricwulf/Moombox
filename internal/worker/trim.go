@@ -114,21 +114,22 @@ func (ts *TrimService) CreateTrim(ctx context.Context, job *database.Job, startT
 		return nil, fmt.Errorf("create trim dir: %w", err)
 	}
 
-	trimBasename := fmt.Sprintf("%s [%.0fs-%.0fs].mp4", job.VideoID, startTime, endTime)
-	trimPath := filepath.Join(trimDir, trimBasename)
-
-	// Store relative path including parent directory from source job's filename
-	// (matches TS: path.join(path.dirname(sourceJob.filename), "trim", trimFilename))
-	sourceParentDir := filepath.Dir(job.Filename)
-	trimRelativePath := filepath.Join(sourceParentDir, "trim", trimBasename)
-
-	// Check for duplicates
+	// Check for duplicates (exact same range) BEFORE building the filename —
+	// the name also needs the existing list for collision disambiguation.
 	existing, _ := ts.db.GetTrimsForJob(job.ID)
 	for _, t := range existing {
 		if t.StartTime == startTime && t.EndTime == endTime {
 			return nil, fmt.Errorf("trim already exists")
 		}
 	}
+
+	trimBasename := uniqueTrimBasename(existing, job.VideoID, startTime, endTime)
+	trimPath := filepath.Join(trimDir, trimBasename)
+
+	// Store relative path including parent directory from source job's filename
+	// (matches TS: path.join(path.dirname(sourceJob.filename), "trim", trimFilename))
+	sourceParentDir := filepath.Dir(job.Filename)
+	trimRelativePath := filepath.Join(sourceParentDir, "trim", trimBasename)
 
 	ts.logger.Info("creating trim", "jobID", job.ID, "start", startTime, "end", endTime)
 
@@ -356,7 +357,8 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 		return nil, fmt.Errorf("create trim dir: %w", err)
 	}
 
-	trimBasename := fmt.Sprintf("%s [%.0fs-%.0fs].mp4", job.VideoID, startTime, endTime)
+	existingTrims, _ := ts.db.GetTrimsForJob(job.ID)
+	trimBasename := uniqueTrimBasename(existingTrims, job.VideoID, startTime, endTime)
 	trimPath := filepath.Join(trimDir, trimBasename)
 
 	// Relative path for DB storage
@@ -507,6 +509,27 @@ func (ts *TrimService) createMultiSegmentTrimInternal(ctx context.Context, job *
 	ts.logger.Info("multi-segment trim created", "trimID", trimID, "path", trimPath,
 		"segments", len(involved))
 	return record, nil
+}
+
+// uniqueTrimBasename returns a trim filename that doesn't collide with any
+// existing trim's file for the same job. Names use whole-second-rounded
+// bounds, so two distinct sub-second ranges (1.2s and 1.8s) can round to the
+// same name — without disambiguation the second FFmpeg run would overwrite
+// the first trim's file while both DB records point at the same bytes.
+func uniqueTrimBasename(existing []database.TrimRecord, videoID string, startTime, endTime float64) string {
+	taken := func(name string) bool {
+		for _, t := range existing {
+			if filepath.Base(t.Filename) == name {
+				return true
+			}
+		}
+		return false
+	}
+	name := fmt.Sprintf("%s [%.0fs-%.0fs].mp4", videoID, startTime, endTime)
+	for n := 2; taken(name); n++ {
+		name = fmt.Sprintf("%s [%.0fs-%.0fs] (%d).mp4", videoID, startTime, endTime, n)
+	}
+	return name
 }
 
 // probeAudioBitrate probes the audio bitrate of a source file in kbps.

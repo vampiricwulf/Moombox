@@ -91,7 +91,7 @@ func (m *SettingsModel) handleChannelKey(key string) string {
 			m.channelIndex++
 		}
 	case keyEnter:
-		if len(m.channels) > 0 {
+		if len(m.channels) > 0 && m.channelIndex < len(m.channels) {
 			m.channelMode = "edit"
 			m.channelEditValues = channelToValues(m.channels[m.channelIndex])
 			m.channelEditField = 0
@@ -141,6 +141,14 @@ func (m *SettingsModel) handleChannelEditKey(key string) string {
 	switch key {
 	case keyEsc:
 		m.channelMode = "list"
+		// "a" set channelIndex = len(channels) for the pending add — clamp
+		// it back or list-mode Enter indexes out of range (mirrors the
+		// setup wizard's handleChannelEditKey Esc).
+		if m.channelIndex >= len(m.channels) && len(m.channels) > 0 {
+			m.channelIndex = len(m.channels) - 1
+		} else if len(m.channels) == 0 {
+			m.channelIndex = 0
+		}
 		m.channelResolving = false
 		m.textInput.Blur()
 		return ""
@@ -204,6 +212,10 @@ func (m *SettingsModel) saveCurrentChannel() {
 		m.channels = append(m.channels, ch)
 	}
 	m.dirty = true
+	// structDirty keeps recheckDirty from clearing the dirty flag — channel
+	// edits aren't reflected in m.values, so a value-level recheck would
+	// otherwise silently discard the add/edit on close.
+	m.structDirty = true
 	m.status = saveIdle
 	m.channelMode = "list"
 }

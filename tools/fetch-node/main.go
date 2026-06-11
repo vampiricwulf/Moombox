@@ -277,21 +277,44 @@ func extractFromTarXz(xzBytes []byte, binaryName string) ([]byte, error) {
 	return nil, fmt.Errorf("%s not found in tar.xz archive", binaryName)
 }
 
+// writeGzipped writes via a temp file + rename so an interrupted run can't
+// leave a truncated .gz at the final path — the idempotency check only
+// stats for existence, so a partial blob would otherwise be accepted on the
+// next run and embedded into release binaries.
 func writeGzipped(outPath string, raw []byte) error {
-	out, err := os.Create(outPath)
+	tmpPath := outPath + ".tmp"
+	out, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 	zw, err := gzip.NewWriterLevel(out, gzip.BestCompression)
 	if err != nil {
+		out.Close()
+		os.Remove(tmpPath)
 		return err
 	}
 	if _, err := zw.Write(raw); err != nil {
+		out.Close()
+		os.Remove(tmpPath)
 		return err
 	}
 	if err := zw.Close(); err != nil {
+		out.Close()
+		os.Remove(tmpPath)
 		return err
 	}
-	return out.Sync()
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }

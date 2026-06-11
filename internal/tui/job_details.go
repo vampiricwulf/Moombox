@@ -86,30 +86,48 @@ func (m *JobDetailsModel) titleValueWidth() int {
 // SetJob updates the displayed job.
 func (m *JobDetailsModel) SetJob(job *database.Job) {
 	prevID := ""
+	prevTitle := ""
 	if m.job != nil {
 		prevID = m.job.ID
+		prevTitle = m.job.Title
 	}
 	m.job = job
-	m.progressOverlay = nil
-	m.buildRows()
-	m.updateViewportContent()
 	newID := ""
 	if job != nil {
 		newID = job.ID
 	}
+	// Transient view state (progress overlay, scroll position, marquee
+	// phase) resets only on a genuine job switch. SetJob is also called as
+	// a same-job re-sync whenever ANY job's display column changes — with
+	// several active downloads, unconditional resets would blank the
+	// overlay and snap the scrolling title back to position 0 constantly.
+	if prevID != newID {
+		m.progressOverlay = nil
+	}
+	m.buildRows()
+	m.updateViewportContent()
 	if prevID != newID {
 		m.viewport.GotoTop()
 	}
-	// Reset marquee for title field.
 	if job != nil {
-		title := job.Title
-		if title == "" {
-			title = job.VideoID
+		if prevID != newID || prevTitle != job.Title {
+			title := job.Title
+			if title == "" {
+				title = job.VideoID
+			}
+			m.marquee.Reset(title, m.titleValueWidth())
 		}
-		m.marquee.Reset(title, m.titleValueWidth())
 	} else {
 		m.marquee.Reset("", 0)
 	}
+}
+
+// HasProgress reports whether a progress overlay is currently displayed.
+// Used by the progress tick to clear a stale overlay (SetProgress(nil))
+// after the store entry was deleted on a terminal status — SetJob no longer
+// resets the overlay on same-job refreshes.
+func (m *JobDetailsModel) HasProgress() bool {
+	return m.progressOverlay != nil
 }
 
 // SetProgress updates the progress overlay from the progress store.

@@ -251,9 +251,12 @@ func parseDashRepresentation(rep representationXML, as adaptationSetXML, period 
 		}
 	}
 
-	// YouTube live: convert /sq/N to /sq/$Number$
+	// YouTube live: convert /sq/N to /sq/$Number$. Must be the Literal
+	// variant — in ReplaceAllString the replacement's "$Number" would be
+	// interpreted as a (nonexistent) named-group reference and expand to
+	// empty, yielding "/sq/$" and 404ing every segment fetch.
 	if sqPattern.MatchString(repBase) {
-		repBase = sqPattern.ReplaceAllString(repBase, "/sq/$Number$")
+		repBase = sqPattern.ReplaceAllLiteralString(repBase, "/sq/$Number$")
 	}
 	stream.BaseURL = repBase
 
@@ -430,10 +433,27 @@ func CalculateSegmentRange(stream *DashStream, startTimeSec, endTimeSec float64)
 
 // --- HLS Parsing ---
 
-// ParseHls parses an HLS M3U8 playlist (master or media).
+// ParseHls parses an HLS M3U8 playlist (master or media). Returns nil when
+// the content is not an M3U8 document at all (e.g. a CDN HTML/JSON error page
+// served with 200 OK) — without this check, every non-# line of an error page
+// would be treated as a segment URL and downloaded as garbage.
 func ParseHls(m3u8Content string, baseURL string) *HlsParseResult {
 	lines := strings.Split(strings.TrimSpace(m3u8Content), "\n")
 	if len(lines) == 0 {
+		return nil
+	}
+
+	// RFC 8216 §4.3.1.1: the first line of every playlist MUST be #EXTM3U.
+	// Tolerate a UTF-8 BOM and leading blank lines.
+	firstLine := ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+		if trimmed != "" {
+			firstLine = trimmed
+			break
+		}
+	}
+	if !strings.HasPrefix(firstLine, "#EXTM3U") {
 		return nil
 	}
 

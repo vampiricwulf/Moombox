@@ -28,6 +28,7 @@ type ActionMenuItem struct {
 	Category       string                   // "Action", "Request", "Open", "Filter", "Other"
 	NeedsJob       bool                     // true → transitions to job selector
 	NeedsConfirm   bool                     // true → transitions to confirm prompt
+	SupportsBatch  bool                     // true → dispatchAction implements a batch path for selected jobs
 	JobFilter      func(*database.Job) bool // filter for job selector (nil = show all)
 	DisabledReason string                   // shown when NeedsJob && no matching jobs
 }

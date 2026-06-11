@@ -195,6 +195,11 @@ func (q *JobQueue) Complete(jobID string) {
 		delete(q.processing, jobID)
 		q.activeLifecycle--
 
+		// Drop any unconsumed user-cancel flag so it can't leak or
+		// misclassify the job's next run (WasCancelled normally consumes it,
+		// but error paths can finish a run without ever reading it).
+		delete(q.cancelled, jobID)
+
 		// Signal that the processing goroutine has returned.
 		ch := q.done[jobID]
 		delete(q.done, jobID)
@@ -225,9 +230,14 @@ func (q *JobQueue) Cancel(jobID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	q.cancelled[jobID] = true
-
+	// Only flag jobs that are actually processing: the flag exists so
+	// handleCancellation (inside a running processJob) can distinguish
+	// user-cancel from shutdown. For a pending-only job there is no run to
+	// classify — the entry would leak forever and, worse, misclassify a
+	// future run of the same job (a later shutdown interruption would read
+	// the stale flag and flip a resumable job to Cancelled).
 	if cancel, ok := q.processing[jobID]; ok {
+		q.cancelled[jobID] = true
 		cancel()
 	}
 	// Also remove from pending

@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -19,8 +20,16 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		action := a.settings.HandleKey(key)
 		switch action {
 		case "close":
-			// Re-apply hide_finished_age_days in case it changed
-			a.taskList.SetHideFinishedAgeDays(int(a.cfg.Monitors.HideFinishedAgeDays.Days()))
+			// Re-apply hide_finished_age_days in case it changed. Read
+			// under the store lock — HTTP handlers mutate config via
+			// configStore.Update concurrently (matches getPort/apiBaseURL).
+			if a.configStore != nil {
+				var days int
+				a.configStore.Read(func(c *config.MoomboxConfig) {
+					days = int(c.Monitors.HideFinishedAgeDays.Days())
+				})
+				a.taskList.SetHideFinishedAgeDays(days)
+			}
 		case "restart":
 			if a.OnRestart != nil {
 				onRestart := a.OnRestart
@@ -91,10 +100,10 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		case strings.HasPrefix(action, "prepare:"):
 			method := strings.TrimPrefix(action, "prepare:")
-			return a, tea.Batch(a.ffmpegPrepareCmd(method), func() tea.Msg { return a.ffmpegCheck.spinner.Tick() })
+			return a, tea.Batch(a.ffmpegPrepareCmd(method), spinnerTickCmd(a.ffmpegCheck.spinner))
 		case strings.HasPrefix(action, "confirm:"):
 			token := strings.TrimPrefix(action, "confirm:")
-			return a, tea.Batch(a.ffmpegConfirmCmd(token), func() tea.Msg { return a.ffmpegCheck.spinner.Tick() })
+			return a, tea.Batch(a.ffmpegConfirmCmd(token), spinnerTickCmd(a.ffmpegCheck.spinner))
 		case strings.HasPrefix(action, "reject:"):
 			token := strings.TrimPrefix(action, "reject:")
 			if a.OnRejectInstall != nil {
@@ -109,7 +118,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.ffmpegCheck.ShowInstallOptions()
 		case strings.HasPrefix(action, "check_custom:"):
 			path := strings.TrimPrefix(action, "check_custom:")
-			return a, tea.Batch(a.ffmpegCheckCmd(path), func() tea.Msg { return a.ffmpegCheck.spinner.Tick() })
+			return a, tea.Batch(a.ffmpegCheckCmd(path), spinnerTickCmd(a.ffmpegCheck.spinner))
 		case action == "dismiss":
 			// Overlay already closed by HandleKey — nothing else to do.
 		}
@@ -175,7 +184,13 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}))
 		}
 		if a.setupWiz.cookieActive {
-			cmds = append(cmds, func() tea.Msg { return a.setupWiz.spinner.Tick() }, cookieCountdownTick())
+			cmds = append(cmds, spinnerTickCmd(a.setupWiz.spinner))
+			// Arm the countdown only when no chain is already ticking —
+			// appending one per keypress stacks chains and the countdown
+			// would drain N+1 per second.
+			if tick := a.setupWiz.armCookieTick(); tick != nil {
+				cmds = append(cmds, tick)
+			}
 		}
 		// Deliver pending huh form init cmd immediately (cursor blink, focus)
 		if a.setupWiz.advancedInitCmd != nil {
@@ -241,7 +256,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				jobID := a.trimDlg.JobID()
 				startSec := a.trimDlg.ParsedStartSeconds()
 				endSec := a.trimDlg.ParsedEndSeconds()
-				return a, tea.Batch(a.createTrimCmd(jobID, startSec, endSec), func() tea.Msg { return a.trimDlg.spinner.Tick() })
+				return a, tea.Batch(a.createTrimCmd(jobID, startSec, endSec), spinnerTickCmd(a.trimDlg.spinner))
 			}
 		case "background":
 			a.setFeedback("Trim encoding in background...")
@@ -251,7 +266,7 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				if trimID != "" {
 					a.trimDlg.SetLoading(true)
 					jobID := a.trimDlg.JobID()
-					return a, tea.Batch(a.deleteTrimCmd(jobID, trimID), func() tea.Msg { return a.trimDlg.spinner.Tick() })
+					return a, tea.Batch(a.deleteTrimCmd(jobID, trimID), spinnerTickCmd(a.trimDlg.spinner))
 				}
 			}
 		}
@@ -315,6 +330,11 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key == keyEsc {
 		if a.taskList.SelectedCount() > 0 {
 			a.taskList.ClearSelection()
+			// Also disarm any pending chord — leaving a confirm chord armed
+			// would let the next keypress fire the destructive action
+			// against the cursor job without its own confirmation.
+			a.chord = chordState{}
+			a.feedbackMsg = ""
 			return a, nil // consume the Esc, don't propagate
 		}
 		// Also clear any active chord prefix on Esc
@@ -444,7 +464,7 @@ func (a *App) handleChord(key string) (tea.Model, tea.Cmd, bool) {
 			// Look up the item to check if it needs a job, re-validate filter
 			for _, item := range a.buildMenuItems() {
 				if item.Chord == chord && item.NeedsJob {
-					if a.taskList.SelectedCount() > 0 {
+					if item.SupportsBatch && a.taskList.SelectedCount() > 0 {
 						break // batch mode — pass nil job so dispatchAction takes batch path
 					}
 					job = a.taskList.SelectedJob()
@@ -511,8 +531,10 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 
 	// NeedsConfirm + NeedsJob: check job first, then enter confirm step
 	if item.NeedsConfirm && item.NeedsJob {
-		// Batch mode: if jobs are selected, confirm with count instead of single job
-		if a.taskList.SelectedCount() > 0 {
+		// Batch mode: if jobs are selected, confirm with count instead of
+		// single job — only for chords dispatchAction implements batch for;
+		// the rest fall through to the single-selected-job path.
+		if item.SupportsBatch && a.taskList.SelectedCount() > 0 {
 			a.chord.action = key
 			a.chord.actionTime = time.Now()
 			a.setFeedback(fmt.Sprintf("Press %s to confirm %s %d jobs (3s)",
@@ -540,9 +562,10 @@ func (a *App) processSecondKey(prefix, key string) (tea.Model, tea.Cmd, bool) {
 	}
 
 	// NeedsJob (no confirm): use selected job, check filter
-	// Batch mode: if jobs are selected, dispatch directly (batch handled in dispatchAction)
+	// Batch mode: if jobs are selected, dispatch directly (batch handled in
+	// dispatchAction) — only for chords that implement a batch path.
 	if item.NeedsJob {
-		if a.taskList.SelectedCount() > 0 {
+		if item.SupportsBatch && a.taskList.SelectedCount() > 0 {
 			a.chord = chordState{}
 			m, cmd := a.dispatchAction(chord, nil)
 			return m, cmd, true

@@ -176,33 +176,36 @@ func CSRFMiddleware(store *config.Store, internalToken string) func(http.Handler
 	}
 }
 
+// ipAllowedByNetworkAccess applies the network_access policy to the
+// request's source IP. Shared by IPGateMiddleware (routed requests) and the
+// WebSocket upgrade interception in Server.Start, which bypasses the
+// middleware chain entirely.
+func ipAllowedByNetworkAccess(store *config.Store, r *http.Request) bool {
+	ip := ExtractIP(r)
+
+	var networkAccess string
+	store.Read(func(c *config.MoomboxConfig) {
+		networkAccess = c.Network.NetworkAccess
+	})
+
+	switch networkAccess {
+	case "external", "public":
+		return true
+	case "lan":
+		return isLoopback(ip) || isPrivateIP(ip)
+	default: // "localhost" or unset
+		return isLoopback(ip)
+	}
+}
+
 // IPGateMiddleware restricts access based on network_access config.
 func IPGateMiddleware(store *config.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := ExtractIP(r)
-
-			var networkAccess string
-			store.Read(func(c *config.MoomboxConfig) {
-				networkAccess = c.Network.NetworkAccess
-			})
-
-			switch networkAccess {
-			case "external", "public":
-				// Allow all
-			case "lan":
-				// Allow loopback + private IPs
-				if !isLoopback(ip) && !isPrivateIP(ip) {
-					http.Error(w, "Forbidden", http.StatusForbidden)
-					return
-				}
-			default: // "localhost" or unset
-				if !isLoopback(ip) {
-					http.Error(w, "Forbidden", http.StatusForbidden)
-					return
-				}
+			if !ipAllowedByNetworkAccess(store, r) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
 			}
-
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -331,11 +334,17 @@ func shouldSkipCompression(p string) bool {
 }
 
 // MaxBodySize limits request body size for mutating methods to prevent
-// abuse. Individual endpoints (e.g., /import at 500MB) can override by
-// wrapping req.Body with their own http.MaxBytesReader.
+// abuse. The import endpoint is exempt: it applies its own 500MB
+// http.MaxBytesReader, and MaxBytesReader wrappers NEST rather than override
+// — wrapping an already-1MB-limited body with a 500MB limit still errors
+// after 1MB, which would cap every real import upload.
 func MaxBodySize(maxBytes int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/import" {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if r.Method != http.MethodGet && r.Method != http.MethodHead &&
 				r.Method != http.MethodOptions && r.Body != nil {
 				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)

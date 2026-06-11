@@ -140,12 +140,16 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 					bestFps = *bestVideo.Fps
 				}
 
-				// FPS tiebreaker
+				// FPS tiebreaker. Keep the cached codec score in sync with
+				// the new best — a stale score would skew every later codec
+				// comparison at this resolution/FPS.
 				if fFps != bestFps {
 					if prefer60fps && fFps > bestFps {
 						bestVideo = f
+						bestVideoCodecScore = cachedVideoCodecScore(f.MimeType)
 					} else if !prefer60fps && fFps < bestFps {
 						bestVideo = f
+						bestVideoCodecScore = cachedVideoCodecScore(f.MimeType)
 					}
 					continue
 				}

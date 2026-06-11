@@ -12,6 +12,15 @@ func (a *App) recalcLayout() {
 	// Status bar is 1 row at the bottom
 	contentH := a.height - 1
 
+	// Restart banner sits above the panels when pending — subtract its
+	// rendered height (it can wrap on narrow terminals) and shift the
+	// mouse regions down by the same amount.
+	bannerH := 0
+	if a.restartPending && a.width > 0 {
+		bannerH = lipgloss.Height(restartBanner(a.width))
+		contentH -= bannerH
+	}
+
 	// Top panels: 70% focused, 25% unfocused (A4 - match TypeScript)
 	var topH, logH int
 	if a.focusedPanel == PanelLogs {
@@ -49,10 +58,10 @@ func (a *App) recalcLayout() {
 	a.actionMenu.SetSize(a.width, a.height)
 	a.settings.SetSize(a.width, a.height)
 
-	// Store regions for mouse
-	a.taskRegion = PanelRegion{X: 0, Y: 0, Width: taskW, Height: topH}
-	a.detailRegion = PanelRegion{X: taskW, Y: 0, Width: detailW, Height: topH}
-	a.logRegion = PanelRegion{X: 0, Y: topH, Width: a.width, Height: logH}
+	// Store regions for mouse (offset by the restart banner when shown)
+	a.taskRegion = PanelRegion{X: 0, Y: bannerH, Width: taskW, Height: topH}
+	a.detailRegion = PanelRegion{X: taskW, Y: bannerH, Width: detailW, Height: topH}
+	a.logRegion = PanelRegion{X: 0, Y: bannerH + topH, Width: a.width, Height: logH}
 }
 
 // viewWithMode wraps content in a tea.View with standard terminal mode settings.

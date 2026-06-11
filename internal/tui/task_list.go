@@ -197,9 +197,22 @@ func (m *TaskListModel) AddJob(job *database.Job) {
 	if _, exists := m.jobIndex[job.ID]; exists {
 		return
 	}
+	// Remember the previously-selected job so the selection follows it
+	// after the insert re-sorts the list (mirrors UpdateJob/RemoveJob).
+	var prevSelectedID string
+	if sel := m.SelectedJob(); sel != nil {
+		prevSelectedID = sel.ID
+	}
+
 	m.jobs = append(m.jobs, job)
 	m.rebuildJobIndex()
 	m.rebuildVirtualList()
+
+	if prevSelectedID != "" {
+		if newIdx, ok := m.virtualIndex[prevSelectedID]; ok {
+			m.list.Select(newIdx)
+		}
+	}
 	m.resetMarquee()
 }
 
@@ -805,7 +818,10 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 		title = job.VideoID
 	}
 	if selected && m.marquee.NeedsScroll() {
-		title = m.marquee.View()
+		// The marquee window was sized at resetMarquee time; the percent
+		// text can have grown since (9→10%, 99→100%), shrinking titleWidth.
+		// Truncate to the current width or the row wraps and shifts layout.
+		title = truncateString(m.marquee.View(), titleWidth)
 	} else {
 		title = truncateString(title, titleWidth)
 	}

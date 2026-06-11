@@ -1,6 +1,7 @@
 package twitch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -9,6 +10,9 @@ import (
 )
 
 func (cd *ChatDownloader) flush() {
+	cd.flushMu.Lock()
+	defer cd.flushMu.Unlock()
+
 	cd.mu.Lock()
 	snapshotLen := len(cd.messages)
 	msgs := make([]TwitchChatMessage, snapshotLen)
@@ -38,6 +42,13 @@ func (cd *ChatDownloader) flush() {
 			if err := utils.UpdateChatFileHeaderFields(cd.outputPath, count); err != nil {
 				cd.logger.Warn("update chat header", "err", err)
 			}
+		} else if errors.Is(writeErr, utils.ErrChatFilePartialWrite) {
+			// Truncated-then-failed write: the on-disk tail is broken, and
+			// the merge below would parse-fail (dropping history) or splice
+			// into garbage on retry. Per the sentinel's contract, advance
+			// past the batch.
+			cd.logger.Error("partial chat append; advancing past batch", "err", writeErr)
+			writeErr = nil
 		} else {
 			// Fallback: read the existing file, merge with the current batch,
 			// and rewrite. The earlier implementation passed only `msgs` to

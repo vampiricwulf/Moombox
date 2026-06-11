@@ -27,7 +27,8 @@ import (
 // triggerRestart cancellation.
 func (s *runState) runTUI() {
 	app := tui.NewApp()
-	s.quitTUI = app.QuitTUI // allow API restart to exit TUI
+	quit := app.QuitTUI
+	s.quitTUI.Store(&quit) // allow API restart to exit TUI
 
 	// Pass config reference, config Store, and version for settings panel.
 	// SetConfigStore also captures the cfg pointer used for direct-field

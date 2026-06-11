@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/microcosm-cc/bluemonday"
@@ -110,6 +111,12 @@ type Updater struct {
 	repoOwner      string
 	repoName       string
 	client         *http.Client
+
+	// applying single-flights ApplyUpdate across ALL surfaces (web route,
+	// TUI chord, future callers). The web route has its own CAS guard, but
+	// the TUI path bypasses it — two concurrent applies share exePath+".new"
+	// and race verify-then-rename into a corrupted live binary.
+	applying atomic.Bool
 
 	// apiBaseURL is the GitHub API origin. Tests override to point at an
 	// httptest server so CheckForUpdate doesn't hit github.com.
@@ -301,6 +308,11 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 // this returns nil — the launcher will pick up the freshly-renamed .exe and
 // the running process exits cleanly. Audit reports/small-packages.md.
 func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
+	if !u.applying.CompareAndSwap(false, true) {
+		return fmt.Errorf("update already in progress")
+	}
+	defer u.applying.Store(false)
+
 	u.logger.Info("[Updater] Downloading update",
 		"version", release.Version,
 		"url", release.DownloadURL,
@@ -474,10 +486,21 @@ func (u *Updater) CleanupOldBinary() {
 		path := u.exePath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {
-				u.logger.Warn("[Updater] Failed to remove stale file",
-					"path", path,
-					"error", err.Error(),
-				)
+				if suffix == "~" {
+					// Expected right after a Windows self-update: the `~`
+					// file is the still-running LAUNCHER's mapped image
+					// (handleUpdateRestart renamed .old → ~ while executing
+					// from it), and image sections can't be deleted until
+					// that process exits. The launcher's own deferred
+					// cleanup / next-start sweep removes it — not an orphan.
+					u.logger.Debug("[Updater] Stale `~` file still in use (likely the running launcher); deferring to launcher cleanup",
+						"path", path, "error", err.Error())
+				} else {
+					u.logger.Warn("[Updater] Failed to remove stale file",
+						"path", path,
+						"error", err.Error(),
+					)
+				}
 			} else {
 				u.logger.Info("[Updater] Cleaned up stale file", "path", path)
 			}

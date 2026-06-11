@@ -204,14 +204,17 @@ func readFirefoxCookies(profileDir string) (string, error) {
 
 // queryFirefoxCookieDB opens the Firefox cookie database and reads all cookies.
 //
-// _busy_timeout=2000 hands SQLite the wait itself — WAL-mode locks from a
-// mid-flush Firefox process return "database is locked" almost immediately
-// under the default 0ms busy timeout, and the caller's 5×500ms retry loop
-// doesn't help if each open returns the error before even waiting. 2s lets
-// SQLite block on the lock until Firefox's fsync completes, which is the
-// desired behavior for most real-world contention.
+// The DSN needs the `file:` prefix — without it modernc/sqlite strips the
+// entire query string and opens read-write with no busy timeout. mode=ro
+// guarantees we never write into the browser's live database (a read-write
+// open can perform WAL-index recovery writes), and
+// `_pragma=busy_timeout(2000)` (modernc's parameter syntax) hands SQLite the
+// wait itself: WAL-mode locks from a mid-flush Firefox return "database is
+// locked" almost immediately under the default 0ms busy timeout, and the
+// caller's 5×500ms retry loop doesn't help if each open errors before even
+// waiting.
 func queryFirefoxCookieDB(dbPath string) ([]string, error) {
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_busy_timeout=2000")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
 	if err != nil {
 		return nil, fmt.Errorf("open cookies.sqlite: %w", err)
 	}
@@ -240,6 +243,13 @@ func queryFirefoxCookieDB(dbPath string) ([]string, error) {
 			name:     name,
 			value:    value,
 		})
+	}
+	// A mid-iteration failure (lock contention while Firefox flushes — the
+	// exact case the caller's retry loop exists for) ends the loop with
+	// Next()==false; without this check a PARTIAL cookie set would be
+	// returned as success and merged over the full file.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cookies: %w", err)
 	}
 
 	return deduplicateAndFormat(collected), nil

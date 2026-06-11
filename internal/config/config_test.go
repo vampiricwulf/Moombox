@@ -1,12 +1,16 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestDefaults(t *testing.T) {
@@ -580,6 +584,45 @@ func TestValidationDiskThresholds(t *testing.T) {
 	if cfg.Disk.CriticalPercent <= cfg.Disk.WarnPercent {
 		t.Errorf("expected critical > warn, got critical=%d, warn=%d",
 			cfg.Disk.CriticalPercent, cfg.Disk.WarnPercent)
+	}
+}
+
+func TestChannelTermsTOMLRoundTrip(t *testing.T) {
+	// Named (map) terms must encode as an INLINE table: MarshalTOML's output
+	// lands at the value position, so the multi-line document form would
+	// produce `terms = key = "value"` — invalid TOML that corrupts the saved
+	// config and prevents the next startup from parsing it.
+	type doc struct {
+		Terms ChannelTerms `toml:"terms"`
+	}
+	cases := []struct {
+		name string
+		in   ChannelTerms
+	}{
+		{"simple", ChannelTerms{Simple: `(?i)kara"o\ke`}},
+		{"named", ChannelTerms{Named: map[string]string{"stream": "live", `we"ird key`: `va\l"ue`}, IsMap: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := toml.NewEncoder(&buf).Encode(doc{Terms: tc.in}); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			var out doc
+			if _, err := toml.Decode(buf.String(), &out); err != nil {
+				t.Fatalf("decode failed for %q: %v", buf.String(), err)
+			}
+			if out.Terms.IsMap != tc.in.IsMap {
+				t.Fatalf("IsMap mismatch: got %v want %v (encoded: %q)", out.Terms.IsMap, tc.in.IsMap, buf.String())
+			}
+			if tc.in.IsMap {
+				if !maps.Equal(out.Terms.Named, tc.in.Named) {
+					t.Errorf("named terms mismatch: got %#v want %#v (encoded: %q)", out.Terms.Named, tc.in.Named, buf.String())
+				}
+			} else if out.Terms.Simple != tc.in.Simple {
+				t.Errorf("simple terms mismatch: got %q want %q", out.Terms.Simple, tc.in.Simple)
+			}
+		})
 	}
 }
 

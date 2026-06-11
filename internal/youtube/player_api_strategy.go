@@ -122,8 +122,11 @@ func (p *PlayerAPI) GetVideoInfoAuthenticated(ctx context.Context, videoID strin
 	// already works fine via the format pool. Skip on members-only and
 	// age-restricted (anonymous android_vr would 401; age-restricted has
 	// its own web_embedded path below).
+	// webResult is nil when both web fetches failed — that means "no DASH
+	// from web", so the fallback applies a fortiori (and dereferencing
+	// webResult unguarded would panic).
 	if result.DashManifestURL == "" &&
-		webResult.DashManifestURL == "" &&
+		(webErr != nil || webResult.DashManifestURL == "") &&
 		(result.StreamStatus == StreamLive || result.StreamStatus == StreamUpcoming) &&
 		result.PlayabilityError != PlayabilityMembersOnly &&
 		result.PlayabilityError != PlayabilityAgeRestricted &&

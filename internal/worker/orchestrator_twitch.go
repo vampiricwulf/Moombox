@@ -19,11 +19,16 @@ import (
 
 // TwitchVariantInfo holds info for a Twitch HLS variant to download.
 type TwitchVariantInfo struct {
-	URL           string
-	Name          string
-	Width         int
-	Height        int
-	FPS           float64
+	URL    string
+	Name   string
+	Width  int
+	Height int
+	FPS    float64
+	// StreamID is the broadcast's stable identity (live stream ID or VOD
+	// ID), passed to the engine so resume state from a DIFFERENT broadcast
+	// is discarded rather than appended into — Twitch weaver URLs carry no
+	// extractable identity of their own.
+	StreamID      string
 	CheckStreamFn func(ctx context.Context) (bool, error) // Returns true if stream is still live
 
 	// For quality monitoring: re-fetches the master playlist and selects the best variant.
@@ -66,10 +71,17 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		defer unregisterConn()
 	}
 
-	o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-		"status":              database.StatusDownloading,
-		"download_started_at": time.Now().UTC().Format(time.RFC3339),
-	})
+	// Preserve the original start timestamp when a Downloading job re-enters
+	// the pipeline after a daemon restart (mirrors the YouTube path) — the
+	// notification "Download Time" fields would otherwise only cover the
+	// post-restart span.
+	twitchUpdates := map[string]any{
+		"status": database.StatusDownloading,
+	}
+	if jobCtx.Job.DownloadStartedAt == "" {
+		twitchUpdates["download_started_at"] = time.Now().UTC().Format(time.RFC3339)
+	}
+	o.db.UpdateJobFields(jobCtx.Job.ID, twitchUpdates)
 
 	// Send "Twitch Download Starting" notification
 	if o.notifier != nil {
@@ -167,6 +179,7 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			OutputFile: videoPath,
 			StartSeq:   -1,
 			IsHls:      true,
+			StreamID:   variant.StreamID,
 			Logger:     o.logger,
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				if isVod {
@@ -182,7 +195,13 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 		return dl, videoPath
 	}
 
-	videoDl, videoPath := createDownloader(variant.URL, jobCtx.StagingDir)
+	// curStagingDir is the staging directory of the CURRENT segment: the job
+	// root before any quality split, seg_N afterwards. Same-quality recovery
+	// must create its replacement downloader here — using the root dir after
+	// a split would append fresh data into segment 0's already-muxed file.
+	curStagingDir := jobCtx.StagingDir
+
+	videoDl, videoPath := createDownloader(variant.URL, curStagingDir)
 
 	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger)
 	tracker.AttachVideoDownloader(videoDl)
@@ -285,13 +304,14 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 					"quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 
 				oldSeq := videoDl.CurrentSeq()
-				videoPath = filepath.Join(jobCtx.StagingDir, "video_stream")
+				videoPath = filepath.Join(curStagingDir, "video_stream")
 				videoDl = engine.NewSegmentDownloader(engine.DownloaderOptions{
 					BaseURL:       newVariant.URL,
 					OutputFile:    videoPath,
 					StartSeq:      oldSeq,
 					ForceStartSeq: true,
 					IsHls:         true,
+					StreamID:      variant.StreamID,
 					Logger:        o.logger,
 					CheckStreamStatus: func(ctx context.Context) (bool, error) {
 						if isVod {
@@ -343,7 +363,8 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			}
 
 			currentQuality = newQuality
-			videoDl, videoPath = createDownloader(newVariant.URL, segStagingDir)
+			curStagingDir = segStagingDir
+			videoDl, videoPath = createDownloader(newVariant.URL, curStagingDir)
 			tracker.AttachVideoDownloader(videoDl)
 			segmentStartTime = time.Now().Unix()
 

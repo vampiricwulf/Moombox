@@ -29,7 +29,7 @@ func (s *runState) wireRoutes() func() {
 	routes.FormatRoutes(s.r, &routes.FormatRoutesDeps{
 		DB:  s.db,
 		Cfg: s.cfg,
-		YT:  &ytFormatAdapter{svc: s.ytService, cfg: s.cfg},
+		YT:  &ytFormatAdapter{svc: s.ytService, store: s.configStore},
 	})
 	routes.StatusRoute(s.r, &routes.StatusRouteDeps{
 		Cfg:                s.cfg,
@@ -122,7 +122,18 @@ func (s *runState) wireRoutes() func() {
 	routes.LogRoutes(s.r, s.log.GetRecentLines)
 	importCleanup := routes.ImportRoutes(s.r, s.db, s.configStore)
 	routes.CookieRoutes(s.r, s.cookieRefresh, s.autoCookieSvc, s.getActivePlatforms, s.apiRL)
-	routes.YtdlpRoutes(s.r, s.cfg.Network.Port, s.cfg.Network.HTTPSEnabled)
+	routes.YtdlpRoutes(s.r, func() int {
+		// Per-request port resolution: the listener binds after route wiring,
+		// and with auto-pick (port 0) only ActualPort knows the real value.
+		if s.webServer != nil && s.webServer.ActualPort > 0 {
+			return s.webServer.ActualPort
+		}
+		var port int
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			port = c.Network.Port
+		})
+		return port
+	}, s.cfg.Network.HTTPSEnabled)
 	routes.RestartRoute(s.r, func() { s.triggerRestart("API") })
 	routes.UpdateRoutes(s.r, &routes.UpdateRouteDeps{
 		Updater:   s.upd,

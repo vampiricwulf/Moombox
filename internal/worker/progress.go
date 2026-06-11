@@ -78,6 +78,14 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 		if p.Percent > 0 {
 			pt.vodPercent = p.Percent
 		}
+		// p.Bytes is per-downloader cumulative. When a fresh downloader is
+		// attached after a quality split (new file, counter restarts near 0)
+		// the delta against the previous downloader's total would be hugely
+		// negative — re-baseline instead. Same-file continuations are fine:
+		// the engine seeds the new downloader's counter with the file size.
+		if p.Bytes < pt.lastVideoBytes {
+			pt.lastVideoBytes = p.Bytes
+		}
 		pt.bytesTotal += p.Bytes - pt.lastVideoBytes
 		pt.lastVideoBytes = p.Bytes
 		pt.mu.Unlock()
@@ -111,6 +119,10 @@ func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 		// Total must never be smaller than the last downloaded segment
 		if pt.audioTotal > 0 && pt.audioTotal < pt.audioSeq {
 			pt.audioTotal = pt.audioSeq
+		}
+		// Re-baseline on downloader replacement — see AttachVideoDownloader.
+		if p.Bytes < pt.lastAudioBytes {
+			pt.lastAudioBytes = p.Bytes
 		}
 		pt.bytesTotal += p.Bytes - pt.lastAudioBytes
 		pt.lastAudioBytes = p.Bytes

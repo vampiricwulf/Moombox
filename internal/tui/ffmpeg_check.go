@@ -230,6 +230,17 @@ func (m *FFmpegCheckModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 		if m.form != nil {
 			model, cmd := m.form.Update(msg)
 			m.form = model.(*huh.Form)
+			// huh completes a selection on a follow-up cycle (Enter →
+			// NextField cmd → completion msg) that only flows through
+			// here, never HandleKey — process completion immediately like
+			// setup_wizard.go does. App-level actions (skip/quit/prepare)
+			// are surfaced as a message since this path can't return an
+			// action string.
+			if m.form != nil && m.form.State == huh.StateCompleted {
+				if action := m.completeMenuForm(); action != "" {
+					return tea.Batch(cmd, func() tea.Msg { return ffmpegMenuActionMsg{Action: action} })
+				}
+			}
 			return cmd
 		}
 		return nil
@@ -313,6 +324,19 @@ func (m *FFmpegCheckModel) handleMainKey(key string) string {
 	}
 	// Check if huh form completed (state set by UpdateComponents on same cycle)
 	if m.form != nil && m.form.State == huh.StateCompleted {
+		return m.completeMenuForm()
+	}
+	return ""
+}
+
+// completeMenuForm consumes a completed huh menu form and performs the
+// resulting transition. Returns an action string ("skip", "quit",
+// "prepare:<method>") for App to dispatch, or "" when the transition is
+// purely internal. Shared between HandleKey (same-cycle completion) and
+// UpdateComponents (huh's follow-up-cycle completion).
+func (m *FFmpegCheckModel) completeMenuForm() string {
+	switch m.mode {
+	case ffmpegMain:
 		action := m.values["action"]
 		m.form = nil
 		switch action {
@@ -334,6 +358,27 @@ func (m *FFmpegCheckModel) handleMainKey(key string) string {
 		case "quit":
 			return "quit"
 		}
+	case ffmpegInstall:
+		method := m.values["method"]
+		m.form = nil
+		if method == "" {
+			// Cancel option
+			m.mode = ffmpegMain
+			m.formInit = m.buildMainForm()
+			return ""
+		}
+		if method == "manual" {
+			// Non-Windows: switch to manual install view which shows the
+			// distro-appropriate install command.
+			m.ShowManual()
+			return ""
+		}
+		// Signal the install to run async — App handles via tea.Cmd
+		m.installing = true
+		m.spinner = newSpinner()
+		m.installResult = "Checking permissions..."
+		m.installError = false
+		return "prepare:" + method
 	}
 	return ""
 }
@@ -409,26 +454,7 @@ func (m *FFmpegCheckModel) handleInstallKey(key string) string {
 	}
 	// Check if huh form completed (state set by UpdateComponents on same cycle)
 	if m.form != nil && m.form.State == huh.StateCompleted {
-		method := m.values["method"]
-		m.form = nil
-		if method == "" {
-			// Cancel option
-			m.mode = ffmpegMain
-			m.formInit = m.buildMainForm()
-			return ""
-		}
-		if method == "manual" {
-			// Non-Windows: switch to manual install view which shows the
-			// distro-appropriate install command.
-			m.ShowManual()
-			return ""
-		}
-		// Signal the install to run async — App handles via tea.Cmd
-		m.installing = true
-		m.spinner = newSpinner()
-		m.installResult = "Checking permissions..."
-		m.installError = false
-		return "prepare:" + method
+		return m.completeMenuForm()
 	}
 	return ""
 }
@@ -453,6 +479,11 @@ func (m *FFmpegCheckModel) handleCustomKey(key string) string {
 	case keyEsc:
 		m.mode = ffmpegMain
 		m.textInput.Blur()
+		// Rebuild the main form — it was consumed (nil) when this mode was
+		// entered; without it the main menu is a dead end whose only exit
+		// (Esc) quits the app. Mirrors handleInstallKey's Esc.
+		m.form = nil
+		m.formInit = m.buildMainForm()
 	case keyEnter:
 		if m.customPath == "" || m.checking {
 			return ""
@@ -554,6 +585,9 @@ func (m *FFmpegCheckModel) handleManualKey(key string) string {
 		m.manualPath = ""
 		m.manualResult = ""
 		m.textInput.Blur()
+		// Rebuild the main form — see handleCustomKey's Esc.
+		m.form = nil
+		m.formInit = m.buildMainForm()
 	case keyEnter:
 		if m.manualPath == "" || m.checking {
 			return ""

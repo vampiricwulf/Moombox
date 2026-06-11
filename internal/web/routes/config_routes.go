@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 
@@ -13,6 +14,25 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
 )
+
+// flexDurationValue extracts the numeric value of a FlexDuration update for
+// validation, accepting both the JSON-number form and the string form
+// ("12h", "0.5d") that applyConfigUpdates parses. unit must match the apply
+// site's unit so both parse identically. Returns ok=false for any other type
+// or an unparseable string (the apply path keeps the stored value then).
+func flexDurationValue(raw any, unit string) (float64, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return v, true
+	case string:
+		fd := config.ParseFlexDuration(v, unit, math.NaN())
+		if math.IsNaN(fd.Value) {
+			return 0, false
+		}
+		return fd.Value, true
+	}
+	return 0, false
+}
 
 // configETag returns a stable short ETag for a marshaled-config response
 // body. Hashing the bytes (rather than maintaining a config-mutation
@@ -155,17 +175,18 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["monitors.twitch_check_interval"] = "twitch_check_interval must be between 5 and 3600"
 			}
 		}
-		if v, ok := mon["feed_check_interval"].(float64); ok {
-			if v < 1 || v > 1440 {
+		// FlexDuration fields accept BOTH JSON numbers and strings ("12h",
+		// "0.5d") in the apply path — validate both forms here, or an
+		// out-of-range string passes the API validator and only fails later
+		// in config.Save with an opaque 500 instead of a clean 400.
+		if raw, exists := mon["feed_check_interval"]; exists {
+			if v, ok := flexDurationValue(raw, "minutes"); ok && (v < 1 || v > 1440) {
 				errs["monitors.feed_check_interval"] = "feed_check_interval must be between 1 and 1440"
 			}
 		}
-		if v, ok := mon["hide_finished_age_days"].(float64); ok {
+		if raw, exists := mon["hide_finished_age_days"]; exists {
 			// Match the canonical 0..365 range enforced by config.Validate.
-			// Without the upper bound here, an over-range value passed the API
-			// validator and only failed later in config.Save with an opaque
-			// 500 "failed to save config" instead of a clean 400.
-			if v < 0 || v > 365 {
+			if v, ok := flexDurationValue(raw, "days"); ok && (v < 0 || v > 365) {
 				errs["monitors.hide_finished_age_days"] = "hide_finished_age_days must be between 0 and 365"
 			}
 		}

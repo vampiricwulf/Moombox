@@ -20,9 +20,15 @@ import (
 func (s *runState) shutdown() bool {
 	s.log.Info("Shutdown signal received, shutting down gracefully...")
 
-	// 10-second force-exit timer. closeLimiters / closeLog must run here too
-	// because os.Exit skips remaining defers; both are sync.Once-guarded so
-	// the concurrently-running deferred cleanup doesn't double-close.
+	// 10-second force-exit timer. closeLimiters / closeDB / closeLog must run
+	// here too because os.Exit skips remaining defers; all are sync.Once-
+	// guarded so the concurrently-running deferred cleanup doesn't
+	// double-close. The exit CODE must honor restartRequested: this backstop
+	// fires routinely (worker stop alone can legitimately take its full 10s
+	// while a background segment mux drains), and exiting 1 during an
+	// update/config restart makes the launcher terminate instead of
+	// respawning — turning a self-update into a daemon outage with the new
+	// binary already swapped on disk but never started.
 	forceExit := time.AfterFunc(10*time.Second, func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -31,7 +37,11 @@ func (s *runState) shutdown() bool {
 		}()
 		s.log.Error("Graceful shutdown timed out, forcing exit")
 		s.closeLimiters()
+		s.closeDB()  // final WAL checkpoint — committed data survives either way
 		s.closeLog() // flush buffered logs before force exit
+		if s.restartRequested.Load() {
+			os.Exit(exitCodeRestart)
+		}
 		os.Exit(1)
 	})
 	defer forceExit.Stop()

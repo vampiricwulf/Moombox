@@ -354,6 +354,9 @@ func (m *TrimDialogModel) handleDeleteKey(key string) string {
 	if len(m.trims) == 0 {
 		return ""
 	}
+	if m.loading {
+		return "" // async delete in flight — a second Enter would 404
+	}
 
 	switch key {
 	case keyUp:
@@ -381,7 +384,9 @@ func (m *TrimDialogModel) handleDeleteKey(key string) string {
 		}
 		trim := m.trims[m.selectedTrimIdx]
 		if m.deleteConfirmID == trim.ID {
-			// Second press: execute delete
+			// Second press: execute delete (clear the confirm so a repeat
+			// press can't fire a duplicate DELETE for the same trim)
+			m.deleteConfirmID = ""
 			return "delete"
 		}
 		// First press: confirm

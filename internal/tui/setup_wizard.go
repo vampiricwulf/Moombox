@@ -16,13 +16,15 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 )
 
-// cookieCountdownTickMsg is sent every second to decrement the cookie timeout countdown.
-type cookieCountdownTickMsg struct{}
+// cookieCountdownTickMsg is sent every second to decrement the cookie timeout
+// countdown. gen identifies the tick chain — ticks from a superseded chain are
+// ignored so stacked chains can't drain the countdown N per second.
+type cookieCountdownTickMsg struct{ gen int }
 
 // cookieCountdownTick returns a tea.Cmd that fires cookieCountdownTickMsg after 1 second.
-func cookieCountdownTick() tea.Cmd {
+func cookieCountdownTick(gen int) tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return cookieCountdownTickMsg{}
+		return cookieCountdownTickMsg{gen: gen}
 	})
 }
 
@@ -178,6 +180,10 @@ type SetupWizardModel struct {
 	cookieTWDone    bool
 	cookieCountdown int  // seconds remaining for cookie timeout
 	cookieTimedOut  bool // true when countdown reaches 0
+	// Countdown tick chain bookkeeping: exactly one chain may be in flight,
+	// identified by cookieTickGen. See armCookieTick.
+	cookieTickGen    int
+	cookieTickActive bool
 
 	// Channel sub-editor (shared by simple and advanced)
 	channels          []config.ChannelConfig
@@ -247,6 +253,7 @@ func (m *SetupWizardModel) Open() {
 	m.cookieTWDone = false
 	m.cookieCountdown = 0
 	m.cookieTimedOut = false
+	m.cookieTickActive = false // any in-flight chain is stale-gen'd by the next arm
 	m.channels = nil
 	m.channelIndex = 0
 	m.channelMode = "list"
@@ -366,6 +373,20 @@ func (m *SetupWizardModel) buildAdvancedForm() {
 	m.advancedInitCmd = m.advancedForm.Init()
 }
 
+// armCookieTick starts a countdown tick chain for the active cookie flow.
+// Returns nil when no flow is active or a chain is already in flight — the
+// caller (app_keys.go) runs on every keypress and must not stack chains.
+// Each arm bumps the generation so any tick still in flight from a previous
+// flow is recognised as stale and dropped.
+func (m *SetupWizardModel) armCookieTick() tea.Cmd {
+	if !m.cookieActive || m.cookieTickActive {
+		return nil
+	}
+	m.cookieTickGen++
+	m.cookieTickActive = true
+	return cookieCountdownTick(m.cookieTickGen)
+}
+
 // UpdateComponents routes tea.Msg to the embedded textinput, huh form, or spinner and syncs.
 func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	if !m.visible {
@@ -373,19 +394,25 @@ func (m *SetupWizardModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	}
 
 	// Handle cookie countdown tick
-	if _, ok := msg.(cookieCountdownTickMsg); ok {
+	if tick, ok := msg.(cookieCountdownTickMsg); ok {
+		if tick.gen != m.cookieTickGen {
+			return nil // stale chain from an earlier cookie flow
+		}
 		if m.cookieActive && !m.cookieFinishing && m.cookieCountdown > 0 {
 			m.cookieCountdown--
 			if m.cookieCountdown <= 0 {
 				m.cookieTimedOut = true
 				m.cookieActive = false
+				m.cookieTickActive = false
 				if m.OnCancelAutoCookie != nil {
 					m.OnCancelAutoCookie()
 				}
 				return nil
 			}
-			return cookieCountdownTick()
+			return cookieCountdownTick(tick.gen)
 		}
+		// Flow ended (cancelled/finishing) — let the chain die.
+		m.cookieTickActive = false
 		return nil
 	}
 

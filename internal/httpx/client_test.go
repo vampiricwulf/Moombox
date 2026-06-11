@@ -65,6 +65,13 @@ func TestNewTransportOverridesDefaults(t *testing.T) {
 	if tr.ForceAttemptHTTP2 {
 		t.Error("DisableHTTP2: ForceAttemptHTTP2 should be false")
 	}
+	// The flag alone doesn't disable h2 — net/http auto-enables it unless
+	// TLSNextProto is a non-nil empty map. Assert the effective mechanism.
+	if tr.TLSNextProto == nil {
+		t.Error("DisableHTTP2: TLSNextProto must be a non-nil empty map to actually disable HTTP/2")
+	} else if len(tr.TLSNextProto) != 0 {
+		t.Errorf("DisableHTTP2: TLSNextProto should be empty, got %d entries", len(tr.TLSNextProto))
+	}
 }
 
 // TestNewTransportUsesDefaultsForZeroValues verifies a zero-valued

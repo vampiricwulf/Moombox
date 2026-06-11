@@ -80,9 +80,15 @@ func findMatchingBrace(js string, start int) int {
 						}
 						i++
 					}
-				} else {
-					// Could be regex literal — skip it
+				} else if regexPossibleAt(js, i) {
+					// Regex literal — skip it
 					i = skipRegexLiteral(js, i)
+				} else {
+					// Division operator — treating it as a regex opener
+					// would blindly consume to the next '/' (or EOL — and
+					// minified player JS is one line), skipping arbitrary
+					// code and desyncing the brace counter.
+					i++
 				}
 			} else {
 				i++
@@ -92,6 +98,44 @@ func findMatchingBrace(js string, start int) int {
 		}
 	}
 	return -1
+}
+
+// regexPossibleAt reports whether the '/' at position i can start a regex
+// literal rather than a division operator, judged by the preceding
+// significant token: after an identifier/number, a closing paren/bracket, a
+// string end, or member access, '/' is division — except when the identifier
+// is a keyword that precedes an expression (return, typeof, …).
+func regexPossibleAt(js string, i int) bool {
+	j := i - 1
+	for j >= 0 && (js[j] == ' ' || js[j] == '\t' || js[j] == '\n' || js[j] == '\r') {
+		j--
+	}
+	if j < 0 {
+		return true
+	}
+	prev := js[j]
+	if isIdentChar(prev) {
+		start := j
+		for start > 0 && isIdentChar(js[start-1]) {
+			start--
+		}
+		switch js[start : j+1] {
+		case "return", "typeof", "instanceof", "in", "of", "new", "delete",
+			"void", "throw", "case", "do", "else", "yield", "await":
+			return true
+		}
+		return false
+	}
+	switch prev {
+	case ')', ']', '"', '\'', '`', '.':
+		return false
+	}
+	return true
+}
+
+func isIdentChar(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || c == '_' || c == '$'
 }
 
 // skipStringLiteral advances past a string literal starting at position i.
@@ -168,8 +212,10 @@ func skipTemplateLiteral(js string, i int) int {
 							}
 							i++
 						}
-					} else {
+					} else if regexPossibleAt(js, i) {
 						i = skipRegexLiteral(js, i)
+					} else {
+						i++ // division operator
 					}
 				default:
 					i++

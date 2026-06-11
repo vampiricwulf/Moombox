@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -38,6 +39,13 @@ func (m *Muxer) runFFmpegWithProgress(ctx context.Context, args []string, totalD
 		if strings.TrimSpace(line) != "" {
 			lastErr = line
 		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		// Scan aborted (e.g. a single stderr token over the 64KB cap). Keep
+		// draining the pipe — if FFmpeg fills it, the process blocks on write
+		// and cmd.Wait() below would never return.
+		m.logger.Warn("ffmpeg stderr scan aborted, draining remainder", "err", scanErr)
+		io.Copy(io.Discard, stderr)
 	}
 
 	if err := cmd.Wait(); err != nil {

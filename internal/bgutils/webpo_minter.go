@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/dop251/goja"
 )
@@ -84,8 +85,42 @@ func (m *WebPoMinter) MintAsWebsafeString(contentBinding string) (string, error)
 	// We pass the raw string and let the mint callback handle encoding
 	encoded := []byte(contentBinding)
 
-	// Call mintCallback(encodedIdentifier) -> Uint8Array
-	result, err := m.mintCallback(goja.Undefined(), m.vm.ToValue(encoded))
+	// Call mintCallback(encodedIdentifier) -> Uint8Array, timeboxed with
+	// vm.Interrupt. The mint executes server-supplied BotGuard JS; a looping
+	// callback (anti-bot rotation) would otherwise block this goroutine
+	// forever while pinning m.mu — wedging every later mint AND Shutdown for
+	// the process lifetime. Same goroutine+Interrupt+ClearInterrupt ordering
+	// as cipher.callWithTimeout: on timeout, fire the interrupt, wait for
+	// the goroutine to actually exit, and only then clear the flag so the
+	// next call on this VM starts clean.
+	type mintResult struct {
+		val goja.Value
+		err error
+	}
+	done := make(chan mintResult, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- mintResult{nil, fmt.Errorf("mint callback panic: %v", r)}
+			}
+		}()
+		v, e := m.mintCallback(goja.Undefined(), m.vm.ToValue(encoded))
+		done <- mintResult{v, e}
+	}()
+
+	timer := time.NewTimer(DefaultMintTimeout)
+	defer timer.Stop()
+
+	var r mintResult
+	select {
+	case r = <-done:
+	case <-timer.C:
+		m.vm.Interrupt(fmt.Sprintf("mint timeout (%v)", DefaultMintTimeout))
+		r = <-done // wait for the goroutine to observe the interrupt
+	}
+	m.vm.ClearInterrupt()
+
+	result, err := r.val, r.err
 	if err != nil {
 		return "", fmt.Errorf("mint callback: %w", err)
 	}

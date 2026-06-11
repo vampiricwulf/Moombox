@@ -304,8 +304,18 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.wsHandler != nil {
 		wsHandler := s.wsHandler
 		router := s.router
+		store := s.configStore
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+				// The upgrade path bypasses the router's middleware chain —
+				// re-apply the IP gate here, or a non-private client against
+				// a "lan"-mode deployment would get the live broadcast
+				// stream (job titles, logs, state) that every HTTP route
+				// 403s, with only the forgeable Origin check in its way.
+				if !ipAllowedByNetworkAccess(store, r) {
+					http.Error(w, "Forbidden", http.StatusForbidden)
+					return
+				}
 				wsHandler(w, r)
 				return
 			}
@@ -326,14 +336,7 @@ func (s *Server) Start(ctx context.Context) error {
 	scheme := "http"
 	var tlsConfig *tls.Config
 	if s.cfg.Network.HTTPSEnabled {
-		certPath := s.cfg.Network.TLSCertPath
-		if certPath == "" {
-			certPath = "./moombox.crt"
-		}
-		keyPath := s.cfg.Network.TLSKeyPath
-		if keyPath == "" {
-			keyPath = "./moombox.key"
-		}
+		certPath, keyPath := resolveTLSPaths(s.cfg)
 
 		var err error
 		tlsConfig, err = LoadOrGenerateTLSConfig(certPath, keyPath, s.cfg.Network.NetworkAccess, s.logger)
@@ -373,9 +376,29 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	// Wrap listener with TLS if enabled
+	// Cross-scheme redirect on the single configured port: each accepted
+	// connection's first byte is sniffed (a TLS handshake always starts
+	// with 0x16) and mismatched-scheme traffic is answered with a 307 to
+	// the right scheme instead of Go's bare protocol-mismatch error text.
+	//   - HTTPS enabled:  plain http:// requests redirect to https://.
+	//   - HTTPS disabled: https:// requests redirect to http:// — possible
+	//     only when a certificate pair exists on disk (typically left from
+	//     an earlier https_enabled run) to terminate the handshake; with no
+	//     loadable cert the listener stays plain-HTTP-only as before.
+	var redirectLn net.Listener
+	redirectScheme := ""
 	if tlsConfig != nil {
-		ln = tls.NewListener(ln, tlsConfig)
+		tlsRaw, plainRaw := newSchemeMux(ln, s.logger)
+		ln = tls.NewListener(tlsRaw, tlsConfig)
+		redirectLn, redirectScheme = plainRaw, "https"
+	} else if redirTLS := loadRedirectTLSConfig(s.cfg); redirTLS != nil {
+		tlsRaw, plainRaw := newSchemeMux(ln, s.logger)
+		ln = plainRaw
+		redirectLn, redirectScheme = tls.NewListener(tlsRaw, redirTLS), "http"
+	}
+	if redirectLn != nil {
+		s.logger.Info("cross-scheme redirect active", "redirectsTo", redirectScheme)
+		go s.serveSchemeRedirect(redirectLn, redirectScheme)
 	}
 
 	// Log the actual URL (matches TS: "Web dashboard available at ...")

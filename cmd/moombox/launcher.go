@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync/atomic"
+	"syscall"
 )
 
 // launchAndSupervise is the launcher/supervisor loop. It spawns moombox
@@ -42,6 +44,39 @@ func launchAndSupervise() {
 	// Ignore interrupts in the launcher — the child handles Ctrl+C.
 	signal.Ignore(os.Interrupt)
 
+	// Forward SIGTERM to the child instead of dying with the default
+	// disposition. The single-instance lock lives in THIS process: if a
+	// plain `kill <launcher-pid>` (the PID a user sees for the foreground
+	// process) killed only the launcher, the child would keep running —
+	// and writing to the database — while the lock is released, letting a
+	// second instance start against the same DB. Windows has no SIGTERM
+	// delivery for console apps, so the fallback there is Kill; outright
+	// TerminateProcess on the launcher remains uninterceptable.
+	var child atomic.Pointer[os.Process]
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "panic in launcher signal forwarder: %v\n", r)
+			}
+		}()
+		for range sigCh {
+			if p := child.Load(); p != nil {
+				if err := p.Signal(syscall.SIGTERM); err != nil {
+					_ = p.Kill()
+				}
+				continue
+			}
+			// No child right now (before the first Start, or in the
+			// respawn window). signal.Notify removed the default terminate
+			// disposition, so without this exit the SIGTERM would be
+			// swallowed entirely and the launcher would respawn as if
+			// nothing happened. Process death releases the instance lock.
+			os.Exit(143) // 128 + SIGTERM
+		}
+	}()
+
 	for {
 		cmd := exec.Command(exePath, os.Args[1:]...)
 		cmd.Stdin = os.Stdin
@@ -49,7 +84,16 @@ func launchAndSupervise() {
 		cmd.Stderr = os.Stderr
 		cmd.Env = append(os.Environ(), "_MOOMBOX_CHILD=1")
 
-		if err := cmd.Run(); err != nil {
+		if startErr := cmd.Start(); startErr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to run moombox: %v\n", startErr)
+			deferDeleteOldLauncher(exePath)
+			os.Exit(1)
+		}
+		child.Store(cmd.Process)
+		err := cmd.Wait()
+		child.Store(nil)
+
+		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				if exitErr.ExitCode() == exitCodeRestart {
 					// Update applied: rename .old → ~ on Windows so the

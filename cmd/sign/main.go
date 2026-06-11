@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/updater"
 )
@@ -82,7 +83,9 @@ func generateKeyPair(outPath string) {
 }
 
 func signFile(path string) {
-	keyHex := os.Getenv("SIGNING_KEY")
+	// TrimSpace: CI secrets routinely carry a trailing newline, which would
+	// fail hex decoding with a confusing "invalid private key hex".
+	keyHex := strings.TrimSpace(os.Getenv("SIGNING_KEY"))
 	if keyHex == "" {
 		fmt.Fprintln(os.Stderr, "error: SIGNING_KEY environment variable not set")
 		os.Exit(1)

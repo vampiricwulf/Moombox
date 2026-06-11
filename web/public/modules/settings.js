@@ -79,6 +79,12 @@ export class SettingsController {
     this._originalRestartValues = {};
     this._dirty = false;
     this._dirtyListenersAdded = false;
+    /** True once populateBrowserSelector has filled the browser <sl-select> —
+     *  saves must not touch browser_path/browser_type before then. */
+    this._browserSelectLoaded = false;
+    /** True when the yt-dlp plugin button reads "Reinstall" (installed,
+     *  matching port) — the install call must then force a rewrite. */
+    this._ytdlpReinstall = false;
   }
 
   setupListeners() {
@@ -213,7 +219,9 @@ export class SettingsController {
     // yt-dlp plugin install
     const ytdlpInstallBtn = document.getElementById("ytdlp-install-btn");
     if (ytdlpInstallBtn) {
-      ytdlpInstallBtn.addEventListener("click", () => this.installYtdlpPlugin());
+      // Force when the button reads "Reinstall" (already installed, port OK) —
+      // see loadYtdlpPluginStatus, which maintains the flag.
+      ytdlpInstallBtn.addEventListener("click", () => this.installYtdlpPlugin(this._ytdlpReinstall));
     }
 
     // yt-dlp plugin refresh
@@ -710,9 +718,8 @@ export class SettingsController {
         active_platforms: activePlatforms,
         auto_enabled: autoEnabled,
         browser_profile_dir: autoCookiesProfileDir,
-        refresh_interval: cookieRefreshInterval ?? null,
         dpapi_fallback: dpapiFallback,
-        // browser_path / browser_type resolved below after validation
+        // refresh_interval / browser_path / browser_type resolved below
       },
       disk: {
         disk_warn_percent: diskWarnPercent,
@@ -731,6 +738,13 @@ export class SettingsController {
       },
     };
 
+    // Only send refresh_interval when the field has a value — the server
+    // turns null into 0, which fails the 10..10080 range validation and
+    // rejects the entire save. Omitting the key keeps the stored value.
+    if (cookieRefreshInterval !== undefined) {
+      payload.cookies.refresh_interval = cookieRefreshInterval;
+    }
+
     // Include notifications — managed entirely via the web UI, so no
     // concurrent modification risk (unlike channels which the TUI can edit).
     if (config.notifications) {
@@ -739,42 +753,57 @@ export class SettingsController {
 
     // Resolve browser selection into payload.cookies.browser_path / browser_type.
     // Must happen before the fetch so validation errors can abort early.
-    if (browserSelectVal === "__custom__") {
-      const path = document.getElementById("cfg-cookies-browser-path")?.value || "";
-      const type = document.getElementById("cfg-cookies-browser-type")?.value || "firefox";
-      const msgEl = document.getElementById("custom-browser-validation-msg");
-      // Clear any previous validation message
-      if (msgEl) { msgEl.textContent = ""; msgEl.style.color = ""; }
-      const validateResp = await fetch("/api/auto-cookies/validate-browser-path", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, type }),
-      });
-      const validateResult = await validateResp.json();
-      if (!validateResult.valid) {
-        if (msgEl) {
-          msgEl.textContent = `Invalid browser: ${validateResult.error}`;
-          msgEl.style.color = "var(--sl-color-danger-600)";
+    // Only when the selector has actually been populated (loadAutoCookieStatus
+    // runs async, and only with auto-cookies enabled) — otherwise the select
+    // reads "" and the save would silently erase a configured browser. Omitting
+    // both keys keeps the server's stored values.
+    if (this._browserSelectLoaded) {
+      if (browserSelectVal === "__custom__") {
+        const path = document.getElementById("cfg-cookies-browser-path")?.value || "";
+        const type = document.getElementById("cfg-cookies-browser-type")?.value || "firefox";
+        const msgEl = document.getElementById("custom-browser-validation-msg");
+        // Clear any previous validation message
+        if (msgEl) { msgEl.textContent = ""; msgEl.style.color = ""; }
+        let validateResult;
+        try {
+          const validateResp = await fetch("/api/auto-cookies/validate-browser-path", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path, type }),
+          });
+          validateResult = await validateResp.json();
+        } catch (e) {
+          // Network error must not leave the Save button stuck spinning
+          this.app.showToast("Failed to validate browser path: " + e.message, "danger");
+          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
+          return;
         }
-        const saveBtn = document.getElementById("save-config-btn");
-        if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
-        return;
+        if (!validateResult.valid) {
+          if (msgEl) {
+            msgEl.textContent = `Invalid browser: ${validateResult.error}`;
+            msgEl.style.color = "var(--sl-color-danger-600)";
+          }
+          if (saveBtn) { saveBtn.loading = false; saveBtn.disabled = false; }
+          return;
+        }
+        if (msgEl) {
+          msgEl.textContent = "Path validated.";
+          msgEl.style.color = "var(--sl-color-success-600)";
+        }
+        payload.cookies.browser_path = path;
+        payload.cookies.browser_type = type;
+      } else if (browserSelectVal === "") {
+        // Auto-detect — clear any explicit browser selection
+        payload.cookies.browser_path = "";
+        payload.cookies.browser_type = "";
+      } else {
+        // A detected browser was chosen — the option value is an index
+        // (Shoelace mangles spaces in values); the real path and family
+        // live in data attributes.
+        const opt = browserSelectEl?.querySelector(`sl-option[value="${CSS.escape(browserSelectVal)}"]`);
+        payload.cookies.browser_path = opt?.dataset.path || "";
+        payload.cookies.browser_type = opt?.dataset.type || "";
       }
-      if (msgEl) {
-        msgEl.textContent = "Path validated.";
-        msgEl.style.color = "var(--sl-color-success-600)";
-      }
-      payload.cookies.browser_path = path;
-      payload.cookies.browser_type = type;
-    } else if (browserSelectVal === "") {
-      // Auto-detect — clear any explicit browser selection
-      payload.cookies.browser_path = "";
-      payload.cookies.browser_type = "";
-    } else {
-      // A detected browser was chosen — value is the path, data-type holds the family
-      const opt = browserSelectEl?.querySelector(`sl-option[value="${CSS.escape(browserSelectVal)}"]`);
-      payload.cookies.browser_path = browserSelectVal;
-      payload.cookies.browser_type = opt?.dataset.type || "";
     }
 
     try {
@@ -786,10 +815,17 @@ export class SettingsController {
 
       if (response.ok) {
         // Deep-merge payload into local config cache to preserve server-only
-        // nested fields (Object.assign would replace entire sub-objects)
+        // nested fields (Object.assign would replace entire sub-objects).
+        // Drop undefined-valued keys (cleared numeric fields) first —
+        // JSON.stringify omitted them from the request, so the server kept
+        // its stored values; copying undefined would desync the local cache
+        // and trigger spurious "Restart Required" prompts.
         for (const [key, val] of Object.entries(payload)) {
           if (val && typeof val === "object" && !Array.isArray(val) && config[key] && typeof config[key] === "object") {
-            Object.assign(config[key], val);
+            const defined = Object.fromEntries(
+              Object.entries(val).filter(([, v]) => v !== undefined),
+            );
+            Object.assign(config[key], defined);
           } else {
             config[key] = val;
           }
@@ -1638,7 +1674,11 @@ export class SettingsController {
       // Port mismatch warning
       mismatchWarning.style.display = status.portMismatch ? "" : "none";
 
-      // Update button text
+      // Update button text. When it reads "Reinstall" the install call must
+      // pass force — otherwise the server short-circuits "already installed"
+      // and never rewrites the file. ("Update" rewrites anyway: the port or
+      // scheme mismatch defeats the short-circuit.)
+      this._ytdlpReinstall = !!status.installed && !status.portMismatch;
       if (status.installed) {
         let icon = installBtn.querySelector("sl-icon");
         if (!icon) { icon = document.createElement("sl-icon"); icon.slot = "prefix"; }
@@ -1988,16 +2028,19 @@ export class SettingsController {
       : "Auto-detect (no browser found)";
     select.appendChild(autoOpt);
 
-    // Detected browsers
+    // Detected browsers. Shoelace replaces spaces in option values with
+    // underscores, which corrupts real paths (C:\Program Files\...) — use the
+    // index as the value and carry the actual path in a data attribute.
     const available = status.availableBrowsers || [];
-    for (const b of available) {
+    available.forEach((b, i) => {
       const opt = document.createElement("sl-option");
-      opt.value = b.path;
+      opt.value = String(i);
+      opt.dataset.path = b.path;
       opt.dataset.type = b.type;
       opt.textContent = b.name;
       opt.title = b.path;
       select.appendChild(opt);
-    }
+    });
 
     // Custom path entry
     const customOpt = document.createElement("sl-option");
@@ -2026,9 +2069,14 @@ export class SettingsController {
         typeInput.value = familyValue;
       }
     } else {
-      select.value = cfgPath; // empty string = auto-detect
+      // Map the configured path back to its detected option (values are
+      // indexes — see above); no configured path = auto-detect ("").
+      const cfgIdx = available.findIndex((b) => b.path === cfgPath);
+      select.value = cfgPath && cfgIdx >= 0 ? String(cfgIdx) : "";
       if (customWrap) customWrap.style.display = "none";
     }
+
+    this._browserSelectLoaded = true;
 
     // Wire change listener once (idempotent)
     if (!select._customListenerAttached) {

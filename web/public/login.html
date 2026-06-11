@@ -185,13 +185,15 @@
                         } else {
                             const data = await response.json().catch(() => ({ error: response.statusText }));
                             errorText.textContent = data.error || "Login failed";
-                            errorAlert.style.display = "";
+                            // "block", not "" — clearing the inline style falls back
+                            // to the stylesheet's #login-error { display: none; }
+                            errorAlert.style.display = "block";
                             passwordInput.value = "";
                             passwordInput.focus();
                         }
                     } catch (e) {
                         errorText.textContent = "Connection error: " + e.message;
-                        errorAlert.style.display = "";
+                        errorAlert.style.display = "block";
                     } finally {
                         if (!success) {
                             submitBtn.loading = false;

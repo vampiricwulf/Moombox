@@ -24,10 +24,14 @@ func parseInstalledPlugin(content string) (scheme string, port int) {
 	return m[1], port
 }
 
-// YtdlpRoutes registers yt-dlp plugin routes.
-func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
+// YtdlpRoutes registers yt-dlp plugin routes. currentPort is a GETTER
+// evaluated per request: route wiring runs before the listener binds, so a
+// port captured by value would be the configured port — with auto-pick
+// (port 0) the plugin file would be generated pointing at ":0" forever.
+func YtdlpRoutes(r chi.Router, currentPort func() int, httpsEnabled bool) {
 	// GET /api/ytdlp-plugin/status
 	r.Get("/api/ytdlp-plugin/status", func(rw http.ResponseWriter, req *http.Request) {
+		port := currentPort()
 		pluginDir := ytdlpPluginDir()
 		installed := false
 		var installedPort *int
@@ -44,7 +48,7 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 				installed = true
 				if scheme, p := parseInstalledPlugin(string(data)); p > 0 {
 					installedPort = &p
-					portMismatch = p != currentPort || scheme != expectedScheme
+					portMismatch = p != port || scheme != expectedScheme
 				}
 			}
 		}
@@ -59,7 +63,7 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 		jsonResponse(rw, map[string]any{
 			"installed":     installed,
 			"pluginDir":     pluginDir,
-			"currentPort":   currentPort,
+			"currentPort":   port,
 			"httpsEnabled":  httpsEnabled,
 			"installedPort": installedPort,
 			"portMismatch":  portMismatch,
@@ -69,6 +73,7 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 
 	// POST /api/ytdlp-plugin/install
 	r.Post("/api/ytdlp-plugin/install", func(rw http.ResponseWriter, req *http.Request) {
+		port := currentPort()
 		var body struct {
 			Force bool `json:"force"`
 		}
@@ -100,7 +105,7 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 		if !body.Force {
 			if data, err := os.ReadFile(pluginPath); err == nil {
 				existingScheme, existingPort := parseInstalledPlugin(string(data))
-				if existingPort == currentPort && existingScheme == expectedScheme {
+				if existingPort == port && existingScheme == expectedScheme {
 					jsonResponse(rw, map[string]any{
 						"success":          true,
 						"alreadyInstalled": true,
@@ -112,7 +117,7 @@ func YtdlpRoutes(r chi.Router, currentPort int, httpsEnabled bool) {
 		}
 
 		// Write the plugin file with the current port
-		pluginContent := generateYtdlpPlugin(currentPort, httpsEnabled)
+		pluginContent := generateYtdlpPlugin(port, httpsEnabled)
 		if err := os.WriteFile(pluginPath, []byte(pluginContent), 0o644); err != nil {
 			jsonError(rw, "failed to write plugin", http.StatusInternalServerError)
 			return

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"maps"
+	"math"
 	"strconv"
 	"strings"
 
@@ -426,7 +427,9 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	} else {
 		m.values["twitch_check_interval"] = ""
 	}
-	m.values["hide_finished_age_days"] = fmt.Sprintf("%.0f", cfg.Monitors.HideFinishedAgeDays.Days())
+	// FormatFloat with -1 precision round-trips fractional values ("0.5"
+	// stays "0.5", "30" stays "30") — %.0f silently rounded them away.
+	m.values["hide_finished_age_days"] = strconv.FormatFloat(cfg.Monitors.HideFinishedAgeDays.Days(), 'f', -1, 64)
 
 	// Downloader
 	m.values["output_template"] = cfg.Downloader.OutputTemplate
@@ -508,6 +511,71 @@ func (m *SettingsModel) applyValues() {
 		}
 	}
 
+	// Range-check the remaining numeric fields BEFORE writing — the ranges
+	// mirror config.Validate (config.go validateOrNormalize), which Save
+	// runs and REFUSES to persist on failure. Without this gate a bad value
+	// (e.g. empty → Atoi 0) poisons the live config while the TUI reports
+	// "Saved" and the change is silently lost on restart. Mirrors the setup
+	// wizard's pre-build checks in finishAdvancedSetup.
+	for _, c := range []struct {
+		key, msg string
+		min, max int
+	}{
+		{"log_max_file_size", "Max log file size must be 1024-1073741824 bytes", 1024, 1073741824},
+		{"log_max_files", "Max log files must be 1-100", 1, 100},
+		{"max_feed_items", "Max feed items must be 1-1000", 1, 1000},
+		{"feed_check_interval", "Feed check interval must be 1-1440 minutes", 1, 1440},
+		{"max_video_resolution", "Max resolution must be at least 1", 1, math.MaxInt},
+		{"num_parallel_downloads", "Parallel downloads must be at least 1", 1, math.MaxInt},
+		{"segment_retry_delay_cap", "Segment retry cap must be at least 1", 1, math.MaxInt},
+		{"segment_live_check_retries", "Live check retries must be at least 1", 1, math.MaxInt},
+		{"refresh_interval", "Cookie refresh interval must be 10-10080 minutes", 10, 10080},
+		{"disk_warn_percent", "Disk warning threshold must be 1-99", 1, 99},
+		{"disk_critical_percent", "Disk critical threshold must be 1-99", 1, 99},
+	} {
+		n, err := strconv.Atoi(m.values[c.key])
+		if err != nil || n < c.min || n > c.max {
+			m.errorMsg = c.msg
+			m.status = saveError
+			return
+		}
+	}
+	warnPct, _ := strconv.Atoi(m.values["disk_warn_percent"])
+	critPct, _ := strconv.Atoi(m.values["disk_critical_percent"])
+	if critPct <= warnPct {
+		m.errorMsg = "Disk critical threshold must exceed warning threshold"
+		m.status = saveError
+		return
+	}
+	// hide_finished_age_days is a FLOAT — fractional days (0.5 = 12h) are
+	// valid config that the Web UI and config file accept. Parsing it as an
+	// int here would silently rewrite 0.5 → 0 on any unrelated TUI save.
+	// The explicit NaN/Inf rejection matters: ParseFloat accepts "nan" (and
+	// TOML 1.0 has nan/inf literals a hand-edited config could carry), and
+	// NaN slips through a min/max range check because both comparisons are
+	// false.
+	hideAge, hideAgeErr := strconv.ParseFloat(m.values["hide_finished_age_days"], 64)
+	if hideAgeErr != nil || math.IsNaN(hideAge) || math.IsInf(hideAge, 0) || hideAge < 0 || hideAge > 365 {
+		m.errorMsg = "Hide finished after must be 0-365 days"
+		m.status = saveError
+		return
+	}
+	// Text fields config.Validate refuses to save empty.
+	for _, c := range []struct{ key, msg string }{
+		{"database_path", "Database path must not be empty"},
+		{"log_file_path", "Log file path must not be empty"},
+		{"output_directory", "Output directory must not be empty"},
+		{"staging_directory", "Staging directory must not be empty"},
+		{"cookie_file", "Cookie file must not be empty"},
+		{"output_template", "Output template must not be empty"},
+	} {
+		if strings.TrimSpace(m.values[c.key]) == "" {
+			m.errorMsg = c.msg
+			m.status = saveError
+			return
+		}
+	}
+
 	// Lock for all config writes
 	mu := m.configStore.RWMutex()
 	mu.Lock()
@@ -545,8 +613,10 @@ func (m *SettingsModel) applyValues() {
 	} else {
 		m.cfg.Monitors.DecapiCheckInterval = nil
 	}
+	// Lower bound 5 matches config.Validate — a 1-4s value would make
+	// Save refuse to persist the whole config.
 	if v := m.values["twitch_check_interval"]; v != "" {
-		if t, err := strconv.Atoi(v); err == nil && t >= 1 && t <= 3600 {
+		if t, err := strconv.Atoi(v); err == nil && t >= 5 && t <= 3600 {
 			m.cfg.Monitors.TwitchCheckInterval = &t
 		} else {
 			m.cfg.Monitors.TwitchCheckInterval = nil
@@ -554,8 +624,7 @@ func (m *SettingsModel) applyValues() {
 	} else {
 		m.cfg.Monitors.TwitchCheckInterval = nil
 	}
-	hideAge, _ := strconv.Atoi(m.values["hide_finished_age_days"])
-	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: float64(hideAge)}
+	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: hideAge}
 
 	// Downloader
 	m.cfg.Downloader.OutputTemplate = m.values["output_template"]

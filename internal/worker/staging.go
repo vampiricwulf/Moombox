@@ -3,16 +3,8 @@ package worker
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
-
-// segmentFileNames contains the known filenames produced by download strategies.
-var segmentFileNames = map[string]bool{
-	"video_stream": true, // DASH video
-	"audio_stream": true, // DASH audio
-	"video.ts":     true, // HLS
-	"video.mp4":    true, // VOD video
-	"audio.m4a":    true, // VOD audio
-}
 
 // HasStagingFiles returns true if the staging directory for a job exists and is non-empty.
 func HasStagingFiles(stagingBase, jobID string) bool {
@@ -21,16 +13,28 @@ func HasStagingFiles(stagingBase, jobID string) bool {
 	return err == nil && len(entries) > 0
 }
 
-// HasSegmentFiles returns true if the staging directory contains recognized segment files.
+// HasSegmentFiles returns true if the staging directory contains recognized
+// segment files, either at the root or inside a quality-split seg_N
+// subdirectory (post-split jobs keep their newest data there — without the
+// subdirectory check, the Mux recovery action stays hidden for them).
+//
+// Recognition is delegated to discoverStagingMedia so this visibility probe
+// and the actual mux recovery (muxFromStaging) can never disagree about what
+// counts as recoverable media.
 func HasSegmentFiles(stagingBase, jobID string) bool {
 	dir := filepath.Join(stagingBase, jobID)
+	if discoverStagingMedia(dir) != nil {
+		return true
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false
 	}
 	for _, e := range entries {
-		if !e.IsDir() && segmentFileNames[e.Name()] {
-			return true
+		if e.IsDir() && strings.HasPrefix(e.Name(), "seg_") {
+			if discoverStagingMedia(filepath.Join(dir, e.Name())) != nil {
+				return true
+			}
 		}
 	}
 	return false

@@ -254,9 +254,7 @@ class MoomboxApp {
     document.getElementById("details-dialog").addEventListener("click", (e) => {
       const copyBtn = e.target.closest("[data-copy]");
       if (copyBtn) {
-        navigator.clipboard.writeText(copyBtn.dataset.copy).catch(() => {
-          this.showToast("Failed to copy to clipboard", "warning");
-        });
+        this.copyTextToClipboard(copyBtn.dataset.copy);
       }
     });
 
@@ -456,6 +454,10 @@ class MoomboxApp {
     const handleThumbError = (e) => {
       const img = e.target;
       if (img.tagName !== "IMG" || !img.closest(".thumb")) return;
+      // Remember the exact src that just failed so updateJobCard doesn't
+      // re-assign it on the next progress tick (endless 404/swap flicker
+      // when a job's local thumbnailFile is missing).
+      img.dataset.localFailed = img.getAttribute("src") || "";
       const fallback = img.dataset.fallback;
       if (fallback) {
         // Remove fallback so we don't loop if it also fails
@@ -873,7 +875,12 @@ class MoomboxApp {
 
   async dismissUpdate() {
     try {
-      await fetch("/api/update/dismiss", { method: "POST" });
+      const resp = await fetch("/api/update/dismiss", { method: "POST" });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({ error: resp.statusText }));
+        this.showToast("Failed to dismiss: " + (data.error || "Unknown error"), "danger");
+        return;
+      }
       this._updateAvailable = null;
       this.updateVersionIndicator();
       document.getElementById("update-dialog")?.hide();
@@ -926,8 +933,11 @@ class MoomboxApp {
       this._pingInterval = setInterval(() => {
         if (this.ws?.readyState !== WebSocket.OPEN) return;
         const now = Date.now();
-        // Dead-socket check: only fire if a recent ping actually went out.
-        if (this._lastPingSent > this._lastPong && now - this._lastPingSent > 45000) {
+        // Dead-socket check: a ping went out and no pong has come back for
+        // 45s. Measured against _lastPong — _lastPingSent refreshes every
+        // tick (send() buffers without throwing on dead sockets), so a
+        // staleness check against it would never fire.
+        if (this._lastPingSent > this._lastPong && now - this._lastPong > 45000) {
           console.log("WebSocket heartbeat timeout — reconnecting");
           this.ws.close();
           return;
@@ -1303,7 +1313,8 @@ class MoomboxApp {
         addChannelsBtn.textContent = "Add Channels";
         addChannelsBtn.addEventListener("click", () => {
           document.querySelector('sl-tab[panel="settings"]')?.click();
-          setTimeout(() => document.querySelector('[data-section="channels"]')?.click(), 100);
+          // The settings nav is an sl-menu — nothing carries data-section.
+          setTimeout(() => document.querySelector('#settings-nav sl-menu-item[value="channels"]')?.click(), 100);
         });
         const addVideoBtn = document.createElement("sl-button");
         addVideoBtn.setAttribute("variant", "primary");
@@ -1332,6 +1343,10 @@ class MoomboxApp {
         if (cta) cta.style.display = "";
       }
       if (filterCount) { filterCount.style.display = "none"; }
+      // No jobs left — every selection is stale; clear them and sync the
+      // batch bar so it doesn't stick at "N selected" with zero jobs.
+      this._selectedTaskJobs.clear();
+      this.updateBatchActionBar();
       return;
     }
 
@@ -1502,6 +1517,9 @@ class MoomboxApp {
       const subtext = emptyState.querySelector(".empty-state-subtext");
       if (subtext) subtext.textContent = "Finished jobs older than the configured age will appear here automatically";
       if (filterCount) filterCount.style.display = "none";
+      // No archived jobs left — clear stale selections and sync the batch bar
+      this._selectedArchivedJobs.clear();
+      this.updateBatchActionBar();
       return;
     }
 
@@ -1702,7 +1720,9 @@ class MoomboxApp {
       const desiredSrc = job.thumbnailFile
         ? `/api/jobs/${encodeURIComponent(job.id)}/thumbnail`
         : (job.thumbnailUrl || "");
-      if (desiredSrc && !thumbImg.src.endsWith(desiredSrc)) {
+      // Skip re-assigning a src that already errored (handleThumbError
+      // swapped to the fallback) — re-setting it would just 404 again.
+      if (desiredSrc && !thumbImg.src.endsWith(desiredSrc) && thumbImg.dataset.localFailed !== desiredSrc) {
         thumbImg.src = desiredSrc;
         thumbImg.classList.remove("thumb-avatar");
         // Reset the data-fallback so an error on the new src can fall
@@ -1835,6 +1855,34 @@ class MoomboxApp {
     this.renderJobDetails(job);
     this.loadJobLogs(job.id);
     document.getElementById("details-dialog").show();
+    this._fetchStagingFields(job.id);
+  }
+
+  /**
+   * Fetch the enriched job (GET /api/jobs/{id}) to seed hasStaging/hasSegments.
+   * Every payload that populates this.jobs (WS initial_state/jobs_update/
+   * job_update, /api/jobs/archived) is a raw DB row WITHOUT these computed
+   * fields, so the Resume/Mux buttons in the details dialog would never
+   * appear without this. _preserveStagingFields keeps them alive across
+   * subsequent WS updates. Failures are silent — buttons just stay hidden.
+   */
+  async _fetchStagingFields(jobId) {
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+      if (!response.ok) return;
+      const enriched = await response.json();
+      // Look the job up again — a jobs_update may have replaced the array
+      // (and the object) while the fetch was in flight.
+      const job = this.jobs.find((j) => j.id === jobId) ||
+        this.archivedJobs.find((j) => j.id === jobId);
+      if (!job) return;
+      job.hasStaging = enriched.hasStaging;
+      job.hasSegments = enriched.hasSegments;
+      // Re-evaluate button visibility if the dialog is still on this job
+      if (this.selectedJobId === jobId && document.getElementById("details-dialog").open) {
+        this.updateDetailsButtons(job);
+      }
+    } catch { /* network blip — buttons stay hidden, same as before the fetch */ }
   }
 
   // Update job details without rebuilding logs section
@@ -3798,6 +3846,34 @@ class MoomboxApp {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  /**
+   * Copy text to the clipboard. navigator.clipboard only exists on secure
+   * origins (HTTPS or localhost) — plain-HTTP LAN access is a first-class
+   * deployment mode, so fall back to a temporary textarea + execCommand there.
+   */
+  copyTextToClipboard(text) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).catch(() => {
+        this.showToast("Failed to copy to clipboard", "warning");
+      });
+      return;
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      if (!ok) throw new Error("execCommand failed");
+    } catch {
+      this.showToast("Clipboard requires HTTPS or localhost", "warning");
+    }
   }
 
   /**

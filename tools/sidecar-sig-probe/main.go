@@ -78,7 +78,11 @@ func main() {
 	if scMatch == nil {
 		fail("no signatureCipher in watch page (stream may have only direct URLs)")
 	}
-	sigCipher := strings.ReplaceAll(scMatch[1], `&`, "&")
+	// The watch page JSON-escapes the separators as the literal six
+	// characters \u0026 — un-escape them (the previous `&`→`&` replace was
+	// a no-op, so ParseQuery saw one giant key and the probe always failed
+	// with "no s param").
+	sigCipher := strings.ReplaceAll(scMatch[1], `\u0026`, "&")
 	parsed, err := url.ParseQuery(sigCipher)
 	if err != nil {
 		fail("parse signatureCipher: %v", err)

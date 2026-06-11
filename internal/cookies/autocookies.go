@@ -3,6 +3,8 @@ package cookies
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -128,6 +130,7 @@ type AutoCookieService struct {
 	cookiePath     string
 	jar            *CookieJar
 	setupProcess   *os.Process
+	setupClaimed   bool        // StartSetup slot claim — held from the gate check until the browser process is registered (or the attempt fails)
 	setupJob       *processJob // Windows Job Object for setup browser; nil on non-Windows
 	refreshCmd     *exec.Cmd   // tracks in-flight headless refresh browser
 	setupBrowser   *DetectedBrowser
@@ -276,14 +279,18 @@ func (s *AutoCookieService) GetStatus() AutoCookieStatus {
 
 	return AutoCookieStatus{
 		Configured:            s.profileDir != "",
-		SetupInProgress:       s.setupProcess != nil,
+		SetupInProgress:       s.setupProcess != nil || s.setupClaimed,
 		Browser:               browser,
 		AvailableBrowsers:     available,
 		ConfiguredBrowserPath: cfgPath,
 		ConfiguredBrowserType: cfgType,
 		LastRefresh:           lastRefreshStr,
 		LastError:             s.lastError,
-		NeedsManualRelogin:    s.needsRelogin,
+		// Must be a COPY: the HTTP handlers JSON-marshal this after the lock
+		// is released, while refresh/flag paths mutate the live map under
+		// s.mu — a concurrent map read+write is a fatal runtime throw that
+		// RecoveryMiddleware cannot catch.
+		NeedsManualRelogin: maps.Clone(s.needsRelogin),
 	}
 }
 
@@ -326,7 +333,7 @@ func (s *AutoCookieService) FlagManualRelogin(platform string) {
 // StartSetup launches a browser for the user to log in.
 func (s *AutoCookieService) StartSetup(platform string) error {
 	s.mu.Lock()
-	if s.setupProcess != nil {
+	if s.setupProcess != nil || s.setupClaimed {
 		s.mu.Unlock()
 		return ErrSetupInProgress
 	}
@@ -334,7 +341,23 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("please try again shortly: %w", ErrRefreshInProgress)
 	}
+	// Claim the slot inside this critical section (mirrors RefreshCookies'
+	// refreshCmd sentinel): browser detection, MkdirAll, and the icacls
+	// shell-out below take tens of milliseconds, and a second StartSetup
+	// passing the gate in that window would launch a second browser against
+	// the same profile and leak the first Job Object. The claim drops when
+	// this call returns — by then either setupProcess holds the real
+	// process (success) or the attempt failed and the slot must free up.
+	// cancelled is reset here, at claim time, so a CancelSetup arriving
+	// DURING the preparation below is observed rather than erased.
+	s.setupClaimed = true
+	s.cancelled = false
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.setupClaimed = false
+		s.mu.Unlock()
+	}()
 
 	browser := s.resolvedBrowser()
 	if browser == nil {
@@ -354,9 +377,16 @@ func (s *AutoCookieService) StartSetup(platform string) error {
 	}
 
 	s.mu.Lock()
+	if s.cancelled {
+		// CancelSetup landed while we were detecting browsers / preparing
+		// the profile dir — the slot was already claimed, so the UI showed
+		// setup-in-progress and offered Cancel. Honor it instead of
+		// launching a browser the user just dismissed.
+		s.mu.Unlock()
+		return ErrSetupCancelled
+	}
 	s.setupBrowser = browser
 	s.lastError = nil
-	s.cancelled = false
 	s.browserExited = false
 	if platform == "" {
 		platform = "youtube"
@@ -527,7 +557,7 @@ func (s *AutoCookieService) CancelSetup() {
 // RefreshCookies performs a headless browser visit to refresh cookies.
 func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	s.mu.Lock()
-	if s.setupProcess != nil {
+	if s.setupProcess != nil || s.setupClaimed {
 		s.mu.Unlock()
 		s.logger.Debug("skipping cookie refresh — setup in progress")
 		return false, nil
@@ -890,9 +920,26 @@ func isWindows() bool {
 // covers any future writes (rotated cookies, side-files) without
 // per-write icacls latency. No-op on non-Windows; idempotent.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, perm); err != nil {
+	// Unique temp name (os.CreateTemp): the RefreshService rewrites the same
+	// cookies.txt through its own temp file, and a shared fixed ".tmp" name
+	// would let two concurrent writers interleave into a corrupt file.
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp cookie file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("write temp cookie file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp cookie file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp cookie file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
@@ -918,7 +965,16 @@ func tightenCookieDirOnce(dir string) {
 	}
 	tightenedCookieDirs[dir] = struct{}{}
 	go func() {
-		defer func() { _ = recover() }()
-		_ = utils.ApplyUserOnlyDACL(dir)
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Warn("cookie dir DACL tightening panicked", "dir", dir, "panic", fmt.Sprint(r))
+			}
+		}()
+		// Surface failures: this is the hardening for the auth-cookie file —
+		// a silent miss leaves the highest-value secret in the app readable
+		// by other local users on every run, with zero operator signal.
+		if err := utils.ApplyUserOnlyDACL(dir); err != nil {
+			slog.Warn("could not restrict cookie dir to current user", "dir", dir, "err", err)
+		}
 	}()
 }

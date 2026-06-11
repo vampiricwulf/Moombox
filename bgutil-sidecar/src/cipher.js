@@ -33,14 +33,26 @@ function evictIfNeeded() {
 
 function loadPlayer(playerID, playerJS) {
     // Preprocess via ejs with empty requests to get back just the
-    // preprocessed source. Solving happens in solveOne via the
+    // preprocessed source. Solving happens in solveMany via the
     // "preprocessed" call shape so we control the cache.
-    const result = ejsMain({
-        type: "player",
-        player: playerJS,
-        requests: [],
-        output_preprocessed: true,
-    });
+    //
+    // ejs THROWS on preprocess failures (meriyah SyntaxError on truncated
+    // JS, "unexpected structure" on a player-layout rotation) rather than
+    // returning {type:"error"}. The label below is load-bearing: the Go
+    // side's isStaleJSError matches "ejs preprocess" to trigger its
+    // remove-cached-player + retry-with-fresh-JS recovery — an unlabeled
+    // throw would fail permanently instead of self-healing.
+    let result;
+    try {
+        result = ejsMain({
+            type: "player",
+            player: playerJS,
+            requests: [],
+            output_preprocessed: true,
+        });
+    } catch (e) {
+        throw new Error(`ejs preprocess: ${e?.message ?? e}`);
+    }
     if (result.type === "error") {
         throw new Error(`ejs preprocess: ${result.error}`);
     }
@@ -58,39 +70,60 @@ function loadPlayer(playerID, playerJS) {
     return entry;
 }
 
-function solveOne(entry, type, challenge) {
+function solveMany(entry, type, challenges) {
     const cache = type === "sig" ? entry.sigCache : entry.nCache;
-    const hit = cache.get(challenge);
-    if (hit !== undefined) return hit;
+    const results = {};
+    const misses = [];
+    for (const challenge of challenges) {
+        const hit = cache.get(challenge);
+        if (hit !== undefined) {
+            results[challenge] = hit;
+        } else if (!misses.includes(challenge)) {
+            misses.push(challenge);
+        }
+    }
+    if (misses.length === 0) return results;
 
-    const result = ejsMain({
-        type: "preprocessed",
-        preprocessed_player: entry.preprocessed,
-        requests: [{ type, challenges: [challenge] }],
-    });
+    // One ejsMain call for ALL uncached challenges of this type: each call
+    // re-evaluates the preprocessed solver source, so per-challenge calls
+    // would redo that work N times back-to-back on the single-threaded
+    // event loop, starving queued PO-token RPCs of the request budget.
+    let result;
+    try {
+        result = ejsMain({
+            type: "preprocessed",
+            preprocessed_player: entry.preprocessed,
+            requests: [{ type, challenges: misses }],
+        });
+    } catch (e) {
+        // Same labeling contract as loadPlayer — see comment there.
+        throw new Error(`ejs solve ${type}: ${e?.message ?? e}`);
+    }
     if (result.type === "error") {
-        throw new Error(`ejs solve: ${result.error}`);
+        throw new Error(`ejs solve ${type}: ${result.error}`);
     }
     const response = result.responses?.[0];
     if (!response) {
-        throw new Error(`ejs solve ${type}: no response for challenge`);
+        throw new Error(`ejs solve ${type}: no response for challenges`);
     }
     if (response.type === "error") {
         throw new Error(`ejs solve ${type}: ${response.error}`);
     }
-    const solved = response.data[challenge];
-    if (solved === undefined) {
-        throw new Error(`ejs solve ${type}: no result for challenge`);
+    for (const challenge of misses) {
+        const solved = response.data[challenge];
+        if (solved === undefined) {
+            throw new Error(`ejs solve ${type}: no result for challenge`);
+        }
+        if (cache.size >= MAX_CHALLENGES_PER_PLAYER) {
+            // Cheap FIFO: evict the oldest-inserted entry. Acceptable for this workload —
+            // challenges are mostly one-shot, so true LRU's bookkeeping cost would not pay back.
+            const firstKey = cache.keys().next().value;
+            cache.delete(firstKey);
+        }
+        cache.set(challenge, solved);
+        results[challenge] = solved;
     }
-
-    if (cache.size >= MAX_CHALLENGES_PER_PLAYER) {
-        // Cheap FIFO: evict the oldest-inserted entry. Acceptable for this workload —
-        // challenges are mostly one-shot, so true LRU's bookkeeping cost would not pay back.
-        const firstKey = cache.keys().next().value;
-        cache.delete(firstKey);
-    }
-    cache.set(challenge, solved);
-    return solved;
+    return results;
 }
 
 export function solveCipher({ playerID, playerJS, sigChallenges, nChallenges, forceReload }) {
@@ -112,14 +145,8 @@ export function solveCipher({ playerID, playerJS, sigChallenges, nChallenges, fo
     }
     entry.lastUsed = Date.now();
 
-    const sigResults = {};
-    for (const challenge of sigChallenges || []) {
-        sigResults[challenge] = solveOne(entry, "sig", challenge);
-    }
-    const nResults = {};
-    for (const challenge of nChallenges || []) {
-        nResults[challenge] = solveOne(entry, "n", challenge);
-    }
+    const sigResults = solveMany(entry, "sig", sigChallenges || []);
+    const nResults = solveMany(entry, "n", nChallenges || []);
     return { sigResults, nResults };
 }
 

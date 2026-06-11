@@ -102,6 +102,13 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 	attachProgress(result)
 
+	// curCtx tracks the JobContext whose StagingDir is the CURRENT segment's
+	// directory. Before any quality split it is jobCtx itself (root staging);
+	// after a split it points at the seg_N copy. Every refresh-created
+	// downloader must use curCtx — using the root jobCtx after a split would
+	// append fresh data into segment 0's already-muxed staging files.
+	curCtx := jobCtx
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -173,20 +180,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			// Create fresh downloaders in the current staging dir to check quality.
 			// ForceStartSeq ensures they continue from where the old ones left off.
-			jobCtx.VideoStartSeq = oldVideoSeq
-			jobCtx.AudioStartSeq = oldAudioSeq
+			curCtx.VideoStartSeq = oldVideoSeq
+			curCtx.AudioStartSeq = oldAudioSeq
 
-			var refreshResult *DownloadResult
-			var refreshErr error
-			if result.IsHls {
-				refreshResult, refreshErr = DownloadHls(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
-			} else {
-				refreshResult, refreshErr = DownloadDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
-			}
+			refreshResult, refreshErr := o.refreshDownload(ctx, curCtx, freshInfo, result.IsHls)
 
 			// Clear orchestrator seqs so they don't persist to future iterations
-			jobCtx.VideoStartSeq = 0
-			jobCtx.AudioStartSeq = 0
+			curCtx.VideoStartSeq = 0
+			curCtx.AudioStartSeq = 0
 
 			if refreshErr != nil {
 				o.logger.Error("failed to refresh for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
@@ -247,11 +248,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			segJobCtx.VideoStartSeq = oldVideoSeq
 			segJobCtx.AudioStartSeq = oldAudioSeq
 
-			if result.IsHls {
-				refreshResult, refreshErr = DownloadHls(ctx, &segJobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
-			} else {
-				refreshResult, refreshErr = DownloadDash(ctx, &segJobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
-			}
+			refreshResult, refreshErr = o.refreshDownload(ctx, &segJobCtx, freshInfo, result.IsHls)
 
 			if refreshErr != nil {
 				o.logger.Error("failed to create downloaders for new quality", "err", refreshErr, "jobID", jobCtx.Job.ID)
@@ -259,6 +256,14 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				// whatever video/audio data was captured in the current staging dir.
 				return nil
 			}
+
+			// The new segment's staging dir is now the current one for all
+			// future refreshes. Clear the seqs — they were only for this
+			// downloader creation, and a later still-live refresh must not
+			// inherit them as a forced start position.
+			segJobCtx.VideoStartSeq = 0
+			segJobCtx.AudioStartSeq = 0
+			curCtx = &segJobCtx
 
 			currentQuality = newQuality
 			result = refreshResult
@@ -335,13 +340,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 
 			// B4: Refresh manifests and create new downloaders
-			var refreshResult *DownloadResult
-			var refreshErr error
-			if result.IsHls {
-				refreshResult, refreshErr = DownloadHls(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
-			} else {
-				refreshResult, refreshErr = DownloadDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
-			}
+			refreshResult, refreshErr := o.refreshDownload(ctx, curCtx, freshInfo, result.IsHls)
 
 			if refreshErr != nil {
 				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
@@ -399,6 +398,23 @@ streamEnded:
 	}
 
 	return nil
+}
+
+// refreshDownload re-creates downloaders for an in-progress live stream from
+// freshly fetched video info, mirroring the initial strategy selection in
+// ExecuteWithChat: HLS jobs stay HLS; DASH jobs prefer the manifest but fall
+// back to manifest-free DASH when the refreshed response withholds
+// dashManifestUrl (YouTube's yt-dlp#15274 experiment). Without the fallback,
+// a manifestless job's first transient quality blip or stall refresh would
+// fail with "no DASH manifest URL" and end the recording mid-live.
+func (o *DownloadOrchestrator) refreshDownload(ctx context.Context, jobCtx *JobContext, freshInfo *youtube.VideoInfo, isHls bool) (*DownloadResult, error) {
+	if isHls {
+		return DownloadHls(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
+	}
+	if freshInfo.DashManifestURL == "" && HasManifestlessDashFormats(freshInfo.Formats) {
+		return DownloadManifestlessDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
+	}
+	return DownloadDash(ctx, jobCtx, freshInfo, o.routedCipher, o.cipherSolver, o.potProvider, connIsOnline(o.conn))
 }
 
 // buildYouTubeProbeFn creates a quality probe function for YouTube streams.

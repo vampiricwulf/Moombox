@@ -23,7 +23,14 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 13
+const schemaVersion = 14
+
+// CurrentSchemaVersion returns the schema version this binary creates and
+// migrates to. Exposed for side processes (`moombox add`) that must refuse
+// to touch a database from a different binary version.
+func CurrentSchemaVersion() int {
+	return schemaVersion
+}
 
 // createSchema defines the full schema for new databases. It includes all tables
 // and indexes from the start. The incremental migrations below handle upgrading
@@ -216,25 +223,35 @@ func (db *Database) migrate() error {
 			}
 		}
 
-		// Backfill: derive chat_file from output_file for existing jobs
+		// Backfill: derive chat_file from output_file for existing jobs.
+		// Collect first, THEN update — with MaxOpenConns(1) an UPDATE issued
+		// while the SELECT cursor is still open waits forever for the pool's
+		// only connection.
+		type chatBackfill struct{ id, chatFile string }
+		var chatBackfills []chatBackfill
 		rows, err := db.db.QueryContext(db.getCtx(),
-			`SELECT id, output_file, chat_filename FROM jobs WHERE output_file != '' AND chat_filename != '' AND (chat_file IS NULL OR chat_file = '')`)
+			`SELECT id, output_file FROM jobs WHERE output_file != '' AND chat_filename != '' AND (chat_file IS NULL OR chat_file = '')`)
 		if err == nil {
 			for rows.Next() {
-				var id, outputFile, chatFilename string
-				if err := rows.Scan(&id, &outputFile, &chatFilename); err != nil {
+				var id, outputFile string
+				if err := rows.Scan(&id, &outputFile); err != nil {
 					continue
 				}
 				// Chat file lives alongside the output file — replace video extension with .chat.json
 				ext := filepath.Ext(outputFile)
-				chatFile := strings.TrimSuffix(outputFile, ext) + ".chat.json"
-				if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET chat_file = ? WHERE id = ?`, chatFile, id); err != nil && db.logger != nil {
-					db.logger.Warn("migration v2: failed to backfill chat_file", "jobID", id, "err", err)
-				}
+				chatBackfills = append(chatBackfills, chatBackfill{
+					id:       id,
+					chatFile: strings.TrimSuffix(outputFile, ext) + ".chat.json",
+				})
 			}
 			rows.Close()
 			if err := rows.Err(); err != nil && db.logger != nil {
 				db.logger.Warn("migration v2: row iteration error during backfill", "err", err)
+			}
+			for _, b := range chatBackfills {
+				if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET chat_file = ? WHERE id = ?`, b.chatFile, b.id); err != nil && db.logger != nil {
+					db.logger.Warn("migration v2: failed to backfill chat_file", "jobID", b.id, "err", err)
+				}
 			}
 		}
 
@@ -261,7 +278,11 @@ func (db *Database) migrate() error {
 			}
 		}
 
-		// Backfill: derive thumbnail_file and description_file from output_file
+		// Backfill: derive thumbnail_file and description_file from
+		// output_file. Collect first, THEN update — same MaxOpenConns(1)
+		// constraint as the v2 backfill above.
+		type assetBackfill struct{ id, outputFile string }
+		var assetBackfills []assetBackfill
 		rows, err := db.db.QueryContext(db.getCtx(),
 			`SELECT id, output_file FROM jobs WHERE output_file != '' AND (thumbnail_file IS NULL OR thumbnail_file = '')`)
 		if err == nil {
@@ -270,15 +291,23 @@ func (db *Database) migrate() error {
 				if err := rows.Scan(&id, &outputFile); err != nil {
 					continue
 				}
-				ext := filepath.Ext(outputFile)
-				base := strings.TrimSuffix(outputFile, ext)
+				assetBackfills = append(assetBackfills, assetBackfill{id: id, outputFile: outputFile})
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil && db.logger != nil {
+				db.logger.Warn("migration v3: row iteration error during backfill", "err", err)
+			}
+
+			for _, b := range assetBackfills {
+				ext := filepath.Ext(b.outputFile)
+				base := strings.TrimSuffix(b.outputFile, ext)
 
 				// Check which thumbnail extension exists on disk
 				for _, thumbExt := range []string{".jpg", ".webp", ".png"} {
 					thumbPath := base + thumbExt
 					if fileExists(thumbPath) {
-						if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET thumbnail_file = ? WHERE id = ?`, thumbPath, id); err != nil && db.logger != nil {
-							db.logger.Warn("migration v3: failed to backfill thumbnail_file", "jobID", id, "err", err)
+						if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET thumbnail_file = ? WHERE id = ?`, thumbPath, b.id); err != nil && db.logger != nil {
+							db.logger.Warn("migration v3: failed to backfill thumbnail_file", "jobID", b.id, "err", err)
 						}
 						break
 					}
@@ -287,14 +316,10 @@ func (db *Database) migrate() error {
 				// Check if description file exists
 				descPath := base + ".description"
 				if fileExists(descPath) {
-					if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET description_file = ? WHERE id = ?`, descPath, id); err != nil && db.logger != nil {
-						db.logger.Warn("migration v3: failed to backfill description_file", "jobID", id, "err", err)
+					if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET description_file = ? WHERE id = ?`, descPath, b.id); err != nil && db.logger != nil {
+						db.logger.Warn("migration v3: failed to backfill description_file", "jobID", b.id, "err", err)
 					}
 				}
-			}
-			rows.Close()
-			if err := rows.Err(); err != nil && db.logger != nil {
-				db.logger.Warn("migration v3: row iteration error during backfill", "err", err)
 			}
 		}
 
@@ -498,6 +523,38 @@ func (db *Database) migrate() error {
 		}
 
 		if err := db.writeUserVersion(13); err != nil {
+			return err
+		}
+	}
+
+	if version < 14 {
+		// (a) The TEXT columns added by v2/v3 carry no DEFAULT, so rows that
+		// predate those migrations (and weren't backfilled) hold NULL — which
+		// scanJob reads into plain strings, erroring the row out of every
+		// query and making the job invisible. Normalize to ''.
+		//
+		// Identifier concatenation is safe here for the same reason as the
+		// v3 ALTER above: hardcoded compile-time literals only.
+		for _, col := range []string{"chat_file", "thumbnail_file", "description_file"} {
+			if _, err := db.db.ExecContext(db.getCtx(), `UPDATE jobs SET `+col+` = '' WHERE `+col+` IS NULL`); err != nil {
+				return err
+			}
+		}
+
+		// (b) Foreign-key enforcement is now actually enabled (the old DSN's
+		// mattn-style parameters were silently ignored by modernc/sqlite),
+		// which makes the child tables' ON DELETE CASCADE live going
+		// forward. Sweep the orphans accumulated while enforcement was off —
+		// job IDs are video IDs, so re-adding a previously-deleted video
+		// would otherwise resurrect the old job's gaps/trims/segments onto
+		// the new job.
+		for _, table := range []string{"gaps", "trims", "segments"} {
+			if _, err := db.db.ExecContext(db.getCtx(), `DELETE FROM `+table+` WHERE job_id NOT IN (SELECT id FROM jobs)`); err != nil {
+				return err
+			}
+		}
+
+		if err := db.writeUserVersion(14); err != nil {
 			return err
 		}
 	}

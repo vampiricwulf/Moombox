@@ -514,8 +514,12 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 		if msg.ID != "" && !cd.dedup.Add(msg.ID) {
 			continue
 		}
+		// messageCount is read concurrently via MessageCount() (orchestrator
+		// goroutine) — mutate under the same lock the reader takes.
+		cd.mu.Lock()
 		cd.messages = append(cd.messages, *msg)
 		cd.messageCount++
+		cd.mu.Unlock()
 		newInBatch++
 	}
 	if len(resp.Messages) > 0 {
@@ -719,8 +723,12 @@ func (cd *ChatDownloader) prependExistingMessages(outputFile string) {
 	if existing == nil {
 		return
 	}
+	// Locked for the same reason as processBatch: MessageCount() reads
+	// messageCount from another goroutine.
+	cd.mu.Lock()
 	cd.messages = append(existing, cd.messages...)
 	cd.messageCount = len(cd.messages)
+	cd.mu.Unlock()
 	// Register recovered message IDs in the dedup to prevent duplicates
 	// on subsequent polls.
 	for _, msg := range existing {

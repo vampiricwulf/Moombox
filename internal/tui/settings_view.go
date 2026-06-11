@@ -40,8 +40,10 @@ func (m *SettingsModel) View() string {
 
 	sec := sections[m.sectionIndex]
 
-	// Buttons row is always present — subtract 1 line from content area
-	buttonLine := 1
+	// Per-section content rows come from settingsContentHeight() — the same
+	// helper ensureFieldVisible and mouse hit-testing use, so the rendered
+	// window and the scroll/click math can't drift apart.
+	contentRows := m.settingsContentHeight()
 
 	// Section content
 	switch sec.name {
@@ -50,17 +52,16 @@ func (m *SettingsModel) View() string {
 		if m.secMode != securityStatus {
 			content.WriteString(m.renderSecurity(innerW))
 		} else {
-			// h-12: extra 4 lines vs default h-8 for the compact security sub-section below
-			content.WriteString(m.renderFields(sec, innerW, h-12-buttonLine))
+			content.WriteString(m.renderFields(sec, innerW, contentRows))
 			content.WriteString("\n")
 			content.WriteString(m.renderSecurityCompact(innerW))
 		}
 	case "Channels":
-		content.WriteString(m.renderChannels(innerW, h-8-buttonLine))
+		content.WriteString(m.renderChannels(innerW, contentRows))
 	case "Integrations":
-		content.WriteString(m.renderNotifications(innerW, h-8-buttonLine))
+		content.WriteString(m.renderNotifications(innerW, contentRows))
 	default:
-		content.WriteString(m.renderFields(sec, innerW, h-8-buttonLine))
+		content.WriteString(m.renderFields(sec, innerW, contentRows))
 	}
 
 	// Action buttons (always visible).
@@ -331,6 +332,16 @@ func renderCycleOptions(options []string, selected string, focused bool) string 
 	return strings.Join(parts, DimStyle.Render(" / "))
 }
 
+// listWindowStart returns the first rendered index for a list capped at
+// maxH rows, scrolled so the selected index stays visible (mirrors
+// renderFields' scrollOffset approach for the channel/notification lists).
+func listWindowStart(selected, maxH int) int {
+	if maxH > 0 && selected >= maxH {
+		return selected - maxH + 1
+	}
+	return 0
+}
+
 func (m *SettingsModel) renderChannels(w, maxH int) string {
 	if m.channelMode == "edit" {
 		return m.renderChannelEdit(w)
@@ -351,8 +362,12 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 		return strings.Join(lines, "\n")
 	}
 
-	channelCount := 0
-	for i, ch := range m.channels {
+	// Window the list around the selection so navigation past the rendered
+	// tail isn't blind.
+	start := listWindowStart(m.channelIndex, maxH)
+	end := min(start+maxH, len(m.channels))
+	for i := start; i < end; i++ {
+		ch := m.channels[i]
 		selected := i == m.channelIndex
 
 		prefix := "  "
@@ -400,10 +415,6 @@ func (m *SettingsModel) renderChannels(w, maxH int) string {
 		}
 
 		lines = append(lines, line)
-		channelCount++
-		if channelCount >= maxH {
-			break
-		}
 	}
 
 	return strings.Join(lines, "\n")
@@ -497,7 +508,12 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 		return strings.Join(lines, "\n")
 	}
 
-	for i, n := range m.notifications {
+	// Window the list around the selection (the cap counts notification
+	// rows, not total lines — the action bar no longer eats a list row).
+	start := listWindowStart(m.notifIndex, maxH)
+	end := min(start+maxH, len(m.notifications))
+	for i := start; i < end; i++ {
+		n := m.notifications[i]
 		selected := i == m.notifIndex
 		prefix := "  "
 		if selected {
@@ -519,9 +535,6 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 			DimStyle.Render(fmt.Sprintf(" (%d/%d events)", eventCount, len(allNotifEvents)))
 
 		lines = append(lines, line)
-		if len(lines) >= maxH {
-			break
-		}
 	}
 
 	return strings.Join(lines, "\n")

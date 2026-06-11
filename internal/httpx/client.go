@@ -8,6 +8,7 @@
 package httpx
 
 import (
+	"crypto/tls"
 	"net/http"
 	"time"
 )
@@ -94,7 +95,12 @@ func NewTransport(opts TransportOptions) *http.Transport {
 		t.ExpectContinueTimeout = opts.ExpectContinueTimeout
 	}
 	if opts.DisableHTTP2 {
+		// ForceAttemptHTTP2=false alone does NOT disable HTTP/2: with no
+		// custom TLS config or dialers, net/http's protocol resolution
+		// still auto-enables h2. A non-nil empty TLSNextProto map is the
+		// documented opt-out.
 		t.ForceAttemptHTTP2 = false
+		t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	}
 	return t
 }

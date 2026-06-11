@@ -32,15 +32,24 @@ function parseTerm(raw) {
     const ns = s.slice(0, colonIdx).toLowerCase();
     if (NAMESPACES.has(ns)) {
       let value = s.slice(colonIdx + 1);
-      // Strip surrounding quotes
-      if ((value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
-      }
+      value = stripQuotePair(value);
       return { type: ns, value, negate };
     }
   }
-  return { type: "text", value: s, negate };
+  // Bare quoted phrases ("jelly fin") arrive as one token WITH the quotes —
+  // strip them here too, or the engine would substring-match the literal
+  // quote characters and never find anything.
+  return { type: "text", value: stripQuotePair(s), negate };
+}
+
+/** Strip one surrounding matching quote pair, if present. */
+function stripQuotePair(value) {
+  if (value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+       (value.startsWith("'") && value.endsWith("'")))) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 /**
@@ -56,7 +65,10 @@ function tokenize(query) {
     if (inQuote) {
       current += ch;
       if (ch === inQuote) inQuote = null;
-    } else if (ch === '"' || ch === "'") {
+    } else if ((ch === '"' || ch === "'") && (current === "" || current.endsWith(":"))) {
+      // A quote only opens quoting at token start or right after a filter-key
+      // colon (channel:"shachi too"). Mid-token it's a literal character, so
+      // natural apostrophes (mori's karaoke) don't swallow the rest of the query.
       inQuote = ch;
       current += ch;
     } else if (ch === " ") {

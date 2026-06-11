@@ -75,7 +75,11 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	}()
 
 	consecutiveGoneErrors := 0
-	hasStartedDownloading := false
+	// "Started" means bytes are in the output file — including bytes restored
+	// by resume. The first-segment hunt in handleGoneError must stay disabled
+	// once data exists (it advances currentSeq past 403s, which would skip
+	// real segments), and must stay ENABLED while the file is still empty.
+	hasStartedDownloading := d.bytesWritten.Load() > 0
 	segsSinceResume := 0
 	d.lastSegTime.StoreNow() // Initialize to avoid premature NoSegmentTimeout
 
@@ -126,7 +130,10 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 					return err
 				}
 				d.currentSeq.Store(int64(nextSeq))
-				hasStartedDownloading = true
+				// Catch-up can legitimately write nothing (e.g. the starting
+				// segments are permanently evicted) — only bytes on disk turn
+				// off the first-segment hunt in handleGoneError.
+				hasStartedDownloading = d.bytesWritten.Load() > 0
 				// Re-probe head after catch-up so the next iteration sees
 				// the updated head position rather than the pre-catch-up
 				// snapshot — head can advance significantly during a long

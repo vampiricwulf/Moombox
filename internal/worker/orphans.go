@@ -147,6 +147,7 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 			return "", err
 		}
 		target := normalizePath(absPath)
+		absOut, absErr := filepath.Abs(outputDir)
 		for _, job := range jobs {
 			if !activeJobStatuses[job.Status] {
 				continue
@@ -154,6 +155,16 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 			for _, candidate := range []string{job.OutputFile, job.ChatFile, job.ThumbnailFile, job.DescriptionFile} {
 				if candidate != "" && normalizePath(candidate) == target {
 					return job.ID, nil
+				}
+			}
+			// Relative-path columns too (imports set ONLY these) — keep this
+			// set identical to scanOutputOrphans' knownFiles so scan and
+			// delete-time recheck can never disagree about ownership.
+			if absErr == nil {
+				for _, rel := range []string{job.Filename, job.ChatFilename} {
+					if rel != "" && normalizePath(filepath.Join(absOut, rel)) == target {
+						return job.ID, nil
+					}
 				}
 			}
 			for _, seg := range job.Segments {
@@ -319,6 +330,16 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		}
 		if job.DescriptionFile != "" {
 			knownFiles[normalizePath(job.DescriptionFile)] = true
+		}
+		// The RELATIVE-path columns must count too: imported jobs set ONLY
+		// Filename/ChatFilename (no absolute OutputFile/ChatFile), so
+		// without these their perfectly valid files would be offered as
+		// orphans — and deleting them leaves a broken Finished job.
+		if job.Filename != "" {
+			knownFiles[normalizePath(filepath.Join(absOutputDir, job.Filename))] = true
+		}
+		if job.ChatFilename != "" {
+			knownFiles[normalizePath(filepath.Join(absOutputDir, job.ChatFilename))] = true
 		}
 		// Include quality-split segment files so they aren't flagged as orphans.
 		for _, seg := range job.Segments {

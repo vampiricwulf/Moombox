@@ -333,15 +333,20 @@ func (s *runState) wireMonitorCallbacks() {
 	// caller is event-driven (state transitions, not loops).
 	s.unsubWSJobUpdate = s.db.OnJobChange(func(ev *database.JobChange) {
 		job := ev.Job
-		// Skip broadcasting updates for archived (old finished) jobs
+		// Skip broadcasting updates for archived (old finished) jobs — same
+		// classification as the list filter, via the shared jobArchivedAt
+		// predicate so the two can never disagree about which jobs are
+		// archived.
 		if job.Status == database.StatusFinished && job.UpdatedAt != "" {
-			var ageDays int
+			var hideAgeDays float64
 			s.configStore.Read(func(c *config.MoomboxConfig) {
-				ageDays = int(c.Monitors.HideFinishedAgeDays.Value)
+				hideAgeDays = c.Monitors.HideFinishedAgeDays.Value
 			})
-			cutoff := time.Now().AddDate(0, 0, -ageDays)
-			if t, err := time.Parse(time.RFC3339, job.UpdatedAt); err == nil && t.Before(cutoff) {
-				return
+			if hideAgeDays >= 0 {
+				cutoff := time.Now().Add(-time.Duration(hideAgeDays*24) * time.Hour)
+				if jobArchivedAt(job, cutoff) {
+					return
+				}
 			}
 		}
 		s.wsHub.BroadcastJobUpdate(job)
@@ -388,8 +393,9 @@ func (s *runState) wireMonitorCallbacks() {
 		for _, j := range jobs {
 			activeIDs[j.ID] = struct{}{}
 		}
+		// Only the DATABASE per-job log pipeline is live (RouteLogToJobs);
+		// the logger's parallel buffers are unwired and permanently empty.
 		s.db.PruneJobLogs(activeIDs)
-		s.log.PruneJobLogs(activeIDs)
 		s.wsHub.BroadcastJobDeleted(ev.JobID)
 	})
 
@@ -401,7 +407,6 @@ func (s *runState) wireMonitorCallbacks() {
 			s.db.TrackJobForLogs(j.ID)
 		}
 		s.db.PruneJobLogs(activeIDs)
-		s.log.PruneJobLogs(activeIDs)
 		s.wsHub.BroadcastJobsUpdate(filterJobsByAge(jobs, s.configStore))
 	})
 

@@ -109,20 +109,29 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.setFeedback(fmt.Sprintf("Cancelled: %s", job.Title))
 		}
 	case "A D":
+		// OnDeleteJob blocks in WaitForJobExit (up to 5s per job) — run the
+		// callback(s) off the update loop so the TUI stays responsive. Row
+		// removal + selection refresh arrive via the JobDeleted lifecycle
+		// event (handleJobDeleted); the result message only sets feedback.
 		if job == nil && a.taskList.SelectedCount() > 0 && a.OnDeleteJob != nil {
-			count := 0
-			for _, id := range a.taskList.SelectedIDs() {
-				a.OnDeleteJob(id)
-				count++
-			}
+			ids := a.taskList.SelectedIDs()
 			a.taskList.ClearSelection()
-			a.setFeedback(fmt.Sprintf("Deleted %d jobs", count))
-			a.updateSelectedJob()
+			a.setFeedback(fmt.Sprintf("Deleting %d jobs...", len(ids)))
+			deleteFn := a.OnDeleteJob
+			return a, safeCmd(func() tea.Msg {
+				for _, id := range ids {
+					deleteFn(id)
+				}
+				return deleteJobsResultMsg{Count: len(ids)}
+			})
 		} else if job != nil && a.OnDeleteJob != nil {
-			a.OnDeleteJob(job.ID)
-			a.setFeedback(fmt.Sprintf("Deleted: %s", job.Title))
-			a.taskList.MoveUp()
-			a.updateSelectedJob()
+			a.setFeedback(fmt.Sprintf("Deleting: %s", job.Title))
+			deleteFn := a.OnDeleteJob
+			id, title := job.ID, job.Title
+			return a, safeCmd(func() tea.Msg {
+				deleteFn(id)
+				return deleteJobsResultMsg{Count: 1, Title: title}
+			})
 		}
 	case "A T":
 		if a.trimInProgress {
@@ -271,7 +280,12 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			a.settings.SetSize(a.width, a.height)
 			a.settings.OnSave = a.OnSaveConfig
 			a.settings.OnRestart = a.OnRestart
-			a.settings.OnRestartRequired = func() { a.restartPending = true }
+			a.settings.OnRestartRequired = func() {
+				a.restartPending = true
+				// The banner consumes rows above the panels — re-derive
+				// panel heights + mouse regions now that it's visible.
+				a.recalcLayout()
+			}
 			a.settings.OnHashPassword = a.OnHashPassword
 			a.settings.OnVerifyPassword = a.OnVerifyPassword
 			a.settings.Open(a.cfg)
@@ -419,7 +433,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	items := []ActionMenuItem{
 		{Chord: "A A", Label: "Add Video", HintLabel: "Add", Category: "Action"},
 		{Chord: "A Z", Label: "Import Archive", HintLabel: "Import", Category: "Action"},
-		{Chord: "A R", Label: "Resume Job", HintLabel: "Resume", Category: "Action", NeedsJob: true,
+		{Chord: "A R", Label: "Resume Job", HintLabel: "Resume", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no resumable jobs",
 			JobFilter: func(j *database.Job) bool {
 				canResume := (j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies) &&
@@ -429,7 +443,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 				}
 				return false
 			}},
-		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true,
+		{Chord: "A I", Label: "Reinitialize Job", HintLabel: "Reinit", Category: "Action", NeedsJob: true, SupportsBatch: true,
 			DisabledReason: "no retriable jobs",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusError || j.Status == database.StatusCancelled || j.Status == database.StatusCookies
@@ -443,12 +457,12 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 				}
 				return false
 			}},
-		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+		{Chord: "A C", Label: "Cancel Job", HintLabel: "Cancel", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no active jobs",
 			JobFilter: func(j *database.Job) bool {
 				return j.Status != database.StatusFinished && j.Status != database.StatusCancelled && j.Status != database.StatusError
 			}},
-		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true,
+		{Chord: "A D", Label: "Delete Job", HintLabel: "Delete", Category: "Action", NeedsJob: true, NeedsConfirm: true, SupportsBatch: true,
 			DisabledReason: "no deletable jobs"},
 		{Chord: "A T", Label: "Trim Video", HintLabel: "Trim", Category: "Action", NeedsJob: true,
 			DisabledReason: "no finished jobs with files",

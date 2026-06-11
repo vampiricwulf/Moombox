@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -20,6 +22,32 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 	"github.com/vampiricwulf/Moombox/internal/web"
 )
+
+// truncateUTF8 caps s at maxBytes without splitting a multi-byte rune —
+// decoded titles are UTF-8, and a blind byte slice would persist an invalid
+// trailing sequence into the job title.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// decodeImportHeader percent-decodes an import metadata header value,
+// falling back to the raw value when it isn't valid percent-encoding.
+func decodeImportHeader(v string) string {
+	if v == "" || !strings.Contains(v, "%") {
+		return v
+	}
+	if decoded, err := url.QueryUnescape(v); err == nil {
+		return decoded
+	}
+	return v
+}
 
 // ImportRoutes registers import-related API routes.
 // Uses its own 5/min rate limiter per the spec — the global API
@@ -39,14 +67,13 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 			return
 		}
 
-		titleHeader := req.Header.Get("X-Import-Title")
-		channelHeader := req.Header.Get("X-Import-Channel")
-		if len(titleHeader) > 500 {
-			titleHeader = titleHeader[:500]
-		}
-		if len(channelHeader) > 500 {
-			channelHeader = channelHeader[:500]
-		}
+		// The frontend percent-encodes these headers (HTTP headers are
+		// Latin-1; raw CJK titles would throw in the browser before the
+		// request is even sent). Decode here; a value without % sequences
+		// (e.g. from curl) passes through unchanged, and malformed encoding
+		// falls back to the raw header.
+		titleHeader := truncateUTF8(decodeImportHeader(req.Header.Get("X-Import-Title")), 500)
+		channelHeader := truncateUTF8(decodeImportHeader(req.Header.Get("X-Import-Channel")), 500)
 
 		// Audit Q-13: peek the first 4 bytes for the ZIP local-file-header
 		// magic ("PK\x03\x04") before allocating a temp file. Otherwise a
@@ -304,6 +331,9 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 			return
 		}
 
+		// Content-Type must be set before the explicit WriteHeader — headers
+		// set afterwards are silently dropped for non-gzip clients.
+		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusCreated)
 		jsonResponse(rw, job)
 	})
@@ -311,7 +341,10 @@ func ImportRoutes(r chi.Router, db *database.Database, store *config.Store) func
 	return func() { importRL.Close() }
 }
 
-// extractZipEntry extracts a single zip entry to a destination path.
+// extractZipEntry extracts a single zip entry to a destination path. On any
+// failure the partially-written destination is removed — the caller returns
+// an error to the client without creating a job, so a leftover truncated
+// file would be a silent disk leak under output/imports/.
 func extractZipEntry(f *zip.File, destPath string) error {
 	os.MkdirAll(filepath.Dir(destPath), 0o755)
 	rc, err := f.Open()
@@ -324,13 +357,18 @@ func extractZipEntry(f *zip.File, destPath string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	// Limit to declared size + 1 byte to detect zip bombs that lie about UncompressedSize64
 	limit := int64(f.UncompressedSize64) + 1
 	n, err := io.Copy(out, io.LimitReader(rc, limit))
 	if n >= limit {
-		return fmt.Errorf("zip entry %q exceeds declared size (zip bomb protection)", f.Name)
+		err = fmt.Errorf("zip entry %q exceeds declared size (zip bomb protection)", f.Name)
+	}
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(destPath)
 	}
 	return err
 }

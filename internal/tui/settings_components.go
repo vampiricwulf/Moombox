@@ -78,6 +78,12 @@ func (m *SettingsModel) UpdateComponents(msg tea.Msg) tea.Cmd {
 	if !m.visible || !m.textInput.Focused() {
 		return nil
 	}
+	// While the close-confirm prompt or restart overlay is up, HandleKey
+	// owns every key (Y/N/Enter/Esc) — routing them into the focused text
+	// input too would append the answer to the field value before saving.
+	if m.closeConfirm || m.showRestartOverlay {
+		return nil
+	}
 	// Suppress "i" key on ffmpeg_path field — it opens the FFmpeg installer
 	// and must not be typed into the text input.
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "i" {

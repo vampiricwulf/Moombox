@@ -86,6 +86,27 @@ func main() {
 		return
 	}
 
+	configPath := flag.String("config", "", "Path to config file")
+	logLevel := flag.String("log-level", "", "Override log level (DEBUG, INFO, WARN, ERROR)")
+	showVersion := flag.Bool("version", false, "Show version and exit")
+	headless := flag.Bool("headless", false, "Run without TUI (web-only mode)")
+	noTUI := flag.Bool("no-tui", false, "Run without TUI (web-only mode)")
+
+	// Read-only diagnostics must not pass through the launcher: they would
+	// trip the single-instance lock ("another instance is already running")
+	// whenever the daemon is up, and pointlessly spawn a supervised child
+	// when it isn't.
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "-version", "--version":
+			fmt.Printf("moombox %s (%s)\n", version, commit)
+			return
+		case "-h", "-help", "--help":
+			flag.Usage()
+			return
+		}
+	}
+
 	// Launcher/supervisor: if we're not already a child process, act as the
 	// launcher. The launcher spawns moombox as a child, waits for it, and
 	// respawns when the child exits with exitCodeRestart (config change or
@@ -97,11 +118,6 @@ func main() {
 		return
 	}
 
-	configPath := flag.String("config", "", "Path to config file")
-	logLevel := flag.String("log-level", "", "Override log level (DEBUG, INFO, WARN, ERROR)")
-	showVersion := flag.Bool("version", false, "Show version and exit")
-	headless := flag.Bool("headless", false, "Run without TUI (web-only mode)")
-	noTUI := flag.Bool("no-tui", false, "Run without TUI (web-only mode)")
 	flag.Parse()
 
 	if *showVersion {

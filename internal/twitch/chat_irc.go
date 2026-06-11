@@ -53,13 +53,37 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 
 	cd.logger.Info("joined twitch IRC", "channel", cd.channelLogin)
 
-	// Message-triggered flush: idle until a message arrives, then collect
-	// for chatSaveInterval before flushing. No I/O during quiet periods.
-	var flushTimer *time.Timer
-	var flushCh <-chan time.Time // nil channel is never ready in select
-	defer func() {
-		if flushTimer != nil {
-			flushTimer.Stop()
+	// Flush on a dedicated ticker goroutine: the read loop below blocks in
+	// conn.Read for up to ircReadDeadline (6 minutes), so a flush serviced
+	// from the loop itself (the previous design) left pending chat unflushed
+	// — and the resume state unsaved — for the whole quiet period in a slow
+	// channel. flush() is serialized via cd.flushMu, so the ticker is safe
+	// alongside the reconnect/exit-path flush calls. No I/O happens on ticks
+	// with nothing pending.
+	flusherDone := make(chan struct{})
+	defer close(flusherDone)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				cd.logger.Error("chat flusher panic", "panic", r)
+			}
+		}()
+		ticker := time.NewTicker(chatSaveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-flusherDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cd.mu.Lock()
+				hasPending := len(cd.messages) > 0
+				cd.mu.Unlock()
+				if hasPending {
+					cd.flush()
+				}
+			}
 		}
 	}()
 
@@ -69,24 +93,7 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-flushCh:
-			cd.flush()
-			flushTimer = nil
-			flushCh = nil
 		default:
-		}
-
-		// Start flush timer when the first pending message arrives.
-		// Subsequent messages within chatSaveInterval are batched together.
-		// Placed before conn.Read so error-path `continue` still triggers it.
-		if flushTimer == nil {
-			cd.mu.Lock()
-			hasPending := len(cd.messages) > 0
-			cd.mu.Unlock()
-			if hasPending {
-				flushTimer = time.NewTimer(chatSaveInterval)
-				flushCh = flushTimer.C
-			}
 		}
 
 		// Read with a per-read deadline so a silent socket (e.g. NAT

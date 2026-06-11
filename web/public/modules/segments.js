@@ -99,6 +99,15 @@ export class SegmentPlayer {
   seekToGlobalTime(globalSeconds, video) {
     if (!this.segOffsets || this.segOffsets.length === 0) return;
 
+    // Unknown durations (ffprobe failed → durationSeconds 0) make the
+    // global timeline degenerate: every seek would clamp to 0 and the
+    // last-segment fallback below would jump there. Seek within the
+    // current segment instead.
+    if (!this.totalDuration || this.totalDuration <= 0) {
+      video.currentTime = Math.max(0, globalSeconds);
+      return;
+    }
+
     // Clamp to valid range to prevent out-of-bounds seeks
     globalSeconds = Math.max(0, Math.min(this.totalDuration, globalSeconds));
 

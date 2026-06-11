@@ -43,7 +43,7 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 			m.notifIndex++
 		}
 	case keyEnter:
-		if len(m.notifications) > 0 {
+		if len(m.notifications) > 0 && m.notifIndex < len(m.notifications) {
 			n := m.notifications[m.notifIndex]
 			m.notifEditURL = n.URL
 			m.notifEditEvents = make(map[string]bool)
@@ -98,6 +98,14 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 	switch key {
 	case keyEsc:
 		m.notifMode = "list"
+		// "a" set notifIndex = len(notifications) for the pending add —
+		// clamp it back or list-mode Enter indexes out of range (mirrors
+		// the setup wizard's channel-edit Esc clamp).
+		if m.notifIndex >= len(m.notifications) && len(m.notifications) > 0 {
+			m.notifIndex = len(m.notifications) - 1
+		} else if len(m.notifications) == 0 {
+			m.notifIndex = 0
+		}
 		m.textInput.Blur()
 		return ""
 	case keyEnter:
@@ -111,6 +119,13 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 				enabledCount++
 				events = append(events, e)
 			}
+		}
+		// Zero selected events would store Events = nil, which the
+		// notifications manager treats as "all events" — reject instead.
+		if enabledCount == 0 {
+			m.errorMsg = "Select at least one event (Space to toggle)"
+			m.status = saveError
+			return ""
 		}
 		n := config.NotificationConfig{URL: m.notifEditURL}
 		if enabledCount < len(allNotifEvents) {
