@@ -809,7 +809,7 @@ func GetActivePlatforms(cfg *MoomboxConfig) (youtube, twitch bool) {
 //   - U+30A0..U+30FF   Katakana
 //   - U+FF00..U+FFEF   Halfwidth and Fullwidth Forms
 //   - U+4E00..U+9FAF   CJK Unified Ideographs (BMP plane covering common
-//                      Chinese, Japanese kanji, and Korean hanja)
+//     Chinese, Japanese kanji, and Korean hanja)
 //
 // Anything outside these ranges (e.g. emoji, math symbols, Cyrillic,
 // Greek, Hebrew, Arabic) gets stripped — the goal is "filename-safe

@@ -77,6 +77,25 @@ func (s *Store) Read(fn func(*MoomboxConfig)) {
 	fn(s.cfg)
 }
 
+// Snapshot returns a shallow copy of the config taken under the read
+// lock — the safe way to hand config data to code that keeps reading
+// after the lock is released (JSON encoders streaming to slow sockets,
+// the orphan scanner, TUI callbacks). Handing such code the live
+// pointer instead would race Update, which mutates the shared struct
+// in place.
+//
+// The copy is SHALLOW: slice fields (Channels, Cookies.Platforms, …)
+// share their backing arrays with the live config. That is safe for
+// reading because Update callers replace whole slices rather than
+// mutating elements in place (see the Update godoc), but the snapshot
+// must not be used to mutate slice elements.
+func (s *Store) Snapshot() *MoomboxConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snap := *s.cfg
+	return &snap
+}
+
 // Update runs fn with the write lock held, then validates the result,
 // normalizes, and saves to disk when savePath is set. On validation OR
 // save failure the in-memory config is rolled back to its pre-fn state,
@@ -180,8 +199,9 @@ func (s *Store) RWMutex() *sync.RWMutex {
 
 // Config returns the raw *MoomboxConfig pointer for dependency-injected
 // APIs that take both a *MoomboxConfig and a *sync.RWMutex (web.Server,
-// routes.* constructors, etc.). Equivalent to Snapshot() but named to
-// signal the raw-access intent.
+// routes.* constructors, etc.). Unlike Snapshot() this is the LIVE
+// struct — readers must hold the mutex, and must not retain it past
+// the critical section.
 //
 // DEPRECATED: kept only for the gradual migration; new APIs should take
 // *Store directly.

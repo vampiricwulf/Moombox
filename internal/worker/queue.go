@@ -41,14 +41,14 @@ type JobQueue struct {
 	activeLifecycle int
 	activeDownloads int
 	pending         []pendingJob
-	pendingSet      map[string]struct{}   // O(1) duplicate detection for pending queue
+	pendingSet      map[string]struct{} // O(1) duplicate detection for pending queue
 	processing      map[string]context.CancelFunc
 	done            map[string]chan struct{} // closed when the job's processing goroutine returns
-	holdingDlSlot   map[string]bool       // tracks which jobs hold download slots
-	cancelled       map[string]bool       // tracks user-initiated cancellations (vs shutdown)
+	holdingDlSlot   map[string]bool          // tracks which jobs hold download slots
+	cancelled       map[string]bool          // tracks user-initiated cancellations (vs shutdown)
 	notify          chan struct{}
 	dlNotify        chan struct{} // signaling for download slot availability
-	logger          logger       // optional logger for warnings
+	logger          logger        // optional logger for warnings
 }
 
 // NewJobQueue creates a new job queue.

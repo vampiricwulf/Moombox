@@ -19,14 +19,15 @@ import (
 // host. Audit reports/cookies.md #25 + reports/config.md #22.
 //
 // Implementation: shells out to icacls — the standard Windows ACL tool.
-//   /inheritance:r       remove ALL inherited ACEs (including SYSTEM /
-//                        Administrators / Users)
-//   /grant:r <user>:(OI)(CI)F
-//                        replace any explicit ACE for the trustee with
-//                        Full Control + Object Inherit + Container
-//                        Inherit so child files / subdirs share the
-//                        restriction
-//   /Q                   suppress per-file success output
+//
+//	/inheritance:r       remove ALL inherited ACEs (including SYSTEM /
+//	                     Administrators / Users)
+//	/grant:r <user>:(OI)(CI)F
+//	                     replace any explicit ACE for the trustee with
+//	                     Full Control + Object Inherit + Container
+//	                     Inherit so child files / subdirs share the
+//	                     restriction
+//	/Q                   suppress per-file success output
 //
 // Trade-offs of the simple "user only" form:
 //   - SYSTEM loses access. Backup / antivirus running as SYSTEM can no

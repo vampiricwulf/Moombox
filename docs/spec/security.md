@@ -359,6 +359,15 @@ Three TOML config fields control TLS:
 - If `https_enabled` is true and the files do NOT exist, a self-signed certificate is auto-generated and written to the configured paths. The generated certificate includes SANs (Subject Alternative Names) appropriate for the `network_access` level — localhost for local access, or the machine's IP addresses for LAN/external.
 - The server wraps its TCP listener with `tls.NewListener` using the loaded TLS config.
 
+### Cross-Scheme Redirect
+
+Both protocols share the single configured port. A protocol splitter (`internal/web/listener_mux.go`) sniffs each accepted connection's first byte (TLS handshakes start with `0x16`) and answers mismatched-scheme requests with a `307` to the same host/port/path on the correct scheme:
+
+- `https_enabled = true`: plain `http://` requests redirect to `https://`.
+- `https_enabled = false`: `https://` requests redirect to `http://` — only when a certificate pair exists on disk (typically left from an earlier HTTPS run) so the TLS handshake can be terminated; the cert is load-only here, never generated. Without one, TLS connections close as before.
+
+`307` (temporary, method-preserving) is deliberate: browsers cache permanent redirects, and toggling `https_enabled` later would otherwise trap clients in a cached cross-scheme loop.
+
 ### Binding
 
 The server binds to different addresses based on `network_access`:

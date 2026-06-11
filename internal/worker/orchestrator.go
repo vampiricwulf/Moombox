@@ -49,16 +49,16 @@ func connIsOnline(c Connectivity) func() bool {
 
 // DownloadOrchestrator coordinates the full download lifecycle for a job.
 type DownloadOrchestrator struct {
-	muxer         *engine.Muxer
-	ffmpegPath    string
-	db            *database.Database
-	queue         *JobQueue
-	cipherSolver  *cipher.GojaResolver
-	routedCipher  cipher.Solver
-	potProvider   *bgutils.PotProvider
-	notifier      *notifications.Manager
-	conn          Connectivity
-	logger        logger
+	muxer        *engine.Muxer
+	ffmpegPath   string
+	db           *database.Database
+	queue        *JobQueue
+	cipherSolver *cipher.GojaResolver
+	routedCipher cipher.Solver
+	potProvider  *bgutils.PotProvider
+	notifier     *notifications.Manager
+	conn         Connectivity
+	logger       logger
 }
 
 // NewDownloadOrchestrator creates a new orchestrator.
@@ -80,7 +80,6 @@ func NewDownloadOrchestrator(db *database.Database, queue *JobQueue, ffmpegPath 
 		logger:       logger,
 	}
 }
-
 
 // Execute runs the full download pipeline for a YouTube job.
 func (o *DownloadOrchestrator) Execute(ctx context.Context, jobCtx *JobContext, videoInfo *youtube.VideoInfo, isVod bool) error {

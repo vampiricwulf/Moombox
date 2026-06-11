@@ -40,7 +40,9 @@ func newFakePlayerServer(body, lastModified, etag string) *fakePlayerServer {
 	return fs
 }
 
-func (fs *fakePlayerServer) URL() string { return fs.server.URL + "/s/player/" + testPlayerID + "/player_ias.vflset/en_US/base.js" }
+func (fs *fakePlayerServer) URL() string {
+	return fs.server.URL + "/s/player/" + testPlayerID + "/player_ias.vflset/en_US/base.js"
+}
 
 func (fs *fakePlayerServer) Hits() int32 { return fs.hits.Load() }
 

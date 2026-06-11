@@ -143,7 +143,9 @@ func (s *runState) runTUI() {
 		return nil
 	}
 	app.OnListOrphans = func() ([]tui.OrphanedFileEntry, error) {
-		entries, err := worker.ScanOrphanedFiles(s.db, s.cfg)
+		// Snapshot, not s.cfg: the scan reads path fields while walking the
+		// filesystem, racing configStore.Update on the live struct.
+		entries, err := worker.ScanOrphanedFiles(s.db, s.configStore.Snapshot())
 		if err != nil {
 			return nil, err
 		}
@@ -163,7 +165,7 @@ func (s *runState) runTUI() {
 		return result, nil
 	}
 	app.OnDeleteOrphan = func(path string) error {
-		return worker.DeleteOrphanedFile(path, s.db, s.cfg)
+		return worker.DeleteOrphanedFile(path, s.db, s.configStore.Snapshot())
 	}
 	app.OnListClientTokens = func() ([]*database.ClientToken, error) {
 		return s.db.ListClientTokens()

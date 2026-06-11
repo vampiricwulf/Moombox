@@ -100,4 +100,3 @@ func TestWebSocketHubClientCount(t *testing.T) {
 		t.Errorf("expected 0 clients, got %d", hub.ClientCount())
 	}
 }
-

@@ -64,7 +64,6 @@ func UpdateDiskStatus(outputDir string, store *config.Store) *DiskStatus {
 // StatsRouteDeps holds dependencies for the stats route.
 type StatsRouteDeps struct {
 	DB     *database.Database
-	Cfg    *config.MoomboxConfig
 	Worker *worker.DownloadWorker // optional; surfaces Twitch hint cache hit/miss
 }
 

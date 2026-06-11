@@ -7,7 +7,8 @@
 // state issue rather than a fundamental ejs/player-shape mismatch.
 //
 // Run via:
-//   go run ./tools/sidecar-sig-probe -wp PATH_TO_WATCH_PAGE.html
+//
+//	go run ./tools/sidecar-sig-probe -wp PATH_TO_WATCH_PAGE.html
 package main
 
 import (
@@ -33,7 +34,7 @@ func (stdLogger) Warn(msg string, args ...any)  { fmt.Fprintf(os.Stderr, "[WARN 
 func (stdLogger) Error(msg string, args ...any) { fmt.Fprintf(os.Stderr, "[ERROR] %s %v\n", msg, args) }
 
 var (
-	jsURLRe = regexp.MustCompile(`"jsUrl":"([^"]+base\.js)"`)
+	jsURLRe    = regexp.MustCompile(`"jsUrl":"([^"]+base\.js)"`)
 	playerIDRe = regexp.MustCompile(`/s/player/([a-f0-9]+)/`)
 )
 

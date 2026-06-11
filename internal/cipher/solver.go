@@ -509,52 +509,15 @@ var _ Solver = (*GojaResolver)(nil)
 // Compile-time check: GojaResolver satisfies cipher.PlayerSource.
 var _ PlayerSource = (*GojaResolver)(nil)
 
-// callWithTimeout invokes a goja callable under CipherTimeout and safely resets
-// the VM's interrupt flag after the call returns.
-//
-// The invocation runs in a dedicated goroutine so that vm.Interrupt (which must
-// be called from a non-VM goroutine) can race the completion. The select waits
-// for either the goroutine's result or the timeout. On timeout, vm.Interrupt is
-// fired and we BLOCK on the result channel until the goroutine actually exits —
-// only then do we call ClearInterrupt. This ordering is what makes the next
-// call to this VM start with a clean slate; the earlier time.AfterFunc
-// implementation could leave a pending interrupt that aborted the next call.
-//
-// The caller still owns the VM mutex (Solvers.mu) for the duration of this
-// function, so there is no concurrent VM access from elsewhere.
+// callWithTimeout invokes a goja callable under CipherTimeout via the shared
+// mbgoja.CallWithTimeout helper, which owns the Interrupt/ClearInterrupt
+// ordering contract (fire, block until the goroutine exits, only then
+// clear). The caller still owns the VM mutex (Solvers.mu) for the duration
+// of this function, so there is no concurrent VM access from elsewhere.
 func callWithTimeout(vm *gojavm.Runtime, label string, fn func() (gojavm.Value, error)) (string, error) {
-	type callResult struct {
-		val gojavm.Value
-		err error
+	v, err := mbgoja.CallWithTimeout(vm, CipherTimeout, "cipher "+label, fn)
+	if err != nil {
+		return "", fmt.Errorf("%s decrypt: %w", label, err)
 	}
-
-	done := make(chan callResult, 1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				done <- callResult{nil, fmt.Errorf("cipher %s panic inside goroutine: %v", label, r)}
-			}
-		}()
-		v, e := fn()
-		done <- callResult{v, e}
-	}()
-
-	timer := time.NewTimer(CipherTimeout)
-	defer timer.Stop()
-
-	var r callResult
-	select {
-	case r = <-done:
-		// Normal path — no interrupt fired. ClearInterrupt below is a no-op
-		// but keeps the cleanup symmetric.
-	case <-timer.C:
-		vm.Interrupt(fmt.Sprintf("cipher %s decrypt timeout (%v)", label, CipherTimeout))
-		r = <-done // wait for the goroutine to observe the interrupt and return
-	}
-	vm.ClearInterrupt()
-
-	if r.err != nil {
-		return "", fmt.Errorf("%s decrypt: %w", label, r.err)
-	}
-	return r.val.String(), nil
+	return v.String(), nil
 }

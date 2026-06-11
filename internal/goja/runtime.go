@@ -84,7 +84,9 @@ func NewRuntimeForCipher(userAgent string) (*goja.Runtime, error) {
 // Audit reports/goja.md Q1. Replaces the inline goroutine+select+
 // Interrupt+ClearInterrupt pattern that BotGuardClient construction
 // (and any future caller that wants timeboxed JS execution) was
-// hand-rolling.
+// hand-rolling. CallWithTimeout (timeout.go) is the ctx-less sibling
+// with a different error contract — see its godoc for why the two
+// stay separate; edits to the interrupt ordering go in both.
 func RunStringWithTimeout(ctx context.Context, vm *goja.Runtime, code string, timeout time.Duration) (goja.Value, error) {
 	type result struct {
 		v   goja.Value

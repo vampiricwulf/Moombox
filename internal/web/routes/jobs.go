@@ -1252,9 +1252,8 @@ func extractVideoIDFromURL(url string) string {
 
 // FormatRoutesDeps holds dependencies for format routes.
 type FormatRoutesDeps struct {
-	DB  *database.Database
-	Cfg *config.MoomboxConfig
-	YT  interface {
+	DB *database.Database
+	YT interface {
 		GetFormats(ctx context.Context, videoID string) (map[string]any, error)
 	}
 }
@@ -1319,7 +1318,6 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 
 // StatusRouteDeps holds dependencies for the status route.
 type StatusRouteDeps struct {
-	Cfg                        *config.MoomboxConfig
 	Version                    string
 	StartTime                  time.Time
 	GetCookieStatus            func() map[string]any

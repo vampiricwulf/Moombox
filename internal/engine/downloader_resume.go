@@ -43,6 +43,41 @@ func streamIdentity(rawURL string) string {
 	return ""
 }
 
+// resumeIdentityMismatch reports whether saved resume state belongs to a
+// DIFFERENT stream than the downloader is configured for. Decision order:
+//
+//  1. Explicit orchestrator-provided StreamID (Twitch broadcast/VOD id)
+//     takes precedence when both sides carry one — a mismatch means the
+//     saved state is another broadcast's, and appending would splice two
+//     streams into one file.
+//  2. URL fingerprinting: YouTube media URLs embed videoID+itag, compared
+//     via streamIdentity. Mixed shapes (exactly one side extracts) are a
+//     conservative mismatch.
+//  3. When NEITHER URL carries an extractable identity (e.g. Twitch weaver
+//     URLs, whose session token rotates every master-playlist fetch), URL
+//     equality has no signal — NOT a mismatch; the caller's file-size and
+//     age validations take over. Treating it as a mismatch is what used to
+//     O_TRUNC hours of recording on every daemon restart.
+//
+// Returns the reason for diagnostics when mismatched.
+func resumeIdentityMismatch(state *ResumeState, optStreamID, currentURL string) (bool, string) {
+	if optStreamID != "" && state.StreamID != "" && state.StreamID != optStreamID {
+		return true, "stream id"
+	}
+	if state.BaseURL == "" {
+		return false, ""
+	}
+	savedID := streamIdentity(state.BaseURL)
+	currentID := streamIdentity(currentURL)
+	if savedID == "" && currentID == "" {
+		return false, ""
+	}
+	if savedID != currentID {
+		return true, "url identity"
+	}
+	return false, ""
+}
+
 // maxResumeStateAge is the oldest resume state we'll trust. Beyond this, we
 // treat the file as stale (the downloader likely changed URL/quality since
 // then, or the segment numbering has rolled) and start fresh. Seven days is

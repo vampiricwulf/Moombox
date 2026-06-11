@@ -601,19 +601,14 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		// (PUT /config, setup/complete, password change) until the
 		// client finished receiving. PasswordHash has json:"-" so it's
 		// omitted from marshaling regardless.
-		var cfgCopy config.MoomboxConfig
-		var hasPassword bool
-		store.Read(func(c *config.MoomboxConfig) {
-			cfgCopy = *c
-			hasPassword = c.Network.PasswordHash != ""
-		})
+		cfgCopy := store.Snapshot()
 
 		resp := struct {
 			*config.MoomboxConfig
 			HasPassword bool `json:"hasPassword"`
 		}{
-			MoomboxConfig: &cfgCopy,
-			HasPassword:   hasPassword,
+			MoomboxConfig: cfgCopy,
+			HasPassword:   cfgCopy.Network.PasswordHash != "",
 		}
 		// ETag + 304 short-circuit: the config payload includes a large
 		// channels slice that rarely changes; serving 304s when the body

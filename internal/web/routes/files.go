@@ -14,7 +14,7 @@ import (
 // FileRoutesDeps holds dependencies for file route handlers.
 type FileRoutesDeps struct {
 	DB     *database.Database
-	Cfg    *config.MoomboxConfig
+	Store  *config.Store
 	Logger interface {
 		Debug(msg string, args ...any)
 		Info(msg string, args ...any)
@@ -24,10 +24,15 @@ type FileRoutesDeps struct {
 }
 
 // FileRoutes registers orphaned file management endpoints.
+//
+// The orphan scan/delete helpers receive a Store.Snapshot() rather than
+// the live config pointer — they keep reading path fields while the scan
+// walks the filesystem, which would race config.Store.Update mutating
+// the shared struct in place.
 func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 	// GET /api/files/orphaned — scan and return orphaned files
 	r.Get("/api/files/orphaned", func(rw http.ResponseWriter, req *http.Request) {
-		entries, err := worker.ScanOrphanedFiles(deps.DB, deps.Cfg)
+		entries, err := worker.ScanOrphanedFiles(deps.DB, deps.Store.Snapshot())
 		if err != nil {
 			jsonError(rw, "failed to scan orphaned files", http.StatusInternalServerError)
 			return
@@ -56,8 +61,9 @@ func FileRoutes(r chi.Router, deps *FileRoutesDeps) {
 		var deleted []string
 		var errors []map[string]string
 
+		cfg := deps.Store.Snapshot()
 		for _, path := range body.Paths {
-			if err := worker.DeleteOrphanedFile(path, deps.DB, deps.Cfg); err != nil {
+			if err := worker.DeleteOrphanedFile(path, deps.DB, cfg); err != nil {
 				errors = append(errors, map[string]string{
 					"path":  path,
 					"error": "failed to delete file",

@@ -104,6 +104,10 @@ const minLogRotationSize = 4096
 // New creates a new Logger with file rotation support.
 func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 	if maxSize < minLogRotationSize {
+		// config.Validate accepts down to 1024, so a 1024-4095 value is
+		// legal config — surface the override instead of silently ignoring
+		// the operator's setting.
+		fmt.Fprintf(os.Stderr, "logger: log_max_file_size %d below the %d-byte rotation floor, using the floor\n", maxSize, minLogRotationSize)
 		maxSize = minLogRotationSize
 	}
 	if maxFiles < 1 {
@@ -262,10 +266,17 @@ func (l *Logger) rotate() {
 		l.diagf("logger: rotation rename current log failed: %v", err)
 	}
 
-	// Remove excess files
-	excess := fmt.Sprintf("%s.%d", l.filePath, l.maxFiles+1)
-	if err := os.Remove(excess); err != nil && !os.IsNotExist(err) {
-		l.diagf("logger: rotation remove excess file failed: %v", err)
+	// Remove excess files. Loop upward until the first gap so a runtime
+	// DECREASE of log_max_files cleans every stale higher-numbered file —
+	// removing only .{maxFiles+1} left .{maxFiles+2}.. behind forever.
+	for i := l.maxFiles + 1; ; i++ {
+		excess := fmt.Sprintf("%s.%d", l.filePath, i)
+		if err := os.Remove(excess); err != nil {
+			if !os.IsNotExist(err) {
+				l.diagf("logger: rotation remove excess file failed: %v", err)
+			}
+			break
+		}
 	}
 
 	// Open fresh file — if this fails, surface it so we don't silently lose all logging

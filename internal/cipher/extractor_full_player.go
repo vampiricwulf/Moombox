@@ -27,7 +27,9 @@ var nArrayPatterns = []*regexp.Regexp{
 }
 
 // urlClassPatterns match the n-param URL class by finding the pattern:
-//   new XXXX(url, !0)).get("n")  or  new XXXX(url, true)).get("n")
+//
+//	new XXXX(url, !0)).get("n")  or  new XXXX(url, true)).get("n")
+//
 // The class name changes across player versions (e.g., g.fb → g.sB). Some
 // future minifier could nest another level ("a.b.c"); the multi-level form
 // accepts any number of dotted segments. Bare identifier stays as a fallback.

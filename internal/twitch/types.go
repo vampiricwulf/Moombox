@@ -81,14 +81,14 @@ type TwitchEmoteRef struct {
 
 // TwitchChatData is the complete chat data structure for a Twitch stream.
 type TwitchChatData struct {
-	Platform           string              `json:"platform"` // "twitch"
-	ChannelLogin       string              `json:"channelLogin"`
-	ChannelDisplayName string              `json:"channelDisplayName"`
-	StreamID           string              `json:"streamId"`
-	StreamStartTime    string              `json:"streamStartTime,omitempty"`
-	RecordingStartTime string              `json:"recordingStartTime,omitempty"`
-	DownloadedAt       string              `json:"downloadedAt"`
-	MessageCount       int                 `json:"messageCount"`
+	Platform           string `json:"platform"` // "twitch"
+	ChannelLogin       string `json:"channelLogin"`
+	ChannelDisplayName string `json:"channelDisplayName"`
+	StreamID           string `json:"streamId"`
+	StreamStartTime    string `json:"streamStartTime,omitempty"`
+	RecordingStartTime string `json:"recordingStartTime,omitempty"`
+	DownloadedAt       string `json:"downloadedAt"`
+	MessageCount       int    `json:"messageCount"`
 	// Emotes must serialize BEFORE Messages: AppendChatMessages locates the
 	// messages array via "last ] in the file tail", so the messages array has
 	// to stay the final field. With emotes trailing, any append after emote

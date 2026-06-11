@@ -68,10 +68,10 @@ type dashStrategyT struct{}
 type manifestlessDashStrategyT struct{}
 type hlsStrategyT struct{}
 
-func (vodStrategyT) Kind() string                { return "vod" }
-func (dashStrategyT) Kind() string               { return "dash" }
-func (manifestlessDashStrategyT) Kind() string   { return "manifestless_dash" }
-func (hlsStrategyT) Kind() string                { return "hls" }
+func (vodStrategyT) Kind() string              { return "vod" }
+func (dashStrategyT) Kind() string             { return "dash" }
+func (manifestlessDashStrategyT) Kind() string { return "manifestless_dash" }
+func (hlsStrategyT) Kind() string              { return "hls" }
 
 func (vodStrategyT) Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error) {
 	return DownloadVod(ctx, job, info, deps.RoutedCipherSolver, deps.CipherSolver, deps.PotProvider)
@@ -94,10 +94,10 @@ func (hlsStrategyT) Download(ctx context.Context, job *JobContext, info *youtube
 // strategy-selection switch. Tests can substitute their own
 // DownloadStrategy implementations.
 var (
-	VodStrategy               DownloadStrategy = vodStrategyT{}
-	DashStrategy              DownloadStrategy = dashStrategyT{}
-	ManifestlessDashStrategy  DownloadStrategy = manifestlessDashStrategyT{}
-	HlsStrategy               DownloadStrategy = hlsStrategyT{}
+	VodStrategy              DownloadStrategy = vodStrategyT{}
+	DashStrategy             DownloadStrategy = dashStrategyT{}
+	ManifestlessDashStrategy DownloadStrategy = manifestlessDashStrategyT{}
+	HlsStrategy              DownloadStrategy = hlsStrategyT{}
 )
 
 // nPathRe matches n-parameter encoded in URL path: /n/{encrypted_value}/

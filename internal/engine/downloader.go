@@ -60,18 +60,18 @@ var (
 
 // DownloaderOptions configures a SegmentDownloader.
 type DownloaderOptions struct {
-	BaseURL           string
-	OutputFile        string
-	StartSeq          int
-	EndSeq            int // -1 for unlimited
-	PoToken           string
-	CookieHeader      string // Cookie header for authenticated downloads
-	IsHls             bool
-	IsDirectURL       bool // Direct URL download (not segmented)
-	MaxRetries        int
-	InitURL           string
-	ForceStartSeq     bool // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
-	ResumeFile        string
+	BaseURL       string
+	OutputFile    string
+	StartSeq      int
+	EndSeq        int // -1 for unlimited
+	PoToken       string
+	CookieHeader  string // Cookie header for authenticated downloads
+	IsHls         bool
+	IsDirectURL   bool // Direct URL download (not segmented)
+	MaxRetries    int
+	InitURL       string
+	ForceStartSeq bool // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
+	ResumeFile    string
 	// StreamID is an optional orchestrator-provided stable identity for the
 	// broadcast, persisted in the resume state. When both the saved state
 	// and the current options carry one and they differ, the resume state
@@ -79,7 +79,7 @@ type DownloaderOptions struct {
 	// platforms whose media URLs carry no extractable identity (Twitch
 	// weaver URLs) — without it, a job resumed after the channel started a
 	// NEW broadcast would splice the new stream into the old recording.
-	StreamID string
+	StreamID          string
 	RetryDelayCap     int // seconds
 	LiveCheckRetries  int
 	CheckStreamStatus func(ctx context.Context) (bool, error) // Returns true if stream ended
@@ -321,41 +321,15 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	resuming := false
 	state, err := d.loadResume()
 	if err == nil && state != nil {
-		// Validate resume state: explicit orchestrator-provided stream
-		// identity takes precedence over URL fingerprinting. When both
-		// sides carry one and they differ, the saved state belongs to a
-		// DIFFERENT broadcast — appending would splice two streams into one
-		// file. Legacy state files (empty StreamID) fall through to the URL
-		// checks below.
-		if d.opts.StreamID != "" && state.StreamID != "" && state.StreamID != d.opts.StreamID {
-			d.logger.Warn("[Downloader] Resume state belongs to a different broadcast, starting fresh",
-				"savedStreamID", state.StreamID, "currentStreamID", d.opts.StreamID)
+		// Validate resume identity — see resumeIdentityMismatch for the
+		// full decision rules (explicit StreamID first, then URL
+		// fingerprinting, with no-identity URLs deliberately trusted).
+		if mismatch, reason := resumeIdentityMismatch(state, d.opts.StreamID, d.getBaseURL()); mismatch {
+			d.logger.Warn("[Downloader] Resume state belongs to a different stream, starting fresh",
+				"reason", reason,
+				"savedStreamID", state.StreamID, "currentStreamID", d.opts.StreamID,
+				"savedURLIdentity", streamIdentity(state.BaseURL), "currentURLIdentity", streamIdentity(d.getBaseURL()))
 			state = nil
-		}
-		// Validate resume state: stream identity (videoID + itag) must match.
-		// YouTube rotates session params (expire, ei, ns, n, sig, pot, …) on
-		// every fresh manifest fetch, so the saved BaseURL string never
-		// equals the current one across restarts. Compare on the stable
-		// identity instead. When NEITHER URL is a YouTube media URL (e.g.
-		// Twitch HLS weaver URLs, whose embedded session token rotates on
-		// every master-playlist fetch), URL equality carries no identity
-		// signal — treating inequality as a mismatch there would discard the
-		// resume state and O_TRUNC hours of recording on every daemon
-		// restart. Trust the file-size and age validations below instead.
-		// Full-URL equality is only meaningful when exactly one side
-		// extracts an identity (mixed URL shapes — conservative fresh start).
-		if state != nil && state.BaseURL != "" {
-			savedID := streamIdentity(state.BaseURL)
-			currentID := streamIdentity(d.getBaseURL())
-			mismatch := false
-			if savedID != "" || currentID != "" {
-				mismatch = savedID != currentID
-			}
-			if mismatch {
-				d.logger.Warn("[Downloader] Resume state stream identity mismatch, starting fresh",
-					"savedID", savedID, "currentID", currentID)
-				state = nil
-			}
 		}
 		// Validate resume state: file must exist and be at least as large as saved position
 		if state != nil && state.BytesWritten > 0 {

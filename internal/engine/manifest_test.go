@@ -1,8 +1,54 @@
 package engine
 
 import (
+	"strings"
 	"testing"
 )
+
+// Regression: the /sq/N → /sq/$Number$ conversion must use the LITERAL
+// replacement variant. ReplaceAllString interprets "$Number" as a
+// (nonexistent) named-group reference and expands it to empty, yielding
+// "/sq/$" — which 404'd every segment of any manifest whose Representation
+// BaseURL carried a current-sequence component.
+func TestParseDash_SqBaseURLBecomesNumberTemplate(t *testing.T) {
+	mpd := `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="299" bandwidth="9000000" width="1920" height="1080">
+        <BaseURL>https://r4---sn.googlevideo.com/videoplayback/id/abc123DEF45.1/itag/299/sq/1234</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+	streams, err := ParseDash(mpd, "https://manifest.example/dash.mpd")
+	if err != nil {
+		t.Fatalf("ParseDash: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("streams: want 1, got %d", len(streams))
+	}
+	if base := streams[0].BaseURL; !strings.Contains(base, "/sq/$Number$") {
+		t.Errorf("BaseURL missing the /sq/$Number$ template (the $-expansion bug yields \"/sq/$\"): %q", base)
+	}
+}
+
+// Regression: ParseHls must reject content that is not an M3U8 document —
+// CDNs serve HTML/JSON error pages with 200 OK, and parsing their non-#
+// lines as segment URLs produced garbage downloads and bogus gap records.
+func TestParseHls_RejectsNonPlaylistContent(t *testing.T) {
+	if got := ParseHls("<html><body>502 Bad Gateway</body></html>", "https://x/"); got != nil {
+		t.Errorf("HTML error page: want nil, got %+v", got)
+	}
+	if got := ParseHls(`{"error":"rate limited"}`, "https://x/"); got != nil {
+		t.Errorf("JSON error body: want nil, got %+v", got)
+	}
+	// Leading blank lines before #EXTM3U are tolerated.
+	got := ParseHls("\n\n#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg1.ts\n", "https://x/")
+	if got == nil || got.Playlist == nil || len(got.Playlist.Segments) != 1 {
+		t.Errorf("valid playlist with leading blanks: want 1 segment, got %+v", got)
+	}
+}
 
 func TestParseDash(t *testing.T) {
 	mpd := `<?xml version="1.0"?>

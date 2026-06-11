@@ -171,7 +171,6 @@ func (m *TaskListModel) SetJobs(jobs []*database.Job) {
 	m.jobs = jobs
 	m.rebuildJobIndex()
 	m.rebuildVirtualList()
-	m.resetMarquee()
 }
 
 // Jobs returns the current job list (caller must NOT mutate the
@@ -197,19 +196,34 @@ func (m *TaskListModel) AddJob(job *database.Job) {
 	if _, exists := m.jobIndex[job.ID]; exists {
 		return
 	}
-	// Remember the previously-selected job so the selection follows it
-	// after the insert re-sorts the list (mirrors UpdateJob/RemoveJob).
-	var prevSelectedID string
-	if sel := m.SelectedJob(); sel != nil {
-		prevSelectedID = sel.ID
-	}
-
 	m.jobs = append(m.jobs, job)
 	m.rebuildJobIndex()
 	m.rebuildVirtualList()
+}
 
-	if prevSelectedID != "" {
-		if newIdx, ok := m.virtualIndex[prevSelectedID]; ok {
+// captureSelection returns the currently-selected job's ID. Called at the
+// top of rebuildVirtualList, before SetItems replaces the rows.
+func (m *TaskListModel) captureSelection() string {
+	if sel := m.SelectedJob(); sel != nil {
+		return sel.ID
+	}
+	return ""
+}
+
+// restoreSelection re-selects prevID at its post-rebuild position via the
+// virtualIndex map (O(1) — audit reports/tui.md #22) and resets the
+// marquee. Called from the tail of rebuildVirtualList so EVERY rebuild
+// preserves selection by job ID structurally: the bubbles list keeps the
+// NUMERIC index across SetItems, so without relocation the highlight
+// silently lands on a different job whenever a rebuild re-sorts, filters,
+// or re-archives the rows. IDs absent from the rebuilt list (removed job,
+// row hidden by a filter or a collapsed archive) are left to the list's
+// natural index clamping — the neighbor row inherits the highlight.
+// Callers that want a different post-rebuild selection (CycleFilter's
+// jump-to-top) Select() after the rebuild returns, which wins.
+func (m *TaskListModel) restoreSelection(prevID string) {
+	if prevID != "" {
+		if newIdx, ok := m.virtualIndex[prevID]; ok {
 			m.list.Select(newIdx)
 		}
 	}
@@ -229,28 +243,12 @@ func (m *TaskListModel) RemoveJob(jobID string) {
 	if !ok || idx >= len(m.jobs) {
 		return
 	}
-	// Remember the previously-selected job (if any) so we can follow
-	// it after the rebuild — a removal that ISN'T the selected row
-	// should keep the selection on the same job.
-	var prevSelectedID string
-	if sel := m.SelectedJob(); sel != nil {
-		prevSelectedID = sel.ID
-	}
-
 	m.jobs = append(m.jobs[:idx], m.jobs[idx+1:]...)
 	m.rebuildJobIndex()
+	// Removing the selected row itself: its ID is absent from the rebuilt
+	// virtualIndex, so the rebuild's restore no-ops and the list's natural
+	// neighbor selection stands.
 	m.rebuildVirtualList()
-
-	if prevSelectedID != "" && prevSelectedID != jobID {
-		// Use virtualIndex (built by rebuildVirtualList) for O(1)
-		// follow-the-selection. Audit reports/tui.md #22 fixed the
-		// equivalent post-rebuild scan in UpdateJob; this is the same
-		// pattern.
-		if newIdx, ok := m.virtualIndex[prevSelectedID]; ok {
-			m.list.Select(newIdx)
-		}
-	}
-	m.resetMarquee()
 }
 
 // UpdateJob replaces a single job by ID using the index map (O(1) lookup).
@@ -263,23 +261,8 @@ func (m *TaskListModel) RemoveJob(jobID string) {
 // turns the relocation into an O(1) map lookup.
 func (m *TaskListModel) UpdateJob(job *database.Job) bool {
 	if idx, ok := m.jobIndex[job.ID]; ok && idx < len(m.jobs) {
-		// Remember which job was selected so we can follow it after re-sort.
-		var prevSelectedID string
-		if sel := m.SelectedJob(); sel != nil {
-			prevSelectedID = sel.ID
-		}
-
 		m.jobs[idx] = job
 		m.rebuildVirtualList()
-
-		// Follow the previously selected job to its new position via the
-		// virtualIndex map populated by rebuildVirtualList.
-		if prevSelectedID != "" {
-			if newIdx, ok := m.virtualIndex[prevSelectedID]; ok {
-				m.list.Select(newIdx)
-			}
-		}
-		m.resetMarquee()
 		return true
 	}
 	return false
@@ -504,6 +487,8 @@ func isJobArchived(j *database.Job, ageDays int, now time.Time) bool {
 }
 
 func (m *TaskListModel) rebuildVirtualList() {
+	prevSelectedID := m.captureSelection()
+
 	now := time.Now()
 	ageDays := m.hideFinishedAgeDays
 
@@ -586,6 +571,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 	}
 
 	m.list.SetItems(items)
+	m.restoreSelection(prevSelectedID)
 }
 
 func (m *TaskListModel) passesFilter(j *database.Job) bool {

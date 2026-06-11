@@ -27,12 +27,10 @@ func (s *runState) wireRoutes() func() {
 		s.notifyMgr,
 	)
 	routes.FormatRoutes(s.r, &routes.FormatRoutesDeps{
-		DB:  s.db,
-		Cfg: s.cfg,
-		YT:  &ytFormatAdapter{svc: s.ytService, store: s.configStore},
+		DB: s.db,
+		YT: &ytFormatAdapter{svc: s.ytService, store: s.configStore},
 	})
 	routes.StatusRoute(s.r, &routes.StatusRouteDeps{
-		Cfg:                s.cfg,
 		Version:            version,
 		StartTime:          s.startTime,
 		GetActivePlatforms: s.getActivePlatforms,
@@ -88,13 +86,12 @@ func (s *runState) wireRoutes() func() {
 	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors)
 	routes.FileRoutes(s.r, &routes.FileRoutesDeps{
 		DB:     s.db,
-		Cfg:    s.cfg,
+		Store:  s.configStore,
 		Logger: s.log,
 	})
 	routes.TrimRoutes(s.r, s.db, s.trimSvc)
 	routes.StatsRoutes(s.r, &routes.StatsRouteDeps{
 		DB:     s.db,
-		Cfg:    s.cfg,
 		Worker: s.dlWorker,
 	})
 	routes.PotRoutes(s.r, &routes.PotRoutesDeps{

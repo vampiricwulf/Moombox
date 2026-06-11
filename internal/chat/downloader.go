@@ -622,10 +622,10 @@ func (cd *ChatDownloader) getOutputPaths() (outputFile, resumeFile string) {
 
 // writeChatFile writes chat data to the output file.
 // Two paths:
-// - Not flushed: all messages are in memory, write complete JSON atomically.
-// - Flushed: the on-disk file already has old messages. Use incremental append:
-//   read only the last bytes to locate ']', truncate there, then append new
-//   messages + closing structure. Memory cost: O(new messages) not O(file size).
+//   - Not flushed: all messages are in memory, write complete JSON atomically.
+//   - Flushed: the on-disk file already has old messages. Use incremental append:
+//     read only the last bytes to locate ']', truncate there, then append new
+//     messages + closing structure. Memory cost: O(new messages) not O(file size).
 //
 // On success, clears the in-memory buffer and marks flushedToDisk = true.
 func (cd *ChatDownloader) writeChatFile() {

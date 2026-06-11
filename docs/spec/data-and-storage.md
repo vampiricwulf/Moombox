@@ -8,7 +8,7 @@ This document specifies every data persistence layer in Moombox: the SQLite data
 
 These are hard rules. An AI assisting with Moombox development must follow them without exception:
 
-- **SQLite with WAL mode, 1 connection, 5s busy timeout, foreign keys on.** The DSN is `file:<path>?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on`. Connection pool is `SetMaxOpenConns(1)` and `SetMaxIdleConns(1)`. SQLite is single-writer; do not change the pool size.
+- **SQLite with WAL mode, 1 connection, 5s busy timeout, foreign keys on.** The DSN is `file:<path>?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)` — modernc.org/sqlite only honors `_pragma=...` parameters (the mattn-style `_journal_mode=...` form is silently ignored). Connection pool is `SetMaxOpenConns(1)` and `SetMaxIdleConns(1)`. SQLite is single-writer; do not change the pool size.
 - **Database partial updates use `UpdateJobFields()` with dynamic SET clauses.** The method accepts `map[string]any`, maps keys through `fieldToColumn` (40 entries), dynamically builds a `SET` clause, and auto-appends `updated_at` with the current UTC RFC3339 timestamp. After writing, it re-reads the full job row to notify subscribers with a complete `*Job` object. Returns the updated `*Job`.
 - **`fieldToColumn` defines the allowed keys for `UpdateJobFields`.** Any key not present in this map is silently ignored. The map currently has 40 entries mapping Go field names to SQLite column names (identity mapping in all cases). Adding a new column to the jobs table requires adding a corresponding entry here.
 - **`JobStatus` is `type JobStatus string`.** Status values are string constants, not integers or enums. Timestamps are ISO 8601 / RFC3339 strings. Optional numeric fields (sequence counters, dimensions, file sizes) use pointers (`*int`, `*int64`, `*float64`).
@@ -33,9 +33,11 @@ The database is opened via `sql.Open("sqlite", dsn)` using the `modernc.org/sqli
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
-| `_journal_mode` | `WAL` | Write-ahead logging for concurrent reads during writes |
-| `_busy_timeout` | `5000` | Wait up to 5 seconds for a locked database before returning SQLITE_BUSY |
-| `_foreign_keys` | `on` | Enforce foreign key constraints (gaps, trims, segments reference jobs) |
+| `_pragma=journal_mode(WAL)` | WAL | Write-ahead logging for concurrent reads during writes |
+| `_pragma=busy_timeout(5000)` | 5000ms | Wait up to 5 seconds for a locked database before returning SQLITE_BUSY |
+| `_pragma=foreign_keys(1)` | on | Enforce foreign key constraints (gaps, trims, segments reference jobs — `ON DELETE CASCADE` fires on `DeleteJob`) |
+
+modernc.org/sqlite recognizes only the `_pragma=name(value)` parameter form; mattn-style keys (`_journal_mode`, `_busy_timeout`, `_foreign_keys`) are silently dropped by the driver.
 
 **Connection pool:**
 
@@ -341,6 +343,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 | v11 | Replaced custom `schema_version` table with SQLite's built-in `PRAGMA user_version`. Existing DBs auto-migrate: legacy value carried forward, then the table is dropped |
 | v12 | Added `idx_history_added_at` index to the `history` table; speeds up the `pruneHistory` ORDER BY ... LIMIT subquery that previously did a full scan on every `AddToHistory` |
 | v13 | Added `auto_retry_count INTEGER NOT NULL DEFAULT 0` column to `jobs`. Tracks monitor-driven Twitch flap auto-recovery attempts (capped at `worker.MaxTwitchAutoRetries`). User-driven `ReinitializeJob`/`ResumeJob` reset to 0; auto-recovery's `AutoReinitializeJob` increments |
+| v14 | Normalized NULLs in the v2/v3-added columns (`chat_file`, `thumbnail_file`, `description_file`) to `''` — pre-backfill legacy rows failed every scan and vanished from the UI. Swept orphaned `gaps`/`trims`/`segments` rows accumulated while foreign-key enforcement was silently off (the pre-fix DSN used parameters modernc ignores); job IDs are video IDs, so re-adding a deleted video would have resurrected the old job's child rows |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 
@@ -877,11 +880,9 @@ A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent 
 
 ### Per-Job Log Buffers
 
-Separate from the database's `jobLogs`, the Logger also maintains per-job buffers:
+The LIVE per-job log pipeline is the database's: `Logger.Subscribe()` feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.PruneJobLogs(activeIDs)` drops buffers for inactive jobs).
 
-- `LogForJob(jobID, level, msg, args...)`: logs normally AND appends to the job-specific buffer.
-- Per-job buffers are capped at 200 lines. When exceeded, trimmed to the last 100 entries.
-- `PruneJobLogs(activeIDs)` removes buffers for jobs no longer active.
+The Logger type also carries a parallel `LogForJob`/`GetJobLogs`/`PruneJobLogs` API — it is **deprecated and unwired**: nothing in production calls `LogForJob`, so those buffers stay permanently empty at runtime. New consumers must use the database pipeline.
 
 ### Pub/Sub
 

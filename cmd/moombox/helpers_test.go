@@ -211,6 +211,35 @@ func idsOf(jobs []*database.Job) []string {
 	return ids
 }
 
+// TestJobArchivedAt covers the single-job predicate shared by the list
+// filter and the WS broadcast gate — an earlier int-truncated copy of this
+// logic suppressed job_update broadcasts for jobs the list still showed.
+func TestJobArchivedAt(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+	fresh := now.Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	cutoff := now.Add(-24 * time.Hour) // 1-day threshold
+
+	cases := []struct {
+		name string
+		job  database.Job
+		want bool
+	}{
+		{"finished and older than cutoff", database.Job{Status: database.StatusFinished, UpdatedAt: old}, true},
+		{"finished but fresh", database.Job{Status: database.StatusFinished, UpdatedAt: fresh}, false},
+		{"old but not finished", database.Job{Status: database.StatusDownloading, UpdatedAt: old}, false},
+		{"finished, no timestamp", database.Job{Status: database.StatusFinished}, false},
+		{"finished, unparseable timestamp", database.Job{Status: database.StatusFinished, UpdatedAt: "yesterday"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := jobArchivedAt(&tc.job, cutoff); got != tc.want {
+				t.Errorf("jobArchivedAt = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestExtractWSIPHostOnly covers the happy path — a host:port
 // RemoteAddr returns just the host.
 func TestExtractWSIPHostOnly(t *testing.T) {

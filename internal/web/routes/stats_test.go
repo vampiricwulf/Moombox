@@ -33,9 +33,8 @@ func newStatsFixture(t *testing.T) (chi.Router, *database.Database) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	cfg := config.Defaults()
 	r := chi.NewRouter()
-	StatsRoutes(r, &StatsRouteDeps{DB: db, Cfg: cfg})
+	StatsRoutes(r, &StatsRouteDeps{DB: db})
 	return r, db
 }
 
@@ -230,4 +229,3 @@ func TestComputeWarnLevelZeroThresholdsDisabled(t *testing.T) {
 		t.Errorf("CriticalPercent=95 at 95%%: want critical, got %q", got)
 	}
 }
-
