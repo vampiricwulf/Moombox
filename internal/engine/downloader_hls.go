@@ -30,6 +30,11 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// stream actually ended, or advance past the segment if not.
 	stuckSeq := int64(-1)
 	stuckSeqRetries := 0
+	// consecutiveStuckSkips bounds termination when EVERY segment fails
+	// (expired auth, dead variant): each skip costs ~12s of retries, and an
+	// ended stream with a long listed backlog would otherwise grind through
+	// it skip by skip before EXT-X-ENDLIST/stale handling could fire.
+	consecutiveStuckSkips := 0
 
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
@@ -104,6 +109,27 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					"snippet", snippet, "attempt", consecutiveErrors)
 			}
 			if consecutiveErrors > 5 {
+				// Mirror the fetch-error escalation above: garbage playlists
+				// during an outage (router/captive-portal error pages served
+				// with 200) must wait for connectivity, and a live stream
+				// whose CDN serves transient garbage should re-resolve the
+				// variant rather than hard-fail the recording.
+				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.logger.Warn("playlist parse failures while device offline, waiting for connectivity")
+					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+						return err
+					}
+					consecutiveErrors = 0
+					continue
+				}
+				if d.opts.CheckStreamStatus != nil {
+					ended, checkErr := d.opts.CheckStreamStatus(ctx)
+					if checkErr != nil {
+						d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
+					} else if !ended {
+						return ErrQualityLost
+					}
+				}
 				return fmt.Errorf("failed to parse HLS playlist after %d consecutive errors", consecutiveErrors)
 			}
 			utils.Sleep(ctx, 5*time.Second)
@@ -153,8 +179,15 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			}
 		}
 
-		// VOD: parallel download only the filtered segments (not already downloaded)
-		if pl.EndList && len(newSegments) > 0 {
+		// VOD: parallel download only the filtered segments (not already downloaded).
+		// StopOnGap recordings take the sequential path below even for the
+		// final ENDLIST playlist: the VOD-parallel downloader skips
+		// permanently-failed segments and keeps writing, which would bury a
+		// discontinuity inside the final part — the sequential path's
+		// stuck-segment escalation preserves the gapless-part contract. The
+		// tail is at most one playlist window, so the lost parallelism is
+		// seconds.
+		if pl.EndList && len(newSegments) > 0 && !d.opts.StopOnGap {
 			filteredPl := &HlsPlaylist{
 				Segments:       newSegments,
 				MediaSequence:  curSeq,
@@ -204,40 +237,30 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				d.logger.Debug("[Downloader] HLS segment failed, will retry after playlist refresh",
 					"seq", curSeqNow, "error", segErr, "stuckRetries", stuckSeqRetries)
 				if stuckSeqRetries >= MaxSegmentRetries {
-					// Escalate: is the stream actually still live? If so,
-					// advance past this segment (treat as gap) so we don't
-					// hang forever. Mirrors DASH's stuckOnSegment path.
-					ended := false
-					if d.opts.CheckStreamStatus != nil {
-						var checkErr error
-						ended, checkErr = d.opts.CheckStreamStatus(ctx)
-						if checkErr != nil {
-							d.logger.Warn("[Downloader] HLS stream status check failed while stuck",
-								"err", checkErr)
-						}
-					}
-					if ended {
-						d.streamEnded.Store(true)
-						return nil
-					}
 					if d.opts.StopOnGap && d.bytesWritten.Load() > 0 {
 						// Same contract as the playlist-window gap above: the
 						// skipped segment would leave a discontinuity inside
-						// the file, so end this part instead. The gap is
-						// recorded and currentSeq advanced PAST the stuck
-						// segment before returning — the caller seeds the
-						// next part from CurrentSeq(), and without the
-						// advance it would re-fetch from the playlist window
-						// start, duplicating the closed part's tail and
-						// hitting the same stuck segment in a split loop.
+						// the file, so end this part instead. currentSeq is
+						// deliberately NOT advanced and OnGap NOT fired: the
+						// resume sidecar must stay honest (LastSeq = last
+						// byte actually in the file — advancing here let a
+						// crash-resume append past a hole), and the SUCCESSOR
+						// downloader — seeded at this position with an empty
+						// file — retries the stuck segment once more and, if
+						// it still fails, skips it via the empty-file rule,
+						// recording the gap exactly once.
 						d.logger.Warn("[Downloader] HLS segment permanently failing, stopping for part split",
 							"seq", curSeqNow, "retries", stuckSeqRetries)
-						if d.OnGap != nil {
-							d.OnGap(DownloadGap{From: int(curSeqNow), To: int(curSeqNow)})
-						}
-						d.currentSeq.Add(1)
 						return ErrGapDetected
 					}
+					// Skip past the stuck segment unconditionally — the
+					// previous ended-check-first ordering abandoned the
+					// still-listed tail when the stream happened to end
+					// during the retries (the final window's segments stay
+					// fetchable after the broadcast is over). With the skip,
+					// an ended stream terminates a few iterations later via
+					// EXT-X-ENDLIST or the stale-playlist escalation, both of
+					// which fetch the remaining tail first.
 					d.logger.Warn("[Downloader] HLS segment stuck, advancing past it as gap",
 						"seq", curSeqNow, "retries", stuckSeqRetries)
 					if d.OnGap != nil {
@@ -246,6 +269,21 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					d.currentSeq.Add(1)
 					stuckSeq = -1
 					stuckSeqRetries = 0
+					consecutiveStuckSkips++
+					// Several skips in a row without a single success means
+					// nothing is fetchable — consult the stream status once
+					// and exit cleanly if the broadcast is over, rather than
+					// grinding through the remaining backlog. A localized
+					// CDN hole resets the counter on the next good segment,
+					// so a fetchable tail is still captured first.
+					if consecutiveStuckSkips >= 3 && d.opts.CheckStreamStatus != nil {
+						if ended, checkErr := d.opts.CheckStreamStatus(ctx); checkErr == nil && ended {
+							d.logger.Warn("[Downloader] Stream ended and segments are unfetchable; stopping",
+								"consecutiveSkips", consecutiveStuckSkips)
+							d.streamEnded.Store(true)
+							return nil
+						}
+					}
 				}
 				utils.Sleep(ctx, 2*time.Second)
 				segFailed = true
@@ -254,6 +292,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			// Success — reset stuck tracking.
 			stuckSeq = -1
 			stuckSeqRetries = 0
+			consecutiveStuckSkips = 0
 			hlsSeq := int(d.currentSeq.Load())
 			n, writeErr := d.outputFile.Write(segData)
 			if writeErr != nil {
@@ -264,8 +303,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			d.lastSegTime.StoreNow()
 
 			if d.OnProgress != nil {
+				// Seq reports the just-WRITTEN sequence — the same convention
+				// as the DASH downloaders — so the persisted last_video_seq
+				// means one thing regardless of strategy. (It used to report
+				// post-increment here, which made restart seeding guess the
+				// writer's convention and skip a segment when it guessed
+				// wrong across an HLS<->DASH strategy flip.)
 				d.OnProgress(DownloadProgress{
-					Seq:   int(d.currentSeq.Load()),
+					Seq:   hlsSeq,
 					Bytes: d.bytesWritten.Load(),
 				})
 			}

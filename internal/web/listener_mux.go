@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,18 +149,54 @@ func newSchemeMux(real net.Listener, logger interface {
 // targetScheme. 307 (temporary, method-preserving), NOT 301/308: browsers
 // cache permanent redirects, and a user who later toggles https_enabled
 // would be trapped in a cached cross-scheme redirect loop.
-func schemeRedirectHandler(targetScheme string) http.Handler {
+//
+// listenPort is the port this service is actually bound to ("" to trust
+// r.Host verbatim). It matters because the SAME socket serves both schemes:
+// when the request arrived on the source scheme's default port, browsers
+// omit the port from the Host header, and a bare cross-scheme redirect would
+// send them to the TARGET scheme's default port — where nothing listens. A
+// port-80 deployment redirecting http→https must say "https://host:80/",
+// not "https://host/" (= port 443).
+func schemeRedirectHandler(targetScheme, listenPort string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host == "" {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
-		// The port is shared between both schemes, so r.Host (which carries
-		// the non-default port) round-trips as-is. r.URL.RequestURI() (not
-		// r.RequestURI) keeps this origin-form even for proxy-style
-		// absolute-form request lines, which would otherwise double the host.
-		http.Redirect(w, r, targetScheme+"://"+r.Host+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+		host := r.Host
+		if listenPort != "" {
+			if _, _, err := net.SplitHostPort(host); err != nil {
+				// Host carries no port — re-pin ours unless it IS the target
+				// scheme's default. Strip IPv6 brackets before JoinHostPort
+				// re-adds them.
+				targetDefault := "80"
+				if targetScheme == "https" {
+					targetDefault = "443"
+				}
+				if listenPort != targetDefault {
+					bare := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+					host = net.JoinHostPort(bare, listenPort)
+				}
+			}
+		}
+		// r.URL.RequestURI() (not r.RequestURI) keeps origin-form even for
+		// proxy-style absolute-form request lines, which would otherwise
+		// double the host.
+		http.Redirect(w, r, targetScheme+"://"+host+r.URL.RequestURI(), http.StatusTemporaryRedirect)
 	})
+}
+
+// listenerPort extracts the numeric port from a listener's address, or ""
+// when it can't be determined (the redirect handler then trusts r.Host).
+func listenerPort(ln net.Listener) string {
+	if ln == nil || ln.Addr() == nil {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		return ""
+	}
+	return port
 }
 
 // loadRedirectTLSConfig LOADS (never generates) the configured certificate
@@ -191,7 +228,7 @@ func (s *Server) serveSchemeRedirect(ln net.Listener, targetScheme string) {
 		}
 	}()
 	srv := &http.Server{
-		Handler:           schemeRedirectHandler(targetScheme),
+		Handler:           schemeRedirectHandler(targetScheme, listenerPort(ln)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),

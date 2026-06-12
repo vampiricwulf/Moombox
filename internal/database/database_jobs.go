@@ -543,9 +543,12 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 			gapRows.Close()
 		}
 
-		// Segments
+		// Segments — keep this column list in lockstep with getSegments:
+		// the orphan scanner protects part chat files through THIS loader
+		// (GetAllJobs), so a column missed here reads as "no chat file" and
+		// the file becomes deletable as an orphan.
 		segRows, err := db.db.QueryContext(db.getCtx(),
-			`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds
+			`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file
 			FROM segments WHERE job_id IN (`+placeholders+`) ORDER BY segment_index`, args...)
 		if err != nil {
 			if db.logger != nil {
@@ -556,7 +559,7 @@ func (db *Database) attachTrimsAndGaps(jobs []*Job) {
 				var s Segment
 				if err := segRows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
 					&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
-					&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds); err == nil {
+					&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds, &s.ChatFile); err == nil {
 					segMap[s.JobID] = append(segMap[s.JobID], s)
 				}
 			}

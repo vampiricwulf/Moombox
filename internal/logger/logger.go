@@ -176,9 +176,51 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 		},
 	}
 	l.slog = slog.New(slog.NewTextHandler(multi, opts))
+	// Route the process-global slog default through the FULL pipeline (level
+	// gate, file, ring buffer, subscribers, TUI-safe stderr gating) via the
+	// bridge — not through l.slog directly, which would feed the file but
+	// skip the ring buffer and subscribers, leaving stray warnings (e.g.
+	// config.Save's DACL warning) invisible in the TUI log panel and the web
+	// log endpoints. Std `log` output (http.Server error noise) is rebridged
+	// by SetDefault at Info level and lands in the same places.
+	slog.SetDefault(slog.New(defaultSlogBridge{l: l}))
 
 	return l, nil
 }
+
+// defaultSlogBridge adapts Logger.log — the full pipeline — to slog.Handler
+// for the process-global default. Group qualifiers are flattened (stray
+// diagnostics don't use them); attrs from WithAttrs are prepended to each
+// record's args.
+type defaultSlogBridge struct {
+	l     *Logger
+	attrs []slog.Attr
+}
+
+func (b defaultSlogBridge) Enabled(_ context.Context, level slog.Level) bool {
+	return b.l.slog.Enabled(context.Background(), level)
+}
+
+func (b defaultSlogBridge) Handle(_ context.Context, r slog.Record) error {
+	args := make([]any, 0, (len(b.attrs)+r.NumAttrs())*2)
+	for _, a := range b.attrs {
+		args = append(args, a.Key, a.Value.Any())
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		args = append(args, a.Key, a.Value.Any())
+		return true
+	})
+	b.l.log(r.Level, r.Message, args...)
+	return nil
+}
+
+func (b defaultSlogBridge) WithAttrs(attrs []slog.Attr) slog.Handler {
+	nb := b
+	nb.attrs = append(append([]slog.Attr{}, b.attrs...), attrs...)
+	return nb
+}
+
+func (b defaultSlogBridge) WithGroup(string) slog.Handler { return b }
 
 // Write implements io.Writer for the log file with rotation.
 func (l *Logger) Write(p []byte) (n int, err error) {

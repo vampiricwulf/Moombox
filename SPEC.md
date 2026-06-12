@@ -613,7 +613,7 @@ Both the web UI and TUI implement the same user-facing features:
 
 ### Database
 
-SQLite in WAL mode, single connection (`SetMaxOpenConns(1)`), 5-second busy timeout, foreign keys enabled. DSN: `file:{path}?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on`.
+SQLite in WAL mode, single connection (`SetMaxOpenConns(1)`), 5-second busy timeout, foreign keys enabled. DSN: `file:{path}?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)` — modernc/sqlite ONLY honors `_pragma=name(value)` parameters; the mattn-style `_journal_mode=`/`_busy_timeout=`/`_foreign_keys=` forms are silently ignored (that exact mistake once disabled WAL and FK enforcement; the v14 migration cleans up its fallout).
 
 **Schema version:** v15 (v5 added `segments` table, v6 added `client_tokens` table, v15 added per-part `segments.chat_file`; see `docs/spec/data-and-storage.md` for the full migration table). Migrations run automatically on startup via `db.migrate()`.
 
@@ -825,7 +825,7 @@ Run `bash references/update-all.sh` to pull all upstream repos and see new commi
 
 ### Notifications
 
-Discord webhooks with async dispatch. The `NotificationManager` validates webhook URLs, formats Discord embeds with color-coded types (Info=blue, Success=green, Warning=yellow, Error=red, Download=teal, Muxing=purple, Cancelled=orange), and dispatches asynchronously via `sync.WaitGroup`. Supports event-based filtering per webhook target. Events include: found, download_start, download_complete, error, cancelled, muxing, trim, added, disk_warning, update_available, cookie_warning, and more.
+Discord webhooks with async dispatch. The `NotificationManager` validates webhook URLs, formats Discord embeds with color-coded types (Info=blue, Success=green, Warning=yellow, Error=red, Download=teal, Muxing=purple, Cancelled=orange), and dispatches asynchronously via `sync.WaitGroup`. Supports event-based filtering per webhook target — see the event list below and the table in `docs/spec/operations.md`.
 
 **Deep-dive:** [docs/spec/operations.md](docs/spec/operations.md)
 
@@ -835,7 +835,7 @@ Discord webhooks with async dispatch. The `NotificationManager` validates webhoo
 
 The notification system supports Discord webhooks with event-based filtering. Each `[[notifications]]` config entry has a webhook URL and an optional event filter list. If no filter is specified, all events are sent.
 
-**Notification events:** `found` (stream detected by monitor), `added` (manually added), `download_start`, `download_complete`, `error`, `cancelled`, `muxing`, `trim_complete`, `trim_error`, `disk_warning`, `update_available`, `cookie_warning`, `auth_lost`, `auth_recovered`.
+**Notification events:** `found`, `added`, `scheduled`, `rescheduled`, `downloading`, `quality_split`, `gap_split`, `muxing`, `finished`, `error`, `cancelled`, `auth`, `connectivity_pause`, `connectivity_resume`, `connectivity_split`, `trim_created`, `trim_deleted`, `trim_error`, `disk_warning`, `update_available` — see `docs/spec/operations.md` for the per-event table; new events must be registered in both UI filter registries.
 
 **Discord embed format:** Title, description, colored sidebar (type-specific), fields (inline key-value pairs), optional URL link, optional thumbnail image. The embed color encodes the notification type: blue=info, green=success, yellow=warning, red=error, teal=download, purple=muxing, orange=cancelled.
 

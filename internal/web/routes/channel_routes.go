@@ -46,22 +46,27 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func()) {
 			}
 		}
 
-		// Upsert
+		// Upsert — copy-on-write: mutate a CLONE and assign the whole slice.
+		// Store.Snapshot() readers (GET /api/config marshals after releasing
+		// the lock) share the previous backing array, so writing an element
+		// in place would race their reads; whole-slice replacement is the
+		// documented Store contract. The old header doubles as the rollback
+		// snapshot since its array is never touched.
 		mu.Lock()
-		// Audit Q-12: use slices.Clone for the rollback snapshot so the
-		// pattern stays correct if ChannelConfig grows pointer fields.
-		oldChannels := slices.Clone(cfg.Channels)
+		oldChannels := cfg.Channels
+		newChannels := slices.Clone(cfg.Channels)
 		found := false
-		for i, ch := range cfg.Channels {
+		for i, ch := range newChannels {
 			if ch.ID == channel.ID {
-				cfg.Channels[i] = channel
+				newChannels[i] = channel
 				found = true
 				break
 			}
 		}
 		if !found {
-			cfg.Channels = append(cfg.Channels, channel)
+			newChannels = append(newChannels, channel)
 		}
+		cfg.Channels = newChannels
 
 		// Persist to disk; restore on save failure so in-memory and disk stay in sync.
 		if err := store.SaveLocked(); err != nil {
@@ -83,22 +88,26 @@ func ChannelRoutes(r chi.Router, store *config.Store, onChannelChange func()) {
 	r.Delete("/api/config/channels/{id}", func(rw http.ResponseWriter, req *http.Request) {
 		channelID := chi.URLParam(req, "id")
 
+		// Copy-on-write for the same reason as the upsert above: the old
+		// append-shift compacted elements inside the shared backing array,
+		// racing lock-free Snapshot readers.
 		mu.Lock()
-		oldChannels := slices.Clone(cfg.Channels)
-		found := false
+		oldChannels := cfg.Channels
+		idx := -1
 		for i, ch := range cfg.Channels {
 			if ch.ID == channelID {
-				cfg.Channels = append(cfg.Channels[:i], cfg.Channels[i+1:]...)
-				found = true
+				idx = i
 				break
 			}
 		}
-
-		if !found {
+		if idx < 0 {
 			mu.Unlock()
 			jsonError(rw, "channel not found", http.StatusNotFound)
 			return
 		}
+		newChannels := slices.Clone(cfg.Channels)
+		newChannels = slices.Delete(newChannels, idx, idx+1)
+		cfg.Channels = newChannels
 
 		// Persist to disk; restore on save failure so in-memory and disk stay in sync.
 		if err := store.SaveLocked(); err != nil {

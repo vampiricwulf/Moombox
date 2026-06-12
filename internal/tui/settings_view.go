@@ -491,7 +491,7 @@ func (m *SettingsModel) renderChannelEdit(w int) string {
 
 func (m *SettingsModel) renderNotifications(w, maxH int) string {
 	if m.notifMode == "edit" {
-		return m.renderNotifEdit(w)
+		return m.renderNotifEdit(w, maxH)
 	}
 
 	var lines []string
@@ -540,8 +540,9 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *SettingsModel) renderNotifEdit(w int) string {
+func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 	var lines []string
+	focusLine := 1 // URL row by default; updated when an event row has focus
 
 	title := "Edit Notification"
 	if m.notifIndex >= len(m.notifications) {
@@ -586,6 +587,9 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 		lines = append(lines, DimStyle.Render("  "+group.name))
 		for _, event := range group.events {
 			isFocused := m.notifEditFocus == flatIdx+1
+			if isFocused {
+				focusLine = len(lines)
+			}
 			isChecked := m.notifEditEvents[event]
 
 			prefix := "  "
@@ -615,6 +619,23 @@ func (m *SettingsModel) renderNotifEdit(w int) string {
 				eventStyle.Render(" "+event))
 			flatIdx++
 		}
+	}
+
+	// Scroll window that follows keyboard focus: the event list outgrew
+	// short terminals when the Connectivity group landed, and the renderer's
+	// bottom-truncation would otherwise let focus walk onto invisible rows.
+	// The title row stays pinned.
+	budget := maxH + 1 // renderNotifications' maxH counts list rows; +1 matches its action-bar line
+	if budget > 1 && len(lines) > budget {
+		body := lines[1:]
+		visible := max(budget-1, 3)
+		start := 0
+		if f := focusLine - 1; f >= visible {
+			start = f - visible + 1
+		}
+		start = min(start, max(len(body)-visible, 0))
+		out := append([]string{lines[0]}, body[start:min(start+visible, len(body))]...)
+		return strings.Join(out, "\n")
 	}
 
 	return strings.Join(lines, "\n")

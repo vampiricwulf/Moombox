@@ -393,6 +393,23 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 		}
 	}
 
+	// StopOnGap no-truncate guard: staged data with no usable resume state
+	// (corrupt/stale/identity-rejected sidecar — e.g. power loss corrupted
+	// the write, or the state aged past maxResumeStateAge during a long
+	// outage on a continuing broadcast). Truncating would destroy a
+	// recording that finalize-time recovery can still mux as a part — hand
+	// the decision to the caller instead: the gap-split path closes this
+	// file as a finished part and continues in a fresh one. Deliberate
+	// discards (the quality-split short-segment rule) remove the staged
+	// media before constructing the downloader, so they don't trip this.
+	if !resuming && d.opts.StopOnGap {
+		if info, statErr := os.Stat(d.opts.OutputFile); statErr == nil && info.Size() > 0 {
+			d.logger.Warn("[Downloader] Staged data present but resume state unusable — splitting instead of truncating",
+				"file", d.opts.OutputFile, "size", info.Size())
+			return ErrGapDetected
+		}
+	}
+
 	// Open output file
 	flags := os.O_CREATE | os.O_WRONLY
 	if resuming {
@@ -404,6 +421,16 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 					"from", info.Size(), "to", state.BytesWritten)
 			}
 			if truncErr := os.Truncate(d.opts.OutputFile, state.BytesWritten); truncErr != nil {
+				if d.opts.StopOnGap {
+					// Same contract as the no-truncate guard above: a failed
+					// truncate must not fall back to O_TRUNC and destroy the
+					// staged recording (transient sharing violations from AV
+					// scans hit exactly this window on Windows). Split
+					// instead — the caller muxes the file as a finished part.
+					d.logger.Warn("[Downloader] Truncate-for-resume failed — splitting instead of starting fresh",
+						"file", d.opts.OutputFile, "err", truncErr)
+					return ErrGapDetected
+				}
 				d.logger.Warn("[Downloader] Failed to truncate for resume, starting fresh", "err", truncErr)
 				resuming = false
 				flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC

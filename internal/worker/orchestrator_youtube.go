@@ -19,9 +19,21 @@ import (
 // runLiveStreamDownload runs downloaders with stream-end verification loop (A2, B4).
 // Supports quality monitoring: when the available quality changes mid-stream,
 // the current download segment is muxed and a new download starts at the new quality.
+//
+// curStart is the JobContext whose StagingDir is the CURRENT part's staging
+// (jobCtx itself for a fresh job; a seg_N copy when ExecuteWithChat's restart
+// discovery resumed a previously-split job), and startSegmentIndex is that
+// part's index — the pair keeps a restarted job from appending into a part
+// finalize already recorded. startPartResumed marks staged data pre-dating
+// this session: such a part must never be classified "short" by the
+// session-local timer (a quality flap right after a restart would otherwise
+// skip muxing hours of footage and append mixed-codec data into it).
 func (o *DownloadOrchestrator) runLiveStreamDownload(
 	ctx context.Context,
 	jobCtx *JobContext,
+	curStart *JobContext,
+	startSegmentIndex int,
+	startPartResumed bool,
 	videoInfo *youtube.VideoInfo,
 	result *DownloadResult,
 	tracker *ProgressTracker,
@@ -31,7 +43,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 	var consecutiveLiveChecks atomic.Int32
 
 	// Quality monitoring state
-	segmentIndex := 0
+	segmentIndex := startSegmentIndex
+	partResumed := startPartResumed
 	segmentStartTime := time.Now().Unix()
 	currentQuality := o.extractQualityFromResult(result)
 	qualityChangeCh := make(chan QualityInfo, 1)
@@ -102,12 +115,13 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 	attachProgress(result)
 
-	// curCtx tracks the JobContext whose StagingDir is the CURRENT segment's
-	// directory. Before any quality split it is jobCtx itself (root staging);
-	// after a split it points at the seg_N copy. Every refresh-created
-	// downloader must use curCtx — using the root jobCtx after a split would
-	// append fresh data into segment 0's already-muxed staging files.
-	curCtx := jobCtx
+	// curCtx tracks the JobContext whose StagingDir is the CURRENT part's
+	// directory. For a fresh job it is jobCtx itself (root staging); after a
+	// quality split — or when restart discovery resumed into a later part —
+	// it points at the seg_N copy. Every refresh-created downloader must use
+	// curCtx — using the root jobCtx after a split would append fresh data
+	// into part 1's already-muxed staging files.
+	curCtx := curStart
 
 	for {
 		if ctx.Err() != nil {
@@ -151,7 +165,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 		if qualityChanged || isQualityLost {
 			segmentEndTime := time.Now().Unix()
-			shortSegment := time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
+			// A resumed part is never "short" — the timer only measures this
+			// session's slice of it.
+			shortSegment := !partResumed && time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
 
 			// Re-fetch manifest FIRST to determine if quality actually changed.
 			// This must happen before muxing so we can skip the split for same-quality.
@@ -223,7 +239,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				"from", currentQuality.Label, "to", newQuality.Label,
 				"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
-			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex)
+			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex, !shortSegment)
 
 			// Mux the old segment in the background (unless too short).
 			// No preMux: YouTube chat stays a single whole-job file.
@@ -242,6 +258,24 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			segStagingDir := filepath.Join(jobCtx.StagingDir, fmt.Sprintf("seg_%d", segmentIndex))
 			if err := os.MkdirAll(segStagingDir, 0o755); err != nil {
 				return fmt.Errorf("create segment staging dir: %w", err)
+			}
+			if shortSegment && segStagingDir == curCtx.StagingDir {
+				// Short-span discard reusing the same index/dir: physically
+				// remove the span's media and resume sidecars, or the engine
+				// would resume-append the NEW quality onto the discarded
+				// old-quality data — a mixed-codec file under a stale init
+				// segment. Mirrors the Twitch discard in advanceToNewPart.
+				// video.ts is the YouTube HLS strategy's staging name;
+				// video_stream/audio_stream are the DASH family's.
+				for _, name := range []string{"video_stream", "audio_stream", "video.ts"} {
+					p := filepath.Join(segStagingDir, name)
+					if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+						o.logger.Warn("failed to remove discarded short-span media", "file", p, "err", err)
+					}
+					if err := os.Remove(p + ".resume.json"); err != nil && !os.IsNotExist(err) {
+						o.logger.Warn("failed to remove discarded short-span resume state", "file", p, "err", err)
+					}
+				}
 			}
 
 			segJobCtx := *jobCtx
@@ -269,6 +303,7 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			currentQuality = newQuality
 			result = refreshResult
 			segmentStartTime = time.Now().Unix()
+			partResumed = false // the next span is watched from birth
 
 			if monitor != nil {
 				select {

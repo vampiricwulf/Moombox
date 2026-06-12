@@ -400,10 +400,10 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 - Progress reported as percentage
 
 **Resume capability:**
-- `.resume.json` file stores: `lastSeq`, `bytesWritten`, `timestamp`, `baseUrl`
-- On resume: validates base URL matches, validates file size matches saved bytes
+- `.resume.json` file stores: `lastSeq`, `bytesWritten`, `timestamp`, `baseUrl`, `streamId`
+- On resume: validates IDENTITY via `resumeIdentityMismatch` (explicit StreamID first, then YouTube URL fingerprinting; opaque no-identity URLs are trusted — see data-and-storage.md), then file size vs saved bytes
 - DB-level fallback: if resume file is lost but database has `last_video_seq`/`last_audio_seq`, uses file size as byte position
-- File is truncated to known-good position before appending
+- File is truncated to known-good position before appending; Twitch live (`StopOnGap`) never truncates staged data on a bad sidecar — it gap-splits instead
 
 **Key constants:**
 | Constant | Value | Purpose |

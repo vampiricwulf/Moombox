@@ -356,18 +356,28 @@ These are the event strings used for filtering. A target with no event filter re
 | `added` | Job manually added (API or CLI) |
 | `scheduled` | Upcoming stream detected with scheduled start time |
 | `rescheduled` | Stream scheduled start time changed |
-| `live` | Stream goes live |
 | `downloading` | Download begins or resumes |
 | `muxing` | FFmpeg mux step begins |
 | `finished` | Job completed successfully |
 | `error` | Job failed |
 | `cancelled` | Job cancelled by user |
 | `auth` | Authentication issue (cookies expired, member-only content) |
+| `quality_split` | Stream quality changed mid-download; previous part closed |
+| `gap_split` | Twitch live segments expired unrecoverably; part closed, new part at live edge |
+| `connectivity_pause` | Twitch live download paused — connectivity lost, waiting to resume |
+| `connectivity_resume` | Connectivity restored; same job resumed |
+| `connectivity_split` | Broadcast/VOD lost during the outage; captured data finalized |
 | `trim_created` | Trim clip created |
 | `trim_deleted` | Trim clip deleted |
 | `trim_error` | Trim operation failed |
 | `disk_warning` | Disk usage exceeds warning threshold |
 | `update_available` | New version detected |
+
+New event strings MUST also be registered in the two filter registries —
+`notifEventGroups` (internal/tui/settings.go) and
+`NOTIFICATION_EVENT_GROUPS` (web/public/modules/settings.js) — filtered
+targets treat the registry as an allowlist, and the TUI's edit-save path
+strips unknown events from hand-edited configs.
 
 ### Dispatch Behavior
 

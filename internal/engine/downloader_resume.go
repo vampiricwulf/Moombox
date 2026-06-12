@@ -147,9 +147,25 @@ func (d *SegmentDownloader) saveResume() {
 		return
 	}
 	tmpFile := d.opts.ResumeFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
+	// Write + fsync + rename: without the fsync a power loss can journal the
+	// rename while the data pages never hit disk, leaving a zero-length or
+	// garbage sidecar (same rationale as utils.ResumeStore). The sidecar is
+	// the no-truncate promise for staged recordings — a corrupt one used to
+	// make the next Start() O_TRUNC hours of footage.
+	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
 		d.logger.Warn("[Downloader] Failed to write resume file", "file", tmpFile, "error", err)
-		// Clean up partial temp file on failure
+		return
+	}
+	_, werr := f.Write(data)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		d.logger.Warn("[Downloader] Failed to write resume file", "file", tmpFile, "error", werr)
 		os.Remove(tmpFile)
 		return
 	}

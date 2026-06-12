@@ -206,6 +206,35 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		existingChat.SetOutputFile(chatPath)
 	}
 
+	// Resume into the correct part after a restart (mirrors ExecuteTwitch's
+	// discovery): a live job restarted after a quality split must not append
+	// into staging whose part index is already muxed — finalize skips
+	// recorded indices, so everything captured after the restart would be
+	// silently dropped when staging is cleaned up. strategyCtx carries the
+	// part's staging dir into the downloaders; jobCtx (root) keeps flowing
+	// to chat and finalize.
+	strategyCtx := jobCtx
+	startSegmentIndex := 0
+	startPartResumed := false
+	if !isVod {
+		var resumeDir string
+		startSegmentIndex, resumeDir = o.discoverResumeSegment(jobCtx)
+		if resumeDir != jobCtx.StagingDir {
+			if mkErr := os.MkdirAll(resumeDir, 0o755); mkErr != nil {
+				return fmt.Errorf("create resume part staging dir: %w", mkErr)
+			}
+			segCtx := *jobCtx
+			segCtx.StagingDir = resumeDir
+			strategyCtx = &segCtx
+			o.logger.Info("resuming YouTube job in part staging",
+				"part", startSegmentIndex+1, "dir", resumeDir, "jobID", jobCtx.Job.ID)
+		}
+		// Staged data pre-dating this session: the short-segment rule must
+		// not treat the resumed part as a discardable <10s span (the
+		// session-local timer doesn't measure the part's true age).
+		startPartResumed = discoverStagingMedia(strategyCtx.StagingDir) != nil
+	}
+
 	// Select download strategy (A1: pass cipher/pot to strategies)
 	var result *DownloadResult
 	var err error
@@ -252,7 +281,47 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 	default:
 		return fmt.Errorf("no download strategy available")
 	}
-	result, err = strategy.Download(ctx, jobCtx, videoInfo, deps)
+
+	// Seed the continuation position from the DB sequences when restart
+	// discovery routed into a non-root part dir: a FRESH dir has no resume
+	// sidecar, and the strategies' DB fallback resets to segment 0 when the
+	// output file is missing — re-downloading the whole broadcast into the
+	// new part. last_video_seq/last_audio_seq hold the LAST-WRITTEN seq
+	// uniformly (the HLS downloader was normalized to the DASH convention),
+	// so +1 is the next segment regardless of which strategy persisted it
+	// or which one runs now. A valid sidecar (resuming into an unmuxed
+	// part) still takes priority in the engine.
+	if strategyCtx != jobCtx {
+		vSeed, aSeed := 0, 0
+		if jobCtx.Job.LastVideoSeq != nil && *jobCtx.Job.LastVideoSeq > 0 {
+			vSeed = *jobCtx.Job.LastVideoSeq + 1
+		}
+		if jobCtx.Job.LastAudioSeq != nil && *jobCtx.Job.LastAudioSeq > 0 {
+			aSeed = *jobCtx.Job.LastAudioSeq + 1
+		}
+		// YouTube live A/V share one segment timeline, so the two seeds are
+		// numerically close in any healthy row. A missing or wildly diverged
+		// audio seed means it's stale from a previous session SHAPE — an HLS
+		// interlude carries no separate audio downloader (and old builds
+		// zeroed the column outright) — and force-starting audio there would
+		// rewind hours of audio into this part. Align it to the video seed.
+		const avSeedTolerance = 50 // ~2-4 min of segments
+		if vSeed > 0 && (aSeed == 0 || aSeed < vSeed-avSeedTolerance || aSeed > vSeed+avSeedTolerance) {
+			aSeed = vSeed
+		}
+		strategyCtx.VideoStartSeq = vSeed
+		strategyCtx.AudioStartSeq = aSeed
+	}
+
+	result, err = strategy.Download(ctx, strategyCtx, videoInfo, deps)
+
+	// The restart seeds are single-use — the initial downloaders above
+	// consumed them. Later refreshDownload call sites manage these fields
+	// set-then-clear around each refresh; a stale forced seq surviving on
+	// strategyCtx (== curCtx in the live loop) would rewind a stall-refresh
+	// hours later to the restart position, duplicating media in the part.
+	strategyCtx.VideoStartSeq = 0
+	strategyCtx.AudioStartSeq = 0
 
 	if err != nil {
 		return fmt.Errorf("setup download: %w", err)
@@ -322,7 +391,7 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		}
 	} else {
 		// Live: run with stream-end verification (A2)
-		err = o.runLiveStreamDownload(ctx, jobCtx, videoInfo, result, tracker)
+		err = o.runLiveStreamDownload(ctx, jobCtx, strategyCtx, startSegmentIndex, startPartResumed, videoInfo, result, tracker)
 	}
 
 	if err != nil {

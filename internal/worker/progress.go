@@ -24,6 +24,8 @@ type ProgressTracker struct {
 	jobID          string
 	videoSeq       int
 	audioSeq       int
+	videoReported  bool // a video downloader DELIVERED a progress event
+	audioReported  bool // an audio downloader DELIVERED a progress event
 	videoTotal     int
 	audioTotal     int
 	chatCount      int
@@ -60,6 +62,11 @@ func NewProgressTracker(db *database.Database, jobID string, logger logger) *Pro
 func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 	dl.OnProgress = func(p engine.DownloadProgress) {
 		pt.mu.Lock()
+		// Reported on DELIVERY, not at attach: between attach and the first
+		// video event (a post-restart 403 hunt can hold this window open for
+		// minutes), a chat tick or audio event must not persist videoSeq=0
+		// over the prior session's continuation position.
+		pt.videoReported = true
 		pt.videoSeq = p.Seq
 		if p.HeadSeq > 0 {
 			pt.videoTotal = p.HeadSeq
@@ -109,6 +116,8 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 	dl.OnProgress = func(p engine.DownloadProgress) {
 		pt.mu.Lock()
+		// See AttachVideoDownloader — reported on delivery, not attach.
+		pt.audioReported = true
 		pt.audioSeq = p.Seq
 		if p.HeadSeq > 0 {
 			pt.audioTotal = p.HeadSeq
@@ -185,16 +194,25 @@ func (pt *ProgressTracker) maybeUpdate() {
 	// B8: Calculate ETA
 	eta := pt.calculateETA()
 
-	// Snapshot values for DB update
+	// Snapshot values for DB update. The seq columns are persisted only for
+	// stream kinds that have actually REPORTED this session: an audio-less
+	// session (HLS delivers muxed A+V) used to overwrite last_audio_seq
+	// with a constant 0 — and any session's first chat/audio tick used to
+	// do the same to last_video_seq before video's first event — destroying
+	// the prior session's continuation position that restart seeding needs.
 	updates := map[string]any{
 		"progress":            progress,
 		"percent":             percent,
 		"speed":               utils.FormatSpeed(pt.speedSmooth.Value()),
-		"last_video_seq":      pt.videoSeq,
-		"last_audio_seq":      pt.audioSeq,
-		"total_video_seq":     pt.videoTotal,
-		"total_audio_seq":     pt.audioTotal,
 		"total_chat_messages": pt.chatCount,
+	}
+	if pt.videoReported {
+		updates["last_video_seq"] = pt.videoSeq
+		updates["total_video_seq"] = pt.videoTotal
+	}
+	if pt.audioReported {
+		updates["last_audio_seq"] = pt.audioSeq
+		updates["total_audio_seq"] = pt.audioTotal
 	}
 	if eta != "" {
 		updates["eta"] = eta

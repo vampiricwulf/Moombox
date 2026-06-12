@@ -13,11 +13,20 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "rescheduled", label: "Rescheduled" },
       { id: "downloading", label: "Downloading" },
       { id: "quality_split", label: "Quality Split" },
+      { id: "gap_split", label: "Gap Split" },
       { id: "muxing", label: "Muxing" },
       { id: "finished", label: "Finished" },
       { id: "error", label: "Error" },
       { id: "cancelled", label: "Cancelled" },
       { id: "auth", label: "Auth" },
+    ],
+  },
+  {
+    name: "Connectivity",
+    events: [
+      { id: "connectivity_pause", label: "Download Paused (Offline)" },
+      { id: "connectivity_resume", label: "Download Resumed" },
+      { id: "connectivity_split", label: "Finalized During Outage" },
     ],
   },
   {

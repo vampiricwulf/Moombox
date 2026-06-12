@@ -160,10 +160,25 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 		job.Logger.Info("[POT] added PO token to HLS variant URL", "tokenLength", len(hlsPoToken))
 	}
 
+	// Orchestrator-provided continuation position (restart discovery seeding
+	// a fresh part dir). Without honoring it, a fresh dir + StartSeq -1
+	// initializes at the playlist window start — which for DVR-enabled
+	// YouTube live HLS reaches back to broadcast start, re-downloading hours
+	// already archived in earlier parts. The DASH strategies honor the same
+	// field; a resume sidecar (resuming into an unmuxed part) still takes
+	// priority inside the engine.
+	hlsStartSeq := -1
+	hlsForceSeq := false
+	if job.VideoStartSeq > 0 {
+		hlsStartSeq = job.VideoStartSeq
+		hlsForceSeq = true
+	}
+
 	result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 		BaseURL:          variantURL,
 		OutputFile:       result.VideoPath,
-		StartSeq:         -1,
+		StartSeq:         hlsStartSeq,
+		ForceStartSeq:    hlsForceSeq,
 		IsHls:            true,
 		PoToken:          hlsPoToken,
 		RetryDelayCap:    job.Config.SegmentRetryDelayCap,

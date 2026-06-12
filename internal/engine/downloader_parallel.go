@@ -24,8 +24,13 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	}
 
 	if d.OnProgress != nil {
+		// Seq follows the last-WRITTEN convention like every other emission
+		// (the mid-loop and exit bookends already do). Reporting the seeded
+		// next-to-download value here persisted last_video_seq one ahead of
+		// reality before any byte landed — a crash inside the catch-up
+		// window then made the next restart's seeding skip that segment.
 		d.OnProgress(DownloadProgress{
-			Seq:        curSeq,
+			Seq:        max(curSeq-1, 0),
 			Bytes:      d.bytesWritten.Load(),
 			HeadSeq:    head,
 			CatchingUp: true,

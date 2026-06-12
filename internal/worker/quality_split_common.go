@@ -157,15 +157,25 @@ func (o *DownloadOrchestrator) sendGapSplitNotification(
 
 // sendQualitySplitNotification delivers the "Stream quality changed during
 // download" notification for the given platform. platformTitle is the
-// user-facing prefix ("YouTube" or "Twitch"). No-op when the notifier is nil.
+// user-facing prefix ("YouTube" or "Twitch"). partCompleted reports whether
+// the closing span was actually muxed as a part — short spans are discarded
+// and their index reused, so claiming "Completed Part: N" for them would
+// name a file that never exists. No-op when the notifier is nil.
 func (o *DownloadOrchestrator) sendQualitySplitNotification(
 	jobCtx *JobContext,
 	platformTitle string,
 	currentQuality, newQuality QualityInfo,
 	segmentIndex int,
+	partCompleted bool,
 ) {
 	if o.notifier == nil {
 		return
+	}
+	// "Part" terminology matches the gap-split notification, the dashboard's
+	// Parts rows, and the "{name} - partN" filenames.
+	partField := notifications.Field{Name: "Completed Part", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true}
+	if !partCompleted {
+		partField = notifications.Field{Name: "Short Span", Value: "discarded (under 10s)", Inline: true}
 	}
 	o.notifier.Send(
 		fmt.Sprintf("%s Quality Split", platformTitle),
@@ -175,7 +185,7 @@ func (o *DownloadOrchestrator) sendQualitySplitNotification(
 			{Name: "Channel", Value: jobCtx.Job.ChannelName, Inline: true},
 			{Name: "From", Value: currentQuality.Label, Inline: true},
 			{Name: "To", Value: newQuality.Label, Inline: true},
-			{Name: "Segment", Value: fmt.Sprintf("%d", segmentIndex+1), Inline: true},
+			partField,
 		},
 		notifications.SendOptions{
 			URL:       jobCtx.Job.URL,

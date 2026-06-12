@@ -19,7 +19,7 @@ func (muxTestLogger) Warn(string, ...any)  {}
 func (muxTestLogger) Error(string, ...any) {}
 
 func TestSchemeRedirectHandler(t *testing.T) {
-	h := schemeRedirectHandler("https")
+	h := schemeRedirectHandler("https", "774")
 
 	req := httptest.NewRequest("GET", "http://example.local:774/tasks?filter=live", nil)
 	rec := httptest.NewRecorder()
@@ -37,9 +37,42 @@ func TestSchemeRedirectHandler(t *testing.T) {
 	req = httptest.NewRequest("GET", "/x", nil)
 	req.Host = ""
 	rec = httptest.NewRecorder()
-	schemeRedirectHandler("http").ServeHTTP(rec, req)
+	schemeRedirectHandler("http", "774").ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("empty host: want 400, got %d", rec.Code)
+	}
+}
+
+// TestSchemeRedirectHandlerDefaultPorts pins the port-80/443 deployment
+// behavior: browsers omit the source scheme's default port from Host, but
+// the same socket serves both schemes — the redirect must re-pin OUR port
+// whenever it isn't the target scheme's default, or it points at a port
+// nothing listens on.
+func TestSchemeRedirectHandlerDefaultPorts(t *testing.T) {
+	cases := []struct {
+		name         string
+		targetScheme string
+		listenPort   string
+		host         string
+		want         string
+	}{
+		{"port 80, http→https pins :80", "https", "80", "example.local", "https://example.local:80/x"},
+		{"port 443, https→http pins :443", "http", "443", "example.local", "http://example.local:443/x"},
+		{"port 80, https→http stays bare", "http", "80", "example.local", "http://example.local/x"},
+		{"explicit port kept verbatim", "https", "774", "example.local:774", "https://example.local:774/x"},
+		{"ipv6 host re-pinned with brackets", "https", "80", "[::1]", "https://[::1]:80/x"},
+		{"unknown listen port trusts host", "https", "", "example.local", "https://example.local/x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "http://placeholder/x", nil)
+			req.Host = tc.host
+			rec := httptest.NewRecorder()
+			schemeRedirectHandler(tc.targetScheme, tc.listenPort).ServeHTTP(rec, req)
+			if loc := rec.Header().Get("Location"); loc != tc.want {
+				t.Errorf("Location: want %q, got %q", tc.want, loc)
+			}
+		})
 	}
 }
 
@@ -92,7 +125,7 @@ func startMuxTopology(t *testing.T, tlsMain bool) string {
 	}
 
 	go (&http.Server{Handler: mainHandler}).Serve(mainLn)
-	go (&http.Server{Handler: schemeRedirectHandler(redirScheme)}).Serve(redirLn)
+	go (&http.Server{Handler: schemeRedirectHandler(redirScheme, listenerPort(redirLn))}).Serve(redirLn)
 
 	return real.Addr().String()
 }

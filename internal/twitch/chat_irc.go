@@ -18,7 +18,22 @@ import (
 func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	cd.logger.Info("connecting to twitch IRC", "channel", cd.channelLogin)
 
-	conn, _, err := websocket.Dial(ctx, constants.TwitchURLs.IRCWS, nil)
+	// sessionCtx scopes this session's I/O so Stop/MarkStreamEnded can abort
+	// a blocked read immediately via interruptSession. The PARENT ctx checks
+	// below stay on ctx — a session cancel is not a caller cancel; the loop
+	// notices it through IsRunning and exits cleanly into the drain path.
+	sessionCtx, sessionCancel := context.WithCancel(ctx)
+	defer sessionCancel()
+	cd.mu.Lock()
+	cd.sessionCancel = sessionCancel
+	cd.mu.Unlock()
+	defer func() {
+		cd.mu.Lock()
+		cd.sessionCancel = nil
+		cd.mu.Unlock()
+	}()
+
+	conn, _, err := websocket.Dial(sessionCtx, constants.TwitchURLs.IRCWS, nil)
 	if err != nil {
 		return fmt.Errorf("connect IRC: %w", err)
 	}
@@ -100,8 +115,9 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 		// dropping the connection mid-stream) triggers a reconnect
 		// instead of blocking until the parent context cancels. Twitch
 		// IRC sends a PING every ~5 minutes; readDeadline covers two
-		// missed PINGs before we give up on the session.
-		readCtx, readCancel := context.WithTimeout(ctx, ircReadDeadline)
+		// missed PINGs before we give up on the session. Derived from
+		// sessionCtx so Stop/MarkStreamEnded unblock the read at once.
+		readCtx, readCancel := context.WithTimeout(sessionCtx, ircReadDeadline)
 		_, data, err := conn.Read(readCtx)
 		readCancel()
 		if err != nil {

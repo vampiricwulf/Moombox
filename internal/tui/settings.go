@@ -187,9 +187,15 @@ type notifEventGroup struct {
 	events []string
 }
 
-// Notification event groups.
+// Notification event groups. Every Event string emitted through the
+// notifications manager MUST appear here (and in the web UI's mirror,
+// web/public/modules/settings.js): targets with an event filter treat the
+// list as an allowlist, and the edit-save path rebuilds Events strictly
+// from allNotifEvents — an unregistered event is silently unfilterable AND
+// stripped from hand-edited configs.
 var notifEventGroups = []notifEventGroup{
-	{"Job Lifecycle", []string{"found", "added", "scheduled", "rescheduled", "downloading", "quality_split", "muxing", "finished", "error", "cancelled", "auth"}},
+	{"Job Lifecycle", []string{"found", "added", "scheduled", "rescheduled", "downloading", "quality_split", "gap_split", "muxing", "finished", "error", "cancelled", "auth"}},
+	{"Connectivity", []string{"connectivity_pause", "connectivity_resume", "connectivity_split"}},
 	{"Trim", []string{"trim_created", "trim_deleted", "trim_error"}},
 	{"System", []string{"disk_warning", "update_available"}},
 }

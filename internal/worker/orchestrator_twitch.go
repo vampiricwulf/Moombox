@@ -272,6 +272,13 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 	// that was already muxed — the appended data would be silently dropped
 	// at finalize).
 	curStagingDir := jobCtx.StagingDir
+	// partResumed marks a part whose staged data PRE-DATES this session
+	// (restart resumed into it). The short-segment rule must never treat
+	// such a part as a discardable <10s span: segmentStartTime measures the
+	// SESSION's view of the part, not its true age — a quality flap in the
+	// first 10s after a restart used to classify hours of unmuxed footage
+	// as "short" and the same-dir discard would have deleted it.
+	partResumed := false
 	if !isVod {
 		segmentIndex, curStagingDir = o.discoverResumeSegment(jobCtx)
 		if curStagingDir != jobCtx.StagingDir {
@@ -281,9 +288,16 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			o.logger.Info("resuming Twitch job in part staging",
 				"part", segmentIndex+1, "dir", curStagingDir, "jobID", jobCtx.Job.ID)
 		}
+		partResumed = discoverStagingMedia(curStagingDir) != nil
 	}
 
-	videoDl, videoPath := createDownloader(variant.URL, curStagingDir, -1, false)
+	// currentVariantURL is the variant playlist URL the active downloader was
+	// built against — the gap branch falls back to it when the post-gap
+	// variant refresh fails (typically because the broadcast just ended:
+	// Usher refuses, but the final playlist window still serves the tail).
+	currentVariantURL := variant.URL
+
+	videoDl, videoPath := createDownloader(currentVariantURL, curStagingDir, -1, false)
 
 	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger)
 	tracker.AttachVideoDownloader(videoDl)
@@ -383,10 +397,25 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			muxResult := &DownloadResult{HasVideo: true, VideoPath: videoPath, ChatPath: closedChat}
 			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
 				segmentStartTime, segmentEndTime, currentQuality, muxResult, "twitch", enrich)
+		} else if nextDir == curStagingDir {
+			// Short-segment discard, reusing the same index/dir: the dropped
+			// span's media and its resume sidecar must actually be removed —
+			// the engine's resume path would otherwise trust the sidecar
+			// (same StreamID, opaque weaver URLs carry no identity) and
+			// APPEND the new quality's data onto the discarded old-quality
+			// span instead of starting the part fresh.
+			oldVideo := filepath.Join(curStagingDir, "video_stream")
+			if err := os.Remove(oldVideo); err != nil && !os.IsNotExist(err) {
+				o.logger.Warn("failed to remove discarded short-segment media", "err", err, "jobID", jobCtx.Job.ID)
+			}
+			if err := os.Remove(oldVideo + ".resume.json"); err != nil && !os.IsNotExist(err) {
+				o.logger.Warn("failed to remove discarded short-segment resume state", "err", err, "jobID", jobCtx.Job.ID)
+			}
 		}
 		segmentIndex = nextIdx
 		curStagingDir = nextDir
 		segmentStartTime = time.Now().Unix()
+		partResumed = false // the next span is watched from birth
 		return true
 	}
 
@@ -450,11 +479,33 @@ sessionLoop:
 			// through to the normal-stop path and captured data still muxes.
 			if (qualityChanged || isQualityLost || isGap) && variant.FetchVariantsFn != nil {
 				segmentEndTime := time.Now().Unix()
-				shortSegment := time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
+				// A resumed part is never "short": the timer only measures
+				// this session's slice of it (see partResumed above).
+				shortSegment := !partResumed && time.Since(time.Unix(segmentStartTime, 0)) < minSegmentDuration
 
 				// Re-fetch master playlist FIRST to determine if quality actually changed.
 				newVariant, fetchErr := refreshBestVariant(ctx)
 				if fetchErr != nil {
+					if isGap {
+						// Refresh failing right after a gap usually means the
+						// broadcast just ended — but the final playlist window
+						// keeps serving the post-gap tail for a while. Split
+						// and let the successor continue on the CURRENT
+						// variant URL: a dead URL ends the successor cleanly
+						// (empty part, nothing lost), a live one captures the
+						// rest of the tail.
+						o.logger.Warn("Twitch variant refresh failed after gap; continuing tail on current variant",
+							"err", fetchErr, "jobID", jobCtx.Job.ID)
+						o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
+						nextSeq := videoDl.CurrentSeq()
+						if !advanceToNewPart(true, segmentEndTime) {
+							break
+						}
+						videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
+						tracker.AttachVideoDownloader(videoDl)
+						drainQualityCh()
+						continue
+					}
 					o.logger.Error("failed to refresh Twitch variants", "err", fetchErr, "jobID", jobCtx.Job.ID)
 					break
 				}
@@ -468,8 +519,10 @@ sessionLoop:
 					// in a new part. The next part is seeded from CurrentSeq
 					// (engine left it at the first sequence NOT in the file):
 					// window gaps then skip forward to the window start via
-					// the empty-file rule, while a stuck-segment gap resumes
-					// at exactly stuck+1 with no overlap.
+					// the empty-file rule, while a stuck-segment gap retries
+					// the stuck sequence once more with an empty file and
+					// skips it via the same rule if it still fails — either
+					// way the gap is recorded exactly once, by the successor.
 					o.logger.Warn("Twitch gap split — starting new part",
 						"closedPart", segmentIndex+1, "quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 					o.sendGapSplitNotification(jobCtx, segmentIndex, currentQuality)
@@ -479,7 +532,8 @@ sessionLoop:
 						break
 					}
 					currentQuality = newQuality
-					videoDl, videoPath = createDownloader(newVariant.URL, curStagingDir, nextSeq, nextSeq > 0)
+					currentVariantURL = newVariant.URL
+					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, nextSeq, nextSeq > 0)
 					tracker.AttachVideoDownloader(videoDl)
 					drainQualityCh()
 					continue
@@ -493,7 +547,8 @@ sessionLoop:
 					o.logger.Info("Twitch quality unchanged after re-fetch, continuing download",
 						"quality", currentQuality.Label, "jobID", jobCtx.Job.ID)
 
-					videoDl, videoPath = createDownloader(newVariant.URL, curStagingDir, videoDl.CurrentSeq(), true)
+					currentVariantURL = newVariant.URL
+					videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, videoDl.CurrentSeq(), true)
 					tracker.AttachVideoDownloader(videoDl)
 					drainQualityCh()
 					continue
@@ -504,7 +559,7 @@ sessionLoop:
 					"from", currentQuality.Label, "to", newQuality.Label,
 					"segment", segmentIndex+1, "jobID", jobCtx.Job.ID)
 
-				o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex)
+				o.sendQualitySplitNotification(jobCtx, "Twitch", currentQuality, newQuality, segmentIndex, !shortSegment)
 
 				if shortSegment {
 					o.logger.Debug("skipping short segment mux",
@@ -515,7 +570,8 @@ sessionLoop:
 					break
 				}
 				currentQuality = newQuality
-				videoDl, videoPath = createDownloader(newVariant.URL, curStagingDir, -1, false)
+				currentVariantURL = newVariant.URL
+				videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, -1, false)
 				tracker.AttachVideoDownloader(videoDl)
 				drainQualityCh()
 				continue
@@ -640,7 +696,8 @@ sessionLoop:
 		// engine's resume + StopOnGap decides between seamless continuation
 		// (short outage, playlist still covers our position: zero loss, no
 		// split) and ErrGapDetected (the inner loop splits to a new part).
-		videoDl, videoPath = createDownloader(newVariant.URL, curStagingDir, -1, false)
+		currentVariantURL = newVariant.URL
+		videoDl, videoPath = createDownloader(currentVariantURL, curStagingDir, -1, false)
 		tracker.AttachVideoDownloader(videoDl)
 		drainQualityCh()
 		if twitchChatDl != nil && !twitchChatDl.IsRunning() {

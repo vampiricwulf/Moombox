@@ -65,10 +65,12 @@ function tokenize(query) {
     if (inQuote) {
       current += ch;
       if (ch === inQuote) inQuote = null;
-    } else if ((ch === '"' || ch === "'") && (current === "" || current.endsWith(":"))) {
-      // A quote only opens quoting at token start or right after a filter-key
-      // colon (channel:"shachi too"). Mid-token it's a literal character, so
-      // natural apostrophes (mori's karaoke) don't swallow the rest of the query.
+    } else if ((ch === '"' || ch === "'") && (current === "" || current === "-" || current.endsWith(":"))) {
+      // A quote only opens quoting at token start, after a bare negation
+      // prefix (-"jelly fin"), or right after a filter-key colon
+      // (channel:"shachi too"). Mid-token it's a literal character, so
+      // natural apostrophes (mori's karaoke) don't swallow the rest of the
+      // query.
       inQuote = ch;
       current += ch;
     } else if (ch === " ") {
@@ -113,7 +115,13 @@ export function serializeToken(token) {
   }
   const prefix = token.negate ? "-" : "";
   if (token.type === "text") {
-    return `${prefix}${token.value}`;
+    // Re-quote spaced phrases or the round-trip corrupts them: the chip
+    // extractor rewrites leftover text tokens into the input, and an
+    // unquoted `-jelly fin` re-tokenizes as TWO tokens — flipping half the
+    // phrase from negated to required.
+    const needsQuotes = token.value.includes(" ");
+    const val = needsQuotes ? `"${token.value}"` : token.value;
+    return `${prefix}${val}`;
   }
   const needsQuotes = token.value.includes(" ");
   const val = needsQuotes ? `"${token.value}"` : token.value;

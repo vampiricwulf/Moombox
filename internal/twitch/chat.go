@@ -64,6 +64,12 @@ type ChatDownloader struct {
 		Error(msg string, args ...any)
 	}
 
+	// sessionCancel aborts the in-flight IRC session's I/O (set by
+	// runIRCSession for its lifetime, guarded by mu). Stop/MarkStreamEnded
+	// fire it so a session parked in a quiet-channel read (up to
+	// ircReadDeadline) reacts immediately instead of minutes later.
+	sessionCancel context.CancelFunc
+
 	// onProgress is read from addMessage under onProgressMu; callers must
 	// use SetOnProgress rather than direct field assignment to avoid a
 	// data race if the callback is reassigned after Start (audit
@@ -437,11 +443,28 @@ func (cd *ChatDownloader) IsRunning() bool {
 	return cd.running
 }
 
+// interruptSession cancels the in-flight IRC session's I/O. Without it,
+// Stop/MarkStreamEnded only flip flags that the session goroutine checks
+// BETWEEN reads — on a chat-quiet channel the goroutine sits inside
+// conn.Read for up to ircReadDeadline (6 min; Twitch PINGs every ~5), far
+// past the orchestrator's chatWaitTimeout, so the stream-end drain (final
+// flush + emote enrichment) used to lose the race against the final part's
+// chat-file copy.
+func (cd *ChatDownloader) interruptSession() {
+	cd.mu.Lock()
+	cancel := cd.sessionCancel
+	cd.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // Stop cancels the chat download.
 func (cd *ChatDownloader) Stop() {
 	cd.mu.Lock()
 	cd.running = false
 	cd.mu.Unlock()
+	cd.interruptSession()
 }
 
 // MarkStreamEnded signals that the upstream live stream has ended and the
@@ -455,4 +478,5 @@ func (cd *ChatDownloader) MarkStreamEnded() {
 	cd.streamEnded = true
 	cd.running = false
 	cd.mu.Unlock()
+	cd.interruptSession()
 }
