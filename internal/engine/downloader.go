@@ -30,6 +30,16 @@ var ErrSegmentPermanent = errors.New("segment permanently unavailable")
 // a gap and continue. Audit reports/engine.md #17.
 var ErrSegmentRetriesExhausted = errors.New("segment retries exhausted")
 
+// ErrGapDetected signals that the live playlist has moved past the next
+// sequence this downloader needed — the missing segments have expired from
+// the CDN and the data is unrecoverable. Only returned when
+// DownloaderOptions.StopOnGap is set and the output file already holds
+// data: the caller is expected to finalize the current file as a complete,
+// internally-gapless part and start a new downloader at the live edge.
+// Without StopOnGap the loop skips past the gap and keeps appending
+// (YouTube-style behavior, where the file knowingly contains a jump).
+var ErrGapDetected = errors.New("unrecoverable gap in live stream")
+
 const (
 	CatchupThreshold      = 10
 	MaxSegmentRetries     = 5
@@ -79,7 +89,15 @@ type DownloaderOptions struct {
 	// platforms whose media URLs carry no extractable identity (Twitch
 	// weaver URLs) — without it, a job resumed after the channel started a
 	// NEW broadcast would splice the new stream into the old recording.
-	StreamID          string
+	StreamID string
+	// StopOnGap makes the HLS live loop return ErrGapDetected instead of
+	// skipping forward when the playlist has moved past the next needed
+	// sequence and the output file already has data. Used for Twitch live,
+	// where expired segments are unrecoverable (no DVR): the orchestrator
+	// muxes the current file as a finished part and starts a new one, so
+	// every output file stays internally gapless. Leave false for platforms
+	// with seekable/backfillable streams (YouTube) and for VODs.
+	StopOnGap         bool
 	RetryDelayCap     int // seconds
 	LiveCheckRetries  int
 	CheckStreamStatus func(ctx context.Context) (bool, error) // Returns true if stream ended

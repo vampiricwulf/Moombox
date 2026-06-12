@@ -125,8 +125,15 @@ type VodCommentEdge struct {
 }
 
 // ChatResumeState holds Twitch chat resume information.
+//
+// MessageCount counts messages in the CURRENT chat file. TotalCount is the
+// cumulative count across all part files of the job (equal to MessageCount
+// until the first RollFile). States written before part-splitting existed
+// lack TotalCount — readers fall back to MessageCount, which was cumulative
+// by definition when there was only ever one file.
 type ChatResumeState struct {
 	MessageCount      int      `json:"messageCount"`
+	TotalCount        int      `json:"totalCount,omitempty"`
 	LastTimestampMs   int64    `json:"lastTimestampMs"`
 	LastOffsetSeconds float64  `json:"lastOffsetSeconds"`
 	Timestamp         int64    `json:"timestamp"`

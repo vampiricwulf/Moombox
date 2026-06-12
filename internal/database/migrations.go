@@ -23,7 +23,7 @@ func isDuplicateColumnErr(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column")
 }
 
-const schemaVersion = 14
+const schemaVersion = 15
 
 // CurrentSchemaVersion returns the schema version this binary creates and
 // migrates to. Exposed for side processes (`moombox add`) that must refuse
@@ -142,7 +142,8 @@ CREATE TABLE IF NOT EXISTS segments (
     video_width INTEGER,
     video_height INTEGER,
     video_fps INTEGER,
-    duration_seconds REAL
+    duration_seconds REAL,
+    chat_file TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS client_tokens (
@@ -555,6 +556,22 @@ func (db *Database) migrate() error {
 		}
 
 		if err := db.writeUserVersion(14); err != nil {
+			return err
+		}
+	}
+
+	if version < 15 {
+		// Per-part chat files: Twitch live jobs split into multiple output
+		// parts (gap/quality splits), each with its own chat file recorded
+		// on the segment row. Empty string for segments muxed before this
+		// feature or without chat.
+		if _, err := db.db.ExecContext(db.getCtx(), `ALTER TABLE segments ADD COLUMN chat_file TEXT NOT NULL DEFAULT ''`); err != nil {
+			if !isDuplicateColumnErr(err) {
+				return err
+			}
+		}
+
+		if err := db.writeUserVersion(15); err != nil {
 			return err
 		}
 	}

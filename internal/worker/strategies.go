@@ -114,6 +114,12 @@ type DownloadResult struct {
 	VideoFormat     *youtube.Format
 	AudioFormat     *youtube.Format
 	IsHls           bool // true if HLS strategy was used
+	// ChatPath is the staged chat JSON belonging to this capture span
+	// (Twitch per-part chat — set when the chat file was rolled at the
+	// part boundary). muxSegment copies it next to the part's video and
+	// records it on the segment row. Empty for platforms/jobs whose chat
+	// is one file handled at finalize (YouTube, legacy staging layouts).
+	ChatPath string
 	// Stream dimensions (populated by all strategies for quality monitoring)
 	VideoWidth  int
 	VideoHeight int

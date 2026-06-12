@@ -233,7 +233,9 @@ All monitors share these patterns:
 
 The orchestrator starts the segment downloader and chat downloader concurrently via an `errgroup`. When the segment download completes, it runs a verification loop: up to 6 checks at 5-minute intervals (`streamEndVerifyInterval`) querying the YouTube API to confirm the stream actually ended. This guards against premature termination from transient 404s or temporary CDN outages. Only after verification confirms the stream is truly over does the orchestrator proceed to muxing.
 
-Quality splits occur when the `QualityMonitor` (probing every 30 seconds) detects a resolution change mid-stream. The orchestrator creates a new segment file and continues downloading, resulting in multi-segment recordings that the video player handles seamlessly. Segments shorter than 10 seconds are not split.
+Quality splits occur when the `QualityMonitor` (probing every 30 seconds) detects a resolution change mid-stream. The orchestrator creates a new segment file and continues downloading, resulting in multi-part recordings that the video player handles seamlessly. Segments shorter than 10 seconds are not split.
+
+Twitch live recordings are additionally **gap-split**: Twitch has no DVR, so segments that leave the playlist window are unrecoverable. The engine appends while HLS sequence numbers stay continuous (a fast daemon restart or network blip resumes seamlessly with zero loss) and stops at any true discontinuity (`ErrGapDetected`); the orchestrator then muxes the current capture as a finished, internally-gapless part (`{name} - partN.mp4`) and continues at the live edge in a new part. The live IRC chat file rolls at every part boundary with offsets rebased to that part's start, and each part's chat is copied beside its video (`{name} - partN.chat.json`, recorded in `segments.chat_file`). Connectivity outages pause the job rather than finalizing it — one job per broadcast: when the connection returns and the same broadcast (stream_start_time identity) is still live, the same job resumes; the job finalizes only when the stream ends or the broadcast changes. A job that finalizes with exactly one part is renamed back to the plain template name.
 
 Muxing runs on `context.Background()` goroutines so it completes even if the parent context is cancelled (user quits during download). This ensures that partially downloaded content is still muxed into a usable file rather than being abandoned as raw segments.
 
@@ -613,7 +615,7 @@ Both the web UI and TUI implement the same user-facing features:
 
 SQLite in WAL mode, single connection (`SetMaxOpenConns(1)`), 5-second busy timeout, foreign keys enabled. DSN: `file:{path}?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on`.
 
-**Schema version:** v6 (v5 added `segments` table, v6 added `client_tokens` table). Migrations run automatically on startup via `db.migrate()`.
+**Schema version:** v15 (v5 added `segments` table, v6 added `client_tokens` table, v15 added per-part `segments.chat_file`; see `docs/spec/data-and-storage.md` for the full migration table). Migrations run automatically on startup via `db.migrate()`.
 
 **Batch update coalescing:** `UpdateJobFields()` sends the job to a channel. A background goroutine collects updates in a 100ms signal-driven window, then writes them in a single transaction. This coalesces rapid segment progress updates (which fire every few hundred milliseconds during download) into batched writes, producing zero I/O during idle periods.
 

@@ -597,6 +597,10 @@ All three providers are fetched in parallel using a `sync.WaitGroup`. Each has a
 
 After chat download completes, `EnrichWithEmotes` reads the chat JSON file, adds the resolved `TwitchEmoteData` to the `emotes` field, and rewrites the file atomically. This uses a fresh `context.Background()` context with a 30-second timeout, ensuring emote resolution completes even after the parent context is cancelled.
 
+#### Per-Part Chat Rolling (live IRC)
+
+Multi-part Twitch live recordings (gap/quality splits) roll the chat file at every part boundary via `ChatDownloader.RollFile(newPath, newRecordingStart)`: pending messages drain into the closing file, its resume state is deleted (the part is final), and recording redirects to the new part's staging dir with `OffsetMs` rebased to the new part's capture start — so each `{name} - partN.chat.json` replays in sync against its own video part. The dedup set and the cumulative message total survive the roll (`ChatResumeState` carries both the per-file `messageCount` and the job-wide `totalCount`; legacy single-file states fall back to `messageCount`). Closed parts are emote-enriched from the background part-mux goroutine using a cached resolve (`resolveEmotesCached` — the emote APIs are hit once per job, not once per part); the final part is enriched by the stream-end drain as before.
+
 ---
 
 ## BotGuard / PO Token (`internal/bgutils/`)

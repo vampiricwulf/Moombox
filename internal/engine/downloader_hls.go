@@ -120,6 +120,23 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 
 		// Handle gap: if currentSeq < mediaSequence, segments expired from CDN
 		if curSeq < pl.MediaSequence {
+			if d.opts.StopOnGap && d.bytesWritten.Load() > 0 {
+				// The file on disk ends exactly where data stopped being
+				// available — return without advancing currentSeq so the
+				// caller can mux it as a gapless part and seed a fresh
+				// downloader from CurrentSeq. Covers both mid-session CDN
+				// gaps and the resume-after-restart case (resume state put
+				// currentSeq at the old position; the first playlist fetch
+				// reveals whether the window still covers it). OnGap is
+				// deliberately NOT fired here: the successor downloader —
+				// seeded at this position with an empty file — takes the
+				// skip-forward branch below on its first fetch and records
+				// the gap exactly once.
+				d.logger.Warn("[Downloader] Unrecoverable gap in live playlist, stopping for part split",
+					"from", curSeq, "to", pl.MediaSequence-1,
+					"missing", pl.MediaSequence-curSeq)
+				return ErrGapDetected
+			}
 			if d.OnGap != nil {
 				d.OnGap(DownloadGap{From: curSeq, To: pl.MediaSequence - 1})
 			}
@@ -202,6 +219,24 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					if ended {
 						d.streamEnded.Store(true)
 						return nil
+					}
+					if d.opts.StopOnGap && d.bytesWritten.Load() > 0 {
+						// Same contract as the playlist-window gap above: the
+						// skipped segment would leave a discontinuity inside
+						// the file, so end this part instead. The gap is
+						// recorded and currentSeq advanced PAST the stuck
+						// segment before returning — the caller seeds the
+						// next part from CurrentSeq(), and without the
+						// advance it would re-fetch from the playlist window
+						// start, duplicating the closed part's tail and
+						// hitting the same stuck segment in a split loop.
+						d.logger.Warn("[Downloader] HLS segment permanently failing, stopping for part split",
+							"seq", curSeqNow, "retries", stuckSeqRetries)
+						if d.OnGap != nil {
+							d.OnGap(DownloadGap{From: int(curSeqNow), To: int(curSeqNow)})
+						}
+						d.currentSeq.Add(1)
+						return ErrGapDetected
 					}
 					d.logger.Warn("[Downloader] HLS segment stuck, advancing past it as gap",
 						"seq", curSeqNow, "retries", stuckSeqRetries)

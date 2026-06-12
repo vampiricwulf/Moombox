@@ -171,6 +171,9 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 				if seg.FilePath != "" && normalizePath(seg.FilePath) == target {
 					return job.ID, nil
 				}
+				if seg.ChatFile != "" && normalizePath(seg.ChatFile) == target {
+					return job.ID, nil
+				}
 			}
 		}
 	}
@@ -341,10 +344,14 @@ func scanOutputOrphans(db *database.Database, cfg *config.MoomboxConfig) ([]Orph
 		if job.ChatFilename != "" {
 			knownFiles[normalizePath(filepath.Join(absOutputDir, job.ChatFilename))] = true
 		}
-		// Include quality-split segment files so they aren't flagged as orphans.
+		// Include part (quality/gap split) files so they aren't flagged as
+		// orphans — both the videos and their per-part chat files.
 		for _, seg := range job.Segments {
 			if seg.FilePath != "" {
 				knownFiles[normalizePath(seg.FilePath)] = true
+			}
+			if seg.ChatFile != "" {
+				knownFiles[normalizePath(seg.ChatFile)] = true
 			}
 		}
 	}

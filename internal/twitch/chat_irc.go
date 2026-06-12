@@ -221,19 +221,11 @@ func (cd *ChatDownloader) parsePrivmsg(tags map[string]string, parts []string, r
 		authorName = "Anonymous"
 	}
 
-	baseMs := cd.recordingStartMs
-	if baseMs == 0 {
-		baseMs = cd.streamStartMs
-	}
-	var offsetMs int64
-	if baseMs > 0 {
-		offsetMs = max(tmiSentTs-baseMs, 0)
-	}
-
+	// OffsetMs is computed in addMessage under cd.mu (atomic with RollFile's
+	// part-boundary base swap), not here.
 	msg := &TwitchChatMessage{
 		ID:           id,
 		TimestampMs:  tmiSentTs,
-		OffsetMs:     offsetMs,
 		AuthorName:   authorName,
 		AuthorID:     tags["user-id"],
 		AuthorBadges: parseBadges(tags["badges"]),
@@ -297,19 +289,11 @@ func (cd *ChatDownloader) parseUsernotice(tags map[string]string, parts []string
 		authorName = "System"
 	}
 
-	baseMs := cd.recordingStartMs
-	if baseMs == 0 {
-		baseMs = cd.streamStartMs
-	}
-	var offsetMs int64
-	if baseMs > 0 {
-		offsetMs = max(tmiSentTs-baseMs, 0)
-	}
-
+	// OffsetMs is computed in addMessage under cd.mu (atomic with RollFile's
+	// part-boundary base swap), not here.
 	msg := &TwitchChatMessage{
 		ID:           id,
 		TimestampMs:  tmiSentTs,
-		OffsetMs:     offsetMs,
 		AuthorName:   authorName,
 		AuthorID:     tags["user-id"],
 		AuthorBadges: parseBadges(tags["badges"]),

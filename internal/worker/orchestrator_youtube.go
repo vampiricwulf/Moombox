@@ -225,10 +225,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			o.sendQualitySplitNotification(jobCtx, "YouTube", currentQuality, newQuality, segmentIndex)
 
-			// Mux the old segment in the background (unless too short)
+			// Mux the old segment in the background (unless too short).
+			// No preMux: YouTube chat stays a single whole-job file.
 			if !shortSegment {
 				o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
-					segmentStartTime, segmentEndTime, currentQuality, result, "youtube")
+					segmentStartTime, segmentEndTime, currentQuality, result, "youtube", nil)
 				segmentIndex++
 			} else {
 				o.logger.Debug("skipping short segment mux",

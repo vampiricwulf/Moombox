@@ -748,7 +748,7 @@ The primary data model. See `internal/database/types.go` for the complete struct
 - `StartTime` / `EndTime` (*float64): Post-download trim boundaries in seconds.
 - `QualityPreference` (string): e.g., `"1080p60"`, `"720p"`, `"best"`, `"audio_only"`.
 - `Gaps` ([]Gap): Missing segment ranges detected during download.
-- `Segments` ([]Segment): Multi-segment records for quality-split downloads.
+- `Segments` ([]Segment): Part records for multi-part downloads — quality splits (both platforms) and Twitch live gap splits. Each row carries the part's video path and (Twitch) its per-part chat file.
 - `Trims` ([]TrimRecord): Clips created from this job.
 
 ### database.Database
@@ -790,7 +790,7 @@ Key methods:
 - `NewDownloadOrchestrator(db, queue, ffmpegPath, logger, cs, pp, nm) -> *DownloadOrchestrator`: Constructor.
 - `Execute(ctx, jobCtx, videoInfo, isVod) -> error`: YouTube download without pre-existing chat.
 - `ExecuteWithChat(ctx, jobCtx, videoInfo, isVod, existingChat) -> error`: Full YouTube download pipeline.
-- `ExecuteTwitch(ctx, jobCtx, variant, isVod, twitchChat) -> error`: Full Twitch download pipeline.
+- `ExecuteTwitch(ctx, jobCtx, variant, isVod, twitchChat) -> error`: Full Twitch download pipeline. For live streams this is a *session loop*: the engine runs with `StopOnGap` (Twitch has no DVR), so an unrecoverable playlist gap muxes the current capture as a finished part (`{name} - partN.mp4` + rolled per-part chat) and continues at the live edge in a new `seg_N` staging dir; a connectivity outage pauses the session and resumes the SAME job once the same broadcast (stream_start_time identity, rechecked post-outage) is reachable again — one job per broadcast. On daemon restart, `discoverResumeSegment` maps staged `seg_N` dirs + recorded segment rows to the correct part so a resume never appends into an already-muxed part's staging file. Seamless continuation (sequence numbers still covered by the playlist window) keeps appending — splits happen only where data was actually lost.
 
 ### worker.JobQueue
 

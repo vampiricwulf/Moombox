@@ -15,7 +15,7 @@ These are hard rules. An AI assisting with Moombox development must follow them 
 - **Batch update coalescing: 100ms signal-driven window, zero IO when idle.** The `batchUpdateLoop` goroutine sleeps on a channel until the first update arrives, then waits 100ms to accumulate more updates, then flushes all pending updates in a single transaction. When no updates are pending, the goroutine consumes zero CPU and performs zero IO.
 - **Config migrations are non-destructive.** `migrateOldFormat()` only applies a migration when the target section does not already exist in the TOML file. It never overwrites user-configured values in existing sections.
 - **FlexDuration parses config values as minutes or days, context-dependent.** A bare integer in `feed_check_interval` means minutes; in `hide_finished_age_days` it means days. Duration strings like `"10m"`, `"7d"` are parsed via regex and converted to the context-appropriate unit.
-- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v13. Each migration checks the current version before applying. Migrations run at startup in `Database.Init()`. There is no rollback mechanism.
+- **Schema migrations are versioned, idempotent, and forward-only.** Currently at v15. Each migration checks the current version before applying. Migrations run at startup in `Database.Init()`. There is no rollback mechanism.
 - **Cookie file format is Netscape.** The jar only loads cookies matching YouTube/Google domains or Twitch domains. Cookies are filtered to essential authentication cookies only.
 - **Log file rotation uses numbered suffixes.** The current file is renamed to `.1`, existing `.N` files shift to `.N+1`, and excess files beyond `max_files` are deleted.
 - **Resume state files are JSON sidecars.** Named `<output_file>.resume.json`, they store the last successful segment sequence number, bytes written, timestamp, and base URL. They are validated on load (URL match + file size check) and cleared only on clean stream completion.
@@ -270,23 +270,27 @@ Index: `idx_gaps_job_id(job_id)`.
 
 Index: `idx_trims_job_id(job_id)`.
 
-**segments** (added v5):
+**segments** (added v5) — one row per output *part* of a multi-part job.
+Parts are produced by quality splits (resolution changed mid-stream, both
+platforms) and by Twitch live gap splits (segments expired unrecoverably from
+the CDN; each part file is internally gapless):
 
 | Column | Type | Notes |
 |--------|------|-------|
 | id | INTEGER | PRIMARY KEY AUTOINCREMENT |
 | job_id | TEXT | NOT NULL, FK -> jobs(id) ON DELETE CASCADE |
-| segment_index | INTEGER | 0-based ordering within a job |
+| segment_index | INTEGER | 0-based ordering within a job; stable across restarts (maps to staging dirs: root = 0, `seg_N` = N). Filenames use `segment_index + 1` as the part number |
 | unix_start | INTEGER | Unix timestamp |
 | unix_end | INTEGER | Unix timestamp |
 | quality | TEXT | e.g. "1080p60" |
-| filename | TEXT | Segment filename |
+| filename | TEXT | Part filename: `{resolved template} - partN.mp4` (a job finalizing with exactly one part is renamed back to the plain `{resolved template}.mp4`) |
 | file_path | TEXT | Absolute path, nullable |
 | file_size | INTEGER | Bytes, nullable |
 | video_width | INTEGER | Nullable |
 | video_height | INTEGER | Nullable |
 | video_fps | INTEGER | Nullable |
 | duration_seconds | REAL | Nullable |
+| chat_file | TEXT | (v15) Absolute path of this part's chat JSON, `''` when the part has no chat (pre-v15 rows, chat disabled, YouTube — only Twitch live IRC chat rolls per part) |
 
 Index: `idx_segments_job_id(job_id)`.
 
@@ -344,6 +348,7 @@ Migrations are forward-only and run at startup in `Database.migrate()`. `PRAGMA 
 | v12 | Added `idx_history_added_at` index to the `history` table; speeds up the `pruneHistory` ORDER BY ... LIMIT subquery that previously did a full scan on every `AddToHistory` |
 | v13 | Added `auto_retry_count INTEGER NOT NULL DEFAULT 0` column to `jobs`. Tracks monitor-driven Twitch flap auto-recovery attempts (capped at `worker.MaxTwitchAutoRetries`). User-driven `ReinitializeJob`/`ResumeJob` reset to 0; auto-recovery's `AutoReinitializeJob` increments |
 | v14 | Normalized NULLs in the v2/v3-added columns (`chat_file`, `thumbnail_file`, `description_file`) to `''` — pre-backfill legacy rows failed every scan and vanished from the UI. Swept orphaned `gaps`/`trims`/`segments` rows accumulated while foreign-key enforcement was silently off (the pre-fix DSN used parameters modernc ignores); job IDs are video IDs, so re-adding a deleted video would have resurrected the old job's child rows |
+| v15 | Added `chat_file` column to `segments` — Twitch live jobs roll the chat file at every part boundary (gap/quality split), and each part's chat is copied beside its video and recorded on the segment row |
 
 Each migration uses `ALTER TABLE ADD COLUMN` with duplicate-column error suppression (columns may already exist from partial migrations). Backfill queries run against existing data where applicable.
 

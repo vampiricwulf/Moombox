@@ -482,6 +482,9 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 				}
 				return info != nil && info.IsLive, nil
 			}
+			variant.RecheckStreamFn = func(innerCtx context.Context) (*twitch.TwitchStreamInfo, error) {
+				return w.tw.GetStreamInfo(innerCtx, login)
+			}
 			variant.FetchVariantsFn = func(innerCtx context.Context) ([]twitch.TwitchHLSVariant, error) {
 				return w.tw.GetHLSMasterPlaylist(innerCtx, login)
 			}

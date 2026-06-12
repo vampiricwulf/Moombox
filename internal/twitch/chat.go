@@ -3,7 +3,9 @@ package twitch
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
@@ -26,24 +28,34 @@ type ChatDownloader struct {
 	// (reconnect/exit paths) and from the periodic flusher goroutine; two
 	// interleaved flushes would snapshot overlapping batches and
 	// double-append them to the chat file.
-	flushMu          sync.Mutex
-	channelLogin     string
-	channelDisplay   string
-	channelID        string
-	streamID         string
-	authToken        string
-	recordingStartMs int64
+	flushMu        sync.Mutex
+	channelLogin   string
+	channelDisplay string
+	channelID      string
+	streamID       string
+	authToken      string
+	// recordingStartMs is the OffsetMs base for the CURRENT part file.
+	// Atomic: the IRC session goroutine reads it per message while RollFile
+	// rebases it at part boundaries from the orchestrator goroutine.
+	recordingStartMs atomic.Int64
 	streamStartTime  string
 	streamStartMs    int64
 	messages         []TwitchChatMessage // Unwritten messages in memory
 	dedup            *utils.OrderedDedup[string]
 	outputPath       string
 	running          bool
-	streamEnded      bool // set by MarkStreamEnded — distinguishes drain from interruption
-	totalCount       int
+	streamEnded      bool  // set by MarkStreamEnded — distinguishes drain from interruption
+	totalCount       int   // cumulative across all part files (job-level metric)
+	fileCount        int   // messages belonging to the CURRENT part file (header count)
 	lastTimestampMs  int64 // Last message timestamp (epoch ms) for resume state
 	flushedToDisk    bool
 	emoteResolver    *EmoteResolver
+	// emoteData caches the third-party emote resolve so multi-part jobs hit
+	// the 7TV/BTTV/FFZ APIs once, not once per part. Guarded by emoteMu,
+	// which is held across the resolve itself to single-flight concurrent
+	// callers (background part mux + stream-end drain).
+	emoteMu   sync.Mutex
+	emoteData *TwitchEmoteData
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -126,15 +138,29 @@ func NewChatDownloader(opts ChatDownloaderOptions, logger interface {
 // Should be called before Start() when the actual recording begins.
 func (cd *ChatDownloader) SetRecordingStartTime(isoString string) {
 	if t, err := time.Parse(time.RFC3339, isoString); err == nil {
-		cd.mu.Lock()
-		cd.recordingStartMs = t.UnixMilli()
-		cd.mu.Unlock()
+		cd.recordingStartMs.Store(t.UnixMilli())
 	}
+}
+
+// chatResumePath returns the resume-state sidecar path for a chat file. The
+// suffix lives here exclusively — RollFile clears the CLOSED part's sidecar
+// by the same rule that getResumeFilePath derives the current one.
+func chatResumePath(chatPath string) string {
+	return chatPath + ".resume.json"
+}
+
+// currentOutputPath snapshots the current part's chat path under cd.mu —
+// required anywhere outside flushMu, because RollFile swaps outputPath from
+// the orchestrator goroutine.
+func (cd *ChatDownloader) currentOutputPath() string {
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	return cd.outputPath
 }
 
 // getResumeFilePath returns the path to the resume state file.
 func (cd *ChatDownloader) getResumeFilePath() string {
-	return cd.outputPath + ".resume.json"
+	return chatResumePath(cd.currentOutputPath())
 }
 
 // loadResumeState loads the resume state from disk.
@@ -160,21 +186,59 @@ func (cd *ChatDownloader) loadResumeState() *ChatResumeState {
 // saveResumeState persists the current chat state for resume after crash/reconnect.
 // Uses atomic write pattern with .tmp file (matches TS saveResumeState).
 func (cd *ChatDownloader) saveResumeState() {
+	// Path captured in the SAME critical section as the counters — a
+	// concurrent RollFile must not pair one part's counts with the other
+	// part's sidecar.
 	cd.mu.Lock()
 	recentIDs := cd.dedup.Snapshot(0)
 	state := ChatResumeState{
-		MessageCount:    cd.totalCount,
+		MessageCount:    cd.fileCount,
+		TotalCount:      cd.totalCount,
 		LastTimestampMs: cd.lastTimestampMs,
 		Timestamp:       time.Now().UnixMilli(),
 		StreamID:        cd.streamID,
 		RecentIDs:       recentIDs,
 	}
+	resumePath := chatResumePath(cd.outputPath)
 	cd.mu.Unlock()
 
-	store := utils.ResumeStore[ChatResumeState]{Path: cd.getResumeFilePath()}
+	store := utils.ResumeStore[ChatResumeState]{Path: resumePath}
 	if err := store.Save(state); err != nil {
 		cd.logger.Warn("save chat resume state", "err", err)
 	}
+}
+
+// restoreResumeState applies a loaded resume snapshot to the downloader's
+// counters and dedup set. fileCount continues the current part file's count;
+// totalCount falls back to MessageCount for states written before
+// part-splitting existed (one file meant the file count WAS the total).
+//
+// flushedToDisk is restored only when the chat file actually exists. A
+// resume state without its file happens when a part was rolled and the
+// daemon stopped before any message arrived (the exit path saves state for
+// the new, never-written part) — blindly marking it flushed would route the
+// first flush onto the append path against a missing file, which fails,
+// merge-fails, and retries forever: the part's chat would never reach disk.
+func (cd *ChatDownloader) restoreResumeState(state *ChatResumeState) {
+	fileExists := false
+	if path := cd.currentOutputPath(); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			fileExists = true
+		}
+	}
+
+	cd.mu.Lock()
+	if fileExists {
+		cd.fileCount = state.MessageCount
+		cd.flushedToDisk = true
+	} else {
+		cd.fileCount = 0
+		cd.flushedToDisk = false
+	}
+	cd.totalCount = max(state.TotalCount, state.MessageCount)
+	cd.lastTimestampMs = state.LastTimestampMs
+	cd.dedup.Restore(state.RecentIDs)
+	cd.mu.Unlock()
 }
 
 // clearResumeState deletes the resume state file on successful completion.
@@ -209,13 +273,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 	// replacing with the on-disk snapshot.
 	if !alreadyInitialized {
 		if resumeState := cd.loadResumeState(); resumeState != nil && len(resumeState.RecentIDs) > 0 {
-			cd.mu.Lock()
-			cd.totalCount = resumeState.MessageCount
-			cd.lastTimestampMs = resumeState.LastTimestampMs
-			cd.flushedToDisk = true
-			cd.dedup.Restore(resumeState.RecentIDs)
-			cd.mu.Unlock()
-			cd.logger.Info("[TwitchChat] Resuming from saved state", "messages", resumeState.MessageCount)
+			cd.restoreResumeState(resumeState)
+			cd.logger.Info("[TwitchChat] Resuming from saved state",
+				"fileMessages", resumeState.MessageCount, "totalMessages", cd.MessageCount())
 		}
 	}
 
@@ -253,13 +313,20 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 
 		// Inject third-party emotes (7TV, BTTV, FFZ) after final flush.
 		// Use a fresh context -- the original ctx may already be cancelled.
-		if cd.totalCount > 0 && cd.emoteResolver != nil && cd.channelID != "" {
+		// Cached resolve: parts rolled earlier in the job already resolved
+		// the emote set, so the final part reuses it. flushedToDisk gates
+		// the case where every message landed in earlier parts and the
+		// final part's file was never created.
+		cd.mu.Lock()
+		finalFileExists := cd.flushedToDisk
+		cd.mu.Unlock()
+		if cd.totalCount > 0 && finalFileExists && cd.emoteResolver != nil && cd.channelID != "" {
 			cd.logger.Info("resolving emotes for Twitch chat", "channelID", cd.channelID)
 			emoteCtx, emoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			emoteData := cd.emoteResolver.Resolve(emoteCtx, cd.channelID, cd.channelLogin)
+			emoteData := cd.resolveEmotesCached(emoteCtx)
 			emoteCancel()
 			if emoteData != nil {
-				if err := EnrichWithEmotes(cd.outputPath, emoteData); err != nil {
+				if err := EnrichWithEmotes(cd.currentOutputPath(), emoteData); err != nil {
 					cd.logger.Warn("emote injection failed", "err", err)
 				}
 			}
@@ -332,8 +399,23 @@ func (cd *ChatDownloader) addMessage(msg *TwitchChatMessage) {
 		cd.dedup.Keep(chatDedupMax)
 	}
 
+	// OffsetMs is computed HERE, under the same lock RollFile holds to swap
+	// the output file and rebase recordingStartMs — guaranteeing a message's
+	// offset base always matches the part file it gets flushed into.
+	// Computing it at parse time (outside the lock) let a message parsed
+	// just before a roll land in the NEW part with an OLD-base offset,
+	// replaying hours out of position.
+	baseMs := cd.recordingStartMs.Load()
+	if baseMs == 0 {
+		baseMs = cd.streamStartMs
+	}
+	if baseMs > 0 {
+		msg.OffsetMs = max(msg.TimestampMs-baseMs, 0)
+	}
+
 	cd.messages = append(cd.messages, *msg)
 	cd.totalCount++
+	cd.fileCount++
 	if msg.TimestampMs > cd.lastTimestampMs {
 		cd.lastTimestampMs = msg.TimestampMs
 	}

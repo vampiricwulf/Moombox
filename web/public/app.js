@@ -2371,16 +2371,20 @@ class MoomboxApp {
       ${(() => {
         if (!job.segments || job.segments.length === 0) return "";
         let segRows = "";
-        job.segments.forEach((seg, i) => {
+        job.segments.forEach((seg) => {
           const dur = seg.durationSeconds ? `${Math.round(seg.durationSeconds)}s` : "—";
           const size = seg.fileSize ? this.formatBytes(seg.fileSize) : "—";
           const res = seg.videoWidth && seg.videoHeight ? `${this.escapeHtml(seg.videoWidth)}x${this.escapeHtml(seg.videoHeight)}` : "";
+          // Part number from segmentIndex (matches the " - partN" filename),
+          // not the loop index — short-skipped spans can leave holes.
+          const partNo = (seg.segmentIndex ?? 0) + 1;
+          const chat = seg.chatFile ? " — chat" : "";
           segRows += `<div class="details-row" style="padding-left:8px;">
-            <span class="details-label">Segment ${this.escapeHtml(i)}:</span>
-            <span class="details-value">${this.escapeHtml(seg.quality)} — ${this.escapeHtml(dur)} — ${this.escapeHtml(size)}${res ? ` — ${res}` : ""}</span>
+            <span class="details-label">Part ${this.escapeHtml(partNo)}:</span>
+            <span class="details-value">${this.escapeHtml(seg.quality)} — ${this.escapeHtml(dur)} — ${this.escapeHtml(size)}${res ? ` — ${res}` : ""}${chat}</span>
           </div>`;
         });
-        return `<div class="details-section"><strong>Quality Segments:</strong>${segRows}</div>`;
+        return `<div class="details-section"><strong>Parts:</strong>${segRows}</div>`;
       })()}
 
       ${job.description ? `

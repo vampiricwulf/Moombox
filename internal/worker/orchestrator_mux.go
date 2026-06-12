@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,11 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
+
+// partBaseRe extracts the shared base from a part filename
+// ("{base} - partN.mp4"). muxSegment uses it to pin every later part to the
+// FIRST recorded part's base name — see the pinning comment there.
+var partBaseRe = regexp.MustCompile(`^(.+) - part\d+\.mp4$`)
 
 // writeDescriptionAtomic writes the description via tmp+rename so a crash
 // mid-write can't leave a partially-written .description file that the DB
@@ -30,38 +36,62 @@ func writeDescriptionAtomic(finalPath, body string) error {
 	return nil
 }
 
+// resolveFreshFilename resolves the filename template against fresh job
+// metadata (title, channel name, and start time may have been updated during
+// stream processing). Returns the resolved name (falling back to the current
+// jobCtx.Filename when the lookup or template comes up empty) and the fresh
+// job row (nil when the lookup failed). Does NOT mutate jobCtx — background
+// part-mux goroutines call this concurrently with the download loop.
+func (o *DownloadOrchestrator) resolveFreshFilename(jobCtx *JobContext) (string, *database.Job) {
+	freshJob, err := o.db.GetJob(jobCtx.Job.ID)
+	if err != nil || freshJob == nil {
+		return jobCtx.Filename, nil
+	}
+	template := jobCtx.Config.FilenameTemplate
+	var dateStr *string
+	if freshJob.StreamStartTime != "" {
+		dateStr = &freshJob.StreamStartTime
+	} else if freshJob.CreatedAt != "" {
+		dateStr = &freshJob.CreatedAt
+	}
+	templateID := freshJob.VideoID
+	if freshJob.Platform == "twitch" {
+		templateID = freshJob.ID
+	}
+	resolved := config.ResolveTemplate(template, config.TemplateVariables{
+		Title:   freshJob.Title,
+		ID:      templateID,
+		Channel: freshJob.ChannelName,
+		Date:    dateStr,
+	})
+	if resolved == "" {
+		resolved = jobCtx.Filename
+	}
+	return resolved, freshJob
+}
+
 func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobContext, result *DownloadResult) error {
 	o.logger.Info("muxing", "jobID", jobCtx.Job.ID)
 
 	// Re-resolve filename template with fresh metadata (matches TS muxFinalize behavior).
-	// Title, channel name, and start time may have been updated during stream processing.
-	if freshJob, err := o.db.GetJob(jobCtx.Job.ID); err == nil && freshJob != nil {
-		template := jobCtx.Config.FilenameTemplate
-		var dateStr *string
-		if freshJob.StreamStartTime != "" {
-			dateStr = &freshJob.StreamStartTime
-		} else if freshJob.CreatedAt != "" {
-			dateStr = &freshJob.CreatedAt
-		}
-		templateID := freshJob.VideoID
-		if freshJob.Platform == "twitch" {
-			templateID = freshJob.ID
-		}
-		resolved := config.ResolveTemplate(template, config.TemplateVariables{
-			Title:   freshJob.Title,
-			ID:      templateID,
-			Channel: freshJob.ChannelName,
-			Date:    dateStr,
-		})
-		if resolved != "" {
-			jobCtx.Filename = resolved
-		}
+	if resolved, freshJob := o.resolveFreshFilename(jobCtx); freshJob != nil {
+		jobCtx.Filename = resolved
 		// Update local job reference for notifications below
 		jobCtx.Job = freshJob
 	}
 
-	// Multi-segment path: if the job has segments (from quality splitting),
-	// the individual segment .mp4 files are already muxed. We just need to
+	// Recover parts whose mux never persisted a segment row — a daemon
+	// restart killed the background FFmpeg before AddSegment, or an
+	// in-process part mux failed and was only logged. This must run BEFORE
+	// the finalize shape is decided: without it the multi-segment path sees
+	// only the recorded rows, the single-part rename can promote a LATER
+	// part to the plain name as if it were the whole recording, and
+	// processJob's staging cleanup then deletes the unmuxed media for good.
+	// No-op when the job has no seg_N staging dirs.
+	o.muxUnrecordedSegments(ctx, jobCtx)
+
+	// Multi-segment path: if the job has segments (from part splitting),
+	// the individual part .mp4 files are already muxed. We just need to
 	// handle assets (chat, thumbnail, description) and set the job as finished.
 	if segments, err := o.db.GetSegments(jobCtx.Job.ID); err != nil {
 		o.logger.Warn("failed to check segments, falling back to single-file mux", "err", err, "jobID", jobCtx.Job.ID)
@@ -195,7 +225,7 @@ func (o *DownloadOrchestrator) muxAndFinalize(ctx context.Context, jobCtx *JobCo
 	}
 
 	// Copy assets (chat, description, thumbnail) to output directory
-	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates)
+	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, false)
 
 	finishedJob := o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
@@ -220,6 +250,13 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	}
 	filenameBase = filepath.Base(filenameBase)
 	relBase := jobCtx.Filename
+
+	// A job that ends with exactly one part (e.g. an outage muxed part 1 and
+	// the stream never came back) shouldn't keep a " - part1" suffix — single
+	// outputs use the plain template name, exactly like jobs that never split.
+	if len(segments) == 1 {
+		segments[0] = o.renameSinglePartToPlain(segments[0], outputDir, filenameBase)
+	}
 
 	// Calculate total file size and duration from segments
 	var totalSize int64
@@ -263,8 +300,27 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 		updates["output_file"] = segments[0].FilePath
 	}
 
+	// Per-part chat: when parts carry their own chat files, the staging
+	// chat.json belongs to part 1 (already enriched + copied at its mux) —
+	// the legacy whole-job copy in copyAssets would duplicate it under the
+	// plain name. The job-level chat fields follow the FIRST part only, so
+	// the dashboard player (which plays output_file = first part) replays
+	// the matching chat; later parts' chat is reachable via segment rows.
+	anyPartChat := false
+	for _, seg := range segments {
+		if seg.ChatFile != "" {
+			anyPartChat = true
+			break
+		}
+	}
+	if anyPartChat && segments[0].ChatFile != "" {
+		updates["chat_file"] = segments[0].ChatFile
+		updates["chat_filename"] = filepath.Join(filepath.Dir(relBase), filepath.Base(segments[0].ChatFile))
+		updates["chat_status"] = "finished"
+	}
+
 	// Copy assets
-	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates)
+	o.copyAssets(ctx, jobCtx, outputDir, filenameBase, relBase, updates, anyPartChat)
 
 	o.db.UpdateJobFields(jobCtx.Job.ID, updates)
 
@@ -325,12 +381,49 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 	return nil
 }
 
+// renameSinglePartToPlain drops the " - part1" suffix from a job's only part
+// — the file, its chat sibling, and the segment row all move to the plain
+// template name so a one-part outcome looks identical to a job that never
+// split. Best-effort: on any rename failure the part keeps its suffixed name
+// and the row is returned unchanged.
+func (o *DownloadOrchestrator) renameSinglePartToPlain(seg database.Segment, outputDir, filenameBase string) database.Segment {
+	plainVideo := filepath.Join(outputDir, filenameBase+".mp4")
+	if seg.FilePath == "" || seg.FilePath == plainVideo {
+		return seg
+	}
+	if err := os.Rename(seg.FilePath, plainVideo); err != nil {
+		o.logger.Warn("failed to rename single part to plain name", "err", err, "from", seg.FilePath)
+		return seg
+	}
+	renamed := seg
+	renamed.FilePath = plainVideo
+	renamed.Filename = filenameBase + ".mp4"
+
+	if seg.ChatFile != "" {
+		plainChat := filepath.Join(outputDir, filenameBase+".chat.json")
+		if err := os.Rename(seg.ChatFile, plainChat); err != nil {
+			o.logger.Warn("failed to rename single part chat to plain name", "err", err, "from", seg.ChatFile)
+		} else {
+			renamed.ChatFile = plainChat
+		}
+	}
+
+	if err := o.db.UpdateSegmentFile(renamed.ID, renamed.Filename, renamed.FilePath, renamed.ChatFile); err != nil {
+		o.logger.Warn("failed to update renamed segment row", "err", err, "segmentID", renamed.ID)
+	}
+	o.logger.Info("single-part job renamed to plain output name",
+		"jobID", seg.JobID, "file", renamed.Filename)
+	return renamed
+}
+
 // copyAssets copies chat, description, and thumbnail files to the output directory.
-// Updates the provided map with file paths for DB storage.
-func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContext, outputDir, filenameBase, relBase string, updates map[string]any) {
+// Updates the provided map with file paths for DB storage. skipChat suppresses
+// the whole-job chat copy for jobs whose parts carry per-part chat files (the
+// staging chat.json is the last part's chat, already handled at part-mux time).
+func (o *DownloadOrchestrator) copyAssets(ctx context.Context, jobCtx *JobContext, outputDir, filenameBase, relBase string, updates map[string]any, skipChat bool) {
 	// Copy chat file to output directory
 	chatSrc := filepath.Join(jobCtx.StagingDir, "chat.json")
-	if _, err := os.Stat(chatSrc); err == nil {
+	if _, err := os.Stat(chatSrc); err == nil && !skipChat {
 		chatBaseName := filenameBase + ".chat.json"
 		chatDst := filepath.Join(outputDir, chatBaseName)
 		if err := copyFile(chatSrc, chatDst); err != nil {
@@ -501,8 +594,9 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 	)
 }
 
-// muxSegment muxes a single quality segment and persists it to the database.
-// Called during quality splits to finalize the current segment before starting a new one.
+// muxSegment muxes a single part and persists it to the database. Called at
+// part boundaries (quality split, gap split) to finalize the current capture
+// before starting a new one, and by recovery for parts that never muxed.
 func (o *DownloadOrchestrator) muxSegment(
 	ctx context.Context,
 	jobCtx *JobContext,
@@ -511,15 +605,27 @@ func (o *DownloadOrchestrator) muxSegment(
 	quality QualityInfo,
 	result *DownloadResult,
 ) (*database.Segment, error) {
-	// Build segment filename: {unixStart}_{unixEnd}_{qualityLabel}.mp4
-	segFilename := fmt.Sprintf("%d_%d_%s.mp4", unixStart, unixEnd, quality.Label)
-
-	// Re-resolve output directory using the same template logic as muxAndFinalize
-	filenameBase := jobCtx.Filename
+	// Part files carry the job's resolved name plus a 1-based part number —
+	// "{name} - partN.mp4" — so they group and sort beside the job's other
+	// assets. segIdx is stable across restarts and recovery (derived from
+	// staging dir indices), which makes the name idempotent; short-skipped
+	// segments can leave cosmetic holes in the numbering.
+	filenameBase, _ := o.resolveFreshFilename(jobCtx)
+	// Pin the base to the first recorded part's name: the template resolves
+	// against live metadata, and a mid-job retitle (a restart re-processes
+	// stream info) would otherwise scatter one recording's parts across
+	// different names.
+	if segs, err := o.db.GetSegments(jobCtx.Job.ID); err == nil && len(segs) > 0 {
+		if m := partBaseRe.FindStringSubmatch(segs[0].Filename); m != nil {
+			filenameBase = filepath.Join(filepath.Dir(filenameBase), m[1])
+		}
+	}
 	outputDir := filepath.Join(jobCtx.OutputDir, filepath.Dir(filenameBase))
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create segment output dir: %w", err)
 	}
+	partBase := fmt.Sprintf("%s - part%d", filepath.Base(filenameBase), segIdx+1)
+	segFilename := partBase + ".mp4"
 
 	outputPath := filepath.Join(outputDir, segFilename)
 
@@ -579,6 +685,19 @@ func (o *DownloadOrchestrator) muxSegment(
 			seg.VideoFps = &probeData.Fps
 		}
 		seg.DurationSeconds = probeData.DurationSec
+	}
+
+	// Per-part chat (Twitch): the rolled chat file for this capture span is
+	// copied beside the part video and recorded on the segment row.
+	if result.ChatPath != "" {
+		if _, statErr := os.Stat(result.ChatPath); statErr == nil {
+			chatDst := filepath.Join(outputDir, partBase+".chat.json")
+			if copyErr := copyFile(result.ChatPath, chatDst); copyErr != nil {
+				o.logger.Warn("failed to copy part chat file", "err", copyErr, "segment", segIdx)
+			} else {
+				seg.ChatFile = chatDst
+			}
+		}
 	}
 
 	// Persist to database
@@ -656,20 +775,23 @@ func discoverStagingMedia(dir string) *DownloadResult {
 	return result
 }
 
-// muxUnrecordedSegments muxes any quality-split staging segment whose index
-// has no row in the segments table. Times and quality are derived post-hoc:
-// the media file's mtime approximates the segment end, and an ffprobe of the
-// raw stream supplies dimensions and duration. Best-effort — individual
-// failures are logged and skipped so the rest of the recovery proceeds.
-func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx *JobContext) {
-	entries, err := os.ReadDir(jobCtx.StagingDir)
-	if err != nil {
-		return
-	}
+// stagedSeg is one seg_N staging dir mapped to its part index.
+type stagedSeg struct {
+	idx int
+	dir string
+}
 
-	type stagedSeg struct {
-		idx int
-		dir string
+// stagedSegDirs scans stagingDir for seg_N part dirs and returns them sorted
+// by index. This is THE mapping between the staging layout and part indices
+// — startup resume (discoverResumeSegment) and finalize recovery
+// (muxUnrecordedSegments) both build on it; if the two ever disagreed, a
+// resumed job could append into a dir that recovery attributes to an
+// already-muxed part. The staging ROOT is part index 0 unless seg_0 exists
+// (a short-skipped root span); that rule lives at the call sites.
+func stagedSegDirs(stagingDir string) []stagedSeg {
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return nil
 	}
 	var segDirs []stagedSeg
 	for _, e := range entries {
@@ -680,12 +802,22 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 		if convErr != nil || n < 0 {
 			continue
 		}
-		segDirs = append(segDirs, stagedSeg{idx: n, dir: filepath.Join(jobCtx.StagingDir, e.Name())})
-	}
-	if len(segDirs) == 0 {
-		return // no quality splits — nothing to recover
+		segDirs = append(segDirs, stagedSeg{idx: n, dir: filepath.Join(stagingDir, e.Name())})
 	}
 	sort.Slice(segDirs, func(i, j int) bool { return segDirs[i].idx < segDirs[j].idx })
+	return segDirs
+}
+
+// muxUnrecordedSegments muxes any part staging dir whose index has no row in
+// the segments table. Times and quality are derived post-hoc: the media
+// file's mtime approximates the segment end, and an ffprobe of the raw
+// stream supplies dimensions and duration. Best-effort — individual
+// failures are logged and skipped so the rest of the recovery proceeds.
+func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx *JobContext) {
+	segDirs := stagedSegDirs(jobCtx.StagingDir)
+	if len(segDirs) == 0 {
+		return // no part splits — nothing to recover
+	}
 
 	recorded := map[int]bool{}
 	segments, err := o.db.GetSegments(jobCtx.Job.ID)
@@ -705,6 +837,19 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 		segDirs = append([]stagedSeg{{idx: 0, dir: jobCtx.StagingDir}}, segDirs...)
 	}
 
+	// Per-part chat detection: when ANY seg_N dir carries its own chat.json,
+	// the per-part rolling scheme was active for this job, and the root
+	// chat.json (if present) is part 0's closed chat rather than a legacy
+	// whole-job file. Without any seg-dir chat the root file stays the
+	// whole-job chat handled by finalize's copyAssets.
+	perPartChat := false
+	for _, sd := range segDirs {
+		if sd.dir != jobCtx.StagingDir && fileExists(filepath.Join(sd.dir, "chat.json")) {
+			perPartChat = true
+			break
+		}
+	}
+
 	for _, sd := range segDirs {
 		if recorded[sd.idx] {
 			continue
@@ -712,6 +857,9 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 		media := discoverStagingMedia(sd.dir)
 		if media == nil {
 			continue
+		}
+		if chatPath := filepath.Join(sd.dir, "chat.json"); perPartChat && fileExists(chatPath) {
+			media.ChatPath = chatPath
 		}
 		mediaPath := media.VideoPath
 		if mediaPath == "" {

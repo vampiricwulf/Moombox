@@ -402,21 +402,36 @@ func (db *Database) getTrimsUnlocked(jobID string) ([]TrimRecord, error) {
 	return trims, nil
 }
 
-// AddSegment adds a segment record for a multi-segment quality-split job.
+// AddSegment adds a part record for a multi-part (quality/gap split) job.
 func (db *Database) AddSegment(seg *Segment) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	result, err := db.db.ExecContext(db.getCtx(), `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	result, err := db.db.ExecContext(db.getCtx(), `INSERT INTO segments (job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		seg.JobID, seg.SegmentIndex, seg.UnixStart, seg.UnixEnd, seg.Quality, seg.Filename,
-		seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds)
+		seg.FilePath, seg.FileSize, seg.VideoWidth, seg.VideoHeight, seg.VideoFps, seg.DurationSeconds,
+		seg.ChatFile)
 	if err != nil {
 		return err
 	}
 	id, _ := result.LastInsertId()
 	seg.ID = int(id)
 	return nil
+}
+
+// UpdateSegmentFile updates a segment row's file identity (filename,
+// file_path, chat_file). Used by the single-part rename at finalize, where
+// "{name} - part1" collapses to the plain "{name}" when a job ends with
+// exactly one part.
+func (db *Database) UpdateSegmentFile(id int, filename, filePath, chatFile string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.db.ExecContext(db.getCtx(),
+		`UPDATE segments SET filename = ?, file_path = ?, chat_file = ? WHERE id = ?`,
+		filename, filePath, chatFile, id)
+	return err
 }
 
 // GetSegments returns all segments for a given job, ordered by segment_index.
@@ -428,7 +443,7 @@ func (db *Database) GetSegments(jobID string) ([]Segment, error) {
 
 func (db *Database) getSegments(jobID string) ([]Segment, error) {
 	rows, err := db.db.QueryContext(db.getCtx(),
-		`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds
+		`SELECT id, job_id, segment_index, unix_start, unix_end, quality, filename, file_path, file_size, video_width, video_height, video_fps, duration_seconds, chat_file
 		FROM segments WHERE job_id = ? ORDER BY segment_index`, jobID)
 	if err != nil {
 		return nil, err
@@ -440,7 +455,7 @@ func (db *Database) getSegments(jobID string) ([]Segment, error) {
 		var s Segment
 		if err := rows.Scan(&s.ID, &s.JobID, &s.SegmentIndex, &s.UnixStart, &s.UnixEnd,
 			&s.Quality, &s.Filename, &s.FilePath, &s.FileSize,
-			&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds); err != nil {
+			&s.VideoWidth, &s.VideoHeight, &s.VideoFps, &s.DurationSeconds, &s.ChatFile); err != nil {
 			if db.logger != nil {
 				db.logger.Warn("getSegments: scan error", "jobID", jobID, "err", err)
 			}

@@ -120,9 +120,10 @@ type JobStats struct {
 	TotalChatMessages int64 `json:"totalChatMessages"`
 }
 
-// Segment represents a quality-split segment of a multi-segment download.
-// When stream quality changes mid-download, each quality period is muxed
-// as a separate segment file.
+// Segment represents one part of a multi-part download. Parts are produced
+// when stream quality changes mid-download (quality split) or, for Twitch
+// live, when segments expired unrecoverably from the CDN (gap split) — each
+// captured span is muxed as its own internally-gapless file.
 type Segment struct {
 	ID              int     `json:"id,omitempty"`
 	JobID           string  `json:"jobId,omitempty"`
@@ -137,6 +138,10 @@ type Segment struct {
 	VideoHeight     *int    `json:"videoHeight,omitempty"`
 	VideoFps        *int    `json:"videoFps,omitempty"`
 	DurationSeconds float64 `json:"durationSeconds,omitempty"`
+	// ChatFile is the absolute path of this part's chat JSON ("" when the
+	// part has no chat — recorded before per-part chat existed, chat
+	// disabled, or no messages during the part). Mirrors Job.ChatFile.
+	ChatFile string `json:"chatFile,omitempty"`
 }
 
 // ClientToken represents a persistent client token for remote auth across restarts.
