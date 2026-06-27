@@ -1717,6 +1717,17 @@ class MoomboxApp {
     // fall back to the remote URL.
     const thumbImg = card.querySelector(".thumb img");
     if (thumbImg) {
+      // When a thumbnailFile first appears server-side (fetched after job start,
+      // or produced during muxing), clear a stale local-URL failure so the
+      // freshly-written file gets one fresh attempt instead of staying pinned
+      // to the fallback. The transition fires once, so a still-404ing file
+      // re-blocks without reopening the original flicker loop.
+      const hasThumbFile = job.thumbnailFile ? "1" : "0";
+      if (hasThumbFile === "1" && thumbImg.dataset.hadThumbFile !== "1") {
+        delete thumbImg.dataset.localFailed;
+      }
+      thumbImg.dataset.hadThumbFile = hasThumbFile;
+
       const desiredSrc = job.thumbnailFile
         ? `/api/jobs/${encodeURIComponent(job.id)}/thumbnail`
         : (job.thumbnailUrl || "");
