@@ -36,20 +36,21 @@ const maxCompressBodySize = 1 << 20 // 1MB
 
 // Server is the Moombox HTTP server.
 type Server struct {
-	configStore   *config.Store // Authoritative cfg + mutex (DECISIONS #8)
-	cfg           *config.MoomboxConfig
-	router        chi.Router
-	server        *http.Server
-	ws            *WebSocketHub
-	auth          *AuthService
-	shutdownOnce  sync.Once        // Ensures shutdown logic runs only once
-	internalToken string           // Random secret for same-process CSRF bypass
-	commit        string           // Build commit hash for cache busting (e.g. "abc1234")
-	loginHTML     []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
-	wsHandler     http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
-	OpenBrowser   bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
-	ActualPort    int              // Actual bound port after Start (may differ from cfg if probed)
-	draining      atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
+	configStore    *config.Store // Authoritative cfg + mutex (DECISIONS #8)
+	cfg            *config.MoomboxConfig
+	router         chi.Router
+	server         *http.Server
+	redirectServer atomic.Pointer[http.Server] // cross-scheme redirect server, for graceful shutdown
+	ws             *WebSocketHub
+	auth           *AuthService
+	shutdownOnce   sync.Once        // Ensures shutdown logic runs only once
+	internalToken  string           // Random secret for same-process CSRF bypass
+	commit         string           // Build commit hash for cache busting (e.g. "abc1234")
+	loginHTML      []byte           // Cached login.html for inline serving (matches TS serveLoginPage)
+	wsHandler      http.HandlerFunc // WebSocket upgrade handler (intercepts upgrades on any path)
+	OpenBrowser    bool             // Open browser to dashboard URL on start (matches TS openBrowser option)
+	ActualPort     int              // Actual bound port after Start (may differ from cfg if probed)
+	draining       atomic.Bool      // Set by StartDrain to make new requests 503 (audit cmd-moombox C-main:165-166)
 
 	// ClientTokenCheck validates a persistent client token and returns a fresh session token.
 	// Called by AuthMiddleware when the session cookie is missing/invalid.
@@ -428,10 +429,15 @@ func (s *Server) Start(ctx context.Context) error {
 // doShutdown performs the actual shutdown logic, guarded by sync.Once.
 func (s *Server) doShutdown() {
 	s.shutdownOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		if s.server != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
 			s.server.Shutdown(ctx)
+		}
+		// Drain the cross-scheme redirect server too, rather than letting it
+		// drop in-flight redirects when the shared listener closes.
+		if rs := s.redirectServer.Load(); rs != nil {
+			rs.Shutdown(ctx)
 		}
 		s.ws.Close()
 		s.logger.Info("web server stopped")

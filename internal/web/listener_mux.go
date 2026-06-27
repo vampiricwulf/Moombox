@@ -233,6 +233,9 @@ func (s *Server) serveSchemeRedirect(ln net.Listener, targetScheme string) {
 		IdleTimeout:       30 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
+	// Publish for doShutdown so it can drain in-flight redirects gracefully;
+	// the shared-listener close still backstops if shutdown races the Store.
+	s.redirectServer.Store(srv)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		s.logger.Debug("scheme-redirect listener closed", "err", err)
 	}

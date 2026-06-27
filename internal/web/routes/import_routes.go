@@ -39,11 +39,14 @@ func truncateUTF8(s string, maxBytes int) string {
 
 // decodeImportHeader percent-decodes an import metadata header value,
 // falling back to the raw value when it isn't valid percent-encoding.
+// Uses PathUnescape (not QueryUnescape) so a literal '+' is preserved rather
+// than turned into a space — the header is not form-urlencoded, and the
+// frontend sends encodeURIComponent output (spaces as %20, '+' as %2B).
 func decodeImportHeader(v string) string {
 	if v == "" || !strings.Contains(v, "%") {
 		return v
 	}
-	if decoded, err := url.QueryUnescape(v); err == nil {
+	if decoded, err := url.PathUnescape(v); err == nil {
 		return decoded
 	}
 	return v
