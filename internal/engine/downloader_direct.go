@@ -5,8 +5,33 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
+
+// validateDownloadedMP4 guards the whole-file VOD path against YouTube handing
+// back a single moov-less media fragment (the post-live "manifestless" case,
+// where the bare format URL serves one DASH segment) or a non-MP4 error body.
+// A complete MP4/M4A always begins with an 'ftyp' box; a bare DASH fragment
+// begins with 'styp'/'moof'/'sidx'/'mdat', and an HTML/JSON error body matches
+// none. Without this guard a corrupt video.mp4 flowed straight into FFmpeg and
+// failed with "moov atom not found", and the job retried the bad fetch forever.
+func validateDownloadedMP4(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("validate download: %w", err)
+	}
+	defer f.Close()
+	// Need at least a full box header: 4-byte size + 4-byte type.
+	hdr := make([]byte, 8)
+	if _, err := io.ReadFull(f, hdr); err != nil {
+		return fmt.Errorf("validate download: file too small or unreadable: %w", err)
+	}
+	if string(hdr[4:8]) != "ftyp" {
+		return fmt.Errorf("downloaded file is not a complete MP4 (leading box %q, expected ftyp) — likely a post-live fragment or error response", string(hdr[4:8]))
+	}
+	return nil
+}
 
 // runDirectDownload downloads a complete file from a direct URL (for VODs).
 // Uses 5MB chunked Range requests with per-chunk retry and percentage progress.

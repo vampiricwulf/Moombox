@@ -202,22 +202,26 @@ func DownloadManifestlessDash(
 	}
 
 	// Orchestrator-provided start sequences (quality recovery / split path);
-	// fall back to DB persisted last seq for crash recovery.
+	// fall back to DB persisted last seq for crash recovery of a LIVE capture.
+	// dbResumeSeq deliberately returns 0 for a finished post-live/VOD stream —
+	// manifestless segments carry their ftyp+moov init only at sq=0, so a VOD
+	// must start there; an interrupted VOD download resumes via the engine's
+	// .resume.json sidecar, not the (possibly stale) job seq column.
 	videoStartSeq := 0
 	forceVideoSeq := false
 	if job.VideoStartSeq > 0 {
 		videoStartSeq = job.VideoStartSeq
 		forceVideoSeq = true
-	} else if job.Job.LastVideoSeq != nil && *job.Job.LastVideoSeq > 0 {
-		videoStartSeq = *job.Job.LastVideoSeq
+	} else {
+		videoStartSeq = dbResumeSeq(videoInfo.StreamStatus, job.Job.LastVideoSeq)
 	}
 	audioStartSeq := 0
 	forceAudioSeq := false
 	if job.AudioStartSeq > 0 {
 		audioStartSeq = job.AudioStartSeq
 		forceAudioSeq = true
-	} else if job.Job.LastAudioSeq != nil && *job.Job.LastAudioSeq > 0 {
-		audioStartSeq = *job.Job.LastAudioSeq
+	} else {
+		audioStartSeq = dbResumeSeq(videoInfo.StreamStatus, job.Job.LastAudioSeq)
 	}
 
 	if videoStream != nil {
@@ -292,6 +296,23 @@ func DownloadManifestlessDash(
 	}
 
 	return result, nil
+}
+
+// dbResumeSeq returns the DB-persisted last sequence to resume a crashed LIVE
+// manifestless capture from, or 0 when none applies. It returns 0 for any
+// non-live stream (post-live / VOD): manifestless segments carry their
+// ftyp+moov init only at sq=0, so a finished stream must start there rather
+// than seed a stale live seq left over from an earlier live recording of the
+// same job. Interrupted VOD downloads resume via the engine's .resume.json
+// sidecar instead, which is keyed to the actual bytes on disk.
+func dbResumeSeq(streamStatus youtube.StreamStatus, lastSeq *int) int {
+	if streamStatus != youtube.StreamLive {
+		return 0
+	}
+	if lastSeq != nil && *lastSeq > 0 {
+		return *lastSeq
+	}
+	return 0
 }
 
 func itagOf(s *DashStreamInfo) int {

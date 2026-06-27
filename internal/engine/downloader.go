@@ -467,7 +467,16 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 
 	// Run download loop
 	if d.opts.IsDirectURL {
-		return d.runDirectDownload(ctx)
+		if err := d.runDirectDownload(ctx); err != nil {
+			return err
+		}
+		// Don't validate a partial file from a user/shutdown cancel — the
+		// caller preserves staging for resume, and a truncated head would
+		// false-positive. Only gate a download that ran to completion.
+		if d.isCancelled() || ctx.Err() != nil {
+			return d.cancelErr(ctx)
+		}
+		return validateDownloadedMP4(d.opts.OutputFile)
 	}
 	if d.opts.IsHls {
 		return d.runHlsLoop(ctx)

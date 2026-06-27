@@ -237,49 +237,23 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 
 	// Select download strategy (A1: pass cipher/pot to strategies)
 	var result *DownloadResult
-	var err error
 
-	// Strategy selection (matches TS):
-	// - not_a_stream or VOD without DASH -> direct format download
-	// - post_live/VOD WITH DASH -> use DASH segments (TS comment: format URLs may only serve individual segments)
-	useDirectVod := isVod && (videoInfo.StreamStatus == youtube.StreamNotAStream || videoInfo.DashManifestURL == "")
+	strategy, err := selectDownloadStrategy(isVod, videoInfo)
+	if err != nil {
+		return err
+	}
 	o.logger.Debug("download strategy selection",
 		"isVod", isVod,
 		"streamStatus", videoInfo.StreamStatus,
 		"hasDash", videoInfo.DashManifestURL != "",
 		"hasHls", videoInfo.HlsManifestURL != "",
 		"formatCount", len(videoInfo.Formats),
-		"useDirectVod", useDirectVod)
+		"strategy", strategy.Kind())
 	deps := &StrategyDeps{
 		CipherSolver:       o.cipherSolver,
 		RoutedCipherSolver: o.routedCipher,
 		PotProvider:        o.potProvider,
 		IsOnline:           connIsOnline(o.conn),
-	}
-	var strategy DownloadStrategy
-	switch {
-	case useDirectVod && len(videoInfo.Formats) > 0:
-		strategy = VodStrategy
-	case videoInfo.DashManifestURL != "":
-		strategy = DashStrategy
-	case !isVod && HasManifestlessDashFormats(videoInfo.Formats):
-		// Manifest-free DASH: live stream where YouTube withheld
-		// dashManifestUrl from cookied clients (yt-dlp issue #15274
-		// experiment) but still shipped split video+audio adaptive
-		// formats with direct URLs in streamingData.adaptiveFormats[].
-		// We can fetch each itag's URL with `&sq=N` from broadcast
-		// start, same shape as the manifest-driven DASH downloader.
-		// Preempts HLS because DASH gives us per-itag selection,
-		// separate audio (cleaner mux), and live-from-start segment
-		// addressability that HLS in YouTube live cannot do.
-		strategy = ManifestlessDashStrategy
-	case videoInfo.HlsManifestURL != "":
-		strategy = HlsStrategy
-	case len(videoInfo.Formats) > 0:
-		// Fallback: no DASH/HLS manifest but formats exist — download directly.
-		strategy = VodStrategy
-	default:
-		return fmt.Errorf("no download strategy available")
 	}
 
 	// Seed the continuation position from the DB sequences when restart

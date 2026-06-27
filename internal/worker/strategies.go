@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -57,6 +58,50 @@ type StrategyDeps struct {
 type DownloadStrategy interface {
 	Download(ctx context.Context, job *JobContext, info *youtube.VideoInfo, deps *StrategyDeps) (*DownloadResult, error)
 	Kind() string
+}
+
+// selectDownloadStrategy picks the download strategy from the resolved stream
+// shape. Pure (no I/O) so the routing rules stay unit-testable. Returns an
+// error only when no strategy can handle the available formats.
+func selectDownloadStrategy(isVod bool, info *youtube.VideoInfo) (DownloadStrategy, error) {
+	// not_a_stream, or a VOD without a DASH manifest -> direct whole-file fetch.
+	useDirectVod := isVod && (info.StreamStatus == youtube.StreamNotAStream || info.DashManifestURL == "")
+	switch {
+	// Post-live "manifestless DASH": a was-live stream that just ended is
+	// classified StreamPostLive (and folded into isVod), but YouTube serves it
+	// with segment-only adaptive URLs (&sq=N) and no dashManifestUrl. A
+	// whole-file VodStrategy GET of those returns a single moov-less fragment
+	// ("moov atom not found"); the segment-addressed manifestless path — the
+	// same one the live downloader uses — fetches sq=0's ftyp+moov init and
+	// terminates cleanly once the already-ended stream's segments are
+	// exhausted (CheckStreamStatus reports a post-live stream as ended).
+	// Scoped to StreamPostLive specifically so a genuine finished StreamVOD —
+	// whose adaptive URLs DO serve whole files — keeps using VodStrategy.
+	case isVod && info.StreamStatus == youtube.StreamPostLive &&
+		info.DashManifestURL == "" && HasManifestlessDashFormats(info.Formats):
+		return ManifestlessDashStrategy, nil
+	case useDirectVod && len(info.Formats) > 0:
+		return VodStrategy, nil
+	case info.DashManifestURL != "":
+		return DashStrategy, nil
+	case !isVod && HasManifestlessDashFormats(info.Formats):
+		// Manifest-free DASH: live stream where YouTube withheld
+		// dashManifestUrl from cookied clients (yt-dlp issue #15274
+		// experiment) but still shipped split video+audio adaptive formats
+		// with direct URLs in streamingData.adaptiveFormats[]. Fetch each
+		// itag's URL with `&sq=N` from broadcast start, same shape as the
+		// manifest-driven DASH downloader. Preempts HLS because DASH gives
+		// per-itag selection, separate audio (cleaner mux), and
+		// live-from-start segment addressability that HLS can't do.
+		return ManifestlessDashStrategy, nil
+	case info.HlsManifestURL != "":
+		return HlsStrategy, nil
+	case len(info.Formats) > 0:
+		// Fallback: no DASH/HLS manifest but formats exist — download directly.
+		return VodStrategy, nil
+	default:
+		return nil, fmt.Errorf("no download strategy available")
+	}
 }
 
 // vodStrategyT / dashStrategyT / hlsStrategyT — stateless adapters
