@@ -334,6 +334,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			}
 
 			// Wait and retry
+			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+				"progress": activityMessage(engine.ActivityVerifyingEnd, timeSinceLastSeg),
+				"speed":    "",
+				"eta":      "",
+			})
 			utils.Sleep(ctx, streamEndVerifyInterval)
 			continue
 		}
@@ -358,7 +363,9 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				"check", checks, "max", maxConsecutiveLiveChecks, "jobID", jobCtx.Job.ID)
 
 			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-				"progress": "Waiting for stream to end...",
+				"progress": activityMessage(engine.ActivityVerifyingEnd, timeSinceLastSeg),
+				"speed":    "",
+				"eta":      "",
 			})
 
 			utils.Sleep(ctx, streamEndVerifyInterval)
@@ -380,6 +387,11 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			if refreshErr != nil {
 				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
+				o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
+					"progress": activityMessage(engine.ActivityVerifyingEnd, timeSinceLastSeg),
+					"speed":    "",
+					"eta":      "",
+				})
 				utils.Sleep(ctx, streamEndVerifyInterval)
 				continue
 			}
