@@ -36,6 +36,14 @@ func TestValidateDownloadedMP4(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			// YouTube commonly delivers VP9/Opus VOD formats in WebM
+			// containers, which begin with the EBML magic, not an ftyp box.
+			// The guard must NOT reject these valid downloads.
+			name:    "webm (EBML) complete file passes",
+			data:    append([]byte{0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00, 0x00, 0x00}, []byte("webm-body-data")...),
+			wantErr: false,
+		},
+		{
 			// The post-live failure: a bare media fragment (no ftyp/moov init).
 			name:    "moof-led fragment is rejected",
 			data:    append(box("styp", []byte("msdh")), box("moof", []byte("fragment-data"))...),

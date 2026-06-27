@@ -9,13 +9,14 @@ import (
 	"time"
 )
 
-// validateDownloadedMP4 guards the whole-file VOD path against YouTube handing
-// back a single moov-less media fragment (the post-live "manifestless" case,
-// where the bare format URL serves one DASH segment) or a non-MP4 error body.
-// A complete MP4/M4A always begins with an 'ftyp' box; a bare DASH fragment
-// begins with 'styp'/'moof'/'sidx'/'mdat', and an HTML/JSON error body matches
-// none. Without this guard a corrupt video.mp4 flowed straight into FFmpeg and
-// failed with "moov atom not found", and the job retried the bad fetch forever.
+// validateDownloadedMP4 guards the whole-file VOD direct-download path against
+// two failure shapes: a bare fragmented-MP4 media segment with no ftyp/moov
+// init (the post-live "manifestless" case, where the bare format URL serves a
+// single &sq segment) and an HTML/JSON error body saved as media. It does NOT
+// require a specific container: a complete file may be MP4/M4A (leading 'ftyp'
+// box) OR WebM (VP9/Opus, leading EBML magic 0x1A45DFA3) — both are valid and
+// must pass. Only the known-bad shapes are rejected, so a corrupt download
+// fails cleanly before FFmpeg instead of producing "moov atom not found".
 func validateDownloadedMP4(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -27,8 +28,18 @@ func validateDownloadedMP4(path string) error {
 	if _, err := io.ReadFull(f, hdr); err != nil {
 		return fmt.Errorf("validate download: file too small or unreadable: %w", err)
 	}
-	if string(hdr[4:8]) != "ftyp" {
-		return fmt.Errorf("downloaded file is not a complete MP4 (leading box %q, expected ftyp) — likely a post-live fragment or error response", string(hdr[4:8]))
+	// An HTML/JSON error body (e.g. a 403 page) saved as media.
+	switch hdr[0] {
+	case '<', '{', '[':
+		return fmt.Errorf("downloaded file looks like a text/error response (leading byte %q), not media", string(hdr[0:1]))
+	}
+	// A bare fragmented-MP4 media segment lacking the ftyp/moov init — the
+	// post-live single-segment failure. A complete MP4/M4A leads with 'ftyp'
+	// and a complete WebM with the EBML magic; only a fragment leads with one
+	// of these boxes.
+	switch string(hdr[4:8]) {
+	case "styp", "moof", "sidx", "mdat":
+		return fmt.Errorf("downloaded file is a bare media fragment (leading box %q, no ftyp/moov init) — likely a post-live segment", string(hdr[4:8]))
 	}
 	return nil
 }
