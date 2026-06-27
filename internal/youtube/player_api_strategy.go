@@ -344,7 +344,7 @@ func (p *PlayerAPI) extractSTS(ctx context.Context, playerURL string) int {
 }
 
 func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client constants.YouTubeClientConfig, ytcfg *YtcfgData, sts int) (*VideoInfo, error) {
-	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.apiKey)
+	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 	headers := p.auth.GenerateAPIHeaders(client, ytcfg)
 
 	// Build client context with optional visitorData
@@ -395,7 +395,7 @@ func (p *PlayerAPI) fetchWithClient(ctx context.Context, videoID string, client 
 }
 
 func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visitorData string) (*VideoInfo, error) {
-	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.apiKey)
+	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 
 	clientCtx := make(map[string]any, len(constants.AndroidVRClient.Context))
 	maps.Copy(clientCtx, constants.AndroidVRClient.Context)
@@ -437,7 +437,7 @@ func (p *PlayerAPI) fetchWithAndroidVR(ctx context.Context, videoID string, visi
 }
 
 func (p *PlayerAPI) fetchWithEmbedded(ctx context.Context, videoID string, ytcfg *YtcfgData, sts int) (*VideoInfo, error) {
-	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.apiKey)
+	apiURL := fmt.Sprintf("%s/player?key=%s", constants.YouTubeURLs.API, p.APIKey())
 
 	// Fetch embed page for encryptedHostFlags
 	embedResult, err := FetchEmbedPage(ctx, videoID)

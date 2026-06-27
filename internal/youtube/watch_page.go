@@ -159,12 +159,18 @@ func extractChatContinuation(html string) (string, bool, error) {
 // slashes as \/ inside its JSON blobs) and prefixes the YouTube base URL for
 // absolute-path URLs. Keeps cipher compilation robust against literal
 // backslashes that can trip some parsers downstream.
+//
+// The final Clone matters: raw is a regexp submatch of the full ~5 MB watch
+// page, and when the URL needs neither un-escaping nor a base prefix,
+// ReplaceAll returns it unchanged — an alias that would pin the whole page
+// in memory for as long as the PlayerURL lives (job state, solver caches).
+// Same discipline as the VisitorData Clone below.
 func normalizePlayerJSURL(raw string) string {
 	u := strings.ReplaceAll(raw, `\/`, "/")
 	if strings.HasPrefix(u, "/") {
-		u = constants.YouTubeURLs.Base + u
+		return constants.YouTubeURLs.Base + u
 	}
-	return u
+	return strings.Clone(u)
 }
 
 func extractYtcfgAndPlayerResponse(html string) (*YtcfgData, map[string]any) {

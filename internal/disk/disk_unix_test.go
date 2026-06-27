@@ -37,11 +37,18 @@ func TestGetDiskSpaceUnix(t *testing.T) {
 }
 
 func TestGetDiskSpaceUnixNonexistentPath(t *testing.T) {
-	// filepath.Abs succeeds on nonexistent paths (it just resolves
-	// relative to cwd); the error comes from syscall.Statfs returning
-	// ENOENT. So this test exercises the Statfs error path, not Abs.
-	_, err := GetDiskSpace("/this/path/does/not/exist/anywhere")
-	if err == nil {
-		t.Error("expected error for nonexistent path, got nil")
+	// Mirrors the Windows invariant (TestGetDiskSpaceNonExistentPathStillResolvesVolume):
+	// the path argument doesn't need to exist on disk — Statfs walks up to the
+	// nearest existing ancestor, so a not-yet-created output directory still
+	// reports the volume it would land on instead of killing disk monitoring.
+	ds, err := GetDiskSpace("/this/path/does/not/exist/anywhere")
+	if err != nil {
+		t.Fatalf("expected nearest-ancestor fallback, got error: %v", err)
+	}
+	if ds.Total == 0 {
+		t.Error("Total bytes is 0; expected > 0 from ancestor volume")
+	}
+	if ds.Free > ds.Total {
+		t.Errorf("Free (%d) > Total (%d), invariant violated", ds.Free, ds.Total)
 	}
 }

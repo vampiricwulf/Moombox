@@ -117,7 +117,8 @@ func (s *Service) Init(ctx context.Context) {
 	s.vdMu.RLock()
 	haveVD := s.visitorData != ""
 	s.vdMu.RUnlock()
-	haveKey := s.PlayerAPI.apiKey != "" && s.PlayerAPI.apiKey != constants.DefaultAPIKey
+	currentKey := s.PlayerAPI.APIKey()
+	haveKey := currentKey != "" && currentKey != constants.DefaultAPIKey
 	if haveVD && haveKey {
 		s.lastInitAt = time.Now()
 		s.initSucceeded = true
@@ -178,7 +179,7 @@ func (s *Service) Init(ctx context.Context) {
 
 // GetApiKey returns the current Innertube API key.
 func (s *Service) GetApiKey() string {
-	return s.PlayerAPI.apiKey
+	return s.PlayerAPI.APIKey()
 }
 
 // GetVideoInfo fetches video info, using authentication if cookies are available.

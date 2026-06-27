@@ -64,12 +64,23 @@ func RegisterEncoding(vm *goja.Runtime) error {
 				buf.push(c);
 			} else if (c < 0x800) {
 				buf.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
-			} else if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
-				var c2 = str.charCodeAt(++i);
+			} else if (c >= 0xd800 && c <= 0xdbff) {
+				// Lead surrogate: pair with a trail surrogate when present;
+				// otherwise emit U+FFFD (EF BF BD) per WHATWG and do NOT
+				// consume the next code unit (the old shape swallowed it,
+				// silently dropping a character from the output).
+				var c2 = i + 1 < str.length ? str.charCodeAt(i + 1) : 0;
 				if (c2 >= 0xdc00 && c2 <= 0xdfff) {
+					i++;
 					var cp = ((c - 0xd800) << 10) + (c2 - 0xdc00) + 0x10000;
 					buf.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+				} else {
+					buf.push(0xef, 0xbf, 0xbd);
 				}
+			} else if (c >= 0xdc00 && c <= 0xdfff) {
+				// Lone trail surrogate → U+FFFD (browser parity; the old
+				// shape CESU-encoded the surrogate itself).
+				buf.push(0xef, 0xbf, 0xbd);
 			} else {
 				buf.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
 			}

@@ -175,17 +175,17 @@ type UpdatesConfig struct {
 // transient allocation spike doesn't OOM-abort the sidecar.
 type MemoryConfig struct {
 	// GoSoftLimitMB is the soft memory limit for the Moombox process.
-	// 0 disables (Go uses its default unbounded behaviour). Default 100.
+	// 0 disables (Go uses its default unbounded behaviour). Default 256.
 	GoSoftLimitMB int `toml:"go_soft_limit_mb" json:"go_soft_limit_mb"`
 	// SidecarSoftLimitMB is the RSS threshold at which Moombox tells the
 	// sidecar to run global.gc(). 0 disables proactive triggering.
-	// Default 100.
+	// Default 200.
 	SidecarSoftLimitMB int `toml:"sidecar_soft_limit_mb" json:"sidecar_soft_limit_mb"`
 	// SidecarHardLimitMB is V8's --max-old-space-size for the sidecar.
 	// Hitting this DOES OOM-abort the sidecar (V8 has no graceful soft
 	// stop). Should be comfortably above SidecarSoftLimitMB.
 	// 0 disables (V8 uses its default ~512-1500 MB depending on host).
-	// Default 256.
+	// Default 512.
 	SidecarHardLimitMB int `toml:"sidecar_hard_limit_mb" json:"sidecar_hard_limit_mb"`
 }
 

@@ -638,6 +638,43 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		}
 	}
 
+	// Memory limits: 0 disables each knob; negatives are meaningless and
+	// would invert consumer comparisons (a negative sidecar soft limit makes
+	// the RSS-exceeded check true on every tick, firing TriggerGC every
+	// 2 minutes forever; a negative --max-old-space-size breaks the sidecar
+	// launch). Clamp to 0 = disabled.
+	if cfg.Memory.GoSoftLimitMB < 0 {
+		fail("memory.go_soft_limit_mb %d must be >= 0", cfg.Memory.GoSoftLimitMB)
+		if !reportOnly {
+			cfg.Memory.GoSoftLimitMB = 0
+		}
+	}
+	if cfg.Memory.SidecarSoftLimitMB < 0 {
+		fail("memory.sidecar_soft_limit_mb %d must be >= 0", cfg.Memory.SidecarSoftLimitMB)
+		if !reportOnly {
+			cfg.Memory.SidecarSoftLimitMB = 0
+		}
+	}
+	if cfg.Memory.SidecarHardLimitMB < 0 {
+		fail("memory.sidecar_hard_limit_mb %d must be >= 0", cfg.Memory.SidecarHardLimitMB)
+		if !reportOnly {
+			cfg.Memory.SidecarHardLimitMB = 0
+		}
+	}
+	// A hard limit at or below the soft limit means V8 OOM-aborts the
+	// sidecar before (or exactly when) the proactive-GC threshold would
+	// help — the pair is unsatisfiable, so reset both to defaults
+	// (mirrors the disk warn/critical pattern above).
+	if cfg.Memory.SidecarSoftLimitMB > 0 && cfg.Memory.SidecarHardLimitMB > 0 &&
+		cfg.Memory.SidecarHardLimitMB <= cfg.Memory.SidecarSoftLimitMB {
+		fail("memory.sidecar_hard_limit_mb %d must be > sidecar_soft_limit_mb %d",
+			cfg.Memory.SidecarHardLimitMB, cfg.Memory.SidecarSoftLimitMB)
+		if !reportOnly {
+			cfg.Memory.SidecarSoftLimitMB = defaults.Memory.SidecarSoftLimitMB
+			cfg.Memory.SidecarHardLimitMB = defaults.Memory.SidecarHardLimitMB
+		}
+	}
+
 	// Channel-level quality_preference (applies to both YouTube and Twitch).
 	for i := range cfg.Channels {
 		if cfg.Channels[i].QualityPreference != "" && !validQualityPreferences[cfg.Channels[i].QualityPreference] {
@@ -678,11 +715,11 @@ func Save(cfg *MoomboxConfig, path string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
-	// Tighten the config dir's ACL to current-user-only on Windows.
-	// Files written inside (moombox.toml, .tmp scratchpads) inherit
-	// the restrictive ACL so the password hash + cookie paths +
-	// auth tokens aren't readable by other non-admin users on a
-	// shared host. No-op on non-Windows; idempotent if the dir
+	// Tighten the config dir's ACL to current-user-only. Files written
+	// inside (moombox.toml, .tmp scratchpads) inherit the restrictive
+	// ACL so the password hash + cookie paths + auth tokens aren't
+	// readable by other non-admin users on a shared host. icacls on
+	// Windows, chmod 0700 on POSIX; idempotent if the dir
 	// already has the right ACL. Memoised across Save calls because
 	// icacls shell-out is ~30-80ms and otherwise blocks every config
 	// save under Store.Update's write lock for no benefit. Failures

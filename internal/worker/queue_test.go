@@ -577,3 +577,40 @@ func TestCalculatePriority(t *testing.T) {
 		})
 	}
 }
+
+// TestAcquireDownloadSlotCascadingWakeup guards the cascading-wakeup forward
+// in AcquireDownloadSlot. dlNotify has capacity 1, so two releases in quick
+// succession can collapse into one signal; without the acquirer re-signaling
+// while capacity remains, one of two parked waiters could sleep next to a
+// free slot until the NEXT release. The invariant: when both slots free up,
+// both waiters acquire promptly.
+func TestAcquireDownloadSlotCascadingWakeup(t *testing.T) {
+	q := NewJobQueue(2)
+	ctx := context.Background()
+
+	if !q.AcquireDownloadSlot(ctx, "a") || !q.AcquireDownloadSlot(ctx, "b") {
+		t.Fatal("initial acquires failed")
+	}
+
+	acquired := make(chan string, 2)
+	for _, id := range []string{"w1", "w2"} {
+		go func(id string) {
+			if q.AcquireDownloadSlot(ctx, id) {
+				acquired <- id
+			}
+		}(id)
+	}
+	// Let both waiters park on dlNotify before releasing.
+	time.Sleep(50 * time.Millisecond)
+
+	q.ReleaseDownloadSlot("a")
+	q.ReleaseDownloadSlot("b")
+
+	for i := range 2 {
+		select {
+		case <-acquired:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("waiter %d never acquired a free slot (lost wakeup)", i+1)
+		}
+	}
+}

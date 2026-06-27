@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS last_videos (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_updated_at ON jobs(updated_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_video_id ON jobs(video_id);
 CREATE TABLE IF NOT EXISTS segments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,

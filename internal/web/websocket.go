@@ -147,9 +147,11 @@ func (hub *WebSocketHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	hub.logger.Debug("websocket connected", "clients", clientCount)
 
-	// Per-client write loop drains `writes`. Started before sendInitialState
-	// so the initial-state push goes through the queue like any other
-	// broadcast.
+	// Per-client write loop drains `writes`. sendInitialState below writes
+	// DIRECTLY to the conn (not through the queue) so the snapshot can't be
+	// displaced by queue-overflow drops; that's safe because coder/websocket
+	// serializes concurrent writers internally — a broadcast queued during
+	// the initial-state write waits its turn rather than interleaving.
 	go hub.writePump(client)
 
 	// Send initial state immediately

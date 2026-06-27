@@ -66,6 +66,26 @@ func TestSanitizeForFilename(t *testing.T) {
 			input:    "   \t\n   ",
 			expected: "untitled",
 		},
+		{
+			name:     "trailing dots stripped (Win32 strips them on create)",
+			input:    "Stream ending...",
+			expected: "Stream ending",
+		},
+		{
+			name:     "trailing dot-space mixture stripped",
+			input:    "name. .",
+			expected: "name",
+		},
+		{
+			name:     "only dots becomes untitled",
+			input:    "...",
+			expected: "untitled",
+		},
+		{
+			name:     "reserved name exposed by trailing dot is prefixed",
+			input:    "con.",
+			expected: "_con",
+		},
 	}
 
 	for _, tt := range tests {

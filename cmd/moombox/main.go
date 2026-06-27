@@ -390,6 +390,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		var lastDiskNotify time.Time
 		var lastDiskLevel string
 		diskCheckCounter := 0
+		diskReadFailing := false
 		for {
 			select {
 			case <-ctx.Done():
@@ -465,8 +466,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 
 				log.Debug(line)
 
-				// Disk space check every ~5th tick (~10 minutes at 2min interval,
-				// close enough to the 5-min target while reusing the existing ticker).
+				// Disk space check every 3rd tick (~6 minutes at the 2min ticker
+				// interval — close enough to the 5-min target while reusing the
+				// existing ticker).
 				diskCheckCounter++
 				if diskCheckCounter%3 == 0 { // every 3 ticks = ~6 minutes
 					var diskOutputDir string
@@ -474,6 +476,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 						diskOutputDir = c.Paths.OutputDirectory
 					})
 					if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
+						diskReadFailing = false
 						// Broadcast to web clients
 						wsHub.Broadcast("disk_status", map[string]any{
 							"free":      ds.Free,
@@ -513,6 +516,14 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 						} else {
 							lastDiskLevel = "" // Reset cooldown when back to ok
 						}
+					} else if !diskReadFailing {
+						// GetDiskSpace failed (volume offline, I/O error). Warn
+						// once per failure streak — until this recovers, the
+						// dashboard disk gauge and low-disk notifications are
+						// frozen at the last good reading.
+						log.Warn("[Disk] disk space check failed; gauge and low-disk alerts frozen until it recovers",
+							slog.String("outputDir", diskOutputDir))
+						diskReadFailing = true
 					}
 				}
 			}

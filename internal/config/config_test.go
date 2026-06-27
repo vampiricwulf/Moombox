@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -512,6 +513,14 @@ func TestFlexDurationParse(t *testing.T) {
 		{-1.5, "minutes", 30, 30},
 		// Zero is allowed
 		{0, "minutes", 10, 0},
+		// Non-finite values fall back to default: ParseFloat accepts
+		// "nan"/"inf" and NaN passes every range check in
+		// validateOrNormalize (all NaN comparisons are false)
+		{"nan", "minutes", 10, 10},
+		{"inf", "minutes", 10, 10},
+		{"-inf", "minutes", 10, 10},
+		{math.NaN(), "minutes", 10, 10},
+		{math.Inf(1), "minutes", 10, 10},
 	}
 
 	for _, tt := range tests {
@@ -519,6 +528,58 @@ func TestFlexDurationParse(t *testing.T) {
 		if result.Value != tt.expected {
 			t.Errorf("ParseFlexDuration(%v, %s) = %f, want %f", tt.input, tt.unit, result.Value, tt.expected)
 		}
+	}
+}
+
+func TestFlexDurationUnmarshalTOMLRejectsNonFinite(t *testing.T) {
+	var d FlexDuration
+	for _, in := range []any{math.NaN(), math.Inf(1), math.Inf(-1), "nan", "inf"} {
+		if err := d.UnmarshalTOML(in); err == nil {
+			t.Errorf("UnmarshalTOML(%v) = nil error, want rejection", in)
+		}
+	}
+	// Sanity: normal values still work
+	if err := d.UnmarshalTOML(int64(30)); err != nil || d.Value != 30 {
+		t.Errorf("UnmarshalTOML(30) = %v (value %v), want nil error and 30", nil, d.Value)
+	}
+}
+
+func TestValidationMemoryLimits(t *testing.T) {
+	// Negatives clamp to 0 (disabled)
+	cfg := Defaults()
+	cfg.Memory.GoSoftLimitMB = -1
+	cfg.Memory.SidecarSoftLimitMB = -5
+	cfg.Memory.SidecarHardLimitMB = -10
+	if errs := Validate(cfg); len(errs) != 3 {
+		t.Errorf("Validate negative memory limits: got %d errors, want 3: %v", len(errs), errs)
+	}
+	Normalize(cfg)
+	if cfg.Memory.GoSoftLimitMB != 0 || cfg.Memory.SidecarSoftLimitMB != 0 || cfg.Memory.SidecarHardLimitMB != 0 {
+		t.Errorf("Normalize negative memory limits: got %+v, want all 0", cfg.Memory)
+	}
+
+	// Hard <= soft (both > 0) is unsatisfiable — reset pair to defaults
+	cfg = Defaults()
+	cfg.Memory.SidecarSoftLimitMB = 600
+	cfg.Memory.SidecarHardLimitMB = 512
+	if errs := Validate(cfg); len(errs) != 1 {
+		t.Errorf("Validate hard<=soft: got %d errors, want 1: %v", len(errs), errs)
+	}
+	Normalize(cfg)
+	def := Defaults()
+	if cfg.Memory.SidecarSoftLimitMB != def.Memory.SidecarSoftLimitMB ||
+		cfg.Memory.SidecarHardLimitMB != def.Memory.SidecarHardLimitMB {
+		t.Errorf("Normalize hard<=soft: got soft=%d hard=%d, want defaults %d/%d",
+			cfg.Memory.SidecarSoftLimitMB, cfg.Memory.SidecarHardLimitMB,
+			def.Memory.SidecarSoftLimitMB, def.Memory.SidecarHardLimitMB)
+	}
+
+	// Hard with soft disabled (0) is fine
+	cfg = Defaults()
+	cfg.Memory.SidecarSoftLimitMB = 0
+	cfg.Memory.SidecarHardLimitMB = 128
+	if errs := Validate(cfg); len(errs) != 0 {
+		t.Errorf("Validate hard-only: got errors %v, want none", errs)
 	}
 }
 

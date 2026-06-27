@@ -152,7 +152,20 @@ func (q *JobQueue) AcquireDownloadSlot(ctx context.Context, jobID string) bool {
 		if q.activeDownloads < q.maxDownloads {
 			q.activeDownloads++
 			q.holdingDlSlot[jobID] = true
+			stillFree := q.activeDownloads < q.maxDownloads
 			q.mu.Unlock()
+			// Cascade the wakeup: dlNotify has capacity 1, so two releases in
+			// quick succession collapse into one signal — without this forward,
+			// one waiter would take one slot while a second waiter slept next
+			// to a free slot until the NEXT release (potentially hours on live
+			// streams). Each successful acquirer re-signals while capacity
+			// remains so every free slot finds its waiter.
+			if stillFree {
+				select {
+				case q.dlNotify <- struct{}{}:
+				default:
+				}
+			}
 			return true
 		}
 		q.mu.Unlock()

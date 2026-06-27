@@ -172,7 +172,10 @@ func (d *SegmentDownloader) fetchSegment(ctx context.Context, segURL string) ([]
 // caller to handle nil-vs-flag explicitly; the sentinel form is more
 // composable and lets callers route through `errors.Is`.
 func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL string) ([]byte, error) {
-	for attempt := range MaxSegmentRetries {
+	// d.opts.MaxRetries (defaulted to MaxSegmentRetries in the constructor) —
+	// previously this loop used the constant directly, silently ignoring the
+	// documented DownloaderOptions.MaxRetries knob.
+	for attempt := range d.opts.MaxRetries {
 		if d.isCancelled() {
 			if cerr := ctx.Err(); cerr != nil {
 				return nil, cerr
@@ -371,6 +374,9 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	// Bound the 206 read to the requested range size — a correct server sends
+	// exactly end-start+1 bytes, and a broken one must not be able to balloon
+	// memory past it (mirrors the maxIgnoredRangeBodyBytes cap on the 200 path).
+	data, err := io.ReadAll(io.LimitReader(resp.Body, end-start+1))
 	return data, resp.StatusCode, err
 }

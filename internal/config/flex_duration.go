@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -47,11 +48,20 @@ func ParseFlexDuration(value any, unit string, defaultValue float64) FlexDuratio
 	default:
 		return FlexDuration{Value: defaultValue}
 	}
-	// Reject negative values — return default instead
-	if result.Value < 0 {
+	// Reject negative and non-finite values — return default instead.
+	// strconv.ParseFloat accepts "nan"/"inf", and NaN would sail through
+	// every range check in validateOrNormalize (all NaN comparisons are
+	// false) before blowing up time.Duration math downstream.
+	if !validFlexValue(result.Value) {
 		return FlexDuration{Value: defaultValue}
 	}
 	return result
+}
+
+// validFlexValue reports whether f is usable as a duration value: finite
+// and non-negative. NaN fails f >= 0 by IEEE semantics.
+func validFlexValue(f float64) bool {
+	return f >= 0 && !math.IsInf(f, 1)
 }
 
 func parseStringDuration(s string, unit string, defaultValue float64) FlexDuration {
@@ -130,11 +140,18 @@ func (d *FlexDuration) UnmarshalTOML(data any) error {
 	case int64:
 		d.Value = float64(v)
 	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("invalid duration %v: must be finite", v)
+		}
 		d.Value = v
 	case string:
 		s := strings.TrimSpace(v)
-		// Plain number: store as-is
+		// Plain number: store as-is (rejecting "nan"/"inf", which
+		// strconv.ParseFloat happily accepts)
 		if n, err := strconv.ParseFloat(s, 64); err == nil {
+			if math.IsNaN(n) || math.IsInf(n, 0) {
+				return fmt.Errorf("invalid duration %q: must be finite", s)
+			}
 			d.Value = n
 			return nil
 		}

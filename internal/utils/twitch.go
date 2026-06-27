@@ -30,6 +30,15 @@ var (
 	twitchLoginRegex  = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,24}$`)
 	twitchVODPrefixRe = regexp.MustCompile(`^v(\d{1,12})$`)
 	twitchVODBareRe   = regexp.MustCompile(`^\d{7,12}$`)
+	// twitchVODIDRe validates a VOD ID taken from a URL path. URL context
+	// already disambiguates it from other numbers, so unlike twitchVODBareRe
+	// it accepts short legacy IDs (< 7 digits).
+	twitchVODIDRe = regexp.MustCompile(`^\d{1,12}$`)
+	// twitchClipSlugRe validates a clip slug ("AwkwardSalamander-271WrMRkSrlpFvOY"
+	// style or legacy CamelCase). Rejects empty and path-garbage values so a
+	// malformed URL surfaces as "unrecognized input" instead of a job that
+	// fails downstream with an empty/garbled ID.
+	twitchClipSlugRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 	// twitchReservedPaths lists first-path-segment slugs on twitch.tv that
 	// are site navigation / product pages rather than channel logins, so we
 	// must not treat them as channel names when parsing /<slug>.
@@ -75,10 +84,11 @@ func ExtractTwitchTarget(input string) *TwitchTarget {
 		if host == "www.twitch.tv" || host == "twitch.tv" || host == "m.twitch.tv" {
 			return parseTwitchURL(u)
 		}
-		// clips.twitch.tv/{slug}
+		// clips.twitch.tv/{slug} — first path segment only
 		if host == "clips.twitch.tv" {
 			slug := strings.TrimPrefix(u.Path, "/")
-			if slug != "" {
+			slug, _, _ = strings.Cut(slug, "/")
+			if twitchClipSlugRe.MatchString(slug) {
 				return &TwitchTarget{Type: TwitchClip, Value: slug}
 			}
 		}
@@ -112,17 +122,26 @@ func parseTwitchURL(u *url.URL) *TwitchTarget {
 
 	// /videos/123456
 	if parts[0] == "videos" && len(parts) >= 2 {
-		return &TwitchTarget{Type: TwitchVOD, Value: parts[1]}
+		if twitchVODIDRe.MatchString(parts[1]) {
+			return &TwitchTarget{Type: TwitchVOD, Value: parts[1]}
+		}
+		return nil
 	}
 
 	// /channel/clip/slug
 	if len(parts) >= 3 && parts[1] == "clip" {
-		return &TwitchTarget{Type: TwitchClip, Value: parts[2]}
+		if twitchClipSlugRe.MatchString(parts[2]) {
+			return &TwitchTarget{Type: TwitchClip, Value: parts[2]}
+		}
+		return nil
 	}
 
 	// /channel/video/123456
 	if len(parts) >= 3 && parts[1] == "video" {
-		return &TwitchTarget{Type: TwitchVOD, Value: parts[2]}
+		if twitchVODIDRe.MatchString(parts[2]) {
+			return &TwitchTarget{Type: TwitchVOD, Value: parts[2]}
+		}
+		return nil
 	}
 
 	// /channel (skip reserved paths)

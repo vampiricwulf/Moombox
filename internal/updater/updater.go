@@ -396,8 +396,8 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 func (u *Updater) VerifyCurrentSignature(ctx context.Context) error {
 	tag := "v" + u.currentVersion
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s",
-		u.repoOwner, u.repoName, tag)
+	url := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s",
+		u.apiBaseURL, u.repoOwner, u.repoName, tag)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

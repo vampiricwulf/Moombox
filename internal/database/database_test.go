@@ -1085,6 +1085,100 @@ func TestFreshInstallUsesPragma(t *testing.T) {
 	}
 }
 
+// schemaInventory returns the set of schema objects (tables/indexes by
+// "type:name") plus per-table column lists, for drift comparison.
+func schemaInventory(t *testing.T, db *Database) map[string][]string {
+	t.Helper()
+	inv := make(map[string][]string)
+
+	rows, err := db.db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+	if err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var typ, name string
+		if err := rows.Scan(&typ, &name); err != nil {
+			t.Fatalf("scan sqlite_master: %v", err)
+		}
+		inv["objects"] = append(inv["objects"], typ+":"+name)
+		if typ == "table" {
+			tables = append(tables, name)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("sqlite_master rows: %v", err)
+	}
+
+	for _, table := range tables {
+		cols, err := db.db.Query(`SELECT name FROM pragma_table_info(?) ORDER BY name`, table)
+		if err != nil {
+			t.Fatalf("table_info(%s): %v", table, err)
+		}
+		for cols.Next() {
+			var name string
+			if err := cols.Scan(&name); err != nil {
+				t.Fatalf("scan table_info(%s): %v", table, err)
+			}
+			inv["columns:"+table] = append(inv["columns:"+table], name)
+		}
+		cols.Close()
+		if err := cols.Err(); err != nil {
+			t.Fatalf("table_info(%s) rows: %v", table, err)
+		}
+	}
+	return inv
+}
+
+// TestFreshSchemaMatchesMigratedSchema guards against drift between
+// createSchema (fresh installs) and the incremental migrations (upgrades):
+// a fresh DB and a DB forced back to version 1 and re-migrated must end up
+// with identical tables, indexes, and columns. Caught the missing
+// idx_jobs_video_id on fresh installs (v4 created it only for upgrades).
+func TestFreshSchemaMatchesMigratedSchema(t *testing.T) {
+	freshPath := filepath.Join(t.TempDir(), "fresh.db")
+	fresh, err := Open(freshPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshInv := schemaInventory(t, fresh)
+	fresh.Close()
+
+	migPath := filepath.Join(t.TempDir(), "mig.db")
+	mig, err := Open(migPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rewind to v1 so the next Open replays migrations 2..current over the
+	// full schema. Migrations are idempotent (IF NOT EXISTS / duplicate-
+	// column tolerant), so anything they ADD that createSchema lacks shows
+	// up as a diff.
+	if _, err := mig.db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	mig.Close()
+
+	mig2, err := Open(migPath)
+	if err != nil {
+		t.Fatalf("re-open with migrations: %v", err)
+	}
+	migInv := schemaInventory(t, mig2)
+	mig2.Close()
+
+	for key, migList := range migInv {
+		freshList := freshInv[key]
+		if strings.Join(freshList, ",") != strings.Join(migList, ",") {
+			t.Errorf("schema drift at %s:\n  fresh:    %v\n  migrated: %v", key, freshList, migList)
+		}
+	}
+	for key := range freshInv {
+		if _, ok := migInv[key]; !ok {
+			t.Errorf("schema drift: fresh has %s but migrated path lacks it entirely", key)
+		}
+	}
+}
+
 // TestFieldToColumnCoverage asserts that every writable column on Job has an
 // entry in fieldToColumn. Drift here caused audit finding database.md C3 where
 // six fields (manually_added, allow_non_stream, selected_video_itag,

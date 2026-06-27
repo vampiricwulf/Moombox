@@ -30,8 +30,14 @@ type PotTokenProvider interface {
 
 // PlayerAPI handles interactions with YouTube's Innertube player API.
 type PlayerAPI struct {
-	auth         *Auth
+	auth *Auth
+	// apiKey is read on every player-API request and rewritten at runtime
+	// by Service.Init's homepage fetch (which any job may trigger
+	// defensively, concurrently). Guarded by apiKeyMu — an unsynchronized
+	// string write can tear under the race detector and in theory at
+	// runtime (two-word header).
 	apiKey       string
+	apiKeyMu     sync.RWMutex
 	cipherSolver *cipher.GojaResolver
 	// cipher is the routed Solver for sig/n decryption. When non-nil,
 	// PlayerAPI uses this for cipher solving (sig flows through the
@@ -224,6 +230,16 @@ func clientAcceptsPlayerPoToken(c constants.YouTubeClientConfig) bool {
 // SetAPIKey updates the API key used for YouTube API requests.
 func (p *PlayerAPI) SetAPIKey(key string) {
 	if key != "" {
+		p.apiKeyMu.Lock()
 		p.apiKey = key
+		p.apiKeyMu.Unlock()
 	}
+}
+
+// APIKey returns the current Innertube API key (default until Service.Init
+// extracts the live one from the homepage).
+func (p *PlayerAPI) APIKey() string {
+	p.apiKeyMu.RLock()
+	defer p.apiKeyMu.RUnlock()
+	return p.apiKey
 }

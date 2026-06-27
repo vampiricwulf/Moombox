@@ -186,6 +186,10 @@ func (s *Sidecar) Start(ctx context.Context) error {
 
 	cmd := exec.CommandContext(context.Background(), nodeExe, nodeArgs...)
 	cmd.Dir = cacheDir
+	// Parent-death cleanup, pre-start half: Linux sets PR_SET_PDEATHSIG
+	// here (must be configured before fork); Windows is a no-op because
+	// the Job Object assigned after Start covers it.
+	configureCmdSysProcAttr(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("stdin pipe: %w", err)
@@ -210,8 +214,8 @@ func (s *Sidecar) Start(ctx context.Context) error {
 	s.readyCh = make(chan struct{})
 
 	// Pin the child to a Job Object so it dies when Moombox dies. On
-	// non-Windows builds processJob is a no-op (the package is currently
-	// Windows-only per Moombox's platform target).
+	// Linux processJob is a no-op — PR_SET_PDEATHSIG (configured before
+	// Start above) provides the same die-with-parent guarantee there.
 	job, err := newProcessJob()
 	if err != nil {
 		s.cfg.Logger.Warn("sidecar: Job Object create failed, child may outlive parent on crash", "err", err)

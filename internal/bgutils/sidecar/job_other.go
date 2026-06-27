@@ -1,17 +1,21 @@
-//go:build !windows
+//go:build !windows && !linux
 
 package sidecar
 
-import "os"
+import (
+	"os"
+	"os/exec"
+)
 
-// processJob is a no-op stub on non-Windows builds. Moombox is Windows-only
-// per CLAUDE.md but the package must still compile on other GOOS so cross-
-// platform CI / `go test ./...` from a Linux dev box doesn't break.
-//
-// If/when Moombox grows Linux/macOS support, this file becomes the place
-// to plug in a Cgroup-based or SetPgid-based equivalent.
+// processJob is a no-op stub on platforms without a parent-death-cleanup
+// primitive wired up (Moombox supports Windows via Job Objects and Linux
+// via PR_SET_PDEATHSIG; everything else just needs to compile). A crashed
+// Moombox on these platforms can leave the sidecar running until it
+// notices stdin EOF.
 type processJob struct{}
 
 func newProcessJob() (*processJob, error)      { return &processJob{}, nil }
 func (j *processJob) assign(*os.Process) error { return nil }
 func (j *processJob) close()                   {}
+
+func configureCmdSysProcAttr(*exec.Cmd) {}

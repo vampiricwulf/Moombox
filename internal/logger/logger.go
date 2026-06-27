@@ -34,9 +34,12 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 // Lock hierarchy (acquire in this order to avoid deadlock; never invert):
 //
 //  1. fileMu     — protects file rotation (rotate() and Write of formatted line)
-//  2. ringMu     — protects the ringBuffer slice + ringIndex/ringCount
-//  3. jobLogsMu  — protects the jobLogs map + per-buffer fan-out
-//  4. subMu      — protects the subscribers slice
+//  2. jobLogsMu  — protects the jobLogs map + per-buffer fan-out
+//  3. subMu      — protects the subscribers slice
+//  4. ringMu     — protects the ringBuffer slice + ringIndex/ringCount.
+//     Leaf lock: broadcast's slow-subscriber drop path ring-appends while
+//     holding subMu.RLock, and rotate→diagf ring-appends while holding
+//     fileMu — so nothing may acquire another logger lock under ringMu.
 //
 // Most operations only take one lock. The Write path takes fileMu first,
 // then publishes to ring/jobs/subscribers (each under its own mutex) without
@@ -419,9 +422,11 @@ func (l *Logger) broadcast(line string) {
 		return
 	}
 
-	// ringWarn, if set, is appended to the ring buffer AFTER subMu is released:
-	// addToRingBuffer takes ringMu, and the documented lock hierarchy is ringMu
-	// BEFORE subMu — acquiring it while holding subMu.RLock would invert it.
+	// ringWarn, if set, is appended to the ring buffer AFTER subMu is released.
+	// ringMu is the leaf lock (acquired after subMu — see the hierarchy above),
+	// so doing the append here under subMu.RLock would be correct ordering; we
+	// still defer it past RUnlock so subMu and ringMu are never held at once and
+	// the hot fan-out loop stays free of a ringMu acquisition.
 	var ringWarn string
 	l.subMu.RLock()
 	for _, ch := range l.subscribers {

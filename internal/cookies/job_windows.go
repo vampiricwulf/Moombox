@@ -3,6 +3,7 @@ package cookies
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"syscall"
 	"unsafe"
 )
@@ -115,3 +116,7 @@ func (j *processJob) close() {
 		j.handle = 0
 	}
 }
+
+// configureCmdSysProcAttr is a no-op on Windows — parent-death cleanup is
+// handled by the Job Object (KILL_ON_JOB_CLOSE) assigned after start.
+func configureCmdSysProcAttr(*exec.Cmd) {}

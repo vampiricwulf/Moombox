@@ -462,7 +462,12 @@ func (vcd *VodChatDownloader) MarkStreamEnded() {
 	// No-op for VOD — download completes when all pages are fetched.
 }
 
-// EnrichWithEmotes adds resolved emote data to the chat output.
+// EnrichWithEmotes adds resolved emote data to the chat output. The rewrite
+// goes through WriteChatFileAtomic (tmp + fsync + rename) — this rewrites the
+// ENTIRE chat archive, and a rename journaled before the data pages hit disk
+// (power loss) would otherwise replace hours of archived chat with a
+// truncated file. Same threat model the periodic flush writers defend
+// against.
 func EnrichWithEmotes(chatPath string, emoteData *TwitchEmoteData) error {
 	data, err := os.ReadFile(chatPath)
 	if err != nil {
@@ -475,18 +480,7 @@ func EnrichWithEmotes(chatPath string, emoteData *TwitchEmoteData) error {
 	}
 
 	chatData.Emotes = emoteData
-
-	out, err := json.MarshalIndent(chatData, "", "  ")
-	if err != nil {
-		return err
-	}
-	out = utils.PadMessageCountJSON(out)
-
-	tmpPath := chatPath + ".tmp"
-	if err := os.WriteFile(tmpPath, out, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, chatPath)
+	return utils.WriteChatFileAtomic(chatPath, &chatData)
 }
 
 // BuildChatFilename generates the chat output filename for a Twitch stream/VOD.

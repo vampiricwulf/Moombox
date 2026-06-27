@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -515,6 +516,13 @@ type gzipResponseWriter struct {
 	minSize    int
 	statusCode int
 	headerSent bool
+	// plain is set when an explicit Flush() arrived before the gzip
+	// threshold: the response is committed to uncompressed output and all
+	// further writes pass straight through. Without this, a handler that
+	// writes a small payload and Flushes to guarantee delivery (e.g.
+	// /api/update/apply flushing its success JSON before restarting the
+	// process) would have its bytes stuck in buf until handler return.
+	plain bool
 }
 
 func (g *gzipResponseWriter) WriteHeader(code int) {
@@ -529,6 +537,10 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 	if g.writer != nil {
 		// Already gzipping
 		return g.writer.Write(b)
+	}
+	if g.plain {
+		// Committed to uncompressed output by an early Flush.
+		return g.ResponseWriter.Write(b)
 	}
 
 	g.buf = append(g.buf, b...)
@@ -576,19 +588,35 @@ func (g *gzipResponseWriter) Close() {
 	}
 
 	// Buffer never reached threshold — send uncompressed
+	g.commitPlain()
+}
+
+// commitPlain commits the response to uncompressed output: sends headers if
+// still pending and drains any buffered bytes to the underlying writer.
+// Idempotent.
+func (g *gzipResponseWriter) commitPlain() {
+	g.plain = true
 	if !g.headerSent {
 		g.flushStatus()
 		g.headerSent = true
 	}
 	if len(g.buf) > 0 {
 		g.ResponseWriter.Write(g.buf)
+		g.buf = nil
 	}
 }
 
-// Flush implements http.Flusher for streaming compatibility.
+// Flush implements http.Flusher for streaming compatibility. A Flush that
+// arrives before the gzip threshold commits the response to uncompressed
+// output first — the caller is explicitly asking for the bytes written so
+// far to reach the client NOW (e.g. /api/update/apply flushing its success
+// JSON before triggering a process restart), and leaving them in the
+// pre-threshold buffer would defeat exactly that.
 func (g *gzipResponseWriter) Flush() {
 	if g.writer != nil {
 		g.writer.Flush()
+	} else {
+		g.commitPlain()
 	}
 	if f, ok := g.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
@@ -670,14 +698,20 @@ func RecoveryMiddleware(logger interface {
 	}
 }
 
-// openBrowserURL opens the default browser to the given URL.
-// Windows-only: uses explorer.exe to launch the URL.
+// openBrowserURL opens the default browser to the given URL — explorer.exe
+// on Windows, xdg-open on other platforms (the freedesktop standard on the
+// supported Linux targets). Failure is silent best-effort either way.
 //
 // Process.Release() returns the OS handle to the kernel so we don't
 // leak one process handle per Moombox lifetime. Symmetric with the
 // open-folder handler's Q-6 fix (audit reports/web.md).
 func openBrowserURL(url string) {
-	cmd := exec.Command("explorer.exe", url)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("explorer.exe", url)
+	} else {
+		cmd = exec.Command("xdg-open", url)
+	}
 	if err := cmd.Start(); err == nil && cmd.Process != nil {
 		_ = cmd.Process.Release()
 	}

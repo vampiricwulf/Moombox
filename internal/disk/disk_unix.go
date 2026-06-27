@@ -3,6 +3,7 @@
 package disk
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"syscall"
@@ -12,6 +13,12 @@ import (
 // On Unix, uses statfs(2). Bavail (blocks available to non-superuser) is
 // reported as Free so per-user quotas are reflected, matching the Windows
 // behaviour of using freeBytesAvailable.
+//
+// Like the Windows implementation (which queries the volume root and so
+// succeeds for paths that don't exist yet), a missing path falls back to the
+// nearest existing ancestor: a configured output directory that hasn't been
+// created reports the space of the volume it would be created on, keeping
+// disk monitoring and low-space notifications alive.
 func GetDiskSpace(path string) (*DiskSpace, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -19,8 +26,17 @@ func GetDiskSpace(path string) (*DiskSpace, error) {
 	}
 
 	var stat syscall.Statfs_t
-	if err := syscall.Statfs(abs, &stat); err != nil {
-		return nil, fmt.Errorf("disk: statfs %q: %w", abs, err)
+	target := abs
+	for {
+		err := syscall.Statfs(target, &stat)
+		if err == nil {
+			break
+		}
+		parent := filepath.Dir(target)
+		if parent == target || (!errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ENOTDIR)) {
+			return nil, fmt.Errorf("disk: statfs %q: %w", abs, err)
+		}
+		target = parent
 	}
 
 	// Bsize is int32 on 32-bit platforms (386, arm) and int64 on 64-bit

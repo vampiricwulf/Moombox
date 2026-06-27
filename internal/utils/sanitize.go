@@ -44,6 +44,12 @@ func SanitizeForFilename(name string) string {
 	}
 
 	result = strings.TrimSpace(result)
+	// Windows (Win32 layer) silently strips trailing dots and spaces when
+	// creating files, so "Stream..." would land on disk as "Stream" while the
+	// recorded name keeps the dots. Strip them here so recorded and on-disk
+	// names agree. TrimSpace above already handled spaces; this adds dots and
+	// any dot/space mixtures.
+	result = strings.TrimRight(result, ". ")
 
 	if result == "" {
 		result = "untitled"

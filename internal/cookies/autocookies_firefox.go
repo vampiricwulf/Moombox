@@ -54,6 +54,7 @@ func (s *AutoCookieService) startFirefoxSetup(browser *DetectedBrowser, url stri
 	}
 
 	cmd := exec.Command(browser.Path, "--new-instance", "--profile", s.profileDir, url)
+	configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG; Windows: no-op
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start firefox: %w", err)
 	}
@@ -150,6 +151,7 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 
 		s.logger.Info("launching Firefox for cookie refresh", "platform", platform, "url", url)
 		cmd := exec.Command(browser.Path, "--new-instance", "--screenshot", tempScreenshot, "--profile", s.profileDir, url)
+		configureCmdSysProcAttr(cmd) // Linux: PR_SET_PDEATHSIG; Windows: no-op (Job Object in runWithTimeout)
 		s.mu.Lock()
 		s.refreshCmd = cmd
 		s.mu.Unlock()

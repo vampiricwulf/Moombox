@@ -88,6 +88,31 @@ func TestExtractTwitchTarget(t *testing.T) {
 			input:    "https://clips.twitch.tv/",
 			expected: nil,
 		},
+		{
+			name:     "clips.twitch.tv extra path segments take first segment only",
+			input:    "https://clips.twitch.tv/SomeClipSlug/edit",
+			expected: &TwitchTarget{Type: TwitchClip, Value: "SomeClipSlug"},
+		},
+		{
+			name:     "VOD URL with non-numeric id returns nil",
+			input:    "https://twitch.tv/videos/abc",
+			expected: nil,
+		},
+		{
+			name:     "VOD URL with short legacy id accepted",
+			input:    "https://twitch.tv/videos/123456",
+			expected: &TwitchTarget{Type: TwitchVOD, Value: "123456"},
+		},
+		{
+			name:     "channel video URL with non-numeric id returns nil",
+			input:    "https://twitch.tv/shroud/video/notanid!",
+			expected: nil,
+		},
+		{
+			name:     "channel clip URL with empty slug returns nil",
+			input:    "https://twitch.tv/shroud/clip/",
+			expected: nil,
+		},
 
 		// Bare identifiers
 		{
