@@ -376,21 +376,20 @@ func (m *SettingsModel) handleMouseChannelClick(contentY int) {
 // handleMouseNotifClick handles clicking in the notification list/edit view.
 func (m *SettingsModel) handleMouseNotifClick(contentY int) {
 	if m.notifMode == "edit" {
-		// Edit mode layout:
-		// Line 0: title
-		// Line 1: URL field
-		// Line 2: empty
-		// Line 3: "Events (Space to toggle):"
-		// Line 4+: event groups with headers and checkboxes
-		if contentY == 1 {
+		// Original (unscrolled) layout:
+		// Line 0: title  | Line 1: URL field | Line 2: empty
+		// Line 3: "Events (Space to toggle):" | Line 4+: event groups
+		// renderNotifEdit pins the title (line 0) and scrolls the body to keep
+		// focus visible, so map the on-screen row back through that offset.
+		origLine := notifEditClickLine(contentY, m.notifEditScrollStart)
+		if origLine == 1 {
 			m.notifEditFocus = 0
 			m.updateTextInputForField()
 			return
 		}
-		// Map event lines: we need to account for group headers and blank lines
-		if contentY >= 4 {
-			eventLine := contentY - 4
-			m.clickNotifEvent(eventLine)
+		// Map event lines: clickNotifEvent accounts for group headers/blanks.
+		if origLine >= 4 {
+			m.clickNotifEvent(origLine - 4)
 		}
 		return
 	}
@@ -402,6 +401,17 @@ func (m *SettingsModel) handleMouseNotifClick(contentY int) {
 		m.notifIndex = nIdx
 		m.notifDeleteConf = false
 	}
+}
+
+// notifEditClickLine maps an on-screen content row in the notification edit
+// view back to its original (unscrolled) line index. renderNotifEdit pins the
+// title at row 0 and renders body[scrollStart:] beneath it, so a row at
+// contentY>=1 corresponds to original line scrollStart+contentY.
+func notifEditClickLine(contentY, scrollStart int) int {
+	if contentY <= 0 {
+		return 0
+	}
+	return contentY + scrollStart
 }
 
 // clickNotifEvent maps a line offset in the event area to a specific event

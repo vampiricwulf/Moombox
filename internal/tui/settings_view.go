@@ -634,10 +634,12 @@ func (m *SettingsModel) renderNotifEdit(w, maxH int) string {
 			start = f - visible + 1
 		}
 		start = min(start, max(len(body)-visible, 0))
+		m.notifEditScrollStart = start // record for mouse-click line mapping
 		out := append([]string{lines[0]}, body[start:min(start+visible, len(body))]...)
 		return strings.Join(out, "\n")
 	}
 
+	m.notifEditScrollStart = 0
 	return strings.Join(lines, "\n")
 }
 

@@ -290,8 +290,12 @@ type SettingsModel struct {
 	notifEditURL    string
 	notifEditEvents map[string]bool
 	notifEditFocus  int // 0=URL, 1+=event index
-	notifDeleteConf bool
-	notifications   []config.NotificationConfig
+	// notifEditScrollStart is the body scroll offset renderNotifEdit applied on
+	// the last render (0 = not scrolled). Mouse click mapping reads it to map an
+	// on-screen row back to the original (unscrolled) line.
+	notifEditScrollStart int
+	notifDeleteConf      bool
+	notifications        []config.NotificationConfig
 
 	// Security sub-editor state
 	secMode         securityMode
