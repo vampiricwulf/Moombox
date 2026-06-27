@@ -157,9 +157,12 @@ func findActiveJobForPath(absPath string, db *database.Database, cfg *config.Moo
 					return job.ID, nil
 				}
 			}
-			// Relative-path columns too (imports set ONLY these) — keep this
-			// set identical to scanOutputOrphans' knownFiles so scan and
-			// delete-time recheck can never disagree about ownership.
+			// Relative-path columns too (imports set ONLY these). The
+			// delete-time recheck deliberately considers these for ACTIVE jobs
+			// only (the status filter above), mirroring how scanOutputOrphans
+			// treats them for ALL jobs when building the orphan list — the
+			// recheck just has to refuse deleting a file an active job still
+			// owns, not reproduce the full scan set.
 			if absErr == nil {
 				for _, rel := range []string{job.Filename, job.ChatFilename} {
 					if rel != "" && normalizePath(filepath.Join(absOut, rel)) == target {

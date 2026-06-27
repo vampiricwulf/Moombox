@@ -793,11 +793,16 @@ sessionLoop:
 		})
 	}
 
-	// If we had part splits, mux the final part (with its chat alongside).
-	// Indexing note (per audit reports/worker.md F4): segmentIndex was incremented
-	// AFTER each background mux, so it now points at the still-unmuxed final
-	// part in seg_N. With N splits the total produced count is N+1 (indices 0..N).
-	if segmentIndex > 0 {
+	// Mux the final part with the live-tracked quality/timestamps (with its chat
+	// alongside). Indexing note (per audit reports/worker.md F4): segmentIndex
+	// was incremented AFTER each background mux, so it now points at the
+	// still-unmuxed final part in seg_N. With N splits the total produced count
+	// is N+1 (indices 0..N). Also run at index 0 when a restart resumed the job
+	// into a seg_N part dir (curStagingDir != root): letting that part fall
+	// through to muxUnrecordedSegments would re-derive its quality/times from
+	// ffprobe+mtime instead of the precise values tracked here. (A failed mux
+	// here is non-fatal — muxUnrecordedSegments still backstops it.)
+	if segmentIndex > 0 || curStagingDir != jobCtx.StagingDir {
 		segmentEndTime := time.Now().Unix()
 		result := &DownloadResult{HasVideo: true, VideoPath: videoPath}
 		if irc != nil {

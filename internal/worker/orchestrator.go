@@ -281,6 +281,11 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		// rewind hours of audio into this part. Align it to the video seed.
 		const avSeedTolerance = 50 // ~2-4 min of segments
 		if vSeed > 0 && (aSeed == 0 || aSeed < vSeed-avSeedTolerance || aSeed > vSeed+avSeedTolerance) {
+			// Log before overwriting so a rare mis-seed (audio legitimately
+			// lagging video past the tolerance after a long outage) is
+			// diagnosable from the job log rather than silently realigned.
+			o.logger.Info("restart seed: audio seq diverged from video, realigning to video seed",
+				"audioSeed", aSeed, "videoSeed", vSeed, "tolerance", avSeedTolerance, "jobID", jobCtx.Job.ID)
 			aSeed = vSeed
 		}
 		strategyCtx.VideoStartSeq = vSeed
