@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,17 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
+
+// dumpLostChatBatch writes a boundary batch that writeBatch could not persist to
+// a "<path>.lostbatch.json" sidecar so the messages are recoverable rather than
+// only logged. Best-effort.
+func dumpLostChatBatch(path string, batch any) error {
+	data, err := json.MarshalIndent(batch, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path+".lostbatch.json", data, 0o644)
+}
 
 func (cd *ChatDownloader) flush() {
 	cd.flushMu.Lock()
@@ -189,6 +201,14 @@ func (cd *ChatDownloader) RollFile(newOutputPath, newRecordingStart string) stri
 		if err := cd.writeBatch(oldPath, batch, oldCount, oldFlushed, oldBase); err != nil {
 			cd.logger.Error("final drain of rolled chat part failed; boundary batch lost",
 				"path", oldPath, "messages", len(batch), "err", err)
+			// Spill the un-writable batch to a sidecar so the messages are
+			// recoverable rather than only logged. Best-effort: a failure here
+			// just leaves the log line as the only record.
+			if dumpErr := dumpLostChatBatch(oldPath, batch); dumpErr != nil {
+				cd.logger.Warn("could not spill lost chat batch to sidecar", "path", oldPath, "err", dumpErr)
+			} else {
+				cd.logger.Info("lost chat batch spilled to sidecar for recovery", "path", oldPath+".lostbatch.json")
+			}
 			if !oldFlushed {
 				closedPath = "" // nothing ever reached disk for this part
 			}

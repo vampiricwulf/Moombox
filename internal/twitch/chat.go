@@ -325,8 +325,9 @@ func (cd *ChatDownloader) Start(ctx context.Context) error {
 		// final part's file was never created.
 		cd.mu.Lock()
 		finalFileExists := cd.flushedToDisk
+		total := cd.totalCount
 		cd.mu.Unlock()
-		if cd.totalCount > 0 && finalFileExists && cd.emoteResolver != nil && cd.channelID != "" {
+		if total > 0 && finalFileExists && cd.emoteResolver != nil && cd.channelID != "" {
 			cd.logger.Info("resolving emotes for Twitch chat", "channelID", cd.channelID)
 			emoteCtx, emoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			emoteData := cd.resolveEmotesCached(emoteCtx)
