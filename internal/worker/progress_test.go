@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vampiricwulf/Moombox/internal/engine"
 )
 
 // nopProgressLogger satisfies the worker package's anonymous logger
@@ -23,6 +25,25 @@ func newTestProgressTracker() *ProgressTracker {
 		jobID:     "test-job",
 		logger:    nopProgressLogger{},
 		startTime: time.Now().Add(-30 * time.Second),
+	}
+}
+
+func TestActivityMessage(t *testing.T) {
+	elapsed := 80 * time.Second // FormatDurationHuman -> "1m 20s"
+	cases := []struct {
+		a    engine.DownloadActivity
+		want string
+	}{
+		{engine.ActivityVerifyingEnd, "Verifying stream ended... (1m 20s)"},
+		{engine.ActivityReconnecting, "Connection lost - reconnecting... (1m 20s)"},
+		{engine.ActivityRateLimited, "Rate-limited - backing off... (1m 20s)"},
+		{engine.ActivityFindingFirstSegment, "Waiting for first segment... (1m 20s)"},
+		{engine.ActivityNone, ""},
+	}
+	for _, c := range cases {
+		if got := activityMessage(c.a, elapsed); got != c.want {
+			t.Errorf("activityMessage(%v) = %q, want %q", c.a, got, c.want)
+		}
 	}
 }
 

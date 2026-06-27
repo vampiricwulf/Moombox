@@ -14,6 +14,7 @@ import (
 const (
 	progressUpdateInterval  = 16 * time.Millisecond // ~60fps, matches TUI tick rate
 	progressPersistInterval = 1 * time.Second
+	activityUpdateInterval  = 1 * time.Second // throttle activity progress-line writes
 )
 
 // ProgressTracker tracks download progress and updates the database.
@@ -41,6 +42,10 @@ type ProgressTracker struct {
 	vodPercent     float64   // VOD download progress percentage (from chunked download)
 	vodTotalBytes  int64     // Total file size for VOD chunked download (0 if not VOD)
 	gaps           []database.Gap
+
+	activity          engine.DownloadActivity // current wait reason (ActivityNone = downloading)
+	activityStart     time.Time               // when the current activity began (for elapsed)
+	lastActivityWrite time.Time               // throttle for activity DB writes
 }
 
 // NewProgressTracker creates a new progress tracker for a job.
@@ -62,6 +67,7 @@ func NewProgressTracker(db *database.Database, jobID string, logger logger) *Pro
 func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 	dl.OnProgress = func(p engine.DownloadProgress) {
 		pt.mu.Lock()
+		pt.activity = engine.ActivityNone // a real segment arrived; resume the normal counter
 		// Reported on DELIVERY, not at attach: between attach and the first
 		// video event (a post-restart 403 hunt can hold this window open for
 		// minutes), a chat tick or audio event must not persist videoSeq=0
@@ -110,12 +116,15 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 		})
 		pt.mu.Unlock()
 	}
+
+	dl.OnActivity = func(a engine.DownloadActivity) { pt.setActivity(a) }
 }
 
 // AttachAudioDownloader attaches progress callbacks to an audio segment downloader.
 func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 	dl.OnProgress = func(p engine.DownloadProgress) {
 		pt.mu.Lock()
+		pt.activity = engine.ActivityNone // a real segment arrived; resume the normal counter
 		// See AttachVideoDownloader — reported on delivery, not attach.
 		pt.audioReported = true
 		pt.audioSeq = p.Seq
@@ -150,6 +159,8 @@ func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 		})
 		pt.mu.Unlock()
 	}
+
+	dl.OnActivity = func(a engine.DownloadActivity) { pt.setActivity(a) }
 }
 
 // SetChatCount updates the chat message count.
@@ -158,6 +169,36 @@ func (pt *ProgressTracker) SetChatCount(count int) {
 	pt.chatCount = count
 	pt.mu.Unlock()
 	pt.maybeUpdate()
+}
+
+// setActivity surfaces a downloader wait reason in the progress line, blanking
+// speed/eta since nothing is downloading. ActivityNone clears the state so the
+// next OnProgress restores the normal counter. DB writes are throttled.
+func (pt *ProgressTracker) setActivity(a engine.DownloadActivity) {
+	pt.mu.Lock()
+	if a == engine.ActivityNone {
+		pt.activity = engine.ActivityNone
+		pt.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	if a != pt.activity {
+		pt.activity = a
+		pt.activityStart = now
+	}
+	if now.Sub(pt.lastActivityWrite) < activityUpdateInterval {
+		pt.mu.Unlock()
+		return
+	}
+	pt.lastActivityWrite = now
+	msg := activityMessage(a, now.Sub(pt.activityStart))
+	pt.mu.Unlock()
+
+	pt.db.UpdateJobFields(pt.jobID, map[string]any{
+		"progress": msg,
+		"speed":    "",
+		"eta":      "",
+	})
 }
 
 func (pt *ProgressTracker) maybeUpdate() {
@@ -269,6 +310,24 @@ func (pt *ProgressTracker) buildProgressString() string {
 		return fmt.Sprintf("Seq: %d C: %d", pt.videoSeq, pt.chatCount)
 	}
 	return fmt.Sprintf("Seq: %d", pt.videoSeq)
+}
+
+// activityMessage renders a downloader wait reason into the progress-line text.
+// ASCII punctuation matches the codebase's existing "..." progress strings.
+func activityMessage(a engine.DownloadActivity, elapsed time.Duration) string {
+	e := utils.FormatDurationHuman(elapsed)
+	switch a {
+	case engine.ActivityVerifyingEnd:
+		return fmt.Sprintf("Verifying stream ended... (%s)", e)
+	case engine.ActivityReconnecting:
+		return fmt.Sprintf("Connection lost - reconnecting... (%s)", e)
+	case engine.ActivityRateLimited:
+		return fmt.Sprintf("Rate-limited - backing off... (%s)", e)
+	case engine.ActivityFindingFirstSegment:
+		return fmt.Sprintf("Waiting for first segment... (%s)", e)
+	default:
+		return ""
+	}
 }
 
 // calculateETA estimates time remaining based on segment or byte progress (B8).
