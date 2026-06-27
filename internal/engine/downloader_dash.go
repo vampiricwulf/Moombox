@@ -320,6 +320,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 
 	if hasStartedDownloading && *consecutiveGoneErrors > goneRetryDuringDownload {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 				return err
@@ -327,6 +328,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 			*consecutiveGoneErrors = 0
 			return nil // Continue loop
 		}
+		d.emitActivity(ActivityVerifyingEnd)
 		// Check if stream is actually ended, or if our format just disappeared
 		if d.opts.CheckStreamStatus != nil {
 			ended, checkErr := d.opts.CheckStreamStatus(ctx)
@@ -340,6 +342,7 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 		return errStreamDone
 	}
 	if !hasStartedDownloading && *consecutiveGoneErrors <= goneRetryBeforeFirstSegment {
+		d.emitActivity(ActivityFindingFirstSegment)
 		d.currentSeq.Add(1)
 		utils.Sleep(ctx, firstSegmentHuntDelay)
 		return nil // Continue loop
@@ -368,6 +371,7 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 		shift = maxShift
 	}
 	backoff := min(time.Duration(int64(1)<<uint(shift))*time.Second, time.Duration(delayCap)*time.Second)
+	d.emitActivity(ActivityRateLimited)
 	d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq.Load(), "delay", backoff)
 	utils.Sleep(ctx, backoff)
 	return nil // Continue loop
@@ -417,6 +421,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	// Check stream status at threshold
 	if *sameHeadRetryDelay == liveCheckThreshold && d.opts.CheckStreamStatus != nil {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 				return err
@@ -433,6 +438,7 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	// Check status on every probe at cap
 	if *sameHeadRetryDelay >= delayCap && d.opts.CheckStreamStatus != nil {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 				return err
@@ -450,9 +456,12 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		}
 	}
 
+	d.emitActivity(ActivityVerifyingEnd)
+
 	// Also check no-segment timeout
 	if d.lastSegTime.Since() > NoSegmentTimeout {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 				return err
