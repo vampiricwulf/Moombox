@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // launchAndSupervise is the launcher/supervisor loop. It spawns moombox
@@ -68,11 +69,29 @@ func launchAndSupervise() {
 				}
 				continue
 			}
-			// No child right now (before the first Start, or in the
-			// respawn window). signal.Notify removed the default terminate
-			// disposition, so without this exit the SIGTERM would be
-			// swallowed entirely and the launcher would respawn as if
-			// nothing happened. Process death releases the instance lock.
+			// No child registered yet. Usually the genuine "no child" state
+			// (before the first Start, or in the respawn window), but it can
+			// also be the microsecond gap between cmd.Start() and
+			// child.Store() — exiting there would orphan the just-started
+			// child. Spin briefly to catch that registration first.
+			signaled := false
+			for i := 0; i < 100; i++ {
+				if p := child.Load(); p != nil {
+					if err := p.Signal(syscall.SIGTERM); err != nil {
+						_ = p.Kill()
+					}
+					signaled = true
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if signaled {
+				continue
+			}
+			// Genuinely no child after the grace window. signal.Notify removed
+			// the default terminate disposition, so without this exit the
+			// SIGTERM would be swallowed entirely and the launcher would
+			// respawn as if nothing happened. Process death releases the lock.
 			os.Exit(143) // 128 + SIGTERM
 		}
 	}()

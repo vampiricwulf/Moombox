@@ -419,9 +419,11 @@ func (l *Logger) broadcast(line string) {
 		return
 	}
 
+	// ringWarn, if set, is appended to the ring buffer AFTER subMu is released:
+	// addToRingBuffer takes ringMu, and the documented lock hierarchy is ringMu
+	// BEFORE subMu — acquiring it while holding subMu.RLock would invert it.
+	var ringWarn string
 	l.subMu.RLock()
-	defer l.subMu.RUnlock()
-
 	for _, ch := range l.subscribers {
 		select {
 		case ch <- line:
@@ -432,19 +434,22 @@ func (l *Logger) broadcast(line string) {
 			last := l.dropWarnLast.Load()
 			if now-last >= int64(time.Second) {
 				if l.dropWarnLast.CompareAndSwap(last, now) {
-					// NOT diagf: we're inside broadcast holding subMu.RLock,
-					// and diagf's suppressed path re-enters broadcast —
-					// recursive RLock deadlocks against a queued writer.
-					// Ring-append directly when the console is suppressed.
 					if l.stderrGate == nil || l.stderrGate.enabled.Load() {
 						fmt.Fprintf(os.Stderr, "logger: dropped log line for slow subscriber\n")
 					} else {
-						l.addToRingBuffer(time.Now().Format("2006-01-02 15:04:05") +
-							" WARN logger: dropped log line for slow subscriber")
+						// Defer the ring-append (see ringWarn above); the CAS
+						// rate-limit guarantees this is set at most once here.
+						ringWarn = time.Now().Format("2006-01-02 15:04:05") +
+							" WARN logger: dropped log line for slow subscriber"
 					}
 				}
 			}
 		}
+	}
+	l.subMu.RUnlock()
+
+	if ringWarn != "" {
+		l.addToRingBuffer(ringWarn)
 	}
 }
 
