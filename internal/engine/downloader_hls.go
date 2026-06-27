@@ -47,6 +47,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			// 404/410 on playlist fetch -- variant may have been removed
 			if plStatus == 404 || plStatus == 410 {
 				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.emitActivity(ActivityReconnecting)
 					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 						return err
@@ -68,6 +69,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			consecutiveErrors++
 			if consecutiveErrors > 5 {
 				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.emitActivity(ActivityReconnecting)
 					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 						return err
@@ -115,6 +117,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				// whose CDN serves transient garbage should re-resolve the
 				// variant rather than hard-fail the recording.
 				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.emitActivity(ActivityReconnecting)
 					d.logger.Warn("playlist parse failures while device offline, waiting for connectivity")
 					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 						return err
@@ -325,6 +328,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			staleCount++
 			if staleCount >= 5 {
 				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+					d.emitActivity(ActivityReconnecting)
 					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 						return err
@@ -332,6 +336,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 					staleCount = 0
 					continue
 				}
+				d.emitActivity(ActivityVerifyingEnd)
 				if d.opts.CheckStreamStatus != nil {
 					ended, _ := d.opts.CheckStreamStatus(ctx)
 					if ended {
