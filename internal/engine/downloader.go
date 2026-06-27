@@ -481,7 +481,15 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	// failing the entire download here would discard hours of recording.
 	if !resuming && d.opts.InitURL != "" && !d.opts.IsHls {
 		if initErr := d.downloadInitSegment(ctx); initErr != nil {
-			d.logger.Warn("[Downloader] Failed to download init segment", "error", initErr)
+			if d.opts.InitFromSegment {
+				// A manifest-free part that force-starts at sq>0 has no inline
+				// init; without this fetched ftyp+moov the part file is a bare
+				// moof+mdat that won't mux. Surface it loudly rather than the
+				// usual best-effort Warn (which assumes FFmpeg can demux without).
+				d.logger.Error("[Downloader] Failed to fetch sq=0 init for manifestless part — part may not mux", "error", initErr)
+			} else {
+				d.logger.Warn("[Downloader] Failed to download init segment", "error", initErr)
+			}
 		}
 	}
 

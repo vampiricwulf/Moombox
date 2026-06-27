@@ -34,7 +34,10 @@ func extractMP4InitBoxes(data []byte) []byte {
 				return nil
 			}
 			size64 := binary.BigEndian.Uint64(data[off+8 : off+16])
-			if size64 < 16 {
+			// A box can't be larger than the buffer we fetched; reject a
+			// garbage/oversized size (which would also overflow int(size64)
+			// into a negative offset and panic on the next slice).
+			if size64 < 16 || size64 > uint64(len(data)) {
 				return nil
 			}
 			off += int(size64)

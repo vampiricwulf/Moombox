@@ -54,6 +54,16 @@ func launchAndSupervise() {
 	// delivery for console apps, so the fallback there is Kill; outright
 	// TerminateProcess on the launcher remains uninterceptable.
 	var child atomic.Pointer[os.Process]
+	// starting is true while the main loop is mid-launch (cmd.Start in flight,
+	// child not yet stored). The forwarder uses it to distinguish "genuinely no
+	// child" from "child being started" without a wall-clock guess, so a slow
+	// cmd.Start (e.g. AV scanning a fresh update binary) can't race the spin.
+	var starting atomic.Bool
+	forward := func(p *os.Process) {
+		if err := p.Signal(syscall.SIGTERM); err != nil {
+			_ = p.Kill()
+		}
+	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
 	go func() {
@@ -64,34 +74,25 @@ func launchAndSupervise() {
 		}()
 		for range sigCh {
 			if p := child.Load(); p != nil {
-				if err := p.Signal(syscall.SIGTERM); err != nil {
-					_ = p.Kill()
-				}
+				forward(p)
 				continue
 			}
-			// No child registered yet. Usually the genuine "no child" state
-			// (before the first Start, or in the respawn window), but it can
-			// also be the microsecond gap between cmd.Start() and
-			// child.Store() — exiting there would orphan the just-started
-			// child. Spin briefly to catch that registration first.
-			signaled := false
-			for i := 0; i < 100; i++ {
-				if p := child.Load(); p != nil {
-					if err := p.Signal(syscall.SIGTERM); err != nil {
-						_ = p.Kill()
-					}
-					signaled = true
-					break
-				}
+			// No child registered. If the main loop is mid-launch, wait for the
+			// child to register (or the launch to fail) rather than exiting and
+			// orphaning a just-started process. child.Store happens before
+			// starting clears, so once starting is false the child is visible.
+			for starting.Load() && child.Load() == nil {
 				time.Sleep(time.Millisecond)
 			}
-			if signaled {
+			if p := child.Load(); p != nil {
+				forward(p)
 				continue
 			}
-			// Genuinely no child after the grace window. signal.Notify removed
-			// the default terminate disposition, so without this exit the
-			// SIGTERM would be swallowed entirely and the launcher would
-			// respawn as if nothing happened. Process death releases the lock.
+			// Genuinely no child (before the first Start, the respawn window,
+			// or a failed Start). signal.Notify removed the default terminate
+			// disposition, so without this exit the SIGTERM would be swallowed
+			// and the launcher would respawn as if nothing happened. Process
+			// death releases the instance lock.
 			os.Exit(143) // 128 + SIGTERM
 		}
 	}()
@@ -103,12 +104,15 @@ func launchAndSupervise() {
 		cmd.Stderr = os.Stderr
 		cmd.Env = append(os.Environ(), "_MOOMBOX_CHILD=1")
 
+		starting.Store(true)
 		if startErr := cmd.Start(); startErr != nil {
+			starting.Store(false)
 			fmt.Fprintf(os.Stderr, "Failed to run moombox: %v\n", startErr)
 			deferDeleteOldLauncher(exePath)
 			os.Exit(1)
 		}
 		child.Store(cmd.Process)
+		starting.Store(false)
 		err := cmd.Wait()
 		child.Store(nil)
 

@@ -54,6 +54,17 @@ func TestExtractMP4InitBoxes(t *testing.T) {
 			want: nil,
 		},
 		{
+			// A malformed 64-bit (size==1) box claiming a huge size must not
+			// overflow int into a negative offset and panic.
+			name: "malformed oversized 64-bit box returns nil (no panic)",
+			data: append(
+				mp4box("ftyp", []byte("dash")),
+				append([]byte{0, 0, 0, 1, 'm', 'o', 'o', 'v'},
+					[]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}...)...,
+			),
+			want: nil,
+		},
+		{
 			// init-only buffer (no media box at all) is entirely init.
 			name: "ftyp+moov with no media box returns whole buffer",
 			data: init,
