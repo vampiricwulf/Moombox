@@ -70,18 +70,23 @@ var (
 
 // DownloaderOptions configures a SegmentDownloader.
 type DownloaderOptions struct {
-	BaseURL       string
-	OutputFile    string
-	StartSeq      int
-	EndSeq        int // -1 for unlimited
-	PoToken       string
-	CookieHeader  string // Cookie header for authenticated downloads
-	IsHls         bool
-	IsDirectURL   bool // Direct URL download (not segmented)
-	MaxRetries    int
-	InitURL       string
-	ForceStartSeq bool // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
-	ResumeFile    string
+	BaseURL      string
+	OutputFile   string
+	StartSeq     int
+	EndSeq       int // -1 for unlimited
+	PoToken      string
+	CookieHeader string // Cookie header for authenticated downloads
+	IsHls        bool
+	IsDirectURL  bool // Direct URL download (not segmented)
+	MaxRetries   int
+	InitURL      string
+	// InitFromSegment marks InitURL as a full media segment (a manifest-free
+	// DASH sq=0) rather than a standalone init segment: downloadInitSegment
+	// then writes only its extracted ftyp+moov init. Needed for manifestless
+	// parts that force-start at sq>0, whose init lives inline at sq=0.
+	InitFromSegment bool
+	ForceStartSeq   bool // When true, StartSeq is exact (orchestrator-provided), skip DB-fallback +1 logic
+	ResumeFile      string
 	// StreamID is an optional orchestrator-provided stable identity for the
 	// broadcast, persisted in the resume state. When both the saved state
 	// and the current options carry one and they differ, the resume state
@@ -588,6 +593,15 @@ func (d *SegmentDownloader) downloadInitSegment(ctx context.Context) error {
 	data, status, err := d.fetchSegment(ctx, d.opts.InitURL)
 	if err != nil || status >= 400 {
 		return fmt.Errorf("init segment: status=%d: %w", status, err)
+	}
+	if d.opts.InitFromSegment {
+		// InitURL is a full sq=0 media segment (manifest-free DASH); keep only
+		// its ftyp+moov init so segment 0's media doesn't prefix this part.
+		init := extractMP4InitBoxes(data)
+		if init == nil {
+			return fmt.Errorf("init segment: no ftyp/moov init found in sq=0 (%d bytes)", len(data))
+		}
+		data = init
 	}
 	n, err := d.outputFile.Write(data)
 	if err != nil {

@@ -8,6 +8,15 @@ import (
 
 func ptrInt(v int) *int { return &v }
 
+func TestManifestlessSq0URL(t *testing.T) {
+	if got := manifestlessSq0URL("https://x/videoplayback?a=1&b=2"); got != "https://x/videoplayback?a=1&b=2&sq=0" {
+		t.Errorf("query-style url: got %q", got)
+	}
+	if got := manifestlessSq0URL("https://x/videoplayback"); got != "https://x/videoplayback?sq=0" {
+		t.Errorf("no-query url: got %q", got)
+	}
+}
+
 func TestHasManifestlessDashFormats(t *testing.T) {
 	cases := []struct {
 		name    string

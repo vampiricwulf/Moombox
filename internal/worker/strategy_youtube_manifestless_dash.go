@@ -230,11 +230,21 @@ func DownloadManifestlessDash(
 		result.VideoWidth = videoStream.Width
 		result.VideoHeight = videoStream.Height
 		result.VideoFps = videoStream.FPS
+		// A part that force-starts mid-stream (quality split / restart) begins
+		// at sq>0, but manifest-free DASH carries the ftyp+moov init only inline
+		// at sq=0. Point InitURL at sq=0 so the engine prepends the extracted
+		// init; otherwise the part file is a bare moof+mdat that won't mux.
+		videoInitURL := ""
+		if forceVideoSeq && videoStartSeq > 0 {
+			videoInitURL = manifestlessSq0URL(videoStream.BaseURL)
+		}
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:          videoStream.BaseURL,
 			OutputFile:       result.VideoPath,
 			StartSeq:         videoStartSeq,
 			ForceStartSeq:    forceVideoSeq,
+			InitURL:          videoInitURL,
+			InitFromSegment:  videoInitURL != "",
 			PoToken:          pot,
 			CookieHeader:     cookieHeader,
 			RetryDelayCap:    job.Config.SegmentRetryDelayCap,
@@ -268,11 +278,17 @@ func DownloadManifestlessDash(
 	if audioStream != nil {
 		result.HasAudio = true
 		result.AudioPath = filepath.Join(job.StagingDir, "audio_stream")
+		audioInitURL := ""
+		if forceAudioSeq && audioStartSeq > 0 {
+			audioInitURL = manifestlessSq0URL(audioStream.BaseURL)
+		}
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
 			BaseURL:          audioStream.BaseURL,
 			OutputFile:       result.AudioPath,
 			StartSeq:         audioStartSeq,
 			ForceStartSeq:    forceAudioSeq,
+			InitURL:          audioInitURL,
+			InitFromSegment:  audioInitURL != "",
 			PoToken:          pot,
 			CookieHeader:     cookieHeader,
 			RetryDelayCap:    job.Config.SegmentRetryDelayCap,
@@ -313,6 +329,18 @@ func dbResumeSeq(streamStatus youtube.StreamStatus, lastSeq *int) int {
 		return *lastSeq
 	}
 	return 0
+}
+
+// manifestlessSq0URL returns the sq=0 segment URL for a query-style manifest-
+// free DASH base URL, used to fetch a part's inline ftyp+moov init. These
+// adaptiveFormats URLs always carry query params, so &sq=0 is the correct
+// separator (mirrors the engine's buildSegmentURL query-style form); the ?
+// fallback is defensive.
+func manifestlessSq0URL(base string) string {
+	if strings.Contains(base, "?") {
+		return base + "&sq=0"
+	}
+	return base + "?sq=0"
 }
 
 func itagOf(s *DashStreamInfo) int {
