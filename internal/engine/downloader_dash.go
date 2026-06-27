@@ -456,7 +456,12 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		}
 	}
 
-	d.emitActivity(ActivityVerifyingEnd)
+	// Only surface "verifying end" once the backoff has escalated toward the
+	// stream-status check; a brief at-edge wait (the normal steady state for a
+	// healthy live stream that has caught up to the head) is not end-verification.
+	if *sameHeadRetryDelay >= liveCheckThreshold {
+		d.emitActivity(ActivityVerifyingEnd)
+	}
 
 	// Also check no-segment timeout
 	if d.lastSegTime.Since() > NoSegmentTimeout {

@@ -15,6 +15,7 @@ const (
 	progressUpdateInterval  = 16 * time.Millisecond // ~60fps, matches TUI tick rate
 	progressPersistInterval = 1 * time.Second
 	activityUpdateInterval  = 1 * time.Second // throttle activity progress-line writes
+	activitySegmentGrace    = 2 * time.Second // show a wait only after this gap with no segment
 )
 
 // ProgressTracker tracks download progress and updates the database.
@@ -43,10 +44,26 @@ type ProgressTracker struct {
 	vodTotalBytes  int64     // Total file size for VOD chunked download (0 if not VOD)
 	gaps           []database.Gap
 
-	activity          engine.DownloadActivity // current wait reason (ActivityNone = downloading)
-	activityStart     time.Time               // when the current activity began (for elapsed)
-	lastActivityWrite time.Time               // throttle for activity DB writes
+	// Per-stream wait activity. Video and audio downloaders share this tracker
+	// but can stall independently, so each keeps its own reason + start; the
+	// displayed wait is the longest-running one, shown only when no segment has
+	// arrived recently (so a stream that keeps delivering keeps the counter on
+	// screen instead of flickering against the other stream's wait message).
+	videoActivity      engine.DownloadActivity
+	videoActivityStart time.Time
+	audioActivity      engine.DownloadActivity
+	audioActivityStart time.Time
+	lastSegmentAt      time.Time // last time either stream delivered a segment
+	lastActivityWrite  time.Time // throttle for activity DB writes
 }
+
+// streamKind identifies which downloader an activity/progress event came from.
+type streamKind int
+
+const (
+	streamVideo streamKind = iota
+	streamAudio
+)
 
 // NewProgressTracker creates a new progress tracker for a job.
 func NewProgressTracker(db *database.Database, jobID string, logger logger) *ProgressTracker {
@@ -67,7 +84,8 @@ func NewProgressTracker(db *database.Database, jobID string, logger logger) *Pro
 func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 	dl.OnProgress = func(p engine.DownloadProgress) {
 		pt.mu.Lock()
-		pt.activity = engine.ActivityNone // a real segment arrived; resume the normal counter
+		pt.videoActivity = engine.ActivityNone // a real video segment arrived
+		pt.lastSegmentAt = time.Now()
 		// Reported on DELIVERY, not at attach: between attach and the first
 		// video event (a post-restart 403 hunt can hold this window open for
 		// minutes), a chat tick or audio event must not persist videoSeq=0
@@ -117,14 +135,15 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 		pt.mu.Unlock()
 	}
 
-	dl.OnActivity = func(a engine.DownloadActivity) { pt.setActivity(a) }
+	dl.OnActivity = func(a engine.DownloadActivity) { pt.setActivity(streamVideo, a) }
 }
 
 // AttachAudioDownloader attaches progress callbacks to an audio segment downloader.
 func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 	dl.OnProgress = func(p engine.DownloadProgress) {
 		pt.mu.Lock()
-		pt.activity = engine.ActivityNone // a real segment arrived; resume the normal counter
+		pt.audioActivity = engine.ActivityNone // a real audio segment arrived
+		pt.lastSegmentAt = time.Now()
 		// See AttachVideoDownloader — reported on delivery, not attach.
 		pt.audioReported = true
 		pt.audioSeq = p.Seq
@@ -160,7 +179,7 @@ func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 		pt.mu.Unlock()
 	}
 
-	dl.OnActivity = func(a engine.DownloadActivity) { pt.setActivity(a) }
+	dl.OnActivity = func(a engine.DownloadActivity) { pt.setActivity(streamAudio, a) }
 }
 
 // SetChatCount updates the chat message count.
@@ -171,27 +190,37 @@ func (pt *ProgressTracker) SetChatCount(count int) {
 	pt.maybeUpdate()
 }
 
-// setActivity surfaces a downloader wait reason in the progress line, blanking
-// speed/eta since nothing is downloading. ActivityNone clears the state so the
-// next OnProgress restores the normal counter. DB writes are throttled.
-func (pt *ProgressTracker) setActivity(a engine.DownloadActivity) {
+// setActivity records a downloader wait reason for one stream and, when no
+// segment has arrived recently across either stream, surfaces the
+// longest-running wait in the progress line (blanking speed/eta). Tracking per
+// stream keeps one stream's delivered segment from resetting the other stalled
+// stream's elapsed clock. DB writes are throttled.
+func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActivity) {
 	pt.mu.Lock()
-	if a == engine.ActivityNone {
-		pt.activity = engine.ActivityNone
-		pt.mu.Unlock()
-		return
-	}
 	now := time.Now()
-	if a != pt.activity {
-		pt.activity = a
-		pt.activityStart = now
+	switch stream {
+	case streamVideo:
+		if a != pt.videoActivity {
+			pt.videoActivity = a
+			pt.videoActivityStart = now
+		}
+	case streamAudio:
+		if a != pt.audioActivity {
+			pt.audioActivity = a
+			pt.audioActivityStart = now
+		}
+	}
+	act, start := pt.dominantActivity(now)
+	if act == engine.ActivityNone {
+		pt.mu.Unlock()
+		return // a stream delivered recently — the normal counter is current
 	}
 	if now.Sub(pt.lastActivityWrite) < activityUpdateInterval {
 		pt.mu.Unlock()
 		return
 	}
 	pt.lastActivityWrite = now
-	msg := activityMessage(a, now.Sub(pt.activityStart))
+	msg := activityMessage(act, now.Sub(start))
 	pt.mu.Unlock()
 
 	pt.db.UpdateJobFields(pt.jobID, map[string]any{
@@ -199,6 +228,32 @@ func (pt *ProgressTracker) setActivity(a engine.DownloadActivity) {
 		"speed":    "",
 		"eta":      "",
 	})
+}
+
+// dominantActivity returns the wait reason + start to display, or ActivityNone
+// when a segment arrived within activitySegmentGrace (the normal counter should
+// show). When both streams wait, the longest-running wait wins so the elapsed
+// reflects the true stall, not the most recent stream to stall. Caller holds mu.
+func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActivity, time.Time) {
+	if !pt.lastSegmentAt.IsZero() && now.Sub(pt.lastSegmentAt) < activitySegmentGrace {
+		return engine.ActivityNone, time.Time{}
+	}
+	act, start := engine.ActivityNone, time.Time{}
+	for _, s := range [...]struct {
+		a engine.DownloadActivity
+		t time.Time
+	}{
+		{pt.videoActivity, pt.videoActivityStart},
+		{pt.audioActivity, pt.audioActivityStart},
+	} {
+		if s.a == engine.ActivityNone {
+			continue
+		}
+		if act == engine.ActivityNone || s.t.Before(start) {
+			act, start = s.a, s.t
+		}
+	}
+	return act, start
 }
 
 func (pt *ProgressTracker) maybeUpdate() {

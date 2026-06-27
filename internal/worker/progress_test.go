@@ -47,6 +47,52 @@ func TestActivityMessage(t *testing.T) {
 	}
 }
 
+func TestDominantActivity(t *testing.T) {
+	base := time.Now()
+
+	t.Run("recent segment shows the counter (None)", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.videoActivity = engine.ActivityReconnecting
+		pt.videoActivityStart = base.Add(-10 * time.Second)
+		pt.lastSegmentAt = base.Add(-200 * time.Millisecond) // a stream just delivered
+		if a, _ := pt.dominantActivity(base); a != engine.ActivityNone {
+			t.Errorf("recent segment: got %v, want ActivityNone", a)
+		}
+	})
+
+	t.Run("one stream stalled keeps its own elapsed", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.videoActivity = engine.ActivityReconnecting
+		pt.videoActivityStart = base.Add(-30 * time.Second)
+		pt.lastSegmentAt = base.Add(-10 * time.Second) // stale — no recent segment
+		a, start := pt.dominantActivity(base)
+		if a != engine.ActivityReconnecting || !start.Equal(base.Add(-30*time.Second)) {
+			t.Errorf("got (%v, %v), want (Reconnecting, -30s)", a, start)
+		}
+	})
+
+	t.Run("both stalled: the longest-running wait wins", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.videoActivity = engine.ActivityVerifyingEnd
+		pt.videoActivityStart = base.Add(-5 * time.Second)
+		pt.audioActivity = engine.ActivityVerifyingEnd
+		pt.audioActivityStart = base.Add(-20 * time.Second) // earlier start = longer wait
+		pt.lastSegmentAt = base.Add(-10 * time.Second)
+		_, start := pt.dominantActivity(base)
+		if !start.Equal(base.Add(-20 * time.Second)) {
+			t.Errorf("want the earlier (audio) start, got %v", start)
+		}
+	})
+
+	t.Run("both idle: None", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.lastSegmentAt = base.Add(-10 * time.Second)
+		if a, _ := pt.dominantActivity(base); a != engine.ActivityNone {
+			t.Errorf("got %v, want ActivityNone", a)
+		}
+	})
+}
+
 // TestBuildProgressStringVODChunked covers the "vodTotalBytes > 0"
 // branch — the function must return a percentage rather than segment
 // counts. Audit reports/worker.md F69.
