@@ -105,6 +105,19 @@ type DownloaderOptions struct {
 	Logger            DownloaderLogger
 }
 
+// DownloadActivity describes what the downloader is currently WAITING ON when
+// it is not actively pulling segments. The worker maps it to a human-readable
+// progress-line message so a verifying/waiting download doesn't read as frozen.
+type DownloadActivity int
+
+const (
+	ActivityNone                DownloadActivity = iota // actively downloading
+	ActivityVerifyingEnd                                // segments stopped; confirming the stream ended
+	ActivityReconnecting                                // connectivity lost; waiting for the network
+	ActivityRateLimited                                 // 429 backoff
+	ActivityFindingFirstSegment                         // pre-first-byte hunt for the first valid segment
+)
+
 // DownloadProgress holds progress information for event callbacks.
 type DownloadProgress struct {
 	Seq        int
@@ -227,6 +240,9 @@ type SegmentDownloader struct {
 	// continues fetching segments. Returning "" preserves the
 	// legacy fall-through to ErrQualityLost.
 	OnCipherFailure func() string
+	// OnActivity reports the downloader's current wait reason (or
+	// ActivityNone when it resumes downloading). Optional; nil to opt out.
+	OnActivity func(a DownloadActivity)
 }
 
 // SetBaseURL atomically replaces the URL used for subsequent segment
@@ -273,6 +289,13 @@ func (d *SegmentDownloader) emitHealthUpdate(p DownloadProgress) {
 		h.LastError = *msg
 	}
 	d.OnHealthUpdate(h)
+}
+
+// emitActivity reports the current wait reason to OnActivity. Nil-callback safe.
+func (d *SegmentDownloader) emitActivity(a DownloadActivity) {
+	if d.OnActivity != nil {
+		d.OnActivity(a)
+	}
 }
 
 // getBaseURL returns the override URL if SetBaseURL has been called,
