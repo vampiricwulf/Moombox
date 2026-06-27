@@ -386,6 +386,13 @@ func (o *DownloadOrchestrator) finalizeMultiSegmentJob(ctx context.Context, jobC
 // template name so a one-part outcome looks identical to a job that never
 // split. Best-effort: on any rename failure the part keeps its suffixed name
 // and the row is returned unchanged.
+//
+// outputDir/filenameBase are the FRESH template-resolved values, so on a
+// mid-job retitle/rechannel this can move the single part into a different
+// directory than where muxSegment originally wrote it (under the first part's
+// pinned name). That relocation is intentional: it places the one-part output
+// exactly where a never-split job's single output lands (muxAndFinalize uses
+// the same fresh template dir), keeping the two outcomes indistinguishable.
 func (o *DownloadOrchestrator) renameSinglePartToPlain(seg database.Segment, outputDir, filenameBase string) database.Segment {
 	plainVideo := filepath.Join(outputDir, filenameBase+".mp4")
 	if seg.FilePath == "" || seg.FilePath == plainVideo {
@@ -882,6 +889,15 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 			}
 			if probe.DurationSec > 0 {
 				unixStart = unixEnd - int64(probe.DurationSec)
+			}
+		}
+		// Guard against an implausibly-early start from a truncated/oversized
+		// ffprobe duration: the recorded span must not precede the job's
+		// download start. The authoritative DurationSeconds comes from the
+		// post-mux probe in muxSegment; this only keeps start/end sanely ordered.
+		if ds := jobCtx.Job.DownloadStartedAt; ds != "" {
+			if t, perr := time.Parse(time.RFC3339, ds); perr == nil && unixStart < t.Unix() {
+				unixStart = t.Unix()
 			}
 		}
 		if seg, muxErr := o.muxSegment(ctx, jobCtx, sd.idx, unixStart, unixEnd, quality, media); muxErr != nil {
