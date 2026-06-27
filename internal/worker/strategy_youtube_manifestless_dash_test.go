@@ -6,6 +6,8 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
+// ptrInt is a shared test helper for the *int format/seq fields. Kept as a
+// named helper (not Go 1.26 new(expr)) for readability and gopls support.
 func ptrInt(v int) *int { return &v }
 
 func TestManifestlessSq0URL(t *testing.T) {

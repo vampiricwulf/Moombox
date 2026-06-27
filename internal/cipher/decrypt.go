@@ -162,8 +162,8 @@ func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver 
 	const pathPrefix = "/n/"
 	if idx := strings.Index(result, pathPrefix); idx >= 0 {
 		rest := result[idx+len(pathPrefix):]
-		if end := strings.Index(rest, "/"); end >= 0 {
-			encryptedN := rest[:end]
+		if before, _, ok := strings.Cut(rest, "/"); ok {
+			encryptedN := before
 			if len(encryptedN) >= 10 {
 				if dec, err := decryptFn(encryptedN); err == nil && dec != encryptedN {
 					result = strings.Replace(result, pathPrefix+encryptedN+"/", pathPrefix+dec+"/", 1)

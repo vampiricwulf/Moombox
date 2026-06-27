@@ -108,7 +108,7 @@ func linuxFFmpegInstallSuggestion() string {
 // family's install command.
 func linuxFFmpegInstallSuggestionFromOSRelease(content string) string {
 	var id, idLike string
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "ID="):

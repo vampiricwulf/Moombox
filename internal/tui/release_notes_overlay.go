@@ -42,16 +42,10 @@ func (o *releaseNotesOverlay) open(tag, rawNotes string, width, height int) {
 	o.width = width
 	o.height = height
 
-	vpWidth := width * 8 / 10
-	if vpWidth < 40 {
-		vpWidth = 40
-	}
+	vpWidth := max(width*8/10, 40)
 	vpWidth -= 4 // account for borders + padding
 
-	vpHeight := height * 8 / 10
-	if vpHeight < 8 {
-		vpHeight = 8
-	}
+	vpHeight := max(height*8/10, 8)
 	vpHeight -= 6 // account for borders + title + footer
 
 	o.vp.SetWidth(vpWidth)
@@ -82,11 +76,6 @@ func (o *releaseNotesOverlay) Update(msg tea.Msg) tea.Cmd {
 func (o *releaseNotesOverlay) View() string {
 	if !o.open_ {
 		return ""
-	}
-
-	vpWidth := o.width * 8 / 10
-	if vpWidth < 40 {
-		vpWidth = 40
 	}
 
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorGreen).Padding(0, 1)

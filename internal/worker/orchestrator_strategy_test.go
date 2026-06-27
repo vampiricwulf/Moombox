@@ -7,8 +7,7 @@ import (
 )
 
 // adaptiveVideo / adaptiveAudio build the split video-only + audio-only
-// adaptive entries that HasManifestlessDashFormats keys on. ptrInt is shared
-// with strategy_youtube_manifestless_dash_test.go.
+// adaptive entries that HasManifestlessDashFormats keys on.
 func adaptiveVideo() youtube.Format {
 	return youtube.Format{Itag: 137, URL: "https://v.example/videoplayback?x=1", MimeType: "video/mp4", Width: ptrInt(1920), Height: ptrInt(1080)}
 }

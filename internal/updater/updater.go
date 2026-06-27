@@ -33,8 +33,8 @@ var markdownPolicy = bluemonday.UGCPolicy()
 // `\n---\n` separator and the actual changelog below; this returns just
 // the changelog. Bodies without a separator are returned unchanged.
 func stripDownloadLinks(body string) string {
-	if i := strings.Index(body, "\n---\n"); i >= 0 {
-		return strings.TrimSpace(body[i+len("\n---\n"):])
+	if _, after, ok := strings.Cut(body, "\n---\n"); ok {
+		return strings.TrimSpace(after)
 	}
 	return body
 }

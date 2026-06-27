@@ -52,7 +52,7 @@ func TestSetConnectivityReporter_ConcurrentRaceFree(t *testing.T) {
 	rep := &atomicCountingReporter{}
 
 	var wg sync.WaitGroup
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		wg.Add(2)
 		go func() { defer wg.Done(); SetConnectivityReporter(rep) }()
 		go func() { defer wg.Done(); reportProbeResult("probe/test", true) }()

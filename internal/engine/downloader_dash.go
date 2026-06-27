@@ -366,10 +366,7 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 	// YouTube's token bucket is fully depleted (audit reports/engine.md #15).
 	// Shift count is clamped so the int64 cast can't overflow.
 	const maxShift = 6 // 1<<6 == 64s — beyond delayCap default of 60s
-	shift := max(*sameHeadRetryDelay-1, 0)
-	if shift > maxShift {
-		shift = maxShift
-	}
+	shift := min(max(*sameHeadRetryDelay-1, 0), maxShift)
 	backoff := min(time.Duration(int64(1)<<uint(shift))*time.Second, time.Duration(delayCap)*time.Second)
 	d.emitActivity(ActivityRateLimited)
 	d.logger.Warn("segment download rate-limited (429), backing off", "seq", d.currentSeq.Load(), "delay", backoff)

@@ -406,7 +406,7 @@ func TestFetch_Singleflight_CoalescesByCacheKey(t *testing.T) {
 	const concurrency = 5
 	var wg sync.WaitGroup
 	wg.Add(concurrency * len(urls))
-	for i := 0; i < concurrency; i++ {
+	for range concurrency {
 		for _, u := range urls {
 			go func(u string) {
 				defer wg.Done()
