@@ -4,24 +4,24 @@ go 1.26
 
 require (
 	charm.land/bubbles/v2 v2.1.0
-	charm.land/bubbletea/v2 v2.0.6
-	charm.land/glamour/v2 v2.0.0
+	charm.land/bubbletea/v2 v2.0.7
+	charm.land/glamour/v2 v2.0.1
 	charm.land/huh/v2 v2.0.3
-	charm.land/lipgloss/v2 v2.0.3
+	charm.land/lipgloss/v2 v2.0.4
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/colorprofile v0.4.3
-	github.com/coder/websocket v1.8.14
-	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/coder/websocket v1.8.15
+	github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/mattn/go-isatty v0.0.22
-	github.com/mattn/go-runewidth v0.0.23
+	github.com/mattn/go-runewidth v0.0.24
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/ulikunitz/xz v0.5.15
 	github.com/yuin/goldmark v1.8.2
-	golang.org/x/crypto v0.50.0
-	golang.org/x/sync v0.20.0
-	golang.org/x/text v0.36.0
-	modernc.org/sqlite v1.50.0
+	golang.org/x/crypto v0.53.0
+	golang.org/x/sync v0.21.0
+	golang.org/x/text v0.38.0
+	modernc.org/sqlite v1.53.0
 )
 
 require (
@@ -30,7 +30,7 @@ require (
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/catppuccin/go v0.3.0 // indirect
 	github.com/charmbracelet/harmonica v0.2.0 // indirect
-	github.com/charmbracelet/ultraviolet v0.0.0-20260428153724-66037269d7be // indirect
+	github.com/charmbracelet/ultraviolet v0.0.0-20260525132238-948f4557a654 // indirect
 	github.com/charmbracelet/x/ansi v0.11.7 // indirect
 	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
 	github.com/charmbracelet/x/exp/slice v0.0.0-20260503005035-c113ba3d2310 // indirect
@@ -41,6 +41,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dlclark/regexp2 v1.12.0 // indirect
+	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
@@ -55,9 +56,9 @@ require (
 	github.com/sahilm/fuzzy v0.1.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
-	golang.org/x/net v0.53.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
-	modernc.org/libc v1.72.2 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
