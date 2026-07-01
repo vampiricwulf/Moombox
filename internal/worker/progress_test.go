@@ -38,6 +38,7 @@ func TestActivityMessage(t *testing.T) {
 		{engine.ActivityReconnecting, "Connection lost - reconnecting... (1m 20s)"},
 		{engine.ActivityRateLimited, "Rate-limited - backing off... (1m 20s)"},
 		{engine.ActivityFindingFirstSegment, "Waiting for first segment... (1m 20s)"},
+		{engine.ActivityRetrying, "Segment fetch failing - retrying... (1m 20s)"},
 		{engine.ActivityNone, ""},
 	}
 	for _, c := range cases {

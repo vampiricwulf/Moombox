@@ -192,6 +192,10 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		if status == 403 || status == 410 {
 			return nil, ErrSegmentPermanent
 		}
+		// Surface the backoff in the progress line — the tracker's grace
+		// window suppresses this while other segments are still landing, so
+		// only a real stall shows it.
+		d.emitActivity(ActivityRetrying)
 		utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
 	}
 	return nil, ErrSegmentRetriesExhausted

@@ -311,8 +311,12 @@ func (o *DownloadOrchestrator) ExecuteWithChat(ctx context.Context, jobCtx *JobC
 		return ctx.Err()
 	}
 
-	// Setup progress tracking
+	// Setup progress tracking. The deferred Close covers the exit paths
+	// that never reach Finalize (download error, ctx cancel) — without it a
+	// pending wait activity would keep the refresh loop rewriting the
+	// terminal job's progress line every second for the process lifetime.
 	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger)
+	defer tracker.Close()
 
 	if result.VideoDownloader != nil {
 		tracker.AttachVideoDownloader(result.VideoDownloader)

@@ -299,7 +299,10 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 
 	videoDl, videoPath := createDownloader(currentVariantURL, curStagingDir, -1, false)
 
+	// Deferred Close mirrors ExecuteWithChat: any exit that skips the
+	// post-loop Finalize must still stop the activity refresh loop.
 	tracker := NewProgressTracker(o.db, jobCtx.Job.ID, o.logger)
+	defer tracker.Close()
 	tracker.AttachVideoDownloader(videoDl)
 
 	// irc is the live IRC chat downloader when present (nil for VOD chat or
@@ -612,6 +615,12 @@ sessionLoop:
 		o.sendTwitchSessionNotification(jobCtx, "Twitch Download Paused — Connectivity Lost",
 			fmt.Sprintf("Waiting for internet to resume download: %s", jobCtx.Job.Title),
 			notifications.TypeWarning, "connectivity_pause", currentQuality, segmentIndex+1)
+		// Progress line for the pause: the downloader is dead (session
+		// cancelled), so nothing else writes it — without this the job card
+		// freezes on the last segment counter for the whole outage. The
+		// tracker's refresh loop keeps the elapsed live through the wait and
+		// the recovery steps; the first segment after resume clears it.
+		tracker.SetWaitActivity(engine.ActivityReconnecting)
 
 		// Recovery: wait for connectivity, then revalidate the broadcast and
 		// refresh the variant. Every network step is retried back through

@@ -121,6 +121,7 @@ const (
 	ActivityReconnecting                                // connectivity lost; waiting for the network
 	ActivityRateLimited                                 // 429 backoff
 	ActivityFindingFirstSegment                         // pre-first-byte hunt for the first valid segment
+	ActivityRetrying                                    // segment/playlist fetch failing; retrying
 )
 
 // DownloadProgress holds progress information for event callbacks.

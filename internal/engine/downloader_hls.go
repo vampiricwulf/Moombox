@@ -88,6 +88,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				}
 				return fmt.Errorf("HLS playlist fetch failed after %d consecutive errors: %w", consecutiveErrors, err)
 			}
+			d.emitActivity(ActivityRetrying)
 			utils.Sleep(ctx, 5*time.Second)
 			continue
 		}
@@ -135,6 +136,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				}
 				return fmt.Errorf("failed to parse HLS playlist after %d consecutive errors", consecutiveErrors)
 			}
+			d.emitActivity(ActivityRetrying)
 			utils.Sleep(ctx, 5*time.Second)
 			continue
 		}
@@ -288,6 +290,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 						}
 					}
 				}
+				d.emitActivity(ActivityRetrying)
 				utils.Sleep(ctx, 2*time.Second)
 				segFailed = true
 				break

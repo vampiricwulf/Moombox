@@ -16,6 +16,12 @@ const (
 	progressPersistInterval = 1 * time.Second
 	activityUpdateInterval  = 1 * time.Second // throttle activity progress-line writes
 	activitySegmentGrace    = 2 * time.Second // show a wait only after this gap with no segment
+	// activityTickerIdleStop is how many consecutive quiet refresh ticks
+	// (nothing to show) the refresh goroutine tolerates before parking
+	// itself. Comfortably outlives activitySegmentGrace so a wait recorded
+	// during the grace window still gets its first write once the grace
+	// passes; any later setActivity restarts the loop.
+	activityTickerIdleStop = 10
 )
 
 // ProgressTracker tracks download progress and updates the database.
@@ -49,20 +55,30 @@ type ProgressTracker struct {
 	// displayed wait is the longest-running one, shown only when no segment has
 	// arrived recently (so a stream that keeps delivering keeps the counter on
 	// screen instead of flickering against the other stream's wait message).
+	// The orch slot carries orchestrator-level waits (stream-end verification
+	// between manifest refreshes, a Twitch connectivity-outage pause) that
+	// happen while no downloader is running — set via SetWaitActivity and
+	// cleared, like the stream slots, by the next delivered segment.
 	videoActivity      engine.DownloadActivity
 	videoActivityStart time.Time
 	audioActivity      engine.DownloadActivity
 	audioActivityStart time.Time
+	orchActivity       engine.DownloadActivity
+	orchActivityStart  time.Time
 	lastSegmentAt      time.Time // last time either stream delivered a segment
 	lastActivityWrite  time.Time // throttle for activity DB writes
+	activityTickerOn   bool      // refresh goroutine running (guarded by mu)
+	closed             bool      // Finalize ran — no further activity writes or tickers
 }
 
 // streamKind identifies which downloader an activity/progress event came from.
+// streamOrch is the orchestrator itself (waits between downloader sessions).
 type streamKind int
 
 const (
 	streamVideo streamKind = iota
 	streamAudio
+	streamOrch
 )
 
 // NewProgressTracker creates a new progress tracker for a job.
@@ -85,6 +101,7 @@ func (pt *ProgressTracker) AttachVideoDownloader(dl *engine.SegmentDownloader) {
 	dl.OnProgress = func(p engine.DownloadProgress) {
 		pt.mu.Lock()
 		pt.videoActivity = engine.ActivityNone // a real video segment arrived
+		pt.orchActivity = engine.ActivityNone  // any orchestrator-level wait is over
 		pt.lastSegmentAt = time.Now()
 		// Reported on DELIVERY, not at attach: between attach and the first
 		// video event (a post-restart 403 hunt can hold this window open for
@@ -143,6 +160,7 @@ func (pt *ProgressTracker) AttachAudioDownloader(dl *engine.SegmentDownloader) {
 	dl.OnProgress = func(p engine.DownloadProgress) {
 		pt.mu.Lock()
 		pt.audioActivity = engine.ActivityNone // a real audio segment arrived
+		pt.orchActivity = engine.ActivityNone  // any orchestrator-level wait is over
 		pt.lastSegmentAt = time.Now()
 		// See AttachVideoDownloader — reported on delivery, not attach.
 		pt.audioReported = true
@@ -190,13 +208,28 @@ func (pt *ProgressTracker) SetChatCount(count int) {
 	pt.maybeUpdate()
 }
 
-// setActivity records a downloader wait reason for one stream and, when no
-// segment has arrived recently across either stream, surfaces the
+// SetWaitActivity records an orchestrator-level wait (stream-end verification
+// between manifest refreshes, a Twitch connectivity-outage pause) in the
+// progress line. Unlike the per-stream activities — which the engine emits
+// from inside its download loops — these waits happen while no downloader is
+// running, so the orchestrator sets them directly; the refresh loop keeps the
+// elapsed counter live for the whole wait, and the next delivered segment
+// clears it like any other activity.
+func (pt *ProgressTracker) SetWaitActivity(a engine.DownloadActivity) {
+	pt.setActivity(streamOrch, a)
+}
+
+// setActivity records a wait reason for one stream (or the orchestrator) and,
+// when no segment has arrived recently across either stream, surfaces the
 // longest-running wait in the progress line (blanking speed/eta). Tracking per
 // stream keeps one stream's delivered segment from resetting the other stalled
 // stream's elapsed clock. DB writes are throttled.
 func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActivity) {
 	pt.mu.Lock()
+	if pt.closed {
+		pt.mu.Unlock()
+		return
+	}
 	now := time.Now()
 	switch stream {
 	case streamVideo:
@@ -209,6 +242,19 @@ func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActiv
 			pt.audioActivity = a
 			pt.audioActivityStart = now
 		}
+	case streamOrch:
+		if a != pt.orchActivity {
+			pt.orchActivity = a
+			pt.orchActivityStart = now
+		}
+	}
+	if a != engine.ActivityNone {
+		// The refresh loop keeps the elapsed counter live when the engine
+		// blocks without re-emitting (waitForConnectivity can hold one
+		// emission for an entire outage) and retries the write below if the
+		// segment grace suppresses it — without the loop, a wait whose only
+		// emission landed inside the grace window never appeared at all.
+		pt.ensureActivityTickerLocked()
 	}
 	act, start := pt.dominantActivity(now)
 	if act == engine.ActivityNone {
@@ -220,7 +266,7 @@ func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActiv
 		return
 	}
 	pt.lastActivityWrite = now
-	msg := activityMessage(act, now.Sub(start))
+	msg := activityMessage(act, pt.activityElapsedLocked(act, start, now))
 	pt.mu.Unlock()
 
 	pt.db.UpdateJobFields(pt.jobID, map[string]any{
@@ -232,8 +278,8 @@ func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActiv
 
 // dominantActivity returns the wait reason + start to display, or ActivityNone
 // when a segment arrived within activitySegmentGrace (the normal counter should
-// show). When both streams wait, the longest-running wait wins so the elapsed
-// reflects the true stall, not the most recent stream to stall. Caller holds mu.
+// show). When several slots wait, the longest-running wait wins so the elapsed
+// reflects the true stall, not the most recent slot to stall. Caller holds mu.
 func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActivity, time.Time) {
 	if !pt.lastSegmentAt.IsZero() && now.Sub(pt.lastSegmentAt) < activitySegmentGrace {
 		return engine.ActivityNone, time.Time{}
@@ -245,6 +291,7 @@ func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActiv
 	}{
 		{pt.videoActivity, pt.videoActivityStart},
 		{pt.audioActivity, pt.audioActivityStart},
+		{pt.orchActivity, pt.orchActivityStart},
 	} {
 		if s.a == engine.ActivityNone {
 			continue
@@ -254,6 +301,101 @@ func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActiv
 		}
 	}
 	return act, start
+}
+
+// activityElapsedLocked picks the elapsed duration shown for an activity.
+// VerifyingEnd shows time since the last delivered segment — the number that
+// actually says whether the stream is over, and the same clock the
+// orchestrator's verification loop reasons with — while the other waits show
+// how long the wait itself has been running. Caller holds mu.
+func (pt *ProgressTracker) activityElapsedLocked(act engine.DownloadActivity, start, now time.Time) time.Duration {
+	if act == engine.ActivityVerifyingEnd && !pt.lastSegmentAt.IsZero() {
+		return now.Sub(pt.lastSegmentAt)
+	}
+	return now.Sub(start)
+}
+
+// pendingActivityLocked reports whether any slot holds a wait. Caller holds mu.
+func (pt *ProgressTracker) pendingActivityLocked() bool {
+	return pt.videoActivity != engine.ActivityNone ||
+		pt.audioActivity != engine.ActivityNone ||
+		pt.orchActivity != engine.ActivityNone
+}
+
+// ensureActivityTickerLocked starts the refresh goroutine when none is
+// running. Caller holds mu.
+func (pt *ProgressTracker) ensureActivityTickerLocked() {
+	if pt.activityTickerOn || pt.closed {
+		return
+	}
+	pt.activityTickerOn = true
+	go pt.activityRefreshLoop()
+}
+
+// activityRefreshLoop re-renders the active wait message once per second so
+// the elapsed counter stays live through long blocking waits — the emit
+// points only fire when the engine reaches a retry/check seam, which can be
+// a 60s rate-limit sleep, a 5-minute orchestrator verify sleep, or a
+// waitForConnectivity block spanning an entire outage. The goroutine is
+// lazy: it parks itself after activityTickerIdleStop quiet ticks, so a
+// normally-downloading job carries no ticker at all; the next setActivity
+// restarts it.
+func (pt *ProgressTracker) activityRefreshLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			pt.logger.Error("panic in activity refresh loop", "panic", fmt.Sprint(r))
+			pt.mu.Lock()
+			pt.activityTickerOn = false
+			pt.mu.Unlock()
+		}
+	}()
+	ticker := time.NewTicker(activityUpdateInterval)
+	defer ticker.Stop()
+	idleTicks := 0
+	for range ticker.C {
+		pt.mu.Lock()
+		if pt.closed {
+			pt.activityTickerOn = false
+			pt.mu.Unlock()
+			return
+		}
+		now := time.Now()
+		act, start := engine.ActivityNone, time.Time{}
+		if pt.pendingActivityLocked() {
+			act, start = pt.dominantActivity(now)
+		}
+		if act == engine.ActivityNone {
+			// Nothing to show: no wait pending, or segments are arriving
+			// (grace). Park after a quiet stretch rather than immediately —
+			// a wait recorded during the grace window still needs its first
+			// write once the grace passes.
+			idleTicks++
+			if idleTicks >= activityTickerIdleStop {
+				pt.activityTickerOn = false
+				pt.mu.Unlock()
+				return
+			}
+			pt.mu.Unlock()
+			continue
+		}
+		idleTicks = 0
+		// Throttle against engine-emission writes; the 9/10 slack keeps the
+		// ~1s ticker from beating against its own last write and skipping
+		// alternate ticks.
+		if now.Sub(pt.lastActivityWrite) < activityUpdateInterval*9/10 {
+			pt.mu.Unlock()
+			continue
+		}
+		pt.lastActivityWrite = now
+		msg := activityMessage(act, pt.activityElapsedLocked(act, start, now))
+		pt.mu.Unlock()
+
+		pt.db.UpdateJobFields(pt.jobID, map[string]any{
+			"progress": msg,
+			"speed":    "",
+			"eta":      "",
+		})
+	}
 }
 
 func (pt *ProgressTracker) maybeUpdate() {
@@ -290,6 +432,21 @@ func (pt *ProgressTracker) maybeUpdate() {
 	// B8: Calculate ETA
 	eta := pt.calculateETA()
 
+	// While a wait activity is showing, this path (chat ticks are its main
+	// trigger during a stall) must not stamp the frozen segment counter and
+	// stale speed over the activity message — render the wait here too, so
+	// the two writers agree instead of alternating once a second. The seq
+	// columns and chat count below still persist normally.
+	speed := utils.FormatSpeed(pt.speedSmooth.Value())
+	activityShown := false
+	if act, start := pt.dominantActivity(now); act != engine.ActivityNone {
+		progress = activityMessage(act, pt.activityElapsedLocked(act, start, now))
+		speed = ""
+		eta = ""
+		activityShown = true
+		pt.lastActivityWrite = now // spare the refresh loop a duplicate write
+	}
+
 	// Snapshot values for DB update. The seq columns are persisted only for
 	// stream kinds that have actually REPORTED this session: an audio-less
 	// session (HLS delivers muxed A+V) used to overwrite last_audio_seq
@@ -299,7 +456,7 @@ func (pt *ProgressTracker) maybeUpdate() {
 	updates := map[string]any{
 		"progress":            progress,
 		"percent":             percent,
-		"speed":               utils.FormatSpeed(pt.speedSmooth.Value()),
+		"speed":               speed,
 		"total_chat_messages": pt.chatCount,
 	}
 	if pt.videoReported {
@@ -312,6 +469,10 @@ func (pt *ProgressTracker) maybeUpdate() {
 	}
 	if eta != "" {
 		updates["eta"] = eta
+	} else if activityShown {
+		// Blank a lingering ETA explicitly — the activity writers do the
+		// same, and skipping the key here would leave the stale value.
+		updates["eta"] = ""
 	}
 
 	// Snapshot gaps for persistence
@@ -380,6 +541,8 @@ func activityMessage(a engine.DownloadActivity, elapsed time.Duration) string {
 		return fmt.Sprintf("Rate-limited - backing off... (%s)", e)
 	case engine.ActivityFindingFirstSegment:
 		return fmt.Sprintf("Waiting for first segment... (%s)", e)
+	case engine.ActivityRetrying:
+		return fmt.Sprintf("Segment fetch failing - retrying... (%s)", e)
 	default:
 		return ""
 	}
@@ -429,10 +592,35 @@ func (pt *ProgressTracker) calculateETA() string {
 	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
-// Finalize saves any remaining state.
+// Close stops activity writes and the refresh loop without flushing gap
+// state. The orchestrators defer it right after constructing the tracker so
+// no exit path — error, cancel, panic — leaves the refresh goroutine alive
+// rewriting a terminal job's progress line every second. Idempotent;
+// Finalize implies it.
+func (pt *ProgressTracker) Close() {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.closeLocked()
+}
+
+// closeLocked marks the tracker closed and clears the wait slots so neither
+// the refresh loop nor maybeUpdate can render an activity again. Caller
+// holds mu.
+func (pt *ProgressTracker) closeLocked() {
+	pt.closed = true
+	pt.videoActivity = engine.ActivityNone
+	pt.audioActivity = engine.ActivityNone
+	pt.orchActivity = engine.ActivityNone
+}
+
+// Finalize saves any remaining state and stops the activity refresh loop —
+// after this, no activity write may land over the finalize-phase progress
+// (Muxing status, mux percent lines).
 func (pt *ProgressTracker) Finalize() {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
+
+	pt.closeLocked()
 
 	for _, gap := range pt.gaps {
 		pt.db.AddGap(gap.JobID, gap.From, gap.To, gap.Stream)

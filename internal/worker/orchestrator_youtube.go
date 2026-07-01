@@ -333,12 +333,10 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 				break
 			}
 
-			// Wait and retry
-			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-				"progress": activityMessage(engine.ActivityVerifyingEnd, timeSinceLastSeg),
-				"speed":    "",
-				"eta":      "",
-			})
+			// Wait and retry. Routed through the tracker (not a direct
+			// UpdateJobFields) so the refresh loop keeps the elapsed counter
+			// live across the 5-minute sleep instead of freezing it.
+			tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
 			utils.Sleep(ctx, streamEndVerifyInterval)
 			continue
 		}
@@ -362,11 +360,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			o.logger.Info("stream still live, refreshing manifests",
 				"check", checks, "max", maxConsecutiveLiveChecks, "jobID", jobCtx.Job.ID)
 
-			o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-				"progress": activityMessage(engine.ActivityVerifyingEnd, timeSinceLastSeg),
-				"speed":    "",
-				"eta":      "",
-			})
+			// Through the tracker — see the verify-retry branch above.
+			tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
 
 			utils.Sleep(ctx, streamEndVerifyInterval)
 
@@ -387,11 +382,8 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 
 			if refreshErr != nil {
 				o.logger.Warn("failed to refresh manifests", "err", refreshErr, "jobID", jobCtx.Job.ID)
-				o.db.UpdateJobFields(jobCtx.Job.ID, map[string]any{
-					"progress": activityMessage(engine.ActivityVerifyingEnd, timeSinceLastSeg),
-					"speed":    "",
-					"eta":      "",
-				})
+				// Through the tracker — see the verify-retry branch above.
+				tracker.SetWaitActivity(engine.ActivityVerifyingEnd)
 				utils.Sleep(ctx, streamEndVerifyInterval)
 				continue
 			}

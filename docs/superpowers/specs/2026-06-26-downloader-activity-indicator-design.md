@@ -4,6 +4,16 @@
 **Status:** Approved design (pre-implementation)
 **Owner decisions:** reuse the existing `progress` line (no new `JobStatus`, no new DB column); cover all four wait windows; no per-second refresh ticker in the minimal version.
 
+> **Addendum (2026-07-01):** the deferred items shipped in a follow-up pass —
+> a lazy per-second refresh loop in `ProgressTracker` (keeps the elapsed live
+> through blocking waits like `waitForConnectivity` and the 5-minute verify
+> sleeps; parks itself when no wait is pending), a fifth activity
+> (`ActivityRetrying`, "Segment fetch failing - retrying…") covering the
+> segment/playlist retry stalls, orchestrator waits routed through
+> `tracker.SetWaitActivity` (including the Twitch connectivity-outage pause,
+> which previously froze the line for the whole outage), and a unified
+> `VerifyingEnd` elapsed clock: time since the last delivered segment.
+
 ## 1. Problem
 
 When a live download stops pulling segments, the dashboard's progress line freezes on
