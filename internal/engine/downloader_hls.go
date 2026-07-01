@@ -508,12 +508,16 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				return fmt.Errorf("write HLS VOD segment %d: %w", nextIdx, err)
 			}
 			d.bytesWritten.Add(int64(n))
+			// Seq reports the just-WRITTEN sequence — the same last-written
+			// convention as every other emitter (see the live loop above) —
+			// so the persisted seq columns mean one thing on every path.
+			writtenSeq := int(d.currentSeq.Load())
 			d.currentSeq.Add(1)
 			nextIdx++
 
 			if d.OnProgress != nil {
 				d.OnProgress(DownloadProgress{
-					Seq:   int(d.currentSeq.Load()),
+					Seq:   writtenSeq,
 					Bytes: d.bytesWritten.Load(),
 					Total: totalSegs,
 				})

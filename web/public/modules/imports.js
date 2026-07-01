@@ -179,7 +179,8 @@ export class ImportController {
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
       // HTTP headers are Latin-1 only — setRequestHeader throws synchronously
       // for CJK/emoji titles and mangles é-style chars. Percent-encode; the
-      // server decodes (url.QueryUnescape in import_routes.go).
+      // server decodes (url.PathUnescape in import_routes.go — PathUnescape,
+      // not QueryUnescape, so a literal '+' survives).
       if (title) xhr.setRequestHeader("X-Import-Title", encodeURIComponent(title));
       if (channel) xhr.setRequestHeader("X-Import-Channel", encodeURIComponent(channel));
     } catch (e) {

@@ -618,16 +618,24 @@ func (o *DownloadOrchestrator) muxSegment(
 	// staging dir indices), which makes the name idempotent; short-skipped
 	// segments can leave cosmetic holes in the numbering.
 	filenameBase, _ := o.resolveFreshFilename(jobCtx)
-	// Pin the base to the first recorded part's name: the template resolves
-	// against live metadata, and a mid-job retitle (a restart re-processes
-	// stream info) would otherwise scatter one recording's parts across
-	// different names.
+	outputDir := filepath.Join(jobCtx.OutputDir, filepath.Dir(filenameBase))
+	// Pin the base — and the directory — to the first recorded part: the
+	// template resolves against live metadata, and a mid-job retitle or
+	// channel rename (a restart re-processes stream info) would otherwise
+	// scatter one recording's parts across different names or folders. The
+	// directory comes from the first part's actual location rather than
+	// re-resolving the template, so all parts of one recording stay
+	// siblings. (finalizeMultiSegmentJob's single-part rename still
+	// relocates a one-part outcome to the fresh template dir — see the
+	// relocation note on renameSinglePartToPlain.)
 	if segs, err := o.db.GetSegments(jobCtx.Job.ID); err == nil && len(segs) > 0 {
 		if m := partBaseRe.FindStringSubmatch(segs[0].Filename); m != nil {
 			filenameBase = filepath.Join(filepath.Dir(filenameBase), m[1])
+			if segs[0].FilePath != "" {
+				outputDir = filepath.Dir(segs[0].FilePath)
+			}
 		}
 	}
-	outputDir := filepath.Join(jobCtx.OutputDir, filepath.Dir(filenameBase))
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create segment output dir: %w", err)
 	}

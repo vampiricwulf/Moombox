@@ -1002,7 +1002,11 @@ func (o *DownloadOrchestrator) recheckTwitchBroadcast(ctx context.Context, varia
 		default:
 			return false, nil
 		}
-		utils.Sleep(ctx, time.Duration(3*(i+1))*time.Second)
+		// No sleep after the final attempt — there is no retry left to wait
+		// for, and the caller is deciding whether to finalize the job.
+		if i < attempts-1 {
+			utils.Sleep(ctx, time.Duration(3*(i+1))*time.Second)
+		}
 	}
 	return false, nil
 }
