@@ -86,3 +86,28 @@ func TestStreamIdentity_QueryStyle_DifferentItag(t *testing.T) {
 		t.Errorf("expected different identities for different query itags")
 	}
 }
+
+func TestStreamIdentity_TildedManifestID(t *testing.T) {
+	// YouTube's multi-manifest special case: the id path segment can carry a
+	// `~suffix` ("{videoID}.{n}~{unknown}", ytarchive#56 / moonarchive) whose
+	// suffix rotates across manifest refreshes of the SAME broadcast. The
+	// identity must extract normally and ignore the suffix — a tilded URL
+	// used to extract no identity at all, and a mixed tilded/untilded pair
+	// then counted as a conservative mismatch that discarded valid resume
+	// state.
+	tilded := "https://rr2---sn-abc.googlevideo.com/videoplayback/expire/1000/ei/old/id/xOdgbNQ_lsE.1~45623198/itag/140/n/old/sig/old/"
+	got := streamIdentity(tilded)
+	want := "xOdgbNQ_lsE/140"
+	if got != want {
+		t.Errorf("streamIdentity(tilded) = %q, want %q", got, want)
+	}
+
+	// Same broadcast: tilded vs untilded and rotated tilde suffixes must all
+	// report the same identity.
+	untilded := "https://rr1---sn-xyz.googlevideo.com/videoplayback/expire/2000/ei/new/id/xOdgbNQ_lsE.1/itag/140/n/new/sig/new/"
+	rotated := "https://rr3---sn-qrs.googlevideo.com/videoplayback/expire/3000/ei/nw2/id/xOdgbNQ_lsE.1~99887766/itag/140/n/nw2/sig/nw2/"
+	if streamIdentity(untilded) != got || streamIdentity(rotated) != got {
+		t.Errorf("tilde variants disagree: tilded=%q untilded=%q rotated=%q",
+			got, streamIdentity(untilded), streamIdentity(rotated))
+	}
+}

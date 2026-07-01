@@ -9,8 +9,14 @@ import (
 
 // streamIdentityPathRe extracts (videoID, itag) from a path-style YouTube
 // media URL — DASH manifest output and HLS variant playlists share the
-// `/id/<videoID>.<streamNumber>/itag/<itag>/` shape.
-var streamIdentityPathRe = regexp.MustCompile(`/id/([\w-]+)\.\d+/itag/(\d+)/`)
+// `/id/<videoID>.<streamNumber>/itag/<itag>/` shape. The optional `~suffix`
+// after the stream number is YouTube's multi-manifest special case
+// (`{videoID}.{n}~{unknown}`, ytarchive#56 / moonarchive) — the suffix can
+// rotate across manifest refreshes of the SAME broadcast, so it must be
+// excluded from the identity: matching it into the fingerprint (or failing
+// to match at all, as the pre-tilde pattern did) turns a mid-broadcast
+// manifest refresh into a false "different stream" resume mismatch.
+var streamIdentityPathRe = regexp.MustCompile(`/id/([\w-]+)\.\d+(?:~[^/]*)?/itag/(\d+)/`)
 
 // streamIdentityQueryIDRe / streamIdentityQueryItagRe extract id and itag
 // from a query-style YouTube media URL — manifestless DASH adaptiveFormat

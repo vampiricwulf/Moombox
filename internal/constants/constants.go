@@ -1,9 +1,37 @@
 // Package constants centralizes all hardcoded values used throughout Moombox.
 package constants
 
+import (
+	"fmt"
+	"math/rand/v2"
+)
+
 // =============================================================================
 // HTTP CONSTANTS
 // =============================================================================
+
+// Chrome-major window for the randomized desktop Web UA. Keep in lockstep
+// with yt-dlp's random_user_agent() range (utils/_utils.py — 143-149 as of
+// 2026-06) so live Google/Twitch endpoints never see an implausibly stale or
+// not-yet-released browser. Bump both bounds when yt-dlp's window moves.
+const (
+	chromeMajorMin = 143
+	chromeMajorMax = 149
+)
+
+// randomizedWebUA builds the desktop Web UA with a Chrome major picked
+// randomly ONCE per process start (this runs during package init). Per-start
+// randomization spreads Moombox installs across the same version window real
+// Chrome users occupy — a single fixed pin makes every install fingerprint
+// identically, so one flagged UA+behavior tuple degrades everyone at once
+// (yt-dlp randomizes for the same reason). The value must stay fixed for the
+// process lifetime: BotGuard's DOM shim reports it as navigator.userAgent
+// while the HTTP layer sends it on every request, and those two views must
+// never disagree.
+func randomizedWebUA() string {
+	major := chromeMajorMin + rand.IntN(chromeMajorMax-chromeMajorMin+1)
+	return fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.0.0 Safari/537.36", major)
+}
 
 // UserAgents contains User-Agent strings for different platforms.
 var UserAgents = struct {
@@ -14,11 +42,13 @@ var UserAgents = struct {
 	TV        string
 	IOS       string
 }{
-	// Keep the Chrome major within yt-dlp's current random_user_agent()
-	// window (142-148 as of 2026-05) so live Google/Twitch endpoints don't
-	// see an implausibly stale browser. This is the single source of truth
-	// for the desktop Web UA — every other site references it.
-	Web:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+	// Randomized per process start (see randomizedWebUA). This is the single
+	// source of truth for the desktop Web UA — every other site references
+	// it. The app UAs below stay PINNED: they embed app versions that must
+	// exactly match the Innertube clientVersion each client config claims,
+	// so randomizing them independently would create a contradictory
+	// fingerprint rather than blend into one.
+	Web:       randomizedWebUA(),
 	WebSafari: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
 	Android:   "com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip",
 	AndroidVR: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",

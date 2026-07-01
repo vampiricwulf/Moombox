@@ -43,6 +43,34 @@ func TestWebUserAgentIsWindowsDesktop(t *testing.T) {
 	}
 }
 
+// TestRandomizedWebUAStaysInWindow pins the randomization contract: every
+// generated UA parses as a desktop Chrome UA whose major falls inside the
+// declared [chromeMajorMin, chromeMajorMax] window — a value outside it
+// (stale or not-yet-released) is exactly the implausible fingerprint the
+// randomization exists to avoid. UserAgents.Web itself is generated once at
+// init and must never be re-rolled mid-process (BotGuard's navigator.userAgent
+// and the HTTP layer must agree), which the var-initializer shape guarantees.
+func TestRandomizedWebUAStaysInWindow(t *testing.T) {
+	if chromeMajorMin > chromeMajorMax {
+		t.Fatalf("window inverted: min %d > max %d", chromeMajorMin, chromeMajorMax)
+	}
+	for range 50 {
+		ua := randomizedWebUA()
+		m := chromeUAPattern.FindStringSubmatch(ua)
+		if m == nil {
+			t.Fatalf("randomizedWebUA() is not a desktop Chrome UA: %q", ua)
+		}
+		major, err := strconv.Atoi(m[1])
+		if err != nil {
+			t.Fatalf("could not parse Chrome major from %q: %v", ua, err)
+		}
+		if major < chromeMajorMin || major > chromeMajorMax {
+			t.Errorf("Chrome major %d outside window [%d, %d]: %q",
+				major, chromeMajorMin, chromeMajorMax, ua)
+		}
+	}
+}
+
 // nativeAppMajorFloor guards the native YouTube app clients (IOS / ANDROID)
 // against rotting back to an old app version the way the iOS client was
 // frozen at 19.29.1. Track yt-dlp's INNERTUBE_CLIENTS (ios/android were
