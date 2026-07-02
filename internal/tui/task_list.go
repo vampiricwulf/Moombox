@@ -449,6 +449,9 @@ func (m *TaskListModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 	m.applyListSize()
+	if m.searching {
+		m.searchInput.SetWidth(max(w-4, 8))
+	}
 	// Recalculate marquee width when panel width changes.
 	if prevW != w {
 		m.resetMarquee()
@@ -467,9 +470,19 @@ func (m *TaskListModel) applyListSize() {
 	m.list.SetSize(contentW, contentH)
 }
 
-// SetFocused sets the focus state.
+// SetFocused sets the focus state. Losing focus closes an open search input
+// (a click on another panel changes focus without routing through
+// HandleSearchKey, which would otherwise strand the box open and dead on the
+// unfocused panel) — the applied query survives as a filter, mirroring the
+// log viewer's focus-out behavior. Re-focusing + "/" reopens it seeded with
+// the query.
 func (m *TaskListModel) SetFocused(f bool) {
 	m.focused = f
+	if !f && m.searching {
+		m.searching = false
+		m.searchInput.Blur()
+		m.applyListSize()
+	}
 }
 
 // MoveUp moves the selection up.

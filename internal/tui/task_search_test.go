@@ -133,6 +133,36 @@ func TestSearchLifecycle(t *testing.T) {
 	}
 }
 
+// TestSearchClosesOnFocusLoss: losing panel focus (e.g. a mouse click on
+// another panel, which bypasses HandleSearchKey) must close the open box so
+// it can't strand dead on an unfocused panel — while keeping the applied
+// query as a filter.
+func TestSearchClosesOnFocusLoss(t *testing.T) {
+	m := searchTestList()
+	m.SetFocused(true)
+	m.StartSearch()
+	m.searchInput.SetValue("chika")
+	if _, consumed := m.HandleSearchKey(keyMsg("enter")); !consumed {
+		t.Fatal("Enter should apply the query")
+	}
+	if len(visibleJobIDs(m)) != 2 {
+		t.Fatalf("query applied visible = %d, want 2", len(visibleJobIDs(m)))
+	}
+	// Reopen the box, then lose focus mid-search.
+	m.StartSearch()
+	if !m.IsSearching() {
+		t.Fatal("box should be open before focus loss")
+	}
+	m.SetFocused(false)
+	if m.IsSearching() {
+		t.Error("focus loss should close the search box")
+	}
+	// The applied query survives as a filter.
+	if m.searchQuery != "chika" || len(visibleJobIDs(m)) != 2 {
+		t.Errorf("after focus loss query=%q visible=%d, want chika/2", m.searchQuery, len(visibleJobIDs(m)))
+	}
+}
+
 // TestSearchEscClearsQuery: Esc while the box is open closes it and clears an
 // applied query in one press.
 func TestSearchEscClearsQuery(t *testing.T) {
