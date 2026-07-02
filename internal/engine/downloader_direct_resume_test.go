@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,6 +96,88 @@ func TestDirectResume_FallbackResetsAvoidsDoubledFile(t *testing.T) {
 	}
 	if string(got) != string(body) {
 		t.Errorf("output content mismatch after fallback reset")
+	}
+}
+
+// TestDirectDownload_MidStream200DoesNotSplice pins the mid-download Range-
+// ignored guard: a server that answers chunk 0 with a proper 206 but then
+// returns 200 (the WHOLE file from byte 0) for a later, non-zero-offset chunk
+// must NOT get that byte-0 payload written at the current offset — that would
+// splice the file's leading bytes into the middle (doubled/corrupt). The guard
+// resets and streams a single clean copy instead.
+func TestDirectDownload_MidStream200DoesNotSplice(t *testing.T) {
+	// 12 MB (> DownloadChunkSize of 5 MB) so at least chunk 1 starts past 0.
+	body := []byte(strings.Repeat("ABCDEFGH", 12*1024*1024/8))
+	tmp := t.TempDir()
+	outFile := filepath.Join(tmp, "video.mp4")
+
+	var nonZeroRangeHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rng := r.Header.Get("Range")
+		if rng == "" {
+			// Streaming fallback GET (no Range) — serve the whole file cleanly.
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusOK)
+			w.Write(body)
+			return
+		}
+		var start, end int64
+		fmt.Sscanf(rng, "bytes=%d-%d", &start, &end)
+		// bytes=0-0 probe: 206 carrying the total via Content-Range.
+		if start == 0 && end == 0 {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-0/%d", len(body)))
+			w.Header().Set("Content-Length", "1")
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(body[0:1])
+			return
+		}
+		if end <= 0 || end >= int64(len(body)) {
+			end = int64(len(body)) - 1
+		}
+		if start > 0 {
+			// A non-zero-offset chunk: pretend the server ignores Range and
+			// dumps the whole file from byte 0 with a 200 — the corruption
+			// trigger. (Under the 50 MB read cap, so it's read in full.)
+			atomic.AddInt32(&nonZeroRangeHits, 1)
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusOK)
+			w.Write(body)
+			return
+		}
+		// start == 0: honest 206 for chunk 0.
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(body)))
+		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(body[start : end+1])
+	}))
+	defer srv.Close()
+
+	d := NewSegmentDownloader(DownloaderOptions{
+		BaseURL:     srv.URL + "/video.mp4",
+		OutputFile:  outFile,
+		IsDirectURL: true,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if atomic.LoadInt32(&nonZeroRangeHits) == 0 {
+		t.Fatal("test never exercised the mid-download 200 path (no non-zero-offset chunk requested)")
+	}
+
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A splice would make the file larger than the body (chunk-0 bytes + a full
+	// second copy). It must be exactly one clean copy.
+	if len(got) != len(body) {
+		t.Fatalf("output size = %d, want %d (larger means byte-0 data was spliced at offset>0)", len(got), len(body))
+	}
+	if string(got) != string(body) {
+		t.Error("output content mismatch after the mid-download 200 reset")
 	}
 }
 
