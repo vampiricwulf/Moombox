@@ -67,6 +67,12 @@ type ChatAPI struct {
 	cookieHeader string
 	generateAuth func() string // Returns Authorization header (SAPISIDHASH) for authenticated requests
 	client       *http.Client
+	// clientContext is the constant Innertube "context" object (client info +
+	// visitorData), built once and reused for every poll. Live chat polls the
+	// same endpoint every ~5s for hours; rebuilding + re-marshaling this nested
+	// map each time was needless per-poll allocation. Read-only after
+	// construction, so concurrent json.Marshal reads are safe.
+	clientContext map[string]any
 
 	// Logger is an optional debug-level diagnostic sink for API drift
 	// signals (unexpected field shapes, parse failures). nil-safe.
@@ -89,11 +95,21 @@ func (api *ChatAPI) logDebug(msg string, args ...any) {
 // httpx transport (MaxIdleConnsPerHost=8) so keep-alive amortises the
 // handshake across the per-poll cadence. Audit chat.md R3.
 func NewChatAPI(apiKey, visitorData, cookieHeader string) *ChatAPI {
+	client := map[string]any{
+		"clientName":    "WEB",
+		"clientVersion": constants.WebClient.ClientVersion,
+		"hl":            "en",
+		"gl":            "US",
+	}
+	if visitorData != "" {
+		client["visitorData"] = visitorData
+	}
 	return &ChatAPI{
-		apiKey:       apiKey,
-		visitorData:  visitorData,
-		cookieHeader: cookieHeader,
-		client:       httpx.Client(chatHTTPTimeout),
+		apiKey:        apiKey,
+		visitorData:   visitorData,
+		cookieHeader:  cookieHeader,
+		client:        httpx.Client(chatHTTPTimeout),
+		clientContext: map[string]any{"client": client},
 	}
 }
 
@@ -164,21 +180,8 @@ func (api *ChatAPI) FetchChatReplay(ctx context.Context, continuation string) (*
 
 func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string) (*ChatApiResponse, error) {
 	reqBody := map[string]any{
-		"context": map[string]any{
-			"client": map[string]any{
-				"clientName":    "WEB",
-				"clientVersion": constants.WebClient.ClientVersion,
-				"hl":            "en",
-				"gl":            "US",
-			},
-		},
+		"context":      api.clientContext,
 		"continuation": continuation,
-	}
-
-	if api.visitorData != "" {
-		ctxMap := reqBody["context"].(map[string]any)
-		client := ctxMap["client"].(map[string]any)
-		client["visitorData"] = api.visitorData
 	}
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -239,13 +242,16 @@ func (api *ChatAPI) fetchChat(ctx context.Context, endpoint, continuation string
 
 // ExtractChatContinuation extracts a chat continuation token from watch page HTML.
 func ExtractChatContinuation(html string) (string, bool, error) {
-	m := ytInitialDataRegex.FindSubmatch([]byte(html))
+	// FindStringSubmatch avoids copying the entire (up-to-10 MB) watch page into
+	// a []byte just to run the regex; only the small captured group is copied
+	// to []byte below for json.Unmarshal.
+	m := ytInitialDataRegex.FindStringSubmatch(html)
 	if m == nil {
 		return "", false, fmt.Errorf("ytInitialData not found")
 	}
 
 	var data map[string]any
-	if err := json.Unmarshal(m[1], &data); err != nil {
+	if err := json.Unmarshal([]byte(m[1]), &data); err != nil {
 		return "", false, fmt.Errorf("parse ytInitialData: %w", err)
 	}
 

@@ -326,14 +326,14 @@ func (vcd *VodChatDownloader) flush() {
 			return
 		}
 	} else {
-		// Subsequent flushes: append new messages to existing file
+		// Subsequent flushes: append new messages to existing file. The header
+		// count/downloadedAt refresh is folded into AppendChatMessages' open
+		// handle (warn-only on failure, as before).
 		count := int(vcd.totalCount.Load())
-		appendErr := utils.AppendChatMessages(vcd.outputPath, vcd.messages, vcd.logger)
+		appendErr := utils.AppendChatMessages(vcd.outputPath, vcd.messages, count, vcd.logger)
 		switch {
 		case appendErr == nil:
-			if err := utils.UpdateChatFileHeaderFields(vcd.outputPath, count); err != nil {
-				vcd.logger.Warn("update vod chat header", "err", err)
-			}
+			// header refreshed inside the append
 		case errors.Is(appendErr, utils.ErrChatFilePartialWrite):
 			// Truncated-then-failed write: the on-disk tail is broken, and a
 			// merge would parse-fail (dropping history). Per the sentinel's

@@ -73,7 +73,14 @@ func WriteChatFileAtomic[T any](path string, data T) error {
 // is non-nil). A truncate-then-write-failure returns ErrChatFilePartialWrite
 // so the chat-side caller can avoid the history-dropping fallback path; see
 // the sentinel's doc.
-func AppendChatMessages[T any](path string, msgs []T, logger ChatFileLogger) error {
+//
+// count is the new total message count; the header's messageCount/downloadedAt
+// are updated in-place within this same open handle (folded in so a flush is
+// one open+fsync instead of an append followed by a separate header open+write).
+// A header-update failure is non-fatal — the appended messages are already
+// durable — so it is only logged via logger, never returned; callers that want
+// a hard guarantee on the final count use UpdateChatFileHeaderFields directly.
+func AppendChatMessages[T any](path string, msgs []T, count int, logger ChatFileLogger) error {
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -170,12 +177,22 @@ func AppendChatMessages[T any](path string, msgs []T, logger ChatFileLogger) err
 		}
 		return fmt.Errorf("%w: %v", ErrChatFilePartialWrite, err)
 	}
-	if err := f.Truncate(bracketBytePos + int64(len(appendStr))); err != nil {
+	newSize := bracketBytePos + int64(len(appendStr))
+	if err := f.Truncate(newSize); err != nil {
 		return fmt.Errorf("truncate: %w", err)
 	}
-	// fsync so the appended messages are durable — without it a crash can
-	// leave the metadata (size) updated but the data pages unwritten, i.e. a
-	// zero/garbage tail that the next append's bracket scan misreads.
+	// Fold the header messageCount/downloadedAt refresh into this same open
+	// handle rather than a second open+read+write elsewhere. Non-fatal: the
+	// appended messages are already written, so a header-count failure is
+	// cosmetic and self-heals on the next flush (and the final standalone
+	// UpdateChatFileHeaderFields, where callers keep the hard-error path).
+	if hdrErr := writeHeaderFieldsToOpenFile(f, newSize, count); hdrErr != nil && logger != nil {
+		logger.Warn("chat header update (folded into append) failed", "err", hdrErr)
+	}
+	// fsync so the appended messages AND the refreshed header are durable —
+	// without it a crash can leave the metadata (size) updated but the data
+	// pages unwritten, i.e. a zero/garbage tail that the next append's bracket
+	// scan misreads.
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("fsync: %w", err)
 	}
@@ -213,7 +230,23 @@ func UpdateChatFileHeaderFields(path string, count int) error {
 	}
 	defer f.Close()
 
-	headerSize := min(int64(1024), info.Size())
+	return writeHeaderFieldsToOpenFile(f, info.Size(), count)
+}
+
+// writeHeaderFieldsToOpenFile rewrites messageCount + downloadedAt in the JSON
+// header of an already-open O_RDWR file whose current size is `size`. Shared by
+// UpdateChatFileHeaderFields (standalone open) and AppendChatMessages (folded
+// into the append's open handle). Does NOT fsync — the caller owns durability.
+//
+// For files this package writes, messageCount is fixed-width padded and
+// downloadedAt is a fixed-length RFC3339 stamp, so the replacement is always
+// the equal-length in-place WriteAt at offset 0. The grow branch only fires on
+// a legacy unpadded header, once, before it becomes padded.
+func writeHeaderFieldsToOpenFile(f *os.File, size int64, count int) error {
+	if size < 50 {
+		return nil
+	}
+	headerSize := min(int64(1024), size)
 	headerBuf := make([]byte, headerSize)
 	n, err := f.ReadAt(headerBuf, 0)
 	if err != nil && n == 0 {
@@ -231,7 +264,7 @@ func UpdateChatFileHeaderFields(path string, count int) error {
 			return fmt.Errorf("write: %w", err)
 		}
 	case len(updatedBytes) > n:
-		restSize := info.Size() - int64(n)
+		restSize := size - int64(n)
 		var restBuf []byte
 		if restSize > 0 {
 			restBuf = make([]byte, restSize)

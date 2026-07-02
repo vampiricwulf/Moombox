@@ -537,10 +537,12 @@ func TestMessageCountHeaderAccurateAfterIncrementalFlushes(t *testing.T) {
 	}
 }
 
-// TestMessageCountHeaderStaleWithoutHeaderUpdate demonstrates the original bug:
-// if updateChatFileHeader is NOT called after an incremental flush, the header
-// count is left at its previous value while the array has grown.
-func TestMessageCountHeaderStaleWithoutHeaderUpdate(t *testing.T) {
+// TestIncrementalFlushKeepsHeaderCountCurrent verifies that an incremental
+// flush keeps the header messageCount in sync with the message array WITHOUT a
+// separate updateChatFileHeader call: writeChatFile folds the header refresh
+// into the append's open handle. (Previously the header went stale until a
+// follow-up updateChatFileHeader; this pins the folded-update behavior.)
+func TestIncrementalFlushKeepsHeaderCountCurrent(t *testing.T) {
 	dir := t.TempDir()
 	outputFile := filepath.Join(dir, "chat.json")
 
@@ -550,35 +552,32 @@ func TestMessageCountHeaderStaleWithoutHeaderUpdate(t *testing.T) {
 		OutputFile: outputFile,
 	})
 
-	// First full write with 2 messages + header update (clean initial state)
+	// First full write with 2 messages (clean initial state).
 	cd.messages = []ChatMessage{makeTestMessage("m1"), makeTestMessage("m2")}
 	cd.messageCount = 2
 	cd.writeChatFile()
 	cd.flushedToDisk = true
 	cd.messages = nil
-	cd.updateChatFileHeader()
 
-	// Incremental flush of 3 more messages — deliberately skip updateChatFileHeader
+	// Incremental flush of 3 more messages — NO separate updateChatFileHeader.
 	cd.messages = []ChatMessage{
 		makeTestMessage("m3"),
 		makeTestMessage("m4"),
 		makeTestMessage("m5"),
 	}
 	cd.messageCount += 3 // now 5
-	cd.writeChatFile()   // appends to file
+	cd.writeChatFile()   // appends to file AND folds the header count refresh
 	cd.messages = nil
-	// NOTE: updateChatFileHeader intentionally NOT called here
 
 	got := readChatFileHeader(t, outputFile)
-	// Header should still say 2 (stale) while array has 5 — demonstrating the bug
-	if got.MessageCount != 2 {
-		t.Errorf("expected stale header count=2 without header update, got %d", got.MessageCount)
+	// The folded append keeps the header count current with the array.
+	if got.MessageCount != 5 {
+		t.Errorf("expected header count kept current at 5 by the folded append, got %d", got.MessageCount)
 	}
 	if len(got.Messages) != 5 {
 		t.Errorf("expected 5 messages in array, got %d", len(got.Messages))
 	}
-	// The mismatch is the bug
-	if got.MessageCount == len(got.Messages) {
-		t.Error("expected mismatch between header count and array length (demonstrating bug), but they were equal")
+	if got.MessageCount != len(got.Messages) {
+		t.Errorf("header count (%d) should match array length (%d)", got.MessageCount, len(got.Messages))
 	}
 }

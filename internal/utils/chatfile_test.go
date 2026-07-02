@@ -89,7 +89,7 @@ func TestAppendChatMessagesIncremental(t *testing.T) {
 		{ID: "b", Text: "second"},
 		{ID: "c", Text: "third"},
 	}
-	if err := AppendChatMessages(path, more, nil); err != nil {
+	if err := AppendChatMessages(path, more, 3, nil); err != nil {
 		t.Fatalf("AppendChatMessages: %v", err)
 	}
 
@@ -110,6 +110,55 @@ func TestAppendChatMessagesIncremental(t *testing.T) {
 	}
 }
 
+// TestAppendChatMessagesFoldsHeaderCount pins the folded header update:
+// AppendChatMessages now refreshes messageCount + downloadedAt in the same open
+// handle, so the on-disk header stays current across appends WITHOUT a separate
+// UpdateChatFileHeaderFields call. Has inherent teeth — under the old
+// append-only behavior the header count would remain 1.
+func TestAppendChatMessagesFoldsHeaderCount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat.json")
+
+	initial := chatfileTestDoc{
+		MessageCount: 1,
+		DownloadedAt: "2020-01-01T00:00:00Z",
+		Messages:     []chatfileTestMessage{{ID: "a", Text: "first"}},
+	}
+	if err := WriteChatFileAtomic(path, &initial); err != nil {
+		t.Fatalf("initial write: %v", err)
+	}
+
+	// Two appends; pass the running total as count each time.
+	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "b"}, {ID: "c"}}, 3, nil); err != nil {
+		t.Fatalf("append 1: %v", err)
+	}
+	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "d"}}, 4, nil); err != nil {
+		t.Fatalf("append 2: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back chatfileTestDoc
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, raw)
+	}
+	if back.MessageCount != 4 {
+		t.Errorf("header messageCount = %d, want 4 (folded update should keep it current)", back.MessageCount)
+	}
+	if len(back.Messages) != 4 {
+		t.Errorf("messages len = %d, want 4", len(back.Messages))
+	}
+	if back.MessageCount != len(back.Messages) {
+		t.Errorf("header count %d != array len %d", back.MessageCount, len(back.Messages))
+	}
+	// downloadedAt must have been refreshed away from the seed value.
+	if back.DownloadedAt == "2020-01-01T00:00:00Z" {
+		t.Errorf("downloadedAt not refreshed by folded update: %q", back.DownloadedAt)
+	}
+}
+
 func TestAppendChatMessagesEmptyFirstAppend(t *testing.T) {
 	// Confirm that appending to a file whose messages array is empty does not
 	// emit a leading comma. This guards the hasExisting branch.
@@ -122,7 +171,7 @@ func TestAppendChatMessagesEmptyFirstAppend(t *testing.T) {
 	}
 
 	more := []chatfileTestMessage{{ID: "x", Text: "only"}}
-	if err := AppendChatMessages(path, more, nil); err != nil {
+	if err := AppendChatMessages(path, more, 1, nil); err != nil {
 		t.Fatalf("AppendChatMessages: %v", err)
 	}
 
@@ -149,7 +198,7 @@ func TestAppendChatMessagesNoOpOnEmptyBatch(t *testing.T) {
 	}
 
 	before, _ := os.ReadFile(path)
-	if err := AppendChatMessages(path, []chatfileTestMessage{}, nil); err != nil {
+	if err := AppendChatMessages(path, []chatfileTestMessage{}, 1, nil); err != nil {
 		t.Fatalf("AppendChatMessages(empty): %v", err)
 	}
 	after, _ := os.ReadFile(path)
@@ -162,7 +211,7 @@ func TestAppendChatMessagesMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist.json")
 
-	err := AppendChatMessages(path, []chatfileTestMessage{{ID: "a"}}, nil)
+	err := AppendChatMessages(path, []chatfileTestMessage{{ID: "a"}}, 1, nil)
 	if err == nil {
 		t.Fatal("expected error when file is missing, got nil")
 	}
@@ -179,7 +228,7 @@ func TestAppendChatMessagesTinyFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
 		t.Fatalf("seed tiny file: %v", err)
 	}
-	err := AppendChatMessages(path, []chatfileTestMessage{{ID: "a"}}, nil)
+	err := AppendChatMessages(path, []chatfileTestMessage{{ID: "a"}}, 1, nil)
 	if err == nil || !strings.Contains(err.Error(), "too small") {
 		t.Errorf("expected too-small error, got %v", err)
 	}
@@ -215,7 +264,7 @@ func TestAppendChatMessagesTailWiderThan10(t *testing.T) {
 		t.Fatalf("seed file is unexpectedly small (%d bytes)", info.Size())
 	}
 
-	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "b", Text: "second"}}, nil); err != nil {
+	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "b", Text: "second"}}, 2, nil); err != nil {
 		t.Fatalf("AppendChatMessages: %v", err)
 	}
 
@@ -250,7 +299,7 @@ func TestAppendChatMessagesMarshalFailureLogs(t *testing.T) {
 	cap := &captureLogger{}
 	// chan types are not marshalable by encoding/json — the marshal failure
 	// path should fire a warn and continue.
-	err := AppendChatMessages(path, []chan int{make(chan int)}, cap)
+	err := AppendChatMessages(path, []chan int{make(chan int)}, 0, cap)
 	if err != nil {
 		t.Fatalf("AppendChatMessages should not error on per-msg marshal failure: %v", err)
 	}
@@ -350,10 +399,10 @@ func TestAppendChatMessagesContentBrackets(t *testing.T) {
 		t.Fatalf("initial write: %v", err)
 	}
 
-	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "b", Text: "nice]"}}, nil); err != nil {
+	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "b", Text: "nice]"}}, 2, nil); err != nil {
 		t.Fatalf("append 1: %v", err)
 	}
-	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "c", Text: "]}"}}, nil); err != nil {
+	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "c", Text: "]}"}}, 3, nil); err != nil {
 		t.Fatalf("append 2: %v", err)
 	}
 

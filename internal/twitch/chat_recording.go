@@ -87,12 +87,11 @@ func (cd *ChatDownloader) writeBatch(path string, msgs []TwitchChatMessage, coun
 		return cd.writeFullChatFileTo(path, msgs, count, startMs)
 	}
 
-	// Subsequent writes: append new messages to the existing file
-	writeErr := utils.AppendChatMessages(path, msgs, cd.logger)
+	// Subsequent writes: append new messages to the existing file. The header
+	// count/downloadedAt refresh is folded into AppendChatMessages' open handle
+	// (warn-only on failure, as before).
+	writeErr := utils.AppendChatMessages(path, msgs, count, cd.logger)
 	if writeErr == nil {
-		if err := utils.UpdateChatFileHeaderFields(path, count); err != nil {
-			cd.logger.Warn("update chat header", "err", err)
-		}
 		return nil
 	}
 	if errors.Is(writeErr, utils.ErrChatFilePartialWrite) {

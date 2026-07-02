@@ -497,6 +497,11 @@ func (cd *ChatDownloader) handleFetchError(ctx context.Context, err error, conse
 // Pre-stream "waiting-room" chat legitimately produces negative offsets, so
 // HasOffset (not OffsetMs == 0) is the sentinel for "offset not yet set".
 func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, lastTs string) {
+	// Collect newly-seen messages first, then commit the whole batch under a
+	// single cd.mu acquisition rather than locking once per message. Offset
+	// computation and dedup touch only loop-goroutine-owned state (cd.dedup,
+	// cd.streamStartMs), so they stay outside the lock as before.
+	var fresh []ChatMessage
 	for i := range resp.Messages {
 		msg := &resp.Messages[i]
 
@@ -514,13 +519,16 @@ func (cd *ChatDownloader) processBatch(resp *ChatApiResponse) (newInBatch int, l
 		if msg.ID != "" && !cd.dedup.Add(msg.ID) {
 			continue
 		}
+		fresh = append(fresh, *msg)
+	}
+	if len(fresh) > 0 {
 		// messageCount is read concurrently via MessageCount() (orchestrator
 		// goroutine) — mutate under the same lock the reader takes.
 		cd.mu.Lock()
-		cd.messages = append(cd.messages, *msg)
-		cd.messageCount++
+		cd.messages = append(cd.messages, fresh...)
+		cd.messageCount += len(fresh)
 		cd.mu.Unlock()
-		newInBatch++
+		newInBatch = len(fresh)
 	}
 	if len(resp.Messages) > 0 {
 		lastTs = resp.Messages[len(resp.Messages)-1].TimestampText
@@ -538,8 +546,11 @@ func (cd *ChatDownloader) maybeFlush(lastWriteAt *time.Time, newInBatch int) {
 	if !lastWriteAt.IsZero() && now.Sub(*lastWriteAt) < writeInterval {
 		return
 	}
+	// writeChatFile updates the header count in the same handle (full write on
+	// the first flush, folded into the append thereafter), so no separate
+	// updateChatFileHeader call is needed here — the final one in Start() keeps
+	// the hard-error (C8) guarantee for the last flush.
 	cd.writeChatFile()
-	cd.updateChatFileHeader()
 	cd.saveResume()
 	*lastWriteAt = now
 }
@@ -668,7 +679,7 @@ func (cd *ChatDownloader) incrementalAppend(outputFile string) bool {
 		return true
 	}
 
-	err := utils.AppendChatMessages(outputFile, newMessages, chatWarnAdapter{cd})
+	err := utils.AppendChatMessages(outputFile, newMessages, cd.messageCount, chatWarnAdapter{cd})
 	if err == nil {
 		return true
 	}
