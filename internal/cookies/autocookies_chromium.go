@@ -20,9 +20,14 @@ import (
 // place rather than scattered across every CDP helper (audit
 // reports/cookies.md #38).
 const (
-	cdpPollTimeout     = 15 * time.Second // wait for /json/version readiness
-	cdpExtractTimeout  = 30 * time.Second // total budget for extractChromiumCookies
-	cdpRefreshTimeout  = 30 * time.Second // total budget for refreshChromium CDP work
+	cdpPollTimeout    = 15 * time.Second // wait for /json/version readiness
+	cdpExtractTimeout = 30 * time.Second // total budget for extractChromiumCookies
+	// cdpRefreshTimeout is the total budget for refreshChromium's CDP work:
+	// waitForCDP cold start (up to 15s on a busy machine) + SEQUENTIAL
+	// per-platform navigations + cookie extraction all share it. 60s gives the
+	// two-platform case real headroom (the Firefox path gets processTimeout
+	// PER platform launch) while staying well inside refreshOverallBudget.
+	cdpRefreshTimeout  = 60 * time.Second
 	cdpNavigateTimeout = 30 * time.Second // single Page.navigate + loadEventFired wait
 	// cdpCloseFlushDelay is the post-Browser.close pause that lets Chromium
 	// flush cookies to disk before our defer kills the process tree. Replaces
@@ -217,7 +222,16 @@ func (s *AutoCookieService) refreshChromium(ctx context.Context, browser *Detect
 			cmd.Wait()
 		}
 		s.mu.Lock()
-		s.refreshCmd = nil
+		// Restore the claim SENTINEL, not nil: RefreshCookies still has its
+		// critical tail to run after this returns (merge → atomic write → jar
+		// reload → auth verify → meta save, up to ~15s). Clearing the slot
+		// here opened that window to a concurrent RefreshCookies or a
+		// StartSetup — a second browser launched against the same profile
+		// mid-write. The outer defer in RefreshCookies releases the slot when
+		// the whole refresh is done; killRefreshProcess tolerates the
+		// nil-Process sentinel (its poll loop caps at 2s). The Firefox path
+		// already holds the slot this way.
+		s.refreshCmd = &exec.Cmd{}
 		s.mu.Unlock()
 	}()
 

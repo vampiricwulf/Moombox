@@ -3,7 +3,9 @@ package cookies
 import (
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // extractedCookie holds a cookie from browser extraction before Netscape formatting.
@@ -166,15 +168,41 @@ func mergeCookieFiles(existing, newCookies string) string {
 		merged[k] = v
 	}
 
+	// Prune clearly-expired rows while assembling: merge otherwise keeps every
+	// existing row forever, and CookieJar.Load ignores the expiry field — so a
+	// cookie name that stops being refreshed (e.g. the platform retires it)
+	// would be sent in the Cookie header indefinitely. Session cookies
+	// (expiry 0) and unparseable rows are never pruned.
+	now := time.Now().Unix()
 	var lines []string
 	lines = append(lines, "# Netscape HTTP Cookie File")
 	lines = append(lines, "# Extracted by Moombox auto-cookie service")
 	lines = append(lines, "")
 	for _, k := range allKeys {
 		if line, ok := merged[k]; ok {
+			if rowExpired(line, now) {
+				continue
+			}
 			lines = append(lines, line)
 		}
 	}
 
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// rowExpired reports whether a Netscape cookie row's expiry (5th field) is a
+// positive unix timestamp in the past. Session cookies (expiry 0) and rows
+// whose expiry field doesn't parse are never treated as expired — the safe
+// failure mode is keeping the row.
+func rowExpired(line string, now int64) bool {
+	trimmed := strings.TrimPrefix(line, "#HttpOnly_")
+	fields := strings.Split(trimmed, "\t")
+	if len(fields) < 7 {
+		return false
+	}
+	exp, err := strconv.ParseInt(strings.TrimSpace(fields[4]), 10, 64)
+	if err != nil {
+		return false
+	}
+	return exp > 0 && exp < now
 }

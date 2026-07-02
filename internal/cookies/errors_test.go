@@ -38,6 +38,26 @@ func TestStartSetupReturnsRefreshInProgressSentinel(t *testing.T) {
 	}
 }
 
+// TestRefreshCookiesRefusesWhileSlotHeld pins the double-refresh gate the
+// refreshChromium sentinel-restore relies on: while the refresh slot is held
+// (claim sentinel or real cmd), a second RefreshCookies must no-op WITHOUT
+// clearing the holder's claim — the first refresh's tail (merge → atomic
+// write → verify → meta save) depends on the slot staying closed until its
+// own outer defer releases it.
+func TestRefreshCookiesRefusesWhileSlotHeld(t *testing.T) {
+	s := NewAutoCookieService("", "", nil, nopAutoCookieLogger{})
+	sentinel := &exec.Cmd{}
+	s.refreshCmd = sentinel // simulate an in-flight refresh (claim or tail)
+
+	ok, err := s.RefreshCookies(context.Background())
+	if ok || err != nil {
+		t.Fatalf("RefreshCookies while slot held = (%v, %v), want (false, nil) no-op", ok, err)
+	}
+	if s.refreshCmd != sentinel {
+		t.Error("second RefreshCookies must not clear the first refresh's slot claim")
+	}
+}
+
 // TestFinishSetupReturnsNoSetupInProgressSentinel covers the "called
 // without StartSetup" case at autocookies.go:306-309.
 func TestFinishSetupReturnsNoSetupInProgressSentinel(t *testing.T) {

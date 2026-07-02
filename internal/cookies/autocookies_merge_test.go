@@ -140,9 +140,11 @@ func TestMergeCookieFilesPrefersNew(t *testing.T) {
 .youtube.com	TRUE	/	TRUE	0	SAPISID	old_value
 .youtube.com	TRUE	/	TRUE	0	LOGIN_INFO	keep_me
 `
+	// Far-future expiry (2100-01-01): merge prunes rows whose expiry is in
+	// the past, so fixtures must not use tiny epoch offsets like 100.
 	newer := `# New
-.youtube.com	TRUE	/	TRUE	100	SAPISID	new_value
-.youtube.com	TRUE	/	TRUE	100	SID	added_cookie
+.youtube.com	TRUE	/	TRUE	4102444800	SAPISID	new_value
+.youtube.com	TRUE	/	TRUE	4102444800	SID	added_cookie
 `
 	merged := mergeCookieFiles(existing, newer)
 
@@ -165,7 +167,7 @@ func TestMergeCookieFilesPrefersNew(t *testing.T) {
 func TestMergeCookieFilesHandlesHttpOnlyPrefix(t *testing.T) {
 	existing := `#HttpOnly_.youtube.com	TRUE	/	TRUE	0	SSID	old_ssid
 `
-	newer := `#HttpOnly_.youtube.com	TRUE	/	TRUE	100	SSID	new_ssid
+	newer := `#HttpOnly_.youtube.com	TRUE	/	TRUE	4102444800	SSID	new_ssid
 `
 	merged := mergeCookieFiles(existing, newer)
 	if strings.Contains(merged, "old_ssid") {
@@ -173,6 +175,34 @@ func TestMergeCookieFilesHandlesHttpOnlyPrefix(t *testing.T) {
 	}
 	if !strings.Contains(merged, "new_ssid") {
 		t.Errorf("expected new_ssid present, got:\n%s", merged)
+	}
+}
+
+// TestMergeCookieFilesPrunesExpiredRows: merge drops rows whose expiry is a
+// positive unix timestamp in the past — otherwise a cookie name the platform
+// retired lingers in cookies.txt forever and (since CookieJar.Load ignores
+// expiry) keeps being sent in the Cookie header. Session cookies (expiry 0)
+// and future-dated rows survive.
+func TestMergeCookieFilesPrunesExpiredRows(t *testing.T) {
+	existing := `# Netscape HTTP Cookie File
+.youtube.com	TRUE	/	TRUE	1000	PREF	long_dead
+.youtube.com	TRUE	/	TRUE	0	LOGIN_INFO	session_kept
+.youtube.com	TRUE	/	TRUE	4102444800	SAPISID	future_kept
+#HttpOnly_.youtube.com	TRUE	/	TRUE	1000	SSID	dead_httponly
+`
+	merged := mergeCookieFiles(existing, "")
+
+	if strings.Contains(merged, "long_dead") {
+		t.Errorf("expected expired PREF row pruned, got:\n%s", merged)
+	}
+	if strings.Contains(merged, "dead_httponly") {
+		t.Errorf("expected expired #HttpOnly_ row pruned, got:\n%s", merged)
+	}
+	if !strings.Contains(merged, "session_kept") {
+		t.Errorf("expected session cookie (expiry 0) kept, got:\n%s", merged)
+	}
+	if !strings.Contains(merged, "future_kept") {
+		t.Errorf("expected future-dated row kept, got:\n%s", merged)
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
 // Firefox user.js preferences to suppress first-run dialogs.
@@ -136,10 +138,12 @@ func (s *AutoCookieService) refreshFirefox(ctx context.Context, browser *Detecte
 	for i, platform := range platforms {
 		url := platformRefreshURLs[platform]
 
-		// Wait between launches so Firefox fully releases the profile
+		// Wait between launches so Firefox fully releases the profile.
+		// Ctx-aware so a shutdown during a multi-platform refresh doesn't
+		// have to wait the spacing out — the ctx check below observes it.
 		if i > 0 {
 			s.logger.Info("waiting before next Firefox launch", "platform", platform, "spacing", firefoxLaunchSpacing)
-			time.Sleep(firefoxLaunchSpacing)
+			utils.Sleep(ctx, firefoxLaunchSpacing)
 		}
 
 		if ctx.Err() != nil {

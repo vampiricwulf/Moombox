@@ -649,14 +649,28 @@ func (s *AutoCookieService) RefreshCookies(ctx context.Context) (bool, error) {
 	ytAuth := false
 	twAuth := false
 
-	if s.jar.HasYouTubeAuthCookies() && s.VerifyYouTubeAuth != nil {
-		if verified, err := s.VerifyYouTubeAuth(verifyCtx); err == nil {
-			ytAuth = verified
+	// Mirror FinishSetup's contract for unwired verify callbacks: presence is
+	// the only signal we have, so report it with a warning instead of counting
+	// the platform as verification-failed and flagging a re-login purely
+	// because no verifier was plumbed in (test wiring / alternate constructors).
+	if s.jar.HasYouTubeAuthCookies() {
+		if s.VerifyYouTubeAuth != nil {
+			if verified, err := s.VerifyYouTubeAuth(verifyCtx); err == nil {
+				ytAuth = verified
+			}
+		} else {
+			s.logger.Warn("YouTube auth verification callback not wired — reporting based on cookie presence alone")
+			ytAuth = true
 		}
 	}
-	if s.jar.HasTwitchAuthCookies() && s.VerifyTwitchAuth != nil {
-		if verified, err := s.VerifyTwitchAuth(verifyCtx); err == nil {
-			twAuth = verified
+	if s.jar.HasTwitchAuthCookies() {
+		if s.VerifyTwitchAuth != nil {
+			if verified, err := s.VerifyTwitchAuth(verifyCtx); err == nil {
+				twAuth = verified
+			}
+		} else {
+			s.logger.Warn("Twitch auth verification callback not wired — reporting based on cookie presence alone")
+			twAuth = true
 		}
 	}
 
