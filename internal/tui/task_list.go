@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
+	"github.com/sahilm/fuzzy"
 
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
@@ -110,6 +112,14 @@ type TaskListModel struct {
 	// Batch selection state (Space to toggle, mirrors Web UI batch operations).
 	selected map[string]bool // selected job IDs for batch operations
 
+	// Live fuzzy search ("/" in the Tasks panel). searching is true while the
+	// input box is open; searchQuery is the applied filter (kept even after
+	// the box closes, so a search stays active until explicitly cleared with
+	// Esc, mirroring the log panel's search). Empty query = no filtering.
+	searching   bool
+	searchInput textinput.Model
+	searchQuery string
+
 	// Marquee for scrolling selected item title.
 	marquee Marquee
 
@@ -127,13 +137,112 @@ type TaskListModel struct {
 
 // NewTaskListModel creates a new task list model.
 func NewTaskListModel() *TaskListModel {
+	ti := newTextInput()
+	ti.Prompt = "/"
+	ti.Placeholder = "search titles, channels…"
+	ti.CharLimit = 200
 	m := &TaskListModel{
 		hideFinishedAgeDays: 30,
 		progressStore:       NewProgressStore(),
 		selected:            make(map[string]bool),
+		searchInput:         ti,
 	}
 	m.list = m.newTaskList()
 	return m
+}
+
+// IsSearching reports whether the search input box is open (capturing keys).
+func (m *TaskListModel) IsSearching() bool { return m.searching }
+
+// StartSearch opens the search input, seeded with any active query so the
+// user can refine rather than retype. Returns the input's focus cmd.
+func (m *TaskListModel) StartSearch() tea.Cmd {
+	m.searching = true
+	m.searchInput.SetWidth(max(m.width-4, 8))
+	m.searchInput.SetValue(m.searchQuery)
+	m.searchInput.CursorEnd()
+	m.applyListSize()
+	return m.searchInput.Focus()
+}
+
+// HandleSearchKey intercepts a key while the box is open. Returns (cmd,
+// consumed); consumed=false when the box isn't open so the caller falls
+// through to normal handling. Enter applies + closes the box (keeping the
+// query live); Esc closes and clears the query entirely. Typing keys are
+// consumed here (to keep them off the chord system) but the textinput
+// itself is updated in UpdateSearchInput via routeComponentMsg — mirrors
+// the log panel's split so the key isn't double-processed. Ctrl+C passes
+// through for quit.
+func (m *TaskListModel) HandleSearchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
+	if !m.searching {
+		return nil, false
+	}
+	switch msg.String() {
+	case keyCtrlC:
+		return nil, false
+	case "enter":
+		m.searchQuery = strings.TrimSpace(m.searchInput.Value())
+		m.searching = false
+		m.searchInput.Blur()
+		m.applyListSize()
+		m.refilterSelectTop()
+		return nil, true
+	case "esc":
+		m.searching = false
+		m.searchInput.Blur()
+		m.applyListSize()
+		if m.searchQuery != "" {
+			m.searchQuery = ""
+			m.refilterSelectTop()
+		}
+		return nil, true
+	}
+	// Consumed; the textinput is fed by UpdateSearchInput.
+	return nil, true
+}
+
+// refilterSelectTop rebuilds the visible list, jumps the cursor to the top,
+// and re-anchors the marquee to the new selection. Shared by the search
+// paths so the highlighted row and the scrolling title never disagree after
+// the visible set changes.
+func (m *TaskListModel) refilterSelectTop() {
+	m.rebuildVirtualList()
+	m.list.Select(0)
+	m.resetMarquee()
+}
+
+// UpdateSearchInput feeds a message to the search textinput and re-filters
+// live as the query changes. Called from routeComponentMsg on every message
+// while the box is open (keys for typing, cursor-blink ticks). No-op when
+// the box is closed.
+func (m *TaskListModel) UpdateSearchInput(msg tea.Msg) tea.Cmd {
+	if !m.searching {
+		return nil
+	}
+	prev := m.searchInput.Value()
+	var cmd tea.Cmd
+	m.searchInput, cmd = m.searchInput.Update(msg)
+	if m.searchInput.Value() != prev {
+		m.searchQuery = strings.TrimSpace(m.searchInput.Value())
+		m.refilterSelectTop()
+	}
+	return cmd
+}
+
+// ClearSearch drops any active query and closes the box. Called on Esc from
+// the app when nothing else claims it.
+func (m *TaskListModel) ClearSearch() bool {
+	if !m.searching && m.searchQuery == "" {
+		return false
+	}
+	m.searching = false
+	m.searchInput.Blur()
+	m.searchInput.SetValue("")
+	hadQuery := m.searchQuery != ""
+	m.searchQuery = ""
+	m.applyListSize()
+	m.refilterSelectTop()
+	return hadQuery
 }
 
 func (m *TaskListModel) newTaskList() list.Model {
@@ -339,13 +448,23 @@ func (m *TaskListModel) SetSize(w, h int) {
 	prevW := m.width
 	m.width = w
 	m.height = h
-	contentW := max(w-2, 1)
-	contentH := m.contentHeight()
-	m.list.SetSize(contentW, contentH)
+	m.applyListSize()
 	// Recalculate marquee width when panel width changes.
 	if prevW != w {
 		m.resetMarquee()
 	}
+}
+
+// applyListSize sizes the embedded list, reserving a row for the search box
+// while it's open so the list can't overrun the panel border. Called on
+// resize and whenever the search box opens/closes.
+func (m *TaskListModel) applyListSize() {
+	contentW := max(m.width-2, 1)
+	contentH := m.contentHeight()
+	if m.searching {
+		contentH = max(contentH-1, 1)
+	}
+	m.list.SetSize(contentW, contentH)
 }
 
 // SetFocused sets the focus state.
@@ -394,6 +513,42 @@ func (m *TaskListModel) resetMarquee() {
 	}
 }
 
+// progressCellText returns the text for a row's progress slot — the live
+// percent for an actively-delivering download, or a dim wait tag while the
+// downloader is in a wait state (verifying end, reconnecting, retrying):
+// the percent would otherwise freeze stale during the wait and read as
+// hung. The full wait reason always shows in the details panel. isWait
+// tells renderJob to style the tag dim rather than in status color. Both
+// renderJob and titleWidth derive from this helper so the row layout and
+// the rendered cells can never disagree.
+func (m *TaskListModel) progressCellText(job *database.Job) (text string, isWait bool) {
+	if job.Status != database.StatusDownloading && job.Status != database.StatusMuxing {
+		return "", false
+	}
+	percent := job.Percent
+	progress := job.Progress
+	if p := m.progressStore.Get(job.ID); p != nil {
+		percent = p.Percent
+		progress = p.Progress
+	}
+	if isWaitProgress(progress) {
+		return "⋯ wait ", true
+	}
+	if percent > 0 {
+		return fmt.Sprintf("%.0f%% ", percent), false
+	}
+	return "", false
+}
+
+// isWaitProgress reports whether a progress string is a downloader wait
+// message rather than a segment counter. Every activity message the worker
+// renders (worker.activityMessage) carries the "... (<elapsed>)" tail and no
+// counter format does — the contract is pinned on the worker side by
+// TestActivityMessagesCarryWaitMarker.
+func isWaitProgress(s string) bool {
+	return strings.Contains(s, "... (")
+}
+
 // titleWidth computes the available title width for a job in the list.
 func (m *TaskListModel) titleWidth(job *database.Job) int {
 	contentW := max(m.width-2, 1)
@@ -404,17 +559,8 @@ func (m *TaskListModel) titleWidth(job *database.Job) int {
 		platformTagWidth = 5
 	}
 	// Include progress width for active jobs
-	progressTextWidth := 0
-	isActive := job.Status == database.StatusDownloading || job.Status == database.StatusMuxing
-	percent := job.Percent
-	if isActive {
-		if p := m.progressStore.Get(job.ID); p != nil {
-			percent = p.Percent
-		}
-	}
-	if isActive && percent > 0 {
-		progressTextWidth = runewidth.StringWidth(fmt.Sprintf("%.0f%% ", percent))
-	}
+	progressText, _ := m.progressCellText(job)
+	progressTextWidth := runewidth.StringWidth(progressText)
 	tw := max(contentW-selectorWidth-iconWidth-progressTextWidth-platformTagWidth, 5)
 	return tw
 }
@@ -498,6 +644,9 @@ func (m *TaskListModel) rebuildVirtualList() {
 		if !m.passesFilter(j) {
 			continue
 		}
+		if !m.passesSearch(j) {
+			continue
+		}
 
 		if isJobArchived(j, ageDays, now) {
 			archived = append(archived, j)
@@ -574,6 +723,21 @@ func (m *TaskListModel) rebuildVirtualList() {
 	m.restoreSelection(prevSelectedID)
 }
 
+// passesSearch reports whether a job matches the active fuzzy query. The
+// query fuzzy-matches against title, channel name, and video ID (the same
+// fields the Web UI's bare-text search covers); an empty query matches
+// everything. Matching is case-insensitive subsequence via sahilm/fuzzy, so
+// "mchi" finds "Minecraft with Chika".
+func (m *TaskListModel) passesSearch(j *database.Job) bool {
+	if m.searchQuery == "" {
+		return true
+	}
+	// Space-joined so a query can span fields ("mumei minecraft"); a
+	// printable separator also avoids sahilm/fuzzy's NUL-byte indexing bug.
+	hay := j.Title + " " + j.ChannelName + " " + j.VideoID
+	return len(fuzzy.Find(m.searchQuery, []string{hay})) > 0
+}
+
 func (m *TaskListModel) passesFilter(j *database.Job) bool {
 	switch m.filter {
 	case FilterActive:
@@ -595,17 +759,24 @@ func (m *TaskListModel) View() string {
 
 	var listContent string
 	if len(m.list.Items()) == 0 {
-		if m.JustCompletedSetup {
+		switch {
+		case m.searchQuery != "":
+			listContent = DimStyle.Render(fmt.Sprintf("No tasks match /%s.", truncateString(m.searchQuery, 30)))
+		case m.JustCompletedSetup:
 			listContent = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ecc71")).Render("Setup complete!") + "\n\n" +
 				DimStyle.Render("Press ` to open Settings and add channels,") + "\n" +
 				DimStyle.Render("or A A to add a video.")
-		} else {
+		default:
 			listContent = DimStyle.Render("No tasks. Press A to add, or use Web UI.")
 		}
 	} else {
 		listContent = m.list.View()
 	}
 	content := header + "\n" + listContent
+	// Search box occupies the row reserved by applyListSize while open.
+	if m.searching {
+		content += "\n" + m.searchInput.View()
+	}
 
 	style := UnfocusedBorder
 	if m.focused {
@@ -634,6 +805,10 @@ func (m *TaskListModel) renderHeader(w int) string {
 
 	if m.filter != FilterAll {
 		left += " " + YellowStyle.Render("["+m.filter.String()+"]")
+	}
+	// Active-search indicator (when the box is closed but a query is applied).
+	if !m.searching && m.searchQuery != "" {
+		left += " " + lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaa00")).Render("[/"+truncateString(m.searchQuery, 20)+"]")
 	}
 
 	// Countdown timers (T3 - match TS format, colored dots before labels)
@@ -781,19 +956,11 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	color := StatusColor(statusStr)
 	dimmed := archived && !selected
 
-	// Only show progress for Downloading/Muxing (match TS isActive check)
-	isActive := job.Status == database.StatusDownloading || job.Status == database.StatusMuxing
-	percent := job.Percent
-	if isActive {
-		if p := m.progressStore.Get(job.ID); p != nil {
-			percent = p.Percent
-		}
-	}
-	showProgress := isActive && percent > 0
-	progressText := ""
-	if showProgress {
-		progressText = fmt.Sprintf("%.0f%% ", percent)
-	}
+	// Only show progress for Downloading/Muxing (match TS isActive check).
+	// A downloader wait state renders as a dim "⋯ wait" tag instead of the
+	// stale frozen percent — see progressCellText.
+	progressText, progressIsWait := m.progressCellText(job)
+	showProgress := progressText != ""
 
 	// Reuse centralized title width calculation (matches titleWidth method)
 	titleWidth := m.titleWidth(job)
@@ -848,6 +1015,9 @@ func (m *TaskListModel) renderJob(job *database.Job, selected bool, archived boo
 	// Progress (before platform tag, matching TS order; uses status color not always green)
 	if showProgress {
 		pctStyle := lipgloss.NewStyle().Foreground(color)
+		if progressIsWait {
+			pctStyle = DimStyle // a wait, not delivery — mute it
+		}
 		if dimmed {
 			pctStyle = pctStyle.Faint(true)
 		}

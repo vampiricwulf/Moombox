@@ -794,6 +794,10 @@ func (a *App) routeComponentMsg(msg tea.Msg) tea.Cmd {
 	}
 	// Panel viewports (when no dialog visible)
 	switch a.focusedPanel {
+	case PanelTasks:
+		if a.taskList.IsSearching() {
+			return a.taskList.UpdateSearchInput(msg)
+		}
 	case PanelLogs:
 		if a.logs.IsSearching() {
 			return a.logs.UpdateSearchInput(msg)

@@ -48,6 +48,41 @@ func TestActivityMessage(t *testing.T) {
 	}
 }
 
+// TestActivityMessagesCarryWaitMarker pins the cross-layer contract the
+// TUI's task rows rely on (internal/tui isWaitProgress): every rendered
+// activity message carries the "... (" tail that distinguishes a wait from
+// a segment counter — and no counter format may carry it.
+func TestActivityMessagesCarryWaitMarker(t *testing.T) {
+	for _, a := range []engine.DownloadActivity{
+		engine.ActivityVerifyingEnd,
+		engine.ActivityReconnecting,
+		engine.ActivityRateLimited,
+		engine.ActivityFindingFirstSegment,
+		engine.ActivityRetrying,
+	} {
+		if msg := activityMessage(a, time.Second); !strings.Contains(msg, "... (") {
+			t.Errorf("activityMessage(%v) = %q lacks the %q wait marker", a, msg, "... (")
+		}
+	}
+
+	// Counter shapes must never carry the marker.
+	pt := newTestProgressTracker()
+	pt.audioSeq = 100
+	pt.audioTotal = 200
+	pt.videoSeq = 50
+	pt.videoTotal = 200
+	pt.chatCount = 7
+	if s := pt.buildProgressString(); strings.Contains(s, "... (") {
+		t.Errorf("segment counter %q carries the wait marker", s)
+	}
+	pt2 := newTestProgressTracker()
+	pt2.vodTotalBytes = 1 << 30
+	pt2.vodPercent = 25.5
+	if s := pt2.buildProgressString(); strings.Contains(s, "... (") {
+		t.Errorf("VOD counter %q carries the wait marker", s)
+	}
+}
+
 func TestDominantActivity(t *testing.T) {
 	base := time.Now()
 

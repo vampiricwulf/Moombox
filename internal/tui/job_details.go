@@ -302,6 +302,31 @@ func (m *JobDetailsModel) buildRows() {
 		}
 	}
 
+	// === Parts section — multi-part outputs from quality/gap splits ===
+	// Mirrors the Web UI's Parts rows: part number comes from SegmentIndex
+	// (matching the " - partN" filenames), not the loop index — short-skipped
+	// spans can leave holes in the numbering.
+	if len(j.Segments) > 0 {
+		m.rows = append(m.rows, detailRow{kind: rowSeparator})
+		m.rows = append(m.rows, detailRow{kind: rowHeader, label: fmt.Sprintf("Parts (%d)", len(j.Segments))})
+		for _, seg := range j.Segments {
+			val := seg.Quality
+			if seg.DurationSeconds > 0 {
+				val += " - " + utils.FormatDurationHuman(time.Duration(seg.DurationSeconds)*time.Second)
+			}
+			if seg.FileSize != nil && *seg.FileSize > 0 {
+				val += " - " + formatFileSize(*seg.FileSize)
+			}
+			if seg.VideoWidth != nil && seg.VideoHeight != nil && *seg.VideoWidth > 0 && *seg.VideoHeight > 0 {
+				val += fmt.Sprintf(" - %dx%d", *seg.VideoWidth, *seg.VideoHeight)
+			}
+			if seg.ChatFile != "" {
+				val += " - chat"
+			}
+			m.rows = append(m.rows, detailRow{kind: rowField, label: fmt.Sprintf("Part %d", seg.SegmentIndex+1), value: val, color: ColorFinished})
+		}
+	}
+
 	// === Trims section (J5/J16) ===
 	if len(j.Trims) > 0 {
 		m.rows = append(m.rows, detailRow{kind: rowSeparator})

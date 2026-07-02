@@ -39,8 +39,8 @@ var navigationKeys = helpSection{
 		{"↑/↓", "Select / Scroll"},
 		{"PgUp/PgDn", "Page scroll (Logs)"},
 		{"Enter", "Expand/collapse archives"},
-		{"/", "Search logs (when Logs focused)"},
-		{"n / N", "Next / previous search match"},
+		{"/", "Search (Tasks: filter jobs · Logs: find text)"},
+		{"n / N", "Next / previous search match (Logs)"},
 	},
 }
 

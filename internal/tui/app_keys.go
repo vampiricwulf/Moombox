@@ -315,6 +315,19 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Task-list search intercept — same shape as the log panel: capture keys
+	// while the box is open (before normalization/chords), and "/" opens it.
+	// All overlays/dialogs intercepted and returned above, so reaching here
+	// with the Tasks panel focused means the main view owns the keyboard.
+	if a.focusedPanel == PanelTasks {
+		if cmd, consumed := a.taskList.HandleSearchKey(msg); consumed {
+			return a, cmd
+		}
+		if key == "/" && !a.taskList.IsSearching() {
+			return a, a.taskList.StartSearch()
+		}
+	}
+
 	// Normalize single-character keys to lowercase (match TS: accepts both d/D, c/C, etc.)
 	// Done AFTER dialog intercepts so text inputs preserve case.
 	if len(key) == 1 && key[0] >= 'A' && key[0] <= 'Z' {
@@ -336,6 +349,11 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.chord = chordState{}
 			a.feedbackMsg = ""
 			return a, nil // consume the Esc, don't propagate
+		}
+		// Clear an active task-list search (box closed, query applied). The
+		// box-open case is already consumed by HandleSearchKey above.
+		if a.focusedPanel == PanelTasks && a.taskList.ClearSearch() {
+			return a, nil
 		}
 		// Also clear any active chord prefix on Esc
 		if a.chord.prefix != "" {
