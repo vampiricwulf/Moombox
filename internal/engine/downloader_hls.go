@@ -552,12 +552,17 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 
 			if data == nil {
 				// Gap sentinel: skip without writing, coalescing runs of
-				// missing segments. currentSeq is deliberately NOT advanced
-				// (it counts bytes-on-disk segments), matching the previous
-				// gap-flush behavior.
+				// missing segments. currentSeq MUST advance here (like the live
+				// loop's gap-skip) so it stays in playlist-index space: the
+				// resume filter in runHlsLoop is index-based
+				// (segSeq = MediaSequence+i >= curSeq), so if currentSeq lagged
+				// the index by the gap count, a resume would re-fetch and append
+				// already-written segments — a duplicated/mis-ordered TS spliced
+				// into the VOD.
 				if gapStart < 0 {
 					gapStart = nextIdx
 				}
+				d.currentSeq.Add(1)
 				nextIdx++
 				continue
 			}

@@ -92,6 +92,16 @@ func TestHlsVodParallel_EarlyGapBoundedAndSkipped(t *testing.T) {
 	if gaps[0].From != goneIdx || gaps[0].To != goneIdx {
 		t.Errorf("gap = %+v, want From=To=%d", gaps[0], goneIdx)
 	}
+
+	// currentSeq must be INDEX-aligned (== total), not written-count (which
+	// would be total-1 here because of the one gap). A written-count seq is
+	// what makes a resume re-fetch and duplicate already-written segments:
+	// the resume filter in runHlsLoop is index-based. MediaSequence is 0, so
+	// the final index-aligned position is exactly `total`.
+	if got := d.CurrentSeq(); got != total {
+		t.Errorf("CurrentSeq() = %d, want %d (index-aligned; a written-count %d would duplicate on resume)",
+			got, total, total-1)
+	}
 }
 
 // TestHlsVodParallel_TrailingGapClosed covers a gap that runs to the end of

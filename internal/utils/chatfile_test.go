@@ -331,3 +331,47 @@ func TestErrChatFilePartialWriteSentinel(t *testing.T) {
 		t.Error("errors.Is should match ErrChatFilePartialWrite through errors.Join")
 	}
 }
+
+// TestAppendChatMessagesContentBrackets pins that the tail scan anchors on the
+// STRUCTURAL closing ']' even when the last message's content ends with ']'
+// and '}' — the write-first append must not splice into the message. Runs two
+// appends and confirms the file stays valid JSON with correct order/count.
+func TestAppendChatMessagesContentBrackets(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat.json")
+
+	// A last message whose text ends with the exact bytes the locator looks
+	// for. If the scan mis-anchored, the next append would splice mid-record.
+	initial := chatfileTestDoc{
+		MessageCount: 1,
+		Messages:     []chatfileTestMessage{{ID: "a", Text: "gg]}]"}},
+	}
+	if err := WriteChatFileAtomic(path, &initial); err != nil {
+		t.Fatalf("initial write: %v", err)
+	}
+
+	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "b", Text: "nice]"}}, nil); err != nil {
+		t.Fatalf("append 1: %v", err)
+	}
+	if err := AppendChatMessages(path, []chatfileTestMessage{{ID: "c", Text: "]}"}}, nil); err != nil {
+		t.Fatalf("append 2: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc chatfileTestDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("file not valid JSON after appends: %v\n%s", err, raw)
+	}
+	if len(doc.Messages) != 3 {
+		t.Fatalf("got %d messages, want 3: %+v", len(doc.Messages), doc.Messages)
+	}
+	if doc.Messages[0].ID != "a" || doc.Messages[1].ID != "b" || doc.Messages[2].ID != "c" {
+		t.Errorf("order wrong: %+v", doc.Messages)
+	}
+	if doc.Messages[0].Text != "gg]}]" || doc.Messages[2].Text != "]}" {
+		t.Errorf("content corrupted: %+v", doc.Messages)
+	}
+}

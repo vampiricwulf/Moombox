@@ -511,14 +511,53 @@ func (w *DownloadWorker) processJob(ctx context.Context, jobID string) {
 		return
 	}
 
-	// Clean up staging directory after successful download + mux
+	// Clean up staging directory after successful download + mux — UNLESS a
+	// part's captured media is still unmuxed (both the stream-end mux and the
+	// finalize backstop failed for it). Deleting it then would silently drop
+	// footage from a job now marked Finished; preserve it so the Mux action
+	// can recover it.
 	if jobCtx.StagingDir != "" {
-		if err := os.RemoveAll(jobCtx.StagingDir); err != nil {
+		if w.hasUnmuxedParts(job.ID, jobCtx.StagingDir) {
+			w.logger.Warn("preserving staging dir: a captured part is still unmuxed after finalize; recover via the Mux action",
+				"path", jobCtx.StagingDir, "jobID", job.ID)
+		} else if err := os.RemoveAll(jobCtx.StagingDir); err != nil {
 			w.logger.Warn("failed to remove staging directory", "path", jobCtx.StagingDir, "err", err)
 		} else {
 			w.logger.Debug("removed staging directory", "path", jobCtx.StagingDir)
 		}
 	}
+}
+
+// hasUnmuxedParts reports whether any quality/gap-split part still has
+// recognized media in staging with no corresponding segment row — i.e.
+// muxUnrecordedSegments failed to mux it at finalize. Mirrors that function's
+// staging-dir→part-index mapping (root is index 0 unless a seg_0 dir exists).
+// Returns false for single-file jobs (no seg_N dirs), whose root media was
+// muxed via the normal path.
+func (w *DownloadWorker) hasUnmuxedParts(jobID, stagingDir string) bool {
+	segDirs := stagedSegDirs(stagingDir)
+	if len(segDirs) == 0 {
+		return false // no part splits — single-file cleanup is safe
+	}
+	segs, err := w.db.GetSegments(jobID)
+	if err != nil {
+		// Can't verify what's recorded — preserve rather than risk deleting
+		// footage that was never persisted.
+		return true
+	}
+	recorded := make(map[int]bool, len(segs))
+	for _, s := range segs {
+		recorded[s.SegmentIndex] = true
+	}
+	if segDirs[0].idx != 0 && !recorded[0] && discoverStagingMedia(stagingDir) != nil {
+		return true // root is part 0 and it was never recorded
+	}
+	for _, sd := range segDirs {
+		if !recorded[sd.idx] && discoverStagingMedia(sd.dir) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // handleCancellation handles a cancelled/shutdown job.
@@ -819,6 +858,29 @@ func (w *DownloadWorker) ResumeJob(jobID string) {
 	w.EnqueueJob(jobID)
 }
 
+// clearJobParts removes a job's persisted parts for a fresh restart: the
+// on-disk part files (video + per-part chat, best-effort) and then the
+// segment/gap rows. Called only by user-initiated Reinitialize.
+func (w *DownloadWorker) clearJobParts(jobID string) {
+	if segs, err := w.db.GetSegments(jobID); err == nil {
+		for _, s := range segs {
+			if s.FilePath != "" {
+				if rmErr := os.Remove(s.FilePath); rmErr != nil && !os.IsNotExist(rmErr) {
+					w.logger.Warn("reinit: failed to remove stale part file", "path", s.FilePath, "err", rmErr)
+				}
+			}
+			if s.ChatFile != "" {
+				if rmErr := os.Remove(s.ChatFile); rmErr != nil && !os.IsNotExist(rmErr) {
+					w.logger.Warn("reinit: failed to remove stale part chat", "path", s.ChatFile, "err", rmErr)
+				}
+			}
+		}
+	}
+	if err := w.db.ClearJobSegmentsAndGaps(jobID); err != nil {
+		w.logger.Warn("reinit: failed to clear segment/gap rows", "jobID", jobID, "err", err)
+	}
+}
+
 // ReinitializeJob resets a job to a fresh state and re-enqueues it.
 // Clears all progress fields and deletes the staging directory.
 func (w *DownloadWorker) ReinitializeJob(jobID string) {
@@ -833,6 +895,13 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 	if err := os.RemoveAll(stagingDir); err != nil {
 		w.logger.Warn("failed to remove staging directory on reinitialize", "path", stagingDir, "err", err)
 	}
+
+	// Fresh start: discard any parts from a prior quality/gap-split attempt.
+	// Without this the stale segment rows survive the reset and muxAndFinalize
+	// would finalize the clean re-download as multi-part from the OLD part
+	// files, silently discarding the freshly-downloaded media. (AutoReinit
+	// deliberately does NOT do this — see that method.)
+	w.clearJobParts(jobID)
 
 	// Clear all non-input fields. auto_retry_count resets here because
 	// user-driven reinit grants the job a fresh budget; auto-recovery
@@ -881,6 +950,13 @@ func (w *DownloadWorker) ReinitializeJob(jobID string) {
 //
 // Capped at MaxTwitchAutoRetries (the caller is expected to pre-check the
 // budget; this method blindly increments).
+//
+// Unlike ReinitializeJob, this deliberately does NOT clear the job's segment
+// rows: auto-recovery only fires for the SAME still-live broadcast (the caller
+// guards on sameBroadcastStart), so already-captured parts 0..N are real
+// footage from this broadcast and the recovered capture continues at part N+1
+// (discoverResumeSegment returns maxRecorded+1). Clearing here would throw away
+// captured footage of a live broadcast — the opposite of recovery.
 func (w *DownloadWorker) AutoReinitializeJob(jobID string) {
 	prev, err := w.db.GetJob(jobID)
 	if err != nil || prev == nil {

@@ -434,6 +434,25 @@ func (db *Database) UpdateSegmentFile(id int, filename, filePath, chatFile strin
 	return err
 }
 
+// ClearJobSegmentsAndGaps deletes all segment and gap rows for a job. Used by
+// a user-initiated Reinitialize ("fresh start"): without it, stale part rows
+// from a prior quality/gap-split attempt survive the reset, and the clean
+// re-download is then finalized as multi-part from the OLD part files while the
+// freshly-downloaded media is discarded. (The job-delete cascade is the only
+// other place these rows are removed.)
+func (db *Database) ClearJobSegmentsAndGaps(jobID string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if _, err := db.db.ExecContext(db.getCtx(), "DELETE FROM segments WHERE job_id = ?", jobID); err != nil {
+		return err
+	}
+	if _, err := db.db.ExecContext(db.getCtx(), "DELETE FROM gaps WHERE job_id = ?", jobID); err != nil {
+		return err
+	}
+	return nil
+}
+
 // GetSegments returns all segments for a given job, ordered by segment_index.
 func (db *Database) GetSegments(jobID string) ([]Segment, error) {
 	db.mu.RLock()

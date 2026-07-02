@@ -174,6 +174,45 @@ func TestGaps(t *testing.T) {
 	}
 }
 
+// TestClearJobSegmentsAndGaps pins the fresh-start reset: after clearing, a
+// re-download must NOT see stale part rows (which muxAndFinalize would finalize
+// from, discarding the new media). Also confirms it's job-scoped.
+func TestClearJobSegmentsAndGaps(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.AddJob(&Job{ID: "yt_keep", VideoID: "keep", URL: "u", Status: StatusDownloading})
+	db.AddJob(&Job{ID: "yt_reset", VideoID: "reset", URL: "u", Status: StatusError})
+	db.AddSegment(&Segment{JobID: "yt_reset", SegmentIndex: 0, Quality: "1080p60", Filename: "a.mp4"})
+	db.AddSegment(&Segment{JobID: "yt_reset", SegmentIndex: 1, Quality: "720p60", Filename: "b.mp4"})
+	db.AddGap("yt_reset", 5, 9, "video")
+	db.AddSegment(&Segment{JobID: "yt_keep", SegmentIndex: 0, Quality: "1080p60", Filename: "k.mp4"})
+	db.AddGap("yt_keep", 1, 2, "audio")
+
+	if err := db.ClearJobSegmentsAndGaps("yt_reset"); err != nil {
+		t.Fatalf("ClearJobSegmentsAndGaps: %v", err)
+	}
+
+	segs, _ := db.GetSegments("yt_reset")
+	if len(segs) != 0 {
+		t.Errorf("reset job segments = %d, want 0", len(segs))
+	}
+	if got, _ := db.GetJob("yt_reset"); got != nil && len(got.Gaps) != 0 {
+		t.Errorf("reset job gaps = %d, want 0", len(got.Gaps))
+	}
+	// Other jobs untouched.
+	keepSegs, _ := db.GetSegments("yt_keep")
+	if len(keepSegs) != 1 {
+		t.Errorf("other job segments = %d, want 1 (must not be cleared)", len(keepSegs))
+	}
+	if got, _ := db.GetJob("yt_keep"); got == nil || len(got.Gaps) != 1 {
+		t.Errorf("other job gaps cleared unexpectedly")
+	}
+}
+
 func TestTrims(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")

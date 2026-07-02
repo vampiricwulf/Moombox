@@ -174,8 +174,18 @@ func (s *runState) runTUI() {
 		return s.db.DeleteClientToken(id)
 	}
 	app.OnSaveConfig = func(updatedCfg *config.MoomboxConfig) {
-		if err := config.Save(updatedCfg, s.configPath); err != nil {
-			s.log.Error("Failed to save config from TUI", slog.String("error", err.Error()))
+		// Serialize on the store lock like every other saver (web routes,
+		// Store.Update-driven background saves, and the setup-wizard callback
+		// below). config.Save writes through a shared temp file and encodes the
+		// live cfg struct; without the lock a concurrent background save (e.g.
+		// cookie refresh) interleaves into the same temp file and renames a
+		// byte-spliced config.toml over the real one.
+		mu := s.configStore.RWMutex()
+		mu.Lock()
+		saveErr := config.Save(updatedCfg, s.configPath)
+		mu.Unlock()
+		if saveErr != nil {
+			s.log.Error("Failed to save config from TUI", slog.String("error", saveErr.Error()))
 		} else {
 			s.log.Info("Config saved from TUI settings")
 		}

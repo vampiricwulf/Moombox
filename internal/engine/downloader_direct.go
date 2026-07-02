@@ -53,28 +53,9 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 
 	if totalSize <= 0 {
 		// Server doesn't support Range requests (or the probe transiently
-		// failed) -- fall back to a streaming download, which can only fetch
-		// the whole file from byte 0. If we entered on a RESUME (file already
-		// opened O_APPEND and truncated to bytesWritten>0), streaming would
-		// append a second full copy after the partial data and corrupt the
-		// file. Reset to a clean slate first: truncate to 0 (O_APPEND then
-		// writes from position 0), drop the byte counter, and clear the now-
-		// meaningless resume sidecar.
-		if d.bytesWritten.Load() > 0 {
-			// Reset via a fresh O_TRUNC handle rather than d.outputFile.Truncate:
-			// Windows refuses ftruncate on an O_APPEND handle ("Access is
-			// denied"). Closing and reopening also drops the append flag so the
-			// fallback's writes land from byte 0. The deferred Close in Start
-			// reads d.outputFile at exit, so reassigning it here is safe.
-			d.outputFile.Close()
-			f, err := os.OpenFile(d.opts.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-			if err != nil {
-				return fmt.Errorf("reset for streaming fallback: %w", err)
-			}
-			d.outputFile = f
-			d.bytesWritten.Store(0)
-			d.ClearResume()
-			d.logger.Warn("[Downloader] direct resume fell back to streaming (no Range on retry); restarting from scratch")
+		// failed) -- fall back to a streaming download from byte 0.
+		if err := d.resetForStreamingFallback(); err != nil {
+			return err
 		}
 		return d.runDirectDownloadFallback(ctx)
 	}
@@ -110,6 +91,22 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 				break // Past end of file
 			}
 			return fmt.Errorf("chunk download failed: %w", err)
+		}
+
+		// A 200 (not 206) means the server IGNORED the Range and sent the whole
+		// file from byte 0. Writing that at the current offset would splice the
+		// file's leading bytes into the middle of the output (doubled/corrupt),
+		// and it's capped at maxIgnoredRangeBodyBytes so it's also truncated.
+		// The probe returned a size, so this is an inconsistent/interleaved
+		// backend — abandon the chunked approach and restart cleanly via the
+		// streaming fallback rather than write byte-0 data at offset>0.
+		if statusCode == http.StatusOK {
+			d.logger.Warn("[Downloader] direct chunk got 200 (Range ignored) mid-download; restarting via streaming",
+				"offset", offset)
+			if rerr := d.resetForStreamingFallback(); rerr != nil {
+				return rerr
+			}
+			return d.runDirectDownloadFallback(ctx)
 		}
 
 		if len(data) == 0 {
@@ -155,6 +152,30 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		})
 	}
 
+	return nil
+}
+
+// resetForStreamingFallback prepares the output for a from-byte-0 streaming
+// download. The streaming fallback can't resume from an offset, so if we
+// entered on a resume (file opened O_APPEND, truncated to bytesWritten>0) or
+// mid-chunked-download, it must start clean or it would append a second copy
+// after the existing bytes. Reopen O_TRUNC rather than d.outputFile.Truncate:
+// Windows refuses ftruncate on an O_APPEND handle ("Access is denied"), and
+// reopening also drops the append flag so writes land from byte 0. Start's
+// deferred Close reads d.outputFile at exit, so reassigning it is safe. No-op
+// when nothing has been written yet.
+func (d *SegmentDownloader) resetForStreamingFallback() error {
+	if d.bytesWritten.Load() == 0 {
+		return nil
+	}
+	d.outputFile.Close()
+	f, err := os.OpenFile(d.opts.OutputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("reset for streaming fallback: %w", err)
+	}
+	d.outputFile = f
+	d.bytesWritten.Store(0)
+	d.ClearResume()
 	return nil
 }
 

@@ -152,11 +152,32 @@ func AppendChatMessages[T any](path string, msgs []T, logger ChatFileLogger) err
 	sb.WriteString("\n  ]\n}")
 	appendStr := sb.String()
 
-	if err := f.Truncate(bracketBytePos); err != nil {
+	// Write the new payload BEFORE truncating, not after. The old order
+	// (Truncate then WriteAt) left the file with no closing "]\n}" — invalid
+	// JSON — if the WriteAt failed or a crash landed between the two ops; the
+	// next append then found a stray ']' inside the last message and spliced
+	// mid-record. The new payload is self-closing ("...]\n}") and always
+	// longer than the "]\n}" it overwrites, so once WriteAt succeeds the file
+	// is already a complete valid document; the Truncate only trims a
+	// theoretical shorter-old-tail remainder.
+	if _, err := f.WriteAt([]byte(appendStr), bracketBytePos); err != nil {
+		// Partial/failed write: restore a valid closing bracket so the file
+		// stays parseable (dropping only this batch), then signal the sentinel
+		// so the caller advances instead of doing a history-dropping rewrite.
+		if _, rerr := f.WriteAt([]byte("\n  ]\n}"), bracketBytePos); rerr == nil {
+			f.Truncate(bracketBytePos + int64(len("\n  ]\n}")))
+			f.Sync()
+		}
+		return fmt.Errorf("%w: %v", ErrChatFilePartialWrite, err)
+	}
+	if err := f.Truncate(bracketBytePos + int64(len(appendStr))); err != nil {
 		return fmt.Errorf("truncate: %w", err)
 	}
-	if _, err := f.WriteAt([]byte(appendStr), bracketBytePos); err != nil {
-		return fmt.Errorf("%w: %v", ErrChatFilePartialWrite, err)
+	// fsync so the appended messages are durable — without it a crash can
+	// leave the metadata (size) updated but the data pages unwritten, i.e. a
+	// zero/garbage tail that the next append's bracket scan misreads.
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("fsync: %w", err)
 	}
 	return nil
 }

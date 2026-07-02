@@ -747,10 +747,20 @@ func Save(cfg *MoomboxConfig, path string) error {
 		}
 	}
 
-	tmpPath := path + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// Unique temp name (not a fixed path+".tmp"): callers are expected to
+	// serialize on the store lock, but a per-writer temp file is cheap
+	// defense-in-depth against two saves that race the lock ever interleaving
+	// into one temp file and renaming spliced bytes over config.toml.
+	tmpF, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
+	}
+	tmpPath := tmpF.Name()
+	f := tmpF
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod config temp: %w", err)
 	}
 
 	// DECISIONS #9: Save validates first and refuses bad input so the user

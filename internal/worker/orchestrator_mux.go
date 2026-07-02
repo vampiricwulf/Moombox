@@ -399,8 +399,19 @@ func (o *DownloadOrchestrator) renameSinglePartToPlain(seg database.Segment, out
 		return seg
 	}
 	if err := os.Rename(seg.FilePath, plainVideo); err != nil {
-		o.logger.Warn("failed to rename single part to plain name", "err", err, "from", seg.FilePath)
-		return seg
+		// Recovery re-entry: a crash between a prior run's successful rename
+		// and its DB commit leaves the file already at plainVideo while the row
+		// still points at the suffixed name. Here os.Rename fails (source gone)
+		// but the destination exists and holds the real media — treat that as
+		// success and fall through to repair the row, so output_file doesn't
+		// resolve to the missing suffixed path (which the orphan scanner would
+		// then offer for deletion). Any other failure keeps the suffixed name.
+		if _, dstErr := os.Stat(plainVideo); os.IsNotExist(dstErr) {
+			o.logger.Warn("failed to rename single part to plain name", "err", err, "from", seg.FilePath)
+			return seg
+		}
+		o.logger.Info("single-part rename source already relocated; repairing segment row to plain name",
+			"plain", plainVideo, "jobID", seg.JobID)
 	}
 	renamed := seg
 	renamed.FilePath = plainVideo
@@ -409,7 +420,13 @@ func (o *DownloadOrchestrator) renameSinglePartToPlain(seg database.Segment, out
 	if seg.ChatFile != "" {
 		plainChat := filepath.Join(outputDir, filenameBase+".chat.json")
 		if err := os.Rename(seg.ChatFile, plainChat); err != nil {
-			o.logger.Warn("failed to rename single part chat to plain name", "err", err, "from", seg.ChatFile)
+			// Same recovery re-entry as the video above: if the chat is already
+			// at the plain path (a prior run renamed it pre-crash), adopt it.
+			if _, dstErr := os.Stat(plainChat); dstErr == nil {
+				renamed.ChatFile = plainChat
+			} else {
+				o.logger.Warn("failed to rename single part chat to plain name", "err", err, "from", seg.ChatFile)
+			}
 		} else {
 			renamed.ChatFile = plainChat
 		}

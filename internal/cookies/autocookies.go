@@ -933,6 +933,15 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("write temp cookie file: %w", err)
 	}
+	// fsync before rename (matches ResumeStore.Save / WriteChatFileAtomic /
+	// config.Save): without it a crash can journal the rename while the data
+	// pages never hit disk, leaving a zero-length/torn cookies.txt that Load
+	// silently trusts — dropping auth cookies until a full re-login.
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("fsync temp cookie file: %w", err)
+	}
 	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp cookie file: %w", err)
