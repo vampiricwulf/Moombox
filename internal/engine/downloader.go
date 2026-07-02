@@ -485,7 +485,10 @@ func (d *SegmentDownloader) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open output file: %w", err)
 	}
-	defer d.outputFile.Close()
+	// Closure (not `defer d.outputFile.Close()`): the direct-download
+	// streaming-fallback reset reopens d.outputFile, and a method-value defer
+	// would close the stale handle and leak the new one.
+	defer func() { d.outputFile.Close() }()
 
 	// Download init segment first (only if not resuming and not HLS).
 	// Non-fatal: a missing init segment usually still produces a playable
