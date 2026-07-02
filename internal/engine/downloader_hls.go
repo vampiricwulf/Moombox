@@ -39,6 +39,11 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// ended stream with a long listed backlog would otherwise grind through
 	// it skip by skip before EXT-X-ENDLIST/stale handling could fire.
 	consecutiveStuckSkips := 0
+	// inAdBreak/adSegmentsSkipped track a Twitch stitched-ad run across
+	// playlist refreshes so the break logs once at entry (Info) and once with
+	// the total at exit, not per 2s segment.
+	inAdBreak := false
+	adSegmentsSkipped := 0
 
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
@@ -211,6 +216,36 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		for _, seg := range newSegments {
 			if d.isCancelled() || ctx.Err() != nil {
 				return d.cancelErr(ctx)
+			}
+
+			// Twitch stitched ad: server-side spliced ad media, not stream
+			// content — during the break the real feed isn't served to this
+			// token at all, so skipping loses nothing recordable. Advance the
+			// position WITHOUT writing: currentSeq must keep pace with the
+			// playlist window or the window sliding past the unadvanced seq
+			// would read as a CDN gap and trigger a spurious part split. The
+			// part file keeps an inline timestamp jump where the break was —
+			// the same discontinuity a non-exempt viewer's player rides over.
+			// Never fires for ad-free tokens or YouTube HLS (IsAd requires
+			// twitch-stitched-ad DATERANGE markers; see collectAdDateRanges).
+			if seg.IsAd {
+				if !inAdBreak {
+					inAdBreak = true
+					d.logger.Info("[Downloader] Twitch stitched-ad break started; skipping ad segments",
+						"seq", d.currentSeq.Load())
+				}
+				adSegmentsSkipped++
+				d.currentSeq.Add(1)
+				// The playlist is advancing normally — an ad break must not
+				// trip the DASH-style no-segment liveness accounting.
+				d.lastSegTime.StoreNow()
+				continue
+			}
+			if inAdBreak {
+				inAdBreak = false
+				d.logger.Info("[Downloader] Twitch stitched-ad break ended",
+					"adSegmentsSkipped", adSegmentsSkipped, "resumeSeq", d.currentSeq.Load())
+				adSegmentsSkipped = 0
 			}
 
 			segData, segStatus, segErr := d.fetchSegment(ctx, seg.URL)

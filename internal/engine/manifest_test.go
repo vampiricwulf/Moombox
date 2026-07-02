@@ -473,7 +473,10 @@ func TestParseDash_SegmentTemplate(t *testing.T) {
 	}
 }
 
-func TestParseHls_Discontinuity(t *testing.T) {
+// TestParseHls_DiscontinuityTagsTolerated: discontinuity tags carry no fields
+// anymore (they were parsed-but-never-read; removed as dead code) but their
+// presence must not disturb segment parsing.
+func TestParseHls_DiscontinuityTagsTolerated(t *testing.T) {
 	m3u8 := `#EXTM3U
 #EXT-X-TARGETDURATION:4
 #EXT-X-MEDIA-SEQUENCE:0
@@ -489,17 +492,139 @@ seg1.ts`
 		t.Fatal("expected playlist")
 	}
 	pl := result.Playlist
-	if pl.DiscontinuitySequence != 5 {
-		t.Errorf("discontinuity sequence: got %d, want 5", pl.DiscontinuitySequence)
-	}
 	if len(pl.Segments) != 2 {
 		t.Fatalf("expected 2 segments, got %d", len(pl.Segments))
 	}
-	if pl.Segments[0].Discontinuity != 0 {
-		t.Errorf("seg0 discontinuity: got %d, want 0", pl.Segments[0].Discontinuity)
+	if pl.Segments[0].URL != "https://example.com/seg0.ts" || pl.Segments[1].URL != "https://example.com/seg1.ts" {
+		t.Errorf("segment URLs wrong: %+v", pl.Segments)
 	}
-	if pl.Segments[1].Discontinuity != 1 {
-		t.Errorf("seg1 discontinuity: got %d, want 1", pl.Segments[1].Discontinuity)
+	if pl.Segments[0].IsAd || pl.Segments[1].IsAd {
+		t.Error("discontinuity alone must NOT classify segments as ads")
+	}
+}
+
+// TestParseHls_TwitchStitchedAd covers ad-segment classification from
+// #EXT-X-DATERANGE + #EXT-X-PROGRAM-DATE-TIME: content before/after the ad
+// window stays content, segments inside are flagged, and the first segment at
+// exactly the range end (half-open interval) is content again.
+func TestParseHls_TwitchStitchedAd(t *testing.T) {
+	m3u8 := `#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+#EXT-X-DATERANGE:ID="stitched-ad-8000",CLASS="twitch-stitched-ad",START-DATE="2026-07-01T00:00:04.000Z",DURATION=4.000,X-TV-TWITCH-AD-POD-LENGTH="2"
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:00.000Z
+#EXTINF:2.000,live
+seg100.ts
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:02.000Z
+#EXTINF:2.000,live
+seg101.ts
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:04.000Z
+#EXTINF:2.000,Amazon
+ad0.ts
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:06.000Z
+#EXTINF:2.000,Amazon
+ad1.ts
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:08.000Z
+#EXTINF:2.000,live
+seg104.ts`
+
+	result := ParseHls(m3u8, "https://example.com/")
+	if result == nil || result.Playlist == nil {
+		t.Fatal("expected playlist")
+	}
+	segs := result.Playlist.Segments
+	if len(segs) != 5 {
+		t.Fatalf("expected 5 segments, got %d", len(segs))
+	}
+	want := []bool{false, false, true, true, false}
+	for i, w := range want {
+		if segs[i].IsAd != w {
+			t.Errorf("seg[%d] (%s) IsAd = %v, want %v", i, segs[i].URL, segs[i].IsAd, w)
+		}
+	}
+}
+
+// TestParseHls_TwitchStitchedAdDerivedPDT: only the FIRST segment carries a
+// PROGRAM-DATE-TIME tag; later segment dates must be derived by accumulating
+// EXTINF durations per the HLS spec, so the ad in the middle is still caught.
+func TestParseHls_TwitchStitchedAdDerivedPDT(t *testing.T) {
+	m3u8 := `#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-07-01T00:00:02.000Z",DURATION=2.000
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:00.000Z
+#EXTINF:2.000,live
+seg0.ts
+#EXTINF:2.000,Amazon
+ad0.ts
+#EXTINF:2.000,live
+seg2.ts`
+
+	result := ParseHls(m3u8, "https://example.com/")
+	segs := result.Playlist.Segments
+	if len(segs) != 3 {
+		t.Fatalf("expected 3 segments, got %d", len(segs))
+	}
+	want := []bool{false, true, false}
+	for i, w := range want {
+		if segs[i].IsAd != w {
+			t.Errorf("seg[%d] IsAd = %v, want %v", i, segs[i].IsAd, w)
+		}
+	}
+}
+
+// TestParseHls_AdRangeSafetyRails pins the conservative failure modes: an
+// UNBOUNDED ad daterange (no DURATION/END-DATE) must be dropped rather than
+// classify everything after it as ad; a non-ad daterange must not flag
+// anything; and a playlist with ad tags but NO program-date-time must not
+// flag anything (no date to classify by).
+func TestParseHls_AdRangeSafetyRails(t *testing.T) {
+	cases := []struct {
+		name string
+		m3u8 string
+	}{
+		{
+			name: "unbounded ad daterange dropped",
+			m3u8: `#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-07-01T00:00:00.000Z"
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:00.000Z
+#EXTINF:2.000,
+seg0.ts
+#EXTINF:2.000,
+seg1.ts`,
+		},
+		{
+			name: "non-ad daterange ignored",
+			m3u8: `#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-DATERANGE:ID="playlist-creation",CLASS="some-other-class",START-DATE="2026-07-01T00:00:00.000Z",DURATION=60.000
+#EXT-X-PROGRAM-DATE-TIME:2026-07-01T00:00:00.000Z
+#EXTINF:2.000,
+seg0.ts
+#EXTINF:2.000,
+seg1.ts`,
+		},
+		{
+			name: "ad daterange without any PDT",
+			m3u8: `#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-07-01T00:00:00.000Z",DURATION=60.000
+#EXTINF:2.000,
+seg0.ts
+#EXTINF:2.000,
+seg1.ts`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := ParseHls(tc.m3u8, "https://example.com/")
+			for i, seg := range result.Playlist.Segments {
+				if seg.IsAd {
+					t.Errorf("seg[%d] flagged as ad; safety rail should prevent this", i)
+				}
+			}
+		})
 	}
 }
 

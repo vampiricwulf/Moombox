@@ -3,7 +3,7 @@ package twitch
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"time"
@@ -51,7 +51,7 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 			return fmt.Errorf("IRC PASS failed: %w", err)
 		}
 	}
-	nick := fmt.Sprintf("justinfan%d", rand.Intn(100000))
+	nick := fmt.Sprintf("justinfan%d", rand.IntN(100000))
 	if err := conn.Write(ctx, websocket.MessageText, []byte("NICK "+nick)); err != nil {
 		return fmt.Errorf("IRC NICK failed: %w", err)
 	}

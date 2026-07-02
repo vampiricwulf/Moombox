@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const defaultSegmentDuration = 2.0
@@ -58,18 +59,23 @@ type HlsVariant struct {
 
 // HlsSegment represents a segment in an HLS media playlist.
 type HlsSegment struct {
-	Duration      float64
-	URL           string
-	Discontinuity int
+	Duration float64
+	URL      string
+	// IsAd marks a Twitch server-side stitched-ad segment, classified by the
+	// segment's #EXT-X-PROGRAM-DATE-TIME falling inside an ad #EXT-X-DATERANGE
+	// (see collectAdDateRanges). The live download loop skips these without
+	// writing — during a stitched break the real feed isn't served to this
+	// token at all, so nothing recordable is lost. Always false for playlists
+	// without ad markers (ad-free tokens, YouTube HLS).
+	IsAd bool
 }
 
 // HlsPlaylist represents a parsed HLS media playlist.
 type HlsPlaylist struct {
-	Segments              []HlsSegment
-	TargetDuration        float64
-	MediaSequence         int
-	DiscontinuitySequence int
-	EndList               bool
+	Segments       []HlsSegment
+	TargetDuration float64
+	MediaSequence  int
+	EndList        bool
 }
 
 // HlsParseResult contains either master variants or media segments.
@@ -563,8 +569,17 @@ func parseMasterPlaylist(lines []string, baseURL string) *HlsParseResult {
 
 func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 	playlist := &HlsPlaylist{}
-	discontinuity := 0
 	var currentDuration float64
+
+	// Pre-scan for stitched-ad DATERANGE tags so segment classification below
+	// doesn't depend on where the tag sits relative to its media lines.
+	adRanges := collectAdDateRanges(lines)
+	// curDate tracks the wall-clock time of the NEXT segment: set explicitly by
+	// #EXT-X-PROGRAM-DATE-TIME (Twitch emits one per segment) and advanced by
+	// each segment's duration per the HLS spec, so classification still works
+	// if only the first segment in the window carries the tag. Zero when the
+	// playlist has no PDT tags — ad classification is then skipped entirely.
+	var curDate time.Time
 
 	for _, rawLine := range lines {
 		line := strings.TrimSpace(rawLine)
@@ -576,16 +591,15 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 		case strings.HasPrefix(line, "#EXT-X-MEDIA-SEQUENCE:"):
 			playlist.MediaSequence, _ = strconv.Atoi(line[len("#EXT-X-MEDIA-SEQUENCE:"):])
 
-		case strings.HasPrefix(line, "#EXT-X-DISCONTINUITY-SEQUENCE:"):
-			playlist.DiscontinuitySequence, _ = strconv.Atoi(line[len("#EXT-X-DISCONTINUITY-SEQUENCE:"):])
+		case strings.HasPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:"):
+			if t, err := time.Parse(time.RFC3339Nano, line[len("#EXT-X-PROGRAM-DATE-TIME:"):]); err == nil {
+				curDate = t
+			}
 
 		case strings.HasPrefix(line, "#EXTINF:"):
 			durationStr := line[len("#EXTINF:"):]
 			durationStr, _, _ = strings.Cut(durationStr, ",")
 			currentDuration, _ = strconv.ParseFloat(durationStr, 64)
-
-		case line == "#EXT-X-DISCONTINUITY":
-			discontinuity++
 
 		case line == "#EXT-X-ENDLIST":
 			playlist.EndList = true
@@ -604,16 +618,111 @@ func parseMediaPlaylist(lines []string, baseURL string) *HlsParseResult {
 				}
 			}
 			segment := HlsSegment{
-				Duration:      segDur,
-				URL:           resolveURL(baseURL, line),
-				Discontinuity: discontinuity,
+				Duration: segDur,
+				URL:      resolveURL(baseURL, line),
+				IsAd:     inAdRange(adRanges, curDate),
 			}
 			playlist.Segments = append(playlist.Segments, segment)
+			if !curDate.IsZero() {
+				curDate = curDate.Add(time.Duration(segDur * float64(time.Second)))
+			}
 			currentDuration = 0
 		}
 	}
 
 	return &HlsParseResult{Playlist: playlist}
+}
+
+// hlsAdRange is a wall-clock window of Twitch server-side stitched-ad content
+// derived from an #EXT-X-DATERANGE tag.
+type hlsAdRange struct {
+	start time.Time
+	end   time.Time
+}
+
+// collectAdDateRanges extracts stitched-ad windows from a media playlist's
+// #EXT-X-DATERANGE tags. A daterange is classified as an ad when it carries
+// CLASS="twitch-stitched-ad", an ID with the "stitched-ad-" prefix, or any
+// X-TV-TWITCH-AD-* attribute (the same three signals streamlink keys on).
+// Ranges without a usable bound (no END-DATE and no positive DURATION /
+// PLANNED-DURATION) are DROPPED: an unbounded range would classify everything
+// after it as ad forever, so the safe failure mode is to not filter — worst
+// case the ad is recorded, which is the status quo. Non-ad dateranges are
+// ignored entirely, so playlists without ad markers (ad-free Turbo/sub tokens,
+// YouTube HLS) never produce ranges and classification is a no-op.
+func collectAdDateRanges(lines []string) []hlsAdRange {
+	var ranges []hlsAdRange
+	for _, rawLine := range lines {
+		attrStr, ok := strings.CutPrefix(strings.TrimSpace(rawLine), "#EXT-X-DATERANGE:")
+		if !ok {
+			continue
+		}
+		var id, class, startStr, endStr string
+		var durSec, plannedSec float64
+		hasTwitchAdAttr := false
+		for _, a := range parseAttributes(attrStr) {
+			switch a.key {
+			case "ID":
+				id = a.value
+			case "CLASS":
+				class = a.value
+			case "START-DATE":
+				startStr = a.value
+			case "END-DATE":
+				endStr = a.value
+			case "DURATION":
+				durSec, _ = strconv.ParseFloat(a.value, 64)
+			case "PLANNED-DURATION":
+				plannedSec, _ = strconv.ParseFloat(a.value, 64)
+			default:
+				if strings.HasPrefix(a.key, "X-TV-TWITCH-AD-") {
+					hasTwitchAdAttr = true
+				}
+			}
+		}
+		if class != "twitch-stitched-ad" && !strings.HasPrefix(id, "stitched-ad-") && !hasTwitchAdAttr {
+			continue
+		}
+		start, err := time.Parse(time.RFC3339Nano, startStr)
+		if err != nil {
+			continue
+		}
+		var end time.Time
+		if endStr != "" {
+			if t, terr := time.Parse(time.RFC3339Nano, endStr); terr == nil {
+				end = t
+			}
+		}
+		if end.IsZero() {
+			if durSec <= 0 {
+				durSec = plannedSec
+			}
+			if durSec > 0 {
+				end = start.Add(time.Duration(durSec * float64(time.Second)))
+			}
+		}
+		if end.IsZero() || !end.After(start) {
+			continue // unbounded/degenerate — see doc comment
+		}
+		ranges = append(ranges, hlsAdRange{start: start, end: end})
+	}
+	return ranges
+}
+
+// inAdRange reports whether a segment dated `date` falls inside any stitched-ad
+// window ([start, end) — half-open so the first post-ad segment, which starts
+// exactly at the range end, is content). Zero date (playlist without PDT tags)
+// never matches.
+func inAdRange(ranges []hlsAdRange, date time.Time) bool {
+	if date.IsZero() {
+		return false
+	}
+	for _, r := range ranges {
+		if !date.Before(r.start) && date.Before(r.end) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Utility ---

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -734,7 +734,7 @@ func BuildUsherLiveURL(channelLogin string, token *TwitchAccessToken) string {
 		"allow_audio_only":           {"true"},
 		"allow_spectre":              {"true"},
 		"fast_bread":                 {"true"},
-		"p":                          {strconv.Itoa(rand.Intn(10_000_000))},
+		"p":                          {strconv.Itoa(rand.IntN(10_000_000))},
 		"player":                     {"twitchweb"},
 		"playlist_include_framerate": {"true"},
 		"sig":                        {token.Signature},
@@ -754,7 +754,7 @@ func BuildUsherVodURL(vodID string, token *TwitchAccessToken) string {
 		"allow_source":               {"true"},
 		"allow_audio_only":           {"true"},
 		"allow_spectre":              {"true"},
-		"p":                          {strconv.Itoa(rand.Intn(10_000_000))},
+		"p":                          {strconv.Itoa(rand.IntN(10_000_000))},
 		"player":                     {"twitchweb"},
 		"playlist_include_framerate": {"true"},
 		"sig":                        {token.Signature},
