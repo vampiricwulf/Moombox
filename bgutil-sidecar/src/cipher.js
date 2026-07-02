@@ -74,11 +74,13 @@ function solveMany(entry, type, challenges) {
     const cache = type === "sig" ? entry.sigCache : entry.nCache;
     const results = {};
     const misses = [];
+    const seen = new Set(); // O(1) miss-dedup; misses.includes() was O(n²)
     for (const challenge of challenges) {
         const hit = cache.get(challenge);
         if (hit !== undefined) {
             results[challenge] = hit;
-        } else if (!misses.includes(challenge)) {
+        } else if (!seen.has(challenge)) {
+            seen.add(challenge);
             misses.push(challenge);
         }
     }

@@ -57,7 +57,7 @@ try {
 
 const productionEntries = ["package.json", "package-lock.json", "src", "node_modules", "vendor/ejs.bundle.js"];
 for (const entry of productionEntries) {
-    if (entry === "vendor/ejs.bundle.js") continue; // freshly written by esbuild step above
+    if (entry === "vendor/ejs.bundle.js") continue; // freshly written by the esbuild step below (1b)
     try {
         statSync(resolve(__dirname, entry));
     } catch {

@@ -51,6 +51,14 @@ const REQUEST_KEY = "O43z0dpjhgX20SCx4KAo";
 const CLIENT_VERSION = "2.20260227.01.00";
 const ATT_GET_URL =
     "https://www.youtube.com/youtubei/v1/att/get?prettyPrint=false";
+// Per-fetch ceiling for the BotGuard network round-trips. Node's fetch (undici)
+// has no overall request timeout — a hung YouTube endpoint would otherwise wedge
+// minterPromise for ~300s (undici's headers timeout), and since every mint awaits
+// that one promise, all mints cascade into the parent's 90s RPC timeout while the
+// sidecar still reports healthy. 30s is well above the happy path (a few seconds)
+// and well under the parent's 90s budget, so a genuine hang aborts fast and the
+// next mint retries from scratch instead of piggybacking a doomed attempt.
+const FETCH_TIMEOUT_MS = 30_000;
 
 // ---------------------------------------------------------------------------
 // State. Single-minter design (matches Moombox's PotProvider CRIT-2 fix): the
@@ -95,6 +103,7 @@ async function generateMinter() {
             context: { client: { clientName: "WEB", clientVersion: CLIENT_VERSION } },
             engagementType: "ENGAGEMENT_TYPE_UNBOUND",
         }),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!attResp.ok) {
         throw new Error(`att/get HTTP ${attResp.status}`);
@@ -109,6 +118,7 @@ async function generateMinter() {
     const interpUrl = `https:${challenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue}`;
     const interpResp = await fetch(interpUrl, {
         headers: { "User-Agent": USER_AGENT },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!interpResp.ok) {
         throw new Error(`interpreter fetch HTTP ${interpResp.status}`);
@@ -135,6 +145,7 @@ async function generateMinter() {
         method: "POST",
         headers: getHeaders(),
         body: JSON.stringify([REQUEST_KEY, botguardResponse]),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!itResp.ok) {
         throw new Error(`GenerateIT HTTP ${itResp.status}`);
@@ -160,6 +171,9 @@ async function generateMinter() {
         minter,
         expiresAt: Date.now() + estimatedTtlSecs * 1000,
         webPoSignalOutput,
+        // Tracked so getOrCreateMinter can free the stale interpreter VM when
+        // YouTube rotates globalName between regenerations (see below).
+        globalName: challenge.globalName,
     };
 }
 
@@ -179,7 +193,23 @@ async function getOrCreateMinter() {
             minterPromise = null;
         });
     }
+    const prev = cachedMinter;
     cachedMinter = await minterPromise;
+    // Free the previous interpreter's VM when YouTube rotates globalName.
+    // generateMinter runs `new Function(interpJS)()`, which attaches the VM
+    // under globalThis[globalName]. A stable name is overwritten in place (the
+    // old VM becomes GC-eligible), but a ROTATED name leaves globalThis[oldName]
+    // pinned forever — one leaked VM per rotation over a days-long run. The live
+    // minter keeps its own VM reachable via the mintCallback closure (not via
+    // globalThis), so deleting the stale property is safe even for an in-flight
+    // mint that captured the old minter.
+    if (prev && prev.globalName && prev.globalName !== cachedMinter.globalName) {
+        try {
+            delete globalThis[prev.globalName];
+        } catch (e) {
+            logWarn(`could not free stale interpreter global: ${e?.message ?? e}`);
+        }
+    }
     stats.cachedMinters = 1;
     return cachedMinter;
 }
@@ -369,6 +399,19 @@ rl.on("close", () => {
 // Belt-and-suspenders: signal handlers in case the parent kills us hard.
 process.on("SIGINT", () => process.exit(0));
 process.on("SIGTERM", () => process.exit(0));
+
+// Log-and-survive for stray async errors. Since Node 15 an unhandled rejection
+// aborts the process by default; a single bad mint/solve would then kill this
+// long-lived sidecar and force the parent into a multi-second cold restart (or
+// a permanent goja fallback). No current path floats a rejection, but this keeps
+// the 24/7 process alive. A genuinely wedged sidecar still surfaces via the
+// parent's RPC timeout → markUnhealthy → fallback, so surviving never traps us.
+process.on("unhandledRejection", (reason) => {
+    logErr(`unhandledRejection: ${reason && reason.message ? reason.message : String(reason)}`);
+});
+process.on("uncaughtException", (err) => {
+    logErr(`uncaughtException: ${err && err.message ? err.message : String(err)}`);
+});
 
 // Signal to the parent that synchronous init is complete and the readline
 // interface is wired up. The parent waits for this line before treating the
