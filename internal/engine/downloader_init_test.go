@@ -70,6 +70,21 @@ func TestExtractMP4InitBoxes(t *testing.T) {
 			data: init,
 			want: init,
 		},
+		{
+			// A 32-bit box whose size overshoots the buffer must be rejected,
+			// not walked past — walking past it would skip the real moof and
+			// return the whole (media-contaminated / truncated) buffer as init.
+			name: "32-bit box size overshooting buffer returns nil",
+			data: func() []byte {
+				ftyp := mp4box("ftyp", []byte("dash"))
+				hdr := make([]byte, 8)
+				binary.BigEndian.PutUint32(hdr, 500) // claims 500 bytes; far more than present
+				copy(hdr[4:], "moov")
+				oversized := append(hdr, bytes.Repeat([]byte("x"), 8)...)
+				return append(append(ftyp, oversized...), mp4box("moof", []byte("f"))...)
+			}(),
+			want: nil,
+		},
 	}
 
 	for _, tt := range tests {

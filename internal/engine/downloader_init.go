@@ -34,15 +34,24 @@ func extractMP4InitBoxes(data []byte) []byte {
 				return nil
 			}
 			size64 := binary.BigEndian.Uint64(data[off+8 : off+16])
-			// A box can't be larger than the buffer we fetched; reject a
-			// garbage/oversized size (which would also overflow int(size64)
-			// into a negative offset and panic on the next slice).
-			if size64 < 16 || size64 > uint64(len(data)) {
+			// Reject a garbage/oversized size on two grounds: the absolute
+			// cap (size64 > len(data)) also guards int(size64) against
+			// overflowing into a negative offset, and — with that cap making
+			// off+int(size64) safe from wraparound — the off-relative check
+			// rejects a box that claims to extend past the fetched buffer
+			// rather than jumping over a real media box that follows.
+			if size64 < 16 || size64 > uint64(len(data)) || off+int(size64) > len(data) {
 				return nil
 			}
 			off += int(size64)
 		case size < 8:
 			// size 0 means "to EOF"; anything < 8 is a malformed header.
+			return nil
+		case off+size > len(data):
+			// Box overshoots the fetched buffer. Advancing off past it would
+			// skip a real moof/mdat and make the loop fall through to
+			// "return whole buffer", emitting a truncated/media-contaminated
+			// init. Treat as malformed so the caller's missing-init path fires.
 			return nil
 		default:
 			off += size

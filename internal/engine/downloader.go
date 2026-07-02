@@ -58,6 +58,17 @@ const (
 	// stayBehindSegments is the number of segments to stay behind the live edge
 	// during parallel catch-up, avoiding download of in-flight segments.
 	stayBehindSegments = 30
+
+	// maxCatchupBatch caps how many segments one runParallelCatchUp call
+	// fetches. Without a cap, a resume far behind the live edge sizes the
+	// batch to the whole gap (thousands of segments); the out-of-order
+	// reorder buffer then holds the entire window in RAM if the
+	// head-of-window segment is stuck or CDN-evicted (oldest-first eviction
+	// makes that the *likely* alignment on a long resume) — a multi-GB spike
+	// that can OOM a low-RAM arm64 host. Bounding the batch makes peak memory
+	// O(batch); runDashLoop re-enters catch-up back-to-back to drain a larger
+	// gap without losing throughput.
+	maxCatchupBatch = 8 * ParallelDownloads
 )
 
 // uaWeb and uaAndroid are the User-Agents for download requests, sourced

@@ -158,15 +158,29 @@ func ParseDash(xmlContent string, manifestURL string) ([]DashStream, error) {
 		return nil, nil
 	}
 
-	mpdBaseURL := mpd.BaseURL
-	if mpdBaseURL == "" && manifestURL != "" {
+	// Resolve the manifest's directory base once (used both when there is no
+	// top-level BaseURL and when it is relative).
+	manifestDirBase := ""
+	if manifestURL != "" {
 		if u, err := url.Parse(manifestURL); err == nil {
 			if idx := strings.LastIndex(u.Path, "/"); idx >= 0 {
 				u.Path = u.Path[:idx+1]
 			}
 			// Preserve query string — YouTube uses it for token auth
-			mpdBaseURL = u.String()
+			manifestDirBase = u.String()
 		}
+	}
+
+	mpdBaseURL := mpd.BaseURL
+	switch {
+	case mpdBaseURL == "":
+		mpdBaseURL = manifestDirBase
+	case !strings.HasPrefix(mpdBaseURL, "http") && manifestDirBase != "":
+		// A relative top-level <BaseURL> must be resolved against the
+		// manifest URL, exactly as Period/AdaptationSet/Representation do
+		// below. Using it verbatim left every downstream resolveURL relative
+		// and 404'd every segment — the one inconsistent link in the chain.
+		mpdBaseURL = resolveURL(manifestDirBase, mpdBaseURL)
 	}
 
 	var streams []DashStream
@@ -433,11 +447,29 @@ func CalculateSegmentRange(stream *DashStream, startTimeSec, endTimeSec float64)
 
 // --- HLS Parsing ---
 
+// maxPlaylistBytes caps the size of an m3u8 document ParseHls will parse. A
+// live media window is tens of KB and even a large VOD playlist is a few MB;
+// beyond this the input is not a real playlist (a proxy/captive-portal HTML
+// body or a hostile response). The guard matters because the next step
+// allocates a []string of one element per newline — on a ~100 MB body
+// (maxSegmentBodyBytes, the playlist fetch cap) that slice-header array alone
+// is ~1.6 GB, an OOM vector on a small arm64 host.
+const maxPlaylistBytes = 16 << 20
+
 // ParseHls parses an HLS M3U8 playlist (master or media). Returns nil when
 // the content is not an M3U8 document at all (e.g. a CDN HTML/JSON error page
 // served with 200 OK) — without this check, every non-# line of an error page
 // would be treated as a segment URL and downloaded as garbage.
 func ParseHls(m3u8Content string, baseURL string) *HlsParseResult {
+	if len(m3u8Content) > maxPlaylistBytes {
+		return nil // not a real playlist; refuse before the Split allocation
+	}
+	// Strip a leading UTF-8 BOM once for the whole document. Doing it only in
+	// the first-line guard (below) left parseMediaPlaylist to see a
+	// BOM-prefixed #EXTM3U — strings.TrimSpace does NOT strip U+FEFF — so a
+	// BOM-prefixed playlist parsed its #EXTM3U line as a bogus segment URL,
+	// shifting every real segment's sequence number by one.
+	m3u8Content = strings.TrimPrefix(m3u8Content, "\ufeff")
 	lines := strings.Split(strings.TrimSpace(m3u8Content), "\n")
 	if len(lines) == 0 {
 		return nil

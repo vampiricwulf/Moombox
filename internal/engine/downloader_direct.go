@@ -56,8 +56,19 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		return d.runDirectDownloadFallback(ctx)
 	}
 
-	// Chunked download with 5MB Range requests
-	var offset int64
+	// Chunked download with 5MB Range requests. Resume from the byte position
+	// Start() restored: on a resumed run it loaded a valid resume sidecar,
+	// validated identity (itag-bearing googlevideo URL) and file size, and
+	// truncated the output to the fsync'd offset + opened O_APPEND — so
+	// continuing from d.bytesWritten appends cleanly. A hard crash that lost
+	// the file's tail fails Start's size check and restarts fresh, so this
+	// can never splice a torn tail. Fresh runs start at 0 (bytesWritten==0).
+	offset := d.bytesWritten.Load()
+	lastSavedOffset := offset
+	// Persist progress every ~10 chunks so an interrupted multi-GB VOD
+	// resumes instead of re-downloading from byte 0. saveResume fsyncs the
+	// sidecar (durability); the ~50MB cadence keeps it off the hot path.
+	const directResumeInterval = 10 * DownloadChunkSize
 	lastProgressTime := time.Time{}
 
 	for offset < totalSize {
@@ -89,6 +100,12 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 		offset += int64(n)
 		d.bytesWritten.Store(offset)
 
+		// Persist resume progress periodically (see directResumeInterval).
+		if offset-lastSavedOffset >= directResumeInterval {
+			d.saveResume()
+			lastSavedOffset = offset
+		}
+
 		// Throttled progress emission
 		now := time.Now()
 		if d.OnProgress != nil && (now.Sub(lastProgressTime) >= ProgressThrottle || offset >= totalSize) {
@@ -101,6 +118,10 @@ func (d *SegmentDownloader) runDirectDownload(ctx context.Context) error {
 			})
 		}
 	}
+
+	// Fully downloaded — clear the resume sidecar so a later run doesn't try
+	// to append to a complete file.
+	d.ClearResume()
 
 	// Final 100% progress callback
 	if d.OnProgress != nil {

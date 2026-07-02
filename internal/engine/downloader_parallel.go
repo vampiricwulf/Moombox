@@ -15,6 +15,10 @@ func (d *SegmentDownloader) runParallelCatchUp(ctx context.Context) (int, error)
 	// targetSeq is EXCLUSIVE: the catch-up downloads seqs [curSeq, targetSeq).
 	targetSeq := head - stayBehindSegments
 	targetSeq = max(targetSeq, curSeq+1) // At least catch up 1 segment
+	// Bound the batch so the reorder buffer below can't grow to the whole
+	// gap on a far-behind resume (see maxCatchupBatch). runDashLoop loops
+	// back into catch-up to drain a larger gap in bounded chunks.
+	targetSeq = min(targetSeq, curSeq+maxCatchupBatch)
 	// Respect endSeq limit (for timestamp-based trimming)
 	if d.opts.EndSeq >= 0 && targetSeq > d.opts.EndSeq+1 {
 		targetSeq = d.opts.EndSeq + 1

@@ -30,6 +30,10 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// stream actually ended, or advance past the segment if not.
 	stuckSeq := int64(-1)
 	stuckSeqRetries := 0
+	// lastSavedSeq tracks the currentSeq at the last resume-state save so the
+	// per-iteration save can skip no-progress refreshes (see below). -1 forces
+	// the first save.
+	lastSavedSeq := -1
 	// consecutiveStuckSkips bounds termination when EVERY segment fails
 	// (expired auth, dead variant): each skip costs ~12s of retries, and an
 	// ended stream with a long listed backlog would otherwise grind through
@@ -378,10 +382,27 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		// Reset consecutive errors on successful iteration
 		consecutiveErrors = 0
 
-		d.saveResume()
+		// Persist resume state only when the position actually advanced. The
+		// loop iterates every ~TargetDuration (~2s for Twitch) and reaches
+		// here even on no-progress refreshes (stale window, verifying-end);
+		// an unconditional saveResume there fsync+renamed the sidecar every
+		// ~2s for zero recovery benefit (only the timestamp changed, which
+		// the loader ignores within the 7-day window). bytesWritten only
+		// changes alongside currentSeq, so the seq is a complete progress
+		// signal. The deferred saveResume still guarantees a final flush.
+		if curSeqNow := int(d.currentSeq.Load()); curSeqNow != lastSavedSeq {
+			d.saveResume()
+			lastSavedSeq = curSeqNow
+		}
 
 		// Check if stream ended (EXT-X-ENDLIST present)
 		if pl.EndList {
+			// Natural end: mark ended so the deferred ClearResume removes the
+			// sidecar (matches the DASH loop). Without this, streamEnded stays
+			// false, the defer re-saves a fresh sidecar, and ClearResume is
+			// skipped — leaving an orphaned .resume.json (masked today only
+			// because the worker wipes staging, but a contract violation).
+			d.streamEnded.Store(true)
 			return nil
 		}
 
@@ -434,23 +455,32 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 					continue // drain channel
 				}
 				data, fetchErr := d.fetchSegmentWithRetry(ctx, item.segURL)
-				if fetchErr == nil {
-					select {
-					case results <- segResult{idx: item.idx, data: data}:
-					case <-done:
-						return
+				if fetchErr != nil {
+					// Audit reports/engine.md #17: distinguish CDN-evicted
+					// segments from retries-exhausted so silent gaps are debuggable.
+					switch {
+					case errors.Is(fetchErr, ErrSegmentPermanent):
+						d.logger.Debug("[Downloader] HLS VOD segment permanently gone (403/410)",
+							"idx", item.idx)
+					case errors.Is(fetchErr, ErrSegmentRetriesExhausted):
+						d.logger.Debug("[Downloader] HLS VOD segment retries exhausted",
+							"idx", item.idx)
 					}
-					continue
+					// Emit a nil-data GAP SENTINEL rather than dropping the
+					// segment silently. Without it, a failed segment at the
+					// consumer's nextIdx never arrives, so nextIdx never
+					// advances while the other workers race the rest of the
+					// playlist into the reorder buffer — accumulating the
+					// ENTIRE remaining VOD in RAM (a multi-GB OOM on a long VOD
+					// with one early muted/deleted segment). The sentinel lets
+					// the consumer flush past the hole and keeps the buffer
+					// bounded to the in-flight window.
+					data = nil
 				}
-				// Audit reports/engine.md #17: distinguish CDN-evicted segments
-				// from retries-exhausted so debugging silent gaps is tractable.
-				switch {
-				case errors.Is(fetchErr, ErrSegmentPermanent):
-					d.logger.Debug("[Downloader] HLS VOD segment permanently gone (403/410)",
-						"idx", item.idx)
-				case errors.Is(fetchErr, ErrSegmentRetriesExhausted):
-					d.logger.Debug("[Downloader] HLS VOD segment retries exhausted",
-						"idx", item.idx)
+				select {
+				case results <- segResult{idx: item.idx, data: data}:
+				case <-done:
+					return
 				}
 			}
 		})
@@ -489,22 +519,49 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 		close(results)
 	}()
 
-	// Stream write: buffer out-of-order segments, write in order as they arrive.
-	// Buffer size is bounded by the number of in-flight workers (ParallelDownloads);
-	// segments are flushed in order so the map typically holds only a few entries.
+	// Stream write: buffer out-of-order segments, write in order as they
+	// arrive. Every index produces exactly one result (segment data or a
+	// nil GAP SENTINEL from a failed worker), so the reorder buffer is
+	// bounded by the in-flight window (~ParallelDownloads + results cap) —
+	// a failed segment can no longer wedge nextIdx and accumulate the whole
+	// VOD in RAM. gapStart coalesces consecutive missing indices into one
+	// OnGap range and persists across the outer loop.
 	buffer := make(map[int][]byte)
 	nextIdx := 0
+	gapStart := -1
+
+	closeGap := func(endIdx int) {
+		if gapStart >= 0 {
+			if d.OnGap != nil {
+				d.OnGap(DownloadGap{From: gapStart, To: endIdx})
+			}
+			gapStart = -1
+		}
+	}
 
 	for r := range results {
 		buffer[r.idx] = r.data
 
-		// Flush consecutive segments from buffer to disk
+		// Flush consecutive entries (segments and gap sentinels) in order.
 		for {
 			data, ok := buffer[nextIdx]
 			if !ok {
 				break
 			}
 			delete(buffer, nextIdx) // Free memory immediately
+
+			if data == nil {
+				// Gap sentinel: skip without writing, coalescing runs of
+				// missing segments. currentSeq is deliberately NOT advanced
+				// (it counts bytes-on-disk segments), matching the previous
+				// gap-flush behavior.
+				if gapStart < 0 {
+					gapStart = nextIdx
+				}
+				nextIdx++
+				continue
+			}
+			closeGap(nextIdx - 1) // a real segment ends any open gap
 
 			n, err := d.outputFile.Write(data)
 			if err != nil {
@@ -526,44 +583,23 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				})
 			}
 
-			// Save resume state every ResumeCatchupInterval (50) segments —
-			// frequent enough that a crash loses at most that many segments,
-			// rare enough that the disk-touching saveResume isn't on the
-			// hot path for every download.
+			// Save resume state periodically — frequent enough that a crash
+			// loses at most that many segments, rare enough that the
+			// disk-touching saveResume isn't on the hot path for every segment.
 			if d.currentSeq.Load()%50 == 0 {
 				d.saveResume()
 			}
 		}
 	}
+	// Close a gap that runs to the end of the playlist.
+	closeGap(totalSegs - 1)
 
-	// Flush remaining buffered segments + detect gaps
-	gapStart := -1
-	for nextIdx < totalSegs {
-		if data, ok := buffer[nextIdx]; ok {
-			// Close any open gap
-			if gapStart >= 0 && d.OnGap != nil {
-				d.OnGap(DownloadGap{From: gapStart, To: nextIdx - 1})
-				gapStart = -1
-			}
-			n, writeErr := d.outputFile.Write(data)
-			if writeErr != nil {
-				return fmt.Errorf("write error during HLS VOD gap flush (segment %d): %w", nextIdx, writeErr)
-			}
-			d.bytesWritten.Add(int64(n))
-			d.currentSeq.Add(1)
-			delete(buffer, nextIdx)
-		} else {
-			if gapStart < 0 {
-				gapStart = nextIdx
-			}
-		}
-		nextIdx++
+	// The whole VOD playlist has been consumed — natural end. Mark ended so
+	// runHlsLoop's deferred ClearResume removes the sidecar (see the ENDLIST
+	// path above).
+	if !d.isCancelled() && ctx.Err() == nil {
+		d.streamEnded.Store(true)
 	}
-	// Close final gap
-	if gapStart >= 0 && d.OnGap != nil {
-		d.OnGap(DownloadGap{From: gapStart, To: totalSegs - 1})
-	}
-
 	d.saveResume()
 	return nil
 }

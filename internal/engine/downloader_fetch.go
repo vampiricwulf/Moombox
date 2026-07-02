@@ -56,6 +56,12 @@ const (
 	// YouTube's JSON errors or a one-line HTML title, but small enough
 	// that a chatty error page doesn't explode the log line.
 	errorBodySnippetBytes = 512
+	// maxDrainBytes caps a best-effort body drain done purely to return a
+	// keep-alive connection to the idle pool. The bodies we drain (head
+	// probes, the trailing bytes after a bounded ReadAll) are expected to be
+	// tiny; the cap ensures a misbehaving edge can't make us pull megabytes
+	// just to reclaim one socket.
+	maxDrainBytes = 64 << 10
 )
 
 // applyPoTokenQuery appends `?pot=<token>` (or `&pot=<token>` if the URL
@@ -196,7 +202,13 @@ func (d *SegmentDownloader) fetchSegmentWithRetry(ctx context.Context, segURL st
 		// window suppresses this while other segments are still landing, so
 		// only a real stall shows it.
 		d.emitActivity(ActivityRetrying)
-		utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
+		// Skip the backoff after the final attempt: no fetch follows it, so
+		// the sleep only delays the already-decided ErrSegmentRetriesExhausted
+		// (up to ~25s at the default MaxRetries=5), keeping a catch-up worker
+		// and its un-flushable buffer entry alive that much longer.
+		if attempt < d.opts.MaxRetries-1 {
+			utils.Sleep(ctx, time.Duration(5*(attempt+1))*time.Second)
+		}
 	}
 	return nil, ErrSegmentRetriesExhausted
 }
@@ -249,7 +261,12 @@ func (d *SegmentDownloader) probeHeadAt(ctx context.Context, probeSeq int) (int,
 		return -1, err
 	}
 	reportSuccess("engine/fetch")
-	io.Copy(io.Discard, resp.Body)
+	// Bounded drain to allow keep-alive reuse. The expected response to this
+	// probe (a GET at a non-existent segment sequence) is tiny, so a modest
+	// cap drains it fully in the normal case; a pathological large body from
+	// a misbehaving edge is capped rather than pulled in full just to reclaim
+	// one socket (mirrors probeFileSize's no-unbounded-drain policy).
+	io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 	resp.Body.Close()
 
 	headSeqStr := resp.Header.Get("X-Head-Seqnum")
@@ -332,11 +349,15 @@ func (d *SegmentDownloader) fetchChunkWithRetry(ctx context.Context, start, end 
 			return nil, status, err
 		}
 
-		// Retry on 5xx or network errors with exponential backoff (capped at 60s)
+		// Retry on 5xx or network errors with exponential backoff (capped at
+		// 60s). Skip the backoff after the final attempt — no fetch follows,
+		// so it only delays the already-decided failure.
 		if status >= 500 || status == 0 {
-			delay := time.Duration(1<<uint(attempt)) * time.Second
-			delay = min(delay, 60*time.Second)
-			utils.Sleep(ctx, delay)
+			if attempt < MaxChunkRetries-1 {
+				delay := time.Duration(1<<uint(attempt)) * time.Second
+				delay = min(delay, 60*time.Second)
+				utils.Sleep(ctx, delay)
+			}
 			continue
 		}
 
@@ -382,5 +403,14 @@ func (d *SegmentDownloader) fetchChunk(ctx context.Context, start, end int64) ([
 	// exactly end-start+1 bytes, and a broken one must not be able to balloon
 	// memory past it (mirrors the maxIgnoredRangeBodyBytes cap on the 200 path).
 	data, err := io.ReadAll(io.LimitReader(resp.Body, end-start+1))
+	if err == nil {
+		// LimitReader returns EOF the instant its counter hits 0, WITHOUT the
+		// trailing Read that lets net/http observe the body's own io.EOF — so
+		// the connection is marked non-reusable and a fresh TCP+TLS handshake
+		// is paid per 5MB chunk (thousands over a large VOD) under HTTP/1.1.
+		// A bounded drain triggers that EOF-observing read (a correct server
+		// has 0 bytes left) so the socket returns to the idle pool.
+		io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
+	}
 	return data, resp.StatusCode, err
 }

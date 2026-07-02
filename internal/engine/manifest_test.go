@@ -50,6 +50,63 @@ func TestParseHls_RejectsNonPlaylistContent(t *testing.T) {
 	}
 }
 
+// Regression: a UTF-8 BOM must be stripped for the WHOLE document, not just
+// the guard's first-line check — otherwise parseMediaPlaylist (which uses
+// TrimSpace, which does not strip U+FEFF) reads "\ufeff#EXTM3U" as a segment
+// URL, shifting every real segment's sequence by one.
+func TestParseHls_StripsBOM(t *testing.T) {
+	m3u8 := "\ufeff#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2.0,\nseg0.ts\n#EXTINF:2.0,\nseg1.ts\n"
+	result := ParseHls(m3u8, "https://x/")
+	if result == nil || result.Playlist == nil {
+		t.Fatal("BOM-prefixed playlist: expected a parsed media playlist")
+	}
+	if len(result.Playlist.Segments) != 2 {
+		t.Fatalf("expected 2 segments (no bogus #EXTM3U segment), got %d", len(result.Playlist.Segments))
+	}
+	if got := result.Playlist.Segments[0].URL; got != "https://x/seg0.ts" {
+		t.Errorf("first segment URL = %q, want the real seg0.ts (not the #EXTM3U line)", got)
+	}
+}
+
+// Regression: an absurdly large body (a proxy/error page served on the
+// playlist endpoint) must be rejected before the per-newline Split allocates
+// a giant slice-header array.
+func TestParseHls_RejectsOversizedBody(t *testing.T) {
+	huge := "#EXTM3U\n" + strings.Repeat("\n", (16<<20)+1)
+	if got := ParseHls(huge, "https://x/"); got != nil {
+		t.Errorf("oversized body: want nil, got %+v", got)
+	}
+}
+
+// Regression: a relative top-level MPD <BaseURL> must be resolved against the
+// manifest URL, like every lower level — using it verbatim left every segment
+// URL relative and 404-ing.
+func TestParseDash_RelativeTopLevelBaseURL(t *testing.T) {
+	mpd := `<?xml version="1.0"?>
+<MPD>
+  <BaseURL>dash/</BaseURL>
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="137" bandwidth="4000000" width="1920" height="1080">
+        <BaseURL>seg/</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`
+	streams, err := ParseDash(mpd, "https://cdn.example.com/live/manifest.mpd")
+	if err != nil {
+		t.Fatalf("ParseDash: %v", err)
+	}
+	if len(streams) != 1 {
+		t.Fatalf("expected 1 stream, got %d", len(streams))
+	}
+	// dash/ resolves against the manifest dir, then seg/ against that.
+	want := "https://cdn.example.com/live/dash/seg/"
+	if streams[0].BaseURL != want {
+		t.Errorf("BaseURL = %q, want %q (relative top-level BaseURL resolved against manifest URL)", streams[0].BaseURL, want)
+	}
+}
+
 func TestParseDash(t *testing.T) {
 	mpd := `<?xml version="1.0"?>
 <MPD>

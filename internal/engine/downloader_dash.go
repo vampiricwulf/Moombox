@@ -120,11 +120,18 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 			d.lastHeadProbeTime.StoreNow()
 		}
 
-		// Parallel catch-up if far behind
+		// Parallel catch-up when far enough behind to have a real
+		// multi-segment window to parallelize. The window is
+		// (segsBehind - stayBehindSegments) segments, so gating at
+		// CatchupThreshold(10) — below stayBehindSegments(30) — would collapse
+		// targetSeq to curSeq+1 and spin the whole worker pool up-and-down
+		// every iteration just to fetch ONE segment while merely keeping pace.
+		// Require the window to hold at least CatchupThreshold segments.
 		head := int(d.headSeq.Load())
 		if head > 0 {
 			segsBehind := head - curSeq
-			if segsBehind >= CatchupThreshold {
+			if segsBehind >= stayBehindSegments+CatchupThreshold {
+				preCatchupSeq := curSeq
 				nextSeq, err := d.runParallelCatchUp(ctx)
 				if err != nil {
 					return err
@@ -142,17 +149,22 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 					d.headSeq.Store(int64(headSeq))
 				}
 				d.lastHeadProbeTime.StoreNow()
-				// Only re-enter loop if catch-up actually closed the gap. If we're
-				// still far behind after a catch-up cycle, fall through to the
-				// sequential download below to avoid spinning in catch-up forever
-				// when head keeps advancing faster than parallel workers can drain.
 				curHead := int(d.headSeq.Load())
 				curSeqNow := int(d.currentSeq.Load())
-				stillFarBehind := curHead > 0 && (curHead-curSeqNow) >= CatchupThreshold
-				if !stillFarBehind {
+				stillFarBehind := curHead > 0 && (curHead-curSeqNow) >= stayBehindSegments+CatchupThreshold
+				// Re-enter catch-up back-to-back while it keeps making progress
+				// and a real window remains — batches are bounded by
+				// maxCatchupBatch, so draining a large gap means several
+				// bounded catch-up cycles rather than one giant in-memory one,
+				// and parallel is faster than sequential when head races ahead.
+				// Fall through to the sequential path ONLY on ZERO progress: the
+				// head-of-window segment is stuck/gone and handleGoneError's
+				// backoff + first-segment hunt is what's designed to break it.
+				if !stillFarBehind || nextSeq > preCatchupSeq {
 					continue
 				}
-				// Still far behind -- fall through to sequential download to avoid infinite catch-up loop
+				// Still far behind AND zero progress -- fall through to
+				// sequential download to break the stuck head segment.
 			}
 		}
 
@@ -387,9 +399,19 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		*lastRetrySeq = curSeq
 	}
 
-	// Re-probe head
-	if headSeq, probeErr := d.probeHeadSequence(ctx); probeErr == nil {
-		d.headSeq.Store(int64(headSeq))
+	// Re-probe head, but honor the same HeadProbeInterval throttle the main
+	// loop uses: at the caught-up live edge, each not-yet-published segment
+	// fetch fails and lands here every ~1-2s, so an unthrottled probe here
+	// issued ~5x the intended head-probe round-trips (a steady multiple of
+	// wasted CDN requests across video+audio, 24/7). head advances
+	// monotonically, so a probe at most HeadProbeInterval stale can only
+	// under-report head — never skip a segment (the currentSeq fetch itself
+	// discovers new segments), at worst a marginally slower backoff reset.
+	if d.lastHeadProbeTime.Since() > HeadProbeInterval {
+		if headSeq, probeErr := d.probeHeadSequence(ctx); probeErr == nil {
+			d.headSeq.Store(int64(headSeq))
+		}
+		d.lastHeadProbeTime.StoreNow()
 	}
 
 	head := int(d.headSeq.Load())
