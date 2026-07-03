@@ -256,7 +256,9 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				jobID := a.trimDlg.JobID()
 				startSec := a.trimDlg.ParsedStartSeconds()
 				endSec := a.trimDlg.ParsedEndSeconds()
-				return a, tea.Batch(a.createTrimCmd(jobID, startSec, endSec), spinnerTickCmd(a.trimDlg.spinner))
+				// A trim's progress overlay ticks at 16ms — start the loop now
+				// (it's demand-driven and may be stopped if all jobs are terminal).
+				return a, tea.Batch(a.createTrimCmd(jobID, startSec, endSec), spinnerTickCmd(a.trimDlg.spinner), a.ensureProgressTicking())
 			}
 		case "background":
 			a.setFeedback("Trim encoding in background...")

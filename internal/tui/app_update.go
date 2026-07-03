@@ -19,7 +19,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.recalcLayout()
-		return a, nil
+		// A narrower title column can push a previously-fitting title into
+		// overflow — (re)start the marquee if so.
+		return a, a.ensureMarqueeTicking()
 
 	case tea.BackgroundColorMsg:
 		a.isDark = msg.IsDark()
@@ -46,9 +48,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.feedbackMsg = ""
 			a.feedbackTimer = time.Time{}
 		}
-		// Update terminal title
-		a.updateTerminalTitle()
-		return a, a.tick()
+		// (Terminal title is event-driven — updated by the job-lifecycle
+		// handlers on status change, not polled here every second.)
+		// Backstop for the demand-driven marquee and progress loops: if a
+		// selection/width/status change slipped past its immediate restart
+		// hook, this bounds the start latency to <=1s.
+		return a, tea.Batch(a.tick(), a.ensureMarqueeTicking(), a.ensureProgressTicking())
 
 	case progressTickMsg:
 		// Refresh progress overlay for the selected job. Active downloads get
@@ -72,17 +77,39 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			elapsed := time.Since(a.trimStartedAt)
 			a.trimDlg.SetProgress(pct, elapsed)
 		}
+		// Self-stopping: once every job is terminal and no trim runs, the
+		// overlay is static — drop the loop instead of waking every 500ms.
+		// Restarts via ensureProgressTicking on the next status→live
+		// transition, new job, or trim start.
+		if !a.hasLiveContent() {
+			a.progressTicking = false
+			return a, nil
+		}
 		return a, a.progressTick()
 
 	case logFlushMsg:
-		// Flush buffered logs as batch (A2 - match TS concat batch)
+		// Flush buffered logs as batch (A2 - match TS concat batch), then
+		// disarm — the loop is one-shot. A new log arrival re-arms it via
+		// scheduleLogFlush (LogBatchMsg), so idle periods run zero flush ticks.
 		if len(a.logBuffer) > 0 {
 			a.logs.AddLines(a.logBuffer)
 			a.logBuffer = a.logBuffer[:0]
 		}
-		return a, a.logFlushTick()
+		a.logFlushScheduled = false
+		return a, nil
 
 	case marqueeTickMsg:
+		// Self-stopping: drop the loop (stop rebuilding the screen 6.6×/sec)
+		// once there's nothing to animate — either no title overflows (e.g.
+		// selection moved to a short title) or a full-screen overlay now hides
+		// the task list. Either way it restarts via ensureMarqueeTicking when
+		// the condition clears. Checked before Tick() so a covered marquee
+		// doesn't advance its offset while hidden.
+		if a.hasActiveOverlay() ||
+			(!a.taskList.marquee.NeedsScroll() && !a.details.marquee.NeedsScroll()) {
+			a.marqueeTicking = false
+			return a, nil
+		}
 		a.taskList.marquee.Tick()
 		a.details.marquee.Tick()
 		return a, a.marqueeTick()
@@ -114,11 +141,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case JobUpdateMsg:
 		a.handleJobUpdate(msg.Change)
-		return a, a.listenForUpdates()
+		// A status change may have moved a job into a live state (e.g.
+		// Upcoming→Downloading) — (re)start the progress loop if needed.
+		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking())
 
 	case JobAddedMsg:
 		a.handleJobAdded(msg.Added)
-		return a, a.listenForUpdates()
+		// A newly added job may be live/upcoming.
+		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking())
 
 	case JobDeletedMsg:
 		a.handleJobDeleted(msg.Deleted)
@@ -165,7 +195,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.updateTerminalTitle()
-		return a, a.listenForUpdates()
+		// Initial snapshot / full refresh — start the progress loop if any
+		// job is live. This is the primary startup path (Init no longer
+		// launches the loop).
+		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking())
 
 	case LogBatchMsg:
 		// Batched log messages — single Update/View cycle for all pending logs
@@ -176,7 +209,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// over the 24/7 runtime target.
 			a.logBuffer = slices.Clone(a.logBuffer[len(a.logBuffer)-1000:])
 		}
-		return a, a.listenForUpdates()
+		// Arm the 250ms batched flush (no-op if one is already pending).
+		return a, tea.Batch(a.listenForUpdates(), a.scheduleLogFlush())
 
 	case CheckTimersMsg:
 		if !msg.NextFeedCheck.IsZero() {
@@ -547,10 +581,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// Navigation may have selected a job with an overflowing title.
+		if cmd := a.ensureMarqueeTicking(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		return a, tea.Batch(cmds...)
 
 	case tea.MouseMsg:
-		return a.handleMouse(msg)
+		model, cmd := a.handleMouse(msg)
+		// A click can move the selection onto a long title.
+		if mCmd := a.ensureMarqueeTicking(); mCmd != nil {
+			cmd = tea.Batch(cmd, mCmd)
+		}
+		return model, cmd
 
 	default:
 		// Route spinner ticks and other component messages to active dialogs

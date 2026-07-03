@@ -266,6 +266,22 @@ type App struct {
 	// Log batching buffer (250ms flush cycle like TypeScript)
 	logBuffer []string
 
+	// Demand-driven tick guards. Each self-perpetuating tick loop triggers a
+	// full-screen View() rebuild per fire, so on a 24/7 dashboard we only run
+	// a loop while it has something to do and stop it otherwise. The guard
+	// bool ensures a restart can't stack a second overlapping ticker.
+	//   marqueeTicking:    the 150ms marquee loop runs only while a visible
+	//                      title actually overflows (NeedsScroll).
+	//   logFlushScheduled: the 250ms log-flush loop is a one-shot armed when
+	//                      logs arrive and disarmed once the buffer drains.
+	//   progressTicking:   the progress-overlay loop runs only while a job is
+	//                      live (or a trim runs) — its Duration / "Starts In" /
+	//                      chat counts tick with wall-clock time; when every
+	//                      job is terminal the overlay is static.
+	marqueeTicking    bool
+	logFlushScheduled bool
+	progressTicking   bool
+
 	// Channels for async updates
 	jobUpdateCh       <-chan *database.JobChange
 	jobAddedCh        <-chan *database.JobAdded
@@ -515,7 +531,55 @@ func (a *App) Init() tea.Cmd {
 		a.ffmpegCheck.Open()
 	}
 
-	return tea.Batch(a.tick(), a.progressTick(), a.logFlushTick(), a.marqueeTick(), a.listenForUpdates(), tea.RequestBackgroundColor)
+	// Set the initial terminal title once — thereafter it's event-driven
+	// (job-lifecycle handlers refresh it on status change), no longer polled
+	// on the 1s tick.
+	a.updateTerminalTitle()
+
+	// marqueeTick, logFlushTick and progressTick are NOT started here — they're
+	// demand-driven (ensureMarqueeTicking / scheduleLogFlush /
+	// ensureProgressTicking). At startup no title is selected, no logs are
+	// buffered, and statusMap is empty, so none of them has work to do; the
+	// first JobsUpdateMsg (initial snapshot) starts the progress loop if any
+	// job is live.
+	return tea.Batch(a.tick(), a.listenForUpdates(), tea.RequestBackgroundColor)
+}
+
+// ensureMarqueeTicking starts the marquee animation loop when a visible title
+// overflows its column and the loop isn't already running. Returns nil when
+// nothing needs to scroll or a loop is already active, so callers can batch it
+// unconditionally. The marquee only ever animates the SELECTED job's title, so
+// selection/title/width changes are the events that can newly require it — plus
+// the 1s tick as a backstop bounding start latency to <=1s (well inside the
+// marquee's own ~2s initial pause, so a missed hook is imperceptible).
+func (a *App) ensureMarqueeTicking() tea.Cmd {
+	if a.marqueeTicking {
+		return nil
+	}
+	// A full-screen overlay (settings, setup wizard, help, action menu, …)
+	// replaces the whole view, hiding the task list and detail titles — no
+	// point animating a marquee nobody can see. It restarts when the overlay
+	// closes (the closing keypress hook, or the 1s backstop within <=1s).
+	if a.hasActiveOverlay() {
+		return nil
+	}
+	if a.taskList.marquee.NeedsScroll() || a.details.marquee.NeedsScroll() {
+		a.marqueeTicking = true
+		return a.marqueeTick()
+	}
+	return nil
+}
+
+// scheduleLogFlush arms a single 250ms flush when logs have arrived and no
+// flush is already pending. The flush handler disarms the guard once the
+// buffer drains, so during a log burst exactly one flush runs per 250ms
+// window (same batching cadence as before) and idle periods run none.
+func (a *App) scheduleLogFlush() tea.Cmd {
+	if a.logFlushScheduled {
+		return nil
+	}
+	a.logFlushScheduled = true
+	return a.logFlushTick()
 }
 
 func (a *App) tick() tea.Cmd {
@@ -653,6 +717,43 @@ func (a *App) hasActiveDownloads() bool {
 	return false
 }
 
+// hasLiveContent reports whether the progress-overlay refresh loop has any work
+// to do: a non-terminal job (whose Duration / "Starts In" countdown / chat
+// counts advance with wall-clock time and so need periodic re-render) or an
+// in-progress trim. When every job is terminal (Finished/Error/Cancelled/
+// Cookies) and no trim runs, the overlay is static — the loop stops rather than
+// waking every 500ms. Broader than hasActiveDownloads on purpose: Upcoming jobs
+// have a live countdown even though nothing is downloading yet.
+func (a *App) hasLiveContent() bool {
+	if a.trimInProgress && a.trimDlg.IsVisible() {
+		return true
+	}
+	for _, s := range a.statusMap {
+		switch s {
+		case database.StatusUpcoming, database.StatusLive,
+			database.StatusDownloading, database.StatusMuxing:
+			return true
+		}
+	}
+	return false
+}
+
+// ensureProgressTicking starts the progress-overlay refresh loop when there's
+// live content and the loop isn't already running. Returns nil otherwise, so
+// callers batch it unconditionally. The guard flag stops a restart from
+// stacking a second ticker; it's cheap to call on every job event because it
+// short-circuits on the flag while a download is already ticking.
+func (a *App) ensureProgressTicking() tea.Cmd {
+	if a.progressTicking {
+		return nil
+	}
+	if a.hasLiveContent() {
+		a.progressTicking = true
+		return a.progressTick()
+	}
+	return nil
+}
+
 // updateTerminalTitle updates a.windowTitle with the current active/upcoming counts.
 // The title is applied to the terminal via the View() return value.
 func (a *App) updateTerminalTitle() {
@@ -674,7 +775,12 @@ func (a *App) updateTerminalTitle() {
 		title += fmt.Sprintf(" — %d upcoming", upcomingCount)
 	}
 
-	a.windowTitle = title
+	// Skip the reassignment when unchanged — the title only moves on status
+	// transitions, so most calls (rapid progress-driven job updates) produce
+	// an identical string.
+	if title != a.windowTitle {
+		a.windowTitle = title
+	}
 }
 
 // getPort returns the configured port or default 774.
