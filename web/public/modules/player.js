@@ -743,63 +743,101 @@ export class PlayerController {
   buildSidebarChat() {
     const container = document.getElementById("player-sidebar-messages");
     container.innerHTML = "";
-
-    if (this.playerChatMessages.length === 0) return;
-
-    const frag = document.createDocumentFragment();
-
-    this.playerChatMessages.forEach((msg) => {
-      const div = document.createElement("div");
-      div.className = "chat-msg future";
-      div.dataset.offset = msg.offsetMs;
-
-      if (msg.superchat) {
-        div.classList.add("superchat");
-      }
-
-      if (msg.messageType === "announcement") {
-        div.classList.add("announcement");
-        div.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
-      }
-
-      // Timestamp
-      const timeSpan = document.createElement("span");
-      timeSpan.className = "chat-msg-time";
-      timeSpan.textContent = formatMsToTime(msg.offsetMs);
-      div.appendChild(timeSpan);
-
-      // Superchat amount
-      if (msg.superchat) {
-        const scSpan = document.createElement("span");
-        scSpan.className = "chat-msg-superchat";
-        scSpan.textContent = msg.superchat.amount;
-        div.appendChild(scSpan);
-      }
-
-      // Author
-      const authorSpan = document.createElement("span");
-      authorSpan.className = "chat-msg-author";
-      if (msg.authorBadges && Array.isArray(msg.authorBadges)) {
-        // Twitch badges use "type/tier" format (e.g. "subscriber/12"), so check prefix
-        const hasBadge = (name) => msg.authorBadges.some((b) => b === name || b.startsWith(name + "/"));
-        if (hasBadge("owner") || hasBadge("broadcaster")) authorSpan.classList.add("owner");
-        else if (hasBadge("moderator")) authorSpan.classList.add("moderator");
-        else if (hasBadge("member") || hasBadge("subscriber")) authorSpan.classList.add("member");
-        else if (hasBadge("vip")) authorSpan.classList.add("member");
-      }
-      authorSpan.textContent = msg.authorName + ": ";
-      div.appendChild(authorSpan);
-
-      // Message content — use safe DOM builder instead of innerHTML
-      const contentSpan = document.createElement("span");
-      this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
-      div.appendChild(contentSpan);
-
-      frag.appendChild(div);
-    });
-
-    container.appendChild(frag);
     this.playerActiveChatIndex = 0;
+
+    const messages = this.playerChatMessages;
+    if (messages.length === 0) return;
+
+    // Chunked build: creating DOM for every message up-front froze the UI for
+    // seconds on long VODs (50-100K+ messages × ~4 nodes each). The first
+    // chunk builds synchronously — chats up to one chunk behave exactly as
+    // before — and the rest appends in setTimeout(0) batches so the player
+    // stays interactive while a huge chat materializes. Chunks append in
+    // order, preserving the children[i] === playerChatMessages[i] alignment
+    // that filterChat / resetSidebarToTime / updateSidebarActiveState rely
+    // on (all three already tolerate missing tail children). A selection
+    // change mid-build cancels via the _selectionSeq token.
+    const CHUNK = 2500;
+    const seq = this._selectionSeq;
+
+    const buildFrom = (start) => {
+      if (this._selectionSeq !== seq) return; // job changed mid-build
+      const end = Math.min(start + CHUNK, messages.length);
+      const frag = document.createDocumentFragment();
+      for (let i = start; i < end; i++) {
+        frag.appendChild(this._buildChatMessageEl(messages[i], i));
+      }
+      container.appendChild(frag);
+      if (end < messages.length) {
+        setTimeout(() => buildFrom(end), 0);
+        return;
+      }
+      // Build complete — a search typed while chunks were pending only hid
+      // the children that existed at the time; re-apply it over the full set.
+      const search = document.getElementById("chat-search");
+      if (search && search.value) {
+        this.filterChat(search.value);
+      }
+    };
+
+    buildFrom(0);
+  }
+
+  /**
+   * Build one sidebar chat message element. `index` decides the initial
+   * active/future class: playback may advance past a message while its chunk
+   * is still pending, and updateSidebarActiveState only walks FORWARD — it
+   * never revisits earlier indices — so a late-built element for an
+   * already-passed message must materialize as active.
+   */
+  _buildChatMessageEl(msg, index) {
+    const div = document.createElement("div");
+    div.className = index < this.playerActiveChatIndex ? "chat-msg active" : "chat-msg future";
+    div.dataset.offset = msg.offsetMs;
+
+    if (msg.superchat) {
+      div.classList.add("superchat");
+    }
+
+    if (msg.messageType === "announcement") {
+      div.classList.add("announcement");
+      div.classList.add(`announcement-${announcementColorClass(msg.announcementColor)}`);
+    }
+
+    // Timestamp
+    const timeSpan = document.createElement("span");
+    timeSpan.className = "chat-msg-time";
+    timeSpan.textContent = formatMsToTime(msg.offsetMs);
+    div.appendChild(timeSpan);
+
+    // Superchat amount
+    if (msg.superchat) {
+      const scSpan = document.createElement("span");
+      scSpan.className = "chat-msg-superchat";
+      scSpan.textContent = msg.superchat.amount;
+      div.appendChild(scSpan);
+    }
+
+    // Author
+    const authorSpan = document.createElement("span");
+    authorSpan.className = "chat-msg-author";
+    if (msg.authorBadges && Array.isArray(msg.authorBadges)) {
+      // Twitch badges use "type/tier" format (e.g. "subscriber/12"), so check prefix
+      const hasBadge = (name) => msg.authorBadges.some((b) => b === name || b.startsWith(name + "/"));
+      if (hasBadge("owner") || hasBadge("broadcaster")) authorSpan.classList.add("owner");
+      else if (hasBadge("moderator")) authorSpan.classList.add("moderator");
+      else if (hasBadge("member") || hasBadge("subscriber")) authorSpan.classList.add("member");
+      else if (hasBadge("vip")) authorSpan.classList.add("member");
+    }
+    authorSpan.textContent = msg.authorName + ": ";
+    div.appendChild(authorSpan);
+
+    // Message content — use safe DOM builder instead of innerHTML
+    const contentSpan = document.createElement("span");
+    this.appendChatContent(contentSpan, msg.message || [], msg.emotes);
+    div.appendChild(contentSpan);
+
+    return div;
   }
 
   onPlayerTimeUpdate() {

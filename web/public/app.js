@@ -48,6 +48,14 @@ class MoomboxApp {
     this._tasksChannels = [];
     this._archivedChannels = [];
     this.focusedJobIndex = -1;
+    // Active tab-panel name, maintained by the sl-tab-show handler. Used to
+    // defer Archived-panel DOM work while that panel isn't visible (tracked
+    // as state rather than queried from the DOM so the guard can't race
+    // Shoelace's own active-attribute bookkeeping during tab transitions).
+    this._activePanel = "tasks";
+    // True when archivedJobs changed while the Archived panel was hidden —
+    // the panel re-renders on activation instead of on every change.
+    this._archivedRenderDirty = false;
     // Theme: respect explicit user choice in localStorage; otherwise follow
     // the OS light/dark preference and keep tracking it across the session.
     const storedTheme = localStorage.getItem("moombox-theme");
@@ -67,8 +75,9 @@ class MoomboxApp {
 
   /** Return the selection set for the currently active panel. */
   _activeSelectionSet() {
-    const panel = document.querySelector("sl-tab-panel[active]")?.getAttribute("name");
-    return panel === "archived" ? this._selectedArchivedJobs : this._selectedTaskJobs;
+    // _activePanel is maintained by the sl-tab-show handler — same source of
+    // truth as the archived-render deferral, and cheaper than a DOM query.
+    return this._activePanel === "archived" ? this._selectedArchivedJobs : this._selectedTaskJobs;
   }
 
   /** Return the selection set for a given container key ("jobs" or "archived"). */
@@ -103,7 +112,26 @@ class MoomboxApp {
     this.connectWebSocket();
     this.loadConfig();
     this.loadStatus();
-    this._countdownInterval = setInterval(() => { this.updateCheckCountdown(); this.refreshRelativeTimestamps(); }, 1000);
+    // 1 Hz UI tick. Skipped entirely while the tab is hidden — the
+    // visibilitychange handler at the bottom of this file re-fires both
+    // updates on return so stale strings never show. This is the app's only
+    // always-on DOM work; keeping it silent in the background matters for a
+    // dashboard left open 24/7.
+    this._countdownInterval = setInterval(() => {
+      if (document.hidden) return;
+      this.updateCheckCountdown();
+      this.refreshRelativeTimestamps();
+    }, 1000);
+    // Cache the header-countdown breakpoint instead of reading
+    // window.innerWidth on every tick (a layout read on the 1 Hz hot path).
+    this._narrowHeader = window.innerWidth <= 992;
+    window.addEventListener("resize", () => {
+      const narrow = window.innerWidth <= 992;
+      if (narrow !== this._narrowHeader) {
+        this._narrowHeader = narrow;
+        this.updateCheckCountdown();
+      }
+    }, { passive: true });
     // Idle-tick sweep: re-evaluate archive boundary in case no job_update
     // arrives but enough time has passed for a Finished job to cross the
     // hide_finished_age_days threshold.
@@ -314,7 +342,11 @@ class MoomboxApp {
     const tabGroup = document.querySelector("sl-tab-group");
     if (tabGroup) {
       tabGroup.addEventListener("sl-tab-show", (e) => {
+        this._activePanel = e.detail.name;
         if (e.detail.name === "archived") {
+          // Render any changes deferred while the panel was hidden for
+          // instant feedback, then refresh from the server.
+          if (this._archivedRenderDirty) this.renderArchivedJobs();
           this.fetchArchivedJobs();
         } else if (e.detail.name === "player") {
           if (!this.player.playerInitialized) {
@@ -346,6 +378,10 @@ class MoomboxApp {
         }
         // Refresh batch action bar for the newly active panel
         this.updateBatchActionBar();
+        // The 1 Hz refresh is scoped to the active panel — bring the newly
+        // shown panel's relative timestamps current immediately rather than
+        // waiting for the next tick.
+        this.refreshRelativeTimestamps();
       });
     }
 
@@ -842,9 +878,15 @@ class MoomboxApp {
     const notes = document.getElementById("update-release-notes");
     if (!dlg || !this._updateAvailable) return;
     dlg.label = `Update to v${this._updateAvailable.version}`;
-    // Prefer the server-rendered HTML (sanitized via bluemonday); fall back
-    // to the raw stripped markdown as text if an older server didn't send
-    // the html field, and finally to a generic message.
+    // SECURITY CONTRACT: this is the app's ONLY innerHTML sink for external
+    // content (GitHub release markdown), deliberately unescaped because the
+    // server renders AND sanitizes it via bluemonday.UGCPolicy()
+    // (internal/updater/updater.go, pinned by
+    // TestRenderReleaseNotesHtmlSanitizesScripts). If this field ever gets a
+    // different source or the server policy loosens, this becomes stored XSS
+    // — keep the sanitizer, or switch to textContent. Fall back to the raw
+    // stripped markdown as TEXT if an older server didn't send the html
+    // field, and finally to a generic message.
     const html = this._updateAvailable.releaseNotesHtml || "";
     if (html) {
       notes.innerHTML = html;
@@ -893,6 +935,12 @@ class MoomboxApp {
   // ===== WebSocket Management =====
 
   connectWebSocket() {
+    // Cancel any queued reconnect so a manual/early connect can't stack a
+    // second attempt behind this one (the timer used to be untracked).
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     // Only clear the ping interval — countdown/timestamp timer runs
     // independently of WebSocket and should keep ticking during reconnection.
     if (this._pingInterval) {
@@ -981,7 +1029,13 @@ class MoomboxApp {
     console.log(
       `Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})`,
     );
-    setTimeout(() => this.connectWebSocket(), delay);
+    // Tracked so connectWebSocket can cancel a queued attempt instead of
+    // relying solely on socket-neutralization to avoid doubled connects.
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this.connectWebSocket();
+    }, delay);
   }
 
   updateConnectionStatus(connected) {
@@ -1077,6 +1131,12 @@ class MoomboxApp {
           // Status change affects sort order — do full re-render
           if (oldStatus !== updatedJob.status) {
             this.renderJobs();
+            // A status change (esp. → Finished) can cross the archive
+            // threshold immediately (hide_finished_age_days = 0). Progress
+            // ticks can't — jobs age by TIME, which the 60s sweep interval
+            // already covers — so archive evaluation stays off the per-tick
+            // path instead of running an O(n) scan on every progress update.
+            this._evaluateArchiveBoundary();
           } else {
             this.updateJobCard(updatedJob);
             this.stats.updateActiveIndicator(this.jobs);
@@ -1095,11 +1155,8 @@ class MoomboxApp {
           this.jobs.push(updatedJob);
           if (this._pruneArchivedAgainstActive()) this.renderArchivedJobs();
           this.renderJobs();
+          this._evaluateArchiveBoundary();
         }
-        // Any per-job update is a good moment to re-check whether other
-        // finished jobs have aged past the archive threshold (mirrors the
-        // TUI, which reclassifies the whole list on every event).
-        this._evaluateArchiveBoundary();
         break;
       }
 
@@ -1237,25 +1294,61 @@ class MoomboxApp {
     return `${seconds}s`;
   }
 
+  /**
+   * The containers that can hold [data-timestamp] elements for the current
+   * view: the ACTIVE panel's job/file list plus the details dialog (its own
+   * subtree, independent of panels). Scoping the 1 Hz refresh to these
+   * instead of document-wide querySelectorAll matters because selector
+   * matching visits EVERY element \u2014 with a large VOD's chat sidebar loaded,
+   * a document-wide scan walked hundreds of thousands of chat nodes per
+   * second that can never match. Hidden panels refresh on activation
+   * (sl-tab-show) and at worst show a \u22641s-stale relative time.
+   */
+  _timestampScopes() {
+    const scopes = [];
+    const panelContainer = {
+      tasks: "jobs-container",
+      archived: "archived-container",
+      files: "files-table",
+    }[this._activePanel];
+    if (panelContainer) {
+      const el = document.getElementById(panelContainer);
+      if (el) scopes.push(el);
+    }
+    const details = document.getElementById("job-details-content");
+    if (details) scopes.push(details);
+    return scopes;
+  }
+
   refreshRelativeTimestamps() {
-    document.querySelectorAll("[data-timestamp]").forEach((el) => {
-      const ts = el.dataset.timestamp;
-      if (!ts) return;
-      const relative = this.formatRelativeTime(ts);
-      const prefix = el.dataset.timestampPrefix || "";
-      const text = prefix + relative;
-      el.textContent = text;
-      // Update title only for prefixed elements (e.g. job progress);
-      // details panel spans keep their fixed full-date title set at render time
-      if (prefix) el.title = text;
-    });
-    // Update "Starts In" countdown in details panel
-    document.querySelectorAll("[data-timestamp-countdown]").forEach((el) => {
-      const ts = el.dataset.timestampCountdown;
-      if (!ts) return;
-      const diff = Math.floor((new Date(ts).getTime() - Date.now()) / 1000);
-      el.textContent = diff > 0 ? this.formatDurationSeconds(diff) : "Now";
-    });
+    for (const scope of this._timestampScopes()) {
+      scope.querySelectorAll("[data-timestamp]").forEach((el) => {
+        const ts = el.dataset.timestamp;
+        if (!ts) return;
+        const relative = this.formatRelativeTime(ts);
+        const prefix = el.dataset.timestampPrefix || "";
+        const text = prefix + relative;
+        // Diff before writing: past the 1-minute mark the string only changes
+        // once a minute (then hour, then day), so the unconditional write was
+        // re-assigning identical text (and dirtying layout) on ~59 of every 60
+        // ticks per element \u2014 forever, scaled by card count.
+        if (el.textContent !== text) {
+          el.textContent = text;
+          // Update title only for prefixed elements (e.g. job progress);
+          // details panel spans keep their fixed full-date title set at render time
+          if (prefix) el.title = text;
+        }
+      });
+      // Update "Starts In" countdown (details panel only, but the scoped
+      // query is cheap enough to run uniformly)
+      scope.querySelectorAll("[data-timestamp-countdown]").forEach((el) => {
+        const ts = el.dataset.timestampCountdown;
+        if (!ts) return;
+        const diff = Math.floor((new Date(ts).getTime() - Date.now()) / 1000);
+        const text = diff > 0 ? this.formatDurationSeconds(diff) : "Now";
+        if (el.textContent !== text) el.textContent = text;
+      });
+    }
   }
 
   updateCheckCountdown() {
@@ -1264,11 +1357,13 @@ class MoomboxApp {
     const feed = this.formatCountdown(this.nextFeedCheck);
     const decapi = this.formatCountdown(this.nextDecapiCheck);
     const twitch = this.formatCountdown(this.nextTwitchCheck);
-    if (window.innerWidth <= 992) {
-      el.textContent = `F ${feed} \u00b7 D ${decapi} \u00b7 T ${twitch}`;
-    } else {
-      el.textContent = `Feed ${feed} \u00b7 DECAPI ${decapi} \u00b7 Twitch ${twitch}`;
-    }
+    // _narrowHeader is maintained by a resize listener (initializeApp) so the
+    // 1 Hz tick never reads window.innerWidth \u2014 a forced-layout risk right
+    // after the timestamp writes above.
+    const text = this._narrowHeader
+      ? `F ${feed} \u00b7 D ${decapi} \u00b7 T ${twitch}`
+      : `Feed ${feed} \u00b7 DECAPI ${decapi} \u00b7 Twitch ${twitch}`;
+    if (el.textContent !== text) el.textContent = text;
   }
 
   // ===== Job Rendering =====
@@ -1498,6 +1593,17 @@ class MoomboxApp {
   }
 
   renderArchivedJobs() {
+    // Defer DOM work while the Archived panel isn't visible. On a 24/7
+    // recorder the archive grows continuously (60s sweep + job updates), and
+    // this method rebuilds EVERY archived card via innerHTML — destroying and
+    // recreating Shoelace shadow DOM for a hidden panel is pure waste. The
+    // sl-tab-show handler re-renders on activation when this flag is set.
+    if (this._activePanel !== "archived") {
+      this._archivedRenderDirty = true;
+      return;
+    }
+    this._archivedRenderDirty = false;
+
     const container = document.getElementById("archived-container");
     const emptyState = document.getElementById("archived-empty-state");
     const table = document.getElementById("archived-table");
@@ -4347,4 +4453,10 @@ document.addEventListener("DOMContentLoaded", () => {
 // paused; }`) suspend animations declaratively without touching JS state.
 document.addEventListener("visibilitychange", () => {
   document.body.setAttribute("data-paused", document.hidden ? "true" : "false");
+  // The 1 Hz UI tick early-returns while hidden; refresh immediately on
+  // return so relative timestamps / countdowns never show stale strings.
+  if (!document.hidden && window.app?._initialized) {
+    window.app.updateCheckCountdown();
+    window.app.refreshRelativeTimestamps();
+  }
 });

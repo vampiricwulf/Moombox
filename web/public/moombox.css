@@ -1487,6 +1487,15 @@ sl-progress-bar {
     line-height: 1.4;
     transition: opacity 0.15s ease;
     word-break: break-word;
+    /* Skip layout/paint for off-screen messages — a long VOD's sidebar holds
+       tens of thousands of these, and only a screenful is ever visible.
+       Composes with the chunked build in player.js: appended chunks that
+       land off-screen are never fully laid out. The intrinsic-size estimate
+       (~one line + padding) sizes the scrollbar until a message is rendered;
+       `auto` then remembers the real size. offsetTop reads used by the
+       chat autoscroll still work — they resolve against the estimates. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 1.9em;
 }
 
 .chat-msg:nth-child(odd) {

@@ -287,6 +287,10 @@ export class SettingsController {
           if (dlg && notes) {
             dlg.label = "Release Notes — " + data.tagName;
             if (data.releaseNotesHtml) {
+              // SECURITY CONTRACT: raw-HTML sink safe ONLY because the server
+              // sanitizes via bluemonday.UGCPolicy() (internal/updater) — see
+              // the matching comment in app.js showUpdateDialog before
+              // changing either side.
               notes.innerHTML = data.releaseNotesHtml;
             } else {
               notes.textContent = data.releaseNotes || "No release notes available.";
