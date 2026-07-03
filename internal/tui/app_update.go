@@ -50,12 +50,38 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// (Terminal title is event-driven — updated by the job-lifecycle
 		// handlers on status change, not polled here every second.)
+		// Keep the details panel's wall-clock text ("5m ago" suffixes) live
+		// for jobs the progress loop isn't rebuilding: (a) the loop is
+		// parked (all jobs terminal — no SetProgress rebuilds at all), or
+		// (b) the loop runs for other jobs but the selected one transitioned
+		// terminal (store entry deleted → the progress tick's gate skips
+		// it). Jobs the running loop covers are excluded to avoid double
+		// rebuilds — SetProgress already recomputes these rows at 2-60Hz.
+		if sel := a.taskList.SelectedJob(); sel != nil {
+			if !a.progressTicking ||
+				(a.progressStore.Get(sel.ID) == nil && !a.details.HasProgress()) {
+				a.details.RefreshRelativeTimes()
+			}
+		}
+		// Archive-boundary sweep (TUI analog of the web UI's 60s sweep): a
+		// Finished job can age across hide_finished_age_days while the
+		// dashboard sits idle with no rebuild-triggering event; without
+		// this it lingers in the active rows until the next unrelated one.
+		if now := time.Now(); now.Sub(a.lastArchiveSweep) >= time.Minute {
+			a.lastArchiveSweep = now
+			a.taskList.ResweepArchive()
+		}
 		// Backstop for the demand-driven marquee and progress loops: if a
 		// selection/width/status change slipped past its immediate restart
 		// hook, this bounds the start latency to <=1s.
 		return a, tea.Batch(a.tick(), a.ensureMarqueeTicking(), a.ensureProgressTicking())
 
 	case progressTickMsg:
+		// A superseded schedule's tick (a cadence upshift replaced it) —
+		// drop without re-arming; the current-generation chain is running.
+		if msg.gen != a.progressGen {
+			return a, nil
+		}
 		// Refresh progress overlay for the selected job. Active downloads get
 		// 16ms ticks; all other jobs still get 500ms ticks which is enough for
 		// chat count updates on Upcoming jobs with early chat running.
@@ -88,13 +114,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.progressTick()
 
 	case logFlushMsg:
-		// Flush buffered logs as batch (A2 - match TS concat batch), then
-		// disarm — the loop is one-shot. A new log arrival re-arms it via
-		// scheduleLogFlush (LogBatchMsg), so idle periods run zero flush ticks.
-		if len(a.logBuffer) > 0 {
-			a.logs.AddLines(a.logBuffer)
-			a.logBuffer = a.logBuffer[:0]
-		}
+		// Trailing flush of the leading-edge throttle (A2 - match TS concat
+		// batch), then disarm — the timer is one-shot. A new log arrival
+		// re-triggers via the LogBatchMsg handler, so idle periods run zero
+		// flush ticks.
+		a.flushLogBuffer()
 		a.logFlushScheduled = false
 		return a, nil
 
@@ -143,20 +167,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.handleJobUpdate(msg.Change)
 		// A status change may have moved a job into a live state (e.g.
 		// Upcoming→Downloading) — (re)start the progress loop if needed.
-		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking())
+		// A title/display change can also make the SELECTED title newly
+		// overflow — (re)start the marquee too (the pause is tick-counted,
+		// so waiting for the 1s backstop would delay first motion additively).
+		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking(), a.ensureMarqueeTicking())
 
 	case JobAddedMsg:
 		a.handleJobAdded(msg.Added)
-		// A newly added job may be live/upcoming.
-		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking())
+		// A newly added job may be live/upcoming; the re-sort can also land
+		// a long title under the cursor.
+		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking(), a.ensureMarqueeTicking())
 
 	case JobDeletedMsg:
 		a.handleJobDeleted(msg.Deleted)
-		return a, a.listenForUpdates()
+		// Takeover-selection may have landed on a long-titled neighbor.
+		return a, tea.Batch(a.listenForUpdates(), a.ensureMarqueeTicking())
 
 	case TrimsChangedMsg:
 		a.handleTrimsChanged(msg.Job)
-		return a, a.listenForUpdates()
+		return a, tea.Batch(a.listenForUpdates(), a.ensureMarqueeTicking())
 
 	case JobsUpdateMsg:
 		// If jobs already exist, the user has used the app before — dismiss the newcomer hint.
@@ -196,9 +225,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.updateTerminalTitle()
 		// Initial snapshot / full refresh — start the progress loop if any
-		// job is live. This is the primary startup path (Init no longer
-		// launches the loop).
-		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking())
+		// job is live (this is the primary startup path; Init no longer
+		// launches the loop) and the marquee if the snapshot landed a long
+		// title under the cursor.
+		return a, tea.Batch(a.listenForUpdates(), a.ensureProgressTicking(), a.ensureMarqueeTicking())
 
 	case LogBatchMsg:
 		// Batched log messages — single Update/View cycle for all pending logs
@@ -209,7 +239,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// over the 24/7 runtime target.
 			a.logBuffer = slices.Clone(a.logBuffer[len(a.logBuffer)-1000:])
 		}
-		// Arm the 250ms batched flush (no-op if one is already pending).
+		// Leading-edge flush: the first batch after a quiet window renders
+		// NOW (real-time principle — no fixed 250ms wait on the first line);
+		// batches landing inside an open window coalesce into one armed
+		// trailing flush at the window boundary.
+		if !a.logFlushScheduled && time.Since(a.lastLogFlush) >= logFlushInterval {
+			a.flushLogBuffer()
+			return a, a.listenForUpdates()
+		}
 		return a, tea.Batch(a.listenForUpdates(), a.scheduleLogFlush())
 
 	case CheckTimersMsg:
@@ -317,7 +354,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Feedback != "" {
 			a.setFeedback(msg.Feedback)
 		}
-		return a, nil
+		// Async close uncovers the task list — resume a paused marquee now
+		// rather than waiting for the 1s backstop.
+		return a, a.ensureMarqueeTicking()
 
 	case fetchFormatsResultMsg:
 		if msg.Err != "" {
@@ -346,7 +385,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.importDlg.Close()
 		a.setFeedback("Imported: " + msg.Title)
-		return a, nil
+		// Async close uncovers the task list — resume a paused marquee now.
+		return a, a.ensureMarqueeTicking()
 
 	case createTrimResultMsg:
 		a.trimInProgress = false
@@ -368,7 +408,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.setFeedback(fmt.Sprintf("Trim created: %s", msg.Filename))
 			}
 		}
-		return a, nil
+		// Success path closed the trim dialog asynchronously — resume a
+		// paused marquee now rather than waiting for the 1s backstop.
+		return a, a.ensureMarqueeTicking()
 
 	case deleteTrimResultMsg:
 		a.trimDlg.SetLoading(false)
@@ -462,7 +504,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			method := strings.TrimPrefix(msg.Action, "prepare:")
 			return a, tea.Batch(a.ffmpegPrepareCmd(method), spinnerTickCmd(a.ffmpegCheck.spinner))
 		}
-		return a, nil
+		// "skip" closed the overlay asynchronously — resume a paused marquee.
+		return a, a.ensureMarqueeTicking()
 
 	case ffmpegCheckResultMsg:
 		if msg.Valid {

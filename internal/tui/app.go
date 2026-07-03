@@ -69,9 +69,13 @@ type (
 	}
 	channelClosedMsg struct{ Name string }
 	tickMsg          struct{}
-	progressTickMsg  struct{}
-	logFlushMsg      struct{} // 250ms log batching flush
-	marqueeTickMsg   struct{} // 150ms marquee scroll tick
+	// progressTickMsg carries the generation of the schedule that produced
+	// it: a cadence upshift (500ms→16ms) supersedes the in-flight schedule
+	// with a fresh one, and the stale tick is dropped on arrival by its
+	// old generation instead of waiting out its interval.
+	progressTickMsg struct{ gen int }
+	logFlushMsg     struct{} // trailing log-batch flush (see logFlushInterval)
+	marqueeTickMsg  struct{} // 150ms marquee scroll tick
 
 	// Async results for update check/apply
 	updateCheckResultMsg struct {
@@ -272,15 +276,29 @@ type App struct {
 	// bool ensures a restart can't stack a second overlapping ticker.
 	//   marqueeTicking:    the 150ms marquee loop runs only while a visible
 	//                      title actually overflows (NeedsScroll).
-	//   logFlushScheduled: the 250ms log-flush loop is a one-shot armed when
-	//                      logs arrive and disarmed once the buffer drains.
+	//   logFlushScheduled: a trailing log flush is armed and pending. Log
+	//                      flushing is a leading-edge throttle: the first
+	//                      batch after a quiet period renders IMMEDIATELY
+	//                      (real-time principle), and only follow-up batches
+	//                      inside the logFlushInterval window wait for the
+	//                      armed trailing flush. lastLogFlush is the stamp
+	//                      the throttle compares against.
 	//   progressTicking:   the progress-overlay loop runs only while a job is
 	//                      live (or a trim runs) — its Duration / "Starts In" /
 	//                      chat counts tick with wall-clock time; when every
 	//                      job is terminal the overlay is static.
 	marqueeTicking    bool
 	logFlushScheduled bool
+	lastLogFlush      time.Time
 	progressTicking   bool
+	// progressGen invalidates a superseded progress schedule on cadence
+	// upshift; progressInterval records the class the running loop was last
+	// scheduled at (so the upshift can detect 500ms→16ms transitions).
+	progressGen      int
+	progressInterval time.Duration
+	// lastArchiveSweep throttles the 60s archive-boundary resweep run from
+	// the 1s tick (TUI analog of the web UI's archive sweep).
+	lastArchiveSweep time.Time
 
 	// Channels for async updates
 	jobUpdateCh       <-chan *database.JobChange
@@ -549,9 +567,11 @@ func (a *App) Init() tea.Cmd {
 // overflows its column and the loop isn't already running. Returns nil when
 // nothing needs to scroll or a loop is already active, so callers can batch it
 // unconditionally. The marquee only ever animates the SELECTED job's title, so
-// selection/title/width changes are the events that can newly require it — plus
-// the 1s tick as a backstop bounding start latency to <=1s (well inside the
-// marquee's own ~2s initial pause, so a missed hook is imperceptible).
+// every event that can newly require it hooks this directly (key nav, mouse,
+// resize, job events, async dialog closes), with the 1s tick as a backstop
+// bounding a missed hook's start latency to <=1s. Note the marquee's ~2s
+// initial pause is TICK-counted, not wall-clock — backstop delay is additive
+// to the pause, not absorbed by it — which is why the direct hooks matter.
 func (a *App) ensureMarqueeTicking() tea.Cmd {
 	if a.marqueeTicking {
 		return nil
@@ -570,10 +590,12 @@ func (a *App) ensureMarqueeTicking() tea.Cmd {
 	return nil
 }
 
-// scheduleLogFlush arms a single 250ms flush when logs have arrived and no
+// scheduleLogFlush arms a single trailing flush when logs have arrived and no
 // flush is already pending. The flush handler disarms the guard once the
-// buffer drains, so during a log burst exactly one flush runs per 250ms
-// window (same batching cadence as before) and idle periods run none.
+// buffer drains, so during a log burst exactly one flush runs per
+// logFlushInterval window and idle periods run none. Callers flush the
+// leading edge inline (see the LogBatchMsg handler) — this only covers the
+// follow-up batches inside an open window.
 func (a *App) scheduleLogFlush() tea.Cmd {
 	if a.logFlushScheduled {
 		return nil
@@ -582,25 +604,60 @@ func (a *App) scheduleLogFlush() tea.Cmd {
 	return a.logFlushTick()
 }
 
+// flushLogBuffer drains the buffered log lines into the log viewer and stamps
+// lastLogFlush for the leading-edge/trailing throttle.
+func (a *App) flushLogBuffer() {
+	if len(a.logBuffer) > 0 {
+		a.logs.AddLines(a.logBuffer)
+		a.logBuffer = a.logBuffer[:0]
+	}
+	a.lastLogFlush = time.Now()
+}
+
 func (a *App) tick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+	// Phase-locked to the wall-clock second: fire ~20ms after each second
+	// boundary instead of a drifting 1Hz phase. The task-list header's
+	// next-check countdowns are seconds-granularity values computed at View
+	// time — with a drifting phase they lag the true boundary by up to 1s
+	// and occasionally skip a displayed second; phase-locked, they flip
+	// right after every boundary at the same one-render-per-second cost.
+	next := time.Until(time.Now().Truncate(time.Second).Add(time.Second + 20*time.Millisecond))
+	return tea.Tick(next, func(t time.Time) tea.Msg {
 		return tickMsg{}
 	})
 }
 
+const (
+	progressFastInterval = 16 * time.Millisecond  // ~60fps during active downloads
+	progressIdleInterval = 500 * time.Millisecond // Upcoming countdown / chat-count cadence
+)
+
+// wantsFastProgress reports whether the progress loop should run at the
+// 60fps class: an actively-delivering download, or a visible in-progress trim.
+func (a *App) wantsFastProgress() bool {
+	return a.hasActiveDownloads() || (a.trimInProgress && a.trimDlg.IsVisible())
+}
+
 func (a *App) progressTick() tea.Cmd {
-	interval := 500 * time.Millisecond
-	if a.hasActiveDownloads() || (a.trimInProgress && a.trimDlg.IsVisible()) {
-		interval = 16 * time.Millisecond // ~60fps during active downloads
+	interval := progressIdleInterval
+	if a.wantsFastProgress() {
+		interval = progressFastInterval
 	}
+	a.progressInterval = interval
+	gen := a.progressGen
 	return tea.Tick(interval, func(t time.Time) tea.Msg {
-		return progressTickMsg{}
+		return progressTickMsg{gen: gen}
 	})
 }
 
-// logFlushTick returns a command that fires every 250ms for log batching (A2).
+// logFlushInterval is the log-batching window (A2): the first batch after a
+// quiet period flushes immediately; follow-ups within this window coalesce
+// into one trailing flush.
+const logFlushInterval = 250 * time.Millisecond
+
+// logFlushTick returns the one-shot trailing flush command.
 func (a *App) logFlushTick() tea.Cmd {
-	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(logFlushInterval, func(t time.Time) tea.Msg {
 		return logFlushMsg{}
 	})
 }
@@ -745,6 +802,16 @@ func (a *App) hasLiveContent() bool {
 // short-circuits on the flag while a download is already ticking.
 func (a *App) ensureProgressTicking() tea.Cmd {
 	if a.progressTicking {
+		// Cadence upshift without waiting out the pending tick: the loop is
+		// running at the idle 500ms class and a download/trim just went
+		// live. Supersede the in-flight schedule with a fresh 16ms one NOW —
+		// the old tick is dropped on arrival by its stale generation —
+		// instead of letting up to one 500ms beat delay 60fps progress
+		// (real-time principle; the lag predated the demand-driven loops).
+		if a.progressInterval != progressFastInterval && a.wantsFastProgress() {
+			a.progressGen++
+			return a.progressTick()
+		}
 		return nil
 	}
 	if a.hasLiveContent() {

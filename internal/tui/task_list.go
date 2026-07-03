@@ -101,6 +101,13 @@ type TaskListModel struct {
 	// "follow the selected job" walk is O(1) rather than O(N). Audit
 	// reports/tui.md #22.
 	virtualIndex map[string]int
+
+	// archivedSet records, for every job displayed by the last
+	// rebuildVirtualList, whether it landed in the archive bucket. Lets
+	// ResweepArchive detect a Finished job aging across the
+	// hide_finished_age_days boundary without rebuilding (and without
+	// resetting the marquee) when nothing changed.
+	archivedSet map[string]bool
 	list         list.Model
 
 	width, height       int
@@ -645,6 +652,43 @@ func isJobArchived(j *database.Job, ageDays int, now time.Time) bool {
 	return false
 }
 
+// archiveBucketsDirty reports whether any displayed job's archive
+// classification differs from the buckets built by the last
+// rebuildVirtualList — i.e. a Finished job aged across the
+// hide_finished_age_days boundary while the list sat idle. Applies the
+// same filter/search gates as the rebuild so hidden jobs can't trigger it.
+// One classification pass, no sort — cheap enough for a periodic sweep.
+func (m *TaskListModel) archiveBucketsDirty() bool {
+	// Only ageDays > 0 has time-driven crossings: 0 archives on the status
+	// change itself (which already rebuilds) and <0 never archives.
+	if m.hideFinishedAgeDays <= 0 {
+		return false
+	}
+	now := time.Now()
+	for _, j := range m.jobs {
+		if !m.passesFilter(j) || !m.passesSearch(j) {
+			continue
+		}
+		if isJobArchived(j, m.hideFinishedAgeDays, now) != m.archivedSet[j.ID] {
+			return true
+		}
+	}
+	return false
+}
+
+// ResweepArchive re-buckets the rows when a Finished job has aged across the
+// archive boundary since the last rebuild (the TUI analog of the web UI's
+// 60s archive-boundary sweep). Returns true when a rebuild ran. The rebuild
+// (with its selection restore + marquee reset) only happens when a job
+// actually crossed — the common every-sweep outcome is the cheap dirty check.
+func (m *TaskListModel) ResweepArchive() bool {
+	if !m.archiveBucketsDirty() {
+		return false
+	}
+	m.rebuildVirtualList()
+	return true
+}
+
 func (m *TaskListModel) rebuildVirtualList() {
 	prevSelectedID := m.captureSelection()
 
@@ -653,6 +697,7 @@ func (m *TaskListModel) rebuildVirtualList() {
 
 	active := make([]*database.Job, 0, len(m.jobs))
 	archived := make([]*database.Job, 0, len(m.jobs)/4)
+	m.archivedSet = make(map[string]bool, len(m.jobs))
 	for _, j := range m.jobs {
 		if !m.passesFilter(j) {
 			continue
@@ -662,9 +707,11 @@ func (m *TaskListModel) rebuildVirtualList() {
 		}
 
 		if isJobArchived(j, ageDays, now) {
+			m.archivedSet[j.ID] = true
 			archived = append(archived, j)
 			continue
 		}
+		m.archivedSet[j.ID] = false
 		active = append(active, j)
 	}
 

@@ -141,6 +141,22 @@ func (m *JobDetailsModel) SetProgress(p *ProgressData) {
 	m.viewport.SetYOffset(yOffset)
 }
 
+// RefreshRelativeTimes rebuilds the detail rows so wall-clock-derived text
+// (the "5m ago" relative suffixes on Created/Updated/DL Started) stays
+// current for jobs the progress tick never rebuilds — terminal statuses
+// have their progressStore entry deleted, so SetProgress skips them and the
+// suffixes would otherwise freeze at whatever the last rebuild computed.
+// Called at 1Hz from the app tick; preserves scroll like SetProgress.
+func (m *JobDetailsModel) RefreshRelativeTimes() {
+	if m.job == nil {
+		return
+	}
+	yOffset := m.viewport.YOffset()
+	m.buildRows()
+	m.updateViewportContent()
+	m.viewport.SetYOffset(yOffset)
+}
+
 // SetSize updates the panel dimensions.
 func (m *JobDetailsModel) SetSize(w, h int) {
 	prevW := m.width
