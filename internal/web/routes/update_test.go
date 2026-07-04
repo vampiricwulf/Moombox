@@ -183,11 +183,11 @@ func TestUpdateApplyNoReleaseAvailable(t *testing.T) {
 
 // --- /api/update/dismiss ---
 
-func TestUpdateDismissClearsAutoCheckAndSharedInfo(t *testing.T) {
+func TestUpdateDismissSkipsVersionAndClearsSharedInfo(t *testing.T) {
 	r, store := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test"})
 
-	// Seed a "we have an update" state so the dismiss has something to clear.
-	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "2.7.0"})
+	// Seed a "we have an update" state so the dismiss has something to skip.
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "2.7.0", TagName: "v2.7.0"})
 	if err := store.Update(func(c *config.MoomboxConfig) {
 		c.Updates.AutoCheckUpdates = true
 	}); err != nil {
@@ -202,16 +202,36 @@ func TestUpdateDismissClearsAutoCheckAndSharedInfo(t *testing.T) {
 		t.Fatalf("dismiss: want 200, got %d (body: %s)", rec.Code, rec.Body.String())
 	}
 
-	// AutoCheckUpdates flipped off
+	// Version-scoped: the pending tag is recorded as skipped, and
+	// AutoCheckUpdates stays ON — the old behavior disabled all update
+	// awareness as the dialog's only non-apply action.
 	var auto bool
-	store.Read(func(c *config.MoomboxConfig) { auto = c.Updates.AutoCheckUpdates })
-	if auto {
-		t.Error("AutoCheckUpdates should be false after dismiss")
+	var skipped string
+	store.Read(func(c *config.MoomboxConfig) {
+		auto = c.Updates.AutoCheckUpdates
+		skipped = c.Updates.SkippedVersion
+	})
+	if !auto {
+		t.Error("AutoCheckUpdates must remain true after a version-scoped dismiss")
+	}
+	if skipped != "v2.7.0" {
+		t.Errorf("SkippedVersion: want v2.7.0, got %q", skipped)
 	}
 
 	// SharedUpdateInfo cleared so /api/update/status returns available=false
 	if SharedUpdateInfo.Load() != nil {
 		t.Error("SharedUpdateInfo should be nil after dismiss")
+	}
+}
+
+func TestUpdateDismissWithoutPendingIs400(t *testing.T) {
+	r, _ := newUpdateFixture(t, &UpdateRouteDeps{Version: "2.6.0-test"})
+	// No SharedUpdateInfo seeded — nothing to skip.
+	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("dismiss with no pending update: want 400, got %d", rec.Code)
 	}
 }
 
@@ -234,6 +254,8 @@ func TestUpdateDismissPersistsToDisk(t *testing.T) {
 	router := chi.NewRouter()
 	UpdateRoutes(router, &UpdateRouteDeps{Version: "2.6.0-test"}, store)
 
+	SharedUpdateInfo.Store(&updater.ReleaseInfo{Version: "2.7.0", TagName: "v2.7.0"})
+
 	req := httptest.NewRequest("POST", "/api/update/dismiss", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -242,12 +264,16 @@ func TestUpdateDismissPersistsToDisk(t *testing.T) {
 		t.Fatalf("dismiss: want 200, got %d", rec.Code)
 	}
 
-	// Reload from disk and check
+	// Reload from disk and check the skip persisted (survives restarts) and
+	// auto-check stayed enabled.
 	reloaded, err := config.Load(configPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if reloaded.Updates.AutoCheckUpdates {
-		t.Error("on-disk AutoCheckUpdates should be false after dismiss")
+	if reloaded.Updates.SkippedVersion != "v2.7.0" {
+		t.Errorf("on-disk SkippedVersion: want v2.7.0, got %q", reloaded.Updates.SkippedVersion)
+	}
+	if !reloaded.Updates.AutoCheckUpdates {
+		t.Error("on-disk AutoCheckUpdates must remain true after a version-scoped dismiss")
 	}
 }

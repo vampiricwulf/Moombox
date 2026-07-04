@@ -375,7 +375,9 @@ These are the event strings used for filtering. A target with no event filter re
 | `disk_warning` | Disk usage exceeds warning threshold (also fired for monitoring-read failures) |
 | `disk_critical` | Disk usage exceeds critical threshold (targets filtering on `disk_warning` also receive it, via the manager's event alias) |
 | `update_available` | New version detected |
-| `update_applied` | Moombox restarted on a different version than the previous run |
+| `update_applied` | Moombox restarted on a different version than the previous run (embed reports whether the web dashboard came back) |
+| `update_failed` | A failed-update marker (`.update-broken` / `.update-failed`) was found at boot — manual attention needed |
+| `crash_recovered` | The launcher respawned Moombox after an abnormal exit |
 
 The canonical event vocabulary is `notifications.EventGroups`
 (internal/notifications/events.go). The TUI filter editor derives from it

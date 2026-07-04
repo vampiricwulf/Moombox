@@ -42,7 +42,12 @@ func (s *runState) shutdown() bool {
 		if s.restartRequested.Load() {
 			os.Exit(exitCodeRestart)
 		}
-		os.Exit(1)
+		// Exit 0, not 1: this backstop fires routinely on slow-but-USER-
+		// INTENDED shutdowns (worker stop legitimately eats its full 10s
+		// draining a segment mux). The launcher's crash supervision treats
+		// abnormal codes from a long-lived child as crashes and respawns —
+		// exiting 1 here would resurrect a daemon the user just quit.
+		os.Exit(0)
 	})
 	defer forceExit.Stop()
 

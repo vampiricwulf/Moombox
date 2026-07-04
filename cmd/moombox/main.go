@@ -287,6 +287,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 
 	// Give the server a moment to bind (port binding is synchronous in Start).
 	// If it fails quickly, exit; otherwise proceed.
+	webBindFailed := false
 	select {
 	case err := <-webErrCh:
 		if err != nil {
@@ -298,6 +299,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				os.Exit(1)
 			}
 			log.Warn("Web server failed, continuing in TUI-only mode", slog.String("error", err.Error()))
+			webBindFailed = true
 		}
 	case <-time.After(500 * time.Millisecond):
 		// Server is binding/listening successfully, drain errors in background
@@ -340,6 +342,18 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}
 	}
 
+	// First-successful-boot milestone: the database opened (initServices)
+	// and the web-server bind resolved above — this binary has proven it
+	// can run, so NOW sweep the previous version's .old binary. Doing this
+	// at the top of initServices deleted the only rollback artifact before
+	// a boot-crashing update could fail (updater review 2026-07, A1). In
+	// headless mode a bind failure exits above, preserving .old; TUI mode
+	// continues without the web server by design, which still counts as a
+	// healthy boot.
+	if upd != nil {
+		upd.CleanupOldBinary()
+	}
+
 	// Initial disk space check (populate immediately so status bar has data).
 	var initialOutputDir string
 	s.configStore.Read(func(c *config.MoomboxConfig) {
@@ -367,13 +381,28 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	})
 	if configLoaded && lastRunVersion != version {
 		if lastRunVersion != "" {
-			notifyMgr.Send("Update Applied",
-				fmt.Sprintf("Moombox updated from v%s to v%s and restarted successfully", lastRunVersion, version),
-				notifications.TypeSuccess,
-				[]notifications.Field{
-					{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
-					{Name: "Current Version", Value: "v" + version, Inline: true},
-				},
+			// Reflect whether the dashboard actually came back: in TUI mode
+			// a failed web bind logs-and-continues above, and "restarted
+			// successfully" on the operator's phone while the dashboard is
+			// dead would be a lie. FAILED only on a CONFIRMED bind error —
+			// a slow bind (>500ms select timeout, e.g. AV-scanned first
+			// boot) leaves ActualPort briefly 0, and claiming failure then
+			// would be a false alarm on exactly the boots that matter.
+			fields := []notifications.Field{
+				{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
+				{Name: "Current Version", Value: "v" + version, Inline: true},
+			}
+			ntype := notifications.TypeSuccess
+			desc := fmt.Sprintf("Moombox updated from v%s to v%s and restarted successfully", lastRunVersion, version)
+			switch {
+			case webBindFailed:
+				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "FAILED — check logs", Inline: true})
+				ntype = notifications.TypeWarning
+				desc = fmt.Sprintf("Moombox updated from v%s to v%s and restarted — but the web dashboard failed to start", lastRunVersion, version)
+			case webServer.ActualPort > 0:
+				fields = append(fields, notifications.Field{Name: "Web Dashboard", Value: "OK", Inline: true})
+			}
+			notifyMgr.Send("Update Applied", desc, ntype, fields,
 				notifications.SendOptions{Event: "update_applied"},
 			)
 		}
@@ -384,21 +413,103 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}
 	}
 
-	// Auto-update check: initial check + daily ticker
-	if upd != nil && cfg.Updates.AutoCheckUpdates {
+	// Crash-recovery notice: the launcher sets _MOOMBOX_CRASH_RESPAWN when
+	// this boot exists because the previous process died abnormally and
+	// supervision respawned it. Tell the operator — an unattended recorder
+	// that silently crash-cycles hides a problem that needs a look.
+	if respawnCode := os.Getenv("_MOOMBOX_CRASH_RESPAWN"); respawnCode != "" {
+		log.Error("moombox was restarted by the launcher after an abnormal exit",
+			slog.String("previousExitCode", respawnCode))
+		notifyMgr.Send("Recovered From Crash",
+			fmt.Sprintf("Moombox exited abnormally (code %s) and was automatically restarted — check the logs for the cause", respawnCode),
+			notifications.TypeWarning, nil,
+			notifications.SendOptions{Event: "crash_recovered"},
+		)
+	}
+
+	// Failed-update marker sweep: both breadcrumbs were previously
+	// WRITE-ONLY — ApplyUpdate's catastrophic .update-broken marker even
+	// documents "so the launcher / next run has a clear breadcrumb", but
+	// nothing ever read either. Runs regardless of configLoaded (the
+	// marker's relevance is independent of setup-wizard state); the
+	// dedupe stamp only persists once a config file exists.
+	if exeSelf, exeErr := os.Executable(); exeErr == nil {
+		var markerSeen string
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			markerSeen = c.Updates.LastFailureMarkerSeen
+		})
+		// The stamp field holds ALL currently-present markers ("a;b") —
+		// a single-marker stamp would alternate re-announcements forever
+		// when both markers exist (each boot sees the other as unseen).
+		var stamps []string
+		for _, marker := range []string{exeSelf + ".update-broken", exeSelf + ".update-failed"} {
+			fi, statErr := os.Stat(marker)
+			if statErr != nil {
+				continue
+			}
+			stamp := filepath.Base(marker) + "|" + fmt.Sprint(fi.ModTime().Unix())
+			stamps = append(stamps, stamp)
+			if strings.Contains(markerSeen, stamp) {
+				continue // already announced this exact failure
+			}
+			content, _ := os.ReadFile(marker)
+			if len(content) > 600 {
+				content = content[:600] // markers are ASCII; plain byte cut is safe
+			}
+			log.Error("previous self-update failure marker present — manual attention needed",
+				slog.String("marker", marker), slog.String("details", string(content)))
+			notifyMgr.Send("Previous Update Failed",
+				"A marker from a failed self-update is present — verify the running binary, then delete the marker file",
+				notifications.TypeError,
+				[]notifications.Field{
+					{Name: "Marker", Value: marker},
+					{Name: "Details", Value: string(content)},
+				},
+				notifications.SendOptions{Event: "update_failed"},
+			)
+		}
+		if combined := strings.Join(stamps, ";"); configLoaded && combined != markerSeen {
+			if err := s.configStore.Update(func(c *config.MoomboxConfig) {
+				c.Updates.LastFailureMarkerSeen = combined
+			}); err != nil {
+				log.Warn("failed to persist failure-marker stamp", slog.String("error", err.Error()))
+			}
+		}
+	}
+
+	// Auto-update check: initial check + daily ticker. The goroutine runs
+	// whenever the updater exists and re-reads auto_check_updates on EVERY
+	// iteration — previously the flag was consulted once at boot, so
+	// disabling checks (the dismiss route / settings toggle) couldn't stop
+	// an armed ticker until restart, and enabling the toggle did nothing
+	// without one.
+	if upd != nil {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
 					log.Error("auto-update check panic", "panic", r)
 				}
 			}()
+			checkEnabled := func() bool {
+				var on bool
+				s.configStore.Read(func(c *config.MoomboxConfig) {
+					on = c.Updates.AutoCheckUpdates
+				})
+				return on
+			}
+			// One notification per pending version, not one per tick —
+			// state lives here because this goroutine is the only caller.
+			var lastNotifiedTag string
+
 			// Initial check (slight delay to avoid slowing startup)
 			select {
 			case <-time.After(5 * time.Second):
 			case <-ctx.Done():
 				return
 			}
-			checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log)
+			if checkEnabled() {
+				checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
+			}
 
 			ticker := time.NewTicker(24 * time.Hour)
 			defer ticker.Stop()
@@ -407,7 +518,9 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log)
+					if checkEnabled() {
+						checkAndBroadcastUpdate(ctx, upd, wsHub, notifyMgr, tuiUpdateStatusCh, log, s.configStore, &lastNotifiedTag)
+					}
 				}
 			}
 		}()

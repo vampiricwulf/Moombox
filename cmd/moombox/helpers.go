@@ -72,6 +72,12 @@ func getAllJobsSafe(db *database.Database) []*database.Job {
 }
 
 // checkAndBroadcastUpdate checks for a new release and broadcasts the result.
+//
+// configStore is re-read AFTER the network check so a "Skip this version" /
+// auto-check disable that landed while the check was in flight still takes
+// effect. lastNotifiedTag (single check-goroutine state) suppresses the
+// daily re-ping: one notification per NEW version, not one per 24h tick
+// while the same update sits pending.
 func checkAndBroadcastUpdate(
 	ctx context.Context,
 	upd *updater.Updater,
@@ -79,6 +85,8 @@ func checkAndBroadcastUpdate(
 	notifyMgr *notifications.Manager,
 	tuiCh chan<- tui.UpdateStatusMsg,
 	log *logger.Logger,
+	configStore *config.Store,
+	lastNotifiedTag *string,
 ) {
 	release, err := upd.CheckForUpdate(ctx)
 	if err != nil {
@@ -87,6 +95,26 @@ func checkAndBroadcastUpdate(
 	}
 	if release == nil {
 		return // already up to date
+	}
+
+	var enabled bool
+	var skipped string
+	configStore.Read(func(c *config.MoomboxConfig) {
+		enabled = c.Updates.AutoCheckUpdates
+		skipped = c.Updates.SkippedVersion
+	})
+	if !enabled {
+		return // disabled while the check was in flight
+	}
+
+	if release.TagName == skipped {
+		// Skipped version: the automatic path surfaces NOTHING — storing it
+		// would leak straight back into the web badge via the /api/status
+		// poll on the next page load, defeating the skip within a day. The
+		// operator's explicit override is the manual "Check for updates"
+		// button (POST /api/update/check), which stores unconditionally.
+		log.Debug("[Updater] Suppressing user-skipped version", slog.String("tag", release.TagName))
+		return
 	}
 
 	routes.SharedUpdateInfo.Store(release)
@@ -101,6 +129,9 @@ func checkAndBroadcastUpdate(
 	default:
 	}
 
+	if *lastNotifiedTag == release.TagName {
+		return // already pinged the operator about this exact version
+	}
 	if notifyMgr.HasTargets() {
 		// Link the embed title to the GitHub release page and carry the
 		// version pair — this was the only lifecycle notification with no
@@ -115,6 +146,7 @@ func checkAndBroadcastUpdate(
 			notifications.SendOptions{Event: "update_available", URL: release.ReleaseURL},
 		)
 	}
+	*lastNotifiedTag = release.TagName
 }
 
 func extractWSIP(r *http.Request) string {

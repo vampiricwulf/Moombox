@@ -69,17 +69,13 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.releaseNotesPopup.close()
 			return a, nil
 		case "u", "U":
-			if a.updateAvailable != nil && a.OnApplyUpdate != nil {
-				a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
-				ver := a.updateAvailable.Version
-				applyFn := a.OnApplyUpdate
-				a.releaseNotesPopup.close()
-				return a, safeCmd(func() tea.Msg {
-					errStr := applyFn(ver)
-					return updateApplyResultMsg{Err: errStr}
-				})
-			}
-			return a, nil
+			// Shared apply flow (active-downloads confirm included). Close
+			// the overlay first so the confirmation/`Updating...` feedback is
+			// visible on the main screen; a pending confirm re-arms via the
+			// R U chord within the 5s window.
+			cmd := a.applyUpdateAction()
+			a.releaseNotesPopup.close()
+			return a, cmd
 		}
 		// All other keys (arrows, pgup/pgdn) are forwarded to the viewport via
 		// routeComponentMsg — nothing to do here.

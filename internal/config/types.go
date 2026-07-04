@@ -164,6 +164,16 @@ type UpdatesConfig struct {
 	// daemon on boot; not a user knob. Additive — absent in older
 	// configs decodes to "" and just skips the first comparison.
 	LastRunVersion string `toml:"last_run_version,omitempty" json:"last_run_version,omitempty"`
+	// LastFailureMarkerSeen dedupes the boot-time failed-update-marker
+	// notification (name|mtime of the last marker announced), so
+	// config-change restarts don't re-ping about the same failure.
+	// Written by the daemon; not a user knob. Additive.
+	LastFailureMarkerSeen string `toml:"last_failure_marker_seen,omitempty" json:"last_failure_marker_seen,omitempty"`
+	// SkippedVersion is the release tag the operator chose to skip via the
+	// update dialog's "Skip this version" — that release stays out of
+	// notifications/broadcasts; the next different tag notifies normally.
+	// Written via the dismiss route; additive.
+	SkippedVersion string `toml:"skipped_version,omitempty" json:"skipped_version,omitempty"`
 }
 
 // MemoryConfig holds memory-management knobs. Defaults applied via

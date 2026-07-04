@@ -102,12 +102,15 @@ func (s *runState) initServices(logLevelOverride string) error {
 		cfg.NeedsAutoPersist = false
 	}
 
-	// Updater: create instance and clean up .old binary from previous update
+	// Updater: create instance. The .old-binary sweep deliberately does NOT
+	// happen here anymore — run() performs it only after the database has
+	// opened and the web-server bind has resolved (first-successful-boot
+	// milestone). Sweeping here deleted the only rollback artifact seconds
+	// before a boot-crashing update could fail, leaving a broken binary and
+	// no recovery path (updater/launcher review 2026-07, finding A1).
 	upd, updErr := updater.New(version, log)
 	if updErr != nil {
 		log.Warn("Updater unavailable", slog.String("error", updErr.Error()))
-	} else {
-		upd.CleanupOldBinary()
 	}
 	s.upd = upd
 

@@ -686,8 +686,31 @@ class MoomboxApp {
         this.cookieStatus = status.cookieStatus;
         this.twitchAuthStatus = status.twitchAuthStatus;
         this.activePlatforms = status.activePlatforms || {};
-        if (status.version) this._version = status.version;
-        if (status.updateAvailable) this._updateAvailable = status.updateAvailable;
+        if (status.version) {
+          if (this._version && status.version !== this._version) {
+            // The server restarted on a DIFFERENT version — an update
+            // landed. The SPA in this tab is still the old build talking to
+            // a new backend; reload to pick up matching assets. Respect
+            // unsaved settings edits: defer (retry on the next status load)
+            // and tell the user instead of discarding their changes.
+            if (this.settings?._dirty) {
+              this.showToast(`Moombox was updated to v${status.version} — reload the page after saving your settings`, "primary");
+            } else {
+              window.location.reload();
+              return;
+            }
+          } else {
+            this._version = status.version;
+          }
+        }
+        if (status.updateAvailable) {
+          this._updateAvailable = status.updateAvailable;
+        } else if (this._updateAvailable) {
+          // Server no longer reports a pending update (it was applied or
+          // superseded) — clear the stale badge instead of advertising an
+          // update we're already running.
+          this._updateAvailable = null;
+        }
         if (status.uptime != null) {
           this._uptimeSeconds = status.uptime;
           this._uptimeCapturedAt = Date.now();
@@ -897,6 +920,21 @@ class MoomboxApp {
   }
 
   async applyUpdate() {
+    // Updating restarts the whole process: active recordings are
+    // interrupted and resume on the new binary, but live segments broadcast
+    // during the ~30s gap can be lost (Twitch expires them fastest). Make
+    // that a deliberate choice, not a surprise.
+    const active = (this.jobs || []).filter(
+      (j) => j.status === "Downloading" || j.status === "Live" || j.status === "Muxing",
+    ).length;
+    if (active > 0) {
+      const noun = active === 1 ? "download is" : "downloads are";
+      const ok = await this.showConfirm(
+        `${active} ${noun} active — the update restart interrupts them, and live segments during the ~30s gap may be lost (Twitch especially). Update anyway?`,
+        { okLabel: "Update Anyway", okVariant: "warning" },
+      );
+      if (!ok) return;
+    }
     const btn = document.getElementById("update-now-btn");
     if (btn) { btn.loading = true; btn.disabled = true; }
     try {
@@ -923,10 +961,13 @@ class MoomboxApp {
         this.showToast("Failed to dismiss: " + (data.error || "Unknown error"), "danger");
         return;
       }
+      const skipped = this._updateAvailable?.tagName || "this version";
       this._updateAvailable = null;
       this.updateVersionIndicator();
       document.getElementById("update-dialog")?.hide();
-      this.showToast("Auto-updates disabled. Re-enable in Settings > Updates.", "primary");
+      // Version-scoped skip (the old behavior disabled ALL update checks —
+      // that lives in Settings > Updates now); the next release notifies.
+      this.showToast(`Skipped ${skipped} — you'll be notified about the next release.`, "primary");
     } catch (e) {
       this.showToast("Failed to dismiss: " + e.message, "danger");
     }

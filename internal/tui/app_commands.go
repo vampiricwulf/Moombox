@@ -9,8 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -486,16 +484,11 @@ func (a *App) resolveChannelCmd(input string) tea.Cmd {
 // openBrowser launches the default browser for the given URL using the
 // platform-appropriate opener (mirrors OnOpenFolder in cmd/moombox/tui_wiring.go).
 func openBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", url)
-	case "darwin":
-		cmd = exec.Command("open", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
-	_ = cmd.Start()
+	// Platform-split (openbrowser_windows.go / openbrowser_other.go):
+	// Windows needs explorer.exe with a forced-quoted command line so the
+	// browser escapes the launcher's Job Object AND query-string URLs
+	// survive explorer's legacy argument parser.
+	_ = openBrowserCmd(url).Start()
 }
 
 // Run starts the TUI program.

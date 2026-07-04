@@ -303,6 +303,9 @@ type App struct {
 	// lastArchiveSweep throttles the 60s archive-boundary resweep run from
 	// the 1s tick (TUI analog of the web UI's archive sweep).
 	lastArchiveSweep time.Time
+	// updateConfirmAt is the press-again confirmation window for applying
+	// an update while downloads are active (applyUpdateAction).
+	updateConfirmAt time.Time
 
 	// Channels for async updates
 	jobUpdateCh       <-chan *database.JobChange
@@ -769,13 +772,50 @@ func (a *App) hasActiveOverlay() bool {
 
 // hasActiveDownloads returns true if any job has live progress to display.
 func (a *App) hasActiveDownloads() bool {
+	return a.activeDownloadCount() > 0
+}
+
+// activeDownloadCount counts jobs currently downloading/live/muxing —
+// used by hasActiveDownloads and the update-apply confirmation.
+func (a *App) activeDownloadCount() int {
+	n := 0
 	for _, s := range a.statusMap {
 		switch s {
 		case database.StatusDownloading, database.StatusLive, database.StatusMuxing:
-			return true
+			n++
 		}
 	}
-	return false
+	return n
+}
+
+// applyUpdateAction runs the update-apply flow shared by the R U chord and
+// the release-notes overlay's U key. When downloads are active it requires
+// a SECOND invocation within 5s (mirroring the confirm-chord pattern):
+// updating restarts the process, interrupting recordings — live segments
+// broadcast during the restart gap may be lost (Twitch expires fastest) —
+// so that must be a deliberate choice. Returns nil when only feedback was
+// shown (no update, or confirmation pending).
+func (a *App) applyUpdateAction() tea.Cmd {
+	if a.updateAvailable == nil || a.OnApplyUpdate == nil {
+		a.setFeedback("No update available — use R V to check")
+		return nil
+	}
+	if n := a.activeDownloadCount(); n > 0 && time.Since(a.updateConfirmAt) > 5*time.Second {
+		a.updateConfirmAt = time.Now()
+		plural := "download is"
+		if n != 1 {
+			plural = "downloads are"
+		}
+		a.setFeedback(fmt.Sprintf("%d %s active — the update restart interrupts them; press R U again within 5s to confirm", n, plural))
+		return nil
+	}
+	a.updateConfirmAt = time.Time{}
+	a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
+	ver := a.updateAvailable.Version
+	applyFn := a.OnApplyUpdate
+	return safeCmd(func() tea.Msg {
+		return updateApplyResultMsg{Err: applyFn(ver)}
+	})
 }
 
 // hasLiveContent reports whether the progress-overlay refresh loop has any work

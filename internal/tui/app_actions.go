@@ -209,16 +209,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 			return releaseNotesFetchedMsg{Tag: tag, Notes: notes}
 		})
 	case "R U":
-		if a.updateAvailable != nil && a.OnApplyUpdate != nil {
-			a.setFeedback(fmt.Sprintf("Updating to %s...", a.updateAvailable.TagName))
-			ver := a.updateAvailable.Version
-			applyFn := a.OnApplyUpdate
-			return a, safeCmd(func() tea.Msg {
-				errStr := applyFn(ver)
-				return updateApplyResultMsg{Err: errStr}
-			})
-		}
-		a.setFeedback("No update available — use R V to check")
+		return a, a.applyUpdateAction()
 	case "R S":
 		if a.OnVerifySignature != nil {
 			a.setFeedback("Verifying signature...")

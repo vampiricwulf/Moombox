@@ -46,6 +46,8 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "disk_critical", label: "Disk Critical" },
       { id: "update_available", label: "Update Available" },
       { id: "update_applied", label: "Update Applied" },
+      { id: "update_failed", label: "Update Failed" },
+      { id: "crash_recovered", label: "Crash Recovered" },
     ],
   },
 ];

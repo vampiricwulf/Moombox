@@ -337,6 +337,7 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 	sigPath := newPath + ".sig"
 	if err := u.downloadFile(ctx, release.SignatureURL, sigPath); err != nil {
 		os.Remove(newPath)
+		os.Remove(sigPath) // a partially-written .sig may remain from the failed download
 		return fmt.Errorf("signature download failed: %w", err)
 	}
 
@@ -384,8 +385,14 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 					"error", mErr.Error(),
 				)
 			}
+			// NOTE: .new is deliberately KEPT in this branch — with both
+			// renames failed, it may be the only intact binary on disk and
+			// the marker's recovery instructions reference it.
 			return fmt.Errorf("failed to place new binary and rollback failed: place=%v rollback=%v", err, rbErr)
 		}
+		// Rollback succeeded — the staged .new would otherwise linger until
+		// the next boot's CleanupOldBinary sweep.
+		os.Remove(newPath)
 		return fmt.Errorf("failed to place new binary: %w", err)
 	}
 

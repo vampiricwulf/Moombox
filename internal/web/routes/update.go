@@ -207,20 +207,34 @@ func UpdateRoutes(r chi.Router, deps *UpdateRouteDeps, store *config.Store) {
 		})
 	})
 
-	// POST /api/update/dismiss — disable auto-check and clear update info
+	// POST /api/update/dismiss — skip THIS pending version and clear the
+	// update info. Version-scoped by design: the old behavior flipped
+	// AutoCheckUpdates=false globally, so the dialog's only non-apply
+	// action permanently disabled all update awareness on a box whose
+	// YouTube/Twitch extractors rot without updates. Disabling checks
+	// entirely remains available as the Settings > Updates toggle.
+	// The NEXT release (different tag) notifies normally.
 	r.Post("/api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
+		pending := SharedUpdateInfo.Load()
+		if pending == nil {
+			jsonError(w, "no update pending", http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
-		oldVal := cfg.Updates.AutoCheckUpdates
-		cfg.Updates.AutoCheckUpdates = false
+		oldVal := cfg.Updates.SkippedVersion
+		cfg.Updates.SkippedVersion = pending.TagName
 		if err := store.SaveLocked(); err != nil {
-			cfg.Updates.AutoCheckUpdates = oldVal
+			cfg.Updates.SkippedVersion = oldVal
 			mu.Unlock()
 			jsonError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
 		mu.Unlock()
-		SharedUpdateInfo.Store(nil)
+		// CompareAndSwap, not Store(nil): a check that stored a NEWER,
+		// non-skipped release between our Load and here must not be wiped
+		// by this dismiss — only the release the user actually skipped.
+		SharedUpdateInfo.CompareAndSwap(pending, nil)
 
-		jsonResponse(w, map[string]any{"success": true})
+		jsonResponse(w, map[string]any{"success": true, "skipped": pending.TagName})
 	})
 }

@@ -215,6 +215,19 @@ func (db *Database) migrate() error {
 		}
 	}
 
+	// Downgrade guard: a database whose schema is NEWER than this binary
+	// means the user rolled back after a newer version migrated it (the
+	// exact scenario the update-rollback path enables). Every `version < N`
+	// block below would be false and the old binary would silently write
+	// against tables and columns it has never seen. Refuse loudly instead —
+	// the `moombox add` side process already has this guard (addvideo.go
+	// via FileSchemaVersion); this closes the same hole for the daemon.
+	if version > schemaVersion {
+		return fmt.Errorf(
+			"database schema v%d is newer than this binary supports (v%d) — you appear to have downgraded after an update migrated the database; restore the newer binary (moombox.exe.old from the update swap, if still present) or upgrade again",
+			version, schemaVersion)
+	}
+
 	// Run incremental migrations if needed
 	if version < 2 {
 		// Add chat_file column to store absolute chat file path
