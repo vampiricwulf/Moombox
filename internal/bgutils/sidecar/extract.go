@@ -82,11 +82,13 @@ func extractIfNeeded(cacheDir string) error {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir cache dir: %w", err)
 	}
-	// Warn on failure (the comment above promises log-and-continue): a
-	// silent miss leaves the extracted sidecar + Node binary with the
-	// looser inherited ACL and gives the operator no signal.
+	// Log-but-continue on failure. Demoted to Debug (matches the config +
+	// cookie dir sites): the common failure is ACCESS_DENIED on a cache dir
+	// created under an elevated/admin context, and on the single-user host
+	// this app targets nobody else can read it anyway — a WARN there is just
+	// noise. Raise the log level to Debug to surface the miss.
 	if daclErr := utils.ApplyUserOnlyDACL(cacheDir); daclErr != nil {
-		slog.Warn("could not restrict sidecar cache dir to current user", "dir", cacheDir, "err", daclErr)
+		slog.Debug("could not restrict sidecar cache dir to current user", "dir", cacheDir, "err", daclErr)
 	}
 
 	if cacheLooksGood(cacheDir, stampPath, wantStamp) {

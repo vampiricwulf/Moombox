@@ -739,11 +739,17 @@ func Save(cfg *MoomboxConfig, path string) error {
 	}
 	dacledDirsMu.Unlock()
 	if !alreadyApplied {
-		// Warn on failure (the comment above promises "logged-but-survived"):
-		// this protects the config file's password hash, and a silent miss
-		// gives the operator no signal that it stayed world-readable.
+		// Log-but-survive on failure (the comment above promises
+		// "logged-but-survived"). Demoted to Debug rather than Warn: the
+		// common failure is ACCESS_DENIED (icacls exit 5) on a config dir
+		// created under an elevated/admin context — a UAC filtered token
+		// then can't rewrite that dir's DACL. On the single-user, run-it-
+		// 24/7 host this targets, the dir isn't reachable by anyone else
+		// anyway, so a startup WARN there is pure noise. A multi-user
+		// operator who genuinely cares about the tightening can raise the
+		// log level to Debug to see the miss.
 		if daclErr := utils.ApplyUserOnlyDACL(dir); daclErr != nil {
-			slog.Warn("could not restrict config dir to current user", "dir", dir, "err", daclErr)
+			slog.Debug("could not restrict config dir to current user", "dir", dir, "err", daclErr)
 		}
 	}
 
