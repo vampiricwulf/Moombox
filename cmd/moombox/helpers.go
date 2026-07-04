@@ -14,12 +14,33 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/database"
 	"github.com/vampiricwulf/Moombox/internal/logger"
+	"github.com/vampiricwulf/Moombox/internal/monitor"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
 	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
+
+// mergeChannelHealth combines the feed and DECAPI health lists (both track
+// the same YouTube channel set) into one row per channel, keeping the entry
+// with the more recent last-check so the dashboard shows a single, freshest
+// status per channel.
+func mergeChannelHealth(lists ...[]monitor.ChannelHealth) []monitor.ChannelHealth {
+	byID := make(map[string]monitor.ChannelHealth)
+	for _, list := range lists {
+		for _, h := range list {
+			if prev, ok := byID[h.ChannelID]; !ok || h.LastCheckedAt >= prev.LastCheckedAt {
+				byID[h.ChannelID] = h
+			}
+		}
+	}
+	out := make([]monitor.ChannelHealth, 0, len(byID))
+	for _, h := range byID {
+		out = append(out, h)
+	}
+	return out
+}
 
 // waitForKeypress waits for a keypress before exiting (prevents .exe window
 // from vanishing on Windows when the process hit a startup error). Matches

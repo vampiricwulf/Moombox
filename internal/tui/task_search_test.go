@@ -50,13 +50,13 @@ func TestPassesSearch(t *testing.T) {
 		query string
 		want  bool
 	}{
-		{"", true},                // empty matches all
-		{"minecraft", true},       // title exact-ish
-		{"MINECRAFT", true},       // case-insensitive
-		{"mchi", true},            // fuzzy subsequence in title
-		{"mumei", true},           // channel match
-		{"aaaaaaaaaaa", true},     // video ID match
-		{"zatsudan", false},       // belongs to another job
+		{"", true},            // empty matches all
+		{"minecraft", true},   // title exact-ish
+		{"MINECRAFT", true},   // case-insensitive
+		{"mchi", true},        // fuzzy subsequence in title
+		{"mumei", true},       // channel match
+		{"aaaaaaaaaaa", true}, // video ID match
+		{"zatsudan", false},   // belongs to another job
 	}
 	for _, c := range cases {
 		m.searchQuery = c.query

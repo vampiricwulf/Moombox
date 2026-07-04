@@ -41,6 +41,14 @@ func (s *Service) GetStreamInfo(ctx context.Context, channelLogin string) (*Twit
 	return s.API.GetStreamInfo(ctx, channelLogin, s.Auth.GetAuthToken())
 }
 
+// GetStreamInfoBatch fetches live stream info for many channels in one GQL
+// request. Returns per-channel (info, error) pairs in input order plus a
+// separate whole-request error; when wholeErr is non-nil the per-channel
+// slices are unusable (see the API method's contract).
+func (s *Service) GetStreamInfoBatch(ctx context.Context, channelLogins []string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {
+	return s.API.GetStreamInfoBatch(ctx, channelLogins, s.Auth.GetAuthToken())
+}
+
 // GetVodInfo fetches VOD metadata.
 func (s *Service) GetVodInfo(ctx context.Context, vodID string) (*TwitchVodInfo, error) {
 	return s.API.GetVodInfo(ctx, vodID, s.Auth.GetAuthToken())

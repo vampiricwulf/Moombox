@@ -569,6 +569,11 @@ func (s *runState) initServices(logLevelOverride string) error {
 	// Shared callback to kick all monitors when channels change.
 	// Wakes monitors that went idle when they had no channels of their type.
 	s.kickMonitors = func() {
+		// Channels may have been added or REMOVED — drop health entries for
+		// gone channels so /api/status doesn't show phantom rows, then poll.
+		feedMon.PruneHealth()
+		decapiMon.PruneHealth()
+		twitchMon.PruneHealth()
 		feedMon.CheckNow()
 		decapiMon.CheckNow()
 		twitchMon.CheckNow()

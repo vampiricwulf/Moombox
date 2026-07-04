@@ -347,6 +347,32 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 	}
 
+	// Channel-health notifications: a channel that fails every check for a
+	// sustained streak (renamed/banned Twitch login, dead YouTube channel,
+	// 404 RSS) previously rotted at Debug level until a stream was missed.
+	// One notification per streak, per monitor; the /api/status
+	// channelHealth surface shows the live state. platform label is set per
+	// monitor so the operator knows which source flagged it.
+	unhealthyNotify := func(platform string) func(channelID string, consecutive int, lastErr string) {
+		return func(channelID string, consecutive int, lastErr string) {
+			s.log.Warn("channel failing monitor checks — verify it still exists",
+				"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
+			s.notifyMgr.Send("Channel Not Responding",
+				fmt.Sprintf("A %s channel has failed %d consecutive monitor checks — it may be renamed, banned, or misconfigured, and its streams are being missed", platform, consecutive),
+				notifications.TypeWarning,
+				[]notifications.Field{
+					{Name: "Channel", Value: channelID, Inline: true},
+					{Name: "Platform", Value: platform, Inline: true},
+					{Name: "Last Error", Value: lastErr},
+				},
+				notifications.SendOptions{Event: "channel_unhealthy"},
+			)
+		}
+	}
+	s.feedMon.SetOnChannelUnhealthy(unhealthyNotify("youtube"))
+	s.decapiMon.SetOnChannelUnhealthy(unhealthyNotify("youtube"))
+	s.twitchMon.SetOnChannelUnhealthy(unhealthyNotify("twitch"))
+
 	// Initialize per-job log tracking with existing jobs (matches TS knownJobIds)
 	if existingJobs, err := s.db.GetAllJobs(); err == nil {
 		for _, j := range existingJobs {

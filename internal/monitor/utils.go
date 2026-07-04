@@ -140,9 +140,8 @@ func (cd *ProbeCooldown) ShouldProbe(videoID string) bool {
 	return time.Since(last) >= cd.duration
 }
 
-// Record marks videoID as just-probed. Called from ProcessYouTubeVideo
-// after every probe attempt (success or failure) so the cooldown limits
-// total probe rate per video, not just success rate.
+// Record marks videoID as just-probed with the full default window.
+// Called after a SUCCESSFUL probe classification.
 func (cd *ProbeCooldown) Record(videoID string) {
 	if cd == nil {
 		return
@@ -151,6 +150,46 @@ func (cd *ProbeCooldown) Record(videoID string) {
 	defer cd.mu.Unlock()
 	cd.lastProbe[videoID] = time.Now()
 	cd.evictExcess()
+}
+
+// RecordFor marks videoID probed with a CUSTOM effective cooldown, used for
+// transient probe failures: a single flaky probe on a freshly-live video
+// must not blind detection for the full 30-min window while DECAPI re-sees
+// it every ~15s. Implemented by back-dating the stored timestamp so
+// ShouldProbe's fixed-duration comparison yields the requested (shorter)
+// wait — no change to the shared window every other caller relies on.
+func (cd *ProbeCooldown) RecordFor(videoID string, cooldown time.Duration) {
+	if cd == nil {
+		return
+	}
+	// Clamp: a cooldown longer than the window would back-date into the
+	// FUTURE and block probing longer than a plain Record — never the
+	// intent (RecordFor is only ever used to SHORTEN the wait).
+	if cooldown > cd.duration {
+		cooldown = cd.duration
+	}
+	cd.mu.Lock()
+	defer cd.mu.Unlock()
+	// stored = now - (duration - cooldown) → ShouldProbe true after `cooldown`.
+	cd.lastProbe[videoID] = time.Now().Add(cooldown - cd.duration)
+	cd.evictExcess()
+}
+
+// failureProbeCooldown returns an escalating re-probe delay for a transient
+// probe failure keyed to the consecutive-failure count: fast retry while the
+// failure is fresh (a genuinely-live video is caught within ~2 min), backing
+// off toward the full window as failures persist (a truly broken video isn't
+// hammered). Caps at DefaultProbeCooldown; the tracker gives up entirely at
+// maxMetadataFailures.
+func failureProbeCooldown(failureCount int) time.Duration {
+	switch {
+	case failureCount <= 1:
+		return 2 * time.Minute
+	case failureCount == 2:
+		return 8 * time.Minute
+	default:
+		return DefaultProbeCooldown
+	}
 }
 
 // evictExcess caps the cooldown map by dropping the oldest entries. Must
@@ -230,27 +269,39 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		ctx = context.Background()
 	}
 	meta, err := p.ProbeVideo(ctx, p.VideoID)
-	// Record after the probe attempt regardless of outcome so transient
-	// failures still respect the cooldown — without that, every cycle
-	// re-tries failing probes immediately, and the failure tracker only
-	// gives up after maxMetadataFailures attempts.
-	p.Cooldown.Record(p.VideoID)
 	if err != nil {
 		count, giveUp := p.Tracker.RecordFailure(p.VideoID)
 		if giveUp {
-			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s %d times, adding to history to stop retrying: %v",
+			// Give up on this video. AddToHistory does NOT actually stop
+			// re-probing — HasProcessed only flips the reprobe/log-level
+			// flag; feed/DECAPI still call ProcessYouTubeVideo — so the
+			// COOLDOWN is the only rate limiter. Record the full window
+			// (giveUp also resets the tracker's escalation to 0), otherwise
+			// a broken-but-still-matching video re-probes every cycle: the
+			// escalation just walked 2→8min and expired, so ShouldProbe is
+			// immediately true again.
+			p.Cooldown.Record(p.VideoID)
+			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s %d times, backing off: %v",
 				p.VideoID, count, err))
 			if p.AddToHistory != nil {
 				p.AddToHistory(p.VideoID)
 			}
 		} else {
+			// Transient failure: record a SHORT escalating cooldown so a
+			// freshly-live video isn't blinded for the full 30-min window
+			// by one flaky probe (previously it was — a 30-min blind spot,
+			// fatal for a DVR-off stream, despite DECAPI re-seeing it every
+			// ~15s).
+			p.Cooldown.RecordFor(p.VideoID, failureProbeCooldown(count))
 			p.Logger.Warn(fmt.Sprintf("[Monitor] Failed to check metadata for %s (attempt %d/%d): %v",
 				p.VideoID, count, maxMetadataFailures, err))
 		}
 		return ProcessYouTubeVideoResult{ShouldProcess: false, Title: p.Title}
 	}
 
-	// Clear failure counter on success
+	// Successful probe: full default cooldown limits total re-probe rate,
+	// and clear the failure counter.
+	p.Cooldown.Record(p.VideoID)
 	p.Tracker.ClearFailure(p.VideoID)
 
 	// Classify stream status (demote to Debug for re-probes of finished videos)

@@ -19,10 +19,12 @@ const (
 	maxConsecutiveProbeErrors = 10
 	chatSurgeWindowMs         = 15_000 // 15 seconds (matches TS CHAT_SURGE_WINDOW_MS)
 	chatSurgeThreshold        = 30     // messages in window to trigger early probe (matches TS CHAT_SURGE_THRESHOLD)
-	probeJitterMax            = 30 * time.Second
-	fullFetchInterval         = 30 * time.Minute // Periodic full WEB fetch for metadata ANDROID_VR can't see
-	twitchPollInterval        = 15 * time.Second
-	twitchPollJitterMax       = 5 * time.Second
+	// probeJitterMax removed — the upcoming-probe loop now uses jitter
+	// proportional to the interval (~10%) instead of a flat 30s that
+	// doubled the tightened 30s imminent tier.
+	fullFetchInterval   = 30 * time.Minute // Periodic full WEB fetch for metadata ANDROID_VR can't see
+	twitchPollInterval  = 15 * time.Second
+	twitchPollJitterMax = 5 * time.Second
 
 	// offlineProbeFloor throttles probing while the oracle reports offline.
 	// We probe anyway (not skip) so a wrongly-offline oracle can't strand a
@@ -288,9 +290,9 @@ func (sp *StreamProcessor) checkPlayability(info *youtube.VideoInfo) (string, er
 // we don't miss the live transition, looser polling for distant streams to
 // avoid hammering YouTube. Audit reports/worker.md F46.
 const (
-	probeIntervalImminent = 1 * time.Minute  // < 5 min until scheduled start
+	probeIntervalImminent = 30 * time.Second // < 5 min until scheduled start
 	probeIntervalNear     = 5 * time.Minute  // < 1 hour
-	probeIntervalDistant  = 10 * time.Minute // ≥ 1 hour OR no schedule
+	probeIntervalDistant  = 10 * time.Minute // ≥ 1 hour with a schedule
 )
 
 func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.Duration {
@@ -307,7 +309,11 @@ func (sp *StreamProcessor) calculateProbeInterval(info *youtube.VideoInfo) time.
 			}
 		}
 	}
-	return probeIntervalDistant
+	// No schedule = the stream can go live at ANY moment (unscheduled or
+	// early start). Poll at the "near" cadence, not the 10-min distant
+	// band — a 10-min blind window meant catching an unscheduled start up
+	// to ~10 min late, losing that much video on DVR-off streams.
+	return probeIntervalNear
 }
 
 // updateJobMetadata updates job metadata from video info.

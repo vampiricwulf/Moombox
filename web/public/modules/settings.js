@@ -48,6 +48,7 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "update_applied", label: "Update Applied" },
       { id: "update_failed", label: "Update Failed" },
       { id: "crash_recovered", label: "Crash Recovered" },
+      { id: "channel_unhealthy", label: "Channel Unhealthy" },
     ],
   },
 ];

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -39,11 +40,17 @@ type DecapiMonitor struct {
 	configStore *config.Store
 	db          *database.Database
 	checking    bool
+	// pendingKick latches a CheckNow that landed while a cycle was in
+	// flight — previously silently dropped. Consumed in runCycle's defer.
+	pendingKick bool
+	// warnedSlow rate-limits the oversubscribed warning; atomic because
+	// scheduleNext touches it outside the monitor mutex.
+	warnedSlow  atomic.Bool
 	timer       *time.Timer
 	ctx         context.Context
 	cancel      context.CancelFunc
 	rateLimit   rateLimitState
-	NextCheckAt int64
+	NextCheckAt int64 // epoch ms; -1 = check in progress, 0 = no channels
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -52,12 +59,32 @@ type DecapiMonitor struct {
 		Error(msg string, args ...any)
 	}
 
+	health *healthTracker
+
 	OnSchedule      func(nextCheckAt int64)
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // optional: shared with FeedMonitor to dedup re-probes
 	IsOnline        func() bool    // nil = always online
+}
+
+// Health returns the per-channel health snapshot for /api/status.
+func (dm *DecapiMonitor) Health() []ChannelHealth { return dm.health.snapshot() }
+
+// PruneHealth drops health entries for channels no longer configured.
+func (dm *DecapiMonitor) PruneHealth() {
+	active := make(map[string]struct{})
+	for _, ch := range dm.getYouTubeChannels() {
+		active[ch.ID] = struct{}{}
+	}
+	dm.health.prune(active)
+}
+
+// SetOnChannelUnhealthy installs the callback fired when a channel crosses
+// the consecutive-failure threshold.
+func (dm *DecapiMonitor) SetOnChannelUnhealthy(fn func(channelID string, consecutive int, lastErr string)) {
+	dm.health.onUnhealthy = fn
 }
 
 // NewDecapiMonitor creates a new DECAPI monitor. The Store carries the
@@ -78,6 +105,7 @@ func NewDecapiMonitor(store *config.Store, db *database.Database, logger interfa
 			remaining: decapiDefaultRateLimit,
 		},
 		logger:          logger,
+		health:          newHealthTracker(),
 		MetadataTracker: NewMetadataFailureTracker(),
 	}
 }
@@ -138,7 +166,14 @@ func (dm *DecapiMonitor) CheckNow() {
 	go dm.runCycle(ctx)
 }
 
-func (dm *DecapiMonitor) scheduleNext(ctx context.Context) {
+// scheduleNext arms the next cycle. cycleStart anchors fixed-RATE
+// scheduling: the delay is interval minus the elapsed cycle time, so the
+// rate-derived interval is a true period. The per-request stagger and
+// waitForRateLimit inside doCheck still bound instantaneous request rate,
+// so this cannot exceed the DECAPI budget — calculateInterval already
+// targets it and the previous gap-scheduling ran BELOW the budget.
+// Zero-value cycleStart behaves as a plain interval.
+func (dm *DecapiMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
 	channels := dm.getYouTubeChannels()
 	if len(channels) == 0 {
 		dm.mu.Lock()
@@ -152,17 +187,38 @@ func (dm *DecapiMonitor) scheduleNext(ctx context.Context) {
 
 	interval := dm.calculateInterval(len(channels))
 
+	delay := interval
+	if !cycleStart.IsZero() {
+		elapsed := time.Since(cycleStart)
+		delay = interval - elapsed
+		if delay < time.Second {
+			// DECAPI's rate-derived interval is structurally smaller than
+			// the mandatory per-request stagger floor once channel count
+			// approaches the per-minute limit, so a normal full-channel
+			// cycle exceeds `interval` by design — waitForRateLimit still
+			// bounds the actual request rate. Warn only on a >2× overshoot
+			// (something genuinely slow), once, via the atomic guard.
+			if elapsed >= 2*interval && dm.warnedSlow.CompareAndSwap(false, true) {
+				dm.logger.Warn("decapi check cycle takes far longer than the rate-derived interval — effective cadence degraded",
+					"cycle", elapsed.Round(time.Second), "interval", interval.Round(time.Second))
+			}
+			delay = time.Second
+		}
+	}
+
 	dm.mu.Lock()
-	// Don't schedule if monitor was stopped (cancel set to nil)
+	// Don't schedule if monitor was stopped; clear the checking sentinel so
+	// a stopped monitor never reports -1 forever.
 	if dm.cancel == nil {
+		dm.NextCheckAt = 0
 		dm.mu.Unlock()
 		return
 	}
-	dm.NextCheckAt = time.Now().Add(interval).UnixMilli()
+	dm.NextCheckAt = time.Now().Add(delay).UnixMilli()
 	if dm.timer != nil {
 		dm.timer.Stop()
 	}
-	dm.timer = time.AfterFunc(interval, func() {
+	dm.timer = time.AfterFunc(delay, func() {
 		dm.runCycle(ctx)
 	})
 	next := dm.NextCheckAt
@@ -172,7 +228,7 @@ func (dm *DecapiMonitor) scheduleNext(ctx context.Context) {
 		dm.OnSchedule(next)
 	}
 
-	dm.logger.Debug("decapi check scheduled", "in", interval.Round(time.Second))
+	dm.logger.Debug("decapi check scheduled", "in", delay.Round(time.Second))
 }
 
 func (dm *DecapiMonitor) calculateInterval(channelCount int) time.Duration {
@@ -217,19 +273,38 @@ func (dm *DecapiMonitor) runCycle(ctx context.Context) {
 		}
 	}()
 
+	cycleStart := time.Now()
 	dm.mu.Lock()
 	if dm.checking {
+		// A kick landed mid-cycle: latch it so the defer re-runs
+		// immediately instead of silently dropping it (the new channel
+		// would otherwise wait a full interval).
+		dm.pendingKick = true
 		dm.mu.Unlock()
 		return
 	}
 	dm.checking = true
+	// -1 sentinel = "checking now" for the UI countdowns (0 keeps its
+	// existing meaning of "no channels"). Restored by scheduleNext.
+	dm.NextCheckAt = -1
 	dm.mu.Unlock()
+	if dm.OnSchedule != nil {
+		dm.OnSchedule(-1)
+	}
 
 	defer func() {
 		dm.mu.Lock()
 		dm.checking = false
+		rerun := dm.pendingKick
+		dm.pendingKick = false
 		dm.mu.Unlock()
-		dm.scheduleNext(ctx)
+		if rerun {
+			// Re-enter via goroutine so the stop-check and offline gate
+			// run naturally; that cycle does its own scheduleNext.
+			go dm.runCycle(ctx)
+			return
+		}
+		dm.scheduleNext(ctx, cycleStart)
 	}()
 
 	dm.doCheck(ctx)
@@ -258,7 +333,10 @@ func (dm *DecapiMonitor) doCheck(ctx context.Context) {
 		dm.waitForRateLimit(ctx)
 
 		if err := dm.checkChannel(ctx, ch); err != nil {
+			dm.health.recordError(ch.ID, err)
 			dm.logger.Debug("decapi check failed", "channel", ch.Name, "err", err)
+		} else {
+			dm.health.recordSuccess(ch.ID)
 		}
 
 		// Stagger between requests

@@ -27,6 +27,23 @@ import (
 // browser produced indistinguishable errors from transient network trouble.
 var ErrTwitchAuthExpired = errors.New("twitch auth token expired or invalid")
 
+// ErrChannelNotFound signals a login that doesn't resolve to a Twitch user
+// (renamed, banned, deleted, or a typo) — GQL returns user:null, which is
+// indistinguishable from "offline" without this. Surfaced ONLY by
+// GetStreamInfoBatch (the monitor's health tracker uses it); the single
+// GetStreamInfo preserves its historical (nil, nil) so worker callers,
+// which treat not-yet-live and not-found identically, are unaffected.
+var ErrChannelNotFound = errors.New("twitch channel not found (renamed, banned, or invalid login)")
+
+// errStreamSlotUnavailable is a per-channel TRANSIENT failure inside an
+// otherwise-successful batch (that channel's StreamMetadata element carried
+// a GQL error or null data). Distinct from ErrChannelNotFound so the
+// monitor's health tracker counts it as an ordinary recoverable streak
+// error, not a definitive renamed/banned channel. The single GetStreamInfo
+// swallows it to (nil, nil) — same as the historical offline behavior for
+// that shape — so worker callers are unaffected.
+var errStreamSlotUnavailable = errors.New("twitch stream metadata slot unavailable")
+
 // twitchHTTPClient is a shared HTTP client for all Twitch GQL + Helix
 // requests. Backed by the shared httpx transport for keep-alive
 // amortisation across the 6-8 GQL calls per monitor cycle.
@@ -401,22 +418,7 @@ type gqlRawQuery struct {
 func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string) (*TwitchStreamInfo, error) {
 	channelLogin = strings.ToLower(channelLogin)
 
-	batch := []gqlPersistedQuery{
-		newPersistedQuery("StreamMetadata", constants.TwitchGQLHashes.StreamMetadata, map[string]any{
-			"channelLogin": channelLogin,
-			"includeIsDJ":  true,
-		}),
-		newPersistedQuery("ComscoreStreamingQuery", constants.TwitchGQLHashes.ComscoreStreamingQuery, map[string]any{
-			"channel":           channelLogin,
-			"clipSlug":          "",
-			"isClip":            false,
-			"isLive":            true,
-			"isVodOrCollection": false,
-			"vodID":             "",
-		}),
-	}
-
-	respData, err := a.gqlRequest(ctx, "StreamMetadata+ComscoreStreamingQuery", batch, authToken)
+	respData, err := a.gqlRequest(ctx, "StreamMetadata+ComscoreStreamingQuery", streamInfoOps(channelLogin), authToken)
 	if err != nil {
 		return nil, err
 	}
@@ -430,10 +432,102 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 		return nil, fmt.Errorf("unexpected batch response length: %d", len(results))
 	}
 
-	// Parse StreamMetadata
+	info, err := a.parseStreamInfo(channelLogin, results[0], results[1])
+	if errors.Is(err, ErrChannelNotFound) || errors.Is(err, errStreamSlotUnavailable) {
+		// Preserve the historical single-call contract: both a not-found
+		// login and a transient error/empty StreamMetadata slot read as
+		// offline (nil, nil). Only the batch path (monitor health) sees the
+		// distinct sentinels.
+		return nil, nil
+	}
+	return info, err
+}
+
+// streamInfoOps builds the StreamMetadata + ComscoreStreamingQuery persisted
+// queries for one channel. Shared by the single and batched paths so the
+// two can never drift.
+func streamInfoOps(channelLogin string) []gqlPersistedQuery {
+	return []gqlPersistedQuery{
+		newPersistedQuery("StreamMetadata", constants.TwitchGQLHashes.StreamMetadata, map[string]any{
+			"channelLogin": channelLogin,
+			"includeIsDJ":  true,
+		}),
+		newPersistedQuery("ComscoreStreamingQuery", constants.TwitchGQLHashes.ComscoreStreamingQuery, map[string]any{
+			"channel":           channelLogin,
+			"clipSlug":          "",
+			"isClip":            false,
+			"isLive":            true,
+			"isVodOrCollection": false,
+			"vodID":             "",
+		}),
+	}
+}
+
+// GetStreamInfoBatch fetches stream info for MANY channels in a SINGLE GQL
+// request (2 ops per channel), collapsing an N-channel monitor cycle from N
+// serialized round-trips to one.
+//
+// Returns a result per input login in the SAME order plus a SEPARATE
+// whole-request error:
+//   - wholeErr != nil → the entire request failed (transport, auth,
+//     malformed batch). infos/errs are unusable; the caller must NOT
+//     attribute this to any channel (it's not per-channel — a shared
+//     outage would otherwise mark every channel unhealthy at once).
+//   - wholeErr == nil → per-channel: infos[i]/errs[i] where (nil,nil) is
+//     offline, (nil, ErrChannelNotFound) is an unresolved login, and
+//     (nil, parseErr) is a malformed slot for THAT channel only
+//     (index-mapped isolation — one bad channel never taints its
+//     neighbors).
+func (a *API) GetStreamInfoBatch(ctx context.Context, channelLogins []string, authToken string) (infos []*TwitchStreamInfo, errs []error, wholeErr error) {
+	infos = make([]*TwitchStreamInfo, len(channelLogins))
+	errs = make([]error, len(channelLogins))
+	if len(channelLogins) == 0 {
+		return infos, errs, nil
+	}
+
+	ops := make([]gqlPersistedQuery, 0, len(channelLogins)*2)
+	lowered := make([]string, len(channelLogins))
+	for i, login := range channelLogins {
+		lowered[i] = strings.ToLower(login)
+		ops = append(ops, streamInfoOps(lowered[i])...)
+	}
+
+	respData, err := a.gqlRequest(ctx, "StreamMetadata+ComscoreStreamingQuery(batch)", ops, authToken)
+	if err != nil {
+		return infos, errs, err
+	}
+
+	var results []json.RawMessage
+	if err := json.Unmarshal(respData, &results); err != nil {
+		return infos, errs, fmt.Errorf("parse batch response: %w", err)
+	}
+	if len(results) < len(channelLogins)*2 {
+		// A truncated batch is a whole-request anomaly, not a per-channel
+		// fault — don't index into a short slice or blame channels.
+		return infos, errs, fmt.Errorf("batch response has %d results, expected %d", len(results), len(channelLogins)*2)
+	}
+
+	// Results are index-aligned with ops: channel i occupies [2i, 2i+1].
+	for i := range channelLogins {
+		infos[i], errs[i] = a.parseStreamInfo(lowered[i], results[2*i], results[2*i+1])
+	}
+	return infos, errs, nil
+}
+
+// parseStreamInfo turns one channel's StreamMetadata + Comscore result pair
+// into a TwitchStreamInfo. Returns (nil, nil) when the channel is offline,
+// (nil, ErrChannelNotFound) when the login doesn't resolve (renamed/banned/
+// typo'd — GQL returns user:null), and (nil, err) on a genuine parse error.
+func (a *API) parseStreamInfo(channelLogin string, smRaw, csRaw json.RawMessage) (*TwitchStreamInfo, error) {
+	// Parse StreamMetadata. Data is a POINTER and Errors is captured so we
+	// can tell a genuine user:null (data present, user null → not-found)
+	// from a per-element GQL error / null-data slot in a PARTIAL batch
+	// (transient) — otherwise a flaky slot for a live channel would be
+	// mislabeled as renamed/banned and wrongly bump its health streak.
 	var smResp struct {
-		Data struct {
-			User struct {
+		Errors []json.RawMessage `json:"errors"`
+		Data   *struct {
+			User *struct {
 				ID              string `json:"id"`
 				DisplayName     string `json:"displayName"`
 				Login           string `json:"login"`
@@ -452,11 +546,26 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 		} `json:"data"`
 	}
 
-	if err := json.Unmarshal(results[0], &smResp); err != nil {
+	if err := json.Unmarshal(smRaw, &smResp); err != nil {
 		return nil, fmt.Errorf("parse StreamMetadata: %w", err)
 	}
 
-	user := smResp.Data.User
+	// Per-element error or absent data = a transient partial-batch failure,
+	// NOT a channel that doesn't exist. Return a plain error so the health
+	// tracker counts it as an ordinary streak error (recoverable) rather
+	// than a definitive not-found.
+	if len(smResp.Errors) > 0 || smResp.Data == nil {
+		return nil, errStreamSlotUnavailable
+	}
+
+	// data.user == null → the login doesn't resolve (renamed/banned/typo).
+	if smResp.Data.User == nil {
+		return nil, ErrChannelNotFound
+	}
+
+	user := *smResp.Data.User
+	// A resolved user with no stream is a real offline channel — success,
+	// not an error (the user:null not-found case is handled above).
 	if user.Stream == nil {
 		return nil, nil // Channel offline
 	}
@@ -512,7 +621,7 @@ func (a *API) GetStreamInfo(ctx context.Context, channelLogin, authToken string)
 		} `json:"data"`
 	}
 
-	if err := json.Unmarshal(results[1], &csResp); err == nil && csResp.Data.User.Stream != nil {
+	if err := json.Unmarshal(csRaw, &csResp); err == nil && csResp.Data.User.Stream != nil {
 		bs := csResp.Data.User.Stream.Broadcaster.BroadcastSettings
 		// Comscore title is only a fallback — stream title takes priority
 		if info.Title == "" && bs.Title != "" {

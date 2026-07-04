@@ -397,6 +397,7 @@ type App struct {
 
 	// Update callbacks
 	OnCheckUpdate     func() (*UpdateStatusMsg, error) // manual check — returns nil if up to date
+	OnForceCheck      func()                           // force an immediate monitor poll of all sources
 	OnApplyUpdate     func(version string) string      // returns error string (empty on success, process exits)
 	OnVerifySignature func() error                     // verify current binary's signature
 	// OnFetchReleaseNotes fetches release notes for a specific version from GitHub.

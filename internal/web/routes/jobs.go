@@ -1328,6 +1328,9 @@ type StatusRouteDeps struct {
 	GetNextFeedCheck           func() int64
 	GetNextDecapiCheck         func() int64
 	GetNextTwitchCheck         func() int64
+	// GetChannelHealth returns per-channel monitor health (last check, last
+	// error, consecutive failures) keyed by platform ("youtube"/"twitch").
+	GetChannelHealth func() map[string]any
 }
 
 // StatusRoute returns the server status.
@@ -1391,6 +1394,9 @@ func StatusRoute(r chi.Router, deps *StatusRouteDeps) {
 		}
 		if deps.GetNextTwitchCheck != nil {
 			resp["nextTwitchCheck"] = deps.GetNextTwitchCheck()
+		}
+		if deps.GetChannelHealth != nil {
+			resp["channelHealth"] = deps.GetChannelHealth()
 		}
 
 		jsonResponse(rw, resp)

@@ -479,6 +479,16 @@ class MoomboxApp {
     const updateDismissBtn = document.getElementById("update-dismiss-btn");
     if (updateDismissBtn) updateDismissBtn.addEventListener("click", () => this.dismissUpdate());
 
+    // Force-check monitors: the header countdown is the click target.
+    const checkCountdown = document.getElementById("check-countdown");
+    if (checkCountdown) {
+      const trigger = () => this.checkMonitorsNow();
+      checkCountdown.addEventListener("click", trigger);
+      checkCountdown.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); trigger(); }
+      });
+    }
+
     // Thumbnail error handling via event delegation (error events don't bubble, use capture).
     // The `thumb-avatar` class only makes sense when the fallback URL is a
     // square channel avatar (Twitch's pre-stream state). For YouTube, and
@@ -1326,7 +1336,8 @@ class MoomboxApp {
   }
 
   formatCountdown(epochMs) {
-    if (!epochMs) return "--";
+    if (epochMs === -1) return "…"; // a check is in progress
+    if (!epochMs || epochMs < 0) return "--";
     const remaining = Math.max(0, Math.floor((epochMs - Date.now()) / 1000));
     if (remaining <= 0) return "now";
     const minutes = Math.floor(remaining / 60);
@@ -1405,6 +1416,22 @@ class MoomboxApp {
       ? `F ${feed} \u00b7 D ${decapi} \u00b7 T ${twitch}`
       : `Feed ${feed} \u00b7 DECAPI ${decapi} \u00b7 Twitch ${twitch}`;
     if (el.textContent !== text) el.textContent = text;
+  }
+
+  async checkMonitorsNow() {
+    try {
+      const resp = await fetch("/api/monitors/check-now", { method: "POST" });
+      const data = await resp.json().catch(() => ({}));
+      if (data.debounced) {
+        this.showToast(`Just checked — try again in ${Math.ceil((data.retryAfterMs || 0) / 1000)}s`, "primary");
+      } else if (resp.ok && data.success) {
+        this.showToast("Checking all monitors now…", "success");
+      } else {
+        this.showToast("Force check failed", "danger");
+      }
+    } catch {
+      this.showToast("Force check failed: could not reach server", "danger");
+    }
   }
 
   // ===== Job Rendering =====

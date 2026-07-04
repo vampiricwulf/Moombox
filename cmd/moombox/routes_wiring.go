@@ -53,6 +53,15 @@ func (s *runState) wireRoutes() func() {
 		GetNextFeedCheck:   s.feedMon.GetNextCheckAt,
 		GetNextDecapiCheck: s.decapiMon.GetNextCheckAt,
 		GetNextTwitchCheck: s.twitchMon.GetNextCheckAt,
+		GetChannelHealth: func() map[string]any {
+			// Feed and DECAPI both track the same YouTube channel set;
+			// merge, preferring whichever has the fresher last-check so
+			// the dashboard shows one row per YouTube channel.
+			return map[string]any{
+				"youtube": mergeChannelHealth(s.feedMon.Health(), s.decapiMon.Health()),
+				"twitch":  s.twitchMon.Health(),
+			}
+		},
 	})
 	routes.ConfigRoutes(s.r, s.configStore, &routes.ConfigRoutesCallbacks{
 		OnLogLevelChange: func(level string) {
@@ -89,6 +98,13 @@ func (s *runState) wireRoutes() func() {
 		},
 	})
 	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})
+	routes.MonitorRoutes(s.r, &routes.MonitorRouteDeps{CheckNow: func() {
+		// Read at call time — kickMonitors is populated in initServices;
+		// the closure avoids capturing a nil field at wiring time.
+		if s.kickMonitors != nil {
+			s.kickMonitors()
+		}
+	}})
 	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors)
 	routes.FileRoutes(s.r, &routes.FileRoutesDeps{
 		DB:     s.db,

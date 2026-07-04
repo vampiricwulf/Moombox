@@ -22,7 +22,7 @@ var EventGroups = []EventGroup{
 	{"Job Lifecycle", []string{"found", "added", "scheduled", "rescheduled", "downloading", "quality_split", "gap_split", "muxing", "finished", "error", "cancelled", "auth"}},
 	{"Connectivity", []string{"connectivity_pause", "connectivity_resume", "connectivity_split", "connectivity_lost", "connectivity_restored"}},
 	{"Trim", []string{"trim_created", "trim_deleted", "trim_error"}},
-	{"System", []string{"disk_warning", "disk_critical", "update_available", "update_applied", "update_failed", "crash_recovered"}},
+	{"System", []string{"disk_warning", "disk_critical", "update_available", "update_applied", "update_failed", "crash_recovered", "channel_unhealthy"}},
 }
 
 // KnownEvents is the flat membership set derived from EventGroups.

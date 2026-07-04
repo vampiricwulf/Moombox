@@ -114,10 +114,16 @@ func (sp *StreamProcessor) waitForLive(ctx context.Context, job *database.Job, i
 			return &StreamProcessResult{ShouldDownload: false, Error: "cancelled"}, nil
 		}
 
-		// A5: Calculate probe interval with jitter
+		// A5: probe interval with PROPORTIONAL jitter (~10% of the interval)
+		// to desync polling. Flat 0-30s jitter previously DOUBLED the tight
+		// imminent tier (30s → 30-60s), throwing away the tightening.
 		info := &youtube.VideoInfo{ScheduledStartTime: scheduledStartTime}
 		interval := sp.calculateProbeInterval(info)
-		jitter := time.Duration(rand.Int63n(int64(probeJitterMax)))
+		jitterMax := interval / 10
+		if jitterMax < time.Second {
+			jitterMax = time.Second
+		}
+		jitter := time.Duration(rand.Int63n(int64(jitterMax)))
 
 		// B2: Race sleep against chat surge
 		probeTimer := time.NewTimer(interval + jitter)

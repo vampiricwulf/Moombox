@@ -458,6 +458,36 @@ func TestProbeCooldownAllowsFreshAndBlocksRecent(t *testing.T) {
 	}
 }
 
+func TestProbeCooldownRecordForShortWindow(t *testing.T) {
+	// RecordFor back-dates against the full window so a transient probe
+	// failure re-probes after the SHORT cooldown, not the full 30 min —
+	// the fix for one flaky probe blinding a freshly-live video.
+	cd := NewProbeCooldown(30 * time.Minute)
+
+	cd.RecordFor("vid-1", 40*time.Millisecond)
+	if cd.ShouldProbe("vid-1") {
+		t.Fatal("ShouldProbe immediately after RecordFor: want false")
+	}
+	time.Sleep(70 * time.Millisecond)
+	if !cd.ShouldProbe("vid-1") {
+		t.Fatal("ShouldProbe after the short RecordFor window: want true (must not wait the full 30m)")
+	}
+}
+
+func TestFailureProbeCooldownEscalates(t *testing.T) {
+	// Escalating backoff: fast retry while fresh, backing toward the full
+	// window as failures persist.
+	if got := failureProbeCooldown(1); got != 2*time.Minute {
+		t.Errorf("count 1: want 2m, got %v", got)
+	}
+	if got := failureProbeCooldown(2); got != 8*time.Minute {
+		t.Errorf("count 2: want 8m, got %v", got)
+	}
+	if got := failureProbeCooldown(3); got != DefaultProbeCooldown {
+		t.Errorf("count 3: want default (%v), got %v", DefaultProbeCooldown, got)
+	}
+}
+
 func TestProbeCooldownNilReceiver(t *testing.T) {
 	// Both methods accept a nil receiver so call sites can pass an unset
 	// optional pointer without nil-checks.

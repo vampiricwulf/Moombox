@@ -80,10 +80,16 @@ type FeedMonitor struct {
 	configStore *config.Store
 	db          *database.Database
 	checking    bool
+	// pendingKick latches a CheckNow that landed while a cycle was in
+	// flight — previously silently dropped. Consumed in runCycle's defer.
+	pendingKick bool
+	// warnedSlow rate-limits the oversubscribed warning; atomic because
+	// scheduleNext touches it outside the monitor mutex.
+	warnedSlow  atomic.Bool
 	timer       *time.Timer
 	ctx         context.Context
 	cancel      context.CancelFunc
-	NextCheckAt int64 // epoch ms
+	NextCheckAt int64 // epoch ms; -1 = check in progress, 0 = no channels
 
 	logger interface {
 		Debug(msg string, args ...any)
@@ -92,12 +98,32 @@ type FeedMonitor struct {
 		Error(msg string, args ...any)
 	}
 
+	health *healthTracker
+
 	OnSchedule      func(nextCheckAt int64)
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // optional: shared with DecapiMonitor to dedup re-probes
 	IsOnline        func() bool    // nil = always online
+}
+
+// Health returns the per-channel health snapshot for /api/status.
+func (fm *FeedMonitor) Health() []ChannelHealth { return fm.health.snapshot() }
+
+// PruneHealth drops health entries for channels no longer configured.
+func (fm *FeedMonitor) PruneHealth() {
+	active := make(map[string]struct{})
+	for _, ch := range fm.getYouTubeChannels() {
+		active[ch.ID] = struct{}{}
+	}
+	fm.health.prune(active)
+}
+
+// SetOnChannelUnhealthy installs the callback fired when a channel crosses
+// the consecutive-failure threshold.
+func (fm *FeedMonitor) SetOnChannelUnhealthy(fn func(channelID string, consecutive int, lastErr string)) {
+	fm.health.onUnhealthy = fn
 }
 
 // NewFeedMonitor creates a new RSS feed monitor. The Store carries the
@@ -114,6 +140,7 @@ func NewFeedMonitor(store *config.Store, db *database.Database, logger interface
 		configStore:     store,
 		db:              db,
 		logger:          logger,
+		health:          newHealthTracker(),
 		MetadataTracker: NewMetadataFailureTracker(),
 	}
 }
@@ -173,7 +200,12 @@ func (fm *FeedMonitor) CheckNow() {
 	go fm.runCycle(ctx)
 }
 
-func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
+// scheduleNext arms the next cycle. cycleStart anchors fixed-RATE
+// scheduling: the delay is interval minus the elapsed cycle time, so the
+// configured interval is a true period — previously it was a GAP after
+// each cycle (which can stretch by minutes when inline probes run).
+// Zero-value cycleStart behaves as a plain interval.
+func (fm *FeedMonitor) scheduleNext(ctx context.Context, cycleStart time.Time) {
 	channels := fm.getYouTubeChannels()
 	if len(channels) == 0 {
 		fm.mu.Lock()
@@ -199,17 +231,35 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
 		interval = interval - time.Duration(tenPercent) + time.Duration(rand.Int63n(2*tenPercent))
 	}
 
+	delay := interval
+	if !cycleStart.IsZero() {
+		elapsed := time.Since(cycleStart)
+		delay = interval - elapsed
+		if delay < time.Second {
+			// Warn only when the cycle ran WELL past the interval (>2×) —
+			// feed cycles run inline probes that can legitimately take a
+			// while; once, via the atomic guard.
+			if elapsed >= 2*interval && fm.warnedSlow.CompareAndSwap(false, true) {
+				fm.logger.Warn("feed check cycle takes far longer than the configured interval — effective cadence degraded",
+					"cycle", elapsed.Round(time.Second), "interval", interval.Round(time.Second))
+			}
+			delay = time.Second
+		}
+	}
+
 	fm.mu.Lock()
-	// Don't schedule if monitor was stopped (cancel set to nil)
+	// Don't schedule if monitor was stopped; clear the checking sentinel so
+	// a stopped monitor never reports -1 forever.
 	if fm.cancel == nil {
+		fm.NextCheckAt = 0
 		fm.mu.Unlock()
 		return
 	}
-	fm.NextCheckAt = time.Now().Add(interval).UnixMilli()
+	fm.NextCheckAt = time.Now().Add(delay).UnixMilli()
 	if fm.timer != nil {
 		fm.timer.Stop()
 	}
-	fm.timer = time.AfterFunc(interval, func() {
+	fm.timer = time.AfterFunc(delay, func() {
 		fm.runCycle(ctx)
 	})
 	next := fm.NextCheckAt
@@ -219,7 +269,7 @@ func (fm *FeedMonitor) scheduleNext(ctx context.Context) {
 		fm.OnSchedule(next)
 	}
 
-	fm.logger.Debug("feed check scheduled", "in", interval.Round(time.Second))
+	fm.logger.Debug("feed check scheduled", "in", delay.Round(time.Second))
 }
 
 func (fm *FeedMonitor) runCycle(ctx context.Context) {
@@ -229,19 +279,38 @@ func (fm *FeedMonitor) runCycle(ctx context.Context) {
 		}
 	}()
 
+	cycleStart := time.Now()
 	fm.mu.Lock()
 	if fm.checking {
+		// A kick landed mid-cycle: latch it so the defer re-runs
+		// immediately instead of silently dropping it (the new channel
+		// would otherwise wait a full interval).
+		fm.pendingKick = true
 		fm.mu.Unlock()
 		return
 	}
 	fm.checking = true
+	// -1 sentinel = "checking now" for the UI countdowns (0 keeps its
+	// existing meaning of "no channels"). Restored by scheduleNext.
+	fm.NextCheckAt = -1
 	fm.mu.Unlock()
+	if fm.OnSchedule != nil {
+		fm.OnSchedule(-1)
+	}
 
 	defer func() {
 		fm.mu.Lock()
 		fm.checking = false
+		rerun := fm.pendingKick
+		fm.pendingKick = false
 		fm.mu.Unlock()
-		fm.scheduleNext(ctx)
+		if rerun {
+			// Re-enter via goroutine so the stop-check and offline gate
+			// run naturally; that cycle does its own scheduleNext.
+			go fm.runCycle(ctx)
+			return
+		}
+		fm.scheduleNext(ctx, cycleStart)
 	}()
 
 	fm.doCheck(ctx)
@@ -268,7 +337,10 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 
 		ch := &channels[i]
 		if err := fm.checkChannel(ctx, ch); err != nil {
+			fm.health.recordError(ch.ID, err)
 			fm.logger.Warn("feed check failed", "channel", ch.Name, "err", err)
+		} else {
+			fm.health.recordSuccess(ch.ID)
 		}
 
 		// Stagger between requests to avoid looking like a scraper and to

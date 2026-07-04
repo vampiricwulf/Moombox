@@ -207,6 +207,11 @@ func (s *runState) runTUI() {
 		s.kickMonitors()
 	}
 	app.OnRestart = func() { s.triggerRestart("TUI settings") }
+	app.OnForceCheck = func() {
+		if s.kickMonitors != nil {
+			s.kickMonitors()
+		}
+	}
 	if s.upd != nil {
 		app.OnCheckUpdate = func() (*tui.UpdateStatusMsg, error) {
 			s.log.Info("Update check requested from TUI")
@@ -476,7 +481,15 @@ func (s *runState) runTUI() {
 	// the monitor goroutines' Load()s.
 	makeTUISchedule := func(makeMsg func(time.Time) tui.CheckTimersMsg) func(int64) {
 		return func(nextCheckAt int64) {
-			t := time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
+			// -1 = "checking now": forward the TUI's checking sentinel
+			// verbatim so the header can render "…" (a lossy time.Unix(-1)
+			// conversion would land near the epoch and read as "now").
+			var t time.Time
+			if nextCheckAt == tui.MonitorCheckingSentinelMs {
+				t = tui.MonitorCheckingTime()
+			} else {
+				t = time.Unix(nextCheckAt/1000, (nextCheckAt%1000)*int64(time.Millisecond))
+			}
 			select {
 			case checkTimersCh <- makeMsg(t):
 			default:

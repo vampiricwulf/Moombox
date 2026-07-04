@@ -181,6 +181,11 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 				return updateCheckResultMsg{Info: info}
 			})
 		}
+	case "R M":
+		if a.OnForceCheck != nil {
+			a.OnForceCheck()
+			a.setFeedback("Checking all monitors now…")
+		}
 	case "R N":
 		if a.releaseNotesPopup == nil {
 			a.releaseNotesPopup = newReleaseNotesOverlay()
@@ -476,6 +481,9 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 	}
 	if a.OnCheckUpdate != nil {
 		items = append(items, ActionMenuItem{Chord: "R V", Label: "Check for Updates", HintLabel: "Version", Category: "Request"})
+	}
+	if a.OnForceCheck != nil {
+		items = append(items, ActionMenuItem{Chord: "R M", Label: "Check Monitors Now", HintLabel: "Monitors", Category: "Request"})
 	}
 	// R N: View release notes. Pending-update notes when an update is
 	// available; otherwise fetches the current running version's notes

@@ -108,7 +108,7 @@ type TaskListModel struct {
 	// hide_finished_age_days boundary without rebuilding (and without
 	// resetting the marquee) when nothing changed.
 	archivedSet map[string]bool
-	list         list.Model
+	list        list.Model
 
 	width, height       int
 	focused             bool
@@ -874,30 +874,31 @@ func (m *TaskListModel) renderHeader(w int) string {
 	// Countdown timers (T3 - match TS format, colored dots before labels)
 	greenDot := lipgloss.NewStyle().Foreground(ColorGreen).Render("\u25CF")
 	grayDot := DimStyle.Render("\u25CF")
+	// renderTimer formats one monitor countdown, showing "…" with a live
+	// (green) dot while a check is actually running (checking sentinel).
+	renderTimer := func(label string, next time.Time) (string, bool) {
+		if next.IsZero() {
+			return "", false
+		}
+		if isMonitorChecking(next) {
+			return greenDot + DimStyle.Render(label+"…"), true
+		}
+		d := time.Until(next)
+		dot := grayDot
+		if d <= 0 {
+			dot = greenDot
+		}
+		return dot + DimStyle.Render(label+formatCountdown(d)), true
+	}
 	var timers []string
-	if !m.NextFeedCheck.IsZero() {
-		d := time.Until(m.NextFeedCheck)
-		dot := grayDot
-		if d <= 0 {
-			dot = greenDot
-		}
-		timers = append(timers, dot+DimStyle.Render("F:"+formatCountdown(d)))
+	if s, ok := renderTimer("F:", m.NextFeedCheck); ok {
+		timers = append(timers, s)
 	}
-	if !m.NextDecapiCheck.IsZero() {
-		d := time.Until(m.NextDecapiCheck)
-		dot := grayDot
-		if d <= 0 {
-			dot = greenDot
-		}
-		timers = append(timers, dot+DimStyle.Render("D:"+formatCountdown(d)))
+	if s, ok := renderTimer("D:", m.NextDecapiCheck); ok {
+		timers = append(timers, s)
 	}
-	if !m.NextTwitchCheck.IsZero() {
-		d := time.Until(m.NextTwitchCheck)
-		dot := grayDot
-		if d <= 0 {
-			dot = greenDot
-		}
-		timers = append(timers, dot+DimStyle.Render("T:"+formatCountdown(d)))
+	if s, ok := renderTimer("T:", m.NextTwitchCheck); ok {
+		timers = append(timers, s)
 	}
 
 	right := strings.Join(timers, " ")
