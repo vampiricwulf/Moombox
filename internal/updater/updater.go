@@ -72,6 +72,7 @@ type ReleaseInfo struct {
 	ReleaseNotes     string `json:"releaseNotes"`           // stripped raw markdown (for TUI glamour rendering)
 	ReleaseNotesHtml string `json:"releaseNotesHtml"`       // sanitized HTML (for web UI innerHTML)
 	PublishedAt      string `json:"publishedAt"`
+	ReleaseURL       string `json:"releaseUrl,omitempty"` // GitHub release page (html_url) — clickable link for notifications
 }
 
 // assetNames bundles the GitHub release asset names for one platform.
@@ -139,6 +140,7 @@ type githubRelease struct {
 	TagName     string        `json:"tag_name"`
 	Body        string        `json:"body"`
 	PublishedAt string        `json:"published_at"`
+	HTMLURL     string        `json:"html_url"`
 	Assets      []githubAsset `json:"assets"`
 }
 
@@ -217,6 +219,7 @@ func (u *Updater) FetchReleaseNotes(ctx context.Context, version string) (*Relea
 		ReleaseNotes:     strippedBody,
 		ReleaseNotesHtml: renderReleaseNotesHtml(strippedBody),
 		PublishedAt:      release.PublishedAt,
+		ReleaseURL:       release.HTMLURL,
 	}, nil
 }
 
@@ -295,6 +298,7 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*ReleaseInfo, error) {
 		ReleaseNotes:     strippedBody,
 		ReleaseNotesHtml: renderReleaseNotesHtml(strippedBody),
 		PublishedAt:      release.PublishedAt,
+		ReleaseURL:       release.HTMLURL,
 	}, nil
 }
 

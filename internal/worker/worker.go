@@ -264,11 +264,15 @@ func (w *DownloadWorker) TwitchHintStats() TwitchHintStats {
 }
 
 // CancelJob cancels a running job and updates its status.
-func (w *DownloadWorker) CancelJob(jobID string) {
-	w.queue.Cancel(jobID)
+// CancelJob cancels a job. Returns true when an actively-processing run was
+// flagged — that run's handleCancellation emits the "cancelled"
+// notification, so callers that notify should skip their own emission.
+func (w *DownloadWorker) CancelJob(jobID string) bool {
+	flagged := w.queue.Cancel(jobID)
 	w.db.UpdateJobFields(jobID, map[string]any{
 		"status": database.StatusCancelled,
 	})
+	return flagged
 }
 
 // WaitForJobExit blocks until the job's orchestrator goroutine has returned,
@@ -587,7 +591,7 @@ func (w *DownloadWorker) handleCancellation(job *database.Job, stagingDir string
 				notifications.TypeCancelled,
 				[]notifications.Field{
 					{Name: "Channel", Value: job.ChannelName, Inline: true},
-					{Name: "Video ID", Value: job.VideoID, Inline: true},
+					{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
 				},
 				notifications.SendOptions{
 					URL:       job.URL,
@@ -717,10 +721,22 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 	// Suppress notifications for non-actionable errors (matches TS behavior):
 	// - Age-restricted content: nothing user can do
 	// - Probe timeout: transient, stream may have ended naturally
-	// - Twitch monitor-driven retries (auto_retry_count > 0): user already
-	//   got the original error notification; subsequent retry-failure
-	//   notifications would be noise on the same job.
-	suppressNotification := errors.Is(err, ErrNonActionable) || job.AutoRetryCount > 0
+	// - Twitch monitor-driven retries STILL WITHIN budget: the monitor will
+	//   silently AutoReinitializeJob on its next poll, so a failure embed
+	//   would be noise on the same job.
+	//
+	// A TERMINAL failure on a retried job (budget exhausted, or an error
+	// shape the recovery predicate rejects) DOES notify: previously any
+	// AutoRetryCount>0 was suppressed, so the operator couldn't distinguish
+	// "still retrying" from "gave up for good" — the exact moment that needs
+	// attention. retryLikely mirrors monitor.isRecoverableTwitchError
+	// (KEEP IN SYNC — the import would be cyclic): Error status, the exact
+	// offline-flap message, no delivered segments, budget remaining.
+	retryLikely := status == database.StatusError &&
+		errMsg == TwitchOfflineErrMsg &&
+		job.LastVideoSeq == nil &&
+		job.AutoRetryCount < MaxTwitchAutoRetries
+	suppressNotification := errors.Is(err, ErrNonActionable) || (job.AutoRetryCount > 0 && retryLikely)
 
 	// Send error/auth notification
 	if w.notifier != nil && !suppressNotification {
@@ -734,7 +750,7 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 				notifications.TypeWarning,
 				[]notifications.Field{
 					{Name: "Channel", Value: job.ChannelName, Inline: true},
-					{Name: "Video ID", Value: job.VideoID, Inline: true},
+					{Name: notifications.IDLabel(job.Platform), Value: job.VideoID, Inline: true},
 					{Name: "Reason", Value: reason, Inline: false},
 				},
 				notifications.SendOptions{
@@ -768,14 +784,19 @@ func (w *DownloadWorker) setJobError(job *database.Job, err error) {
 			if notifURL == "" && job.VideoID != "" {
 				notifURL = "https://www.youtube.com/watch?v=" + job.VideoID
 			}
+			fields := notifications.NewFieldBuilder().
+				AddInline("Channel", job.ChannelName).
+				AddInline(notifications.IDLabel(job.Platform), job.VideoID).
+				Add("Error", errMsg).
+				// Terminal-after-retries: say the automation gave up so the
+				// operator knows this needs a manual look.
+				AddIf(job.AutoRetryCount > 0, "Automatic Retries",
+					fmt.Sprintf("gave up after %d/%d", job.AutoRetryCount, MaxTwitchAutoRetries)).
+				Build()
 			w.notifier.Send("Job Failed",
 				fmt.Sprintf("Job failed for: %s", job.Title),
 				notifications.TypeError,
-				[]notifications.Field{
-					{Name: "Channel", Value: job.ChannelName, Inline: true},
-					{Name: "Video ID", Value: job.VideoID, Inline: true},
-					{Name: "Error", Value: errMsg},
-				},
+				fields,
 				notifications.SendOptions{
 					URL:       notifURL,
 					Thumbnail: job.ThumbnailURL,

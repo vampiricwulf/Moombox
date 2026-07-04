@@ -361,30 +361,39 @@ These are the event strings used for filtering. A target with no event filter re
 | `finished` | Job completed successfully |
 | `error` | Job failed |
 | `cancelled` | Job cancelled by user |
-| `auth` | Authentication issue (cookies expired, member-only content) |
+| `auth` | Authentication issue or recovery (cookies expired, member-only content, refresh failure, COOKIES? jobs resumed) |
 | `quality_split` | Stream quality changed mid-download; previous part closed |
 | `gap_split` | Twitch live segments expired unrecoverably; part closed, new part at live edge |
 | `connectivity_pause` | Twitch live download paused — connectivity lost, waiting to resume |
 | `connectivity_resume` | Connectivity restored; same job resumed |
 | `connectivity_split` | Broadcast/VOD lost during the outage; captured data finalized |
+| `connectivity_lost` | Global internet outage detected (no download required) |
+| `connectivity_restored` | Global connectivity restored; embed carries outage duration |
 | `trim_created` | Trim clip created |
 | `trim_deleted` | Trim clip deleted |
 | `trim_error` | Trim operation failed |
-| `disk_warning` | Disk usage exceeds warning threshold |
+| `disk_warning` | Disk usage exceeds warning threshold (also fired for monitoring-read failures) |
+| `disk_critical` | Disk usage exceeds critical threshold (targets filtering on `disk_warning` also receive it, via the manager's event alias) |
 | `update_available` | New version detected |
+| `update_applied` | Moombox restarted on a different version than the previous run |
 
-New event strings MUST also be registered in the two filter registries —
-`notifEventGroups` (internal/tui/settings.go) and
-`NOTIFICATION_EVENT_GROUPS` (web/public/modules/settings.js) — filtered
-targets treat the registry as an allowlist, and the TUI's edit-save path
-strips unknown events from hand-edited configs.
+The canonical event vocabulary is `notifications.EventGroups`
+(internal/notifications/events.go). The TUI filter editor derives from it
+directly; the web UI keeps a labeled mirror (`NOTIFICATION_EVENT_GROUPS` in
+web/public/modules/settings.js) that MUST be updated in lockstep. Filtered
+targets treat the vocabulary as an allowlist, the TUI's edit-save path
+strips unknown events from hand-edited configs, and `NewManager` logs a
+warning for any configured filter entry outside the vocabulary.
 
 ### Dispatch Behavior
 
 - **Asynchronous:** Each notification is dispatched in a goroutine tracked by a `sync.WaitGroup`
 - **Panic recovery:** Each goroutine has `defer recover()` — a panic in one notification sender cannot crash the application
 - **Event filtering:** If a target has an event filter list, only matching events are sent. Targets with no filter receive everything.
-- **Timeout:** Discord webhook HTTP requests have a 15-second timeout
+- **Timeout:** Discord webhook HTTP requests have a 15-second timeout per attempt
+- **Retry:** Bounded delivery loop, max 3 attempts total — transport errors and Discord 5xx back off 2s/5s; 429 honors a validated `Retry-After` (≤30s); other 4xx are permanent. Cumulative sleep is capped at 30s so a notification's semaphore slot can't be held past ~75s worst-case.
+- **Hot-reload:** Notification config edits apply immediately — the web config route fires `OnNotificationsChange` → `Manager.Reload`, and the TUI save path calls `Reload` directly. No restart required.
+- **Save-time validation:** Webhook URLs are validated at save (web `validateConfigUpdates` + TUI editor) via `notifications.ValidateURL`; `POST /api/notifications/test {url}` sends a single-attempt test embed (used by the web Test buttons and the TUI `T` action, including for unsaved URLs).
 - **Graceful shutdown:** `Manager.Wait()` blocks until all in-flight notifications complete (called during shutdown step 3)
 - **Embed format:** Discord rich embeds with title, description, color (by notification type), optional fields, thumbnail, image, footer ("Moombox Go"), and ISO 8601 timestamp
 

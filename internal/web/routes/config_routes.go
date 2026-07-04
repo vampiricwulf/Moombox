@@ -13,6 +13,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
 
 // flexDurationValue extracts the numeric value of a FlexDuration update for
@@ -55,6 +56,10 @@ type ConfigRoutesCallbacks struct {
 	// OnChannelChange is called when channels are added, updated, or removed,
 	// so monitors can re-evaluate their channel lists immediately.
 	OnChannelChange func()
+	// OnNotificationsChange is called when the notifications list changes,
+	// so the notification manager can hot-reload its targets (previously
+	// edits silently required a restart nothing prompted for).
+	OnNotificationsChange func()
 }
 
 // isSafePath validates that a path doesn't contain traversal or absolute paths.
@@ -554,13 +559,6 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 				if v, ok := nm["url"].(string); ok {
 					nc.URL = v
 				}
-				if v, ok := nm["tags"].([]any); ok {
-					for _, t := range v {
-						if s, ok := t.(string); ok {
-							nc.Tags = append(nc.Tags, s)
-						}
-					}
-				}
 				if v, ok := nm["events"].([]any); ok {
 					for _, e := range v {
 						if s, ok := e.(string); ok {
@@ -641,7 +639,39 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 		}
 
 		// Validate with Zod-equivalent schema constraints (match TS updateConfigSchema)
-		if validationErrs := validateConfigUpdates(updates); len(validationErrs) > 0 {
+		validationErrs := validateConfigUpdates(updates)
+
+		// Notification webhook URLs must parse at save time — previously a
+		// bad paste was accepted with a success toast, then silently
+		// warn-skipped at the next startup ("notifications just don't
+		// work"). Only NEW/EDITED URLs are validated: a pre-existing
+		// hand-edited entry (e.g. a legacy non-Discord URL, tolerated as a
+		// boot-time warn-skip) is grandfathered, because the web UI's
+		// full-form save always includes the stored notifications array —
+		// hard-failing it would block every unrelated settings save. The
+		// TUI editor validates on edit the same way.
+		if notifs, ok := updates["notifications"].([]any); ok {
+			existing := make(map[string]struct{})
+			store.Read(func(c *config.MoomboxConfig) {
+				for _, nc := range c.Notifications {
+					existing[nc.URL] = struct{}{}
+				}
+			})
+			for i, n := range notifs {
+				if nm, ok := n.(map[string]any); ok {
+					if v, ok := nm["url"].(string); ok && v != "" {
+						if _, known := existing[v]; known {
+							continue
+						}
+						if err := notifications.ValidateURL(v); err != nil {
+							validationErrs[fmt.Sprintf("notifications[%d].url", i)] = err.Error()
+						}
+					}
+				}
+			}
+		}
+
+		if len(validationErrs) > 0 {
 			rw.Header().Set("Content-Type", "application/json")
 			rw.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(rw).Encode(map[string]any{
@@ -705,6 +735,9 @@ func ConfigRoutes(r chi.Router, store *config.Store, callbacks *ConfigRoutesCall
 			}
 			if _, hasChannels := updates["channels"]; hasChannels && callbacks.OnChannelChange != nil {
 				callbacks.OnChannelChange()
+			}
+			if _, hasNotifs := updates["notifications"]; hasNotifs && callbacks.OnNotificationsChange != nil {
+				callbacks.OnNotificationsChange()
 			}
 		}
 

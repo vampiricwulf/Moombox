@@ -158,6 +158,9 @@ const maxInflightNotifications = 16
 
 // Manager dispatches notifications to configured targets.
 type Manager struct {
+	// targetsMu guards targets: Reload (config hot-apply) rebuilds the
+	// slice while Send/HasTargets read it from worker goroutines.
+	targetsMu sync.RWMutex
 	targets   []notificationTarget
 	wg        sync.WaitGroup
 	semaphore chan struct{}
@@ -178,13 +181,127 @@ type sender interface {
 	Send(title, description string, color int, fields []Field, opts SendOptions) error
 }
 
-// NewManager creates a new notification manager from config.
+// parseTarget resolves a configured notification URL into a sender.
 //
 // **Discord-only**: the only URL scheme handled today is Discord webhook
 // (either `discord://ID/TOKEN` or a full `https://discord.com/api/webhooks/...`
-// URL). Anything else is logged at Warn and skipped — this is intentional,
-// not a TODO. If/when another transport (e.g. ntfy) is added, register a
-// new sender in the URL-scheme switch below. Audit reports/small-packages.md.
+// URL). Anything else errors — this is intentional, not a TODO. If/when
+// another transport (e.g. ntfy) is added, register a new sender here.
+// Audit reports/small-packages.md.
+//
+// Error messages never echo the URL (webhook paths are secrets) — callers
+// that log attach a redacted form themselves.
+func parseTarget(url string) (sender, error) {
+	switch {
+	case strings.HasPrefix(url, "discord://"):
+		// discord://ID/TOKEN -> https://discord.com/api/webhooks/ID/TOKEN
+		raw := strings.TrimPrefix(url, "discord://")
+		// Only use the first two path segments (ID/TOKEN), matching TS behavior
+		segments := strings.SplitN(raw, "/", 3)
+		if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
+			return nil, fmt.Errorf("invalid discord:// URL: expected discord://ID/TOKEN")
+		}
+		parts := strings.Join(segments[:2], "/")
+		return &DiscordWebhook{URL: "https://discord.com/api/webhooks/" + parts}, nil
+
+	case discordWebhookRe.MatchString(url):
+		return &DiscordWebhook{URL: url}, nil
+
+	case strings.Contains(url, "discord.com/api/webhooks"):
+		return nil, fmt.Errorf("invalid Discord webhook URL: must be HTTPS with a numeric ID and token")
+
+	default:
+		return nil, fmt.Errorf("unsupported notification URL scheme (Discord webhooks only)")
+	}
+}
+
+// ValidateURL reports whether a notification URL would be accepted by the
+// manager. Exposed for save-time validation in the web/TUI settings flows —
+// previously a broken paste was accepted with a success toast and then
+// silently warn-skipped at the next startup.
+func ValidateURL(url string) error {
+	_, err := parseTarget(url)
+	return err
+}
+
+// SendTest synchronously delivers a single test embed to url with NO
+// retries — the caller is an interactive settings flow, where surfacing a
+// 429/error immediately beats sleeping through backoff. Bounded by the
+// single-attempt request timeout (~15s).
+func SendTest(url string) error {
+	s, err := parseTarget(url)
+	if err != nil {
+		return err
+	}
+	title := "Test Notification"
+	desc := "Moombox notifications are configured correctly"
+	fields := []Field{{Name: "Status", Value: "Working", Inline: true}}
+	if d, ok := s.(*DiscordWebhook); ok {
+		return d.sendOnce(title, desc, TypeSuccess.Color(), fields, SendOptions{})
+	}
+	return s.Send(title, desc, TypeSuccess.Color(), fields, SendOptions{})
+}
+
+// buildTargets converts the configured notification list into live targets,
+// warn-skipping invalid URLs (with secrets redacted) and warning on
+// unknown event-filter entries. Shared by NewManager and Reload.
+func buildTargets(cfg *config.MoomboxConfig, logger interface {
+	Debug(msg string, args ...any)
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}) []notificationTarget {
+	var targets []notificationTarget
+	for _, nc := range cfg.Notifications {
+		url := nc.URL
+		if url == "" {
+			continue
+		}
+
+		s, err := parseTarget(url)
+		if err != nil {
+			// Redacted: even a near-valid URL carries a real secret; a
+			// rejection log that copies it verbatim ends up in every
+			// log-collection store that tails the file.
+			logger.Warn("rejected notification URL: "+err.Error(), "url", redactURLForLog(url))
+			continue
+		}
+
+		// Build event filter
+		var events map[string]bool
+		if len(nc.Events) > 0 {
+			events = make(map[string]bool, len(nc.Events))
+			for _, e := range nc.Events {
+				// Drop empty entries outright (hand-edited TOML / raw API):
+				// stored, an "" key would combine with the alias lookup's
+				// zero-value miss to match everything. The map stays non-nil
+				// so a filter of ONLY garbage entries matches nothing rather
+				// than falling back to "all events".
+				if e == "" {
+					logger.Warn("notification target filters on empty event name — ignored",
+						"url", redactURLForLog(url))
+					continue
+				}
+				// A typo'd event name would otherwise be silently filtered
+				// forever — the allowlist never matches, no error anywhere.
+				if !KnownEvents[e] {
+					logger.Warn("notification target filters on unknown event — it will never match",
+						"event", e, "url", redactURLForLog(url))
+				}
+				events[e] = true
+			}
+		}
+
+		targets = append(targets, notificationTarget{
+			sender: s,
+			events: events,
+		})
+	}
+	return targets
+}
+
+// NewManager creates a new notification manager from config. See
+// parseTarget for the accepted URL forms (Discord-only, intentionally).
 func NewManager(cfg *config.MoomboxConfig, logger interface {
 	Debug(msg string, args ...any)
 	Info(msg string, args ...any)
@@ -194,63 +311,7 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 	m := &Manager{
 		logger:    logger,
 		semaphore: make(chan struct{}, maxInflightNotifications),
-	}
-
-	for _, nc := range cfg.Notifications {
-		url := nc.URL
-		if url == "" {
-			continue
-		}
-
-		var s sender
-
-		// Parse URL scheme
-		switch {
-		case strings.HasPrefix(url, "discord://"):
-			// discord://ID/TOKEN -> https://discord.com/api/webhooks/ID/TOKEN
-			raw := strings.TrimPrefix(url, "discord://")
-			// Only use the first two path segments (ID/TOKEN), matching TS behavior
-			segments := strings.SplitN(raw, "/", 3)
-			if len(segments) < 2 || segments[0] == "" || segments[1] == "" {
-				// Redacted: a malformed discord:// URL can still carry a
-				// real token (e.g. discord:///TOKEN with an empty ID).
-				logger.Warn("invalid discord:// URL: expected discord://ID/TOKEN", "url", redactURLForLog(url))
-				continue
-			}
-			parts := strings.Join(segments[:2], "/")
-			webhookURL := "https://discord.com/api/webhooks/" + parts
-			s = &DiscordWebhook{URL: webhookURL}
-
-		case discordWebhookRe.MatchString(url):
-			s = &DiscordWebhook{URL: url}
-
-		case strings.Contains(url, "discord.com/api/webhooks"):
-			// Log with the token segment redacted. Even a near-valid URL
-			// carries a real secret; a rejection log that copies it verbatim
-			// ends up in every log-collection store that tails the file.
-			logger.Warn("rejected invalid Discord webhook URL (must be HTTPS with valid ID/token)", "url", redactDiscordWebhookURL(url))
-			continue
-
-		default:
-			// Redacted: users paste full webhook URLs from other services
-			// (Slack, ntfy) here — those paths are secrets too.
-			logger.Warn("unsupported notification URL scheme", "url", redactURLForLog(url))
-			continue
-		}
-
-		// Build event filter
-		var events map[string]bool
-		if len(nc.Events) > 0 {
-			events = make(map[string]bool, len(nc.Events))
-			for _, e := range nc.Events {
-				events[e] = true
-			}
-		}
-
-		m.targets = append(m.targets, notificationTarget{
-			sender: s,
-			events: events,
-		})
+		targets:   buildTargets(cfg, logger),
 	}
 
 	if len(m.targets) > 0 {
@@ -260,18 +321,42 @@ func NewManager(cfg *config.MoomboxConfig, logger interface {
 	return m
 }
 
+// Reload rebuilds the target list from the current config so notification
+// edits apply immediately — previously they silently required a process
+// restart (and neither UI flagged the section as restart-required).
+// In-flight sends keep the sender they captured; new Sends see the new list.
+func (m *Manager) Reload(cfg *config.MoomboxConfig) {
+	targets := buildTargets(cfg, m.logger)
+	m.targetsMu.Lock()
+	m.targets = targets
+	m.targetsMu.Unlock()
+	m.logger.Info("notification targets reloaded", "targets", len(targets))
+}
+
 // Send dispatches a notification to all matching targets asynchronously.
 func (m *Manager) Send(title, description string, ntype NotificationType, fields []Field, opts SendOptions) {
-	if len(m.targets) == 0 {
+	// Snapshot under RLock so a concurrent Reload can't swap the slice
+	// mid-iteration. The slice is replaced wholesale, never mutated in
+	// place, so iterating the snapshot after release is safe.
+	m.targetsMu.RLock()
+	targets := m.targets
+	m.targetsMu.RUnlock()
+	if len(targets) == 0 {
 		return
 	}
 
 	color := ntype.Color()
 
-	for _, target := range m.targets {
-		// Check event filter
+	for _, target := range targets {
+		// Check event filter. An event that split from a broader legacy name
+		// (eventAliases) also matches targets allowlisting the old name, so
+		// pre-split filters keep receiving the new event after an upgrade.
+		// The alias lookup needs the ok-check: a bare eventAliases[...] map
+		// miss yields "", and a garbage events=[""] filter entry would then
+		// match EVERY non-aliased event, inverting the allowlist.
 		if target.events != nil && opts.Event != "" {
-			if !target.events[opts.Event] {
+			alias, hasAlias := eventAliases[opts.Event]
+			if !target.events[opts.Event] && (!hasAlias || !target.events[alias]) {
 				continue
 			}
 		}
@@ -338,5 +423,7 @@ func (m *Manager) Wait() {
 
 // HasTargets returns true if any notification targets are configured.
 func (m *Manager) HasTargets() bool {
+	m.targetsMu.RLock()
+	defer m.targetsMu.RUnlock()
 	return len(m.targets) > 0
 }

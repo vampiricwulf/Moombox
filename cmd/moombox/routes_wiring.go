@@ -82,7 +82,13 @@ func (s *runState) wireRoutes() func() {
 			s.wsHub.BroadcastJobsUpdate(filterJobsByAgeThreshold(jobs, hideAge))
 		},
 		OnChannelChange: s.kickMonitors,
+		OnNotificationsChange: func() {
+			// Hot-reload notification targets so edits apply immediately —
+			// previously they silently required a restart nothing asked for.
+			s.notifyMgr.Reload(s.configStore.Snapshot())
+		},
 	})
+	routes.NotificationRoutes(s.r, &routes.NotificationRouteDeps{Logger: s.log})
 	routes.ChannelRoutes(s.r, s.configStore, s.kickMonitors)
 	routes.FileRoutes(s.r, &routes.FileRoutesDeps{
 		DB:     s.db,

@@ -27,6 +27,8 @@ const NOTIFICATION_EVENT_GROUPS = [
       { id: "connectivity_pause", label: "Download Paused (Offline)" },
       { id: "connectivity_resume", label: "Download Resumed" },
       { id: "connectivity_split", label: "Finalized During Outage" },
+      { id: "connectivity_lost", label: "Connectivity Lost" },
+      { id: "connectivity_restored", label: "Connectivity Restored" },
     ],
   },
   {
@@ -41,7 +43,9 @@ const NOTIFICATION_EVENT_GROUPS = [
     name: "System",
     events: [
       { id: "disk_warning", label: "Disk Warning" },
+      { id: "disk_critical", label: "Disk Critical" },
       { id: "update_available", label: "Update Available" },
+      { id: "update_applied", label: "Update Applied" },
     ],
   },
 ];
@@ -1481,6 +1485,7 @@ export class SettingsController {
       <div class="notification-card" data-index="${idx}">
         <div class="notification-card-header">
           <div class="notification-card-url" title="${this.app.escapeHtml(notif.url || "")}">${this.app.escapeHtml(notif.url || "")}</div>
+          <sl-icon-button name="send" label="Send test notification" data-notif-action="test" data-notif-index="${idx}"></sl-icon-button>
           <sl-icon-button name="trash" label="Delete" data-notif-action="delete" data-notif-index="${idx}"></sl-icon-button>
         </div>
         ${eventsHtml}
@@ -1497,6 +1502,7 @@ export class SettingsController {
         const action = el.dataset.notifAction;
         const idx = parseInt(el.dataset.notifIndex);
         if (action === "delete") this.deleteNotification(idx);
+        else if (action === "test") this.testNotification(this.app.config.notifications?.[idx]?.url, el);
         else if (action === "toggle-event") this.toggleNotificationEvent(idx, el.dataset.eventId);
         else if (action === "clear-filter") this.clearNotificationFilter(idx);
         else if (action === "enable-filter") this.enableNotificationFilter(idx);
@@ -1504,15 +1510,53 @@ export class SettingsController {
     }
   }
 
+  /**
+   * Send a test embed to a webhook URL via POST /api/notifications/test.
+   * Works for saved targets (card button) AND the unsaved dialog value —
+   * validation + delivery outcome surfaces as a toast. `busyEl` (optional)
+   * gets loading/disabled state while the request runs.
+   */
+  async testNotification(url, busyEl) {
+    url = (url || "").trim();
+    if (!url) {
+      this.app.showToast("Enter a webhook URL first", "warning");
+      return;
+    }
+    if (busyEl) { busyEl.loading = true; busyEl.disabled = true; }
+    try {
+      const resp = await fetch("/api/notifications/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (resp.ok) {
+        this.app.showToast("Test notification delivered", "success");
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        this.app.showToast(data.error || `Test failed (HTTP ${resp.status})`, "danger");
+      }
+    } catch {
+      this.app.showToast("Test failed: could not reach server", "danger");
+    } finally {
+      if (busyEl) { busyEl.loading = false; busyEl.disabled = false; }
+    }
+  }
+
   addNotification() {
     const dialog = document.getElementById("webhook-dialog");
     const input = document.getElementById("webhook-url-input");
     const confirmBtn = document.getElementById("webhook-confirm-btn");
+    const testBtn = document.getElementById("webhook-test-btn");
     input.value = "";
 
     // Replace to avoid stacking listeners (consistent with showConfirm/removePassword)
     const newConfirm = confirmBtn.cloneNode(true);
     confirmBtn.replaceWith(newConfirm);
+    // Test button: exercises the UNSAVED dialog value so a bad paste fails
+    // here instead of after saving.
+    const newTest = testBtn.cloneNode(true);
+    testBtn.replaceWith(newTest);
+    newTest.addEventListener("click", () => this.testNotification(input.value, newTest));
     newConfirm.addEventListener("click", async () => {
       const url = input.value.trim();
       if (!url) {

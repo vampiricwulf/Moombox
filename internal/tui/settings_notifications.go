@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
 
 // --- Notification sub-editor ---
@@ -75,6 +76,15 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		if len(m.notifications) > 0 {
 			m.notifDeleteConf = true
 		}
+	case "t", "T":
+		// Async test-send of the highlighted target's URL — the app layer
+		// dispatches the HTTP call (testNotificationCmd) and routes the
+		// result back via SetNotifTestResult.
+		if len(m.notifications) > 0 && m.notifIndex < len(m.notifications) {
+			m.errorMsg = "Sending test notification..."
+			m.status = saveNotice
+			return "test_notification"
+		}
 	case keyTab:
 		m.switchSection((m.sectionIndex + 1) % len(sections))
 		m.updateTextInputForField()
@@ -90,6 +100,29 @@ func (m *SettingsModel) handleNotifKey(key string) string {
 		}
 	}
 	return ""
+}
+
+// SelectedNotificationURL returns the URL of the highlighted notification
+// target in list mode, or "" when none is selected. Used by the app layer
+// to dispatch the async test-send.
+func (m *SettingsModel) SelectedNotificationURL() string {
+	if m.notifIndex < len(m.notifications) {
+		return m.notifications[m.notifIndex].URL
+	}
+	return ""
+}
+
+// SetNotifTestResult surfaces an async test-notification outcome in the
+// settings status line (the settings overlay covers the main feedback
+// line, so the result must render inside the overlay).
+func (m *SettingsModel) SetNotifTestResult(errMsg string) {
+	if errMsg == "" {
+		m.errorMsg = "Test notification delivered ✓"
+		m.status = saveNotice
+		return
+	}
+	m.errorMsg = "Test failed: " + errMsg
+	m.status = saveError
 }
 
 func (m *SettingsModel) handleNotifEditKey(key string) string {
@@ -112,6 +145,13 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 		if strings.TrimSpace(m.notifEditURL) == "" {
 			return ""
 		}
+		// Save-time URL validation — a broken paste previously round-tripped
+		// to config with no error and was silently warn-skipped at startup.
+		if err := notifications.ValidateURL(strings.TrimSpace(m.notifEditURL)); err != nil {
+			m.errorMsg = err.Error()
+			m.status = saveError
+			return ""
+		}
 		var events []string
 		enabledCount := 0
 		for _, e := range allNotifEvents {
@@ -127,7 +167,7 @@ func (m *SettingsModel) handleNotifEditKey(key string) string {
 			m.status = saveError
 			return ""
 		}
-		n := config.NotificationConfig{URL: m.notifEditURL}
+		n := config.NotificationConfig{URL: strings.TrimSpace(m.notifEditURL)}
 		if enabledCount < len(allNotifEvents) {
 			n.Events = events
 		}

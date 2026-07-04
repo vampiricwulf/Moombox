@@ -40,6 +40,8 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		case "resolve_channel":
 			return a, a.resolveChannelCmd(a.settings.GetChannelResolveInput())
+		case "test_notification":
+			return a, a.testNotificationCmd(a.settings.SelectedNotificationURL())
 		case "open_ffmpeg":
 			a.settings.Close()
 			a.ffmpegCheck.OnCheckPrereqs = a.OnCheckPrereqs

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
@@ -23,6 +24,25 @@ import (
 //
 // Called once between wireRoutes() and the "start services" phase in run().
 func (s *runState) wireMonitorCallbacks() {
+	// Cooldown for auth-recovery failure notifications: OnRecoveryNeeded can
+	// re-fire on every periodic auth check while cookies stay dead, and a
+	// broken refresh should page the operator once per window, not per poll.
+	// Guarded by a mutex — the recovery attempt runs on its own goroutine.
+	var authNotifyMu sync.Mutex
+	lastAuthFailNotify := make(map[string]time.Time)
+	notifyAuthFailure := func(platform, title, desc string, ntype notifications.NotificationType) {
+		authNotifyMu.Lock()
+		defer authNotifyMu.Unlock()
+		if time.Since(lastAuthFailNotify[platform]) < 30*time.Minute {
+			return
+		}
+		lastAuthFailNotify[platform] = time.Now()
+		s.notifyMgr.Send(title, desc, ntype,
+			[]notifications.Field{{Name: "Platform", Value: platform, Inline: true}},
+			notifications.SendOptions{Event: "auth"},
+		)
+	}
+
 	s.cookieRefresh.OnRecoveryNeeded = func(platform string) {
 		var autoEnabled bool
 		s.configStore.Read(func(c *config.MoomboxConfig) {
@@ -44,12 +64,21 @@ func (s *runState) wireMonitorCallbacks() {
 			ok, err := s.autoCookieSvc.RefreshCookies(refreshCtx)
 			if err != nil {
 				s.log.Error("auto-cookie recovery failed", "platform", platform, "err", err)
+				// Previously log-only: the operator learned cookies were dead
+				// only when a recording actually failed. 30-min per-platform
+				// cooldown via notifyAuthFailure.
+				notifyAuthFailure(platform, "Cookie Auto-Refresh Failed",
+					fmt.Sprintf("Automatic cookie refresh for %s failed — recordings will fail until cookies are refreshed. Re-run cookie setup from Settings.", platform),
+					notifications.TypeError)
 			} else if ok {
 				s.log.Info("auto-cookie recovery succeeded", "platform", platform)
 				// Re-check auth status immediately so the UI updates
 				s.cookieRefresh.CheckNow(context.Background())
 			} else {
 				s.log.Warn("auto-cookie recovery did not restore auth", "platform", platform)
+				notifyAuthFailure(platform, "Cookie Auto-Refresh Ineffective",
+					fmt.Sprintf("Automatic cookie refresh completed but did not restore %s authentication — sign in again via cookie setup in Settings.", platform),
+					notifications.TypeWarning)
 			}
 		}()
 	}
@@ -80,6 +109,9 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		if resumed > 0 {
 			s.log.Info("auth recovered — resumed COOKIES? jobs", "platform", platform, "count", resumed)
+			// Event "auth" pairs with the worker's "Authentication Required"
+			// emit — an empty Event would bypass every target's allowlist
+			// (unfilterable) since the filter only applies when Event != "".
 			s.notifyMgr.Send("Authentication Recovered",
 				fmt.Sprintf("Resumed %d job(s) waiting on %s cookies", resumed, platform),
 				notifications.TypeInfo,
@@ -87,7 +119,7 @@ func (s *runState) wireMonitorCallbacks() {
 					{Name: "Platform", Value: platform, Inline: true},
 					{Name: "Jobs", Value: fmt.Sprintf("%d", resumed), Inline: true},
 				},
-				notifications.SendOptions{},
+				notifications.SendOptions{Event: "auth"},
 			)
 		}
 	}
@@ -425,7 +457,14 @@ func (s *runState) wireMonitorCallbacks() {
 	}()
 
 	// Connectivity -> monitors + WebSocket: kick monitors on reconnect,
-	// broadcast state.
+	// broadcast state — and notify. The web/TUI broadcasts are ephemeral;
+	// an operator who was away during an outage previously had NO trace
+	// that monitoring was down (streams silently missed). Transitions are
+	// already debounced by the connectivity monitor, so this can't flap-spam.
+	// outageStart is guarded by a mutex — OnStateChange serializes today,
+	// but this closure must not silently depend on that.
+	var connNotifyMu sync.Mutex
+	var outageStart time.Time
 	s.connMon.OnStateChange(func(online bool) {
 		if online {
 			s.feedMon.CheckNow()
@@ -433,5 +472,30 @@ func (s *runState) wireMonitorCallbacks() {
 			s.twitchMon.CheckNow()
 		}
 		s.wsHub.BroadcastConnectivity(online)
+
+		connNotifyMu.Lock()
+		defer connNotifyMu.Unlock()
+		if !online {
+			outageStart = time.Now()
+			s.notifyMgr.Send("Connectivity Lost",
+				"Internet connectivity lost — channel monitoring is paused and active downloads are waiting",
+				notifications.TypeWarning, nil,
+				notifications.SendOptions{Event: "connectivity_lost"},
+			)
+			return
+		}
+		if outageStart.IsZero() {
+			return // startup/initial online state — nothing to report
+		}
+		outage := time.Since(outageStart).Round(time.Second)
+		outageStart = time.Time{}
+		s.notifyMgr.Send("Connectivity Restored",
+			"Internet connectivity restored — monitors re-checking now",
+			notifications.TypeSuccess,
+			[]notifications.Field{
+				{Name: "Outage Duration", Value: outage.String(), Inline: true},
+			},
+			notifications.SendOptions{Event: "connectivity_restored"},
+		)
 	})
 }

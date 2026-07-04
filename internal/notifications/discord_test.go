@@ -109,29 +109,133 @@ func TestDiscordWebhookRateLimitRetriesOnce(t *testing.T) {
 	}
 }
 
-// TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter verifies
-// that a Retry-After beyond the 30s ceiling returns an error rather
-// than sleeping for an absurd duration.
-func TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter(t *testing.T) {
+// shrinkBackoff makes the retry backoff schedule test-fast, restoring it
+// on cleanup.
+func shrinkBackoff(t *testing.T) {
+	t.Helper()
+	orig := discordRetryBackoff
+	discordRetryBackoff = [discordMaxAttempts - 1]time.Duration{5 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { discordRetryBackoff = orig })
+}
+
+// TestDiscordWebhook5xxRetriesThenSucceeds covers the transient-server-error
+// path: two 500s followed by a 204 must succeed on the third attempt.
+func TestDiscordWebhook5xxRetriesThenSucceeds(t *testing.T) {
+	shrinkBackoff(t)
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		hits.Add(1)
-		rw.Header().Set("Retry-After", "9999") // far past the 30s cap
-		rw.WriteHeader(http.StatusTooManyRequests)
+		if hits.Add(1) <= 2 {
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		rw.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(srv.Close)
 
 	d := &DiscordWebhook{URL: srv.URL}
-	start := time.Now()
+	if err := d.Send("t", "d", 0, nil, SendOptions{}); err != nil {
+		t.Fatalf("Send (5xx twice then success): %v", err)
+	}
+	if got := hits.Load(); got != 3 {
+		t.Errorf("expected 3 hits, got %d", got)
+	}
+}
+
+// TestDiscordWebhook5xxGivesUpAfterMaxAttempts pins the attempt bound: a
+// persistently failing server gets exactly discordMaxAttempts requests.
+func TestDiscordWebhook5xxGivesUpAfterMaxAttempts(t *testing.T) {
+	shrinkBackoff(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		rw.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+
+	d := &DiscordWebhook{URL: srv.URL}
 	err := d.Send("t", "d", 0, nil, SendOptions{})
-	elapsed := time.Since(start)
 	if err == nil {
-		t.Fatal("Retry-After=9999: want error, got nil")
+		t.Fatal("persistent 502: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "502") || !strings.Contains(err.Error(), "gave up") {
+		t.Errorf("error should carry status and give-up note, got %v", err)
+	}
+	if got := hits.Load(); got != discordMaxAttempts {
+		t.Errorf("expected exactly %d hits, got %d", discordMaxAttempts, got)
+	}
+}
+
+// TestDiscordWebhookTransportErrorRetries covers the connection-level
+// failure path: a server that dies after the first attempt must be retried
+// (the request errors are transport errors, not HTTP statuses).
+func TestDiscordWebhookTransportErrorRetries(t *testing.T) {
+	shrinkBackoff(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusNoContent)
+	}))
+	url := srv.URL
+	srv.Close() // all connections now refused
+
+	d := &DiscordWebhook{URL: url}
+	err := d.Send("t", "d", 0, nil, SendOptions{})
+	if err == nil {
+		t.Fatal("dead server: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "gave up") {
+		t.Errorf("transport errors should be retried to the attempt bound, got %v", err)
+	}
+}
+
+// TestDiscordWebhook4xxIsPermanent pins that non-429 4xx responses are NOT
+// retried — resending a rejected payload just spams Discord.
+func TestDiscordWebhook4xxIsPermanent(t *testing.T) {
+	shrinkBackoff(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		rw.WriteHeader(http.StatusNotFound) // revoked webhook
+	}))
+	t.Cleanup(srv.Close)
+
+	d := &DiscordWebhook{URL: srv.URL}
+	if err := d.Send("t", "d", 0, nil, SendOptions{}); err == nil {
+		t.Fatal("404: want error, got nil")
 	}
 	if got := hits.Load(); got != 1 {
-		t.Errorf("server should NOT be retried with bogus Retry-After: hits=%d", got)
+		t.Errorf("4xx must not retry: hits=%d", got)
 	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("Send slept for %v despite refusing the Retry-After value", elapsed)
+}
+
+// TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter verifies that a
+// Retry-After beyond the 30s ceiling fast-fails after exactly one request.
+// The overflow cases matter: values past ~9.2e9s (or Inf/NaN) overflow
+// time.Duration to a NEGATIVE on amd64 — a Duration-space cap comparison
+// silently accepted them and hammered the rate-limited webhook with
+// zero-delay retries. The cap must be checked in float space.
+func TestDiscordWebhookRateLimitRefusesUnreasonableRetryAfter(t *testing.T) {
+	for _, retryAfter := range []string{"9999", "9999999999999", "1e300", "Inf", "NaN", "-5", ""} {
+		t.Run("retryAfter="+retryAfter, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				rw.Header().Set("Retry-After", retryAfter)
+				rw.WriteHeader(http.StatusTooManyRequests)
+			}))
+			t.Cleanup(srv.Close)
+
+			d := &DiscordWebhook{URL: srv.URL}
+			start := time.Now()
+			err := d.Send("t", "d", 0, nil, SendOptions{})
+			elapsed := time.Since(start)
+			if err == nil {
+				t.Fatal("bogus Retry-After: want error, got nil")
+			}
+			if got := hits.Load(); got != 1 {
+				t.Errorf("server should NOT be retried with bogus Retry-After: hits=%d", got)
+			}
+			if elapsed > 500*time.Millisecond {
+				t.Errorf("Send slept for %v despite refusing the Retry-After value", elapsed)
+			}
+		})
 	}
 }

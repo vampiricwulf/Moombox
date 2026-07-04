@@ -554,6 +554,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.settings.HandleChannelResolved(msg.ID, msg.Name, msg.Platform, msg.Err)
 		return a, nil
 
+	case testNotificationResultMsg:
+		// Route into the settings overlay's status line — the overlay
+		// covers the main feedback line while it's open.
+		if a.settings.IsVisible() {
+			a.settings.SetNotifTestResult(msg.Err)
+		} else if msg.Err != "" {
+			a.setFeedback("Test notification failed: " + msg.Err)
+		} else {
+			a.setFeedback("Test notification delivered")
+		}
+		return a, nil
+
 	case setupSaveResultMsg:
 		if msg.Err != "" {
 			a.setupWiz.saving = false

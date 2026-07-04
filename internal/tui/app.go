@@ -77,6 +77,10 @@ type (
 	logFlushMsg     struct{} // trailing log-batch flush (see logFlushInterval)
 	marqueeTickMsg  struct{} // 150ms marquee scroll tick
 
+	// testNotificationResultMsg reports the outcome of an async
+	// test-notification send dispatched from the settings overlay.
+	testNotificationResultMsg struct{ Err string }
+
 	// Async results for update check/apply
 	updateCheckResultMsg struct {
 		Info *UpdateStatusMsg // nil = up to date

@@ -196,6 +196,13 @@ func (s *runState) runTUI() {
 		if updatedCfg.Downloader.NumParallelDownloads > 0 {
 			s.dlWorker.SetParallelDownloads(updatedCfg.Downloader.NumParallelDownloads)
 		}
+		// Notification targets hot-reload (mirrors the web route's
+		// OnNotificationsChange). Unconditional — the rebuild is a few URL
+		// parses, cheaper than diffing the section. Snapshot, NOT
+		// updatedCfg: that's the live *MoomboxConfig pointer, and reading
+		// its Notifications slice unlocked would race a concurrent web
+		// PUT /api/config whole-struct store.
+		s.notifyMgr.Reload(s.configStore.Snapshot())
 		// Kick monitors so they re-evaluate channels (may have been added/removed)
 		s.kickMonitors()
 	}

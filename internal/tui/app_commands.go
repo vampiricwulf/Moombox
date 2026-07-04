@@ -435,6 +435,35 @@ func (a *App) ffmpegConfirmCmd(token string) tea.Cmd {
 	})
 }
 
+// testNotificationCmd delivers a test embed to url via the local API
+// (POST /api/notifications/test) and reports the outcome back to the
+// settings overlay through testNotificationResultMsg.
+func (a *App) testNotificationCmd(url string) tea.Cmd {
+	baseURL := a.apiBaseURL()
+	client := a.apiClient()
+	return safeCmd(func() tea.Msg {
+		if url == "" {
+			return testNotificationResultMsg{Err: "no notification selected"}
+		}
+		body, _ := json.Marshal(map[string]string{"url": url})
+		resp, err := client.Post(baseURL+"/api/notifications/test", "application/json", bytes.NewReader(body))
+		if err != nil {
+			return testNotificationResultMsg{Err: "failed to connect to server"}
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			var errResp struct {
+				Error string `json:"error"`
+			}
+			if decErr := json.NewDecoder(resp.Body).Decode(&errResp); decErr == nil && errResp.Error != "" {
+				return testNotificationResultMsg{Err: errResp.Error}
+			}
+			return testNotificationResultMsg{Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+		}
+		return testNotificationResultMsg{}
+	})
+}
+
 // resolveChannelCmd resolves a channel URL asynchronously via tea.Cmd.
 func (a *App) resolveChannelCmd(input string) tea.Cmd {
 	return safeCmd(func() tea.Msg {

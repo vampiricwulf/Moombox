@@ -238,8 +238,12 @@ func (q *JobQueue) Complete(jobID string) {
 	}
 }
 
-// Cancel cancels a specific job (user-initiated).
-func (q *JobQueue) Cancel(jobID string) {
+// Cancel cancels a specific job (user-initiated). Returns true when it
+// flagged an actively-processing run — that run's handleCancellation will
+// emit the "cancelled" notification, so notifying callers (the cancel
+// route) skip their own emission; previously one user cancel produced two
+// embeds for an in-flight job.
+func (q *JobQueue) Cancel(jobID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -249,9 +253,11 @@ func (q *JobQueue) Cancel(jobID string) {
 	// classify — the entry would leak forever and, worse, misclassify a
 	// future run of the same job (a later shutdown interruption would read
 	// the stale flag and flip a resumable job to Cancelled).
+	flagged := false
 	if cancel, ok := q.processing[jobID]; ok {
 		q.cancelled[jobID] = true
 		cancel()
+		flagged = true
 	}
 	// Also remove from pending
 	for i, pj := range q.pending {
@@ -261,6 +267,7 @@ func (q *JobQueue) Cancel(jobID string) {
 			break
 		}
 	}
+	return flagged
 }
 
 // WasCancelled returns true if the job was explicitly cancelled by the user

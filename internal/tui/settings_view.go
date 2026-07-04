@@ -80,6 +80,8 @@ func (m *SettingsModel) View() string {
 		switch m.status {
 		case saveSaved:
 			content.WriteString(lipgloss.NewStyle().Foreground(ColorGreen).Render("Saved"))
+		case saveNotice:
+			content.WriteString(lipgloss.NewStyle().Foreground(ColorGreen).Render(m.errorMsg))
 		case saveError:
 			content.WriteString(lipgloss.NewStyle().Foreground(ColorRed).Render(m.errorMsg))
 		default:
@@ -496,7 +498,7 @@ func (m *SettingsModel) renderNotifications(w, maxH int) string {
 
 	var lines []string
 
-	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  ")
+	actionBar := DimStyle.Render("A: Add  Enter: Edit  D: Delete  T: Test  ")
 	if m.notifDeleteConf {
 		actionBar += YellowStyle.Render("Press D again to confirm delete")
 	}

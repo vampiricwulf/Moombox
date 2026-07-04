@@ -962,15 +962,16 @@ func JobRoutes(r chi.Router, db *database.Database, store *config.Store, w *work
 			"status": database.StatusCancelled,
 		})
 
+		// When the cancel flagged an actively-processing run, that run's
+		// handleCancellation emits the "cancelled" notification — sending
+		// here too produced two embeds per cancel of an in-flight job.
+		workerWillNotify := false
 		if w != nil {
-			w.CancelJob(jobID)
+			workerWillNotify = w.CancelJob(jobID)
 		}
 
-		if notifier != nil {
-			idLabel := "Video ID"
-			if job.Platform == "twitch" {
-				idLabel = "Stream ID"
-			}
+		if notifier != nil && !workerWillNotify {
+			idLabel := notifications.IDLabel(job.Platform)
 			notifyURL := job.URL
 			if notifyURL == "" {
 				notifyURL = "https://www.youtube.com/watch?v=" + job.VideoID

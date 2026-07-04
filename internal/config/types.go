@@ -158,6 +158,12 @@ type DiskConfig struct {
 // UpdatesConfig holds auto-update settings.
 type UpdatesConfig struct {
 	AutoCheckUpdates bool `toml:"auto_check_updates" json:"auto_check_updates"`
+	// LastRunVersion records the binary version of the previous run so
+	// startup can detect a version change (self-update OR manual binary
+	// swap) and emit the update_applied notification. Written by the
+	// daemon on boot; not a user knob. Additive — absent in older
+	// configs decodes to "" and just skips the first comparison.
+	LastRunVersion string `toml:"last_run_version,omitempty" json:"last_run_version,omitempty"`
 }
 
 // MemoryConfig holds memory-management knobs. Defaults applied via
@@ -241,9 +247,11 @@ func (c *ChannelConfig) GetPlatform() string {
 }
 
 // NotificationConfig holds notification endpoint configuration.
+// (A legacy `tags` field was removed 2026-07: it was persisted and
+// round-tripped but read by nothing — leftover keys in existing TOML files
+// are ignored harmlessly by the decoder.)
 type NotificationConfig struct {
 	URL    string   `toml:"url,omitempty" json:"url,omitempty"`
-	Tags   []string `toml:"tags,omitempty" json:"tags,omitempty"`
 	Events []string `toml:"events,omitempty" json:"events,omitempty"`
 }
 

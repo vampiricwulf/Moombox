@@ -12,6 +12,7 @@ import (
 
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/cookies"
+	"github.com/vampiricwulf/Moombox/internal/notifications"
 )
 
 // fieldType identifies how a settings field is edited.
@@ -170,6 +171,10 @@ const (
 	saveIdle saveStatus = iota
 	saveSaved
 	saveError
+	// saveNotice renders errorMsg as a neutral/positive notice (green) —
+	// used for non-save outcomes like test-notification results, where
+	// "Saved" would be misleading and red would read as failure.
+	saveNotice
 )
 
 // securityMode tracks the security editor state.
@@ -187,18 +192,18 @@ type notifEventGroup struct {
 	events []string
 }
 
-// Notification event groups. Every Event string emitted through the
-// notifications manager MUST appear here (and in the web UI's mirror,
-// web/public/modules/settings.js): targets with an event filter treat the
-// list as an allowlist, and the edit-save path rebuilds Events strictly
-// from allNotifEvents — an unregistered event is silently unfilterable AND
-// stripped from hand-edited configs.
-var notifEventGroups = []notifEventGroup{
-	{"Job Lifecycle", []string{"found", "added", "scheduled", "rescheduled", "downloading", "quality_split", "gap_split", "muxing", "finished", "error", "cancelled", "auth"}},
-	{"Connectivity", []string{"connectivity_pause", "connectivity_resume", "connectivity_split"}},
-	{"Trim", []string{"trim_created", "trim_deleted", "trim_error"}},
-	{"System", []string{"disk_warning", "update_available"}},
-}
+// Notification event groups, derived from the canonical vocabulary in
+// internal/notifications (notifications.EventGroups) so the TUI can never
+// drift from the events the manager actually filters on. The web UI keeps
+// a labeled mirror in web/public/modules/settings.js — update that copy
+// (and docs/spec/operations.md) when the canonical registry changes.
+var notifEventGroups = func() []notifEventGroup {
+	out := make([]notifEventGroup, 0, len(notifications.EventGroups))
+	for _, g := range notifications.EventGroups {
+		out = append(out, notifEventGroup{name: g.Name, events: g.Events})
+	}
+	return out
+}()
 
 // allNotifEvents is a flat list derived from the groups (preserves order).
 var allNotifEvents = func() []string {

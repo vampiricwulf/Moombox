@@ -14,6 +14,11 @@ import (
 //
 // Imports worker.TwitchOfflineErrMsg so producer (stream_processor_twitch.go)
 // and consumer (this predicate) can never drift on the literal.
+//
+// KEEP IN SYNC with the retryLikely mirror in worker.setJobError
+// (internal/worker/worker.go) — it suppresses the failure notification only
+// while a retry remains possible under THESE conditions; drift would either
+// spam retry noise or silence terminal failures.
 func isRecoverableTwitchError(job *database.Job, maxRetries int) bool {
 	if job == nil {
 		return false

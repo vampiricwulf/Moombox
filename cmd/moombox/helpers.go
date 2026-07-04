@@ -102,10 +102,17 @@ func checkAndBroadcastUpdate(
 	}
 
 	if notifyMgr.HasTargets() {
+		// Link the embed title to the GitHub release page and carry the
+		// version pair — this was the only lifecycle notification with no
+		// clickable link and no detail fields.
 		notifyMgr.Send("Update Available",
 			"Moombox "+release.TagName+" is available",
-			notifications.TypeInfo, nil,
-			notifications.SendOptions{Event: "update_available"},
+			notifications.TypeInfo,
+			[]notifications.Field{
+				{Name: "Current Version", Value: "v" + upd.CurrentVersion(), Inline: true},
+				{Name: "New Version", Value: release.TagName, Inline: true},
+			},
+			notifications.SendOptions{Event: "update_available", URL: release.ReleaseURL},
 		)
 	}
 }

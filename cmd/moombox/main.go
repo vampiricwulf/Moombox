@@ -347,6 +347,43 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 	})
 	routes.UpdateDiskStatus(initialOutputDir, s.configStore)
 
+	// Update-applied detection: if this boot runs a different version than
+	// the previous run (self-update restart OR manual binary swap), confirm
+	// it — the update_available embed otherwise never gets a "landed
+	// successfully" counterpart, and a boot-time check also covers applies
+	// the process didn't survive to report. LastRunVersion == "" means
+	// pre-feature config or first run: persist silently, don't announce.
+	//
+	// Gated on ConfigLoaded (mirrors the NeedsAutoPersist gate in
+	// services.go): on a true first run the config file doesn't exist yet,
+	// and writing one here would make the NEXT boot see ConfigLoaded=true —
+	// permanently skipping the setup wizard. The version stamp simply waits
+	// until the boot after setup has created the file.
+	var lastRunVersion string
+	var configLoaded bool
+	s.configStore.Read(func(c *config.MoomboxConfig) {
+		lastRunVersion = c.Updates.LastRunVersion
+		configLoaded = c.ConfigLoaded
+	})
+	if configLoaded && lastRunVersion != version {
+		if lastRunVersion != "" {
+			notifyMgr.Send("Update Applied",
+				fmt.Sprintf("Moombox updated from v%s to v%s and restarted successfully", lastRunVersion, version),
+				notifications.TypeSuccess,
+				[]notifications.Field{
+					{Name: "Previous Version", Value: "v" + lastRunVersion, Inline: true},
+					{Name: "Current Version", Value: "v" + version, Inline: true},
+				},
+				notifications.SendOptions{Event: "update_applied"},
+			)
+		}
+		if err := s.configStore.Update(func(c *config.MoomboxConfig) {
+			c.Updates.LastRunVersion = version
+		}); err != nil {
+			log.Warn("failed to persist last-run version", slog.String("error", err.Error()))
+		}
+	}
+
 	// Auto-update check: initial check + daily ticker
 	if upd != nil && cfg.Updates.AutoCheckUpdates {
 		go func() {
@@ -391,6 +428,11 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		var lastDiskLevel string
 		diskCheckCounter := 0
 		diskReadFailing := false
+		// Consecutive read failures. The low-disk safety net silently dying
+		// (volume offline, I/O error) is itself alert-worthy — notified on
+		// the 2nd consecutive failure (~12 min) so a transient SMB blip or
+		// flapping network volume doesn't page the operator.
+		diskReadFailCount := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -477,6 +519,7 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 					})
 					if ds := routes.UpdateDiskStatus(diskOutputDir, s.configStore); ds != nil {
 						diskReadFailing = false
+						diskReadFailCount = 0
 						// Broadcast to web clients
 						wsHub.Broadcast("disk_status", map[string]any{
 							"free":      ds.Free,
@@ -501,14 +544,32 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 								freeGB := float64(ds.Free) / (1024 * 1024 * 1024)
 								level := "Warning"
 								ntype := notifications.TypeWarning
+								// Critical gets its own event so targets can route
+								// it separately (e.g. a high-priority channel);
+								// eventAliases keeps plain "disk_warning" filters
+								// receiving it too.
+								event := "disk_warning"
 								if ds.WarnLevel == "critical" {
 									level = "Critical"
 									ntype = notifications.TypeError
+									event = "disk_critical"
+								}
+								// Name the directory: an operator with several
+								// machines (or several volumes) can't act on
+								// "output drive" alone. Absolute path — the
+								// config default is the relative "./output".
+								dirShown := diskOutputDir
+								if abs, absErr := filepath.Abs(diskOutputDir); absErr == nil {
+									dirShown = abs
 								}
 								notifyMgr.Send(
 									fmt.Sprintf("Disk Space %s", level),
 									fmt.Sprintf("%.1f%% used — %.1f GB free on output drive", ds.UsedPct, freeGB),
-									ntype, nil, notifications.SendOptions{Event: "disk_warning"},
+									ntype,
+									[]notifications.Field{
+										{Name: "Output Directory", Value: dirShown},
+									},
+									notifications.SendOptions{Event: event},
 								)
 								lastDiskNotify = time.Now()
 								lastDiskLevel = ds.WarnLevel
@@ -516,14 +577,31 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 						} else {
 							lastDiskLevel = "" // Reset cooldown when back to ok
 						}
-					} else if !diskReadFailing {
+					} else {
 						// GetDiskSpace failed (volume offline, I/O error). Warn
 						// once per failure streak — until this recovers, the
 						// dashboard disk gauge and low-disk notifications are
 						// frozen at the last good reading.
-						log.Warn("[Disk] disk space check failed; gauge and low-disk alerts frozen until it recovers",
-							slog.String("outputDir", diskOutputDir))
-						diskReadFailing = true
+						diskReadFailCount++
+						if !diskReadFailing {
+							log.Warn("[Disk] disk space check failed; gauge and low-disk alerts frozen until it recovers",
+								slog.String("outputDir", diskOutputDir))
+							diskReadFailing = true
+						}
+						// The safety net dying is itself alert-worthy: with
+						// monitoring frozen, the drive can fill unnoticed.
+						// Fires once per streak, on the 2nd consecutive
+						// failure (~12 min) to ride out transient blips.
+						if diskReadFailCount == 2 {
+							notifyMgr.Send("Disk Monitoring Failed",
+								"Disk space checks are failing (volume offline or I/O error) — low-disk alerts are suspended until monitoring recovers",
+								notifications.TypeError,
+								[]notifications.Field{
+									{Name: "Output Directory", Value: diskOutputDir},
+								},
+								notifications.SendOptions{Event: "disk_warning"},
+							)
+						}
 					}
 				}
 			}
