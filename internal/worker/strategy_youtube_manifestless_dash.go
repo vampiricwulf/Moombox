@@ -12,21 +12,33 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/youtube"
 )
 
-// HasManifestlessDashFormats reports whether videoInfo.Formats[] contains
-// the split video + audio adaptive entries that make a manifest-free DASH
-// download viable. The signal is: at least one audio-only entry AND at
-// least one video-only entry, both with non-empty URLs. HLS variants are
-// muxed (carry both video and audio in the same itag) so they don't pass
-// this check; only true DASH-style adaptive splits do.
+// HasManifestlessDashFormats reports whether videoInfo.Formats[] contains the
+// split video + audio adaptive entries that make a manifest-free DASH
+// (&sq=N-segmented) download viable. The signal is: at least one audio-only
+// entry AND at least one video-only entry, both with non-empty URLs AND no
+// contentLength. HLS variants are muxed (carry both video and audio in the same
+// itag) so they don't pass; only true DASH-style adaptive splits do.
 //
-// Used by the orchestrator strategy switch to detect the experiment case
-// where YouTube withholds dashManifestUrl but still ships adaptiveFormats[]
-// in the watch-page player response (yt-dlp issue #15274).
+// The contentLength exclusion is critical. A format carrying a contentLength is
+// a COMPLETE FILE (a regular VOD / premiere adaptive format) served whole over
+// its URL — it is downloaded directly via byte-range, NEVER segment-addressed
+// with &sq=N. Only open-ended live/OTF formats (no contentLength) are the
+// manifest-free DASH segment case. This mirrors yt-dlp, which byte-range-chunks
+// a contentLength-bearing format and only gives OTF/live formats &sq fragments.
+// Feeding a whole-file URL to the &sq loop is catastrophic: YouTube ignores &sq
+// and returns the ENTIRE file for every sequence number, so the segment loop
+// re-downloads the whole file forever — no past-end 403 ever arrives to stop it
+// (a premiere classified StreamPostLive filled the disk with hundreds of GB
+// this way before this guard).
+//
+// Used by the orchestrator strategy switch to detect the experiment case where
+// YouTube withholds dashManifestUrl but still ships adaptiveFormats[] in the
+// watch-page player response (yt-dlp issue #15274).
 func HasManifestlessDashFormats(formats []youtube.Format) bool {
 	hasAudio, hasVideo := false, false
 	for i := range formats {
 		f := &formats[i]
-		if f.URL == "" {
+		if f.URL == "" || f.ContentLength != "" {
 			continue
 		}
 		if f.IsAudio() {

@@ -47,6 +47,18 @@ func TestHasManifestlessDashFormats(t *testing.T) {
 			want: true,
 		},
 		{
+			// Complete-file adaptive formats (contentLength set) are whole files
+			// downloaded directly, NOT &sq segments — a premiere/regular VOD, not
+			// the manifest-free live DASH case. Feeding these to the &sq loop
+			// re-downloads the whole file forever.
+			name: "complete-file adaptive formats (contentLength set) are not segment-addressable",
+			formats: []youtube.Format{
+				{Itag: 248, MimeType: `video/webm; codecs="vp9"`, URL: "https://x/", Width: ptrInt(1920), Height: ptrInt(1080), ContentLength: "58382400"},
+				{Itag: 251, MimeType: `audio/webm; codecs="opus"`, URL: "https://x/", ContentLength: "3211436"},
+			},
+			want: false,
+		},
+		{
 			name: "audio-only without any video — incomplete (no DASH possible)",
 			formats: []youtube.Format{
 				{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, URL: "https://x/"},

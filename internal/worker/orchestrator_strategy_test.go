@@ -41,6 +41,24 @@ func TestSelectDownloadStrategy(t *testing.T) {
 			want: "manifestless_dash",
 		},
 		{
+			// Regression (hundreds-of-GB runaway): a premiere is classified
+			// StreamPostLive, but its adaptive URLs are COMPLETE FILES
+			// (contentLength set) served whole — not &sq segments. It MUST use
+			// VodStrategy; the &sq loop makes YouTube return the whole file for
+			// every seq (no past-end 403), an infinite re-download.
+			name:  "premiere post-live with complete-file formats uses VodStrategy",
+			isVod: true,
+			info: &youtube.VideoInfo{
+				StreamStatus:    youtube.StreamPostLive,
+				DashManifestURL: "",
+				Formats: []youtube.Format{
+					{Itag: 248, URL: "https://v.example/videoplayback?x=1", MimeType: "video/webm", Width: ptrInt(1920), Height: ptrInt(1080), ContentLength: "58382400"},
+					{Itag: 251, URL: "https://a.example/videoplayback?x=2", MimeType: "audio/webm", ContentLength: "3211436"},
+				},
+			},
+			want: "vod",
+		},
+		{
 			// Non-regression: a genuine finished VOD (StreamVOD) with the same
 			// adaptive-format shape must KEEP using VodStrategy — its URLs serve
 			// whole files, so the &sq path would be wrong.
