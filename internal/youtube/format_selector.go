@@ -8,17 +8,23 @@ import (
 
 var codecRegex = regexp.MustCompile(`codecs="?([^",]+)`)
 
-// Video codec priority patterns (higher index = better).
+// Video codec priority patterns (higher score = more preferred). Mirrors
+// yt-dlp's default FormatSort vcodec order (utils/_utils.py): av01 > vp9.2 >
+// vp9 > h265/hevc > h264/avc > vp8. Matching yt-dlp means AV1 — including the
+// Premium enhanced-bitrate itags like 721 — is chosen over vp9 at the same
+// resolution/fps. Patterns are tested in order, so the more-specific vp9.2
+// pattern must precede vp9. Codec strings are the extracted `codecs=` value
+// (e.g. "av01.0.09M.08", "vp9", "vp9.2", "avc1.640028").
 var videoCodecPatterns = []struct {
 	pattern *regexp.Regexp
 	score   int
 }{
-	{regexp.MustCompile(`^vp9\.2`), 5},
-	{regexp.MustCompile(`^vp9`), 4},
-	{regexp.MustCompile(`^vp09`), 4},
-	{regexp.MustCompile(`^av01`), 3},
-	{regexp.MustCompile(`^avc1`), 2},
-	{regexp.MustCompile(`^h264`), 1},
+	{regexp.MustCompile(`^av0?1`), 6},
+	{regexp.MustCompile(`^vp0?9\.0?2`), 5},
+	{regexp.MustCompile(`^vp0?9`), 4},
+	{regexp.MustCompile(`^([hx]265|he?vc?)`), 3},
+	{regexp.MustCompile(`^([hx]264|avc)`), 2},
+	{regexp.MustCompile(`^vp0?8`), 1},
 }
 
 // Audio codec priority patterns.
@@ -164,8 +170,13 @@ func selectBestFormatsImpl(formats []Format, maxResolution int, prefer60fps bool
 					continue
 				}
 
-				// Lower bitrate wins (better compression)
-				if f.Bitrate < bestVideo.Bitrate {
+				// Higher bitrate wins (better quality). Matches yt-dlp's
+				// size/br sort, which prefers the higher-quality / Premium
+				// stream at the same res/fps/codec (e.g. AV1 Premium 721 over
+				// the base AV1 399). YouTube only serves a Premium format's URL
+				// to accounts entitled to it, so a non-entitled session simply
+				// never sees it here (URL empty → skipped upstream).
+				if f.Bitrate > bestVideo.Bitrate {
 					bestVideo = f
 				} else if f.Bitrate == bestVideo.Bitrate {
 					// Lower auth level wins

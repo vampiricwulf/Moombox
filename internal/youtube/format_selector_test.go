@@ -204,17 +204,44 @@ func TestSelectBestFormats_CodecTiebreaker(t *testing.T) {
 	}
 }
 
+// TestSelectBestFormats_MatchesYtDlp is the regression guard for the
+// "picked 303 (vp9) instead of 721 (AV1 Premium)" report. It pins the two
+// yt-dlp-matching rules: AV1 beats vp9 at the same res/fps (codec order), and
+// among AV1 the higher-bitrate Premium stream wins (quality tiebreak). yt-dlp's
+// default selects exactly 721 for this shape.
+func TestSelectBestFormats_MatchesYtDlp(t *testing.T) {
+	formats := []Format{
+		{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`, Bitrate: 5828877, Width: new(1920), Height: new(1080), Fps: new(60), URL: "https://x/avc"},
+		{Itag: 303, MimeType: `video/webm; codecs="vp9"`, Bitrate: 5330212, Width: new(1920), Height: new(1080), Fps: new(60), URL: "https://x/vp9"},
+		{Itag: 399, MimeType: `video/mp4; codecs="av01.0.09M.08"`, Bitrate: 4794946, Width: new(1920), Height: new(1080), Fps: new(60), URL: "https://x/av1"},
+		{Itag: 721, MimeType: `video/mp4; codecs="av01.0.09M.08"`, Bitrate: 7609081, Width: new(1920), Height: new(1080), Fps: new(60), URL: "https://x/av1-premium"},
+		{Itag: 251, MimeType: `audio/webm; codecs="opus"`, Bitrate: 165407, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://x/opus"},
+		{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, Bitrate: 131072, AudioQuality: "AUDIO_QUALITY_MEDIUM", URL: "https://x/aac"},
+	}
+
+	result := SelectBestFormats(formats, 1920, true)
+	if result.Video == nil || result.Video.Itag != 721 {
+		t.Fatalf("expected itag 721 (AV1 Premium — highest codec + bitrate), got %v", result.Video)
+	}
+	if result.Audio == nil || result.Audio.Itag != 251 {
+		t.Fatalf("expected itag 251 (opus), got %v", result.Audio)
+	}
+}
+
 func TestScoreVideoCodec(t *testing.T) {
 	tests := []struct {
 		codec string
 		want  int
 	}{
+		{"av01.0.09M.08", 6},
 		{"vp9.2", 5},
 		{"vp9", 4},
 		{"vp09.00.10.08", 4},
-		{"av01.0.00M.08", 3},
+		{"hev1.1.6.L93", 3},
+		{"h265", 3},
 		{"avc1.640028", 2},
-		{"h264", 1},
+		{"h264", 2},
+		{"vp8", 1},
 		{"unknown", 0},
 		{"", 0},
 	}
