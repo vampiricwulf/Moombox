@@ -352,22 +352,19 @@ func (s *runState) initServices(logLevelOverride string) error {
 
 	// =========================================================================
 	// 12. Feed monitor (YouTube RSS)
-	// =========================================================================
-	// Shared probe cooldown: feed and DECAPI both probe YouTube videos via
-	// ytService.ProbeVideoStatus. Sharing one cache means a probe by either
-	// monitor blocks the other from re-probing the same video for the
-	// cooldown window. Caps per-video probe rate at ~2/hour.
-	probeCooldown := monitor.NewProbeCooldown(monitor.DefaultProbeCooldown)
-
+	// Feed and DECAPI each own a probe cooldown (created in their
+	// constructors, like MetadataTracker). They are deliberately NOT shared:
+	// the two monitors run on different cadences, and a shared cache let a
+	// single slow RSS probe of an upcoming video record the full window and
+	// block DECAPI — the fast ~15s live-detector — from re-probing that same
+	// video, delaying live-transition detection by up to the cooldown window.
 	feedMon := monitor.NewFeedMonitor(s.configStore, db, log)
-	feedMon.ProbeCooldown = probeCooldown
 	s.feedMon = feedMon
 
 	// =========================================================================
 	// 13. DECAPI monitor
 	// =========================================================================
 	decapiMon := monitor.NewDecapiMonitor(s.configStore, db, log)
-	decapiMon.ProbeCooldown = probeCooldown
 	s.decapiMon = decapiMon
 
 	// =========================================================================

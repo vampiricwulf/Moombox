@@ -106,9 +106,13 @@ func (t *MetadataFailureTracker) evictExcess() {
 
 // ProbeCooldown caches "last probe time" per video ID to prevent every
 // feed/DECAPI cycle from re-probing the same videos through the YouTube
-// player API. Both monitors share a single instance so a probe by either
-// blocks the other from re-probing the same video for the cooldown
-// window. Audit reports/monitor.md #5.
+// player API. Each monitor owns its own instance (created in its
+// constructor, like MetadataTracker) — the caches are deliberately NOT
+// shared: sharing let a slow RSS probe of an upcoming video record the full
+// window and block DECAPI, the fast ~15s live-detector, from re-probing the
+// same video, delaying live-transition detection. Audit reports/monitor.md
+// #5 (originally shared; scoped per-monitor after the cross-monitor block
+// was found to blind DECAPI).
 type ProbeCooldown struct {
 	mu        sync.Mutex
 	lastProbe map[string]time.Time

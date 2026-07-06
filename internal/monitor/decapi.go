@@ -65,7 +65,7 @@ type DecapiMonitor struct {
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
-	ProbeCooldown   *ProbeCooldown // optional: shared with FeedMonitor to dedup re-probes
+	ProbeCooldown   *ProbeCooldown // per-monitor: caps this monitor's own re-probe rate
 	IsOnline        func() bool    // nil = always online
 }
 
@@ -107,6 +107,7 @@ func NewDecapiMonitor(store *config.Store, db *database.Database, logger interfa
 		logger:          logger,
 		health:          newHealthTracker(),
 		MetadataTracker: NewMetadataFailureTracker(),
+		ProbeCooldown:   NewProbeCooldown(DefaultProbeCooldown),
 	}
 }
 

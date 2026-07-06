@@ -458,6 +458,36 @@ func TestProbeCooldownAllowsFreshAndBlocksRecent(t *testing.T) {
 	}
 }
 
+// TestMonitorsHaveIndependentProbeCooldowns pins the per-monitor cooldown
+// contract: the feed (RSS) and DECAPI monitors must NOT share a probe
+// cooldown. Sharing let a slow RSS probe of an upcoming video record the full
+// window and block DECAPI — the fast ~15s live-detector — from re-probing the
+// same video, delaying live-transition detection by up to the cooldown window.
+func TestMonitorsHaveIndependentProbeCooldowns(t *testing.T) {
+	log := silentLogger{}
+	// Constructors only stash store/db; nil is fine for this construction-only
+	// check and keeps the test free of a Store/DB fixture.
+	feedMon := NewFeedMonitor(nil, nil, log)
+	decapiMon := NewDecapiMonitor(nil, nil, log)
+
+	if feedMon.ProbeCooldown == nil || decapiMon.ProbeCooldown == nil {
+		t.Fatal("each monitor must own a probe cooldown")
+	}
+	if feedMon.ProbeCooldown == decapiMon.ProbeCooldown {
+		t.Fatal("feed and DECAPI must NOT share a probe cooldown instance")
+	}
+
+	// Behavioral proof: a probe recorded by feed must not block DECAPI.
+	const videoID = "dQw4w9WgXcQ"
+	feedMon.ProbeCooldown.Record(videoID)
+	if feedMon.ProbeCooldown.ShouldProbe(videoID) {
+		t.Error("feed cooldown should block feed's own re-probe right after Record")
+	}
+	if !decapiMon.ProbeCooldown.ShouldProbe(videoID) {
+		t.Error("DECAPI must stay free to probe a video feed just probed — cooldowns are independent")
+	}
+}
+
 func TestProbeCooldownRecordForShortWindow(t *testing.T) {
 	// RecordFor back-dates against the full window so a transient probe
 	// failure re-probes after the SHORT cooldown, not the full 30 min —
