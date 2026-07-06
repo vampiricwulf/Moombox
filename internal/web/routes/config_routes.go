@@ -214,14 +214,9 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["downloader.max_video_resolution"] = "max_video_resolution must be at least 1"
 			}
 		}
-		if v, ok := dl["segment_retry_delay_cap"].(float64); ok {
-			if v < 1 || v > 300 {
-				errs["downloader.segment_retry_delay_cap"] = "segment_retry_delay_cap must be between 1 and 300"
-			}
-		}
-		if v, ok := dl["segment_live_check_retries"].(float64); ok {
-			if v < 1 || v > 100 {
-				errs["downloader.segment_live_check_retries"] = "segment_live_check_retries must be between 1 and 100"
+		if v, ok := dl["maximum_timeout"].(float64); ok {
+			if v < 30 {
+				errs["downloader.maximum_timeout"] = "maximum_timeout must be at least 30 seconds"
 			}
 		}
 	}
@@ -446,11 +441,8 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		if v, ok := dl["prefer_60fps"].(bool); ok {
 			cfg.Downloader.Prefer60fps = v
 		}
-		if v, ok := dl["segment_retry_delay_cap"].(float64); ok {
-			cfg.Downloader.SegmentRetryDelayCap = int(v)
-		}
-		if v, ok := dl["segment_live_check_retries"].(float64); ok {
-			cfg.Downloader.SegmentLiveCheckRetries = int(v)
+		if v, ok := dl["maximum_timeout"].(float64); ok {
+			cfg.Downloader.MaximumTimeout = int(v)
 		}
 		if v, ok := dl["po_token"].(string); ok {
 			cfg.Downloader.PoToken = v

@@ -81,7 +81,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	// real segments), and must stay ENABLED while the file is still empty.
 	hasStartedDownloading := d.bytesWritten.Load() > 0
 	segsSinceResume := 0
-	d.lastSegTime.StoreNow() // Initialize to avoid premature NoSegmentTimeout
+	d.lastSegTime.StoreNow() // Initialize to avoid premature MaxTimeout
 
 	// Same-segment retry tracking with exponential backoff: when the same
 	// sequence keeps failing we ramp the delay so we don't hammer the CDN.
@@ -90,14 +90,10 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 	sameHeadRetryDelay := 0
 	lastConfirmedHead := -1
 
-	delayCap := d.opts.RetryDelayCap
-	if delayCap <= 0 {
-		delayCap = DefaultRetryDelayCap
-	}
-	liveCheckThreshold := d.opts.LiveCheckRetries
-	if liveCheckThreshold <= 0 {
-		liveCheckThreshold = 16
-	}
+	// Backoff-sleep cap for at-edge retries (fixed). The operator knob is now
+	// MaxTimeout (config.MaximumTimeout) — how long to keep waiting/verifying
+	// before force-finalizing — not a separate retry-delay cap or check count.
+	delayCap := DefaultRetryDelayCap
 
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
@@ -174,7 +170,7 @@ func (d *SegmentDownloader) runDashLoop(ctx context.Context) error {
 
 		if err != nil || statusCode >= 400 {
 			herr := d.handleDashError(ctx, statusCode, err, &consecutiveGoneErrors, hasStartedDownloading,
-				&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, delayCap, liveCheckThreshold)
+				&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, delayCap)
 			if herr == errStreamDone {
 				return nil // Clean exit
 			}
@@ -234,7 +230,7 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 	consecutiveGoneErrors *int, hasStartedDownloading bool,
 	sameSegRetries *int, lastRetrySeq *int,
 	sameHeadRetryDelay *int, lastConfirmedHead *int,
-	delayCap, liveCheckThreshold int) error {
+	delayCap int) error {
 
 	if statusCode == 403 || statusCode == 410 {
 		// 403 fire cases (only on 403; 410 = stream ended, not cipher):
@@ -283,7 +279,7 @@ func (d *SegmentDownloader) handleDashError(ctx context.Context, statusCode int,
 
 	if statusCode >= 400 {
 		return d.handleHTTPError(ctx, hasStartedDownloading, sameSegRetries, lastRetrySeq,
-			sameHeadRetryDelay, lastConfirmedHead, delayCap, liveCheckThreshold)
+			sameHeadRetryDelay, lastConfirmedHead, delayCap)
 	}
 
 	// Generic non-HTTP error (timeout, network, etc.) -- simple fixed-delay retry
@@ -362,7 +358,10 @@ func (d *SegmentDownloader) handleGoneError(ctx context.Context, consecutiveGone
 	if !hasStartedDownloading && *consecutiveGoneErrors > goneRetryBeforeFirstSegment {
 		return errStreamDone // Failed to find valid starting segment
 	}
-	// Single GONE while downloading -- small delay before retry
+	// Single GONE while downloading -- the next segment isn't there yet. Surface
+	// the wait (the tracker's 2s segment grace suppresses it for a healthy
+	// stream); it escalates to VerifyingEnd above once gones pile up.
+	d.emitActivity(ActivityWaitingForSegment)
 	utils.Sleep(ctx, singleGoneRetryDelay)
 	return nil // Continue loop
 }
@@ -389,7 +388,7 @@ func (d *SegmentDownloader) handleRateLimitError(ctx context.Context, sameHeadRe
 func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownloading bool,
 	sameSegRetries *int, lastRetrySeq *int,
 	sameHeadRetryDelay *int, lastConfirmedHead *int,
-	delayCap, liveCheckThreshold int) error {
+	delayCap int) error {
 
 	curSeq := int(d.currentSeq.Load())
 	if curSeq == *lastRetrySeq {
@@ -419,7 +418,9 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 	stuckOnSegment := *sameSegRetries >= MaxSegmentRetries
 
 	if behindHead && !stuckOnSegment {
-		// Transient failure while behind head -- retry with small delay
+		// Transient failure while behind head -- retry with small delay. Surface
+		// the wait (2s grace suppresses it for a stream that recovers quickly).
+		d.emitActivity(ActivityWaitingForSegment)
 		utils.Sleep(ctx, transientFailureRetryDelay)
 		return nil // Continue loop
 	}
@@ -437,71 +438,76 @@ func (d *SegmentDownloader) handleHTTPError(ctx context.Context, hasStartedDownl
 		*sameHeadRetryDelay = delayCap
 	}
 
-	// Check stream status at threshold
-	if *sameHeadRetryDelay == liveCheckThreshold && d.opts.CheckStreamStatus != nil {
+	// Time-based stream-status verification. A live segment is ~1s of media
+	// arriving about once a second, so once the gap since the last segment
+	// crosses streamStatusCheckInterval (30s) the wait itself is the signal to
+	// verify the stream ended — re-checked at most once per interval so an ended
+	// stream finalizes within ~30s (rather than waiting out MaxTimeout), while
+	// brief hiccups (the lastSegTime gate) don't spend an API call.
+	if d.opts.CheckStreamStatus != nil &&
+		d.lastSegTime.Since() >= streamStatusCheckInterval &&
+		d.lastStreamStatusCheck.Since() >= streamStatusCheckInterval {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 				return err
 			}
+			// Offline pauses the clock: reset lastSegTime so the outage doesn't
+			// count toward MaxTimeout (a recovered stream gets a fresh budget),
+			// matching the backstop's offline branch below. Without this, a long
+			// outage detected here first would leave lastSegTime aged and could
+			// force-finalize a still-live stream on the next non-gone HTTP error.
+			d.lastSegTime.StoreNow()
+			d.lastStreamStatusCheck.StoreNow()
 			*sameHeadRetryDelay = 0
 			return nil
 		}
-		ended, _ := d.opts.CheckStreamStatus(ctx)
-		if ended {
+		d.lastStreamStatusCheck.StoreNow()
+		ended, checkErr := d.opts.CheckStreamStatus(ctx)
+		if checkErr != nil {
+			d.logger.Warn("stream status check failed while waiting for segment", "err", checkErr)
+		} else if ended {
 			return errStreamDone
-		}
-	}
-
-	// Check status on every probe at cap
-	if *sameHeadRetryDelay >= delayCap && d.opts.CheckStreamStatus != nil {
-		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
-			d.emitActivity(ActivityReconnecting)
-			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
-			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
-				return err
-			}
-			*sameHeadRetryDelay = 0
-			return nil
-		}
-		ended, _ := d.opts.CheckStreamStatus(ctx)
-		if ended {
-			return errStreamDone
-		}
-		// Stream still live but we can't get segments -- format may have changed
-		if hasStartedDownloading {
+		} else if behindHead && hasStartedDownloading {
+			// Still live, but a segment we KNOW exists (curSeq < head) won't
+			// come — the format/URL likely rotated; refresh via ErrQualityLost.
 			return ErrQualityLost
 		}
+		// Still live and simply at the live edge — keep waiting for the next segment.
 	}
 
-	// Only surface "verifying end" once the backoff has escalated toward the
-	// stream-status check; a brief at-edge wait (the normal steady state for a
-	// healthy live stream that has caught up to the head) is not end-verification.
-	if *sameHeadRetryDelay >= liveCheckThreshold {
+	// Surface the wait: "waiting for next segment" for the earlier at-edge gap
+	// (the segment simply hasn't published yet — the normal steady state for a
+	// healthy stream caught up to the head), escalating to "verifying end" once
+	// the no-segment gap crosses the verify interval and we start checking with
+	// YouTube. The tracker's 2s segment grace suppresses both when the next
+	// segment arrives promptly, so a healthy stream shows neither.
+	if d.lastSegTime.Since() >= streamStatusCheckInterval {
 		d.emitActivity(ActivityVerifyingEnd)
+	} else {
+		d.emitActivity(ActivityWaitingForSegment)
 	}
 
-	// Also check no-segment timeout
-	if d.lastSegTime.Since() > NoSegmentTimeout {
+	// Maximum-timeout backstop: once the no-segment gap exceeds the configured
+	// MaxTimeout, force-finalize the recording even if YouTube still reports the
+	// stream live — its status can lag or stick. Offline is the one exception:
+	// pause the clock and wait for connectivity rather than give up. The clock
+	// resets whenever a segment lands (lastSegTime updates), so a recovered
+	// stream gets a fresh MaxTimeout budget.
+	if d.lastSegTime.Since() >= d.opts.MaxTimeout {
 		if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 			d.emitActivity(ActivityReconnecting)
 			d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
 			if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
 				return err
 			}
-			d.lastSegTime.StoreNow() // Reset timer on recovery
+			d.lastSegTime.StoreNow() // reset the timeout clock on recovery
 			*sameHeadRetryDelay = 0
 			return nil
 		}
-		if d.opts.CheckStreamStatus != nil && hasStartedDownloading {
-			ended, checkErr := d.opts.CheckStreamStatus(ctx)
-			if checkErr != nil {
-				d.logger.Warn("stream status check failed, assuming ended", "err", checkErr)
-			} else if !ended {
-				return ErrQualityLost
-			}
-		}
+		d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
+			"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
 		return errStreamDone
 	}
 

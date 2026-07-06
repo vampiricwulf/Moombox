@@ -123,8 +123,7 @@ var advancedSetupSteps = []setupStepDef{
 			{"prefer60fps", "Prefer 60fps", "Yes", "When same resolution, prefer 60fps. Resolution always wins", setupFieldToggle, []string{"Yes", "No"}},
 			{"numParallel", "Parallel downloads", "2", "2-4 recommended, higher uses more CPU/network", setupFieldNumber, nil},
 			{"downloadChat", "Download chat", "Yes", "Save live chat as JSON alongside video", setupFieldToggle, []string{"Yes", "No"}},
-			{"segmentRetryDelayCap", "Retry delay cap (sec)", "60", "Max seconds between segment retry attempts", setupFieldNumber, nil},
-			{"segmentLiveCheckRetries", "Live check retries", "16", "Retries before declaring stream ended", setupFieldNumber, nil},
+			{"maximumTimeout", "YouTube max timeout (sec)", "600", "Seconds to keep retrying a stalled YouTube livestream before finalizing even if YouTube still says live", setupFieldNumber, nil},
 		},
 	},
 	{
@@ -1080,12 +1079,8 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 		m.errorMsg = "Downloader: Max resolution must be at least 1"
 		return ""
 	}
-	if n := vNum("segmentRetryDelayCap"); n != 0 && (n < 1 || n > 300) {
-		m.errorMsg = "Downloader: Retry delay cap must be between 1 and 300 seconds"
-		return ""
-	}
-	if n := vNum("segmentLiveCheckRetries"); n != 0 && (n < 1 || n > 100) {
-		m.errorMsg = "Downloader: Live check retries must be between 1 and 100"
+	if n := vNum("maximumTimeout"); n != 0 && n < 30 {
+		m.errorMsg = "Downloader: YouTube max timeout must be at least 30 seconds"
 		return ""
 	}
 
@@ -1166,11 +1161,8 @@ func (m *SetupWizardModel) finishAdvancedSetup() string {
 	}
 	cfg.Downloader.Prefer60fps = vBool("prefer60fps", true)
 	cfg.Downloader.DownloadChat = vBool("downloadChat", true)
-	if n := vNum("segmentRetryDelayCap"); n > 0 {
-		cfg.Downloader.SegmentRetryDelayCap = n
-	}
-	if n := vNum("segmentLiveCheckRetries"); n > 0 {
-		cfg.Downloader.SegmentLiveCheckRetries = n
+	if n := vNum("maximumTimeout"); n > 0 {
+		cfg.Downloader.MaximumTimeout = n
 	}
 
 	// Cookies

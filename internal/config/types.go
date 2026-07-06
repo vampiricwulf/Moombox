@@ -89,13 +89,16 @@ type MonitorsConfig struct {
 
 // DownloaderConfig holds download-related settings.
 type DownloaderConfig struct {
-	OutputTemplate          string `toml:"output_template" json:"output_template"`
-	MaxVideoResolution      int    `toml:"max_video_resolution" json:"max_video_resolution"`
-	NumParallelDownloads    int    `toml:"num_parallel_downloads" json:"num_parallel_downloads"`
-	DownloadChat            bool   `toml:"download_chat" json:"download_chat"`
-	Prefer60fps             bool   `toml:"prefer_60fps" json:"prefer_60fps"`
-	SegmentRetryDelayCap    int    `toml:"segment_retry_delay_cap" json:"segment_retry_delay_cap"`
-	SegmentLiveCheckRetries int    `toml:"segment_live_check_retries" json:"segment_live_check_retries"`
+	OutputTemplate       string `toml:"output_template" json:"output_template"`
+	MaxVideoResolution   int    `toml:"max_video_resolution" json:"max_video_resolution"`
+	NumParallelDownloads int    `toml:"num_parallel_downloads" json:"num_parallel_downloads"`
+	DownloadChat         bool   `toml:"download_chat" json:"download_chat"`
+	Prefer60fps          bool   `toml:"prefer_60fps" json:"prefer_60fps"`
+	// MaximumTimeout (seconds, YouTube livestreams only) is how long to keep
+	// retrying — checking every 30s whether the stream has ended — before
+	// force-finalizing the recording, even if YouTube still reports the stream
+	// live. Resets whenever a segment arrives.
+	MaximumTimeout int `toml:"maximum_timeout" json:"maximum_timeout"`
 	// PoToken and VisitorData are session-scoped secrets. Like PasswordHash,
 	// they must never be returned by GET /api/config — use json:"-" to hide
 	// them from any encoder walking the Config struct. Operators who need to

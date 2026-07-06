@@ -11,6 +11,22 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/utils"
 )
 
+// waitOnline blocks until connectivity returns, then resets the no-segment
+// clock so the offline stretch doesn't count toward the MaxTimeout backstop
+// (which measures from lastSegTime at the top of runHlsLoop). EVERY HLS
+// offline-recovery branch must route through this: otherwise a reconnect after
+// an outage longer than MaxTimeout would trip the backstop and force-finalize a
+// still-live recording — the outage branches unblock only once IsOnline() is
+// true, so the backstop's own offline sub-branch never gets a chance to reset
+// the clock first. Returns the context error if cancelled while waiting.
+func (d *SegmentDownloader) waitOnline(ctx context.Context) error {
+	if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+		return err
+	}
+	d.lastSegTime.StoreNow()
+	return nil
+}
+
 // runHlsLoop is the main HLS download loop.
 func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// Save resume state on exit so interrupted downloads can continue on restart.
@@ -21,6 +37,10 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			d.ClearResume()
 		}
 	}()
+
+	// Initialize the no-segment clock so the MaxTimeout backstop (YouTube HLS
+	// only, see below) measures from loop entry rather than the zero time.
+	d.lastSegTime.StoreNow()
 
 	staleCount := 0
 	consecutiveErrors := 0
@@ -50,6 +70,28 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			return d.cancelErr(ctx)
 		}
 
+		// Maximum-timeout backstop (YouTube HLS only — see EnforceMaxTimeout):
+		// once the no-segment gap exceeds the configured MaxTimeout, force-
+		// finalize even if YouTube still reports the stream live (its status can
+		// lag or stick). Offline pauses the clock — wait for connectivity rather
+		// than give up. The clock resets whenever a segment lands, so a recovered
+		// stream gets a fresh budget. Twitch HLS leaves EnforceMaxTimeout false
+		// and relies on its (reliable) GQL end-detection instead.
+		if d.opts.EnforceMaxTimeout && d.lastSegTime.Since() >= d.opts.MaxTimeout {
+			if d.opts.IsOnline != nil && !d.opts.IsOnline() {
+				d.emitActivity(ActivityReconnecting)
+				d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
+				if err := d.waitOnline(ctx); err != nil {
+					return err
+				}
+				continue
+			}
+			d.logger.Info("[Downloader] maximum timeout reached while waiting for segment; finalizing",
+				"maxTimeout", d.opts.MaxTimeout, "gap", d.lastSegTime.Since().Round(time.Second))
+			d.streamEnded.Store(true)
+			return nil
+		}
+
 		// Fetch playlist
 		data, plStatus, err := d.fetchSegment(ctx, d.getBaseURL())
 		if err != nil {
@@ -58,7 +100,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 					d.emitActivity(ActivityReconnecting)
 					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
-					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+					if err := d.waitOnline(ctx); err != nil {
 						return err
 					}
 					consecutiveErrors = 0
@@ -80,7 +122,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 					d.emitActivity(ActivityReconnecting)
 					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
-					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+					if err := d.waitOnline(ctx); err != nil {
 						return err
 					}
 					consecutiveErrors = 0
@@ -129,7 +171,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 					d.emitActivity(ActivityReconnecting)
 					d.logger.Warn("playlist parse failures while device offline, waiting for connectivity")
-					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+					if err := d.waitOnline(ctx); err != nil {
 						return err
 					}
 					consecutiveErrors = 0
@@ -372,7 +414,7 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 				if d.opts.IsOnline != nil && !d.opts.IsOnline() {
 					d.emitActivity(ActivityReconnecting)
 					d.logger.Warn("stream end signal suppressed — device offline, waiting for connectivity")
-					if err := waitForConnectivity(ctx, d.opts.IsOnline); err != nil {
+					if err := d.waitOnline(ctx); err != nil {
 						return err
 					}
 					staleCount = 0

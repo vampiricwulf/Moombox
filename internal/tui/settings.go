@@ -109,8 +109,7 @@ var sections = []settingsSection{
 			{"num_parallel_downloads", "Parallel downloads", fieldNumber, nil, "2-4 recommended, higher uses more CPU/network", nil},
 			{"download_chat", "Download chat", fieldToggle, nil, "save live chat as JSON alongside video", nil},
 			{"prefer_60fps", "Prefer 60fps", fieldToggle, nil, "prefer 60fps when same resolution available", nil},
-			{"segment_retry_delay_cap", "Segment retry cap", fieldNumber, nil, "max retry backoff in seconds (default: 60)", nil},
-			{"segment_live_check_retries", "Live check retries", fieldNumber, nil, "failures before API check (default: 16)", nil},
+			{"maximum_timeout", "YouTube max timeout", fieldNumber, nil, "seconds to keep retrying a stalled YouTube livestream (30s live-checks) before finalizing even if YouTube still reports it live (default: 600, min 30, no max; very large values risk account consequences)", nil},
 		},
 	},
 	{
@@ -452,8 +451,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	m.values["num_parallel_downloads"] = strconv.Itoa(cfg.Downloader.NumParallelDownloads)
 	m.values["download_chat"] = boolToDisplay(cfg.Downloader.DownloadChat)
 	m.values["prefer_60fps"] = boolToDisplay(cfg.Downloader.Prefer60fps)
-	m.values["segment_retry_delay_cap"] = strconv.Itoa(cfg.Downloader.SegmentRetryDelayCap)
-	m.values["segment_live_check_retries"] = strconv.Itoa(cfg.Downloader.SegmentLiveCheckRetries)
+	m.values["maximum_timeout"] = strconv.Itoa(cfg.Downloader.MaximumTimeout)
 
 	// Cookies
 	m.values["cookie_file"] = cfg.Cookies.CookieFile
@@ -542,8 +540,7 @@ func (m *SettingsModel) applyValues() {
 		{"feed_check_interval", "Feed check interval must be 1-1440 minutes", 1, 1440},
 		{"max_video_resolution", "Max resolution must be at least 1", 1, math.MaxInt},
 		{"num_parallel_downloads", "Parallel downloads must be at least 1", 1, math.MaxInt},
-		{"segment_retry_delay_cap", "Segment retry cap must be at least 1", 1, math.MaxInt},
-		{"segment_live_check_retries", "Live check retries must be at least 1", 1, math.MaxInt},
+		{"maximum_timeout", "YouTube max timeout must be at least 30 seconds", 30, math.MaxInt},
 		{"refresh_interval", "Cookie refresh interval must be 10-10080 minutes", 10, 10080},
 		{"disk_warn_percent", "Disk warning threshold must be 1-99", 1, 99},
 		{"disk_critical_percent", "Disk critical threshold must be 1-99", 1, 99},
@@ -647,8 +644,7 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Downloader.NumParallelDownloads, _ = strconv.Atoi(m.values["num_parallel_downloads"])
 	m.cfg.Downloader.DownloadChat = m.values["download_chat"] == "Yes"
 	m.cfg.Downloader.Prefer60fps = m.values["prefer_60fps"] == "Yes"
-	m.cfg.Downloader.SegmentRetryDelayCap, _ = strconv.Atoi(m.values["segment_retry_delay_cap"])
-	m.cfg.Downloader.SegmentLiveCheckRetries, _ = strconv.Atoi(m.values["segment_live_check_retries"])
+	m.cfg.Downloader.MaximumTimeout, _ = strconv.Atoi(m.values["maximum_timeout"])
 
 	// Cookies
 	m.cfg.Cookies.CookieFile = m.values["cookie_file"]

@@ -37,6 +37,19 @@ func TestHandleGoneErrorEmitsVerifyingEnd(t *testing.T) {
 	}
 }
 
+func TestHandleGoneErrorEmitsWaitingForSegment(t *testing.T) {
+	d, got := newActivityDownloader(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled so the single-gone retry sleep returns immediately
+	n := 1   // one gone while downloading — below the verify threshold
+	if err := d.handleGoneError(ctx, &n, true); err != nil {
+		t.Fatalf("handleGoneError returned %v, want nil (continue)", err)
+	}
+	if *got != ActivityWaitingForSegment {
+		t.Errorf("activity = %v, want ActivityWaitingForSegment (pre-verify wait)", *got)
+	}
+}
+
 func TestHandleRateLimitErrorEmitsRateLimited(t *testing.T) {
 	d, got := newActivityDownloader(t)
 	ctx, cancel := context.WithCancel(context.Background())

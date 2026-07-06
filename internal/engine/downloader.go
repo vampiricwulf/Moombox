@@ -41,15 +41,26 @@ var ErrSegmentRetriesExhausted = errors.New("segment retries exhausted")
 var ErrGapDetected = errors.New("unrecoverable gap in live stream")
 
 const (
-	CatchupThreshold      = 10
-	MaxSegmentRetries     = 5
-	ParallelDownloads     = 6  // Bounded parallel downloads during catch-up
-	DefaultRetryDelayCap  = 60 // seconds
-	HeadProbeInterval     = 5 * time.Second
-	SegmentTimeout        = 30 * time.Second
-	NoSegmentTimeout      = 10 * time.Minute
-	ResumeSeqInterval     = 50 // Save resume state every N sequential segments
-	ResumeCatchupInterval = 10 // Save resume state every N catch-up segments
+	CatchupThreshold     = 10
+	MaxSegmentRetries    = 5
+	ParallelDownloads    = 6  // Bounded parallel downloads during catch-up
+	DefaultRetryDelayCap = 60 // seconds
+	HeadProbeInterval    = 5 * time.Second
+	SegmentTimeout       = 30 * time.Second
+	// DefaultMaxTimeout is the fallback for DownloaderOptions.MaxTimeout (the
+	// operator-configurable config.MaximumTimeout): how long the DASH loop keeps
+	// waiting/verifying for the next segment before force-finalizing, even when
+	// YouTube still reports the stream live.
+	DefaultMaxTimeout = 10 * time.Minute
+	// streamStatusCheckInterval bounds how often the DASH loop re-checks the
+	// stream's status while waiting for the next segment. A live segment is ~1s
+	// of media arriving about once a second, so a gap this long is the signal to
+	// verify the stream ended; we then re-check at most once per interval so an
+	// ended stream finalizes within ~30s (vs. waiting out MaxTimeout) without
+	// hammering the API on brief hiccups.
+	streamStatusCheckInterval = 30 * time.Second
+	ResumeSeqInterval         = 50 // Save resume state every N sequential segments
+	ResumeCatchupInterval     = 10 // Save resume state every N catch-up segments
 	// DownloadChunkSize is sourced from the central constants catalog (5 MB).
 	DownloadChunkSize = constants.DownloadChunkSize
 	MaxChunkRetries   = 3                      // Per-chunk retry limit
@@ -113,9 +124,20 @@ type DownloaderOptions struct {
 	// muxes the current file as a finished part and starts a new one, so
 	// every output file stays internally gapless. Leave false for platforms
 	// with seekable/backfillable streams (YouTube) and for VODs.
-	StopOnGap         bool
-	RetryDelayCap     int // seconds
-	LiveCheckRetries  int
+	StopOnGap bool
+	// MaxTimeout bounds how long the DASH loop keeps retrying/verifying while
+	// waiting for the next segment before it force-finalizes the recording —
+	// even if YouTube still reports the stream live (its status can lag or
+	// stick). The clock resets whenever a segment lands. Zero uses
+	// DefaultMaxTimeout. Sourced from config.MaximumTimeout (YouTube only).
+	MaxTimeout time.Duration
+	// EnforceMaxTimeout opts the HLS loop into the same MaxTimeout backstop.
+	// The DASH loop always enforces MaxTimeout because only YouTube ever runs
+	// it, but runHlsLoop is shared with Twitch — whose GQL end-detection is
+	// reliable and which never sets MaxTimeout (so the constructor default
+	// would otherwise apply). Only the YouTube HLS strategy sets this true, so
+	// Twitch recordings are never force-finalized by the timeout.
+	EnforceMaxTimeout bool
 	CheckStreamStatus func(ctx context.Context) (bool, error) // Returns true if stream ended
 	IsOnline          func() bool                             // Returns false if device has no internet
 	Logger            DownloaderLogger
@@ -133,6 +155,7 @@ const (
 	ActivityRateLimited                                 // 429 backoff
 	ActivityFindingFirstSegment                         // pre-first-byte hunt for the first valid segment
 	ActivityRetrying                                    // segment/playlist fetch failing; retrying
+	ActivityWaitingForSegment                           // caught up at the live edge; the next segment isn't published yet
 )
 
 // DownloadProgress holds progress information for event callbacks.
@@ -211,19 +234,20 @@ func (a *atomicTime) Since() time.Duration { return time.Since(a.Load()) }
 
 // SegmentDownloader downloads DASH or HLS segments sequentially/in parallel.
 type SegmentDownloader struct {
-	opts               DownloaderOptions
-	mu                 sync.Mutex
-	running            bool
-	cancelled          atomic.Bool
-	streamEnded        atomic.Bool
-	outputFile         *os.File
-	bytesWritten       atomic.Int64
-	currentSeq         atomic.Int64
-	headSeq            atomic.Int64
-	lastSegTime        atomicTime
-	lastHeadProbeTime  atomicTime
-	logger             DownloaderLogger
-	cipherFailureFired atomic.Bool
+	opts                  DownloaderOptions
+	mu                    sync.Mutex
+	running               bool
+	cancelled             atomic.Bool
+	streamEnded           atomic.Bool
+	outputFile            *os.File
+	bytesWritten          atomic.Int64
+	currentSeq            atomic.Int64
+	headSeq               atomic.Int64
+	lastSegTime           atomicTime
+	lastHeadProbeTime     atomicTime
+	lastStreamStatusCheck atomicTime
+	logger                DownloaderLogger
+	cipherFailureFired    atomic.Bool
 
 	// baseURLOverride is set by SetBaseURL when a cipher rotation
 	// requires swapping the stream URL mid-download. nil = use
@@ -329,11 +353,8 @@ func NewSegmentDownloader(opts DownloaderOptions) *SegmentDownloader {
 	if opts.MaxRetries == 0 {
 		opts.MaxRetries = MaxSegmentRetries
 	}
-	if opts.RetryDelayCap == 0 {
-		opts.RetryDelayCap = DefaultRetryDelayCap
-	}
-	if opts.LiveCheckRetries == 0 {
-		opts.LiveCheckRetries = 16
+	if opts.MaxTimeout <= 0 {
+		opts.MaxTimeout = DefaultMaxTimeout
 	}
 	if opts.EndSeq == 0 {
 		opts.EndSeq = -1

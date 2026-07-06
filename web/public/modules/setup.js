@@ -689,8 +689,7 @@ export class SetupController {
         max_video_resolution: num("setup-max-resolution"),
         prefer_60fps: document.getElementById("setup-prefer-60fps")?.checked ?? true,
         download_chat: document.getElementById("setup-download-chat")?.checked ?? true,
-        segment_retry_delay_cap: num("setup-retry-delay-cap"),
-        segment_live_check_retries: num("setup-live-check-retries"),
+        maximum_timeout: num("setup-maximum-timeout"),
       },
       cookies: {
         cookie_file: val("setup-cookie-file") || undefined,

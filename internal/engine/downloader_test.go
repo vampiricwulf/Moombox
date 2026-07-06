@@ -18,11 +18,8 @@ func TestNewSegmentDownloader_Defaults(t *testing.T) {
 	if d.opts.MaxRetries != MaxSegmentRetries {
 		t.Errorf("MaxRetries: got %d, want %d", d.opts.MaxRetries, MaxSegmentRetries)
 	}
-	if d.opts.RetryDelayCap != DefaultRetryDelayCap {
-		t.Errorf("RetryDelayCap: got %d, want %d", d.opts.RetryDelayCap, DefaultRetryDelayCap)
-	}
-	if d.opts.LiveCheckRetries != 16 {
-		t.Errorf("LiveCheckRetries: got %d, want 16", d.opts.LiveCheckRetries)
+	if d.opts.MaxTimeout != DefaultMaxTimeout {
+		t.Errorf("MaxTimeout: got %v, want %v", d.opts.MaxTimeout, DefaultMaxTimeout)
 	}
 	if d.opts.EndSeq != -1 {
 		t.Errorf("EndSeq: got %d, want -1", d.opts.EndSeq)
@@ -37,20 +34,19 @@ func TestNewSegmentDownloader_Defaults(t *testing.T) {
 
 func TestNewSegmentDownloader_CustomValues(t *testing.T) {
 	d := NewSegmentDownloader(DownloaderOptions{
-		BaseURL:          "https://example.com/video",
-		OutputFile:       "out.mp4",
-		MaxRetries:       10,
-		RetryDelayCap:    120,
-		LiveCheckRetries: 32,
-		EndSeq:           999,
-		ResumeFile:       "custom.resume.json",
+		BaseURL:    "https://example.com/video",
+		OutputFile: "out.mp4",
+		MaxRetries: 10,
+		MaxTimeout: 5 * time.Minute,
+		EndSeq:     999,
+		ResumeFile: "custom.resume.json",
 	})
 
 	if d.opts.MaxRetries != 10 {
 		t.Errorf("MaxRetries: got %d, want 10", d.opts.MaxRetries)
 	}
-	if d.opts.RetryDelayCap != 120 {
-		t.Errorf("RetryDelayCap: got %d, want 120", d.opts.RetryDelayCap)
+	if d.opts.MaxTimeout != 5*time.Minute {
+		t.Errorf("MaxTimeout: got %v, want 5m", d.opts.MaxTimeout)
 	}
 	if d.opts.EndSeq != 999 {
 		t.Errorf("EndSeq: got %d, want 999", d.opts.EndSeq)

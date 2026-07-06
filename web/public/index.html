@@ -857,25 +857,13 @@
                                 >
                             </sl-switch>
 
-                            <sl-divider></sl-divider>
-                            <h4>Live Stream Retry Behavior</h4>
                             <sl-input
-                                id="cfg-retry-delay-cap"
+                                id="cfg-maximum-timeout"
                                 type="number"
-                                min="1"
-                                max="300"
-                                label="Retry Delay Cap (seconds)"
-                                placeholder="60"
-                                help-text="When a live segment isn't available yet, wait time increases by 1s each retry up to this cap (default: 60, range: 1–300). Applies to new downloads."
-                            ></sl-input>
-                            <sl-input
-                                id="cfg-live-check-retries"
-                                type="number"
-                                min="1"
-                                max="100"
-                                label="Live Check Retries"
-                                placeholder="16"
-                                help-text="After this many consecutive segment failures, query the YouTube API to check if the stream ended (default: 16, range: 1–100). Lower values detect ended/privated streams faster. Applies to new downloads."
+                                min="30"
+                                label="YouTube Maximum Timeout (seconds)"
+                                placeholder="600"
+                                help-text="YouTube livestreams only: how long to keep retrying — re-checking every 30s whether the stream has ended — before finalizing the recording even if YouTube still reports it live. The clock resets whenever a segment arrives (default: 600, minimum: 30, no maximum). ⚠ Very large values keep polling YouTube for a long time, which can risk negative consequences on your account. Applies to new downloads."
                             ></sl-input>
                         </div>
 
@@ -1660,8 +1648,7 @@
                     <sl-input id="setup-parallel-downloads" type="number" label="Parallel Downloads" placeholder="2" min="1" help-text="Streams to download simultaneously. 2–4 recommended. Higher values use more CPU and network."></sl-input>
                     <sl-switch id="setup-download-chat" checked>Download Live Chat</sl-switch>
                     <sl-details summary="Advanced retry settings">
-                        <sl-input id="setup-retry-delay-cap" type="number" label="Retry Delay Cap (seconds)" placeholder="60" min="1" max="300"></sl-input>
-                        <sl-input id="setup-live-check-retries" type="number" label="Live Check Retries" placeholder="16" min="1" max="100"></sl-input>
+                        <sl-input id="setup-maximum-timeout" type="number" label="YouTube Maximum Timeout (seconds)" placeholder="600" min="30" help-text="How long to keep retrying a stalled YouTube livestream before finalizing, even if YouTube still says live (min 30, no max). Very large values risk account consequences."></sl-input>
                     </sl-details>
                     <div class="setup-nav">
                         <sl-button variant="default" id="setup-adv-back-5"><sl-icon slot="prefix" name="arrow-left"></sl-icon> Back</sl-button>

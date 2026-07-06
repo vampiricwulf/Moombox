@@ -16,6 +16,15 @@ const (
 	progressPersistInterval = 1 * time.Second
 	activityUpdateInterval  = 1 * time.Second // throttle activity progress-line writes
 	activitySegmentGrace    = 2 * time.Second // show a wait only after this gap with no segment
+	// waitingForSegmentGrace suppresses the "Waiting for next segment" line
+	// until the quiet gap outgrows a normal segment interval. YouTube's live
+	// segments are ~1s, but normal-latency streams publish ~5s segments, so a
+	// gap of a few seconds is the healthy steady state at the live edge; showing
+	// the wait during it flickers the line every cycle. 5s clears typical
+	// cadences while still surfacing a genuine stall ~25s before the 30s
+	// "verifying end" escalation. Applies only to ActivityWaitingForSegment —
+	// other waits keep the 2s activitySegmentGrace.
+	waitingForSegmentGrace = 5 * time.Second
 	// activityTickerIdleStop is how many consecutive quiet refresh ticks
 	// (nothing to show) the refresh goroutine tolerates before parking
 	// itself. Comfortably outlives activitySegmentGrace so a wait recorded
@@ -281,7 +290,9 @@ func (pt *ProgressTracker) setActivity(stream streamKind, a engine.DownloadActiv
 // show). When several slots wait, the longest-running wait wins so the elapsed
 // reflects the true stall, not the most recent slot to stall. Caller holds mu.
 func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActivity, time.Time) {
-	if !pt.lastSegmentAt.IsZero() && now.Sub(pt.lastSegmentAt) < activitySegmentGrace {
+	haveSeg := !pt.lastSegmentAt.IsZero()
+	sinceSeg := now.Sub(pt.lastSegmentAt)
+	if haveSeg && sinceSeg < activitySegmentGrace {
 		return engine.ActivityNone, time.Time{}
 	}
 	act, start := engine.ActivityNone, time.Time{}
@@ -296,6 +307,12 @@ func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActiv
 		if s.a == engine.ActivityNone {
 			continue
 		}
+		// "Waiting for next segment" is the normal live-edge gap; hold it back
+		// until the quiet stretch outgrows a typical segment interval so a
+		// healthy multi-second-segment stream doesn't flicker the wait line.
+		if s.a == engine.ActivityWaitingForSegment && haveSeg && sinceSeg < waitingForSegmentGrace {
+			continue
+		}
 		if act == engine.ActivityNone || s.t.Before(start) {
 			act, start = s.a, s.t
 		}
@@ -304,12 +321,13 @@ func (pt *ProgressTracker) dominantActivity(now time.Time) (engine.DownloadActiv
 }
 
 // activityElapsedLocked picks the elapsed duration shown for an activity.
-// VerifyingEnd shows time since the last delivered segment — the number that
-// actually says whether the stream is over, and the same clock the
-// orchestrator's verification loop reasons with — while the other waits show
-// how long the wait itself has been running. Caller holds mu.
+// VerifyingEnd and WaitingForSegment show time since the last delivered segment
+// — the number that actually says how long the stream has been quiet (and, for
+// VerifyingEnd, the same clock the orchestrator's verification loop reasons
+// with) — while the other waits show how long the wait itself has been running.
+// Caller holds mu.
 func (pt *ProgressTracker) activityElapsedLocked(act engine.DownloadActivity, start, now time.Time) time.Duration {
-	if act == engine.ActivityVerifyingEnd && !pt.lastSegmentAt.IsZero() {
+	if (act == engine.ActivityVerifyingEnd || act == engine.ActivityWaitingForSegment) && !pt.lastSegmentAt.IsZero() {
 		return now.Sub(pt.lastSegmentAt)
 	}
 	return now.Sub(start)
@@ -541,6 +559,8 @@ func activityMessage(a engine.DownloadActivity, elapsed time.Duration) string {
 		return fmt.Sprintf("Rate-limited - backing off... (%s)", e)
 	case engine.ActivityFindingFirstSegment:
 		return fmt.Sprintf("Waiting for first segment... (%s)", e)
+	case engine.ActivityWaitingForSegment:
+		return fmt.Sprintf("Waiting for next segment... (%s)", e)
 	case engine.ActivityRetrying:
 		return fmt.Sprintf("Segment fetch failing - retrying... (%s)", e)
 	default:

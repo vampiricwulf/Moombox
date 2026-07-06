@@ -412,7 +412,8 @@ The `SegmentDownloader` in `internal/engine/downloader.go` handles the actual by
 | `MaxSegmentRetries` | 5 | Per-segment retry limit |
 | `ParallelDownloads` | 6 | Concurrent workers during catch-up |
 | `SegmentTimeout` | 30s | HTTP timeout per segment request |
-| `NoSegmentTimeout` | 10min | Max time without new segment before stopping |
+| `DefaultMaxTimeout` | 10min | Fallback for `maximum_timeout` (force-finalize when no segment arrives for this long, even if YouTube reports live) |
+| `streamStatusCheckInterval` | 30s | No-segment gap that triggers a stream-status check (re-checked at most once per interval) |
 | `HeadProbeInterval` | 5s | Interval for HEAD probes to discover head seq |
 | `ResumeSeqInterval` | 50 | Save resume state every N sequential segments |
 | `ResumeCatchupInterval` | 10 | Save resume state every N catch-up segments |

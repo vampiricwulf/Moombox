@@ -470,8 +470,7 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 | NumParallelDownloads | int | 2 | `num_parallel_downloads` | Min: 1 |
 | DownloadChat | bool | true | `download_chat` | |
 | Prefer60fps | bool | true | `prefer_60fps` | |
-| SegmentRetryDelayCap | int | 60 | `segment_retry_delay_cap` | Seconds |
-| SegmentLiveCheckRetries | int | 16 | `segment_live_check_retries` | |
+| MaximumTimeout | int | 600 | `maximum_timeout` | Seconds; YouTube livestreams. Min: 30 |
 | PoToken | string | "" | `po_token` | Manual PO token override |
 | VisitorData | string | "" | `visitor_data` | Manual visitor data override |
 | PotProviderURL | string | "" | `pot_provider_url` | External PO token provider |
@@ -594,8 +593,7 @@ Handles backward compatibility with older flat config formats. All migrations ar
 - TwitchCheckInterval: 1-3600 seconds (or nil)
 - NumParallelDownloads: min 1
 - MaxVideoResolution: min 1
-- SegmentRetryDelayCap: min 1
-- SegmentLiveCheckRetries: min 1
+- MaximumTimeout: min 30 seconds (no maximum)
 - DiskWarnPercent: 1-99, DiskCriticalPercent: must be > WarnPercent (auto-adjusted if not)
 - CookieRefreshInterval: min 10 minutes
 - QualityPreference: validated against a fixed set of allowed values (best, 2160p60, 2160p, 1440p60, 1440p, 1080p60, 1080p, 900p60, 900p, 720p60, 720p, 480p, 360p, 160p, audio_only)

@@ -488,8 +488,7 @@ export class SettingsController {
     if (prefer60fpsSwitch) {
       prefer60fpsSwitch.checked = config.downloader?.prefer_60fps !== false;
     }
-    this.app.setInputValue("cfg-retry-delay-cap", config.downloader?.segment_retry_delay_cap);
-    this.app.setInputValue("cfg-live-check-retries", config.downloader?.segment_live_check_retries);
+    this.app.setInputValue("cfg-maximum-timeout", config.downloader?.maximum_timeout);
 
     // Cookies settings
     this.app.setInputValue("cfg-cookie-file", config.cookies?.cookie_file);
@@ -652,8 +651,7 @@ export class SettingsController {
     const outputTemplate = this.app.getInputValue("cfg-output-template");
     const maxResolution = this.app.getInputNumber("cfg-max-resolution");
     const parallelDownloads = this.app.getInputNumber("cfg-parallel-downloads");
-    const retryDelayCap = this.app.getInputNumber("cfg-retry-delay-cap");
-    const liveCheckRetries = this.app.getInputNumber("cfg-live-check-retries");
+    const maximumTimeout = this.app.getInputNumber("cfg-maximum-timeout");
     const downloadChatSwitch = document.getElementById("cfg-download-chat");
     const downloadChat = downloadChatSwitch ? downloadChatSwitch.checked : true;
     const prefer60fpsSwitch = document.getElementById("cfg-prefer-60fps");
@@ -730,8 +728,7 @@ export class SettingsController {
         num_parallel_downloads: parallelDownloads,
         download_chat: downloadChat,
         prefer_60fps: prefer60fps,
-        segment_retry_delay_cap: retryDelayCap,
-        segment_live_check_retries: liveCheckRetries,
+        maximum_timeout: maximumTimeout,
       },
       cookies: {
         cookie_file: cookieFile,

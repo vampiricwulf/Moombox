@@ -101,11 +101,12 @@
 # Prefer 60fps streams when available at the same resolution
 # prefer_60fps = true
 
-# Advanced: segment retry backoff cap in seconds (for live streams hitting 404s)
-# segment_retry_delay_cap = 60
-
-# Advanced: number of 404 retries before checking if stream ended
-# segment_live_check_retries = 16
+# YouTube livestreams: how long (seconds) to keep retrying — re-checking stream
+# status every 30s — before assuming the stream has finished even if YouTube
+# still reports it live. The clock resets whenever a segment arrives. Minimum 30;
+# there is no maximum, but very large values keep polling YouTube for a long
+# time, which can risk negative consequences on your account.
+# maximum_timeout = 600
 
 # Advanced: manual PO token override (bypasses built-in BotGuard generation)
 # po_token = ""

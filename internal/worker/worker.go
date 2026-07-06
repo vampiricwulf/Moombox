@@ -80,16 +80,15 @@ type JobContext struct {
 
 // JobConfig holds per-job configuration derived from the global config.
 type JobConfig struct {
-	MaxVideoResolution      int
-	Prefer60fps             bool
-	VideoItag               int
-	AudioItag               int
-	OutputDirectory         string
-	StagingDirectory        string
-	FilenameTemplate        string
-	DownloadChat            bool
-	SegmentRetryDelayCap    int
-	SegmentLiveCheckRetries int
+	MaxVideoResolution int
+	Prefer60fps        bool
+	VideoItag          int
+	AudioItag          int
+	OutputDirectory    string
+	StagingDirectory   string
+	FilenameTemplate   string
+	DownloadChat       bool
+	MaximumTimeout     int
 }
 
 // DownloadWorker manages the job processing loop.
@@ -619,7 +618,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 	// Snapshot all config fields under lock
 	var (
 		cfgOutputDir, cfgStagingDir, cfgTemplate string
-		cfgMaxRes, cfgRetryCap, cfgLiveRetries   int
+		cfgMaxRes, cfgMaxTimeout                 int
 		cfgPrefer60, cfgChat                     bool
 	)
 	w.readConfig(func(c *config.MoomboxConfig) {
@@ -629,8 +628,7 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		cfgMaxRes = c.Downloader.MaxVideoResolution
 		cfgPrefer60 = c.Downloader.Prefer60fps
 		cfgChat = c.Downloader.DownloadChat
-		cfgRetryCap = c.Downloader.SegmentRetryDelayCap
-		cfgLiveRetries = c.Downloader.SegmentLiveCheckRetries
+		cfgMaxTimeout = c.Downloader.MaximumTimeout
 	})
 
 	outputDir := cfgOutputDir
@@ -675,14 +673,13 @@ func (w *DownloadWorker) buildJobContext(job *database.Job) *JobContext {
 		Job: job,
 		DB:  w.db,
 		Config: &JobConfig{
-			MaxVideoResolution:      cfgMaxRes,
-			Prefer60fps:             cfgPrefer60,
-			OutputDirectory:         outputDir,
-			StagingDirectory:        stagingDir,
-			FilenameTemplate:        template,
-			DownloadChat:            cfgChat,
-			SegmentRetryDelayCap:    cfgRetryCap,
-			SegmentLiveCheckRetries: cfgLiveRetries,
+			MaxVideoResolution: cfgMaxRes,
+			Prefer60fps:        cfgPrefer60,
+			OutputDirectory:    outputDir,
+			StagingDirectory:   stagingDir,
+			FilenameTemplate:   template,
+			DownloadChat:       cfgChat,
+			MaximumTimeout:     cfgMaxTimeout,
 		},
 		YT:         w.yt,
 		StagingDir: stagingDir,

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
@@ -175,16 +176,16 @@ func DownloadHls(ctx context.Context, job *JobContext, videoInfo *youtube.VideoI
 	}
 
 	result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-		BaseURL:          variantURL,
-		OutputFile:       result.VideoPath,
-		StartSeq:         hlsStartSeq,
-		ForceStartSeq:    hlsForceSeq,
-		IsHls:            true,
-		PoToken:          hlsPoToken,
-		RetryDelayCap:    job.Config.SegmentRetryDelayCap,
-		LiveCheckRetries: job.Config.SegmentLiveCheckRetries,
-		IsOnline:         isOnline,
-		Logger:           job.Logger,
+		BaseURL:           variantURL,
+		OutputFile:        result.VideoPath,
+		StartSeq:          hlsStartSeq,
+		ForceStartSeq:     hlsForceSeq,
+		IsHls:             true,
+		PoToken:           hlsPoToken,
+		MaxTimeout:        time.Duration(job.Config.MaximumTimeout) * time.Second,
+		EnforceMaxTimeout: true, // YouTube status can stick; Twitch HLS opts out
+		IsOnline:          isOnline,
+		Logger:            job.Logger,
 		CheckStreamStatus: func(ctx context.Context) (bool, error) {
 			info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 			if err != nil {

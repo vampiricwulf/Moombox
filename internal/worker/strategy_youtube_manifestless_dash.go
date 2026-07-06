@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/vampiricwulf/Moombox/internal/bgutils"
 	"github.com/vampiricwulf/Moombox/internal/cipher"
@@ -251,18 +252,17 @@ func DownloadManifestlessDash(
 			videoInitURL = manifestlessSq0URL(videoStream.BaseURL)
 		}
 		result.VideoDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:          videoStream.BaseURL,
-			OutputFile:       result.VideoPath,
-			StartSeq:         videoStartSeq,
-			ForceStartSeq:    forceVideoSeq,
-			InitURL:          videoInitURL,
-			InitFromSegment:  videoInitURL != "",
-			PoToken:          pot,
-			CookieHeader:     cookieHeader,
-			RetryDelayCap:    job.Config.SegmentRetryDelayCap,
-			LiveCheckRetries: job.Config.SegmentLiveCheckRetries,
-			IsOnline:         isOnline,
-			Logger:           job.Logger,
+			BaseURL:         videoStream.BaseURL,
+			OutputFile:      result.VideoPath,
+			StartSeq:        videoStartSeq,
+			ForceStartSeq:   forceVideoSeq,
+			InitURL:         videoInitURL,
+			InitFromSegment: videoInitURL != "",
+			PoToken:         pot,
+			CookieHeader:    cookieHeader,
+			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
+			IsOnline:        isOnline,
+			Logger:          job.Logger,
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				if err != nil {
@@ -295,18 +295,17 @@ func DownloadManifestlessDash(
 			audioInitURL = manifestlessSq0URL(audioStream.BaseURL)
 		}
 		result.AudioDownloader = engine.NewSegmentDownloader(engine.DownloaderOptions{
-			BaseURL:          audioStream.BaseURL,
-			OutputFile:       result.AudioPath,
-			StartSeq:         audioStartSeq,
-			ForceStartSeq:    forceAudioSeq,
-			InitURL:          audioInitURL,
-			InitFromSegment:  audioInitURL != "",
-			PoToken:          pot,
-			CookieHeader:     cookieHeader,
-			RetryDelayCap:    job.Config.SegmentRetryDelayCap,
-			LiveCheckRetries: job.Config.SegmentLiveCheckRetries,
-			IsOnline:         isOnline,
-			Logger:           job.Logger,
+			BaseURL:         audioStream.BaseURL,
+			OutputFile:      result.AudioPath,
+			StartSeq:        audioStartSeq,
+			ForceStartSeq:   forceAudioSeq,
+			InitURL:         audioInitURL,
+			InitFromSegment: audioInitURL != "",
+			PoToken:         pot,
+			CookieHeader:    cookieHeader,
+			MaxTimeout:      time.Duration(job.Config.MaximumTimeout) * time.Second,
+			IsOnline:        isOnline,
+			Logger:          job.Logger,
 			CheckStreamStatus: func(ctx context.Context) (bool, error) {
 				info, err := job.YT.ProbeVideoStatus(ctx, job.Job.VideoID)
 				if err != nil {

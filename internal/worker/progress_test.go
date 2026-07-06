@@ -38,6 +38,7 @@ func TestActivityMessage(t *testing.T) {
 		{engine.ActivityReconnecting, "Connection lost - reconnecting... (1m 20s)"},
 		{engine.ActivityRateLimited, "Rate-limited - backing off... (1m 20s)"},
 		{engine.ActivityFindingFirstSegment, "Waiting for first segment... (1m 20s)"},
+		{engine.ActivityWaitingForSegment, "Waiting for next segment... (1m 20s)"},
 		{engine.ActivityRetrying, "Segment fetch failing - retrying... (1m 20s)"},
 		{engine.ActivityNone, ""},
 	}
@@ -125,6 +126,38 @@ func TestDominantActivity(t *testing.T) {
 		pt.lastSegmentAt = base.Add(-10 * time.Second)
 		if a, _ := pt.dominantActivity(base); a != engine.ActivityNone {
 			t.Errorf("got %v, want ActivityNone", a)
+		}
+	})
+
+	t.Run("waiting-for-segment held back within its grace window", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.videoActivity = engine.ActivityWaitingForSegment
+		pt.videoActivityStart = base.Add(-3 * time.Second)
+		pt.lastSegmentAt = base.Add(-3 * time.Second) // 3s < waitingForSegmentGrace (5s)
+		if a, _ := pt.dominantActivity(base); a != engine.ActivityNone {
+			t.Errorf("gap 3s: got %v, want ActivityNone (no flicker on normal cadence)", a)
+		}
+	})
+
+	t.Run("waiting-for-segment surfaces once the gap outgrows the grace", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.videoActivity = engine.ActivityWaitingForSegment
+		pt.videoActivityStart = base.Add(-6 * time.Second)
+		pt.lastSegmentAt = base.Add(-6 * time.Second) // 6s >= waitingForSegmentGrace (5s)
+		if a, _ := pt.dominantActivity(base); a != engine.ActivityWaitingForSegment {
+			t.Errorf("gap 6s: got %v, want ActivityWaitingForSegment", a)
+		}
+	})
+
+	t.Run("waiting-for-segment grace is specific — other waits still show", func(t *testing.T) {
+		pt := newTestProgressTracker()
+		pt.videoActivity = engine.ActivityWaitingForSegment
+		pt.videoActivityStart = base.Add(-3 * time.Second)
+		pt.audioActivity = engine.ActivityReconnecting // past the 2s segment grace
+		pt.audioActivityStart = base.Add(-3 * time.Second)
+		pt.lastSegmentAt = base.Add(-3 * time.Second)
+		if a, _ := pt.dominantActivity(base); a != engine.ActivityReconnecting {
+			t.Errorf("got %v, want ActivityReconnecting (only WaitingForSegment is held back)", a)
 		}
 	})
 }

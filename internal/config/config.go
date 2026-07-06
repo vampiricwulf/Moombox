@@ -55,13 +55,12 @@ func Defaults() *MoomboxConfig {
 			HideFinishedAgeDays: FlexDuration{Value: 30},
 		},
 		Downloader: DownloaderConfig{
-			OutputTemplate:          "${channel}/${start_date} ${title} [${id}]",
-			MaxVideoResolution:      2160,
-			NumParallelDownloads:    2,
-			DownloadChat:            true,
-			Prefer60fps:             true,
-			SegmentRetryDelayCap:    60,
-			SegmentLiveCheckRetries: 16,
+			OutputTemplate:       "${channel}/${start_date} ${title} [${id}]",
+			MaxVideoResolution:   2160,
+			NumParallelDownloads: 2,
+			DownloadChat:         true,
+			Prefer60fps:          true,
+			MaximumTimeout:       600,
 		},
 		Cookies: CookiesConfig{
 			CookieFile:        "./cookies.txt",
@@ -553,16 +552,10 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 			d.OutputTemplate = defaults.Downloader.OutputTemplate
 		}
 	}
-	if d.SegmentRetryDelayCap < 1 {
-		fail("downloader.segment_retry_delay_cap %d must be >= 1", d.SegmentRetryDelayCap)
+	if d.MaximumTimeout < 30 {
+		fail("downloader.maximum_timeout %d must be at least 30 seconds", d.MaximumTimeout)
 		if !reportOnly {
-			d.SegmentRetryDelayCap = defaults.Downloader.SegmentRetryDelayCap
-		}
-	}
-	if d.SegmentLiveCheckRetries < 1 {
-		fail("downloader.segment_live_check_retries %d must be >= 1", d.SegmentLiveCheckRetries)
-		if !reportOnly {
-			d.SegmentLiveCheckRetries = defaults.Downloader.SegmentLiveCheckRetries
+			d.MaximumTimeout = defaults.Downloader.MaximumTimeout
 		}
 	}
 
