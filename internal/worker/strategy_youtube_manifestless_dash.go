@@ -77,6 +77,32 @@ func formatToDashStreamInfo(f *youtube.Format) DashStreamInfo {
 	return info
 }
 
+// partitionManifestlessFormats splits adaptive formats into the video + audio
+// pools SelectBestDashStream picks from. It excludes both URL-less formats and
+// whole-file formats (ContentLength set) — the latter is critical: a complete
+// file handed to the &sq segment loop returns the ENTIRE file for every
+// sequence number, re-downloading it forever (the disk-filling runaway that
+// HasManifestlessDashFormats guards against at the strategy gate). This MUST
+// mirror that gate's exclusion: DashStreamInfo drops ContentLength, so
+// SelectBestDashStream is contentLength-blind and would otherwise pick a
+// higher-res whole-file itag as "best" from a MIXED pool (OTF video+audio that
+// passes the gate PLUS a contentLength video) and feed its URL to the runaway.
+func partitionManifestlessFormats(formats []youtube.Format) (video, audio []DashStreamInfo) {
+	for i := range formats {
+		f := &formats[i]
+		if f.URL == "" || f.ContentLength != "" {
+			continue
+		}
+		info := formatToDashStreamInfo(f)
+		if f.IsAudio() {
+			audio = append(audio, info)
+		} else if info.Width > 0 {
+			video = append(video, info)
+		}
+	}
+	return video, audio
+}
+
 // DownloadManifestlessDash sets up a download for streams that ship adaptive
 // formats with direct URLs but no DASH manifest. Triggered by the YouTube
 // account experiment that strips dashManifestUrl from cookied responses
@@ -108,20 +134,9 @@ func DownloadManifestlessDash(
 	potProvider *bgutils.PotProvider,
 	isOnline func() bool,
 ) (*DownloadResult, error) {
-	// Partition videoInfo.Formats into video + audio adaptive pools.
-	var videoStreams, audioStreams []DashStreamInfo
-	for i := range videoInfo.Formats {
-		f := &videoInfo.Formats[i]
-		if f.URL == "" {
-			continue
-		}
-		info := formatToDashStreamInfo(f)
-		if f.IsAudio() {
-			audioStreams = append(audioStreams, info)
-		} else if info.Width > 0 {
-			videoStreams = append(videoStreams, info)
-		}
-	}
+	// Partition videoInfo.Formats into video + audio adaptive pools (excludes
+	// whole-file contentLength formats — see partitionManifestlessFormats).
+	videoStreams, audioStreams := partitionManifestlessFormats(videoInfo.Formats)
 
 	// Per-job itag selection overrides config defaults.
 	videoItag := job.Config.VideoItag

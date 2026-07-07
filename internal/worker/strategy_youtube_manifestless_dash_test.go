@@ -90,3 +90,38 @@ func TestHasManifestlessDashFormats(t *testing.T) {
 		})
 	}
 }
+
+// TestPartitionManifestlessFormatsExcludesContentLength pins the fix for the
+// mixed-pool runaway: HasManifestlessDashFormats excludes contentLength formats
+// at the strategy gate, and the partition inside DownloadManifestlessDash MUST
+// do the same. A whole-file itag that reaches the pool is contentLength-blind
+// to SelectBestDashStream and, if higher-res, gets picked as "best" and fed to
+// the &sq loop — which returns the entire file for every sequence forever.
+// Excluding it from the pool is the strongest guarantee it is never selected.
+func TestPartitionManifestlessFormatsExcludesContentLength(t *testing.T) {
+	// A MIXED pool: OTF video+audio (segment-addressable, no contentLength) plus
+	// a HIGHER-res whole-file video (contentLength set) and a URL-less format.
+	formats := []youtube.Format{
+		{Itag: 299, MimeType: `video/mp4; codecs="avc1.64002a"`, URL: "https://x/", Width: ptrInt(1920), Height: ptrInt(1080)},
+		{Itag: 140, MimeType: `audio/mp4; codecs="mp4a.40.2"`, URL: "https://x/"},
+		{Itag: 401, MimeType: `video/mp4; codecs="av01.0.12M.08"`, URL: "https://x/", Width: ptrInt(3840), Height: ptrInt(2160), ContentLength: "1073741824"},
+		{Itag: 137, MimeType: `video/mp4; codecs="avc1.640028"`, URL: "", Width: ptrInt(1920), Height: ptrInt(1080)},
+	}
+
+	video, audio := partitionManifestlessFormats(formats)
+
+	for _, s := range video {
+		if s.Itag == 401 {
+			t.Fatal("contentLength (whole-file) itag 401 must be excluded — it would feed the &sq runaway")
+		}
+		if s.Itag == 137 {
+			t.Fatal("URL-less itag 137 must be excluded from the video pool")
+		}
+	}
+	if len(video) != 1 || video[0].Itag != 299 {
+		t.Fatalf("video pool = %+v, want exactly the OTF itag 299", video)
+	}
+	if len(audio) != 1 || audio[0].Itag != 140 {
+		t.Fatalf("audio pool = %+v, want exactly the OTF itag 140", audio)
+	}
+}
