@@ -12,7 +12,7 @@ require (
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/coder/websocket v1.8.15
 	github.com/dop251/goja v0.0.0-20260701091749-b07b74453ea9
-	github.com/go-chi/chi/v5 v5.3.0
+	github.com/go-chi/chi/v5 v5.3.1
 	github.com/mattn/go-isatty v0.0.22
 	github.com/mattn/go-runewidth v0.0.24
 	github.com/microcosm-cc/bluemonday v1.0.27
