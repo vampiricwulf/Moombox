@@ -74,3 +74,30 @@ func TestHandleHTTPErrorBriefGapSkipsStatusCheck(t *testing.T) {
 		t.Error("CheckStreamStatus must not be called for a brief (<30s) segment gap")
 	}
 }
+
+// TestHandleHTTPErrorBehindHeadStillLiveRefreshesFormat pins the behind-head
+// branch of the status check: a segment we KNOW exists (curSeq < head) stops
+// arriving while YouTube still reports the stream LIVE — the format/URL rotated
+// out from under us. handleHTTPError must return ErrQualityLost so the caller
+// refreshes the stream, rather than force-finalizing a live stream or waiting
+// out MaxTimeout. This branch narrowed prior behavior and had no coverage.
+func TestHandleHTTPErrorBehindHeadStillLiveRefreshesFormat(t *testing.T) {
+	d := NewSegmentDownloader(DownloaderOptions{
+		OutputFile:        filepath.Join(t.TempDir(), "v"),
+		CheckStreamStatus: func(context.Context) (bool, error) { return false, nil }, // still LIVE
+	})
+	d.headSeq.Store(100)                                                              // head known...
+	d.currentSeq.Store(50)                                                            // ...and we're behind it (a known-existing segment)
+	d.lastSegTime.Store(time.Now().Add(-(streamStatusCheckInterval + 5*time.Second))) // sustained gap → status check runs
+	d.lastHeadProbeTime.StoreNow()                                                    // skip the network head re-probe so headSeq stays 100
+
+	// Force "stuck on this segment" (sameSegRetries reaches MaxSegmentRetries for
+	// curSeq) so the behind-head EARLY retry (return nil) is bypassed and the
+	// status-check branch runs — where behind-head + still-live yields ErrQualityLost.
+	sameSegRetries, lastRetrySeq, sameHeadRetryDelay, lastConfirmedHead := MaxSegmentRetries, 50, 0, -1
+	err := d.handleHTTPError(context.Background(), true,
+		&sameSegRetries, &lastRetrySeq, &sameHeadRetryDelay, &lastConfirmedHead, 60)
+	if err != ErrQualityLost {
+		t.Fatalf("handleHTTPError = %v, want ErrQualityLost (known segment gone but stream still live → refresh format)", err)
+	}
+}
