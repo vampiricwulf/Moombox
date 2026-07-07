@@ -104,7 +104,7 @@ type FeedMonitor struct {
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
-	ProbeCooldown   *ProbeCooldown // per-monitor: caps this monitor's own re-probe rate
+	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
 	IsOnline        func() bool    // nil = always online
 }
 
@@ -142,7 +142,10 @@ func NewFeedMonitor(store *config.Store, db *database.Database, logger interface
 		logger:          logger,
 		health:          newHealthTracker(),
 		MetadataTracker: NewMetadataFailureTracker(),
-		ProbeCooldown:   NewProbeCooldown(DefaultProbeCooldown),
+		// Window is set from config at the start of every cycle via
+		// refreshProbeCooldown (before any probe runs), so the zero here just
+		// means "disabled until the first cycle reads config".
+		ProbeCooldown: NewProbeCooldown(0),
 	}
 }
 
@@ -314,7 +317,20 @@ func (fm *FeedMonitor) runCycle(ctx context.Context) {
 		fm.scheduleNext(ctx, cycleStart)
 	}()
 
+	fm.refreshProbeCooldown()
 	fm.doCheck(ctx)
+}
+
+// refreshProbeCooldown hot-reloads the per-video probe cooldown window from
+// config before each cycle's probes run, so a config change takes effect on
+// the next cycle without a restart (mirrors how the check interval is re-read
+// in scheduleNext). Read under configStore.Read to avoid racing a reload.
+func (fm *FeedMonitor) refreshProbeCooldown() {
+	var d time.Duration
+	fm.configStore.Read(func(c *config.MoomboxConfig) {
+		d = c.Monitors.ProbeCooldown.AsDuration(time.Second)
+	})
+	fm.ProbeCooldown.SetDuration(d)
 }
 
 func (fm *FeedMonitor) doCheck(ctx context.Context) {

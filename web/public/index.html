@@ -808,6 +808,14 @@
                                 placeholder="30"
                                 help-text="Hide completed jobs older than this many days (default: 30, 0 = archive immediately)"
                             ></sl-input>
+                            <sl-input
+                                id="cfg-probe-cooldown"
+                                type="number"
+                                min="0"
+                                label="Probe Cooldown (seconds)"
+                                placeholder="0"
+                                help-text="Minimum seconds between re-probing the same video's YouTube metadata. 0 = disabled: every monitor cycle re-probes every listed video (default: 0, no maximum)."
+                            ></sl-input>
                         </div>
 
                         <!-- Downloader Settings -->

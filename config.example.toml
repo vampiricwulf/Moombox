@@ -82,6 +82,14 @@
 # Set to 0 to instantly archive all finished jobs.
 # hide_finished_age_days = 30
 
+# Minimum time between re-probing the SAME video's metadata through the YouTube
+# player API. Each feed/DECAPI cycle re-lists the same upcoming/unfinished
+# videos, so this caps how often each is re-checked. Accepts a number (seconds)
+# or a duration string like "30s"/"2m". 0 disables it — every cycle re-probes
+# every listed video, and your check intervals become the only throttle. There
+# is no maximum. Default: 0.
+# probe_cooldown = 0
+
 # ─── Downloader ───────────────────────────────────────────────────────────────
 [downloader]
 

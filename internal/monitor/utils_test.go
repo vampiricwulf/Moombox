@@ -477,6 +477,11 @@ func TestMonitorsHaveIndependentProbeCooldowns(t *testing.T) {
 		t.Fatal("feed and DECAPI must NOT share a probe cooldown instance")
 	}
 
+	// Enable a window on both (the default is 0 = disabled, under which
+	// ShouldProbe is always true and the independence isn't observable).
+	feedMon.ProbeCooldown.SetDuration(time.Hour)
+	decapiMon.ProbeCooldown.SetDuration(time.Hour)
+
 	// Behavioral proof: a probe recorded by feed must not block DECAPI.
 	const videoID = "dQw4w9WgXcQ"
 	feedMon.ProbeCooldown.Record(videoID)
@@ -488,33 +493,39 @@ func TestMonitorsHaveIndependentProbeCooldowns(t *testing.T) {
 	}
 }
 
-func TestProbeCooldownRecordForShortWindow(t *testing.T) {
-	// RecordFor back-dates against the full window so a transient probe
-	// failure re-probes after the SHORT cooldown, not the full 30 min —
-	// the fix for one flaky probe blinding a freshly-live video.
-	cd := NewProbeCooldown(30 * time.Minute)
+func TestProbeCooldownDisabledAlwaysProbes(t *testing.T) {
+	// A window of 0 disables the cooldown: ShouldProbe is always true and
+	// Record is a no-op (the map stays empty), so every cycle re-probes.
+	// This is the default behavior — the operator opts into rate-limiting.
+	cd := NewProbeCooldown(0)
 
-	cd.RecordFor("vid-1", 40*time.Millisecond)
-	if cd.ShouldProbe("vid-1") {
-		t.Fatal("ShouldProbe immediately after RecordFor: want false")
-	}
-	time.Sleep(70 * time.Millisecond)
+	cd.Record("vid-1")
 	if !cd.ShouldProbe("vid-1") {
-		t.Fatal("ShouldProbe after the short RecordFor window: want true (must not wait the full 30m)")
+		t.Fatal("disabled cooldown must always allow probing")
+	}
+	cd.mu.Lock()
+	size := len(cd.lastProbe)
+	cd.mu.Unlock()
+	if size != 0 {
+		t.Errorf("disabled cooldown Record must be a no-op: want empty map, got %d entries", size)
 	}
 }
 
-func TestFailureProbeCooldownEscalates(t *testing.T) {
-	// Escalating backoff: fast retry while fresh, backing toward the full
-	// window as failures persist.
-	if got := failureProbeCooldown(1); got != 2*time.Minute {
-		t.Errorf("count 1: want 2m, got %v", got)
+func TestProbeCooldownSetDurationHotReload(t *testing.T) {
+	// SetDuration lets a monitor hot-reload the configured window each cycle.
+	// Enabling a window then applies to subsequently recorded probes; setting
+	// it back to 0 re-opens probing immediately.
+	cd := NewProbeCooldown(0)
+
+	cd.SetDuration(time.Hour)
+	cd.Record("vid-1")
+	if cd.ShouldProbe("vid-1") {
+		t.Fatal("after enabling a window, a just-recorded probe must be blocked")
 	}
-	if got := failureProbeCooldown(2); got != 8*time.Minute {
-		t.Errorf("count 2: want 8m, got %v", got)
-	}
-	if got := failureProbeCooldown(3); got != DefaultProbeCooldown {
-		t.Errorf("count 3: want default (%v), got %v", DefaultProbeCooldown, got)
+
+	cd.SetDuration(0)
+	if !cd.ShouldProbe("vid-1") {
+		t.Fatal("after disabling the window, probing must re-open immediately")
 	}
 }
 

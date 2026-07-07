@@ -65,7 +65,7 @@ type DecapiMonitor struct {
 	OnVideoFound    func(videoID, title, url string, channel *config.ChannelConfig)
 	ProbeVideo      VideoProbeFunc
 	MetadataTracker *MetadataFailureTracker
-	ProbeCooldown   *ProbeCooldown // per-monitor: caps this monitor's own re-probe rate
+	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
 	IsOnline        func() bool    // nil = always online
 }
 
@@ -107,7 +107,10 @@ func NewDecapiMonitor(store *config.Store, db *database.Database, logger interfa
 		logger:          logger,
 		health:          newHealthTracker(),
 		MetadataTracker: NewMetadataFailureTracker(),
-		ProbeCooldown:   NewProbeCooldown(DefaultProbeCooldown),
+		// Window is set from config at the start of every cycle via
+		// refreshProbeCooldown (before any probe runs), so the zero here just
+		// means "disabled until the first cycle reads config".
+		ProbeCooldown: NewProbeCooldown(0),
 	}
 }
 
@@ -308,7 +311,20 @@ func (dm *DecapiMonitor) runCycle(ctx context.Context) {
 		dm.scheduleNext(ctx, cycleStart)
 	}()
 
+	dm.refreshProbeCooldown()
 	dm.doCheck(ctx)
+}
+
+// refreshProbeCooldown hot-reloads the per-video probe cooldown window from
+// config before each cycle's probes run, so a config change takes effect on
+// the next cycle without a restart (mirrors how the check interval is re-read
+// in calculateInterval). Read under configStore.Read to avoid racing a reload.
+func (dm *DecapiMonitor) refreshProbeCooldown() {
+	var d time.Duration
+	dm.configStore.Read(func(c *config.MoomboxConfig) {
+		d = c.Monitors.ProbeCooldown.AsDuration(time.Second)
+	})
+	dm.ProbeCooldown.SetDuration(d)
 }
 
 func (dm *DecapiMonitor) doCheck(ctx context.Context) {

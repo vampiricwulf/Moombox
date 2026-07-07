@@ -53,6 +53,7 @@ func Defaults() *MoomboxConfig {
 			MaxFeedItems:        15,
 			FeedCheckInterval:   FlexDuration{Value: 10}, // minutes
 			HideFinishedAgeDays: FlexDuration{Value: 30},
+			ProbeCooldown:       FlexDuration{Value: 0}, // seconds; 0 = disabled
 		},
 		Downloader: DownloaderConfig{
 			OutputTemplate:       "${channel}/${start_date} ${title} [${id}]",
@@ -496,6 +497,15 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		fail("monitors.hide_finished_age_days %v out of range 0..365 days", cfg.Monitors.HideFinishedAgeDays.Value)
 		if !reportOnly {
 			cfg.Monitors.HideFinishedAgeDays = defaults.Monitors.HideFinishedAgeDays
+		}
+	}
+	// probe_cooldown: 0 disables (probe every cycle); there is deliberately no
+	// maximum — a large value simply re-probes rarely. Only a negative value is
+	// invalid, and it means the same as 0, so normalize it back to the default.
+	if cfg.Monitors.ProbeCooldown.Value < 0 {
+		fail("monitors.probe_cooldown %v must be >= 0 seconds (0 disables)", cfg.Monitors.ProbeCooldown.Value)
+		if !reportOnly {
+			cfg.Monitors.ProbeCooldown = defaults.Monitors.ProbeCooldown
 		}
 	}
 	if cfg.Monitors.DecapiCheckInterval != nil && (*cfg.Monitors.DecapiCheckInterval < 15 || *cfg.Monitors.DecapiCheckInterval > 3600) {

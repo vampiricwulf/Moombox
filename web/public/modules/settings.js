@@ -472,6 +472,7 @@ export class SettingsController {
     this.app.setInputValue("cfg-decapi-check-interval", config.monitors?.decapi_check_interval ?? "");
     this.app.setInputValue("cfg-twitch-check-interval", config.monitors?.twitch_check_interval ?? "");
     this.app.setInputValue("cfg-hide-finished-days", config.monitors?.hide_finished_age_days);
+    this.app.setInputValue("cfg-probe-cooldown", config.monitors?.probe_cooldown);
 
     // Downloader settings
     this.app.setInputValue("cfg-output-template", config.downloader?.output_template);
@@ -647,6 +648,7 @@ export class SettingsController {
     const decapiCheckInterval = this.app.getInputNumber("cfg-decapi-check-interval");
     const twitchCheckInterval = this.app.getInputNumber("cfg-twitch-check-interval");
     const hideFinishedDays = this.app.getInputNumber("cfg-hide-finished-days");
+    const probeCooldown = this.app.getInputNumber("cfg-probe-cooldown");
 
     const outputTemplate = this.app.getInputValue("cfg-output-template");
     const maxResolution = this.app.getInputNumber("cfg-max-resolution");
@@ -719,6 +721,7 @@ export class SettingsController {
         max_feed_items: maxFeedItems,
         feed_check_interval: feedCheckInterval,
         hide_finished_age_days: hideFinishedDays,
+        probe_cooldown: probeCooldown,
         decapi_check_interval: decapiCheckInterval ?? null,
         twitch_check_interval: twitchCheckInterval ?? null,
       },

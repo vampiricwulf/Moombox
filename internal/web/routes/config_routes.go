@@ -195,6 +195,13 @@ func validateConfigUpdates(updates map[string]any) map[string]string {
 				errs["monitors.hide_finished_age_days"] = "hide_finished_age_days must be between 0 and 365"
 			}
 		}
+		if raw, exists := mon["probe_cooldown"]; exists {
+			// 0 disables, no maximum — only a negative value is invalid. Match
+			// config.Validate so a hand-edited TOML can't sneak past the API.
+			if v, ok := flexDurationValue(raw, "seconds"); ok && v < 0 {
+				errs["monitors.probe_cooldown"] = "probe_cooldown must be >= 0 seconds (0 disables)"
+			}
+		}
 	}
 
 	// Downloader sub-fields
@@ -421,6 +428,11 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 			cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: v}
 		} else if vs, ok := mon["hide_finished_age_days"].(string); ok {
 			cfg.Monitors.HideFinishedAgeDays = config.ParseFlexDuration(vs, "days", cfg.Monitors.HideFinishedAgeDays.Value)
+		}
+		if v, ok := mon["probe_cooldown"].(float64); ok {
+			cfg.Monitors.ProbeCooldown = config.FlexDuration{Value: v}
+		} else if vs, ok := mon["probe_cooldown"].(string); ok {
+			cfg.Monitors.ProbeCooldown = config.ParseFlexDuration(vs, "seconds", cfg.Monitors.ProbeCooldown.Value)
 		}
 	}
 

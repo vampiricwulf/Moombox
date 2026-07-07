@@ -92,6 +92,7 @@ var sections = []settingsSection{
 			{"decapi_check_interval", "DECAPI check interval", fieldNumber, nil, "seconds, 15-3600 or empty for dynamic", nil},
 			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds (default: 15, range: 1-3600)", nil},
 			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days (default: 30)", nil},
+			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle (default: 0, no max)", nil},
 		},
 	},
 	{
@@ -444,6 +445,7 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	// FormatFloat with -1 precision round-trips fractional values ("0.5"
 	// stays "0.5", "30" stays "30") — %.0f silently rounded them away.
 	m.values["hide_finished_age_days"] = strconv.FormatFloat(cfg.Monitors.HideFinishedAgeDays.Days(), 'f', -1, 64)
+	m.values["probe_cooldown"] = strconv.Itoa(int(cfg.Monitors.ProbeCooldown.Value))
 
 	// Downloader
 	m.values["output_template"] = cfg.Downloader.OutputTemplate
@@ -538,6 +540,7 @@ func (m *SettingsModel) applyValues() {
 		{"log_max_files", "Max log files must be 1-100", 1, 100},
 		{"max_feed_items", "Max feed items must be 1-1000", 1, 1000},
 		{"feed_check_interval", "Feed check interval must be 1-1440 minutes", 1, 1440},
+		{"probe_cooldown", "Probe cooldown must be >= 0 seconds (0 disables)", 0, math.MaxInt},
 		{"max_video_resolution", "Max resolution must be at least 1", 1, math.MaxInt},
 		{"num_parallel_downloads", "Parallel downloads must be at least 1", 1, math.MaxInt},
 		{"maximum_timeout", "YouTube max timeout must be at least 30 seconds", 30, math.MaxInt},
@@ -637,6 +640,8 @@ func (m *SettingsModel) applyValues() {
 		m.cfg.Monitors.TwitchCheckInterval = nil
 	}
 	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: hideAge}
+	probeCd, _ := strconv.Atoi(m.values["probe_cooldown"])
+	m.cfg.Monitors.ProbeCooldown = config.FlexDuration{Value: float64(probeCd)}
 
 	// Downloader
 	m.cfg.Downloader.OutputTemplate = m.values["output_template"]

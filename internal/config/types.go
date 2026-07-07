@@ -85,6 +85,13 @@ type MonitorsConfig struct {
 	DecapiCheckInterval *int         `toml:"decapi_check_interval,omitempty" json:"decapi_check_interval,omitempty"`
 	TwitchCheckInterval *int         `toml:"twitch_check_interval,omitempty" json:"twitch_check_interval,omitempty"`
 	HideFinishedAgeDays FlexDuration `toml:"hide_finished_age_days" json:"hide_finished_age_days"`
+	// ProbeCooldown (seconds) is the minimum interval between re-probes of the
+	// SAME video's metadata through the YouTube player API. Each feed/DECAPI
+	// cycle re-lists the same upcoming/unfinished videos, so without a cooldown
+	// every cycle re-probes every listed video. 0 disables the cooldown (every
+	// cycle re-probes every listed video — the poll interval is then the only
+	// throttle). No maximum. Hot-reloaded each monitor cycle.
+	ProbeCooldown FlexDuration `toml:"probe_cooldown" json:"probe_cooldown"`
 }
 
 // DownloaderConfig holds download-related settings.
