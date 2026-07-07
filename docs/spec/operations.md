@@ -378,7 +378,7 @@ These are the event strings used for filtering. A target with no event filter re
 | `update_applied` | Moombox restarted on a different version than the previous run (embed reports whether the web dashboard came back) |
 | `update_failed` | A failed-update marker (`.update-broken` / `.update-failed`) was found at boot — manual attention needed |
 | `crash_recovered` | The launcher respawned Moombox after an abnormal exit |
-| `channel_unhealthy` | A monitored channel failed a sustained streak of checks (renamed/banned/misconfigured) — its streams are being missed |
+| `channel_unhealthy` | A monitored channel failed a sustained streak of checks on EVERY monitor covering it (renamed/banned/misconfigured) — its streams are being missed. Cross-monitor confirmed: a YouTube channel still reachable via DECAPI while its RSS feed 404s during peak hours does NOT fire (avoids the false positive). |
 
 The canonical event vocabulary is `notifications.EventGroups`
 (internal/notifications/events.go). The TUI filter editor derives from it

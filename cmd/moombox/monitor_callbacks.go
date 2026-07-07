@@ -14,6 +14,45 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/twitch"
 )
 
+// crossMonitorVouchWindow bounds how recently a sibling monitor must have
+// succeeded for its success to suppress another monitor's "unhealthy" alert.
+// Comfortably longer than DECAPI's seconds-scale cadence and a typical feed
+// interval, but short enough that a silently-stalled sibling (frozen at a stale
+// success) stops vouching so a genuine outage still surfaces.
+const crossMonitorVouchWindow = 20 * time.Minute
+
+// channelHealthReporter is the slice of a monitor's surface needed to
+// cross-confirm a channel's reachability across sibling monitors.
+type channelHealthReporter interface {
+	Health() []monitor.ChannelHealth
+}
+
+// siblingReachable reports whether any sibling monitor RECENTLY reached the
+// channel successfully. When true the channel is not "not responding" — another
+// monitor is still seeing it, so its streams aren't being missed — and the
+// failing monitor's unhealthy alert is a false positive to suppress. This is
+// the guard against YouTube serving RSS 404/5xx during peak hours while the
+// independent DECAPI monitor stays healthy. A sibling vouches only on a FRESH
+// success (last check succeeded within crossMonitorVouchWindow); one that is
+// itself failing, has never checked the channel, or has gone stale does not.
+func siblingReachable(siblings []channelHealthReporter, channelID string, now time.Time) bool {
+	for _, sib := range siblings {
+		if sib == nil {
+			continue
+		}
+		for _, h := range sib.Health() {
+			if h.ChannelID != channelID {
+				continue
+			}
+			if h.ConsecutiveErrors == 0 && h.LastCheckedAt != 0 &&
+				now.Sub(time.UnixMilli(h.LastCheckedAt)) <= crossMonitorVouchWindow {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // wireMonitorCallbacks installs every post-service-startup callback that
 // connects the construction graph: cookie recovery / auth-recovered sweep,
 // monitor ProbeVideo + OnVideoFound / OnStreamFound job-creation closures,
@@ -353,8 +392,18 @@ func (s *runState) wireMonitorCallbacks() {
 	// One notification per streak, per monitor; the /api/status
 	// channelHealth surface shows the live state. platform label is set per
 	// monitor so the operator knows which source flagged it.
-	unhealthyNotify := func(platform string) func(channelID string, consecutive int, lastErr string) {
+	unhealthyNotify := func(platform string, siblings ...channelHealthReporter) func(channelID string, consecutive int, lastErr string) {
 		return func(channelID string, consecutive int, lastErr string) {
+			// Cross-monitor confirmation: a channel is only "not responding" if
+			// EVERY monitor covering it has lost it. YouTube serves RSS 404/5xx
+			// during peak hours while the independent DECAPI monitor keeps
+			// working, so a lone feed-monitor failure is a false positive — its
+			// streams are still being seen. Suppress unless no sibling vouches.
+			if siblingReachable(siblings, channelID, time.Now()) {
+				s.log.Info("channel unhealthy on one monitor but still reachable via another — suppressing alert",
+					"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
+				return
+			}
 			s.log.Warn("channel failing monitor checks — verify it still exists",
 				"platform", platform, "channel", channelID, "consecutive", consecutive, "err", lastErr)
 			s.notifyMgr.Send("Channel Not Responding",
@@ -369,8 +418,11 @@ func (s *runState) wireMonitorCallbacks() {
 			)
 		}
 	}
-	s.feedMon.SetOnChannelUnhealthy(unhealthyNotify("youtube"))
-	s.decapiMon.SetOnChannelUnhealthy(unhealthyNotify("youtube"))
+	// YouTube channels are covered by both the RSS feed and DECAPI monitors, so
+	// each cross-confirms against the other before alerting. Twitch has a single
+	// (reliable GQL) monitor with no sibling to confirm against.
+	s.feedMon.SetOnChannelUnhealthy(unhealthyNotify("youtube", s.decapiMon))
+	s.decapiMon.SetOnChannelUnhealthy(unhealthyNotify("youtube", s.feedMon))
 	s.twitchMon.SetOnChannelUnhealthy(unhealthyNotify("twitch"))
 
 	// Initialize per-job log tracking with existing jobs (matches TS knownJobIds)
