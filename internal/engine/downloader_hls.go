@@ -27,6 +27,41 @@ func (d *SegmentDownloader) waitOnline(ctx context.Context) error {
 	return nil
 }
 
+// hlsReloadDelay returns how long to wait before the next media-playlist reload,
+// porting ffmpeg's libavformat/hls.c pacing so the live loop hugs the live edge
+// instead of accumulating segment batches. `elapsed` is the time already spent
+// this cycle since the playlist was loaded (ffmpeg's last_load_time), so the
+// result is the REMAINDER of the reload interval:
+//
+//   - hadNewSegments (flowing): interval = the last segment's duration —
+//     ffmpeg default_reload_interval — falling back to targetDur, then 2s if the
+//     playlist declared neither.
+//   - !hadNewSegments (stalled at the live edge): interval = targetDur/2, matching
+//     ffmpeg switching to half the target duration for still-empty reloads.
+//   - clamp to 0 when already past the interval, so we reload immediately —
+//     ffmpeg's `now - last_load_time >= reload_interval` (its wait `while` is then
+//     false). The caught-up cadence is still floored by the interval, so this
+//     never reloads faster than the segment rate once we've caught up.
+func hlsReloadDelay(lastSegDur, targetDur float64, hadNewSegments bool, elapsed time.Duration) time.Duration {
+	if targetDur <= 0 {
+		targetDur = 2.0
+	}
+	var interval float64
+	if hadNewSegments {
+		interval = lastSegDur
+		if interval <= 0 {
+			interval = targetDur
+		}
+	} else {
+		interval = targetDur / 2
+	}
+	remain := time.Duration(interval*float64(time.Second)) - elapsed
+	if remain < 0 {
+		remain = 0
+	}
+	return remain
+}
+
 // runHlsLoop is the main HLS download loop.
 func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// Save resume state on exit so interrupted downloads can continue on restart.
@@ -192,6 +227,12 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			continue
 		}
 		pl := result.Playlist
+
+		// ffmpeg hls.c stamps last_load_time at the end of parse_playlist; mirror
+		// it here so the reload interval (hlsReloadDelay, at the tail) is measured
+		// from when this playlist was loaded — the segment downloads below then
+		// count against the interval instead of being added after a fixed sleep.
+		loadTime := time.Now()
 
 		// Initialize currentSeq if needed
 		curSeq := int(d.currentSeq.Load())
@@ -460,11 +501,12 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		consecutiveErrors = 0
 
 		// Persist resume state only when the position actually advanced. The
-		// loop iterates every ~TargetDuration (~2s for Twitch) and reaches
-		// here even on no-progress refreshes (stale window, verifying-end);
-		// an unconditional saveResume there fsync+renamed the sidecar every
-		// ~2s for zero recovery benefit (only the timestamp changed, which
-		// the loader ignores within the 7-day window). bytesWritten only
+		// loop iterates about once per reload interval (~one segment duration;
+		// see hlsReloadDelay) and reaches here even on no-progress refreshes
+		// (stale window, verifying-end); an unconditional saveResume there
+		// fsync+renamed the sidecar every ~2s for zero recovery benefit (only
+		// the timestamp changed, which the loader ignores within the 7-day
+		// window). bytesWritten only
 		// changes alongside currentSeq, so the seq is a complete progress
 		// signal. The deferred saveResume still guarantees a final flush.
 		if curSeqNow := int(d.currentSeq.Load()); curSeqNow != lastSavedSeq {
@@ -483,12 +525,17 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 			return nil
 		}
 
-		// Wait before next refresh
-		targetDur := pl.TargetDuration
-		if targetDur <= 0 {
-			targetDur = 2.0
+		// Wait before the next reload — ffmpeg hls.c pacing (see hlsReloadDelay).
+		// Measured from loadTime, so the segment downloads above count against the
+		// interval rather than being added after a full fixed sleep (which is what
+		// let segments batch up and the recording trail the live edge). Interval is
+		// the last segment's duration while flowing, half the target duration while
+		// stalled at the live edge; clamps to an immediate reload when already behind.
+		var lastSegDur float64
+		if n := len(pl.Segments); n > 0 {
+			lastSegDur = pl.Segments[n-1].Duration
 		}
-		utils.Sleep(ctx, time.Duration(targetDur*float64(time.Second)))
+		utils.Sleep(ctx, hlsReloadDelay(lastSegDur, pl.TargetDuration, len(newSegments) > 0, time.Since(loadTime)))
 	}
 }
 
