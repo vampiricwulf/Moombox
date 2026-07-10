@@ -11,7 +11,7 @@
           "name": "Moombox",
           "version": "0.0.0.0"
         },
-        "description": "YouTube/Twitch Stream Archiver",
+        "description": "Moombox Stream Archiver",
         "minimum-os": "win10",
         "execution-level": "as invoker",
         "ui-access": false,
@@ -38,9 +38,9 @@
         },
         "info": {
           "0409": {
-            "Comments": "",
+            "Comments": "YouTube/Twitch live stream archiver",
             "CompanyName": "Moombox",
-            "FileDescription": "YouTube/Twitch Stream Archiver",
+            "FileDescription": "Moombox Stream Archiver",
             "FileVersion": "0.0.0.0",
             "InternalName": "Moombox",
             "LegalCopyright": "",
