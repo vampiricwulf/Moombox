@@ -11,6 +11,10 @@ import { formatTimestamp, formatBytes, formatDurationSeconds, formatRelativeTime
 import { parseFilterQuery, serializeToken } from "./modules/filter-parser.js";
 import { applyFilterTokens } from "./modules/filter-engine.js";
 
+// Moombox GitHub repository page — opened by double-clicking the version
+// indicator. Mirrors constants.ProjectRepoURL on the Go side (keep in sync).
+const GITHUB_REPO_URL = "https://github.com/vampiricwulf/Moombox";
+
 // Status sets for quick action visibility (single source of truth)
 const CANCEL_STATUSES = new Set(["Downloading", "Live", "Upcoming", "Muxing", "COOKIES?"]);
 const RESUME_STATUSES = new Set(["Cancelled", "Error", "COOKIES?"]);
@@ -889,7 +893,28 @@ class MoomboxApp {
     // icon children that might be added later and any unrelated listeners.
     if (!this._versionClickHandler) {
       this._versionClickHandler = () => {
-        if (this._updateAvailable) this.showUpdateDialog();
+        if (this._updateAvailable) {
+          this.showUpdateDialog();
+          return;
+        }
+        // No update pending: click-twice-to-open. The first click arms and
+        // pops the manual tooltip ("Click again to open the GitHub page");
+        // a second click inside the window opens the repo. Mirrors the
+        // TUI's O G chord (and its confirm-chord arming pattern).
+        const tooltip = document.getElementById("version-open-tooltip");
+        if (this._versionOpenArmed) {
+          clearTimeout(this._versionOpenArmTimer);
+          this._versionOpenArmed = false;
+          tooltip?.hide();
+          window.open(GITHUB_REPO_URL, "_blank", "noopener");
+          return;
+        }
+        this._versionOpenArmed = true;
+        tooltip?.show();
+        this._versionOpenArmTimer = setTimeout(() => {
+          this._versionOpenArmed = false;
+          tooltip?.hide();
+        }, 3000);
       };
       el.addEventListener("click", this._versionClickHandler);
     }
@@ -901,7 +926,7 @@ class MoomboxApp {
     } else {
       el.textContent = `v${this._version}`;
       el.className = "version-indicator";
-      el.title = `Moombox v${this._version}`;
+      el.title = `Moombox v${this._version} — double-click to open the GitHub page`;
       el.style.cursor = "";
     }
   }

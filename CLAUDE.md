@@ -105,7 +105,7 @@ Error paths: any → `Error`, `Cancelled`, or `COOKIES?`
 ### TUI chord system
 `buildMenuItems()` in `app.go` = single source of truth for chords, action menu, hints, and help. `dispatchAction(chord, job)` = unified handler. Adding a chord: one entry in `buildMenuItems()` + one case in `dispatchAction()`.
 
-Prefixes: **A** (Action), **R** (Request), **O** (Open), **Q** (Quit). Single keys: **F** (Filter), **M** (Menu), **`** (Settings), **?** (Help), **/** (Search logs — log panel only; `n`/`N` navigate matches, `Esc` clears). **O** chords include `O C` (Copy Stream URL to clipboard via OSC 52). Confirm chords require a third keypress within 3s. **R** chords include `R N` (View Release Notes — shows pending-update notes when an update is available, otherwise fetches current version's notes from GitHub; from inside the overlay `U` applies the update).
+Prefixes: **A** (Action), **R** (Request), **O** (Open), **Q** (Quit). Single keys: **F** (Filter), **M** (Menu), **`** (Settings), **?** (Help), **/** (Search logs — log panel only; `n`/`N` navigate matches, `Esc` clears). **O** chords include `O C` (Copy Stream URL to clipboard via OSC 52) and `O G` (Open GitHub Page). Confirm chords require a third keypress within 3s. **R** chords include `R N` (View Release Notes — shows pending-update notes when an update is available, otherwise fetches current version's notes from GitHub; from inside the overlay `U` applies the update).
 
 ### Config migrations
 `migrateOldFormat()` in `config/config.go` handles backward compat — migrates flat fields into current sections, converts legacy flags. Non-destructive (only applies when new section doesn't exist). Add migration logic for any renamed/relocated fields.

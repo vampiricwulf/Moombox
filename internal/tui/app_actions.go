@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/vampiricwulf/Moombox/internal/config"
+	"github.com/vampiricwulf/Moombox/internal/constants"
 	"github.com/vampiricwulf/Moombox/internal/database"
 )
 
@@ -269,6 +270,9 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 		url := fmt.Sprintf("%s://localhost:%d", scheme, a.getPort())
 		a.setFeedback(fmt.Sprintf("Opening: %s", url))
 		openBrowser(url)
+	case "O G":
+		a.setFeedback("Opening: " + constants.ProjectRepoURL)
+		openBrowser(constants.ProjectRepoURL)
 	case "F":
 		a.handleFilter()
 	case "`":
@@ -516,6 +520,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 		ActionMenuItem{Chord: "O C", Label: "Copy Stream URL", HintLabel: "Copy URL", Category: "Open", NeedsJob: true,
 			DisabledReason: "no jobs with stream URLs",
 			JobFilter:      func(j *database.Job) bool { return canOpenStream(j) }},
+		ActionMenuItem{Chord: "O G", Label: "Open GitHub Page", HintLabel: "GitHub", Category: "Open"},
 	)
 
 	// Filter + Other

@@ -246,6 +246,7 @@ The chord system is a three-state finite automaton:
 | `O S` | Open Stream Page (browser) | Yes | Job has a stream URL |
 | `O W` | Open Web UI (browser) | No | — |
 | `O C` | Copy Stream URL to clipboard (OSC 52) | Yes | Job has a stream URL |
+| `O G` | Open GitHub Page (browser) | No | — |
 
 **Single-key shortcuts:**
 

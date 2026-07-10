@@ -6,6 +6,11 @@ import (
 	"math/rand/v2"
 )
 
+// ProjectRepoURL is the Moombox GitHub repository page — opened by the TUI's
+// O G chord; the Web UI's version-indicator double-click mirrors it as a
+// hardcoded string in web/public/app.js (keep the two in sync).
+const ProjectRepoURL = "https://github.com/vampiricwulf/Moombox"
+
 // =============================================================================
 // HTTP CONSTANTS
 // =============================================================================
