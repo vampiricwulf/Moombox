@@ -54,15 +54,18 @@ func (m *Marquee) Reset(text string, maxWidth int) {
 }
 
 // Tick advances the marquee animation by one step (called every 150ms).
-func (m *Marquee) Tick() {
+// Returns whether the visible offset actually moved — false during the
+// ~2s end pauses (waitTicks) and when nothing scrolls — so callers can
+// skip re-render work for frames that would be identical.
+func (m *Marquee) Tick() bool {
 	if !m.needsScroll {
-		return
+		return false
 	}
 
 	// Pausing at an end
 	if m.waitTicks > 0 {
 		m.waitTicks--
-		return
+		return false
 	}
 
 	// Advance
@@ -81,6 +84,7 @@ func (m *Marquee) Tick() {
 		m.direction = 1
 		m.waitTicks = marqueeWaitTicks
 	}
+	return true
 }
 
 // View returns the visible portion of text at the current offset, padded to maxWidth.
