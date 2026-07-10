@@ -229,6 +229,26 @@ func filterJobsByAgeThreshold(jobs []*database.Job, hideAgeDays float64) []*data
 	return filtered
 }
 
+// launcherStalenessNote renders the INFO-level suggestion logged when the
+// supervisor process is running a different version than this child — the
+// launcher keeps executing the binary it was originally started from across
+// every in-place update, so launcher-side improvements (crash supervision,
+// auto-rollback, …) only take effect after a full stop/start. Deliberately a
+// light suggestion, never a warning: nothing is broken in the meantime.
+// Returns "" when the versions match (nothing to log). An empty
+// launcherVersion means the launcher predates the version handshake itself.
+func launcherStalenessNote(launcherVersion, currentVersion string) string {
+	if launcherVersion == currentVersion {
+		return ""
+	}
+	supervisor := "an earlier version"
+	if launcherVersion != "" {
+		supervisor = "v" + launcherVersion
+	}
+	return fmt.Sprintf("Supervisor is %s, this process is v%s — a full restart refreshes it (optional, at your leisure).",
+		supervisor, currentVersion)
+}
+
 // shouldSkipPendingVersion decides whether a .update-pending breadcrumb (the
 // release tag ApplyUpdate was updating TO) should be recorded as the skipped
 // version on this boot. True only for the auto-rollback shape: the pending

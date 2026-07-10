@@ -133,6 +133,14 @@ func launchAndSupervise() {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		env := append(os.Environ(), "_MOOMBOX_CHILD=1")
+		// Staleness handshake: the supervisor process keeps running the
+		// binary it started from across every in-place update, so its
+		// version diverges from the child's until a full stop/start. Tell
+		// the child which version this launcher is; the child logs a light
+		// INFO suggestion when they differ (helpers.go
+		// launcherStalenessNote). Absent for pre-handshake launchers, which
+		// the child treats as "an earlier version".
+		env = append(env, "_MOOMBOX_LAUNCHER_VERSION="+version)
 		// wasRespawn: this spawn exists because the previous child crashed.
 		// A quick death of a respawned child must route into the crash
 		// COUNTER (backoff + cutoff), not the fail-fast branch — otherwise

@@ -240,6 +240,25 @@ func TestJobArchivedAt(t *testing.T) {
 	}
 }
 
+// TestLauncherStalenessNote pins the staleness-handshake rendering: silent on
+// a version match, names the launcher's version on a mismatch, and treats a
+// missing handshake value (pre-handshake launcher) as "an earlier version".
+func TestLauncherStalenessNote(t *testing.T) {
+	if got := launcherStalenessNote("2.7.1", "2.7.1"); got != "" {
+		t.Errorf("matching versions must be silent, got %q", got)
+	}
+	got := launcherStalenessNote("2.7.0", "2.7.1")
+	if !strings.Contains(got, "Supervisor is v2.7.0") || !strings.Contains(got, "this process is v2.7.1") {
+		t.Errorf("mismatch note should carry both versions, got %q", got)
+	}
+	if !strings.Contains(got, "optional, at your leisure") {
+		t.Errorf("note must stay a light suggestion, got %q", got)
+	}
+	if got := launcherStalenessNote("", "2.7.1"); !strings.Contains(got, "an earlier version") {
+		t.Errorf("pre-handshake launcher should read as an earlier version, got %q", got)
+	}
+}
+
 // TestShouldSkipPendingVersion pins the auto-rollback skip decision: only a
 // pending tag that names a DIFFERENT version than the running one, together
 // with a failed-update marker, marks that tag skipped. Our own tag (the

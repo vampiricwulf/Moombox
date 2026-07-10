@@ -414,6 +414,15 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 		}
 	}
 
+	// Launcher-staleness note: an in-place update replaces the binary on
+	// disk, but the supervisor PROCESS keeps running the code it started
+	// with — launcher-side improvements land only after a full stop/start.
+	// Surface that as a light INFO suggestion (log only, by design — no
+	// status field, no notification): everything keeps working meanwhile.
+	if note := launcherStalenessNote(os.Getenv("_MOOMBOX_LAUNCHER_VERSION"), version); note != "" {
+		log.Info(note)
+	}
+
 	// Crash-recovery notice: the launcher sets _MOOMBOX_CRASH_RESPAWN when
 	// this boot exists because the previous process died abnormally and
 	// supervision respawned it. Tell the operator — an unattended recorder
