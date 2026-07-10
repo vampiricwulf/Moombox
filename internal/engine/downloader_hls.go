@@ -228,6 +228,14 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		}
 		pl := result.Playlist
 
+		// consecutiveErrors counts playlist fetch/parse failures, so it resets
+		// HERE — the playlist round-trip just succeeded — not at the bottom of
+		// the iteration. The old end-of-iteration reset was skipped by the
+		// segFailed continue, so a stretch of segment failures kept a stale
+		// playlist-error count alive and a later fetch blip hit the >5
+		// escalation early.
+		consecutiveErrors = 0
+
 		// ffmpeg hls.c stamps last_load_time at the end of parse_playlist; mirror
 		// it here so the reload interval (hlsReloadDelay, at the tail) is measured
 		// from when this playlist was loaded — the segment downloads below then
@@ -496,9 +504,6 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 		} else {
 			staleCount = 0
 		}
-
-		// Reset consecutive errors on successful iteration
-		consecutiveErrors = 0
 
 		// Persist resume state only when the position actually advanced. The
 		// loop iterates about once per reload interval (~one segment duration;
