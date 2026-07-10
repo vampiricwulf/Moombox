@@ -720,8 +720,13 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 			}
 		}
 	}
-	// Close a gap that runs to the end of the playlist.
-	closeGap(totalSegs - 1)
+	// Close a gap still open at consumer exit. nextIdx-1 is the last flushed
+	// index — equal to totalSegs-1 after full consumption (every index emits a
+	// result, so the flush loop drains to totalSegs), but the honest bound on
+	// early exit via cancellation: drained workers emit nothing, and closing at
+	// totalSegs-1 would record the entire unflushed remainder as a gap even
+	// though those segments were never determined missing.
+	closeGap(nextIdx - 1)
 
 	// The whole VOD playlist has been consumed — natural end. Mark ended so
 	// runHlsLoop's deferred ClearResume removes the sidecar (see the ENDLIST
