@@ -99,6 +99,17 @@ func (d *SegmentDownloader) runHlsLoop(ctx context.Context) error {
 	// the total at exit, not per 2s segment.
 	inAdBreak := false
 	adSegmentsSkipped := 0
+	// The break-exit log normally fires when the first post-ad content
+	// segment is processed. When the loop exits DURING a break (stream ends
+	// mid-ad, gap split, error, cancel) that site is never reached and the
+	// skip tally would vanish — close the bookkeeping here instead. Captures
+	// the variables by reference, so it sees their final values.
+	defer func() {
+		if inAdBreak {
+			d.logger.Info("[Downloader] HLS loop exited during a Twitch stitched-ad break",
+				"adSegmentsSkipped", adSegmentsSkipped)
+		}
+	}()
 
 	for {
 		if d.isCancelled() || ctx.Err() != nil {
