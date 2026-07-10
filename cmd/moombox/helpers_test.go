@@ -240,6 +240,33 @@ func TestJobArchivedAt(t *testing.T) {
 	}
 }
 
+// TestShouldSkipPendingVersion pins the auto-rollback skip decision: only a
+// pending tag that names a DIFFERENT version than the running one, together
+// with a failed-update marker, marks that tag skipped. Our own tag (the
+// update landed) or a markerless leftover must never set a skip.
+func TestShouldSkipPendingVersion(t *testing.T) {
+	cases := []struct {
+		name          string
+		pendingTag    string
+		version       string
+		markerPresent bool
+		want          bool
+	}{
+		{"rolled back: different tag + marker", "v2.7.1", "2.7.0", true, true},
+		{"update landed: own tag", "v2.7.1", "2.7.1", true, false},
+		{"different tag but no marker", "v2.7.1", "2.7.0", false, false},
+		{"empty tag", "", "2.7.0", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipPendingVersion(tc.pendingTag, tc.version, tc.markerPresent); got != tc.want {
+				t.Errorf("shouldSkipPendingVersion(%q, %q, %v) = %v, want %v",
+					tc.pendingTag, tc.version, tc.markerPresent, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestExtractWSIPHostOnly covers the happy path — a host:port
 // RemoteAddr returns just the host.
 func TestExtractWSIPHostOnly(t *testing.T) {

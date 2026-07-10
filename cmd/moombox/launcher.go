@@ -160,8 +160,13 @@ func launchAndSupervise() {
 			starting.Store(false)
 			fmt.Fprintf(os.Stderr, "Failed to run moombox: %v\n", startErr)
 			if firstAfterUpdate {
-				// The freshly-updated binary would not even start — keep the
-				// previous version on disk and say how to restore it.
+				// The freshly-updated binary would not even start — restore
+				// the previous version and respawn it; fall back to keeping
+				// it on disk with manual instructions if that isn't possible.
+				if attemptAutoRollback(exePath, -1) {
+					firstAfterUpdate = false
+					continue
+				}
 				preserveUpdateRollback(exePath, -1)
 				os.Exit(1)
 			}
@@ -222,12 +227,24 @@ func launchAndSupervise() {
 			os.Exit(code)
 
 		case wasFirstAfterUpdate && code != 0 && ranFor < postUpdateFailureWindow:
-			// First boot of a fresh update failed almost immediately: the
-			// old behavior deleted the ~ backup on the way out — destroying
-			// the only rollback binary at the exact moment it was needed.
-			// Preserve it and leave instructions instead. Takes priority
-			// over crash-respawn: retrying a binary that just proved broken
-			// buys nothing.
+			// First boot of a fresh update failed almost immediately —
+			// retrying a binary that just proved broken buys nothing, so
+			// this takes priority over crash-respawn. Roll back to the
+			// preserved previous binary and respawn it as a KNOWN-GOOD
+			// fresh launch: not a crash respawn (no _MOOMBOX_CRASH_RESPAWN
+			// — the restored version didn't crash), and with a clean crash
+			// budget (any pre-update streak belonged to different
+			// circumstances). firstAfterUpdate is already false, so a quick
+			// death of the RESTORED binary hits the normal fail-fast path
+			// — no rollback ping-pong is possible. When the artifact is
+			// gone (the boot reached the milestone sweep before dying) or
+			// the restore fails, fall back to preserving what's left with
+			// manual instructions.
+			if attemptAutoRollback(exePath, code) {
+				crashRespawnCode = 0
+				consecutiveCrashes = 0
+				continue
+			}
 			preserveUpdateRollback(exePath, code)
 			os.Exit(code)
 
@@ -306,12 +323,83 @@ func crashBackoff(n int) time.Duration {
 // past it has proven the binary starts.
 const postUpdateFailureWindow = 2 * time.Minute
 
+// attemptAutoRollback restores the previous binary after a failed first
+// post-update boot: the broken binary at exePath is removed (it is
+// bit-identical to the published GitHub asset, so nothing diagnostic is
+// lost), the preserved rollback artifact is renamed back to the plain
+// name, and a marker documents what happened — the next child boot
+// announces it, and (via the .update-pending breadcrumb ApplyUpdate
+// writes) marks the failed version skipped so automatic checks stop
+// offering a release that just proved broken.
+//
+// Returns false without touching anything when no rollback artifact
+// exists (the boot survived long enough to reach the milestone sweep
+// before dying) and on the remove failure path; the caller then falls
+// back to preserveUpdateRollback's manual instructions. A rename failure
+// AFTER the remove succeeded is the one unrecoverable shape (the plain
+// name is empty) — the preserve fallback's instructions still point at
+// the intact artifact, so recovery stays one manual rename.
+//
+// Windows note: the artifact (the ~ file) is this launcher's own mapped
+// image — renaming a mapped image is legal (it is how the update swap
+// renamed it to ~ in the first place), and afterwards the launcher runs
+// from the file at the plain name, exactly like a fresh start.
+func attemptAutoRollback(exePath string, exitCode int) bool {
+	backup := rollbackArtifactPath(exePath)
+	if _, err := os.Stat(backup); err != nil {
+		return false
+	}
+	// os.Rename cannot replace an existing file on Windows, so the broken
+	// binary must be removed first. The child has exited (its image is
+	// unmapped); brief retries ride out an AV scanner still holding the
+	// freshly-downloaded file.
+	var rmErr error
+	for range 3 {
+		if rmErr = os.Remove(exePath); rmErr == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if rmErr != nil {
+		fmt.Fprintf(os.Stderr, "auto-rollback: could not remove failed binary: %v\n", rmErr)
+		return false
+	}
+	if err := os.Rename(backup, exePath); err != nil {
+		fmt.Fprintf(os.Stderr, "auto-rollback: could not restore previous binary: %v\n", err)
+		return false
+	}
+	writeAutoRollbackMarker(exePath, exitCode)
+	return true
+}
+
+// writeAutoRollbackMarker records a completed automatic rollback in the
+// same .update-failed marker file the manual-recovery path uses — existing
+// children (2.7.0+) already announce this marker's content on boot, and
+// pending-breadcrumb-aware children additionally mark the failed version
+// skipped when they see it.
+func writeAutoRollbackMarker(exePath string, exitCode int) {
+	msg := fmt.Sprintf(
+		"Moombox: the first launch after a self-update failed (exit code %d) at %s.\n"+
+			"Moombox AUTOMATICALLY ROLLED BACK to the previous binary and restarted it.\n"+
+			"The failed release was removed from disk (it is re-downloadable from GitHub).\n"+
+			"Automatic update checks will skip the failed version where supported; use a\n"+
+			"manual \"Check for updates\" to retry it deliberately.\n"+
+			"Delete this marker file once acknowledged.\n",
+		exitCode, time.Now().Format(time.RFC3339))
+	markerPath := exePath + ".update-failed"
+	if err := os.WriteFile(markerPath, []byte(msg), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", markerPath, err)
+	}
+	fmt.Fprint(os.Stderr, "\n"+msg)
+}
+
 // preserveUpdateRollback runs when the first boot of a freshly-applied
-// update fails: it deliberately SKIPS the ~-file cleanup (Windows; on
-// Linux the .old survives because the child never reached its
-// post-milestone sweep), writes a recovery-instruction marker next to the
-// binary, and prints the same instructions to stderr. Recovery is one
-// file rename instead of a GitHub re-download.
+// update fails AND automatic rollback was not possible (artifact already
+// swept, or the restore itself failed): it deliberately SKIPS the ~-file
+// cleanup (Windows; on Linux the .old survives because the child never
+// reached its post-milestone sweep), writes a recovery-instruction marker
+// next to the binary, and prints the same instructions to stderr.
+// Recovery is one file rename instead of a GitHub re-download.
 func preserveUpdateRollback(exePath string, exitCode int) {
 	backup := rollbackArtifactPath(exePath)
 	msg := fmt.Sprintf(

@@ -18,6 +18,7 @@ import (
 	"github.com/vampiricwulf/Moombox/internal/config"
 	"github.com/vampiricwulf/Moombox/internal/notifications"
 	"github.com/vampiricwulf/Moombox/internal/tui"
+	"github.com/vampiricwulf/Moombox/internal/updater"
 	"github.com/vampiricwulf/Moombox/internal/web/routes"
 )
 
@@ -473,6 +474,35 @@ func run(configPath string, logLevelOverride string, useTUI bool) bool {
 				c.Updates.LastFailureMarkerSeen = combined
 			}); err != nil {
 				log.Warn("failed to persist failure-marker stamp", slog.String("error", err.Error()))
+			}
+		}
+
+		// .update-pending breadcrumb: ApplyUpdate wrote the tag it updated
+		// TO right before restarting. Resolve it now, ahead of the auto-check
+		// goroutine below. Our own version means the update landed — just
+		// remove it. A DIFFERENT version alongside a failure marker means the
+		// launcher auto-rolled back to this binary: mark that tag skipped so
+		// automatic checks stop offering a release that just proved broken (a
+		// manual "Check for updates" still retries it deliberately). A
+		// different version with NO marker (manual binary swap, marker
+		// deleted early) is treated conservatively: delete without skipping.
+		pendingPath := exeSelf + updater.PendingVersionSuffix
+		if raw, readErr := os.ReadFile(pendingPath); readErr == nil {
+			pendingTag := strings.TrimSpace(string(raw))
+			if shouldSkipPendingVersion(pendingTag, version, len(stamps) > 0) && configLoaded {
+				if err := s.configStore.Update(func(c *config.MoomboxConfig) {
+					c.Updates.SkippedVersion = pendingTag
+				}); err != nil {
+					log.Warn("failed to persist skipped version after rollback",
+						slog.String("version", pendingTag), slog.String("error", err.Error()))
+				} else {
+					log.Warn("failed update rolled back — version marked skipped for automatic checks",
+						slog.String("version", pendingTag))
+				}
+			}
+			if rmErr := os.Remove(pendingPath); rmErr != nil {
+				log.Warn("failed to remove pending-version breadcrumb",
+					slog.String("path", pendingPath), slog.String("error", rmErr.Error()))
 			}
 		}
 	}

@@ -319,6 +319,14 @@ func TestApplyUpdateEndToEnd(t *testing.T) {
 			t.Errorf("stray %s file: %v", suffix, err)
 		}
 	}
+	// The pending-version breadcrumb records the tag this install updated TO,
+	// for the post-restart boot (a successful boot deletes it; a rolled-back
+	// boot marks it skipped).
+	if pending, err := os.ReadFile(exePath + PendingVersionSuffix); err != nil {
+		t.Errorf("pending-version breadcrumb missing: %v", err)
+	} else if string(pending) != "v2.0.0" {
+		t.Errorf("pending breadcrumb: want %q, got %q", "v2.0.0", string(pending))
+	}
 	if got := verifyCalls.Load(); got != 1 {
 		t.Errorf("verifier calls: want 1, got %d", got)
 	}

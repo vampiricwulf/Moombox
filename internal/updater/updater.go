@@ -396,11 +396,32 @@ func (u *Updater) ApplyUpdate(ctx context.Context, release *ReleaseInfo) error {
 		return fmt.Errorf("failed to place new binary: %w", err)
 	}
 
+	// Record the tag this install is updating TO (see PendingVersionSuffix):
+	// the post-restart boot resolves it — a successful boot deletes it, and a
+	// boot that finds it alongside a failed-update marker (the launcher
+	// auto-rolled back) marks the version skipped. Best-effort: without it
+	// the skip feature degrades, nothing else.
+	pendingPath := u.exePath + PendingVersionSuffix
+	if err := os.WriteFile(pendingPath, []byte(release.TagName), 0o644); err != nil {
+		u.logger.Warn("[Updater] Failed to write pending-version breadcrumb",
+			"path", pendingPath, "error", err.Error())
+	}
+
 	u.logger.Info("[Updater] Update applied successfully",
 		"version", release.Version,
 	)
 	return nil
 }
+
+// PendingVersionSuffix is appended to the executable path to form the
+// breadcrumb file recording which release tag an in-flight self-update was
+// updating TO. Written by ApplyUpdate after the binary swap succeeds; the
+// next boot consumes it (cmd/moombox run()): pending == own version means
+// the update landed (delete it), pending != own version WITH a failed-update
+// marker present means the launcher auto-rolled back (mark that tag skipped,
+// then delete it). Stale copies are inert — binaries that predate the
+// breadcrumb ignore it, and the next aware boot cleans it up.
+const PendingVersionSuffix = ".update-pending"
 
 // VerifyCurrentSignature downloads the .sig for the current version from GitHub
 // and verifies it against the running binary. Returns nil if the signature is valid.

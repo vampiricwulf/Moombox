@@ -208,9 +208,15 @@ The self-updater lives in `internal/updater/`. It checks GitHub Releases, downlo
    - `current.exe.new` -> `current.exe` (place new binary)
    - If the second rename fails: attempts rollback by renaming `.old` back to the current path. If rollback also fails, logs an error (binary may be in an inconsistent state).
 
-6. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary.
+6. **Breadcrumb** — After a successful swap, `ApplyUpdate` writes `<exe-path>.update-pending` containing the target release tag. The next boot resolves it: a boot running that version deletes it (update landed); a boot running a *different* version alongside a failed-update marker (the launcher auto-rolled back — see below) records the tag as `updates.skipped_version` so automatic checks stop offering the broken release (a manual "Check for updates" still retries it deliberately), then deletes it. Binaries that predate the breadcrumb ignore it; stale copies are inert until the next aware boot cleans them up.
 
-7. **Cleanup** (`updater.go: CleanupOldBinary`) — Called on startup. Removes stale `.old`, `.new`, and `.new.sig` files left by previous updates or interrupted downloads.
+7. **Restart** — The caller invokes `triggerRestart("update")`, which exits with code 42. The launcher respawns, picking up the new binary.
+
+8. **Cleanup** (`updater.go: CleanupOldBinary`) — Called at the first-successful-boot milestone (database opened, web bind resolved). Removes stale `.old`, `.new`, and `.new.sig` files left by previous updates or interrupted downloads.
+
+### Automatic Rollback
+
+If the **first boot of a freshly-applied update** fails within `postUpdateFailureWindow` (2 minutes) — or the new binary fails to even start — the launcher rolls back automatically (`launcher.go: attemptAutoRollback`): the broken binary is removed (it is bit-identical to the published GitHub asset, so nothing is lost), the preserved rollback artifact (`~` on Windows, `.old` on Linux) is renamed back to the plain name, an `.update-failed` marker documents the rollback, and the restored binary is respawned as a fresh launch. The next boot announces the marker as a notification and — via the `.update-pending` breadcrumb — marks the failed version skipped. Rollback ping-pong is impossible: the restored binary is not "first after update", so a quick death of it takes the normal fail-fast path. When the artifact is already gone (the boot survived to the milestone sweep before dying) or the restore itself fails, the launcher falls back to preserving what remains with written manual-recovery instructions (`preserveUpdateRollback`).
 
 ### Signature Verification of Current Binary
 

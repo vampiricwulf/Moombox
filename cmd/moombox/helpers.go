@@ -229,6 +229,20 @@ func filterJobsByAgeThreshold(jobs []*database.Job, hideAgeDays float64) []*data
 	return filtered
 }
 
+// shouldSkipPendingVersion decides whether a .update-pending breadcrumb (the
+// release tag ApplyUpdate was updating TO) should be recorded as the skipped
+// version on this boot. True only for the auto-rollback shape: the pending
+// tag names a DIFFERENT version than the one running (we are the restored
+// previous binary, not the update that landed) AND a failed-update marker is
+// present (the launcher documented the rollback). currentVersion is the bare
+// semver ("2.7.1"); the tag carries the "v" prefix, matching SkippedVersion's
+// comparison against release.TagName.
+func shouldSkipPendingVersion(pendingTag, currentVersion string, failureMarkerPresent bool) bool {
+	return pendingTag != "" &&
+		pendingTag != "v"+currentVersion &&
+		failureMarkerPresent
+}
+
 // jobArchivedAt is the single-job archive classification shared by
 // filterJobsByAgeThreshold and the WS job_update broadcast gate. Keeping one
 // predicate prevents the two from drifting (an earlier int-truncated copy of
