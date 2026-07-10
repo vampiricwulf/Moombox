@@ -34,16 +34,20 @@ func (sw *switchableWriter) Write(p []byte) (int, error) {
 // Lock hierarchy (acquire in this order to avoid deadlock; never invert):
 //
 //  1. fileMu     — protects file rotation (rotate() and Write of formatted line)
-//  2. jobLogsMu  — protects the jobLogs map + per-buffer fan-out
-//  3. subMu      — protects the subscribers slice
-//  4. ringMu     — protects the ringBuffer slice + ringIndex/ringCount.
+//  2. subMu      — protects the subscribers slice
+//  3. ringMu     — protects the ringBuffer slice + ringIndex/ringCount.
 //     Leaf lock: broadcast's slow-subscriber drop path ring-appends while
 //     holding subMu.RLock, and rotate→diagf ring-appends while holding
 //     fileMu — so nothing may acquire another logger lock under ringMu.
 //
 // Most operations only take one lock. The Write path takes fileMu first,
-// then publishes to ring/jobs/subscribers (each under its own mutex) without
+// then publishes to ring/subscribers (each under its own mutex) without
 // holding fileMu. Audit reports/small-packages.md.
+//
+// Per-job log routing lives in the DATABASE (db.TrackJobForLogs /
+// db.RouteLogToJobs fed via Subscribe, served by db.GetJobLogs) — the
+// logger once carried a parallel LogForJob/GetJobLogs buffer API, but
+// nothing in production ever wired it and it was removed 2026-07.
 type Logger struct {
 	slog   *slog.Logger
 	level  *slog.LevelVar
@@ -72,10 +76,6 @@ type Logger struct {
 	ringIndex  int
 	ringCount  int
 
-	// Per-job log buffers
-	jobLogs   map[string]*jobLogBuffer
-	jobLogsMu sync.RWMutex
-
 	// Pub/sub for log lines
 	subscribers []chan string
 	subMu       sync.RWMutex
@@ -87,15 +87,7 @@ type Logger struct {
 	closed atomic.Bool
 }
 
-type jobLogBuffer struct {
-	lines []string
-	mu    sync.RWMutex
-}
-
-const (
-	defaultRingSize = 200
-	maxJobLogLines  = 500
-)
+const defaultRingSize = 200
 
 // minLogRotationSize is the smallest acceptable rotation threshold. Below
 // this, a single formatted log line could exceed the cap and trigger
@@ -122,7 +114,6 @@ func New(filePath, level string, maxSize, maxFiles int) (*Logger, error) {
 		maxFiles:   maxFiles,
 		ringSize:   defaultRingSize,
 		ringBuffer: make([]string, defaultRingSize),
-		jobLogs:    make(map[string]*jobLogBuffer),
 	}
 
 	// Set up log level
@@ -476,79 +467,6 @@ func (l *Logger) Warn(msg string, args ...any) {
 // Error logs an error message.
 func (l *Logger) Error(msg string, args ...any) {
 	l.log(slog.LevelError, msg, args...)
-}
-
-// LogForJob logs a message and also stores it in the per-job buffer.
-//
-// Deprecated: nothing in production wires this — the live per-job log
-// pipeline is db.RouteLogToJobs (fed via Subscribe) and db.GetJobLogs, with
-// its own caps. These logger-side buffers stay permanently empty at runtime;
-// kept only because tests exercise them. New consumers must use the database
-// pipeline. (Same applies to GetJobLogs / ClearJobLogs / PruneJobLogs.)
-func (l *Logger) LogForJob(jobID string, level slog.Level, msg string, args ...any) {
-	l.log(level, msg, args...)
-
-	line := formatLogLine(level, msg, args...)
-
-	l.jobLogsMu.RLock()
-	buf, ok := l.jobLogs[jobID]
-	l.jobLogsMu.RUnlock()
-
-	if !ok {
-		l.jobLogsMu.Lock()
-		// Double-check under write lock to avoid overwriting concurrent creation
-		if buf, ok = l.jobLogs[jobID]; !ok {
-			buf = &jobLogBuffer{lines: make([]string, 0, 100)}
-			l.jobLogs[jobID] = buf
-		}
-		l.jobLogsMu.Unlock()
-	}
-
-	buf.mu.Lock()
-	if len(buf.lines) >= maxJobLogLines {
-		// Remove oldest 20% of entries to amortize pruning cost
-		pruneCount := maxJobLogLines / 5
-		copy(buf.lines, buf.lines[pruneCount:])
-		buf.lines = buf.lines[:len(buf.lines)-pruneCount]
-	}
-	buf.lines = append(buf.lines, line)
-	buf.mu.Unlock()
-}
-
-// GetJobLogs returns log lines for a specific job.
-func (l *Logger) GetJobLogs(jobID string) []string {
-	l.jobLogsMu.RLock()
-	buf, ok := l.jobLogs[jobID]
-	l.jobLogsMu.RUnlock()
-
-	if !ok {
-		return nil
-	}
-
-	buf.mu.RLock()
-	defer buf.mu.RUnlock()
-
-	result := make([]string, len(buf.lines))
-	copy(result, buf.lines)
-	return result
-}
-
-// ClearJobLogs removes the log buffer for a specific job.
-func (l *Logger) ClearJobLogs(jobID string) {
-	l.jobLogsMu.Lock()
-	delete(l.jobLogs, jobID)
-	l.jobLogsMu.Unlock()
-}
-
-// PruneJobLogs removes log buffers for job IDs not in the provided set.
-func (l *Logger) PruneJobLogs(activeIDs map[string]struct{}) {
-	l.jobLogsMu.Lock()
-	defer l.jobLogsMu.Unlock()
-	for id := range l.jobLogs {
-		if _, ok := activeIDs[id]; !ok {
-			delete(l.jobLogs, id)
-		}
-	}
 }
 
 // GetRecentLines returns the most recent log lines from the ring buffer.

@@ -1,7 +1,6 @@
 package logger
 
 import (
-	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -200,48 +199,6 @@ func TestSubscriberDropDoesNotBlockBroadcast(t *testing.T) {
 	mu.Unlock()
 	if got < lines {
 		t.Errorf("fast subscriber received only %d lines, want %d", got, lines)
-	}
-}
-
-// TestLogForJobConcurrentSameJobID hammers LogForJob with concurrent
-// goroutines all targeting the same jobID. The double-checked-lock
-// pattern in jobLogs initialisation must not lose lines (no zero-init
-// race) and must not exceed maxJobLogLines (the prune trigger).
-// Audit reports/small-packages.md logger LogForJob concurrent.
-func TestLogForJobConcurrentSameJobID(t *testing.T) {
-	l, err := New("", "DEBUG", 1024*1024, 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Close() })
-
-	const jobID = "job-stress"
-	const writers = 8
-	const perWriter = 100
-
-	var wg sync.WaitGroup
-	wg.Add(writers)
-	for w := range writers {
-		go func(id int) {
-			defer wg.Done()
-			for i := range perWriter {
-				l.LogForJob(jobID, slog.LevelInfo, "stress", "writer", id, "i", i)
-			}
-		}(w)
-	}
-	wg.Wait()
-
-	logs := l.GetJobLogs(jobID)
-	// Expected exactly writers*perWriter = 800 lines, but the prune
-	// trigger fires at maxJobLogLines (500) and removes 20% (100) at a
-	// time. So the final count is somewhere in [500-100, maxJobLogLines]
-	// = [400, 500]. Anything outside that range signals a race.
-	if len(logs) > maxJobLogLines {
-		t.Errorf("got %d job log lines; prune trigger should cap at %d", len(logs), maxJobLogLines)
-	}
-	if len(logs) < maxJobLogLines-maxJobLogLines/5 {
-		t.Errorf("got %d job log lines; expected ≥ %d (signal of lost-line race)",
-			len(logs), maxJobLogLines-maxJobLogLines/5)
 	}
 }
 

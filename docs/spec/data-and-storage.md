@@ -897,7 +897,7 @@ A fixed-size ring buffer (200 entries, `defaultRingSize`) holds the most recent 
 
 The LIVE per-job log pipeline is the database's: `Logger.Subscribe()` feeds `db.RouteLogToJobs()`, served by `db.GetJobLogs` (capped at 200 lines, trimmed to 100; `db.PruneJobLogs(activeIDs)` drops buffers for inactive jobs).
 
-The Logger type also carries a parallel `LogForJob`/`GetJobLogs`/`PruneJobLogs` API — it is **deprecated and unwired**: nothing in production calls `LogForJob`, so those buffers stay permanently empty at runtime. New consumers must use the database pipeline.
+The Logger type once carried a parallel `LogForJob`/`GetJobLogs`/`PruneJobLogs` buffer API; nothing in production ever wired it (the buffers stayed permanently empty at runtime), and it was removed in 2026-07. Per-job log consumers use the database pipeline above.
 
 ### Pub/Sub
 
