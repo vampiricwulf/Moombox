@@ -3,6 +3,7 @@ package cipher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 )
@@ -79,6 +80,16 @@ func (s *GojaResolver) ResolveURL(ctx context.Context, req ResolveURLRequest) (*
 		}
 	} else {
 		nParam = decodedN
+	}
+	if nParam != "" && rawN != "" && solvers.N == nil {
+		// Deliberate degrade, not a failure: unlike a missing sig solver
+		// (hard error above — an unsigned URL 403s), an encrypted n still
+		// serves; YouTube just throttles it. Surface the degrade, or the
+		// only symptom is mysteriously slow downloads. Via slog.Default
+		// (bridged into the full logger pipeline) — this path predates the
+		// struct having any logger.
+		slog.Warn("cipher: no n-param solver — leaving n encrypted, downloads may be throttled",
+			"player", PlayerIDFromURL(req.PlayerURL))
 	}
 	if nParam != "" && rawN != "" && solvers.N != nil {
 		decryptedN, err := solvers.DecryptN(nParam)

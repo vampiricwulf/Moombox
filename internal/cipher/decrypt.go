@@ -3,6 +3,7 @@ package cipher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 )
@@ -112,7 +113,16 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 				}
 			}
 		}
-		if err == nil && decryptedN != nParam {
+		switch {
+		case err != nil:
+			// Deliberate degrade, not a failure: an encrypted n still serves
+			// (unlike a missing sig, which 403s) — YouTube just throttles it.
+			// Surface it, or the only symptom is mysteriously slow downloads.
+			// Goes through slog.Default (bridged into the full logger
+			// pipeline) because this free function carries no logger.
+			slog.Warn("cipher: n-param decryption failed — leaving n encrypted, downloads may be throttled",
+				"player", playerID, "err", err)
+		case decryptedN != nParam:
 			for _, prefix := range []string{"?", "&"} {
 				old := prefix + "n=" + rawN
 				if strings.Contains(result, old) {
@@ -129,8 +139,9 @@ func RoutedResolveURL(ctx context.Context, routedSolver Solver, gojaResolver *Go
 // RoutedDecryptNInURL decrypts the n-parameter (query-string and path forms)
 // in rawURL, routing through the composite Solver first, falling back to the
 // goja resolver on error.  Returns the mutated URL; on a total failure the
-// original rawURL is returned unchanged (matching the pre-existing silent-fail
-// behaviour of decryptNParamInURL in the worker).
+// original rawURL is returned unchanged (the pre-existing fail-open contract
+// of decryptNParamInURL in the worker — an encrypted n still serves, just
+// throttled) with a Warn logged so the degrade is diagnosable.
 //
 // playerURL is the player.js URL (used for PlayerIDFromURL and the goja
 // GetSolvers cache key).  Pass a nil routedSolver to use goja directly.
@@ -165,7 +176,12 @@ func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver 
 		if before, _, ok := strings.Cut(rest, "/"); ok {
 			encryptedN := before
 			if len(encryptedN) >= 10 {
-				if dec, err := decryptFn(encryptedN); err == nil && dec != encryptedN {
+				dec, err := decryptFn(encryptedN)
+				switch {
+				case err != nil:
+					slog.Warn("cipher: n-param decryption failed — leaving n encrypted, downloads may be throttled",
+						"player", playerID, "form", "path", "err", err)
+				case dec != encryptedN:
 					result = strings.Replace(result, pathPrefix+encryptedN+"/", pathPrefix+dec+"/", 1)
 				}
 			}
@@ -179,7 +195,12 @@ func RoutedDecryptNInURL(ctx context.Context, routedSolver Solver, gojaResolver 
 	}
 	rawN, decodedN := RawQueryParam(rawQuery, "n")
 	if rawN != "" && decodedN != "" {
-		if dec, err := decryptFn(decodedN); err == nil && dec != decodedN {
+		dec, err := decryptFn(decodedN)
+		switch {
+		case err != nil:
+			slog.Warn("cipher: n-param decryption failed — leaving n encrypted, downloads may be throttled",
+				"player", playerID, "form", "query", "err", err)
+		case dec != decodedN:
 			for _, prefix := range []string{"?", "&"} {
 				old := prefix + "n=" + rawN
 				if strings.Contains(result, old) {
