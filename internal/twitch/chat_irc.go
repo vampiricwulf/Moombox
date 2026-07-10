@@ -18,10 +18,12 @@ import (
 func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 	cd.logger.Info("connecting to twitch IRC", "channel", cd.channelLogin)
 
-	// sessionCtx scopes this session's I/O so Stop/MarkStreamEnded can abort
-	// a blocked read immediately via interruptSession. The PARENT ctx checks
-	// below stay on ctx — a session cancel is not a caller cancel; the loop
-	// notices it through IsRunning and exits cleanly into the drain path.
+	// sessionCtx scopes ALL of this session's I/O — dial, reads, and writes
+	// (handshake + PONG) — so Stop/MarkStreamEnded can abort a blocked
+	// operation immediately via interruptSession, not just the read loop.
+	// The PARENT ctx checks below stay on ctx — a session cancel is not a
+	// caller cancel; the loop notices it through IsRunning and exits cleanly
+	// into the drain path.
 	sessionCtx, sessionCancel := context.WithCancel(ctx)
 	defer sessionCancel()
 	cd.mu.Lock()
@@ -43,26 +45,26 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 
 	// Authenticate
 	if cd.authToken != "" {
-		if err := conn.Write(ctx, websocket.MessageText, []byte("PASS oauth:"+cd.authToken)); err != nil {
+		if err := conn.Write(sessionCtx, websocket.MessageText, []byte("PASS oauth:"+cd.authToken)); err != nil {
 			return fmt.Errorf("IRC PASS failed: %w", err)
 		}
 	} else {
-		if err := conn.Write(ctx, websocket.MessageText, []byte("PASS SCHMOOPIIE")); err != nil {
+		if err := conn.Write(sessionCtx, websocket.MessageText, []byte("PASS SCHMOOPIIE")); err != nil {
 			return fmt.Errorf("IRC PASS failed: %w", err)
 		}
 	}
 	nick := fmt.Sprintf("justinfan%d", rand.IntN(100000))
-	if err := conn.Write(ctx, websocket.MessageText, []byte("NICK "+nick)); err != nil {
+	if err := conn.Write(sessionCtx, websocket.MessageText, []byte("NICK "+nick)); err != nil {
 		return fmt.Errorf("IRC NICK failed: %w", err)
 	}
 
 	// Request capabilities
-	if err := conn.Write(ctx, websocket.MessageText, []byte("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership")); err != nil {
+	if err := conn.Write(sessionCtx, websocket.MessageText, []byte("CAP REQ :twitch.tv/tags twitch.tv/commands twitch.tv/membership")); err != nil {
 		return fmt.Errorf("IRC CAP REQ failed: %w", err)
 	}
 
 	// Join channel
-	if err := conn.Write(ctx, websocket.MessageText, []byte("JOIN #"+strings.ToLower(cd.channelLogin))); err != nil {
+	if err := conn.Write(sessionCtx, websocket.MessageText, []byte("JOIN #"+strings.ToLower(cd.channelLogin))); err != nil {
 		return fmt.Errorf("IRC JOIN failed: %w", err)
 	}
 
@@ -146,7 +148,7 @@ func (cd *ChatDownloader) runIRCSession(ctx context.Context) error {
 					// rather than racing on a cancelled conn.
 					return nil
 				}
-				if err := conn.Write(ctx, websocket.MessageText, []byte("PONG :tmi.twitch.tv")); err != nil {
+				if err := conn.Write(sessionCtx, websocket.MessageText, []byte("PONG :tmi.twitch.tv")); err != nil {
 					cd.logger.Warn("IRC PONG write failed", "err", err)
 				}
 				continue
