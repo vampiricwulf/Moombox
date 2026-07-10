@@ -397,9 +397,16 @@ func (o *DownloadOrchestrator) ExecuteTwitch(ctx context.Context, jobCtx *JobCon
 			}
 		}
 		if muxCurrent {
+			// A resumed part's true start pre-dates this session — pass the
+			// sentinel so muxSegment derives it from the muxed duration
+			// instead of stamping hours of footage with the restart time.
+			muxStart := segmentStartTime
+			if partResumed {
+				muxStart = 0
+			}
 			muxResult := &DownloadResult{HasVideo: true, VideoPath: videoPath, ChatPath: closedChat}
 			o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
-				segmentStartTime, segmentEndTime, currentQuality, muxResult, "twitch", enrich)
+				muxStart, segmentEndTime, currentQuality, muxResult, "twitch", enrich)
 		} else if nextDir == curStagingDir {
 			// Short-segment discard, reusing the same index/dir: the dropped
 			// span's media and its resume sidecar must actually be removed —
@@ -813,11 +820,18 @@ sessionLoop:
 	// here is non-fatal — muxUnrecordedSegments still backstops it.)
 	if segmentIndex > 0 || curStagingDir != jobCtx.StagingDir {
 		segmentEndTime := time.Now().Unix()
+		// A part that survived a restart started before this session —
+		// segmentStartTime only measures the session's slice of it. Pass the
+		// sentinel so muxSegment derives the start from the muxed duration.
+		muxStart := segmentStartTime
+		if partResumed {
+			muxStart = 0
+		}
 		result := &DownloadResult{HasVideo: true, VideoPath: videoPath}
 		if irc != nil {
 			result.ChatPath = chatPathFor(curStagingDir)
 		}
-		seg, muxErr := o.muxSegment(muxCtx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)
+		seg, muxErr := o.muxSegment(muxCtx, jobCtx, segmentIndex, muxStart, segmentEndTime, currentQuality, result)
 		if muxErr != nil {
 			o.logger.Error("failed to mux final Twitch part", "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {

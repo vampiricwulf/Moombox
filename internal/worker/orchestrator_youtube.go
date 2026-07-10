@@ -244,8 +244,15 @@ func (o *DownloadOrchestrator) runLiveStreamDownload(
 			// Mux the old segment in the background (unless too short).
 			// No preMux: YouTube chat stays a single whole-job file.
 			if !shortSegment {
+				// A resumed part's true start pre-dates this session — pass
+				// the sentinel so muxSegment derives it from the muxed
+				// duration instead of stamping it with the restart time.
+				muxStart := segmentStartTime
+				if partResumed {
+					muxStart = 0
+				}
 				o.launchBackgroundSegmentMux(jobCtx, &segmentMuxWg, segmentIndex,
-					segmentStartTime, segmentEndTime, currentQuality, result, "youtube", nil)
+					muxStart, segmentEndTime, currentQuality, result, "youtube", nil)
 				segmentIndex++
 			} else {
 				o.logger.Debug("skipping short segment mux",
@@ -427,7 +434,13 @@ streamEnded:
 	// So total segments produced is N+1 (indices 0..N).
 	if segmentIndex > 0 {
 		segmentEndTime := time.Now().Unix()
-		seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, segmentStartTime, segmentEndTime, currentQuality, result)
+		// Same resumed-part rule as the split path above: the session-local
+		// start time mis-stamps a part that pre-dates this session.
+		muxStart := segmentStartTime
+		if partResumed {
+			muxStart = 0
+		}
+		seg, muxErr := o.muxSegment(ctx, jobCtx, segmentIndex, muxStart, segmentEndTime, currentQuality, result)
 		if muxErr != nil {
 			o.logger.Error("failed to mux final quality segment", "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {

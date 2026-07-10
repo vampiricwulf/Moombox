@@ -621,6 +621,13 @@ func (o *DownloadOrchestrator) sendFinishedNotification(jobCtx *JobContext, fini
 // muxSegment muxes a single part and persists it to the database. Called at
 // part boundaries (quality split, gap split) to finalize the current capture
 // before starting a new one, and by recovery for parts that never muxed.
+//
+// unixStart == 0 is a sentinel meaning "the caller can't know the part's
+// true start": a restart resumed into staged data that pre-dates the session,
+// so the session-local segmentStartTime would mis-stamp hours of pre-restart
+// footage as starting at daemon restart. The start is then derived from the
+// muxed output's probed duration (unixEnd - duration, clamped to the job's
+// download start) — the same approximation segment recovery uses.
 func (o *DownloadOrchestrator) muxSegment(
 	ctx context.Context,
 	jobCtx *JobContext,
@@ -687,6 +694,21 @@ func (o *DownloadOrchestrator) muxSegment(
 
 	// FFprobe for metadata
 	probeData := o.runFFprobe(ctx, outputPath)
+
+	// Resolve the unixStart sentinel (see the doc comment): derive the start
+	// from the probed duration, clamped so it never precedes the job's
+	// download start — mirroring muxUnrecordedSegments' recovery heuristic.
+	if unixStart == 0 {
+		unixStart = unixEnd
+		if probeData != nil && probeData.DurationSec > 0 {
+			unixStart = unixEnd - int64(probeData.DurationSec)
+		}
+		if ds := jobCtx.Job.DownloadStartedAt; ds != "" {
+			if t, perr := time.Parse(time.RFC3339, ds); perr == nil && unixStart < t.Unix() {
+				unixStart = t.Unix()
+			}
+		}
+	}
 
 	// Get file info
 	info, _ := os.Stat(outputPath)
@@ -901,31 +923,20 @@ func (o *DownloadOrchestrator) muxUnrecordedSegments(ctx context.Context, jobCtx
 		if info, statErr := os.Stat(mediaPath); statErr == nil {
 			unixEnd = info.ModTime().Unix()
 		}
-		unixStart := unixEnd
 		quality := QualityInfo{Label: "unknown"}
-		if probe := o.runFFprobe(ctx, mediaPath); probe != nil {
-			if probe.Height > 0 {
-				quality = QualityInfo{
-					Width:  probe.Width,
-					Height: probe.Height,
-					FPS:    probe.Fps,
-					Label:  FormatQualityLabel(probe.Height, probe.Fps),
-				}
-			}
-			if probe.DurationSec > 0 {
-				unixStart = unixEnd - int64(probe.DurationSec)
+		if probe := o.runFFprobe(ctx, mediaPath); probe != nil && probe.Height > 0 {
+			quality = QualityInfo{
+				Width:  probe.Width,
+				Height: probe.Height,
+				FPS:    probe.Fps,
+				Label:  FormatQualityLabel(probe.Height, probe.Fps),
 			}
 		}
-		// Guard against an implausibly-early start from a truncated/oversized
-		// ffprobe duration: the recorded span must not precede the job's
-		// download start. The authoritative DurationSeconds comes from the
-		// post-mux probe in muxSegment; this only keeps start/end sanely ordered.
-		if ds := jobCtx.Job.DownloadStartedAt; ds != "" {
-			if t, perr := time.Parse(time.RFC3339, ds); perr == nil && unixStart < t.Unix() {
-				unixStart = t.Unix()
-			}
-		}
-		if seg, muxErr := o.muxSegment(ctx, jobCtx, sd.idx, unixStart, unixEnd, quality, media); muxErr != nil {
+		// unixStart 0 = muxSegment's derive-from-duration sentinel: it
+		// computes end - probed duration (from the MUXED output — at least as
+		// accurate as this raw stream's container metadata), clamped so the
+		// span never precedes the job's download start.
+		if seg, muxErr := o.muxSegment(ctx, jobCtx, sd.idx, 0, unixEnd, quality, media); muxErr != nil {
 			o.logger.Error("failed to mux recovered segment", "segment", sd.idx, "err", muxErr, "jobID", jobCtx.Job.ID)
 		} else if seg != nil {
 			o.logger.Info("recovered unmuxed quality segment", "segment", sd.idx, "file", seg.Filename, "jobID", jobCtx.Job.ID)
