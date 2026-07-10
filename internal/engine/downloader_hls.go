@@ -566,10 +566,47 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 	defer close(done)
 	var wg sync.WaitGroup
 
+	// fetchItem downloads one segment, converting BOTH failure shapes —
+	// fetch errors and panics — into the nil-data GAP SENTINEL. The
+	// sentinel is load-bearing: every dequeued index must produce exactly
+	// one result, or the consumer's nextIdx wedges on the missing index
+	// while the other workers race the rest of the playlist into the
+	// reorder buffer — accumulating the ENTIRE remaining VOD in RAM (a
+	// multi-GB OOM on a long VOD). The per-item recover exists for the
+	// same reason: a worker panic that only logged (the previous shape)
+	// dropped its in-flight item's result and re-opened exactly that hole.
+	fetchItem := func(item segWork) (data []byte) {
+		defer func() {
+			if r := recover(); r != nil {
+				if d.logger != nil {
+					d.logger.Error("VOD parallel download worker panic", "panic", r, "idx", item.idx)
+				}
+				data = nil // gap sentinel — the index must still emit a result
+			}
+		}()
+		data, fetchErr := d.fetchSegmentWithRetry(ctx, item.segURL)
+		if fetchErr != nil {
+			// Audit reports/engine.md #17: distinguish CDN-evicted
+			// segments from retries-exhausted so silent gaps are debuggable.
+			switch {
+			case errors.Is(fetchErr, ErrSegmentPermanent):
+				d.logger.Debug("[Downloader] HLS VOD segment permanently gone (403/410)",
+					"idx", item.idx)
+			case errors.Is(fetchErr, ErrSegmentRetriesExhausted):
+				d.logger.Debug("[Downloader] HLS VOD segment retries exhausted",
+					"idx", item.idx)
+			}
+			return nil
+		}
+		return data
+	}
+
 	// Spawn fixed worker pool
 	for range ParallelDownloads {
 		wg.Go(func() {
 			defer func() {
+				// Backstop only (channel ops below): per-item panics are
+				// already converted to sentinels inside fetchItem.
 				if r := recover(); r != nil && d.logger != nil {
 					d.logger.Error("VOD parallel download worker panic", "panic", r)
 				}
@@ -578,31 +615,8 @@ func (d *SegmentDownloader) runHlsVodParallel(ctx context.Context, pl *HlsPlayli
 				if d.isCancelled() || ctx.Err() != nil {
 					continue // drain channel
 				}
-				data, fetchErr := d.fetchSegmentWithRetry(ctx, item.segURL)
-				if fetchErr != nil {
-					// Audit reports/engine.md #17: distinguish CDN-evicted
-					// segments from retries-exhausted so silent gaps are debuggable.
-					switch {
-					case errors.Is(fetchErr, ErrSegmentPermanent):
-						d.logger.Debug("[Downloader] HLS VOD segment permanently gone (403/410)",
-							"idx", item.idx)
-					case errors.Is(fetchErr, ErrSegmentRetriesExhausted):
-						d.logger.Debug("[Downloader] HLS VOD segment retries exhausted",
-							"idx", item.idx)
-					}
-					// Emit a nil-data GAP SENTINEL rather than dropping the
-					// segment silently. Without it, a failed segment at the
-					// consumer's nextIdx never arrives, so nextIdx never
-					// advances while the other workers race the rest of the
-					// playlist into the reorder buffer — accumulating the
-					// ENTIRE remaining VOD in RAM (a multi-GB OOM on a long VOD
-					// with one early muted/deleted segment). The sentinel lets
-					// the consumer flush past the hole and keeps the buffer
-					// bounded to the in-flight window.
-					data = nil
-				}
 				select {
-				case results <- segResult{idx: item.idx, data: data}:
+				case results <- segResult{idx: item.idx, data: fetchItem(item)}:
 				case <-done:
 					return
 				}
