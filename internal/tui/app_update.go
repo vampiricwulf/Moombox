@@ -136,6 +136,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.taskList.marquee.Tick()
 		a.details.marquee.Tick()
+		// The details panel bakes its title frame into the viewport content
+		// (renderRow runs from updateViewportContent, not per render frame) —
+		// re-render it now so the scrolling title advances one step per tick
+		// instead of jumping several positions on the next slower rebuild
+		// (500ms–1s via SetProgress / RefreshRelativeTimes).
+		a.details.RefreshMarqueeFrame()
 		return a, a.marqueeTick()
 
 	case channelClosedMsg:

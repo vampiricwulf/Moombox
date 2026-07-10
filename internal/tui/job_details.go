@@ -141,6 +141,24 @@ func (m *JobDetailsModel) SetProgress(p *ProgressData) {
 	m.viewport.SetYOffset(yOffset)
 }
 
+// RefreshMarqueeFrame re-renders the viewport content so the Title row picks
+// up the marquee's current offset. The frame is read at renderRow time (not
+// stored in m.rows), so no row rebuild is needed — only the content
+// re-render. Called from the 150ms marquee tick: without it, the frame baked
+// into the viewport string only refreshed on the next SetProgress /
+// RefreshRelativeTimes rebuild (500ms–1s), so the scrolling title visibly
+// jumped 3–7 positions at a time instead of stepping once per tick (the task
+// list marquee never had this problem — its delegate renders live per frame).
+// No-op when nothing scrolls; preserves scroll like SetProgress.
+func (m *JobDetailsModel) RefreshMarqueeFrame() {
+	if m.job == nil || !m.marquee.NeedsScroll() {
+		return
+	}
+	yOffset := m.viewport.YOffset()
+	m.updateViewportContent()
+	m.viewport.SetYOffset(yOffset)
+}
+
 // RefreshRelativeTimes rebuilds the detail rows so wall-clock-derived text
 // (the "5m ago" relative suffixes on Created/Updated/DL Started) stays
 // current for jobs the progress tick never rebuilds — terminal statuses
