@@ -302,16 +302,23 @@ export class SettingsController {
             } else {
               notes.textContent = data.releaseNotes || "No release notes available.";
             }
-            // Hide the "Update Now" button since this is just a viewer
+            // Viewer mode: this is just a notes viewer, not the update prompt.
+            // Hide "Update Now", relabel the dismiss button to "Close", and
+            // flag the dialog so app.js's dismissUpdate() plain-hides instead
+            // of POSTing /api/update/dismiss (which errors "no update pending"
+            // here, and would wrongly SKIP a version if one were pending).
             const updateBtn = document.getElementById("update-now-btn");
             const dismissBtn = document.getElementById("update-dismiss-btn");
             if (updateBtn) updateBtn.style.display = "none";
             if (dismissBtn) dismissBtn.textContent = "Close";
+            dlg.dataset.viewerMode = "true";
             dlg.show();
-            // Restore the original buttons when the dialog closes
+            // Restore the update-prompt state when the dialog closes. Text must
+            // match index.html's dismiss button ("Skip this version").
             dlg.addEventListener("sl-after-hide", () => {
               if (updateBtn) updateBtn.style.display = "";
-              if (dismissBtn) dismissBtn.textContent = "Don't ask again";
+              if (dismissBtn) dismissBtn.textContent = "Skip this version";
+              delete dlg.dataset.viewerMode;
             }, { once: true });
           }
         } finally {

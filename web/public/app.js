@@ -964,6 +964,15 @@ class MoomboxApp {
   }
 
   async dismissUpdate() {
+    // Viewer mode: the shared update dialog is being reused by Settings >
+    // View Release Notes, with this same button relabeled "Close" (see
+    // settings.js). In that mode there may be no pending update at all, and
+    // even if there is, "Close" must NOT skip it — just hide the dialog.
+    const dlg = document.getElementById("update-dialog");
+    if (dlg?.dataset.viewerMode === "true") {
+      dlg.hide();
+      return;
+    }
     try {
       const resp = await fetch("/api/update/dismiss", { method: "POST" });
       if (!resp.ok) {
