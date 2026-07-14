@@ -163,7 +163,9 @@ type FilesDialogModel struct {
 	deleteConfirmID string // path (file) or video ID (history) pending confirm
 	confirmTimer    time.Time
 	loading         bool
-	errorMsg        string
+	filesErr        string // orphaned-files fetch failed (empty = ok)
+	historyErr      string // orphaned-history fetch failed (empty = ok)
+	actionErr       string // transient error from a delete; the list stays visible
 	feedbackMsg     string
 
 	// Two async sources feed one list: orphaned files and orphaned history.
@@ -218,7 +220,9 @@ func (m *FilesDialogModel) Open() {
 	m.list.SetItems(nil)
 	m.deleteConfirmID = ""
 	m.confirmTimer = time.Time{}
-	m.errorMsg = ""
+	m.filesErr = ""
+	m.historyErr = ""
+	m.actionErr = ""
 	m.feedbackMsg = ""
 	m.files = nil
 	m.history = nil
@@ -249,6 +253,7 @@ func (m *FilesDialogModel) SetSize(w, h int) {
 // SetFiles records the orphaned-files result and rebuilds the combined list.
 func (m *FilesDialogModel) SetFiles(files []OrphanedFileEntry) tea.Cmd {
 	m.files = files
+	m.filesErr = ""
 	m.filesLoaded = true
 	return m.finishLoad()
 }
@@ -256,6 +261,7 @@ func (m *FilesDialogModel) SetFiles(files []OrphanedFileEntry) tea.Cmd {
 // SetHistory records the orphaned-history result and rebuilds the combined list.
 func (m *FilesDialogModel) SetHistory(history []OrphanedHistoryEntry) tea.Cmd {
 	m.history = history
+	m.historyErr = ""
 	m.historyLoaded = true
 	return m.finishLoad()
 }
@@ -285,12 +291,31 @@ func (m *FilesDialogModel) rebuildList() tea.Cmd {
 	return m.list.SetItems(items)
 }
 
-// SetError sets an error message (from the files fetch). A history-fetch failure
-// is handled leniently — see SetHistory usage in the update loop.
-func (m *FilesDialogModel) SetError(msg string) {
-	m.errorMsg = msg
-	m.loading = false
+// SetFilesError records a failure to load the orphaned files. The two sources
+// are independent: if the history loaded, it is still shown, and this error
+// appears only as an inline warning (or as the main message when there is
+// nothing else to show). Mirrors SetHistoryError.
+func (m *FilesDialogModel) SetFilesError(msg string) tea.Cmd {
+	m.filesErr = msg
+	m.files = nil
 	m.filesLoaded = true
+	return m.finishLoad()
+}
+
+// SetHistoryError records a failure to load the orphaned history. Symmetric to
+// SetFilesError — the files section still shows.
+func (m *FilesDialogModel) SetHistoryError(msg string) tea.Cmd {
+	m.historyErr = msg
+	m.history = nil
+	m.historyLoaded = true
+	return m.finishLoad()
+}
+
+// SetActionError shows a transient error from a delete action without hiding the
+// list, which remains valid.
+func (m *FilesDialogModel) SetActionError(msg string) {
+	m.actionErr = msg
+	m.feedbackMsg = ""
 }
 
 // SelectedFile returns the currently selected file entry.
@@ -330,21 +355,23 @@ func (m *FilesDialogModel) RemoveHistory(videoID string) {
 		}
 	}
 	m.deleteConfirmID = ""
+	m.actionErr = ""
 	m.rebuildList()
 }
 
-// RemoveFile removes a file by path from the list after successful deletion.
-// Audit reports/tui.md Finding 5 was wrong about list.RemoveItem returning
-// a tea.Cmd — the void return is the actual API in this bubbles/v2 version.
+// RemoveFile removes a file by path from the backing slice after successful
+// deletion, then rebuilds so the divider drops when the files group empties and
+// the file cannot reappear on a later rebuild (m.files is the source of truth).
 func (m *FilesDialogModel) RemoveFile(path string) {
-	for i, item := range m.list.Items() {
-		fi, ok := item.(fileItem)
-		if ok && fi.entry.Path == path {
-			m.list.RemoveItem(i)
-			m.deleteConfirmID = ""
+	for i, f := range m.files {
+		if f.Path == path {
+			m.files = append(m.files[:i], m.files[i+1:]...)
 			break
 		}
 	}
+	m.deleteConfirmID = ""
+	m.actionErr = ""
+	m.rebuildList()
 }
 
 // UpdateComponents routes tea.Msg to the spinner when loading.
@@ -380,7 +407,9 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 		return "close", nil
 	case "r", "R":
 		m.loading = true
-		m.errorMsg = ""
+		m.filesErr = ""
+		m.historyErr = ""
+		m.actionErr = ""
 		m.filesLoaded = false
 		m.historyLoaded = false
 		return "refresh", nil
@@ -388,6 +417,7 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 		if len(m.list.Items()) == 0 {
 			return "", nil
 		}
+		m.actionErr = "" // starting a fresh delete clears any prior failure
 		// Files: two-press confirm, returns "delete" (routed to file deletion).
 		if f := m.SelectedFile(); f != nil {
 			if m.deleteConfirmID == f.Path && !m.confirmTimer.IsZero() && time.Now().Before(m.confirmTimer) {
@@ -435,6 +465,22 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 	return "", nil
 }
 
+// loadErrorText composes a single message from the two independent fetch
+// errors. Empty when both sources loaded. When only one failed it names that
+// source, so a files-fetch failure never hides loaded history (and vice versa).
+func (m *FilesDialogModel) loadErrorText() string {
+	switch {
+	case m.filesErr != "" && m.historyErr != "":
+		return "Couldn't load orphaned files or history."
+	case m.filesErr != "":
+		return "Couldn't scan orphaned files: " + m.filesErr
+	case m.historyErr != "":
+		return "Couldn't load orphaned history: " + m.historyErr
+	default:
+		return ""
+	}
+}
+
 // View renders the files dialog overlay.
 func (m *FilesDialogModel) View() string {
 	if !m.visible {
@@ -445,6 +491,7 @@ func (m *FilesDialogModel) View() string {
 	boxH := max(min(24, m.height-4), 10)
 
 	total := len(m.list.Items())
+	loadErr := m.loadErrorText()
 
 	var lines []string
 
@@ -453,12 +500,24 @@ func (m *FilesDialogModel) View() string {
 
 	if m.loading {
 		lines = append(lines, "  "+m.spinner.View()+" Scanning...")
-	} else if m.errorMsg != "" {
-		lines = append(lines, ErrorStyle.Render("  "+m.errorMsg))
 	} else if total == 0 {
-		lines = append(lines, DimStyle.Render("  No orphaned files or history entries found."))
+		// Nothing to list: show the load error if any, else the empty message.
+		if loadErr != "" {
+			lines = append(lines, ErrorStyle.Render("  "+loadErr))
+		} else {
+			lines = append(lines, DimStyle.Render("  No orphaned files or history entries found."))
+		}
 	} else {
 		lines = append(lines, m.list.View())
+		// One source loaded, the other failed — keep the list, warn inline.
+		if loadErr != "" {
+			lines = append(lines, "", ErrorStyle.Render("  ⚠ "+loadErr))
+		}
+	}
+
+	if m.actionErr != "" {
+		lines = append(lines, "")
+		lines = append(lines, ErrorStyle.Render("  "+m.actionErr))
 	}
 
 	if m.feedbackMsg != "" {

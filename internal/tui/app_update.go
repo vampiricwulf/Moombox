@@ -442,16 +442,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case fetchOrphansResultMsg:
+		// A files-fetch failure is non-fatal: still show any loaded history,
+		// with the error surfaced inline (see SetFilesError).
 		if msg.Err != "" {
-			a.filesDlg.SetError(msg.Err)
-			return a, nil
+			return a, a.filesDlg.SetFilesError(msg.Err)
 		}
 		cmd := a.filesDlg.SetFiles(msg.Files)
 		return a, cmd
 
 	case deleteOrphanResultMsg:
 		if msg.Err != "" {
-			a.filesDlg.SetError(msg.Err)
+			a.filesDlg.SetActionError(msg.Err)
 		} else {
 			a.filesDlg.RemoveFile(msg.Path)
 			a.filesDlg.feedbackMsg = "Deleted"
@@ -460,15 +461,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fetchOrphanedHistoryResultMsg:
 		// A history-fetch failure is non-fatal: still show the orphaned files,
-		// just with no history section.
+		// with the error surfaced inline (see SetHistoryError).
 		if msg.Err != "" {
-			return a, a.filesDlg.SetHistory(nil)
+			return a, a.filesDlg.SetHistoryError(msg.Err)
 		}
 		return a, a.filesDlg.SetHistory(msg.Entries)
 
 	case deleteHistoryEntryResultMsg:
 		if msg.Err != "" {
-			a.filesDlg.SetError(msg.Err)
+			a.filesDlg.SetActionError(msg.Err)
 		} else {
 			a.filesDlg.RemoveHistory(msg.VideoID)
 			a.filesDlg.feedbackMsg = "Deleted"
