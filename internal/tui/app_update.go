@@ -458,6 +458,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case fetchOrphanedHistoryResultMsg:
+		// A history-fetch failure is non-fatal: still show the orphaned files,
+		// just with no history section.
+		if msg.Err != "" {
+			return a, a.filesDlg.SetHistory(nil)
+		}
+		return a, a.filesDlg.SetHistory(msg.Entries)
+
+	case deleteHistoryEntryResultMsg:
+		if msg.Err != "" {
+			a.filesDlg.SetError(msg.Err)
+		} else {
+			a.filesDlg.RemoveHistory(msg.VideoID)
+			a.filesDlg.feedbackMsg = "Deleted"
+		}
+		return a, nil
+
 	case fetchClientTokensResultMsg:
 		if msg.Err != "" {
 			a.clientTokensDlg.SetError(msg.Err)

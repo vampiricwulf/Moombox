@@ -1333,3 +1333,58 @@ func TestSubscriberSliceShrinksAfterChurn(t *testing.T) {
 		t.Errorf("cap=%d, len=%d: expected shrink to bring cap within 4x len", cap(db.onJobUpdate), len(db.onJobUpdate))
 	}
 }
+
+// --- Orphaned history ---
+
+func TestOrphanedHistory(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, v := range []string{"vidOrphan01", "vidHasJob02", "vidOrphan03"} {
+		if err := db.AddToHistory(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// vidHasJob02 gets a job -> not orphaned.
+	if _, err := db.AddJob(&Job{
+		ID: "vidHasJob02", VideoID: "vidHasJob02", Platform: "youtube",
+		Status: StatusFinished, CreatedAt: "2026-07-14T00:00:00Z", UpdatedAt: "2026-07-14T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	orphans, err := db.ListOrphanedHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, o := range orphans {
+		got[o.VideoID] = true
+	}
+	if !got["vidOrphan01"] || !got["vidOrphan03"] {
+		t.Errorf("expected both orphans listed, got %+v", orphans)
+	}
+	if got["vidHasJob02"] {
+		t.Error("a history row with a matching job must NOT be listed as orphaned")
+	}
+
+	// Delete one orphan.
+	n, err := db.DeleteHistoryEntries([]string{"vidOrphan01"})
+	if err != nil || n != 1 {
+		t.Fatalf("delete: n=%d err=%v", n, err)
+	}
+	if p, _ := db.HasProcessed("vidOrphan01"); p {
+		t.Error("deleted orphan should no longer be in history")
+	}
+	if p, _ := db.HasProcessed("vidOrphan03"); !p {
+		t.Error("untouched orphan should remain")
+	}
+	// Empty delete is a no-op.
+	if n, err := db.DeleteHistoryEntries(nil); err != nil || n != 0 {
+		t.Errorf("empty delete: n=%d err=%v", n, err)
+	}
+}

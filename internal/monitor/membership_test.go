@@ -83,9 +83,9 @@ func TestMembershipCandidates(t *testing.T) {
 func TestMergeCandidatesRecencyCap(t *testing.T) {
 	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
 	cands := []discoveredVideo{
-		{videoID: "rssRecent01", published: now.Add(-1 * time.Hour), source: "feed"},       // recent public
-		{videoID: "rssOlder002", published: now.Add(-48 * time.Hour), source: "feed"},       // older public
-		{videoID: "memLive0003", published: now, source: "membership", authProbe: true},      // live members (now)
+		{videoID: "rssRecent01", published: now.Add(-1 * time.Hour), source: "feed"},                               // recent public
+		{videoID: "rssOlder002", published: now.Add(-48 * time.Hour), source: "feed"},                              // older public
+		{videoID: "memLive0003", published: now, source: "membership", authProbe: true},                            // live members (now)
 		{videoID: "memOldVod04", published: now.Add(-700 * 24 * time.Hour), source: "membership", authProbe: true}, // ~2y old members VOD
 	}
 	got := mergeCandidates(cands, 2)

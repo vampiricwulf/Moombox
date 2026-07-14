@@ -31,6 +31,31 @@ type fileItem struct {
 
 func (f fileItem) FilterValue() string { return f.entry.RelPath }
 
+// OrphanedHistoryEntry is a processing-history row with no matching job, shown
+// in the same overlay as orphaned files. While it remains, the monitor treats
+// the video as already-processed and won't re-discover it; removing it unblocks
+// the video.
+type OrphanedHistoryEntry struct {
+	VideoID string
+	AddedAt string
+}
+
+// historyItem wraps OrphanedHistoryEntry as a list.Item.
+type historyItem struct {
+	entry OrphanedHistoryEntry
+}
+
+func (h historyItem) FilterValue() string { return h.entry.VideoID }
+
+// sectionHeaderItem is a non-selectable divider between the files and history
+// groups. Navigation skips it and it is only inserted when both groups are
+// non-empty, so the cursor never starts on it.
+type sectionHeaderItem struct {
+	label string
+}
+
+func (s sectionHeaderItem) FilterValue() string { return "" }
+
 // fileDelegate renders file list items with type badges and delete confirmation.
 type fileDelegate struct {
 	dialog *FilesDialogModel
@@ -41,12 +66,48 @@ func (d fileDelegate) Spacing() int                            { return 0 }
 func (d fileDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
 
 func (d fileDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	fi, ok := item.(fileItem)
-	if !ok {
-		return
+	switch it := item.(type) {
+	case sectionHeaderItem:
+		fmt.Fprint(w, DimStyle.Render("  "+it.label))
+	case historyItem:
+		d.renderHistory(w, m, index, it.entry)
+	case fileItem:
+		d.renderFile(w, m, index, it.entry)
 	}
-	f := fi.entry
+}
 
+// renderHistory draws one orphaned-history row: a [history] badge, the video ID,
+// and when it entered the history table.
+func (d fileDelegate) renderHistory(w io.Writer, m list.Model, index int, h OrphanedHistoryEntry) {
+	prefix := "  "
+	if index == m.Index() {
+		prefix = "▸ "
+	}
+
+	var style lipgloss.Style
+	if d.dialog != nil && d.dialog.deleteConfirmID == h.VideoID {
+		style = YellowStyle
+	} else if index == m.Index() {
+		style = lipgloss.NewStyle().Foreground(ColorCyan)
+	} else {
+		style = lipgloss.NewStyle()
+	}
+
+	badgeStyle := lipgloss.NewStyle().Foreground(ColorGray)
+	if (d.dialog != nil && d.dialog.deleteConfirmID == h.VideoID) || index == m.Index() {
+		badgeStyle = style
+	}
+
+	added := h.AddedAt
+	if len(added) >= 16 {
+		added = strings.Replace(added[:16], "T", " ", 1)
+	}
+	badgeTag := fmt.Sprintf("%-9s", "[history]")
+	line := prefix + badgeStyle.Render(badgeTag) + " " + h.VideoID + "  " + added
+	fmt.Fprint(w, style.Render(line))
+}
+
+func (d fileDelegate) renderFile(w io.Writer, m list.Model, index int, f OrphanedFileEntry) {
 	prefix := "  "
 	if index == m.Index() {
 		prefix = "▸ "
@@ -99,11 +160,17 @@ type FilesDialogModel struct {
 	visible         bool
 	width, height   int
 	list            list.Model
-	deleteConfirmID string // path of file pending double-press confirm
+	deleteConfirmID string // path (file) or video ID (history) pending confirm
 	confirmTimer    time.Time
 	loading         bool
 	errorMsg        string
 	feedbackMsg     string
+
+	// Two async sources feed one list: orphaned files and orphaned history.
+	files         []OrphanedFileEntry
+	history       []OrphanedHistoryEntry
+	filesLoaded   bool
+	historyLoaded bool
 
 	// Loading spinner
 	spinner spinner.Model
@@ -153,6 +220,10 @@ func (m *FilesDialogModel) Open() {
 	m.confirmTimer = time.Time{}
 	m.errorMsg = ""
 	m.feedbackMsg = ""
+	m.files = nil
+	m.history = nil
+	m.filesLoaded = false
+	m.historyLoaded = false
 }
 
 // Close hides the dialog.
@@ -175,21 +246,51 @@ func (m *FilesDialogModel) SetSize(w, h int) {
 	m.list.SetSize(boxW-2, listH)
 }
 
-// SetFiles populates the file list after async fetch.
+// SetFiles records the orphaned-files result and rebuilds the combined list.
 func (m *FilesDialogModel) SetFiles(files []OrphanedFileEntry) tea.Cmd {
-	m.loading = false
-	m.errorMsg = ""
-	items := make([]list.Item, len(files))
-	for i, f := range files {
-		items[i] = fileItem{entry: f}
+	m.files = files
+	m.filesLoaded = true
+	return m.finishLoad()
+}
+
+// SetHistory records the orphaned-history result and rebuilds the combined list.
+func (m *FilesDialogModel) SetHistory(history []OrphanedHistoryEntry) tea.Cmd {
+	m.history = history
+	m.historyLoaded = true
+	return m.finishLoad()
+}
+
+// finishLoad clears the loading state once BOTH sources have reported, and
+// rebuilds the list. Called after each source arrives.
+func (m *FilesDialogModel) finishLoad() tea.Cmd {
+	if m.filesLoaded && m.historyLoaded {
+		m.loading = false
+	}
+	return m.rebuildList()
+}
+
+// rebuildList assembles the single list: files, then a divider (only when both
+// groups are non-empty), then history entries.
+func (m *FilesDialogModel) rebuildList() tea.Cmd {
+	items := make([]list.Item, 0, len(m.files)+len(m.history)+1)
+	for _, f := range m.files {
+		items = append(items, fileItem{entry: f})
+	}
+	if len(m.files) > 0 && len(m.history) > 0 {
+		items = append(items, sectionHeaderItem{label: "── Orphaned History Entries ──"})
+	}
+	for _, h := range m.history {
+		items = append(items, historyItem{entry: h})
 	}
 	return m.list.SetItems(items)
 }
 
-// SetError sets an error message.
+// SetError sets an error message (from the files fetch). A history-fetch failure
+// is handled leniently — see SetHistory usage in the update loop.
 func (m *FilesDialogModel) SetError(msg string) {
 	m.errorMsg = msg
 	m.loading = false
+	m.filesLoaded = true
 }
 
 // SelectedFile returns the currently selected file entry.
@@ -203,6 +304,33 @@ func (m *FilesDialogModel) SelectedFile() *OrphanedFileEntry {
 		return nil
 	}
 	return &fi.entry
+}
+
+// SelectedHistory returns the currently selected history entry, or nil if the
+// selection is not a history row.
+func (m *FilesDialogModel) SelectedHistory() *OrphanedHistoryEntry {
+	sel := m.list.SelectedItem()
+	if sel == nil {
+		return nil
+	}
+	hi, ok := sel.(historyItem)
+	if !ok {
+		return nil
+	}
+	return &hi.entry
+}
+
+// RemoveHistory removes a history entry by video ID from the list after
+// successful deletion, then drops the divider if the history group is now empty.
+func (m *FilesDialogModel) RemoveHistory(videoID string) {
+	for i, h := range m.history {
+		if h.VideoID == videoID {
+			m.history = append(m.history[:i], m.history[i+1:]...)
+			break
+		}
+	}
+	m.deleteConfirmID = ""
+	m.rebuildList()
 }
 
 // RemoveFile removes a file by path from the list after successful deletion.
@@ -253,26 +381,38 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 	case "r", "R":
 		m.loading = true
 		m.errorMsg = ""
+		m.filesLoaded = false
+		m.historyLoaded = false
 		return "refresh", nil
 	case "d", "D":
 		if len(m.list.Items()) == 0 {
 			return "", nil
 		}
-		sel := m.SelectedFile()
-		if sel == nil {
+		// Files: two-press confirm, returns "delete" (routed to file deletion).
+		if f := m.SelectedFile(); f != nil {
+			if m.deleteConfirmID == f.Path && !m.confirmTimer.IsZero() && time.Now().Before(m.confirmTimer) {
+				m.deleteConfirmID = ""
+				m.confirmTimer = time.Time{}
+				return "delete", nil
+			}
+			m.deleteConfirmID = f.Path
+			m.confirmTimer = time.Now().Add(3 * time.Second)
+			m.feedbackMsg = fmt.Sprintf("Press D again to delete \"%s\"", f.RelPath)
 			return "", nil
 		}
-		if m.deleteConfirmID == sel.Path && !m.confirmTimer.IsZero() && time.Now().Before(m.confirmTimer) {
-			// Second press: execute delete
-			m.deleteConfirmID = ""
-			m.confirmTimer = time.Time{}
-			return "delete", nil
+		// History: two-press confirm, returns "delete-history".
+		if h := m.SelectedHistory(); h != nil {
+			if m.deleteConfirmID == h.VideoID && !m.confirmTimer.IsZero() && time.Now().Before(m.confirmTimer) {
+				m.deleteConfirmID = ""
+				m.confirmTimer = time.Time{}
+				return "delete-history", nil
+			}
+			m.deleteConfirmID = h.VideoID
+			m.confirmTimer = time.Now().Add(3 * time.Second)
+			m.feedbackMsg = fmt.Sprintf("Press D again to remove history for %s", h.VideoID)
+			return "", nil
 		}
-		// First press: set confirmation
-		m.deleteConfirmID = sel.Path
-		m.confirmTimer = time.Now().Add(3 * time.Second)
-		m.feedbackMsg = fmt.Sprintf("Press D again to delete \"%s\"", sel.RelPath)
-		return "", nil
+		return "", nil // section divider selected — nothing to delete
 	}
 
 	// Reset confirm on navigation
@@ -285,6 +425,11 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 	if !m.loading && len(m.list.Items()) > 0 {
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
+		// The section divider is non-selectable; step past it in the same
+		// direction so the cursor never lands on it.
+		if _, isHeader := m.list.SelectedItem().(sectionHeaderItem); isHeader {
+			m.list, _ = m.list.Update(msg)
+		}
 		return "", cmd
 	}
 	return "", nil
@@ -299,19 +444,19 @@ func (m *FilesDialogModel) View() string {
 	boxW := max(min(80, m.width-4), 40)
 	boxH := max(min(24, m.height-4), 10)
 
-	fileCount := len(m.list.Items())
+	total := len(m.list.Items())
 
 	var lines []string
 
-	lines = append(lines, TitleStyle.Render("Orphaned Files")+" "+DimStyle.Render(fmt.Sprintf("(%d files)", fileCount)))
+	lines = append(lines, TitleStyle.Render("Orphaned")+" "+DimStyle.Render(fmt.Sprintf("(%d files, %d history)", len(m.files), len(m.history))))
 	lines = append(lines, "")
 
 	if m.loading {
 		lines = append(lines, "  "+m.spinner.View()+" Scanning...")
 	} else if m.errorMsg != "" {
 		lines = append(lines, ErrorStyle.Render("  "+m.errorMsg))
-	} else if fileCount == 0 {
-		lines = append(lines, DimStyle.Render("  No orphaned files found."))
+	} else if total == 0 {
+		lines = append(lines, DimStyle.Render("  No orphaned files or history entries found."))
 	} else {
 		lines = append(lines, m.list.View())
 	}

@@ -167,6 +167,21 @@ func (s *runState) runTUI() {
 	app.OnDeleteOrphan = func(path string) error {
 		return worker.DeleteOrphanedFile(path, s.db, s.configStore.Snapshot())
 	}
+	app.OnListOrphanedHistory = func() ([]tui.OrphanedHistoryEntry, error) {
+		entries, err := s.db.ListOrphanedHistory()
+		if err != nil {
+			return nil, err
+		}
+		result := make([]tui.OrphanedHistoryEntry, len(entries))
+		for i, e := range entries {
+			result[i] = tui.OrphanedHistoryEntry{VideoID: e.VideoID, AddedAt: e.AddedAt}
+		}
+		return result, nil
+	}
+	app.OnDeleteHistoryEntry = func(videoID string) error {
+		_, err := s.db.DeleteHistoryEntries([]string{videoID})
+		return err
+	}
 	app.OnListClientTokens = func() ([]*database.ClientToken, error) {
 		return s.db.ListClientTokens()
 	}

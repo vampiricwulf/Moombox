@@ -145,7 +145,7 @@ func (a *App) dispatchAction(chord string, job *database.Job) (tea.Model, tea.Cm
 	case "A O":
 		a.filesDlg.SetSize(a.width, a.height)
 		a.filesDlg.Open()
-		return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
+		return a, tea.Batch(a.fetchOrphansCmd(), a.fetchOrphanedHistoryCmd(), a.filesDlg.SpinnerInit())
 	case "A K":
 		if a.OnListClientTokens != nil {
 			a.clientTokensDlg.SetSize(a.width, a.height)
@@ -469,7 +469,7 @@ func (a *App) buildMenuItems() []ActionMenuItem {
 			JobFilter: func(j *database.Job) bool {
 				return j.Status == database.StatusFinished && j.OutputFile != ""
 			}},
-		{Chord: "A O", Label: "Browse Orphaned Files", HintLabel: "Orphans", Category: "Action"},
+		{Chord: "A O", Label: "Browse Orphaned Items", HintLabel: "Orphans", Category: "Action"},
 	}
 
 	if a.OnListClientTokens != nil {

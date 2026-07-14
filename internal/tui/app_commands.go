@@ -384,6 +384,33 @@ func (a *App) deleteOrphanCmd(path string) tea.Cmd {
 	})
 }
 
+func (a *App) fetchOrphanedHistoryCmd() tea.Cmd {
+	listFn := a.OnListOrphanedHistory
+	return safeCmd(func() tea.Msg {
+		if listFn == nil {
+			return fetchOrphanedHistoryResultMsg{Err: "Not available"}
+		}
+		entries, err := listFn()
+		if err != nil {
+			return fetchOrphanedHistoryResultMsg{Err: err.Error()}
+		}
+		return fetchOrphanedHistoryResultMsg{Entries: entries}
+	})
+}
+
+func (a *App) deleteHistoryEntryCmd(videoID string) tea.Cmd {
+	deleteFn := a.OnDeleteHistoryEntry
+	return safeCmd(func() tea.Msg {
+		if deleteFn == nil {
+			return deleteHistoryEntryResultMsg{VideoID: videoID, Err: "Not available"}
+		}
+		if err := deleteFn(videoID); err != nil {
+			return deleteHistoryEntryResultMsg{VideoID: videoID, Err: err.Error()}
+		}
+		return deleteHistoryEntryResultMsg{VideoID: videoID}
+	})
+}
+
 // ffmpegCheckCmd runs FFmpeg path validation asynchronously via tea.Cmd.
 func (a *App) ffmpegCheckCmd(path string) tea.Cmd {
 	checkFn := a.OnCheckFFmpeg

@@ -139,6 +139,14 @@ type (
 		Path string
 		Err  string
 	}
+	fetchOrphanedHistoryResultMsg struct {
+		Entries []OrphanedHistoryEntry
+		Err     string
+	}
+	deleteHistoryEntryResultMsg struct {
+		VideoID string
+		Err     string
+	}
 
 	// Async results for FFmpeg check overlay
 	ffmpegCheckResultMsg struct {
@@ -390,6 +398,9 @@ type App struct {
 	OnImportFile      func(path, title, channel string) (string, error) // optional: import zip, returns title
 	OnListOrphans     func() ([]OrphanedFileEntry, error)               // list orphaned files
 	OnDeleteOrphan    func(path string) error                           // delete orphaned file
+	// Orphaned processing-history rows (no matching job) shown in the same overlay.
+	OnListOrphanedHistory func() ([]OrphanedHistoryEntry, error)
+	OnDeleteHistoryEntry  func(videoID string) error
 
 	// Client token callbacks
 	OnListClientTokens  func() ([]*database.ClientToken, error)

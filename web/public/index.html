@@ -82,7 +82,7 @@
             <sl-tab slot="nav" panel="archived">Archived</sl-tab>
             <sl-tab slot="nav" panel="player">Player</sl-tab>
             <sl-tab slot="nav" panel="imports">Imports</sl-tab>
-            <sl-tab slot="nav" panel="files">Files</sl-tab>
+            <sl-tab slot="nav" panel="files">Orphaned</sl-tab>
             <sl-tab slot="nav" panel="stats">Stats</sl-tab>
             <sl-tab slot="nav" panel="logs">Logs</sl-tab>
             <sl-tab slot="nav" panel="settings">Settings</sl-tab>
@@ -415,6 +415,33 @@
                                 <span>Size</span>
                                 <span>Modified</span>
                                 <span>Job</span>
+                                <span></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="files-header history-section-header">
+                        <h3>Orphaned History Entries</h3>
+                        <div class="files-actions">
+                            <sl-button size="small" id="history-refresh-btn">
+                                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                                Refresh
+                            </sl-button>
+                            <sl-button size="small" variant="danger" id="history-delete-all-btn" disabled>
+                                <sl-icon slot="prefix" name="trash"></sl-icon>
+                                Delete All
+                            </sl-button>
+                        </div>
+                    </div>
+                    <p class="settings-help">Videos the monitor recorded as already-processed but which no longer have a job — most often a job you deleted. While an entry remains the monitor won't re-discover that video; removing it lets the monitor pick it up again.</p>
+                    <div id="history-empty" style="display: none">
+                        <p style="text-align: center; color: var(--sl-color-neutral-500); padding: 2rem 0;">No orphaned history entries found.</p>
+                    </div>
+                    <div id="history-table-wrapper" style="display: none">
+                        <div class="history-table" id="history-table">
+                            <div id="history-table-header">
+                                <span>Video ID</span>
+                                <span>Added</span>
                                 <span></span>
                             </div>
                         </div>

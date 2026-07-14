@@ -218,6 +218,23 @@ type ProcessYouTubeVideoResult struct {
 	ChannelName   string // possibly updated channel name from metadata
 }
 
+// nonLiveSkipReason decides whether a non-live classification (a VOD, post-live
+// recording, or non-stream upload) should be skipped, and returns a distinct
+// reason for the log so the two very different causes aren't conflated:
+//   - "VODs not archived for this channel" — include_non_live_content is off.
+//   - "already processed (in history)" — the channel DOES archive these, but the
+//     video is already in the processing history (its job may have been deleted;
+//     clear it from the Orphaned history list to let it be picked up again).
+func nonLiveSkipReason(includeNonLive, isReprobe bool) (skip bool, reason string) {
+	if !includeNonLive {
+		return true, "VODs not archived for this channel"
+	}
+	if isReprobe {
+		return true, "already processed (in history)"
+	}
+	return false, ""
+}
+
 // ProcessYouTubeVideo probes a YouTube video's metadata to classify its stream
 // status before creating a job. This mirrors the TypeScript processYouTubeVideo
 // from monitorUtils.ts.
@@ -290,8 +307,8 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 
 	switch meta.StreamStatus {
 	case "not_a_stream":
-		if !includeNonLive || p.IsReprobe {
-			logInfo(fmt.Sprintf("[Monitor] Skipping non-stream content: %s (%s)", p.Title, p.VideoID))
+		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
+			logInfo(fmt.Sprintf("[Monitor] Skipping non-stream content (%s): %s (%s)", reason, p.Title, p.VideoID))
 			if p.AddToHistory != nil {
 				p.AddToHistory(p.VideoID)
 			}
@@ -307,8 +324,8 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		p.Logger.Info(fmt.Sprintf("[Monitor] Found LIVE stream/premiere: %s (%s) - queuing for download", p.Title, p.VideoID))
 
 	case "post_live", "vod":
-		if !includeNonLive || p.IsReprobe {
-			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (%s): %s (%s)", meta.StreamStatus, p.Title, p.VideoID))
+		if skip, reason := nonLiveSkipReason(includeNonLive, p.IsReprobe); skip {
+			logInfo(fmt.Sprintf("[Monitor] Skipping ended stream (%s, %s): %s (%s)", meta.StreamStatus, reason, p.Title, p.VideoID))
 			if p.AddToHistory != nil {
 				p.AddToHistory(p.VideoID)
 			}

@@ -276,10 +276,14 @@ func (a *App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		action, cmd := a.filesDlg.HandleKey(msg)
 		switch action {
 		case "refresh":
-			return a, tea.Batch(a.fetchOrphansCmd(), a.filesDlg.SpinnerInit())
+			return a, tea.Batch(a.fetchOrphansCmd(), a.fetchOrphanedHistoryCmd(), a.filesDlg.SpinnerInit())
 		case "delete":
 			if sel := a.filesDlg.SelectedFile(); sel != nil {
 				return a, a.deleteOrphanCmd(sel.Path)
+			}
+		case "delete-history":
+			if sel := a.filesDlg.SelectedHistory(); sel != nil {
+				return a, a.deleteHistoryEntryCmd(sel.VideoID)
 			}
 		}
 		if cmd != nil {

@@ -111,6 +111,10 @@ func (s *runState) wireRoutes() func() {
 		Store:  s.configStore,
 		Logger: s.log,
 	})
+	routes.HistoryRoutes(s.r, &routes.HistoryRoutesDeps{
+		DB:     s.db,
+		Logger: s.log,
+	})
 	routes.TrimRoutes(s.r, s.db, s.trimSvc)
 	routes.StatsRoutes(s.r, &routes.StatsRouteDeps{
 		DB:     s.db,

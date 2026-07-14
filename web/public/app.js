@@ -367,6 +367,7 @@ class MoomboxApp {
           }
         } else if (e.detail.name === "files") {
           this.fetchOrphanedFiles();
+          this.fetchOrphanedHistory();
         } else if (e.detail.name === "stats") {
           this.stats.activate();
         }
@@ -432,6 +433,14 @@ class MoomboxApp {
     const filesDeleteAllBtn = document.getElementById("files-delete-all-btn");
     if (filesDeleteAllBtn) {
       filesDeleteAllBtn.addEventListener("click", () => this.deleteAllOrphanedFiles());
+    }
+    const historyRefreshBtn = document.getElementById("history-refresh-btn");
+    if (historyRefreshBtn) {
+      historyRefreshBtn.addEventListener("click", () => this.fetchOrphanedHistory());
+    }
+    const historyDeleteAllBtn = document.getElementById("history-delete-all-btn");
+    if (historyDeleteAllBtn) {
+      historyDeleteAllBtn.addEventListener("click", () => this.deleteAllOrphanedHistory());
     }
 
     // Status warnings — delegated click (text on desktop)
@@ -4322,6 +4331,121 @@ class MoomboxApp {
         // fetch/render didn't run (e.g. DELETE request failed).
         const hasFiles = this._orphanedFiles && this._orphanedFiles.length > 0;
         deleteAllBtn.disabled = !hasFiles;
+      }
+    }
+  }
+
+  async fetchOrphanedHistory() {
+    const refreshBtn = document.getElementById("history-refresh-btn");
+    if (refreshBtn) refreshBtn.loading = true;
+    try {
+      const resp = await fetch("/api/history/orphaned");
+      if (!resp.ok) throw new Error("Failed to fetch");
+      const data = await resp.json();
+      this._orphanedHistory = data;
+      this.renderOrphanedHistory(data);
+    } catch (err) {
+      console.error("Failed to fetch orphaned history:", err);
+      this._orphanedHistory = [];
+      this.renderOrphanedHistory(null); // null signals error vs empty
+    } finally {
+      if (refreshBtn) refreshBtn.loading = false;
+    }
+  }
+
+  renderOrphanedHistory(entries) {
+    const emptyEl = document.getElementById("history-empty");
+    const tableWrapper = document.getElementById("history-table-wrapper");
+    const deleteAllBtn = document.getElementById("history-delete-all-btn");
+
+    if (entries === null || (Array.isArray(entries) && entries.length === 0)) {
+      if (emptyEl) {
+        emptyEl.style.display = "";
+        const msg = emptyEl.querySelector("p");
+        if (msg) msg.textContent = entries === null
+          ? "Failed to load orphaned history. Try refreshing."
+          : "No orphaned history entries found.";
+      }
+      if (tableWrapper) tableWrapper.style.display = "none";
+      if (deleteAllBtn) deleteAllBtn.disabled = true;
+      return;
+    }
+
+    if (emptyEl) emptyEl.style.display = "none";
+    if (tableWrapper) tableWrapper.style.display = "";
+    if (deleteAllBtn) deleteAllBtn.disabled = false;
+
+    const table = document.getElementById("history-table");
+    table.querySelectorAll(".history-row").forEach((row) => row.remove());
+
+    for (const entry of entries) {
+      const row = document.createElement("div");
+      row.className = "history-row";
+      const vid = this.escapeHtml(entry.videoId);
+      const vidStr = `<a class="history-vid" href="https://www.youtube.com/watch?v=${vid}" target="_blank" rel="noopener" title="${vid}">${vid}</a>`;
+      const addedStr = `<span data-timestamp="${this.escapeHtml(entry.addedAt)}" title="${new Date(entry.addedAt).toLocaleString()}">${this.escapeHtml(this.formatRelativeTime(entry.addedAt))}</span>`;
+      const deleteBtn = `<sl-icon-button name="trash" label="Remove" class="history-delete-btn" data-video-id="${vid}"></sl-icon-button>`;
+      row.innerHTML = vidStr + addedStr + deleteBtn;
+      table.appendChild(row);
+    }
+
+    // Event delegation for delete buttons — attach once.
+    if (!table._historyDelegated) {
+      table._historyDelegated = true;
+      table.addEventListener("click", (e) => {
+        const btn = e.target.closest(".history-delete-btn");
+        if (btn) this.deleteOrphanedHistory(btn.dataset.videoId);
+      });
+    }
+  }
+
+  async deleteOrphanedHistory(videoId) {
+    if (!await this.showConfirm(`Remove this history entry so the video can be re-discovered?\n\n${videoId}`, { okLabel: "Remove", okVariant: "danger" })) return;
+
+    try {
+      const resp = await fetch("/api/history/orphaned", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoIds: [videoId] }),
+      });
+      if (!resp.ok) throw new Error("Failed to delete");
+      const result = await resp.json();
+      if (result.deleted && result.deleted.length > 0) {
+        this.showToast("History entry removed", "success");
+      }
+      await this.fetchOrphanedHistory();
+    } catch (err) {
+      this.showToast("Failed to remove history entry", "danger");
+    }
+  }
+
+  async deleteAllOrphanedHistory() {
+    if (!this._orphanedHistory || this._orphanedHistory.length === 0) return;
+    const count = this._orphanedHistory.length;
+    if (!await this.showConfirm(`Remove ${count === 1 ? "this" : `all ${count}`} orphaned history entr${count === 1 ? "y" : "ies"}?`, { okLabel: "Remove All", okVariant: "danger" })) return;
+
+    const deleteAllBtn = document.getElementById("history-delete-all-btn");
+    if (deleteAllBtn) { deleteAllBtn.loading = true; deleteAllBtn.disabled = true; }
+
+    const videoIds = this._orphanedHistory.map((e) => e.videoId);
+    try {
+      const resp = await fetch("/api/history/orphaned", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoIds }),
+      });
+      if (!resp.ok) throw new Error("Failed to delete");
+      const result = await resp.json();
+      const n = result.deleted ? result.deleted.length : 0;
+      this.showToast(`Removed ${n} entr${n === 1 ? "y" : "ies"}`, "success");
+      await this.fetchOrphanedHistory();
+    } catch (err) {
+      this.showToast("Failed to remove history entries", "danger");
+    } finally {
+      if (deleteAllBtn) {
+        deleteAllBtn.loading = false;
+        const has = this._orphanedHistory && this._orphanedHistory.length > 0;
+        deleteAllBtn.disabled = !has;
       }
     }
   }
