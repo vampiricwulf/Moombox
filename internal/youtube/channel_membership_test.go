@@ -3,6 +3,7 @@ package youtube
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // wrapPage embeds a ytInitialData JSON literal in a minimal HTML page the way
@@ -79,6 +80,44 @@ func TestParseMembershipTab_ClassicRenderers(t *testing.T) {
 	}
 	if got["liveMembr02"] != "members live now" {
 		t.Errorf("title.simpleText not read: %q", got["liveMembr02"])
+	}
+}
+
+func TestMembershipItemAge(t *testing.T) {
+	json := `{"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[
+		{"tabRenderer":{"selected":true,"tabIdentifier":"TAB_ID_SPONSORSHIPS","content":{"richGridRenderer":{"contents":[
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"liveVid0001","badge":"THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE","metadata":{"lockupMetadataViewModel":{"title":{"content":"live now"}}}}}}},
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"oldVid00002","meta":"Streamed 2 years ago","metadata":{"lockupMetadataViewModel":{"title":{"content":"old vod"}}}}}}},
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"weekVid0003","meta":"Streamed 3 weeks ago","metadata":{"lockupMetadataViewModel":{"title":{"content":"week vod"}}}}}}},
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"upcomVid004","metadata":{"lockupMetadataViewModel":{"title":{"content":"upcoming stream"}}}}}}},
+			{"richItemRenderer":{"content":{"lockupViewModel":{"contentId":"noSignal005","metadata":{"lockupMetadataViewModel":{"title":{"content":"no signal"}}}}}}}
+		]}}}}
+	]}}}`
+	videos, ok := parseMembershipTab([]byte(wrapPage(json)))
+	if !ok {
+		t.Fatal("expected access")
+	}
+	age := map[string]time.Duration{}
+	for _, v := range videos {
+		age[v.VideoID] = v.Age
+	}
+	if age["liveVid0001"] != 0 {
+		t.Errorf("live item should have Age 0, got %v", age["liveVid0001"])
+	}
+	if got, want := age["oldVid00002"], 2*365*24*time.Hour; got != want {
+		t.Errorf("2 years ago: got %v want %v", got, want)
+	}
+	if got, want := age["weekVid0003"], 3*7*24*time.Hour; got != want {
+		t.Errorf("3 weeks ago: got %v want %v", got, want)
+	}
+	// An upcoming stream (no live badge, no "Streamed N ago") and any item with
+	// no recognizable timestamp must rank as "now" (Age 0), NOT sink — otherwise
+	// upcoming/live members streams get crowded out of the cap.
+	if age["upcomVid004"] != 0 {
+		t.Errorf("upcoming item should rank as now (Age 0), got %v", age["upcomVid004"])
+	}
+	if age["noSignal005"] != 0 {
+		t.Errorf("no-signal item should rank as now (Age 0), got %v", age["noSignal005"])
 	}
 }
 

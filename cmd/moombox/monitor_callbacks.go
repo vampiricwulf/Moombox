@@ -180,6 +180,23 @@ func (s *runState) wireMonitorCallbacks() {
 	s.feedMon.ProbeVideo = probeVideoFunc
 	s.decapiMon.ProbeVideo = probeVideoFunc
 
+	// Authenticated probe for members-only videos: an anonymous probe can't see
+	// members-only content, gets no formats, and misclassifies it as "upcoming"
+	// (which bypasses include_non_live_content). The TV_DOWNGRADED+cookies probe
+	// classifies it correctly (vod/live/upcoming). Only the feed monitor's
+	// membership path uses it; RSS/DECAPI stay on the anonymous probe.
+	s.feedMon.ProbeVideoAuth = func(ctx context.Context, videoID string) (*monitor.VideoProbeResult, error) {
+		meta, err := s.ytService.ProbeVideoStatusAuthenticated(ctx, videoID)
+		if err != nil {
+			return nil, err
+		}
+		return &monitor.VideoProbeResult{
+			StreamStatus: string(meta.StreamStatus),
+			Title:        meta.Title,
+			ChannelName:  meta.ChannelName,
+		}, nil
+	}
+
 	// Membership discovery: authenticated /membership tab scan for members-only
 	// videos the RSS feed never lists. Wired on the feed monitor only. The
 	// closure adapts youtube.MembershipVideo -> monitor.MembershipVideo (keeping
@@ -194,7 +211,7 @@ func (s *runState) wireMonitorCallbacks() {
 		}
 		out := make([]monitor.MembershipVideo, len(vids))
 		for i, v := range vids {
-			out[i] = monitor.MembershipVideo{VideoID: v.VideoID, Title: v.Title}
+			out[i] = monitor.MembershipVideo{VideoID: v.VideoID, Title: v.Title, Age: v.Age}
 		}
 		return out, nil
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,13 +29,23 @@ const membershipTabIdentifier = "TAB_ID_SPONSORSHIPS"
 var ytInitialDataStartRe = regexp.MustCompile(`ytInitialData(?:"\])?\s*=\s*\{`)
 
 // MembershipVideo is a members-only video discovered from a channel's
-// /membership tab. Only the fields the discovery pipeline needs are captured;
-// stream status (live/upcoming/vod) is resolved downstream by the same probe
-// the RSS path uses, so it is intentionally not extracted here.
+// /membership tab. Stream status (live/upcoming/vod) is resolved downstream by
+// an authenticated probe; Age is a coarse recency estimate used only to merge
+// and rank membership items against dated RSS items (the tab exposes no exact
+// timestamp — a past item shows only "Streamed N <unit> ago"). Age is 0 for a
+// live/upcoming/unrecognized item (treated as "now"), so it always ranks into
+// the cap; only a proven past VOD gets a non-zero Age and can be crowded out.
 type MembershipVideo struct {
 	VideoID string
 	Title   string
+	Age     time.Duration // ~time since it streamed; 0 = live/upcoming/now
 }
+
+// relativeAgeRe matches YouTube's relative published text, e.g. "Streamed 2
+// years ago" / "3 weeks ago". Localized to en (we send Accept-Language: en).
+// Its PRESENCE marks a past stream/upload; its ABSENCE means the item is live,
+// upcoming, or unrecognized — all treated as "now" (see itemAge).
+var relativeAgeRe = regexp.MustCompile(`(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago`)
 
 // FetchMembershipVideos fetches a channel's /membership tab with the current
 // auth cookies and returns the members-only videos listed there.
@@ -163,13 +174,13 @@ func walkVideoRenderers(node any, seen map[string]struct{}, out *[]MembershipVid
 	case map[string]any:
 		if lv, ok := n["lockupViewModel"].(map[string]any); ok {
 			if cid := getStr(lv, "contentId"); len(cid) == 11 {
-				addVideo(cid, lockupTitle(lv), seen, out)
+				addVideo(cid, lockupTitle(lv), itemAge(lv), seen, out)
 			}
 		}
 		for _, key := range []string{"videoRenderer", "gridVideoRenderer", "playlistVideoRenderer"} {
 			if r, ok := n[key].(map[string]any); ok {
 				if vid := getStr(r, "videoId"); len(vid) == 11 {
-					addVideo(vid, rendererTitle(r), seen, out)
+					addVideo(vid, rendererTitle(r), itemAge(r), seen, out)
 				}
 			}
 		}
@@ -183,12 +194,62 @@ func walkVideoRenderers(node any, seen map[string]struct{}, out *[]MembershipVid
 	}
 }
 
-func addVideo(id, title string, seen map[string]struct{}, out *[]MembershipVideo) {
+func addVideo(id, title string, age time.Duration, seen map[string]struct{}, out *[]MembershipVideo) {
 	if _, dup := seen[id]; dup {
 		return
 	}
 	seen[id] = struct{}{}
-	*out = append(*out, MembershipVideo{VideoID: id, Title: title})
+	*out = append(*out, MembershipVideo{VideoID: id, Title: title, Age: age})
+}
+
+// itemAge estimates how long ago a membership item streamed, for recency
+// ranking in the merged candidate list. The ONLY thing that pushes an item down
+// the ranking is a "Streamed N <unit> ago" text, which marks a PAST stream: it
+// is ranked by that age so old VODs sink and get crowded out of the cap.
+// Everything else — a live badge, an upcoming stream, or an item with no
+// recognizable timestamp — returns 0 ("now"), so it ranks to the top and is
+// always probed. Keying on the ABSENCE of a past-time signal (rather than the
+// PRESENCE of a live badge) makes catching live/upcoming members streams robust
+// to YouTube's frequent badge DOM churn — a live/upcoming item can never sink
+// below dated VODs and be dropped from the cap. Scanning the serialized item is
+// layout-agnostic (lockup and classic renderers both work).
+func itemAge(item map[string]any) time.Duration {
+	b, err := json.Marshal(item)
+	if err != nil {
+		return 0
+	}
+	s := string(b)
+	// Currently live → "now", regardless of any "streaming for N" elapsed text.
+	if strings.Contains(s, "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE") ||
+		strings.Contains(s, `"imageName":"LIVE"`) ||
+		strings.Contains(s, "BADGE_STYLE_TYPE_LIVE_NOW") {
+		return 0
+	}
+	// A "Streamed N <unit> ago" text marks a PAST stream → rank by that age.
+	if m := relativeAgeRe.FindStringSubmatch(s); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		var unit time.Duration
+		switch m[2] {
+		case "second":
+			unit = time.Second
+		case "minute":
+			unit = time.Minute
+		case "hour":
+			unit = time.Hour
+		case "day":
+			unit = 24 * time.Hour
+		case "week":
+			unit = 7 * 24 * time.Hour
+		case "month":
+			unit = 30 * 24 * time.Hour
+		case "year":
+			unit = 365 * 24 * time.Hour
+		}
+		return time.Duration(n) * unit
+	}
+	// No live badge and no past-time text → upcoming or unrecognized → "now",
+	// so live/upcoming catching never depends on a single fragile badge marker.
+	return 0
 }
 
 // lockupTitle reads the title from a lockupViewModel:
