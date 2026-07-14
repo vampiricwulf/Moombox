@@ -56,16 +56,23 @@ type OrphanedHistoryEntry struct {
 }
 
 // ListOrphanedHistory returns processing-history rows that have no matching job,
-// newest first. The NOT-NULL / non-empty guard on the subquery avoids the
-// NULL-in-NOT-IN pitfall (a single NULL in the list would otherwise make NOT IN
-// match nothing).
+// newest first. History is keyed by JOB ID (AddToHistory is called with the job
+// ID): YouTube jobs use the video ID as their ID, so history.video_id ==
+// jobs.id == the 11-char video ID; Twitch jobs use a "tw_"-prefixed ID and store
+// the UNPREFIXED stream ID in jobs.video_id. The match MUST therefore be against
+// jobs.id, not jobs.video_id — otherwise every monitor-created Twitch history
+// row (whose "tw_<id>" key never equals the unprefixed jobs.video_id) is falsely
+// reported orphaned and offered for deletion even while its job is live.
+// jobs.id is always bound from a non-nil Go string (job insertion never writes a
+// NULL id), so the subquery yields no NULLs and the NULL-in-NOT-IN pitfall
+// cannot arise.
 func (db *Database) ListOrphanedHistory() ([]OrphanedHistoryEntry, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	rows, err := db.db.QueryContext(db.getCtx(),
 		`SELECT video_id, added_at FROM history
-		 WHERE video_id NOT IN (SELECT video_id FROM jobs WHERE video_id IS NOT NULL AND video_id != '')
+		 WHERE video_id NOT IN (SELECT id FROM jobs)
 		 ORDER BY added_at DESC`)
 	if err != nil {
 		return nil, err

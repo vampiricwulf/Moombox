@@ -1357,6 +1357,20 @@ func TestOrphanedHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Twitch regression: history is keyed by the "tw_"-prefixed JOB ID, while
+	// the monitor-created Twitch job stores the UNPREFIXED stream ID in
+	// jobs.video_id. A job.video_id join would never match, falsely flagging a
+	// live Twitch job's history as orphaned. The job.id join must catch it.
+	if err := db.AddToHistory("tw_stream999"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddJob(&Job{
+		ID: "tw_stream999", VideoID: "stream999", Platform: "twitch",
+		Status: StatusLive, CreatedAt: "2026-07-14T00:00:00Z", UpdatedAt: "2026-07-14T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	orphans, err := db.ListOrphanedHistory()
 	if err != nil {
 		t.Fatal(err)
@@ -1370,6 +1384,9 @@ func TestOrphanedHistory(t *testing.T) {
 	}
 	if got["vidHasJob02"] {
 		t.Error("a history row with a matching job must NOT be listed as orphaned")
+	}
+	if got["tw_stream999"] {
+		t.Error("a Twitch history row (keyed by tw_-prefixed job ID) with a live job must NOT be listed as orphaned")
 	}
 
 	// Delete one orphan.

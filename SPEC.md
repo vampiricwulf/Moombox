@@ -207,7 +207,7 @@ internal/
 
 Three independent monitors detect new streams and create jobs:
 
-**FeedMonitor** (YouTube RSS) — Polls YouTube's RSS feed endpoint (`/feeds/videos.xml?channel_id={id}`) for each monitored YouTube channel. Runs on a configurable interval (default 10 minutes) with jitter. Processes up to `max_feed_items` (default 15) entries per channel. For each new video ID not already in the database history, it calls `ProbeVideo()` to classify the video (live/upcoming/VOD/regular), applies channel term filtering (include/exclude), and if it passes, calls `OnVideoFound()` which creates a database job and enqueues it. The monitor uses a `MetadataFailureTracker` to stop retrying videos that consistently fail metadata probes.
+**FeedMonitor** (YouTube RSS + members-only) — Polls YouTube's RSS feed endpoint (`/feeds/videos.xml?channel_id={id}`) for each monitored YouTube channel. Runs on a configurable interval (default 10 minutes) with jitter. When `membership_discovery` is enabled (default on) and YouTube auth cookies are present, it ALSO fetches each channel's authenticated `/membership` tab — RSS and DECAPI never list members-only content, so this is the only discovery source for members-only live/upcoming streams (and, with `include_non_live_content`, their VODs). RSS and membership candidates are merged into ONE list ranked by recency and capped at `max_feed_items` (default 15) per channel per cycle, so the two sources compete for the same slots and membership can't flood the queue (a live/upcoming members item ranks as "now" and always makes the cut). For each candidate not already tracked (`HasActiveJob` dedup), it calls `ProbeVideo()` — or the authenticated `ProbeVideoAuth()` for members-only items, so a members VOD isn't misfired as "upcoming" — to classify the video (live/upcoming/VOD/regular), applies channel term filtering (include/exclude), and if it passes, calls `OnVideoFound()` which creates a database job and enqueues it. The monitor uses a `MetadataFailureTracker` to stop retrying videos that consistently fail metadata probes.
 
 **DECAPIMonitor** — Polls DECAPI for the latest video from each monitored YouTube channel. This is a secondary detection mechanism that catches streams the RSS feed might miss (RSS updates can be delayed by minutes). Extracts video IDs from DECAPI responses, runs the same ProbeVideo + term filtering pipeline as FeedMonitor. Has its own rate limit tracking (respects DECAPI rate limit headers) and configurable check interval.
 
@@ -469,7 +469,7 @@ The TUI uses Charmbracelet's full suite: bubbletea for the Elm architecture, bub
 - **JobDetails** (top right) — Selected job's metadata, progress, segment counts, file info.
 - **Logs** (bottom, full width) — Real-time log output, 250ms batched flush, scrollable viewport.
 
-**Overlays (10):** Action Menu, Help, Add Video, Import, Trim, Orphaned Files, Client Tokens, Settings, Setup Wizard, FFmpeg Check.
+**Overlays (10):** Action Menu, Help, Add Video, Import, Trim, Orphaned Files & History, Client Tokens, Settings, Setup Wizard, FFmpeg Check.
 
 ### Chord System
 
@@ -567,6 +567,8 @@ All API routes use the `/api/` prefix (no version). Non-API routes exist for POT
 - `GET /api/ffmpeg/install-options` — FFmpeg install methods
 - `GET /api/files/orphaned` — List orphaned files
 - `DELETE /api/files/orphaned` — Delete orphaned files
+- `GET /api/history/orphaned` — List orphaned processing-history rows (no matching job; block re-discovery until removed)
+- `DELETE /api/history/orphaned` — Remove given history video IDs to unblock re-discovery
 - `GET /api/ytdlp-plugin/status` — yt-dlp plugin status
 - `POST /api/ytdlp-plugin/install` — Install yt-dlp POT plugin
 
@@ -640,9 +642,9 @@ Dynamically builds `SET` clauses from the map using `fieldToColumn` (a 40-entry 
 
 TOML format parsed by `BurntSushi/toml`. Search order: custom path (CLI flag), `./config.toml`, `./config/config.toml`, `~/.config/moombox/config.toml`. Falls back to defaults if no file found.
 
-**Sections:** `[network]` (port, access level, TLS, password), `[paths]` (database, log, output, staging, ffmpeg), `[logs]` (level, rotation), `[monitors]` (intervals, max items, hide threshold), `[downloader]` (template, resolution, parallelism, chat, retry), `[cookies]` (file, auto, browser profile, platforms, refresh interval), `[disk]` (warn/critical percent), `[updates]` (auto-check), `[[channels]]` (array of monitored channels), `[[notifications]]` (array of webhook configs).
+**Sections:** `[network]` (port, access level, TLS, password), `[paths]` (database, log, output, staging, ffmpeg), `[logs]` (level, rotation), `[monitors]` (intervals, max items, hide threshold, probe cooldown, membership discovery), `[downloader]` (template, resolution, parallelism, chat, retry), `[cookies]` (file, auto, browser profile, platforms, refresh interval), `[disk]` (warn/critical percent), `[updates]` (auto-check), `[[channels]]` (array of monitored channels), `[[notifications]]` (array of webhook configs).
 
-**FlexDuration:** Custom type that accepts either a bare number (minutes) or a structured duration in TOML. Used for `feed_check_interval`, `hide_finished_age_days`, `refresh_interval`.
+**FlexDuration:** Custom type that accepts either a bare number (interpreted in the field's documented unit — minutes for `feed_check_interval`, seconds for `probe_cooldown`) or a structured duration in TOML. Used for `feed_check_interval`, `hide_finished_age_days`, `probe_cooldown`, `refresh_interval`.
 
 **Non-destructive migrations:** `migrateOldFormat()` handles backward compatibility — migrates flat fields into current sections, converts legacy flags (e.g., `allow_lan`/`allow_external` to `network_access`). Only applies when the new section does not already exist.
 

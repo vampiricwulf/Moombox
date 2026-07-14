@@ -123,8 +123,8 @@ The `OnCookieRefreshNeeded` callback is wired to `autoCookieSvc.RefreshCookies()
 ### 12. Trim Service
 `worker.NewTrimService()` creates the FFmpeg-based clip creation service. Prevents concurrent trim operations on the same job via `activeOps` mutex map.
 
-### 13. Feed Monitor (YouTube RSS)
-`monitor.NewFeedMonitor()` polls YouTube RSS feeds (`https://www.youtube.com/feeds/videos.xml?channel_id=...`) for new videos. Default interval from config. Immediate first check on startup, then timer-based with jitter.
+### 13. Feed Monitor (YouTube RSS + members-only)
+`monitor.NewFeedMonitor()` polls YouTube RSS feeds (`https://www.youtube.com/feeds/videos.xml?channel_id=...`) for new videos. Default interval from config. Immediate first check on startup, then timer-based with jitter. When `membership_discovery` is enabled (default) and YouTube auth cookies are present, `checkChannel` additionally fetches the channel's authenticated `/membership` tab (`youtube.FetchMembershipVideos`) — the only discovery source for members-only content, which RSS/DECAPI never list — and merges those items with the RSS entries into one recency-ranked candidate list capped at `max_feed_items` (so membership can't flood the queue). Members-only candidates are probed with the authenticated `ProbeVideoAuth` closure so a members VOD classifies correctly instead of misfiring as "upcoming". A membership fetch failure is logged but never marks the RSS feed unhealthy (independent signals).
 
 ### 14. DECAPI Monitor
 `monitor.NewDecapiMonitor()` uses the DECAPI API to find the latest video for YouTube channels. Rate-limited to 60 requests/minute (reads rate limit headers from responses). Stagger of 1 second between per-channel requests.

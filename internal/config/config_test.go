@@ -316,6 +316,21 @@ func TestMembershipDiscoveryDefaultOnAndPersist(t *testing.T) {
 	if falseCfg.Monitors.MembershipDiscoveryEnabled() {
 		t.Error("Normalize must not flip an explicit false to on")
 	}
+
+	// 4. Save→reload round-trip: an explicit false must survive the ENCODER —
+	//    omitempty on a *bool keys off nil, not the pointed value, so a non-nil
+	//    &false is still written. This is the "…AndPersist" half of the contract.
+	saved := filepath.Join(dir, "saved.toml")
+	if err := Save(cfgOff, saved); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reloaded, err := Load(saved)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Monitors.MembershipDiscoveryEnabled() {
+		t.Error("membership_discovery=false must survive a Save→reload round-trip")
+	}
 }
 
 func TestLoadOldFormatMigration(t *testing.T) {

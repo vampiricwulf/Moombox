@@ -935,7 +935,7 @@ class MoomboxApp {
     } else {
       el.textContent = `v${this._version}`;
       el.className = "version-indicator";
-      el.title = `Moombox v${this._version} — double-click to open the GitHub page`;
+      el.title = `Moombox v${this._version} — click to open the GitHub page`;
       el.style.cursor = "";
     }
   }

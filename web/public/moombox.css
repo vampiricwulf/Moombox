@@ -2635,9 +2635,9 @@ html.sl-theme-light {
     .player-controls-hint { display: none; }
 }
 
-/* Version indicator. user-select: none — the version is double-clickable
-   (opens the GitHub page), and a double click would otherwise text-select
-   the "v2.7.0" label. */
+/* Version indicator. user-select: none — clicking the version opens the GitHub
+   page (click to arm, click again to open), and a quick second click would
+   otherwise text-select the "v2.7.0" label. */
 .version-indicator { cursor: default; font-size: 0.65rem; font-family: var(--sl-font-mono); color: var(--sl-color-neutral-400); letter-spacing: -0.02em; user-select: none; }
 .version-indicator.has-update { cursor: pointer; color: var(--sl-color-success-500); }
 .version-indicator.has-update:hover { text-decoration: underline; }

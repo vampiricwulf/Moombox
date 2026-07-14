@@ -455,11 +455,13 @@ When loading configuration (via `Load(customPath)`), files are checked in order:
 
 | Field | Type | Default | TOML Key |
 |-------|------|---------|----------|
-| MaxFeedItems | int | 15 | `max_feed_items` | Min: 1 |
+| MaxFeedItems | int | 15 | `max_feed_items` | Min: 1. Caps the merged RSS + membership candidate list per channel per cycle. |
 | FeedCheckInterval | FlexDuration | 10 (minutes) | `feed_check_interval` | |
 | DecapiCheckInterval | *int | nil | `decapi_check_interval` | Seconds, valid: 15-3600 |
 | TwitchCheckInterval | *int | nil | `twitch_check_interval` | Seconds, valid: 1-3600 |
 | HideFinishedAgeDays | FlexDuration | 30 (days) | `hide_finished_age_days` | |
+| ProbeCooldown | FlexDuration | 0 (seconds, disabled) | `probe_cooldown` | Min seconds between re-probing the same video's metadata. 0 = every cycle re-probes; no max. |
+| MembershipDiscovery | *bool | nil (→ true) | `membership_discovery` | Members-only `/membership`-tab discovery. Absent/nil = enabled; needs YouTube auth cookies to do anything. |
 
 #### [downloader]
 

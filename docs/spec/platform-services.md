@@ -167,6 +167,16 @@ The ANDROID_VR client has its own dedicated method (`fetchWithAndroidVR`) becaus
 - Sets `androidSdkVersion: 32`, `osVersion: "12L"`, `deviceMake: "Oculus"`, `deviceModel: "Quest 3"` in the client context
 - Does not pass STS (no cipher support needed -- returns direct URLs)
 
+### Channel Membership Tab
+
+`FetchMembershipVideos` in `channel_membership.go` performs an authenticated GET of `https://www.youtube.com/channel/{id}/membership` (with the current YouTube cookies) and returns the members-only videos listed there — the only discovery source for members-only streams, which RSS/DECAPI never expose. It returns `(nil, nil)` when discovery isn't applicable: no auth cookies, or the account isn't a member (the page then falls back to a public tab with no selected membership tab).
+
+Parsing (`parseMembershipTab`):
+- Extracts `ytInitialData` via a brace-depth scan that respects string literals (`extractYtInitialData`) — robust on the megabyte-scale channel payload where a non-greedy regex under/over-matches. Handles both `var ytInitialData = {…}` and `window["ytInitialData"] = {…}` forms.
+- Locates the membership tab by the stable `tabIdentifier` `TAB_ID_SPONSORSHIPS` (YouTube localizes the visible title), and only when that tab is the SELECTED one — a non-member's fallback page reports `(nil, false)` and is never deep-parsed. The large tab body stays a `json.RawMessage` until then, so the common non-member case is near-zero allocation.
+- Walks the selected tab for video IDs across both the current `lockupViewModel` (`contentId`) and classic `videoRenderer`/`gridVideoRenderer` layouts (YouTube A/B-serves both), deduping by video ID.
+- Estimates each item's recency (`itemAge`): a live badge or an item with no recognizable timestamp ranks as "now" (Age 0, always probed), while a "Streamed N &lt;unit&gt; ago" text ranks it as a past VOD that can be crowded out of the `max_feed_items` cap. Keying on the ABSENCE of a past-time signal (rather than the presence of a live badge) keeps live/upcoming catching robust to YouTube's badge DOM churn.
+
 ### Watch Page Parsing
 
 `FetchWatchPage` in `watch_page.go` performs a GET request to `https://www.youtube.com/watch?v={videoID}` and extracts:

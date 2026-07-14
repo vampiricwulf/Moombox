@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // itemCounts tallies the list items by concrete type.
@@ -107,6 +109,45 @@ func TestFilesDialog_RemoveFileNoResurrect(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "two.ts") {
 		t.Fatal("surviving file two.ts missing after rebuild")
+	}
+}
+
+// TestFilesDialog_PagingClearsDeleteConfirm guards the fix: paging (not just
+// up/down) away from an armed delete must clear the stale "Press D again" hint.
+// Previously only keyUp/keyDown reset the confirm, so a PageDown left a
+// dangling confirmation.
+func TestFilesDialog_PagingClearsDeleteConfirm(t *testing.T) {
+	m := NewFilesDialogModel()
+	m.SetSize(100, 30)
+	m.Open()
+	m.SetFiles([]OrphanedFileEntry{{Path: "/a/one.ts", RelPath: "one.ts"}, {Path: "/a/two.ts", RelPath: "two.ts"}})
+	m.SetHistory([]OrphanedHistoryEntry{{VideoID: "aaaaaaaaaaa"}})
+
+	m.deleteConfirmID = "/a/one.ts"
+	m.feedbackMsg = `Press D again to delete "one.ts"`
+	m.HandleKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m.deleteConfirmID != "" || m.feedbackMsg != "" {
+		t.Errorf("paging must clear the delete-confirm arming; got id=%q msg=%q", m.deleteConfirmID, m.feedbackMsg)
+	}
+}
+
+// TestFilesDialog_NavigationSkipsDivider guards that a cursor move never rests
+// on the non-selectable section divider between the files and history groups.
+func TestFilesDialog_NavigationSkipsDivider(t *testing.T) {
+	m := NewFilesDialogModel()
+	m.SetSize(100, 30)
+	m.Open()
+	m.SetFiles([]OrphanedFileEntry{{Path: "/a/one.ts", RelPath: "one.ts"}})
+	m.SetHistory([]OrphanedHistoryEntry{{VideoID: "aaaaaaaaaaa"}})
+
+	// Layout: [file, divider, history]. From the file, a down move would land
+	// on the divider; HandleKey must step past it to the history row.
+	m.list.Select(0)
+	for _, msg := range []tea.KeyPressMsg{{Code: tea.KeyDown}, {Code: tea.KeyUp}, {Code: tea.KeyDown}} {
+		m.HandleKey(msg)
+		if _, isHeader := m.list.SelectedItem().(sectionHeaderItem); isHeader {
+			t.Fatalf("cursor rested on the section divider after a %q move", msg.String())
+		}
 	}
 }
 

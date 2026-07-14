@@ -275,7 +275,7 @@ Overlays are full-screen or near-full-screen modal views that take over keyboard
 | Add Video | `A A` | Multi-step form: (1) enter URL, (2) fetch and select format, (3) set timestamps, (4) confirm. Format fetch is async with a spinner. On error, auto-advances past format selection after a timeout. |
 | Import | `A I` | Zip import form with title and channel override fields. |
 | Trim | `A T` | Clip creation. Enter start/end seconds. Encoding runs asynchronously with a progress callback that updates the UI. |
-| Orphaned Files | `A O` | File browser showing files in the output directory that have no corresponding database job. Delete with confirmation. |
+| Orphaned Files & History | `A O` | Two sections in one list (with a divider): orphaned files in the output directory with no corresponding job, and orphaned processing-history rows (history entries with no matching job, which otherwise block re-discovery). Each section loads independently — a failure in one is shown inline without hiding the other. Delete with confirmation. |
 | Client Tokens | `A K` | List of persistent client authentication tokens. Delete individual tokens. |
 | Settings | `` ` `` | Full config editor built with the `huh` form framework. Supports full mouse interaction (click tabs, fields, toggles, cycle options, and action buttons). Action buttons at the bottom: `[ Save & Return ]` / `[ Return Without Saving ]` (when dirty), or `[ Return ]` (when clean). Presents a close confirmation when there are unsaved changes and the user attempts to dismiss. Smart dirty tracking: reverting a field back to its original value clears the dirty flag. Job detail panel renders clickable hyperlinks (OSC 8) for stream URLs and output paths. |
 | Setup Wizard | First run | Multi-step initial setup: configuration, FFmpeg check/install, yt-dlp plugin, cookie capture. Built with `huh`. |
@@ -535,6 +535,13 @@ All routes use the `/api/` prefix unless otherwise noted. PO Token routes use ba
 |--------|------|-------|
 | `GET` | `/api/files/orphaned` | List files in the output directory with no corresponding job. |
 | `DELETE` | `/api/files/orphaned` | Delete specified orphaned files. |
+
+### History
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET` | `/api/history/orphaned` | List processing-history rows with no matching job (job deleted, or the video was skipped and never jobbed). While the row remains, the monitor treats the video as already-processed and won't re-discover it. Keyed by job ID, so the match is against `jobs.id`. |
+| `DELETE` | `/api/history/orphaned` | Remove the given history video IDs (JSON body `{"videoIds":[...]}`), unblocking re-discovery. |
 
 ### Updates
 

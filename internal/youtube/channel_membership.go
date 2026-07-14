@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -68,7 +69,10 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 		s.logger.Warn("[YouTube] SyncCookies failed before membership fetch", "error", err)
 	}
 
-	url := fmt.Sprintf("%s/channel/%s/membership", constants.YouTubeURLs.Base, channelID)
+	// PathEscape the channel ID: it comes from config, so escaping keeps a
+	// malformed value from altering the request path (the fixed https host
+	// prefix already precludes SSRF; this is defense-in-depth).
+	pageURL := fmt.Sprintf("%s/channel/%s/membership", constants.YouTubeURLs.Base, url.PathEscape(channelID))
 	headers := map[string]string{
 		"User-Agent":      constants.UserAgents.Web,
 		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -78,7 +82,7 @@ func (s *Service) FetchMembershipVideos(ctx context.Context, channelID string) (
 		headers["Cookie"] = ch
 	}
 
-	body, err := utils.FetchBody(ctx, url, 20*time.Second, headers)
+	body, err := utils.FetchBody(ctx, pageURL, 20*time.Second, headers)
 	if err != nil {
 		return nil, fmt.Errorf("fetch membership tab: %w", err)
 	}

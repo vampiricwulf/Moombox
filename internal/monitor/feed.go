@@ -440,9 +440,14 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	// include_non_live_content, their VODs). Uses the authenticated probe
 	// downstream so a members VOD is seen as a VOD, not misfired as "upcoming".
 	if fm.membershipActive() {
-		mctx, cancel := context.WithTimeout(ctx, feedFetchTimeout)
-		vids, mErr := fm.FetchMembership(mctx, ch.ID)
-		cancel()
+		// defer cancel() inside the closure so a panic in FetchMembership can't
+		// leak the timeout timer, while still releasing it the moment the fetch
+		// returns (not held for the rest of checkChannel's candidate loop).
+		vids, mErr := func() ([]MembershipVideo, error) {
+			mctx, cancel := context.WithTimeout(ctx, feedFetchTimeout)
+			defer cancel()
+			return fm.FetchMembership(mctx, ch.ID)
+		}()
 		if mErr != nil {
 			fm.logger.Debug("membership discovery failed", "channel", ch.Name, "err", mErr)
 		} else if len(vids) > 0 {
@@ -684,7 +689,7 @@ func membershipCandidates(vids []MembershipVideo, now time.Time, includeVODs boo
 // stream-status classification, and OnVideoFound. checkChannel's merged loop is
 // the sole caller, so dedup, probe, and job-creation semantics stay identical
 // across discovery sources — a video seen by two sources can never create two
-// jobs. Members-only candidates (c.authProbe) are probed with cookies.
+// jobs.
 //
 // c.desc may be empty (membership entries carry no description, so matching is
 // title-only, like DECAPI). c.url may be empty; a canonical watch URL is

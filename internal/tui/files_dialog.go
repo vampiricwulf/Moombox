@@ -98,9 +98,13 @@ func (d fileDelegate) renderHistory(w io.Writer, m list.Model, index int, h Orph
 		badgeStyle = style
 	}
 
+	// Compact relative time (e.g. "2h ago"), matching the sibling client-tokens
+	// overlay and the Web history view, instead of a raw truncated UTC stamp.
+	// Compact avoids overflowing the narrow overlay box; falls back to the raw
+	// value if it somehow isn't RFC3339.
 	added := h.AddedAt
-	if len(added) >= 16 {
-		added = strings.Replace(added[:16], "T", " ", 1)
+	if t, err := time.Parse(time.RFC3339, h.AddedAt); err == nil {
+		added = relativeTime(t)
 	}
 	badgeTag := fmt.Sprintf("%-9s", "[history]")
 	line := prefix + badgeStyle.Render(badgeTag) + " " + h.VideoID + "  " + added
@@ -445,8 +449,10 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 		return "", nil // section divider selected — nothing to delete
 	}
 
-	// Reset confirm on navigation
-	if key == keyUp || key == keyDown {
+	// Reset the delete-confirm arming on ANY navigation key — paging (not just
+	// up/down) away from an armed item must clear its stale "Press D again" hint.
+	switch key {
+	case keyUp, keyDown, keyPgUp, keyPgDown, keyHome, keyEnd:
 		m.deleteConfirmID = ""
 		m.feedbackMsg = ""
 	}
@@ -455,10 +461,16 @@ func (m *FilesDialogModel) HandleKey(msg tea.KeyPressMsg) (string, tea.Cmd) {
 	if !m.loading && len(m.list.Items()) > 0 {
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
-		// The section divider is non-selectable; step past it in the same
-		// direction so the cursor never lands on it.
+		// The section divider is non-selectable. Step past it with a SINGLE-row
+		// cursor move in the travel direction — re-applying the original key
+		// would page a second time on PageUp/PageDown (an extra-page over-jump).
 		if _, isHeader := m.list.SelectedItem().(sectionHeaderItem); isHeader {
-			m.list, _ = m.list.Update(msg)
+			switch key {
+			case keyUp, keyPgUp, keyHome:
+				m.list.CursorUp()
+			default: // keyDown, keyPgDown, keyEnd
+				m.list.CursorDown()
+			}
 		}
 		return "", cmd
 	}
