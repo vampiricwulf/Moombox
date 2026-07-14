@@ -816,6 +816,19 @@
                                 placeholder="0"
                                 help-text="Minimum seconds between re-probing the same video's YouTube metadata. 0 = disabled: every monitor cycle re-probes every listed video (default: 0, no maximum)."
                             ></sl-input>
+                            <sl-switch id="cfg-membership-discovery" checked>
+                                Membership Stream Discovery
+                                <span slot="help-text"
+                                    >Each cycle, also scan every YouTube channel's
+                                    members-only tab to catch members-only live
+                                    streams — and, for channels with "Also archive
+                                    uploads &amp; premieres" enabled, their
+                                    VODs/premieres too — that the public RSS feed
+                                    never lists. Uses your YouTube login cookies;
+                                    automatically does nothing for channels you're
+                                    not a member of.</span
+                                >
+                            </sl-switch>
                         </div>
 
                         <!-- Downloader Settings -->

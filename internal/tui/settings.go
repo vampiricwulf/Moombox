@@ -93,6 +93,7 @@ var sections = []settingsSection{
 			{"twitch_check_interval", "Twitch check interval", fieldNumber, nil, "seconds (default: 15, range: 1-3600)", nil},
 			{"hide_finished_age_days", "Hide finished after", fieldNumber, nil, "days (default: 30)", nil},
 			{"probe_cooldown", "Probe cooldown", fieldNumber, nil, "seconds between re-probing the same video's YouTube metadata; 0 = disabled/probe every cycle (default: 0, no max)", nil},
+			{"membership_discovery", "Membership discovery", fieldToggle, nil, "scan each YouTube channel's members-only tab for members-only streams (+ their VODs for channels that archive uploads & premieres); needs YouTube cookies (default: on)", nil},
 		},
 	},
 	{
@@ -446,6 +447,8 @@ func (m *SettingsModel) loadValues(cfg *config.MoomboxConfig) {
 	// stays "0.5", "30" stays "30") — %.0f silently rounded them away.
 	m.values["hide_finished_age_days"] = strconv.FormatFloat(cfg.Monitors.HideFinishedAgeDays.Days(), 'f', -1, 64)
 	m.values["probe_cooldown"] = strconv.Itoa(int(cfg.Monitors.ProbeCooldown.Value))
+	// nil normalizes to true (default on) — matches config validation.
+	m.values["membership_discovery"] = boolToDisplay(cfg.Monitors.MembershipDiscoveryEnabled())
 
 	// Downloader
 	m.values["output_template"] = cfg.Downloader.OutputTemplate
@@ -642,6 +645,8 @@ func (m *SettingsModel) applyValues() {
 	m.cfg.Monitors.HideFinishedAgeDays = config.FlexDuration{Value: hideAge}
 	probeCd, _ := strconv.Atoi(m.values["probe_cooldown"])
 	m.cfg.Monitors.ProbeCooldown = config.FlexDuration{Value: float64(probeCd)}
+	membershipOn := m.values["membership_discovery"] == "Yes"
+	m.cfg.Monitors.MembershipDiscovery = &membershipOn
 
 	// Downloader
 	m.cfg.Downloader.OutputTemplate = m.values["output_template"]

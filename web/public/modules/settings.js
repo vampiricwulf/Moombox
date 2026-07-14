@@ -480,6 +480,11 @@ export class SettingsController {
     this.app.setInputValue("cfg-twitch-check-interval", config.monitors?.twitch_check_interval ?? "");
     this.app.setInputValue("cfg-hide-finished-days", config.monitors?.hide_finished_age_days);
     this.app.setInputValue("cfg-probe-cooldown", config.monitors?.probe_cooldown);
+    // Membership stream discovery switch (default on: absent/nil => checked)
+    const membershipSwitch = document.getElementById("cfg-membership-discovery");
+    if (membershipSwitch) {
+      membershipSwitch.checked = config.monitors?.membership_discovery !== false;
+    }
 
     // Downloader settings
     this.app.setInputValue("cfg-output-template", config.downloader?.output_template);
@@ -656,6 +661,8 @@ export class SettingsController {
     const twitchCheckInterval = this.app.getInputNumber("cfg-twitch-check-interval");
     const hideFinishedDays = this.app.getInputNumber("cfg-hide-finished-days");
     const probeCooldown = this.app.getInputNumber("cfg-probe-cooldown");
+    const membershipSwitch = document.getElementById("cfg-membership-discovery");
+    const membershipDiscovery = membershipSwitch ? membershipSwitch.checked : true;
 
     const outputTemplate = this.app.getInputValue("cfg-output-template");
     const maxResolution = this.app.getInputNumber("cfg-max-resolution");
@@ -731,6 +738,7 @@ export class SettingsController {
         probe_cooldown: probeCooldown,
         decapi_check_interval: decapiCheckInterval ?? null,
         twitch_check_interval: twitchCheckInterval ?? null,
+        membership_discovery: membershipDiscovery,
       },
       downloader: {
         output_template: outputTemplate,

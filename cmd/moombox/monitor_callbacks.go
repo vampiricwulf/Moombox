@@ -180,6 +180,32 @@ func (s *runState) wireMonitorCallbacks() {
 	s.feedMon.ProbeVideo = probeVideoFunc
 	s.decapiMon.ProbeVideo = probeVideoFunc
 
+	// Membership discovery: authenticated /membership tab scan for members-only
+	// videos the RSS feed never lists. Wired on the feed monitor only. The
+	// closure adapts youtube.MembershipVideo -> monitor.MembershipVideo (keeping
+	// the monitor package decoupled from youtube, like probeVideoFunc does for
+	// VideoInfo). MembershipEnabled re-reads the config flag AND cookie state
+	// live each cycle, so toggling the setting or acquiring cookies takes effect
+	// on the next cycle with no restart.
+	s.feedMon.FetchMembership = func(ctx context.Context, channelID string) ([]monitor.MembershipVideo, error) {
+		vids, err := s.ytService.FetchMembershipVideos(ctx, channelID)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]monitor.MembershipVideo, len(vids))
+		for i, v := range vids {
+			out[i] = monitor.MembershipVideo{VideoID: v.VideoID, Title: v.Title}
+		}
+		return out, nil
+	}
+	s.feedMon.MembershipEnabled = func() bool {
+		enabled := true
+		s.configStore.Read(func(c *config.MoomboxConfig) {
+			enabled = c.Monitors.MembershipDiscoveryEnabled()
+		})
+		return enabled && s.ytService.HasAuthCookies()
+	}
+
 	// createYouTubeJob creates a YouTube job and enqueues it. Stream-status
 	// classification is handled by the monitors via ProcessYouTubeVideo.
 	createYouTubeJob := func(videoID, title, videoURL string, ch *config.ChannelConfig, source string) {

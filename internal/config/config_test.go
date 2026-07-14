@@ -271,6 +271,53 @@ terms = "live|stream"
 	}
 }
 
+func TestMembershipDiscoveryDefaultOnAndPersist(t *testing.T) {
+	dir := t.TempDir()
+
+	// 1. An existing config WITHOUT the key must load as enabled (default on),
+	//    and normalization must make the pointer concrete (non-nil).
+	absent := filepath.Join(dir, "absent.toml")
+	if err := os.WriteFile(absent, []byte("[monitors]\nmax_feed_items = 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(absent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Monitors.MembershipDiscoveryEnabled() {
+		t.Error("membership discovery should default ON when the key is absent")
+	}
+	if cfg.Monitors.MembershipDiscovery == nil {
+		t.Error("load should normalize the nil pointer to a concrete value")
+	}
+
+	// 2. An explicit false must survive the load (disable persists).
+	off := filepath.Join(dir, "off.toml")
+	if err := os.WriteFile(off, []byte("[monitors]\nmembership_discovery = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgOff, err := Load(off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfgOff.Monitors.MembershipDiscoveryEnabled() {
+		t.Error("explicit membership_discovery=false must stay disabled after load")
+	}
+
+	// 3. Normalize directly: nil -> enabled; explicit false left untouched.
+	nilCfg := &MoomboxConfig{}
+	Normalize(nilCfg)
+	if !nilCfg.Monitors.MembershipDiscoveryEnabled() {
+		t.Error("Normalize should turn a nil membership_discovery ON")
+	}
+	f := false
+	falseCfg := &MoomboxConfig{Monitors: MonitorsConfig{MembershipDiscovery: &f}}
+	Normalize(falseCfg)
+	if falseCfg.Monitors.MembershipDiscoveryEnabled() {
+		t.Error("Normalize must not flip an explicit false to on")
+	}
+}
+
 func TestLoadOldFormatMigration(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

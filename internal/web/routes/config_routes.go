@@ -434,6 +434,9 @@ func applyConfigUpdates(cfg *config.MoomboxConfig, updates map[string]any) {
 		} else if vs, ok := mon["probe_cooldown"].(string); ok {
 			cfg.Monitors.ProbeCooldown = config.ParseFlexDuration(vs, "seconds", cfg.Monitors.ProbeCooldown.Value)
 		}
+		if v, ok := mon["membership_discovery"].(bool); ok {
+			cfg.Monitors.MembershipDiscovery = &v
+		}
 	}
 
 	// Downloader sub-fields

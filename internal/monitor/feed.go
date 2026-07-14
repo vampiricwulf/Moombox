@@ -74,6 +74,21 @@ func reportMonitorResult(tag string, failed bool) {
 	}
 }
 
+// MembershipVideo is a members-only video discovered from a channel's
+// membership tab. It mirrors youtube.MembershipVideo but is declared here so
+// the monitor package stays decoupled from the youtube package (the wiring
+// closure in cmd/moombox adapts between the two, exactly like ProbeVideo does).
+type MembershipVideo struct {
+	VideoID string
+	Title   string
+}
+
+// MembershipFetchFunc fetches the members-only videos listed on a channel's
+// authenticated /membership tab. It returns an empty slice (no error) when
+// there are no auth cookies or the account is not a member of the channel.
+// Typically wired to youtube.Service.FetchMembershipVideos.
+type MembershipFetchFunc func(ctx context.Context, channelID string) ([]MembershipVideo, error)
+
 // FeedMonitor polls YouTube RSS feeds for new videos from monitored channels.
 type FeedMonitor struct {
 	mu          sync.Mutex
@@ -106,6 +121,17 @@ type FeedMonitor struct {
 	MetadataTracker *MetadataFailureTracker
 	ProbeCooldown   *ProbeCooldown // per-monitor; window from config, refreshed each cycle
 	IsOnline        func() bool    // nil = always online
+
+	// FetchMembership discovers members-only videos via a channel's
+	// authenticated /membership tab. RSS never lists members-only content, so
+	// this is the ONLY discovery source for members-only live/upcoming streams
+	// (and, when include_non_live_content is set, their VODs/premieres). Nil
+	// disables membership discovery. Wired to youtube.Service.FetchMembershipVideos.
+	FetchMembership MembershipFetchFunc
+	// MembershipEnabled gates membership discovery each cycle — typically
+	// "config flag on AND YouTube auth cookies present". Nil means "always
+	// enabled whenever FetchMembership is set".
+	MembershipEnabled func() bool
 }
 
 // Health returns the per-channel health snapshot for /api/status.
@@ -360,6 +386,13 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 			fm.health.recordSuccess(ch.ID)
 		}
 
+		// Members-only discovery via the channel's /membership tab (independent
+		// of RSS health). RSS never lists members-only content, so this is the
+		// only path that catches members live/upcoming streams and, when
+		// include_non_live_content is set, their VODs/premieres. No-op unless
+		// wired + enabled + auth cookies present.
+		fm.checkMembership(ctx, ch)
+
 		// Stagger between requests to avoid looking like a scraper and to
 		// match the pacing of the other two monitors.
 		if i < len(channels)-1 {
@@ -439,24 +472,32 @@ type atomMediaGroup struct {
 	Description string `xml:"http://search.yahoo.com/mrss/ description"`
 }
 
+// maxFeedItems is the per-channel cap on how many recent items a discovery
+// source considers each cycle: the channel's own MaxFeedItems override, else
+// the global monitors.max_feed_items, else defaultMaxFeedItems. Shared by the
+// RSS path (truncates the feed) and the membership path (bounds re-probing of
+// already-handled videos to the recent window).
+func (fm *FeedMonitor) maxFeedItems(ch *config.ChannelConfig) int {
+	if ch.MaxFeedItems != nil && *ch.MaxFeedItems > 0 {
+		return *ch.MaxFeedItems
+	}
+	var cfgMax int
+	fm.configStore.Read(func(c *config.MoomboxConfig) {
+		cfgMax = c.Monitors.MaxFeedItems
+	})
+	if cfgMax > 0 {
+		return cfgMax
+	}
+	return defaultMaxFeedItems
+}
+
 func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig, data []byte) error {
 	var feed atomFeed
 	if err := xml.Unmarshal(data, &feed); err != nil {
 		return fmt.Errorf("parse feed: %w", err)
 	}
 
-	maxItems := defaultMaxFeedItems
-	if ch.MaxFeedItems != nil && *ch.MaxFeedItems > 0 {
-		maxItems = *ch.MaxFeedItems
-	} else {
-		var cfgMax int
-		fm.configStore.Read(func(c *config.MoomboxConfig) {
-			cfgMax = c.Monitors.MaxFeedItems
-		})
-		if cfgMax > 0 {
-			maxItems = cfgMax
-		}
-	}
+	maxItems := fm.maxFeedItems(ch)
 
 	entries := feed.Entries
 	if len(entries) > maxItems {
@@ -496,19 +537,6 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 			continue
 		}
 
-		// Skip if active job exists (but not if merely finished — stream may restart on same URL)
-		active, err := fm.db.HasActiveJob(videoID)
-		if err != nil {
-			// Don't swallow DB errors — proceeding as if no active job could
-			// create duplicates if the DB was simply busy. Log and skip this
-			// entry for the current cycle.
-			fm.logger.Debug("HasActiveJob query failed", "videoID", videoID, "err", err)
-			continue
-		}
-		if active {
-			continue
-		}
-
 		// Description dedup: filter lines that appear in older entries
 		description := entry.MediaGroup.Description
 		if lookbehind > 0 && i+1 < len(entries) {
@@ -516,7 +544,8 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 			description = filterUniqueDescriptionLinesPrecomputed(description, entryLineSets[i+1:end])
 		}
 
-		// Get video URL
+		// Get video URL (feed provides an alternate link; else synthesized in
+		// processCandidate).
 		videoURL := ""
 		for _, link := range entry.Links {
 			if link.Rel == "alternate" {
@@ -524,63 +553,160 @@ func (fm *FeedMonitor) processFeed(ctx context.Context, ch *config.ChannelConfig
 				break
 			}
 		}
-		if videoURL == "" {
-			videoURL = fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
-		}
 
-		// Term matching: title OR description can match independently
-		title := entry.Title
-		titleMatch := MatchesTerms(title, ch)
-		descMatch := description != "" && MatchesTerms(description, ch)
-
-		if !titleMatch && !descMatch {
-			continue
-		}
-
-		// Check if this is a re-probe of a previously processed video.
-		// Ignore the error — a DB-busy here is best treated as "not yet
-		// processed" so we probe and let upstream dedup (INSERT-OR-IGNORE)
-		// handle collisions. We still log for visibility.
-		reprobe, hpErr := fm.db.HasProcessed(videoID)
-		if hpErr != nil {
-			fm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
-		}
-
-		if reprobe {
-			fm.logger.Debug("feed match found (re-probe)",
-				"videoID", videoID,
-				"title", title,
-				"channel", ch.Name)
-		} else {
-			fm.logger.Info("feed match found",
-				"videoID", videoID,
-				"title", title,
-				"channel", ch.Name)
-		}
-
-		// Probe video metadata to classify stream status before creating job
-		result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
-			Ctx:          ctx,
-			VideoID:      videoID,
-			Title:        title,
-			Channel:      ch,
-			ProbeVideo:   fm.ProbeVideo,
-			AddToHistory: func(id string) error { return fm.db.AddToHistory(id) },
-			Tracker:      fm.MetadataTracker,
-			Cooldown:     fm.ProbeCooldown,
-			IsReprobe:    reprobe,
-			Logger:       fm.logger,
-		})
-		if !result.ShouldProcess {
-			continue
-		}
-
-		if fm.OnVideoFound != nil {
-			fm.OnVideoFound(videoID, result.Title, videoURL, ch)
-		}
+		fm.processCandidate(ctx, ch, videoID, entry.Title, description, videoURL, "feed")
 	}
 
 	return nil
+}
+
+// processCandidate runs a single discovered video through the shared feed
+// pipeline: active-job dedup, term matching (title/description), stream-status
+// classification via ProbeVideo, and OnVideoFound. Both the RSS path
+// (processFeed) and the membership path (checkMembership) funnel through here,
+// so dedup, probe, and job-creation semantics stay identical across discovery
+// sources — a video seen by two sources can never create two jobs.
+//
+// source is only a log label ("feed" | "membership"). description may be empty
+// (membership entries carry no description, so matching is title-only, like
+// DECAPI). videoURL may be empty; a canonical watch URL is synthesized.
+func (fm *FeedMonitor) processCandidate(ctx context.Context, ch *config.ChannelConfig, videoID, title, description, videoURL, source string) {
+	if videoID == "" {
+		return
+	}
+
+	// Skip if an active job exists (but not if merely finished — a stream may
+	// restart on the same URL).
+	active, err := fm.db.HasActiveJob(videoID)
+	if err != nil {
+		// Don't swallow DB errors — proceeding as if no active job could create
+		// duplicates if the DB was simply busy. Skip this entry for this cycle.
+		fm.logger.Debug("HasActiveJob query failed", "videoID", videoID, "err", err)
+		return
+	}
+	if active {
+		return
+	}
+
+	if videoURL == "" {
+		videoURL = fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+	}
+
+	// Term matching: title OR description can match independently.
+	titleMatch := MatchesTerms(title, ch)
+	descMatch := description != "" && MatchesTerms(description, ch)
+	if !titleMatch && !descMatch {
+		return
+	}
+
+	// Check if this is a re-probe of a previously processed video. Ignore the
+	// error — a DB-busy here is best treated as "not yet processed" so we probe
+	// and let upstream dedup (INSERT-OR-IGNORE) handle collisions.
+	reprobe, hpErr := fm.db.HasProcessed(videoID)
+	if hpErr != nil {
+		fm.logger.Debug("HasProcessed query failed", "videoID", videoID, "err", hpErr)
+	}
+
+	if reprobe {
+		fm.logger.Debug("feed match found (re-probe)",
+			"videoID", videoID, "title", title, "channel", ch.Name, "source", source)
+	} else {
+		fm.logger.Info("feed match found",
+			"videoID", videoID, "title", title, "channel", ch.Name, "source", source)
+	}
+
+	// Probe video metadata to classify stream status before creating a job.
+	result := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		Ctx:          ctx,
+		VideoID:      videoID,
+		Title:        title,
+		Channel:      ch,
+		ProbeVideo:   fm.ProbeVideo,
+		AddToHistory: func(id string) error { return fm.db.AddToHistory(id) },
+		Tracker:      fm.MetadataTracker,
+		Cooldown:     fm.ProbeCooldown,
+		IsReprobe:    reprobe,
+		Logger:       fm.logger,
+	})
+	if !result.ShouldProcess {
+		return
+	}
+
+	if fm.OnVideoFound != nil {
+		fm.OnVideoFound(videoID, result.Title, videoURL, ch)
+	}
+}
+
+// checkMembership discovers members-only videos via a channel's authenticated
+// /membership tab and routes each through the shared processCandidate pipeline.
+// RSS and DECAPI cannot see members-only content, so this is the only source
+// for members-only live/upcoming streams (and, when include_non_live_content is
+// set, their VODs/premieres).
+//
+// It is a no-op when FetchMembership is unset or MembershipEnabled gates it off
+// (feature disabled or no auth cookies). Fetch failures are logged at Debug and
+// never touch RSS feed health — the two are independent signals, so a membership
+// hiccup must not mark the channel's RSS feed unhealthy.
+//
+// Re-probe bounding: a members video NOT yet in history is always processed, so
+// new live/upcoming streams — and, with include_non_live_content, VOD backfill —
+// are never missed regardless of their position in the tab. A video ALREADY in
+// history (previously jobbed or classified) is only re-probed while it sits in
+// the recent maxFeedItems window; older handled videos are skipped rather than
+// re-probed every cycle forever. This is safe because a jobbed upcoming/live
+// stream is polled by the worker (and skipped here via HasActiveJob), not by a
+// monitor re-probe, while a recent transiently-failing live stream stays in the
+// window and keeps being retried. The window mirrors the RSS path's bounded
+// recent view, so both sources scale the same way with monitors.max_feed_items.
+func (fm *FeedMonitor) checkMembership(ctx context.Context, ch *config.ChannelConfig) {
+	if fm.FetchMembership == nil {
+		return
+	}
+	if fm.MembershipEnabled != nil && !fm.MembershipEnabled() {
+		return
+	}
+
+	// Bound the whole channel's membership scan the way the RSS path bounds
+	// processFeed (checkChannel wraps it in feedProcessTimeout). ProbeVideo can
+	// be slow (retries + backoff), and a first enable or large members backlog
+	// probes every not-yet-seen video with no count cap; without an aggregate
+	// deadline one channel could run past the cycle interval and starve later
+	// channels' live-stream discovery. The HTTP fetch keeps its own shorter
+	// timeout inside FetchMembership; this cap covers fetch + all probes, and a
+	// cutoff just defers the remaining (still-unprocessed) videos to next cycle.
+	procCtx, cancel := context.WithTimeout(ctx, feedProcessTimeout)
+	defer cancel()
+
+	videos, err := fm.FetchMembership(procCtx, ch.ID)
+	if err != nil {
+		fm.logger.Debug("membership discovery failed", "channel", ch.Name, "err", err)
+		return
+	}
+	if len(videos) == 0 {
+		return
+	}
+
+	window := fm.maxFeedItems(ch)
+	fm.logger.Debug("membership videos discovered", "channel", ch.Name, "count", len(videos), "reprobeWindow", window)
+	for i, v := range videos {
+		select {
+		case <-procCtx.Done():
+			return
+		default:
+		}
+		// Beyond the recent window, skip anything we've already handled so old
+		// members VODs aren't re-probed every cycle. New (not-yet-processed)
+		// videos still fall through to be probed even when far down the list.
+		if i >= window {
+			processed, hpErr := fm.db.HasProcessed(v.VideoID)
+			if hpErr != nil {
+				fm.logger.Debug("HasProcessed query failed (membership window)", "videoID", v.VideoID, "err", hpErr)
+			} else if processed {
+				continue
+			}
+		}
+		fm.processCandidate(procCtx, ch, v.VideoID, v.Title, "", "", "membership")
+	}
 }
 
 // descriptionLineSet builds the trimmed-line lookup set for a description.

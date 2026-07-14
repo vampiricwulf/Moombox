@@ -92,6 +92,22 @@ type MonitorsConfig struct {
 	// cycle re-probes every listed video — the poll interval is then the only
 	// throttle). No maximum. Hot-reloaded each monitor cycle.
 	ProbeCooldown FlexDuration `toml:"probe_cooldown" json:"probe_cooldown"`
+	// MembershipDiscovery enables per-cycle discovery of members-only videos via
+	// each YouTube channel's authenticated /membership tab. RSS and DECAPI never
+	// list members-only content, so this is the only source for members-only
+	// live/upcoming streams (and, when include_non_live_content is set, their
+	// VODs/premieres). Requires YouTube auth cookies to do anything. Defaults to
+	// enabled: a nil pointer (absent from an existing config) is normalized to
+	// true on load, so only an explicit false disables it.
+	MembershipDiscovery *bool `toml:"membership_discovery,omitempty" json:"membership_discovery,omitempty"`
+}
+
+// MembershipDiscoveryEnabled reports whether members-only /membership discovery
+// is on. The *bool defaults to ON, so a nil pointer (field absent from an
+// existing config, i.e. before normalization) counts as enabled. Centralizes
+// the "nil means on" semantic so callers never dereference the pointer unguarded.
+func (m MonitorsConfig) MembershipDiscoveryEnabled() bool {
+	return m.MembershipDiscovery == nil || *m.MembershipDiscovery
 }
 
 // DownloaderConfig holds download-related settings.

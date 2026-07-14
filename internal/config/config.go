@@ -31,6 +31,11 @@ var (
 )
 
 // Defaults returns a new MoomboxConfig with all default values applied.
+// boolPtr returns a pointer to b. Used for *bool config fields whose default is
+// a concrete value (a feature that is on unless explicitly disabled), where a
+// plain bool couldn't distinguish "absent" from "explicitly false".
+func boolPtr(b bool) *bool { return &b }
+
 func Defaults() *MoomboxConfig {
 	return &MoomboxConfig{
 		Network: NetworkConfig{
@@ -54,6 +59,7 @@ func Defaults() *MoomboxConfig {
 			FeedCheckInterval:   FlexDuration{Value: 10}, // minutes
 			HideFinishedAgeDays: FlexDuration{Value: 30},
 			ProbeCooldown:       FlexDuration{Value: 0}, // seconds; 0 = disabled
+			MembershipDiscovery: boolPtr(true),
 		},
 		Downloader: DownloaderConfig{
 			OutputTemplate:       "${channel}/${start_date} ${title} [${id}]",
@@ -486,6 +492,12 @@ func validateOrNormalize(cfg *MoomboxConfig, reportOnly bool) []error {
 		if !reportOnly {
 			cfg.Monitors.MaxFeedItems = defaults.Monitors.MaxFeedItems
 		}
+	}
+	// monitors.membership_discovery defaults to on: a nil pointer (the field is
+	// absent from an existing config) normalizes to true so the feature is
+	// enabled unless an operator explicitly sets false.
+	if cfg.Monitors.MembershipDiscovery == nil && !reportOnly {
+		cfg.Monitors.MembershipDiscovery = boolPtr(true)
 	}
 	if cfg.Monitors.FeedCheckInterval.Value < 1 || cfg.Monitors.FeedCheckInterval.Value > 1440 {
 		fail("monitors.feed_check_interval %v out of range 1..1440 minutes", cfg.Monitors.FeedCheckInterval.Value)
