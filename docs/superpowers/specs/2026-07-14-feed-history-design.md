@@ -971,9 +971,11 @@ per row, in this order:
     live     → probe (goal 3)
     vod / not_a_stream → NOT probed for discovery
   probe choice: source='membership' ⇒ authenticated, else anonymous
-  ESCALATION: an anonymous probe returning members_only/login_required sets
-    source:='membership' and re-probes with cookies THIS CYCLE if
-    membershipActive(). See "A refusal escalates, and sets `source` itself".
+  ESCALATION: an anonymous probe returning members_only/login_required re-probes
+    with cookies THIS CYCLE if membershipActive(). ONLY members_only sets
+    source:='membership' — login_required is also YouTube's anti-bot refusal on
+    PUBLIC videos, and relabelling one hides it from the read arms forever.
+    See "A refusal escalates, and sets `source` itself".
   (no row is ever deferred in Phase 1 — see "Probe-list growth")
 ```
 
@@ -1326,9 +1328,10 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         └─ source='membership' ⇒ authenticated probe (ProbeVideoAuth); else
            anonymous. This replaces today's in-memory discoveredVideo.authProbe
            (feed.go:681/:748), which cannot survive store-driven candidates.
-        └─ a members_only/login_required refusal sets source:='membership' and
-           escalates to the authenticated probe in the same cycle (if
-           membershipActive()) — the refusal IS the sighting.
+        └─ a members_only refusal sets source:='membership' — the refusal IS the
+           sighting. members_only OR login_required escalates to the authenticated
+           probe in the same cycle (if membershipActive()); login_required does NOT
+           relabel, since it is also the anti-bot refusal on public videos.
       outcome per item:
         probed     ⇒ UPDATE title
                      UPDATE status (post_live→vod)
@@ -1609,9 +1612,23 @@ This is one of two jobs `source` does — the other is the toggle predicate belo
 
 ### A refusal escalates, and sets `source` itself
 
-`source` is **not** only listing-derived. A `members_only`/`login_required` refusal —
-from *any* probe — sets `source := 'membership'`, and this is the more authoritative
-of the two writers.
+`source` is **not** only listing-derived. A **`members_only`** refusal — from *any*
+probe — sets `source := 'membership'`, and this is the more authoritative of the two
+writers.
+
+**Only `members_only`, never `login_required`.** The two are not interchangeable, and
+conflating them loses public videos. `parsePlayabilityStatus` returns `login_required`
+as the *fallback* for any `LOGIN_REQUIRED` whose reason mentions neither
+member/join nor age (`:357-363`) — which includes YouTube's anti-bot **"Sign in to
+confirm you're not a bot"** refusal, served on **public** videos when it decides to
+IP-block us. Flipping `source` on that would mark a public video as members content
+forever, and with `membership_discovery = false` the read arms would then hide it from
+ranking and archival entirely: a silent archival loss caused by an anti-bot block.
+
+`members_only` proves membership — it is returned only when the reason says
+"member"/"join" (`:358-359`) or `UNPLAYABLE` says "member" (`:366`). `login_required`
+proves only "try with credentials", which is a reason to **escalate** but never a
+reason to relabel the item.
 
 **Why the probe beats the listing here.** An earlier draft had `source` flip only on a
 listing sighting, and then had to concede that a public video later locked to members
@@ -1627,17 +1644,26 @@ no tab, and no toggle to arrive. It is available at exactly the moment we need i
 **The escalation:**
 
 ```
-probe returns members_only / login_required
-  ⇒ source := 'membership'          ← unconditional; the refusal proves the probe,
-                                      whether or not we can see the item
+probe returns members_only
+  ⇒ source := 'membership'      ← the refusal proves the item is members-only,
+                                  whether or not we can see it
+
+probe returns members_only OR login_required
   ⇒ if the probe was anonymous AND membershipActive():
        re-probe with cookies, same cycle:
-         ok                    ⇒ probed — real status + date; ARCHIVED normally
-         members_only again    ⇒ denied — wrong membership tier, or stale cookies
-         errored               ⇒ errored
+         ok                  ⇒ probed — real status + date; ARCHIVED normally
+         members_only again  ⇒ denied — wrong membership tier, or stale cookies
+                               (source is now 'membership', so next cycle probes
+                                authenticated directly — no second escalation)
+         login_required again⇒ denied — cookies did not satisfy it; source unchanged
+         errored             ⇒ errored
      else:
        denied
 ```
+
+Escalating on `login_required` is still right even though it does not relabel:
+cookies are exactly what an anti-bot refusal wants, so the retry often succeeds —
+and if it does, the item was public all along and `source` correctly stayed `rss`.
 
 **Why setting `source` even on a failed escalation matters.** It looks pointless —
 we still cannot see the item — but it is what bounds the cost. Once `source` is
@@ -2438,6 +2464,11 @@ Then:
 - **A failed escalation still flips `source`.** Wrong membership tier: escalated probe
   also returns `members_only` ⇒ `denied` ⇒ but `source='membership'` persists, so the
   next cycle issues **one** probe (authenticated) rather than two.
+- **An anti-bot `login_required` on a PUBLIC video must NOT flip `source`.** YouTube's
+  "Sign in to confirm you're not a bot" refusal returns `login_required`
+  (`player_api_parsing.go:357-363` — the fallback arm). It escalates (cookies are
+  exactly what it wants) but must leave `source='rss'`. Relabelling it would hide a
+  public video from the read arms permanently once `membership_discovery = false`.
 - **No cookies ⇒ no escalation, and eventually no probe at all.** `membershipActive()`
   false ⇒ refusal sets `source` ⇒ `denied` ⇒ next cycle the probe gate skips the row
   entirely (zero probes).
@@ -2625,9 +2656,11 @@ exists (see "Phase 1 limitation").
   (operator choice only), the **probe** arm on `membershipActive()` (which includes
   cookie state). The asymmetry is load-bearing: gating a read on cookie state moves
   scope on a fetch failure.
-- **Refusal escalation**: a `members_only`/`login_required` result sets
-  `source := 'membership'` (unconditionally — the refusal proves which probe is
-  correct) and, when `membershipActive()`, re-probes with cookies in the same cycle.
+- **Refusal escalation**: a `members_only` result sets `source := 'membership'` (the
+  refusal proves the item is members-only). `members_only` **or** `login_required`
+  re-probes with cookies in the same cycle when `membershipActive()` —
+  but `login_required` must **not** relabel, since it is also YouTube's anti-bot
+  refusal on public videos and would hide one from the read arms forever.
   This is what archives a public video later locked to members — the listing can
   never reach it — and it makes the no-cookies case cost **zero** probes per cycle
   instead of one. `source` therefore has two writers: listings and refusals, the
