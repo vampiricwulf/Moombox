@@ -949,7 +949,9 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
            it needs a DATE for ranking, and ranking counts all channel content.
            Without this it is never probed, never dated, never rankable: a
            permanent sink.
-        └─ members-only content uses the authenticated probe (unchanged)
+        └─ source='membership' ⇒ authenticated probe (ProbeVideoAuth); else
+           anonymous. This replaces today's in-memory discoveredVideo.authProbe
+           (feed.go:681/:748), which cannot survive store-driven candidates.
       outcome per item:
         probed     ⇒ UPDATE title
                      UPDATE status (post_live→vod)
@@ -1185,6 +1187,35 @@ orphan tooling remains necessary and correct — just less busy.
 This composes with the date-based cap into defence in depth: purging history can no
 longer re-arm an out-of-scope VOD (the cap stops it), *and* there is much less
 spurious history to purge.
+
+### `source` decides which probe to use
+
+Today the authenticated-probe choice rides on the in-memory candidate:
+`membershipCandidates` sets `authProbe: true` (`feed.go:681`) and `processCandidate`
+reads it (`feed.go:748`) to pick `ProbeVideoAuth`. That field cannot survive the
+move to store-driven passes — a row read back from `feed_items` has no `authProbe`.
+
+**`source = 'membership'` is the signal.** It is the only durable record that an item
+came from the members tab, and members-only content must be probed with cookies or
+the classifier misfires it as `upcoming` (`feed.go:743-746`) — the bug 2.7.2 fixed.
+
+This is the second job `source` does, alongside the toggle predicate below. Both
+are reads of a column that was, until this round, written and never read.
+
+**The transition cases, and why the failure directions are acceptable:**
+
+- **Members → public** (creator unlocks a video). RSS now lists it with an `exact`
+  date; the stored row is `coarse`, so the precision guard fires and `source`
+  becomes `rss`. Subsequent probes are anonymous — correct, it *is* public now.
+- **Public → members** (creator locks an existing video). RSS drops it; the
+  membership tab lists it `coarse`, which loses to the stored `exact`, so the guard
+  rejects and `source` stays `rss`. The row keeps being probed anonymously, the
+  probe returns no formats, and it stays `unknown` — never archived. That is wrong
+  but **safe**: we decline to archive rather than misfire, and the row self-heals if
+  it is ever unlocked. Handling it properly would mean decoupling `source` from the
+  precision guard, which buys a rare edge case at the cost of making two unrelated
+  fields move independently. Not worth it; recorded so it is a decision rather than
+  a surprise.
 
 ### `membership_discovery = false` must gate reads, not just writes
 
@@ -1791,6 +1822,9 @@ Then:
   writes none either — give-up's only effect today is the reprobe flag
 - A DECAPI probe still writes history exactly as today (regression guard on the
   `probeAndClassify` split)
+- **`source='membership'` selects the authenticated probe.** A members row read back
+  from the store is probed with cookies, not anonymously — otherwise it misclassifies
+  as `upcoming` (`feed.go:743-746`), the 2.7.2 bug
 - **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
   shared with `decapi.go:583`; the outcome is surfaced to the caller so only the
   feed monitor persists it (non-goal guard)
@@ -1952,6 +1986,10 @@ exists (see "Phase 1 limitation").
 *Monitor*
 - Discovery pass / archival pass split, with the FRESH rule (`outcome == probed`)
 - `post_live` → `vod` normalization on write; the probe write is precision-guarded
+- `source` becomes a **read** column: it selects the authenticated probe (replacing
+  the in-memory `discoveredVideo.authProbe`) and gates all three store queries when
+  `membershipActive()` is false
+- The `assumed`-row probe carve-out (probed regardless of terms, to obtain a date)
 - Refresh probe on the archival `vod` branch, writing its result back
 - Established gate; rewired `checkChannel`/`processCandidate`
 - **Channel-removal prune** from `kickMonitors`, mirroring `PruneHealth`
