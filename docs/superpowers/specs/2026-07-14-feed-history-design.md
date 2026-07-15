@@ -489,10 +489,22 @@ Hence the chain, and the final rung:
 startTimestamp → 'exact'   |  uploadDate/publishDate → 'day'  |  neither → leave as-is
 ```
 
-**If the probe yields no date at all, the row keeps its existing precision.** For an
-`assumed` row that means it stays unrankable and therefore unarchived — the safe
-direction (we decline to archive what we cannot place), but a real residual worth
-naming rather than pretending the chain always terminates.
+**Invariant: never write a terminal status without a rankable date.** If the probe
+classifies a past item but supplies no date, the row stays **`unknown`** — it does
+*not* become `vod`.
+
+Without this rule the chain has a permanent sink. A members row stored `assumed`
+probes to `vod` with no date (no `lbd`, no microformat — a real case per the
+analysis above), and the precision guard correctly declines to write a date it
+wasn't given. The row is then `vod` + `assumed`: terminal, so never discovery-probed
+again, *and* excluded from the top-N, so never archived. It can never recover, even
+though the very next probe might have supplied a date. That is the dead-end this
+whole section exists to close, reached by a different route.
+
+Keeping it `unknown` costs a probe per cycle (the accepted cost — see "Probe-list
+growth") and buys self-healing: the moment any probe returns a usable date, the row
+takes it, becomes `vod`, and ranks normally. A terminal status is a promise that we
+know enough to stop looking; without a date we do not.
 
 The `liveStreamability` epoch branch is never a publish date — it is the scheduled
 start of an upcoming stream. It must not feed `PublishedAt` at all.
@@ -879,7 +891,12 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         └─ same order as today: HasActiveJob → terms → probe (feed.go:704-725)
         └─ members-only content uses the authenticated probe (unchanged)
       outcome per item:
-        probed     ⇒ UPDATE status (post_live→vod), title
+        probed     ⇒ UPDATE title
+                     UPDATE status (post_live→vod)
+                       └─ EXCEPT: a terminal status (vod/not_a_stream) is only
+                          written if the row will have a rankable date. No date
+                          ⇒ stay 'unknown', so the row keeps getting probed
+                          instead of becoming terminal-and-unrankable forever
                      UPDATE published + date_precision ONLY IF the probe supplied a
                        date AND its precision is strictly better than the stored one
                        └─ SAME precision guard as the upsert. Without it a probe of
@@ -1518,6 +1535,9 @@ Then:
   `published=''` for an `upcoming`/`live` row
 - **`post_live` normalizes to `vod` on write** — no `post_live` row ever reaches the
   archival decision table, where it would match no branch
+- **A probe returning `vod` with no usable date leaves the row `unknown`, not
+  `vod`.** Guards the permanent sink: `vod`+`assumed` is terminal *and* unrankable,
+  so it could never recover even though the next probe might supply a date
 - An `assumed`/`unknown` members row that probes to `vod` gets a real date and
   **becomes rankable** — the dead-end guard (without a probe date it would be
   `vod`+`assumed`: terminal and unrankable, i.e. unarchivable forever)
