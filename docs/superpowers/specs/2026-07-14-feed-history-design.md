@@ -217,6 +217,23 @@ defence in depth; it is one lock with three copies of the same broken key.
 Reading the playability answer closes every door at once, including that one, because
 it depends on nothing we stored.
 
+**How this was arrived at, recorded because the wrong turns are instructive:**
+
+| Attempt | Why it failed |
+|---|---|
+| Gate the store reads on `membershipActive()` | it folds in **cookie state**, so the ranking moved on a fetch failure — the Jerry bug, reintroduced |
+| Split: reads on config, probe on `membershipActive()` | the **refresh** probe was ungated, and `ProbeVideoAuth` has no cookie guard, so it did not fail — it lied, and the lie was jobbed |
+| Gate the refresh probe too | `source` *picks* the probe, and a stale `source` lies identically |
+| Update `source` on every sighting | `source` flips only on a **sighting**, and the fetch is gated — with `membership_discovery = false` it can never flip at all |
+| **Read `PlayabilityError`** | ✅ depends on nothing we stored |
+| (first draft: any non-`ok` ⇒ denied) | too broad — would refuse a downloadable age-restricted VOD |
+
+Four consecutive fixes patched a symptom, each one correct about the case in front
+of it and blind to the next. The signal that ends the sequence was in
+`player_api_parsing.go` the entire time; `VideoProbeResult` simply dropped it. The
+lesson generalises past this design: **when a guard needs a stored value to be
+current, ask whether the source of truth can be read directly instead.**
+
 **The dated store makes probes cheaper, not rarer.** Today the capped N items are
 probed *every cycle forever*, and most results are discarded by `nonLiveSkipReason`
 immediately after. With recorded status, an item needs probing once. Steady state
