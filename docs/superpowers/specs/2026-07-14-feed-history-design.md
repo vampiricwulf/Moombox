@@ -27,11 +27,15 @@ carve-out to repair the rows that rule stranded.
 | 4 | **Keep `denied`; file `classifyStream:454` separately.** The producer bug stays fixed-in-place until its own change | ✅ applied |
 | 5 | **Backfill is strictly serial across channels**, one at a time, globally, hours of wall-clock permitted, never gated on idleness | ✅ applied |
 | 6 | **Scope is an N-day window, not a top-N row count.** A date cut never splits a coarse lump, which is what the total order existed to handle | ⚠️ "The in-scope query", `idx_feed_items_rank`. Skew: ✅ applied — inverted to **skew-new**, and it deletes the unit-preserving `itemAge` refactor from Phase 1 |
+| 13 | **The backlog is `Queued` DB rows; a scheduler admits them.** A `Queued` job never enters `JobQueue` until a slot frees | ✅ applied ("The scheduler") — dissolves the `maxLifecycle` / pending-drop / FIFO / crash-recovery items |
+| 14 | **M paces the back-catalogue, not the channel.** Newly-discovered content bypasses M entirely and never counts against it | ✅ applied ("The scheduler") |
+| 15 | **Every VOD waiting on the download pool shows as `Queued`**, new or backlog; new sorts first. "Skip the queue" is priority, not exemption | ✅ applied |
+| 16 | **`num_parallel_downloads` default 2 → 10.** It only ever meant VODs; 2 was conservative because it was throttling live streams it should never have touched | ✅ applied |
 | 12 | **The discovery pass is a serial per-source walk with early exit.** Within a source the listing is recency order, so one probe landing outside the window retires that source for the pass. Only a probe that *returned a date* may retire; errored/denied/cooldown/dateless must not. **Self-validating**: a probed date newer than the source's previous one disproves the ordering and disables early-exit for it | ✅ applied ("The source walk"); adds the third External Assumption |
 | 7 | **M-rows is throughput, not depth.** Everything inside the window is archived eventually; M paces it, most-recent-first, and a completed job frees a slot the next item fills. Per channel | ⚠️ every "top-N"/"cap slot"/"archival depth" statement in the doc |
 | 8 | **Defaults: 3 days, 3 rows.** | ⚠️ Documentation Updates |
 | 9 | **`num_parallel_downloads` becomes VOD-only** — live/upcoming must not consume a download slot. **Folded into this spec** | ⚠️ the "no worker changes" scope assumption |
-| 10 | **The backlog waits in the jobs table under a new `Queued` status** | ⚠️ the job status lifecycle (a CLAUDE.md critical pattern) |
+| 10 | **The backlog waits in the jobs table under a new `Queued` status** | ⚠️ the job status lifecycle (a CLAUDE.md critical pattern); `IsTerminal`/`ShouldProcess` (`types.go:92-94`, `queue.go:350-357`), `calculatePriority` (`queue.go:19-30`), the `JobStats` aggregate (`database_jobs.go:622-645` — which today counts pool-waiters as active), both UIs' colour maps and filter buckets. See "The scheduler" |
 | 11 | **`max_feed_items` is dropped, not migrated.** Both new settings take defaults on upgrade | ⚠️ "What `max_feed_items` comes to mean" — the relabel is void; the setting is gone |
 
 **Why 11 rather than a migration:** the old value bounded depth, the new `M` bounds
@@ -48,21 +52,75 @@ the default `num_parallel_downloads = 2`, and a third channel going live blocks
 indefinitely. That is a missed stream from a stock config, and M-rows would queue on
 top of it.
 
-**Known consequences not yet worked through — these are open, not decided:**
+## The scheduler
 
-- `maxLifecycle = 100` (`queue.go:61`) caps concurrently-alive jobs and a slot-waiter
-  holds one the entire time it blocks; the pending queue **silently drops** jobs past
-  100 (`queue.go:93-98`). A 3-day window on a prolific channel can exceed both.
-- A new `JobStatus` touches `IsTerminal()`/`ShouldProcess()` (`types.go:92-94`,
-  `queue.go:350-357`), `calculatePriority` (`queue.go:19-30`), the `JobStats`
-  aggregate (`database_jobs.go:622-645`, which today counts slot-waiters as active),
-  both UIs' colour maps and filter buckets, and the crash-recovery path
-  (`worker.go:306-312`) — which already special-cases interrupted `Muxing` and would
-  strand `Queued` the same way.
-- `AcquireDownloadSlot` has no FIFO and no priority; M-rows assumes most-recent-first
-  ordering that does not exist yet.
-- With `include_non_live_content = false`, VODs never job at all — so the window and
-  slots govern only the `was_live → live` safety walk. That walk still probes.
+Decisions 13–16. This section is what makes the queue tractable: three problems the
+earlier draft listed as open all dissolve into one structural choice.
+
+**A `Queued` job is a durable DB row, not a blocked goroutine.** The monitor creates
+it and stops. A scheduler admits it — enqueues it into `JobQueue` — only when a slot
+is actually free. Consequences, each of which was an open item:
+
+| Was open | Why it is gone |
+|---|---|
+| `maxLifecycle = 100` (`queue.go:61`) caps alive jobs, and a slot-waiter holds one the whole time it blocks | a `Queued` job is never in `JobQueue`, so it holds nothing. The queue only ever contains new content plus admitted backlog — bounded as today |
+| the pending queue **silently drops** jobs past 100 (`queue.go:93-98`) — an unarchived video with only a warning log | the backlog never reaches the pending queue. This one mattered most: it is this spec's own failure mode, re-entering from the worker side |
+| `AcquireDownloadSlot` (`queue.go:149-180`) has no FIFO and no priority — waiters wake in Go runtime order, so "most recent first" does not exist | admission ordering lives in the scheduler, where it is an `ORDER BY`. The semaphore stops being the arbiter and becomes a safety net |
+| a new `JobStatus` strands on crash, as `worker.go:306-312` already shows for interrupted `Muxing` | `Queued` is a **resting** state, not a transient one. It survives restart because it was never in memory — the scheduler simply re-reads it. No recovery special-case |
+
+**M paces the back-catalogue, not the channel.** Newly-discovered content bypasses M
+entirely and never counts against it. M exists so an archival backlog cannot flood a
+channel; it must never make a live stream, a premiere, or a just-published VOD wait
+behind old content. This is what keeps M defensible as a default of 3: it is not a
+throttle on the channel, it is a throttle on history.
+
+**Admission rules:**
+
+```
+upcoming / live  → admit immediately, always. No M, no download pool (decision 9).
+                   A broadcast cannot be throttled — it is happening now.
+new VOD          → no M gate; still needs a download-pool slot.
+                   Sorts AHEAD of all backlog.
+backlog VOD      → M per channel, then a download-pool slot. Most-recent-first.
+
+"new" = first seen by the FEED MONITOR this cycle. NOT a backfill row: a scan
+writes thousands of rows with first_seen=now, and none of them are new content.
+```
+
+**Every VOD waiting on the pool shows as `Queued` — new or backlog.** "Skip the
+queue" is **priority, not exemption**: a new VOD jumps the entire back-catalogue and
+starts the instant a slot frees, but `num_parallel_downloads` is a hard resource
+limit and nothing bypasses it. This also kills an existing lie rather than working
+around it: today `stream_processor.go:220`/`:238` write `Downloading` *before*
+`AcquireDownloadSlot` blocks at `worker.go:446`, so a job waiting on the pool is
+persisted as downloading while it does nothing — byte-identical to one actively
+pulling segments. Only `download_started_at` (`orchestrator.go:123-124`) separates
+them, and no UI reads it. One waiting state, one truthful status, everywhere.
+
+**`num_parallel_downloads` default 2 → 10** (`config.go:67`).
+
+There is **no maximum** to raise — validation only rejects `< 1` (`config.go:559-560`).
+And the key is *commented out* in `config.example.toml:104`, so installs that never
+touched it inherit the default: this is a live behavior change on upgrade, not just
+for new installs.
+
+It compounds with decision 9, and the peak is worth stating plainly rather than
+discovering: today the pool is a hard **2 shared by everything, live included** —
+which is the bug. After decision 9 live is exempt and therefore unbounded, because it
+must be. So peak concurrency becomes **(live streams) + 10** where it was 2. Twenty
+channels with five live and a backlog running is fifteen concurrent downloads.
+
+That is the correct direction: `2` was only ever defensible because it was
+double-counting live streams it should never have touched. As a VOD-only archival
+knob it is far too low — and with M = 3 per channel, saturating 10 takes four
+channels' backlogs at once. Live concurrency was always dictated by reality rather
+than config; decision 9 stops pretending otherwise. **The help text must state the
+peak**, so it is chosen rather than discovered.
+
+**Still genuinely open:** with `include_non_live_content = false` (the default —
+`types.go:264` is a plain `bool`), VODs never job at all, so the window and M govern
+only the `was_live → live` safety walk. That walk still probes. Whether M should
+apply to a pass that creates no jobs is unresolved.
 
 ## Problem
 
