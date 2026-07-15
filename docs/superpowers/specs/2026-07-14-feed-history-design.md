@@ -255,9 +255,16 @@ So coarse dates store the **oldest** instant consistent with the text —
 `now - Age - unit` (the exclusive upper bound of the range):
 
 ```
-"3 weeks ago"  → now - 28d   (not now - 21d)
-"1 year ago"   → now - 730d  (not now - 365d)
+"3 weeks ago"  → now - 28d   (not now - 21d)     Age=21d, unit=7d
+"1 year ago"   → now - 730d  (not now - 365d)    Age=365d, unit=365d
 ```
+
+**The skew applies to `coarse` only.** It is defined in terms of the matched unit,
+and an `assumed` row has no matched unit — `Age = 0` is the *absence* of a parse,
+not a measurement of zero. `assumed` rows keep `published = now` and are excluded
+from the top-N query anyway, so the skew never applies to them. Live and upcoming
+items likewise carry `Age = 0` and are cap-exempt, so nothing about their ordering
+depends on this.
 
 Errors then bias toward *exclusion*, which is the safe direction for an
 archival-depth cap. This costs nothing real: ordering among old content does not
@@ -487,6 +494,28 @@ archived until `channel_state.last_rss_ok_at IS NOT NULL` or `backfilled_at IS N
 NULL`.** Upcoming/live still pass, being cap-exempt. This gate is independent of
 the backfill, so a failed backfill never blocks normal operation.
 
+**Phase 1 limitation, stated plainly.** Only Phase 2 ever sets `backfilled_at`, so
+in Phase 1 the gate rests entirely on `last_rss_ok_at`. A channel whose RSS is
+*permanently* broken — a dead or renamed channel ID, not the intermittent 404s that
+motivated this spec — therefore never becomes established and never archives past
+content, even legitimately new content, indefinitely. Live and upcoming streams are
+unaffected.
+
+This is the correct trade for Phase 1: without a single successful full listing we
+have no basis for claiming to know a channel's newest N, and guessing is precisely
+the bug being fixed. Phase 2 removes the limitation, because the catalog scan
+establishes a channel without RSS at all. It is not a concern for the observed
+failure — Jerry's RSS succeeds ~87% of cycles, so it establishes within minutes —
+but an operator with a genuinely dead RSS feed would see silence, and that must be
+documented rather than discovered.
+
+**One residual worth naming:** a successful RSS fetch returning *zero* entries also
+sets `last_rss_ok_at`. For a members-only channel with no public uploads, the store
+then holds only membership items and all of them are in the top N. That is
+**correct** — if a channel has fewer than N items total, its newest N is all of
+them — but it is worth stating explicitly, because it looks like the original bug
+and is not.
+
 ## Part 2 — Full-Catalog Backfill
 
 ### Current capability
@@ -566,16 +595,32 @@ The backfill therefore completes all three tab scans **before** assigning
 positions, then does one merged ordering pass over the union:
 
 ```
-1. scan /videos, /streams, /membership to completion, retaining per-tab index
-2. dedup by video_id (an item in two tabs keeps its best classification)
-3. sort the union by (coarse published DESC, per-tab index ASC, video_id ASC)
-4. assign catalog_pos = 0..n-1 over that merged order
-5. write rows, then set backfilled_at
+1. scan /videos, /streams, /membership page by page
+     └─ write each page's rows IMMEDIATELY, catalog_pos = provisional per-tab index
+     └─ advance the per-tab cursor in channel_state.backfill_state
+2. when all eligible tabs are exhausted, run one ORDERING PASS:
+     └─ SELECT the channel's rows into a slice, CLOSE the cursor
+     └─ sort by (published DESC, source rank, provisional pos ASC, video_id ASC)
+     └─ UPDATE each row's catalog_pos = 0..n-1
+3. set backfilled_at
 ```
 
-Because this runs as one unit before `backfilled_at` is set, a partial scan never
-publishes half-assigned positions — a resumed scan re-derives the merge from the
-stored cursor state and assigns positions once, at the end.
+**Rows are written as they are scanned, not buffered to the end.** The obvious
+formulation — scan everything, merge in memory, then write — is incompatible with
+"resumable via cursor": a restart mid-scan would destroy the buffer, so the cursor
+would resume into a merge whose earlier half no longer exists. Writing per page
+means progress survives a restart and the cursor means what it says.
+
+The cost is that `catalog_pos` is provisional (per-tab) until the ordering pass
+runs. That is harmless: a partially-backfilled channel's rows are old, coarse-dated
+content that cannot reach the top N, and `backfilled_at` stays NULL until the
+ordering pass completes, so nothing claims the catalog is ordered before it is.
+
+**The ordering pass must collect-then-update.** With `SetMaxOpenConns(1)`
+(`internal/database/database.go:177`), issuing UPDATEs while a SELECT cursor is
+open deadlocks on the single connection — the hazard documented at
+`internal/database/migrations.go:242-244`. Read rows into a slice, close the
+cursor, then write.
 
 Steady-state inserts (RSS, membership) keep using the per-fetch index, which is
 sound there: RSS dates are `exact` and distinct, so they effectively never tie, and
@@ -649,6 +694,23 @@ silently skip its backfill.
 in `internal/database/` deletes by channel today — `ListOrphanedHistory` joins on
 `jobs.id`, and `pruneHistory` is a global 10k FIFO. We are establishing a pattern,
 not extending one.
+
+**The prune races the backfill, and both arrive via `kickMonitors`.** Removing a
+channel mid-scan means the prune deletes its rows while the scan is still writing
+them — resurrecting a channel that no longer exists, with a half-written catalog and
+a NULL `backfilled_at` that no sweep will ever revisit (it is no longer in the
+active set). It would sit there forever.
+
+Ordering fixes it: `kickMonitors` **cancels any in-flight backfill for channels
+leaving the active set, waits for the worker to observe cancellation, and only then
+prunes.** The backfill worker additionally re-checks membership of the active set
+before each page write, so a cancellation that lands between the check and the write
+costs at most one stale page — which the prune then removes, because the prune runs
+last.
+
+This is why the prune belongs in the same sweep as the trigger rather than in the
+delete route: `channel_routes.go:121-123` fires `kickMonitors` *after* the config is
+written, so the active set is already authoritative when the sweep reads it.
 
 ### The backfill must respect `membership_discovery` and the auth gate
 
