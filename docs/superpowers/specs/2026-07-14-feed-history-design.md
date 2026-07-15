@@ -1007,10 +1007,10 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         (no passthrough on this path — probeAndClassify requires a wired probe)
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
       in-scope = top-N query  ∪  {items WHERE status IN (upcoming, live)}
-                 [top-N arm excludes source='membership' iff NOT
-                  MembershipDiscoveryEnabled(); cap-exempt arm iff NOT
-                  membershipActive(). Reads must be gated, not just fetches —
-                  and the RANKING arm must ignore cookie state]
+                 [BOTH arms exclude source='membership' iff NOT
+                  MembershipDiscoveryEnabled() — the operator's choice only.
+                  Reads must be gated, not just fetches, and neither read arm
+                  may depend on cookie state, or a cookie lapse moves scope]
       per item: skip if HasActiveJob → skip if NOT term-match → decide:
          upcoming/live    → job iff FRESH this cycle
                             (cap exempt; NOT gated by HasProcessed — see below)
@@ -1319,25 +1319,36 @@ channel action with a visible cause"; a cookie rotation is neither.
 **So the arms split by what they are for:**
 
 ```sql
--- ranking (top-N): gate on the OPERATOR'S CHOICE only
+-- READ arms (top-N ranking, cap-exempt union): the OPERATOR'S CHOICE only
 AND source <> 'membership'      -- iff NOT MembershipDiscoveryEnabled()
 
--- discovery probe list and cap-exempt union: gate on membershipActive()
+-- PROBE arm (discovery probe list): config AND cookies
 AND source <> 'membership'      -- iff NOT membershipActive()
 ```
 
 The asymmetry is the point:
 
-- **Ranking must be stable**, so it may only move on an operator's decision.
-  `MembershipDiscoveryEnabled()` is exactly that decision and nothing else.
+- **What is visible may only move on an operator's decision.**
+  `MembershipDiscoveryEnabled()` is exactly that decision and nothing else. Both read
+  arms use it, so a cookie lapse cannot change what is in scope *or* what is
+  cap-exempt.
 - **Probing may be opportunistic.** With no cookies an authenticated probe is
-  useless, so skipping it costs nothing and loses nothing permanently — the row is
-  still ranked, still un-jobbable (no FRESH result ⇒ no job), and resumes the moment
-  cookies return.
+  useless, so skipping it costs nothing — and loses nothing, because the row stays
+  ranked, stays cap-exempt, and simply cannot become a job without a FRESH result.
+
+**Why the cap-exempt union uses config and not `membershipActive()`:** it makes the
+cookie-lapse question disappear rather than answering it. Both choices reach the
+same outcome — during a lapse the row is unprobeable, so it is never FRESH, so it is
+never jobbed, and it is caught the moment cookies return — but keying it on cookie
+state invites the reader to ask "does a cookie lapse hide a live members stream?"
+every time they encounter it. Keying both read arms on the operator's choice means
+the only thing cookie state can do is skip a probe that would have failed.
 
 A cookie lapse therefore leaves scope *exactly* where it was: members rows keep
-their ranks, hold their slots, and simply go un-probed for a cycle. Goal 2 holds at
-no cost.
+their ranks, hold their slots, stay cap-exempt, and simply go un-probed for a cycle.
+Goal 2 holds at no cost, and goal 3 is unaffected — the stream is jobbed on the
+first cycle cookies return, which is also the first cycle it could have been
+downloaded at all.
 
 **Excluding them from the ranking when the operator turns the toggle off is
 deliberate.** With it off, today's cap counts only public items, because members
@@ -2081,10 +2092,10 @@ exists (see "Phase 1 limitation").
 - `post_live` → `vod` normalization on write; the probe write is precision-guarded
 - `source` becomes a **read** column: it selects the authenticated probe (replacing
   the in-memory `discoveredVideo.authProbe`) and gates the store queries — the
-  **ranking** arm on `MembershipDiscoveryEnabled()` (operator choice only), the
-  probe list and cap-exempt arm on `membershipActive()` (which includes cookie
-  state). The asymmetry is load-bearing: gating ranking on cookie state moves scope
-  on a fetch failure.
+  **read** arms (top-N, cap-exempt union) on `MembershipDiscoveryEnabled()`
+  (operator choice only), the **probe** arm on `membershipActive()` (which includes
+  cookie state). The asymmetry is load-bearing: gating a read on cookie state moves
+  scope on a fetch failure.
 - The `assumed`-row probe carve-out (probed regardless of terms, to obtain a date)
 - Refresh probe on the archival `vod` branch, writing its result back
 - Established gate; rewired `checkChannel`/`processCandidate`
