@@ -185,8 +185,10 @@ CREATE TABLE IF NOT EXISTS feed_items (
     date_precision TEXT NOT NULL,         -- 'exact' | 'coarse' | 'assumed'
     catalog_pos  INTEGER NOT NULL DEFAULT 0,
     source       TEXT NOT NULL,           -- rss|membership|videos|streams
-    status       TEXT NOT NULL,           -- unknown|upcoming|live|vod|not_a_stream|unreachable
+    status       TEXT NOT NULL,           -- unknown|upcoming|live|vod|not_a_stream
     first_seen   TEXT NOT NULL,
+    probe_fails  INTEGER NOT NULL DEFAULT 0,  -- consecutive probe failures
+    next_probe_at TEXT,                       -- NULL = probe freely; else earliest retry
     PRIMARY KEY (channel_id, video_id)
 );
 -- Serves the archival pass's top-N query. PARTIAL: rows excluded from ranking are
@@ -199,7 +201,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
 CREATE INDEX IF NOT EXISTS idx_feed_items_rank
     ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC)
     WHERE date_precision <> 'assumed'
-      AND status NOT IN ('upcoming', 'live', 'unreachable');
+      AND status NOT IN ('upcoming', 'live');
 
 -- Serves the discovery probe list and the cap-exempt union, both of which filter
 -- on status every cycle. Without this they degrade to a full scan of the
@@ -335,7 +337,7 @@ scope for a channel is simply the top N of the store:
 SELECT video_id, title, published, status FROM feed_items
  WHERE channel_id = ?
    AND date_precision <> 'assumed'
-   AND status NOT IN ('upcoming', 'live', 'unreachable')
+   AND status NOT IN ('upcoming', 'live')
  ORDER BY published DESC, catalog_pos ASC, video_id ASC
  LIMIT ?
 ```
@@ -376,7 +378,9 @@ of **zero**. On a channel that keeps two or three streams scheduled a week out, 
 is the steady state, not an edge case. "Never consumes a cap slot" has to mean
 excluded from the ranking, not merely exempted from the cut.
 
-`unreachable` is excluded for the same reason — see "Terminal states" below.
+A permanently-failing row needs no exclusion of its own: it is stuck at `unknown`
+(excluded by the `assumed` rule) or at `upcoming`/`live` (excluded by the status
+rule), so it can never evict real content from scope. See "Bounding the probe list".
 
 **The transition is the point, not a wrinkle.** When an upcoming stream ends it
 becomes `vod` and *enters* the ranking at its (recent) date, taking rank 1 and
@@ -455,10 +459,48 @@ the other is metadata freshness before job creation.
 unknown  → probe (nothing can be missed)
 upcoming → probe (goal 3)
 live     → probe (goal 3)
-vod / not_a_stream / unreachable → NOT probed for discovery
+vod / not_a_stream → NOT probed for discovery
+(any status → deferred while next_probe_at > now; see the backoff below)
 ```
 
-### Terminal states: the probe list must not grow without bound
+### Bounding the probe list without ever giving up
+
+**A terminal "unreachable" state is the wrong answer, and an earlier draft of this
+spec adopted it before catching why.** `MetadataTracker` gives up after a handful of
+*consecutive* failures — a cookie hiccup or a YouTube 5xx spell is enough. Marking
+the row terminal at that point means a members upcoming stream that was briefly
+unprobeable is never probed again and is missed forever: the identical
+unrecoverable goal-3 violation as the `HasProcessed` gate, reintroduced by the fix
+meant to bound cost. Today a transient give-up stops nothing — the cooldown is a
+no-op at its default of 0 and re-probing simply continues.
+
+So the row is never retired; it is **rescheduled**. `probe_fails` and
+`next_probe_at` give the store a durable per-item backoff:
+
+```
+probe fails   ⇒ probe_fails++, next_probe_at = now + backoff(probe_fails)
+probe succeeds⇒ probe_fails = 0, next_probe_at = NULL
+discovery list = status IN (unknown, upcoming, live)
+                 AND (next_probe_at IS NULL OR next_probe_at <= now)
+```
+
+A dead ID decays toward a floor (say hourly, then daily) instead of costing a probe
+every cycle forever; a recoverable one returns to full rate on its first success.
+Nothing is ever permanently abandoned, so no stream can be lost this way.
+
+This is also strictly better than today in a way worth stating: `MetadataTracker` is
+**in-memory** and resets on every restart, so today's give-up does not survive a
+process restart at all. Persisting the schedule is the point of having a store.
+
+**Decision flagged for the operator:** this is new machinery, adjacent to the
+non-goal "changing the probe-failure/cooldown machinery", and it sits near a
+standing preference that poll intervals — not cooldowns — should be the throttle.
+It differs from `probe_cooldown` in that it never touches a healthy item: a row that
+probes successfully has `next_probe_at = NULL` and is polled at full rate forever.
+The backoff applies only to rows that are already failing, where the alternative is
+a guaranteed-useless request every cycle in perpetuity.
+
+### Why the probe list must be bounded at all
 
 `status IN (unknown, upcoming, live)` is read from a store that **never forgets**,
 and that breaks an assumption today's code gets for free.
@@ -476,23 +518,14 @@ An earlier draft of this spec claimed "no regression" here. That was wrong: it i
 regression created precisely by reading the store instead of the response, which is
 the same property that fixes the original bug.
 
-So probe give-up gets a terminal state. When `MetadataTracker` gives up
-(`internal/monitor/utils.go:270-285` — the branch that already calls
-`AddToHistory`), the row is set to **`status='unreachable'`**:
+The backoff above is what bounds it. Note the ranking is unaffected either way: a
+row stuck at `unknown` is excluded from the top-N by the `assumed` rule, and a row
+stuck at `upcoming`/`live` is excluded by the status rule — so a dead ID can never
+evict real content from scope regardless of how often it is retried.
 
-- not in the discovery probe list — probing stops, bounding cost
-- not in the top-N query — we know nothing about it, so it must not evict real
-  content from scope (same argument as `assumed`)
-- not in the cap-exempt union — it is not a live stream, it is a dead ID
-
-**Recovery.** `unreachable` is not a death sentence: a Part 2 backfill re-scan
-resets rows it still finds listed, and a manual re-run is the operator's escape
-hatch. A row that YouTube no longer lists *should* stay terminal — that is the
-correct end state for a deleted video, and the alternative is probing a 404 forever.
-
-This does **not** change the probe-failure machinery (a non-goal): `MetadataTracker`
-and `ProbeCooldown` are untouched. We only record the outcome they already produce,
-in a store that — unlike today's in-memory tracker — survives a restart.
+`MetadataTracker` and `ProbeCooldown` themselves are untouched, per the non-goal.
+The backoff is an additional store-level schedule layered on the outcome they
+already produce.
 
 **Refresh probe** — on demand, only when a stored item is about to become a job:
 
@@ -1044,14 +1077,13 @@ re-probing and the cooldown is the only limiter.
 earlier draft claimed it.** Today such an item scrolls out of RSS's 15-item window
 once 15 newer items exist, and probing stops as a side effect of the response being
 the work list. Reading the store instead removes that escape — the same property
-that fixes the original bug — so the item would be probed forever. That is why
-probe give-up now records `status='unreachable'` (see "Terminal states"): we record
-the outcome the existing machinery already produces, rather than changing it.
+that fixes the original bug — so the item would be probed forever.
 
-**Noted follow-up (not this spec):** the store makes a durable per-item probe
-backoff possible, which would let `unreachable` rows retry on a schedule rather than
-waiting for a backfill re-scan. `MetadataTracker` is in-memory today and resets on
-every restart.
+That is what the durable per-item backoff (`probe_fails`/`next_probe_at`) is for:
+see "Bounding the probe list without ever giving up". It reschedules a failing row
+rather than retiring it, so cost is bounded without any possibility of permanently
+abandoning a stream that could still recover. It also makes give-up survive a
+restart, which today's in-memory `MetadataTracker` does not.
 
 ## Testing
 
@@ -1125,8 +1157,14 @@ Then:
 - An `upcoming` row that ends becomes `vod`, **enters** the ranking at rank 1, and
   pushes the previous rank N out of scope
 - A scheduled start time is never stored as `published`
-- Probe give-up marks the row `unreachable`; it is then never probed again, and
-  does not evict real content from scope
+- Probe give-up sets a backoff (`probe_fails`/`next_probe_at`), never a terminal
+  state: an upcoming stream that is unprobeable for a few cycles (cookie hiccup,
+  YouTube 5xx) is still probed later and still archived once it recovers. This is
+  the goal-3 guard against the terminal-state design that was rejected.
+- A successful probe resets `probe_fails` to 0 and clears `next_probe_at`, so a
+  recovered row returns to full poll rate
+- A healthy row is never deferred: `next_probe_at` stays NULL for anything that
+  probes successfully
 - Backfill: a plain upload (no "Streamed" text, no badge, just "3 weeks ago") is
   classified `vod`/`coarse` — not left `unknown`, not probed
 - Backfill: an item with **no** age text is left `unknown` and **is** probed, so a
@@ -1270,7 +1308,8 @@ is still correct; only the file is wrong. This matters here because Part 2 adds 
 **Phase 1** — independently shippable, fixes the bug:
 schema v16 (`feed_items`, `channel_state`, both indexes), precision-guarded upsert,
 top-N query, discovery/refresh probe split with the freshness rule, terminal
-`unreachable` state on probe give-up, established gate, channel-removal prune,
+durable per-item probe backoff (probe_fails/next_probe_at), established gate,
+channel-removal prune,
 **a unit-preserving `itemAge` signature** (today it discards the unit, making the
 coarse skew uncomputable — propagates to `MembershipVideo.Age` and
 `membershipCandidates`), **an injectable RSS fetch seam plus a new `feed_test.go`**
