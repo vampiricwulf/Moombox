@@ -164,7 +164,7 @@ exclusion, and worth stating as such.
 | Decision | Choice | Rationale |
 |---|---|---|
 | Scope | One spec, phased implementation | Part 1 ships alone and fixes the bug; Part 2 lands on top |
-| Store structure | SQLite table + covering index | Workload is one indexed top-N query per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
+| Store structure | SQLite table + partial rank index + status index | Workload is one indexed top-N query per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
 | Cap gate | Coarse pre-filter **removed**. Scope is a store-driven top-N query; every job still follows a fresh probe | The pre-filter was the sole cause of the miss risk, and guarded a probe budget that no longer exists once status is recorded |
 | Cap meaning | Archival depth, not probe budget | Matches goal 2; probe volume is naturally bounded by sources |
 | `history` table | Left alone, separate | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI |
@@ -185,13 +185,21 @@ CREATE TABLE IF NOT EXISTS feed_items (
     date_precision TEXT NOT NULL,         -- 'exact' | 'coarse' | 'assumed'
     catalog_pos  INTEGER NOT NULL DEFAULT 0,
     source       TEXT NOT NULL,           -- rss|membership|videos|streams
-    status       TEXT NOT NULL,           -- unknown|upcoming|live|vod|not_a_stream
+    status       TEXT NOT NULL,           -- unknown|upcoming|live|vod|not_a_stream|unreachable
     first_seen   TEXT NOT NULL,
     PRIMARY KEY (channel_id, video_id)
 );
--- Serves the archival pass's top-N query.
+-- Serves the archival pass's top-N query. PARTIAL: rows excluded from ranking are
+-- excluded from the index itself, so they cost nothing to skip. This matters —
+-- 'assumed' rows carry published=now and therefore sort FIRST, so a non-partial
+-- index would fetch and discard every one of them ahead of every real row, on
+-- every query, forever (and under the relativeAgeRe breakage that is ~30 rows per
+-- channel). Not a covering index: date_precision/status/title still require a
+-- table lookup per returned row, which is fine at N rows.
 CREATE INDEX IF NOT EXISTS idx_feed_items_rank
-    ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
+    ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC)
+    WHERE date_precision <> 'assumed'
+      AND status NOT IN ('upcoming', 'live', 'unreachable');
 
 -- Serves the discovery probe list and the cap-exempt union, both of which filter
 -- on status every cycle. Without this they degrade to a full scan of the
@@ -270,6 +278,28 @@ from the top-N query anyway, so the skew never applies to them. Live and upcomin
 items likewise carry `Age = 0` and are cap-exempt, so nothing about their ordering
 depends on this.
 
+**`itemAge` cannot express this today — changing it is Phase 1 work.** It returns a
+bare `time.Duration` (`channel_membership.go:252`: `return time.Duration(n) * unit`)
+and **discards the unit**. The unit is not recoverable from the result: `504h` is
+either `"3 weeks"` or `"21 days"`, and `24h` is either `"1 day"` or `"24 hours"` —
+identical durations, different skews. A naive implementation reading only this
+spec's `now - Age - unit` would guess `now.Add(-2 * age)`, which is correct for
+weeks and wrong for months and years.
+
+So `itemAge` must return the **upper bound of the consistent range** (or the unit
+alongside the age) rather than the truncated lower bound. That propagates to
+`MembershipVideo.Age`, and to `membershipCandidates`' `v.Age > 0` test at
+`feed.go:673` — which keeps working, since the upper bound is zero exactly when the
+age is. This is a signature change across three files and must be budgeted, not
+discovered.
+
+**Two zeros, one meaning — almost.** `itemAge` returns `0` from two branches: the
+explicit live-badge check (`:227-231`) and the unrecognized fallback (`:256`). This
+spec's `assumed` framing ("a fabricated date") is only accurate for the second. For
+a genuinely live item, `now` is a *correct* date, not a fabrication. It makes no
+behavioral difference — both are excluded from ranking and both are probed — but the
+justification text should not be read as claiming live items are mis-dated.
+
 Errors then bias toward *exclusion*, which is the safe direction for an
 archival-depth cap. This costs nothing real: ordering among old content does not
 affect what gets archived, live/upcoming are cap-exempt regardless of date, and any
@@ -303,12 +333,48 @@ scope for a channel is simply the top N of the store:
 
 ```sql
 SELECT video_id, title, published, status FROM feed_items
- WHERE channel_id = ? AND date_precision <> 'assumed'
+ WHERE channel_id = ?
+   AND date_precision <> 'assumed'
+   AND status NOT IN ('upcoming', 'live', 'unreachable')
  ORDER BY published DESC, catalog_pos ASC, video_id ASC
  LIMIT ?
 ```
 
-The index covers this exactly — one seek, N rows, no scan.
+`idx_feed_items_rank` is **partial**, and its `WHERE` matches these two predicates
+exactly — so excluded rows are not in the index at all: one seek, N rows, nothing
+scanned and discarded. It is *not* a covering index (`date_precision`, `status` and
+`title` still cost a table lookup per returned row), but that is N lookups, not a
+scan.
+
+**`status NOT IN ('upcoming','live')` is what makes goal 3 true.** Without it the
+exemption is only additive (`top-N ∪ {upcoming, live}`) — which archives them, but
+leaves them *ranked*. They carry the newest dates, so they occupy the top of the
+order and evict VODs from scope. At `N=3`, a channel with three scheduled premieres
+would have a top-3 consisting entirely of premieres and an effective archival depth
+of **zero**. On a channel that keeps two or three streams scheduled a week out, that
+is the steady state, not an edge case. "Never consumes a cap slot" has to mean
+excluded from the ranking, not merely exempted from the cut.
+
+`unreachable` is excluded for the same reason — see "Terminal states" below.
+
+**The transition is the point, not a wrinkle.** When an upcoming stream ends it
+becomes `vod` and *enters* the ranking at its (recent) date, taking rank 1 and
+pushing the previous rank N out of scope. That is correct: a finished stream is
+exactly the kind of content the archival depth is measured in, and it should
+displace older content. Nothing needs to re-probe for this — the row is already
+`exact` from the probe that observed the transition.
+
+### `published` for upcoming and live rows
+
+Never store the **scheduled start time**. It is in the future, so it would sort
+above every real row — for weeks, on a stream scheduled far out — which is the same
+eviction bug in a different disguise.
+
+An `upcoming` or `live` row stores the moment we first saw it (`assumed`/`now` from
+`itemAge`'s zero, or the probe's publish date once known). Its stored date is only
+ever a *placeholder*, because those statuses are excluded from the ranking anyway.
+The date starts mattering exactly when the row becomes `vod`, at which point the
+probe that observed the transition has written an authoritative date.
 
 **`date_precision <> 'assumed'` is what enforces goal 4.** An `assumed` row carries a
 fabricated date: `itemAge` returns `0` for any item it cannot parse, which becomes
@@ -340,11 +406,16 @@ This is expressed as a **top-N query rather than a per-candidate rank check** fo
 two reasons:
 
 1. **Raising `max_feed_items` must widen scope for existing content.** Because
-   `vod` items are terminal and never re-probed, a per-candidate rank check
-   evaluated only at probe time would leave an item skipped at `N=3` skipped
-   forever, even after the operator sets `N=20`. The top-N query re-evaluates
-   scope every cycle from the store, so a config change takes effect immediately —
-   and needs no probe, since the date and status are already recorded.
+   `vod` items are terminal and never *discovery*-probed, a per-candidate rank
+   check evaluated only at probe time would leave an item skipped at `N=3` skipped
+   forever, even after the operator sets `N=20`. The top-N query re-evaluates scope
+   every cycle from the store, so a config change takes effect immediately.
+
+   Precisely: **entering scope needs no probe; becoming a job still does.** The
+   store already holds the date and status, so re-ranking is pure SQL. But the item
+   then hits the archival branch, which fires a refresh probe before creating the
+   job — because a job must never be built on stale metadata. The two statements are
+   about different steps, and an earlier draft conflated them into "needs no probe".
 2. It is cheaper: one indexed query returning N rows, instead of a counting query
    per candidate against a store that holds thousands of backfilled rows.
 
@@ -363,8 +434,44 @@ the other is metadata freshness before job creation.
 unknown  → probe (nothing can be missed)
 upcoming → probe (goal 3)
 live     → probe (goal 3)
-vod / not_a_stream → NOT probed for discovery
+vod / not_a_stream / unreachable → NOT probed for discovery
 ```
+
+### Terminal states: the probe list must not grow without bound
+
+`status IN (unknown, upcoming, live)` is read from a store that **never forgets**,
+and that breaks an assumption today's code gets for free.
+
+Today, an item that can never be probed eventually scrolls out of RSS's 15-item
+window and probing simply stops. There is no such escape here. An upcoming stream
+that is cancelled and deleted probes 404 forever, keeps `status='upcoming'`, and is
+re-probed **every cycle for the life of the install** — while also sitting in the
+cap-exempt union forever. Every such event permanently adds one probe per cycle per
+channel, monotonically, on a 24/7 process. Under the `relativeAgeRe` breakage
+described in External Assumptions, that is ~30 permanent per-cycle probes per
+channel.
+
+An earlier draft of this spec claimed "no regression" here. That was wrong: it is a
+regression created precisely by reading the store instead of the response, which is
+the same property that fixes the original bug.
+
+So probe give-up gets a terminal state. When `MetadataTracker` gives up
+(`internal/monitor/utils.go:270-285` — the branch that already calls
+`AddToHistory`), the row is set to **`status='unreachable'`**:
+
+- not in the discovery probe list — probing stops, bounding cost
+- not in the top-N query — we know nothing about it, so it must not evict real
+  content from scope (same argument as `assumed`)
+- not in the cap-exempt union — it is not a live stream, it is a dead ID
+
+**Recovery.** `unreachable` is not a death sentence: a Part 2 backfill re-scan
+resets rows it still finds listed, and a manual re-run is the operator's escape
+hatch. A row that YouTube no longer lists *should* stay terminal — that is the
+correct end state for a deleted video, and the alternative is probing a 404 forever.
+
+This does **not** change the probe-failure machinery (a non-goal): `MetadataTracker`
+and `ProbeCooldown` are untouched. We only record the outcome they already produce,
+in a store that — unlike today's in-memory tracker — survives a restart.
 
 **Refresh probe** — on demand, only when a stored item is about to become a job:
 
@@ -410,16 +517,28 @@ The efficiency win survives: a `vod` that is already processed, or out of scope,
 `/player` fetch with retries every single cycle only to be discarded by
 `nonLiveSkipReason` immediately after.
 
-**`include_non_live_content = false` channels must not probe past content.** Today
-`membershipCandidates` drops members items with `Age > 0` outright on such channels
-(`internal/monitor/feed.go:673-675`) precisely because they could never become
-jobs. This design still *stores* them — ranking must count all channel content (see
-"Step 2 stores items that do not match terms") — but must not probe them. A
-membership item with `Age > 0` carries a `"Streamed N ago"` text, which is a
-positive past-stream signal, so it is inserted directly as `status='vod'`,
-`date_precision='coarse'` and never enters the discovery probe list. Same outcome as
-today, with the row retained for ordering. RSS items on such channels are still
-probed, exactly as today, since RSS carries no status signal at all.
+**Listing-derived status is unconditional, and it subsumes the
+`include_non_live_content` case.** One rule covers every source and every channel:
+
+```
+any listing item with a relative-age text (Age > 0) ⇒ status='vod', coarse
+any listing item without one                        ⇒ status='unknown', assumed
+```
+
+This is a property of the **item**, not of the channel's config, so it must not be
+scoped to `include_non_live_content = false` — an earlier draft specified it only
+there, leaving membership status undefined on `include_non_live = true` channels.
+
+Today `membershipCandidates` drops members items with `Age > 0` outright when
+`include_non_live_content` is false (`internal/monitor/feed.go:673-675`), precisely
+because they could never become jobs. The unified rule reproduces that outcome
+without a special case: such an item is `vod`, `vod` is not discovery-probed, and
+the archival branch skips it on the `include_non_live_content` check *before*
+probing. Same behavior as today — and unlike today, the row is retained so ranking
+still counts it (see "Step 2 stores items that do not match terms").
+
+RSS items carry no status signal at all, so they enter as `unknown` and are probed —
+exactly as today.
 
 Discovery probe volume is bounded naturally: RSS returns ≤15 and the membership tab
 ~30, so a cycle cannot exceed ~45 unknowns, and only once. The first cycle after
@@ -457,6 +576,10 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                                  live/upcoming    → job (cap exempt)
                                  vod/not_a_stream → job
                                  probe errored    → no job, retry next cycle
+                                 cooldown-skipped → no job, retry next cycle
+                                 (same FRESH rule as the discovery pass —
+                                  no fresh result, no job, never fall through
+                                  on stored status)
          unknown          → NO JOB. We do not know what it is. Retry next cycle.
                             (Unreachable via the top-N query, which excludes
                             'assumed' rows, but reachable for a coarse-dated
@@ -626,12 +749,44 @@ channels lacking tabs.
 
 ### Classification during scan
 
-The listing carries what we need, so the backfill leaves **nothing** in the
-unknown pool:
+Classification keys on the **presence of a relative-age text**, and on nothing else:
 
-- `"Streamed N <unit> ago"` present ⇒ `status='vod'`, `date_precision='coarse'`
-- live badge ⇒ `status='live'`
-- scheduled/upcoming badge ⇒ `status='upcoming'`
+```
+relative-age text present  ⇒ status='vod', date_precision='coarse'
+otherwise                  ⇒ status='unknown', date_precision='assumed' → probed
+```
+
+This deliberately mirrors `itemAge`'s existing philosophy, which the codebase
+already states (`channel_membership.go:213-219`): key on the **absence** of a
+past-time signal rather than the presence of a live badge, because that "makes
+catching live/upcoming members streams robust to YouTube's frequent badge DOM
+churn."
+
+An earlier draft classified from badges (`live badge ⇒ live`, `scheduled badge ⇒
+upcoming`, `"Streamed N ago" ⇒ vod`) and claimed it left "nothing in the unknown
+pool". Two defects:
+
+- **A plain upload matched none of the three rules.** No `"Streamed"` text, no
+  badge — and that is most of `/videos` on most channels. Its status was undefined.
+- **Badge-derived terminal status is unsafe.** Writing `not_a_stream`/`vod` from
+  badge text means one DOM change at YouTube silently marks live and upcoming
+  streams terminal. Terminal statuses are never discovery-probed, so those streams
+  would never be looked at again — goal 3, permanently, with no correction path.
+
+Keying on the age text fixes both. `relativeAgeRe`
+(`channel_membership.go:49`) matches a bare `"3 weeks ago"` — the `"Streamed"`
+prefix is not required — so a plain upload dates correctly as `coarse`/`vod`. A live
+or upcoming item carries no age text, so it falls through to `unknown` and gets
+probed. **Every failure of this heuristic costs an unnecessary probe, never a
+missed stream** — errors land on the safe side by construction.
+
+`vod` versus `not_a_stream` is not worth distinguishing here: both are terminal,
+both are gated by `include_non_live_content`, and the archival pass treats them
+identically. The backfill writes `vod`; a later probe refines it if it ever matters.
+
+**Probe volume stays bounded.** Only rows *without* age text are probed — live,
+upcoming, and unparseable items, a handful per channel — not the thousands of
+catalog rows a naive `unknown` default would have queued.
 
 ### Assigning catalog_pos
 
@@ -654,8 +809,18 @@ positions, then does one merged ordering pass over the union:
      └─ SELECT the channel's rows into a slice, CLOSE the cursor
      └─ sort by (published DESC, source rank, provisional pos ASC, video_id ASC)
      └─ UPDATE each row's catalog_pos = 0..n-1
+        (an unguarded UPDATE — the precision guard governs the upsert only, and
+         would otherwise reject a coarse backfill write onto a pre-existing
+         exact RSS row, leaving the merged position permanently unapplied to
+         exactly the recent rows where it decides archival)
 3. set backfilled_at
 ```
+
+Rows without a `published` (live/upcoming/unparseable, which enter as
+`assumed`/`now`) sort by that `now` and land at the top of the merged order. Their
+`catalog_pos` is irrelevant — those statuses are excluded from the rank index
+entirely — so the sort is well-defined for every row rather than only for
+coarse-dated ones.
 
 **Rows are written as they are scanned, not buffered to the end.** The obvious
 formulation — scan everything, merge in memory, then write — is incompatible with
@@ -724,6 +889,19 @@ fires identically on a reorder. So "auto on channel add" **cannot** be event-dri
 It must be an idempotent sweep keyed on `channel_state.backfilled_at IS NULL`,
 invoked from `kickMonitors` and at startup. These are therefore **one trigger, not
 two**, and the Decisions table's phrasing is shorthand for that.
+
+**Idempotent at the DB level is not idempotent at the worker level.** This is the
+trap: `backfilled_at` is set only on *completion*, so a channel whose scan is
+in-flight still reads `backfilled_at IS NULL`. `kickMonitors` fires on every add,
+remove, reorder, bulk PUT, and TUI settings save — so a user reordering channels
+three times launches three concurrent scans of the same three tabs for the same
+channel. The 30s debounce specified for the manual re-run does not help; it lives on
+the POST route, not in the sweep.
+
+The sweep therefore holds an **in-flight set** (channel ID → cancel func), owned by
+the backfill worker, and skips any channel already scanning. The condition is
+"`backfilled_at IS NULL` **and not already in flight**". The in-flight set is also
+what makes cancellation-before-prune possible, below — one structure serves both.
 
 `setup_routes.go:176-177` deliberately does not fire the channel-change callback
 (the process restarts instead), so setup-wizard channels are covered by the startup
@@ -836,13 +1014,23 @@ Note: `buildMenuItems()`/`dispatchAction()` live in `internal/tui/app_actions.go
 | Backfill fails mid-scan | Cursor saved, `backfilled_at` stays NULL, retries next startup |
 | DB error | Skip the item this cycle — existing `HasActiveJob`/`HasProcessed` pattern |
 
-The probe-failure path is deliberately untouched. A permanently unprobeable item
-is re-probed each cycle exactly as today — `internal/monitor/utils.go:272-279` is
-explicit that history does not stop re-probing and the cooldown is the only
-limiter. No regression, no cooldown-default change.
+The probe-failure **machinery** is deliberately untouched: `MetadataTracker` and
+`ProbeCooldown` behave exactly as today, and the cooldown default does not change.
+`internal/monitor/utils.go:272-279` remains accurate that history does not stop
+re-probing and the cooldown is the only limiter.
+
+**But "a permanently unprobeable item behaves exactly as today" is false, and an
+earlier draft claimed it.** Today such an item scrolls out of RSS's 15-item window
+once 15 newer items exist, and probing stops as a side effect of the response being
+the work list. Reading the store instead removes that escape — the same property
+that fixes the original bug — so the item would be probed forever. That is why
+probe give-up now records `status='unreachable'` (see "Terminal states"): we record
+the outcome the existing machinery already produces, rather than changing it.
 
 **Noted follow-up (not this spec):** the store makes a durable per-item probe
-backoff possible. `MetadataTracker` is in-memory today and resets on every restart.
+backoff possible, which would let `unreachable` rows retry on a schedule rather than
+waiting for a backfill re-scan. `MetadataTracker` is in-memory today and resets on
+every restart.
 
 ## Testing
 
@@ -911,10 +1099,24 @@ Then:
   rather than re-scanning; `catalog_pos` is only final once `backfilled_at` is set
 - Removing a channel mid-backfill cancels the scan before the prune, and leaves no
   resurrected rows
+- **Upcoming/live rows do not occupy ranking slots.** `N=3` + three scheduled
+  premieres + one VOD from yesterday ⇒ the VOD is still in scope (goal 3)
+- An `upcoming` row that ends becomes `vod`, **enters** the ranking at rank 1, and
+  pushes the previous rank N out of scope
+- A scheduled start time is never stored as `published`
+- Probe give-up marks the row `unreachable`; it is then never probed again, and
+  does not evict real content from scope
+- Backfill: a plain upload (no "Streamed" text, no badge, just "3 weeks ago") is
+  classified `vod`/`coarse` — not left `unknown`, not probed
+- Backfill: an item with **no** age text is left `unknown` and **is** probed, so a
+  badge-DOM change costs probes, never a missed stream
+- `itemAge` returns a unit-preserving age so the coarse skew is computable
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
 - Top-N counts non-term-matching items, **and** a non-term-matching item is never
   probed (matching today's `HasActiveJob` → terms → probe order)
-- Raising `max_feed_items` widens scope for already-stored VODs without a re-probe
+- Raising `max_feed_items` brings an already-stored VOD into scope with **no**
+  discovery probe (pure re-rank), and the resulting job **does** follow a refresh
+  probe — the two assertions are about different steps
 - `published` frozen at first insert; upgraded only by higher precision
 - Term matching: an RSS-carried description matches in-cycle; a store-only
   re-evaluation is title-only
@@ -928,7 +1130,10 @@ established pattern: a sequential `if version < 16 { ... return
 db.writeUserVersion(16) }` block, `CREATE TABLE/INDEX IF NOT EXISTS`, tables also
 added to `createSchema`.
 
-1. Create `feed_items`, `channel_state`, and `idx_feed_items_rank`.
+1. Create `feed_items`, `channel_state`, and **both** indexes — `idx_feed_items_rank`
+   (partial) and `idx_feed_items_status`. Omitting the status index turns two
+   per-cycle queries into full scans of the channel's catalog (see the schema
+   block); it is not optional.
 2. `DROP TABLE IF EXISTS last_videos`.
 3. Remove `GetLastVideo`/`SetLastVideo` (`database_extras.go:126-148`) and
    `TestLastVideos` (`database_test.go:119`).
@@ -977,6 +1182,18 @@ scan cost. Rewrite:
 - Web UI text: `web/public/index.html:795-800` (`cfg-max-feed-items` label/help) and
   `:1682` (`setup-max-feed-items` label) — previously no Web UI text was listed
 - `internal/config/config.go:485` — the `O(N) per channel` per-tick comment
+
+**In-code comments that assert the deleted model.** These are the highest-traffic
+explanations of the exact mechanism being removed, and would be left describing a
+cap that no longer exists:
+
+- `internal/youtube/channel_membership.go:206-219` — *"it is ranked by that age so
+  old VODs sink and get **crowded out of the cap**"* (also the `MembershipVideo.Age`
+  doc, which changes with the unit-preserving signature)
+- `internal/monitor/feed.go:660-669` — *"letting them **occupy shared cap slots**
+  would only crowd out public videos that CAN be jobbed"*
+- `internal/monitor/feed.go:415-424` — `checkChannel`'s merge/cap doc block, which
+  describes the per-cycle merge being replaced wholesale
 
 ## Included Fixes
 
@@ -1027,11 +1244,14 @@ is still correct; only the file is wrong. This matters here because Part 2 adds 
 
 **Phase 1** — independently shippable, fixes the bug:
 schema v16 (`feed_items`, `channel_state`, both indexes), precision-guarded upsert,
-top-N query, discovery/refresh probe split with the freshness rule, established
-gate, channel-removal prune, **an injectable RSS fetch seam plus a new
-`feed_test.go`** (neither exists today — see Testing), rewired
-`checkChannel`/`processCandidate`, deletion of `TestMergeCandidatesRecencyCap`,
-`last_videos` removal, the included fixes, doc updates.
+top-N query, discovery/refresh probe split with the freshness rule, terminal
+`unreachable` state on probe give-up, established gate, channel-removal prune,
+**a unit-preserving `itemAge` signature** (today it discards the unit, making the
+coarse skew uncomputable — propagates to `MembershipVideo.Age` and
+`membershipCandidates`), **an injectable RSS fetch seam plus a new `feed_test.go`**
+(neither exists today — see Testing), rewired `checkChannel`/`processCandidate`,
+deletion of `TestMergeCandidatesRecencyCap`, `last_videos` removal, the included
+fixes, doc updates.
 
 **Phase 2** — lands on top:
 InnerTube `/browse` continuation client (modelled on `internal/chat`, not ported
