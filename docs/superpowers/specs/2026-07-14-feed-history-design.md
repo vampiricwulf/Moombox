@@ -334,7 +334,8 @@ download — an age-restricted VOD that returns formats classifies `vod`, not
 `upcoming`, and the worker can fetch it. Denying that would be a self-inflicted
 archival gap, trading one lie for one silence.
 
-**`denied` creates no sink.** It writes nothing, so the row keeps whatever it had —
+**`denied` creates no sink.** It writes no status and no date, so the row keeps its
+classification —
 `unknown` (probed, per the status rule) or `assumed` (excluded from ranking, which is
 correct: we still do not know its date). Permanently-denied content — age-restricted
 we can never see, a members video we have no cookies for — therefore sits in the
@@ -971,10 +972,11 @@ per row, in this order:
     live     → probe (goal 3)
     vod / not_a_stream → NOT probed for discovery
   probe choice: source='membership' ⇒ authenticated, else anonymous
-  ESCALATION: an anonymous probe returning members_only/login_required re-probes
-    with cookies THIS CYCLE if membershipActive(). ONLY members_only sets
-    source:='membership' — login_required is also YouTube's anti-bot refusal on
-    PUBLIC videos, and relabelling one hides it from the read arms forever.
+  ESCALATION: an anonymous probe returning members_only sets source:='membership'
+    and re-probes with cookies THIS CYCLE if membershipActive() (cooldown bypassed
+    for the re-probe). login_required does NOT escalate: it is also YouTube's
+    anti-bot refusal on PUBLIC videos, so it must not relabel — and without a
+    relabel the escalation would recur every cycle forever.
     See "A refusal escalates, and sets `source` itself".
   (no row is ever deferred in Phase 1 — see "Probe-list growth")
 ```
@@ -1088,7 +1090,10 @@ feed path (probeAndClassify) — four outcomes:
                 bucket — undefined, never FRESH, never jobbed.
   denied      — YouTube refused us and the classifier was guessing.
                 Predicate: see "The `denied` predicate (canonical)". Do not restate it.
-                Behaviour: NOT FRESH; writes no status; retried next cycle.
+                Behaviour: NOT FRESH; writes no status and no date; retried next
+                cycle. (A `members_only` refusal separately sets `source` before
+                the outcome is classified — see the escalation. That is the
+                refusal's write, not `denied`'s.)
   errored     — a probe ran and failed                     (utils.go:269-294)
   cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
 
@@ -1328,10 +1333,11 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         └─ source='membership' ⇒ authenticated probe (ProbeVideoAuth); else
            anonymous. This replaces today's in-memory discoveredVideo.authProbe
            (feed.go:681/:748), which cannot survive store-driven candidates.
-        └─ a members_only refusal sets source:='membership' — the refusal IS the
-           sighting. members_only OR login_required escalates to the authenticated
-           probe in the same cycle (if membershipActive()); login_required does NOT
-           relabel, since it is also the anti-bot refusal on public videos.
+        └─ a members_only refusal sets source:='membership' (the refusal IS the
+           sighting) AND escalates to the authenticated probe in the same cycle if
+           membershipActive(), bypassing the cooldown gate. login_required does
+           NEITHER — it is also the anti-bot refusal on public videos, so it must
+           not relabel, and an escalation that cannot relabel never terminates.
       outcome per item:
         probed     ⇒ UPDATE title
                      UPDATE status (post_live→vod)
@@ -1353,7 +1359,9 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                         ShouldProcess, which is false for a successful probe
                         of a non-jobbable item (utils.go:315, :332)
         denied     ⇒ (predicate: see "The `denied` predicate (canonical)")
-                     Store untouched; NOT fresh; retry next cycle. The backstop
+                     No status/date written; NOT fresh; retry next cycle. (A
+                     members_only refusal sets `source` first — that is the
+                     refusal's write, not denied's.) The backstop
                      that depends on nothing we stored — not `source`, not
                      cookies.
         errored    ⇒ store untouched; NOT fresh; retry next cycle
@@ -1645,25 +1653,41 @@ no tab, and no toggle to arrive. It is available at exactly the moment we need i
 
 ```
 probe returns members_only
-  ⇒ source := 'membership'      ← the refusal proves the item is members-only,
-                                  whether or not we can see it
-
-probe returns members_only OR login_required
+  ⇒ source := 'membership'      ← the refusal proves the item is members-only
   ⇒ if the probe was anonymous AND membershipActive():
-       re-probe with cookies, same cycle:
-         ok                  ⇒ probed — real status + date; ARCHIVED normally
-         members_only again  ⇒ denied — wrong membership tier, or stale cookies
-                               (source is now 'membership', so next cycle probes
-                                authenticated directly — no second escalation)
-         login_required again⇒ denied — cookies did not satisfy it; source unchanged
-         errored             ⇒ errored
-     else:
-       denied
+       re-probe with cookies, same cycle, bypassing the cooldown gate
+  ⇒ classify the final result through the SAME outcome rules as any probe
+     (probed / denied / errored) — this branch writes no bespoke predicate
 ```
 
-Escalating on `login_required` is still right even though it does not relabel:
-cookies are exactly what an anti-bot refusal wants, so the retry often succeeds —
-and if it does, the item was public all along and `source` correctly stayed `rss`.
+**Escalate only on `members_only`, and only because it relabels.** The two are one
+event, not two rules:
+
+- `members_only` proves membership, so it sets `source` — and *because* it sets
+  `source`, the escalation fires at most **once**. Next cycle the row is
+  `source='membership'` and the authenticated probe is selected directly.
+- `login_required` does **not** escalate. It is YouTube's anti-bot refusal on public
+  videos (`:357-363`, the fallback arm), so it must not relabel — and an escalation
+  that cannot relabel never terminates: `source` stays `rss`, the next cycle probes
+  anonymously, is refused again, and escalates again. That is **2 probes per cycle
+  for the duration of the block**, permanently, breaching goal 5 against today's 1 —
+  and it doubles our request rate against YouTube during precisely the condition (an
+  IP block) where more requests make recovery worse.
+
+An earlier draft escalated on both. It was wrong for exactly that reason: an
+escalation is only bounded if its trigger is also what stops it recurring.
+
+**The escalated result is classified normally.** An earlier draft gave this branch
+its own list (`ok ⇒ probed / members_only ⇒ denied / …`), which is a
+`PlayabilityError` trichotomy — the over-broad rule this document rejects twice, and
+a second statement of the predicate at a use site, which the rule against restating
+it forbids. It disagreed with the canonical rule in three places: `vod`+`members_only`
+(canonical: **trusted**, formats came back) would have been denied; `not_a_stream`
++`login_required` (canonical: trusted) would have been denied, falsifying "the rule
+never fires on it"; and `upcoming`+`age_restricted`/`unknown` matched no branch at
+all. The escalated probe is a probe. Its result goes through the same classifier.
+
+
 
 **Why setting `source` even on a failed escalation matters.** It looks pointless —
 we still cannot see the item — but it is what bounds the cost. Once `source` is
@@ -1684,10 +1708,11 @@ discover members content; discovering it *harder* would defeat them. `source` st
 flips, which is correct and useful: it means the read arms then hide the row from
 ranking, and the probe gate skips it entirely.
 
-**One extra probe, once.** Escalation fires only on the transition — the cycle where a
-video is first found to be locked. Every cycle after, `source='membership'` selects the
-authenticated probe directly and there is nothing to escalate.
-Both are reads of a column that was, until this round, written and never read.
+**One extra probe, once — and this is exactly why the trigger must be the relabel.**
+Escalation fires only on the transition: the cycle where a video is first found to be
+locked. Every cycle after, `source='membership'` selects the authenticated probe
+directly and there is nothing to escalate. An escalation whose trigger does *not*
+relabel would fire again every cycle, forever.
 
 **The transition cases, and why the failure directions are acceptable:**
 
@@ -2464,11 +2489,19 @@ Then:
 - **A failed escalation still flips `source`.** Wrong membership tier: escalated probe
   also returns `members_only` ⇒ `denied` ⇒ but `source='membership'` persists, so the
   next cycle issues **one** probe (authenticated) rather than two.
-- **An anti-bot `login_required` on a PUBLIC video must NOT flip `source`.** YouTube's
-  "Sign in to confirm you're not a bot" refusal returns `login_required`
-  (`player_api_parsing.go:357-363` — the fallback arm). It escalates (cookies are
-  exactly what it wants) but must leave `source='rss'`. Relabelling it would hide a
-  public video from the read arms permanently once `membership_discovery = false`.
+- **An anti-bot `login_required` on a PUBLIC video must neither relabel nor
+  escalate.** YouTube's "Sign in to confirm you're not a bot" refusal returns
+  `login_required` (`player_api_parsing.go:357-363` — the fallback arm). Assert
+  `source` stays `rss` (relabelling would hide a public video from the read arms once
+  `membership_discovery = false`) **and** that no second probe is issued (escalating
+  without a relabel recurs every cycle: 2 probes/cycle for the whole block).
+- **The escalated re-probe is not suppressed by `probe_cooldown`.** With
+  `probe_cooldown > 0`, a `members_only` refusal is a *successful* probe and records
+  the cooldown (`utils.go:299`); the same-cycle escalation must still run, or it never
+  runs at all for that operator.
+- **The escalated result is classified by the normal outcome rules.** Specifically a
+  `vod` + `members_only` escalated result is **trusted** (formats came back), not
+  denied.
 - **No cookies ⇒ no escalation, and eventually no probe at all.** `membershipActive()`
   false ⇒ refusal sets `source` ⇒ `denied` ⇒ next cycle the probe gate skips the row
   entirely (zero probes).
@@ -2656,11 +2689,16 @@ exists (see "Phase 1 limitation").
   (operator choice only), the **probe** arm on `membershipActive()` (which includes
   cookie state). The asymmetry is load-bearing: gating a read on cookie state moves
   scope on a fetch failure.
-- **Refusal escalation**: a `members_only` result sets `source := 'membership'` (the
-  refusal proves the item is members-only). `members_only` **or** `login_required`
-  re-probes with cookies in the same cycle when `membershipActive()` —
-  but `login_required` must **not** relabel, since it is also YouTube's anti-bot
-  refusal on public videos and would hide one from the read arms forever.
+- **Refusal escalation**: a `members_only` result sets `source := 'membership'` and,
+  when `membershipActive()`, re-probes with cookies in the same cycle (bypassing the
+  cooldown gate — the first probe already recorded it, and gating a same-cycle retry
+  on it would suppress the escalation entirely for any operator with
+  `probe_cooldown > 0`). `login_required` does neither: it is YouTube's anti-bot
+  refusal on public videos, so relabelling would hide a public video from the read
+  arms, and escalating without relabelling would recur every cycle forever.
+  **Lives in the feed monitor, not `probeAndClassify`** — `ProbeVideoAuth`
+  (`feed.go:131`) and `membershipActive()` (`feed.go:518-523`) are `*FeedMonitor`
+  members, unreachable from a `utils.go` free function that DECAPI also composes.
   This is what archives a public video later locked to members — the listing can
   never reach it — and it makes the no-cookies case cost **zero** probes per cycle
   instead of one. `source` therefore has two writers: listings and refusals, the
