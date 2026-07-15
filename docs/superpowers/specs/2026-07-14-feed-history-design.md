@@ -27,6 +27,7 @@ carve-out to repair the rows that rule stranded.
 | 4 | **Keep `denied`; file `classifyStream:454` separately.** The producer bug stays fixed-in-place until its own change | ✅ applied |
 | 5 | **Backfill is strictly serial across channels**, one at a time, globally, hours of wall-clock permitted, never gated on idleness | ✅ applied |
 | 6 | **Scope is an N-day window, not a top-N row count.** A date cut never splits a coarse lump, which is what the total order existed to handle | ⚠️ "The in-scope query", `idx_feed_items_rank`. Skew: ✅ applied — inverted to **skew-new**, and it deletes the unit-preserving `itemAge` refactor from Phase 1 |
+| 12 | **The discovery pass is a serial per-source walk with early exit.** Within a source the listing is recency order, so one probe landing outside the window retires that source for the pass. Only a probe that *returned a date* may retire; errored/denied/cooldown/dateless must not. **Self-validating**: a probed date newer than the source's previous one disproves the ordering and disables early-exit for it | ✅ applied ("The source walk"); adds the third External Assumption |
 | 7 | **M-rows is throughput, not depth.** Everything inside the window is archived eventually; M paces it, most-recent-first, and a completed job frees a slot the next item fills. Per channel | ⚠️ every "top-N"/"cap slot"/"archival depth" statement in the doc |
 | 8 | **Defaults: 3 days, 3 rows.** | ⚠️ Documentation Updates |
 | 9 | **`num_parallel_downloads` becomes VOD-only** — live/upcoming must not consume a download slot. **Folded into this spec** | ⚠️ the "no worker changes" scope assumption |
@@ -469,7 +470,22 @@ design still holds, just with more first-cycle probes — but the plan should ve
 the RSS figure empirically rather than inherit it, and **no code should encode
 either number as a constant.**
 
-A third, sharper fragility deserves the same treatment. `relativeAgeRe`
+**A third assumption, added by revision 2, and the first whose failure loses
+content:** *within one source's listing, items are ordered strictly newest-first.*
+
+This is not new — it is what `catalog_pos` and the whole "rank comes from the scan"
+reframing rest on. What is new is its blast radius. Before the source walk, a
+mis-ordered tab cost *ranking precision*: every item still got a date, and the date
+adjudicated. With early-exit, a mis-ordered source means the walk retires it at the
+wrong item and **silently skips everything behind it**.
+
+It is unverified in-repo and unverifiable from outside — which is why the walk
+**self-validates** rather than trusting it: a probed date newer than the previous one
+from the same source disproves the assumption for that source, disables early-exit
+for it, and logs. See "The source walk". This is the only one of the three
+assumptions with a detector, because it is the only one that fails silently.
+
+A fourth, sharper fragility deserves the same treatment. `relativeAgeRe`
 (`internal/youtube/channel_membership.go:49`) is a single en-locale regex matched
 against serialized JSON, and `itemAge` returns `0` on any miss. One YouTube copy
 change makes *every* membership item on *every* channel return `Age=0`. Today that
@@ -1039,6 +1055,11 @@ the other is metadata freshness before job creation.
 is only half of it; the gates are not optional, and they are stated here in full
 because a reader looking up "when do we probe?" stops at this block:
 
+⚠️ **The `probe list =` line below is SUPERSEDED by revision 2** — scope is an N-day
+window, not a top-N, and the pass is a serial per-source walk. See "The source walk"
+immediately after this block. The per-row gate order, the probe choice, and the
+escalation are unchanged and still authoritative.
+
 ```
 probe list = the in-scope set  ∪  {rows WHERE date_precision='assumed'}
              ── in-scope is the SAME set the archival pass reads:
@@ -1079,6 +1100,70 @@ every `unknown` row unconditionally", which drops the term gate and reintroduces
 goal-5 cost regression on any channel using `terms`. It is also exactly the false
 premise that made an earlier state-space proof miss a sink (see "This invariant is
 exactly necessary and sufficient"). The status rule alone is never the answer.
+
+### The source walk
+
+The window admits the whole straddling bucket ("Coarse dates skew new"), and probing
+all of it would be wasteful. It is not necessary: **within one source the listing is
+recency order**, so once a probe places an item of source `S` outside the window,
+every later item of `S` is older by construction and no probe can change that.
+
+So the discovery pass is a **serial walk in store order, with per-source exhaustion**:
+
+```
+candidates = window query, ORDER BY published DESC, catalog_pos ASC, video_id ASC
+exhausted  = {}                          -- per PASS, in memory; never persisted
+lastDate   = {}                          -- per source, for the ordering check
+
+for row in candidates:                   -- SERIAL. Not concurrent: parallel probes
+                                         -- are already in flight past the boundary
+                                         -- before it is known.
+    if row.source in exhausted:  skip    -- proven older than a verified boundary
+    apply the per-row gates above (HasActiveJob / terms / membership)
+    outcome, date := probe(row)
+
+    if outcome == probed AND date supplied:
+        if date is NEWER than lastDate[row.source]:
+            -- the ordering assumption is FALSE for this source
+            disable early-exit for row.source this cycle; log a warning
+        lastDate[row.source] = date
+        if date is OUTSIDE the window:
+            exhausted += row.source       -- everything behind it is older
+    -- errored / denied / cooldown / probed-with-no-date: DO NOT exhaust.
+    -- The boundary was not learned. Retiring on these truncates the source on a
+    -- transient fault — "unreachable" is not "we stopped looking".
+
+stop when every source is exhausted, or the candidate list ends
+```
+
+Sources that need the walk are the coarse ones — `videos`, `streams`, `membership`.
+RSS rows carry `exact` dates already, so no probe can move them and the walk never
+retires that source on their account.
+
+**The cost this removes is per-cycle, not total.** Each probe writes an exact date
+back, so that row leaves the window permanently and the bucket drains at one item per
+source per cycle regardless. The walk bounds the **per-cycle** cost to
+`items-inside + 1 per source`, which is the number that matters on a 24/7 process.
+The worst case is stark: at a 30-day window, every item displayed `1 month ago` has a
+true age of at least 30 days, so the entire bucket is admitted and the entire bucket
+fails — one probe now settles it instead of thirty days of content.
+
+**Serial probing costs latency, and the budget is there.** `items-inside` sequential
+`/player` calls at ~200 ms each is a few seconds per channel against a 5-minute cycle.
+
+**This promotes an assumption, which is why it self-validates.** "Tab order is
+recency order" already underpins `catalog_pos` — but until now, a mis-ordered tab
+would only cost *ranking precision*, because every item still got a date and the date
+adjudicated. Under early-exit a mis-ordered source means we stop at the wrong item
+and **silently skip everything behind it**: completeness, not precision. Concretely,
+in a `1 week ago` lump of true ages 7d/8d/13d against a 7-day window, a listing that
+returned 8d first would retire the source and skip the 7d item that belonged in it.
+
+The check costs one comparison and one variable per source, needs no extra requests,
+and uses dates the pass already has. It cannot repair a mis-ordered source — it turns
+a silent completeness loss into a logged, self-detecting degradation that falls back
+to probing the full bucket. That is the same trade as `denied`: distrust the inference
+exactly when the evidence says it was a guess.
 
 ### The cap is the bound
 
@@ -2537,6 +2622,26 @@ Then:
   must still be jobbed. This is the goal-3 regression guard.
 - A stale stored `live` whose probe errored this cycle produces **no** job
 - With `probe_cooldown > 0`, a cooldown-skipped item produces **no** job
+*The source walk*
+- **Early exit fires:** a source with items at true ages 5d/6d/10d/11d/12d against a
+  7-day window, all displayed within the straddling bucket, costs exactly **three**
+  probes — 5d, 6d, then 10d retires the source. The 11d and 12d rows are **never
+  probed**, this cycle or any later one
+- **Only a dated probe retires a source.** Four tests, one per outcome: `errored`,
+  `denied`, cooldown-skipped, and probed-with-no-date each leave the source live and
+  the walk continues to the next row. A transient cookie fault must not truncate a
+  source — this is the retirement mistake in a new place
+- **The ordering check fires and degrades safely.** A source whose probed dates go
+  8d → 7d (newer than the previous) disables early-exit for that source, logs a
+  warning, and probes the remainder of the bucket. Nothing is skipped
+- **The check is per-source, not global.** A mis-ordered `/streams` must not disable
+  early-exit for `/videos`
+- **Exhaustion never persists.** A source retired in cycle N is walked again in
+  cycle N+1 (the rows that were probed are gone from the window on their exact
+  dates; the skipped ones are not permanently excluded by a remembered flag)
+- **RSS rows never retire a source.** They carry `exact` dates that no probe moves
+- **Probes are serial.** Assert call ordering, not just call count: a concurrent
+  implementation passes a count assertion while issuing every probe past the boundary
 - **Coarse dates skew new:** `"1 week ago"` stores `now - 7d`, not `now - 14d`, so
   the whole [7d, 14d) bucket is admitted to a 7-day window rather than excluded
 - **A straddling item is admitted, probed, and then dropped on its exact date.** With
