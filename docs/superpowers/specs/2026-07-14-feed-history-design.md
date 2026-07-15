@@ -157,10 +157,39 @@ So a probe that returns `upcoming` with `PlayabilityError == members_only` did *
 observe an upcoming stream** — it observed a locked door and guessed. A probe that
 returns `upcoming` with `ok` really did.
 
-The rule follows: **`PlayabilityError != ok` ⇒ outcome is `denied`, not `probed`.**
+The rule follows — and it must be **narrow**, because the lie has exactly one shape:
+
+```
+denied  ⇔  StreamStatus == 'upcoming'  AND  PlayabilityError != ok
+```
+
 A `denied` result is not FRESH, writes no status, and creates no job — it is retried
 next cycle, exactly like `errored`. This requires surfacing the field, which
 `VideoProbeResult` does not carry today (see Phase 1).
+
+**Why `upcoming` and not "any non-`ok`".** `classifyStream` only *guesses* on the
+no-formats path — `!hasFormats && (lbd != nil || isLiveContent) ⇒ StreamUpcoming`
+(`player_api_parsing.go:454`). Every other classification is grounded in formats
+YouTube actually returned. So:
+
+| Probe result | Meaning | Rule |
+|---|---|---|
+| `upcoming` + `ok` | genuine scheduled stream | trust it — **goal 3** |
+| `upcoming` + `members_only`/`login_required`/`age_restricted`/… | we were refused; the status is a guess | **`denied`** |
+| `vod`/`post_live`/`not_a_stream` + any playability | formats came back; the classification is grounded | trust it |
+
+A broader rule ("any non-`ok` ⇒ denied") would refuse content we can actually
+download — an age-restricted VOD that returns formats classifies `vod`, not
+`upcoming`, and the worker can fetch it. Denying that would be a self-inflicted
+archival gap, trading one lie for one silence.
+
+**`denied` creates no sink.** It writes nothing, so the row keeps whatever it had —
+`unknown` (probed, per the status rule) or `assumed` (excluded from ranking, which is
+correct: we still do not know its date). Permanently-denied content — age-restricted
+we can never see, a members video we have no cookies for — therefore sits in the
+retry pool, un-archived and un-ranked, and recovers the moment access returns. That
+is the accepted re-probe cost from "Probe-list growth", not a new failure: it is
+exactly the state of *knowing nothing*, which is what a refusal means.
 
 **Why this and not a heuristic.** The tempting cross-check — "a row with a past
 `published` that probes `upcoming` is contradictory" — is wrong and would violate
@@ -853,9 +882,13 @@ Instead `ProcessYouTubeVideoResult` gains an **outcome** discriminator:
 ```
 feed path (probeAndClassify) — four outcomes:
   probed      — a probe ran, returned metadata, PlayabilityError == ok
-  denied      — a probe ran and returned metadata, but PlayabilityError != ok:
-                YouTube refused us. StreamStatus is a GUESS, not an observation.
+  denied      — StreamStatus=='upcoming' AND PlayabilityError != ok: YouTube
+                refused us, and 'upcoming' is the one status the classifier
+                GUESSES when it gets no formats (player_api_parsing.go:454).
                 Not FRESH; writes no status; retried next cycle.
+                NARROW BY DESIGN: a vod/post_live with a non-ok playability came
+                back WITH formats, so it is grounded — trust it, or we refuse
+                content we can download.
   errored     — a probe ran and failed                     (utils.go:269-294)
   cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
 
@@ -872,7 +905,7 @@ rather than rely on the reader:
 | `utils.go:249` | not yet assigned | `passthrough` |
 | `utils.go:261` | not yet assigned | `cooldown` |
 | `utils.go:294` | zero value (`err != nil`) | `errored` |
-| `utils.go:315`, `:332`, `:350` | valid | `probed` **iff `PlayabilityError == ok`**, else `denied` |
+| `utils.go:315`, `:332`, `:350` | valid | `probed`, or `denied` iff `upcoming` + non-`ok` playability |
 
 `meta` is assigned at `:268`, so the first two returns precede it entirely and the
 error return holds only its zero value. Reading `StreamStatus` on any non-`probed`
@@ -1110,11 +1143,12 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                      └─ fires whenever METADATA came back — NOT gated on
                         ShouldProcess, which is false for a successful probe
                         of a non-jobbable item (utils.go:314, :333)
-        denied     ⇒ PlayabilityError != ok — YouTube refused us, so the
-                     returned StreamStatus is a guess (a members video with no
-                     cookies classifies 'upcoming'). Store untouched; NOT fresh;
-                     retry next cycle. This is the backstop that does not depend
-                     on `source` or cookie state being current.
+        denied     ⇒ status=='upcoming' AND PlayabilityError != ok — we were
+                     refused, and 'upcoming' is the classifier's guess when it
+                     gets no formats. Store untouched; NOT fresh; retry next
+                     cycle. The backstop that depends on nothing we stored —
+                     not `source`, not cookie state.
+                     (A genuine upcoming stream returns ok, so it is unaffected.)
         errored    ⇒ store untouched; NOT fresh; retry next cycle
         cooldown   ⇒ probe skipped; NOT fresh; retry next cycle
         (no passthrough on this path — probeAndClassify requires a wired probe)
@@ -2036,6 +2070,10 @@ Then:
   ⇒ `probed` ⇒ FRESH ⇒ jobbed. Guards goal 3 against over-eager denial — and against
   the tempting "past `published` + `upcoming` = contradiction" heuristic, which an
   RSS-announced stream legitimately trips.
+- **An age-restricted VOD that returns formats is NOT denied.** It classifies `vod`
+  (not `upcoming`), so the grounded-classification rule applies and it is archived
+  normally. Guards against the over-broad "any non-`ok` ⇒ denied" rule, which would
+  trade one lie for one silence.
 - **A cookie lapse must not create a job either.** Members `vod` rows in scope (e.g.
   after raising `max_feed_items`) + no cookies ⇒ the refresh probe must **not** fire.
   Ungated it succeeds with `upcoming` (no formats ⇒ misclassified), which is FRESH,
