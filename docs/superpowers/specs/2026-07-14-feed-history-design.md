@@ -1273,6 +1273,11 @@ positions, then does one merged ordering pass over the union:
 1. scan /videos, /streams, /membership page by page
      └─ write each page's rows IMMEDIATELY, catalog_pos = provisional per-tab index
      └─ advance the per-tab cursor in channel_state.backfill_state
+     └─ EARLY EXIT: if backfilled_at IS NOT NULL and a full page yields no new
+        video IDs, stop paging this tab (a re-run; the rest is already stored).
+        NEVER early-exit when backfilled_at IS NULL — the store is non-empty from
+        Phase 1's RSS/membership rows, so page 1 can be entirely known while the
+        catalogue behind it is entirely unscanned.
 2. when all eligible tabs are exhausted, run one ORDERING PASS:
      └─ SELECT the channel's rows into a slice, CLOSE the cursor
      └─ sort by (published DESC, source rank, provisional pos ASC, video_id ASC)
@@ -1289,6 +1294,35 @@ Rows without a `published` (live/upcoming/unparseable, which enter as
 `catalog_pos` is irrelevant — those statuses are excluded from the rank index
 entirely — so the sort is well-defined for every row rather than only for
 coarse-dated ones.
+
+### Early exit — only on a re-run, never on the first scan
+
+A re-run should not re-page a channel's entire back catalogue to discover what it
+already knows. So a tab **stops paging once a full page yields no new video IDs**:
+everything below is, by construction, already stored.
+
+A full page of known IDs is the threshold rather than a single known ID, because
+YouTube reorders shelves and interleaves; one familiar item proves nothing about the
+next page. A whole page does.
+
+**The trap: early exit must be gated on `backfilled_at IS NOT NULL`.** On a *first*
+scan the store is not empty — RSS and membership have been populating it since
+Phase 1 shipped, so `/videos` page 1 is very likely *entirely* known. A naive early
+exit would fire on page 1, declare the tab exhausted, and set `backfilled_at` having
+scanned nothing — permanently marking the channel complete with no catalogue behind
+it, and no sweep would ever revisit it (`backfilled_at IS NULL` is the only trigger).
+
+So:
+
+```
+backfilled_at IS NULL      → full scan, no early exit (the store proves nothing)
+backfilled_at IS NOT NULL  → early exit allowed (the catalogue is already complete,
+                              so a page of known IDs really does mean "the rest is
+                              known")
+```
+
+This is the reason the first backfill is expensive exactly once, and every re-run
+after it is cheap.
 
 **Rows are written as they are scanned, not buffered to the end.** The obvious
 formulation — scan everything, merge in memory, then write — is incompatible with
@@ -1584,6 +1618,10 @@ Then:
   discovery list — it is not skipped as "no longer non-live"
 - Backfill: rows persist per page, so a restart mid-scan resumes from the cursor
   rather than re-scanning; `catalog_pos` is only final once `backfilled_at` is set
+- **Early exit fires on a re-run and NEVER on a first scan.** Specifically: a first
+  scan of a channel whose store already holds its 15 newest RSS items must still
+  page the whole catalogue — an early exit there would set `backfilled_at` on an
+  unscanned channel that no sweep would revisit
 - Removing a channel mid-backfill cancels the scan before the prune, and leaves no
   resurrected rows
 - **Upcoming/live rows do not occupy ranking slots.** `N=3` + three scheduled
@@ -1819,6 +1857,9 @@ exists (see "Phase 1 limitation").
 *Worker*
 - Throttled, resumable backfill; rows written per page; `backfilled_at` set only on
   completion of the eligible tabs
+- Early exit on re-runs (a full page of known IDs ends a tab), **gated on
+  `backfilled_at IS NOT NULL`** — never on a first scan, where the store's existing
+  RSS rows would trigger it against an unscanned catalogue
 - The idempotent `backfilled_at IS NULL` sweep, with an **in-flight set** so
   repeated `kickMonitors` calls cannot launch concurrent scans of one channel
 - **Cancel-before-prune**: the in-flight set is what lets `kickMonitors` cancel a
