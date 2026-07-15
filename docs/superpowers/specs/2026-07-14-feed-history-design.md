@@ -375,9 +375,10 @@ it depends on nothing we stored.
 | Gate the store reads on `membershipActive()` | it folds in **cookie state**, so the ranking moved on a fetch failure — the Jerry bug, reintroduced |
 | Split: reads on config, probe on `membershipActive()` | the **refresh** probe was ungated, and `ProbeVideoAuth` has no cookie guard, so it did not fail — it lied, and the lie was jobbed |
 | Gate the refresh probe too | `source` *picks* the probe, and a stale `source` lies identically |
-| Update `source` on every sighting | `source` flips only on a **sighting**, and the fetch is gated — with `membership_discovery = false` it can never flip at all |
+| Update `source` on every sighting | `source` flips only on a **listing** sighting, and the fetch is gated — with `membership_discovery = false` a locked video never flips |
 | **Read `PlayabilityError`** | ✅ depends on nothing we stored |
 | (first draft: any non-`ok` ⇒ denied) | too broad — would refuse a downloadable age-restricted VOD |
+| **Escalate on the refusal, and flip `source` from it** | ✅ the refusal *is* the sighting — no fetch, no tab, no toggle needed |
 
 Four consecutive fixes patched a symptom, each one correct about the case in front
 of it and blind to the next. The signal that ends the sequence was in
@@ -970,6 +971,9 @@ per row, in this order:
     live     → probe (goal 3)
     vod / not_a_stream → NOT probed for discovery
   probe choice: source='membership' ⇒ authenticated, else anonymous
+  ESCALATION: an anonymous probe returning members_only/login_required sets
+    source:='membership' and re-probes with cookies THIS CYCLE if
+    membershipActive(). See "A refusal escalates, and sets `source` itself".
   (no row is ever deferred in Phase 1 — see "Probe-list growth")
 ```
 
@@ -1016,10 +1020,11 @@ Two classes qualify, and the second is **not** rare:
 
 - **Dead IDs** — deleted before ever being probed successfully. Genuinely rare.
 - **Persistently `denied` rows** — a members video on a channel we hold no cookies
-  for. By design, permanent while access is missing, and bounded by how much members
-  content such a channel has (tens, not thousands). The membership probe gate removes
-  most of these before they cost anything: with `membershipActive()` false the probe
-  is skipped outright, so only rows whose `source` is stale reach a real request.
+  for. **Self-limiting, and this is what the escalation buys.** The first refusal sets
+  `source := 'membership'` ("A refusal escalates, and sets `source` itself"), so from
+  the next cycle the probe gate skips the row outright with `membershipActive()`
+  false: **zero** probes, not one per cycle. The cost is one refusal per row, once —
+  not a permanent class.
 
 Correctness and reliability outrank efficiency here, and every bounding scheme tried
 above bought efficiency with a chance of losing a stream. `last_listed_at` (below)
@@ -1321,6 +1326,9 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         └─ source='membership' ⇒ authenticated probe (ProbeVideoAuth); else
            anonymous. This replaces today's in-memory discoveredVideo.authProbe
            (feed.go:681/:748), which cannot survive store-driven candidates.
+        └─ a members_only/login_required refusal sets source:='membership' and
+           escalates to the authenticated probe in the same cycle (if
+           membershipActive()) — the refusal IS the sighting.
       outcome per item:
         probed     ⇒ UPDATE title
                      UPDATE status (post_live→vod)
@@ -1593,11 +1601,66 @@ Today the authenticated-probe choice rides on the in-memory candidate:
 reads it (`feed.go:748`) to pick `ProbeVideoAuth`. That field cannot survive the
 move to store-driven passes — a row read back from `feed_items` has no `authProbe`.
 
-**`source = 'membership'` is the signal.** It is the only durable record that an item
-came from the members tab, and members-only content must be probed with cookies or
-the classifier misfires it as `upcoming` (`feed.go:743-746`) — the bug 2.7.2 fixed.
+**`source = 'membership'` is the signal.** Members-only content must be probed with
+cookies or the classifier misfires it as `upcoming` (`feed.go:743-746`) — the bug
+2.7.2 fixed.
 
 This is one of two jobs `source` does — the other is the toggle predicate below.
+
+### A refusal escalates, and sets `source` itself
+
+`source` is **not** only listing-derived. A `members_only`/`login_required` refusal —
+from *any* probe — sets `source := 'membership'`, and this is the more authoritative
+of the two writers.
+
+**Why the probe beats the listing here.** An earlier draft had `source` flip only on a
+listing sighting, and then had to concede that a public video later locked to members
+can *never* flip: the membership tab is the only listing that would mention it, and
+`membershipActive()` gates that fetch. The row was stuck with `source='rss'` forever,
+probed anonymously forever, refused forever, and never archived — `denied` stopped the
+phantom job but achieved nothing else.
+
+The refusal itself dissolves that. YouTube stating `members_only` **is** the sighting:
+it is a direct, authoritative answer about where the item lives, and it needs no fetch,
+no tab, and no toggle to arrive. It is available at exactly the moment we need it.
+
+**The escalation:**
+
+```
+probe returns members_only / login_required
+  ⇒ source := 'membership'          ← unconditional; the refusal proves the probe,
+                                      whether or not we can see the item
+  ⇒ if the probe was anonymous AND membershipActive():
+       re-probe with cookies, same cycle:
+         ok                    ⇒ probed — real status + date; ARCHIVED normally
+         members_only again    ⇒ denied — wrong membership tier, or stale cookies
+         errored               ⇒ errored
+     else:
+       denied
+```
+
+**Why setting `source` even on a failed escalation matters.** It looks pointless —
+we still cannot see the item — but it is what bounds the cost. Once `source` is
+`membership`:
+
+| Next cycle | Before | After |
+|---|---|---|
+| Wrong tier, cookies valid | anon probe + escalated auth probe = **2/cycle** | auth probe directly = **1/cycle** |
+| No cookies | anon probe, refused = **1/cycle** | probe gate skips it = **0/cycle** |
+
+So the refusal pays for itself immediately, and the no-cookies case — the one the
+"Probe-list growth" section accepts as an unbounded cost — stops costing anything at
+all.
+
+**The toggle still governs.** With `membership_discovery = false`, `membershipActive()`
+is false, so no escalation happens and the row is `denied`. The operator asked not to
+discover members content; discovering it *harder* would defeat them. `source` still
+flips, which is correct and useful: it means the read arms then hide the row from
+ranking, and the probe gate skips it entirely.
+
+**One extra probe, once.** Escalation fires only on the transition — the cycle where a
+video is first found to be locked. Every cycle after, `source='membership'` selects the
+authenticated probe directly and there is nothing to escalate.
 Both are reads of a column that was, until this round, written and never read.
 
 **The transition cases, and why the failure directions are acceptable:**
@@ -1605,9 +1668,12 @@ Both are reads of a column that was, until this round, written and never read.
 - **Members → public** (creator unlocks a video). RSS now lists it with an `exact`
   date; the stored row is `coarse`, so the precision guard fires and `source`
   becomes `rss`. Subsequent probes are anonymous — correct, it *is* public now.
-- **Public → members** (creator locks an existing video). RSS drops it; the
-  membership tab lists it `coarse`. **`source` must flip to `membership` here, and
-  the precision guard must not be allowed to prevent that** — see below.
+- **Public → members** (creator locks an existing video). RSS drops it. The
+  membership tab may never list it (that fetch is gated, and Phase 1's tab is
+  first-page-only), so the *listing* may never flip `source`. **The probe does:** the
+  anonymous probe's `members_only` refusal sets `source := 'membership'` and escalates
+  to the authenticated probe in the same cycle — see "A refusal escalates, and sets
+  `source` itself". The precision guard must not gate `source`, for the same reason.
 
 **`source` is updated on every sighting, independent of the precision guard.** An
 earlier draft folded `source` into the guarded `DO UPDATE`, so a public→members
@@ -2364,14 +2430,26 @@ Then:
 - **`source='membership'` selects the authenticated probe.** A members row read back
   from the store is probed with cookies, not anonymously — otherwise it misclassifies
   as `upcoming` (`feed.go:743-746`), the 2.7.2 bug
-- **A public video that becomes members-only flips `source` to `membership` on the
-  next membership listing, even though its stored `exact` date beats the listing's
-  `coarse`.** The precision guard must not gate `source`. Regression test for the
-  phantom-upcoming misfire: left as `rss`, it is probed anonymously, lies
-  `upcoming` — which `denied` intercepts. Assert the **`denied` outcome and the
-  absent job**, not "source flipped": this is the case where `source` provably
-  cannot flip (no membership fetch ⇒ no sighting), which is exactly why the
-  playability rule, not the gate, is what saves it.
+- **A public video that becomes members-only is archived without any membership
+  listing.** Cookies valid, `membership_discovery = true`, `source='rss'`: the
+  anonymous probe returns `members_only` ⇒ `source` flips ⇒ escalate ⇒ authenticated
+  probe returns `ok` ⇒ real status/date ⇒ **jobbed**. This is the case the listing can
+  never reach (no fetch ⇒ no sighting), so it is the escalation's reason to exist.
+- **A failed escalation still flips `source`.** Wrong membership tier: escalated probe
+  also returns `members_only` ⇒ `denied` ⇒ but `source='membership'` persists, so the
+  next cycle issues **one** probe (authenticated) rather than two.
+- **No cookies ⇒ no escalation, and eventually no probe at all.** `membershipActive()`
+  false ⇒ refusal sets `source` ⇒ `denied` ⇒ next cycle the probe gate skips the row
+  entirely (zero probes).
+- **`membership_discovery = false` ⇒ no escalation.** The refusal still sets `source`,
+  which is what lets the read arms hide the row from ranking.
+- **A public video that becomes members-only also flips `source` on a membership
+  listing, even though its stored `exact` date beats the listing's `coarse`.** The precision guard must not gate `source`. Regression test for the
+  phantom-upcoming misfire: left as `rss` with no `denied` rule, it is probed
+  anonymously and lies `upcoming`. Assert both: the refusal **flips `source`** (from
+  the probe, not a listing — no membership fetch occurs in this scenario) and
+  **no job is created**. The playability rule is what makes the refusal legible; the
+  escalation is what makes it useful.
 - A members video that becomes public flips `source` to `rss` and is probed
   anonymously thereafter
 - **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
@@ -2547,6 +2625,13 @@ exists (see "Phase 1 limitation").
   (operator choice only), the **probe** arm on `membershipActive()` (which includes
   cookie state). The asymmetry is load-bearing: gating a read on cookie state moves
   scope on a fetch failure.
+- **Refusal escalation**: a `members_only`/`login_required` result sets
+  `source := 'membership'` (unconditionally — the refusal proves which probe is
+  correct) and, when `membershipActive()`, re-probes with cookies in the same cycle.
+  This is what archives a public video later locked to members — the listing can
+  never reach it — and it makes the no-cookies case cost **zero** probes per cycle
+  instead of one. `source` therefore has two writers: listings and refusals, the
+  latter authoritative.
 - The `assumed`-row probe carve-out (probed regardless of terms, to obtain a date)
 - Refresh probe on the archival `vod` branch, writing its result back
 - Established gate; rewired `checkChannel`/`processCandidate`
