@@ -99,16 +99,23 @@ publish date, frozen at first insert.
 3-week-old VOD inserts at its true date, lands at rank ~17, and never enters the
 top 3 — even if the store is only partially populated. The full-catalog backfill is
 therefore *not* required for correctness. It matters when `N` exceeds what RSS
-returns (RSS is hard-capped at 15 items; `max_feed_items` allows up to 1000).
+returns, and `max_feed_items` allows up to 1000.
 
 **Coarse dates lump, and lumps break naive ranking.** If twenty items all resolve
 to "3 weeks ago" they share one timestamp. A naive `COUNT(*) WHERE published > ?`
 gives them all the same rank, so a boundary landing inside a lump admits the
 *entire lump* — this bug, amplified. A total order is mandatory.
 
-**Tab order recovers lost precision.** YouTube renders tabs newest-first, so an
-item's position within a listing is true recency ordering *within* a coarse lump.
-Storing `catalog_pos` recovers what the relative text threw away.
+**Tab order recovers lost precision — but only within one scan.** YouTube renders
+tabs newest-first, so an item's position within a listing is true recency ordering
+*within* a coarse lump. `catalog_pos` recovers what the relative text threw away.
+
+The caveat is essential: a position is a coordinate **within a single listing**, and
+`/videos` and `/streams` overlap heavily (a past stream appears in both, at
+unrelated positions). Comparing position 5 of `/videos` against position 5 of
+`/streams` is meaningless. So `catalog_pos` must be a **channel-global** coordinate
+assigned by one merged ordering pass, not whichever tab happened to scan first.
+See "Assigning catalog_pos" under Part 2.
 
 **The probe is how we learn rank, not just status.** Anything undatable from a
 listing gets a direct probe and returns an authoritative date. This is what
@@ -120,6 +127,34 @@ immediately after. With recorded status, an item needs probing once. Steady stat
 falls from 3-per-channel-per-cycle to ~0–2 per cycle. This is why the pre-probe
 rank filter could be removed rather than mitigated.
 
+## External Assumptions (unverified in-repo)
+
+Two numbers this design leans on are **external YouTube behavior, asserted from
+observation and not enforced or documented anywhere in this codebase**. Called out
+because they are load-bearing and could drift silently:
+
+| Assumption | Status |
+|---|---|
+| YouTube's `videos.xml` returns at most 15 items | Not asserted in code. `fetchFeed` (`feed.go:484`) and `parseFeedCandidates` impose no limit; the `15` at `feed.go:24` and `config.go:58` is the *default cap*, an unrelated coincidence. |
+| The membership tab carries ~30 items per page | Not asserted anywhere. `parseMembershipTab`/`walkVideoRenderers` take whatever the page carries. |
+
+They justify "the backfill is not required for correctness" and the "~45 unknowns
+per cycle" probe bound. Neither is safety-critical — if RSS returned 50 items the
+design still holds, just with more first-cycle probes — but the plan should verify
+the RSS figure empirically rather than inherit it, and **no code should encode
+either number as a constant.**
+
+A third, sharper fragility deserves the same treatment. `relativeAgeRe`
+(`internal/youtube/channel_membership.go:49`) is a single en-locale regex matched
+against serialized JSON, and `itemAge` returns `0` on any miss. One YouTube copy
+change makes *every* membership item on *every* channel return `Age=0`. Today that
+is self-limiting, because the cap is recomputed per cycle from live data. Under this
+design those items all become `assumed` — which is exactly why `assumed` rows are
+excluded from the top-N query. The failure mode degrades to "members content is not
+archived until probed" instead of "fabricated dates dominate the cap", and probes
+repair it automatically. This is the single best argument for the `assumed`
+exclusion, and worth stating as such.
+
 ## Decisions
 
 | Decision | Choice | Rationale |
@@ -130,7 +165,7 @@ rank filter could be removed rather than mitigated.
 | Cap meaning | Archival depth, not probe budget | Matches goal 2; probe volume is naturally bounded by sources |
 | `history` table | Left alone, separate | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI |
 | Catalog scan role | Backfill only | Part 1 makes RSS 404s harmless; 3 MB/channel/cycle forever buys no correctness |
-| Backfill trigger | Auto on startup for un-backfilled channels, auto on channel add, plus manual re-run | No action needed on upgrade; new channels start complete |
+| Backfill trigger | One idempotent sweep keyed on `backfilled_at IS NULL`, run at startup and from `kickMonitors` (which fires on every channel add/remove/reorder), plus a manual re-run | No action needed on upgrade; new channels start complete. Not two triggers — `kickMonitors` cannot distinguish an add from a reorder, so it must be idempotent (see Integration Points) |
 | `last_videos` | Removed | Dead code; `feed_items` supersedes it (per-channel **and** dated) |
 
 ## Part 1 — Dated Store and Cap-by-Date
@@ -150,8 +185,17 @@ CREATE TABLE IF NOT EXISTS feed_items (
     first_seen   TEXT NOT NULL,
     PRIMARY KEY (channel_id, video_id)
 );
+-- Serves the archival pass's top-N query.
 CREATE INDEX IF NOT EXISTS idx_feed_items_rank
     ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
+
+-- Serves the discovery probe list and the cap-exempt union, both of which filter
+-- on status every cycle. Without this they degrade to a full scan of the
+-- channel's rows — after Part 2's backfill that is the entire catalog, scanned
+-- twice per cycle, forever (violating goal 5). The rank index cannot serve them:
+-- status is not in it, and published leads.
+CREATE INDEX IF NOT EXISTS idx_feed_items_status
+    ON feed_items(channel_id, status);
 
 CREATE TABLE IF NOT EXISTS channel_state (
     channel_id     TEXT PRIMARY KEY,
@@ -194,6 +238,32 @@ when a probe returns a better one, mirroring today's rule at
 `internal/monitor/utils.go:341-344` that an `"Unknown Title"` placeholder must not
 overwrite a real feed title.
 
+### Coarse dates must skew old, not new
+
+`itemAge` (`internal/youtube/channel_membership.go:220-257`) truncates: `"3 weeks
+ago"` becomes exactly `21d`, `"1 year ago"` exactly `365d`. The true age is a
+*range* — `[21d, 28d)` and `[365d, 730d)` respectively. Storing `now - Age` picks
+the **newest instant consistent with the text**, biasing every coarse date newer by
+up to 6 days (weeks), 29 days (months), or 364 days (years).
+
+That bias runs in the dangerous direction: newer means higher rank, and higher rank
+means *admitted*. It is the same class of error as the bug being fixed, just
+smaller — a coarse members VOD can outrank genuinely newer public content on a
+low-volume channel.
+
+So coarse dates store the **oldest** instant consistent with the text —
+`now - Age - unit` (the exclusive upper bound of the range):
+
+```
+"3 weeks ago"  → now - 28d   (not now - 21d)
+"1 year ago"   → now - 730d  (not now - 365d)
+```
+
+Errors then bias toward *exclusion*, which is the safe direction for an
+archival-depth cap. This costs nothing real: ordering among old content does not
+affect what gets archived, live/upcoming are cap-exempt regardless of date, and any
+coarse item that matters is promoted to `exact` by its discovery probe.
+
 ### Descriptions and term matching
 
 Descriptions are deliberately **not** stored. The description used for term
@@ -211,7 +281,7 @@ are probed and archived in the same cycle they first appear.
 The one degradation: an item re-evaluated from the store *without* being in this
 cycle's RSS response (for example after `max_feed_items` is raised) matches on
 **title only**. This is not a new behavior — membership and DECAPI candidates are
-already title-only (`internal/monitor/feed.go:697`: *"matching is title-only, like
+already title-only (`internal/monitor/feed.go:694-696`: *"matching is title-only, like
 DECAPI"*) — but it must be documented, since an RSS item whose *description* alone
 matched the channel's terms would not be picked up by a later scope widening.
 
@@ -331,22 +401,69 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         └─ read from the STORE, not this cycle's response
       per item: skip if HasActiveJob → probe
         └─ members-only content uses the authenticated probe (unchanged)
-      probe result ⇒ UPDATE published (exact), date_precision='exact', status, title
+      outcome per item:
+        probed OK  ⇒ UPDATE published(exact), date_precision='exact', status, title
+                     mark FRESH for this cycle
+        probe error⇒ store untouched; NOT fresh
+        cooldown   ⇒ probe skipped; NOT fresh
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
       in-scope = top-N query  ∪  {items WHERE status IN (upcoming, live)}
-      per item: skip if HasActiveJob or HasProcessed → term match → decide:
-         upcoming/live    → job  (cap exempt; probed this cycle already)
-         vod/not_a_stream → refresh-probe, then job iff include_non_live_content
-                                AND channel established
-                                AND still non-live on the fresh result
-         unknown          → NO JOB. Its probe failed this cycle; we do not know
-                            what it is. Retry next cycle. (Unreachable via the
-                            top-N query, which excludes 'assumed' rows, but
-                            reachable for a coarse-dated backfilled row whose
-                            probe fails — so the branch must exist.)
+      per item: skip if HasActiveJob → skip if NOT term-match → decide:
+         upcoming/live    → job iff FRESH this cycle
+                            (cap exempt; NOT gated by HasProcessed — see below)
+         vod/not_a_stream → skip if HasProcessed
+                            skip unless include_non_live_content   ← before probing
+                            skip unless channel established
+                            → refresh-probe → job iff still non-live on the
+                              fresh result
+         unknown          → NO JOB. We do not know what it is. Retry next cycle.
+                            (Unreachable via the top-N query, which excludes
+                            'assumed' rows, but reachable for a coarse-dated
+                            backfilled row whose probe fails — the branch must
+                            exist.)
 5. AddToHistory on job creation  (unchanged)
 6. on RSS success ⇒ channel_state.last_rss_ok_at = now
 ```
+
+**`HasProcessed` must gate ONLY the `vod`/`not_a_stream` branch.** This is not a
+stylistic choice — gating live/upcoming on it loses streams permanently, which is
+the worst outcome this system has.
+
+Today `HasProcessed` never touches live/upcoming. `feed.go:730` passes it as
+`IsReprobe`, and `IsReprobe` is consulted in exactly one place: `nonLiveSkipReason`
+(`utils.go:228-236`), reachable only from the `not_a_stream` and `post_live`/`vod`
+branches. The `live` and `upcoming` branches return `ShouldProcess: true`
+regardless of history. Job creation dedups on the **job row** (`AddJob` returning
+`added=false`, `cmd/moombox/monitor_callbacks.go:252-259`), not on history.
+
+That distinction is load-bearing because **history can be written with no job row**:
+the probe give-up branch calls `AddToHistory` after repeated failures
+(`utils.go:283-285`). So:
+
+1. A members upcoming stream is discovered; cookies hiccup; the probe fails enough
+   times to give up ⇒ `AddToHistory(X)`, **no job row**, status stays `unknown`.
+2. Cookies recover; the next discovery probe succeeds ⇒ status becomes `live`.
+3. A `HasProcessed` gate on the live branch skips it. **The stream is never
+   archived, and it is gone forever.**
+
+Today step 3 jobs it. A design that regresses this would violate goal 3 via exactly
+the transient failures this spec claims to leave untouched.
+
+**Only FRESH items become jobs.** "Fresh" means this cycle's probe returned a
+result — precisely today's `ShouldProcess == true`. This preserves the existing
+invariant through the two-pass split, which otherwise silently breaks it:
+
+- **Probe errored this cycle.** Stored status still says `live`; the stream has
+  since ended and been privated. Jobbing on stored status would create a job for a
+  dead video. Today the probe error returns `ShouldProcess=false` and nothing is
+  created.
+- **`ProbeCooldown` skipped the probe.** `utils.go:258-262` returns
+  `ShouldProcess=false` when `ShouldProbe` is false. Since not changing the cooldown
+  machinery is a non-goal, a stored status under a non-zero cooldown is arbitrarily
+  stale and must not be treated as authoritative.
+
+Freshness reconciles the two-pass split with both, and maps 1:1 onto today's
+behavior: no fresh result, no job, retry next cycle.
 
 **The passes read the store, not the response.** This is what removes the bug
 class: an RSS 404 no longer changes either work list, it only means nothing new was
@@ -374,10 +491,23 @@ the backfill, so a failed backfill never blocks normal operation.
 
 ### Current capability
 
-There is **no continuation pagination anywhere in the codebase**; every YouTube
-path is first-page-only (~30 items). The only occurrence of
-`continuationItemRenderer` is a test fixture
+No continuation paging exists on any YouTube **channel/browse listing** path —
+every channel path is first-page-only. The only occurrence of
+`continuationItemRenderer` under `internal/youtube/` is a test fixture
 (`internal/youtube/channel_membership_test.go:27`) proving the walker ignores it.
+
+**But continuation paging is not new to this codebase.** `internal/chat` already
+does full InnerTube continuation paging and is the in-repo pattern Part 2 should
+follow rather than porting yt-dlp from first principles:
+
+- `internal/chat/api.go:172-178` — `FetchLiveChat`/`FetchChatReplay(ctx, continuation)`
+- `internal/chat/downloader.go:412-423` — the paging loop (`cd.continuation = resp.NextContinuation`)
+- `internal/chat/downloader.go:558-583` — stale-token recovery
+
+yt-dlp's `_tab.py` remains the reference for the *browse-specific* response shape
+(which renderers carry items, where the token hides), but the transport, retry, and
+loop mechanics should mirror `internal/chat`, which already works in production
+against the same API.
 
 Reusable as-is from `internal/youtube/channel_membership.go`:
 
@@ -404,11 +534,11 @@ uploads" (`references/yt-dlp/yt_dlp/extractor/youtube/_tab.py:2318` carries
 Paging ports yt-dlp's `_entries` loop (`_tab.py:571`), including:
 
 - `seen_continuations` loop detection (`_tab.py:585-590`)
-- `visitorData` re-extraction per page (`_tab.py:607`)
+- `visitorData` re-extraction per page (`_tab.py:608`)
 - `appendContinuationItemsAction.continuationItems` unwrapping (`_tab.py:628-631`)
 - token extraction from
   `continuationItemRenderer.continuationEndpoint.continuationCommand.token`
-  (`_base.py:1034`)
+  (`_base.py:1041`, unwrapped by `_extract_continuation_ep_data` at `_base.py:1027`)
 
 `UC`→`UU` uploads-playlist swap (`_tab.py:2326`) is the fallback handle for
 channels lacking tabs.
@@ -421,10 +551,53 @@ unknown pool:
 - `"Streamed N <unit> ago"` present ⇒ `status='vod'`, `date_precision='coarse'`
 - live badge ⇒ `status='live'`
 - scheduled/upcoming badge ⇒ `status='upcoming'`
-- `catalog_pos` = index within the listing
+
+### Assigning catalog_pos
+
+`catalog_pos` must be **channel-global**, not per-tab. A per-tab index is unusable
+as a tiebreaker because the three tabs are unrelated coordinate systems and
+`/videos`/`/streams` overlap heavily — a past stream appears in both at different
+positions, and the row is deduped by `(channel_id, video_id)`, so a per-tab value
+would be permanently whichever tab scanned first. (The precision guard makes this
+worse, not better: both tabs write `coarse`, so the second write is rejected
+outright and cannot correct the position.)
+
+The backfill therefore completes all three tab scans **before** assigning
+positions, then does one merged ordering pass over the union:
+
+```
+1. scan /videos, /streams, /membership to completion, retaining per-tab index
+2. dedup by video_id (an item in two tabs keeps its best classification)
+3. sort the union by (coarse published DESC, per-tab index ASC, video_id ASC)
+4. assign catalog_pos = 0..n-1 over that merged order
+5. write rows, then set backfilled_at
+```
+
+Because this runs as one unit before `backfilled_at` is set, a partial scan never
+publishes half-assigned positions — a resumed scan re-derives the merge from the
+stored cursor state and assigns positions once, at the end.
+
+Steady-state inserts (RSS, membership) keep using the per-fetch index, which is
+sound there: RSS dates are `exact` and distinct, so they effectively never tie, and
+a membership fetch is a single listing whose internal order is genuine recency.
+`catalog_pos` only ever arbitrates *within* one `published` value.
+
+**Known limit, accepted:** a tie between a backfilled row (global position) and a
+later steady-state row (per-fetch position) is resolved deterministically but
+arbitrarily. It requires identical `published` values across a coarse backfill row
+and a coarse membership row, and it only changes ordering *within* a lump, never
+whether the lump straddles N. Not worth a second coordinate column.
 
 ### Operational rules
 
+- **YouTube channels only.** The backfill must re-apply the platform filter
+  (`ch.GetPlatform() == "youtube"`, as `getYouTubeChannels` does at
+  `internal/monitor/feed.go:809-823`). Twitch channels live in the *same*
+  `[[channels]]` list, and this worker runs on its own path rather than through the
+  monitor's cycle loop — so nothing else filters for it. Without this, a Twitch
+  channel would be scanned as `youtube.com/channel/<twitch_login>/videos`, 404 on
+  all three tabs, never set `backfilled_at`, and retry on every startup forever.
+  The "no Twitch-side change" non-goal is only a guarantee if this filter exists.
 - Throttled: one page per interval (constant, not config).
 - Resumable: per-tab cursor in `channel_state.backfill_state`.
 - `backfilled_at` set **only** on full completion of all three tabs, so a partial
@@ -434,6 +607,110 @@ unknown pool:
   items.
 - Progress surfaced in Web UI and TUI.
 - Inline `defer recover()` in the scan goroutine, per project rule.
+
+## Integration Points
+
+The spec previously assumed several of these existed in a shape they do not.
+
+### Trigger: there is no config watcher — `kickMonitors` is the hook
+
+There is no file watcher and no `fsnotify` dependency; `internal/config/store.go`
+exposes only `Read`/`Snapshot`/`Update`/`SaveLocked`. "Hot-reload" means *callbacks
+fired by the writer*. The single funnel for every runtime channel mutation is
+`s.kickMonitors` (`cmd/moombox/services.go:568-577`), called from
+`channel_routes.go:80-82` (add), `:121-123` (delete), `:186-188` (reorder),
+`config_routes.go:743-744` (bulk PUT), and `tui_wiring.go:222` (TUI settings, which
+bypasses `ChannelRoutes` entirely).
+
+**`kickMonitors` is a bare `func()` with no add/remove/reorder discrimination** — it
+fires identically on a reorder. So "auto on channel add" **cannot** be event-driven.
+It must be an idempotent sweep keyed on `channel_state.backfilled_at IS NULL`,
+invoked from `kickMonitors` and at startup. These are therefore **one trigger, not
+two**, and the Decisions table's phrasing is shorthand for that.
+
+`setup_routes.go:176-177` deliberately does not fire the channel-change callback
+(the process restarts instead), so setup-wizard channels are covered by the startup
+sweep.
+
+### Channel removal must prune, and there is a precedent
+
+`feed_items` is per-channel state on a 24/7 process, on disk, unbounded per channel
+(the backfill writes the entire catalog), and it survives restarts. The established
+pattern is `PruneHealth` — `internal/monitor/health.go:110-112` states it exists so
+the map "can't grow unbounded on a 24/7 process", implemented at `feed.go:151-158`
+and called from `services.go:571-573`.
+
+So the same `kickMonitors` sweep deletes `feed_items`/`channel_state` rows for
+channels no longer in the active set. This also fixes a real bug: a
+removed-then-re-added channel would otherwise inherit a stale `backfilled_at` and
+silently skip its backfill.
+
+**Caveat:** this is the **first channel-keyed DB cleanup in the codebase**. Nothing
+in `internal/database/` deletes by channel today — `ListOrphanedHistory` joins on
+`jobs.id`, and `pruneHistory` is a global 10k FIFO. We are establishing a pattern,
+not extending one.
+
+### The backfill must respect `membership_discovery` and the auth gate
+
+The per-cycle membership path is gated by `membershipActive()`
+(`internal/monitor/feed.go:516-523`) on `MembershipDiscoveryEnabled()`
+(`internal/config/types.go:109-110`) and a wired fetcher. The reuse inventory flags
+`HasAuthCookies()` (`channel_membership.go:65`) as needing "parameterisation" —
+which must not mean *removing* the gate.
+
+This matters more than it looks: **the archival pass reads the store, not the
+response.** If the backfill writes members-only rows on a channel with
+`membership_discovery = false`, those rows become in-scope and get jobbed — the
+toggle is silently defeated by the very indirection that fixes the original bug.
+
+So: the backfill's membership tab is gated on `MembershipDiscoveryEnabled() &&
+HasAuthCookies()`. `/videos` and `/streams` are public and are not gated.
+
+**`backfilled_at` semantics when the membership tab is skipped:** it is still set on
+completion of the tabs that were *eligible*. The flag means "this channel's catalog
+has been scanned as fully as its configuration permits", not "all three tabs ran" —
+otherwise a `membership_discovery = false` channel could never complete a backfill
+and would retry forever. Turning membership discovery **on** later must therefore
+clear `backfilled_at` to force a rescan, since the eligible set changed.
+
+### Progress: two mechanisms, and an initial-state trap
+
+- **Web:** the generic `hub.Broadcast(msgType, payload)` (`internal/web/websocket.go:441`).
+  No typed wrapper needed — `disk_status` (`cmd/moombox/main.go:676-681`) and
+  `update_available` (`helpers.go:142`) already use the generic path.
+- **TUI:** not WebSocket. A buffered channel plus `tea.Msg`, modelled on
+  `DiskStatusMsg`: type at `internal/tui/app.go:60-64`, channel at
+  `services.go:609`, non-blocking send with a `default:` drop at `main.go:684-689`,
+  wired via `SetUpdateChannels` (`tui_wiring.go:404`), handled at
+  `app_update.go:277-279` — where the trailing `return a, a.listenForUpdates()` is
+  **mandatory** to re-arm the receive.
+
+**The trap:** `InitialState` (`cmd/moombox/ws_wiring.go:87-111`) returns only
+`jobs`, `logs`, `nextFeedCheck`, `nextDecapiCheck`, `nextTwitchCheck`,
+`connectivity`, `hideFinishedAgeDays`. `disk_status` is absent, so a web client
+connecting mid-event renders nothing until the next tick. The TUI seeds itself
+(`tui_wiring.go:409-415`); the Web UI does not. A throttled full-catalog backfill is
+long-running *by design*, so mid-flight connect is the **common case**: backfill
+progress must be added to `InitialState` and the TUI seed mirrored.
+
+### Manual re-run: `R` chord + debounced route
+
+- **Chord `R` (Request)** — the global namespace (`A` is job-scoped). Model on
+  `R M` "Check Monitors Now": callback field `internal/tui/app.go:411`, menu
+  registration **gated on non-nil** (`app_actions.go:489-491` — an unregistered
+  chord is rejected by the parser at `:492-495`), dispatch at `:185-189`, host
+  wiring at `cmd/moombox/tui_wiring.go:225-229`. For an async trigger use the `R V`
+  shape (`app_actions.go:173-184`): capture the fn and return `safeCmd(...)`
+  producing a one-shot msg — never block the update loop.
+- **API** — model on `POST /api/monitors/check-now` (`internal/web/routes/monitors.go:34`),
+  which carries a **30s `atomic.Int64` debounce** (`monitors.go:22`, `:39-51`)
+  returning HTTP 200 `{"success":false,"debounced":true,"retryAfterMs":N}`. A manual
+  backfill re-run needs the same guard against overlapping scans.
+
+Both front doors share one service func, exactly as `kickMonitors` does today.
+
+Note: `buildMenuItems()`/`dispatchAction()` live in `internal/tui/app_actions.go:430`/`:18`,
+**not** `app.go` as CLAUDE.md claims — see Included Fixes.
 
 ## Error Handling
 
@@ -455,7 +732,33 @@ backoff possible. `MetadataTracker` is in-memory today and resets on every resta
 
 ## Testing
 
-Regression test for this exact bug:
+### Prerequisite: `checkChannel` is not testable today
+
+The headline regression test cannot be written against the current code, and this
+is implementation work the plan must budget for, not an assumption:
+
+- **There is no `feed_test.go`.** `internal/monitor/` has `connectivity_test.go`,
+  `health_test.go`, `membership_test.go`, `twitch_recover_test.go`,
+  `utils_test.go` — nothing covers `checkChannel`.
+- **There is no fetch seam.** `checkChannel` calls `fm.fetchFeed(ctx, ch)` directly
+  (`feed.go:426`), which does a real HTTP GET (`feed.go:484`). RSS failure cannot be
+  simulated. By contrast `FetchMembership` is already an injectable func field
+  (`MembershipFetchFunc`, `feed.go:94`) — the RSS path needs the same treatment.
+
+So Phase 1 includes: introduce an injectable RSS fetch seam mirroring
+`MembershipFetchFunc`, and create `feed_test.go`. Fixtures stay **inline** —
+`internal/monitor/` has no `testdata/` directory and every existing fixture is
+inline (`membership_test.go:207` uses inline XML; `channel_membership_test.go:27`
+inline HTML). Do not introduce `testdata/` for this.
+
+### Test to delete
+
+`internal/monitor/membership_test.go:83-108` `TestMergeCandidatesRecencyCap` calls
+`mergeCandidates(cands, 2)` and asserts precisely the cap-crowding behavior this
+design removes. It must be deleted or rewritten against the top-N query — it cannot
+survive as-is.
+
+### Regression test for this exact bug
 
 - **RSS 404 cycle + membership returns a 3-week-old VOD ⇒ not archived.**
 
@@ -476,6 +779,17 @@ Then:
 - An in-scope `unknown` row is never jobbed
 - `include_non_live_content = false`: a past members VOD is stored but never
   discovery-probed, preserving today's drop behavior
+- **`HasProcessed` does not block a live/upcoming job.** Specifically: probe
+  give-up wrote history with no job row ⇒ probe later succeeds ⇒ stream is still
+  jobbed. This is the goal-3 regression guard.
+- A stale stored `live` whose probe errored this cycle produces **no** job
+- With `probe_cooldown > 0`, a cooldown-skipped item produces **no** job
+- Coarse dates skew old: `"3 weeks ago"` stores `now-28d`, not `now-21d`
+- `membership_discovery = false` ⇒ backfill writes no members rows, and none are
+  jobbed via the store
+- Channel removed from config ⇒ its `feed_items`/`channel_state` rows are pruned;
+  re-adding it triggers a fresh backfill rather than inheriting `backfilled_at`
+- Backfill skips Twitch channels entirely
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
 - Top-N counts non-term-matching items
 - Raising `max_feed_items` widens scope for already-stored VODs without a re-probe
@@ -521,39 +835,87 @@ much live** field: the download-resume segment counter used in
 scan cost. Rewrite:
 
 - `config.example.toml:69,208`
-- `docs/spec/data-and-storage.md:458,526` (and `:320,400`, which wrongly claim
-  `last_videos` "tracks the most recent video per channel for deduplication")
+- `docs/spec/data-and-storage.md:458,526` — the `MaxFeedItems` tables
+- `docs/spec/data-and-storage.md:400` — wrongly claims `last_videos` "tracks the
+  most recent video per channel for deduplication" (`:320-325` is the schema block
+  above it; both go)
+- `docs/spec/data-and-storage.md:337` — migration table; **add a v16 row**
+- `docs/spec/data-and-storage.md:403` — `ImportFromJSON` description (changes with
+  the `lastVideos` no-op)
+- `docs/spec/data-and-storage.md:579,591` — migration table + `MaxFeedItems: min 1`
+  validation doc
+- `docs/spec/architecture.md:127` — describes `max_feed_items`; previously missed
+  entirely
 - `docs/spec/platform-services.md:178` (the `itemAge` cap description)
 - `SPEC.md:210,653`
 - TUI help text `internal/tui/settings.go:90` — currently *"RSS items per feed
   (default: 15)"*
+- TUI setup wizard `internal/tui/setup_wizard.go:113` — *"RSS feed items to check
+  per channel"*
+- Web UI text: `web/public/index.html:795-800` (`cfg-max-feed-items` label/help) and
+  `:1682` (`setup-max-feed-items` label) — previously no Web UI text was listed
 - `internal/config/config.go:485` — the `O(N) per channel` per-tick comment
 
 ## Included Fixes
 
-Two pre-existing defects, approved for inclusion.
+Pre-existing defects found while mapping this work, approved for inclusion.
 
-**1. `max_feed_items` validation disagrees with itself.** `config.go:490` accepts
-1–1000 and the TUI agrees (`internal/tui/settings.go:544`, *"must be 1-1000"*), but
-`internal/web/routes/config_routes.go:170` rejects anything over 100. The same
-setting has two limits depending on whether you edit TOML or the Web UI. The Web UI
-is the outlier; align it to 1000.
+**1. `max_feed_items` validation disagrees with itself — in three places, split 2-2.**
+
+| Site | Limit |
+|---|---|
+| `internal/config/config.go:490` (TOML load + validate — authoritative) | 1–1000 |
+| `internal/tui/settings.go:544` (TUI settings) | 1–1000 |
+| `internal/web/routes/config_routes.go:169` (Web API) | **1–100** |
+| `internal/tui/setup_wizard.go:1066` (TUI first-run wizard) | **1–100** |
+| `web/public/index.html:798` (`cfg-max-feed-items`, Web settings form) | **1–100** |
+| `web/public/index.html:1682` (`setup-max-feed-items`, Web setup wizard) | **1–100** |
+
+The accepted range depends on *which UI you happen to use*: `500` is valid via TOML
+or the TUI settings screen and rejected by four other front doors. Align every
+100-gate to 1–1000, matching `config.go:490` — the only validator that actually
+guards the loaded config. `web/public/modules/setup.js:682` feeds
+`setup-max-feed-items` and needs no change beyond the `max` attribute.
+
+Note both the "one outlier" and "even split" framings are wrong; this is four
+client-side gates disagreeing with one authoritative server-side validator.
 
 **2. `.claude/skills/moombox-database-migrations/SKILL.md` is stale.** It documents
-v6, a `schema_version` table, and `tx.Exec`. Reality is v15, `PRAGMA user_version`,
-and direct `db.db` execution (no transaction wraps the migration). Anyone following
-it writes a broken migration. Update to match `migrations.go`, and include the
-`SetMaxOpenConns(1)` collect-then-update constraint, which the skill omits
-entirely.
+v6 (line 8), a `schema_version` table with `UPDATE schema_version SET version = 7`
+(line 27), and `tx.Exec` (lines 20-27). Reality is v15, `PRAGMA user_version` via
+`writeUserVersion`, and direct `db.db.ExecContext` with no transaction wrapping the
+migration. Anyone following it writes a broken migration. Update to match
+`migrations.go`, and add the `SetMaxOpenConns(1)` collect-then-update constraint,
+which the skill omits entirely.
+
+While rewriting it, scope step 4 ("Update Field Maps") explicitly to the `jobs`
+table. `fieldToColumn` (`internal/database/database.go:21`, consumed at `:356`) is
+jobs-only and enforced by `TestFieldToColumnCoverage` (`database_test.go:1222`); the
+step currently reads as unconditional, so the next reader adds `feed_items` entries
+to a jobs-only allowlist. It is genuinely N/A for this design's new tables.
+
+**3. `CLAUDE.md` misplaces the chord system.** It states `buildMenuItems()` is "in
+`app.go`" and is the single source of truth for chords. Both `buildMenuItems()` and
+`dispatchAction()` actually live in `internal/tui/app_actions.go` (`:430` and `:18`).
+The instruction "one entry in `buildMenuItems()` + one case in `dispatchAction()`"
+is still correct; only the file is wrong. This matters here because Part 2 adds an
+`R` chord by following exactly that instruction.
 
 ## Implementation Phasing
 
 **Phase 1** — independently shippable, fixes the bug:
-schema v16, `feed_items`/`channel_state`, rank query, probe rules, rewired
-`checkChannel`/`processCandidate`, established gate, `last_videos` removal, the two
-included fixes, doc updates.
+schema v16 (`feed_items`, `channel_state`, both indexes), precision-guarded upsert,
+top-N query, discovery/refresh probe split with the freshness rule, established
+gate, channel-removal prune, **an injectable RSS fetch seam plus a new
+`feed_test.go`** (neither exists today — see Testing), rewired
+`checkChannel`/`processCandidate`, deletion of `TestMergeCandidatesRecencyCap`,
+`last_videos` removal, the included fixes, doc updates.
 
 **Phase 2** — lands on top:
-InnerTube `/browse` continuation client, three-tab scan, listing classification,
-throttled resumable backfill worker, triggers (startup/channel-add/manual),
-progress UI.
+InnerTube `/browse` continuation client (modelled on `internal/chat`, not ported
+from yt-dlp), three-tab scan gated on `membership_discovery` + auth and filtered to
+YouTube channels, listing classification, merged channel-global `catalog_pos`
+assignment, throttled resumable backfill worker, the idempotent
+`backfilled_at IS NULL` sweep, debounced manual re-run (`R` chord + API), and
+progress via `hub.Broadcast` + a TUI `tea.Msg` channel — including the
+`InitialState` seed.
