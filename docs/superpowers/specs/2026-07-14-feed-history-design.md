@@ -527,6 +527,32 @@ evict real content from scope regardless of how often it is retried.
 The backoff is an additional store-level schedule layered on the outcome they
 already produce.
 
+### The probe outcome must surface to the caller, not be hooked inside
+
+`ProcessYouTubeVideo` is shared: it is called from `internal/monitor/feed.go:753`
+**and** `internal/monitor/decapi.go:583`. So the backoff must **not** be hooked into
+its give-up branch — DECAPI would then write `feed_items` rows, breaking the
+"no DECAPI-side change" non-goal and putting rank-1 DECAPI hits into a store the
+design says they never enter.
+
+Instead `ProcessYouTubeVideoResult` gains an **outcome** discriminator:
+
+```
+probed   — a probe ran and returned metadata
+errored  — a probe ran and failed
+cooldown — no probe ran; ProbeCooldown suppressed it
+```
+
+Today the caller cannot distinguish these: all three collapse to
+`ShouldProcess=false` (`utils.go:258-262` for cooldown, `:294` for error). The feed
+monitor reads the outcome and owns both store writes; DECAPI ignores it and behaves
+exactly as it does today.
+
+This single addition serves both new rules: **`outcome == probed` is precisely the
+"FRESH" predicate** the archival pass needs, and `outcome == errored` is what drives
+`probe_fails`/`next_probe_at`. Neither is a new source of truth — both read a
+decision `ProcessYouTubeVideo` already makes internally and currently discards.
+
 **Refresh probe** — on demand, only when a stored item is about to become a job:
 
 ```
@@ -806,18 +832,39 @@ channels lacking tabs.
 
 ### Classification during scan
 
-Classification keys on the **presence of a relative-age text**, and on nothing else:
+Classification **calls `itemAge` itself** — badge check included — rather than
+re-deriving a rule from its regex:
 
 ```
-relative-age text present  ⇒ status='vod', date_precision='coarse'
-otherwise                  ⇒ status='unknown', date_precision='assumed' → probed
+age := itemAge(item)          // live-badge short-circuit FIRST, then the age regex
+age > 0  ⇒ status='vod',     date_precision='coarse'   (skewed old; see above)
+age == 0 ⇒ status='unknown', date_precision='assumed'  → probed
 ```
 
-This deliberately mirrors `itemAge`'s existing philosophy, which the codebase
-already states (`channel_membership.go:213-219`): key on the **absence** of a
-past-time signal rather than the presence of a live badge, because that "makes
-catching live/upcoming members streams robust to YouTube's frequent badge DOM
-churn."
+**The live-badge short-circuit is load-bearing and must not be dropped.** An earlier
+draft specified "presence of a relative-age text, and nothing else", claiming it
+mirrored `itemAge`'s philosophy. It mirrored half of it and discarded the guard that
+makes that half safe:
+
+- `itemAge` checks the live badge **first** and returns `0` immediately
+  (`channel_membership.go:226-231`), with the comment *"Currently live → 'now',
+  **regardless of any 'streaming for N' elapsed text**"*. The guard exists precisely
+  because live items carry elapsed text.
+- `relativeAgeRe` (`:49`) is matched against the **serialized JSON of the whole
+  item**, so a live renderer's `"Started streaming 2 hours ago"` matches it
+  (verified: the regex matches that string).
+
+A bare-regex rule would therefore insert a **live stream** as a terminal `vod` — on
+`/streams`, the tab most likely to list one. `status` is deliberately excluded from
+the upsert's `DO UPDATE`, and `vod` is never discovery-probed, so nothing would ever
+correct it. That is the precise failure the badge-derived-status objection was
+raised against, arrived at from the opposite direction.
+
+Calling `itemAge` keeps the safe property real rather than asserted: a live or
+upcoming item short-circuits to `0` → `unknown` → probed. RSS-visible streams were
+protected anyway by entering as `unknown`, but a members-only live stream first seen
+by the backfill's membership tab has no such protection — it is exactly the case this
+guard saves.
 
 An earlier draft classified from badges (`live badge ⇒ live`, `scheduled badge ⇒
 upcoming`, `"Streamed N ago" ⇒ vod`) and claimed it left "nothing in the unknown
@@ -830,19 +877,25 @@ pool". Two defects:
   streams terminal. Terminal statuses are never discovery-probed, so those streams
   would never be looked at again — goal 3, permanently, with no correction path.
 
-Keying on the age text fixes both. `relativeAgeRe`
-(`channel_membership.go:49`) matches a bare `"3 weeks ago"` — the `"Streamed"`
-prefix is not required — so a plain upload dates correctly as `coarse`/`vod`. A live
-or upcoming item carries no age text, so it falls through to `unknown` and gets
-probed. **Every failure of this heuristic costs an unnecessary probe, never a
-missed stream** — errors land on the safe side by construction.
+Calling `itemAge` fixes both. `relativeAgeRe` (`channel_membership.go:49`) matches a
+bare `"3 weeks ago"` — the `"Streamed"` prefix is not required — so a plain upload
+dates correctly as `coarse`/`vod`. And the badge short-circuit ahead of it keeps a
+live item at `0` even though its renderer carries elapsed text, so it lands in
+`unknown` and gets probed.
+
+**The safe-side property holds only because of the badge check**, not because of the
+age regex: `itemAge` returns `0` for a live item, for an upcoming item, and for
+anything it cannot parse — and every one of those is probed. A wrong answer costs a
+probe; it cannot cost a stream. That guarantee evaporates the moment the badge
+short-circuit is dropped, which is why the classification calls `itemAge` rather
+than re-implementing part of it.
 
 `vod` versus `not_a_stream` is not worth distinguishing here: both are terminal,
 both are gated by `include_non_live_content`, and the archival pass treats them
 identically. The backfill writes `vod`; a later probe refines it if it ever matters.
 
-**Probe volume stays bounded.** Only rows *without* age text are probed — live,
-upcoming, and unparseable items, a handful per channel — not the thousands of
+**Probe volume stays bounded.** Only rows where `itemAge` returns `0` are probed —
+live, upcoming, and unparseable items, a handful per channel — not the thousands of
 catalog rows a naive `unknown` default would have queued.
 
 ### Assigning catalog_pos
@@ -1171,10 +1224,15 @@ Then:
   recovered row returns to full poll rate
 - A healthy row is never deferred: `next_probe_at` stays NULL for anything that
   probes successfully
+- **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
+  shared with `decapi.go:583`; the outcome is surfaced to the caller so only the
+  feed monitor persists it (non-goal guard)
 - Backfill: a plain upload (no "Streamed" text, no badge, just "3 weeks ago") is
   classified `vod`/`coarse` — not left `unknown`, not probed
-- Backfill: an item with **no** age text is left `unknown` and **is** probed, so a
-  badge-DOM change costs probes, never a missed stream
+- **Backfill: a LIVE item whose renderer carries elapsed text** (e.g. `"Started
+  streaming 2 hours ago"`, which `relativeAgeRe` matches) is left `unknown` and
+  **is** probed — not written as a terminal `vod`. This is the badge-short-circuit
+  guard; without it the `/streams` tab silently retires live streams.
 - `itemAge` returns a unit-preserving age so the coarse skew is computable
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
 - Top-N counts non-term-matching items, **and** a non-term-matching item is never
@@ -1314,7 +1372,10 @@ is still correct; only the file is wrong. This matters here because Part 2 adds 
 **Phase 1** — independently shippable, fixes the bug:
 schema v16 (`feed_items`, `channel_state`, both indexes), precision-guarded upsert,
 top-N query, discovery/refresh probe split with the freshness rule, terminal
-durable per-item probe backoff (probe_fails/next_probe_at), established gate,
+durable per-item probe backoff (`probe_fails`/`next_probe_at`), a **probe-outcome
+discriminator on `ProcessYouTubeVideoResult`** (today `probed`/`errored`/`cooldown`
+all collapse to `ShouldProcess=false`; it supplies both the FRESH predicate and the
+backoff trigger, and keeps DECAPI out of the store), established gate,
 channel-removal prune,
 **a unit-preserving `itemAge` signature** (today it discards the unit, making the
 coarse skew uncomputable — propagates to `MembershipVideo.Age` and
