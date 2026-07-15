@@ -147,21 +147,74 @@ is therefore **false**, and every rule below exists because it is false:
 video, and `parsePlayabilityStatus` (`internal/youtube/player_api_parsing.go:332-375`)
 already decodes it into exactly the distinction this design needs:
 
-| Situation | `PlayabilityError` |
-|---|---|
-| **Genuine** upcoming stream (`LIVE_STREAM_OFFLINE`, "live event will begin") | `ok` — the helper deliberately suppresses the error (`:349-351`) |
-| Members-only video, no cookies (`LOGIN_REQUIRED` + "member"/"join") | `members_only` (`:357-359`) |
-| Login required, age-gated, private, region-blocked, unavailable | the corresponding non-`ok` value |
+| Situation | `PlayabilityError` | Trusted? |
+|---|---|---|
+| Members-only video, no cookies (`LOGIN_REQUIRED` + "member"/"join") | `members_only` (`:357-359`) | **denied** |
+| Login required, not member-specific | `login_required` | **denied** |
+| Genuine upcoming (`LIVE_STREAM_OFFLINE`, "live event will begin") | `ok` (`:349-351`) | trusted |
+| Premiere detected by `videoDetails`/`liveStreamability`, not playability | often **not** `ok` (`:434-454`) | trusted — see (a) |
+| Status block absent, unmatched reason, or an unknown status code | `unknown` (`:333-335`, `:378`, `:385`, `:386-388`) | trusted — see (b) |
+| Age-restricted | `age_restricted` | trusted — the download path recovers it |
 
 So a probe that returns `upcoming` with `PlayabilityError == members_only` did **not
 observe an upcoming stream** — it observed a locked door and guessed. A probe that
 returns `upcoming` with `ok` really did.
 
-The rule follows — and it must be **narrow**, because the lie has exactly one shape:
+The rule follows — and it must be **minimal**. Not "narrow-ish": minimal, naming the
+two values that can only mean *"you were refused"*:
 
 ```
-denied  ⇔  StreamStatus == 'upcoming'  AND  PlayabilityError != ok
+denied  ⇔  StreamStatus == 'upcoming'
+           AND PlayabilityError IN ('members_only', 'login_required')
 ```
+
+**Everything else is trusted, including `unknown`.** Two independent reasons, both
+verified in code, and both fatal to the broader rules this went through first:
+
+**(a) `ok` does not mean "genuine" — it means `status` was literally `"OK"`.**
+`classifyStream` reaches `upcoming`/`live` through five branches, and `:429`
+*early-returns* on `isUpcomingPlayability`. So `:434`, `:439`, `:442`, `:448`, `:454`
+are reachable **only when playability did *not* say "upcoming"** — and
+`parsePlayabilityStatus` yields `ok` from exactly two sites
+(`isUpcomingFromPlayability` `:350-351`, and `status == "OK"` `:355-356`). Those four
+extra branches exist **precisely because the playability signal was found
+insufficient**; `player_api_parsing.go:414-419` documents the case in the very client
+the anonymous probe uses:
+
+> "Some probes (**notably ANDROID_VR on unpublished premieres**) return this without
+> a full microformat or `videoDetails.isUpcoming` flag — the raw fallthrough would
+> misclassify those as `not_a_stream`. Detect it independently."
+
+A rule of "trust `upcoming` only when playability is `ok`" therefore **denies genuine
+premieres detected by the branches that exist to catch what playability misses** —
+goal 3, violated from the opposite side, silently and forever.
+
+**(b) `unknown` is not a refusal.** `parsePlayabilityStatus` returns it when the
+status block is **absent** (`:333-335`), on an unmatched `UNPLAYABLE`/`ERROR` reason
+(`:378`, `:385`), and from `default:` — **any status code YouTube adds that we do not
+know** (`:386-388`). It means *"we could not interpret the answer"*. Treating that as
+a refusal means one new YouTube status code silently converts every affected stream
+to `denied`-forever — strictly worse than the `relativeAgeRe` fragility this spec
+already flags.
+
+**And the codebase already disagrees with the broad reading.**
+`isTerminalPlayability` (`internal/worker/stream_processor_youtube.go:27-35`)
+classifies `members_only`/`login_required`/`age_restricted` as **non-terminal** —
+only `private`/`unavailable`/`region_blocked` are terminal, because "only states that
+no amount of waiting or re-auth can fix are terminal". And the download path recovers
+age-restricted content via `web_embedded` (`player_api_strategy.go:150-160`,
+`:246-258`). Non-`ok` is a **routing signal** there, not a verdict. The probe is
+single-client (`ProbeVideoStatus` = ANDROID_VR only, `:20-22`) and has none of those
+fallbacks, so promoting its playability to a verdict claims more than it knows.
+
+`members_only` and `login_required` are the exceptions: they cannot mean anything but
+"authenticate to see this", and paired with the classifier's `upcoming` guess they
+are exactly the 2.7.2 signature. Denying them refuses nothing we could have had —
+without cookies the content is unreachable regardless.
+
+**Which way to be wrong.** Too broad silently discards real streams; too narrow
+leaves a phantom `upcoming` job that is visible in the UI and loses nothing. Goal 3
+decides: be minimal.
 
 A `denied` result is not FRESH, writes no status, and creates no job — it is retried
 next cycle, exactly like `errored`. This requires surfacing the field, which
@@ -660,8 +713,17 @@ reachable by any archival path:
 | `vod` | `assumed` | no | no | no | **stuck** |
 | `not_a_stream` | `assumed` | no | no | no | **stuck** |
 
-Every other combination is either probed (so it can change) or rankable (so it can
-be archived). `unknown`+`assumed` is fine — it is probed. `upcoming`/`live`+`assumed`
+Every other combination is either probed (so it can change **when the world
+changes**) or rankable (so it can be archived).
+
+**`denied` qualifies that premise, and the qualification matters.** A `denied` probe
+*succeeds* at the HTTP level and is discarded, so a row denied every cycle — a
+members video on a channel we hold no cookies for — is probed forever and never
+changes. That is not a design sink: it changes the instant cookies arrive, which is
+also the instant the content becomes archivable at all. It is excluded from ranking
+(`assumed`), so it evicts nothing; it is never archived, which is correct, because we
+have never seen it. The row is a faithful record of *knowing nothing*, and the only
+thing that can end that is access — not a probe. `unknown`+`assumed` is fine — it is probed. `upcoming`/`live`+`assumed`
 are fine — they are cap-exempt. The only sinks are a terminal status paired with a
 fabricated date, and forbidding that pairing is precisely this invariant. Nothing
 else needs guarding, and nothing less would do.
@@ -750,8 +812,11 @@ probed every cycle, so it recovers the moment YouTube answers.
 
 **The honest cost:** excluding rows shrinks the population the top-N is computed
 over, so while an `assumed` row is pending it is possible to admit an item that is
-truly rank N+1. ("Pending" is bounded precisely because every `assumed` row is
-probed — terms notwithstanding.) This is a real trade, not a free win — but it is the right
+truly rank N+1. "Pending" is normally one cycle, because every `assumed` row is
+probed (terms notwithstanding) — **except a persistently `denied` row, which stays
+pending for as long as we lack access.** That is correct rather than unfortunate: an
+item we are refused has no knowable date, so ranking it would be the guess goal 4
+forbids. This is a real trade, not a free win — but it is the right
 direction. Over-admitting by one position archives one slightly-older item; letting
 a fabricated date rank *evicts real content* and, at `N=3`, can freeze a channel.
 The window is normally one cycle (the discovery probe promotes the row to `exact`
@@ -842,16 +907,27 @@ because the membership tab yields `itemAge == 0` ⇒ `assumed`/`unknown`. So the
 and defers exactly the rows where the same transient fault prevented success. It
 guards everything except the case it was written for.
 
-**Accepted for Phase 1: no backoff.** A row that can never be probed is re-probed
-every cycle. Today's escape — scrolling out of RSS's 15-item window — is gone,
-because reading the store is what fixes the original bug, so this *is* a real
-regression. It is also a small one: it costs one `/player` call per cycle per
-permanently-dead row, and rows that die before ever being successfully probed are
-rare. Correctness and reliability outrank efficiency here, and every bounding scheme
-tried above bought efficiency with a chance of losing a stream.
+**Accepted for Phase 1: no backoff.** A row that can never be usefully probed is
+re-probed every cycle. Today's escape — scrolling out of RSS's 15-item window — is
+gone, because reading the store is what fixes the original bug, so this *is* a real
+regression. It costs one `/player` call per cycle per such row.
+
+Two classes qualify, and the second is **not** rare:
+
+- **Dead IDs** — deleted before ever being probed successfully. Genuinely rare.
+- **Persistently `denied` rows** — a members video on a channel we hold no cookies
+  for. By design, permanent while access is missing, and bounded by how much members
+  content such a channel has (tens, not thousands). The membership probe gate removes
+  most of these before they cost anything: with `membershipActive()` false the probe
+  is skipped outright, so only rows whose `source` is stale reach a real request.
+
+Correctness and reliability outrank efficiency here, and every bounding scheme tried
+above bought efficiency with a chance of losing a stream. `last_listed_at` (below)
+retires both classes for the same reason and with the same evidence.
 
 **The Part 2 fix, deferred deliberately.** `last_listed_at` is the correct signal: a
-row that **no listing has mentioned for N days** *and* whose probes fail is gone —
+row that **no listing has mentioned for N days** *and* whose probes fail or are
+denied is gone (or permanently out of reach) —
 which is a fact about YouTube's catalog, not a guess about a probe. It carries no
 miss risk, because a row that still appears in any listing is never deferred. It
 needs the listing-coverage data only the three-tab scan provides, so it belongs to
@@ -899,13 +975,14 @@ Instead `ProcessYouTubeVideoResult` gains an **outcome** discriminator:
 ```
 feed path (probeAndClassify) — four outcomes:
   probed      — a probe ran, returned metadata, PlayabilityError == ok
-  denied      — StreamStatus=='upcoming' AND PlayabilityError != ok: YouTube
-                refused us, and 'upcoming' is the one status the classifier
-                GUESSES when it gets no formats (player_api_parsing.go:454).
+  denied      — StreamStatus=='upcoming' AND PlayabilityError IN
+                ('members_only','login_required'): the only two values that can
+                only mean "authenticate to see this", paired with the one status
+                the classifier GUESSES when it gets no formats (:454).
                 Not FRESH; writes no status; retried next cycle.
-                NARROW BY DESIGN: a vod/post_live with a non-ok playability came
-                back WITH formats, so it is grounded — trust it, or we refuse
-                content we can download.
+                MINIMAL BY DESIGN: `unknown` and `age_restricted` are TRUSTED —
+                see "A probe that lacks what it needs". Too broad silently
+                discards real streams; too narrow leaves a visible phantom job.
   errored     — a probe ran and failed                     (utils.go:269-294)
   cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
 
@@ -922,7 +999,7 @@ rather than rely on the reader:
 | `utils.go:249` | not yet assigned | `passthrough` |
 | `utils.go:261` | not yet assigned | `cooldown` |
 | `utils.go:294` | zero value (`err != nil`) | `errored` |
-| `utils.go:315`, `:332`, `:350` | valid | `probed`, or `denied` iff `upcoming` + non-`ok` playability |
+| `utils.go:315`, `:332`, `:350` | valid | `probed`, or `denied` iff `upcoming` + `members_only`/`login_required` |
 
 `meta` is assigned at `:268`, so the first two returns precede it entirely and the
 error return holds only its zero value. Reading `StreamStatus` on any non-`probed`
@@ -1023,7 +1100,12 @@ in-scope AND NOT HasProcessed AND term-match AND status IN (vod, not_a_stream)
     → re-probe now, then job on the fresh result (denied/errored/cooldown ⇒ no job)
 ```
 
-**The membership gate applies here too, and omitting it is a job-creating bug.**
+**The membership gate applies here too.** With the `denied` rule in place this is
+now an *efficiency* control, not a correctness one — a cookieless probe of members
+content returns `members_only`, which is `denied`, so no job results either way. The
+gate's job is to skip a request we already know will be refused. The reasoning below
+is retained because it is what the gate was *derived* from, and because it is exactly
+what happens if the `denied` rule is ever weakened:
 `ProbeVideoAuth` carries no cookie check — `cmd/moombox/monitor_callbacks.go:188-198`
 calls `ProbeVideoStatusAuthenticated` unconditionally — so with no cookies the
 "authenticated" probe still *runs*, gets no formats, and misclassifies the video as
@@ -1160,12 +1242,14 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                      └─ fires whenever METADATA came back — NOT gated on
                         ShouldProcess, which is false for a successful probe
                         of a non-jobbable item (utils.go:314, :333)
-        denied     ⇒ status=='upcoming' AND PlayabilityError != ok — we were
-                     refused, and 'upcoming' is the classifier's guess when it
-                     gets no formats. Store untouched; NOT fresh; retry next
-                     cycle. The backstop that depends on nothing we stored —
-                     not `source`, not cookie state.
-                     (A genuine upcoming stream returns ok, so it is unaffected.)
+        denied     ⇒ status=='upcoming' AND playability IN (members_only,
+                     login_required) — the unambiguous "authenticate to see this",
+                     paired with the classifier's no-formats guess. Store
+                     untouched; NOT fresh; retry next cycle. The backstop that
+                     depends on nothing we stored — not `source`, not cookies.
+                     `unknown`/`age_restricted` are TRUSTED: a premiere detected
+                     via videoDetails/liveStreamability rather than playability
+                     is usually NOT ok, and denying it would lose it.
         errored    ⇒ store untouched; NOT fresh; retry next cycle
         cooldown   ⇒ probe skipped; NOT fresh; retry next cycle
         (no passthrough on this path — probeAndClassify requires a wired probe)
@@ -1184,7 +1268,8 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                             skip if source='membership' AND NOT membershipActive()
                               └─ ProbeVideoAuth has NO cookie guard, so without
                                  cookies it RUNS, gets no formats, and returns
-                                 'upcoming' — FRESH, and jobbed as cap-exempt
+                                 'upcoming' — which `denied` intercepts
+                                 (members_only). Gate = skip a doomed request.
                             → refresh-probe, WRITE THE RESULT BACK to the store,
                               then re-decide on the FRESH status:
                                  live/upcoming    → job (cap exempt)
@@ -1436,7 +1521,8 @@ Traced properly, `source='rss'` on a members video means:
    no membership gate applies — the row does not look like members content.
 2. `feed.go:743-746`: an anonymous probe of members-only content "gets no formats
    and the classifier misfires it as **upcoming**". It returns no error.
-3. Outcome is `probed` ⇒ **FRESH**. The row becomes `upcoming`.
+3. Outcome would be `probed` ⇒ **FRESH** (this is what the `denied` rule now
+   intercepts: `members_only` ⇒ `denied` ⇒ no job). The row becomes `upcoming`.
 4. `upcoming` is **cap-exempt** ⇒ in scope regardless of rank ⇒ `job iff FRESH` ⇒
    **job created**, bypassing both the cap and `include_non_live_content`.
 
@@ -2093,8 +2179,9 @@ Then:
   trade one lie for one silence.
 - **A cookie lapse must not create a job either.** Members `vod` rows in scope (e.g.
   after raising `max_feed_items`) + no cookies ⇒ the refresh probe must **not** fire.
-  Ungated it succeeds with `upcoming` (no formats ⇒ misclassified), which is FRESH,
-  which jobs it cap-exempt — and `AddToHistory` then blocks the real VOD forever.
+  Ungated it still issues a pointless request; the `denied` rule stops the result
+  becoming a job. Assert **no probe is issued** — the job assertion cannot
+  distinguish gated from ungated now, and would pass vacuously.
 - **A cookie lapse must NOT move scope.** Arrange members rows at ranks 1-3 and
   public VODs at 4-6, then make `HasAuthCookies()` false for one cycle: the top-3
   must still be the members rows, and **no public VOD may be jobbed**. Gating the
@@ -2154,8 +2241,10 @@ Then:
   next membership listing, even though its stored `exact` date beats the listing's
   `coarse`.** The precision guard must not gate `source`. Regression test for the
   phantom-upcoming misfire: left as `rss`, it is probed anonymously, lies
-  `upcoming`, and is jobbed cap-exempt — bypassing the cap AND
-  `include_non_live_content`.
+  `upcoming` — which `denied` intercepts. Assert the **`denied` outcome and the
+  absent job**, not "source flipped": this is the case where `source` provably
+  cannot flip (no membership fetch ⇒ no sighting), which is exactly why the
+  playability rule, not the gate, is what saves it.
 - A members video that becomes public flips `source` to `rss` and is probed
   anonymously thereafter
 - **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
