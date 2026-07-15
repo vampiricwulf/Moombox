@@ -802,7 +802,7 @@ Note: `buildMenuItems()`/`dispatchAction()` live in `internal/tui/app_actions.go
 
 | Failure | Behavior |
 |---|---|
-| RSS 404/500 | Membership still runs; store untouched; `last_rss_ok_at` keeps prior value so trust persists |
+| RSS 404/500 | Membership still runs and still writes its items. No RSS-sourced rows are added, and previously-stored ones remain — so scope is unchanged. `last_rss_ok_at` keeps its prior value, so trust persists. **This is the bug's failure mode, now inert.** |
 | Membership fetch fails | Debug log only — unchanged; never marks RSS unhealthy |
 | Probe fails | Existing `MetadataTracker` give-up + `ProbeCooldown`, untouched |
 | Backfill fails mid-scan | Cursor saved, `backfilled_at` stays NULL, retries next startup |
