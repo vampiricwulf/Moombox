@@ -26,7 +26,7 @@ carve-out to repair the rows that rule stranded.
 | 3 | **No retirement, no `last_listed_at`.** It cannot tell "unreachable" from "we stopped looking" — a cookie expiry gates the fetch and the probe together, eroding the members catalogue | ✅ applied |
 | 4 | **Keep `denied`; file `classifyStream:454` separately.** The producer bug stays fixed-in-place until its own change | ✅ applied |
 | 5 | **Backfill is strictly serial across channels**, one at a time, globally, hours of wall-clock permitted, never gated on idleness | ✅ applied |
-| 6 | **Scope is an N-day window, not a top-N row count.** A date cut never splits a coarse lump, which is what the total order existed to handle | ⚠️ "The in-scope query", "Coarse dates must skew old" (the skew's safety property **inverts** under a date cut), `idx_feed_items_rank` |
+| 6 | **Scope is an N-day window, not a top-N row count.** A date cut never splits a coarse lump, which is what the total order existed to handle | ⚠️ "The in-scope query", `idx_feed_items_rank`. Skew: ✅ applied — inverted to **skew-new**, and it deletes the unit-preserving `itemAge` refactor from Phase 1 |
 | 7 | **M-rows is throughput, not depth.** Everything inside the window is archived eventually; M paces it, most-recent-first, and a completed job frees a slot the next item fills. Per channel | ⚠️ every "top-N"/"cap slot"/"archival depth" statement in the doc |
 | 8 | **Defaults: 3 days, 3 rows.** | ⚠️ Documentation Updates |
 | 9 | **`num_parallel_downloads` becomes VOD-only** — live/upcoming must not consume a download slot. **Folded into this spec** | ⚠️ the "no worker changes" scope assumption |
@@ -587,60 +587,70 @@ when a probe returns a better one, mirroring today's rule at
 `internal/monitor/utils.go:341-344` that an `"Unknown Title"` placeholder must not
 overwrite a real feed title.
 
-### Coarse dates must skew old, not new
+### Coarse dates skew new, and the probe adjudicates
 
-`itemAge` (`internal/youtube/channel_membership.go:220-257`) truncates: `"3 weeks
-ago"` becomes exactly `21d`, `"1 year ago"` exactly `365d`. The true age is a
-*range* — `[21d, 28d)` and `[365d, 730d)` respectively. Storing `now - Age` picks
-the **newest instant consistent with the text**, biasing every coarse date newer by
-up to 6 days (weeks), 29 days (months), or 364 days (years).
+**A coarse date is an upper bound on recency: the item is this new *at most*.**
 
-That bias runs in the dangerous direction: newer means higher rank, and higher rank
-means *admitted*. It is the same class of error as the bug being fixed, just
-smaller — a coarse members VOD can outrank genuinely newer public content on a
-low-volume channel.
+`itemAge` (`internal/youtube/channel_membership.go:220-257`) truncates — `"1 week
+ago"` is displayed for anything 7 to 13 days old, `"1 year ago"` for anything from
+365 to 729 days. It returns `n * unit` (`:252`), the **lower bound of the true age**,
+so `now - itemAge()` is the **newest instant consistent with the text**.
 
-So coarse dates store the **oldest** instant consistent with the text —
-`now - Age - unit` (the exclusive upper bound of the range):
+That is exactly what the window wants, and it needs no new code:
 
 ```
-"3 weeks ago"  → now - 28d   (not now - 21d)     Age=21d, unit=7d
-"1 year ago"   → now - 730d  (not now - 365d)    Age=365d, unit=365d
+published      = now - itemAge(item)      -- the naive formula, already correct
+date_precision = 'coarse'                 -- meaning: this date, or older
 ```
 
-**The skew applies to `coarse` only.** It is defined in terms of the matched unit,
-and an `assumed` row has no matched unit — `Age = 0` is the *absence* of a parse,
-not a measurement of zero. `assumed` rows keep `published = now` and are excluded
-from the top-N query anyway, so the skew never applies to them. Live and upcoming
-items likewise carry `Age = 0` and are cap-exempt, so nothing about their ordering
+**Why new is the safe direction here — and why an earlier draft said the opposite.**
+The skew direction is a function of the cap semantics, not of the parser:
+
+| Cap | A too-**new** guess | A too-**old** guess | Safe skew |
+|---|---|---|---|
+| top-N rank *(rejected)* | **promotes** an old VOD into scope — the Jerry shape | sinks it harmlessly | old |
+| N-day window *(chosen)* | admits it to the window, where a **mandatory probe** corrects it | **silently excludes** it — no probe, no job, no trace | **new** |
+
+Under a date cut, exclusion is the only unrecoverable outcome, because an excluded
+row is never probed and so never gets the exact date that would have included it.
+Inclusion costs a probe. So every item that *could* fall inside the window does, and
+**nothing is ever excluded on a date we have not verified**.
+
+Worked example, `archive_window_days = 7`:
+
+| Displayed | Stored | True age | Outcome |
+|---|---|---|---|
+| `6 days ago` | `now - 6d` | [6d, 7d) | inside → probe → job |
+| `1 week ago` | `now - 7d` | **[7d, 14d)** | inside (boundary) → probe → job **only if truly ≤ 7d** |
+| `2 weeks ago` | `now - 14d` | [14d, 21d) | outside → never probed ✓ |
+
+The `1 week ago` bucket is the *straddling bucket*: seven days of content collapsed
+onto one timestamp, all of it admitted, most of it dropped once probed. That is the
+design working, not leaking.
+
+**The over-inclusion is paid once per item, not per cycle.** A straddling item is
+probed, its exact date is written back by the precision guard, and the row falls out
+of the window permanently. Cost = the size of the straddling bucket, once. At the
+3-day default that bucket is `3 days ago` — one day of content. It scales with the
+window: at 30 days, `1 month ago` covers [30d, 60d), so a month of content takes one
+probe each before dropping out. Bounded, and self-extinguishing.
+
+**This deletes a Phase 1 refactor.** The rejected skew-old rule needed `now - Age -
+unit`, and the unit is **not recoverable** from `itemAge`'s return value — `504h` is
+either `"3 weeks"` or `"21 days"`; identical durations, different skews. That forced
+a signature change across `itemAge`, `MembershipVideo.Age`, and `membershipCandidates`'
+`v.Age > 0` test at `feed.go:673`. Skew-new wants the truncated lower bound, which is
+what the function already returns. **Do not change `itemAge`.**
+
+**The skew applies to `coarse` only.** An `assumed` row has no matched unit — `Age =
+0` is the *absence* of a parse, not a measurement of zero — and live/upcoming items
+carry `Age = 0` by the badge short-circuit (`:227-231`), so nothing about them
 depends on this.
 
-**`itemAge` cannot express this today — changing it is Phase 1 work.** It returns a
-bare `time.Duration` (`channel_membership.go:252`: `return time.Duration(n) * unit`)
-and **discards the unit**. The unit is not recoverable from the result: `504h` is
-either `"3 weeks"` or `"21 days"`, and `24h` is either `"1 day"` or `"24 hours"` —
-identical durations, different skews. A naive implementation reading only this
-spec's `now - Age - unit` would guess `now.Add(-2 * age)`, which is correct for
-weeks and wrong for months and years.
-
-So `itemAge` must return the **upper bound of the consistent range** (or the unit
-alongside the age) rather than the truncated lower bound. That propagates to
-`MembershipVideo.Age`, and to `membershipCandidates`' `v.Age > 0` test at
-`feed.go:673` — which keeps working, since the upper bound is zero exactly when the
-age is. This is a signature change across three files and must be budgeted, not
-discovered.
-
-**Two zeros, one meaning — almost.** `itemAge` returns `0` from two branches: the
-explicit live-badge check (`:227-231`) and the unrecognized fallback (`:256`). This
-spec's `assumed` framing ("a fabricated date") is only accurate for the second. For
-a genuinely live item, `now` is a *correct* date, not a fabrication. It makes no
-behavioral difference — both are excluded from ranking and both are probed — but the
-justification text should not be read as claiming live items are mis-dated.
-
-Errors then bias toward *exclusion*, which is the safe direction for an
-archival-depth cap. This costs nothing real: ordering among old content does not
-affect what gets archived, live/upcoming are cap-exempt regardless of date, and any
-coarse item that matters is promoted to `exact` by its discovery probe.
+**Residual, named.** If a probe classifies a straddling item as past but supplies no
+date, the terminal-status invariant holds the row at `unknown`: it never jobs, but it
+keeps its coarse date, stays inside the window, and is re-probed every cycle.
+Bounded by the straddling bucket, and it resolves the moment a probe returns a date.
 
 ### Descriptions and term matching
 
@@ -912,8 +922,11 @@ VideoProbeResult.PublishedAt   (new, internal/monitor)
 + both monitor_callbacks.go wiring sites
 ```
 
-This is a cross-package signature change of the same shape as the unit-preserving
-`itemAge` change, and it must be budgeted, not discovered.
+This is a cross-package signature change and it must be budgeted, not discovered. It
+is now the **only** such refactor in Phase 1 — the unit-preserving `itemAge` change
+was cut with the skew-old rule (see "Coarse dates skew new") — and it is also the
+load-bearing one: under an N-day window the probe's date is what adjudicates every
+straddling item, so without it the whole coarse bucket is admitted and never resolved.
 
 **`uploadDate` is day-granular, so the ladder needs a rung for it.** Calling a
 date-only value `exact` alongside RSS's second-granular `<published>` would
@@ -2524,7 +2537,15 @@ Then:
   must still be jobbed. This is the goal-3 regression guard.
 - A stale stored `live` whose probe errored this cycle produces **no** job
 - With `probe_cooldown > 0`, a cooldown-skipped item produces **no** job
-- Coarse dates skew old: `"3 weeks ago"` stores `now-28d`, not `now-21d`
+- **Coarse dates skew new:** `"1 week ago"` stores `now - 7d`, not `now - 14d`, so
+  the whole [7d, 14d) bucket is admitted to a 7-day window rather than excluded
+- **A straddling item is admitted, probed, and then dropped on its exact date.** With
+  a 7-day window, an item displayed `"1 week ago"` whose probe returns a true age of
+  10 days is **never jobbed** — and the probe's exact date is written back, so it
+  falls out of the window and is not re-probed on the next cycle
+- **Nothing is excluded on an unverified date.** An item displayed `"2 weeks ago"`
+  (stored `now - 14d`) is outside a 7-day window and must **never** be probed — its
+  newest possible age already exceeds the window
 - `membership_discovery = false` ⇒ backfill writes no members rows, and none are
   jobbed via the store
 - **A denied probe never becomes a job, whatever `source` says.** The decisive
@@ -2654,7 +2675,9 @@ Then:
   streaming 2 hours ago"`, which `relativeAgeRe` matches) is left `unknown` and
   **is** probed — not written as a terminal `vod`. This is the badge-short-circuit
   guard; without it the `/streams` tab silently retires live streams.
-- `itemAge` returns a unit-preserving age so the coarse skew is computable
+- **`itemAge` is unchanged** — a regression test pinning `"1 week ago" → 168h` (the
+  truncated lower bound) guards against a well-meaning "fix" to the unit-preserving
+  form the rejected skew-old rule needed
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
 - Top-N counts non-term-matching items. A non-term-matching item with a real date
   is never probed (matching today's `HasActiveJob` → terms → probe order) — **but a
@@ -2740,8 +2763,10 @@ explanations of the exact mechanism being removed, and would be left describing 
 cap that no longer exists:
 
 - `internal/youtube/channel_membership.go:206-219` — *"it is ranked by that age so
-  old VODs sink and get **crowded out of the cap**"* (also the `MembershipVideo.Age`
-  doc, which changes with the unit-preserving signature)
+  old VODs sink and get **crowded out of the cap**"*. The `MembershipVideo.Age` doc
+  needs a *comment* change but **no signature change**: it must now state that the
+  value is the truncated **lower bound** of the true age, which is what makes
+  `now - Age` the newest-possible date the window relies on
 - `internal/monitor/feed.go:660-669` — *"letting them **occupy shared cap slots**
   would only crowd out public videos that CAN be jobbed"*
 - `internal/monitor/feed.go:415-424` — `checkChannel`'s merge/cap doc block, which
@@ -2886,8 +2911,10 @@ thing that makes the new label true.
   **No date exists in the probe chain today** — without this, an `assumed` row can
   never be promoted and members content becomes permanently unarchivable. Also adds
   the `day` rung to the precision ladder and the guard's `CASE`.
-- **Unit-preserving `itemAge`** — today it discards the unit, making the coarse skew
-  uncomputable. Propagates to `MembershipVideo.Age` and `membershipCandidates`.
+- ~~**Unit-preserving `itemAge`**~~ — **cut**. It existed only to compute the
+  rejected skew-old rule's `now - Age - unit`. Skew-new uses the truncated lower
+  bound `itemAge` already returns, so the function, `MembershipVideo.Age`, and
+  `membershipCandidates` are all untouched. See "Coarse dates skew new".
 - **An injectable RSS fetch seam + a new `feed_test.go`** — `checkChannel` calls
   `fm.fetchFeed` directly and has no test, so the headline regression test is not
   writable without this.
