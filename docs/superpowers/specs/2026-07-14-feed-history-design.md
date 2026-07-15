@@ -171,12 +171,21 @@ So a probe that returns `upcoming` with `PlayabilityError == members_only` did *
 observe an upcoming stream** — it observed a locked door and guessed. A probe that
 returns `upcoming` with `ok` really did.
 
-**The rule above is the only normative statement of `denied` in this document.**
-Everything else — the outcome list, the flow pseudocode, the contract table, the
-tests — derives from it and must not restate it. An earlier draft stated it twice,
-verbatim, twenty lines apart, and the two copies drifted: one was corrected to the
-minimal form while the other kept listing `age_restricted`/`…` as denied. Two
-statements of one rule is two rules.
+**The block above is the canonical `denied` predicate.** The table below *derives*
+it, in this same section, under the reader's eye. Every use site elsewhere — the
+outcome list, the flow pseudocode, the contract table, the tests — states only what
+`denied` *does* and refers here for what it *is*. No use site writes the predicate.
+
+That split is deliberate, and it is the fix for a defect this document generated five
+times. An earlier draft wrote the predicate in five places. They drifted exactly as
+duplicated rules always do: one copy was corrected to the minimal form while another
+kept listing `age_restricted`/`…` as denied — a live goal-3 loss — and each round
+patched the copy it happened to read. Two statements of one rule is two rules; five
+is five.
+
+Predicate here, behaviour at the use site. A reader coding the flow needs to know
+`denied` writes nothing and retries; they do not need the predicate inlined, and
+inlining it is what let the copies disagree.
 
 **Why minimal, and why everything else is trusted — including `unknown`.** Two
 independent reasons, both verified in code, and both fatal to the broader rules this
@@ -303,7 +312,7 @@ YouTube actually returned. So:
 **`age_restricted` is trusted, and the list above is exhaustive — no "…".** An
 earlier draft wrote `members_only`/`login_required`/`age_restricted`/… here, which is
 "any non-`ok`" — the rule the paragraph below rejects, contradicting the rule stated
-twice above. It is not academic: `PlayabilityAgeRestricted` comes from
+above. It is not academic: `PlayabilityAgeRestricted` comes from
 `LOGIN_REQUIRED` + "age" (`:361-363`) and `AGE_VERIFICATION_REQUIRED` (`:379-380`),
 neither of which satisfies `isUpcomingFromPlayability`, so an age-restricted premiere
 carrying `videoDetails.isUpcoming` and no formats reaches guard `:439` ⇒ `upcoming` +
@@ -1059,14 +1068,9 @@ feed path (probeAndClassify) — four outcomes:
                 rule, and pairing it with the current `denied` leaves
                 upcoming+unknown premieres and age_restricted VODs in NEITHER
                 bucket — undefined, never FRESH, never jobbed.
-  denied      — StreamStatus=='upcoming' AND PlayabilityError IN
-                ('members_only','login_required'): the only two values that can
-                only mean "authenticate to see this", paired with the one status
-                the classifier GUESSES when it gets no formats (:454).
-                Not FRESH; writes no status; retried next cycle.
-                MINIMAL BY DESIGN: `unknown` and `age_restricted` are TRUSTED —
-                see "A probe that lacks what it needs". Too broad silently
-                discards real streams; too narrow leaves a visible phantom job.
+  denied      — YouTube refused us and the classifier was guessing.
+                Predicate: see "The authoritative fix" — do not restate it here.
+                Behaviour: NOT FRESH; writes no status; retried next cycle.
   errored     — a probe ran and failed                     (utils.go:269-294)
   cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
 
@@ -1083,7 +1087,7 @@ rather than rely on the reader:
 | `utils.go:249` | not yet assigned | `passthrough` |
 | `utils.go:261` | not yet assigned | `cooldown` |
 | `utils.go:294` | zero value (`err != nil`) | `errored` |
-| `utils.go:315`, `:332`, `:350` | valid | `probed`, or `denied` iff `upcoming` + `members_only`/`login_required` |
+| `utils.go:315`, `:332`, `:350` | valid | `probed`, or `denied` (predicate: see "The authoritative fix") |
 
 `meta` is assigned at `:268`, so the first two returns precede it entirely and the
 error return holds only its zero value. Reading `StreamStatus` on any non-`probed`
@@ -1326,14 +1330,10 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                      └─ fires whenever METADATA came back — NOT gated on
                         ShouldProcess, which is false for a successful probe
                         of a non-jobbable item (utils.go:315, :332)
-        denied     ⇒ status=='upcoming' AND playability IN (members_only,
-                     login_required) — the unambiguous "authenticate to see this",
-                     paired with the classifier's no-formats guess. Store
-                     untouched; NOT fresh; retry next cycle. The backstop that
-                     depends on nothing we stored — not `source`, not cookies.
-                     `unknown`/`age_restricted` are TRUSTED: a premiere detected
-                     via videoDetails/liveStreamability rather than playability
-                     is usually NOT ok, and denying it would lose it.
+        denied     ⇒ (predicate: see "The authoritative fix")
+                     Store untouched; NOT fresh; retry next cycle. The backstop
+                     that depends on nothing we stored — not `source`, not
+                     cookies.
         errored    ⇒ store untouched; NOT fresh; retry next cycle
         cooldown   ⇒ probe skipped; NOT fresh; retry next cycle
         (no passthrough on this path — probeAndClassify requires a wired probe)
