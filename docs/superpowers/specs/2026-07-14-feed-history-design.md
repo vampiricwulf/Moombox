@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
     catalog_pos  INTEGER NOT NULL DEFAULT 0,
     source       TEXT NOT NULL,           -- rss|membership|videos|streams
     status       TEXT NOT NULL,           -- unknown|upcoming|live|vod|not_a_stream
+                                          -- probe 'post_live' NORMALIZES to 'vod'
     first_seen   TEXT NOT NULL,
     PRIMARY KEY (channel_id, video_id)
 );
@@ -440,6 +441,8 @@ should take the **best** source per status rather than the safest single one:
 ```
 status vod / post_live   → liveBroadcastDetails.startTimestamp   → precision 'exact'
                             (the stream's ACTUAL start; RFC3339, second-granular)
+                         → ELSE uploadDate / publishDate         → precision 'day'
+                            (fallback — see below; must not be skipped)
 status not_a_stream      → microformat uploadDate / publishDate  → precision 'day'
                             (date-only, e.g. "2025-06-15")
 status upcoming / live   → no ranking date stored
@@ -448,12 +451,48 @@ status upcoming / live   → no ranking date stored
                              ranking anyway, so nothing needs it)
 ```
 
-`liveBroadcastDetails` carries `startTimestamp` **and** `endTimestamp` for a finished
-stream (see the fixture at `player_api_parsing_test.go:317-318`), and `VideoInfo`
-already extracts `EndTimestamp` from that same map (`player_api_parsing.go:87-90`) —
-so the precise start time is present and already reachable for exactly the status
-that needs it. Taking `uploadDate` for a VOD instead would discard a second-granular
-timestamp in favour of a date, for no benefit.
+**The `vod` fallback is not optional.** If a past stream's response carries no
+`liveBroadcastDetails`, a rule that only reads `startTimestamp` yields no date at
+all — and the row then keeps whatever precision it had. For a members item first
+seen without an age text that is `assumed`, which reinstates the exact dead-end this
+section exists to close: `vod` + `assumed` is terminal *and* unrankable. Falling
+back to `uploadDate` costs nothing and removes the cliff.
+
+**`post_live`, not `vod`, is the status that reliably has `startTimestamp`** — and
+getting this backwards is what makes the fallback mandatory. `classifyStream`
+(`player_api_parsing.go:391-461`) makes the two mutually exclusive:
+
+```go
+isPostLiveDVR := lbd != nil && getStr(lbd, "endTimestamp") != "" && !isLiveNow  // :407
+if lbd == nil && !isLiveContent && !isPremiere { return StreamNotAStream }      // :451
+if !hasFormats && (lbd != nil || isLiveContent) { return StreamUpcoming }       // :454
+if isPostLiveDVR { return StreamPostLive }                                      // :457
+return StreamVOD                                                               // :460
+```
+
+An ended stream that *has* an `endTimestamp` short-circuits to `post_live` at `:457`
+and never reaches `:460`. So `StreamVOD` is reachable only via `lbd == nil &&
+isLiveContent && hasFormats` (**no `liveBroadcastDetails` at all**) or `lbd != nil &&
+endTimestamp == ""` (`startTimestamp` not guaranteed). The fixture at
+`player_api_parsing_test.go:317-328` is `TestClassifyStream_PostLiveDVR` — it
+demonstrates presence for `post_live`, not `vod`.
+
+Nor is microformat guaranteed per client: `player_api_parsing.go:414-419` notes
+"Some probes (notably ANDROID_VR on unpublished premieres) return this without a
+full microformat", and the authenticated probe uses TV_DOWNGRADED
+(`player_api_strategy.go:28-34`). So a members past stream can classify `vod` with
+no `lbd` and no microformat at all.
+
+Hence the chain, and the final rung:
+
+```
+startTimestamp → 'exact'   |  uploadDate/publishDate → 'day'  |  neither → leave as-is
+```
+
+**If the probe yields no date at all, the row keeps its existing precision.** For an
+`assumed` row that means it stays unrankable and therefore unarchived — the safe
+direction (we decline to archive what we cannot place), but a real residual worth
+naming rather than pretending the chain always terminates.
 
 The `liveStreamability` epoch branch is never a publish date — it is the scheduled
 start of an upcoming stream. It must not feed `PublishedAt` at all.
@@ -482,17 +521,41 @@ The upsert's precision guard ranks all four; the top-N excludes only `assumed`. 
 a VOD's `startTimestamp` is genuinely `exact` — `day` applies only to plain uploads,
 which are the case where YouTube itself only publishes a date.
 
+### `post_live` normalizes to `vod` on write
+
+The probe returns five statuses — `internal/youtube/types.go:13` defines
+`StreamPostLive = "post_live"` — but the store's enum has no `post_live`. That was an
+omission, and per the analysis above it is not a rare one: `post_live` is the *common*
+classification for an ended stream, since any stream with an `endTimestamp`
+short-circuits there.
+
+Left unstated, a probed `post_live` row would match **no** archival branch
+(`upcoming/live`, `vod/not_a_stream`, `unknown`) while still passing both rank-index
+predicates — in scope, ranked, and undecidable.
+
+So the store **normalizes `post_live` → `vod` on write.** The store's vocabulary
+exists to answer two questions — where does this rank, and should it be archived —
+and `post_live` and `vod` answer both identically: today's `nonLiveSkipReason` is
+reached from a single `case "post_live", "vod":` (`utils.go:326`). The distinction is
+a *download-strategy* concern (DVR window, still-processing manifests), and the
+worker re-probes for that anyway; it is not the store's business. Normalizing keeps
+the enum at five values with every branch defined, rather than adding a sixth that
+would be a synonym everywhere it appeared.
+
+The date rule above is written in probe terms (`vod`/`post_live` → `startTimestamp`)
+precisely because it runs *before* this normalization.
+
 ### `published` for upcoming and live rows
 
 Never store the **scheduled start time**. It is in the future, so it would sort
 above every real row — for weeks, on a stream scheduled far out — which is the same
 eviction bug in a different disguise.
 
-An `upcoming` or `live` row stores the moment we first saw it (`assumed`/`now` from
-`itemAge`'s zero, or the probe's publish date once known). Its stored date is only
-ever a *placeholder*, because those statuses are excluded from the ranking anyway.
-The date starts mattering exactly when the row becomes `vod`, at which point the
-probe that observed the transition has written an authoritative date.
+An `upcoming` or `live` row keeps whatever it was first stored with — `assumed`/`now`
+from `itemAge`'s zero. The probe supplies **no** date for these statuses, so nothing
+overwrites it. That is fine: the value is a placeholder, because those statuses are
+excluded from the ranking entirely. The date starts mattering exactly when the row
+becomes `vod`, and the probe that observes that transition supplies the real one.
 
 **`date_precision <> 'assumed'` is what enforces goal 4.** An `assumed` row carries a
 fabricated date: `itemAge` returns `0` for any item it cannot parse, which becomes
@@ -816,7 +879,16 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         └─ same order as today: HasActiveJob → terms → probe (feed.go:704-725)
         └─ members-only content uses the authenticated probe (unchanged)
       outcome per item:
-        probed     ⇒ UPDATE published(exact), date_precision='exact', status, title
+        probed     ⇒ UPDATE status (post_live→vod), title
+                     UPDATE published + date_precision ONLY IF the probe supplied a
+                       date AND its precision is strictly better than the stored one
+                       └─ SAME precision guard as the upsert. Without it a probe of
+                          a plain upload writes uploadDate ('day') over RSS's
+                          second-granular <published> ('exact') — a downgrade of the
+                          value while upgrading the label, and a direct breach of
+                          "published is frozen and only ever upgraded"
+                       └─ upcoming/live supply NO date, so this clause simply does
+                          not fire for them; it must never write published=''
                      mark FRESH for this cycle
                      └─ fires whenever METADATA came back — NOT gated on
                         ShouldProcess, which is false for a successful probe
@@ -1435,10 +1507,17 @@ Then:
 - Precision guard: a later `coarse` write never overwrites a stored `exact`; a
   later `exact` write does overwrite a stored `coarse`. All four rungs ordered
   (`assumed` < `coarse` < `day` < `exact`)
-- **`PublishedAt` extraction is status-aware.** A `vod` takes
-  `liveBroadcastDetails.startTimestamp` (`exact`, second-granular); a
+- **`PublishedAt` extraction is status-aware.** `post_live`/`vod` take
+  `liveBroadcastDetails.startTimestamp` (`exact`, second-granular), **falling back
+  to `uploadDate` (`day`) when `lbd` is absent** — which is the *normal* `vod` case,
+  since an ended stream with an `endTimestamp` classifies `post_live`; a
   `not_a_stream` takes `uploadDate` (`day`); an `upcoming` stores **no** ranking
   date — specifically, its future `startTimestamp` never reaches `published`
+- **The probe write is precision-guarded.** A probe of a plain upload (`uploadDate`,
+  `day`) must NOT overwrite RSS's second-granular `exact` date, and must never write
+  `published=''` for an `upcoming`/`live` row
+- **`post_live` normalizes to `vod` on write** — no `post_live` row ever reaches the
+  archival decision table, where it would match no branch
 - An `assumed`/`unknown` members row that probes to `vod` gets a real date and
   **becomes rankable** — the dead-end guard (without a probe date it would be
   `vod`+`assumed`: terminal and unrankable, i.e. unarchivable forever)
@@ -1480,9 +1559,6 @@ Then:
   against both rejected bounding designs.
 - A row stuck at `unknown` after repeated failures is still probed every cycle
   (accepted cost — see "Probe-list growth")
-- **A known `upcoming`/`live` row is NEVER deferred**, however many times its probe
-  has failed — it goes live on time and is caught on time. Only `unknown` rows back
-  off.
 - `passthrough` (`ProbeVideo` unwired) counts as fresh and still jobs, exactly as
   today — freshness must not be derived from `ShouldProcess`, which is `true` on
   that path
@@ -1655,6 +1731,7 @@ exists (see "Phase 1 limitation").
 
 *Monitor*
 - Discovery pass / archival pass split, with the FRESH rule (`outcome == probed`)
+- `post_live` → `vod` normalization on write; the probe write is precision-guarded
 - Refresh probe on the archival `vod` branch, writing its result back
 - Established gate; rewired `checkChannel`/`processCandidate`
 - **Channel-removal prune** from `kickMonitors`, mirroring `PruneHealth`
