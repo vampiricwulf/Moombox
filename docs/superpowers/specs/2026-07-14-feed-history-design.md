@@ -222,12 +222,29 @@ scope for a channel is simply the top N of the store:
 
 ```sql
 SELECT video_id, title, published, status FROM feed_items
- WHERE channel_id = ?
+ WHERE channel_id = ? AND date_precision <> 'assumed'
  ORDER BY published DESC, catalog_pos ASC, video_id ASC
  LIMIT ?
 ```
 
 The index covers this exactly — one seek, N rows, no scan.
+
+**`date_precision <> 'assumed'` is what enforces goal 4.** An `assumed` row carries a
+fabricated date: `itemAge` returns `0` for any item it cannot parse, which becomes
+`published = now`. Letting that rank would place a guess at position 1 ahead of
+every real date — the opposite of the goal. Excluding it costs nothing, because an
+`assumed` row is always `unknown` and therefore always discovery-probed; the probe
+promotes it to `exact` and it enters the ranking on a real date, usually within the
+same cycle.
+
+This also removes a denial-of-scope failure. `published` is frozen at insert, so if
+the corrective probe fails permanently the fabricated "now" would sit in the top N
+indefinitely, evicting real content from scope — at `N=3`, three such rows would
+freeze a channel's archival scope entirely. An excluded row cannot evict anything.
+
+An item that can never be probed therefore never enters scope, which is the correct
+outcome: we know nothing about it, so we archive nothing on its behalf. It is still
+probed every cycle, so it recovers the moment YouTube answers.
 
 This is expressed as a **top-N query rather than a per-candidate rank check** for
 two reasons:
@@ -286,6 +303,17 @@ The efficiency win survives: a `vod` that is already processed, or out of scope,
 `/player` fetch with retries every single cycle only to be discarded by
 `nonLiveSkipReason` immediately after.
 
+**`include_non_live_content = false` channels must not probe past content.** Today
+`membershipCandidates` drops members items with `Age > 0` outright on such channels
+(`internal/monitor/feed.go:673-675`) precisely because they could never become
+jobs. This design still *stores* them — ranking must count all channel content (see
+"Step 2 stores items that do not match terms") — but must not probe them. A
+membership item with `Age > 0` carries a `"Streamed N ago"` text, which is a
+positive past-stream signal, so it is inserted directly as `status='vod'`,
+`date_precision='coarse'` and never enters the discovery probe list. Same outcome as
+today, with the row retained for ordering. RSS items on such channels are still
+probed, exactly as today, since RSS carries no status signal at all.
+
 Discovery probe volume is bounded naturally: RSS returns ≤15 and the membership tab
 ~30, so a cycle cannot exceed ~45 unknowns, and only once. The first cycle after
 upgrade pays a one-time cost (~17 probes for a 3-channel install).
@@ -311,6 +339,11 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
          vod/not_a_stream → refresh-probe, then job iff include_non_live_content
                                 AND channel established
                                 AND still non-live on the fresh result
+         unknown          → NO JOB. Its probe failed this cycle; we do not know
+                            what it is. Retry next cycle. (Unreachable via the
+                            top-N query, which excludes 'assumed' rows, but
+                            reachable for a coarse-dated backfilled row whose
+                            probe fails — so the branch must exist.)
 5. AddToHistory on job creation  (unchanged)
 6. on RSS success ⇒ channel_state.last_rss_ok_at = now
 ```
@@ -438,6 +471,11 @@ Then:
 - Precision guard: a later `coarse` write never overwrites a stored `exact`; a
   later `exact` write does overwrite a stored `coarse`
 - A stale listing never demotes a probed `live` back to `vod`
+- An `assumed` row never enters the top-N query (goal 4), and a permanently
+  unprobeable `assumed` row cannot evict real content from scope
+- An in-scope `unknown` row is never jobbed
+- `include_non_live_content = false`: a past members VOD is stored but never
+  discovery-probed, preserving today's drop behavior
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
 - Top-N counts non-term-matching items
 - Raising `max_feed_items` widens scope for already-stored VODs without a re-probe
