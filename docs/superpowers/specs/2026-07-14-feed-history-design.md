@@ -167,7 +167,7 @@ exclusion, and worth stating as such.
 | Store structure | SQLite table + partial rank index + status index | Workload is one indexed top-N query per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
 | Cap gate | Coarse pre-filter **removed**. Scope is a store-driven top-N query; every job still follows a fresh probe | The pre-filter was the sole cause of the miss risk, and guarded a probe budget that no longer exists once status is recorded |
 | Cap meaning | Archival depth, not probe budget | Matches goal 2; probe volume is naturally bounded by sources |
-| `history` table | Left alone, separate | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI |
+| `history` table | Schema/API/UI untouched; the feed path writes **fewer** rows | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI. See "What history comes to mean" — dropping the skip/give-up writes is a population change, not a schema change |
 | Catalog scan role | Backfill only | Part 1 makes RSS 404s harmless; 3 MB/channel/cycle forever buys no correctness |
 | Backfill trigger | One idempotent sweep keyed on `backfilled_at IS NULL`, run at startup and from `kickMonitors` (which fires on every channel add/remove/reorder), plus a manual re-run | No action needed on upgrade; new channels start complete. Not two triggers — `kickMonitors` cannot distinguish an add from a reorder, so it must be idempotent (see Integration Points) |
 | `last_videos` | Removed | Dead code; `feed_items` supersedes it (per-channel **and** dated) |
@@ -902,6 +902,30 @@ harmless: status only drives probing and job decisions, and it does neither.
 Term matching cannot be a SQL predicate — it needs the in-memory description for
 RSS-carried items — so it stays a Go-side filter over the query's rows, exactly as
 it is a Go-side filter over candidates today.
+
+### What `history` comes to mean
+
+Removing the feed path's hidden `AddToHistory` calls (`utils.go:284/313/330`) is a
+**population** change, not a schema one — the table, its API, the orphan overlay and
+Twitch/DECAPI writers are all untouched. But it is worth stating what it does to the
+meaning of the table, because the change is an improvement and reviewers will notice
+the row count drop.
+
+Today `history` conflates three things: *we jobbed this* (`monitor_callbacks.go:260`),
+*we looked at this and declined* (`nonLiveSkipReason` skips), and *we gave up probing
+this* (give-up). Only the first has a job row — which is exactly why
+`ListOrphanedHistory` finds anything at all, and why an operator eventually purges 80
+rows and re-arms content that was never supposed to come back.
+
+On the feed path it now means only the first: **we created a job for this video.**
+That is what "already acted on" should have meant, it makes `HasProcessed` a precise
+predicate rather than a fuzzy one, and it means far fewer orphans are manufactured in
+the first place. DECAPI and Twitch keep writing exactly as they do today, so the
+orphan tooling remains necessary and correct — just less busy.
+
+This composes with the date-based cap into defence in depth: purging history can no
+longer re-arm an out-of-scope VOD (the cap stops it), *and* there is much less
+spurious history to purge.
 
 ### The established gate
 
