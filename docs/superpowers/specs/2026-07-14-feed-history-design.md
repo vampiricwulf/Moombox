@@ -346,6 +346,27 @@ scanned and discarded. It is *not* a covering index (`date_precision`, `status` 
 `title` still cost a table lookup per returned row), but that is N lookups, not a
 scan.
 
+**Verified, not assumed** (SQLite 3.50.4, 4000 rows, 3 channels). SQLite only uses
+a partial index when it can prove the index's `WHERE` holds for every row the query
+needs, and that proof is a syntactic term match — so the index `WHERE` and the query
+predicates must be written identically, as they are above. Confirmed:
+
+```
+CREATE partial index with `status NOT IN (...)`  → accepted
+EXPLAIN QUERY PLAN (top-N)          → SEARCH feed_items USING INDEX idx_feed_items_rank (channel_id=?)
+EXPLAIN QUERY PLAN (discovery list) → SEARCH feed_items USING INDEX idx_feed_items_status (channel_id=? AND status=?)
+```
+
+No `SCAN`, and no `USE TEMP B-TREE FOR ORDER BY` — the index satisfies the ordering
+as well as the filter, which is why the `DESC` in its definition matters. If the
+implementation ever reworks these predicates, re-check the query plan: a partial
+index silently degrades to a full scan when the term match stops lining up, and the
+failure is invisible until the catalog is large.
+
+(Checked against CPython's SQLite; `modernc.org/sqlite` is a transpilation of the
+same upstream C source, so the planner behaviour is the same. Worth one assertion in
+the migration test regardless.)
+
 **`status NOT IN ('upcoming','live')` is what makes goal 3 true.** Without it the
 exemption is only additive (`top-N ∪ {upcoming, live}`) — which archives them, but
 leaves them *ranked*. They carry the newest dates, so they occupy the top of the
@@ -1122,6 +1143,10 @@ Then:
   re-evaluation is title-only
 - Backfill: fixture-driven continuation paging, loop detection, resume-from-cursor
 - Migration v15→v16 idempotent
+- **Query plan assertion:** the top-N query uses `idx_feed_items_rank` and does not
+  fall back to a scan or a temp b-tree sort. A partial index degrades silently when
+  the predicate term-match stops lining up, and nothing else would catch it until
+  the catalog is large.
 
 ## Migration (v16)
 
