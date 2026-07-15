@@ -68,11 +68,15 @@ longer re-arm out-of-scope content.
 1. An RSS (or any single-source) failure must not change discovery scope.
 2. `max_feed_items` becomes a stable **archival-depth** boundary. "Stable" means
    *invariant with respect to fetch outcomes* — scope is a function of the
-   channel's content and `N`, never of what a given cycle happened to retrieve.
-   It is deliberately **not** immutable: raising `N` widens scope for content
-   already in the store, and publishing N newer items pushes an item out of scope.
-   Both are the boundary working as intended. What must never happen is scope
-   moving because a fetch failed.
+   channel's content and the operator's configuration, never of what a given cycle
+   happened to retrieve.
+   It is deliberately **not** immutable. Scope moves when the *inputs* move, and
+   that is the boundary working as intended: raising `N` widens it for content
+   already stored; publishing N newer items pushes an item out; flipping
+   `membership_discovery` off hides members rows from it. Each is an operator or
+   channel action with a visible cause.
+   What must never happen is scope moving because **a fetch failed** — that is the
+   one input nobody chose.
 3. **Upcoming and live content is never missed and never consumes a cap slot.**
 4. Nothing is ever ranked on a guessed date.
 5. Steady-state cost must not exceed today's.
