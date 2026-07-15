@@ -1677,10 +1677,30 @@ state invites the reader to ask "does a cookie lapse hide a live members stream?
 every time they encounter it. Keying both read arms on the operator's choice means
 cookie state can only skip a probe that would have failed. The probe-side membership
 gates make that true cheaply; the `denied` rule makes it true *regardless*, by
-intercepting the wrong answer even on an ungated path. Note this applies to the
-**probe** arms only — the read arms' `MembershipDiscoveryEnabled()` gate is a genuine
-correctness control that `denied` cannot cover, because a members probe *with* valid
-cookies returns `ok` and would be jobbed.
+intercepting the wrong answer even on an ungated path.
+
+**This demotion applies to the probe arms only. The read arms are not redundant, and
+the reason is ranking — not job prevention.** An earlier draft justified them by
+claiming `denied` cannot cover "a members probe with valid cookies, which returns
+`ok` and would be jobbed". That reason is wrong: with `membership_discovery = false`
+a `source='membership'` row hits the *probe* gate (`membershipActive()` is false), is
+never probed, never becomes FRESH, and therefore cannot be jobbed at all. Nothing
+about jobbing needs the read arms.
+
+What needs them is scope. With the toggle off and no read gate, members rows still
+**rank** — so three members VODs at ranks 1-3 hold the top-N slots and evict the
+channel's public VODs at ranks 4-6 out of scope, which are then never archived. The
+operator disabled members *discovery* and silently lost their public archival depth.
+`denied` cannot reach this: it decides whether a probe's answer is trusted, and no
+probe is involved in ranking a stored row.
+
+So the three controls partition cleanly by what they protect:
+
+| Control | Protects | Can another cover it? |
+|---|---|---|
+| Read arms — `MembershipDiscoveryEnabled()` | **scope**: members rows must not hold slots when the operator turned discovery off | No — nothing else touches ranking |
+| Probe gates — `membershipActive()` | **efficiency**: skip a request we know will be refused | Yes, `denied` catches the result anyway |
+| `denied` — playability | **correctness**: a refusal must never be read as `upcoming` | No — it is the only control that depends on nothing we stored |
 
 A cookie lapse therefore leaves scope *exactly* where it was: members rows keep
 their ranks, hold their slots, stay cap-exempt, and simply go un-probed for a cycle.
@@ -2233,6 +2253,10 @@ Then:
   Ungated it still issues a pointless request; the `denied` rule stops the result
   becoming a job. Assert **no probe is issued** — the job assertion cannot
   distinguish gated from ungated now, and would pass vacuously.
+- **With `membership_discovery = false`, members rows must not hold ranking slots.**
+  Three members VODs at ranks 1-3 + public VODs at 4-6 + the toggle off ⇒ the public
+  VODs must be in scope. This is what the read arms protect, and neither the probe
+  gates nor `denied` can: no probe is involved in ranking a stored row.
 - **A cookie lapse must NOT move scope.** Arrange members rows at ranks 1-3 and
   public VODs at 4-6, then make `HasAuthCookies()` false for one cycle: the top-3
   must still be the members rows, and **no public VOD may be jobbed**. Gating the
