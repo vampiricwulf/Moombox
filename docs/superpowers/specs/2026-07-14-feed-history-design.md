@@ -339,6 +339,7 @@ SELECT video_id, title, published, status FROM feed_items
  WHERE channel_id = ?
    AND date_precision <> 'assumed'
    AND status NOT IN ('upcoming', 'live')
+   -- AND source <> 'membership'      ← appended when membershipActive() is false
  ORDER BY published DESC, catalog_pos ASC, video_id ASC
  LIMIT ?
 ```
@@ -506,12 +507,29 @@ growth") and buys self-healing: the moment any probe returns a usable date, the 
 takes it, becomes `vod`, and ranks normally. A terminal status is a promise that we
 know enough to stop looking; without a date we do not.
 
-**This invariant is exactly necessary and sufficient.** Enumerating the full state
-space (5 statuses × 4 precisions) against the three rules — discovery-probed iff
-`status IN (unknown, upcoming, live)`; in the top-N iff `date_precision <> 'assumed'
-AND status NOT IN ('upcoming','live')`; cap-exempt iff `status IN (upcoming, live)` —
-yields exactly **two** states that are neither probeable nor reachable by any
-archival path:
+**This invariant is exactly necessary and sufficient — given the probe carve-outs.**
+Enumerate the full state space (5 statuses × 4 precisions) against the three rules:
+
+```
+discovery-probed  iff  status IN (unknown, upcoming, live)
+                       AND (term-match OR date_precision = 'assumed')   ← see below
+in the top-N      iff  date_precision <> 'assumed'
+                       AND status NOT IN ('upcoming','live')
+cap-exempt        iff  status IN (upcoming, live)
+```
+
+**The first premise is easy to state wrongly, and an earlier draft of this proof did
+— which is how it missed a sink.** Written as the bare `status IN (unknown, upcoming,
+live)`, it ignores the term gate at `feed.go:704-725`, and the enumeration then
+"proves" that `unknown`+`assumed` is always fine because it is always probed. It is
+not: a *non-term-matching* `unknown`+`assumed` row is never probed, never dated, and
+therefore never rankable — a third sink, invisible to the proof because the proof
+had already assumed it away. The `OR date_precision = 'assumed'` carve-out (see
+"Descriptions and term matching") is what makes the premise true, and therefore what
+makes the enumeration below sound.
+
+With the corrected premise, exactly **two** states are neither probeable nor
+reachable by any archival path:
 
 | status | precision | probed | in top-N | cap-exempt | outcome |
 |---|---|---|---|---|---|
@@ -591,9 +609,10 @@ becomes `vod`, and the probe that observes that transition supplies the real one
 fabricated date: `itemAge` returns `0` for any item it cannot parse, which becomes
 `published = now`. Letting that rank would place a guess at position 1 ahead of
 every real date — the opposite of the goal. Excluding it costs nothing, because an
-`assumed` row is always `unknown` and therefore always discovery-probed; the probe
-promotes it to `exact` and it enters the ranking on a real date, usually within the
-same cycle.
+`assumed` row is always `unknown` and is always discovery-probed — including when
+its terms do not match, via the carve-out in "Descriptions and term matching". The
+probe promotes it to a real date and it enters the ranking, usually within the same
+cycle.
 
 This also removes a denial-of-scope failure. `published` is frozen at insert, so if
 the corrective probe fails permanently the fabricated "now" would sit in the top N
@@ -606,7 +625,8 @@ probed every cycle, so it recovers the moment YouTube answers.
 
 **The honest cost:** excluding rows shrinks the population the top-N is computed
 over, so while an `assumed` row is pending it is possible to admit an item that is
-truly rank N+1. This is a real trade, not a free win — but it is the right
+truly rank N+1. ("Pending" is bounded precisely because every `assumed` row is
+probed — terms notwithstanding.) This is a real trade, not a free win — but it is the right
 direction. Over-admitting by one position archives one slightly-older item; letting
 a fabricated date rank *evicts real content* and, at `N=3`, can freeze a channel.
 The window is normally one cycle (the discovery probe promotes the row to `exact`
@@ -921,9 +941,14 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
       memb → coarse from Age; undatable → 'assumed' (provisional)
 3. DISCOVERY PROBE PASS
       probe list = feed_items[channel] WHERE status IN (unknown, upcoming, live)
+                     [AND source <> 'membership' when membershipActive() is false]
         └─ read from the STORE, not this cycle's response
       per item: skip if HasActiveJob → skip if NOT term-match → probe
         └─ same order as today: HasActiveJob → terms → probe (feed.go:704-725)
+        └─ CARVE-OUT: an 'assumed' row is probed even if terms do not match —
+           it needs a DATE for ranking, and ranking counts all channel content.
+           Without this it is never probed, never dated, never rankable: a
+           permanent sink.
         └─ members-only content uses the authenticated probe (unchanged)
       outcome per item:
         probed     ⇒ UPDATE title
@@ -950,6 +975,8 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         (no passthrough on this path — probeAndClassify requires a wired probe)
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
       in-scope = top-N query  ∪  {items WHERE status IN (upcoming, live)}
+                 [both arms exclude source='membership' when membershipActive()
+                  is false — the toggle must gate READS, not just fetches]
       per item: skip if HasActiveJob → skip if NOT term-match → decide:
          upcoming/live    → job iff FRESH this cycle
                             (cap exempt; NOT gated by HasProcessed — see below)
@@ -1100,10 +1127,36 @@ halves matter, and they pull in opposite directions:
   jobbed on a channel using `terms` — a cost regression against goal 5, introduced
   purely by splitting the passes.
 
-So the discovery pass keeps today's exact order: `HasActiveJob` → terms → probe. A
-non-matching item is stored and ranked (so the top-N stays correct) and never
-probed (so it stays free). Its `status` simply remains `unknown` forever, which is
-harmless: status only drives probing and job decisions, and it does neither.
+So the discovery pass keeps today's order — `HasActiveJob` → terms → probe — **with
+one carve-out: an `assumed` row is probed regardless of terms.**
+
+Without the carve-out the term gate opens a third permanent sink, and it defeats the
+very rule this section exists to state. A non-matching row that entered `assumed`
+(no parseable age text) would never be probed, so its date could never be upgraded;
+`published` is frozen at insert and only a probe can improve it. It would stay
+`assumed` forever, and `assumed` rows are excluded from the top-N — so the row is
+stored but **not ranked**, and the top-N is computed over a subset. That is exactly
+the "compute the top-N over a subset and get it wrong" failure that justifies
+storing non-matching items at all.
+
+The carve-out is cheap and self-limiting, because the two gates exist for different
+reasons:
+
+- **Terms gate the probe** to avoid repeatedly fetching metadata for content that
+  could never become a job. That reasoning is about *jobbing*.
+- **An `assumed` row is probed to get a date**, which *ranking* needs — and ranking
+  counts all channel content, matching or not.
+
+So a non-matching row is probed at most once, to date it. Once it has a real date it
+is `vod`/`not_a_stream` (terminal) or dated-`unknown`, and either way it is never
+discovery-probed again while it stays non-matching. Rows that already carry a real
+date (RSS `exact`, membership/backfill `coarse`) are never probed on this path at
+all — they are already rankable.
+
+A non-matching row's `status` may well remain `unknown` forever, and that part *is*
+harmless: status drives probing and job decisions, and a dated `unknown` row does
+neither. The harm was never the status — it was the precision the status was
+blocking.
 
 Term matching cannot be a SQL predicate — it needs the in-memory description for
 RSS-carried items — so it stays a Go-side filter over the query's rows, exactly as
@@ -1132,6 +1185,51 @@ orphan tooling remains necessary and correct — just less busy.
 This composes with the date-based cap into defence in depth: purging history can no
 longer re-arm an out-of-scope VOD (the cap stops it), *and* there is much less
 spurious history to purge.
+
+### `membership_discovery = false` must gate reads, not just writes
+
+The store-driven passes create a hazard the response-driven design never had, and
+closing it at write time is not enough.
+
+`membershipActive()` (`internal/monitor/feed.go:518-523`) stops the *fetch*. Today
+that is sufficient, because the candidate pool **is** the response — no fetch, no
+candidates, no jobs. But the discovery and archival passes read the **store**, which
+still holds every members row written while the toggle was on. So:
+
+1. `membership_discovery = true`; a members premiere `X` is stored `unknown`
+   (`source='membership'`).
+2. The operator sets `membership_discovery = false` — cookies expired, or they no
+   longer want members content.
+3. Next cycle: no membership fetch. But the probe list is *"read from the STORE, not
+   this cycle's response"*, and `X` is `unknown` ⇒ it is in the list, and probed
+   with cookies.
+4. It returns `upcoming` ⇒ cap-exempt ⇒ in scope ⇒ **job created.**
+
+Moombox then downloads members-only content on a channel where members-only
+discovery is off. The Part 2 backfill gate does not help: this needs no backfill.
+
+**The fix is a read-side predicate.** When `membershipActive()` is false, rows with
+`source = 'membership'` are excluded from **all three** store queries — the discovery
+probe list, the top-N, and the cap-exempt union:
+
+```sql
+-- appended to each query when membershipActive() == false
+AND source <> 'membership'
+```
+
+`source` already exists (`feed_items.source`) and was, until now, written but never
+read. This is the one place it earns its keep.
+
+**Excluding them from the *ranking* too is deliberate, not incidental.** With the
+toggle off, today's cap counts only public items, because members items never enter
+the pool at all. Ranking stored members rows would let invisible content evict
+public content from scope — a silent behavior change in the opposite direction. The
+rows stay in the store (turning the toggle back on must not lose them) and simply
+stop being visible while it is off.
+
+This composes with the partial rank index: the query gains a predicate, so the
+index's `WHERE` is still implied and still usable; `source` becomes a residual
+filter over the rows it returns.
 
 ### The established gate
 
@@ -1311,7 +1409,11 @@ positions, then does one merged ordering pass over the union:
         catalogue behind it is entirely unscanned.
 2. when all eligible tabs are exhausted, run one ORDERING PASS:
      └─ SELECT the channel's rows into a slice, CLOSE the cursor
-     └─ sort by (published DESC, source rank, provisional pos ASC, video_id ASC)
+     └─ sort by (published DESC, provisional pos ASC, video_id ASC)
+        (video_id makes this a total order; an earlier draft had a "source rank"
+         term here but never defined one, leaving step 2 unimplementable. Any
+         total order satisfies the requirement — cross-source ties inside a
+         coarse lump are deterministic-but-arbitrary by design, see below)
      └─ UPDATE each row's catalog_pos = 0..n-1
         (an unguarded UPDATE — the precision guard governs the upsert only, and
          would otherwise reject a coarse backfill write onto a pre-existing
@@ -1643,6 +1745,12 @@ Then:
 - Coarse dates skew old: `"3 weeks ago"` stores `now-28d`, not `now-21d`
 - `membership_discovery = false` ⇒ backfill writes no members rows, and none are
   jobbed via the store
+- **Turning `membership_discovery` OFF takes effect immediately, on rows already
+  stored.** Arrange a members row written while it was on, then flip it off: the row
+  must not be probed, must not rank, and must not be jobbed — even though no
+  membership fetch occurs. (Today this is free, because the pool *is* the response;
+  the store-driven passes are what make it a real hazard.)
+- Turning it back ON restores those rows (they were hidden, not deleted)
 - Channel removed from config ⇒ its `feed_items`/`channel_state` rows are pruned;
   re-adding it triggers a fresh backfill rather than inheriting `backfilled_at`
 - Backfill skips Twitch channels entirely
@@ -1694,8 +1802,10 @@ Then:
   guard; without it the `/streams` tab silently retires live streams.
 - `itemAge` returns a unit-preserving age so the coarse skew is computable
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
-- Top-N counts non-term-matching items, **and** a non-term-matching item is never
-  probed (matching today's `HasActiveJob` → terms → probe order)
+- Top-N counts non-term-matching items. A non-term-matching item with a real date
+  is never probed (matching today's `HasActiveJob` → terms → probe order) — **but a
+  non-term-matching `assumed` item IS probed once**, to date it, or it could never
+  be ranked and the top-N would silently be computed over a subset
 - Raising `max_feed_items` brings an already-stored VOD into scope with **no**
   discovery probe (pure re-rank), and the resulting job **does** follow a refresh
   probe — the two assertions are about different steps
