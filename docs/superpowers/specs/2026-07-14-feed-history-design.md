@@ -365,6 +365,23 @@ probe**. Without it, the archival pass would create jobs from probe data capture
 in an arbitrarily old cycle — stale titles, and videos that may since have been
 deleted or privated.
 
+**The refresh probe writes its result back, and its result is authoritative.** Both
+halves matter, and an earlier draft of this spec got both wrong by phrasing the rule
+as "job iff *still* non-live":
+
+- A stream can restart on the same video ID — `feed.go:702-703` says so explicitly
+  ("not if merely finished — a stream may restart on the same URL"). So a stored
+  `vod` can legitimately refresh to `live`. Treating a non-`vod` refresh as "skip"
+  would refuse to archive a live stream: a goal-3 violation.
+- Discarding the refresh result would leave the row `vod` forever. `vod` is not in
+  the discovery probe list, so the restarted stream would never be looked at again
+  and would be missed **permanently**, not just this cycle.
+
+The refresh probe is therefore an ordinary probe that happens to be triggered by
+archival rather than discovery: it updates `published`/`date_precision`/`status`/`title`
+exactly like the discovery pass, and the job decision is re-made against what it
+returned — never against what the store said beforehand.
+
 It also keeps a documented user workflow intact. `internal/monitor/utils.go:226-227`
 describes deleting a job and clearing its Orphaned history entry so the video "can
 be picked up again". That still works: clearing history makes `HasProcessed` false,
@@ -421,8 +438,11 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
          vod/not_a_stream → skip if HasProcessed
                             skip unless include_non_live_content   ← before probing
                             skip unless channel established
-                            → refresh-probe → job iff still non-live on the
-                              fresh result
+                            → refresh-probe, WRITE THE RESULT BACK to the store,
+                              then re-decide on the FRESH status:
+                                 live/upcoming    → job (cap exempt)
+                                 vod/not_a_stream → job
+                                 probe errored    → no job, retry next cycle
          unknown          → NO JOB. We do not know what it is. Retry next cycle.
                             (Unreachable via the top-N query, which excludes
                             'assumed' rows, but reachable for a coarse-dated
@@ -852,6 +872,13 @@ Then:
 - Channel removed from config ⇒ its `feed_items`/`channel_state` rows are pruned;
   re-adding it triggers a fresh backfill rather than inheriting `backfilled_at`
 - Backfill skips Twitch channels entirely
+- A stored `vod` whose refresh probe returns `live` (stream restarted on the same
+  ID) **is** jobbed, and the store is updated to `live` so it stays in the
+  discovery list — it is not skipped as "no longer non-live"
+- Backfill: rows persist per page, so a restart mid-scan resumes from the cursor
+  rather than re-scanning; `catalog_pos` is only final once `backfilled_at` is set
+- Removing a channel mid-backfill cancels the scan before the prune, and leaves no
+  resurrected rows
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
 - Top-N counts non-term-matching items
 - Raising `max_feed_items` widens scope for already-stored VODs without a re-probe
