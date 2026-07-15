@@ -163,8 +163,9 @@ carve-out created. Three mechanisms, all resting on one wrong premise.
 
 **A coarse date is an upper bound on recency, and the probe adjudicates.** `"1 week
 ago"` means *somewhere in [7d, 14d)*. Stored as the newest instant consistent with
-the text, it is admitted to a 7-day window, probed, and dropped if its true date
-falls outside. Nothing is ever excluded on a date we have not verified — because an
+the text, it is admitted to any window wider than 7 days, probed, and dropped if its
+true date falls outside. (Windows aligned to a bucket edge — 3, the default, and 7 —
+admit no straddling bucket at all; see "Coarse dates skew new".) Nothing is ever excluded on a date we have not verified — because an
 excluded row is never probed, and so never gets the date that would have included it.
 
 **Within one source, ordering is recency — so one probe settles the boundary.** Once
@@ -202,7 +203,7 @@ leaves the probe list exactly as it leaves scope.
 | Row retirement | **None.** No `last_listed_at`, no backoff columns | It cannot distinguish "unreachable" from "we stopped looking": a cookie expiry gates the membership fetch **and** the authenticated probe together, so both conjuncts drift true while nothing about the row changed, and the members catalogue erodes because a credential lapsed |
 | Backlog queue | **`Queued` rows in the jobs table**; a scheduler admits them | A `Queued` job never enters `JobQueue` until a slot frees, which dissolves `maxLifecycle`, the silent pending drop, the missing FIFO, and crash recovery in one move |
 | `num_parallel_downloads` | **VOD-only** (live/upcoming exempt), default **2 → 10** | Live cannot be throttled — a broadcast is happening now. `2` was only defensible because it was double-counting live streams it should never have touched |
-| Store structure | SQLite table + **one** non-partial window index | Workload is one indexed range scan per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
+| Store structure | SQLite table + **two** non-partial indexes (window + status) | Workload is one indexed range scan per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
 | Coarse-date skew | **New**, not old | Under a date cut, a too-old guess *silently excludes*; a too-new guess buys a probe that corrects it. The safe direction is a function of the cap semantics |
 | `classifyStream:454` | Keep `denied`; **file `:454` separately** | The producer bug has download-path blast radius. `denied` is the cheap local containment |
 | `history` table | Schema/API/UI untouched; the feed path writes **fewer** rows | Answers a different question ("acted on" vs "exists and when"). Dropping the skip/give-up writes is a population change, not a schema change |
@@ -531,7 +532,7 @@ survives, but for one of its two original jobs: it served a rank-blind probe lis
 (gone) **and** the cap-exempt union (very much alive — see "The window query").
 
 `published` is frozen at first insert and only ever *upgraded* by a higher-precision
-source (`assumed` → `coarse` → `day` → `exact`). It is never recomputed from `now`,
+source (`assumed` → `coarse` → `day` → `exact` → `started`). It is never recomputed from `now`,
 which is what makes scope stable across cycles.
 
 That upgrade requires a **precision-guarded upsert, not `INSERT OR IGNORE`** — the
@@ -694,8 +695,10 @@ right.
 Status-aware extraction:
 
 ```
-status vod / post_live   → liveBroadcastDetails.startTimestamp   → precision 'exact'
-                            (the stream's ACTUAL start; RFC3339, second-granular)
+status vod / post_live   → liveBroadcastDetails.startTimestamp   → precision 'started'
+                            (the stream's ACTUAL start; RFC3339, second-granular.
+                             'started', NOT 'exact' — it must outrank RSS's
+                             announcement time or it can never overwrite it)
                          → ELSE uploadDate / publishDate         → precision 'day'
                             (fallback — must not be skipped, see below)
 status not_a_stream      → microformat uploadDate / publishDate  → precision 'day'
@@ -733,7 +736,7 @@ microformat", and the authenticated probe uses TV_DOWNGRADED
 Hence the chain, and the final rung:
 
 ```
-startTimestamp → 'exact'  |  uploadDate/publishDate → 'day'  |  neither → leave as-is
+startTimestamp → 'started' | uploadDate/publishDate → 'day' | neither → leave as-is
 ```
 
 **Invariant: never write a terminal status without a rankable date.** If the probe
@@ -1019,12 +1022,11 @@ per row, in this order:
     live     → probe (goal 3)
     vod / not_a_stream → NOT probed for discovery
   probe choice: source='membership' ⇒ authenticated, else anonymous
-  ESCALATION: an anonymous probe returning members_only sets source:='membership'
-    and re-probes with cookies THIS CYCLE if membershipActive() (cooldown bypassed
-    for the re-probe). login_required does NOT escalate: it is also YouTube's
-    anti-bot refusal on PUBLIC videos, so it must not relabel — and without a
-    relabel the escalation would recur every cycle forever.
-    See "A refusal escalates, and sets `source` itself".
+  ESCALATION: see "A refusal escalates, and sets `source` itself" for the rule.
+    Do NOT restate it here — the copy this line used to carry narrowed the relabel
+    to ANONYMOUS probes (canonical: any probe) and scoped `source := 'membership'`
+    under the same `if membershipActive()` as the re-probe (canonical: the relabel
+    is unconditional; only the RE-PROBE is gated).
   (no row is ever deferred or retired — the window is the bound)
 ```
 
@@ -1238,7 +1240,10 @@ They coincide on the `live`/`upcoming` branches (`utils.go:319-324` fall through
 On demand, only when a stored item is about to become a job:
 
 ```
-in window AND NOT HasProcessed AND term-match AND status IN (vod, not_a_stream)
+NOT HasActiveJob                      ← FIRST, as everywhere else: the worker
+                                        already owns it
+    AND in window AND NOT HasProcessed AND term-match
+    AND status IN (vod, not_a_stream)
     AND include_non_live_content          ← BEFORE probing; a channel that archives
                                             no VODs must not pay the probe
     AND channel established
@@ -2144,10 +2149,14 @@ removes. It cannot survive.
 *The window and the skew*
 
 - **Coarse dates skew new:** `"1 week ago"` stores `now - 7d`, not `now - 14d`, so the
-  whole [7d, 14d) bucket is admitted to a 7-day window rather than excluded
-- **A straddling item is admitted, probed, and dropped on its exact date.** 7-day
-  window, item displayed `"1 week ago"`, probe returns a true age of 10 days ⇒ **never
-  jobbed** — and the exact date is written back, so it leaves the window and is not
+  whole [7d, 14d) bucket is admitted to a **10-day** window rather than excluded.
+  Use 10, not 7: `published` is frozen at insert and compared against a later `now`,
+  so a bucket whose lower bound EQUALS the window is already outside. A 7-day window
+  admits no part of the `"1 week ago"` bucket, and the test would assert the reverse
+  of what the query does
+- **A straddling item is admitted, probed, and dropped on its exact date.** 10-day
+  window, item displayed `"1 week ago"`, probe returns a true age of 13 days ⇒
+  **never jobbed** — and the exact date is written back, so it leaves the window and is not
   re-probed next cycle. This is the refresh-probe window re-check; without it the item
   is archived on a guess (goal 4)
 - **Nothing is excluded on an unverified date.** An item displayed `"2 weeks ago"`
@@ -2159,7 +2168,9 @@ removes. It cannot survive.
   discovery probe (pure re-scope), and the resulting job **does** follow a refresh probe
 - `published` frozen at first insert; upgraded only by higher precision
 - Precision guard: a later `coarse` write never overwrites a stored `exact`; a later
-  `exact` does overwrite a stored `coarse`. All four rungs ordered
+  `exact` does overwrite a stored `coarse`. **All five rungs ordered**
+  (`assumed` < `coarse` < `day` < `exact` < `started`), and specifically: a probe's
+  `started` MUST overwrite an RSS `exact` — that is the rung's whole purpose
 - A scheduled start time is never stored as `published`
 - An `assumed` row sits inside every window and is probed; an `unknown` row is never
   jobbed
@@ -2168,9 +2179,11 @@ removes. It cannot survive.
 
 *The source walk*
 
-- **Early exit fires:** a source with items at true ages 5d/6d/10d/11d/12d against a
-  7-day window, all displayed within the straddling bucket, costs exactly **three**
-  probes — 5d, 6d, then 10d retires the source. The 11d and 12d rows are **never probed**
+- **Early exit fires:** against a **10-day** window, a source whose `"1 week ago"` rows
+  have true ages 8d/9d/11d/12d/13d costs exactly **three** probes — 8d, 9d, then 11d
+  retires the source. The 12d and 13d rows are **never probed**. (All five share one
+  displayed bucket and one stored `published`, which is what makes this a test of the
+  walk rather than of the window)
 - **Only a dated probe retires a source.** Four tests, one per outcome: `errored`,
   `denied`, cooldown-skipped, and probed-with-no-date each leave the source live and the
   walk continues. A transient cookie fault must not truncate a source
@@ -2186,7 +2199,9 @@ removes. It cannot survive.
 *The probe date and the terminal invariant*
 
 - **`PublishedAt` extraction is status-aware.** `post_live`/`vod` take
-  `liveBroadcastDetails.startTimestamp` (`exact`), **falling back to `uploadDate`
+  `liveBroadcastDetails.startTimestamp` (**`started`** — the rung that outranks RSS's
+  `exact` announcement time; pinning it as `exact` makes rung 5 dead code and the
+  probe's real start can never land), **falling back to `uploadDate`
   (`day`) when `lbd` is absent** — the *normal* `vod` case; `not_a_stream` takes
   `uploadDate` (`day`); `upcoming` stores **no** date — its future `startTimestamp`
   never reaches `published`
@@ -2327,8 +2342,12 @@ Current `schemaVersion = 15` (`internal/database/migrations.go:26`). Follow the
 established pattern: a sequential `if version < 16 { ... return db.writeUserVersion(16) }`
 block, `CREATE TABLE/INDEX IF NOT EXISTS`, tables also added to `createSchema`.
 
-1. Create `feed_items`, `channel_state`, and the **single** index `idx_feed_items_window`
-   (non-partial).
+1. Create `feed_items`, `channel_state`, and **both** indexes —
+   `idx_feed_items_window` and `idx_feed_items_status`, neither partial. Add both to
+   `createSchema` too. **Do not ship one:** an earlier draft of this revision dropped
+   the status index, and Q2 then degrades to a full scan of every row the channel
+   has, every cycle, on a table that never forgets. See "Why not one query with an
+   `OR`".
 2. `DROP TABLE IF EXISTS last_videos`.
 3. Remove `GetLastVideo`/`SetLastVideo` (`database_extras.go:126-148`) and
    `TestLastVideos` (`database_test.go:119`).
@@ -2480,8 +2499,10 @@ an archive that never happened.
 ### Phase 1 — store, passes, scheduler
 
 *Store*
-- Schema v16: `feed_items`, `channel_state`, the single non-partial index
-  `idx_feed_items_window`
+- Schema v16: `feed_items`, `channel_state`, and **both** non-partial indexes —
+  `idx_feed_items_window` (Q1's range) and `idx_feed_items_status` (Q2's
+  unconditional upcoming/live union). Revision 1's *partial* `idx_feed_items_rank`
+  is gone; the status index is not
 - Precision-guarded upsert, **per-column**: `published`/`date_precision` move only
   upward; `source` updates on **every** sighting. Coupling them lets a date-quality rule
   pick the probe, and the wrong probe does not fail — it lies
