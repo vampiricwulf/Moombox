@@ -129,6 +129,30 @@ See "Assigning catalog_pos" under Part 2.
 listing gets a direct probe and returns an authoritative date. This is what
 guarantees goal 4.
 
+**A probe that lacks what it needs does not fail — it lies.** This is the least
+intuitive fact in the design, and three separate rules exist only because of it.
+
+`feed.go:743-746`: a probe of members-only content without cookies "gets no formats
+and the classifier misfires it as **upcoming**". No error. And `upcoming` is
+cap-exempt, so a lie is jobbed *unconditionally* — bypassing the cap and
+`include_non_live_content` both. It then writes history, which blocks the real video
+from ever being archived correctly. That is the 2.7.2 bug.
+
+The natural safety argument — "no cookies ⇒ the probe fails ⇒ not FRESH ⇒ no job" —
+is therefore **false**, and every rule below exists because it is false:
+
+| Rule | Without it |
+|---|---|
+| The discovery probe is gated on `membershipActive()` | a members row is probed cookieless every cycle and lies |
+| The refresh probe carries the same gate | the lie is jobbed the moment scope widens (`ProbeVideoAuth` has no cookie guard — `monitor_callbacks.go:188-198`) |
+| `source` updates on **every** sighting, ungated by precision | a public→members video keeps `source='rss'`, is probed anonymously, and lies |
+
+They are one rule wearing three hats: **never let a probe run without what it needs,
+and never trust a stale input to decide what it needs.** Any one of them removed
+re-opens the same phantom-upcoming job. Each was found separately, several rounds
+apart, and each time the missing piece was assumed to be a failure rather than a
+falsehood.
+
 **The dated store makes probes cheaper, not rarer.** Today the capped N items are
 probed *every cycle forever*, and most results are discarded by `nonLiveSkipReason`
 immediately after. With recorded status, an item needs probing once. Steady state
