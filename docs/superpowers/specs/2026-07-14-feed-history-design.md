@@ -1,126 +1,8 @@
 # Dated Per-Channel Feed History
 
-**Status:** **Revision 2 in progress — sections below marked ⚠️ SUPERSEDED are stale**
-**Date:** 2026-07-14, revised 2026-07-15
+**Status:** Design approved — ready for an implementation plan
+**Date:** 2026-07-14, rewritten 2026-07-15
 **Schema:** v15 → v16
-
-## Revision 2 (2026-07-15) — decisions pending rewrite
-
-A review session with the owner changed the design's centre of gravity. Everything in
-"The Problem", "The `denied` rule", the escalation, the store, and the backfill still
-holds. **Scope, the cap, and the queue do not.** These decisions are recorded here
-first because they are the valuable output of that session; the sections they affect
-are rewritten below as each is reworked.
-
-**The reframing that drove most of it:** rank does not come from dates — it comes from
-the scan. The `/videos`, `/streams`, and `/membership` tabs list newest-first, so a
-scanned row's *position* is its rank. Dates exist to merge the three tabs and to place
-new RSS items, not to order within one. An earlier draft built an `assumed`-exclusion
-rule on "an undated row cannot be ranked", which is false, and then invented a probe
-carve-out to repair the rows that rule stranded.
-
-| # | Decision | Supersedes |
-|---|---|---|
-| 1 | **Both phases ship in one release.** Phases are build order, not release boundaries — only Phase 2 sets `backfilled_at`, the established gate's second key | ✅ applied |
-| 2 | **Probe only what is in scope.** The cap is the bound; a rank-blind probe list needs a reaper, and a reaper is a mechanism to contain a mechanism | ✅ applied ("The cap is the bound") |
-| 3 | **No retirement, no `last_listed_at`.** It cannot tell "unreachable" from "we stopped looking" — a cookie expiry gates the fetch and the probe together, eroding the members catalogue | ✅ applied |
-| 4 | **Keep `denied`; file `classifyStream:454` separately.** The producer bug stays fixed-in-place until its own change | ✅ applied |
-| 5 | **Backfill is strictly serial across channels**, one at a time, globally, hours of wall-clock permitted, never gated on idleness | ✅ applied |
-| 6 | **Scope is an N-day window, not a top-N row count.** A date cut never splits a coarse lump, which is what the total order existed to handle | ⚠️ "The in-scope query", `idx_feed_items_rank`. Skew: ✅ applied — inverted to **skew-new**, and it deletes the unit-preserving `itemAge` refactor from Phase 1 |
-| 13 | **The backlog is `Queued` DB rows; a scheduler admits them.** A `Queued` job never enters `JobQueue` until a slot frees | ✅ applied ("The scheduler") — dissolves the `maxLifecycle` / pending-drop / FIFO / crash-recovery items |
-| 14 | **M paces the back-catalogue, not the channel.** Newly-discovered content bypasses M entirely and never counts against it | ✅ applied ("The scheduler") |
-| 15 | **Every VOD waiting on the download pool shows as `Queued`**, new or backlog; new sorts first. "Skip the queue" is priority, not exemption | ✅ applied |
-| 16 | **`num_parallel_downloads` default 2 → 10.** It only ever meant VODs; 2 was conservative because it was throttling live streams it should never have touched | ✅ applied |
-| 12 | **The discovery pass is a serial per-source walk with early exit.** Within a source the listing is recency order, so one probe landing outside the window retires that source for the pass. Only a probe that *returned a date* may retire; errored/denied/cooldown/dateless must not. **Self-validating**: a probed date newer than the source's previous one disproves the ordering and disables early-exit for it | ✅ applied ("The source walk"); adds the third External Assumption |
-| 7 | **M-rows is throughput, not depth.** Everything inside the window is archived eventually; M paces it, most-recent-first, and a completed job frees a slot the next item fills. Per channel | ⚠️ every "top-N"/"cap slot"/"archival depth" statement in the doc |
-| 8 | **Defaults: 3 days, 3 rows.** | ⚠️ Documentation Updates |
-| 9 | **`num_parallel_downloads` becomes VOD-only** — live/upcoming must not consume a download slot. **Folded into this spec** | ⚠️ the "no worker changes" scope assumption |
-| 10 | **The backlog waits in the jobs table under a new `Queued` status** | ⚠️ the job status lifecycle (a CLAUDE.md critical pattern); `IsTerminal`/`ShouldProcess` (`types.go:92-94`, `queue.go:350-357`), `calculatePriority` (`queue.go:19-30`), the `JobStats` aggregate (`database_jobs.go:622-645` — which today counts pool-waiters as active), both UIs' colour maps and filter buckets. See "The scheduler" |
-| 11 | **`max_feed_items` is dropped, not migrated.** Both new settings take defaults on upgrade | ⚠️ "What `max_feed_items` comes to mean" — the relabel is void; the setting is gone |
-
-**Why 11 rather than a migration:** the old value bounded depth, the new `M` bounds
-concurrency, and the window has no old counterpart. Carrying the number forward
-preserves a shape, not an intent — and mapping `1000` onto a per-channel slot count
-would read as "archive deep" and behave as 1000 simultaneous downloads.
-
-**Why 9 is here and `:454` is not** (both are worker-adjacent producer bugs, decided
-opposite ways): `:454` is reachable only through the probe this spec already guards,
-so `denied` contains it. The download-slot bug is live on today's build with no
-containment — `AcquireDownloadSlot` (`queue.go:149-180`) is called for *every* job at
-`worker.go:446`, live included, with no timeout and no priority. Two long streams fill
-the default `num_parallel_downloads = 2`, and a third channel going live blocks
-indefinitely. That is a missed stream from a stock config, and M-rows would queue on
-top of it.
-
-## The scheduler
-
-Decisions 13–16. This section is what makes the queue tractable: three problems the
-earlier draft listed as open all dissolve into one structural choice.
-
-**A `Queued` job is a durable DB row, not a blocked goroutine.** The monitor creates
-it and stops. A scheduler admits it — enqueues it into `JobQueue` — only when a slot
-is actually free. Consequences, each of which was an open item:
-
-| Was open | Why it is gone |
-|---|---|
-| `maxLifecycle = 100` (`queue.go:61`) caps alive jobs, and a slot-waiter holds one the whole time it blocks | a `Queued` job is never in `JobQueue`, so it holds nothing. The queue only ever contains new content plus admitted backlog — bounded as today |
-| the pending queue **silently drops** jobs past 100 (`queue.go:93-98`) — an unarchived video with only a warning log | the backlog never reaches the pending queue. This one mattered most: it is this spec's own failure mode, re-entering from the worker side |
-| `AcquireDownloadSlot` (`queue.go:149-180`) has no FIFO and no priority — waiters wake in Go runtime order, so "most recent first" does not exist | admission ordering lives in the scheduler, where it is an `ORDER BY`. The semaphore stops being the arbiter and becomes a safety net |
-| a new `JobStatus` strands on crash, as `worker.go:306-312` already shows for interrupted `Muxing` | `Queued` is a **resting** state, not a transient one. It survives restart because it was never in memory — the scheduler simply re-reads it. No recovery special-case |
-
-**M paces the back-catalogue, not the channel.** Newly-discovered content bypasses M
-entirely and never counts against it. M exists so an archival backlog cannot flood a
-channel; it must never make a live stream, a premiere, or a just-published VOD wait
-behind old content. This is what keeps M defensible as a default of 3: it is not a
-throttle on the channel, it is a throttle on history.
-
-**Admission rules:**
-
-```
-upcoming / live  → admit immediately, always. No M, no download pool (decision 9).
-                   A broadcast cannot be throttled — it is happening now.
-new VOD          → no M gate; still needs a download-pool slot.
-                   Sorts AHEAD of all backlog.
-backlog VOD      → M per channel, then a download-pool slot. Most-recent-first.
-
-"new" = first seen by the FEED MONITOR this cycle. NOT a backfill row: a scan
-writes thousands of rows with first_seen=now, and none of them are new content.
-```
-
-**Every VOD waiting on the pool shows as `Queued` — new or backlog.** "Skip the
-queue" is **priority, not exemption**: a new VOD jumps the entire back-catalogue and
-starts the instant a slot frees, but `num_parallel_downloads` is a hard resource
-limit and nothing bypasses it. This also kills an existing lie rather than working
-around it: today `stream_processor.go:220`/`:238` write `Downloading` *before*
-`AcquireDownloadSlot` blocks at `worker.go:446`, so a job waiting on the pool is
-persisted as downloading while it does nothing — byte-identical to one actively
-pulling segments. Only `download_started_at` (`orchestrator.go:123-124`) separates
-them, and no UI reads it. One waiting state, one truthful status, everywhere.
-
-**`num_parallel_downloads` default 2 → 10** (`config.go:67`).
-
-There is **no maximum** to raise — validation only rejects `< 1` (`config.go:559-560`).
-And the key is *commented out* in `config.example.toml:104`, so installs that never
-touched it inherit the default: this is a live behavior change on upgrade, not just
-for new installs.
-
-It compounds with decision 9, and the peak is worth stating plainly rather than
-discovering: today the pool is a hard **2 shared by everything, live included** —
-which is the bug. After decision 9 live is exempt and therefore unbounded, because it
-must be. So peak concurrency becomes **(live streams) + 10** where it was 2. Twenty
-channels with five live and a backlog running is fifteen concurrent downloads.
-
-That is the correct direction: `2` was only ever defensible because it was
-double-counting live streams it should never have touched. As a VOD-only archival
-knob it is far too low — and with M = 3 per channel, saturating 10 takes four
-channels' backlogs at once. Live concurrency was always dictated by reality rather
-than config; decision 9 stops pretending otherwise. **The help text must state the
-peak**, so it is chosen rather than discovered.
-
-**Still genuinely open:** with `include_non_live_content = false` (the default —
-`types.go:264` is a plain `bool`), VODs never job at all, so the window and M govern
-only the `was_live → live` safety walk. That walk still probes. Whether M should
-apply to a pass that creates no jobs is unresolved.
 
 ## Problem
 
@@ -178,39 +60,45 @@ cycle re-downloaded it. The DB confirms: its history row is dated
 `2026-07-15T02:57:23Z`, the *second* download, not the first.
 
 This is a second, independent lesson: `history` was the **only** thing holding the
-video back. A date-based cap defends independently, so a history purge can no
+video back. A date-based scope defends independently, so a history purge can no
 longer re-arm out-of-scope content.
 
 ## Goals
 
 1. An RSS (or any single-source) failure must not change discovery scope.
-2. `max_feed_items` becomes a stable **archival-depth** boundary. "Stable" means
-   *invariant with respect to fetch outcomes* — scope is a function of the
-   channel's content and the operator's configuration, never of what a given cycle
-   happened to retrieve.
-   It is deliberately **not** immutable. Scope moves when the *inputs* move, and
-   that is the boundary working as intended: raising `N` widens it for content
-   already stored; publishing N newer items pushes an item out; flipping
-   `membership_discovery` off hides members rows from it. Each is an operator or
-   channel action with a visible cause.
+2. Scope is a stable **archival window**. "Stable" means *invariant with respect to
+   fetch outcomes* — scope is a function of the channel's content and the operator's
+   configuration, never of what a given cycle happened to retrieve.
+   It is deliberately **not** immutable. Scope moves when the *inputs* move, and that
+   is the boundary working as intended: widening the window admits older content;
+   time passing pushes an item out; flipping `membership_discovery` off hides members
+   rows. Each is an operator or channel action with a visible cause.
    What must never happen is scope moving because **a fetch failed** — that is the
    one input nobody chose.
-3. **Upcoming and live content is never missed and never consumes a cap slot.**
-4. Nothing is ever ranked on a guessed date.
+3. **Upcoming and live content is never missed, never throttled, and never consumes
+   a slot.**
+4. **Nothing is ever archived on a guessed date.** Every job follows a fresh probe,
+   and the probe's date — not a listing's guess — decides whether the item was inside
+   the window.
 5. Steady-state cost must not exceed today's.
 
 ## Non-Goals
 
 - Replacing RSS as the steady-state discovery source (see Decisions).
 - Unifying the `history` table into the new store (see Decisions).
-- Changing the probe-failure/cooldown machinery.
+- Changing the probe-failure/cooldown machinery (`MetadataTracker`, `ProbeCooldown`).
 - Any Twitch-side change. The Twitch monitor is live-only and has no cap.
 - Any DECAPI-side change. DECAPI parses a single video ID out of its response
   (`internal/monitor/decapi.go:523-534`) — the channel's *latest* — so it cannot
   reach back to old content and cannot be the source of this bug class. It keeps
   its existing `HasActiveJob`/`HasProcessed`/probe path and does **not** write to
-  `feed_items`; anything it finds is by construction rank 1 and would be admitted
-  by the cap anyway. This is why `decapi` is absent from the `source` enum.
+  `feed_items`; anything it finds is by construction the newest item on the channel.
+  This is why `decapi` is absent from the `source` enum.
+
+**Worker changes are *not* a non-goal.** An earlier draft scoped this to the monitor
+and store. It cannot be: the queue this design creates sits directly on top of
+`internal/worker/queue.go`, and one bug there (see decision 9) already loses streams
+on a stock config.
 
 ## Key Insights
 
@@ -218,30 +106,28 @@ These shaped the design and are recorded because they are non-obvious.
 
 **Discovery order is not recency order.** A store that prepends newly-seen unique
 IDs would *preserve this exact bug*: `gr-ZTohjwnQ` was newly **discovered** on 7/14
-despite being three weeks old. The store must be keyed on the item's actual
-publish date, frozen at first insert.
+despite being three weeks old. The store must be keyed on the item's actual publish
+date, frozen at first insert.
 
-**The cap only needs the newest N items to be correct.** With a dated store, a
-3-week-old VOD inserts at its true date, lands at rank ~17, and never enters the
-top 3 — even if the store is only partially populated. The full-catalog backfill is
-therefore *not* required for correctness. It matters when `N` exceeds what RSS
-returns, and `max_feed_items` allows up to 1000.
+**Rank comes from the scan, not from dates.** The `/videos`, `/streams` and
+`/membership` tabs list newest-first, so a scanned row's *position* is its rank
+within that listing. Dates exist to **merge** the three tabs and to place new RSS
+items — not to order within one. This is the single most load-bearing insight in the
+document, and an earlier draft got it backwards: it built an `assumed`-exclusion rule
+on "an undated row cannot be ranked", which is false, then invented a probe carve-out
+to repair the rows that rule stranded, then needed a reaper to bound the probes the
+carve-out created. Three mechanisms, all resting on one wrong premise.
 
-**Coarse dates lump, and lumps break naive ranking.** If twenty items all resolve
-to "3 weeks ago" they share one timestamp. A naive `COUNT(*) WHERE published > ?`
-gives them all the same rank, so a boundary landing inside a lump admits the
-*entire lump* — this bug, amplified. A total order is mandatory.
+**A coarse date is an upper bound on recency, and the probe adjudicates.** `"1 week
+ago"` means *somewhere in [7d, 14d)*. Stored as the newest instant consistent with
+the text, it is admitted to a 7-day window, probed, and dropped if its true date
+falls outside. Nothing is ever excluded on a date we have not verified — because an
+excluded row is never probed, and so never gets the date that would have included it.
 
-**Tab order recovers lost precision — but only within one scan.** YouTube renders
-tabs newest-first, so an item's position within a listing is true recency ordering
-*within* a coarse lump. `catalog_pos` recovers what the relative text threw away.
-
-The caveat is essential: a position is a coordinate **within a single listing**, and
-`/videos` and `/streams` overlap heavily (a past stream appears in both, at
-unrelated positions). Comparing position 5 of `/videos` against position 5 of
-`/streams` is meaningless. So `catalog_pos` must be a **channel-global** coordinate
-assigned by one merged ordering pass, not whichever tab happened to scan first.
-See "Assigning catalog_pos" under Part 2.
+**Within one source, ordering is recency — so one probe settles the boundary.** Once
+a probe places an item of source `S` outside the window, every later item of `S` is
+older by construction. That is what bounds the probe cost, and it is why the pass is
+serial rather than concurrent.
 
 **The probe is how we learn rank, not just status.** Anything undatable from a
 listing gets a direct probe and returns an authoritative date. This is what
@@ -249,10 +135,76 @@ guarantees goal 4.
 
 **A probe that lacks what it needs does not fail — it lies. But it also tells us it
 lied, and the design must read that.** A probe of members-only content without
-cookies returns `upcoming` with no error, and `upcoming` is cap-exempt, so the lie is
-jobbed unconditionally. The natural safety argument — "no cookies ⇒ the probe fails ⇒
-no job" — is therefore false. See **The `denied` rule** below, which is the whole
-answer and the single most-revised part of this design.
+cookies returns `upcoming` with no error, and `upcoming` is exempt from every gate,
+so the lie is jobbed unconditionally. The natural safety argument — "no cookies ⇒ the
+probe fails ⇒ no job" — is therefore false. See **The `denied` rule**, which is the
+whole answer and the single most-revised part of this design.
+
+**The window bounds the probes; nothing else needs to.** A row outside the window is
+never archived whatever its status turns out to be, so its status is not worth a
+request. It stays stored and correctly ordered, costing one row of disk. An item
+leaves the probe list exactly as it leaves scope.
+
+## Decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Release scope | One spec, **both parts ship together** | Parts are build order, not release boundaries. Part 1 alone leaves the established gate permanently shut on any channel whose RSS never succeeds — only Part 2 sets `backfilled_at`, the gate's second key. Shipping Part 1 alone trades a wrong-archive for a **silent** no-archive |
+| Scope | An **N-day window**, not a top-N row count | A date cut never splits a coarse lump, so the total order stops being load-bearing for the cut. It also matches how an operator thinks about archiving |
+| Throughput | **M slots per channel**, most-recent-first; a completed job frees a slot | Everything inside the window is archived *eventually*; M paces it. M is throughput, not depth |
+| M's blast radius | M paces the **back-catalogue only**. New content bypasses it entirely | A default of 3 is indefensible as a channel throttle — it would make a live stream wait behind history. As a backlog throttle it is obviously right |
+| Defaults | **3 days, 3 slots** | |
+| `max_feed_items` | **Dropped, not migrated** | It bounded depth; M bounds concurrency; the window has no old counterpart. Any mapping preserves a shape rather than an intent — and mapping `1000` onto a per-channel slot count reads as "archive deep" and behaves as 1000 simultaneous downloads |
+| Probe scope | Probe **only what is in scope** — the window query's rows, walked serially per source with early exit | The window *is* the bound. A rank-blind probe list grows without limit once the backfill lands, and needs a reaper to contain it — a mechanism invented to contain a mechanism |
+| Row retirement | **None.** No `last_listed_at`, no backoff columns | It cannot distinguish "unreachable" from "we stopped looking": a cookie expiry gates the membership fetch **and** the authenticated probe together, so both conjuncts drift true while nothing about the row changed, and the members catalogue erodes because a credential lapsed |
+| Backlog queue | **`Queued` rows in the jobs table**; a scheduler admits them | A `Queued` job never enters `JobQueue` until a slot frees, which dissolves `maxLifecycle`, the silent pending drop, the missing FIFO, and crash recovery in one move |
+| `num_parallel_downloads` | **VOD-only** (live/upcoming exempt), default **2 → 10** | Live cannot be throttled — a broadcast is happening now. `2` was only defensible because it was double-counting live streams it should never have touched |
+| Store structure | SQLite table + **one** non-partial window index | Workload is one indexed range scan per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
+| Coarse-date skew | **New**, not old | Under a date cut, a too-old guess *silently excludes*; a too-new guess buys a probe that corrects it. The safe direction is a function of the cap semantics |
+| `classifyStream:454` | Keep `denied`; **file `:454` separately** | The producer bug has download-path blast radius. `denied` is the cheap local containment |
+| `history` table | Schema/API/UI untouched; the feed path writes **fewer** rows | Answers a different question ("acted on" vs "exists and when"). Dropping the skip/give-up writes is a population change, not a schema change |
+| Catalog scan role | **Backfill only** | RSS stays the steady-state source; 3 MB/channel/cycle forever buys no correctness |
+| Backfill trigger | One idempotent sweep keyed on `backfilled_at IS NULL`, at startup and from `kickMonitors`, plus a manual re-run | `kickMonitors` cannot distinguish an add from a reorder, so it must be idempotent |
+| Backfill pacing | **Strictly serial across channels**, hours of wall-clock permitted, never gated on idleness | Upgrade day fires the sweep for every channel at once |
+| `last_videos` | Removed | Dead code; `feed_items` supersedes it |
+
+## External Assumptions (unverified in-repo)
+
+Four things this design leans on are **external YouTube behavior, asserted from
+observation and not enforced or documented anywhere in this codebase**. Called out
+because they are load-bearing and could drift silently:
+
+| Assumption | Status |
+|---|---|
+| `videos.xml` returns at most 15 items | Not asserted in code. `fetchFeed` (`feed.go:484`) and `parseFeedCandidates` impose no limit; the `15` at `feed.go:24` and `config.go:58` is the *old default cap*, an unrelated coincidence |
+| The membership tab carries ~30 items per page | Not asserted anywhere. `parseMembershipTab`/`walkVideoRenderers` take whatever the page carries |
+| **Within one source's listing, items are ordered strictly newest-first** | Unverified, and **the only one whose failure loses content** — see below |
+| `relativeAgeRe` matches YouTube's current en-locale copy | A single regex (`channel_membership.go:49`) matched against serialized JSON; `itemAge` returns `0` on any miss |
+
+Neither of the first two is safety-critical — if RSS returned 50 items the design
+still holds, just with more first-cycle probes — but the plan should verify the RSS
+figure empirically rather than inherit it, and **no code should encode either number
+as a constant.**
+
+**The third is different, and it is the one to watch.** It already underpins
+`catalog_pos` and the whole "rank comes from the scan" reframing. What the source
+walk changes is its blast radius: before, a mis-ordered tab cost *ranking precision*,
+because every item still got a date and the date adjudicated. With early exit, a
+mis-ordered source means the walk retires it at the wrong item and **silently skips
+everything behind it** — completeness, not precision.
+
+It is unverifiable from outside, so the walk **self-validates** rather than trusting
+it: a probed date newer than the previous one from the same source disproves the
+assumption for that source, disables early exit for it, and logs. See "The source
+walk". This is the only assumption with a detector, because it is the only one that
+fails silently.
+
+**The fourth degrades gracefully, and this is worth stating because an earlier draft
+built a whole mechanism to handle it.** One YouTube copy change makes *every* listing
+item return `Age = 0` ⇒ `assumed` ⇒ `published = now` ⇒ inside every window ⇒ probed.
+The failure mode is "everything looks new until probed, and probes repair it", which
+is noisy but not lossy. It does **not** require the catalogue to be probed: the source
+walk still retires each source at its first out-of-window probe.
 
 ## The `denied` rule
 
@@ -260,20 +212,21 @@ This is the least intuitive part of the design, and it took four rounds and thre
 separate patches to state properly.
 
 `feed.go:743-746`: a probe of members-only content without cookies "gets no formats
-and the classifier misfires it as **upcoming**". No error. And `upcoming` is
-cap-exempt, so a lie is jobbed *unconditionally* — bypassing the cap and
-`include_non_live_content` both. It then writes history, which blocks the real video
-from ever being archived correctly. That is the 2.7.2 bug.
+and the classifier misfires it as **upcoming**". No error. And `upcoming` bypasses
+every gate by design — the window (it carries `published = now`), M (never throttled),
+and `include_non_live_content` — so a lie is jobbed *unconditionally*. It then writes
+history, which blocks the real video from ever being archived correctly. That is the
+2.7.2 bug.
 
 The natural safety argument — "no cookies ⇒ the probe fails ⇒ not FRESH ⇒ no job" —
-is therefore **false**, and every rule below exists because it is false:
+is therefore **false**, and every rule below exists because it is false.
 
 ### The `denied` predicate (canonical)
 
 **Distrust a probe result only when YouTube said it refused us AND the classifier was
-guessing.** YouTube states outright whether we were allowed
-to see the video, and `parsePlayabilityStatus`
-(`internal/youtube/player_api_parsing.go:332-388`) already decodes it:
+guessing.** YouTube states outright whether we were allowed to see the video, and
+`parsePlayabilityStatus` (`internal/youtube/player_api_parsing.go:332-388`) already
+decodes it:
 
 ```
 denied  ⇔  StreamStatus == 'upcoming'
@@ -302,19 +255,15 @@ returns `upcoming` with `ok` really did.
 **The rule at the top of this section is the canonical `denied` predicate**, and the
 table above derives it — both in this subsection, under the reader's eye. Every use
 site elsewhere — the outcome list, the flow pseudocode, the contract table, the
-tests — states only what `denied` *does* and refers here for what it *is*. No use
-site writes the predicate.
+tests — states only what `denied` *does* and refers here for what it *is*. **No use
+site writes the predicate.**
 
 That split is deliberate, and it is the fix for a defect this document generated five
 times. An earlier draft wrote the predicate in five places. They drifted exactly as
 duplicated rules always do: one copy was corrected to the minimal form while another
 kept listing `age_restricted`/`…` as denied — a live goal-3 loss — and each round
 patched the copy it happened to read. Two statements of one rule is two rules; five
-is five.
-
-Predicate here, behaviour at the use site. A reader coding the flow needs to know
-`denied` writes nothing and retries; they do not need the predicate inlined, and
-inlining it is what let the copies disagree.
+is five. Predicate here, behaviour at the use site.
 
 **Why minimal, and why everything else is trusted — including `unknown`.** Two
 independent reasons, both verified in code, and both fatal to the broader rules this
@@ -324,8 +273,7 @@ went through first:
 `classifyStream` reaches `StreamUpcoming` through five guards — `:429`, `:432`,
 `:439`, `:448`, `:454` — and `:429` *early-returns* on `isUpcomingPlayability`. So
 the four after it are reachable **only when playability did *not* say "upcoming"** —
-and
-`parsePlayabilityStatus` yields `ok` from exactly two sites
+and `parsePlayabilityStatus` yields `ok` from exactly two sites
 (`isUpcomingFromPlayability` `:350-351`, and `status == "OK"` `:355-356`). Those four
 extra branches exist **precisely because the playability signal was found
 insufficient**; `player_api_parsing.go:414-419` documents the case in the very client
@@ -379,10 +327,9 @@ from exactly five guards, and **every one requires live metadata to be present**
 | `:448` | `hasLiveStreamability && !hasFormats` | `liveStreamability` present |
 | `:454` | `!hasFormats && (lbd != nil \|\| isLiveContent)` | `lbd` or `isLiveContent` |
 
-So a
-refusal that *still carries live metadata* is a content-level refusal on known-live
-content — the 2.7.2 signature exactly. A refusal carrying none (anti-bot / IP-block
-`LOGIN_REQUIRED`, "Sign in to confirm you're not a bot", which returns no
+So a refusal that *still carries live metadata* is a content-level refusal on
+known-live content — the 2.7.2 signature exactly. A refusal carrying none (anti-bot /
+IP-block `LOGIN_REQUIRED`, "Sign in to confirm you're not a bot", which returns no
 `videoDetails`) falls to `:451` ⇒ `not_a_stream`, and the rule never fires on it.
 
 **Known residual, accepted.** A members refusal phrased as `UNPLAYABLE` with none of
@@ -390,76 +337,11 @@ the matched keywords yields `unknown` (`:378`) ⇒ trusted ⇒ the lie survives.
 the price of keeping `unknown` trusted, and (b) above is why the price is worth
 paying.
 
-### Follow-up: `classifyStream:454` diverges from yt-dlp (file separately)
-
-`denied` is a **compensating control in the consumer for a producer bug**, and the
-producer bug should be recorded even though fixing it is out of scope here.
-
-`player_api_parsing.go:454` infers `upcoming` from the *absence* of formats:
-
-```go
-if !hasFormats && (lbd != nil || isLiveContent) { return StreamUpcoming, ... }
-```
-
-yt-dlp never does this. `_list_formats`
-(`references/yt-dlp/yt_dlp/extractor/youtube/_video.py:3858-3870`) reads the flag and
-falls back the other way:
-
-```python
-is_upcoming = get_first(video_details, 'isUpcoming')
-live_status = ('post_live' if post_live else 'is_live' if is_live
-               else 'is_upcoming' if is_upcoming
-               else 'was_live' if live_content ...)
-```
-
-For a members video with no formats and `isLiveContent = true`, yt-dlp returns
-`was_live` — a past stream, correct — where Moombox returns `upcoming`. Under the
-project's standing "match yt-dlp for extraction" rule, `:454` is the actual defect.
-
-**Not fixed here, deliberately.** Changing the classifier has download-path blast
-radius (every strategy branches on `StreamStatus`), which is well outside this spec's
-non-goals. `denied` is the cheap, local containment. File `:454` as its own issue; if
-it is ever fixed, `denied` becomes redundant rather than wrong.
-
-A `denied` result is not FRESH, writes no status, and creates no job — it is retried
-next cycle, exactly like `errored`. This requires surfacing the field, which
-`VideoProbeResult` does not carry today (see Phase 1).
-
-**Why `upcoming` and not "any non-`ok`".** `classifyStream` only *guesses* on the
-no-formats path — `!hasFormats && (lbd != nil || isLiveContent) ⇒ StreamUpcoming`
-(`player_api_parsing.go:454`). Every other classification is grounded in formats
-YouTube actually returned. So:
-
-| Probe result | Meaning | Rule |
-|---|---|---|
-| `upcoming` + `members_only`/`login_required` | we were refused; the status is a guess | **`denied`** |
-| `upcoming` + `ok` | genuine scheduled stream | trust it — **goal 3** |
-| `upcoming` + `age_restricted` | reachable (`:361-363`, `:379-380`), and **trusted** — see below | trust it |
-| `upcoming` + `unknown` | we could not read the answer | trust it |
-| `vod`/`post_live`/`not_a_stream` + any playability | formats came back; the classification is grounded | trust it |
-
-**`age_restricted` is trusted, and the list above is exhaustive — no "…".** An
-earlier draft wrote `members_only`/`login_required`/`age_restricted`/… here, which is
-"any non-`ok`" — the rule the paragraph below rejects, contradicting the rule stated
-above. It is not academic: `PlayabilityAgeRestricted` comes from
-`LOGIN_REQUIRED` + "age" (`:361-363`) and `AGE_VERIFICATION_REQUIRED` (`:379-380`),
-neither of which satisfies `isUpcomingFromPlayability`, so an age-restricted premiere
-carrying `videoDetails.isUpcoming` and no formats reaches guard `:439` ⇒ `upcoming` +
-`age_restricted`. Denying it loses a real premiere forever.
-
-A broader rule ("any non-`ok` ⇒ denied") would refuse content we can actually
-download — an age-restricted VOD that returns formats classifies `vod`, not
-`upcoming`, and the worker can fetch it. Denying that would be a self-inflicted
-archival gap, trading one lie for one silence.
-
 **`denied` creates no sink.** It writes no status and no date, so the row keeps its
-classification —
-`unknown` (probed, per the status rule) or `assumed` (excluded from ranking, which is
-correct: we still do not know its date). Permanently-denied content — age-restricted
-we can never see, a members video we have no cookies for — therefore sits in the
-retry pool, un-archived and un-ranked, and recovers the moment access returns. That
-is the bounded re-probe cost from "The cap is the bound", not a new failure: it is
-exactly the state of *knowing nothing*, which is what a refusal means.
+classification. Permanently-denied content — age-restricted we can never see, a
+members video we have no cookies for — sits in the retry pool, un-archived, and
+recovers the moment access returns. That is exactly the state of *knowing nothing*,
+which is what a refusal means.
 
 **Why this and not a heuristic.** The tempting cross-check — "a row with a past
 `published` that probes `upcoming` is contradictory" — is wrong and would violate
@@ -491,7 +373,7 @@ it depends on nothing we stored.
 
 | Attempt | Why it failed |
 |---|---|
-| Gate the store reads on `membershipActive()` | it folds in **cookie state**, so the ranking moved on a fetch failure — the Jerry bug, reintroduced |
+| Gate the store reads on `membershipActive()` | it folds in **cookie state**, so scope moved on a fetch failure — the Jerry bug, reintroduced |
 | Split: reads on config, probe on `membershipActive()` | the **refresh** probe was ungated, and `ProbeVideoAuth` has no cookie guard, so it did not fail — it lied, and the lie was jobbed |
 | Gate the refresh probe too | `source` *picks* the probe, and a stale `source` lies identically |
 | Update `source` on every sighting | `source` flips only on a **listing** sighting, and the fetch is gated — with `membership_discovery = false` a locked video never flips |
@@ -499,77 +381,49 @@ it depends on nothing we stored.
 | (first draft: any non-`ok` ⇒ denied) | too broad — would refuse a downloadable age-restricted VOD |
 | **Escalate on the refusal, and flip `source` from it** | ✅ the refusal *is* the sighting — no fetch, no tab, no toggle needed |
 
-Four consecutive fixes patched a symptom, each one correct about the case in front
-of it and blind to the next. The signal that ends the sequence was in
+Four consecutive fixes patched a symptom, each one correct about the case in front of
+it and blind to the next. The signal that ends the sequence was in
 `player_api_parsing.go` the entire time; `VideoProbeResult` simply dropped it. The
 lesson generalises past this design: **when a guard needs a stored value to be
 current, ask whether the source of truth can be read directly instead.**
 
-**The dated store makes probes cheaper, not rarer.** Today the capped N items are
-probed *every cycle forever*, and most results are discarded by `nonLiveSkipReason`
-immediately after. With recorded status, an item needs probing once. Steady state
-falls from 3-per-channel-per-cycle to ~0–2 per cycle. This is why the pre-probe
-rank filter could be removed rather than mitigated.
+### Follow-up: `classifyStream:454` diverges from yt-dlp (file separately)
 
-## External Assumptions (unverified in-repo)
+`denied` is a **compensating control in the consumer for a producer bug**, and the
+producer bug should be recorded even though fixing it is out of scope here.
 
-Two numbers this design leans on are **external YouTube behavior, asserted from
-observation and not enforced or documented anywhere in this codebase**. Called out
-because they are load-bearing and could drift silently:
+`player_api_parsing.go:454` infers `upcoming` from the *absence* of formats:
 
-| Assumption | Status |
-|---|---|
-| YouTube's `videos.xml` returns at most 15 items | Not asserted in code. `fetchFeed` (`feed.go:484`) and `parseFeedCandidates` impose no limit; the `15` at `feed.go:24` and `config.go:58` is the *default cap*, an unrelated coincidence. |
-| The membership tab carries ~30 items per page | Not asserted anywhere. `parseMembershipTab`/`walkVideoRenderers` take whatever the page carries. |
+```go
+if !hasFormats && (lbd != nil || isLiveContent) { return StreamUpcoming, ... }
+```
 
-They justify "the backfill is not required for correctness" and the "~45 unknowns
-per cycle" probe bound. Neither is safety-critical — if RSS returned 50 items the
-design still holds, just with more first-cycle probes — but the plan should verify
-the RSS figure empirically rather than inherit it, and **no code should encode
-either number as a constant.**
+yt-dlp never does this. `_list_formats`
+(`references/yt-dlp/yt_dlp/extractor/youtube/_video.py:3858-3870`) reads the flag and
+falls back the other way:
 
-**A third assumption, added by revision 2, and the first whose failure loses
-content:** *within one source's listing, items are ordered strictly newest-first.*
+```python
+is_upcoming = get_first(video_details, 'isUpcoming')
+live_status = ('post_live' if post_live else 'is_live' if is_live
+               else 'is_upcoming' if is_upcoming
+               else 'was_live' if live_content ...)
+```
 
-This is not new — it is what `catalog_pos` and the whole "rank comes from the scan"
-reframing rest on. What is new is its blast radius. Before the source walk, a
-mis-ordered tab cost *ranking precision*: every item still got a date, and the date
-adjudicated. With early-exit, a mis-ordered source means the walk retires it at the
-wrong item and **silently skips everything behind it**.
+For a members video with no formats and `isLiveContent = true`, yt-dlp returns
+`was_live` — a past stream, correct — where Moombox returns `upcoming`. Under the
+project's standing "match yt-dlp for extraction" rule, `:454` is the actual defect.
 
-It is unverified in-repo and unverifiable from outside — which is why the walk
-**self-validates** rather than trusting it: a probed date newer than the previous one
-from the same source disproves the assumption for that source, disables early-exit
-for it, and logs. See "The source walk". This is the only one of the three
-assumptions with a detector, because it is the only one that fails silently.
+**Not fixed here, deliberately.** Changing the classifier has download-path blast
+radius (every strategy branches on `StreamStatus`). `denied` is the cheap, local
+containment. File `:454` as its own issue; if it is ever fixed, `denied` becomes
+redundant rather than wrong.
 
-A fourth, sharper fragility deserves the same treatment. `relativeAgeRe`
-(`internal/youtube/channel_membership.go:49`) is a single en-locale regex matched
-against serialized JSON, and `itemAge` returns `0` on any miss. One YouTube copy
-change makes *every* membership item on *every* channel return `Age=0`. Today that
-is self-limiting, because the cap is recomputed per cycle from live data. Under this
-design those items all become `assumed` — which is exactly why `assumed` rows are
-excluded from the top-N query. The failure mode degrades to "members content is not
-archived until probed" instead of "fabricated dates dominate the cap", and probes
-repair it automatically. This is the single best argument for the `assumed`
-exclusion, and worth stating as such.
+**Why `:454` is filed and the download-slot bug (decision 9) is folded in**, since
+both are worker-adjacent producer bugs decided opposite ways: `:454` is reachable
+only through the probe this spec already guards, so `denied` contains it. The
+download-slot bug has **no containment** and loses streams on today's build.
 
-## Decisions
-
-| Decision | Choice | Rationale |
-|---|---|---|
-| Scope | One spec, **both parts ship together** | Parts are internal sequencing, not release boundaries. Part 1 alone leaves the established gate permanently shut on any channel whose RSS never succeeds — only Part 2 sets `backfilled_at`, the gate's second key. Shipping Part 1 alone would trade a wrong-archive for a silent no-archive |
-| Probe scope | Probe **only what is in scope** — the window query's rows, walked serially per source with early exit (see "The source walk") | The window *is* the bound. A rank-blind probe list (every non-terminal row, regardless of scope) grows without limit once the backfill lands, and needs a reaper to contain it — a mechanism invented to contain a mechanism. Rows outside the window are stored and correctly ordered but never probed: we would never archive them, so their status is not worth a request |
-| Cap naming | UI labels + help text only; TOML key `max_feed_items` **unchanged** | The name describes the old, broken per-cycle meaning and is the misreading that hid this bug — so the label must move. The key must not: renaming it leaves two names for one concept in the codebase forever and puts ~12 doc sites in lockstep. No migration, no clamp of legacy values (see "What `max_feed_items` comes to mean") |
-| Store structure | SQLite table + **one** non-partial window index | Workload is one indexed range scan per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
-| Cap gate | Coarse pre-filter **removed**. Scope is a store-driven date-window query; every job still follows a fresh probe | The pre-filter was the sole cause of the miss risk, and guarded a probe budget that no longer exists once status is recorded |
-| Cap meaning | Archival depth | Matches goal 2. It bounds probe volume too, but only incidentally: a backfilled row is born `vod` with a coarse date, and `vod` is terminal, so the newest-N set is almost entirely un-probed in steady state. Depth of 1000 does not mean 1000 probes per cycle — it means ~0 |
-| `history` table | Schema/API/UI untouched; the feed path writes **fewer** rows | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI. See "What `history` comes to mean" — dropping the skip/give-up writes is a population change, not a schema change |
-| Catalog scan role | Backfill only | Part 1 makes RSS 404s harmless; 3 MB/channel/cycle forever buys no correctness |
-| Backfill trigger | One idempotent sweep keyed on `backfilled_at IS NULL`, run at startup and from `kickMonitors` (which fires on every channel add/remove/reorder), plus a manual re-run | No action needed on upgrade; new channels start complete. Not two triggers — `kickMonitors` cannot distinguish an add from a reorder, so it must be idempotent (see Integration Points) |
-| `last_videos` | Removed | Dead code; `feed_items` supersedes it (per-channel **and** dated) |
-
-## Part 1 — Dated Store and Cap-by-Date
+## Part 1 — The Dated Store
 
 ### Schema (v16)
 
@@ -579,7 +433,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
     video_id     TEXT NOT NULL,
     title        TEXT NOT NULL DEFAULT '',
     published    TEXT NOT NULL,           -- RFC3339 UTC, best-known
-    date_precision TEXT NOT NULL,         -- 'exact'|'day'|'coarse'|'assumed' (ladder)
+    date_precision TEXT NOT NULL,         -- 'assumed'|'coarse'|'day'|'exact' (ladder)
     catalog_pos  INTEGER NOT NULL DEFAULT 0,
     source       TEXT NOT NULL,           -- rss|membership|videos|streams
     status       TEXT NOT NULL,           -- unknown|upcoming|live|vod|not_a_stream
@@ -587,24 +441,21 @@ CREATE TABLE IF NOT EXISTS feed_items (
     first_seen   TEXT NOT NULL,
     PRIMARY KEY (channel_id, video_id)
 );
+
 -- Serves the window query, which the discovery walk and the archival pass BOTH
--- read (see "The window query"). A plain range scan: seek to now-window_days,
--- walk forward in recency order, stop. The DESC matters — it is what lets the
--- index satisfy ORDER BY as well as the filter, with no temp b-tree.
+-- read. A plain range scan: seek to now-window_days, walk forward in recency
+-- order, stop. The DESC matters — it is what lets the index satisfy ORDER BY as
+-- well as the filter, with no temp b-tree.
 --
--- NOT partial. Revision 1 carried `WHERE date_precision <> 'assumed' AND status
--- NOT IN ('upcoming','live')` to keep those rows out of a fixed-size top-N. A
--- date range has no slots to evict from, so both exclusions are gone and the
--- predicate with them — which also retires a real hazard: a partial index is
+-- NOT partial. An earlier draft carried `WHERE date_precision <> 'assumed' AND
+-- status NOT IN ('upcoming','live')` to keep those rows out of a fixed-size
+-- top-N. A date range has no slots to evict from, so both exclusions are gone and
+-- the predicate with them — which also retires a real hazard: a partial index is
 -- used only when SQLite can SYNTACTICALLY match its WHERE against the query's
 -- terms, so rewording a predicate degrades it to a full scan, silently, and the
 -- failure stays invisible until the catalog is large.
 CREATE INDEX IF NOT EXISTS idx_feed_items_window
     ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
-
--- (Revision 1's idx_feed_items_status is DROPPED, not added: it served the
---  rank-blind probe list and the cap-exempt union, and nothing queries
---  feed_items by status any more.)
 
 CREATE TABLE IF NOT EXISTS channel_state (
     channel_id     TEXT PRIMARY KEY,
@@ -614,9 +465,14 @@ CREATE TABLE IF NOT EXISTS channel_state (
 );
 ```
 
-`published` is frozen at first insert and only ever *upgraded* by a
-higher-precision source (`assumed` → `coarse` → `day` → `exact`). It is never recomputed
-from `now`, which is what makes ranking stable across cycles.
+There is **one** index. An earlier draft specified two — a partial
+`idx_feed_items_rank` and an `idx_feed_items_status`; neither exists now. The status
+index served a rank-blind probe list and a cap-exempt union, both of which are gone,
+and nothing queries `feed_items` by status.
+
+`published` is frozen at first insert and only ever *upgraded* by a higher-precision
+source (`assumed` → `coarse` → `day` → `exact`). It is never recomputed from `now`,
+which is what makes scope stable across cycles.
 
 That upgrade requires a **precision-guarded upsert, not `INSERT OR IGNORE`** — the
 latter can only ever insert, so a first-seen coarse date would be permanent:
@@ -638,25 +494,24 @@ ON CONFLICT(channel_id, video_id) DO UPDATE SET
 --     WHEN 'exact' THEN 4 WHEN 'day' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
 ```
 
-**The guard moved from `WHERE` to `CASE` deliberately.** A statement-level `WHERE`
-gates the *whole* `DO UPDATE`, which would drag `source` along with the date rule —
-and a stale `source` selects the wrong probe, which does not fail but **lies** (see
-"`source` decides which probe to use"). Per-column `CASE` lets the two fields move
-on their own schedules in one statement: `source` always, dates only upward.
+**The guard is per-column `CASE`, not a statement-level `WHERE`, deliberately.** A
+`WHERE` gates the *whole* `DO UPDATE`, which would drag `source` along with the date
+rule — and a stale `source` selects the wrong probe, which does not fail but **lies**
+(see "`source` decides which probe to use"). Per-column `CASE` lets the two fields
+move on their own schedules in one statement: `source` always, dates only upward.
 
-The guard makes the write monotonic: a later, *worse* estimate can never overwrite
-a better one, so ordering cannot regress no matter which source sees an item next.
-This is reachable, not theoretical: the backfill records a 2-day-old stream as
-`coarse`, RSS later carries an exact date for it, and being recent it is competing
-for the top N — exactly where ordering decides whether it is archived.
+The guard makes the write monotonic: a later, *worse* estimate can never overwrite a
+better one. This is reachable, not theoretical: the backfill records a 2-day-old
+stream as `coarse`, RSS later carries an exact date for it, and being recent it is
+inside the window — exactly where the date decides whether it is archived.
 
-Note `status` is deliberately **not** in the `DO UPDATE` set at all. Listing-derived
-status is weaker than probe-derived status, and a stale listing must never demote a
-probed `live` back to `vod`. (`source` is the opposite case: the listing is the
-*only* authority on where the item currently appears.)
+`status` is deliberately **not** in the `DO UPDATE` set at all. Listing-derived status
+is weaker than probe-derived status, and a stale listing must never demote a probed
+`live` back to `vod`. (`source` is the opposite case: the listing is the *only*
+authority on where the item currently appears.)
 
-`title` is stored (the archival pass and job creation both need it) and refreshed
-when a probe returns a better one, mirroring today's rule at
+`title` is stored (the archival pass and job creation both need it) and refreshed when
+a probe returns a better one, mirroring today's rule at
 `internal/monitor/utils.go:341-344` that an `"Unknown Title"` placeholder must not
 overwrite a real feed title.
 
@@ -703,48 +558,167 @@ design working, not leaking.
 
 **The over-inclusion is paid once per item, not per cycle.** A straddling item is
 probed, its exact date is written back by the precision guard, and the row falls out
-of the window permanently. Cost = the size of the straddling bucket, once. At the
-3-day default that bucket is `3 days ago` — one day of content. It scales with the
-window: at 30 days, `1 month ago` covers [30d, 60d), so a month of content takes one
-probe each before dropping out. Bounded, and self-extinguishing.
+of the window permanently. The source walk bounds the per-cycle cost further, to one
+probe per source (see "The source walk").
 
-**This deletes a Phase 1 refactor.** The rejected skew-old rule needed `now - Age -
-unit`, and the unit is **not recoverable** from `itemAge`'s return value — `504h` is
-either `"3 weeks"` or `"21 days"`; identical durations, different skews. That forced
-a signature change across `itemAge`, `MembershipVideo.Age`, and `membershipCandidates`'
+**This deletes a refactor.** The rejected skew-old rule needed `now - Age - unit`, and
+the unit is **not recoverable** from `itemAge`'s return value — `504h` is either
+`"3 weeks"` or `"21 days"`; identical durations, different skews. That forced a
+signature change across `itemAge`, `MembershipVideo.Age`, and `membershipCandidates`'
 `v.Age > 0` test at `feed.go:673`. Skew-new wants the truncated lower bound, which is
 what the function already returns. **Do not change `itemAge`.**
 
-**The skew applies to `coarse` only.** An `assumed` row has no matched unit — `Age =
-0` is the *absence* of a parse, not a measurement of zero — and live/upcoming items
-carry `Age = 0` by the badge short-circuit (`:227-231`), so nothing about them
-depends on this.
+**The skew applies to `coarse` only.** An `assumed` row has no matched unit — `Age = 0`
+is the *absence* of a parse, not a measurement of zero — and live/upcoming items carry
+`Age = 0` by the badge short-circuit (`:227-231`), so nothing about them depends on
+this.
 
-**Residual, named.** If a probe classifies a straddling item as past but supplies no
-date, the terminal-status invariant holds the row at `unknown`: it never jobs, but it
-keeps its coarse date, stays inside the window, and is re-probed every cycle.
-Bounded by the straddling bucket, and it resolves the moment a probe returns a date.
+### `published` for `assumed`, `upcoming` and `live` rows
 
-### Descriptions and term matching
+Never store the **scheduled start time**. It is in the future, so it would sit inside
+every window for weeks and claim to be the newest thing on the channel.
 
-Descriptions are deliberately **not** stored. The description used for term
-matching is not a property of the item — `parseFeedCandidates` derives it from feed
-context, stripping boilerplate lines that also appear in the `num_desc_lookbehind`
-neighbouring entries (`internal/monitor/feed.go:615-620`). Freezing that in a row
-would preserve a value computed against a feed state that no longer exists, and the
-backfill cannot produce it at all (tab listings carry no descriptions).
+An `upcoming` or `live` row keeps whatever it was first stored with — `assumed`/`now`
+from `itemAge`'s zero. The probe supplies **no** date for these statuses, so nothing
+overwrites it. `published = now` places them inside every window, which is correct and
+is what goal 3 wants: they are always in scope, always probed, never throttled. The
+date starts mattering exactly when the row becomes `vod`, and the probe that observes
+that transition supplies the real one.
 
-So descriptions stay exactly where they are today: computed per cycle, in memory,
-from the RSS response. The archival pass uses them when this cycle's RSS carried
-the item — which is always the case for a newly-seen item, since `unknown` items
-are probed and archived in the same cycle they first appear.
+**An `assumed` row is a claim of ignorance, not a date — and under a window that is
+harmless.** `itemAge` returns `0` for anything it cannot parse, which becomes
+`published = now` ⇒ inside the window ⇒ probed ⇒ dated ⇒ it either stays or drops out
+on a verified date. Goal 4 is satisfied because **nothing is archived on that guess**:
+an `assumed` row is `unknown` or `upcoming`/`live`, and `unknown` never jobs.
 
-The one degradation: an item re-evaluated from the store *without* being in this
-cycle's RSS response (for example after `max_feed_items` is raised) matches on
-**title only**. This is not a new behavior — membership and DECAPI candidates are
-already title-only (`internal/monitor/feed.go:694-696`: *"matching is title-only, like
-DECAPI"*) — but it must be documented, since an RSS item whose *description* alone
-matched the channel's terms would not be picked up by a later scope widening.
+This is where an earlier draft went wrong, and the error is worth recording because it
+cascaded. It excluded `assumed` rows from ranking on the reasoning that "a fabricated
+date must not rank" — true under a top-N, where a fabricated `now` sits at rank 1 and
+*evicts real content*. Under a window there are no slots to evict from: a wrong `now`
+costs a probe, and the probe corrects it. The exclusion then stranded the very rows it
+excluded (they could never be dated), which required a probe carve-out, which created
+unbounded probe growth, which required a reaper. Three mechanisms, one wrong premise.
+
+### The probe has no publish date today — adding one is Phase 1 work
+
+This spec repeatedly says the probe returns an authoritative date. **That data does
+not exist anywhere in the chain**, and unlike `Outcome`/`StreamStatus` it is not
+something `ProcessYouTubeVideo` computes and discards — it is simply absent:
+
+- `internal/monitor/utils.go:32-36` — `VideoProbeResult{StreamStatus, Title, ChannelName}`
+- `internal/youtube/types.go:46` — `VideoInfo` carries only `ScheduledStartTime`
+- `cmd/moombox/monitor_callbacks.go:174-178`, `:193-197` — both wiring sites copy
+  exactly those three fields
+
+**This is the load-bearing refactor.** Under a window the probe's date is what
+adjudicates every straddling item; without it the whole coarse bucket is admitted and
+never resolved, and every job is decided on a guess — goal 4, lost outright.
+
+**Do not reuse `ScheduledStartTime` as-is.** `extractScheduledStartTime`
+(`internal/youtube/player_api_parsing.go:113-138`) is a *conflated* accessor: it
+returns `liveBroadcastDetails.startTimestamp`, else a `liveStreamability` epoch, else
+microformat `uploadDate`/`publishDate` (`:129-135`). So it holds a genuine publish
+date for a plain upload and a **future** timestamp for an upcoming stream. An
+implementer looking for "the probe's publish date" will find it, and it will look
+right.
+
+Status-aware extraction:
+
+```
+status vod / post_live   → liveBroadcastDetails.startTimestamp   → precision 'exact'
+                            (the stream's ACTUAL start; RFC3339, second-granular)
+                         → ELSE uploadDate / publishDate         → precision 'day'
+                            (fallback — must not be skipped, see below)
+status not_a_stream      → microformat uploadDate / publishDate  → precision 'day'
+status upcoming / live   → no date stored
+                            (startTimestamp is the FUTURE scheduled start here)
+```
+
+The `liveStreamability` epoch branch is never a publish date — it is the scheduled
+start of an upcoming stream. It must not feed `PublishedAt` at all.
+
+**The `vod` fallback is not optional, and `post_live` is why.** `classifyStream`
+(`player_api_parsing.go:391-461`) makes the two mutually exclusive:
+
+```go
+isPostLiveDVR := lbd != nil && getStr(lbd, "endTimestamp") != "" && !isLiveNow  // :407
+if lbd == nil && !isLiveContent && !isPremiere { return StreamNotAStream }      // :451
+if !hasFormats && (lbd != nil || isLiveContent) { return StreamUpcoming }       // :454
+if isPostLiveDVR { return StreamPostLive }                                      // :457
+return StreamVOD                                                               // :460
+```
+
+An ended stream that *has* an `endTimestamp` short-circuits to `post_live` at `:457`
+and never reaches `:460`. So `StreamVOD` is reachable only via `lbd == nil &&
+isLiveContent && hasFormats` (**no `liveBroadcastDetails` at all**) or `lbd != nil &&
+endTimestamp == ""` (`startTimestamp` not guaranteed). The fixture at
+`player_api_parsing_test.go:317-328` is `TestClassifyStream_PostLiveDVR` — it
+demonstrates presence for `post_live`, not `vod`. A rule that only reads
+`startTimestamp` therefore yields no date at all for the normal `vod` case.
+
+Nor is microformat guaranteed per client: `player_api_parsing.go:414-419` notes "Some
+probes (notably ANDROID_VR on unpublished premieres) return this without a full
+microformat", and the authenticated probe uses TV_DOWNGRADED
+(`player_api_strategy.go:28-34`).
+
+Hence the chain, and the final rung:
+
+```
+startTimestamp → 'exact'  |  uploadDate/publishDate → 'day'  |  neither → leave as-is
+```
+
+**Invariant: never write a terminal status without a rankable date.** If the probe
+classifies a past item but supplies no date, the row stays **`unknown`** — it does
+*not* become `vod`.
+
+Without it, a members row stored `assumed` probes to `vod` with no date, and the row
+becomes `vod` + `assumed`: `published = now`, so it sits inside the window forever
+claiming to be new, while `vod` is terminal so no discovery probe ever revisits it.
+On a channel with `include_non_live_content = false` the refresh probe never fires
+either, so nothing can ever correct it. Keeping it `unknown` costs a probe per cycle
+and buys self-healing: the moment any probe returns a usable date, the row takes it.
+A terminal status is a promise that we know enough to stop looking; without a date we
+do not.
+
+**`uploadDate` is day-granular, so the ladder needs a rung for it.** Calling a
+date-only value `exact` alongside RSS's second-granular `<published>` would
+manufacture ties. Four rungs:
+
+```
+assumed  <  coarse  <  day  <  exact
+```
+
+A VOD's `startTimestamp` is genuinely `exact` — `day` applies only to plain uploads,
+which are the case where YouTube itself only publishes a date.
+
+New fields:
+
+```
+VideoInfo.PublishedAt          (new, internal/youtube)
+VideoProbeResult.PublishedAt   (new, internal/monitor)
++ both monitor_callbacks.go wiring sites
+```
+
+### `post_live` normalizes to `vod` on write
+
+The probe returns five statuses — `internal/youtube/types.go:13` defines
+`StreamPostLive = "post_live"` — but the store's enum has no `post_live`. That was an
+omission, and per the analysis above it is not a rare one: `post_live` is the *common*
+classification for an ended stream.
+
+Left unstated, a probed `post_live` row would match **no** archival branch
+(`upcoming/live`, `vod/not_a_stream`, `unknown`) while still sitting inside the
+window — in scope and undecidable.
+
+So the store **normalizes `post_live` → `vod` on write.** The store's vocabulary
+exists to answer two questions — is this in the window, and should it be archived —
+and `post_live` and `vod` answer both identically: today's `nonLiveSkipReason` is
+reached from a single `case "post_live", "vod":` (`utils.go:326`). The distinction is
+a *download-strategy* concern (DVR window, still-processing manifests), and the worker
+re-probes for that anyway.
+
+The date rule above is written in probe terms (`vod`/`post_live` → `startTimestamp`)
+precisely because it runs *before* this normalization.
 
 ### The window query
 
@@ -765,37 +739,22 @@ SELECT video_id, title, published, status, source, catalog_pos
  ORDER BY published DESC, catalog_pos ASC, video_id ASC
 ```
 
-**No `LIMIT`, and no status or precision exclusions.** Every one of them is gone, and
-each for a reason worth stating, because the earlier top-N formulation needed all
-three and a partial index to carry them:
+**No `LIMIT`, and no status or precision exclusions.** Each one is gone for its own
+reason, and the earlier top-N formulation needed all three plus a partial index:
 
 | Removed | Why it is unnecessary now |
 |---|---|
 | `LIMIT N` | the window is the bound. `M` is throughput, not depth — see "The scheduler" |
 | `status NOT IN ('upcoming','live')` | it existed to stop premieres **evicting VODs from a fixed-size top-N**. A date range has no fixed size, so there is nothing to evict from. They carry `published = now`, sit inside every window by construction, and cost nothing to anyone |
-| `date_precision <> 'assumed'` | it rested on "an undated row cannot be ranked" — false. `assumed` rows carry `published = now`, land inside the window, and get probed, which is exactly what we want for them. They needed a carve-out only because this exclusion stranded them |
+| `date_precision <> 'assumed'` | it rested on "an undated row cannot be ranked" — false. `assumed` rows land inside the window and get probed, which is exactly what we want |
 
 The ordering still uses the full `(published DESC, catalog_pos ASC, video_id ASC)`
 key — not to cut a lump at rank N, but because **the source walk consumes rows in
-recency order** and `catalog_pos` is what makes order well-defined inside a
-coarse-date lump (see "The source walk").
+recency order**, and `catalog_pos` is what makes order well-defined inside a
+coarse-date lump.
 
-**One index, not two, and not partial:**
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_feed_items_window
-    ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
-```
-
-`idx_feed_items_status` is **dropped**. It existed to serve the rank-blind probe list
-and the cap-exempt union; both are gone, and nothing else queries `feed_items` by
-status. The partial predicate is gone with the exclusions it enforced — which also
-retires a real hazard: a partial index is only used when SQLite can *syntactically*
-match its `WHERE` against the query's terms, so it degrades silently to a full scan
-the moment someone rewords a predicate.
-
-**Verified, not assumed** — re-run for revision 2 against `modernc.org/sqlite`
-(the driver actually in use), 6,000 rows across 4 channels, after `ANALYZE`:
+**Verified, not assumed** — run against `modernc.org/sqlite` (the driver actually in
+use), 6,000 rows across 4 channels, after `ANALYZE`:
 
 ```
 window query (all sources)
@@ -808,323 +767,80 @@ window query (membership_discovery = false)
 No `SCAN`, and no `USE TEMP B-TREE FOR ORDER BY` — the index satisfies the ordering
 as well as the filter, which is why the `DESC` in its definition matters. The
 `source <> 'membership'` arm is a post-filter on rows the range already narrowed, so
-it does not disturb the plan. Worth one assertion in the migration test regardless.
+it does not disturb the plan.
+
+**Widening the window admits already-stored content, with no probe.** Because `vod`
+rows are terminal and never *discovery*-probed, a per-candidate check evaluated only
+at probe time would leave an item skipped at 3 days skipped forever, even after the
+operator sets 30. The query re-evaluates scope every cycle from the store, so a config
+change takes effect immediately.
+
+Precisely: **entering scope needs no probe; becoming a job still does.** The store
+already holds the date and status, so re-scoping is pure SQL. But the item then hits
+the archival branch, which fires a refresh probe before creating the job — because a
+job must never be built on stale metadata.
 
 **An `unknown` row inside the window is probed, not skipped.** An RSS-sourced row
 carries an `exact` date, so a video that is listed but never successfully probed sits
 at `unknown` inside the window indefinitely. It is never jobbed (`unknown` ⇒ no job),
 and it costs one probe per cycle while it remains in the window — bounded, and it
-resolves the moment the probe succeeds or the window moves past it. Under the
-rejected top-N this row was worse: it *held an archival slot* and masked real content
-behind it. A date range has no slots to hold.
+resolves the moment the probe succeeds or the window moves past it. Under the rejected
+top-N this row was worse: it *held an archival slot* and masked real content behind
+it. A date range has no slots to hold.
 
-**The transition is the point, not a wrinkle.** When an upcoming stream ends it
-becomes `vod` at its true start time — already `exact`, from the probe that observed
-the transition — and stays inside the window for `archive_window_days`. That is
-exactly the content this tool exists for.
+## The passes
 
-### The probe has no publish date today — adding one is Phase 1 work
+### Descriptions and term matching
 
-This spec repeatedly says the probe returns an authoritative date and promotes an
-`assumed` row to a real one. **That data does not exist anywhere in the chain**, and
-unlike `Outcome`/`StreamStatus` it is not something `ProcessYouTubeVideo` computes
-and discards — it is simply absent:
+Descriptions are deliberately **not** stored. The description used for term matching
+is not a property of the item — `parseFeedCandidates` derives it from feed context,
+stripping boilerplate lines that also appear in the `num_desc_lookbehind` neighbouring
+entries (`internal/monitor/feed.go:615-620`). Freezing that in a row would preserve a
+value computed against a feed state that no longer exists, and the backfill cannot
+produce it at all (tab listings carry no descriptions).
 
-- `internal/monitor/utils.go:32-36` — `VideoProbeResult{StreamStatus, Title, ChannelName}`
-- `internal/youtube/types.go:46` — `VideoInfo` carries only `ScheduledStartTime`
-- `cmd/moombox/monitor_callbacks.go:174-178`, `:193-197` — both wiring sites copy
-  exactly those three fields
+So descriptions stay exactly where they are today: computed per cycle, in memory, from
+the RSS response. The archival pass uses them when this cycle's RSS carried the item —
+which is always the case for a newly-seen item.
 
-**Why this is blocking rather than cosmetic.** Without a probe date, an `assumed`
-row's *status* can be written but its `published`/`date_precision` cannot. So:
+The one degradation: an item re-evaluated from the store *without* being in this
+cycle's RSS response (for example after the window is widened) matches on **title
+only**. This is not a new behavior — membership and DECAPI candidates are already
+title-only (`feed.go:694-696`) — but it must be documented.
 
-```
-members item → assumed/unknown → probed → becomes vod
-             → now vod + assumed
-             → vod is terminal        ⇒ never discovery-probed again
-             → assumed is excluded    ⇒ never in the top-N
-             ⇒ silently unarchivable, forever
-```
+**Store non-matching items; do not probe them.** Storing is what makes the store a
+catalogue rather than a filtered view: terms can change, and the backfill writes
+everything regardless. Probing them would pay `/player` fetches for content that can
+never be jobbed on a channel using `terms` — a cost regression against goal 5,
+introduced purely by splitting the passes. So the discovery pass keeps today's order:
+`HasActiveJob` → terms → probe (`feed.go:704-725`).
 
-That is members-only content — precisely the class this bug is about — and it also
-disables the repair path the External Assumptions section leans on ("probes repair it
-automatically"). They cannot repair what they cannot supply.
+**There is no `assumed` carve-out, and an earlier draft's was cargo cult.** That draft
+probed `assumed` rows *regardless of terms*, to obtain a date. Its stated justification
+was that `assumed` rows were excluded from the top-N, so an unprobed one could never
+be ranked and scope would be computed over a subset. Both halves of that are gone: the
+exclusion no longer exists, and a window has no subset to miscompute. A non-matching
+`assumed` row now sits inside the window at `published = now`, is never probed, and is
+never jobbed — which is correct, because terms already said we do not want it. It costs
+one row in the query result. Skipping it costs nothing, because nothing downstream
+consults its date.
 
-**Do not reuse `ScheduledStartTime` as-is.** `extractScheduledStartTime`
-(`internal/youtube/player_api_parsing.go:113-138`) is a *conflated* accessor: it
-returns `liveBroadcastDetails.startTimestamp`, else a `liveStreamability` epoch, else
-microformat `uploadDate`/`publishDate` (`:129-135`). So it holds a genuine publish
-date for a plain upload and a **future** timestamp for an upcoming stream — exactly
-what the next section forbids storing. An implementer looking for "the probe's
-publish date" will find it, and it will look right.
-
-But the underlying data is better than that accessor implies, and the extraction
-should take the **best** source per status rather than the safest single one:
-
-```
-status vod / post_live   → liveBroadcastDetails.startTimestamp   → precision 'exact'
-                            (the stream's ACTUAL start; RFC3339, second-granular)
-                         → ELSE uploadDate / publishDate         → precision 'day'
-                            (fallback — see below; must not be skipped)
-status not_a_stream      → microformat uploadDate / publishDate  → precision 'day'
-                            (date-only, e.g. "2025-06-15")
-status upcoming / live   → no ranking date stored
-                            (startTimestamp is the FUTURE scheduled start here —
-                             never store it; these statuses are excluded from the
-                             ranking anyway, so nothing needs it)
-```
-
-**The `vod` fallback is not optional.** If a past stream's response carries no
-`liveBroadcastDetails`, a rule that only reads `startTimestamp` yields no date at
-all — and the row then keeps whatever precision it had. For a members item first
-seen without an age text that is `assumed`, which reinstates the exact dead-end this
-section exists to close: `vod` + `assumed` is terminal *and* unrankable. Falling
-back to `uploadDate` costs nothing and removes the cliff.
-
-**`post_live`, not `vod`, is the status that reliably has `startTimestamp`** — and
-getting this backwards is what makes the fallback mandatory. `classifyStream`
-(`player_api_parsing.go:391-461`) makes the two mutually exclusive:
-
-```go
-isPostLiveDVR := lbd != nil && getStr(lbd, "endTimestamp") != "" && !isLiveNow  // :407
-if lbd == nil && !isLiveContent && !isPremiere { return StreamNotAStream }      // :451
-if !hasFormats && (lbd != nil || isLiveContent) { return StreamUpcoming }       // :454
-if isPostLiveDVR { return StreamPostLive }                                      // :457
-return StreamVOD                                                               // :460
-```
-
-An ended stream that *has* an `endTimestamp` short-circuits to `post_live` at `:457`
-and never reaches `:460`. So `StreamVOD` is reachable only via `lbd == nil &&
-isLiveContent && hasFormats` (**no `liveBroadcastDetails` at all**) or `lbd != nil &&
-endTimestamp == ""` (`startTimestamp` not guaranteed). The fixture at
-`player_api_parsing_test.go:317-328` is `TestClassifyStream_PostLiveDVR` — it
-demonstrates presence for `post_live`, not `vod`.
-
-Nor is microformat guaranteed per client: `player_api_parsing.go:414-419` notes
-"Some probes (notably ANDROID_VR on unpublished premieres) return this without a
-full microformat", and the authenticated probe uses TV_DOWNGRADED
-(`player_api_strategy.go:28-34`). So a members past stream can classify `vod` with
-no `lbd` and no microformat at all.
-
-Hence the chain, and the final rung:
-
-```
-startTimestamp → 'exact'   |  uploadDate/publishDate → 'day'  |  neither → leave as-is
-```
-
-**Invariant: never write a terminal status without a rankable date.** If the probe
-classifies a past item but supplies no date, the row stays **`unknown`** — it does
-*not* become `vod`.
-
-Without this rule the chain has a permanent sink. A members row stored `assumed`
-probes to `vod` with no date (no `lbd`, no microformat — a real case per the
-analysis above), and the precision guard correctly declines to write a date it
-wasn't given. The row is then `vod` + `assumed`: terminal, so never discovery-probed
-again, *and* excluded from the top-N, so never archived. It can never recover, even
-though the very next probe might have supplied a date. That is the dead-end this
-whole section exists to close, reached by a different route.
-
-Keeping it `unknown` costs a probe per cycle (the accepted cost — see "Probe-list
-growth") and buys self-healing: the moment any probe returns a usable date, the row
-takes it, becomes `vod`, and ranks normally. A terminal status is a promise that we
-know enough to stop looking; without a date we do not.
-
-**This invariant is exactly necessary and sufficient — given the probe carve-outs.**
-Enumerate the full state space (5 statuses × 4 precisions) against the three rules:
-
-```
-discovery-probed  iff  status IN (unknown, upcoming, live)
-                       AND (term-match OR date_precision = 'assumed')   ← see below
-in the top-N      iff  date_precision <> 'assumed'
-                       AND status NOT IN ('upcoming','live')
-cap-exempt        iff  status IN (upcoming, live)
-```
-
-**The first premise is easy to state wrongly, and an earlier draft of this proof did
-— which is how it missed a sink.** Written as the bare `status IN (unknown, upcoming,
-live)`, it ignores the term gate at `feed.go:704-725`, and the enumeration then
-"proves" that `unknown`+`assumed` is always fine because it is always probed. It is
-not: a *non-term-matching* `unknown`+`assumed` row is never probed, never dated, and
-therefore never rankable — a third sink, invisible to the proof because the proof
-had already assumed it away. The `OR date_precision = 'assumed'` carve-out (see
-"Descriptions and term matching") is what makes the premise true, and therefore what
-makes the enumeration below sound.
-
-With the corrected premise, exactly **two** states are neither probeable nor
-reachable by any archival path:
-
-| status | precision | probed | in top-N | cap-exempt | outcome |
-|---|---|---|---|---|---|
-| `vod` | `assumed` | no | no | no | **stuck** |
-| `not_a_stream` | `assumed` | no | no | no | **stuck** |
-
-Every other combination is either probed (so it can change **when the world
-changes**) or rankable (so it can be archived).
-
-**`denied` qualifies that premise, and the qualification matters.** A `denied` probe
-*succeeds* at the HTTP level and is discarded, so a row denied every cycle — a
-members video on a channel we hold no cookies for — is probed forever and never
-changes. That is not a design sink: it changes the instant cookies arrive, which is
-also the instant the content becomes archivable at all. It is excluded from ranking
-(`assumed`), so it evicts nothing; it is never archived, which is correct, because we
-have never seen it. The row is a faithful record of *knowing nothing*, and the only
-thing that can end that is access — not a probe.
-
-Reading the table back: `unknown`+`assumed` is fine — it is probed.
-`upcoming`/`live`+`assumed` are fine — they are cap-exempt. The only sinks are a
-terminal status paired with a fabricated date, and forbidding that pairing is
-precisely this invariant. Nothing else needs guarding, and nothing less would do.
-
-The `liveStreamability` epoch branch is never a publish date — it is the scheduled
-start of an upcoming stream. It must not feed `PublishedAt` at all.
-
-Phase 1 therefore adds a **distinct** field, with its own status-aware extraction:
-
-```
-VideoInfo.PublishedAt          (new, internal/youtube)
-VideoProbeResult.PublishedAt   (new, internal/monitor)
-+ both monitor_callbacks.go wiring sites
-```
-
-This is a cross-package signature change and it must be budgeted, not discovered. It
-is now the **only** such refactor in Phase 1 — the unit-preserving `itemAge` change
-was cut with the skew-old rule (see "Coarse dates skew new") — and it is also the
-load-bearing one: under an N-day window the probe's date is what adjudicates every
-straddling item, so without it the whole coarse bucket is admitted and never resolved.
-
-**`uploadDate` is day-granular, so the ladder needs a rung for it.** Calling a
-date-only value `exact` alongside RSS's second-granular `<published>` would
-manufacture ties and undercut "RSS dates are exact and distinct, so they effectively
-never tie". Four rungs:
-
-```
-assumed  <  coarse  <  day  <  exact
-```
-
-The upsert's precision guard ranks all four; the top-N excludes only `assumed`. Note
-a VOD's `startTimestamp` is genuinely `exact` — `day` applies only to plain uploads,
-which are the case where YouTube itself only publishes a date.
-
-### `post_live` normalizes to `vod` on write
-
-The probe returns five statuses — `internal/youtube/types.go:13` defines
-`StreamPostLive = "post_live"` — but the store's enum has no `post_live`. That was an
-omission, and per the analysis above it is not a rare one: `post_live` is the *common*
-classification for an ended stream, since any stream with an `endTimestamp`
-short-circuits there.
-
-Left unstated, a probed `post_live` row would match **no** archival branch
-(`upcoming/live`, `vod/not_a_stream`, `unknown`) while still passing both rank-index
-predicates — in scope, ranked, and undecidable.
-
-So the store **normalizes `post_live` → `vod` on write.** The store's vocabulary
-exists to answer two questions — where does this rank, and should it be archived —
-and `post_live` and `vod` answer both identically: today's `nonLiveSkipReason` is
-reached from a single `case "post_live", "vod":` (`utils.go:326`). The distinction is
-a *download-strategy* concern (DVR window, still-processing manifests), and the
-worker re-probes for that anyway; it is not the store's business. Normalizing keeps
-the enum at five values with every branch defined, rather than adding a sixth that
-would be a synonym everywhere it appeared.
-
-The date rule above is written in probe terms (`vod`/`post_live` → `startTimestamp`)
-precisely because it runs *before* this normalization.
-
-### `published` for upcoming and live rows
-
-Never store the **scheduled start time**. It is in the future, so it would sort
-above every real row — for weeks, on a stream scheduled far out — which is the same
-eviction bug in a different disguise.
-
-An `upcoming` or `live` row keeps whatever it was first stored with — `assumed`/`now`
-from `itemAge`'s zero. The probe supplies **no** date for these statuses, so nothing
-overwrites it. That is fine: the value is a placeholder, because those statuses are
-excluded from the ranking entirely. The date starts mattering exactly when the row
-becomes `vod`, and the probe that observes that transition supplies the real one.
-
-**`date_precision <> 'assumed'` is what enforces goal 4.** An `assumed` row carries a
-fabricated date: `itemAge` returns `0` for any item it cannot parse, which becomes
-`published = now`. Letting that rank would place a guess at position 1 ahead of
-every real date — the opposite of the goal. Excluding it costs nothing, because
-every `assumed` row is always discovery-probed — an `unknown` one by the status rule
-plus the term carve-out ("Descriptions and term matching"), an `upcoming`/`live` one
-by the status rule directly. (Not every `assumed` row is `unknown`: `upcoming`/`live`
-rows store no date and stay `assumed` too.) The probe promotes it to a real date and
-it enters the ranking, usually within the same cycle.
-
-This also removes a denial-of-scope failure. `published` is frozen at insert, so if
-the corrective probe fails permanently the fabricated "now" would sit in the top N
-indefinitely, evicting real content from scope — at `N=3`, three such rows would
-freeze a channel's archival scope entirely. An excluded row cannot evict anything.
-
-An item that can never be probed therefore never enters scope, which is the correct
-outcome: we know nothing about it, so we archive nothing on its behalf. It is still
-probed every cycle, so it recovers the moment YouTube answers.
-
-**The honest cost:** excluding rows shrinks the population the top-N is computed
-over, so while an `assumed` row is pending it is possible to admit an item that is
-truly rank N+1. "Pending" is normally one cycle, because every `assumed` row is
-probed (terms notwithstanding) — **except a persistently `denied` row, which stays
-pending for as long as we lack access.** That is correct rather than unfortunate: an
-item we are refused has no knowable date, so ranking it would be the guess goal 4
-forbids. This is a real trade, not a free win — but it is the right
-direction. Over-admitting by one position archives one slightly-older item; letting
-a fabricated date rank *evicts real content* and, at `N=3`, can freeze a channel.
-The window is normally one cycle (the discovery probe promotes the row to `exact`
-immediately), and it only persists while probes are failing — during which we
-would not be archiving that item anyway.
-
-This is expressed as a **top-N query rather than a per-candidate rank check** for
-two reasons:
-
-1. **Raising `max_feed_items` must widen scope for existing content.** Because
-   `vod` items are terminal and never *discovery*-probed, a per-candidate rank
-   check evaluated only at probe time would leave an item skipped at `N=3` skipped
-   forever, even after the operator sets `N=20`. The top-N query re-evaluates scope
-   every cycle from the store, so a config change takes effect immediately.
-
-   Precisely: **entering scope needs no probe; becoming a job still does.** The
-   store already holds the date and status, so re-ranking is pure SQL. But the item
-   then hits the archival branch, which fires a refresh probe before creating the
-   job — because a job must never be built on stale metadata. The two statements are
-   about different steps, and an earlier draft conflated them into "needs no probe".
-2. It is cheaper: one indexed query returning N rows, instead of a counting query
-   per candidate against a store that holds thousands of backfilled rows.
-
-The total order is what makes this safe against coarse-date lumps: `LIMIT N` over a
-strict total order returns exactly N items, whereas a rank-by-count formulation
-would tie every member of a lump at the same rank and admit all of them.
+Term matching cannot be a SQL predicate — it needs the in-memory description for
+RSS-carried items — so it stays a Go-side filter over the query's rows, exactly as it
+is a Go-side filter over candidates today.
 
 ### Probe rules
 
-Probes have two distinct triggers. Conflating them is a mistake: one is discovery,
-the other is metadata freshness before job creation.
+Probes have two distinct triggers. Conflating them is a mistake: one is discovery, the
+other is metadata freshness before job creation.
 
-**Discovery probes** — every cycle, over the **in-scope set only**. The status rule
-is only half of it; the gates are not optional, and they are stated here in full
-because a reader looking up "when do we probe?" stops at this block:
-
-⚠️ **The `probe list =` line below is SUPERSEDED by revision 2** — scope is an N-day
-window, not a top-N, and the pass is a serial per-source walk. See "The source walk"
-immediately after this block. The per-row gate order, the probe choice, and the
-escalation are unchanged and still authoritative.
+**Discovery probes** — every cycle, over the window's rows only:
 
 ```
-probe list = the in-scope set  ∪  {rows WHERE date_precision='assumed'}
-             ── in-scope is the SAME set the archival pass reads:
-                top-N  ∪  {rows WHERE status IN (upcoming, live)}
-                (see "The in-scope query"; both arms exclude source='membership'
-                 iff NOT MembershipDiscoveryEnabled())
-             ── the 'assumed' arm is NOT redundant: assumed rows are excluded from
-                the top-N by construction, so a purely scope-bounded list would
-                never date them — the sink the carve-out below exists to prevent
-
 per row, in this order:
   skip if HasActiveJob                        (the worker owns it)
-  skip if NOT term-match  UNLESS date_precision='assumed'
-                                              (terms gate JOBBING; an assumed row is
-                                               probed anyway to get a DATE, which
-                                               RANKING needs — see the carve-out in
-                                               "Descriptions and term matching")
+  skip if NOT term-match                      (terms gate jobbing; an unjobbable
+                                               item's status is not worth a request)
   skip if source='membership' AND NOT membershipActive()
                                               (no cookies / discovery off ⇒ an
                                                authenticated probe is useless)
@@ -1140,21 +856,19 @@ per row, in this order:
     anti-bot refusal on PUBLIC videos, so it must not relabel — and without a
     relabel the escalation would recur every cycle forever.
     See "A refusal escalates, and sets `source` itself".
-  (no row is ever deferred or retired — see "The cap is the bound")
+  (no row is ever deferred or retired — the window is the bound)
 ```
 
 **Stating this as the bare status rule is a known trap.** It then reads as "probe
-every `unknown` row unconditionally", which drops the term gate and reintroduces the
-goal-5 cost regression on any channel using `terms`. It is also exactly the false
-premise that made an earlier state-space proof miss a sink (see "This invariant is
-exactly necessary and sufficient"). The status rule alone is never the answer.
+every `unknown` row unconditionally", which drops the term gate and reintroduces a
+goal-5 cost regression on any channel using `terms`.
 
 ### The source walk
 
-The window admits the whole straddling bucket ("Coarse dates skew new"), and probing
-all of it would be wasteful. It is not necessary: **within one source the listing is
-recency order**, so once a probe places an item of source `S` outside the window,
-every later item of `S` is older by construction and no probe can change that.
+The window admits the whole straddling bucket, and probing all of it would be
+wasteful. It is not necessary: **within one source the listing is recency order**, so
+once a probe places an item of source `S` outside the window, every later item of `S`
+is older by construction and no probe can change that.
 
 So the discovery pass is a **serial walk in store order, with per-source exhaustion**:
 
@@ -1188,101 +902,36 @@ Sources that need the walk are the coarse ones — `videos`, `streams`, `members
 RSS rows carry `exact` dates already, so no probe can move them and the walk never
 retires that source on their account.
 
+**The exhaustion trigger is narrow by design.** Only a probe that *returned a date*
+may retire a source. This is the retirement mistake in a new place: a transient cookie
+fault that denies four members rows in a row must not be read as "the source ends
+here".
+
 **The cost this removes is per-cycle, not total.** Each probe writes an exact date
 back, so that row leaves the window permanently and the bucket drains at one item per
 source per cycle regardless. The walk bounds the **per-cycle** cost to
-`items-inside + 1 per source`, which is the number that matters on a 24/7 process.
-The worst case is stark: at a 30-day window, every item displayed `1 month ago` has a
-true age of at least 30 days, so the entire bucket is admitted and the entire bucket
-fails — one probe now settles it instead of thirty days of content.
+`items-inside + 1 per source`, which is the number that matters on a 24/7 process. The
+worst case is stark: at a 30-day window, every item displayed `1 month ago` has a true
+age of at least 30 days, so the entire bucket is admitted and the entire bucket fails —
+one probe settles it instead of thirty days of content.
 
 **Serial probing costs latency, and the budget is there.** `items-inside` sequential
 `/player` calls at ~200 ms each is a few seconds per channel against a 5-minute cycle.
 
-**This promotes an assumption, which is why it self-validates.** "Tab order is
-recency order" already underpins `catalog_pos` — but until now, a mis-ordered tab
-would only cost *ranking precision*, because every item still got a date and the date
-adjudicated. Under early-exit a mis-ordered source means we stop at the wrong item
-and **silently skip everything behind it**: completeness, not precision. Concretely,
-in a `1 week ago` lump of true ages 7d/8d/13d against a 7-day window, a listing that
-returned 8d first would retire the source and skip the 7d item that belonged in it.
-
-The check costs one comparison and one variable per source, needs no extra requests,
-and uses dates the pass already has. It cannot repair a mis-ordered source — it turns
-a silent completeness loss into a logged, self-detecting degradation that falls back
-to probing the full bucket. That is the same trade as `denied`: distrust the inference
-exactly when the evidence says it was a guess.
-
-### The cap is the bound
-
-A store **never forgets**, so "probe every non-terminal row" — the obvious rule, and
-the one three earlier drafts of this spec carried — has no ceiling. Today an
-unprobeable item escapes by scrolling out of RSS's 15-item window; reading the store
-is what removes that escape, and removing it is also what fixes the original bug. So
-the escape has to be replaced, not mourned.
-
-**It is replaced by the cap, which was always the right bound.** We probe the
-in-scope set. A row below rank N is out of scope: we would not archive it whatever
-its status turned out to be, so its status is not worth a request. It stays in the
-store, correctly ranked at its true date, costing one row of disk and nothing else.
-An item leaves the probe list exactly as it leaves scope — pushed below rank N by
-newer content — which is the same escape RSS gave us for free, now stated as a rule
-instead of inherited from a response-size accident.
-
-This bounds the list at `N + |upcoming ∪ live| + |assumed|` forever, on every
-channel, with no reaper, no backoff, no retirement, and no columns to carry any of
-them.
-
-**The three arms, and why each is necessary:**
-
-| Arm | Why it cannot be dropped | Size |
-|---|---|---|
-| top-N | the archival target; a row here that is `unknown` must be resolved or it is never archived | ≤ `N`, and ~0 of them are non-terminal in steady state |
-| `upcoming` ∪ `live` | cap-exempt by goal 3, so they must be probed wherever they rank | a handful; a channel has few scheduled streams |
-| `assumed` | excluded from the top-N by construction (they carry `published=now` and would sort first), so a purely scope-bounded list would never date them — the sink the term carve-out exists to prevent | ~0 normally; ~30 under the `relativeAgeRe` breakage in External Assumptions |
-
-**Depth does not mean probes.** `max_feed_items` allows 1000, and a top-1000 sounds
-like 1000 probes per cycle. It is ~0: a backfilled row is written `vod` with a coarse
-date, `vod` is terminal, and terminal rows are never discovery-probed. The probe list
-is the top-N *intersected with* the non-terminal statuses, and in steady state that
-intersection is the few items published since the last cycle.
-
-**A dead ID inside the top-N is probed every cycle, and that is fine.** It is bounded
-by `N`, it is repaired by time — newer content pushes it out of scope — and the two
-alternatives are both worse: deleting it shifts every row below it up by one, which
-is scope moving because *a probe failed* (goal 2, the Jerry shape); keeping it while
-refusing to probe it means it holds an archival slot forever and never resolves.
-Retirement was designed to fix a problem the rank-blind list created; deleting the
-rank-blind list deletes the problem.
-
-Two mechanisms were tried before this and are recorded because both are tempting:
-
-**Rejected: a terminal `unreachable` status.** `MetadataTracker` gives up after
-three *consecutive* failures (`utils.go:19-21`, `:61-76`) and then **deletes the
-counter** — `utils.go:275-279` calls it "backing off" and notes it "resets the
-tracker's escalation to 0". It is a recurring, deliberately transient backoff, not a
-verdict. Marking a row terminal on it means a members stream that was briefly
-unprobeable is never probed again: the same unrecoverable goal-3 loss as the
-`HasProcessed` gate.
-
-**Rejected: `last_listed_at` retirement.** Retire a row no listing has mentioned for
-N days whose probes also fail. It cannot tell *"this row is unreachable"* from *"we
-stopped looking at this row"*: a cookie expiry gates off the `/membership` fetch
-**and** the authenticated probe together, so both conjuncts drift true for the same
-reason while nothing about the row changed — and the members catalog erodes because a
-credential lapsed. Under the cap bound there is nothing left for it to fix.
-
-`MetadataTracker` and `ProbeCooldown` are untouched, per the non-goal.
+**It self-validates, because it promotes an assumption.** See External Assumptions for
+why. The check costs one comparison and one variable per source, needs no extra
+requests, and uses dates the pass already has. It cannot repair a mis-ordered source —
+it turns a silent completeness loss into a logged, self-detecting degradation that
+falls back to probing the full bucket. That is the same trade as `denied`: distrust the
+inference exactly when the evidence says it was a guess.
 
 ### The probe outcome must surface to the caller, not be hooked inside
 
 `ProcessYouTubeVideo` is shared: it is called from `internal/monitor/feed.go:753`
-**and** `internal/monitor/decapi.go:583`. So no `feed_items` write may be hooked
-inside it — DECAPI would then write rows, breaking the "no DECAPI-side change"
-non-goal and putting rank-1 DECAPI hits into a store the design says they never
-enter.
+**and** `internal/monitor/decapi.go:583`. So no `feed_items` write may be hooked inside
+it — DECAPI would then write rows, breaking the "no DECAPI-side change" non-goal.
 
-Instead `ProcessYouTubeVideoResult` gains an **outcome** discriminator:
+Instead the result gains an **outcome** discriminator:
 
 ```
 feed path (probeAndClassify) — four outcomes:
@@ -1295,18 +944,18 @@ feed path (probeAndClassify) — four outcomes:
                 Predicate: see "The `denied` predicate (canonical)". Do not restate it.
                 Behaviour: NOT FRESH; writes no status and no date; retried next
                 cycle. (A `members_only` refusal separately sets `source` before
-                the outcome is classified — see the escalation. That is the
-                refusal's write, not `denied`'s.)
+                the outcome is classified — that is the refusal's write, not
+                `denied`'s.)
   errored     — a probe ran and failed                     (utils.go:269-294)
   cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
 
-DECAPI (composed ProcessYouTubeVideo) — keeps a fourth:
+DECAPI (composed ProcessYouTubeVideo) — keeps a fifth:
   passthrough — no probe ran; ProbeVideo is not wired      (utils.go:248-250)
 ```
 
 **Contract: `StreamStatus` is meaningful if and only if `outcome == probed`.** This
-falls straight out of the existing control flow, and the type should enforce it
-rather than rely on the reader:
+falls straight out of the existing control flow, and the type should enforce it rather
+than rely on the reader:
 
 | return site | `meta` | outcome |
 |---|---|---|
@@ -1315,52 +964,28 @@ rather than rely on the reader:
 | `utils.go:294` | zero value (`err != nil`) | `errored` |
 | `utils.go:315`, `:332`, `:350` | valid | `probed`, or `denied` (predicate: see "The `denied` predicate (canonical)") |
 
-`meta` is assigned at `:268`, so the first two returns precede it entirely and the
-error return holds only its zero value. Reading `StreamStatus` on any non-`probed`
-outcome yields `""` and would classify silently wrong. The spec never does — the
-store write and the job decision both require `probed` first — but the coupling
-should be explicit, because "empty string means not-a-stream-ish" is exactly the
-kind of thing that compiles.
+`meta` is assigned at `:268`, so the first two returns precede it entirely. Reading
+`StreamStatus` on any non-`probed` outcome yields `""` and would classify silently
+wrong — "empty string means not-a-stream-ish" is exactly the kind of thing that
+compiles.
 
-**There are four, not three, and the fourth breaks the obvious rule.** An earlier
-draft claimed all outcomes "collapse to `ShouldProcess=false`". Three do —
+**`passthrough` breaks the obvious rule, which is why it must be named.** An earlier
+draft claimed all non-`probed` outcomes "collapse to `ShouldProcess=false`". Three do —
 `utils.go:258-262` (cooldown) and `:294` (error) — but `p.ProbeVideo == nil` returns
-`ShouldProcess: **true**` at `:248-250`, passing the item straight through
-un-probed. So "not `ShouldProcess`" is not a usable proxy for "not fresh", and a
-naive implementation deriving freshness from `ShouldProcess` would job on no
-metadata whenever the probe is unwired.
+`ShouldProcess: **true**` at `:248-250`, passing the item straight through un-probed.
+So "not `ShouldProcess`" is not a usable proxy for "not fresh", and a naive
+implementation deriving freshness from `ShouldProcess` would job on no metadata
+whenever the probe is unwired.
 
-**`passthrough` does not produce a job on the feed path, and this is a deliberate
-behavior change.** An earlier draft claimed it "counts as fresh and still jobs,
-exactly as today". That was wishful: the archival pass dispatches on **stored
-status**, and a passthrough writes no status, so the row stays `unknown` — whose
-branch is an explicit NO JOB. Declaring it fresh changes nothing, because no branch
-consults freshness for `unknown`.
-
-Rather than carve out a special case, the feed path simply **requires a wired
-probe**: `probeAndClassify` has no passthrough outcome, and a nil `ProbeVideo` there
-is a programming error, not a supported mode. Production always wires it
-(`cmd/moombox/monitor_callbacks.go:180`), and the only nil caller is a test
-(`utils_test.go:215`). DECAPI keeps the composed `ProcessYouTubeVideo` and with it
+The feed path sidesteps it entirely by **requiring a wired probe**: `probeAndClassify`
+has no passthrough outcome, and a nil `ProbeVideo` there is a programming error.
+Production always wires it (`cmd/moombox/monitor_callbacks.go:180`), and the only nil
+caller is a test (`utils_test.go:215`). DECAPI keeps the composed function and with it
 today's nil behavior, unchanged.
-
-So the feed path's outcome set is four values (`probed`/`denied`/`errored`/`cooldown`)
-and `outcome == probed` is the FRESH predicate without qualification. `passthrough`
-still matters — it is why `ShouldProcess` cannot be used as a freshness proxy — but
-it lives on DECAPI's side of the split, so it is not in the feed path's set at all.
-
-The feed monitor reads the outcome and owns both store writes; DECAPI ignores it and
-behaves exactly as it does today.
 
 **`outcome == probed` is the FRESH predicate** — for the store write *and* as the
 precondition for a job. It is not a new source of truth: it reads a decision
 `ProcessYouTubeVideo` already makes internally and currently discards.
-
-`Outcome` alone is not sufficient, though. The result must **also** carry
-`StreamStatus` and the authoritative publish date, because `ShouldProcess` conflates
-"the probe worked" with "this should become a job" — see "Only FRESH items become
-jobs". The feed path reads `Outcome` + `StreamStatus` and decides for itself;
-`ShouldProcess` remains for DECAPI.
 
 ### The split must be a function split, not just a richer return type
 
@@ -1374,145 +999,105 @@ utils.go:330  AddToHistory  — post_live/vod skipped by nonLiveSkipReason
 ```
 
 And `nonLiveSkipReason(includeNonLive=false, _)` **always** skips (`utils.go:229-231`),
-so on a default-config channel those fire for *every* plain upload. If the feed path
-keeps calling the function while ignoring its verdict, it silently inherits history
-writes it does not control.
-
-So `ProcessYouTubeVideo` splits in two:
+so on a default-config channel those fire for *every* plain upload.
 
 | | used by | does |
 |---|---|---|
 | `probeAndClassify` | feed monitor | probe; record cooldown; update `MetadataTracker`; return `Outcome` + `StreamStatus` + title/channel/publish date. **No history writes, no job verdict.** |
 | `ProcessYouTubeVideo` | DECAPI only | `probeAndClassify` + today's `nonLiveSkipReason`/`AddToHistory`/`ShouldProcess` logic, byte-identical |
 
-The feed monitor then owns every decision it is specified to own — status write,
-archival gating, history — with no hidden writes underneath it. DECAPI keeps the
-composed function and is untouched, which is what makes the "no DECAPI-side change"
-non-goal true rather than aspirational.
-
 **Two consequences worth stating:**
 
 - **`IsReprobe` becomes dead for the feed path.** It exists only to drive
   `nonLiveSkipReason` and to demote log level; the archival pass consults
-  `HasProcessed` directly. `probeAndClassify` does not take it. DECAPI still passes
-  it.
-- **Feed-path give-up no longer writes history.** Today give-up calls
-  `AddToHistory`, whose only effect is flipping the reprobe/log-level flag — it
-  explicitly does *not* stop re-probing (`utils.go:272-279`), so nothing is lost by
-  dropping it. This is a deliberate behavior change: it stops manufacturing
+  `HasProcessed` directly. DECAPI still passes it.
+- **Feed-path give-up no longer writes history.** Today give-up calls `AddToHistory`,
+  whose only effect is flipping the reprobe/log-level flag — it explicitly does *not*
+  stop re-probing (`utils.go:272-279`), so nothing is lost. This stops manufacturing
   orphaned-history rows for videos that were never jobbed, which is precisely the row
   class that accumulated into the 80-entry purge that re-armed `gr-ZTohjwnQ`.
 
-**Refresh probe** — on demand, only when a stored item is about to become a job:
+**Only FRESH items become jobs**, where fresh means **this cycle's probe returned
+metadata** — `outcome == probed`. It does **not** mean `ShouldProcess == true`, and
+conflating the two is a trap that survived eight review rounds:
+
+`ShouldProcess` is *not* "the probe worked". A probe that **runs and succeeds** returns
+`ShouldProcess=false` whenever `nonLiveSkipReason` skips — `utils.go:315`
+(`not_a_stream`) and `:332` (`post_live`/`vod`). The mapping is not invertible: `false`
+means "errored **or** cooled down **or** succeeded-but-not-jobbable".
+
+Deriving the store write from `ShouldProcess` breaks the design on the **default**
+configuration (`IncludeNonLiveContent` is a plain `bool` at
+`internal/config/types.go:264`, so it defaults to `false`):
+
+1. RSS carries a plain upload ⇒ stored `unknown`/`exact`.
+2. Discovery probes it ⇒ succeeds ⇒ `not_a_stream` ⇒ `nonLiveSkipReason(false, _)`
+   skips ⇒ `ShouldProcess=false`.
+3. If that means "not fresh", the status write never fires ⇒ the row stays `unknown`
+   **forever**.
+4. Nothing bounds it: the probe *succeeded*, so no failure path engages either.
+
+Every plain upload on every default-config channel would then be probed at full rate
+forever. So the design needs **two predicates, not one**:
+
+| Predicate | Value | Purpose |
+|---|---|---|
+| store write | `outcome == probed` | record status/date/title whenever metadata came back — **regardless of jobbability** |
+| job | `outcome == probed` **plus the archival rules** | the archival pass decides from the fresh `StreamStatus` |
+
+They coincide on the `live`/`upcoming` branches (`utils.go:319-324` fall through to
+`ShouldProcess: true`), which is exactly why the divergence hid.
+
+### Refresh probe
+
+On demand, only when a stored item is about to become a job:
 
 ```
-in-scope AND NOT HasProcessed AND term-match AND status IN (vod, not_a_stream)
+in window AND NOT HasProcessed AND term-match AND status IN (vod, not_a_stream)
     AND include_non_live_content          ← BEFORE probing; a channel that archives
                                             no VODs must not pay the probe
     AND channel established
     AND NOT (source='membership' AND NOT membershipActive())   ← same gate as discovery
-    → re-probe now, then job on the fresh result (denied/errored/cooldown ⇒ no job)
+    → re-probe now, WRITE THE RESULT BACK, then RE-CHECK THE WINDOW against the
+      probe's date, then decide (denied/errored/cooldown ⇒ no job)
 ```
 
-**The membership gate applies here too.** With the `denied` rule in place this is
-now an *efficiency* control, not a correctness one — a cookieless probe of members
-content returns `members_only`, which is `denied`, so no job results either way. The
-gate's job is to skip a request we already know will be refused. The reasoning below
-is retained because it is what the gate was *derived* from, and because it is exactly
-what happens if the `denied` rule is ever weakened:
-`ProbeVideoAuth` carries no cookie check — `cmd/moombox/monitor_callbacks.go:188-198`
-calls `ProbeVideoStatusAuthenticated` unconditionally — so with no cookies the
+**The window re-check is the crux of the whole skew-new design.** A `coarse` row is
+admitted on an *upper bound* — `"1 week ago"` could be 13 days old. The refresh probe
+supplies the exact date; if that date falls outside the window, **there is no job**,
+and the row drops out permanently on the date just written. Skipping this re-check
+would archive on a guess and lose goal 4 outright.
+
+**The membership gate applies here too.** With the `denied` rule in place this is now
+an *efficiency* control, not a correctness one — a cookieless probe of members content
+returns `members_only`, which is `denied`, so no job results either way. The reasoning
+below is retained because it is what the gate was *derived* from, and because it is
+exactly what happens if the `denied` rule is ever weakened: `ProbeVideoAuth` carries no
+cookie check — `cmd/moombox/monitor_callbacks.go:188-198` calls
+`ProbeVideoStatusAuthenticated` unconditionally — so with no cookies the
 "authenticated" probe still *runs*, gets no formats, and misclassifies the video as
-`upcoming`. That is the failure `feed.go:743-746` documents and 2.7.2 fixed.
+`upcoming`. Ungated, that misclassification is laundered straight into a job, and
+`AddToHistory` then poisons the row against ever being archived correctly.
 
-Ungated, that misclassification is laundered straight into a job:
-
-1. Operator raises `max_feed_items` 3 → 20 (the explicitly-supported widening case),
-   so members `vod` rows enter the top-N. The read arms gate on config only, so a
-   cookie lapse does not remove them — correctly.
-2. Cookies lapse that cycle. The archival pass fires a refresh probe on a members
-   `vod`.
-3. No cookies ⇒ no formats ⇒ returns `upcoming`. The outcome is `probed`, so it is
-   **FRESH**.
-4. Written back ⇒ the row becomes `upcoming`. Re-decide on the fresh status ⇒
-   `upcoming → job (cap exempt)`. A job is created for a members VOD that cannot
-   download.
-5. `AddToHistory` fires on job creation ⇒ `HasProcessed`. Cookies return, discovery
-   corrects the row to `vod`, and the archival `vod` branch now hits
-   `skip if HasProcessed`. **The VOD is never archived**, and recovering it requires
-   clearing orphaned history by hand.
-
-So the gate is not symmetry for its own sake. Without it, cookie state does far more
-than skip a doomed probe: the probe is not skipped, does not fail, and returns a
-*wrong answer* that this design routes directly to a job — and then poisons the row
-against ever being archived correctly.
-
-Gated, the refresh probe simply does not fire during a lapse: no fresh result, no
-job, retry next cycle — the behavior already specified for `errored` and `cooldown`.
-
-This preserves today's invariant that **job creation always follows a fresh
-probe**. Without it, the archival pass would create jobs from probe data captured
-in an arbitrarily old cycle — stale titles, and videos that may since have been
-deleted or privated.
-
-**The refresh probe writes its result back, and its result is authoritative.** Both
-halves matter, and an earlier draft of this spec got both wrong by phrasing the rule
-as "job iff *still* non-live":
+**The refresh probe's result is authoritative, and both halves matter.** An earlier
+draft phrased the rule as "job iff *still* non-live" and got both wrong:
 
 - A stream can restart on the same video ID — `feed.go:702-703` says so explicitly
-  ("not if merely finished — a stream may restart on the same URL"). So a stored
-  `vod` can legitimately refresh to `live`. Treating a non-`vod` refresh as "skip"
-  would refuse to archive a live stream: a goal-3 violation.
-- Discarding the refresh result would leave the row `vod` forever. `vod` is not in
-  the discovery probe list, so the restarted stream would never be looked at again
-  and would be missed **permanently**, not just this cycle.
-
-The refresh probe is therefore an ordinary probe that happens to be triggered by
-archival rather than discovery: it updates `published`/`date_precision`/`status`/`title`
-exactly like the discovery pass, and the job decision is re-made against what it
-returned — never against what the store said beforehand.
+  ("not if merely finished — a stream may restart on the same URL"). So a stored `vod`
+  can legitimately refresh to `live`. Treating a non-`vod` refresh as "skip" would
+  refuse to archive a live stream: a goal-3 violation.
+- Discarding the refresh result would leave the row `vod` forever. `vod` is not in the
+  discovery probe list, so the restarted stream would never be looked at again and
+  would be missed **permanently**, not just this cycle.
 
 It also keeps a documented user workflow intact. `internal/monitor/utils.go:226-227`
-describes deleting a job and clearing its Orphaned history entry so the video "can
-be picked up again". That still works: clearing history makes `HasProcessed` false,
-the item is still in the top N, so the refresh probe fires and it is re-jobbed —
-provided it is still within the archival scope, which is the intended new limit.
+describes deleting a job and clearing its Orphaned history entry so the video "can be
+picked up again". That still works: clearing history makes `HasProcessed` false, the
+item is still in the window, so the refresh probe fires and it is re-jobbed — provided
+it is still within the window, which is the intended new limit.
 
-The refresh probe is rare by construction: it only fires for an item that is
-in-scope, unprocessed, and terminal — i.e. after a history clear or a
-`max_feed_items` increase. Steady state never triggers it.
-
-The efficiency win survives: a `vod` that is already processed, or out of scope, is
-**never probed again**. That is the common case, and today it costs a full
-`/player` fetch with retries every single cycle only to be discarded by
-`nonLiveSkipReason` immediately after.
-
-**Listing-derived status is unconditional, and it subsumes the
-`include_non_live_content` case.** One rule covers every source and every channel:
-
-```
-any listing item with a relative-age text (Age > 0) ⇒ status='vod', coarse
-any listing item without one                        ⇒ status='unknown', assumed
-```
-
-This is a property of the **item**, not of the channel's config, so it must not be
-scoped to `include_non_live_content = false` — an earlier draft specified it only
-there, leaving membership status undefined on `include_non_live = true` channels.
-
-Today `membershipCandidates` drops members items with `Age > 0` outright when
-`include_non_live_content` is false (`internal/monitor/feed.go:673-675`), precisely
-because they could never become jobs. The unified rule reproduces that outcome
-without a special case: such an item is `vod`, `vod` is not discovery-probed, and
-the archival branch skips it on the `include_non_live_content` check *before*
-probing. Same behavior as today — and unlike today, the row is retained so ranking
-still counts it (see "Step 2 stores items that do not match terms").
-
-RSS items carry no status signal at all, so they enter as `unknown` and are probed —
-exactly as today.
-
-Discovery probe volume is bounded naturally: RSS returns ≤15 and the membership tab
-~30, so a cycle cannot exceed ~45 unknowns, and only once. The first cycle after
-upgrade pays a one-time cost (~17 probes for a 3-channel install).
+The refresh probe is rare by construction: it fires only for an item that is in
+window, unprocessed, and terminal — i.e. after a history clear or a window widening.
 
 ### Steady-state flow (per channel, per cycle)
 
@@ -1521,358 +1106,115 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
    fetch /membership ─┘
 2. UPSERT every item seen → feed_items  (precision-guarded; never downgrades)
       RSS  → published exact
-      memb → coarse from Age; undatable → 'assumed' (provisional)
-3. DISCOVERY PROBE PASS
-      probe list = (in-scope set ∪ {rows WHERE date_precision='assumed'})
-                     WHERE status IN (unknown, upcoming, live)
-                     [AND source <> 'membership' iff NOT membershipActive()
-                      — probing may be opportunistic; ranking may not]
+      memb → coarse from Age (skewed NEW); undatable → 'assumed'/now
+3. DISCOVERY PASS — the source walk over the window query
         └─ read from the STORE, not this cycle's response
-        └─ in-scope is the SAME set step 4 reads: top-N ∪ {upcoming, live}.
-           Probing only what we would archive is what bounds the list —
-           see "The cap is the bound". Compute it ONCE, before probing,
-           and reuse it in step 4: the dates it ranks on are then the
-           PRE-probe dates, which is correct — step 4 re-reads scope after
-           the probe pass has corrected them.
+        └─ serial; per-source early exit; see "The source walk"
       per item: skip if HasActiveJob → skip if NOT term-match → probe
-        └─ same order as today: HasActiveJob → terms → probe (feed.go:704-725)
-        └─ CARVE-OUT: an 'assumed' row is probed even if terms do not match —
-           it needs a DATE for ranking, and ranking counts all channel content.
-           Without this it is never probed, never dated, never rankable: a
-           permanent sink.
+        └─ same order as today (feed.go:704-725)
         └─ source='membership' ⇒ authenticated probe (ProbeVideoAuth); else
            anonymous. This replaces today's in-memory discoveredVideo.authProbe
            (feed.go:681/:748), which cannot survive store-driven candidates.
         └─ a members_only refusal sets source:='membership' (the refusal IS the
            sighting) AND escalates to the authenticated probe in the same cycle if
            membershipActive(), bypassing the cooldown gate. login_required does
-           NEITHER — it is also the anti-bot refusal on public videos, so it must
-           not relabel, and an escalation that cannot relabel never terminates.
+           NEITHER.
       outcome per item:
         probed     ⇒ UPDATE title
                      UPDATE status (post_live→vod)
-                       └─ EXCEPT: a terminal status (vod/not_a_stream) is only
-                          written if the row will have a rankable date. No date
-                          ⇒ stay 'unknown', so the row keeps getting probed
-                          instead of becoming terminal-and-unrankable forever
+                       └─ EXCEPT: a terminal status is only written if the row will
+                          have a rankable date. No date ⇒ stay 'unknown'
                      UPDATE published + date_precision ONLY IF the probe supplied a
                        date AND its precision is strictly better than the stored one
                        └─ SAME precision guard as the upsert. Without it a probe of
                           a plain upload writes uploadDate ('day') over RSS's
-                          second-granular <published> ('exact') — a downgrade of the
-                          value while upgrading the label, and a direct breach of
-                          "published is frozen and only ever upgraded"
-                       └─ upcoming/live supply NO date, so this clause simply does
-                          not fire for them; it must never write published=''
+                          second-granular <published> ('exact')
+                       └─ upcoming/live supply NO date; must never write published=''
                      mark FRESH for this cycle
                      └─ fires whenever METADATA came back — NOT gated on
                         ShouldProcess, which is false for a successful probe
                         of a non-jobbable item (utils.go:315, :332)
         denied     ⇒ (predicate: see "The `denied` predicate (canonical)")
-                     No status/date written; NOT fresh; retry next cycle. (A
-                     members_only refusal sets `source` first — that is the
-                     refusal's write, not denied's.) The backstop
-                     that depends on nothing we stored — not `source`, not
-                     cookies.
+                     No status/date written; NOT fresh; retry next cycle
         errored    ⇒ store untouched; NOT fresh; retry next cycle
         cooldown   ⇒ probe skipped; NOT fresh; retry next cycle
         (no passthrough on this path — probeAndClassify requires a wired probe)
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
-      in-scope = top-N query  ∪  {items WHERE status IN (upcoming, live)}
-                 [BOTH arms exclude source='membership' iff NOT
-                  MembershipDiscoveryEnabled() — the operator's choice only.
-                  Reads must be gated, not just fetches, and neither read arm
-                  may depend on cookie state, or a cookie lapse moves scope]
+      re-read the window query — the discovery pass has just corrected dates,
+      so rows may have entered or left scope since step 3
+      [excludes source='membership' iff NOT MembershipDiscoveryEnabled() — the
+       operator's choice only. Reads must be gated, not just fetches, and no read
+       may depend on cookie state, or a cookie lapse moves scope]
       per item: skip if HasActiveJob → skip if NOT term-match → decide:
          upcoming/live    → job iff FRESH this cycle
-                            (cap exempt; NOT gated by HasProcessed — see below)
+                            (never throttled; NOT gated by HasProcessed — see below)
          vod/not_a_stream → skip if HasProcessed
                             skip unless include_non_live_content   ← before probing
                             skip unless channel established
                             skip if source='membership' AND NOT membershipActive()
-                              └─ ProbeVideoAuth has NO cookie guard, so without
-                                 cookies it RUNS, gets no formats, and returns
-                                 'upcoming' — which `denied` intercepts
-                                 (members_only). Gate = skip a doomed request.
-                            → refresh-probe, WRITE THE RESULT BACK to the store,
-                              then re-decide on the FRESH status:
+                            → refresh-probe, WRITE THE RESULT BACK, RE-CHECK THE
+                              WINDOW on the probe's date, then decide:
                                  denied           → NO JOB, retry next cycle
                                    └─ MUST be listed FIRST: `denied` carries
                                       StreamStatus=='upcoming' by definition, so
                                       any table that omits it routes it straight
-                                      to `live/upcoming → job (cap exempt)` —
-                                      the 2.7.2 misfire, laundered.
-                                 live/upcoming    → job (cap exempt)
-                                 vod/not_a_stream → job
+                                      to `live/upcoming → job` — the 2.7.2
+                                      misfire, laundered
+                                 outside window   → NO JOB, ever (the coarse date
+                                                    was an upper bound; the exact
+                                                    date disproved it)
+                                 live/upcoming    → job (never throttled)
+                                 vod/not_a_stream → job (M-gated if backlog)
                                  probe errored    → no job, retry next cycle
                                  cooldown-skipped → no job, retry next cycle
-                                 (same FRESH rule as the discovery pass —
-                                  no fresh result, no job, never fall through
-                                  on stored status)
          unknown          → NO JOB. We do not know what it is. Retry next cycle.
-                            (Reachable: an RSS row enters as unknown with an
-                            EXACT date, so it is in the top-N legitimately —
-                            the query excludes 'assumed' precision, not
-                            'unknown' status. If its probe fails it stays
-                            unknown and holds its true rank, which is correct:
-                            it is a real video at a real position, and an older
-                            item must not take its slot.)
 5. AddToHistory on job creation  (unchanged)
 6. on RSS success ⇒ channel_state.last_rss_ok_at = now
 ```
 
 **`HasProcessed` must gate ONLY the `vod`/`not_a_stream` branch.** This is not a
-stylistic choice — gating live/upcoming on it loses streams permanently, which is
-the worst outcome this system has.
+stylistic choice — gating live/upcoming on it loses streams permanently.
 
 Today `HasProcessed` never touches live/upcoming. `feed.go:730` passes it as
 `IsReprobe`, and `IsReprobe` is consulted in exactly one place: `nonLiveSkipReason`
 (`utils.go:228-236`), reachable only from the `not_a_stream` and `post_live`/`vod`
-branches. The `live` and `upcoming` branches return `ShouldProcess: true`
-regardless of history. Job creation dedups on the **job row** (`AddJob` returning
-`added=false`, `cmd/moombox/monitor_callbacks.go:252-259`), not on history.
+branches. Job creation dedups on the **job row** (`AddJob` returning `added=false`,
+`monitor_callbacks.go:252-259`), not on history.
 
 That distinction is load-bearing because **history rows exist with no job row**, so
-`HasProcessed` is true for videos that were never archived:
+`HasProcessed` is true for videos that were never archived. A `HasProcessed` gate on
+the live branch would skip such a row the moment its probe returned `live` — **and the
+stream is gone forever.**
 
-1. `X` has a history row but no job. (Sources below.)
-2. A discovery probe succeeds ⇒ status becomes `live`.
-3. A `HasProcessed` gate on the live branch skips it. **The stream is never
-   archived, and it is gone forever.**
-
-Today step 3 jobs it, because `HasProcessed` never reaches the live branch.
-
-**Where such rows come from — after this design lands.** The obvious source is the
-feed path's own probe give-up (`utils.go:283-285`), and an earlier draft cited it.
-That citation is now dead: the `probeAndClassify` split deliberately removes that
-write (see "The split must be a function split"). The rule nonetheless stands, and
-must not be dropped with its original justification, because two sources survive:
+**Where such rows come from — after this design lands.** The obvious source is the feed
+path's own probe give-up, and an earlier draft cited it. That citation is now dead: the
+`probeAndClassify` split removes that write. The rule stands anyway, because two
+sources survive:
 
 - **DECAPI give-up.** `decapi.go:583-594` still calls the composed
-  `ProcessYouTubeVideo` with `AddToHistory` wired, so a DECAPI probe that gives up
-  still writes a history row with no job. DECAPI and the feed monitor see the same
-  YouTube channels.
-- **Every pre-existing row.** Installs upgrading into this design carry years of
-  them — the 80-row purge in the Problem section is direct evidence, and those rows
-  were orphaned precisely because they had no job.
+  `ProcessYouTubeVideo` with `AddToHistory` wired. DECAPI and the feed monitor see the
+  same YouTube channels.
+- **Every pre-existing row.** Installs upgrading into this design carry years of them —
+  the 80-row purge in the Problem section is direct evidence.
 
-So the guard is not hypothetical; only its most obvious arranger went away. A design
-that regressed this would violate goal 3 via the transient failures this spec claims
-to leave untouched.
+**The passes read the store, not the response.** This is what removes the bug class: an
+RSS 404 no longer changes either work list, it only means nothing new was added.
 
-**Only FRESH items become jobs**, where fresh means **this cycle's probe returned
-metadata** — `outcome == probed`. It does **not** mean today's
-`ShouldProcess == true`, and conflating the two is a trap that survived eight review
-rounds of this document:
-
-`ShouldProcess` is *not* "the probe worked". A probe that **runs and succeeds**
-returns `ShouldProcess=false` whenever `nonLiveSkipReason` skips — `utils.go:315`
-(`not_a_stream`) and `:332` (`post_live`/`vod`). The mapping is not invertible:
-`false` means "errored **or** cooled down **or** succeeded-but-not-jobbable".
-
-Deriving the store write from `ShouldProcess` therefore breaks the design on the
-**default** configuration (`IncludeNonLiveContent` is a plain `bool` at
-`internal/config/types.go:264`, so it defaults to `false`):
-
-1. RSS carries a plain upload ⇒ stored `unknown`/`exact`.
-2. Discovery probes it — that pass gates on `HasActiveJob` → terms only; the
-   `include_non_live_content` check lives in the archival branch.
-3. The probe **succeeds**, returns `not_a_stream`, and `nonLiveSkipReason(false, _)`
-   skips ⇒ `ShouldProcess=false`.
-4. If that means "not fresh", the status write never fires ⇒ the row stays
-   `unknown` **forever**.
-5. Nothing bounds it: the probe *succeeded*, so no failure path engages either.
-
-Every plain upload on every default-config channel would then be probed at full rate
-forever: ~15 per channel per cycle against today's 3. That inverts goal 5 and
-falsifies "`vod` is not discovery-probed", which silently *depends* on the status
-write landing.
-
-So the design needs **two predicates, not one**:
-
-| Predicate | Value | Purpose |
-|---|---|---|
-| store write | `outcome == probed` | record status/date/title whenever metadata came back — **regardless of jobbability** |
-| job | `outcome == probed` **plus the archival rules** | the archival pass decides from the fresh `StreamStatus` |
-
-They coincide on the `live`/`upcoming` branches (`utils.go:319-324` fall through to
-`ShouldProcess: true`), which is exactly why the divergence hid — it exists only on
-the succeeded-but-skipped path.
-
-Consequently the feed monitor consumes the probe's **metadata**, not
-`ProcessYouTubeVideo`'s verdict: `ProcessYouTubeVideoResult` must expose
-`StreamStatus` and the authoritative publish date alongside `Outcome`. The archival
-pass already re-derives the job decision (upcoming/live → job; vod → gated on
-`include_non_live_content` and `established`), so `ShouldProcess` is simply unused by
-the feed path. DECAPI keeps using it, unchanged — which is also why it must stay.
-
-This preserves the existing invariant through the two-pass split, which otherwise
-silently breaks it:
-
-- **Probe errored this cycle.** Stored status still says `live`; the stream has
-  since ended and been privated. Jobbing on stored status would create a job for a
-  dead video. Today the probe error returns `ShouldProcess=false` and nothing is
-  created.
-- **`ProbeCooldown` skipped the probe.** `utils.go:258-262` returns
-  `ShouldProcess=false` when `ShouldProbe` is false. Since not changing the cooldown
-  machinery is a non-goal, a stored status under a non-zero cooldown is arbitrarily
-  stale and must not be treated as authoritative.
-
-Freshness reconciles the two-pass split with both, and maps 1:1 onto today's
-behavior: no fresh result, no job, retry next cycle.
-
-**The passes read the store, not the response.** This is what removes the bug
-class: an RSS 404 no longer changes either work list, it only means nothing new was
-added that cycle.
-
-**The two passes are separate because dates change mid-cycle.** The probe pass
-corrects `published` to an authoritative value; the archival pass must run
-afterwards so scope is computed on corrected dates rather than provisional ones.
-Merging them would rank an item using the guess the probe just disproved.
-
-**Step 2 stores items that do not match terms — but does not probe them.** Both
-halves matter, and they pull in opposite directions:
-
-- **Store them.** Today the cap is applied at `feed.go:464` *before* term matching
-  at `feed.go:721`, so scope covers all channel content. Storing only term-matched
-  items would compute the top-N over a subset and get it wrong. Terms gate the
-  *job*, not the store.
-- **Do not probe them.** Today term matching *gates the probe*: `processCandidate`
-  runs `HasActiveJob` → term match → **return if no match** → probe
-  (`feed.go:704-725`). A non-matching video is never probed. Probing before term
-  matching would start paying `/player` fetches for content that can never be
-  jobbed on a channel using `terms` — a cost regression against goal 5, introduced
-  purely by splitting the passes.
-
-So the discovery pass keeps today's order — `HasActiveJob` → terms → probe — **with
-one carve-out: an `assumed` row is probed regardless of terms.**
-
-Without the carve-out the term gate opens a third permanent sink, and it defeats the
-very rule this section exists to state. A non-matching row that entered `assumed`
-(no parseable age text) would never be probed, so its date could never be upgraded;
-`published` is frozen at insert and only a probe can improve it. It would stay
-`assumed` forever, and `assumed` rows are excluded from the top-N — so the row is
-stored but **not ranked**, and the top-N is computed over a subset. That is exactly
-the "compute the top-N over a subset and get it wrong" failure that justifies
-storing non-matching items at all.
-
-The carve-out is cheap and self-limiting, because the two gates exist for different
-reasons:
-
-- **Terms gate the probe** to avoid repeatedly fetching metadata for content that
-  could never become a job. That reasoning is about *jobbing*.
-- **An `assumed` row is probed to get a date**, which *ranking* needs — and ranking
-  counts all channel content, matching or not.
-
-So a non-matching row is probed until it *has* a date, then never again while it
-stays non-matching. For the common case that is once: the probe returns
-`vod`/`not_a_stream` with a date (terminal, and rankable).
-
-Two cases cost more, and neither is unbounded:
-
-- **The probe returns `upcoming`/`live`.** Those statuses store no date, so the row
-  stays `assumed` and the carve-out keeps probing it every cycle — a non-matching
-  members premiere scheduled three weeks out costs one authenticated probe per cycle
-  for three weeks. It stops when the stream ends and `post_live` supplies
-  `startTimestamp`. Bounded by the stream's lifetime, and such a row is exactly the
-  one whose status we most want current.
-- **The probe returns `vod` with no date.** The row stays `unknown` per the terminal
-  invariant and is retried — bounded by the `assumed` arm, which is ~0 rows normally
-  (see "The cap is the bound").
-
-Rows that already carry a real date (RSS `exact`, membership/backfill `coarse`) are
-never probed on this path at all — they are already rankable.
-
-A non-matching row's `status` may well remain `unknown` forever, and that part *is*
-harmless: status drives probing and job decisions, and a dated `unknown` row does
-neither. The harm was never the status — it was the precision the status was
-blocking.
-
-Term matching cannot be a SQL predicate — it needs the in-memory description for
-RSS-carried items — so it stays a Go-side filter over the query's rows, exactly as
-it is a Go-side filter over candidates today.
-
-### What `max_feed_items` comes to mean
-
-The setting's value does not change. What it *does* changes, on every existing
-install, silently — so the change has to be visible somewhere, and the only place an
-operator looks is the label.
-
-| | Today | After |
-|---|---|---|
-| Counts | candidates collected **this cycle** | the channel's **newest N**, full stop |
-| Depends on | what the fetches happened to return | the channel's content and the operator's config |
-| `upcoming`/`live` | consume slots — a stream ranked below N is **never probed**, so it is missed | exempt; never consume a slot, never missed (goal 3) |
-| At `N = 1000` | quietly capped by reality: RSS returns ~15, so nobody's setting does what it says | means 1000, because the backfill put 1000 rows in the store |
-
-That last row is the one to watch. **The backfill is what makes a large value real
-for the first time**, and we are widening the UI range from 1–100 to 1–1000 in the
-same release (see Included Fixes) — arming the number and removing its guard rail
-together. An install with `max_feed_items = 1000` and `include_non_live_content =
-true` will, once its sweep completes, queue its channel's entire back catalogue.
-
-**That is correct and it stays.** It is what the setting literally asks for, it is
-what "archival depth" means, and the jobs queue through the existing worker pool
-rather than running at once. Clamping legacy values on migration was considered and
-rejected: silently overriding an explicit operator setting to protect them from their
-own configuration is the same class of error as scope moving on a fetch failure —
-the system deciding it knows better than a stated input. The common case is
-untouched: defaults of 3–15 behave almost identically before and after.
-
-**The response is the label, not a migration.** `max_feed_items` names a per-cycle
-feed concept that will no longer exist, and that name is exactly the misreading that
-let this bug hide for three weeks — the investigation's first wrong turn was assuming
-it meant "the newest 3 on the channel". So:
-
-- **UI labels and help text change** in all four surfaces (Web UI, TUI settings,
-  setup wizard, `config.example.toml`), and the help text states both new facts: it
-  counts the channel's newest N, and upcoming/live are exempt.
-- **The TOML key does not change.** Renaming it leaves two names for one concept in
-  the codebase forever, puts ~12 documentation sites in lockstep, and buys nothing a
-  label does not. `migrateOldFormat()` could carry it — the machinery exists and is
-  used for prior renames — which is what makes this a choice rather than a cost.
-- **No migration, no clamp.** Every existing value survives byte-identical.
-
-The residual is honest and small: someone hand-editing TOML reads a key name that
-describes the old behaviour. They are also the reader most likely to check the
-comment directly above it, which will not.
-
-### What `history` comes to mean
-
-Removing the feed path's hidden `AddToHistory` calls (`utils.go:284/313/330`) is a
-**population** change, not a schema one — the table, its API, the orphan overlay and
-Twitch/DECAPI writers are all untouched. But it is worth stating what it does to the
-meaning of the table, because the change is an improvement and reviewers will notice
-the row count drop.
-
-Today `history` conflates three things: *we jobbed this* (`monitor_callbacks.go:260`),
-*we looked at this and declined* (`nonLiveSkipReason` skips), and *we gave up probing
-this* (give-up). Only the first has a job row — which is exactly why
-`ListOrphanedHistory` finds anything at all, and why an operator eventually purges 80
-rows and re-arms content that was never supposed to come back.
-
-On the feed path it now means only the first: **we created a job for this video.**
-That is what "already acted on" should have meant, it makes `HasProcessed` a precise
-predicate rather than a fuzzy one, and it means far fewer orphans are manufactured in
-the first place. DECAPI and Twitch keep writing exactly as they do today, so the
-orphan tooling remains necessary and correct — just less busy.
-
-This composes with the date-based cap into defence in depth: purging history can no
-longer re-arm an out-of-scope VOD (the cap stops it), *and* there is much less
-spurious history to purge.
+**The two passes are separate because dates change mid-cycle.** The probe pass corrects
+`published` to an authoritative value; the archival pass must run afterwards so scope
+is computed on corrected dates. Merging them would scope an item on the guess the probe
+just disproved.
 
 ### `source` decides which probe to use
 
 Today the authenticated-probe choice rides on the in-memory candidate:
 `membershipCandidates` sets `authProbe: true` (`feed.go:681`) and `processCandidate`
-reads it (`feed.go:748`) to pick `ProbeVideoAuth`. That field cannot survive the
-move to store-driven passes — a row read back from `feed_items` has no `authProbe`.
+reads it (`feed.go:748`). That field cannot survive the move to store-driven passes — a
+row read back from `feed_items` has no `authProbe`.
 
 **`source = 'membership'` is the signal.** Members-only content must be probed with
-cookies or the classifier misfires it as `upcoming` (`feed.go:743-746`) — the bug
-2.7.2 fixed.
-
-This is one of two jobs `source` does — the other is the toggle predicate below.
+cookies or the classifier misfires it as `upcoming` (`feed.go:743-746`) — the bug 2.7.2
+fixed. This is one of two jobs `source` does; the other is the toggle predicate below.
 
 ### A refusal escalates, and sets `source` itself
 
@@ -1882,17 +1224,15 @@ writers.
 
 **Only `members_only`, never `login_required`.** The two are not interchangeable, and
 conflating them loses public videos. `parsePlayabilityStatus` returns `login_required`
-as the *fallback* for any `LOGIN_REQUIRED` whose reason mentions neither
-member/join nor age (`:357-363`) — which includes YouTube's anti-bot **"Sign in to
-confirm you're not a bot"** refusal, served on **public** videos when it decides to
-IP-block us. Flipping `source` on that would mark a public video as members content
-forever, and with `membership_discovery = false` the read arms would then hide it from
-ranking and archival entirely: a silent archival loss caused by an anti-bot block.
+as the *fallback* for any `LOGIN_REQUIRED` whose reason mentions neither member/join
+nor age (`:357-363`) — which includes YouTube's anti-bot **"Sign in to confirm you're
+not a bot"** refusal, served on **public** videos when it decides to IP-block us.
+Flipping `source` on that would mark a public video as members content forever, and
+with `membership_discovery = false` the read arm would then hide it from scope
+entirely: a silent archival loss caused by an anti-bot block.
 
 `members_only` proves membership — it is returned only when the reason says
-"member"/"join" (`:358-359`) or `UNPLAYABLE` says "member" (`:366`). `login_required`
-proves only "try with credentials", which is a reason to **escalate** but never a
-reason to relabel the item.
+"member"/"join" (`:358-359`) or `UNPLAYABLE` says "member" (`:366`).
 
 **Why the probe beats the listing here.** An earlier draft had `source` flip only on a
 listing sighting, and then had to concede that a public video later locked to members
@@ -1902,10 +1242,8 @@ probed anonymously forever, refused forever, and never archived — `denied` sto
 phantom job but achieved nothing else.
 
 The refusal itself dissolves that. YouTube stating `members_only` **is** the sighting:
-it is a direct, authoritative answer about where the item lives, and it needs no fetch,
-no tab, and no toggle to arrive. It is available at exactly the moment we need it.
-
-**The escalation:**
+a direct, authoritative answer about where the item lives, needing no fetch, no tab, and
+no toggle.
 
 ```
 probe returns members_only
@@ -1919,103 +1257,62 @@ probe returns members_only
 **Escalate only on `members_only`, and only because it relabels.** The two are one
 event, not two rules:
 
-- `members_only` proves membership, so it sets `source` — and *because* it sets
-  `source`, the escalation fires at most **once**. Next cycle the row is
-  `source='membership'` and the authenticated probe is selected directly.
-- `login_required` does **not** escalate. It is YouTube's anti-bot refusal on public
-  videos (`:357-363`, the fallback arm), so it must not relabel — and an escalation
-  that cannot relabel never terminates: `source` stays `rss`, the next cycle probes
-  anonymously, is refused again, and escalates again. That is **2 probes per cycle
-  for the duration of the block**, permanently, breaching goal 5 against today's 1 —
-  and it doubles our request rate against YouTube during precisely the condition (an
-  IP block) where more requests make recovery worse.
+- `members_only` sets `source` — and *because* it sets `source`, the escalation fires
+  at most **once**. Next cycle the row is `source='membership'` and the authenticated
+  probe is selected directly.
+- `login_required` does **not** escalate. It must not relabel — and an escalation that
+  cannot relabel never terminates: `source` stays `rss`, the next cycle probes
+  anonymously, is refused again, and escalates again. That is **2 probes per cycle for
+  the duration of the block**, permanently, breaching goal 5 against today's 1 — and it
+  doubles our request rate against YouTube during precisely the condition (an IP block)
+  where more requests make recovery worse.
 
-An earlier draft escalated on both. It was wrong for exactly that reason: an
-escalation is only bounded if its trigger is also what stops it recurring.
+**An escalation is only bounded if its trigger is also what stops it recurring.**
 
-**The escalated result is classified normally.** An earlier draft gave this branch
-its own list (`ok ⇒ probed / members_only ⇒ denied / …`), which is a
-`PlayabilityError` trichotomy — the over-broad rule this document rejects twice, and
-a second statement of the predicate at a use site, which the rule against restating
-it forbids. It disagreed with the canonical rule in three places: `vod`+`members_only`
-(canonical: **trusted**, formats came back) would have been denied; `not_a_stream`
-+`login_required` (canonical: trusted) would have been denied, falsifying "the rule
-never fires on it"; and `upcoming`+`age_restricted`/`unknown` matched no branch at
-all. The escalated probe is a probe. Its result goes through the same classifier.
+**The escalated result is classified normally.** An earlier draft gave this branch its
+own list (`ok ⇒ probed / members_only ⇒ denied / …`) — a `PlayabilityError`
+trichotomy, which is both the over-broad rule this document rejects twice and a second
+statement of the predicate at a use site. It disagreed with the canonical rule in three
+places: `vod`+`members_only` (canonical: **trusted**, formats came back) would have
+been denied; `not_a_stream`+`login_required` (canonical: trusted) would have been
+denied; and `upcoming`+`age_restricted`/`unknown` matched no branch at all. The
+escalated probe is a probe. Its result goes through the same classifier.
 
+**The cooldown must be bypassed for the escalated re-probe.** A `members_only` refusal
+is a *successful* probe and records the cooldown (`utils.go:299`); gating the
+same-cycle retry on it would suppress the escalation entirely for any operator with
+`probe_cooldown > 0`.
 
-
-**Why setting `source` even on a failed escalation matters.** It looks pointless —
-we still cannot see the item — but it is what bounds the cost. Once `source` is
-`membership`:
+**Why setting `source` even on a failed escalation matters.** It looks pointless — we
+still cannot see the item — but it is what bounds the cost:
 
 | Next cycle | Before | After |
 |---|---|---|
 | Wrong tier, cookies valid | anon probe + escalated auth probe = **2/cycle** | auth probe directly = **1/cycle** |
 | No cookies | anon probe, refused = **1/cycle** | probe gate skips it = **0/cycle** |
 
-So the refusal pays for itself immediately: the no-cookies case stops costing
-anything at all, rather than one refusal per cycle for as long as the row is in
-scope.
-
 **The toggle still governs.** With `membership_discovery = false`, `membershipActive()`
 is false, so no escalation happens and the row is `denied`. The operator asked not to
 discover members content; discovering it *harder* would defeat them. `source` still
-flips, which is correct and useful: it means the read arms then hide the row from
-ranking, and the probe gate skips it entirely.
+flips, which is correct and useful: the read arm then hides the row from scope, and the
+probe gate skips it entirely.
 
-**One extra probe, once — and this is exactly why the trigger must be the relabel.**
-Escalation fires only on the transition: the cycle where a video is first found to be
-locked. Every cycle after, `source='membership'` selects the authenticated probe
-directly and there is nothing to escalate. An escalation whose trigger does *not*
-relabel would fire again every cycle, forever.
+**The transition cases:**
 
-**The transition cases, and why the failure directions are acceptable:**
-
-- **Members → public** (creator unlocks a video). RSS now lists it with an `exact`
-  date; the stored row is `coarse`, so the precision guard fires and `source`
-  becomes `rss`. Subsequent probes are anonymous — correct, it *is* public now.
-- **Public → members** (creator locks an existing video). RSS drops it. The
-  membership tab may never list it (that fetch is gated, and Phase 1's tab is
-  first-page-only), so the *listing* may never flip `source`. **The probe does:** the
-  anonymous probe's `members_only` refusal sets `source := 'membership'` and escalates
-  to the authenticated probe in the same cycle — see "A refusal escalates, and sets
-  `source` itself". The precision guard must not gate `source`, for the same reason.
+- **Members → public.** RSS now lists it with an `exact` date; the stored row is
+  `coarse`, so the precision guard fires and `source` becomes `rss`. Subsequent probes
+  are anonymous — correct, it *is* public now.
+- **Public → members.** RSS drops it. The membership tab may never list it, so the
+  *listing* may never flip `source`. **The probe does**, via the refusal.
 
 **`source` is updated on every sighting, independent of the precision guard.** An
 earlier draft folded `source` into the guarded `DO UPDATE`, so a public→members
-transition left `source='rss'` (the membership tab's `coarse` date loses to the
-stored `exact`), and dismissed the result as "wrong but safe: we decline to archive
-rather than misfire". **That was false, and it is the same mistake the refresh-probe
-gate exists to prevent: a probe without cookies does not fail, it lies.**
-
-Traced properly, `source='rss'` on a members video means:
-
-1. The discovery pass picks the **anonymous** probe (`source <> 'membership'`), and
-   no membership gate applies — the row does not look like members content.
-2. `feed.go:743-746`: an anonymous probe of members-only content "gets no formats
-   and the classifier misfires it as **upcoming**". It returns no error.
-3. Outcome would be `probed` ⇒ **FRESH** (this is what the `denied` rule now
-   intercepts: `members_only` ⇒ `denied` ⇒ no job). The row becomes `upcoming`.
-4. `upcoming` is **cap-exempt** ⇒ in scope regardless of rank ⇒ `job iff FRESH` ⇒
-   **job created**, bypassing both the cap and `include_non_live_content`.
-
-That is precisely the misfire `feed.go:743-746` documents and 2.7.2 fixed — reached
-by trusting a stale `source`. It is not a decline; it is a phantom upcoming stream
-that will never go live, jobbed forever.
-
-So the upsert splits the two concerns, because they are unrelated:
-
-- **`source` records where we last saw the item.** It is a fact about *this*
-  sighting and is always current. It decides which probe to use, so it must track
-  reality immediately.
-- **`published`/`date_precision` record our best estimate.** They are monotonic, so
-  a worse estimate never overwrites a better one.
-
-Coupling them made a date-quality rule silently govern probe selection. Both
-directions are then correct: members→public flips to `rss` (anonymous probe —
-correct, it is public), and public→members flips to `membership` (authenticated
-probe, and the membership gates apply — correct, it is members-only).
+transition left `source='rss'` (the membership tab's `coarse` date loses to the stored
+`exact`), and dismissed the result as "wrong but safe: we decline to archive rather
+than misfire". **That was false, and it is the same mistake the refresh-probe gate
+exists to prevent: a probe without cookies does not fail, it lies.** `source='rss'` on
+a members video picks the anonymous probe, which returns `upcoming` with no error, is
+FRESH, and is jobbed — bypassing every gate.
 
 The only way two sources contend for one row in a cycle is the backfill's `/videos`
 and `/streams` tabs, which both list past streams; both are public, so either value
@@ -2026,26 +1323,15 @@ selects the anonymous probe and last-writer-wins is harmless.
 The store-driven passes create a hazard the response-driven design never had, and
 closing it at write time is not enough.
 
-`membershipActive()` (`internal/monitor/feed.go:518-523`) stops the *fetch*. Today
-that is sufficient, because the candidate pool **is** the response — no fetch, no
-candidates, no jobs. But the discovery and archival passes read the **store**, which
-still holds every members row written while the toggle was on. So:
+`membershipActive()` (`feed.go:518-523`) stops the *fetch*. Today that is sufficient,
+because the candidate pool **is** the response. But the passes read the **store**, which
+still holds every members row written while the toggle was on. So a members premiere
+stored while it was on is still `unknown`, still in the window, still probed with
+cookies, and still jobbed — on a channel where members discovery is off.
 
-1. `membership_discovery = true`; a members premiere `X` is stored `unknown`
-   (`source='membership'`).
-2. The operator sets `membership_discovery = false` — cookies expired, or they no
-   longer want members content.
-3. Next cycle: no membership fetch. But the probe list is *"read from the STORE, not
-   this cycle's response"*, and `X` is `unknown` ⇒ it is in the list, and probed
-   with cookies.
-4. It returns `upcoming` ⇒ cap-exempt ⇒ in scope ⇒ **job created.**
-
-Moombox then downloads members-only content on a channel where members-only
-discovery is off. The Part 2 backfill gate does not help: this needs no backfill.
-
-**The fix is a read-side predicate — but the three arms must not use the same
-predicate.** This is the trap, and an earlier draft of this section fell into it by
-gating all three on `membershipActive()`.
+**The fix is a read-side predicate — but the arms must not use the same predicate.**
+This is the trap, and an earlier draft fell into it by gating both on
+`membershipActive()`.
 
 **`membershipActive()` is not the toggle.** It folds in live cookie state:
 
@@ -2056,100 +1342,61 @@ MembershipEnabled()         = MembershipDiscoveryEnabled() && HasAuthCookies() m
 
 and its own comment says it "re-reads the config flag **AND cookie state** live each
 cycle". Cookies lapse for reasons nobody chose: the exporter rotates the file
-(`cookies/jar.go:72-90` — `Load` on a missing file clears the jar and returns nil),
-the browser session ends, a refresh races. `SyncCookies` runs before every
-membership fetch and every authenticated probe.
+(`cookies/jar.go:72-90`), the browser session ends, a refresh races.
 
-So gating the **ranking** on `membershipActive()` reintroduces this spec's own bug:
-
-1. `N=3`. Store: three recent members VODs at ranks 1-3; public VODs at ranks 4-6.
-2. Cookies lapse for one cycle ⇒ `membershipActive()` false ⇒ the top-N appends
-   `AND source <> 'membership'` ⇒ the top-3 becomes the three **public** VODs.
-3. They are in scope, unprocessed, term-matching, non-live ⇒ refresh-probed
-   anonymously (they are public, so it succeeds) ⇒ **three jobs created**.
-4. Cookies return; scope reverts. The downloads are permanent and now in `history`.
-
-That is scope moving because a fetch input failed — *"a partial discovery failure
-silently changes what the cap means"*, which is the Problem statement of this
-document. Round 20b's goal-2 wording claims every scope-mover is "an operator or
-channel action with a visible cause"; a cookie rotation is neither.
-
-**So the arms split by what they are for:**
+So gating the **read** on `membershipActive()` reintroduces this spec's own bug: a
+cookie lapse would remove members rows from scope, which is scope moving because a
+fetch input failed — the Problem statement of this document, reached through a new door.
 
 ```sql
--- READ arms (top-N ranking, cap-exempt union): the OPERATOR'S CHOICE only
+-- READ arm (the window query): the OPERATOR'S CHOICE only
 AND source <> 'membership'      -- iff NOT MembershipDiscoveryEnabled()
 
--- PROBE arm (discovery probe list): config AND cookies
+-- PROBE arm (the discovery walk): config AND cookies
 AND source <> 'membership'      -- iff NOT membershipActive()
 ```
 
 The asymmetry is the point:
 
 - **What is visible may only move on an operator's decision.**
-  `MembershipDiscoveryEnabled()` is exactly that decision and nothing else. Both read
-  arms use it, so a cookie lapse cannot change what is in scope *or* what is
-  cap-exempt.
-- **Probing may be opportunistic.** With no cookies an authenticated probe is
-  useless, so skipping it costs nothing — and loses nothing, because the row stays
-  ranked, stays cap-exempt, and simply cannot become a job without a FRESH result.
+  `MembershipDiscoveryEnabled()` is exactly that decision and nothing else.
+- **Probing may be opportunistic.** With no cookies an authenticated probe is useless,
+  so skipping it costs nothing — and loses nothing, because the row stays in the
+  window and simply cannot become a job without a FRESH result.
 
-**Why the cap-exempt union uses config and not `membershipActive()`:** it makes the
-cookie-lapse question disappear rather than answering it. Both choices reach the
-same outcome — during a lapse the row is unprobeable, so it is never FRESH, so it is
-never jobbed, and it is caught the moment cookies return — but keying it on cookie
-state invites the reader to ask "does a cookie lapse hide a live members stream?"
-every time they encounter it. Keying both read arms on the operator's choice means
-cookie state can only skip a probe that would have failed. The probe-side membership
-gates make that true cheaply; the `denied` rule makes it true *regardless*, by
-intercepting the wrong answer even on an ungated path.
+**The read arm is not redundant, and the reason is scope — not job prevention.** An
+earlier draft justified it by claiming `denied` cannot cover "a members probe with
+valid cookies". That reason is wrong: with the toggle off, a `source='membership'` row
+hits the *probe* gate, is never probed, never FRESH, and cannot be jobbed at all.
 
-**This demotion applies to the probe arms only. The read arms are not redundant, and
-the reason is ranking — not job prevention.** An earlier draft justified them by
-claiming `denied` cannot cover "a members probe with valid cookies, which returns
-`ok` and would be jobbed". That reason is wrong: with `membership_discovery = false`
-a `source='membership'` row hits the *probe* gate (`membershipActive()` is false), is
-never probed, never becomes FRESH, and therefore cannot be jobbed at all. Nothing
-about jobbing needs the read arms.
-
-What needs them is scope. With the toggle off and no read gate, members rows still
-**rank** — so three members VODs at ranks 1-3 hold the top-N slots and evict the
-channel's public VODs at ranks 4-6 out of scope, which are then never archived. The
-operator disabled members *discovery* and silently lost their public archival depth.
-`denied` cannot reach this: it decides whether a probe's answer is trusted, and no
-probe is involved in ranking a stored row.
+What needs the read arm is what the operator sees and what the walk spends. With the
+toggle off and no read gate, members rows still occupy the window — they are walked,
+they are counted, and with `M` slots they compete for the channel's archival
+throughput against the public content the operator actually asked for. The operator
+disabled members *discovery* and silently lost archival bandwidth to it.
 
 So the three controls partition cleanly by what they protect:
 
 | Control | Protects | Can another cover it? |
 |---|---|---|
-| Read arms — `MembershipDiscoveryEnabled()` | **scope**: members rows must not hold slots when the operator turned discovery off | No — nothing else touches ranking |
+| Read arm — `MembershipDiscoveryEnabled()` | **scope**: members rows must not occupy the window when the operator turned discovery off | No — nothing else touches scope |
 | Probe gates — `membershipActive()` | **efficiency**: skip a request we know will be refused | Yes, `denied` catches the result anyway |
 | `denied` — playability | **correctness**: a refusal must never be read as `upcoming` | No — it is the only control that depends on nothing we stored |
 
-A cookie lapse therefore leaves scope *exactly* where it was: members rows keep
-their ranks, hold their slots, stay cap-exempt, and simply go un-probed for a cycle.
-Goal 2 holds at no cost, and goal 3 is unaffected — the stream is jobbed on the
-first cycle cookies return, which is also the first cycle it could have been
-downloaded at all.
+A cookie lapse therefore leaves scope *exactly* where it was: members rows stay in the
+window and simply go un-probed for a cycle. Goal 2 holds at no cost, and goal 3 is
+unaffected — the stream is jobbed on the first cycle cookies return, which is also the
+first cycle it could have been downloaded at all.
 
-**Excluding them from the ranking when the operator turns the toggle off is
-deliberate.** With it off, today's cap counts only public items, because members
-items never enter the pool at all. Ranking invisible rows would let hidden content
-evict public content from scope — a silent change in the opposite direction. The
-rows stay stored (turning it back on must not lose them) and stop being visible.
-
-Both predicates compose with the partial rank index: each is conjunctive, so the
-index's `WHERE` stays implied and usable, and `source` is a residual filter over the
-rows returned.
+The rows stay stored when the toggle goes off (turning it back on must not lose them)
+and stop being visible.
 
 ### The established gate
 
-A fresh install whose very first cycle 404s would hold only membership items, and
-top-3 of a 2-item store includes the old VOD. Therefore: **past content is not
-archived until `channel_state.last_rss_ok_at IS NOT NULL` or `backfilled_at IS NOT
-NULL`.** Upcoming/live still pass, being cap-exempt. This gate is independent of
-the backfill, so a failed backfill never blocks normal operation.
+A fresh install whose very first cycle 404s would hold only membership items.
+Therefore: **past content is not archived until `channel_state.last_rss_ok_at IS NOT
+NULL` or `backfilled_at IS NOT NULL`.** Upcoming/live still pass. This gate is
+independent of the backfill, so a failed backfill never blocks normal operation.
 
 **Both keys must exist at ship, and this is why the phases do not ship apart.** Only
 Phase 2 sets `backfilled_at`. With Phase 1 alone the gate rests entirely on
@@ -2160,41 +1407,154 @@ archives past content, indefinitely and silently. Live and upcoming streams are
 unaffected, which is what makes the silence hard to notice: the channel looks like it
 is working.
 
-The gate itself is right. Without a single successful full listing we have no basis
-for claiming to know a channel's newest N, and guessing is precisely the bug being
-fixed. What is wrong is a gate with one key when the design specifies two. The
-catalog scan establishes a channel without RSS at all, so shipping the two together
-closes the hole by construction rather than by documenting it — see "Implementation
-Phasing".
+The gate itself is right. Without a single successful full listing we have no basis for
+claiming to know a channel's recent content, and guessing is precisely the bug being
+fixed. What is wrong is a gate with one key when the design specifies two.
 
-**One residual worth naming:** a successful RSS fetch returning *zero* entries also
-sets `last_rss_ok_at`. For a members-only channel with no public uploads, the store
-then holds only membership items and all of them are in the top N. That is
-**correct** — if a channel has fewer than N items total, its newest N is all of
-them — but it is worth stating explicitly, because it looks like the original bug
-and is not.
+**One residual worth naming:** a successful RSS fetch returning *zero* entries also sets
+`last_rss_ok_at`. For a members-only channel with no public uploads, the store then
+holds only membership items and all of them are in the window. That is **correct** —
+but it looks like the original bug and is not.
+
+## The scheduler
+
+`archive_window_days` decides **what** is archived. `archive_slots` (M) decides **how
+fast**. They are different questions, and an earlier draft conflated them into one
+number, which is what made `max_feed_items` mean two things and neither well.
+
+**Everything inside the window is archived eventually.** M paces it: at most M backlog
+VODs in flight per channel, most-recent-first, and a completed job frees a slot the
+next item fills. Defaults: **3 days, 3 slots**.
+
+**M paces the back-catalogue, not the channel.** Newly-discovered content bypasses M
+entirely and never counts against it. M exists so an archival backlog cannot flood a
+channel; it must never make a live stream, a premiere, or a just-published VOD wait
+behind old content. This is what keeps M defensible as a default of 3: it is not a
+throttle on the channel, it is a throttle on history.
+
+### A `Queued` job is a durable DB row, not a blocked goroutine
+
+The monitor creates it and stops. A scheduler admits it — enqueues it into `JobQueue` —
+only when a slot is actually free. Three problems dissolve at once:
+
+| Problem | Why it is gone |
+|---|---|
+| `maxLifecycle = 100` (`queue.go:61`) caps alive jobs, and a slot-waiter holds one the whole time it blocks | a `Queued` job is never in `JobQueue`, so it holds nothing. The queue only ever contains new content plus admitted backlog — bounded as today |
+| the pending queue **silently drops** jobs past 100 (`queue.go:93-98`) — an unarchived video with only a warning log | the backlog never reaches the pending queue. This one mattered most: it is this spec's own failure mode, re-entering from the worker side |
+| `AcquireDownloadSlot` (`queue.go:149-180`) has no FIFO and no priority — waiters wake in Go runtime order, so "most recent first" does not exist | admission ordering lives in the scheduler, where it is an `ORDER BY`. The semaphore stops being the arbiter and becomes a safety net |
+| a new `JobStatus` strands on crash, as `worker.go:306-312` already shows for interrupted `Muxing` | `Queued` is a **resting** state, not a transient one. It survives restart because it was never in memory — the scheduler simply re-reads it. No recovery special-case |
+
+**Admission rules:**
+
+```
+upcoming / live  → admit immediately, always. No M, no download pool.
+                   A broadcast cannot be throttled — it is happening now.
+new VOD          → no M gate; still needs a download-pool slot.
+                   Sorts AHEAD of all backlog.
+backlog VOD      → M per channel, then a download-pool slot. Most-recent-first.
+
+"new" = first seen by the FEED MONITOR this cycle. NOT a backfill row: a scan
+writes thousands of rows with first_seen=now, and none of them are new content.
+```
+
+**Every VOD waiting on the pool shows as `Queued` — new or backlog.** "Skip the queue"
+is **priority, not exemption**: a new VOD jumps the entire back-catalogue and starts
+the instant a slot frees, but `num_parallel_downloads` is a hard resource limit and
+nothing bypasses it. This also kills an existing lie rather than working around it:
+today `stream_processor.go:220`/`:238` write `Downloading` *before*
+`AcquireDownloadSlot` blocks at `worker.go:446`, so a job waiting on the pool is
+persisted as downloading while it does nothing — byte-identical to one actively pulling
+segments. Only `download_started_at` (`orchestrator.go:123-124`) separates them, and no
+UI reads it. One waiting state, one truthful status, everywhere.
+
+### `num_parallel_downloads` becomes VOD-only, default 2 → 10
+
+**The bug this fixes is live on today's build.** `AcquireDownloadSlot` is called for
+*every* job at `worker.go:446` — live included — with no timeout and no priority. Two
+long streams fill the default of 2, and a third channel going live blocks
+**indefinitely**. That is a missed stream from a stock config, and it is goal 3 failing
+one layer below where this spec was looking.
+
+So live and upcoming are exempt from the pool entirely, and therefore unbounded —
+because they must be.
+
+**The default moves 2 → 10** (`config.go:67`). There is **no maximum** to raise —
+validation only rejects `< 1` (`config.go:559-560`). And the key is *commented out* in
+`config.example.toml:104`, so installs that never touched it inherit the default: this
+is a live behavior change on upgrade, not just for new installs.
+
+Peak concurrency becomes **(live streams) + 10** where it was a hard 2. Twenty channels
+with five live and a backlog running is fifteen concurrent downloads. That is the
+correct direction: `2` was only ever defensible because it was double-counting live
+streams it should never have touched. As a VOD-only archival knob it is far too low —
+and with M = 3 per channel, saturating 10 takes four channels' backlogs at once. Live
+concurrency was always dictated by reality rather than config; this stops pretending
+otherwise. **The help text must state the peak**, so it is chosen rather than
+discovered.
+
+### The two settings
+
+| | `archive_window_days` | `archive_slots` |
+|---|---|---|
+| Answers | what is archived | how fast |
+| Default | 3 | 3 |
+| Scope | per channel | per channel |
+| Bounds | the probe walk and the archival set | in-flight backlog jobs only |
+| Applies to new content | yes (it is inside the window by definition) | **no** — new content bypasses M |
+| Applies to upcoming/live | they are always inside (`published = now`) | **no** — never throttled |
+
+**With `include_non_live_content = false` (the default), VODs never job at all.** The
+window and M then govern only the `was_live → live` safety walk — a pass that creates
+no jobs, so M has nothing to gate. No special case is needed: M gates job creation, and
+there are none. The window still decides how far back we look for a restarted stream,
+which is the right knob for it.
+
+**`max_feed_items` is dropped, not migrated.** It bounded depth; M bounds concurrency;
+the window has no old counterpart. Carrying the number forward preserves a shape rather
+than an intent — and mapping `1000` onto a per-channel slot count would read as
+"archive deep" and behave as 1000 simultaneous downloads. Every install takes the new
+defaults.
+
+## What `history` comes to mean
+
+Removing the feed path's hidden `AddToHistory` calls (`utils.go:284/313/330`) is a
+**population** change, not a schema one — the table, its API, the orphan overlay and
+Twitch/DECAPI writers are all untouched.
+
+Today `history` conflates three things: *we jobbed this* (`monitor_callbacks.go:260`),
+*we looked at this and declined* (`nonLiveSkipReason` skips), and *we gave up probing
+this* (give-up). Only the first has a job row — which is exactly why
+`ListOrphanedHistory` finds anything at all, and why an operator eventually purges 80
+rows and re-arms content that was never supposed to come back.
+
+On the feed path it now means only the first: **we created a job for this video.** That
+is what "already acted on" should have meant, it makes `HasProcessed` a precise
+predicate, and it means far fewer orphans are manufactured. DECAPI and Twitch keep
+writing exactly as they do today.
+
+This composes with the window into defence in depth: purging history can no longer
+re-arm an out-of-window VOD, *and* there is much less spurious history to purge.
 
 ## Part 2 — Full-Catalog Backfill
 
 ### Current capability
 
-No continuation paging exists on any YouTube **channel/browse listing** path —
-every channel path is first-page-only. The only occurrence of
-`continuationItemRenderer` under `internal/youtube/` is a test fixture
-(`internal/youtube/channel_membership_test.go:27`) proving the walker ignores it.
+No continuation paging exists on any YouTube **channel/browse listing** path — every
+channel path is first-page-only. The only occurrence of `continuationItemRenderer`
+under `internal/youtube/` is a test fixture (`channel_membership_test.go:27`) proving
+the walker ignores it.
 
-**But continuation paging is not new to this codebase.** `internal/chat` already
-does full InnerTube continuation paging and is the in-repo pattern Part 2 should
-follow rather than porting yt-dlp from first principles:
+**But continuation paging is not new to this codebase.** `internal/chat` already does
+full InnerTube continuation paging and is the in-repo pattern to follow rather than
+porting yt-dlp from first principles:
 
 - `internal/chat/api.go:172-178` — `FetchLiveChat`/`FetchChatReplay(ctx, continuation)`
-- `internal/chat/downloader.go:412-423` — the paging loop (`cd.continuation = resp.NextContinuation`)
+- `internal/chat/downloader.go:412-423` — the paging loop
 - `internal/chat/downloader.go:558-583` — stale-token recovery
 
-yt-dlp's `_tab.py` remains the reference for the *browse-specific* response shape
-(which renderers carry items, where the token hides), but the transport, retry, and
-loop mechanics should mirror `internal/chat`, which already works in production
-against the same API.
+yt-dlp's `_tab.py` remains the reference for the *browse-specific* response shape, but
+the transport, retry, and loop mechanics should mirror `internal/chat`, which already
+works in production against the same API.
 
 Reusable as-is from `internal/youtube/channel_membership.go`:
 
@@ -2203,20 +1563,18 @@ Reusable as-is from `internal/youtube/channel_membership.go`:
 - `walkVideoRenderers` (`:176`) — handles `lockupViewModel` and classic renderers
 - `lockupTitle` (`:261`), `rendererTitle` (`:267`), fetch/cookie/header pattern
 
-Membership-specific and needing parameterisation: the `TAB_ID_SPONSORSHIPS`
-constant (`:22`) and its match (`:150`), the `/membership` URL literal (`:75`), the
+Membership-specific and needing parameterisation: the `TAB_ID_SPONSORSHIPS` constant
+(`:22`) and its match (`:150`), the `/membership` URL literal (`:75`), the
 `HasAuthCookies()` early return (`:65`), and the inverted `hasAccess` semantics.
 
-The InnerTube transport already exists (`player_api_strategy.go:346`,
-`auth.go:53` `GenerateAPIHeaders`, `constants.YouTubeURLs.API`) but nothing calls
-`/browse`.
+The InnerTube transport already exists (`player_api_strategy.go:346`, `auth.go:53`
+`GenerateAPIHeaders`, `constants.YouTubeURLs.API`) but nothing calls `/browse`.
 
 ### Scan
 
-Union `/videos` + `/streams` + `/membership`, dedup by video ID. This is
-deliberately broader than yt-dlp, which omits the membership tab from "all
-uploads" (`references/yt-dlp/yt_dlp/extractor/youtube/_tab.py:2318` carries
-`XXX: Members-only tab should also be extracted`).
+Union `/videos` + `/streams` + `/membership`, dedup by video ID. This is deliberately
+broader than yt-dlp, which omits the membership tab from "all uploads"
+(`_tab.py:2318` carries `XXX: Members-only tab should also be extracted`).
 
 Paging ports yt-dlp's `_entries` loop (`_tab.py:571`), including:
 
@@ -2227,8 +1585,8 @@ Paging ports yt-dlp's `_entries` loop (`_tab.py:571`), including:
   `continuationItemRenderer.continuationEndpoint.continuationCommand.token`
   (`_base.py:1041`, unwrapped by `_extract_continuation_ep_data` at `_base.py:1027`)
 
-`UC`→`UU` uploads-playlist swap (`_tab.py:2326`) is the fallback handle for
-channels lacking tabs.
+`UC`→`UU` uploads-playlist swap (`_tab.py:2326`) is the fallback for channels lacking
+tabs.
 
 ### Classification during scan
 
@@ -2237,79 +1595,56 @@ re-deriving a rule from its regex:
 
 ```
 age := itemAge(item)          // live-badge short-circuit FIRST, then the age regex
-age > 0  ⇒ status='vod',     date_precision='coarse'   (skewed old; see above)
+age > 0  ⇒ status='vod',     date_precision='coarse'   (skewed NEW: now - age)
 age == 0 ⇒ status='unknown', date_precision='assumed'  → probed
 ```
 
 **The live-badge short-circuit is load-bearing and must not be dropped.** An earlier
-draft specified "presence of a relative-age text, and nothing else", claiming it
-mirrored `itemAge`'s philosophy. It mirrored half of it and discarded the guard that
-makes that half safe:
+draft specified "presence of a relative-age text, and nothing else":
 
 - `itemAge` checks the live badge **first** and returns `0` immediately
   (`channel_membership.go:226-231`), with the comment *"Currently live → 'now',
   **regardless of any 'streaming for N' elapsed text**"*. The guard exists precisely
   because live items carry elapsed text.
-- `relativeAgeRe` (`:49`) is matched against the **serialized JSON of the whole
-  item**, so a live renderer's `"Started streaming 2 hours ago"` matches it
-  (verified: the regex matches that string).
+- `relativeAgeRe` (`:49`) is matched against the **serialized JSON of the whole item**,
+  so a live renderer's `"Started streaming 2 hours ago"` matches it.
 
 A bare-regex rule would therefore insert a **live stream** as a terminal `vod` — on
-`/streams`, the tab most likely to list one. `status` is deliberately excluded from
-the upsert's `DO UPDATE`, and `vod` is never discovery-probed, so nothing would ever
-correct it. That is the precise failure the badge-derived-status objection was
-raised against, arrived at from the opposite direction.
+`/streams`, the tab most likely to list one. `status` is excluded from the upsert's
+`DO UPDATE`, and `vod` is never discovery-probed, so nothing would ever correct it.
 
-Calling `itemAge` keeps the safe property real rather than asserted: a live or
-upcoming item short-circuits to `0` → `unknown` → probed. RSS-visible streams were
-protected anyway by entering as `unknown`, but a members-only live stream first seen
-by the backfill's membership tab has no such protection — it is exactly the case this
-guard saves.
+An earlier draft classified from badges (`live badge ⇒ live`, `scheduled ⇒ upcoming`,
+`"Streamed N ago" ⇒ vod`) and claimed it left "nothing in the unknown pool". Two
+defects: a plain upload matched **none** of the three rules (no `"Streamed"` text, no
+badge — most of `/videos` on most channels), and badge-derived *terminal* status means
+one DOM change silently marks live streams terminal, never to be probed again.
 
-An earlier draft classified from badges (`live badge ⇒ live`, `scheduled badge ⇒
-upcoming`, `"Streamed N ago" ⇒ vod`) and claimed it left "nothing in the unknown
-pool". Two defects:
-
-- **A plain upload matched none of the three rules.** No `"Streamed"` text, no
-  badge — and that is most of `/videos` on most channels. Its status was undefined.
-- **Badge-derived terminal status is unsafe.** Writing `not_a_stream`/`vod` from
-  badge text means one DOM change at YouTube silently marks live and upcoming
-  streams terminal. Terminal statuses are never discovery-probed, so those streams
-  would never be looked at again — goal 3, permanently, with no correction path.
-
-Calling `itemAge` fixes both. `relativeAgeRe` (`channel_membership.go:49`) matches a
-bare `"3 weeks ago"` — the `"Streamed"` prefix is not required — so a plain upload
-dates correctly as `coarse`/`vod`. And the badge short-circuit ahead of it keeps a
-live item at `0` even though its renderer carries elapsed text, so it lands in
-`unknown` and gets probed.
+Calling `itemAge` fixes both. `relativeAgeRe` matches a bare `"3 weeks ago"` — the
+`"Streamed"` prefix is not required — so a plain upload dates correctly as
+`coarse`/`vod`. And the badge short-circuit keeps a live item at `0` even though its
+renderer carries elapsed text, so it lands in `unknown` and gets probed.
 
 **The safe-side property holds only because of the badge check**, not because of the
-age regex: `itemAge` returns `0` for a live item, for an upcoming item, and for
-anything it cannot parse — and every one of those is probed. A wrong answer costs a
-probe; it cannot cost a stream. That guarantee evaporates the moment the badge
-short-circuit is dropped, which is why the classification calls `itemAge` rather
-than re-implementing part of it.
+age regex: `itemAge` returns `0` for a live item, an upcoming item, and anything it
+cannot parse — and every one of those is probed. A wrong answer costs a probe; it
+cannot cost a stream.
 
-`vod` versus `not_a_stream` is not worth distinguishing here: both are terminal,
-both are gated by `include_non_live_content`, and the archival pass treats them
-identically. The backfill writes `vod`; a later probe refines it if it ever matters.
+`vod` versus `not_a_stream` is not worth distinguishing here: both are terminal, both
+are gated by `include_non_live_content`, and the archival pass treats them identically.
+The backfill writes `vod`; a later probe refines it if it ever matters.
 
-**Probe volume stays bounded.** Only rows where `itemAge` returns `0` are probed —
-live, upcoming, and unparseable items, a handful per channel — not the thousands of
-catalog rows a naive `unknown` default would have queued.
+**Probe volume stays bounded.** Only rows where `itemAge` returns `0` land in `unknown`
+— live, upcoming, and unparseable items — and the source walk retires each source at
+its first out-of-window probe regardless.
 
 ### Assigning catalog_pos
 
-`catalog_pos` must be **channel-global**, not per-tab. A per-tab index is unusable
-as a tiebreaker because the three tabs are unrelated coordinate systems and
+`catalog_pos` must be **channel-global**, not per-tab. A per-tab index is unusable as a
+tiebreaker because the three tabs are unrelated coordinate systems and
 `/videos`/`/streams` overlap heavily — a past stream appears in both at different
-positions, and the row is deduped by `(channel_id, video_id)`, so a per-tab value
-would be permanently whichever tab scanned first. (The precision guard makes this
-worse, not better: both tabs write `coarse`, so the second write is rejected
-outright and cannot correct the position.)
-
-The backfill therefore completes all three tab scans **before** assigning
-positions, then does one merged ordering pass over the union:
+positions, and the row is deduped by `(channel_id, video_id)`, so a per-tab value would
+be permanently whichever tab scanned first. (The precision guard makes this worse, not
+better: both tabs write `coarse`, so the second write is rejected outright.)
 
 ```
 1. scan /videos, /streams, /membership page by page
@@ -2317,128 +1652,106 @@ positions, then does one merged ordering pass over the union:
      └─ advance the per-tab cursor in channel_state.backfill_state
      └─ EARLY EXIT: if backfilled_at IS NOT NULL and a full page yields no new
         video IDs, stop paging this tab (a re-run; the rest is already stored).
-        NEVER early-exit when backfilled_at IS NULL — the store is non-empty from
-        Phase 1's RSS/membership rows, so page 1 can be entirely known while the
-        catalogue behind it is entirely unscanned.
+        NEVER early-exit when backfilled_at IS NULL — see below
 2. when all eligible tabs are exhausted, run one ORDERING PASS:
      └─ SELECT the channel's rows into a slice, CLOSE the cursor
      └─ sort by (published DESC, provisional pos ASC, video_id ASC)
         (video_id makes this a total order; an earlier draft had a "source rank"
-         term here but never defined one, leaving step 2 unimplementable. Any
-         total order satisfies the requirement — cross-source ties inside a
-         coarse lump are deterministic-but-arbitrary by design, see below)
+         term here but never defined one, leaving the step unimplementable)
      └─ UPDATE each row's catalog_pos = 0..n-1
         (an unguarded UPDATE — the precision guard governs the upsert only, and
-         would otherwise reject a coarse backfill write onto a pre-existing
-         exact RSS row, leaving the merged position permanently unapplied to
-         exactly the recent rows where it decides archival)
+         would otherwise reject a coarse backfill write onto a pre-existing exact
+         RSS row, leaving the merged position permanently unapplied to exactly the
+         recent rows where it decides archival)
 3. set backfilled_at
 ```
 
-Rows without a `published` (live/upcoming/unparseable, which enter as
-`assumed`/`now`) sort by that `now` and land at the top of the merged order. Their
-`catalog_pos` is irrelevant — those statuses are excluded from the rank index
-entirely — so the sort is well-defined for every row rather than only for
-coarse-dated ones.
+Rows with no real `published` (live/upcoming/unparseable, which enter as `assumed`/now)
+sort by that `now` and land at the top of the merged order — which is where they belong:
+they are always in the window and always probed.
 
 ### Early exit — only on a re-run, never on the first scan
 
 A re-run should not re-page a channel's entire back catalogue to discover what it
-already knows. So a tab **stops paging once a full page yields no new video IDs**:
-everything below is, by construction, already stored.
+already knows. So a tab **stops paging once a full page yields no new video IDs**.
 
 A full page of known IDs is the threshold rather than a single known ID, because
 YouTube reorders shelves and interleaves; one familiar item proves nothing about the
 next page. A whole page does.
 
 **The trap: early exit must be gated on `backfilled_at IS NOT NULL`.** On a *first*
-scan the store is not empty — RSS and membership have been populating it since
-Phase 1 shipped, so `/videos` page 1 is very likely *entirely* known. A naive early
-exit would fire on page 1, declare the tab exhausted, and set `backfilled_at` having
-scanned nothing — permanently marking the channel complete with no catalogue behind
-it, and no sweep would ever revisit it (`backfilled_at IS NULL` is the only trigger).
-
-So:
+scan the store is not empty — RSS and membership have been populating it since Phase 1,
+so `/videos` page 1 is very likely *entirely* known. A naive early exit would fire on
+page 1, declare the tab exhausted, and set `backfilled_at` having scanned nothing —
+permanently marking the channel complete with no catalogue behind it, and no sweep would
+ever revisit it (`backfilled_at IS NULL` is the only trigger).
 
 ```
 backfilled_at IS NULL      → full scan, no early exit (the store proves nothing)
-backfilled_at IS NOT NULL  → early exit allowed (the catalogue is already complete,
-                              so a page of known IDs really does mean "the rest is
-                              known")
+backfilled_at IS NOT NULL  → early exit allowed (the catalogue is already complete)
 ```
-
-This is the reason the first backfill is expensive exactly once, and every re-run
-after it is cheap.
 
 **Rows are written as they are scanned, not buffered to the end.** The obvious
 formulation — scan everything, merge in memory, then write — is incompatible with
-"resumable via cursor": a restart mid-scan would destroy the buffer, so the cursor
-would resume into a merge whose earlier half no longer exists. Writing per page
-means progress survives a restart and the cursor means what it says.
+"resumable via cursor": a restart mid-scan would destroy the buffer, so the cursor would
+resume into a merge whose earlier half no longer exists.
 
-The cost is that `catalog_pos` is provisional (per-tab) until the ordering pass
-runs. That is harmless: a partially-backfilled channel's rows are old, coarse-dated
-content that cannot reach the top N, and `backfilled_at` stays NULL until the
-ordering pass completes, so nothing claims the catalog is ordered before it is.
+The cost is that `catalog_pos` is provisional until the ordering pass runs. That is
+harmless: a partially-backfilled channel's un-ordered rows are old, coarse-dated content
+outside the window, and `backfilled_at` stays NULL until the ordering pass completes.
 
 **The ordering pass must collect-then-update.** With `SetMaxOpenConns(1)`
-(`internal/database/database.go:177`), issuing UPDATEs while a SELECT cursor is
-open deadlocks on the single connection — the hazard documented at
-`internal/database/migrations.go:242-244`. Read rows into a slice, close the
-cursor, then write.
+(`internal/database/database.go:177`), issuing UPDATEs while a SELECT cursor is open
+deadlocks on the single connection — the hazard documented at `migrations.go:242-244`.
+Read rows into a slice, close the cursor, then write.
 
-Steady-state inserts (RSS, membership) keep using the per-fetch index, which is
-sound there: RSS dates are `exact` and distinct, so they effectively never tie, and
-a membership fetch is a single listing whose internal order is genuine recency.
+Steady-state inserts (RSS, membership) keep using the per-fetch index, which is sound
+there: RSS dates are `exact` and distinct, so they effectively never tie, and a
+membership fetch is a single listing whose internal order is genuine recency.
 `catalog_pos` only ever arbitrates *within* one `published` value.
 
-**Known limit, accepted:** a tie between a backfilled row (global position) and a
-later steady-state row (per-fetch position) is resolved deterministically but
-arbitrarily. It requires identical `published` values across a coarse backfill row
-and a coarse membership row, and it only changes ordering *within* a lump, never
-whether the lump straddles N. Not worth a second coordinate column.
+**Known limit, accepted:** a tie between a backfilled row (global position) and a later
+steady-state row (per-fetch position) is resolved deterministically but arbitrarily. It
+requires identical `published` values across a coarse backfill row and a coarse
+membership row, and it only changes ordering *within* a lump. Not worth a second
+coordinate column.
 
 ### Operational rules
 
 - **YouTube channels only.** The backfill must re-apply the platform filter
-  (`ch.GetPlatform() == "youtube"`, as `getYouTubeChannels` does at
-  `internal/monitor/feed.go:809-823`). Twitch channels live in the *same*
-  `[[channels]]` list, and this worker runs on its own path rather than through the
-  monitor's cycle loop — so nothing else filters for it. Without this, a Twitch
-  channel would be scanned as `youtube.com/channel/<twitch_login>/videos`, 404 on
-  all three tabs, never set `backfilled_at`, and retry on every startup forever.
-  The "no Twitch-side change" non-goal is only a guarantee if this filter exists.
+  (`ch.GetPlatform() == "youtube"`, as `getYouTubeChannels` does at `feed.go:809-823`).
+  Twitch channels live in the *same* `[[channels]]` list, and this worker runs on its
+  own path rather than through the monitor's cycle loop — so nothing else filters for
+  it. Without this, a Twitch channel would be scanned as
+  `youtube.com/channel/<twitch_login>/videos`, 404 on all three tabs, never set
+  `backfilled_at`, and retry on every startup forever. The "no Twitch-side change"
+  non-goal is only a guarantee if this filter exists.
 - Throttled: one page per interval (constant, not config).
 - **Strictly serial across channels — one channel scanned at a time, globally.** On
   upgrade day *every* YouTube channel has `backfilled_at IS NULL`, so the sweep fires
-  for all of them at once; a single global queue is what stops that from becoming a
-  request storm. The numbers are not small: a 2,000-video channel is roughly 65 pages
-  × 3 tabs ≈ 200 requests, and twenty channels ≈ 4,000 — aimed at an endpoint we
-  already observe failing ~13% of cycles. Concurrency would multiply the rate exactly
-  where it hurts, and backfill failures are silent by design (cursor saved,
-  `backfilled_at` stays NULL), so throttling would present as slowness rather than as
-  breakage.
+  for all of them at once; a single global queue is what stops that becoming a request
+  storm. The numbers are not small: a 2,000-video channel is roughly 65 pages × 3 tabs
+  ≈ 200 requests, and twenty channels ≈ 4,000 — aimed at an endpoint we already observe
+  failing ~13% of cycles. Concurrency would multiply the rate exactly where it hurts,
+  and backfill failures are silent by design (cursor saved, `backfilled_at` stays NULL),
+  so throttling would present as slowness rather than as breakage.
 - **Wall-clock is allowed to be hours, and that is not a defect.** The monitors keep
   running on RSS throughout; the store deepens underneath them. Nothing waits on the
-  sweep except the established gate on a channel that has no working RSS, which had
-  no path at all before this.
+  sweep except the established gate on a channel that has no working RSS, which had no
+  path at all before this.
 - **Never gated on idleness.** A tempting variant pauses paging while downloads or
   monitor cycles are active. On a 24/7 install — the target deployment — it may never
-  finish, which leaves the established gate shut on dead-RSS channels forever: the
-  exact hole that shipping both phases together exists to close.
-- Resumable: per-tab cursor in `channel_state.backfill_state`. A restart mid-sweep
-  costs one page, so serial + slow carries no risk of lost work.
-- `backfilled_at` set **only** on full completion of all three tabs, so a partial
-  scan retries rather than silently claiming completeness.
-- Runs in its own throttled path — **not** through the monitor's cycle loop, which
-  does retries and backoff per video and would be pathological over thousands of
-  items.
+  finish, which leaves the established gate shut on dead-RSS channels forever: the exact
+  hole that shipping both phases together exists to close.
+- Resumable: per-tab cursor in `channel_state.backfill_state`. A restart mid-sweep costs
+  one page, so serial + slow carries no risk of lost work.
+- `backfilled_at` set **only** on full completion of all eligible tabs.
+- Runs in its own throttled path — **not** through the monitor's cycle loop, which does
+  retries and backoff per video and would be pathological over thousands of items.
 - Progress surfaced in Web UI and TUI.
 - Inline `defer recover()` in the scan goroutine, per project rule.
 
 ## Integration Points
-
-The spec previously assumed several of these existed in a shape they do not.
 
 ### Trigger: there is no config watcher — `kickMonitors` is the hook
 
@@ -2451,85 +1764,70 @@ fired by the writer*. The single funnel for every runtime channel mutation is
 bypasses `ChannelRoutes` entirely).
 
 **`kickMonitors` is a bare `func()` with no add/remove/reorder discrimination** — it
-fires identically on a reorder. So "auto on channel add" **cannot** be event-driven.
-It must be an idempotent sweep keyed on `channel_state.backfilled_at IS NULL`,
-invoked from `kickMonitors` and at startup. These are therefore **one trigger, not
-two**, and the Decisions table's phrasing is shorthand for that.
+fires identically on a reorder. So "auto on channel add" **cannot** be event-driven. It
+must be an idempotent sweep keyed on `backfilled_at IS NULL`, invoked from
+`kickMonitors` and at startup.
 
-**Idempotent at the DB level is not idempotent at the worker level.** This is the
-trap: `backfilled_at` is set only on *completion*, so a channel whose scan is
-in-flight still reads `backfilled_at IS NULL`. `kickMonitors` fires on every add,
-remove, reorder, bulk PUT, and TUI settings save — so a user reordering channels
-three times launches three concurrent scans of the same three tabs for the same
-channel. The 30s debounce specified for the manual re-run does not help; it lives on
-the POST route, not in the sweep.
+**Idempotent at the DB level is not idempotent at the worker level.** `backfilled_at` is
+set only on *completion*, so a channel whose scan is in-flight still reads
+`backfilled_at IS NULL`. A user reordering channels three times would launch three
+concurrent scans of the same tabs. The 30s debounce specified for the manual re-run does
+not help; it lives on the POST route, not in the sweep.
 
-The sweep therefore holds an **in-flight set** (channel ID → cancel func), owned by
-the backfill worker, and skips any channel already scanning. The condition is
-"`backfilled_at IS NULL` **and not already in flight**". The in-flight set is also
-what makes cancellation-before-prune possible, below — one structure serves both.
+The sweep therefore holds an **in-flight set** (channel ID → cancel func), owned by the
+backfill worker, and skips any channel already scanning. The in-flight set is also what
+makes cancellation-before-prune possible — one structure serves both.
 
-`setup_routes.go:176-177` deliberately does not fire the channel-change callback
-(the process restarts instead), so setup-wizard channels are covered by the startup
-sweep.
+`setup_routes.go:176-177` deliberately does not fire the channel-change callback (the
+process restarts instead), so setup-wizard channels are covered by the startup sweep.
 
 ### Channel removal must prune, and there is a precedent
 
-`feed_items` is per-channel state on a 24/7 process, on disk, unbounded per channel
-(the backfill writes the entire catalog), and it survives restarts. The established
-pattern is `PruneHealth` — `internal/monitor/health.go:110-112` states it exists so
-the map "can't grow unbounded on a 24/7 process", implemented at `feed.go:151-158`
-and called from `services.go:571-573`.
+`feed_items` is per-channel state on a 24/7 process, on disk, unbounded per channel, and
+it survives restarts. The established pattern is `PruneHealth` — `health.go:110-112`
+states it exists so the map "can't grow unbounded on a 24/7 process", implemented at
+`feed.go:151-158` and called from `services.go:571-573`.
 
-So the same `kickMonitors` sweep deletes `feed_items`/`channel_state` rows for
-channels no longer in the active set. This also fixes a real bug: a
-removed-then-re-added channel would otherwise inherit a stale `backfilled_at` and
-silently skip its backfill.
+So the same `kickMonitors` sweep deletes `feed_items`/`channel_state` rows for channels
+no longer in the active set. This also fixes a real bug: a removed-then-re-added channel
+would otherwise inherit a stale `backfilled_at` and silently skip its backfill.
 
-**Caveat:** this is the **first channel-keyed DB cleanup in the codebase**. Nothing
-in `internal/database/` deletes by channel today — `ListOrphanedHistory` joins on
-`jobs.id`, and `pruneHistory` is a global 10k FIFO. We are establishing a pattern,
-not extending one.
+**Caveat:** this is the **first channel-keyed DB cleanup in the codebase**. Nothing in
+`internal/database/` deletes by channel today — `ListOrphanedHistory` joins on
+`jobs.id`, and `pruneHistory` is a global 10k FIFO. We are establishing a pattern, not
+extending one.
 
-**The prune races the backfill, and both arrive via `kickMonitors`.** Removing a
-channel mid-scan means the prune deletes its rows while the scan is still writing
-them — resurrecting a channel that no longer exists, with a half-written catalog and
-a NULL `backfilled_at` that no sweep will ever revisit (it is no longer in the
-active set). It would sit there forever.
+**The prune races the backfill, and both arrive via `kickMonitors`.** Removing a channel
+mid-scan means the prune deletes its rows while the scan is still writing them —
+resurrecting a channel that no longer exists, with a half-written catalog and a NULL
+`backfilled_at` that no sweep will ever revisit.
 
-Ordering fixes it: `kickMonitors` **cancels any in-flight backfill for channels
-leaving the active set, waits for the worker to observe cancellation, and only then
-prunes.** The backfill worker additionally re-checks membership of the active set
-before each page write, so a cancellation that lands between the check and the write
-costs at most one stale page — which the prune then removes, because the prune runs
-last.
+Ordering fixes it: `kickMonitors` **cancels any in-flight backfill for channels leaving
+the active set, waits for the worker to observe cancellation, and only then prunes.** The
+backfill worker additionally re-checks membership of the active set before each page
+write, so a cancellation that lands between the check and the write costs at most one
+stale page — which the prune then removes, because the prune runs last.
 
-This is why the prune belongs in the same sweep as the trigger rather than in the
-delete route: `channel_routes.go:121-123` fires `kickMonitors` *after* the config is
-written, so the active set is already authoritative when the sweep reads it.
+This is why the prune belongs in the sweep rather than the delete route:
+`channel_routes.go:121-123` fires `kickMonitors` *after* the config is written, so the
+active set is already authoritative when the sweep reads it.
 
 ### The backfill must respect `membership_discovery` and the auth gate
 
-The per-cycle membership path is gated by `membershipActive()`
-(`internal/monitor/feed.go:516-523`) on `MembershipDiscoveryEnabled()`
-(`internal/config/types.go:109-110`) and a wired fetcher. The reuse inventory flags
-`HasAuthCookies()` (`channel_membership.go:65`) as needing "parameterisation" —
-which must not mean *removing* the gate.
-
-This matters more than it looks: **the archival pass reads the store, not the
-response.** If the backfill writes members-only rows on a channel with
-`membership_discovery = false`, those rows become in-scope and get jobbed — the
-toggle is silently defeated by the very indirection that fixes the original bug.
+**The archival pass reads the store, not the response.** If the backfill writes
+members-only rows on a channel with `membership_discovery = false`, those rows enter the
+window and get jobbed — the toggle silently defeated by the very indirection that fixes
+the original bug.
 
 So: the backfill's membership tab is gated on `MembershipDiscoveryEnabled() &&
 HasAuthCookies()`. `/videos` and `/streams` are public and are not gated.
 
 **`backfilled_at` semantics when the membership tab is skipped:** it is still set on
-completion of the tabs that were *eligible*. The flag means "this channel's catalog
-has been scanned as fully as its configuration permits", not "all three tabs ran" —
-otherwise a `membership_discovery = false` channel could never complete a backfill
-and would retry forever. Turning membership discovery **on** later must therefore
-clear `backfilled_at` to force a rescan, since the eligible set changed.
+completion of the tabs that were *eligible*. The flag means "this channel's catalog has
+been scanned as fully as its configuration permits" — otherwise a
+`membership_discovery = false` channel could never complete a backfill and would retry
+forever. Turning membership discovery **on** later must therefore clear `backfilled_at`
+to force a rescan, since the eligible set changed.
 
 ### Progress: two mechanisms, and an initial-state trap
 
@@ -2537,33 +1835,32 @@ clear `backfilled_at` to force a rescan, since the eligible set changed.
   No typed wrapper needed — `disk_status` (`cmd/moombox/main.go:676-681`) and
   `update_available` (`helpers.go:142`) already use the generic path.
 - **TUI:** not WebSocket. A buffered channel plus `tea.Msg`, modelled on
-  `DiskStatusMsg`: type at `internal/tui/app.go:60-64`, channel at
-  `services.go:609`, non-blocking send with a `default:` drop at `main.go:684-689`,
-  wired via `SetUpdateChannels` (`tui_wiring.go:404`), handled at
-  `app_update.go:277-279` — where the trailing `return a, a.listenForUpdates()` is
-  **mandatory** to re-arm the receive.
+  `DiskStatusMsg`: type at `internal/tui/app.go:60-64`, channel at `services.go:609`,
+  non-blocking send with a `default:` drop at `main.go:684-689`, wired via
+  `SetUpdateChannels` (`tui_wiring.go:404`), handled at `app_update.go:277-279` — where
+  the trailing `return a, a.listenForUpdates()` is **mandatory** to re-arm the receive.
 
-**The trap:** `InitialState` (`cmd/moombox/ws_wiring.go:87-111`) returns only
-`jobs`, `logs`, `nextFeedCheck`, `nextDecapiCheck`, `nextTwitchCheck`,
-`connectivity`, `hideFinishedAgeDays`. `disk_status` is absent, so a web client
-connecting mid-event renders nothing until the next tick. The TUI seeds itself
-(`tui_wiring.go:409-415`); the Web UI does not. A throttled full-catalog backfill is
-long-running *by design*, so mid-flight connect is the **common case**: backfill
-progress must be added to `InitialState` and the TUI seed mirrored.
+**The trap:** `InitialState` (`cmd/moombox/ws_wiring.go:87-111`) returns only `jobs`,
+`logs`, `nextFeedCheck`, `nextDecapiCheck`, `nextTwitchCheck`, `connectivity`,
+`hideFinishedAgeDays`. `disk_status` is absent, so a web client connecting mid-event
+renders nothing until the next tick. The TUI seeds itself (`tui_wiring.go:409-415`); the
+Web UI does not. A throttled full-catalog backfill is long-running *by design*, so
+mid-flight connect is the **common case**: backfill progress must be added to
+`InitialState` and the TUI seed mirrored.
 
 ### Manual re-run: `R` chord + debounced route
 
-- **Chord `R` (Request)** — the global namespace (`A` is job-scoped). Model on
-  `R M` "Check Monitors Now": callback field `internal/tui/app.go:411`, menu
-  registration **gated on non-nil** (`app_actions.go:489-491` — an unregistered
-  chord is rejected by the parser at `:492-495`), dispatch at `:185-189`, host
-  wiring at `cmd/moombox/tui_wiring.go:225-229`. For an async trigger use the `R V`
-  shape (`app_actions.go:173-184`): capture the fn and return `safeCmd(...)`
-  producing a one-shot msg — never block the update loop.
-- **API** — model on `POST /api/monitors/check-now` (`internal/web/routes/monitors.go:34`),
-  which carries a **30s `atomic.Int64` debounce** (`monitors.go:22`, `:39-51`)
-  returning HTTP 200 `{"success":false,"debounced":true,"retryAfterMs":N}`. A manual
-  backfill re-run needs the same guard against overlapping scans.
+- **Chord `R` (Request)** — the global namespace (`A` is job-scoped). Model on `R M`
+  "Check Monitors Now": callback field `internal/tui/app.go:411`, menu registration
+  **gated on non-nil** (`app_actions.go:489-491` — an unregistered chord is rejected by
+  the parser at `:492-495`), dispatch at `:185-189`, host wiring at
+  `cmd/moombox/tui_wiring.go:225-229`. For an async trigger use the `R V` shape
+  (`app_actions.go:173-184`): capture the fn and return `safeCmd(...)` producing a
+  one-shot msg — never block the update loop.
+- **API** — model on `POST /api/monitors/check-now`
+  (`internal/web/routes/monitors.go:34`), which carries a **30s `atomic.Int64` debounce**
+  (`monitors.go:22`, `:39-51`) returning HTTP 200
+  `{"success":false,"debounced":true,"retryAfterMs":N}`.
 
 Both front doors share one service func, exactly as `kickMonitors` does today.
 
@@ -2574,7 +1871,7 @@ Note: `buildMenuItems()`/`dispatchAction()` live in `internal/tui/app_actions.go
 
 | Failure | Behavior |
 |---|---|
-| RSS 404/500 | Membership still runs and still writes its items. No RSS-sourced rows are added, and previously-stored ones remain — so scope is unchanged. `last_rss_ok_at` keeps its prior value, so trust persists. **This is the bug's failure mode, now inert.** |
+| RSS 404/500 | Membership still runs and still writes its items. No RSS-sourced rows are added, and previously-stored ones remain — so scope is unchanged. `last_rss_ok_at` keeps its prior value. **This is the bug's failure mode, now inert.** |
 | Membership fetch fails | Debug log only — unchanged; never marks RSS unhealthy |
 | Probe fails | Existing `MetadataTracker` give-up + `ProbeCooldown`, untouched |
 | Backfill fails mid-scan | Cursor saved, `backfilled_at` stays NULL, retries next startup |
@@ -2585,363 +1882,300 @@ The probe-failure **machinery** is deliberately untouched: `MetadataTracker` and
 `internal/monitor/utils.go:272-279` remains accurate that history does not stop
 re-probing and the cooldown is the only limiter.
 
-**A permanently unprobeable item still escapes, but for a stated reason rather than
-an accidental one.** Today it scrolls out of RSS's 15-item window once 15 newer items
-exist, and probing stops as a side effect of the response being the work list.
-Reading the store removes that escape — the same property that fixes the original
-bug — so the escape is re-established deliberately: the probe list is the in-scope
-set, and the item leaves it when newer content pushes it below rank `N`. See "The cap
-is the bound".
+**A permanently unprobeable item still escapes, but for a stated reason rather than an
+accidental one.** Today it scrolls out of RSS's 15-item window once 15 newer items
+exist, and probing stops as a side effect of the response being the work list. Reading
+the store removes that escape — the same property that fixes the original bug — so the
+escape is re-established deliberately: the probe list is the window, and the item leaves
+it when time passes.
 
 ## Testing
 
 ### Prerequisite: `checkChannel` is not testable today
 
-The headline regression test cannot be written against the current code, and this
-is implementation work the plan must budget for, not an assumption:
+The headline regression test cannot be written against the current code, and this is
+implementation work the plan must budget for:
 
 - **There is no `feed_test.go`.** `internal/monitor/` has `connectivity_test.go`,
-  `health_test.go`, `membership_test.go`, `twitch_recover_test.go`,
-  `utils_test.go` — nothing covers `checkChannel`.
+  `health_test.go`, `membership_test.go`, `twitch_recover_test.go`, `utils_test.go` —
+  nothing covers `checkChannel`.
 - **There is no fetch seam.** `checkChannel` calls `fm.fetchFeed(ctx, ch)` directly
   (`feed.go:426`), which does a real HTTP GET (`feed.go:484`). RSS failure cannot be
   simulated. By contrast `FetchMembership` is already an injectable func field
   (`MembershipFetchFunc`, `feed.go:94`) — the RSS path needs the same treatment.
 
-So Phase 1 includes: introduce an injectable RSS fetch seam mirroring
-`MembershipFetchFunc`, and create `feed_test.go`. Fixtures stay **inline** —
-`internal/monitor/` has no `testdata/` directory and every existing fixture is
-inline (`membership_test.go:207` uses inline XML; `channel_membership_test.go:27`
-inline HTML). Do not introduce `testdata/` for this.
+Fixtures stay **inline** — `internal/monitor/` has no `testdata/` directory and every
+existing fixture is inline (`membership_test.go:207` inline XML;
+`channel_membership_test.go:27` inline HTML). Do not introduce `testdata/`.
 
 ### Test to delete
 
 `internal/monitor/membership_test.go:83-108` `TestMergeCandidatesRecencyCap` calls
-`mergeCandidates(cands, 2)` and asserts precisely the cap-crowding behavior this
-design removes. It must be deleted or rewritten against the top-N query — it cannot
-survive as-is.
+`mergeCandidates(cands, 2)` and asserts precisely the cap-crowding behavior this design
+removes. It cannot survive.
 
 ### Regression test for this exact bug
 
 - **RSS 404 cycle + membership returns a 3-week-old VOD ⇒ not archived.**
 
-Then:
+*The window and the skew*
 
-- Coarse-tie lump: 20 items sharing one date, `N=3` ⇒ exactly 3 admitted (proves
-  the total order)
-- Upcoming below rank N ⇒ still probed and jobbed (proves cap-exemption)
-- Processed/out-of-scope `vod` never re-probed; `unknown` probed exactly once
-- Job creation always follows a fresh probe, including via the archival pass
-- Clearing orphaned history for an in-scope VOD re-jobs it (refresh probe fires);
-  clearing it for an out-of-scope VOD does **not**
-- Precision guard: a later `coarse` write never overwrites a stored `exact`; a
-  later `exact` write does overwrite a stored `coarse`. All four rungs ordered
-  (`assumed` < `coarse` < `day` < `exact`)
-- **`PublishedAt` extraction is status-aware.** `post_live`/`vod` take
-  `liveBroadcastDetails.startTimestamp` (`exact`, second-granular), **falling back
-  to `uploadDate` (`day`) when `lbd` is absent** — which is the *normal* `vod` case,
-  since an ended stream with an `endTimestamp` classifies `post_live`; a
-  `not_a_stream` takes `uploadDate` (`day`); an `upcoming` stores **no** ranking
-  date — specifically, its future `startTimestamp` never reaches `published`
-- **The probe write is precision-guarded.** A probe of a plain upload (`uploadDate`,
-  `day`) must NOT overwrite RSS's second-granular `exact` date, and must never write
-  `published=''` for an `upcoming`/`live` row
-- **`post_live` normalizes to `vod` on write** — no `post_live` row ever reaches the
-  archival decision table, where it would match no branch
-- **A probe returning `vod` with no usable date leaves the row `unknown`, not
-  `vod`.** Guards the permanent sink: `vod`+`assumed` is terminal *and* unrankable,
-  so it could never recover even though the next probe might supply a date
-- An `assumed`/`unknown` members row that probes to `vod` gets a real date and
-  **becomes rankable** — the dead-end guard (without a probe date it would be
-  `vod`+`assumed`: terminal and unrankable, i.e. unarchivable forever)
-- A stale listing never demotes a probed `live` back to `vod`
-- An `assumed` row never enters the top-N query (goal 4), and a permanently
-  unprobeable `assumed` row cannot evict real content from scope
-- An in-scope `unknown` row is never jobbed — and an RSS row whose probe fails
-  stays `unknown` with its **exact** date, holding its true rank rather than
-  yielding the slot to an older item (the top-N excludes `assumed` precision, not
-  `unknown` status)
-- `include_non_live_content = false`: a past members VOD is stored but never
-  discovery-probed, preserving today's drop behavior
-- **`HasProcessed` does not block a live/upcoming job.** Arrange a history row with
-  **no** job row — via a DECAPI give-up (`decapi.go:583-594` still wires
-  `AddToHistory`) or a pre-existing/legacy row, **not** via a feed-path give-up,
-  which no longer writes one — then let a discovery probe return `live`. The stream
-  must still be jobbed. This is the goal-3 regression guard.
-- A stale stored `live` whose probe errored this cycle produces **no** job
-- With `probe_cooldown > 0`, a cooldown-skipped item produces **no** job
+- **Coarse dates skew new:** `"1 week ago"` stores `now - 7d`, not `now - 14d`, so the
+  whole [7d, 14d) bucket is admitted to a 7-day window rather than excluded
+- **A straddling item is admitted, probed, and dropped on its exact date.** 7-day
+  window, item displayed `"1 week ago"`, probe returns a true age of 10 days ⇒ **never
+  jobbed** — and the exact date is written back, so it leaves the window and is not
+  re-probed next cycle. This is the refresh-probe window re-check; without it the item
+  is archived on a guess (goal 4)
+- **Nothing is excluded on an unverified date.** An item displayed `"2 weeks ago"`
+  (stored `now - 14d`) is outside a 7-day window and must **never** be probed
+- **`itemAge` is unchanged** — pin `"1 week ago" → 168h` (the truncated lower bound)
+  against a well-meaning "fix" to the unit-preserving form the rejected skew-old rule
+  needed
+- Widening `archive_window_days` brings an already-stored VOD into scope with **no**
+  discovery probe (pure re-scope), and the resulting job **does** follow a refresh probe
+- `published` frozen at first insert; upgraded only by higher precision
+- Precision guard: a later `coarse` write never overwrites a stored `exact`; a later
+  `exact` does overwrite a stored `coarse`. All four rungs ordered
+- A scheduled start time is never stored as `published`
+- An `assumed` row sits inside every window and is probed; an `unknown` row is never
+  jobbed
+- **Query plan assertion:** the window query uses `idx_feed_items_window` and does not
+  fall back to a `SCAN` or a `USE TEMP B-TREE FOR ORDER BY`, on both arms
+
 *The source walk*
+
 - **Early exit fires:** a source with items at true ages 5d/6d/10d/11d/12d against a
   7-day window, all displayed within the straddling bucket, costs exactly **three**
-  probes — 5d, 6d, then 10d retires the source. The 11d and 12d rows are **never
-  probed**, this cycle or any later one
+  probes — 5d, 6d, then 10d retires the source. The 11d and 12d rows are **never probed**
 - **Only a dated probe retires a source.** Four tests, one per outcome: `errored`,
-  `denied`, cooldown-skipped, and probed-with-no-date each leave the source live and
-  the walk continues to the next row. A transient cookie fault must not truncate a
-  source — this is the retirement mistake in a new place
+  `denied`, cooldown-skipped, and probed-with-no-date each leave the source live and the
+  walk continues. A transient cookie fault must not truncate a source
 - **The ordering check fires and degrades safely.** A source whose probed dates go
-  8d → 7d (newer than the previous) disables early-exit for that source, logs a
-  warning, and probes the remainder of the bucket. Nothing is skipped
+  8d → 7d disables early exit for that source, logs, and probes the remainder
 - **The check is per-source, not global.** A mis-ordered `/streams` must not disable
-  early-exit for `/videos`
-- **Exhaustion never persists.** A source retired in cycle N is walked again in
-  cycle N+1 (the rows that were probed are gone from the window on their exact
-  dates; the skipped ones are not permanently excluded by a remembered flag)
-- **RSS rows never retire a source.** They carry `exact` dates that no probe moves
-- **Probes are serial.** Assert call ordering, not just call count: a concurrent
+  early exit for `/videos`
+- **Exhaustion never persists.** A source retired in cycle N is walked again in N+1
+- **RSS rows never retire a source.** They carry `exact` dates no probe moves
+- **Probes are serial.** Assert call *ordering*, not just count: a concurrent
   implementation passes a count assertion while issuing every probe past the boundary
-- **Coarse dates skew new:** `"1 week ago"` stores `now - 7d`, not `now - 14d`, so
-  the whole [7d, 14d) bucket is admitted to a 7-day window rather than excluded
-- **A straddling item is admitted, probed, and then dropped on its exact date.** With
-  a 7-day window, an item displayed `"1 week ago"` whose probe returns a true age of
-  10 days is **never jobbed** — and the probe's exact date is written back, so it
-  falls out of the window and is not re-probed on the next cycle
-- **Nothing is excluded on an unverified date.** An item displayed `"2 weeks ago"`
-  (stored `now - 14d`) is outside a 7-day window and must **never** be probed — its
-  newest possible age already exceeds the window
-- `membership_discovery = false` ⇒ backfill writes no members rows, and none are
-  jobbed via the store
-- **A denied probe never becomes a job, whatever `source` says.** The decisive
-  case: `membership_discovery = false`, a public video locked to members after we
-  stored it (`source` stays `rss` **forever** — no membership fetch means no
-  sighting means no flip), then `max_feed_items` is raised so it enters scope. The
-  anonymous refresh probe returns `upcoming` with `PlayabilityError = members_only`
-  ⇒ `denied` ⇒ no job. Without the playability rule this jobs members content on a
-  channel with members discovery **off**, and no gate can see it.
-- **A genuine upcoming stream is NOT denied.** `LIVE_STREAM_OFFLINE` /
-  "live event will begin" ⇒ `PlayabilityError == ok` (`player_api_parsing.go:349-351`)
-  ⇒ `probed` ⇒ FRESH ⇒ jobbed. Guards goal 3 against over-eager denial — and against
-  the tempting "past `published` + `upcoming` = contradiction" heuristic, which an
-  RSS-announced stream legitimately trips.
-- **An age-restricted VOD that returns formats is NOT denied.** It classifies `vod`
-  (not `upcoming`), so the grounded-classification rule applies and it is archived
-  normally. Guards against the over-broad "any non-`ok` ⇒ denied" rule, which would
-  trade one lie for one silence.
-- **A cookie lapse must not create a job either.** Members `vod` rows in scope (e.g.
-  after raising `max_feed_items`) + no cookies ⇒ the refresh probe must **not** fire.
-  Ungated it still issues a pointless request; the `denied` rule stops the result
-  becoming a job. Assert **no probe is issued** — the job assertion cannot
-  distinguish gated from ungated now, and would pass vacuously.
-- **With `membership_discovery = false`, members rows must not hold ranking slots.**
-  Three members VODs at ranks 1-3 + public VODs at 4-6 + the toggle off ⇒ the public
-  VODs must be in scope. This is what the read arms protect, and neither the probe
-  gates nor `denied` can: no probe is involved in ranking a stored row.
-- **A cookie lapse must NOT move scope.** Arrange members rows at ranks 1-3 and
-  public VODs at 4-6, then make `HasAuthCookies()` false for one cycle: the top-3
-  must still be the members rows, and **no public VOD may be jobbed**. Gating the
-  ranking on `membershipActive()` (which folds in cookie state) instead of
-  `MembershipDiscoveryEnabled()` fails this — and is this spec's own bug, reached
-  through a new door.
-- **Turning `membership_discovery` OFF takes effect immediately, on rows already
-  stored.** Arrange a members row written while it was on, then flip it off: the row
-  must not be probed, must not rank, and must not be jobbed — even though no
-  membership fetch occurs. (Today this is free, because the pool *is* the response;
-  the store-driven passes are what make it a real hazard.)
-- Turning it back ON restores those rows (they were hidden, not deleted)
-- Channel removed from config ⇒ its `feed_items`/`channel_state` rows are pruned;
-  re-adding it triggers a fresh backfill rather than inheriting `backfilled_at`
-- Backfill skips Twitch channels entirely
-- A stored `vod` whose refresh probe returns `live` (stream restarted on the same
-  ID) **is** jobbed, and the store is updated to `live` so it stays in the
-  discovery list — it is not skipped as "no longer non-live"
-- Backfill: rows persist per page, so a restart mid-scan resumes from the cursor
-  rather than re-scanning; `catalog_pos` is only final once `backfilled_at` is set
-- **Early exit fires on a re-run and NEVER on a first scan.** Specifically: a first
-  scan of a channel whose store already holds its 15 newest RSS items must still
-  page the whole catalogue — an early exit there would set `backfilled_at` on an
-  unscanned channel that no sweep would revisit
-- Removing a channel mid-backfill cancels the scan before the prune, and leaves no
-  resurrected rows
-- **Upcoming/live rows do not occupy ranking slots.** `N=3` + three scheduled
-  premieres + one VOD from yesterday ⇒ the VOD is still in scope (goal 3)
-- An `upcoming` row that ends becomes `vod`, **enters** the ranking at rank 1, and
-  pushes the previous rank N out of scope
-- A scheduled start time is never stored as `published`
-- **Probe give-up never retires or defers a row.** An upcoming/members stream that
-  is unprobeable for several cycles (cookie hiccup, YouTube 5xx) is probed again on
-  the very next cycle and archived once it recovers. This is the goal-3 guard
-  against both rejected bounding designs.
-- **An in-scope row stuck at `unknown` after repeated failures is still probed every
-  cycle, and an out-of-scope one is never probed at all.** Two tests: an `unknown`
-  row inside the top-N stays in the probe list indefinitely; the same row, once `N`
-  newer items exist, drops out of the probe list entirely without being deleted,
-  modified, or un-ranked (see "The cap is the bound")
+
+*The probe date and the terminal invariant*
+
+- **`PublishedAt` extraction is status-aware.** `post_live`/`vod` take
+  `liveBroadcastDetails.startTimestamp` (`exact`), **falling back to `uploadDate`
+  (`day`) when `lbd` is absent** — the *normal* `vod` case; `not_a_stream` takes
+  `uploadDate` (`day`); `upcoming` stores **no** date — its future `startTimestamp`
+  never reaches `published`
+- **The probe write is precision-guarded.** A probe of a plain upload (`uploadDate`,
+  `day`) must NOT overwrite RSS's `exact` date, and must never write `published=''`
+- **`post_live` normalizes to `vod` on write** — no `post_live` row ever reaches the
+  archival decision table, where it would match no branch
+- **A probe returning `vod` with no usable date leaves the row `unknown`, not `vod`.**
+  Guards the sink: `vod`+`assumed` sits inside the window forever claiming to be new,
+  terminal so never discovery-probed, and on `include_non_live_content = false` never
+  refresh-probed either
+- An `assumed`/`unknown` members row that probes to `vod` gets a real date and drops out
+  of the window if it is old
+- A stale listing never demotes a probed `live` back to `vod`
+
+*Freshness and the split*
+
 - **`probeAndClassify` requires a wired probe** — the feed path has no passthrough
-  outcome, so `outcome == probed` is FRESH without qualification. DECAPI keeps
-  today's nil behavior via the composed function. (Freshness must never be derived
-  from `ShouldProcess`, which is `true` on the nil path.)
-- **A successful probe of a non-jobbable item still writes its status.** Default
-  config (`include_non_live_content = false`), RSS plain upload ⇒ probe succeeds ⇒
-  `not_a_stream` ⇒ `ShouldProcess=false` ⇒ the row must become `not_a_stream`, NOT
-  stay `unknown`. Guards the goal-5 inversion where every upload is probed forever.
+  outcome, so `outcome == probed` is FRESH without qualification. (Freshness must never
+  be derived from `ShouldProcess`, which is `true` on the nil path.)
+- **A successful probe of a non-jobbable item still writes its status.** Default config,
+  RSS plain upload ⇒ probe succeeds ⇒ `not_a_stream` ⇒ `ShouldProcess=false` ⇒ the row
+  must become `not_a_stream`, NOT stay `unknown`. Guards the goal-5 inversion
 - `ShouldProcess` is never used by the feed path; DECAPI's behaviour is byte-identical
 - **No hidden history writes on the feed path.** A plain upload probed on a
-  default-config channel writes **no** history row (today `nonLiveSkipReason` →
-  `AddToHistory` at `utils.go:313` fires for every one), and a feed-path give-up
-  writes none either — give-up's only effect today is the reprobe flag
-- A DECAPI probe still writes history exactly as today (regression guard on the
-  `probeAndClassify` split)
-- **`source='membership'` selects the authenticated probe.** A members row read back
-  from the store is probed with cookies, not anonymously — otherwise it misclassifies
-  as `upcoming` (`feed.go:743-746`), the 2.7.2 bug
+  default-config channel writes **no** history row, and a feed-path give-up writes none
+- A DECAPI probe still writes history exactly as today
+- **A DECAPI probe give-up writes no `feed_items` row**
+- A stale stored `live` whose probe errored this cycle produces **no** job
+- With `probe_cooldown > 0`, a cooldown-skipped item produces **no** job
+- Job creation always follows a fresh probe, including via the archival pass
+- **`HasProcessed` does not block a live/upcoming job.** Arrange a history row with **no**
+  job row — via a DECAPI give-up or a pre-existing/legacy row, **not** a feed-path
+  give-up, which no longer writes one — then let a discovery probe return `live`. The
+  stream must still be jobbed. This is the goal-3 regression guard
+- A stored `vod` whose refresh probe returns `live` (stream restarted on the same ID)
+  **is** jobbed, and the store is updated to `live`
+- Clearing orphaned history for an in-window VOD re-jobs it; clearing it for an
+  out-of-window VOD does **not**
+
+*`denied` and the escalation*
+
+- **A denied probe never becomes a job, whatever `source` says.** `membership_discovery
+  = false`, a public video locked to members after we stored it (`source` stays `rss`
+  forever), then the window is widened so it enters scope. The anonymous refresh probe
+  returns `upcoming` + `members_only` ⇒ `denied` ⇒ no job
+- **A genuine upcoming stream is NOT denied.** `LIVE_STREAM_OFFLINE` ⇒
+  `PlayabilityError == ok` (`:349-351`) ⇒ `probed` ⇒ FRESH ⇒ jobbed. Guards goal 3
+  against over-eager denial, and against the tempting "past `published` + `upcoming` =
+  contradiction" heuristic, which an RSS-announced stream legitimately trips
+- **An age-restricted VOD that returns formats is NOT denied.** It classifies `vod`, so
+  the grounded-classification rule applies. Guards against "any non-`ok` ⇒ denied"
+- **`source='membership'` selects the authenticated probe**
 - **A public video that becomes members-only is archived without any membership
-  listing.** Cookies valid, `membership_discovery = true`, `source='rss'`: the
-  anonymous probe returns `members_only` ⇒ `source` flips ⇒ escalate ⇒ authenticated
-  probe returns `ok` ⇒ real status/date ⇒ **jobbed**. This is the case the listing can
-  never reach (no fetch ⇒ no sighting), so it is the escalation's reason to exist.
-- **A failed escalation still flips `source`.** Wrong membership tier: escalated probe
-  also returns `members_only` ⇒ `denied` ⇒ but `source='membership'` persists, so the
-  next cycle issues **one** probe (authenticated) rather than two.
-- **An anti-bot `login_required` on a PUBLIC video must neither relabel nor
-  escalate.** YouTube's "Sign in to confirm you're not a bot" refusal returns
-  `login_required` (`player_api_parsing.go:357-363` — the fallback arm). Assert
-  `source` stays `rss` (relabelling would hide a public video from the read arms once
-  `membership_discovery = false`) **and** that no second probe is issued (escalating
-  without a relabel recurs every cycle: 2 probes/cycle for the whole block).
-- **The escalated re-probe is not suppressed by `probe_cooldown`.** With
-  `probe_cooldown > 0`, a `members_only` refusal is a *successful* probe and records
-  the cooldown (`utils.go:299`); the same-cycle escalation must still run, or it never
-  runs at all for that operator.
-- **The escalated result is classified by the normal outcome rules.** Specifically a
-  `vod` + `members_only` escalated result is **trusted** (formats came back), not
-  denied.
-- **No cookies ⇒ no escalation, and eventually no probe at all.** `membershipActive()`
-  false ⇒ refusal sets `source` ⇒ `denied` ⇒ next cycle the probe gate skips the row
-  entirely (zero probes).
-- **`membership_discovery = false` ⇒ no escalation.** The refusal still sets `source`,
-  which is what lets the read arms hide the row from ranking.
-- **A public video that becomes members-only also flips `source` on a membership
-  listing, even though its stored `exact` date beats the listing's `coarse`.** The precision guard must not gate `source`. Regression test for the
-  phantom-upcoming misfire: left as `rss` with no `denied` rule, it is probed
-  anonymously and lies `upcoming`. Assert both: the refusal **flips `source`** (from
-  the probe, not a listing — no membership fetch occurs in this scenario) and
-  **no job is created**. The playability rule is what makes the refusal legible; the
-  escalation is what makes it useful.
-- A members video that becomes public flips `source` to `rss` and is probed
-  anonymously thereafter
-- **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
-  shared with `decapi.go:583`; the outcome is surfaced to the caller so only the
-  feed monitor persists it (non-goal guard)
-- Backfill: a plain upload (no "Streamed" text, no badge, just "3 weeks ago") is
-  classified `vod`/`coarse` — not left `unknown`, not probed
-- **Backfill: a LIVE item whose renderer carries elapsed text** (e.g. `"Started
-  streaming 2 hours ago"`, which `relativeAgeRe` matches) is left `unknown` and
-  **is** probed — not written as a terminal `vod`. This is the badge-short-circuit
-  guard; without it the `/streams` tab silently retires live streams.
-- **`itemAge` is unchanged** — a regression test pinning `"1 week ago" → 168h` (the
-  truncated lower bound) guards against a well-meaning "fix" to the unit-preserving
-  form the rejected skew-old rule needed
-- Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
-- Top-N counts non-term-matching items. A non-term-matching item with a real date
-  is never probed (matching today's `HasActiveJob` → terms → probe order) — **but a
-  non-term-matching `assumed` item IS probed once**, to date it, or it could never
-  be ranked and the top-N would silently be computed over a subset
-- Raising `max_feed_items` brings an already-stored VOD into scope with **no**
-  discovery probe (pure re-rank), and the resulting job **does** follow a refresh
-  probe — the two assertions are about different steps
-- `published` frozen at first insert; upgraded only by higher precision
-- Term matching: an RSS-carried description matches in-cycle; a store-only
-  re-evaluation is title-only
-- Backfill: fixture-driven continuation paging, loop detection, resume-from-cursor
+  listing.** Anonymous probe returns `members_only` ⇒ `source` flips ⇒ escalate ⇒
+  authenticated probe returns `ok` ⇒ **jobbed**. This is the case the listing can never
+  reach
+- **A failed escalation still flips `source`.** Wrong tier ⇒ escalated probe also
+  `members_only` ⇒ `denied` ⇒ but `source='membership'` persists, so next cycle issues
+  **one** probe, not two
+- **An anti-bot `login_required` on a PUBLIC video must neither relabel nor escalate.**
+  Assert `source` stays `rss` **and** no second probe is issued
+- **The escalated re-probe is not suppressed by `probe_cooldown`**
+- **The escalated result is classified by the normal outcome rules** — a `vod` +
+  `members_only` escalated result is **trusted**
+- **No cookies ⇒ no escalation, and eventually no probe at all**
+- **`membership_discovery = false` ⇒ no escalation.** The refusal still sets `source`
+- A members video that becomes public flips `source` to `rss` and is probed anonymously
+
+*Membership gating*
+
+- **A cookie lapse must NOT move scope.** Members rows in the window + `HasAuthCookies()`
+  false for one cycle ⇒ they stay in the window and **no** job changes. Gating the read
+  on `membershipActive()` fails this — and is this spec's own bug through a new door
+- **A cookie lapse must not create a job either.** Assert **no probe is issued** — the
+  job assertion cannot distinguish gated from ungated, and would pass vacuously
+- **`membership_discovery = false` hides stored members rows from the window**, takes
+  effect immediately on rows already stored, and turning it back ON restores them
+- `membership_discovery = false` ⇒ backfill writes no members rows
+
+*The scheduler*
+
+- **New content bypasses M.** M=1 with a full backlog ⇒ a newly-discovered VOD still
+  admits ahead of every queued row
+- **Live/upcoming bypass M and the download pool.** `num_parallel_downloads=1` saturated
+  by a VOD ⇒ a stream going live still downloads immediately. This is the stock-config
+  stream-miss guard
+- **A backlog VOD waits as `Queued`, not as `Downloading`** — assert the DB status of a
+  pool-blocked job
+- **`Queued` survives a restart** — it is a resting state, re-read by the scheduler, not
+  reset like interrupted `Muxing`
+- **A completed job frees a slot and the next backlog item is admitted, most-recent-first**
+- **The backlog never enters `JobQueue`** — 300 windowed VODs must not trip
+  `maxLifecycle` or the 100-job pending drop
+- `include_non_live_content = false` ⇒ a past members VOD is stored, walked, but never
+  jobbed; M gates nothing
+
+*Backfill*
+
+- Backfill skips Twitch channels entirely
+- Rows persist per page, so a restart mid-scan resumes from the cursor;
+  `catalog_pos` is only final once `backfilled_at` is set
+- **Early exit fires on a re-run and NEVER on a first scan.** A first scan of a channel
+  whose store already holds its 15 newest RSS items must still page the whole catalogue
+- Removing a channel mid-backfill cancels the scan before the prune, and leaves no
+  resurrected rows
+- Channel removed ⇒ its `feed_items`/`channel_state` rows are pruned; re-adding triggers
+  a fresh backfill rather than inheriting `backfilled_at`
+- A plain upload (no "Streamed" text, no badge, just "3 weeks ago") is classified
+  `vod`/`coarse` — not left `unknown`, not probed
+- **A LIVE item whose renderer carries elapsed text** (`"Started streaming 2 hours ago"`,
+  which `relativeAgeRe` matches) is left `unknown` and **is** probed — not written as a
+  terminal `vod`. Without this the `/streams` tab silently retires live streams
+- Fixture-driven continuation paging, loop detection, resume-from-cursor
+
+*Other*
+
+- Established gate: fresh install, first cycle 404 ⇒ no past-content archival
+- Term matching: an RSS-carried description matches in-cycle; a store-only re-evaluation
+  is title-only. A non-term-matching item is stored but never probed
 - Migration v15→v16 idempotent
-- **Query plan assertion:** the window query uses `idx_feed_items_window` and does
-  not fall back to a `SCAN` or a `USE TEMP B-TREE FOR ORDER BY`, on both arms (with
-  and without the `source <> 'membership'` filter). Verified for revision 2 against
-  `modernc.org/sqlite` at 6,000 rows across 4 channels; pin it, because an index
-  regression is invisible until the catalog is large.
+- `max_feed_items` is removed from config and every UI; an existing value in TOML is
+  ignored without error
 
 ## Migration (v16)
 
 Current `schemaVersion = 15` (`internal/database/migrations.go:26`). Follow the
-established pattern: a sequential `if version < 16 { ... return
-db.writeUserVersion(16) }` block, `CREATE TABLE/INDEX IF NOT EXISTS`, tables also
-added to `createSchema`.
+established pattern: a sequential `if version < 16 { ... return db.writeUserVersion(16) }`
+block, `CREATE TABLE/INDEX IF NOT EXISTS`, tables also added to `createSchema`.
 
-1. Create `feed_items`, `channel_state`, and the **single** index
-   `idx_feed_items_window` (non-partial). Revision 1 specified two — a partial
-   `idx_feed_items_rank` and `idx_feed_items_status`; **create neither.** The window
-   query needs no exclusions to enforce and nothing queries `feed_items` by status.
+1. Create `feed_items`, `channel_state`, and the **single** index `idx_feed_items_window`
+   (non-partial).
 2. `DROP TABLE IF EXISTS last_videos`.
 3. Remove `GetLastVideo`/`SetLastVideo` (`database_extras.go:126-148`) and
    `TestLastVideos` (`database_test.go:119`).
-4. Make the legacy JSON importer ignore `lastVideos` (`database_jobs.go:723`)
-   rather than write a dropped table.
-5. Add the `Queued` job status (decision 10) — and place it in the lifecycle
-   deliberately, since CLAUDE.md marks that a critical pattern. It is **not**
-   terminal (`types.go:92-94`) and it **is** `ShouldProcess` (`queue.go:350-357`).
+4. Make the legacy JSON importer ignore `lastVideos` (`database_jobs.go:723`) rather than
+   write a dropped table.
+5. Add the `Queued` job status — and place it in the lifecycle deliberately, since
+   CLAUDE.md marks that a critical pattern. It is **not** terminal (`types.go:92-94`) and
+   it **is** `ShouldProcess` (`queue.go:350-357`). It also touches `calculatePriority`
+   (`queue.go:19-30`), the `JobStats` aggregate (`database_jobs.go:622-645`, which today
+   counts pool-waiters as active), and both UIs' colour maps and filter buckets.
 
-**Config migration** (`migrateOldFormat()`, not the DB migration): `max_feed_items`
-is **dropped, not carried** (decision 11) — it bounded depth, `M` bounds concurrency,
-and the window has no old counterpart, so any mapping preserves a shape rather than
-an intent. `archive_window_days` and `archive_slots` take their defaults of 3 and 3.
-`num_parallel_downloads` default 2 → 10 (`config.go:67`, decision 16); the key is
-commented out in `config.example.toml:104`, so this reaches every install that never
-set it.
+**Config migration** (`migrateOldFormat()`, not the DB migration):
+
+- `max_feed_items` is **dropped, not carried**. `archive_window_days` and
+  `archive_slots` take their defaults of 3 and 3.
+- `num_parallel_downloads` default 2 → 10 (`config.go:67`); the key is commented out in
+  `config.example.toml:104`, so this reaches every install that never set it.
 
 No data backfill inside the migration, so the `SetMaxOpenConns(1)` cursor hazard
 (`migrations.go:242-244`) does not apply.
 
 ### `last_videos` removal justification
 
-`GetLastVideo`/`SetLastVideo` have **zero non-test callers**. DECAPI — the
-suspected consumer — makes exactly three DB calls: `HasActiveJob`
-(`decapi.go:543`), `HasProcessed` (`decapi.go:565`), `AddToHistory`
-(`decapi.go:589`). Rows can only ever arrive via the legacy JSON importer, and
-nothing reads them.
+`GetLastVideo`/`SetLastVideo` have **zero non-test callers**. DECAPI — the suspected
+consumer — makes exactly three DB calls: `HasActiveJob` (`decapi.go:543`),
+`HasProcessed` (`decapi.go:565`), `AddToHistory` (`decapi.go:589`). Rows can only ever
+arrive via the legacy JSON importer, and nothing reads them.
 
-Not to be confused with `LastVideoSeq`/`last_video_seq`, a **different and very
-much live** field: the download-resume segment counter used in
-`worker/orchestrator.go:270`, `strategy_youtube_dash.go:243`,
-`twitch_recover.go:32`, and the TUI. That is untouched.
+Not to be confused with `LastVideoSeq`/`last_video_seq`, a **different and very much
+live** field: the download-resume segment counter used in `worker/orchestrator.go:270`,
+`strategy_youtube_dash.go:243`, `twitch_recover.go:32`, and the TUI. That is untouched.
 
 ## Documentation Updates
 
-`max_feed_items` keeps its **TOML key** but changes meaning — archival depth, not
-per-tick scan cost — so every user-visible *label* and help string must move even
-though the key does not. Rewrite (see "What `max_feed_items` comes to mean" for what
-the new text must say: newest N on the channel, upcoming/live exempt):
+`max_feed_items` is **removed**, and two settings replace it. Every site that names it
+must be rewritten, not relabelled:
 
-- `config.example.toml:69,208`
+- `config.example.toml:69,208` — remove `max_feed_items`; document
+  `archive_window_days` and `archive_slots`, and state that upcoming/live are never
+  throttled
+- `config.example.toml:103-104` — `num_parallel_downloads`: new default, and the help
+  text must state the peak is `(live streams) + N`
 - `docs/spec/data-and-storage.md:458,526` — the `MaxFeedItems` tables
-- `docs/spec/data-and-storage.md:400` — wrongly claims `last_videos` "tracks the
-  most recent video per channel for deduplication" (`:320-325` is the schema block
-  above it; both go)
+- `docs/spec/data-and-storage.md:400` — wrongly claims `last_videos` "tracks the most
+  recent video per channel for deduplication" (`:320-325` is the schema block above it;
+  both go)
 - `docs/spec/data-and-storage.md:337` — migration table; **add a v16 row**
-- `docs/spec/data-and-storage.md:403` — `ImportFromJSON` description (changes with
-  the `lastVideos` no-op)
+- `docs/spec/data-and-storage.md:403` — `ImportFromJSON` description
 - `docs/spec/data-and-storage.md:579,591` — migration table + `MaxFeedItems: min 1`
   validation doc
-- `docs/spec/architecture.md:127` — describes `max_feed_items`; previously missed
-  entirely
-- `docs/spec/platform-services.md:178` (the `itemAge` cap description)
+- `docs/spec/architecture.md:127` — describes `max_feed_items`
+- `docs/spec/platform-services.md:178` — the `itemAge` cap description
 - `SPEC.md:210,653`
 - TUI help text `internal/tui/settings.go:90` — currently *"RSS items per feed
   (default: 15)"*
-- TUI setup wizard `internal/tui/setup_wizard.go:113` — *"RSS feed items to check
-  per channel"*
-- Web UI text: `web/public/index.html:795-800` (`cfg-max-feed-items` label/help) and
-  `:1682` (`setup-max-feed-items` label) — previously no Web UI text was listed
+- TUI setup wizard `internal/tui/setup_wizard.go:113` — *"RSS feed items to check per
+  channel"*
+- Web UI: `web/public/index.html:795-800` (`cfg-max-feed-items`) and `:1682`
+  (`setup-max-feed-items`)
 - `internal/config/config.go:485` — the `O(N) per channel` per-tick comment
+- The job status lifecycle in **CLAUDE.md** — `Queued` joins it
 
-**In-code comments that assert the deleted model.** These are the highest-traffic
-explanations of the exact mechanism being removed, and would be left describing a
-cap that no longer exists:
+**In-code comments that assert the deleted model:**
 
-- `internal/youtube/channel_membership.go:206-219` — *"it is ranked by that age so
-  old VODs sink and get **crowded out of the cap**"*. The `MembershipVideo.Age` doc
-  needs a *comment* change but **no signature change**: it must now state that the
-  value is the truncated **lower bound** of the true age, which is what makes
-  `now - Age` the newest-possible date the window relies on
-- `internal/monitor/feed.go:660-669` — *"letting them **occupy shared cap slots**
-  would only crowd out public videos that CAN be jobbed"*
-- `internal/monitor/feed.go:415-424` — `checkChannel`'s merge/cap doc block, which
-  describes the per-cycle merge being replaced wholesale
+- `internal/youtube/channel_membership.go:206-219` — *"it is ranked by that age so old
+  VODs sink and get **crowded out of the cap**"*. The `MembershipVideo.Age` doc needs a
+  *comment* change but **no signature change**: it must now state that the value is the
+  truncated **lower bound** of the true age, which is what makes `now - Age` the
+  newest-possible date the window relies on
+- `internal/monitor/feed.go:660-669` — *"letting them **occupy shared cap slots** would
+  only crowd out public videos that CAN be jobbed"*
+- `internal/monitor/feed.go:415-424` — `checkChannel`'s merge/cap doc block
 
 ## Included Fixes
 
 Pre-existing defects found while mapping this work, approved for inclusion.
 
-**1. `max_feed_items` validation disagrees with itself — in three places, split 2-2.**
+**1. `max_feed_items` validation disagrees with itself — four client gates vs one server
+validator.** This is now a *deletion*, not a reconciliation: the setting is gone, so all
+six sites go with it.
 
 | Site | Limit |
 |---|---|
@@ -2949,182 +2183,142 @@ Pre-existing defects found while mapping this work, approved for inclusion.
 | `internal/tui/settings.go:544` (TUI settings) | 1–1000 |
 | `internal/web/routes/config_routes.go:169` (Web API) | **1–100** |
 | `internal/tui/setup_wizard.go:1066` (TUI first-run wizard) | **1–100** |
-| `web/public/index.html:798` (`cfg-max-feed-items`, Web settings form) | **1–100** |
-| `web/public/index.html:1682` (`setup-max-feed-items`, Web setup wizard) | **1–100** |
+| `web/public/index.html:798` (`cfg-max-feed-items`) | **1–100** |
+| `web/public/index.html:1682` (`setup-max-feed-items`) | **1–100** |
 
-The accepted range depends on *which UI you happen to use*: `500` is valid via TOML
-or the TUI settings screen and rejected by four other front doors. Align every
-100-gate to 1–1000, matching `config.go:490` — the only validator that actually
-guards the loaded config. `web/public/modules/setup.js:682` feeds
-`setup-max-feed-items` and needs no change beyond the `max` attribute.
+The accepted range depended on *which UI you happened to use*: `500` was valid via TOML
+or the TUI settings screen and rejected by four other front doors. Recorded because the
+replacement settings must not repeat it: `archive_window_days` and `archive_slots` need
+**one** validator, in `config.go`, with every UI deferring to it.
+`web/public/modules/setup.js:682` feeds `setup-max-feed-items` and goes too.
 
-Note both the "one outlier" and "even split" framings are wrong; this is four
-client-side gates disagreeing with one authoritative server-side validator.
-
-**Sequence this with the relabel, in the same change.** Widening the range to 1–1000
-and giving the backfill the data to make 1000 real are the same release, so the four
-sites getting a new `max` are the four sites getting new label and help text (see
-"What `max_feed_items` comes to mean"). Doing the numeric fix alone would raise the
-ceiling while the label still describes the old per-cycle meaning — the ceiling
-raised on a setting nobody reads correctly.
-
-**2. `.claude/skills/moombox-database-migrations/SKILL.md` is stale.** It documents
-v6 (line 8), a `schema_version` table with `UPDATE schema_version SET version = 7`
-(line 27), and `tx.Exec` (lines 20-27). Reality is v15, `PRAGMA user_version` via
+**2. `.claude/skills/moombox-database-migrations/SKILL.md` is stale.** It documents v6
+(line 8), a `schema_version` table with `UPDATE schema_version SET version = 7` (line
+27), and `tx.Exec` (lines 20-27). Reality is v15, `PRAGMA user_version` via
 `writeUserVersion`, and direct `db.db.ExecContext` with no transaction wrapping the
 migration. Anyone following it writes a broken migration. Update to match
-`migrations.go`, and add the `SetMaxOpenConns(1)` collect-then-update constraint,
-which the skill omits entirely.
+`migrations.go`, and add the `SetMaxOpenConns(1)` collect-then-update constraint, which
+the skill omits entirely.
 
-While rewriting it, scope step 4 ("Update Field Maps") explicitly to the `jobs`
-table. `fieldToColumn` (`internal/database/database.go:21`, consumed at `:356`) is
-jobs-only and enforced by `TestFieldToColumnCoverage` (`database_test.go:1222`); the
-step currently reads as unconditional, so the next reader adds `feed_items` entries
-to a jobs-only allowlist. It is genuinely N/A for this design's new tables.
+While rewriting it, scope step 4 ("Update Field Maps") explicitly to the `jobs` table.
+`fieldToColumn` (`internal/database/database.go:21`, consumed at `:356`) is jobs-only and
+enforced by `TestFieldToColumnCoverage` (`database_test.go:1222`); the step currently
+reads as unconditional, so the next reader adds `feed_items` entries to a jobs-only
+allowlist.
 
 **3. `CLAUDE.md` misplaces the chord system.** It states `buildMenuItems()` is "in
-`app.go`" and is the single source of truth for chords. Both `buildMenuItems()` and
-`dispatchAction()` actually live in `internal/tui/app_actions.go` (`:430` and `:18`).
-The instruction "one entry in `buildMenuItems()` + one case in `dispatchAction()`"
-is still correct; only the file is wrong. This matters here because Part 2 adds an
-`R` chord by following exactly that instruction.
+`app.go`". Both `buildMenuItems()` and `dispatchAction()` actually live in
+`internal/tui/app_actions.go` (`:430` and `:18`). The instruction "one entry in
+`buildMenuItems()` + one case in `dispatchAction()`" is still correct; only the file is
+wrong. This matters here because Part 2 adds an `R` chord by following exactly that
+instruction.
+
+**4. Live jobs consume a download slot** (`queue.go:149-180` via `worker.go:446`), with
+no timeout and no priority. See "The scheduler" — folded into this spec rather than
+filed, because it loses streams on a stock config and M would queue on top of it.
 
 ## Implementation Phasing
 
-**Both phases ship in one release.** The phases are build order, not release
-boundaries — Phase 1 is landable and testable on its own, and should be landed and
-tested on its own, but it is not *shippable* on its own.
+**Both phases ship in one release.** The phases are build order, not release boundaries —
+Phase 1 is landable and testable on its own, and should be, but it is not *shippable* on
+its own.
 
 The reason is the established gate. It opens on `last_rss_ok_at IS NOT NULL` **or**
-`backfilled_at IS NOT NULL`, and only Phase 2 ever sets the second. Ship Phase 1
-alone and a channel whose RSS never succeeds never establishes, so it never archives
-past content at all — including a members-only channel, whose RSS legitimately
-returns nothing useful. That trades a wrong-archive (today's bug) for a **silent**
-no-archive, which is the worse of the two: the operator can see a bad download and
-cancel it; they cannot see an archive that never happened.
+`backfilled_at IS NOT NULL`, and only Phase 2 ever sets the second. Ship Phase 1 alone
+and a channel whose RSS never succeeds never establishes, so it never archives past
+content at all — including a members-only channel, whose RSS legitimately returns nothing
+useful. That trades a wrong-archive (today's bug) for a **silent** no-archive, which is
+the worse of the two: the operator can see a bad download and cancel it; they cannot see
+an archive that never happened.
 
-Phase 2 also carries the only mechanism that makes a deep `max_feed_items` mean
-anything, so shipping Phase 1 alone would ship the relabelled setting before the
-thing that makes the new label true.
+### Phase 1 — store, passes, scheduler
 
 *Store*
-- Schema v16: `feed_items`, `channel_state`, and the **single** non-partial index
-  `idx_feed_items_window`. Revision 1's two indexes are both gone.
+- Schema v16: `feed_items`, `channel_state`, the single non-partial index
+  `idx_feed_items_window`
 - Precision-guarded upsert, **per-column**: `published`/`date_precision` move only
-  upward; `source` updates on **every** sighting. Coupling them lets a date-quality
-  rule pick the probe, and the wrong probe does not fail — it lies.
-- The **window query** (`published >= now - archive_window_days`), read by the
-  discovery walk and the archival pass alike. No `LIMIT`, no status or precision
-  exclusions — see "The window query" for why each one went.
+  upward; `source` updates on **every** sighting. Coupling them lets a date-quality rule
+  pick the probe, and the wrong probe does not fail — it lies
+- The window query, read by the discovery walk and the archival pass alike
 
 *Monitor*
 - Discovery pass / archival pass split, with the FRESH rule (`outcome == probed`)
+- **The source walk**: serial, per-source early exit, self-validating ordering check
 - `post_live` → `vod` normalization on write; the probe write is precision-guarded
-- **The terminal-status invariant**: never write `vod`/`not_a_stream` without a
-  rankable date — a probe that classifies a past item but cannot date it leaves the
-  row `unknown`. This is the rule that closes the only two sinks in the state space.
+- **The terminal-status invariant**: never write `vod`/`not_a_stream` without a rankable
+  date
 - The membership gate on **both** probe triggers (discovery and refresh)
-- `source` becomes a **read** column: it selects the authenticated probe (replacing
-  the in-memory `discoveredVideo.authProbe`) and gates the store queries — the
-  **read** arms (top-N, cap-exempt union) on `MembershipDiscoveryEnabled()`
-  (operator choice only), the **probe** arm on `membershipActive()` (which includes
-  cookie state). The asymmetry is load-bearing: gating a read on cookie state moves
-  scope on a fetch failure.
-- **Refusal escalation**: a `members_only` result sets `source := 'membership'` and,
-  when `membershipActive()`, re-probes with cookies in the same cycle (bypassing the
-  cooldown gate — the first probe already recorded it, and gating a same-cycle retry
-  on it would suppress the escalation entirely for any operator with
-  `probe_cooldown > 0`). `login_required` does neither: it is YouTube's anti-bot
-  refusal on public videos, so relabelling would hide a public video from the read
-  arms, and escalating without relabelling would recur every cycle forever.
-  **Lives in the feed monitor, not `probeAndClassify`** — `ProbeVideoAuth`
-  (`feed.go:131`) and `membershipActive()` (`feed.go:518-523`) are `*FeedMonitor`
-  members, unreachable from a `utils.go` free function that DECAPI also composes.
-  This is what archives a public video later locked to members — the listing can
-  never reach it — and it makes the no-cookies case cost **zero** probes per cycle
-  instead of one. `source` therefore has two writers: listings and refusals, the
-  latter authoritative.
-- The `assumed`-row probe carve-out (probed regardless of terms, to obtain a date)
-- Refresh probe on the archival `vod` branch, writing its result back
+- `source` as a **read** column: it selects the authenticated probe and gates the window
+  query — the **read** arm on `MembershipDiscoveryEnabled()` (operator choice only), the
+  **probe** arm on `membershipActive()` (which includes cookie state). The asymmetry is
+  load-bearing: gating a read on cookie state moves scope on a fetch failure
+- **Refusal escalation** (`members_only` only; cooldown bypassed). **Lives in the feed
+  monitor, not `probeAndClassify`** — `ProbeVideoAuth` (`feed.go:131`) and
+  `membershipActive()` (`feed.go:518-523`) are `*FeedMonitor` members, unreachable from a
+  `utils.go` free function that DECAPI also composes
+- Refresh probe on the archival `vod` branch, writing its result back **and re-checking
+  the window on the probe's date**
 - Established gate; rewired `checkChannel`/`processCandidate`
-- **Channel-removal prune** from `kickMonitors`, mirroring `PruneHealth`
-  (`feed.go:151-158`, called at `services.go:571-573`). Needed in Phase 1, not
-  Phase 2: `feed_items` is populated by RSS/membership from day one, so without it a
-  removed channel leaks rows forever. Phase 1's prune is the simple form — there is
-  no backfill to cancel yet, so cancel-before-prune arrives with Phase 2.
+- **Channel-removal prune** from `kickMonitors`, mirroring `PruneHealth`. Needed in
+  Phase 1: `feed_items` is populated by RSS/membership from day one. Phase 1's prune is
+  the simple form — there is no backfill to cancel yet
+
+*Worker*
+- **Live/upcoming exempt from `num_parallel_downloads`**; default 2 → 10
+- The `Queued` status and the scheduler that admits from it
+- Most-recent-first admission ordering; new content ahead of backlog
+
+*Config*
+- `archive_window_days` + `archive_slots` (defaults 3/3), one validator in `config.go`
+- `max_feed_items` dropped from config and all six UI sites
 
 *Refactors this depends on* (none of which exist today — budget them)
-- **Split `ProcessYouTubeVideo`** into `probeAndClassify` (feed path: probe +
-  classify + tracker/cooldown; no history writes, no verdict) and the existing
-  composed function (DECAPI only, unchanged). Required because the feed path must
-  consume probe *metadata*, not `ShouldProcess` — which is `false` for a successful
-  probe of a non-jobbable item and would otherwise strand every plain upload at
-  `unknown` forever — and because it must not inherit the hidden `AddToHistory`
-  side effects at `utils.go:284/313/330`.
+- **Split `ProcessYouTubeVideo`** into `probeAndClassify` (feed path: probe + classify +
+  tracker/cooldown; no history writes, no verdict) and the existing composed function
+  (DECAPI only, unchanged)
 - **`VideoProbeResult.PlayabilityError`** — `VideoInfo` already carries it
-  (`types.go:17-28`, parsed at `player_api_parsing.go:332-388`) but
-  `VideoProbeResult` (`utils.go:32-36`) drops it, so the monitor cannot tell an
-  observation from a refusal. Surfacing it is what makes the `denied` outcome
-  possible, and `denied` is the only membership protection that does not depend on
-  a stored value being current. Both `monitor_callbacks.go` wiring sites.
+  (`types.go:17-28`) but `VideoProbeResult` (`utils.go:32-36`) drops it, so the monitor
+  cannot tell an observation from a refusal. Surfacing it is what makes `denied` possible
 - **A publish date on the probe** — `VideoInfo.PublishedAt` +
   `VideoProbeResult.PublishedAt` + both `monitor_callbacks.go` wiring sites, with
-  status-aware extraction:
-  `post_live`/`vod` → `liveBroadcastDetails.startTimestamp` (`exact`), **else
-  `uploadDate`/`publishDate` (`day`) — the fallback is NOT optional; it is the
-  normal `vod` case, since an ended stream with an `endTimestamp` classifies
-  `post_live`**; `not_a_stream` → `uploadDate` (`day`); `upcoming`/`live` → none.
-  **No date exists in the probe chain today** — without this, an `assumed` row can
-  never be promoted and members content becomes permanently unarchivable. Also adds
-  the `day` rung to the precision ladder and the guard's `CASE`.
-- ~~**Unit-preserving `itemAge`**~~ — **cut**. It existed only to compute the
-  rejected skew-old rule's `now - Age - unit`. Skew-new uses the truncated lower
-  bound `itemAge` already returns, so the function, `MembershipVideo.Age`, and
-  `membershipCandidates` are all untouched. See "Coarse dates skew new".
-- **An injectable RSS fetch seam + a new `feed_test.go`** — `checkChannel` calls
-  `fm.fetchFeed` directly and has no test, so the headline regression test is not
-  writable without this.
+  status-aware extraction and the `day` rung. **No date exists in the probe chain today**,
+  and under a window it is what adjudicates every straddling item
+- **An injectable RSS fetch seam + a new `feed_test.go`**
 
 *Cleanup*
-- Delete `TestMergeCandidatesRecencyCap` (asserts the deleted cap-crowding behavior)
+- Delete `TestMergeCandidatesRecencyCap`
 - Remove `last_videos` + `GetLastVideo`/`SetLastVideo`
 - The included fixes; doc updates (including the in-code comments)
 
-**Phase 2** — builds on Phase 1, ships with it.
+### Phase 2 — backfill
 
 *Scanner*
-- InnerTube `/browse` continuation client, modelled on `internal/chat`
-  (`api.go:172-178`, `downloader.go:412-423`, `:558-583`) — **not** ported from
-  yt-dlp, which is only the reference for the browse response shape
-- Three-tab scan (`/videos` + `/streams` + `/membership`), unioned and deduped;
-  membership gated on `MembershipDiscoveryEnabled() && HasAuthCookies()`; the whole
-  scan filtered to `GetPlatform() == "youtube"`
+- InnerTube `/browse` continuation client, modelled on `internal/chat` — **not** ported
+  from yt-dlp, which is only the reference for the browse response shape
+- Three-tab scan, unioned and deduped; membership gated on `MembershipDiscoveryEnabled()
+  && HasAuthCookies()`; the whole scan filtered to `GetPlatform() == "youtube"`
 - Listing classification via `itemAge` (badge short-circuit included)
 - Merged channel-global `catalog_pos` ordering pass (collect-then-update)
 
 *Worker*
-- Throttled, resumable backfill; rows written per page; `backfilled_at` set only on
-  completion of the eligible tabs
-- Early exit on re-runs (a full page of known IDs ends a tab), **gated on
-  `backfilled_at IS NOT NULL`** — never on a first scan, where the store's existing
-  RSS rows would trigger it against an unscanned catalogue
-- The idempotent `backfilled_at IS NULL` sweep, with an **in-flight set** so
-  repeated `kickMonitors` calls cannot launch concurrent scans of one channel
-- **Cancel-before-prune**: the in-flight set is what lets `kickMonitors` cancel a
-  scan for a departing channel before pruning its rows (Phase 1's prune is the
-  simple form; this upgrades it)
-- Debounced manual re-run (`R` chord + API), modelled on
-  `POST /api/monitors/check-now` and its 30s `atomic.Int64` guard
-
-*Not included, deliberately*
-- `last_listed_at` + deferral for rows no listing has mentioned for N days. It has
-  nothing left to bound — the in-scope probe list is bounded by `N` already — and it
-  cannot distinguish "unreachable" from "we stopped looking", so a cookie expiry
-  would erode the members catalogue. See "The cap is the bound"
-- Turning `membership_discovery` on must clear `backfilled_at` to force a rescan,
-  since the eligible tab set changed
+- Throttled, **strictly serial across channels**, resumable; rows written per page;
+  `backfilled_at` set only on completion of the eligible tabs
+- Early exit on re-runs, **gated on `backfilled_at IS NOT NULL`**
+- The idempotent `backfilled_at IS NULL` sweep, with an **in-flight set**
+- **Cancel-before-prune**
+- Debounced manual re-run (`R` chord + API)
+- Turning `membership_discovery` on must clear `backfilled_at`
 
 *UI*
 - Progress via `hub.Broadcast` (web) + a TUI `tea.Msg` channel, **including** the
-  `InitialState` seed (`ws_wiring.go:87-111`) — a long-running scan makes mid-flight
-  connect the common case
+  `InitialState` seed — a long-running scan makes mid-flight connect the common case
+
+### Explicitly not included
+
+- **`last_listed_at` / row retirement.** Nothing left to bound — the walk is bounded by
+  the window — and it cannot distinguish "unreachable" from "we stopped looking", so a
+  cookie expiry would erode the members catalogue
+- **The `assumed` probe carve-out.** It existed to repair rows the `assumed` ranking
+  exclusion stranded; both are gone
+- **Unit-preserving `itemAge`.** It existed only to compute the rejected skew-old rule
+- **`classifyStream:454`.** Filed separately; `denied` contains it
