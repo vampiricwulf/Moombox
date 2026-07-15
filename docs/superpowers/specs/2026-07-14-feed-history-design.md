@@ -426,15 +426,39 @@ That is members-only content — precisely the class this bug is about — and i
 disables the repair path the External Assumptions section leans on ("probes repair it
 automatically"). They cannot repair what they cannot supply.
 
-**Do not reach for `ScheduledStartTime`.** It is a conflated field:
-`extractScheduledStartTime` (`internal/youtube/player_api_parsing.go:113-138`) falls
-back to microformat `uploadDate`/`publishDate` at `:129-135`, so it holds a genuine
-publish date for a plain upload and a **future** timestamp for an upcoming stream —
-exactly what the next section forbids storing. An implementer looking for "the
-probe's publish date" will find it and it will look right.
+**Do not reuse `ScheduledStartTime` as-is.** `extractScheduledStartTime`
+(`internal/youtube/player_api_parsing.go:113-138`) is a *conflated* accessor: it
+returns `liveBroadcastDetails.startTimestamp`, else a `liveStreamability` epoch, else
+microformat `uploadDate`/`publishDate` (`:129-135`). So it holds a genuine publish
+date for a plain upload and a **future** timestamp for an upcoming stream — exactly
+what the next section forbids storing. An implementer looking for "the probe's
+publish date" will find it, and it will look right.
 
-So Phase 1 adds a **distinct** field, parsed from microformat `uploadDate`/
-`publishDate` only, never from the scheduled-start path:
+But the underlying data is better than that accessor implies, and the extraction
+should take the **best** source per status rather than the safest single one:
+
+```
+status vod / post_live   → liveBroadcastDetails.startTimestamp   → precision 'exact'
+                            (the stream's ACTUAL start; RFC3339, second-granular)
+status not_a_stream      → microformat uploadDate / publishDate  → precision 'day'
+                            (date-only, e.g. "2025-06-15")
+status upcoming / live   → no ranking date stored
+                            (startTimestamp is the FUTURE scheduled start here —
+                             never store it; these statuses are excluded from the
+                             ranking anyway, so nothing needs it)
+```
+
+`liveBroadcastDetails` carries `startTimestamp` **and** `endTimestamp` for a finished
+stream (see the fixture at `player_api_parsing_test.go:317-318`), and `VideoInfo`
+already extracts `EndTimestamp` from that same map (`player_api_parsing.go:87-90`) —
+so the precise start time is present and already reachable for exactly the status
+that needs it. Taking `uploadDate` for a VOD instead would discard a second-granular
+timestamp in favour of a date, for no benefit.
+
+The `liveStreamability` epoch branch is never a publish date — it is the scheduled
+start of an upcoming stream. It must not feed `PublishedAt` at all.
+
+Phase 1 therefore adds a **distinct** field, with its own status-aware extraction:
 
 ```
 VideoInfo.PublishedAt          (new, internal/youtube)
@@ -445,20 +469,18 @@ VideoProbeResult.PublishedAt   (new, internal/monitor)
 This is a cross-package signature change of the same shape as the unit-preserving
 `itemAge` change, and it must be budgeted, not discovered.
 
-**It is day-granular, so it needs its own precision tier.** `uploadDate` is a date,
-not a timestamp (`"2025-06-15"` — see `player_api_parsing_test.go:777`). Calling that
-`exact` alongside RSS's second-granular `<published>` would manufacture ties and
-undercut "RSS dates are exact and distinct, so they effectively never tie". The
-precision ladder therefore has four rungs:
+**`uploadDate` is day-granular, so the ladder needs a rung for it.** Calling a
+date-only value `exact` alongside RSS's second-granular `<published>` would
+manufacture ties and undercut "RSS dates are exact and distinct, so they effectively
+never tie". Four rungs:
 
 ```
 assumed  <  coarse  <  day  <  exact
 ```
 
-The upsert's precision guard ranks all four; the top-N excludes only `assumed`. A
-probe-derived `day` date is a large improvement on a `coarse` one (a 1-day bucket
-versus a 28-day one) and is ample for ranking a channel's newest N, while remaining
-honestly weaker than an RSS timestamp.
+The upsert's precision guard ranks all four; the top-N excludes only `assumed`. Note
+a VOD's `startTimestamp` is genuinely `exact` — `day` applies only to plain uploads,
+which are the case where YouTube itself only publishes a date.
 
 ### `published` for upcoming and live rows
 
@@ -1411,7 +1433,15 @@ Then:
 - Clearing orphaned history for an in-scope VOD re-jobs it (refresh probe fires);
   clearing it for an out-of-scope VOD does **not**
 - Precision guard: a later `coarse` write never overwrites a stored `exact`; a
-  later `exact` write does overwrite a stored `coarse`
+  later `exact` write does overwrite a stored `coarse`. All four rungs ordered
+  (`assumed` < `coarse` < `day` < `exact`)
+- **`PublishedAt` extraction is status-aware.** A `vod` takes
+  `liveBroadcastDetails.startTimestamp` (`exact`, second-granular); a
+  `not_a_stream` takes `uploadDate` (`day`); an `upcoming` stores **no** ranking
+  date — specifically, its future `startTimestamp` never reaches `published`
+- An `assumed`/`unknown` members row that probes to `vod` gets a real date and
+  **becomes rankable** — the dead-end guard (without a probe date it would be
+  `vod`+`assumed`: terminal and unrankable, i.e. unarchivable forever)
 - A stale listing never demotes a probed `live` back to `vod`
 - An `assumed` row never enters the top-N query (goal 4), and a permanently
   unprobeable `assumed` row cannot evict real content from scope
