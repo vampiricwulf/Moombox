@@ -618,6 +618,49 @@ decision `ProcessYouTubeVideo` already makes internally and currently discards.
 jobs". The feed path reads `Outcome` + `StreamStatus` and decides for itself;
 `ShouldProcess` remains for DECAPI.
 
+### The split must be a function split, not just a richer return type
+
+Adding fields is not enough, because `ProcessYouTubeVideo` does not merely *decide* —
+it has **side effects the feed path must no longer trigger**:
+
+```
+utils.go:284  AddToHistory  — probe give-up
+utils.go:313  AddToHistory  — not_a_stream skipped by nonLiveSkipReason
+utils.go:330  AddToHistory  — post_live/vod skipped by nonLiveSkipReason
+```
+
+And `nonLiveSkipReason(includeNonLive=false, _)` **always** skips (`utils.go:229-231`),
+so on a default-config channel those fire for *every* plain upload. If the feed path
+keeps calling the function while ignoring its verdict, it silently inherits history
+writes it does not control — and on give-up it would get **both** a history row and
+the new backoff, two mechanisms for one event.
+
+So `ProcessYouTubeVideo` splits in two:
+
+| | used by | does |
+|---|---|---|
+| `probeAndClassify` | feed monitor | probe; record cooldown; update `MetadataTracker`; return `Outcome` + `StreamStatus` + title/channel/publish date. **No history writes, no job verdict.** |
+| `ProcessYouTubeVideo` | DECAPI only | `probeAndClassify` + today's `nonLiveSkipReason`/`AddToHistory`/`ShouldProcess` logic, byte-identical |
+
+The feed monitor then owns every decision it is specified to own — status write,
+archival gating, history — with no hidden writes underneath it. DECAPI keeps the
+composed function and is untouched, which is what makes the "no DECAPI-side change"
+non-goal true rather than aspirational.
+
+**Two consequences worth stating:**
+
+- **`IsReprobe` becomes dead for the feed path.** It exists only to drive
+  `nonLiveSkipReason` and to demote log level; the archival pass consults
+  `HasProcessed` directly. `probeAndClassify` does not take it. DECAPI still passes
+  it.
+- **Feed-path give-up no longer writes history.** Today give-up calls
+  `AddToHistory`, whose only effect is flipping the reprobe/log-level flag — it
+  explicitly does *not* stop re-probing (`utils.go:272-279`). The backoff now serves
+  that purpose properly and durably. This is a deliberate behavior change: it stops
+  manufacturing orphaned-history rows for videos that were never jobbed, which is
+  precisely the row class that accumulated into the 80-entry purge that re-armed
+  `gr-ZTohjwnQ`.
+
 **Refresh probe** — on demand, only when a stored item is about to become a job:
 
 ```
@@ -1351,6 +1394,12 @@ Then:
   `not_a_stream` ⇒ `ShouldProcess=false` ⇒ the row must become `not_a_stream`, NOT
   stay `unknown`. Guards the goal-5 inversion where every upload is probed forever.
 - `ShouldProcess` is never used by the feed path; DECAPI's behaviour is byte-identical
+- **No hidden history writes on the feed path.** A plain upload probed on a
+  default-config channel writes **no** history row (today `nonLiveSkipReason` →
+  `AddToHistory` at `utils.go:313` fires for every one), and a feed-path give-up
+  writes none either — the backoff replaces it
+- A DECAPI probe still writes history exactly as today (regression guard on the
+  `probeAndClassify` split)
 - **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
   shared with `decapi.go:583`; the outcome is surfaced to the caller so only the
   feed monitor persists it (non-goal guard)
@@ -1500,11 +1549,14 @@ is still correct; only the file is wrong. This matters here because Part 2 adds 
 schema v16 (`feed_items`, `channel_state`, both indexes), precision-guarded upsert,
 top-N query, discovery/refresh probe split with the freshness rule, terminal
 durable per-item probe backoff (`probe_fails`/`next_probe_at`, `unknown` rows only),
-**`ProcessYouTubeVideoResult` gains `Outcome` + `StreamStatus` + publish date** — the
-feed path must consume probe *metadata*, not `ShouldProcess`, which is `false` for a
-successful probe of a non-jobbable item and would otherwise strand every plain upload
-at `unknown` forever; it also supplies the FRESH predicate and the backoff trigger,
-and keeps DECAPI out of the store, established gate, channel-removal prune,
+**splitting `ProcessYouTubeVideo` into `probeAndClassify` (feed path: probe +
+classify + tracker/cooldown, no history writes, no verdict) and the existing composed
+function (DECAPI only, unchanged)** — the feed path must consume probe *metadata*,
+not `ShouldProcess`, which is `false` for a successful probe of a non-jobbable item
+and would otherwise strand every plain upload at `unknown` forever; the split also
+removes the hidden `AddToHistory` side effects at `utils.go:284/313/330` from the
+feed path, supplies the FRESH predicate and the backoff trigger, and keeps DECAPI out
+of the store, established gate, channel-removal prune,
 **a unit-preserving `itemAge` signature** (today it discards the unit, making the
 coarse skew uncomputable — propagates to `MembershipVideo.Age` and
 `membershipCandidates`), **an injectable RSS fetch seam plus a new `feed_test.go`**
