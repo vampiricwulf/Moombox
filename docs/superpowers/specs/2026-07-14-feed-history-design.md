@@ -327,6 +327,15 @@ An item that can never be probed therefore never enters scope, which is the corr
 outcome: we know nothing about it, so we archive nothing on its behalf. It is still
 probed every cycle, so it recovers the moment YouTube answers.
 
+**The honest cost:** excluding rows shrinks the population the top-N is computed
+over, so while an `assumed` row is pending it is possible to admit an item that is
+truly rank N+1. This is a real trade, not a free win — but it is the right
+direction. Over-admitting by one position archives one slightly-older item; letting
+a fabricated date rank *evicts real content* and, at `N=3`, can freeze a channel.
+The window is normally one cycle (the discovery probe promotes the row to `exact`
+immediately), and it only persists while probes are failing — during which we
+would not be archiving that item anyway.
+
 This is expressed as a **top-N query rather than a per-candidate rank check** for
 two reasons:
 
@@ -427,7 +436,8 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
 3. DISCOVERY PROBE PASS
       probe list = feed_items[channel] WHERE status IN (unknown, upcoming, live)
         └─ read from the STORE, not this cycle's response
-      per item: skip if HasActiveJob → probe
+      per item: skip if HasActiveJob → skip if NOT term-match → probe
+        └─ same order as today: HasActiveJob → terms → probe (feed.go:704-725)
         └─ members-only content uses the authenticated probe (unchanged)
       outcome per item:
         probed OK  ⇒ UPDATE published(exact), date_precision='exact', status, title
@@ -505,10 +515,28 @@ corrects `published` to an authoritative value; the archival pass must run
 afterwards so scope is computed on corrected dates rather than provisional ones.
 Merging them would rank an item using the guess the probe just disproved.
 
-**Step 2 stores items that do not match terms.** Non-obvious but load-bearing:
-today the cap is applied at `feed.go:464` *before* term matching at `feed.go:721`,
-so scope covers all channel content. Storing only term-matched items would compute
-the top-N over a subset and get it wrong. Terms gate the *job*, not the store.
+**Step 2 stores items that do not match terms — but does not probe them.** Both
+halves matter, and they pull in opposite directions:
+
+- **Store them.** Today the cap is applied at `feed.go:464` *before* term matching
+  at `feed.go:721`, so scope covers all channel content. Storing only term-matched
+  items would compute the top-N over a subset and get it wrong. Terms gate the
+  *job*, not the store.
+- **Do not probe them.** Today term matching *gates the probe*: `processCandidate`
+  runs `HasActiveJob` → term match → **return if no match** → probe
+  (`feed.go:704-725`). A non-matching video is never probed. Probing before term
+  matching would start paying `/player` fetches for content that can never be
+  jobbed on a channel using `terms` — a cost regression against goal 5, introduced
+  purely by splitting the passes.
+
+So the discovery pass keeps today's exact order: `HasActiveJob` → terms → probe. A
+non-matching item is stored and ranked (so the top-N stays correct) and never
+probed (so it stays free). Its `status` simply remains `unknown` forever, which is
+harmless: status only drives probing and job decisions, and it does neither.
+
+Term matching cannot be a SQL predicate — it needs the in-memory description for
+RSS-carried items — so it stays a Go-side filter over the query's rows, exactly as
+it is a Go-side filter over candidates today.
 
 ### The established gate
 
@@ -884,7 +912,8 @@ Then:
 - Removing a channel mid-backfill cancels the scan before the prune, and leaves no
   resurrected rows
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
-- Top-N counts non-term-matching items
+- Top-N counts non-term-matching items, **and** a non-term-matching item is never
+  probed (matching today's `HasActiveJob` → terms → probe order)
 - Raising `max_feed_items` widens scope for already-stored VODs without a re-probe
 - `published` frozen at first insert; upgraded only by higher precision
 - Term matching: an RSS-carried description matches in-cycle; a store-only
