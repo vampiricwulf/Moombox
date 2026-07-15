@@ -130,8 +130,16 @@ listing gets a direct probe and returns an authoritative date. This is what
 guarantees goal 4.
 
 **A probe that lacks what it needs does not fail — it lies. But it also tells us it
-lied, and the design must read that.** This is the least intuitive fact here, and it
-took four rounds and three separate patches to state properly.
+lied, and the design must read that.** A probe of members-only content without
+cookies returns `upcoming` with no error, and `upcoming` is cap-exempt, so the lie is
+jobbed unconditionally. The natural safety argument — "no cookies ⇒ the probe fails ⇒
+no job" — is therefore false. See **The `denied` rule** below, which is the whole
+answer and the single most-revised part of this design.
+
+## The `denied` rule
+
+This is the least intuitive part of the design, and it took four rounds and three
+separate patches to state properly.
 
 `feed.go:743-746`: a probe of members-only content without cookies "gets no formats
 and the classifier misfires it as **upcoming**". No error. And `upcoming` is
@@ -142,8 +150,10 @@ from ever being archived correctly. That is the 2.7.2 bug.
 The natural safety argument — "no cookies ⇒ the probe fails ⇒ not FRESH ⇒ no job" —
 is therefore **false**, and every rule below exists because it is false:
 
-**The authoritative fix: distrust a probe result only when YouTube said it refused
-us AND the classifier was guessing.** YouTube states outright whether we were allowed
+### The `denied` predicate (canonical)
+
+**Distrust a probe result only when YouTube said it refused us AND the classifier was
+guessing.** YouTube states outright whether we were allowed
 to see the video, and `parsePlayabilityStatus`
 (`internal/youtube/player_api_parsing.go:332-388`) already decodes it:
 
@@ -1069,7 +1079,7 @@ feed path (probeAndClassify) — four outcomes:
                 upcoming+unknown premieres and age_restricted VODs in NEITHER
                 bucket — undefined, never FRESH, never jobbed.
   denied      — YouTube refused us and the classifier was guessing.
-                Predicate: see "The authoritative fix" — do not restate it here.
+                Predicate: see "The `denied` predicate (canonical)". Do not restate it.
                 Behaviour: NOT FRESH; writes no status; retried next cycle.
   errored     — a probe ran and failed                     (utils.go:269-294)
   cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
@@ -1087,7 +1097,7 @@ rather than rely on the reader:
 | `utils.go:249` | not yet assigned | `passthrough` |
 | `utils.go:261` | not yet assigned | `cooldown` |
 | `utils.go:294` | zero value (`err != nil`) | `errored` |
-| `utils.go:315`, `:332`, `:350` | valid | `probed`, or `denied` (predicate: see "The authoritative fix") |
+| `utils.go:315`, `:332`, `:350` | valid | `probed`, or `denied` (predicate: see "The `denied` predicate (canonical)") |
 
 `meta` is assigned at `:268`, so the first two returns precede it entirely and the
 error return holds only its zero value. Reading `StreamStatus` on any non-`probed`
@@ -1330,7 +1340,7 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                      └─ fires whenever METADATA came back — NOT gated on
                         ShouldProcess, which is false for a successful probe
                         of a non-jobbable item (utils.go:315, :332)
-        denied     ⇒ (predicate: see "The authoritative fix")
+        denied     ⇒ (predicate: see "The `denied` predicate (canonical)")
                      Store untouched; NOT fresh; retry next cycle. The backstop
                      that depends on nothing we stored — not `source`, not
                      cookies.
