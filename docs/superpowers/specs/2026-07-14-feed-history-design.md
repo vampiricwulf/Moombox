@@ -182,13 +182,11 @@ CREATE TABLE IF NOT EXISTS feed_items (
     video_id     TEXT NOT NULL,
     title        TEXT NOT NULL DEFAULT '',
     published    TEXT NOT NULL,           -- RFC3339 UTC, best-known
-    date_precision TEXT NOT NULL,         -- 'exact' | 'coarse' | 'assumed'
+    date_precision TEXT NOT NULL,         -- 'exact'|'day'|'coarse'|'assumed' (ladder)
     catalog_pos  INTEGER NOT NULL DEFAULT 0,
     source       TEXT NOT NULL,           -- rss|membership|videos|streams
     status       TEXT NOT NULL,           -- unknown|upcoming|live|vod|not_a_stream
     first_seen   TEXT NOT NULL,
-    probe_fails  INTEGER NOT NULL DEFAULT 0,  -- consecutive probe failures
-    next_probe_at TEXT,                       -- NULL = probe freely; else earliest retry
     PRIMARY KEY (channel_id, video_id)
 );
 -- Serves the archival pass's top-N query. PARTIAL: rows excluded from ranking are
@@ -220,7 +218,7 @@ CREATE TABLE IF NOT EXISTS channel_state (
 ```
 
 `published` is frozen at first insert and only ever *upgraded* by a
-higher-precision source (`assumed` → `coarse` → `exact`). It is never recomputed
+higher-precision source (`assumed` → `coarse` → `day` → `exact`). It is never recomputed
 from `now`, which is what makes ranking stable across cycles.
 
 That upgrade requires a **precision-guarded upsert, not `INSERT OR IGNORE`** — the
@@ -233,8 +231,10 @@ ON CONFLICT(channel_id, video_id) DO UPDATE SET
     published      = excluded.published,
     date_precision = excluded.date_precision,
     source         = excluded.source
-WHERE CASE excluded.date_precision WHEN 'exact' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
-    > CASE feed_items.date_precision WHEN 'exact' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
+WHERE CASE excluded.date_precision
+        WHEN 'exact' THEN 4 WHEN 'day' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
+    > CASE feed_items.date_precision
+        WHEN 'exact' THEN 4 WHEN 'day' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
 ```
 
 The guard makes the write monotonic: a later, *worse* estimate can never overwrite
@@ -359,8 +359,7 @@ CREATE partial index with `status NOT IN (...)`   → accepted
 top-N (archival)
   SEARCH feed_items USING INDEX idx_feed_items_rank (channel_id=?)
 
-discovery probe list
-  (status IN (unknown,upcoming,live) AND (next_probe_at IS NULL OR next_probe_at <= ?))
+discovery probe list (status IN (unknown,upcoming,live))
   SEARCH feed_items USING INDEX idx_feed_items_status (channel_id=? AND status=?)
 
 cap-exempt union (status IN (upcoming,live))
@@ -368,8 +367,7 @@ cap-exempt union (status IN (upcoming,live))
 ```
 
 The `status=?` in the latter two is how SQLite renders an `IN`-list — it expands to
-one index seek per value, not an equality mismatch. `next_probe_at` is a residual
-filter over the few rows those seeks return, not an index miss.
+one index seek per value, not an equality mismatch.
 
 No `SCAN`, and no `USE TEMP B-TREE FOR ORDER BY` — the index satisfies the ordering
 as well as the filter, which is why the `DESC` in its definition matters. If the
@@ -400,6 +398,67 @@ pushing the previous rank N out of scope. That is correct: a finished stream is
 exactly the kind of content the archival depth is measured in, and it should
 displace older content. Nothing needs to re-probe for this — the row is already
 `exact` from the probe that observed the transition.
+
+### The probe has no publish date today — adding one is Phase 1 work
+
+This spec repeatedly says the probe returns an authoritative date and promotes an
+`assumed` row to a real one. **That data does not exist anywhere in the chain**, and
+unlike `Outcome`/`StreamStatus` it is not something `ProcessYouTubeVideo` computes
+and discards — it is simply absent:
+
+- `internal/monitor/utils.go:32-36` — `VideoProbeResult{StreamStatus, Title, ChannelName}`
+- `internal/youtube/types.go:46` — `VideoInfo` carries only `ScheduledStartTime`
+- `cmd/moombox/monitor_callbacks.go:174-178`, `:193-197` — both wiring sites copy
+  exactly those three fields
+
+**Why this is blocking rather than cosmetic.** Without a probe date, an `assumed`
+row's *status* can be written but its `published`/`date_precision` cannot. So:
+
+```
+members item → assumed/unknown → probed → becomes vod
+             → now vod + assumed
+             → vod is terminal        ⇒ never discovery-probed again
+             → assumed is excluded    ⇒ never in the top-N
+             ⇒ silently unarchivable, forever
+```
+
+That is members-only content — precisely the class this bug is about — and it also
+disables the repair path the External Assumptions section leans on ("probes repair it
+automatically"). They cannot repair what they cannot supply.
+
+**Do not reach for `ScheduledStartTime`.** It is a conflated field:
+`extractScheduledStartTime` (`internal/youtube/player_api_parsing.go:113-138`) falls
+back to microformat `uploadDate`/`publishDate` at `:129-135`, so it holds a genuine
+publish date for a plain upload and a **future** timestamp for an upcoming stream —
+exactly what the next section forbids storing. An implementer looking for "the
+probe's publish date" will find it and it will look right.
+
+So Phase 1 adds a **distinct** field, parsed from microformat `uploadDate`/
+`publishDate` only, never from the scheduled-start path:
+
+```
+VideoInfo.PublishedAt          (new, internal/youtube)
+VideoProbeResult.PublishedAt   (new, internal/monitor)
++ both monitor_callbacks.go wiring sites
+```
+
+This is a cross-package signature change of the same shape as the unit-preserving
+`itemAge` change, and it must be budgeted, not discovered.
+
+**It is day-granular, so it needs its own precision tier.** `uploadDate` is a date,
+not a timestamp (`"2025-06-15"` — see `player_api_parsing_test.go:777`). Calling that
+`exact` alongside RSS's second-granular `<published>` would manufacture ties and
+undercut "RSS dates are exact and distinct, so they effectively never tie". The
+precision ladder therefore has four rungs:
+
+```
+assumed  <  coarse  <  day  <  exact
+```
+
+The upsert's precision guard ranks all four; the top-N excludes only `assumed`. A
+probe-derived `day` date is a large improvement on a `coarse` one (a 1-day bucket
+versus a 28-day one) and is ample for ranking a channel's newest N, while remaining
+honestly weaker than an RSS timestamp.
 
 ### `published` for upcoming and live rows
 
@@ -472,80 +531,54 @@ unknown  → probe (nothing can be missed)
 upcoming → probe (goal 3)
 live     → probe (goal 3)
 vod / not_a_stream → NOT probed for discovery
-(an `unknown` row is additionally deferred while next_probe_at > now;
- `upcoming`/`live` are NEVER deferred — see the backoff below)
+(no row is ever deferred in Phase 1 — see "Probe-list growth")
 ```
 
-### Bounding the probe list without ever giving up
+### Probe-list growth: named, accepted, and deferred to Part 2
 
-**A terminal "unreachable" state is the wrong answer, and an earlier draft of this
-spec adopted it before catching why.** `MetadataTracker` gives up after a handful of
-*consecutive* failures — a cookie hiccup or a YouTube 5xx spell is enough. Marking
-the row terminal at that point means a members upcoming stream that was briefly
-unprobeable is never probed again and is missed forever: the identical
-unrecoverable goal-3 violation as the `HasProcessed` gate, reintroduced by the fix
-meant to bound cost. Today a transient give-up stops nothing — the cooldown is a
-no-op at its default of 0 and re-probing simply continues.
+Two designs were tried here and **both were wrong**; the honest answer is to do
+nothing in Phase 1.
 
-So the row is never retired; it is **rescheduled**. `probe_fails` and
-`next_probe_at` give the store a durable per-item backoff:
+**Rejected: a terminal `unreachable` status.** `MetadataTracker` gives up after
+three *consecutive* failures (`utils.go:19-21`, `:61-76`) and then **deletes the
+counter** — `utils.go:275-279` calls it "backing off" and notes it "resets the
+tracker's escalation to 0". It is a recurring, deliberately transient backoff, not a
+verdict. Marking a row terminal on it means a members stream that was briefly
+unprobeable is never probed again: the same unrecoverable goal-3 loss as the
+`HasProcessed` gate.
 
-```
-probe fails    ⇒ probe_fails++
-                 next_probe_at = now + backoff(probe_fails)  ONLY if status='unknown'
-probe succeeds ⇒ probe_fails = 0, next_probe_at = NULL
-discovery list = status IN (unknown, upcoming, live)
-                 AND (next_probe_at IS NULL OR next_probe_at <= now)
-```
+**Rejected: a durable per-item backoff, deferring only `unknown` rows.** The
+exemption was justified as "`unknown` — we have never successfully probed it, so we
+do not know it is a stream at all; deferring costs nothing we can name." That is
+false, and this spec names the cost itself in its own goal-3 worked example: *"cookies
+hiccup; the probe fails enough times to give up ⇒ status stays `unknown`. Cookies
+recover; the next discovery probe succeeds ⇒ status becomes `live`."*
 
-**A known `upcoming` or `live` row is never deferred.** This asymmetry is the whole
-point, and it follows from the project's stated priority order
-(Correctness > Reliability > Efficiency):
+Under an `unknown`-only backoff there **is no next discovery probe** — the row is
+deferred. And the failure is structural, not incidental: **members content cannot
+reach `upcoming`/`live` in the store without a successful authenticated probe**,
+because the membership tab yields `itemAge == 0` ⇒ `assumed`/`unknown`. So the
+"never defer a known stream" exemption protects rows whose probe already succeeded,
+and defers exactly the rows where the same transient fault prevented success. It
+guards everything except the case it was written for.
 
-- **`unknown`** — we have never successfully probed it, so we do not know it is a
-  stream at all. Deferring costs nothing we can name. Safe.
-- **`upcoming` / `live`** — a *successful* probe told us this is a stream. Deferring
-  it trades the one thing that must not be traded: a deferred upcoming row that goes
-  live during its backoff window is recorded late, and a late start is a partial
-  miss of an unrepeatable event. Efficiency does not get to win that.
+**Accepted for Phase 1: no backoff.** A row that can never be probed is re-probed
+every cycle. Today's escape — scrolling out of RSS's 15-item window — is gone,
+because reading the store is what fixes the original bug, so this *is* a real
+regression. It is also a small one: it costs one `/player` call per cycle per
+permanently-dead row, and rows that die before ever being successfully probed are
+rare. Correctness and reliability outrank efficiency here, and every bounding scheme
+tried above bought efficiency with a chance of losing a stream.
 
-This also respects what give-up actually means. `RecordFailure`
-(`internal/monitor/utils.go:61-76`) **deletes the counter** when it gives up at
-`maxMetadataFailures = 3` (`:19-21`), and `utils.go:275-279` calls that "backing
-off" and notes "giveUp also resets the tracker's escalation to 0". Give-up is a
-recurring, deliberately transient backoff — not a verdict on the video. Treating it
-as permanent (which a terminal state, or an unbounded backoff on a known stream,
-would) misreads it.
+**The Part 2 fix, deferred deliberately.** `last_listed_at` is the correct signal: a
+row that **no listing has mentioned for N days** *and* whose probes fail is gone —
+which is a fact about YouTube's catalog, not a guess about a probe. It carries no
+miss risk, because a row that still appears in any listing is never deferred. It
+needs the listing-coverage data only the three-tab scan provides, so it belongs to
+Part 2 and is specified there rather than approximated now.
 
-An `unknown` dead ID decays toward a floor (say hourly, then daily) instead of
-costing a probe every cycle forever; a recoverable one returns to full rate on its
-first success. Nothing is ever permanently abandoned, so no stream can be lost this
-way.
-
-**Residual, accepted and named:** a row that was successfully probed as `upcoming`
-and *then* deleted keeps `status='upcoming'`, is never deferred, and therefore
-probes every cycle forever. We cannot distinguish "deleted permanently" from
-"YouTube is 5xx-ing" without error-kind information `ProbeVideo` does not currently
-surface — and given that ambiguity, probing a dead ID is the correct error to make.
-The accumulation is slow (cancelled/deleted scheduled streams are rare — a handful
-per channel per year), and bounded work per row is one `/player` call per cycle.
-
-The clean fix is a `last_listed_at` column: a row that no listing has mentioned for
-N days *and* whose probes are failing is gone, and can be deferred safely without
-ever guessing about a stream that still exists. That needs listing-coverage data
-Part 2 provides, so it is named here as a follow-up rather than designed now.
-
-This is also strictly better than today in a way worth stating: `MetadataTracker` is
-**in-memory** and resets on every restart, so today's give-up does not survive a
-process restart at all. Persisting the schedule is the point of having a store.
-
-**Decision flagged for the operator:** this is new machinery, adjacent to the
-non-goal "changing the probe-failure/cooldown machinery", and it sits near a
-standing preference that poll intervals — not cooldowns — should be the throttle.
-It differs from `probe_cooldown` in that it never touches a healthy item: a row that
-probes successfully has `next_probe_at = NULL` and is polled at full rate forever.
-The backoff applies only to rows that are already failing, where the alternative is
-a guaranteed-useless request every cycle in perpetuity.
+This is why the Phase 1 schema carries no backoff columns: the wrong mechanism,
+persisted, is harder to remove than absent.
 
 ### Why the probe list must be bounded at all
 
@@ -565,22 +598,21 @@ An earlier draft of this spec claimed "no regression" here. That was wrong: it i
 regression created precisely by reading the store instead of the response, which is
 the same property that fixes the original bug.
 
-The backoff above is what bounds it. Note the ranking is unaffected either way: a
-row stuck at `unknown` is excluded from the top-N by the `assumed` rule, and a row
-stuck at `upcoming`/`live` is excluded by the status rule — so a dead ID can never
-evict real content from scope regardless of how often it is retried.
+Phase 1 accepts it rather than bounding it badly (see above). Note the *ranking* is
+unaffected regardless: a row stuck at `unknown` is excluded from the top-N by the
+`assumed` rule, and one stuck at `upcoming`/`live` by the status rule — so a dead ID
+can never evict real content from scope, however often it is retried. The cost is
+purely wasted requests, which is why it can wait for the correct signal.
 
-`MetadataTracker` and `ProbeCooldown` themselves are untouched, per the non-goal.
-The backoff is an additional store-level schedule layered on the outcome they
-already produce.
+`MetadataTracker` and `ProbeCooldown` are untouched, per the non-goal.
 
 ### The probe outcome must surface to the caller, not be hooked inside
 
 `ProcessYouTubeVideo` is shared: it is called from `internal/monitor/feed.go:753`
-**and** `internal/monitor/decapi.go:583`. So the backoff must **not** be hooked into
-its give-up branch — DECAPI would then write `feed_items` rows, breaking the
-"no DECAPI-side change" non-goal and putting rank-1 DECAPI hits into a store the
-design says they never enter.
+**and** `internal/monitor/decapi.go:583`. So no `feed_items` write may be hooked
+inside it — DECAPI would then write rows, breaking the "no DECAPI-side change"
+non-goal and putting rank-1 DECAPI hits into a store the design says they never
+enter.
 
 Instead `ProcessYouTubeVideoResult` gains an **outcome** discriminator:
 
@@ -625,10 +657,9 @@ discriminator has to be exhaustive or it silently re-derives the bug.
 The feed monitor reads the outcome and owns both store writes; DECAPI ignores it and
 behaves exactly as it does today.
 
-This addition serves both new rules: **`outcome == probed` is the FRESH predicate**
-(for the store write *and* as the precondition for a job), and `outcome == errored`
-drives `probe_fails`/`next_probe_at`. Neither is a new source of truth — both read a
-decision `ProcessYouTubeVideo` already makes internally and currently discards.
+**`outcome == probed` is the FRESH predicate** — for the store write *and* as the
+precondition for a job. It is not a new source of truth: it reads a decision
+`ProcessYouTubeVideo` already makes internally and currently discards.
 
 `Outcome` alone is not sufficient, though. The result must **also** carry
 `StreamStatus` and the authoritative publish date, because `ShouldProcess` conflates
@@ -650,8 +681,7 @@ utils.go:330  AddToHistory  — post_live/vod skipped by nonLiveSkipReason
 And `nonLiveSkipReason(includeNonLive=false, _)` **always** skips (`utils.go:229-231`),
 so on a default-config channel those fire for *every* plain upload. If the feed path
 keeps calling the function while ignoring its verdict, it silently inherits history
-writes it does not control — and on give-up it would get **both** a history row and
-the new backoff, two mechanisms for one event.
+writes it does not control.
 
 So `ProcessYouTubeVideo` splits in two:
 
@@ -673,11 +703,10 @@ non-goal true rather than aspirational.
   it.
 - **Feed-path give-up no longer writes history.** Today give-up calls
   `AddToHistory`, whose only effect is flipping the reprobe/log-level flag — it
-  explicitly does *not* stop re-probing (`utils.go:272-279`). The backoff now serves
-  that purpose properly and durably. This is a deliberate behavior change: it stops
-  manufacturing orphaned-history rows for videos that were never jobbed, which is
-  precisely the row class that accumulated into the 80-entry purge that re-armed
-  `gr-ZTohjwnQ`.
+  explicitly does *not* stop re-probing (`utils.go:272-279`), so nothing is lost by
+  dropping it. This is a deliberate behavior change: it stops manufacturing
+  orphaned-history rows for videos that were never jobbed, which is precisely the row
+  class that accumulated into the 80-entry purge that re-armed `gr-ZTohjwnQ`.
 
 **Refresh probe** — on demand, only when a stored item is about to become a job:
 
@@ -770,8 +799,8 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                      └─ fires whenever METADATA came back — NOT gated on
                         ShouldProcess, which is false for a successful probe
                         of a non-jobbable item (utils.go:314, :333)
-        errored    ⇒ store untouched; NOT fresh; probe_fails++ (unknown rows defer)
-        cooldown   ⇒ probe skipped; NOT fresh; no backoff
+        errored    ⇒ store untouched; NOT fresh; retry next cycle
+        cooldown   ⇒ probe skipped; NOT fresh; retry next cycle
         passthrough⇒ ProbeVideo unwired; no metadata; treated as FRESH (jobs, as
                      today)
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
@@ -848,8 +877,7 @@ Deriving the store write from `ShouldProcess` therefore breaks the design on the
    skips ⇒ `ShouldProcess=false`.
 4. If that means "not fresh", the status write never fires ⇒ the row stays
    `unknown` **forever**.
-5. `next_probe_at` stays NULL, because the probe *succeeded* — the backoff only
-   triggers on `errored`. Nothing bounds it.
+5. Nothing bounds it: the probe *succeeded*, so no failure path engages either.
 
 Every plain upload on every default-config channel would then be probed at full rate
 forever: ~15 per channel per cycle against today's 3. That inverts goal 5 and
@@ -1336,11 +1364,10 @@ once 15 newer items exist, and probing stops as a side effect of the response be
 the work list. Reading the store instead removes that escape — the same property
 that fixes the original bug — so the item would be probed forever.
 
-That is what the durable per-item backoff (`probe_fails`/`next_probe_at`) is for:
-see "Bounding the probe list without ever giving up". It reschedules a failing row
-rather than retiring it, so cost is bounded without any possibility of permanently
-abandoning a stream that could still recover. It also makes give-up survive a
-restart, which today's in-memory `MetadataTracker` does not.
+Phase 1 accepts that regression rather than bounding it badly — see "Probe-list
+growth: named, accepted, and deferred to Part 2". Every bounding scheme considered
+bought efficiency with a chance of losing a stream; the correct signal
+(`last_listed_at`) needs Part 2's listing coverage.
 
 ## Testing
 
@@ -1417,14 +1444,12 @@ Then:
 - An `upcoming` row that ends becomes `vod`, **enters** the ranking at rank 1, and
   pushes the previous rank N out of scope
 - A scheduled start time is never stored as `published`
-- Probe give-up sets a backoff (`probe_fails`/`next_probe_at`), never a terminal
-  state: an upcoming stream that is unprobeable for a few cycles (cookie hiccup,
-  YouTube 5xx) is still probed later and still archived once it recovers. This is
-  the goal-3 guard against the terminal-state design that was rejected.
-- A successful probe resets `probe_fails` to 0 and clears `next_probe_at`, so a
-  recovered row returns to full poll rate
-- A healthy row is never deferred: `next_probe_at` stays NULL for anything that
-  probes successfully
+- **Probe give-up never retires or defers a row.** An upcoming/members stream that
+  is unprobeable for several cycles (cookie hiccup, YouTube 5xx) is probed again on
+  the very next cycle and archived once it recovers. This is the goal-3 guard
+  against both rejected bounding designs.
+- A row stuck at `unknown` after repeated failures is still probed every cycle
+  (accepted cost — see "Probe-list growth")
 - **A known `upcoming`/`live` row is NEVER deferred**, however many times its probe
   has failed — it goes live on time and is caught on time. Only `unknown` rows back
   off.
@@ -1439,7 +1464,7 @@ Then:
 - **No hidden history writes on the feed path.** A plain upload probed on a
   default-config channel writes **no** history row (today `nonLiveSkipReason` →
   `AddToHistory` at `utils.go:313` fires for every one), and a feed-path give-up
-  writes none either — the backoff replaces it
+  writes none either — give-up's only effect today is the reprobe flag
 - A DECAPI probe still writes history exactly as today (regression guard on the
   `probeAndClassify` split)
 - **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
@@ -1587,24 +1612,38 @@ is still correct; only the file is wrong. This matters here because Part 2 adds 
 
 ## Implementation Phasing
 
-**Phase 1** — independently shippable, fixes the bug:
-schema v16 (`feed_items`, `channel_state`, both indexes), precision-guarded upsert,
-top-N query, discovery/refresh probe split with the freshness rule, terminal
-durable per-item probe backoff (`probe_fails`/`next_probe_at`, `unknown` rows only),
-**splitting `ProcessYouTubeVideo` into `probeAndClassify` (feed path: probe +
-classify + tracker/cooldown, no history writes, no verdict) and the existing composed
-function (DECAPI only, unchanged)** — the feed path must consume probe *metadata*,
-not `ShouldProcess`, which is `false` for a successful probe of a non-jobbable item
-and would otherwise strand every plain upload at `unknown` forever; the split also
-removes the hidden `AddToHistory` side effects at `utils.go:284/313/330` from the
-feed path, supplies the FRESH predicate and the backoff trigger, and keeps DECAPI out
-of the store, established gate, channel-removal prune,
-**a unit-preserving `itemAge` signature** (today it discards the unit, making the
-coarse skew uncomputable — propagates to `MembershipVideo.Age` and
-`membershipCandidates`), **an injectable RSS fetch seam plus a new `feed_test.go`**
-(neither exists today — see Testing), rewired `checkChannel`/`processCandidate`,
-deletion of `TestMergeCandidatesRecencyCap`, `last_videos` removal, the included
-fixes, doc updates.
+**Phase 1** — independently shippable, fixes the bug. Nothing here depends on
+Phase 2; the established gate simply rests on `last_rss_ok_at` alone until Phase 2
+exists (see "Phase 1 limitation").
+
+*Store*
+- Schema v16: `feed_items`, `channel_state`, **both** indexes (rank index is partial)
+- Precision-guarded upsert; `published` frozen at first insert, upgraded only upward
+- Top-N in-scope query; archival scope excludes `assumed`, `upcoming`, `live`
+
+*Monitor*
+- Discovery pass / archival pass split, with the FRESH rule (`outcome == probed`)
+- Refresh probe on the archival `vod` branch, writing its result back
+- Established gate; rewired `checkChannel`/`processCandidate`
+
+*Refactors this depends on* (none of which exist today — budget them)
+- **Split `ProcessYouTubeVideo`** into `probeAndClassify` (feed path: probe +
+  classify + tracker/cooldown; no history writes, no verdict) and the existing
+  composed function (DECAPI only, unchanged). Required because the feed path must
+  consume probe *metadata*, not `ShouldProcess` — which is `false` for a successful
+  probe of a non-jobbable item and would otherwise strand every plain upload at
+  `unknown` forever — and because it must not inherit the hidden `AddToHistory`
+  side effects at `utils.go:284/313/330`.
+- **Unit-preserving `itemAge`** — today it discards the unit, making the coarse skew
+  uncomputable. Propagates to `MembershipVideo.Age` and `membershipCandidates`.
+- **An injectable RSS fetch seam + a new `feed_test.go`** — `checkChannel` calls
+  `fm.fetchFeed` directly and has no test, so the headline regression test is not
+  writable without this.
+
+*Cleanup*
+- Delete `TestMergeCandidatesRecencyCap` (asserts the deleted cap-crowding behavior)
+- Remove `last_videos` + `GetLastVideo`/`SetLastVideo`
+- The included fixes; doc updates (including the in-code comments)
 
 **Phase 2** — lands on top:
 InnerTube `/browse` continuation client (modelled on `internal/chat`, not ported
