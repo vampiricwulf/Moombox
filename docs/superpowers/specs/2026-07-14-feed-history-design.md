@@ -178,8 +178,9 @@ verbatim, twenty lines apart, and the two copies drifted: one was corrected to t
 minimal form while the other kept listing `age_restricted`/`…` as denied. Two
 statements of one rule is two rules.
 
-**Why minimal, and why everything else is trusted — including `unknown`.** Two independent reasons, both
-verified in code, and both fatal to the broader rules this went through first:
+**Why minimal, and why everything else is trusted — including `unknown`.** Two
+independent reasons, both verified in code, and both fatal to the broader rules this
+went through first:
 
 **(a) `ok` does not mean "genuine" — it means `status` was literally `"OK"`.**
 `classifyStream` reaches `StreamUpcoming` through five guards — `:429`, `:432`,
@@ -800,10 +801,12 @@ changes. That is not a design sink: it changes the instant cookies arrive, which
 also the instant the content becomes archivable at all. It is excluded from ranking
 (`assumed`), so it evicts nothing; it is never archived, which is correct, because we
 have never seen it. The row is a faithful record of *knowing nothing*, and the only
-thing that can end that is access — not a probe. `unknown`+`assumed` is fine — it is probed. `upcoming`/`live`+`assumed`
-are fine — they are cap-exempt. The only sinks are a terminal status paired with a
-fabricated date, and forbidding that pairing is precisely this invariant. Nothing
-else needs guarding, and nothing less would do.
+thing that can end that is access — not a probe.
+
+Reading the table back: `unknown`+`assumed` is fine — it is probed.
+`upcoming`/`live`+`assumed` are fine — they are cap-exempt. The only sinks are a
+terminal status paired with a fabricated date, and forbidding that pairing is
+precisely this invariant. Nothing else needs guarding, and nothing less would do.
 
 The `liveStreamability` epoch branch is never a publish date — it is the scheduled
 start of an upcoming stream. It must not feed `PublishedAt` at all.
