@@ -171,15 +171,14 @@ So a probe that returns `upcoming` with `PlayabilityError == members_only` did *
 observe an upcoming stream** — it observed a locked door and guessed. A probe that
 returns `upcoming` with `ok` really did.
 
-The rule follows — and it must be **minimal**. Not "narrow-ish": minimal, naming the
-two values that can only mean *"you were refused"*:
+**The rule above is the only normative statement of `denied` in this document.**
+Everything else — the outcome list, the flow pseudocode, the contract table, the
+tests — derives from it and must not restate it. An earlier draft stated it twice,
+verbatim, twenty lines apart, and the two copies drifted: one was corrected to the
+minimal form while the other kept listing `age_restricted`/`…` as denied. Two
+statements of one rule is two rules.
 
-```
-denied  ⇔  StreamStatus == 'upcoming'
-           AND PlayabilityError IN ('members_only', 'login_required')
-```
-
-**Everything else is trusted, including `unknown`.** Two independent reasons, both
+**Why minimal, and why everything else is trusted — including `unknown`.** Two independent reasons, both
 verified in code, and both fatal to the broader rules this went through first:
 
 **(a) `ok` does not mean "genuine" — it means `status` was literally `"OK"`.**
