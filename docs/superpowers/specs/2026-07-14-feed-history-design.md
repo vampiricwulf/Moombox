@@ -616,7 +616,7 @@ becomes `vod`, and the probe that observes that transition supplies the real one
 **`date_precision <> 'assumed'` is what enforces goal 4.** An `assumed` row carries a
 fabricated date: `itemAge` returns `0` for any item it cannot parse, which becomes
 `published = now`. Letting that rank would place a guess at position 1 ahead of
-every real date — the opposite of the goal. Excluding it costs nothing, because an
+every real date — the opposite of the goal. Excluding it costs nothing, because
 every `assumed` row is always discovery-probed — an `unknown` one by the status rule
 plus the term carve-out ("Descriptions and term matching"), an `upcoming`/`live` one
 by the status rule directly. (Not every `assumed` row is `unknown`: `upcoming`/`live`
@@ -893,8 +893,40 @@ non-goal true rather than aspirational.
 
 ```
 in-scope AND NOT HasProcessed AND term-match AND status IN (vod, not_a_stream)
+    AND NOT (source='membership' AND NOT membershipActive())   ← same gate as discovery
     → re-probe now, then job on the fresh result
 ```
+
+**The membership gate applies here too, and omitting it is a job-creating bug.**
+`ProbeVideoAuth` carries no cookie check — `cmd/moombox/monitor_callbacks.go:188-198`
+calls `ProbeVideoStatusAuthenticated` unconditionally — so with no cookies the
+"authenticated" probe still *runs*, gets no formats, and misclassifies the video as
+`upcoming`. That is the failure `feed.go:743-746` documents and 2.7.2 fixed.
+
+Ungated, that misclassification is laundered straight into a job:
+
+1. Operator raises `max_feed_items` 3 → 20 (the explicitly-supported widening case),
+   so members `vod` rows enter the top-N. The read arms gate on config only, so a
+   cookie lapse does not remove them — correctly.
+2. Cookies lapse that cycle. The archival pass fires a refresh probe on a members
+   `vod`.
+3. No cookies ⇒ no formats ⇒ returns `upcoming`. The outcome is `probed`, so it is
+   **FRESH**.
+4. Written back ⇒ the row becomes `upcoming`. Re-decide on the fresh status ⇒
+   `upcoming → job (cap exempt)`. A job is created for a members VOD that cannot
+   download.
+5. `AddToHistory` fires on job creation ⇒ `HasProcessed`. Cookies return, discovery
+   corrects the row to `vod`, and the archival `vod` branch now hits
+   `skip if HasProcessed`. **The VOD is never archived**, and recovering it requires
+   clearing orphaned history by hand.
+
+So the gate is not symmetry for its own sake. Without it, cookie state does far more
+than skip a doomed probe: the probe is not skipped, does not fail, and returns a
+*wrong answer* that this design routes directly to a job — and then poisons the row
+against ever being archived correctly.
+
+Gated, the refresh probe simply does not fire during a lapse: no fresh result, no
+job, retry next cycle — the behavior already specified for `errored` and `cooldown`.
 
 This preserves today's invariant that **job creation always follows a fresh
 probe**. Without it, the archival pass would create jobs from probe data captured
@@ -1017,6 +1049,10 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
          vod/not_a_stream → skip if HasProcessed
                             skip unless include_non_live_content   ← before probing
                             skip unless channel established
+                            skip if source='membership' AND NOT membershipActive()
+                              └─ ProbeVideoAuth has NO cookie guard, so without
+                                 cookies it RUNS, gets no formats, and returns
+                                 'upcoming' — FRESH, and jobbed as cap-exempt
                             → refresh-probe, WRITE THE RESULT BACK to the store,
                               then re-decide on the FRESH status:
                                  live/upcoming    → job (cap exempt)
@@ -1197,9 +1233,7 @@ Two cases cost more, and neither is unbounded:
   invariant and is retried — the accepted cost in "Probe-list growth".
 
 Rows that already carry a real date (RSS `exact`, membership/backfill `coarse`) are
-never probed on this path at all — they are already rankable. Rows that already carry a real
-date (RSS `exact`, membership/backfill `coarse`) are never probed on this path at
-all — they are already rankable.
+never probed on this path at all — they are already rankable.
 
 A non-matching row's `status` may well remain `unknown` forever, and that part *is*
 harmless: status drives probing and job decisions, and a dated `unknown` row does
@@ -1342,7 +1376,10 @@ same outcome — during a lapse the row is unprobeable, so it is never FRESH, so
 never jobbed, and it is caught the moment cookies return — but keying it on cookie
 state invites the reader to ask "does a cookie lapse hide a live members stream?"
 every time they encounter it. Keying both read arms on the operator's choice means
-the only thing cookie state can do is skip a probe that would have failed.
+cookie state can only skip a probe that would have failed — provided **every** probe
+trigger carries the membership gate, discovery and refresh alike. The refresh probe
+is the one that bites if forgotten: without cookies it does not fail, it succeeds
+with a wrong answer (see "Refresh probe").
 
 A cookie lapse therefore leaves scope *exactly* where it was: members rows keep
 their ranks, hold their slots, stay cap-exempt, and simply go un-probed for a cycle.
@@ -1874,6 +1911,10 @@ Then:
 - Coarse dates skew old: `"3 weeks ago"` stores `now-28d`, not `now-21d`
 - `membership_discovery = false` ⇒ backfill writes no members rows, and none are
   jobbed via the store
+- **A cookie lapse must not create a job either.** Members `vod` rows in scope (e.g.
+  after raising `max_feed_items`) + no cookies ⇒ the refresh probe must **not** fire.
+  Ungated it succeeds with `upcoming` (no formats ⇒ misclassified), which is FRESH,
+  which jobs it cap-exempt — and `AddToHistory` then blocks the real VOD forever.
 - **A cookie lapse must NOT move scope.** Arrange members rows at ranks 1-3 and
   public VODs at 4-6, then make `HasAuthCookies()` false for one cycle: the top-3
   must still be the members rows, and **no public VOD may be jobbed**. Gating the
@@ -2090,6 +2131,10 @@ exists (see "Phase 1 limitation").
 *Monitor*
 - Discovery pass / archival pass split, with the FRESH rule (`outcome == probed`)
 - `post_live` → `vod` normalization on write; the probe write is precision-guarded
+- **The terminal-status invariant**: never write `vod`/`not_a_stream` without a
+  rankable date — a probe that classifies a past item but cannot date it leaves the
+  row `unknown`. This is the rule that closes the only two sinks in the state space.
+- The membership gate on **both** probe triggers (discovery and refresh)
 - `source` becomes a **read** column: it selects the authenticated probe (replacing
   the in-memory `discoveredVideo.authProbe`) and gates the store queries — the
   **read** arms (top-N, cap-exempt union) on `MembershipDiscoveryEnabled()`
@@ -2115,11 +2160,14 @@ exists (see "Phase 1 limitation").
   side effects at `utils.go:284/313/330`.
 - **A publish date on the probe** — `VideoInfo.PublishedAt` +
   `VideoProbeResult.PublishedAt` + both `monitor_callbacks.go` wiring sites, with
-  status-aware extraction (`vod` → `liveBroadcastDetails.startTimestamp`, `exact`;
-  `not_a_stream` → `uploadDate`, `day`; `upcoming`/`live` → none). **No date exists
-  in the probe chain today** — without this, an `assumed` row can never be promoted
-  and members content becomes permanently unarchivable. Also adds the `day` rung to
-  the precision ladder and the guard's `CASE`.
+  status-aware extraction:
+  `post_live`/`vod` → `liveBroadcastDetails.startTimestamp` (`exact`), **else
+  `uploadDate`/`publishDate` (`day`) — the fallback is NOT optional; it is the
+  normal `vod` case, since an ended stream with an `endTimestamp` classifies
+  `post_live`**; `not_a_stream` → `uploadDate` (`day`); `upcoming`/`live` → none.
+  **No date exists in the probe chain today** — without this, an `assumed` row can
+  never be promoted and members content becomes permanently unarchivable. Also adds
+  the `day` rung to the precision ladder and the guard's `CASE`.
 - **Unit-preserving `itemAge`** — today it discards the unit, making the coarse skew
   uncomputable. Propagates to `MembershipVideo.Age` and `membershipCandidates`.
 - **An injectable RSS fetch seam + a new `feed_test.go`** — `checkChannel` calls
