@@ -635,10 +635,13 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                                   no fresh result, no job, never fall through
                                   on stored status)
          unknown          → NO JOB. We do not know what it is. Retry next cycle.
-                            (Unreachable via the top-N query, which excludes
-                            'assumed' rows, but reachable for a coarse-dated
-                            backfilled row whose probe fails — the branch must
-                            exist.)
+                            (Reachable: an RSS row enters as unknown with an
+                            EXACT date, so it is in the top-N legitimately —
+                            the query excludes 'assumed' precision, not
+                            'unknown' status. If its probe fails it stays
+                            unknown and holds its true rank, which is correct:
+                            it is a real video at a real position, and an older
+                            item must not take its slot.)
 5. AddToHistory on job creation  (unchanged)
 6. on RSS success ⇒ channel_state.last_rss_ok_at = now
 ```
@@ -1131,7 +1134,10 @@ Then:
 - A stale listing never demotes a probed `live` back to `vod`
 - An `assumed` row never enters the top-N query (goal 4), and a permanently
   unprobeable `assumed` row cannot evict real content from scope
-- An in-scope `unknown` row is never jobbed
+- An in-scope `unknown` row is never jobbed — and an RSS row whose probe fails
+  stays `unknown` with its **exact** date, holding its true rank rather than
+  yielding the slot to an older item (the top-N excludes `assumed` precision, not
+  `unknown` status)
 - `include_non_live_content = false`: a past members VOD is stored but never
   discovery-probed, preserving today's drop behavior
 - **`HasProcessed` does not block a live/upcoming job.** Specifically: probe
