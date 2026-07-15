@@ -460,7 +460,8 @@ unknown  → probe (nothing can be missed)
 upcoming → probe (goal 3)
 live     → probe (goal 3)
 vod / not_a_stream → NOT probed for discovery
-(any status → deferred while next_probe_at > now; see the backoff below)
+(an `unknown` row is additionally deferred while next_probe_at > now;
+ `upcoming`/`live` are NEVER deferred — see the backoff below)
 ```
 
 ### Bounding the probe list without ever giving up
