@@ -181,10 +181,11 @@ So a probe that returns `upcoming` with `PlayabilityError == members_only` did *
 observe an upcoming stream** — it observed a locked door and guessed. A probe that
 returns `upcoming` with `ok` really did.
 
-**The block above is the canonical `denied` predicate.** The table below *derives*
-it, in this same section, under the reader's eye. Every use site elsewhere — the
-outcome list, the flow pseudocode, the contract table, the tests — states only what
-`denied` *does* and refers here for what it *is*. No use site writes the predicate.
+**The rule at the top of this section is the canonical `denied` predicate**, and the
+table above derives it — both in this subsection, under the reader's eye. Every use
+site elsewhere — the outcome list, the flow pseudocode, the contract table, the
+tests — states only what `denied` *does* and refers here for what it *is*. No use
+site writes the predicate.
 
 That split is deliberate, and it is the fix for a defect this document generated five
 times. An earlier draft wrote the predicate in five places. They drifted exactly as
