@@ -559,10 +559,10 @@ exclusion, and worth stating as such.
 | Decision | Choice | Rationale |
 |---|---|---|
 | Scope | One spec, **both parts ship together** | Parts are internal sequencing, not release boundaries. Part 1 alone leaves the established gate permanently shut on any channel whose RSS never succeeds — only Part 2 sets `backfilled_at`, the gate's second key. Shipping Part 1 alone would trade a wrong-archive for a silent no-archive |
-| Probe scope | Probe **only what is in scope**: `top-N ∪ {upcoming, live} ∪ {assumed}`, non-terminal rows only — the same set the archival pass reads | The cap *is* the bound. A rank-blind probe list (every non-terminal row, regardless of rank) grows without limit once the backfill lands, and needs a reaper to contain it — a mechanism invented to contain a mechanism. Out-of-scope rows are stored and correctly ranked but never probed: we would never archive them, so their status is not worth a request |
+| Probe scope | Probe **only what is in scope** — the window query's rows, walked serially per source with early exit (see "The source walk") | The window *is* the bound. A rank-blind probe list (every non-terminal row, regardless of scope) grows without limit once the backfill lands, and needs a reaper to contain it — a mechanism invented to contain a mechanism. Rows outside the window are stored and correctly ordered but never probed: we would never archive them, so their status is not worth a request |
 | Cap naming | UI labels + help text only; TOML key `max_feed_items` **unchanged** | The name describes the old, broken per-cycle meaning and is the misreading that hid this bug — so the label must move. The key must not: renaming it leaves two names for one concept in the codebase forever and puts ~12 doc sites in lockstep. No migration, no clamp of legacy values (see "What `max_feed_items` comes to mean") |
-| Store structure | SQLite table + partial rank index + status index | Workload is one indexed top-N query per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
-| Cap gate | Coarse pre-filter **removed**. Scope is a store-driven top-N query; every job still follows a fresh probe | The pre-filter was the sole cause of the miss risk, and guarded a probe budget that no longer exists once status is recorded |
+| Store structure | SQLite table + **one** non-partial window index | Workload is one indexed range scan per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
+| Cap gate | Coarse pre-filter **removed**. Scope is a store-driven date-window query; every job still follows a fresh probe | The pre-filter was the sole cause of the miss risk, and guarded a probe budget that no longer exists once status is recorded |
 | Cap meaning | Archival depth | Matches goal 2. It bounds probe volume too, but only incidentally: a backfilled row is born `vod` with a coarse date, and `vod` is terminal, so the newest-N set is almost entirely un-probed in steady state. Depth of 1000 does not mean 1000 probes per cycle — it means ~0 |
 | `history` table | Schema/API/UI untouched; the feed path writes **fewer** rows | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI. See "What `history` comes to mean" — dropping the skip/give-up writes is a population change, not a schema change |
 | Catalog scan role | Backfill only | Part 1 makes RSS 404s harmless; 3 MB/channel/cycle forever buys no correctness |
@@ -587,25 +587,24 @@ CREATE TABLE IF NOT EXISTS feed_items (
     first_seen   TEXT NOT NULL,
     PRIMARY KEY (channel_id, video_id)
 );
--- Serves the archival pass's top-N query. PARTIAL: rows excluded from ranking are
--- excluded from the index itself, so they cost nothing to skip. This matters —
--- 'assumed' rows carry published=now and therefore sort FIRST, so a non-partial
--- index would fetch and discard every one of them ahead of every real row, on
--- every query, forever (and under the relativeAgeRe breakage that is ~30 rows per
--- channel). Not a covering index: date_precision/status/title still require a
--- table lookup per returned row, which is fine at N rows.
-CREATE INDEX IF NOT EXISTS idx_feed_items_rank
-    ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC)
-    WHERE date_precision <> 'assumed'
-      AND status NOT IN ('upcoming', 'live');
+-- Serves the window query, which the discovery walk and the archival pass BOTH
+-- read (see "The window query"). A plain range scan: seek to now-window_days,
+-- walk forward in recency order, stop. The DESC matters — it is what lets the
+-- index satisfy ORDER BY as well as the filter, with no temp b-tree.
+--
+-- NOT partial. Revision 1 carried `WHERE date_precision <> 'assumed' AND status
+-- NOT IN ('upcoming','live')` to keep those rows out of a fixed-size top-N. A
+-- date range has no slots to evict from, so both exclusions are gone and the
+-- predicate with them — which also retires a real hazard: a partial index is
+-- used only when SQLite can SYNTACTICALLY match its WHERE against the query's
+-- terms, so rewording a predicate degrades it to a full scan, silently, and the
+-- failure stays invisible until the catalog is large.
+CREATE INDEX IF NOT EXISTS idx_feed_items_window
+    ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
 
--- Serves the discovery probe list and the cap-exempt union, both of which filter
--- on status every cycle. Without this they degrade to a full scan of the
--- channel's rows — after Part 2's backfill that is the entire catalog, scanned
--- twice per cycle, forever (violating goal 5). The rank index cannot serve them:
--- status is not in it, and published leads.
-CREATE INDEX IF NOT EXISTS idx_feed_items_status
-    ON feed_items(channel_id, status);
+-- (Revision 1's idx_feed_items_status is DROPPED, not added: it served the
+--  rank-blind probe list and the cap-exempt union, and nothing queries
+--  feed_items by status any more.)
 
 CREATE TABLE IF NOT EXISTS channel_state (
     channel_id     TEXT PRIMARY KEY,
@@ -747,91 +746,82 @@ already title-only (`internal/monitor/feed.go:694-696`: *"matching is title-only
 DECAPI"*) — but it must be documented, since an RSS item whose *description* alone
 matched the channel's terms would not be picked up by a later scope widening.
 
-### The in-scope query
+### The window query
 
-Total order is `(published DESC, catalog_pos ASC, video_id ASC)`. The archival
-scope for a channel is simply the top N of the store:
+Scope is a **date range**, not a rank. One query serves the discovery walk and the
+archival pass both — they read the same set, which is what makes "probe only what we
+would archive" true rather than aspirational.
 
 ```sql
-SELECT video_id, title, published, status FROM feed_items
+SELECT video_id, title, published, status, source, catalog_pos
+  FROM feed_items
  WHERE channel_id = ?
-   AND date_precision <> 'assumed'
-   AND status NOT IN ('upcoming', 'live')
+   AND published >= ?              -- now - archive_window_days
    -- AND source <> 'membership'   ← iff NOT MembershipDiscoveryEnabled()
    --                                 (the OPERATOR'S toggle only — never
    --                                  membershipActive(), which folds in live
    --                                  cookie state and would move scope on a
    --                                  cookie lapse)
  ORDER BY published DESC, catalog_pos ASC, video_id ASC
- LIMIT ?
 ```
 
-`idx_feed_items_rank` is **partial**, and its `WHERE` matches these two predicates
-exactly — so excluded rows are not in the index at all: one seek, N rows, nothing
-scanned and discarded. It is *not* a covering index (`date_precision`, `status` and
-`title` still cost a table lookup per returned row), but that is N lookups, not a
-scan.
+**No `LIMIT`, and no status or precision exclusions.** Every one of them is gone, and
+each for a reason worth stating, because the earlier top-N formulation needed all
+three and a partial index to carry them:
 
-**Verified, not assumed** (SQLite 3.50.4, 4000 rows, 3 channels). SQLite only uses
-a partial index when it can prove the index's `WHERE` holds for every row the query
-needs, and that proof is a syntactic term match — so the index `WHERE` and the query
-predicates must be written identically, as they are above. Confirmed:
+| Removed | Why it is unnecessary now |
+|---|---|
+| `LIMIT N` | the window is the bound. `M` is throughput, not depth — see "The scheduler" |
+| `status NOT IN ('upcoming','live')` | it existed to stop premieres **evicting VODs from a fixed-size top-N**. A date range has no fixed size, so there is nothing to evict from. They carry `published = now`, sit inside every window by construction, and cost nothing to anyone |
+| `date_precision <> 'assumed'` | it rested on "an undated row cannot be ranked" — false. `assumed` rows carry `published = now`, land inside the window, and get probed, which is exactly what we want for them. They needed a carve-out only because this exclusion stranded them |
 
-```
-CREATE partial index with `status NOT IN (...)`   → accepted
+The ordering still uses the full `(published DESC, catalog_pos ASC, video_id ASC)`
+key — not to cut a lump at rank N, but because **the source walk consumes rows in
+recency order** and `catalog_pos` is what makes order well-defined inside a
+coarse-date lump (see "The source walk").
 
-top-N (archival)
-  SEARCH feed_items USING INDEX idx_feed_items_rank (channel_id=?)
+**One index, not two, and not partial:**
 
-discovery probe list (status IN (unknown,upcoming,live))
-  SEARCH feed_items USING INDEX idx_feed_items_status (channel_id=? AND status=?)
-
-cap-exempt union (status IN (upcoming,live))
-  SEARCH feed_items USING INDEX idx_feed_items_status (channel_id=? AND status=?)
+```sql
+CREATE INDEX IF NOT EXISTS idx_feed_items_window
+    ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
 ```
 
-The `status=?` in the latter two is how SQLite renders an `IN`-list — it expands to
-one index seek per value, not an equality mismatch.
+`idx_feed_items_status` is **dropped**. It existed to serve the rank-blind probe list
+and the cap-exempt union; both are gone, and nothing else queries `feed_items` by
+status. The partial predicate is gone with the exclusions it enforced — which also
+retires a real hazard: a partial index is only used when SQLite can *syntactically*
+match its `WHERE` against the query's terms, so it degrades silently to a full scan
+the moment someone rewords a predicate.
+
+**Verified, not assumed** — re-run for revision 2 against `modernc.org/sqlite`
+(the driver actually in use), 6,000 rows across 4 channels, after `ANALYZE`:
+
+```
+window query (all sources)
+  SEARCH feed_items USING INDEX idx_feed_items_window (channel_id=? AND published>?)
+
+window query (membership_discovery = false)
+  SEARCH feed_items USING INDEX idx_feed_items_window (channel_id=? AND published>?)
+```
 
 No `SCAN`, and no `USE TEMP B-TREE FOR ORDER BY` — the index satisfies the ordering
-as well as the filter, which is why the `DESC` in its definition matters. If the
-implementation ever reworks these predicates, re-check the query plan: a partial
-index silently degrades to a full scan when the term match stops lining up, and the
-failure is invisible until the catalog is large.
+as well as the filter, which is why the `DESC` in its definition matters. The
+`source <> 'membership'` arm is a post-filter on rows the range already narrowed, so
+it does not disturb the plan. Worth one assertion in the migration test regardless.
 
-(Checked against CPython's SQLite; `modernc.org/sqlite` is a transpilation of the
-same upstream C source, so the planner behaviour is the same. Worth one assertion in
-the migration test regardless.)
-
-**`status NOT IN ('upcoming','live')` is what makes goal 3 true.** Without it the
-exemption is only additive (`top-N ∪ {upcoming, live}`) — which archives them, but
-leaves them *ranked*. They carry the newest dates, so they occupy the top of the
-order and evict VODs from scope. At `N=3`, a channel with three scheduled premieres
-would have a top-3 consisting entirely of premieres and an effective archival depth
-of **zero**. On a channel that keeps two or three streams scheduled a week out, that
-is the steady state, not an edge case. "Never consumes a cap slot" has to mean
-excluded from the ranking, not merely exempted from the cut.
-
-A permanently-failing row gets no exclusion of its own, and **one class of them does
-occupy a slot**: an RSS-sourced row carries an `exact` date, so a video that is
-listed but never successfully probed sits at `unknown` with a real rank, holds it,
-and is never jobbed (`unknown` ⇒ no job). It is not excluded by the `assumed` rule —
-that rule only catches rows we could not date, and RSS dated this one.
-
-This is accepted, and the alternatives are worse: dropping `unknown` from the ranking
-would make archival depth a function of probe success, so a cold store archives
-nothing until probing catches up; reaping the row would move every row below it up by
-one, which is scope responding to a probe failure — goal 2, in the Jerry shape. It is
-bounded by `N`, it stays in the probe list precisely because it is in scope, and it
-resolves the moment the probe succeeds or newer content pushes it out. See "The cap
-is the bound".
+**An `unknown` row inside the window is probed, not skipped.** An RSS-sourced row
+carries an `exact` date, so a video that is listed but never successfully probed sits
+at `unknown` inside the window indefinitely. It is never jobbed (`unknown` ⇒ no job),
+and it costs one probe per cycle while it remains in the window — bounded, and it
+resolves the moment the probe succeeds or the window moves past it. Under the
+rejected top-N this row was worse: it *held an archival slot* and masked real content
+behind it. A date range has no slots to hold.
 
 **The transition is the point, not a wrinkle.** When an upcoming stream ends it
-becomes `vod` and *enters* the ranking at its (recent) date, taking rank 1 and
-pushing the previous rank N out of scope. That is correct: a finished stream is
-exactly the kind of content the archival depth is measured in, and it should
-displace older content. Nothing needs to re-probe for this — the row is already
-`exact` from the probe that observed the transition.
+becomes `vod` at its true start time — already `exact`, from the probe that observed
+the transition — and stays inside the window for `archive_window_days`. That is
+exactly the content this tool exists for.
 
 ### The probe has no publish date today — adding one is Phase 1 work
 
@@ -2854,10 +2844,11 @@ Then:
   re-evaluation is title-only
 - Backfill: fixture-driven continuation paging, loop detection, resume-from-cursor
 - Migration v15→v16 idempotent
-- **Query plan assertion:** the top-N query uses `idx_feed_items_rank` and does not
-  fall back to a scan or a temp b-tree sort. A partial index degrades silently when
-  the predicate term-match stops lining up, and nothing else would catch it until
-  the catalog is large.
+- **Query plan assertion:** the window query uses `idx_feed_items_window` and does
+  not fall back to a `SCAN` or a `USE TEMP B-TREE FOR ORDER BY`, on both arms (with
+  and without the `source <> 'membership'` filter). Verified for revision 2 against
+  `modernc.org/sqlite` at 6,000 rows across 4 channels; pin it, because an index
+  regression is invisible until the catalog is large.
 
 ## Migration (v16)
 
@@ -2866,15 +2857,26 @@ established pattern: a sequential `if version < 16 { ... return
 db.writeUserVersion(16) }` block, `CREATE TABLE/INDEX IF NOT EXISTS`, tables also
 added to `createSchema`.
 
-1. Create `feed_items`, `channel_state`, and **both** indexes — `idx_feed_items_rank`
-   (partial) and `idx_feed_items_status`. Omitting the status index turns two
-   per-cycle queries into full scans of the channel's catalog (see the schema
-   block); it is not optional.
+1. Create `feed_items`, `channel_state`, and the **single** index
+   `idx_feed_items_window` (non-partial). Revision 1 specified two — a partial
+   `idx_feed_items_rank` and `idx_feed_items_status`; **create neither.** The window
+   query needs no exclusions to enforce and nothing queries `feed_items` by status.
 2. `DROP TABLE IF EXISTS last_videos`.
 3. Remove `GetLastVideo`/`SetLastVideo` (`database_extras.go:126-148`) and
    `TestLastVideos` (`database_test.go:119`).
 4. Make the legacy JSON importer ignore `lastVideos` (`database_jobs.go:723`)
    rather than write a dropped table.
+5. Add the `Queued` job status (decision 10) — and place it in the lifecycle
+   deliberately, since CLAUDE.md marks that a critical pattern. It is **not**
+   terminal (`types.go:92-94`) and it **is** `ShouldProcess` (`queue.go:350-357`).
+
+**Config migration** (`migrateOldFormat()`, not the DB migration): `max_feed_items`
+is **dropped, not carried** (decision 11) — it bounded depth, `M` bounds concurrency,
+and the window has no old counterpart, so any mapping preserves a shape rather than
+an intent. `archive_window_days` and `archive_slots` take their defaults of 3 and 3.
+`num_parallel_downloads` default 2 → 10 (`config.go:67`, decision 16); the key is
+commented out in `config.example.toml:104`, so this reaches every install that never
+set it.
 
 No data backfill inside the migration, so the `SetMaxOpenConns(1)` cursor hazard
 (`migrations.go:242-244`) does not apply.
@@ -3006,13 +3008,14 @@ anything, so shipping Phase 1 alone would ship the relabelled setting before the
 thing that makes the new label true.
 
 *Store*
-- Schema v16: `feed_items`, `channel_state`, and **both** indexes —
-  `idx_feed_items_rank` (partial) and `idx_feed_items_status`. Omitting the latter
-  turns two per-cycle queries into full catalog scans.
+- Schema v16: `feed_items`, `channel_state`, and the **single** non-partial index
+  `idx_feed_items_window`. Revision 1's two indexes are both gone.
 - Precision-guarded upsert, **per-column**: `published`/`date_precision` move only
   upward; `source` updates on **every** sighting. Coupling them lets a date-quality
   rule pick the probe, and the wrong probe does not fail — it lies.
-- Top-N in-scope query; archival scope excludes `assumed`, `upcoming`, `live`
+- The **window query** (`published >= now - archive_window_days`), read by the
+  discovery walk and the archival pass alike. No `LIMIT`, no status or precision
+  exclusions — see "The window query" for why each one went.
 
 *Monitor*
 - Discovery pass / archival pass split, with the FRESH rule (`outcome == probed`)
