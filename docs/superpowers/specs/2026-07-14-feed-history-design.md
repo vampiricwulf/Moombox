@@ -732,10 +732,13 @@ enter.
 Instead `ProcessYouTubeVideoResult` gains an **outcome** discriminator:
 
 ```
-probed      — a probe ran and returned metadata          (utils.go:268-300)
-errored     — a probe ran and failed                     (utils.go:269-294)
-cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
-passthrough — no probe ran; ProbeVideo is not wired      (utils.go:248-250)
+feed path (probeAndClassify) — three outcomes:
+  probed      — a probe ran and returned metadata          (utils.go:268-300)
+  errored     — a probe ran and failed                     (utils.go:269-294)
+  cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
+
+DECAPI (composed ProcessYouTubeVideo) — keeps a fourth:
+  passthrough — no probe ran; ProbeVideo is not wired      (utils.go:248-250)
 ```
 
 **Contract: `StreamStatus` is meaningful if and only if `outcome == probed`.** This
@@ -764,10 +767,24 @@ un-probed. So "not `ShouldProcess`" is not a usable proxy for "not fresh", and a
 naive implementation deriving freshness from `ShouldProcess` would job on no
 metadata whenever the probe is unwired.
 
-`passthrough` counts as **fresh**, which preserves today's behavior exactly: with no
-probe wired, `ProcessYouTubeVideo` jobs the item today, and it must continue to. It
-is a test-and-backwards-compatibility path, not a production one — but the
-discriminator has to be exhaustive or it silently re-derives the bug.
+**`passthrough` does not produce a job on the feed path, and this is a deliberate
+behavior change.** An earlier draft claimed it "counts as fresh and still jobs,
+exactly as today". That was wishful: the archival pass dispatches on **stored
+status**, and a passthrough writes no status, so the row stays `unknown` — whose
+branch is an explicit NO JOB. Declaring it fresh changes nothing, because no branch
+consults freshness for `unknown`.
+
+Rather than carve out a special case, the feed path simply **requires a wired
+probe**: `probeAndClassify` has no passthrough outcome, and a nil `ProbeVideo` there
+is a programming error, not a supported mode. Production always wires it
+(`cmd/moombox/monitor_callbacks.go:180`), and the only nil caller is a test
+(`utils_test.go:215`). DECAPI keeps the composed `ProcessYouTubeVideo` and with it
+today's nil behavior, unchanged.
+
+So the feed path's outcome set is three values (`probed`/`errored`/`cooldown`) and
+`outcome == probed` is the FRESH predicate without qualification. The fourth value
+still matters — it is why `ShouldProcess` cannot be used as a freshness proxy — but
+it lives on DECAPI's side of the split.
 
 The feed monitor reads the outcome and owns both store writes; DECAPI ignores it and
 behaves exactly as it does today.
@@ -930,8 +947,7 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                         of a non-jobbable item (utils.go:314, :333)
         errored    ⇒ store untouched; NOT fresh; retry next cycle
         cooldown   ⇒ probe skipped; NOT fresh; retry next cycle
-        passthrough⇒ ProbeVideo unwired; no metadata; treated as FRESH (jobs, as
-                     today)
+        (no passthrough on this path — probeAndClassify requires a wired probe)
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
       in-scope = top-N query  ∪  {items WHERE status IN (upcoming, live)}
       per item: skip if HasActiveJob → skip if NOT term-match → decide:
@@ -972,18 +988,33 @@ branches. The `live` and `upcoming` branches return `ShouldProcess: true`
 regardless of history. Job creation dedups on the **job row** (`AddJob` returning
 `added=false`, `cmd/moombox/monitor_callbacks.go:252-259`), not on history.
 
-That distinction is load-bearing because **history can be written with no job row**:
-the probe give-up branch calls `AddToHistory` after repeated failures
-(`utils.go:283-285`). So:
+That distinction is load-bearing because **history rows exist with no job row**, so
+`HasProcessed` is true for videos that were never archived:
 
-1. A members upcoming stream is discovered; cookies hiccup; the probe fails enough
-   times to give up ⇒ `AddToHistory(X)`, **no job row**, status stays `unknown`.
-2. Cookies recover; the next discovery probe succeeds ⇒ status becomes `live`.
+1. `X` has a history row but no job. (Sources below.)
+2. A discovery probe succeeds ⇒ status becomes `live`.
 3. A `HasProcessed` gate on the live branch skips it. **The stream is never
    archived, and it is gone forever.**
 
-Today step 3 jobs it. A design that regresses this would violate goal 3 via exactly
-the transient failures this spec claims to leave untouched.
+Today step 3 jobs it, because `HasProcessed` never reaches the live branch.
+
+**Where such rows come from — after this design lands.** The obvious source is the
+feed path's own probe give-up (`utils.go:283-285`), and an earlier draft cited it.
+That citation is now dead: the `probeAndClassify` split deliberately removes that
+write (see "The split must be a function split"). The rule nonetheless stands, and
+must not be dropped with its original justification, because two sources survive:
+
+- **DECAPI give-up.** `decapi.go:583-594` still calls the composed
+  `ProcessYouTubeVideo` with `AddToHistory` wired, so a DECAPI probe that gives up
+  still writes a history row with no job. DECAPI and the feed monitor see the same
+  YouTube channels.
+- **Every pre-existing row.** Installs upgrading into this design carry years of
+  them — the 80-row purge in the Problem section is direct evidence, and those rows
+  were orphaned precisely because they had no job.
+
+So the guard is not hypothetical; only its most obvious arranger went away. A design
+that regressed this would violate goal 3 via the transient failures this spec claims
+to leave untouched.
 
 **Only FRESH items become jobs**, where fresh means **this cycle's probe returned
 metadata** — `outcome == probed`. It does **not** mean today's
@@ -1602,9 +1633,11 @@ Then:
   `unknown` status)
 - `include_non_live_content = false`: a past members VOD is stored but never
   discovery-probed, preserving today's drop behavior
-- **`HasProcessed` does not block a live/upcoming job.** Specifically: probe
-  give-up wrote history with no job row ⇒ probe later succeeds ⇒ stream is still
-  jobbed. This is the goal-3 regression guard.
+- **`HasProcessed` does not block a live/upcoming job.** Arrange a history row with
+  **no** job row — via a DECAPI give-up (`decapi.go:583-594` still wires
+  `AddToHistory`) or a pre-existing/legacy row, **not** via a feed-path give-up,
+  which no longer writes one — then let a discovery probe return `live`. The stream
+  must still be jobbed. This is the goal-3 regression guard.
 - A stale stored `live` whose probe errored this cycle produces **no** job
 - With `probe_cooldown > 0`, a cooldown-skipped item produces **no** job
 - Coarse dates skew old: `"3 weeks ago"` stores `now-28d`, not `now-21d`
@@ -1635,9 +1668,10 @@ Then:
   against both rejected bounding designs.
 - A row stuck at `unknown` after repeated failures is still probed every cycle
   (accepted cost — see "Probe-list growth")
-- `passthrough` (`ProbeVideo` unwired) counts as fresh and still jobs, exactly as
-  today — freshness must not be derived from `ShouldProcess`, which is `true` on
-  that path
+- **`probeAndClassify` requires a wired probe** — the feed path has no passthrough
+  outcome, so `outcome == probed` is FRESH without qualification. DECAPI keeps
+  today's nil behavior via the composed function. (Freshness must never be derived
+  from `ShouldProcess`, which is `true` on the nil path.)
 - **A successful probe of a non-jobbable item still writes its status.** Default
   config (`include_non_live_content = false`), RSS plain upload ⇒ probe succeeds ⇒
   `not_a_stream` ⇒ `ShouldProcess=false` ⇒ the row must become `not_a_stream`, NOT
