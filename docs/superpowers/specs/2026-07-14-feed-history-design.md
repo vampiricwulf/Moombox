@@ -230,17 +230,27 @@ That upgrade requires a **precision-guarded upsert, not `INSERT OR IGNORE`** —
 latter can only ever insert, so a first-seen coarse date would be permanent:
 
 ```sql
-INSERT INTO feed_items (channel_id, video_id, title, published, date_precision, ...)
-VALUES (?, ?, ?, ?, ?, ...)
+INSERT INTO feed_items (channel_id, video_id, title, published, date_precision, source, ...)
+VALUES (?, ?, ?, ?, ?, ?, ...)
 ON CONFLICT(channel_id, video_id) DO UPDATE SET
-    published      = excluded.published,
-    date_precision = excluded.date_precision,
-    source         = excluded.source
-WHERE CASE excluded.date_precision
-        WHEN 'exact' THEN 4 WHEN 'day' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
-    > CASE feed_items.date_precision
-        WHEN 'exact' THEN 4 WHEN 'day' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
+    -- ALWAYS: a fact about this sighting; decides which probe to use
+    source = excluded.source,
+    -- GUARDED: monotonic estimate; a worse date never overwrites a better one
+    published = CASE WHEN <newRank> > <oldRank>
+                     THEN excluded.published ELSE feed_items.published END,
+    date_precision = CASE WHEN <newRank> > <oldRank>
+                     THEN excluded.date_precision ELSE feed_items.date_precision END
+
+-- where <newRank>/<oldRank> are:
+--   CASE {excluded.|feed_items.}date_precision
+--     WHEN 'exact' THEN 4 WHEN 'day' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
 ```
+
+**The guard moved from `WHERE` to `CASE` deliberately.** A statement-level `WHERE`
+gates the *whole* `DO UPDATE`, which would drag `source` along with the date rule —
+and a stale `source` selects the wrong probe, which does not fail but **lies** (see
+"`source` decides which probe to use"). Per-column `CASE` lets the two fields move
+on their own schedules in one statement: `source` always, dates only upward.
 
 The guard makes the write monotonic: a later, *worse* estimate can never overwrite
 a better one, so ordering cannot regress no matter which source sees an item next.
@@ -248,9 +258,10 @@ This is reachable, not theoretical: the backfill records a 2-day-old stream as
 `coarse`, RSS later carries an exact date for it, and being recent it is competing
 for the top N — exactly where ordering decides whether it is archived.
 
-Note `status` is deliberately **not** in the `DO UPDATE` set. Listing-derived
+Note `status` is deliberately **not** in the `DO UPDATE` set at all. Listing-derived
 status is weaker than probe-derived status, and a stale listing must never demote a
-probed `live` back to `vod`.
+probed `live` back to `vod`. (`source` is the opposite case: the listing is the
+*only* authority on where the item currently appears.)
 
 `title` is stored (the archival pass and job creation both need it) and refreshed
 when a probe returns a better one, mirroring today's rule at
@@ -1288,14 +1299,46 @@ Both are reads of a column that was, until this round, written and never read.
   date; the stored row is `coarse`, so the precision guard fires and `source`
   becomes `rss`. Subsequent probes are anonymous — correct, it *is* public now.
 - **Public → members** (creator locks an existing video). RSS drops it; the
-  membership tab lists it `coarse`, which loses to the stored `exact`, so the guard
-  rejects and `source` stays `rss`. The row keeps being probed anonymously, the
-  probe returns no formats, and it stays `unknown` — never archived. That is wrong
-  but **safe**: we decline to archive rather than misfire, and the row self-heals if
-  it is ever unlocked. Handling it properly would mean decoupling `source` from the
-  precision guard, which buys a rare edge case at the cost of making two unrelated
-  fields move independently. Not worth it; recorded so it is a decision rather than
-  a surprise.
+  membership tab lists it `coarse`. **`source` must flip to `membership` here, and
+  the precision guard must not be allowed to prevent that** — see below.
+
+**`source` is updated on every sighting, independent of the precision guard.** An
+earlier draft folded `source` into the guarded `DO UPDATE`, so a public→members
+transition left `source='rss'` (the membership tab's `coarse` date loses to the
+stored `exact`), and dismissed the result as "wrong but safe: we decline to archive
+rather than misfire". **That was false, and it is the same mistake the refresh-probe
+gate exists to prevent: a probe without cookies does not fail, it lies.**
+
+Traced properly, `source='rss'` on a members video means:
+
+1. The discovery pass picks the **anonymous** probe (`source <> 'membership'`), and
+   no membership gate applies — the row does not look like members content.
+2. `feed.go:743-746`: an anonymous probe of members-only content "gets no formats
+   and the classifier misfires it as **upcoming**". It returns no error.
+3. Outcome is `probed` ⇒ **FRESH**. The row becomes `upcoming`.
+4. `upcoming` is **cap-exempt** ⇒ in scope regardless of rank ⇒ `job iff FRESH` ⇒
+   **job created**, bypassing both the cap and `include_non_live_content`.
+
+That is precisely the misfire `feed.go:743-746` documents and 2.7.2 fixed — reached
+by trusting a stale `source`. It is not a decline; it is a phantom upcoming stream
+that will never go live, jobbed forever.
+
+So the upsert splits the two concerns, because they are unrelated:
+
+- **`source` records where we last saw the item.** It is a fact about *this*
+  sighting and is always current. It decides which probe to use, so it must track
+  reality immediately.
+- **`published`/`date_precision` record our best estimate.** They are monotonic, so
+  a worse estimate never overwrites a better one.
+
+Coupling them made a date-quality rule silently govern probe selection. Both
+directions are then correct: members→public flips to `rss` (anonymous probe —
+correct, it is public), and public→members flips to `membership` (authenticated
+probe, and the membership gates apply — correct, it is members-only).
+
+The only way two sources contend for one row in a cycle is the backfill's `/videos`
+and `/streams` tabs, which both list past streams; both are public, so either value
+selects the anonymous probe and last-writer-wins is harmless.
 
 ### `membership_discovery = false` must gate reads, not just writes
 
@@ -1970,6 +2013,14 @@ Then:
 - **`source='membership'` selects the authenticated probe.** A members row read back
   from the store is probed with cookies, not anonymously — otherwise it misclassifies
   as `upcoming` (`feed.go:743-746`), the 2.7.2 bug
+- **A public video that becomes members-only flips `source` to `membership` on the
+  next membership listing, even though its stored `exact` date beats the listing's
+  `coarse`.** The precision guard must not gate `source`. Regression test for the
+  phantom-upcoming misfire: left as `rss`, it is probed anonymously, lies
+  `upcoming`, and is jobbed cap-exempt — bypassing the cap AND
+  `include_non_live_content`.
+- A members video that becomes public flips `source` to `rss` and is probed
+  anonymously thereafter
 - **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
   shared with `decapi.go:583`; the outcome is surfaced to the caller so only the
   feed monitor persists it (non-goal guard)
@@ -2125,7 +2176,9 @@ exists (see "Phase 1 limitation").
 - Schema v16: `feed_items`, `channel_state`, and **both** indexes —
   `idx_feed_items_rank` (partial) and `idx_feed_items_status`. Omitting the latter
   turns two per-cycle queries into full catalog scans.
-- Precision-guarded upsert; `published` frozen at first insert, upgraded only upward
+- Precision-guarded upsert, **per-column**: `published`/`date_precision` move only
+  upward; `source` updates on **every** sighting. Coupling them lets a date-quality
+  rule pick the probe, and the wrong probe does not fail — it lies.
 - Top-N in-scope query; archival scope excludes `assumed`, `upcoming`, `live`
 
 *Monitor*
