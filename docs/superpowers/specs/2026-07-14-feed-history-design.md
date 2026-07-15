@@ -183,10 +183,10 @@ denied  ⇔  StreamStatus == 'upcoming'
 verified in code, and both fatal to the broader rules this went through first:
 
 **(a) `ok` does not mean "genuine" — it means `status` was literally `"OK"`.**
-`classifyStream` reaches `upcoming`/`live` through five guards — `:429`, `:432`,
-`:439`, `:442` (this one returns `StreamLive`), `:448`, `:454` — and `:429`
-*early-returns* on `isUpcomingPlayability`. So every guard after it is reachable
-**only when playability did *not* say "upcoming"** — and
+`classifyStream` reaches `StreamUpcoming` through five guards — `:429`, `:432`,
+`:439`, `:448`, `:454` — and `:429` *early-returns* on `isUpcomingPlayability`. So
+the four after it are reachable **only when playability did *not* say "upcoming"** —
+and
 `parsePlayabilityStatus` yields `ok` from exactly two sites
 (`isUpcomingFromPlayability` `:350-351`, and `status == "OK"` `:355-356`). Those four
 extra branches exist **precisely because the playability signal was found
@@ -294,9 +294,20 @@ YouTube actually returned. So:
 
 | Probe result | Meaning | Rule |
 |---|---|---|
+| `upcoming` + `members_only`/`login_required` | we were refused; the status is a guess | **`denied`** |
 | `upcoming` + `ok` | genuine scheduled stream | trust it — **goal 3** |
-| `upcoming` + `members_only`/`login_required`/`age_restricted`/… | we were refused; the status is a guess | **`denied`** |
+| `upcoming` + `age_restricted` | reachable (`:361-363`, `:379-380`), and **trusted** — see below | trust it |
+| `upcoming` + `unknown` | we could not read the answer | trust it |
 | `vod`/`post_live`/`not_a_stream` + any playability | formats came back; the classification is grounded | trust it |
+
+**`age_restricted` is trusted, and the list above is exhaustive — no "…".** An
+earlier draft wrote `members_only`/`login_required`/`age_restricted`/… here, which is
+"any non-`ok`" — the rule the paragraph below rejects, contradicting the rule stated
+twice above. It is not academic: `PlayabilityAgeRestricted` comes from
+`LOGIN_REQUIRED` + "age" (`:361-363`) and `AGE_VERIFICATION_REQUIRED` (`:379-380`),
+neither of which satisfies `isUpcomingFromPlayability`, so an age-restricted premiere
+carrying `videoDetails.isUpcoming` and no formats reaches guard `:439` ⇒ `upcoming` +
+`age_restricted`. Denying it loses a real premiere forever.
 
 A broader rule ("any non-`ok` ⇒ denied") would refuse content we can actually
 download — an age-restricted VOD that returns formats classifies `vod`, not
@@ -1414,7 +1425,7 @@ rounds of this document:
 
 `ShouldProcess` is *not* "the probe worked". A probe that **runs and succeeds**
 returns `ShouldProcess=false` whenever `nonLiveSkipReason` skips — `utils.go:315`
-(`not_a_stream`) and `:333` (`post_live`/`vod`). The mapping is not invertible:
+(`not_a_stream`) and `:332` (`post_live`/`vod`). The mapping is not invertible:
 `false` means "errored **or** cooled down **or** succeeded-but-not-jobbable".
 
 Deriving the store write from `ShouldProcess` therefore breaks the design on the
@@ -2541,7 +2552,7 @@ exists (see "Phase 1 limitation").
   `unknown` forever — and because it must not inherit the hidden `AddToHistory`
   side effects at `utils.go:284/313/330`.
 - **`VideoProbeResult.PlayabilityError`** — `VideoInfo` already carries it
-  (`types.go:17-28`, parsed at `player_api_parsing.go:332-375`) but
+  (`types.go:17-28`, parsed at `player_api_parsing.go:332-388`) but
   `VideoProbeResult` (`utils.go:32-36`) drops it, so the monitor cannot tell an
   observation from a refusal. Surfacing it is what makes the `denied` outcome
   possible, and `denied` is the only membership protection that does not depend on
