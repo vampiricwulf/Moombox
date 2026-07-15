@@ -183,9 +183,10 @@ denied  ⇔  StreamStatus == 'upcoming'
 verified in code, and both fatal to the broader rules this went through first:
 
 **(a) `ok` does not mean "genuine" — it means `status` was literally `"OK"`.**
-`classifyStream` reaches `upcoming`/`live` through five branches, and `:429`
-*early-returns* on `isUpcomingPlayability`. So `:434`, `:439`, `:442`, `:448`, `:454`
-are reachable **only when playability did *not* say "upcoming"** — and
+`classifyStream` reaches `upcoming`/`live` through five guards — `:429`, `:432`,
+`:439`, `:442` (this one returns `StreamLive`), `:448`, `:454` — and `:429`
+*early-returns* on `isUpcomingPlayability`. So every guard after it is reachable
+**only when playability did *not* say "upcoming"** — and
 `parsePlayabilityStatus` yields `ok` from exactly two sites
 (`isUpcomingFromPlayability` `:350-351`, and `status == "OK"` `:355-356`). Those four
 extra branches exist **precisely because the playability signal was found
@@ -228,11 +229,19 @@ leaves a phantom `upcoming` job that is visible in the UI and loses nothing. Goa
 decides: be minimal.
 
 **The `upcoming` conjunct is a metadata-presence test in disguise**, which is what
-makes `login_required` safe to include. `classifyStream` reaches `StreamUpcoming` via
-`:430`/`:433`/`:439`/`:448`/`:454`, and **every one requires live metadata to be
-present**: `:430` needs `isUpcomingFromPlayability` (which also forces `ok`, so
-`denied` cannot fire there at all), `:433` needs `isPremiere` ⇒ `lbd != nil`, and the
-rest need `lbd != nil`, `isLiveContent`, or `liveStreamability`. So a
+makes `login_required` safe to include. `classifyStream` returns `StreamUpcoming`
+from exactly five guards, and **every one requires live metadata to be present**
+(guard lines, not the `return` beneath each):
+
+| Guard | Condition | Implies |
+|---|---|---|
+| `:429` | `isUpcomingPlayability` | forces `ok` (`:350-351`) — `denied` cannot fire here at all |
+| `:432` | `isUpcomingPremiere` | `isPremiere` ⇒ `lbd != nil` |
+| `:439` | `isUpcomingVD && !hasFormats` | `videoDetails.isUpcoming` present |
+| `:448` | `hasLiveStreamability && !hasFormats` | `liveStreamability` present |
+| `:454` | `!hasFormats && (lbd != nil \|\| isLiveContent)` | `lbd` or `isLiveContent` |
+
+So a
 refusal that *still carries live metadata* is a content-level refusal on known-live
 content — the 2.7.2 signature exactly. A refusal carrying none (anti-bot / IP-block
 `LOGIN_REQUIRED`, "Sign in to confirm you're not a bot", which returns no
