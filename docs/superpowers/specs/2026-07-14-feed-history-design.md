@@ -354,10 +354,22 @@ needs, and that proof is a syntactic term match — so the index `WHERE` and the
 predicates must be written identically, as they are above. Confirmed:
 
 ```
-CREATE partial index with `status NOT IN (...)`  → accepted
-EXPLAIN QUERY PLAN (top-N)          → SEARCH feed_items USING INDEX idx_feed_items_rank (channel_id=?)
-EXPLAIN QUERY PLAN (discovery list) → SEARCH feed_items USING INDEX idx_feed_items_status (channel_id=? AND status=?)
+CREATE partial index with `status NOT IN (...)`   → accepted
+
+top-N (archival)
+  SEARCH feed_items USING INDEX idx_feed_items_rank (channel_id=?)
+
+discovery probe list
+  (status IN (unknown,upcoming,live) AND (next_probe_at IS NULL OR next_probe_at <= ?))
+  SEARCH feed_items USING INDEX idx_feed_items_status (channel_id=? AND status=?)
+
+cap-exempt union (status IN (upcoming,live))
+  SEARCH feed_items USING INDEX idx_feed_items_status (channel_id=? AND status=?)
 ```
+
+The `status=?` in the latter two is how SQLite renders an `IN`-list — it expands to
+one index seek per value, not an equality mismatch. `next_probe_at` is a residual
+filter over the few rows those seeks return, not an index miss.
 
 No `SCAN`, and no `USE TEMP B-TREE FOR ORDER BY` — the index satisfies the ordering
 as well as the filter, which is why the `DESC` in its definition matters. If the
@@ -595,10 +607,16 @@ discriminator has to be exhaustive or it silently re-derives the bug.
 The feed monitor reads the outcome and owns both store writes; DECAPI ignores it and
 behaves exactly as it does today.
 
-This single addition serves both new rules: **`outcome == probed` is precisely the
-"FRESH" predicate** the archival pass needs, and `outcome == errored` is what drives
-`probe_fails`/`next_probe_at`. Neither is a new source of truth — both read a
+This addition serves both new rules: **`outcome == probed` is the FRESH predicate**
+(for the store write *and* as the precondition for a job), and `outcome == errored`
+drives `probe_fails`/`next_probe_at`. Neither is a new source of truth — both read a
 decision `ProcessYouTubeVideo` already makes internally and currently discards.
+
+`Outcome` alone is not sufficient, though. The result must **also** carry
+`StreamStatus` and the authoritative publish date, because `ShouldProcess` conflates
+"the probe worked" with "this should become a job" — see "Only FRESH items become
+jobs". The feed path reads `Outcome` + `StreamStatus` and decides for itself;
+`ShouldProcess` remains for DECAPI.
 
 **Refresh probe** — on demand, only when a stored item is about to become a job:
 
@@ -686,10 +704,15 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         └─ same order as today: HasActiveJob → terms → probe (feed.go:704-725)
         └─ members-only content uses the authenticated probe (unchanged)
       outcome per item:
-        probed OK  ⇒ UPDATE published(exact), date_precision='exact', status, title
+        probed     ⇒ UPDATE published(exact), date_precision='exact', status, title
                      mark FRESH for this cycle
-        probe error⇒ store untouched; NOT fresh
-        cooldown   ⇒ probe skipped; NOT fresh
+                     └─ fires whenever METADATA came back — NOT gated on
+                        ShouldProcess, which is false for a successful probe
+                        of a non-jobbable item (utils.go:314, :333)
+        errored    ⇒ store untouched; NOT fresh; probe_fails++ (unknown rows defer)
+        cooldown   ⇒ probe skipped; NOT fresh; no backoff
+        passthrough⇒ ProbeVideo unwired; no metadata; treated as FRESH (jobs, as
+                     today)
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
       in-scope = top-N query  ∪  {items WHERE status IN (upcoming, live)}
       per item: skip if HasActiveJob → skip if NOT term-match → decide:
@@ -743,9 +766,55 @@ the probe give-up branch calls `AddToHistory` after repeated failures
 Today step 3 jobs it. A design that regresses this would violate goal 3 via exactly
 the transient failures this spec claims to leave untouched.
 
-**Only FRESH items become jobs.** "Fresh" means this cycle's probe returned a
-result — precisely today's `ShouldProcess == true`. This preserves the existing
-invariant through the two-pass split, which otherwise silently breaks it:
+**Only FRESH items become jobs**, where fresh means **this cycle's probe returned
+metadata** — `outcome == probed`. It does **not** mean today's
+`ShouldProcess == true`, and conflating the two is a trap that survived eight review
+rounds of this document:
+
+`ShouldProcess` is *not* "the probe worked". A probe that **runs and succeeds**
+returns `ShouldProcess=false` whenever `nonLiveSkipReason` skips — `utils.go:314`
+(`not_a_stream`) and `:333` (`post_live`/`vod`). The mapping is not invertible:
+`false` means "errored **or** cooled down **or** succeeded-but-not-jobbable".
+
+Deriving the store write from `ShouldProcess` therefore breaks the design on the
+**default** configuration (`IncludeNonLiveContent` is a plain `bool` at
+`internal/config/types.go:264`, so it defaults to `false`):
+
+1. RSS carries a plain upload ⇒ stored `unknown`/`exact`.
+2. Discovery probes it — that pass gates on `HasActiveJob` → terms only; the
+   `include_non_live_content` check lives in the archival branch.
+3. The probe **succeeds**, returns `not_a_stream`, and `nonLiveSkipReason(false, _)`
+   skips ⇒ `ShouldProcess=false`.
+4. If that means "not fresh", the status write never fires ⇒ the row stays
+   `unknown` **forever**.
+5. `next_probe_at` stays NULL, because the probe *succeeded* — the backoff only
+   triggers on `errored`. Nothing bounds it.
+
+Every plain upload on every default-config channel would then be probed at full rate
+forever: ~15 per channel per cycle against today's 3. That inverts goal 5 and
+falsifies "`vod` is not discovery-probed", which silently *depends* on the status
+write landing.
+
+So the design needs **two predicates, not one**:
+
+| Predicate | Value | Purpose |
+|---|---|---|
+| store write | `outcome == probed` | record status/date/title whenever metadata came back — **regardless of jobbability** |
+| job | `outcome == probed` **plus the archival rules** | the archival pass decides from the fresh `StreamStatus` |
+
+They coincide on the `live`/`upcoming` branches (`utils.go:319-324` fall through to
+`ShouldProcess: true`), which is exactly why the divergence hid — it exists only on
+the succeeded-but-skipped path.
+
+Consequently the feed monitor consumes the probe's **metadata**, not
+`ProcessYouTubeVideo`'s verdict: `ProcessYouTubeVideoResult` must expose
+`StreamStatus` and the authoritative publish date alongside `Outcome`. The archival
+pass already re-derives the job decision (upcoming/live → job; vod → gated on
+`include_non_live_content` and `established`), so `ShouldProcess` is simply unused by
+the feed path. DECAPI keeps using it, unchanged — which is also why it must stay.
+
+This preserves the existing invariant through the two-pass split, which otherwise
+silently breaks it:
 
 - **Probe errored this cycle.** Stored status still says `live`; the stream has
   since ended and been privated. Jobbing on stored status would create a job for a
@@ -1277,6 +1346,11 @@ Then:
 - `passthrough` (`ProbeVideo` unwired) counts as fresh and still jobs, exactly as
   today — freshness must not be derived from `ShouldProcess`, which is `true` on
   that path
+- **A successful probe of a non-jobbable item still writes its status.** Default
+  config (`include_non_live_content = false`), RSS plain upload ⇒ probe succeeds ⇒
+  `not_a_stream` ⇒ `ShouldProcess=false` ⇒ the row must become `not_a_stream`, NOT
+  stay `unknown`. Guards the goal-5 inversion where every upload is probed forever.
+- `ShouldProcess` is never used by the feed path; DECAPI's behaviour is byte-identical
 - **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
   shared with `decapi.go:583`; the outcome is surfaced to the caller so only the
   feed monitor persists it (non-goal guard)
@@ -1425,11 +1499,12 @@ is still correct; only the file is wrong. This matters here because Part 2 adds 
 **Phase 1** — independently shippable, fixes the bug:
 schema v16 (`feed_items`, `channel_state`, both indexes), precision-guarded upsert,
 top-N query, discovery/refresh probe split with the freshness rule, terminal
-durable per-item probe backoff (`probe_fails`/`next_probe_at`), a **probe-outcome
-discriminator on `ProcessYouTubeVideoResult`** (today `probed`/`errored`/`cooldown`
-all collapse to `ShouldProcess=false`; it supplies both the FRESH predicate and the
-backoff trigger, and keeps DECAPI out of the store), established gate,
-channel-removal prune,
+durable per-item probe backoff (`probe_fails`/`next_probe_at`, `unknown` rows only),
+**`ProcessYouTubeVideoResult` gains `Outcome` + `StreamStatus` + publish date** — the
+feed path must consume probe *metadata*, not `ShouldProcess`, which is `false` for a
+successful probe of a non-jobbable item and would otherwise strand every plain upload
+at `unknown` forever; it also supplies the FRESH predicate and the backoff trigger,
+and keeps DECAPI out of the store, established gate, channel-removal prune,
 **a unit-preserving `itemAge` signature** (today it discards the unit, making the
 coarse skew uncomputable — propagates to `MembershipVideo.Age` and
 `membershipCandidates`), **an injectable RSS fetch seam plus a new `feed_test.go`**
