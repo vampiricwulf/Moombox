@@ -142,19 +142,30 @@ from ever being archived correctly. That is the 2.7.2 bug.
 The natural safety argument — "no cookies ⇒ the probe fails ⇒ not FRESH ⇒ no job" —
 is therefore **false**, and every rule below exists because it is false:
 
-**The authoritative fix: a probe result is only trusted when
-`PlayabilityError == ok`.** YouTube says outright whether we were allowed to see the
-video, and `parsePlayabilityStatus` (`internal/youtube/player_api_parsing.go:332-375`)
-already decodes it into exactly the distinction this design needs:
+**The authoritative fix: distrust a probe result only when YouTube said it refused
+us AND the classifier was guessing.** YouTube states outright whether we were allowed
+to see the video, and `parsePlayabilityStatus`
+(`internal/youtube/player_api_parsing.go:332-388`) already decodes it:
 
-| Situation | `PlayabilityError` | Trusted? |
-|---|---|---|
-| Members-only video, no cookies (`LOGIN_REQUIRED` + "member"/"join") | `members_only` (`:357-359`) | **denied** |
-| Login required, not member-specific | `login_required` | **denied** |
-| Genuine upcoming (`LIVE_STREAM_OFFLINE`, "live event will begin") | `ok` (`:349-351`) | trusted |
-| Premiere detected by `videoDetails`/`liveStreamability`, not playability | often **not** `ok` (`:434-454`) | trusted — see (a) |
-| Status block absent, unmatched reason, or an unknown status code | `unknown` (`:333-335`, `:378`, `:385`, `:386-388`) | trusted — see (b) |
-| Age-restricted | `age_restricted` | trusted — the download path recovers it |
+```
+denied  ⇔  StreamStatus == 'upcoming'
+           AND PlayabilityError IN ('members_only', 'login_required')
+```
+
+**Both conjuncts are load-bearing.** Trust is *not* a function of `PlayabilityError`
+alone — an earlier draft said "trusted iff `PlayabilityError == ok`" and that rule is
+rejected below (it discards genuine premieres, which reach `upcoming` through
+branches where playability is *not* `ok` by construction).
+
+| Situation | `StreamStatus` | `PlayabilityError` | Trusted? |
+|---|---|---|---|
+| Members-only, no cookies (`LOGIN_REQUIRED` + "member"/"join") | `upcoming` | `members_only` (`:357-359`) | **denied** |
+| Login required, not member-specific | `upcoming` | `login_required` | **denied** |
+| Genuine upcoming (`LIVE_STREAM_OFFLINE`, "live event will begin") | `upcoming` | `ok` (`:350-351`) | trusted |
+| Premiere via `videoDetails`/`liveStreamability`, not playability | `upcoming` | often **not** `ok` (`:433-454`) | trusted — see (a) |
+| Status block absent, unmatched reason, or an unknown status code | any | `unknown` (`:333-335`, `:378`, `:385`, `:386-388`) | trusted — see (b) |
+| Age-restricted VOD that returned formats | `vod` | `age_restricted` | **trusted** — formats came back, so the classification is grounded |
+| Members-only that returned formats | `vod` | `members_only` | **trusted** — same reason; the `StreamStatus` conjunct is what allows this |
 
 So a probe that returns `upcoming` with `PlayabilityError == members_only` did **not
 observe an upcoming stream** — it observed a locked door and guessed. A probe that
@@ -217,9 +228,11 @@ leaves a phantom `upcoming` job that is visible in the UI and loses nothing. Goa
 decides: be minimal.
 
 **The `upcoming` conjunct is a metadata-presence test in disguise**, which is what
-makes `login_required` safe to include. `classifyStream` can only reach
-`StreamUpcoming` via `:439`/`:448`/`:454`, all of which require the response to have
-carried live metadata (`lbd != nil`, `isLiveContent`, or `liveStreamability`). So a
+makes `login_required` safe to include. `classifyStream` reaches `StreamUpcoming` via
+`:430`/`:433`/`:439`/`:448`/`:454`, and **every one requires live metadata to be
+present**: `:430` needs `isUpcomingFromPlayability` (which also forces `ok`, so
+`denied` cannot fire there at all), `:433` needs `isPremiere` ⇒ `lbd != nil`, and the
+rest need `lbd != nil`, `isLiveContent`, or `liveStreamability`. So a
 refusal that *still carries live metadata* is a content-level refusal on known-live
 content — the 2.7.2 signature exactly. A refusal carrying none (anti-bot / IP-block
 `LOGIN_REQUIRED`, "Sign in to confirm you're not a bot", which returns no
@@ -1080,9 +1093,9 @@ is a programming error, not a supported mode. Production always wires it
 today's nil behavior, unchanged.
 
 So the feed path's outcome set is four values (`probed`/`denied`/`errored`/`cooldown`)
-and `outcome == probed` is the FRESH predicate without qualification. The fourth value
+and `outcome == probed` is the FRESH predicate without qualification. `passthrough`
 still matters — it is why `ShouldProcess` cannot be used as a freshness proxy — but
-it lives on DECAPI's side of the split.
+it lives on DECAPI's side of the split, so it is not in the feed path's set at all.
 
 The feed monitor reads the outcome and owns both store writes; DECAPI ignores it and
 behaves exactly as it does today.
@@ -1290,7 +1303,7 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                      mark FRESH for this cycle
                      └─ fires whenever METADATA came back — NOT gated on
                         ShouldProcess, which is false for a successful probe
-                        of a non-jobbable item (utils.go:314, :333)
+                        of a non-jobbable item (utils.go:315, :332)
         denied     ⇒ status=='upcoming' AND playability IN (members_only,
                      login_required) — the unambiguous "authenticate to see this",
                      paired with the classifier's no-formats guess. Store
@@ -1321,6 +1334,12 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
                                  (members_only). Gate = skip a doomed request.
                             → refresh-probe, WRITE THE RESULT BACK to the store,
                               then re-decide on the FRESH status:
+                                 denied           → NO JOB, retry next cycle
+                                   └─ MUST be listed FIRST: `denied` carries
+                                      StreamStatus=='upcoming' by definition, so
+                                      any table that omits it routes it straight
+                                      to `live/upcoming → job (cap exempt)` —
+                                      the 2.7.2 misfire, laundered.
                                  live/upcoming    → job (cap exempt)
                                  vod/not_a_stream → job
                                  probe errored    → no job, retry next cycle
@@ -1385,7 +1404,7 @@ metadata** — `outcome == probed`. It does **not** mean today's
 rounds of this document:
 
 `ShouldProcess` is *not* "the probe worked". A probe that **runs and succeeds**
-returns `ShouldProcess=false` whenever `nonLiveSkipReason` skips — `utils.go:314`
+returns `ShouldProcess=false` whenever `nonLiveSkipReason` skips — `utils.go:315`
 (`not_a_stream`) and `:333` (`post_live`/`vod`). The mapping is not invertible:
 `false` means "errored **or** cooled down **or** succeeded-but-not-jobbable".
 
