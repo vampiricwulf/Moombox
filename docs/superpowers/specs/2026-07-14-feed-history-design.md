@@ -506,6 +506,24 @@ growth") and buys self-healing: the moment any probe returns a usable date, the 
 takes it, becomes `vod`, and ranks normally. A terminal status is a promise that we
 know enough to stop looking; without a date we do not.
 
+**This invariant is exactly necessary and sufficient.** Enumerating the full state
+space (5 statuses × 4 precisions) against the three rules — discovery-probed iff
+`status IN (unknown, upcoming, live)`; in the top-N iff `date_precision <> 'assumed'
+AND status NOT IN ('upcoming','live')`; cap-exempt iff `status IN (upcoming, live)` —
+yields exactly **two** states that are neither probeable nor reachable by any
+archival path:
+
+| status | precision | probed | in top-N | cap-exempt | outcome |
+|---|---|---|---|---|---|
+| `vod` | `assumed` | no | no | no | **stuck** |
+| `not_a_stream` | `assumed` | no | no | no | **stuck** |
+
+Every other combination is either probed (so it can change) or rankable (so it can
+be archived). `unknown`+`assumed` is fine — it is probed. `upcoming`/`live`+`assumed`
+are fine — they are cap-exempt. The only sinks are a terminal status paired with a
+fabricated date, and forbidding that pairing is precisely this invariant. Nothing
+else needs guarding, and nothing less would do.
+
 The `liveStreamability` epoch branch is never a publish date — it is the scheduled
 start of an upcoming stream. It must not feed `PublishedAt` at all.
 
