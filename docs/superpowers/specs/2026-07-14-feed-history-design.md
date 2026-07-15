@@ -1647,7 +1647,9 @@ Phase 2; the established gate simply rests on `last_rss_ok_at` alone until Phase
 exists (see "Phase 1 limitation").
 
 *Store*
-- Schema v16: `feed_items`, `channel_state`, **both** indexes (rank index is partial)
+- Schema v16: `feed_items`, `channel_state`, and **both** indexes —
+  `idx_feed_items_rank` (partial) and `idx_feed_items_status`. Omitting the latter
+  turns two per-cycle queries into full catalog scans.
 - Precision-guarded upsert; `published` frozen at first insert, upgraded only upward
 - Top-N in-scope query; archival scope excludes `assumed`, `upcoming`, `live`
 
@@ -1655,6 +1657,11 @@ exists (see "Phase 1 limitation").
 - Discovery pass / archival pass split, with the FRESH rule (`outcome == probed`)
 - Refresh probe on the archival `vod` branch, writing its result back
 - Established gate; rewired `checkChannel`/`processCandidate`
+- **Channel-removal prune** from `kickMonitors`, mirroring `PruneHealth`
+  (`feed.go:151-158`, called at `services.go:571-573`). Needed in Phase 1, not
+  Phase 2: `feed_items` is populated by RSS/membership from day one, so without it a
+  removed channel leaks rows forever. Phase 1's prune is the simple form — there is
+  no backfill to cancel yet, so cancel-before-prune arrives with Phase 2.
 
 *Refactors this depends on* (none of which exist today — budget them)
 - **Split `ProcessYouTubeVideo`** into `probeAndClassify` (feed path: probe +
@@ -1664,6 +1671,13 @@ exists (see "Phase 1 limitation").
   probe of a non-jobbable item and would otherwise strand every plain upload at
   `unknown` forever — and because it must not inherit the hidden `AddToHistory`
   side effects at `utils.go:284/313/330`.
+- **A publish date on the probe** — `VideoInfo.PublishedAt` +
+  `VideoProbeResult.PublishedAt` + both `monitor_callbacks.go` wiring sites, with
+  status-aware extraction (`vod` → `liveBroadcastDetails.startTimestamp`, `exact`;
+  `not_a_stream` → `uploadDate`, `day`; `upcoming`/`live` → none). **No date exists
+  in the probe chain today** — without this, an `assumed` row can never be promoted
+  and members content becomes permanently unarchivable. Also adds the `day` rung to
+  the precision ladder and the guard's `CASE`.
 - **Unit-preserving `itemAge`** — today it discards the unit, making the coarse skew
   uncomputable. Propagates to `MembershipVideo.Age` and `membershipCandidates`.
 - **An injectable RSS fetch seam + a new `feed_test.go`** — `checkChannel` calls
@@ -1675,11 +1689,37 @@ exists (see "Phase 1 limitation").
 - Remove `last_videos` + `GetLastVideo`/`SetLastVideo`
 - The included fixes; doc updates (including the in-code comments)
 
-**Phase 2** — lands on top:
-InnerTube `/browse` continuation client (modelled on `internal/chat`, not ported
-from yt-dlp), three-tab scan gated on `membership_discovery` + auth and filtered to
-YouTube channels, listing classification, merged channel-global `catalog_pos`
-assignment, throttled resumable backfill worker, the idempotent
-`backfilled_at IS NULL` sweep, debounced manual re-run (`R` chord + API), and
-progress via `hub.Broadcast` + a TUI `tea.Msg` channel — including the
-`InitialState` seed.
+**Phase 2** — lands on top of a shipped Phase 1.
+
+*Scanner*
+- InnerTube `/browse` continuation client, modelled on `internal/chat`
+  (`api.go:172-178`, `downloader.go:412-423`, `:558-583`) — **not** ported from
+  yt-dlp, which is only the reference for the browse response shape
+- Three-tab scan (`/videos` + `/streams` + `/membership`), unioned and deduped;
+  membership gated on `MembershipDiscoveryEnabled() && HasAuthCookies()`; the whole
+  scan filtered to `GetPlatform() == "youtube"`
+- Listing classification via `itemAge` (badge short-circuit included)
+- Merged channel-global `catalog_pos` ordering pass (collect-then-update)
+
+*Worker*
+- Throttled, resumable backfill; rows written per page; `backfilled_at` set only on
+  completion of the eligible tabs
+- The idempotent `backfilled_at IS NULL` sweep, with an **in-flight set** so
+  repeated `kickMonitors` calls cannot launch concurrent scans of one channel
+- **Cancel-before-prune**: the in-flight set is what lets `kickMonitors` cancel a
+  scan for a departing channel before pruning its rows (Phase 1's prune is the
+  simple form; this upgrades it)
+- Debounced manual re-run (`R` chord + API), modelled on
+  `POST /api/monitors/check-now` and its 30s `atomic.Int64` guard
+
+*Then enabled by the scan's data*
+- `last_listed_at` + deferral for rows no listing has mentioned for N days — the
+  correct bound on dead-row probing that Phase 1 deliberately does without (see
+  "Probe-list growth")
+- Turning `membership_discovery` on must clear `backfilled_at` to force a rescan,
+  since the eligible tab set changed
+
+*UI*
+- Progress via `hub.Broadcast` (web) + a TUI `tea.Msg` channel, **including** the
+  `InitialState` seed (`ws_wiring.go:87-111`) — a long-running scan makes mid-flight
+  connect the common case
