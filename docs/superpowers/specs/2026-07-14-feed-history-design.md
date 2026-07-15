@@ -343,7 +343,11 @@ SELECT video_id, title, published, status FROM feed_items
  WHERE channel_id = ?
    AND date_precision <> 'assumed'
    AND status NOT IN ('upcoming', 'live')
-   -- AND source <> 'membership'      ← appended when membershipActive() is false
+   -- AND source <> 'membership'   ← iff NOT MembershipDiscoveryEnabled()
+   --                                 (the OPERATOR'S toggle only — never
+   --                                  membershipActive(), which folds in live
+   --                                  cookie state and would move scope on a
+   --                                  cookie lapse)
  ORDER BY published DESC, catalog_pos ASC, video_id ASC
  LIMIT ?
 ```
@@ -613,10 +617,11 @@ becomes `vod`, and the probe that observes that transition supplies the real one
 fabricated date: `itemAge` returns `0` for any item it cannot parse, which becomes
 `published = now`. Letting that rank would place a guess at position 1 ahead of
 every real date — the opposite of the goal. Excluding it costs nothing, because an
-`assumed` row is always `unknown` and is always discovery-probed — including when
-its terms do not match, via the carve-out in "Descriptions and term matching". The
-probe promotes it to a real date and it enters the ranking, usually within the same
-cycle.
+every `assumed` row is always discovery-probed — an `unknown` one by the status rule
+plus the term carve-out ("Descriptions and term matching"), an `upcoming`/`live` one
+by the status rule directly. (Not every `assumed` row is `unknown`: `upcoming`/`live`
+rows store no date and stay `assumed` too.) The probe promotes it to a real date and
+it enters the ranking, usually within the same cycle.
 
 This also removes a denial-of-scope failure. `published` is frozen at insert, so if
 the corrective probe fails permanently the fabricated "now" would sit in the top N
@@ -663,15 +668,35 @@ would tie every member of a lump at the same rank and admit all of them.
 Probes have two distinct triggers. Conflating them is a mistake: one is discovery,
 the other is metadata freshness before job creation.
 
-**Discovery probes** — every cycle, rank ignored:
+**Discovery probes** — every cycle, rank ignored. The status rule is only half of
+it; the gates are not optional, and they are stated here in full because a reader
+looking up "when do we probe?" stops at this block:
 
 ```
-unknown  → probe (nothing can be missed)
-upcoming → probe (goal 3)
-live     → probe (goal 3)
-vod / not_a_stream → NOT probed for discovery
-(no row is ever deferred in Phase 1 — see "Probe-list growth")
+per row, in this order:
+  skip if HasActiveJob                        (the worker owns it)
+  skip if NOT term-match  UNLESS date_precision='assumed'
+                                              (terms gate JOBBING; an assumed row is
+                                               probed anyway to get a DATE, which
+                                               RANKING needs — see the carve-out in
+                                               "Descriptions and term matching")
+  skip if source='membership' AND NOT membershipActive()
+                                              (no cookies / discovery off ⇒ an
+                                               authenticated probe is useless)
+  then, by status:
+    unknown  → probe (nothing can be missed)
+    upcoming → probe (goal 3)
+    live     → probe (goal 3)
+    vod / not_a_stream → NOT probed for discovery
+  probe choice: source='membership' ⇒ authenticated, else anonymous
+  (no row is ever deferred in Phase 1 — see "Probe-list growth")
 ```
+
+**Stating this as the bare status rule is a known trap.** It then reads as "probe
+every `unknown` row unconditionally", which drops the term gate and reintroduces the
+goal-5 cost regression on any channel using `terms`. It is also exactly the false
+premise that made an earlier state-space proof miss a sink (see "This invariant is
+exactly necessary and sufficient"). The status rule alone is never the answer.
 
 ### Probe-list growth: named, accepted, and deferred to Part 2
 
@@ -945,7 +970,8 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
       memb → coarse from Age; undatable → 'assumed' (provisional)
 3. DISCOVERY PROBE PASS
       probe list = feed_items[channel] WHERE status IN (unknown, upcoming, live)
-                     [AND source <> 'membership' when membershipActive() is false]
+                     [AND source <> 'membership' iff NOT membershipActive()
+                      — probing may be opportunistic; ranking may not]
         └─ read from the STORE, not this cycle's response
       per item: skip if HasActiveJob → skip if NOT term-match → probe
         └─ same order as today: HasActiveJob → terms → probe (feed.go:704-725)
@@ -981,8 +1007,10 @@ upgrade pays a one-time cost (~17 probes for a 3-channel install).
         (no passthrough on this path — probeAndClassify requires a wired probe)
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
       in-scope = top-N query  ∪  {items WHERE status IN (upcoming, live)}
-                 [both arms exclude source='membership' when membershipActive()
-                  is false — the toggle must gate READS, not just fetches]
+                 [top-N arm excludes source='membership' iff NOT
+                  MembershipDiscoveryEnabled(); cap-exempt arm iff NOT
+                  membershipActive(). Reads must be gated, not just fetches —
+                  and the RANKING arm must ignore cookie state]
       per item: skip if HasActiveJob → skip if NOT term-match → decide:
          upcoming/live    → job iff FRESH this cycle
                             (cap exempt; NOT gated by HasProcessed — see below)
@@ -1153,9 +1181,23 @@ reasons:
 - **An `assumed` row is probed to get a date**, which *ranking* needs — and ranking
   counts all channel content, matching or not.
 
-So a non-matching row is probed at most once, to date it. Once it has a real date it
-is `vod`/`not_a_stream` (terminal) or dated-`unknown`, and either way it is never
-discovery-probed again while it stays non-matching. Rows that already carry a real
+So a non-matching row is probed until it *has* a date, then never again while it
+stays non-matching. For the common case that is once: the probe returns
+`vod`/`not_a_stream` with a date (terminal, and rankable).
+
+Two cases cost more, and neither is unbounded:
+
+- **The probe returns `upcoming`/`live`.** Those statuses store no date, so the row
+  stays `assumed` and the carve-out keeps probing it every cycle — a non-matching
+  members premiere scheduled three weeks out costs one authenticated probe per cycle
+  for three weeks. It stops when the stream ends and `post_live` supplies
+  `startTimestamp`. Bounded by the stream's lifetime, and such a row is exactly the
+  one whose status we most want current.
+- **The probe returns `vod` with no date.** The row stays `unknown` per the terminal
+  invariant and is retried — the accepted cost in "Probe-list growth".
+
+Rows that already carry a real date (RSS `exact`, membership/backfill `coarse`) are
+never probed on this path at all — they are already rankable. Rows that already carry a real
 date (RSS `exact`, membership/backfill `coarse`) are never probed on this path at
 all — they are already rankable.
 
@@ -1203,8 +1245,8 @@ move to store-driven passes — a row read back from `feed_items` has no `authPr
 came from the members tab, and members-only content must be probed with cookies or
 the classifier misfires it as `upcoming` (`feed.go:743-746`) — the bug 2.7.2 fixed.
 
-This is the second job `source` does, alongside the toggle predicate below. Both
-are reads of a column that was, until this round, written and never read.
+This is one of two jobs `source` does — the other is the toggle predicate below.
+Both are reads of a column that was, until this round, written and never read.
 
 **The transition cases, and why the failure directions are acceptable:**
 
@@ -1243,28 +1285,69 @@ still holds every members row written while the toggle was on. So:
 Moombox then downloads members-only content on a channel where members-only
 discovery is off. The Part 2 backfill gate does not help: this needs no backfill.
 
-**The fix is a read-side predicate.** When `membershipActive()` is false, rows with
-`source = 'membership'` are excluded from **all three** store queries — the discovery
-probe list, the top-N, and the cap-exempt union:
+**The fix is a read-side predicate — but the three arms must not use the same
+predicate.** This is the trap, and an earlier draft of this section fell into it by
+gating all three on `membershipActive()`.
 
-```sql
--- appended to each query when membershipActive() == false
-AND source <> 'membership'
+**`membershipActive()` is not the toggle.** It folds in live cookie state:
+
+```
+membershipActive()          = FetchMembership != nil && MembershipEnabled()   feed.go:518-523
+MembershipEnabled()         = MembershipDiscoveryEnabled() && HasAuthCookies() monitor_callbacks.go:218-224
 ```
 
-`source` already exists (`feed_items.source`) and was, until now, written but never
-read. This is the one place it earns its keep.
+and its own comment says it "re-reads the config flag **AND cookie state** live each
+cycle". Cookies lapse for reasons nobody chose: the exporter rotates the file
+(`cookies/jar.go:72-90` — `Load` on a missing file clears the jar and returns nil),
+the browser session ends, a refresh races. `SyncCookies` runs before every
+membership fetch and every authenticated probe.
 
-**Excluding them from the *ranking* too is deliberate, not incidental.** With the
-toggle off, today's cap counts only public items, because members items never enter
-the pool at all. Ranking stored members rows would let invisible content evict
-public content from scope — a silent behavior change in the opposite direction. The
-rows stay in the store (turning the toggle back on must not lose them) and simply
-stop being visible while it is off.
+So gating the **ranking** on `membershipActive()` reintroduces this spec's own bug:
 
-This composes with the partial rank index: the query gains a predicate, so the
-index's `WHERE` is still implied and still usable; `source` becomes a residual
-filter over the rows it returns.
+1. `N=3`. Store: three recent members VODs at ranks 1-3; public VODs at ranks 4-6.
+2. Cookies lapse for one cycle ⇒ `membershipActive()` false ⇒ the top-N appends
+   `AND source <> 'membership'` ⇒ the top-3 becomes the three **public** VODs.
+3. They are in scope, unprocessed, term-matching, non-live ⇒ refresh-probed
+   anonymously (they are public, so it succeeds) ⇒ **three jobs created**.
+4. Cookies return; scope reverts. The downloads are permanent and now in `history`.
+
+That is scope moving because a fetch input failed — *"a partial discovery failure
+silently changes what the cap means"*, which is the Problem statement of this
+document. Round 20b's goal-2 wording claims every scope-mover is "an operator or
+channel action with a visible cause"; a cookie rotation is neither.
+
+**So the arms split by what they are for:**
+
+```sql
+-- ranking (top-N): gate on the OPERATOR'S CHOICE only
+AND source <> 'membership'      -- iff NOT MembershipDiscoveryEnabled()
+
+-- discovery probe list and cap-exempt union: gate on membershipActive()
+AND source <> 'membership'      -- iff NOT membershipActive()
+```
+
+The asymmetry is the point:
+
+- **Ranking must be stable**, so it may only move on an operator's decision.
+  `MembershipDiscoveryEnabled()` is exactly that decision and nothing else.
+- **Probing may be opportunistic.** With no cookies an authenticated probe is
+  useless, so skipping it costs nothing and loses nothing permanently — the row is
+  still ranked, still un-jobbable (no FRESH result ⇒ no job), and resumes the moment
+  cookies return.
+
+A cookie lapse therefore leaves scope *exactly* where it was: members rows keep
+their ranks, hold their slots, and simply go un-probed for a cycle. Goal 2 holds at
+no cost.
+
+**Excluding them from the ranking when the operator turns the toggle off is
+deliberate.** With it off, today's cap counts only public items, because members
+items never enter the pool at all. Ranking invisible rows would let hidden content
+evict public content from scope — a silent change in the opposite direction. The
+rows stay stored (turning it back on must not lose them) and stop being visible.
+
+Both predicates compose with the partial rank index: each is conjunctive, so the
+index's `WHERE` stays implied and usable, and `source` is a residual filter over the
+rows returned.
 
 ### The established gate
 
@@ -1780,6 +1863,12 @@ Then:
 - Coarse dates skew old: `"3 weeks ago"` stores `now-28d`, not `now-21d`
 - `membership_discovery = false` ⇒ backfill writes no members rows, and none are
   jobbed via the store
+- **A cookie lapse must NOT move scope.** Arrange members rows at ranks 1-3 and
+  public VODs at 4-6, then make `HasAuthCookies()` false for one cycle: the top-3
+  must still be the members rows, and **no public VOD may be jobbed**. Gating the
+  ranking on `membershipActive()` (which folds in cookie state) instead of
+  `MembershipDiscoveryEnabled()` fails this — and is this spec's own bug, reached
+  through a new door.
 - **Turning `membership_discovery` OFF takes effect immediately, on rows already
   stored.** Arrange a members row written while it was on, then flip it off: the row
   must not be probed, must not rank, and must not be jobbed — even though no
@@ -1991,8 +2080,11 @@ exists (see "Phase 1 limitation").
 - Discovery pass / archival pass split, with the FRESH rule (`outcome == probed`)
 - `post_live` → `vod` normalization on write; the probe write is precision-guarded
 - `source` becomes a **read** column: it selects the authenticated probe (replacing
-  the in-memory `discoveredVideo.authProbe`) and gates all three store queries when
-  `membershipActive()` is false
+  the in-memory `discoveredVideo.authProbe`) and gates the store queries — the
+  **ranking** arm on `MembershipDiscoveryEnabled()` (operator choice only), the
+  probe list and cap-exempt arm on `membershipActive()` (which includes cookie
+  state). The asymmetry is load-bearing: gating ranking on cookie state moves scope
+  on a fetch failure.
 - The `assumed`-row probe carve-out (probed regardless of terms, to obtain a date)
 - Refresh probe on the archival `vod` branch, writing its result back
 - Established gate; rewired `checkChannel`/`processCandidate`
