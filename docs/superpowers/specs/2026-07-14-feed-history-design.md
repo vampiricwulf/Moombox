@@ -79,8 +79,12 @@ longer re-arm out-of-scope content.
 - Unifying the `history` table into the new store (see Decisions).
 - Changing the probe-failure/cooldown machinery.
 - Any Twitch-side change. The Twitch monitor is live-only and has no cap.
-- Any DECAPI-side change. DECAPI returns only the channel's single latest video
-  (`internal/monitor/decapi.go:523-534`), so it cannot reach back to old content.
+- Any DECAPI-side change. DECAPI parses a single video ID out of its response
+  (`internal/monitor/decapi.go:523-534`) — the channel's *latest* — so it cannot
+  reach back to old content and cannot be the source of this bug class. It keeps
+  its existing `HasActiveJob`/`HasProcessed`/probe path and does **not** write to
+  `feed_items`; anything it finds is by construction rank 1 and would be admitted
+  by the cap anyway. This is why `decapi` is absent from the `source` enum.
 
 ## Key Insights
 
@@ -141,7 +145,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
     published    TEXT NOT NULL,           -- RFC3339 UTC, best-known
     date_precision TEXT NOT NULL,         -- 'exact' | 'coarse' | 'assumed'
     catalog_pos  INTEGER NOT NULL DEFAULT 0,
-    source       TEXT NOT NULL,           -- rss|membership|videos|streams|decapi
+    source       TEXT NOT NULL,           -- rss|membership|videos|streams
     status       TEXT NOT NULL,           -- unknown|upcoming|live|vod|not_a_stream
     first_seen   TEXT NOT NULL,
     PRIMARY KEY (channel_id, video_id)
@@ -160,6 +164,30 @@ CREATE TABLE IF NOT EXISTS channel_state (
 `published` is frozen at first insert and only ever *upgraded* by a
 higher-precision source (`assumed` → `coarse` → `exact`). It is never recomputed
 from `now`, which is what makes ranking stable across cycles.
+
+That upgrade requires a **precision-guarded upsert, not `INSERT OR IGNORE`** — the
+latter can only ever insert, so a first-seen coarse date would be permanent:
+
+```sql
+INSERT INTO feed_items (channel_id, video_id, title, published, date_precision, ...)
+VALUES (?, ?, ?, ?, ?, ...)
+ON CONFLICT(channel_id, video_id) DO UPDATE SET
+    published      = excluded.published,
+    date_precision = excluded.date_precision,
+    source         = excluded.source
+WHERE CASE excluded.date_precision WHEN 'exact' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
+    > CASE feed_items.date_precision WHEN 'exact' THEN 3 WHEN 'coarse' THEN 2 ELSE 1 END
+```
+
+The guard makes the write monotonic: a later, *worse* estimate can never overwrite
+a better one, so ordering cannot regress no matter which source sees an item next.
+This is reachable, not theoretical: the backfill records a 2-day-old stream as
+`coarse`, RSS later carries an exact date for it, and being recent it is competing
+for the top N — exactly where ordering decides whether it is archived.
+
+Note `status` is deliberately **not** in the `DO UPDATE` set. Listing-derived
+status is weaker than probe-derived status, and a stale listing must never demote a
+probed `live` back to `vod`.
 
 `title` is stored (the archival pass and job creation both need it) and refreshed
 when a probe returns a better one, mirroring today's rule at
@@ -219,27 +247,58 @@ would tie every member of a lump at the same rank and admit all of them.
 
 ### Probe rules
 
+Probes have two distinct triggers. Conflating them is a mistake: one is discovery,
+the other is metadata freshness before job creation.
+
+**Discovery probes** — every cycle, rank ignored:
+
 ```
-unknown  → probe once, rank ignored          (nothing can be missed)
-upcoming → probe every cycle, rank ignored   (goal 3)
-live     → probe every cycle, rank ignored
-vod      → never probe again
-not_a_stream → never probe again
+unknown  → probe (nothing can be missed)
+upcoming → probe (goal 3)
+live     → probe (goal 3)
+vod / not_a_stream → NOT probed for discovery
 ```
 
-Probe volume is bounded naturally: RSS returns ≤15 and the membership tab ~30, so
-a cycle cannot exceed ~45 unknowns, and only once. The first cycle after upgrade
-pays a one-time cost (~17 probes for a 3-channel install).
+**Refresh probe** — on demand, only when a stored item is about to become a job:
+
+```
+in-scope AND NOT HasProcessed AND term-match AND status IN (vod, not_a_stream)
+    → re-probe now, then job on the fresh result
+```
+
+This preserves today's invariant that **job creation always follows a fresh
+probe**. Without it, the archival pass would create jobs from probe data captured
+in an arbitrarily old cycle — stale titles, and videos that may since have been
+deleted or privated.
+
+It also keeps a documented user workflow intact. `internal/monitor/utils.go:226-227`
+describes deleting a job and clearing its Orphaned history entry so the video "can
+be picked up again". That still works: clearing history makes `HasProcessed` false,
+the item is still in the top N, so the refresh probe fires and it is re-jobbed —
+provided it is still within the archival scope, which is the intended new limit.
+
+The refresh probe is rare by construction: it only fires for an item that is
+in-scope, unprocessed, and terminal — i.e. after a history clear or a
+`max_feed_items` increase. Steady state never triggers it.
+
+The efficiency win survives: a `vod` that is already processed, or out of scope, is
+**never probed again**. That is the common case, and today it costs a full
+`/player` fetch with retries every single cycle only to be discarded by
+`nonLiveSkipReason` immediately after.
+
+Discovery probe volume is bounded naturally: RSS returns ≤15 and the membership tab
+~30, so a cycle cannot exceed ~45 unknowns, and only once. The first cycle after
+upgrade pays a one-time cost (~17 probes for a 3-channel install).
 
 ### Steady-state flow (per channel, per cycle)
 
 ```
 1. fetch RSS ─┐ (independent; either may fail)
    fetch /membership ─┘
-2. INSERT OR IGNORE every item seen → feed_items
+2. UPSERT every item seen → feed_items  (precision-guarded; never downgrades)
       RSS  → published exact
       memb → coarse from Age; undatable → 'assumed' (provisional)
-3. PROBE PASS
+3. DISCOVERY PROBE PASS
       probe list = feed_items[channel] WHERE status IN (unknown, upcoming, live)
         └─ read from the STORE, not this cycle's response
       per item: skip if HasActiveJob → probe
@@ -248,9 +307,10 @@ pays a one-time cost (~17 probes for a 3-channel install).
 4. ARCHIVAL PASS  (runs after the probe pass, on corrected dates)
       in-scope = top-N query  ∪  {items WHERE status IN (upcoming, live)}
       per item: skip if HasActiveJob or HasProcessed → term match → decide:
-         upcoming/live    → job  (cap exempt)
-         vod/not_a_stream → job iff include_non_live_content
+         upcoming/live    → job  (cap exempt; probed this cycle already)
+         vod/not_a_stream → refresh-probe, then job iff include_non_live_content
                                 AND channel established
+                                AND still non-live on the fresh result
 5. AddToHistory on job creation  (unchanged)
 6. on RSS success ⇒ channel_state.last_rss_ok_at = now
 ```
@@ -371,7 +431,13 @@ Then:
 - Coarse-tie lump: 20 items sharing one date, `N=3` ⇒ exactly 3 admitted (proves
   the total order)
 - Upcoming below rank N ⇒ still probed and jobbed (proves cap-exemption)
-- `vod` never re-probed; `unknown` probed exactly once
+- Processed/out-of-scope `vod` never re-probed; `unknown` probed exactly once
+- Job creation always follows a fresh probe, including via the archival pass
+- Clearing orphaned history for an in-scope VOD re-jobs it (refresh probe fires);
+  clearing it for an out-of-scope VOD does **not**
+- Precision guard: a later `coarse` write never overwrites a stored `exact`; a
+  later `exact` write does overwrite a stored `coarse`
+- A stale listing never demotes a probed `live` back to `vod`
 - Trust gate: fresh install, first cycle 404 ⇒ no past-content archival
 - Top-N counts non-term-matching items
 - Raising `max_feed_items` widens scope for already-stored VODs without a re-probe
