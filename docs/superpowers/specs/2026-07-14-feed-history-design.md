@@ -478,15 +478,49 @@ So the row is never retired; it is **rescheduled**. `probe_fails` and
 `next_probe_at` give the store a durable per-item backoff:
 
 ```
-probe fails   ⇒ probe_fails++, next_probe_at = now + backoff(probe_fails)
-probe succeeds⇒ probe_fails = 0, next_probe_at = NULL
+probe fails    ⇒ probe_fails++
+                 next_probe_at = now + backoff(probe_fails)  ONLY if status='unknown'
+probe succeeds ⇒ probe_fails = 0, next_probe_at = NULL
 discovery list = status IN (unknown, upcoming, live)
                  AND (next_probe_at IS NULL OR next_probe_at <= now)
 ```
 
-A dead ID decays toward a floor (say hourly, then daily) instead of costing a probe
-every cycle forever; a recoverable one returns to full rate on its first success.
-Nothing is ever permanently abandoned, so no stream can be lost this way.
+**A known `upcoming` or `live` row is never deferred.** This asymmetry is the whole
+point, and it follows from the project's stated priority order
+(Correctness > Reliability > Efficiency):
+
+- **`unknown`** — we have never successfully probed it, so we do not know it is a
+  stream at all. Deferring costs nothing we can name. Safe.
+- **`upcoming` / `live`** — a *successful* probe told us this is a stream. Deferring
+  it trades the one thing that must not be traded: a deferred upcoming row that goes
+  live during its backoff window is recorded late, and a late start is a partial
+  miss of an unrepeatable event. Efficiency does not get to win that.
+
+This also respects what give-up actually means. `RecordFailure`
+(`internal/monitor/utils.go:61-76`) **deletes the counter** when it gives up at
+`maxMetadataFailures = 3` (`:19-21`), and `utils.go:275-279` calls that "backing
+off" and notes "giveUp also resets the tracker's escalation to 0". Give-up is a
+recurring, deliberately transient backoff — not a verdict on the video. Treating it
+as permanent (which a terminal state, or an unbounded backoff on a known stream,
+would) misreads it.
+
+An `unknown` dead ID decays toward a floor (say hourly, then daily) instead of
+costing a probe every cycle forever; a recoverable one returns to full rate on its
+first success. Nothing is ever permanently abandoned, so no stream can be lost this
+way.
+
+**Residual, accepted and named:** a row that was successfully probed as `upcoming`
+and *then* deleted keeps `status='upcoming'`, is never deferred, and therefore
+probes every cycle forever. We cannot distinguish "deleted permanently" from
+"YouTube is 5xx-ing" without error-kind information `ProbeVideo` does not currently
+surface — and given that ambiguity, probing a dead ID is the correct error to make.
+The accumulation is slow (cancelled/deleted scheduled streams are rare — a handful
+per channel per year), and bounded work per row is one `/player` call per cycle.
+
+The clean fix is a `last_listed_at` column: a row that no listing has mentioned for
+N days *and* whose probes are failing is gone, and can be deferred safely without
+ever guessing about a stream that still exists. That needs listing-coverage data
+Part 2 provides, so it is named here as a follow-up rather than designed now.
 
 This is also strictly better than today in a way worth stating: `MetadataTracker` is
 **in-memory** and resets on every restart, so today's give-up does not survive a
@@ -538,15 +572,27 @@ design says they never enter.
 Instead `ProcessYouTubeVideoResult` gains an **outcome** discriminator:
 
 ```
-probed   — a probe ran and returned metadata
-errored  — a probe ran and failed
-cooldown — no probe ran; ProbeCooldown suppressed it
+probed      — a probe ran and returned metadata          (utils.go:268-300)
+errored     — a probe ran and failed                     (utils.go:269-294)
+cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
+passthrough — no probe ran; ProbeVideo is not wired      (utils.go:248-250)
 ```
 
-Today the caller cannot distinguish these: all three collapse to
-`ShouldProcess=false` (`utils.go:258-262` for cooldown, `:294` for error). The feed
-monitor reads the outcome and owns both store writes; DECAPI ignores it and behaves
-exactly as it does today.
+**There are four, not three, and the fourth breaks the obvious rule.** An earlier
+draft claimed all outcomes "collapse to `ShouldProcess=false`". Three do —
+`utils.go:258-262` (cooldown) and `:294` (error) — but `p.ProbeVideo == nil` returns
+`ShouldProcess: **true**` at `:248-250`, passing the item straight through
+un-probed. So "not `ShouldProcess`" is not a usable proxy for "not fresh", and a
+naive implementation deriving freshness from `ShouldProcess` would job on no
+metadata whenever the probe is unwired.
+
+`passthrough` counts as **fresh**, which preserves today's behavior exactly: with no
+probe wired, `ProcessYouTubeVideo` jobs the item today, and it must continue to. It
+is a test-and-backwards-compatibility path, not a production one — but the
+discriminator has to be exhaustive or it silently re-derives the bug.
+
+The feed monitor reads the outcome and owns both store writes; DECAPI ignores it and
+behaves exactly as it does today.
 
 This single addition serves both new rules: **`outcome == probed` is precisely the
 "FRESH" predicate** the archival pass needs, and `outcome == errored` is what drives
@@ -1224,6 +1270,12 @@ Then:
   recovered row returns to full poll rate
 - A healthy row is never deferred: `next_probe_at` stays NULL for anything that
   probes successfully
+- **A known `upcoming`/`live` row is NEVER deferred**, however many times its probe
+  has failed — it goes live on time and is caught on time. Only `unknown` rows back
+  off.
+- `passthrough` (`ProbeVideo` unwired) counts as fresh and still jobs, exactly as
+  today — freshness must not be derived from `ShouldProcess`, which is `true` on
+  that path
 - **A DECAPI probe give-up writes no `feed_items` row.** `ProcessYouTubeVideo` is
   shared with `decapi.go:583`; the outcome is surfaced to the caller so only the
   feed monitor persists it (non-goal guard)
