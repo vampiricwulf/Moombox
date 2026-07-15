@@ -427,7 +427,7 @@ exclusion, and worth stating as such.
 | Store structure | SQLite table + partial rank index + status index | Workload is one indexed top-N query per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
 | Cap gate | Coarse pre-filter **removed**. Scope is a store-driven top-N query; every job still follows a fresh probe | The pre-filter was the sole cause of the miss risk, and guarded a probe budget that no longer exists once status is recorded |
 | Cap meaning | Archival depth, not probe budget | Matches goal 2; probe volume is naturally bounded by sources |
-| `history` table | Schema/API/UI untouched; the feed path writes **fewer** rows | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI. See "What history comes to mean" — dropping the skip/give-up writes is a population change, not a schema change |
+| `history` table | Schema/API/UI untouched; the feed path writes **fewer** rows | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI. See "What `history` comes to mean" — dropping the skip/give-up writes is a population change, not a schema change |
 | Catalog scan role | Backfill only | Part 1 makes RSS 404s harmless; 3 MB/channel/cycle forever buys no correctness |
 | Backfill trigger | One idempotent sweep keyed on `backfilled_at IS NULL`, run at startup and from `kickMonitors` (which fires on every channel add/remove/reorder), plus a manual re-run | No action needed on upgrade; new channels start complete. Not two triggers — `kickMonitors` cannot distinguish an add from a reorder, so it must be idempotent (see Integration Points) |
 | `last_videos` | Removed | Dead code; `feed_items` supersedes it (per-channel **and** dated) |
@@ -667,7 +667,7 @@ excluded from the ranking, not merely exempted from the cut.
 
 A permanently-failing row needs no exclusion of its own: it is stuck at `unknown`
 (excluded by the `assumed` rule) or at `upcoming`/`live` (excluded by the status
-rule), so it can never evict real content from scope. See "Bounding the probe list".
+rule), so it can never evict real content from scope. See "Why the probe list must be bounded at all".
 
 **The transition is the point, not a wrinkle.** When an upcoming stream ends it
 becomes `vod` and *enters* the ranking at its (recent) date, taking rank 1 and
