@@ -88,18 +88,60 @@ longer re-arm out-of-scope content.
 - Unifying the `history` table into the new store (see Decisions).
 - Changing the probe-failure/cooldown machinery (`MetadataTracker`, `ProbeCooldown`).
 - Any Twitch-side change. The Twitch monitor is live-only and has no cap.
-- Any DECAPI-side change. DECAPI parses a single video ID out of its response
-  (`internal/monitor/decapi.go:523-534`) — the channel's *latest* — so it cannot
-  reach back to old content and cannot be the source of this bug class. It keeps
-  its existing `HasActiveJob`/`HasProcessed`/probe path and does **not** write to
-  `feed_items`; anything it finds is by construction the newest item on the channel.
-  This is why `decapi` is absent from the `source` enum.
+- Any DECAPI-side change **beyond one date comparison**. DECAPI keeps its
+  `HasActiveJob`/`HasProcessed`/probe path and still does **not** write to
+  `feed_items` — which is why `decapi` is absent from the `source` enum. See "DECAPI
+  needs the window, and only on one branch" below for the comparison, and for why the
+  flat non-goal an earlier draft carried here was unsafe.
 
 **Worker changes are *not* a non-goal.** An earlier draft scoped this to the monitor
 and store. It cannot be: the queue this design creates sits directly on top of
 `internal/worker/queue.go`, and one bug there (see "`num_parallel_downloads` becomes
-VOD-only") already loses streams
-on a stock config.
+VOD-only") already loses streams on a stock config.
+
+### DECAPI needs the window, and only on one branch
+
+DECAPI is **redundancy for RSS**, not a history mechanism. RSS fails ~13% of cycles
+(see Evidence); DECAPI independently asks *"what is the newest video on this channel"*
+so a stream going live during a 404 is still caught. That is its whole job.
+
+An earlier draft made it a flat non-goal on this reasoning:
+
+> "anything it finds is by construction the newest item on the channel"
+
+which was airtight under the rejected top-N — rank 1 passes any cap of N ≥ 1 — and is
+**false under a window**. The newest item on a dormant channel can be a year old.
+`decapi.go:523-600` parses the latest video ID, checks `HasActiveJob`, checks
+`HasProcessed` (which only sets the log level and `IsReprobe`), probes, and jobs. There
+is no date check anywhere. So with `include_non_live_content = true`, adding a channel
+whose last upload was six months ago has DECAPI job it on the first cycle — an old VOD
+archived because a monitor's scope is not date-bounded, which is the opening sentence of
+this document, reached through a second door.
+
+The reasoning was load-bearing on a model we replaced, and the non-goal was carried
+across the rewrite without re-checking it.
+
+**The fix is one comparison, on one branch:**
+
+```
+DECAPI probe returns live / upcoming  → job, ALWAYS. No date check.
+                                        This IS the redundancy — a stream going live
+                                        during an RSS outage is the case DECAPI
+                                        exists for, and a date must never block it.
+DECAPI probe returns vod / not_a_stream
+                                      → job only if the probe's PublishedAt is inside
+                                        archive_window_days. Otherwise no job.
+                                        "Most recent" is not "recent".
+```
+
+It reads the probe's own `PublishedAt` — which Phase 1 adds anyway — so DECAPI needs no
+`feed_items` read, no store write, and no change to its existing path.
+
+**The cost, stated plainly:** the window now bounds two monitors, and this document's
+own thesis is that a rule written twice drifts. What keeps it honest is that these are
+not two copies of one rule: the feed path scopes a *set* with a query, DECAPI filters a
+*single probe result*. The shared part is one config value. There is no predicate to
+duplicate, only a bound to consult.
 
 ## Key Insights
 
@@ -165,8 +207,9 @@ leaves the probe list exactly as it leaves scope.
 | `classifyStream:454` | Keep `denied`; **file `:454` separately** | The producer bug has download-path blast radius. `denied` is the cheap local containment |
 | `history` table | Schema/API/UI untouched; the feed path writes **fewer** rows | Answers a different question ("acted on" vs "exists and when"). Dropping the skip/give-up writes is a population change, not a schema change |
 | Catalog scan role | **Backfill only** | RSS stays the steady-state source; 3 MB/channel/cycle forever buys no correctness |
+| Backfill depth | **To the window, not the catalogue** — page each tab until the content is older than `archive_window_days`, then stop | Every row beyond the window is outside it *forever*: never probed, never archived, never read. At the 3-day default a full scan costs ~200 requests per channel to write rows nothing consults. Widening the window clears `backfilled_at` and rescans deeper |
 | Backfill trigger | One idempotent sweep keyed on `backfilled_at IS NULL`, at startup and from `kickMonitors`, plus a manual re-run | `kickMonitors` cannot distinguish an add from a reorder, so it must be idempotent |
-| Backfill pacing | **Strictly serial across channels**, hours of wall-clock permitted, never gated on idleness | Upgrade day fires the sweep for every channel at once |
+| Backfill pacing | **Strictly serial across channels**, never gated on idleness | Upgrade day fires the sweep for every channel at once. Wall-clock stops being a concern once the scan is window-depth (~3 requests/channel at the default), but serial costs nothing and bounds the worst case when the window is wide |
 | `last_videos` | Removed | Dead code; `feed_items` supersedes it |
 
 ## External Assumptions (unverified in-repo)
@@ -467,9 +510,10 @@ CREATE INDEX IF NOT EXISTS idx_feed_items_window
 
 -- Serves Q2, the cap-exempt union: the upcoming/live rows, read UNCONDITIONALLY
 -- with no date term (see "The window query"). Without it Q2 degrades to a full
--- scan of the channel's rows — the whole catalogue after the backfill — every
--- cycle. The window index cannot serve Q2: status is not in it, and published
--- leads.
+-- scan of every row the channel has, every cycle — and that set only grows: the
+-- store never forgets, so RSS alone accumulates a channel's whole visible history
+-- over a long-lived install, backfill or no backfill. The window index cannot
+-- serve Q2: status is not in it, and published leads.
 CREATE INDEX IF NOT EXISTS idx_feed_items_status
     ON feed_items(channel_id, status);
 
@@ -849,8 +893,8 @@ AND (published >= ? OR status IN ('upcoming','live'))` plans as (modernc.org/sql
 without a status index (one-index design):
   SEARCH feed_items USING INDEX idx_feed_items_window (channel_id=?)
         ^^ the `published>?` term is GONE — this is a full scan of every row the
-           channel has. After the backfill that is the entire catalogue, every
-           cycle, forever. Goal 5, lost.
+           channel has, every cycle, forever. The store never forgets, so that set
+           only grows. Goal 5, lost.
 
 with a status index:
   MULTI-INDEX OR
@@ -1710,7 +1754,7 @@ writing exactly as they do today.
 This composes with the window into defence in depth: purging history can no longer
 re-arm an out-of-window VOD, *and* there is much less spurious history to purge.
 
-## Part 2 — Full-Catalog Backfill
+## Part 2 — Backfill to the window
 
 ### Current capability
 
@@ -1825,9 +1869,9 @@ better: both tabs write `coarse`, so the second write is rejected outright.)
 1. scan /videos, /streams, /membership page by page
      └─ write each page's rows IMMEDIATELY, catalog_pos = provisional per-tab index
      └─ advance the per-tab cursor in channel_state.backfill_state
-     └─ EARLY EXIT: if backfilled_at IS NOT NULL and a full page yields no new
-        video IDs, stop paging this tab (a re-run; the rest is already stored).
-        NEVER early-exit when backfilled_at IS NULL — see below
+     └─ STOP when an item's date is older than archive_window_days, or when a
+        full page yields no datable item (the parser-failure arm). Same rule on a
+        first scan and a re-run — see "The stop condition is the window"
 2. when all eligible tabs are exhausted, run one ORDERING PASS:
      └─ SELECT the channel's rows into a slice, CLOSE the cursor
      └─ sort by (published DESC, provisional pos ASC, video_id ASC)
@@ -1845,51 +1889,56 @@ Rows with no real `published` (live/upcoming/unparseable, which enter as `assume
 sort by that `now` and land at the top of the merged order — which is where they belong:
 they are always in the window and always probed.
 
-### Early exit — only on a re-run, never on the first scan
+### The stop condition is the window, not a page of known IDs
 
-A re-run should not re-page a channel's entire back catalogue to discover what it
-already knows. So a tab **stops paging once a full page yields no new video IDs**.
+**Page each tab until an item's date is older than `archive_window_days`, then stop.**
+Everything behind it is older still — the same source-ordering fact the discovery walk
+rests on — so it is outside the window too, and a row outside the window is never
+probed, never archived, and never read by anything. Scanning it writes disk nobody
+consults.
 
-A full page of known IDs is the threshold rather than a single known ID, because
-YouTube reorders shelves and interleaves; one familiar item proves nothing about the
-next page. A whole page does.
+At the 3-day default that is roughly **one page per tab**: three requests per channel,
+not two hundred. Upgrade day stops being an event.
 
-**The trap: early exit must be gated on `backfilled_at IS NOT NULL`.** On a *first*
-scan the store is not empty — RSS and membership have been populating it since Phase 1,
-so `/videos` page 1 is very likely *entirely* known. A naive early exit would fire on
-page 1, declare the tab exhausted, and set `backfilled_at` having scanned nothing —
-permanently marking the channel complete with no catalogue behind it, and no sweep would
-ever revisit it (`backfilled_at IS NULL` is the only trigger).
+**Coarse dates make the stop condition sound without a margin.** `now - itemAge()` is
+the *newest instant consistent with the text* ("Coarse dates skew new"), so an item
+whose coarse date is already outside the window is outside it on any reading. The skew
+direction *is* the margin.
 
-```
-backfilled_at IS NULL      → full scan, no early exit (the store proves nothing)
-backfilled_at IS NOT NULL  → early exit allowed (the catalogue is already complete)
-```
+**This deletes the first-scan trap.** An earlier draft stopped on "a full page yields no
+new video IDs", which is ambiguous on a cold store: RSS and membership have been
+populating `feed_items` since Phase 1, so `/videos` page 1 is very likely *entirely*
+known. A naive early exit would fire on page 1, declare the tab exhausted, and set
+`backfilled_at` having scanned nothing — permanently marking the channel complete with
+no catalogue behind it, and no sweep would revisit it (`backfilled_at IS NULL` is the
+only trigger). That draft needed a `backfilled_at IS NOT NULL` gate to tell a first scan
+from a re-run.
+
+A date-based stop needs no such gate. *"This item is older than the window"* means the
+same thing on a cold store and a warm one, so first scans and re-runs run the identical
+rule. The gate, the ambiguity, and the trap all go.
+
+**Widening `archive_window_days` must clear `backfilled_at`.** The scan's depth is a
+function of the window, so a wider window is a deeper scan — the same rule as turning
+`membership_discovery` on, and for the same reason: the eligible set changed. Narrowing
+it need not rescan; the surplus rows are merely outside the window, which is the state
+every un-scanned row is in anyway.
+
+**The `assumed` hazard the stop condition must survive.** An item `itemAge` cannot parse
+returns `0` ⇒ `published = now` ⇒ *inside* the window. So a tab of unparseable items
+never stops. Under the `relativeAgeRe` breakage in External Assumptions that is every
+item on every channel, and the scan pages the entire catalogue — the exact cost this
+decision removes, reappearing precisely when the parser fails.
+
+So the stop condition is **`assumed`-aware**: page until an item's date is outside the
+window *or* a full page yields no datable item, whichever comes first. The second arm
+is a parser-failure detector, not a completeness rule — log it, stop the tab, and leave
+`backfilled_at` NULL so the scan retries once YouTube's copy or our regex is fixed.
 
 **Rows are written as they are scanned, not buffered to the end.** The obvious
 formulation — scan everything, merge in memory, then write — is incompatible with
 "resumable via cursor": a restart mid-scan would destroy the buffer, so the cursor would
 resume into a merge whose earlier half no longer exists.
-
-The cost is that `catalog_pos` is provisional until the ordering pass runs. That is
-harmless: a partially-backfilled channel's un-ordered rows are old, coarse-dated content
-outside the window, and `backfilled_at` stays NULL until the ordering pass completes.
-
-**The ordering pass must collect-then-update.** With `SetMaxOpenConns(1)`
-(`internal/database/database.go:177`), issuing UPDATEs while a SELECT cursor is open
-deadlocks on the single connection — the hazard documented at `migrations.go:242-244`.
-Read rows into a slice, close the cursor, then write.
-
-Steady-state inserts (RSS, membership) keep using the per-fetch index, which is sound
-there: RSS dates are `exact` and distinct, so they effectively never tie, and a
-membership fetch is a single listing whose internal order is genuine recency.
-`catalog_pos` only ever arbitrates *within* one `published` value.
-
-**Known limit, accepted:** a tie between a backfilled row (global position) and a later
-steady-state row (per-fetch position) is resolved deterministically but arbitrarily. It
-requires identical `published` values across a coarse backfill row and a coarse
-membership row, and it only changes ordering *within* a lump. Not worth a second
-coordinate column.
 
 ### Operational rules
 
@@ -1907,16 +1956,12 @@ coordinate column.
 - Throttled: one page per interval (constant, not config).
 - **Strictly serial across channels — one channel scanned at a time, globally.** On
   upgrade day *every* YouTube channel has `backfilled_at IS NULL`, so the sweep fires
-  for all of them at once; a single global queue is what stops that becoming a request
-  storm. The numbers are not small: a 2,000-video channel is roughly 65 pages × 3 tabs
-  ≈ 200 requests, and twenty channels ≈ 4,000 — aimed at an endpoint we already observe
-  failing ~13% of cycles. Concurrency would multiply the rate exactly where it hurts,
-  and backfill failures are silent by design (cursor saved, `backfilled_at` stays NULL),
-  so throttling would present as slowness rather than as breakage.
-- **Wall-clock is allowed to be hours, and that is not a defect.** The monitors keep
-  running on RSS throughout; the store deepens underneath them. Nothing waits on the
-  sweep except the established gate on a channel that has no working RSS, which had no
-  path at all before this.
+  for all of them at once. At the 3-day default that is ~3 requests per channel and the
+  serial queue costs nothing to keep; it earns its place at a **wide** window, where the
+  scan is deep again and concurrency would multiply the rate against an endpoint we
+  already observe failing ~13% of cycles. Backfill failures are silent by design (cursor
+  saved, `backfilled_at` stays NULL), so throttling would present as slowness rather
+  than as breakage.
 - **Never gated on idleness.** A tempting variant pauses paging while downloads or
   monitor cycles are active. On a 24/7 install — the target deployment — it may never
   finish, which leaves the established gate shut on dead-RSS channels forever: the exact
@@ -1925,7 +1970,7 @@ coordinate column.
   one page, so serial + slow carries no risk of lost work.
 - `backfilled_at` set **only** on full completion of all eligible tabs.
 - Runs in its own throttled path — **not** through the monitor's cycle loop, which does
-  retries and backoff per video and would be pathological over thousands of items.
+  retries and backoff per video and would be pathological over a deep scan.
 - Progress surfaced in Web UI and TUI.
 - Inline `defer recover()` in the scan goroutine, per project rule.
 
@@ -2022,9 +2067,9 @@ to force a rescan, since the eligible set changed.
 `logs`, `nextFeedCheck`, `nextDecapiCheck`, `nextTwitchCheck`, `connectivity`,
 `hideFinishedAgeDays`. `disk_status` is absent, so a web client connecting mid-event
 renders nothing until the next tick. The TUI seeds itself (`tui_wiring.go:409-415`); the
-Web UI does not. A throttled full-catalog backfill is long-running *by design*, so
-mid-flight connect is the **common case**: backfill progress must be added to
-`InitialState` and the TUI seed mirrored.
+Web UI does not. At the 3-day default a scan is over in seconds, but a wide window
+makes it long-running again — and that is exactly when an operator watches it. Backfill
+progress must be added to `InitialState` and the TUI seed mirrored.
 
 ### Manual re-run: `R` chord + debounced route
 
@@ -2246,8 +2291,16 @@ removes. It cannot survive.
 - Backfill skips Twitch channels entirely
 - Rows persist per page, so a restart mid-scan resumes from the cursor;
   `catalog_pos` is only final once `backfilled_at` is set
-- **Early exit fires on a re-run and NEVER on a first scan.** A first scan of a channel
-  whose store already holds its 15 newest RSS items must still page the whole catalogue
+- **The scan stops at the window, on a first scan and a re-run alike.** A cold-store
+  first scan of a channel whose `feed_items` already holds its 15 newest RSS rows must
+  behave identically to a re-run: page until the content is older than
+  `archive_window_days`, then stop. No `backfilled_at` gate is involved
+- **A tab of undatable items does not page forever.** `itemAge` returning `0` means
+  `published = now`, which is *inside* every window — so under a `relativeAgeRe` break
+  the date arm never fires. Assert the parser-failure arm stops the tab and leaves
+  `backfilled_at` NULL
+- **Widening `archive_window_days` clears `backfilled_at` and rescans deeper; narrowing
+  it does not rescan**
 - Removing a channel mid-backfill cancels the scan before the prune, and leaves no
   resurrected rows
 - Channel removed ⇒ its `feed_items`/`channel_state` rows are pruned; re-adding triggers
@@ -2496,7 +2549,8 @@ an archive that never happened.
 *Worker*
 - Throttled, **strictly serial across channels**, resumable; rows written per page;
   `backfilled_at` set only on completion of the eligible tabs
-- Early exit on re-runs, **gated on `backfilled_at IS NOT NULL`**
+- Window-depth stop condition (date arm + parser-failure arm), identical on first
+  scans and re-runs — no `backfilled_at` gate
 - The idempotent `backfilled_at IS NULL` sweep, with an **in-flight set**
 - **Cancel-before-prune**
 - Debounced manual re-run (`R` chord + API)
