@@ -591,6 +591,24 @@ cooldown    — no probe ran; ProbeCooldown suppressed it  (utils.go:258-262)
 passthrough — no probe ran; ProbeVideo is not wired      (utils.go:248-250)
 ```
 
+**Contract: `StreamStatus` is meaningful if and only if `outcome == probed`.** This
+falls straight out of the existing control flow, and the type should enforce it
+rather than rely on the reader:
+
+| return site | `meta` | outcome |
+|---|---|---|
+| `utils.go:249` | not yet assigned | `passthrough` |
+| `utils.go:261` | not yet assigned | `cooldown` |
+| `utils.go:294` | zero value (`err != nil`) | `errored` |
+| `utils.go:315`, `:332`, `:350` | valid | `probed` |
+
+`meta` is assigned at `:268`, so the first two returns precede it entirely and the
+error return holds only its zero value. Reading `StreamStatus` on any non-`probed`
+outcome yields `""` and would classify silently wrong. The spec never does — the
+store write and the job decision both require `probed` first — but the coupling
+should be explicit, because "empty string means not-a-stream-ish" is exactly the
+kind of thing that compiles.
+
 **There are four, not three, and the fourth breaks the obvious rule.** An earlier
 draft claimed all outcomes "collapse to `ShouldProcess=false`". Three do —
 `utils.go:258-262` (cooldown) and `:294` (error) — but `p.ProbeVideo == nil` returns
