@@ -66,9 +66,13 @@ longer re-arm out-of-scope content.
 ## Goals
 
 1. An RSS (or any single-source) failure must not change discovery scope.
-2. `max_feed_items` becomes a stable **archival-depth** boundary: content below
-   rank N is permanently out of scope, not "out of scope depending on what we
-   fetched this cycle".
+2. `max_feed_items` becomes a stable **archival-depth** boundary. "Stable" means
+   *invariant with respect to fetch outcomes* — scope is a function of the
+   channel's content and `N`, never of what a given cycle happened to retrieve.
+   It is deliberately **not** immutable: raising `N` widens scope for content
+   already in the store, and publishing N newer items pushes an item out of scope.
+   Both are the boundary working as intended. What must never happen is scope
+   moving because a fetch failed.
 3. **Upcoming and live content is never missed and never consumes a cap slot.**
 4. Nothing is ever ranked on a guessed date.
 5. Steady-state cost must not exceed today's.
@@ -161,7 +165,7 @@ exclusion, and worth stating as such.
 |---|---|---|
 | Scope | One spec, phased implementation | Part 1 ships alone and fixes the bug; Part 2 lands on top |
 | Store structure | SQLite table + covering index | Workload is one indexed top-N query per channel per cycle (~3 per 5 min); in-memory/materialised-rank optimise microseconds while adding cache-skew and renumber races |
-| Cap gate | Coarse pre-filter **removed**; authoritative post-probe gate | Pre-filter was the sole cause of the miss risk, and guarded a budget that no longer exists |
+| Cap gate | Coarse pre-filter **removed**. Scope is a store-driven top-N query; every job still follows a fresh probe | The pre-filter was the sole cause of the miss risk, and guarded a probe budget that no longer exists once status is recorded |
 | Cap meaning | Archival depth, not probe budget | Matches goal 2; probe volume is naturally bounded by sources |
 | `history` table | Left alone, separate | Answers a different question ("acted on" vs "exists and when"); unifying would touch Twitch, DECAPI, orphan API, Web UI, TUI |
 | Catalog scan role | Backfill only | Part 1 makes RSS 404s harmless; 3 MB/channel/cycle forever buys no correctness |
