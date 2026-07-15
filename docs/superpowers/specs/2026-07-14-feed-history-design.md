@@ -216,6 +216,51 @@ without cookies the content is unreachable regardless.
 leaves a phantom `upcoming` job that is visible in the UI and loses nothing. Goal 3
 decides: be minimal.
 
+**The `upcoming` conjunct is a metadata-presence test in disguise**, which is what
+makes `login_required` safe to include. `classifyStream` can only reach
+`StreamUpcoming` via `:439`/`:448`/`:454`, all of which require the response to have
+carried live metadata (`lbd != nil`, `isLiveContent`, or `liveStreamability`). So a
+refusal that *still carries live metadata* is a content-level refusal on known-live
+content — the 2.7.2 signature exactly. A refusal carrying none (anti-bot / IP-block
+`LOGIN_REQUIRED`, "Sign in to confirm you're not a bot", which returns no
+`videoDetails`) falls to `:451` ⇒ `not_a_stream`, and the rule never fires on it.
+
+**Known residual, accepted.** A members refusal phrased as `UNPLAYABLE` with none of
+the matched keywords yields `unknown` (`:378`) ⇒ trusted ⇒ the lie survives. That is
+the price of keeping `unknown` trusted, and (b) above is why the price is worth
+paying.
+
+### Follow-up: `classifyStream:454` diverges from yt-dlp (file separately)
+
+`denied` is a **compensating control in the consumer for a producer bug**, and the
+producer bug should be recorded even though fixing it is out of scope here.
+
+`player_api_parsing.go:454` infers `upcoming` from the *absence* of formats:
+
+```go
+if !hasFormats && (lbd != nil || isLiveContent) { return StreamUpcoming, ... }
+```
+
+yt-dlp never does this. `_list_formats`
+(`references/yt-dlp/yt_dlp/extractor/youtube/_video.py:3858-3870`) reads the flag and
+falls back the other way:
+
+```python
+is_upcoming = get_first(video_details, 'isUpcoming')
+live_status = ('post_live' if post_live else 'is_live' if is_live
+               else 'is_upcoming' if is_upcoming
+               else 'was_live' if live_content ...)
+```
+
+For a members video with no formats and `isLiveContent = true`, yt-dlp returns
+`was_live` — a past stream, correct — where Moombox returns `upcoming`. Under the
+project's standing "match yt-dlp for extraction" rule, `:454` is the actual defect.
+
+**Not fixed here, deliberately.** Changing the classifier has download-path blast
+radius (every strategy branches on `StreamStatus`), which is well outside this spec's
+non-goals. `denied` is the cheap, local containment. File `:454` as its own issue; if
+it is ever fixed, `denied` becomes redundant rather than wrong.
+
 A `denied` result is not FRESH, writes no status, and creates no job — it is retried
 next cycle, exactly like `errored`. This requires surfacing the field, which
 `VideoProbeResult` does not carry today (see Phase 1).
@@ -974,7 +1019,11 @@ Instead `ProcessYouTubeVideoResult` gains an **outcome** discriminator:
 
 ```
 feed path (probeAndClassify) — four outcomes:
-  probed      — a probe ran, returned metadata, PlayabilityError == ok
+  probed      — a probe ran, returned metadata, and the result is NOT denied.
+                NOT "PlayabilityError == ok": that was an earlier, over-broad
+                rule, and pairing it with the current `denied` leaves
+                upcoming+unknown premieres and age_restricted VODs in NEITHER
+                bucket — undefined, never FRESH, never jobbed.
   denied      — StreamStatus=='upcoming' AND PlayabilityError IN
                 ('members_only','login_required'): the only two values that can
                 only mean "authenticate to see this", paired with the one status
@@ -1030,8 +1079,8 @@ is a programming error, not a supported mode. Production always wires it
 (`utils_test.go:215`). DECAPI keeps the composed `ProcessYouTubeVideo` and with it
 today's nil behavior, unchanged.
 
-So the feed path's outcome set is three values (`probed`/`errored`/`cooldown`) and
-`outcome == probed` is the FRESH predicate without qualification. The fourth value
+So the feed path's outcome set is four values (`probed`/`denied`/`errored`/`cooldown`)
+and `outcome == probed` is the FRESH predicate without qualification. The fourth value
 still matters — it is why `ShouldProcess` cannot be used as a freshness proxy — but
 it lives on DECAPI's side of the split.
 
@@ -1626,10 +1675,12 @@ same outcome — during a lapse the row is unprobeable, so it is never FRESH, so
 never jobbed, and it is caught the moment cookies return — but keying it on cookie
 state invites the reader to ask "does a cookie lapse hide a live members stream?"
 every time they encounter it. Keying both read arms on the operator's choice means
-cookie state can only skip a probe that would have failed — provided **every** probe
-trigger carries the membership gate, discovery and refresh alike. The refresh probe
-is the one that bites if forgotten: without cookies it does not fail, it succeeds
-with a wrong answer (see "Refresh probe").
+cookie state can only skip a probe that would have failed. The probe-side membership
+gates make that true cheaply; the `denied` rule makes it true *regardless*, by
+intercepting the wrong answer even on an ungated path. Note this applies to the
+**probe** arms only — the read arms' `MembershipDiscoveryEnabled()` gate is a genuine
+correctness control that `denied` cannot cover, because a members probe *with* valid
+cookies returns `ok` and would be jobbed.
 
 A cookie lapse therefore leaves scope *exactly* where it was: members rows keep
 their ranks, hold their slots, stay cap-exempt, and simply go un-probed for a cycle.
