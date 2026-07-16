@@ -48,13 +48,14 @@ func (c *Client) FetchChannelTabPage(ctx context.Context, channelID, tab, contin
 **Interfaces:**
 - Produces: `type BackfillWorker struct{...}` with `func (bw *BackfillWorker) scanChannel(ctx context.Context, ch *config.ChannelConfig, chID string, windowDays int, withMembership bool) error`.
 - Consumes: Task 1's client, `db.UpsertFeedItem`, `db.SaveBackfillCursor(chID, stateJSON string) error` + `db.LoadBackfillCursor(chID) (string, error)` (add to Plan 1's file — two trivial upsert/select methods on `channel_state.backfill_state`).
-- Rules (spec §11): per tab — page at 1 page/sec (global ticker), write each page's rows immediately (`published = now - Age` coarse / `= now` assumed; **status always `'unknown'`**; `catalog_pos` = provisional per-tab index), save the cursor after each page, stop when **(a)** an entire page's items are ALL older than the window (page-granular — the margin), or **(b)** a full page has no datable item (parser-failure arm: log loudly, stop the tab, `backfilled_at` stays NULL). Log any item dated newer than an earlier item in the same tab (ordering evidence). Membership tab only when `withMembership`.
+- Rules (spec §11): per tab — page at 1 page/sec (global ticker), write each page's rows immediately (`published = now - Age` coarse / `= now` assumed; **status always `'unknown'`**; `catalog_pos` = provisional per-tab index), save the cursor after each page, stop when **(a)** an entire page's items are ALL older than the window (page-granular — the margin), or **(b)** a **non-empty** page has no datable item (parser-failure arm: log loudly, stop the tab, `backfilled_at` stays NULL). An EMPTY page with no continuation is neither arm — natural exhaustion, the tab completes CLEANLY (spec §11: an empty channel must finish its backfill, set `backfilled_at`, and establish; misreading the parser arm as vacuously true rescans empty channels every cycle forever). Log any item dated newer than an earlier item in the same tab (ordering evidence). Membership tab only when `withMembership`.
 
 - [ ] **Step 1: Failing tests** — stub client returning scripted pages:
   - (a) page-granular stop: page 1 mixed in/out-of-window ⇒ keeps paging; page 2 fully out ⇒ tab stops; rows from BOTH pages persisted.
   - (b) parser-failure arm: pages of `Age==0` items ⇒ tab stops after one full undatable page, error recorded, completion NOT reported.
   - (c) resume: cursor saved after page 1; a new scanner with the same DB resumes at page 2 (stub asserts the continuation it was called with).
-  - (d) live item (`Age==0` from the badge) among datable items ⇒ stored `assumed`/`unknown`, does not trigger arm (b) (the arm needs a FULL page undatable).
+  - (d) live item (`Age==0` from the badge) among datable items ⇒ stored `assumed`/`unknown`, does not trigger arm (b) (the arm needs a whole NON-EMPTY page undatable).
+  - (e) **empty channel:** every tab returns zero items and no continuation ⇒ all tabs complete CLEANLY, the completion path runs (Task 3: `backfilled_at` set over zero rows), no parser-failure recorded, and a second sweep does NOT rescan it.
 - [ ] **Step 2:** Verify failure → implement. **Step 3:** Verify pass; commit `feat(monitor): backfill scanner — page-granular window stop + parser-failure arm`.
 
 ---

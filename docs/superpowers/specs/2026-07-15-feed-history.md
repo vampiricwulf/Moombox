@@ -949,11 +949,19 @@ Coarse dates need no margin of their own: `now - itemAge()` is the *newest* inst
 consistent with the text, so an item whose coarse date is outside is outside on any
 reading. The page granularity covers the ORDERING assumption, which dates cannot.
 
-**Second stop arm: a full page with no datable item.** An undatable item gets `published = now`
-— *inside* every window — so the date arm never fires on a tab of them, and under a
-`relativeAgeRe` break that is every item on every channel. This arm is a parser-failure
-detector, not a completeness rule: log it, stop the tab, and leave `backfilled_at` NULL so the
-scan retries when the parser is fixed.
+**Second stop arm: a NON-EMPTY page with no datable item.** An undatable item gets
+`published = now` — *inside* every window — so the date arm never fires on a tab of them, and
+under a `relativeAgeRe` break that is every item on every channel. This arm is a
+parser-failure detector, not a completeness rule: log it, stop the tab, and leave
+`backfilled_at` NULL so the scan retries when the parser is fixed.
+
+**An empty page is neither arm — it is natural exhaustion.** A tab with no items and no
+continuation token simply ends, *cleanly*: a brand-new channel with zero streams/VODs/members
+content completes all its tabs this way, gets its ordering pass over zero rows, and **sets
+`backfilled_at`** — establishing the channel (its RSS may 404 forever) for ~3 requests total.
+The distinction is load-bearing: reading the parser arm as vacuously true of an empty page
+would classify every empty channel as a parser failure and rescan it every cycle, forever.
+Zero datable items only means something on a page that HAS items.
 
 **Classification:**
 
