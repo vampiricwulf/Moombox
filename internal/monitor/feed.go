@@ -441,14 +441,16 @@ func (fm *FeedMonitor) doCheck(ctx context.Context) {
 //     listing-derived date/precision and collect the video IDs
 //     inserted (not merely re-sighted) THIS cycle into newIDs, for
 //     the ARCHIVE step to disposition as new-vs-backlog.
-//  3. WALK    (PLAN3 Task 3) the serial probe pass over the store's scope.
+//  3. WALK    the serial probe pass over the store's scope (walk.go, spec §8).
 //  4. ARCHIVE (PLAN3 Task 5) re-reads scope (the walk corrected dates) and
 //     decides jobs per item.
 //
-// Until Tasks 3-5 land, the tail of this function retains the pre-PLAN3
+// Until Task 5 lands, the tail of this function retains the pre-PLAN3
 // merge+process pipeline (mergeCandidates/processCandidate) against the SAME
-// fetch results, so probing and job creation keep working across Tasks 2-4;
-// Task 5 deletes that block along with processCandidate and mergeCandidates.
+// fetch results, so probing and job creation keep working — at the cost of
+// re-probing rows the WALK already probed this cycle (see the
+// PLAN3-TASK5-removes-the-double-probe marker in walk.go). Task 5 deletes
+// that block along with processCandidate and mergeCandidates.
 //
 // Returns the RSS fetch/parse error for channel-health accounting. A
 // membership failure is logged but never marks the RSS feed unhealthy — they
@@ -457,7 +459,6 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 	chID := ch.ID
 	cycleNow := fm.now().UTC()
 	cutoff := cycleNow.Add(-time.Duration(fm.archiveWindowDays(ch)) * 24 * time.Hour).Format(time.RFC3339)
-	_ = cutoff // consumed by the ARCHIVE step (PLAN3 Task 5); computed here so every cycle timestamp derives from ONE cycleNow (spec §7)
 
 	// 1. FETCH — independent; neither failure is fatal to the other.
 	data, rssErr := fm.rssFetch(ctx, ch)
@@ -534,10 +535,26 @@ func (fm *FeedMonitor) checkChannel(ctx context.Context, ch *config.ChannelConfi
 		}
 	}
 
-	// PLAN3-TASK5 archive pass here — the WALK (Task 3) and ARCHIVE (Task 5)
-	// steps replace everything below with a re-read of the store's scope.
-	// Retained temporarily so probing/jobbing keeps working from THIS cycle's
-	// fetch results.
+	// 3. WALK — the serial probe pass over the store's scope (spec §8). Its DB
+	// writes (ApplyProbeToFeedItem) land regardless of whether checkChannel
+	// consumes the returned FRESH map; ARCHIVE (PLAN3 Task 5) is what wires
+	// that map in to avoid re-probing the same rows below.
+	scope, scopeErr := fm.db.FeedScope(chID, cutoff, fm.membershipDiscoveryEnabled())
+	if scopeErr != nil {
+		fm.logger.Warn("FeedScope query failed; walk skipped this cycle", "channel", ch.Name, "err", scopeErr)
+	} else {
+		walkCtx, walkCancel := context.WithTimeout(ctx, feedProcessTimeout)
+		fresh := fm.walk(walkCtx, ch, chID, cutoff, scope)
+		walkCancel()
+		_ = fresh // consumed by the ARCHIVE step (PLAN3 Task 5)
+	}
+
+	// PLAN3-TASK5 archive pass here — ARCHIVE replaces everything below with
+	// a re-read of the store's scope (the walk's corrected dates) and the
+	// decision table from spec §10. Retained temporarily so probing/jobbing
+	// keeps working from THIS cycle's fetch results; the legacy loop below
+	// probing rows the walk already probed is an accepted double-probe until
+	// Task 5 removes it (see the PLAN3-TASK5 marker in walk.go).
 	var candidates []discoveredVideo
 	candidates = append(candidates, rssCandidates...)
 	if len(membVideos) > 0 {
@@ -673,6 +690,18 @@ func (fm *FeedMonitor) archiveSlots(ch *config.ChannelConfig) int {
 		return g
 	}
 	return defaultArchiveSlots
+}
+
+// membershipDiscoveryEnabled reports the operator's membership_discovery
+// config TOGGLE only — never membershipActive(), which also folds in
+// cookie state. FeedScope's includeMembership parameter must reflect only
+// the toggle: cookie state moving scope would let a cookie lapse silently
+// drop members rows instead of leaving them in scope, probe-gated (spec
+// §7). Mirrors monitor_callbacks.go's MembershipEnabled config half.
+func (fm *FeedMonitor) membershipDiscoveryEnabled() bool {
+	var enabled bool
+	fm.configStore.Read(func(c *config.MoomboxConfig) { enabled = c.Monitors.MembershipDiscoveryEnabled() })
+	return enabled
 }
 
 // discoveredVideo is one candidate from any discovery source. RSS and

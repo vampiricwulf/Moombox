@@ -56,6 +56,24 @@ func withNow(t time.Time) feedMonitorOpt {
 	return func(fm *FeedMonitor) { fm.now = func() time.Time { return t } }
 }
 
+// withProbe wires fm.ProbeVideo to fn. probeRow (walk.go) falls back to
+// ProbeVideo for every row whose source isn't "membership", or whenever
+// ProbeVideoAuth is unset (as it is by default in tests) — so this one
+// fixture serves both anonymous and membership rows unless a test also
+// wires ProbeVideoAuth separately.
+func withProbe(fn VideoProbeFunc) feedMonitorOpt {
+	return func(fm *FeedMonitor) { fm.ProbeVideo = fn }
+}
+
+// withWindowDays sets monitors.archive_window_days on the test monitor's
+// config store, which fm.archiveWindowDays(ch) reads for an unconfigured
+// channel (no per-channel ArchiveWindowDays override).
+func withWindowDays(days int) feedMonitorOpt {
+	return func(fm *FeedMonitor) {
+		_ = fm.configStore.Update(func(c *config.MoomboxConfig) { c.Monitors.ArchiveWindowDays = days })
+	}
+}
+
 // newTestFeedMonitor builds a FeedMonitor over a real (temp-file) db and an
 // in-memory config store, ready for a test to drive checkChannel/a cycle.
 // Every Plan 3 test builds its monitor through this constructor plus the
