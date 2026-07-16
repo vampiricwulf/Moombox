@@ -68,8 +68,9 @@ Per channel, Moombox keeps **a list of every video it has seen, ordered by recen
   combined, deduped and ordered by recency, down to the configured depth.
 - **RSS and the membership tab** then keep it current each cycle: they update metadata
   on entries already in the list and add new ones.
-- **Scope is a time window** — `archive_window_days`, default 3. Everything published
-  inside it is archived; everything outside is not.
+- **Scope is a time window** — `archive_window_days`, default 3 — plus, always,
+  every upcoming/live/unresolved row (§7, Q2). Everything published inside it is
+  archived; everything *verified* outside it is not.
 - **`archive_slots` (M, default 3) is throughput, not depth.** Everything inside the
   window is archived *eventually*, M at a time per channel, most-recent-first. A
   completed job frees a slot and the next item fills it.
@@ -85,15 +86,15 @@ cycle", not "the channel now has two videos".
 
 | Term | Means |
 |---|---|
-| **the window** | `published >= now - archive_window_days`. Scope |
-| **Q1 / Q2** | the two queries that form scope. Q1 = the window range. Q2 = the unconditional `upcoming`/`live` union |
+| **the window** | `published >= now - archive_window_days` — Q1's predicate. Scope is larger: Q1 ∪ Q2 |
+| **Q1 / Q2** | the two queries that form scope. Q1 = the window range. Q2 = the unconditional union: `upcoming`/`live` rows plus unresolved (`unknown` + `assumed`) rows |
 | **M** | `archive_slots`. Max in-flight backlog jobs per channel |
 | **backlog** | a video already in the list before this cycle. The only thing M paces |
 | **new** | a video first inserted into the list this cycle |
-| **admitted** | a job the scheduler moved `Queued → Upcoming` and enqueued |
+| **admitted** | a job in `JobQueue`'s custody rather than the scheduler's: created `Upcoming` directly, or moved `Queued → Upcoming` by the scheduler |
 | **FRESH** | this cycle's probe returned metadata (`outcome == probed`) |
 | **denied** | a probe result we distrust: YouTube refused us *and* the classifier guessed |
-| **the walk** | the serial, per-source, early-exiting probe pass over the window |
+| **the walk** | the serial, per-source, early-exiting probe pass over scope |
 | **established** | `last_rss_ok_at IS NOT NULL OR backfilled_at IS NOT NULL` |
 
 **One `now` per cycle.** Compute `cutoff := time.Now().UTC().Add(-window)` once at the
@@ -157,7 +158,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
 CREATE INDEX IF NOT EXISTS idx_feed_items_window
     ON feed_items(channel_id, published DESC, catalog_pos ASC, video_id ASC);
 
--- Q2: the upcoming/live union, read with no date term. Without this index Q2 scans
+-- Q2: the upcoming/live/unresolved union, read with no date term. Without this index Q2 scans
 -- every row the channel has, every cycle — and that set only grows, because the
 -- store never forgets. The window index cannot serve it: status is not in it, and
 -- published leads.
@@ -171,6 +172,9 @@ CREATE TABLE IF NOT EXISTS channel_state (
     channel_id             TEXT PRIMARY KEY,
     backfilled_at          TEXT,     -- NULL until a scan completes
     backfilled_window_days INTEGER,  -- the window the scan ran AT
+    backfilled_with_membership INTEGER, -- 1 iff the completed scan's eligible set
+                                     -- included /membership; the sweep compares it
+                                     -- against CURRENT eligibility (see §11)
     backfill_state         TEXT,     -- JSON: per-tab cursor (see §11)
     last_rss_ok_at         TEXT
 );
@@ -183,19 +187,22 @@ ALTER TABLE jobs ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 1;
 
 | Column | Written by | Read by |
 |---|---|---|
-| `published`, `date_precision` | §7 step 2 upsert (guarded); the probe write (same statement) | Q1, the walk |
-| `catalog_pos` | step 2, from the listing index; the backfill's ordering pass overwrites it once | the walk's lump tiebreak |
-| `source` | step 2, **every** sighting; a `members_only` refusal (§9) | probe selection, the read arm |
-| `status` | probes only — **never** a listing (§7 step 2) | the walk, the archival pass |
-| `first_seen` | step 2 insert | `RETURNING`, to identify new rows this cycle (§10) |
+| `published`, `date_precision` | the §7 STORE upsert (guarded); the probe write (separate statement, same ladder — §6) | Q1, the walk |
+| `catalog_pos` | the STORE step, from the item's index within its fetch; the backfill's ordering pass renumbers once | the walk's lump tiebreak |
+| `source` | the STORE step, **every** sighting; a `members_only` refusal (§9) | probe selection, the read arm |
+| `status` | probes only — **never** a listing (§6, §7) | the walk, the archival pass |
+| `first_seen` | the STORE insert | `RETURNING`, to identify new rows this cycle (§10) |
 | `channel_state.*` | the feed monitor and the backfill, both upserting | the established gate, the sweep |
 | `jobs.channel_id` | job creation | the scheduler's M count |
 | `jobs.queue_priority` | job creation | the scheduler's ordering |
 
 `jobs.channel_id` is NULL on legacy, Twitch and manual rows; the scheduler filters
-`channel_id IS NOT NULL`. `queue_priority` **must** default to 1: `ALTER TABLE` without
-a default yields NULL, and SQLite sorts NULL *first* under `ORDER BY … ASC`, so every
-legacy job would sort ahead of all backlog.
+`channel_id IS NOT NULL`. `queue_priority` is 1 = backlog (M-counted), 0 = everything
+else; **every creator writes it explicitly** (§10) and only the backlog creator
+writes 1. The `DEFAULT 1` is fail-closed for the M count — the column's only reader —
+so a future creator that forgets the write over-throttles instead of flooding.
+Legacy rows take the default, but their NULL `channel_id` already excludes them from
+every scheduler query.
 
 ### The upsert
 
@@ -239,8 +246,35 @@ Three rules, each load-bearing:
   loses to everything), but a misspelt rung then fails silently. Pin the five values in
   a test.
 
-**One guard, not two.** The probe's status/date write goes through this same statement.
-A second copy of the ladder in Go is two statements of one rule, which is two rules.
+### The probe write
+
+Probe results land through a **separate UPDATE** — they cannot reuse the upsert. The
+upsert never touches `status` (deliberately, above) and always inserts `'unknown'`; a
+probe has no listing index for `catalog_pos`; and a probe must not touch `source`
+(the escalation's `source` flip in §9 is the refusal's own write, not the probe's).
+An earlier draft said the probe write "goes through this same statement", under which
+no row could ever leave `unknown`, Q2 would never match, and nothing would ever be
+archived.
+
+```sql
+UPDATE feed_items SET
+    status         = :status,   -- probe-derived; post_live->vod normalized; the
+                                -- terminal invariant (S12) is enforced in Go BEFORE
+                                -- binding: a terminal status with no usable date
+                                -- binds :status = 'unknown'
+    title          = CASE WHEN :title <> '' AND :title <> 'Unknown Title'
+                          THEN :title ELSE title END,
+    published      = CASE WHEN :rank > <storedRank> THEN :published ELSE published END,
+    date_precision = CASE WHEN :rank > <storedRank> THEN :precision ELSE date_precision END
+ WHERE channel_id = :ch AND video_id = :id
+-- probed upcoming/live supply NO date: :rank binds 0, so the date arms are no-ops.
+-- published must never be written '' -- the no-op is the rank comparison failing.
+```
+
+**One ladder, two statements.** The rank `CASE` is generated from a single Go
+definition (`precisionRank(string) int`) used by both the upsert and the probe
+write — the rule lives once even though it is bound twice. Pin its five values in
+one test.
 
 ---
 
@@ -250,6 +284,10 @@ Per channel, per cycle.
 
 ```
 1. FETCH   RSS and /membership, independently. Either may fail; neither is fatal.
+           On RSS success: channel_state.last_rss_ok_at = now — HERE, not at the
+           end of the cycle. The ARCHIVE step reads the established gate this same
+           cycle; writing it last would open the gate one cycle late on a fresh
+           install, for no reason.
 
 2. STORE   Upsert every item seen (§6). Collect the video IDs whose RETURNING
            first_seen == this cycle's instant — those are NEW; the rest are backlog.
@@ -257,30 +295,31 @@ Per channel, per cycle.
            listings → published = now - itemAge(item), precision 'coarse'
                       (or 'assumed'/now when itemAge returns 0)
            status   → always 'unknown'. Probes classify; listings do not.
+           catalog_pos → the item's index within THIS fetch (RSS: feed order;
+           listings: listing order). The ALWAYS arm overwrites the backfill's
+           channel-global renumbering on re-sighting — harmless: catalog_pos only
+           ever tie-breaks within one `published` value, a coarse lump's members
+           come from a single listing whose per-fetch order is genuine recency,
+           and RSS's exact dates effectively never tie.
 
 3. WALK    The serial probe pass over scope (§8).
 
-4. ARCHIVE Re-read scope — step 3 has corrected dates, so rows may have entered or
-           left it — and decide per item (§10).
-
-5. On RSS success: channel_state.last_rss_ok_at = now.
+4. ARCHIVE Re-read scope — the walk has corrected dates, so rows may have entered
+           or left it — and decide per item (§10).
 ```
-
-**Step 5 must run between steps 1 and 2, not last.** As the final step it opens the
-established gate a full cycle late: on a fresh install's first successful cycle, step 4
-reads a gate that step 5 has not yet set, and past content waits a cycle for no reason.
 
 **`checkChannel`'s zero-candidate early return must go.** `feed.go:457-459` reads
 `if len(candidates) == 0 { return rssErr }`. That is correct when the response *is* the
 work list and fatal when the store is: a cycle whose fetches return nothing must still
-run steps 3 and 4, because the store has rows and a live stream may be in one. It is
+run the WALK and ARCHIVE steps, because the store has rows and a live stream may be
+in one. It is
 the original bug's sibling, and it is easy to leave behind because the function is being
 rewritten around it rather than deleted.
 
 **The budget is 60 seconds, not 5 minutes.** `feedProcessTimeout = 60s`
 (`feed.go:22-23`) bounds the per-channel process at `feed.go:469`. The walk is serial and
-Q1 has no `LIMIT`, so a wide window can exhaust it and silently truncate. Steps 3 and 4
-take **separate contexts** — a truncated walk must not also kill archival — and the
+Q1 has no `LIMIT`, so a wide window can exhaust it and silently truncate. The WALK and
+ARCHIVE steps take **separate contexts** — a truncated walk must not also kill archival — and the
 timeout scales with the window rather than staying a 60s constant, since
 `archive_window_days` validates to 3650.
 
@@ -296,20 +335,43 @@ SELECT video_id, title, published, date_precision, status, source, catalog_pos
    -- AND source <> 'membership'   ← iff NOT MembershipDiscoveryEnabled()
  ORDER BY published DESC, catalog_pos ASC, video_id ASC;
 
--- Q2: upcoming/live. UNCONDITIONAL — no date term
+-- Q2: rows the window must never age out. UNCONDITIONAL — no date term
 SELECT ...same columns...
   FROM feed_items
- WHERE channel_id = ? AND status IN ('upcoming','live')
+ WHERE channel_id = ?
+   AND (status IN ('upcoming','live')
+        OR (status = 'unknown' AND date_precision = 'assumed'))
    -- AND source <> 'membership'   ← same read arm
 -- no ORDER BY: a handful of rows, merged in Go
+-- implementation: fetch status IN ('upcoming','live','unknown') via
+-- idx_feed_items_status, post-filter the unknown rows to assumed-only in Go
 ```
 
-**Q2 is not optional, and its absence loses streams.** `published` is frozen at insert,
-so an `upcoming` row's date is *when we first saw it*, not when it airs. RSS
-`<published>` is the **announcement** time. A stream announced 5 days before it airs is
-already outside a 3-day window on the cycle it is discovered — so without Q2 it is never
-probed, never becomes `live`, and is missed at every stage. Q2 is what delivers "never
-miss a stream".
+**Q2 is not optional, and its absence loses streams.** An `upcoming` row's stored
+date is the announcement (RSS `<published>`) or the sighting instant — never the
+airing. A stream announced 5 days ahead under a 3-day window: with continuous
+monitoring it enters the window at announcement and **exits it 2 days before it
+airs**, at which point Q1 stops producing it — un-probed from then on, it never
+becomes `live`, and the airing is missed. On a cold store (channel added later), it
+can be outside on its very first sighting. Either way, what matters for an upcoming
+row is the airing, and its stored date says nothing about that. Q2's first arm is
+what delivers "never miss a stream".
+
+**The `assumed` arm is the same rule from the other side.** An `assumed` date is the
+sighting instant — a claim of ignorance, not a verified date (§12) — so letting it
+age a row out of Q1 excludes on a guess, which §12 forbids: *nothing is ever excluded
+on a date we have not verified*. The concrete loss without this arm: a members
+upcoming stream is listed (undatable ⇒ `assumed`/`unknown`), cookies lapse before its
+first successful probe, the probe gate skips it for the lapse, and after
+`archive_window_days` the frozen sighting date ages it out of Q1 — status still
+`unknown`, so it is in neither query when cookies return, and a stream that has
+**not yet aired** is permanently missed. The arm keeps exactly the unresolved rows in
+scope until one successful probe either dates them (they enter or leave Q1 on a real
+date) or classifies them `upcoming`/`live` (the first arm). Bounded: `assumed`
+requires an undatable listing item, one successful probe retires the row from this
+arm forever, and a later datable re-sighting upgrades it to `coarse` (rank 2 > 1)
+which ages out normally. `coarse` rows age out unprobed **correctly** — a coarse date
+is the newest the item can be, so exclusion on it is verified by construction.
 
 **Why not one query with an `OR`.** Measured on `modernc.org/sqlite`, 6,000 rows,
 4 channels, after `ANALYZE`:
@@ -351,11 +413,17 @@ lastDate   = {}          -- per source
 
 for row in candidates:                  -- SERIAL. Concurrent probes are already in
                                         -- flight past the boundary before it is known.
-    if row.source in exhausted AND row.status NOT IN (upcoming, live):
+    if row.source in exhausted
+       AND row.status NOT IN (upcoming, live)
+       AND row.date_precision <> 'assumed':
         skip
-        -- The status exemption is not optional: Q2 puts upcoming/live here
-        -- unconditionally, and their published is an insert instant, not a listing
-        -- position — "everything behind it is older" says nothing about them.
+        -- The exemptions are not optional: Q2 carries upcoming/live and assumed
+        -- rows unconditionally, and their published is an insert or sighting
+        -- instant, not a listing position — "everything behind the boundary is
+        -- older" says nothing about them. Skipping an assumed row here would
+        -- repeat identically every cycle (same order, same boundary) and
+        -- permanently starve the probe that Q2's unresolved arm exists to
+        -- guarantee.
 
     apply the probe gates below, in order
     outcome, date := probe(row)
@@ -484,7 +552,7 @@ Feed-path outcomes:
 | outcome | means | store effect |
 |---|---|---|
 | `probed` | a probe ran, returned metadata, and is not `denied` | write status/date/title. **FRESH** |
-| `denied` | see the predicate below | nothing. Not fresh. Retry next cycle |
+| `denied` | see the predicate below | no status/date write. (A `members_only` refusal separately flips `source` — the refusal's own write, §9.) Not fresh. Retry next cycle |
 | `errored` | a probe ran and failed (`utils.go:269-294`) | nothing. Not fresh |
 | `cooldown` | `ProbeCooldown` suppressed it (`utils.go:258-262`) | nothing. Not fresh |
 
@@ -644,9 +712,12 @@ PROBE gate (the walk):    source <> 'membership' iff NOT membershipActive()
 | `denied` — playability | **correctness** | No — it is the only control that depends on nothing we stored |
 
 **What is visible may only move on an operator's decision. Probing may be opportunistic.**
-A cookie lapse therefore leaves scope exactly where it was: members rows stay in scope and
-simply go un-probed for a cycle, and the stream is jobbed on the first cycle cookies return
-— which is also the first cycle it could have been downloaded at all.
+A cookie lapse therefore leaves scope exactly where it was: members rows stay in
+scope and simply go un-probed, and the stream is jobbed on the first cycle cookies
+return — which is also the first cycle it could have been downloaded at all. For
+lapses longer than the window this is true **only because of Q2's `assumed` arm**
+(§7): an unresolved members row cannot age out of scope while we have never
+successfully probed it.
 
 **Accepted residual:** a cookie lapse longer than `archive_window_days` permanently loses
 members content published during it. The fetch is gated, so no rows are written; on cookie
@@ -672,7 +743,7 @@ vod / not_a_stream→ skip if HasProcessed
                     skip unless include_non_live_content   ← BEFORE probing
                     skip unless established
                     skip if source='membership' AND NOT membershipActive()
-                    if already probed in step 3 → use that result (it is FRESH)
+                    if already probed by this cycle's walk → use that result (FRESH)
                     else → refresh-probe now, write the result back
                     then RE-CHECK THE WINDOW against the probe's date, then:
                        denied            → no job, retry next cycle   ← FIRST
@@ -692,15 +763,17 @@ week ago" could be 13 days. The probe supplies the exact date; if it falls outsi
 no job, and the row drops out permanently on the date just written. Skipping this re-check
 archives on a guess.
 
-**An item probed in step 3 is FRESH; step 4 must not re-probe it.** Otherwise every VOD
-entering scope costs **two** probes per cycle — step 3 probes it as `unknown`, it becomes
-`vod`, step 4 sees `vod` and refresh-probes it seconds later. `probe_cooldown` defaults to
+**An item probed by the walk is FRESH; the archive step must not re-probe it.**
+Otherwise every VOD entering scope costs **two** probes per cycle — the walk probes it
+as `unknown`, it becomes `vod`, the archive step sees `vod` and refresh-probes it
+seconds later. `probe_cooldown` defaults to
 0, so nothing suppresses it. The refresh probe exists to stop a job being built on *stale*
 metadata; metadata from earlier in the same cycle is not stale.
 
 **`HasProcessed` gates ONLY the `vod`/`not_a_stream` branch.** Today it never touches
-live/upcoming: `feed.go:730` reads it and `:762` passes it as `IsReprobe`, which is consulted
-only in `nonLiveSkipReason` (`utils.go:228-236`). This matters because **history rows exist
+live/upcoming: `feed.go:730` reads it and `:762` passes it as `IsReprobe`, whose only
+*behavioral* consumer is `nonLiveSkipReason` (`utils.go:228-236`) — it is also read
+to demote log levels (`utils.go:303-306`, `feed.go:735-741`), which gates nothing. This matters because **history rows exist
 with no job row** — DECAPI give-up and every pre-existing row. A `HasProcessed` gate on the
 live branch would skip such a row the moment its probe returned `live`, and the stream is
 gone forever.
@@ -709,13 +782,37 @@ gone forever.
 
 Job creation, by source:
 
-| Creator | Status at creation | Why |
-|---|---|---|
-| feed monitor, backlog VOD | `Queued`, `queue_priority = 1` | the only thing M paces |
-| feed monitor, new VOD | `Queued`, `queue_priority = 0` | ordered ahead of backlog, never M-gated |
-| feed monitor, live/upcoming | `Upcoming` (admitted) | never throttled |
-| DECAPI | `Upcoming` (admitted) | it writes no `feed_items` row by design (§13), so a `Queued` DECAPI job would have no row to JOIN for `published` and would strand un-ordered forever |
-| Twitch, manual adds | `Upcoming` (admitted) | the scheduler is YouTube-only; neither has a `feed_items` row |
+| Creator | Status at creation | `queue_priority` | Why |
+|---|---|---|---|
+| feed monitor, backlog VOD | `Queued` | **1** | the only thing M paces — and the **only** creator that ever writes `Queued` |
+| feed monitor, new VOD | `Upcoming` (admitted), enqueued immediately | 0 | the owner's rule, verbatim: a just-found job "should skip the queue and instantly enter the state it should be … and not count towards the M-row limit". An earlier draft created these `Queued` — a leftover from the rejected pool-gating scheduler; with that gate dead, routing new VODs through the scheduler adds wake latency and gates nothing |
+| feed monitor, live/upcoming | `Upcoming` (admitted) | 0 | never throttled, never counted |
+| DECAPI | `Upcoming` (admitted) | 0 | it writes no `feed_items` row by design (§13), so a `Queued` DECAPI job would have no row to JOIN for `published` and would strand un-ordered forever |
+| Twitch, manual adds | `Upcoming` (admitted) | 0 | the scheduler is YouTube-only; neither has a `feed_items` row, and their `channel_id` stays NULL — which alone excludes them from M |
+
+**Every creator writes `queue_priority` explicitly; only the backlog creator writes
+1.** The M count filters on `queue_priority = 1`, so an omitted write — falling to
+the DDL `DEFAULT 1` — silently makes a live stream or a 5-day-out premiere hold an M
+slot for its entire `Upcoming → Live → Downloading → Muxing` life: at the default
+M=3, three concurrent live/upcoming jobs would stall **all** backlog admission on
+the channel. That is the "never counted" rule, lost to a default.
+
+**A backlog job that turns out live keeps its slot.** An admitted backlog VOD whose
+worker probe finds it restarted live becomes status `Live` at `queue_priority = 1`
+and still counts toward M until it finishes. M bounds in-flight backlog-*originated*
+work, whatever it turns into; "live is never counted" applies to jobs that were
+never backlog. Rare — it requires a same-ID restart of an in-window ended stream —
+and self-resolving.
+
+**Every creator still calls `AddToHistory` at job creation**
+(`monitor_callbacks.go:260`), unchanged — including for `Queued` rows. That is what
+makes `HasProcessed` mean "a job was created" (§15); the history writes this design
+removes are only the feed path's skip/give-up writes. Dropping the creation-time
+write silently breaks the `HasProcessed` gate and §11's prune rule together.
+
+**`Queued` counts as active.** `HasActiveJob` is `status NOT IN
+(Finished, Error, Cancelled)` (`database_jobs.go:268-274`), so the walk and archival
+passes naturally skip a video whose job is still waiting — no new predicate needed.
 
 This means `monitor_callbacks.go` **must change**: `:242` currently creates every job as
 `StatusUpcoming` unconditionally and `:261` calls `EnqueueJob` immediately. A reader told
@@ -740,8 +837,8 @@ admit(job):
 Step 1 is what makes the admission observable. `Enqueue` touches no DB row, so without it M
 counts 0 forever and admits on every tick. `Upcoming` needs no invention — it is already what
 `monitor_callbacks.go:242` writes for "created, awaiting processing", and `ShouldProcess`
-accepts it, so a crash between the steps is self-healing via `recoverJobs`
-(`worker.go:295-318`).
+accepts it, so a crash between the steps is self-healing via `enqueueExistingJobs`
+(`worker.go:294-318`, called from `Start` at `worker.go:201`).
 
 ```
 Queued → Upcoming → (Live | Downloading) → Muxing → Finished
@@ -765,10 +862,12 @@ Finished/Error/Cancelled, `types.go:92-94`) nor `Queued` — so it would hold a 
 **forever**, and a channel whose cookies lapse would silently lose its throughput with no
 error anywhere. `COOKIES?` is a resting state awaiting the operator, like `Queued`.
 
-**Admission order:** `ORDER BY queue_priority ASC, published DESC`, where `published` comes
-from an INNER JOIN on `feed_items(channel_id, video_id)` — the PK, so it is indexed, and the
-date stays in one place. The join is guaranteed to hit because only the feed monitor creates
-`Queued` rows. The scheduler filters `status = 'Queued' AND channel_id IS NOT NULL`.
+**Admission order:** `ORDER BY published DESC` — no priority term, because only
+backlog VODs are ever `Queued`, so every `Queued` row is priority 1 by construction.
+`published` comes from an INNER JOIN on `feed_items(channel_id, video_id)` — the PK,
+so it is indexed, and the date stays in one place. The join is guaranteed to hit
+because only the feed monitor's archival pass creates `Queued` rows. The scheduler
+filters `status = 'Queued' AND channel_id IS NOT NULL`.
 
 **The scheduler gates M, and only M.** `AcquireDownloadSlot` stays the pool's arbiter. It
 cannot gate the pool: `result.IsVod` does not exist until `streamProc.Process` returns
@@ -777,8 +876,12 @@ cannot gate the pool: `result.IsVod` does not exist until `streamProc.Process` r
 (`queue.go:303-307`) reads `activeDownloads`, incremented *inside* `AcquireDownloadSlot`, so
 between admission and acquisition it reads 0.
 
-**Count-then-admit holds a per-channel lock.** The scheduler is woken by job completion *and*
-by a heartbeat; otherwise two wakeups read M−1 and both admit.
+**Count-then-admit holds a per-channel lock.** The scheduler is woken **when the
+archival pass creates `Queued` rows**, on job completion, and by its own heartbeat
+(reuse the worker's `heartbeatInterval = 60s`, `worker.go:47-49`) — `pollForJobs`
+cannot serve as its heartbeat, because `ShouldProcess(Queued)` is false by design,
+and without the creation-time wake a fresh backlog waits a full heartbeat before its
+first admissions. The lock exists because two wakeups reading M−1 would both admit.
 
 **It is a goroutine and owns the only path out of `Queued`** — if it dies the backlog strands
 silently with no error anywhere. Wrap it in the restart-on-panic pattern `pollForJobs`
@@ -819,14 +922,18 @@ text must say so.
 Populates the list once per channel, from `/videos` + `/streams` + `/membership` combined and
 deduped, ordered by recency, **to the window depth**.
 
-**Depth: page each tab until an item's date is older than `archive_window_days`, then stop.**
-Everything behind it is older still — the same source-ordering fact the walk rests on — so it
-is outside the window, and a row outside the window is never probed, never archived, never
-read. At the 3-day default that is ~1 page per tab: **~3 requests per channel**.
+**Depth: page each tab until a full page's items are ALL older than
+`archive_window_days`, then stop.** Page-granular, not item-granular: the stop
+inherits the newest-first listing assumption (§19), and a whole page of out-of-window
+items is far stronger evidence than one item — the extra page is the owner's "window
+depth + margin", made concrete. The scan also logs any item dated *newer* than an
+item earlier in the same tab (the walk's ordering check, at scan granularity); a
+violation is evidence the stop condition's premise is broken for that tab. At the
+3-day default this is ~1–2 pages per tab: **~3–6 requests per channel**.
 
-Coarse dates make this sound without a margin: `now - itemAge()` is the *newest* instant
-consistent with the text, so an item whose coarse date is already outside is outside on any
-reading.
+Coarse dates need no margin of their own: `now - itemAge()` is the *newest* instant
+consistent with the text, so an item whose coarse date is outside is outside on any
+reading. The page granularity covers the ORDERING assumption, which dates cannot.
 
 **Second stop arm: a full page with no datable item.** An undatable item gets `published = now`
 — *inside* every window — so the date arm never fires on a tab of them, and under a
@@ -887,6 +994,13 @@ sweep condition:
     backfilled_at IS NULL
  OR backfilled_window_days IS NULL          -- NULL < 30 is NULL, not true. Without
  OR backfilled_window_days < <resolved>     -- this arm the widen check never fires.
+ OR (backfilled_with_membership = 0 AND <membership eligible now>)
+    -- membership eligible = MembershipDiscoveryEnabled() AND HasAuthCookies(),
+    -- resolved per cycle. Covers BOTH the toggle turning on and cookies arriving
+    -- after a scan: the eligible tab set changed either way, and no event hook
+    -- exists to announce either (the same reason the sweep runs every cycle).
+    -- Toggle-OFF needs no arm: members rows are hidden by the read arm, not
+    -- deleted, and the completed scan is a superset of what is now eligible.
 
 evaluated EVERY MONITOR CYCLE, plus startup, kickMonitors, and a manual re-run.
 ```
@@ -907,11 +1021,28 @@ deeper rescan resuming from a shallow cursor skips exactly the pages it was rest
 fetch. Narrowing does neither: a running deeper scan records a deeper depth, which satisfies
 every narrower window it will be asked for.
 
-**The in-flight set** (channel ID → cancel func), owned by the backfill worker, is the
-scan-dedup condition: `kickMonitors` fires on every add, remove, reorder, bulk PUT and TUI
-save, so without it a user reordering three times launches three concurrent scans of one
-channel. **A scan that ends for any reason — success, failure, cancellation — must remove
-itself**, or the channel is never retried for the life of the process.
+**The in-flight set** (channel ID → {cancel func, window_days, membership_eligible}),
+owned by the backfill worker, is the scan-dedup condition: `kickMonitors` fires on
+every add, remove, reorder, bulk PUT and TUI save, so without it a user reordering
+three times launches three concurrent scans of one channel. **A scan that ends for
+any reason — success, failure, cancellation — must remove itself**, or the channel is
+never retried for the life of the process.
+
+**The recorded depth is what makes the mid-scan widen detectable.** Mid-scan,
+`backfilled_at IS NULL` makes the sweep condition trivially true, and
+`backfilled_window_days` is only written at completion — so the sweep cannot tell
+"scanning at 3, config now 30" from "scanning at 30" from the DB. For a channel
+already in flight, the sweep instead compares the in-flight entry's recorded
+`window_days` (and `membership_eligible`) against the currently-resolved values, and
+cancels-and-restarts if the running scan is narrower. Otherwise it skips in-flight
+channels as before.
+
+**Cursor lifecycle:** `backfill_state` is cleared when `backfilled_at` is written
+(completion) and on any cancel — a widen-restart or a prune. "Resumable via the
+per-tab cursor" applies only to a scan interrupted by a crash or restart, never to a
+cancelled one: a deeper rescan resuming a shallow cursor would skip exactly the pages
+it was restarted to fetch, and a completed scan's stale continuation token must not
+leak into the next one.
 
 ### Operational rules
 
@@ -926,11 +1057,13 @@ itself**, or the channel is never retried for the life of the process.
   channel with discovery off, they would enter scope and be jobbed — the toggle defeated by the
   indirection that fixes the original bug.
 - **`backfilled_at` is set on completion of the *eligible* tabs**, not all three — otherwise a
-  `membership_discovery = false` channel could never complete. Turning membership discovery
-  **on** must therefore clear `backfilled_at`: the eligible set changed.
+  `membership_discovery = false` channel could never complete. Membership becoming
+  eligible *after* a completed scan — the toggle turning on, or cookies arriving — is
+  detected by the sweep's `backfilled_with_membership` arm; nothing clears
+  `backfilled_at` by hand, because no hook fires on settings or cookie changes.
 - **Throttled: one page per second, globally.** A constant, not config.
 - **Strictly serial across channels.** On upgrade day every channel has `backfilled_at IS
-  NULL` and the sweep fires for all of them. At the default that is ~3 requests each and the
+  NULL` and the sweep fires for all of them. At the default that is ~3–6 requests each and the
   queue costs nothing; it earns its place at a wide window, where the scan is deep again.
 - Resumable via the per-tab cursor. Inline `defer recover()` in the scan goroutine.
 - Progress via `hub.Broadcast` (`websocket.go:441`) and a TUI `tea.Msg` channel — **including
@@ -1043,9 +1176,11 @@ not verified.**
 is not recoverable from the return value — `504h` is either "3 weeks" or "21 days". Skew-new
 wants the truncated lower bound the function already returns.
 
-**A bucket is admitted iff its lower bound is strictly inside the window.** `published` is frozen
-at insert and compared against a *later* `now`, so a bucket whose lower bound equals the window
-is already outside.
+**A bucket is admitted iff its lower bound is strictly inside the window — from the
+cycle after insertion.** `published` is frozen at insert and compared against each
+later cycle's `now`; on the insertion cycle itself, Q1's inclusive `>=` can admit the
+boundary bucket once (the one-`now`-per-cycle cutoff predates the insert), costing at
+most one probe whose date-write settles the row. From the next cycle it is outside.
 
 Worked example, `archive_window_days = 10`:
 
@@ -1237,14 +1372,22 @@ behaviour this design removes.
   `SCAN` or `USE TEMP B-TREE FOR ORDER BY`. Assert via `EXPLAIN QUERY PLAN` on the live
   `modernc.org/sqlite` handle after `ANALYZE`
 - A cookie lapse does not move scope: members rows stay in scope, no public VOD is jobbed
+- **The lapse-outlasts-the-window case:** a members upcoming stream written
+  `assumed`/`unknown`, probe-gated through a cookie lapse LONGER than the window, is
+  still in scope on cookie return (Q2's `assumed` arm), probed, and jobbed when it
+  airs
+- An `assumed` row behind an exhausted source is still probed (the walk's exemption);
+  a `coarse` row behind one is not
 - `membership_discovery = false` hides stored members rows from scope immediately; turning it
   back on restores them
 - A cycle with zero fetch results still runs both passes
 
 *Dates*
 - `itemAge` unchanged: `"1 week ago"` → `168h`
-- Coarse skews new: `"1 week ago"` stores `now - 7d`, admitted to a **10-day** window (not 7 —
-  at 7 the bucket's lower bound equals the window and is already outside)
+- Coarse skews new: `"1 week ago"` stores `now - 7d`, admitted to a **10-day** window.
+  Test at 10, not 7: at 7 the bucket is outside from the cycle after insertion (Q1's
+  inclusive `>=` can admit it once on the discovery cycle, so a window=7 assertion
+  races that one harmless probe)
 - A straddling item probed to 13 days against a 10-day window is **never jobbed**, its exact
   date is written back, and it is not re-probed next cycle
 - `"2 weeks ago"` against a 10-day window is **never probed**
@@ -1293,14 +1436,18 @@ behaviour this design removes.
 - A stale stored `live` whose probe errored ⇒ no job; a cooldown-skipped item ⇒ no job
 
 *Archival and throughput*
-- An item probed in step 3 is not re-probed in step 4
+- An item probed by the walk is not re-probed by the archive step in the same cycle
 - A stored `vod` whose refresh probe returns `live` **is** jobbed and the store updates to `live`
 - Clearing orphaned history re-jobs an in-window VOD, not an out-of-window one
 - New content bypasses M: M=1 with a full backlog, a new VOD still admits
 - Live/upcoming bypass M and the pool: `num_parallel_downloads=1` saturated by a VOD, a stream
   going live still downloads
-- `ShouldProcess(Queued) == false` — call `recoverJobs` against a DB holding a `Queued` row and
-  assert it is neither enqueued nor mutated
+- **Live/upcoming/DECAPI jobs carry `queue_priority = 0` and never hold an M slot** —
+  a 5-day-out premiere plus M=1 must not stall backlog admission
+- A new VOD is **never** `Queued`: created admitted and enqueued immediately, even
+  with a full backlog at M=1 (this is also the only correct reading of "bypasses M")
+- `ShouldProcess(Queued) == false` — call `enqueueExistingJobs` (`worker.go:294`)
+  against a DB holding a `Queued` row and assert it is neither enqueued nor mutated
 - Admission writes the status before enqueueing; M counts it
 - A `COOKIES?` job does not hold an M slot
 - 300 backlog VODs with M=3 converge and never trip the pending drop
@@ -1310,7 +1457,12 @@ behaviour this design removes.
 - Stops at the window depth, identically on a first scan and a re-run
 - A tab of undatable items stops on the parser-failure arm and leaves `backfilled_at` NULL
 - Widening triggers a deeper rescan (assert on `backfilled_window_days`); narrowing does not; a
-  widen mid-scan cancels and **resets the cursor**
+  widen mid-scan cancels and **resets the cursor** (via the in-flight entry's recorded
+  depth — assert the running scan is replaced, not skipped as already-in-flight)
+- Membership becoming eligible after a completed scan (toggle on, or cookies arriving)
+  triggers a rescan via the `backfilled_with_membership` arm; toggle-off does not
+- The backfill stop is page-granular: a page whose first item is out-of-window but
+  whose later items are not keeps paging; only a fully-out-of-window page stops the tab
 - A channel with no `channel_state` row is swept
 - Skips Twitch channels
 - Rows persist per page; a restart resumes from the cursor
@@ -1333,7 +1485,9 @@ behaviour this design removes.
 
 | Limit | Why it is accepted |
 |---|---|
-| A cookie lapse longer than the window loses members content published during it | Structurally identical to an RSS outage. The alternative — anchoring the window to first-observation — is the original bug |
+| A cookie lapse longer than the window loses members content **published during it** (content listed *before* the lapse stays in scope via Q2's `assumed` arm) | Structurally identical to an RSS outage. The alternative — anchoring the window to first-observation — is the original bug |
+| On a terms-filtered channel, an undatable item that never matches terms lingers in Q2's unresolved arm until a listing re-sighting dates it; if it falls off the tab's first page while still undatable, it lingers indefinitely | A row of Q2 output, never probed (terms gate the probe), never jobbed. Tiny class, zero request cost, and a terms change can only widen what gets probed |
+| A dead ID first seen undatable (`assumed`) stays in the probe list until a probe succeeds; probes that error forever keep it there | Bounded by the tiny class of undatable-then-deleted items; `MetadataTracker`/`ProbeCooldown` already pace the retries |
 | A stream only ever listed by a coarse source, never probed while `unknown`, has its restart missed | Widening the carve-out to `coarse` would probe every past upload on the channel |
 | A members refusal phrased as `UNPLAYABLE` with no matched keyword is trusted | The price of keeping `unknown` trusted, which protects against YouTube adding a status code |
 | `classifyStream:454` diverges from yt-dlp | Fixing it has download-path blast radius. `denied` contains it |
@@ -1347,5 +1501,5 @@ Unverified in this repo, asserted from observation:
 |---|---|
 | `videos.xml` returns ≤15 items | Low. Not encoded as a constant anywhere; more items just means more first-cycle probes |
 | The membership tab carries ~30 items/page | Low. Same |
-| **Within one source's listing, items are strictly newest-first** | **The only one whose failure loses content** — the walk stops at the wrong item and silently skips everything behind it. Which is why the walk self-validates and degrades to probing the full bucket |
-| `relativeAgeRe` matches YouTube's current en-locale copy | Degrades safely: every item becomes `assumed`/`now`, lands in the window, and is probed. Noisy, not lossy. The backfill's parser-failure arm catches the scan case |
+| **Within one source's listing, items are strictly newest-first** | **The only one whose failure loses content** — the walk stops at the wrong item and silently skips everything behind it. The walk's self-check narrows the exposure (it catches disorder among rows it actually probes) but cannot close it: disorder that puts an out-of-window item first triggers exhaustion before any evidence is probed. The backfill's page-granular stop is the same trade. Accepted residual |
+| `relativeAgeRe` matches YouTube's current en-locale copy | Degrades safely: every item becomes `assumed`/`now`, lands in scope, and stays there until probed (Q2's unresolved arm) — each successful probe resolves one row. Noisy, not lossy. The backfill's parser-failure arm catches the scan case |
