@@ -787,3 +787,44 @@ func TestExtractScheduledStartTime(t *testing.T) {
 		t.Errorf("expected empty for nil inputs, got %q", result3)
 	}
 }
+
+func TestExtractPublishedAt(t *testing.T) {
+	cases := []struct {
+		name, status, wantTS, wantPrec string
+		microformat                    map[string]any
+	}{
+		{"post_live takes startTimestamp as started", "post_live", "2026-07-14T20:00:00+00:00", "started",
+			playerWith(map[string]any{"startTimestamp": "2026-07-14T20:00:00+00:00", "endTimestamp": "2026-07-14T22:00:00+00:00"}, "2026-07-01")},
+		{"vod without lbd falls back to uploadDate as day", "vod", "2026-07-01", "day",
+			playerWith(nil, "2026-07-01")},
+		{"not_a_stream takes uploadDate as day", "not_a_stream", "2026-07-01", "day",
+			playerWith(nil, "2026-07-01")},
+		{"upcoming stores nothing — startTimestamp here is the FUTURE", "upcoming", "", "",
+			playerWith(map[string]any{"startTimestamp": "2027-01-01T00:00:00+00:00"}, "2026-07-01")},
+		{"live stores nothing", "live", "", "", playerWith(nil, "2026-07-01")},
+		{"vod with neither yields nothing (caller enforces the terminal invariant)", "vod", "", "",
+			playerWith(nil, "")},
+	}
+	for _, c := range cases {
+		ts, prec := extractPublishedAt(c.status, c.microformat)
+		if ts != c.wantTS || prec != c.wantPrec {
+			t.Errorf("%s: got (%q,%q) want (%q,%q)", c.name, ts, prec, c.wantTS, c.wantPrec)
+		}
+	}
+}
+
+// playerWith builds the minimal already-unwrapped microformat map —
+// the same shape classifyStream and extractScheduledStartTime consume in
+// this file (see TestClassifyStream_PostLiveDVR and
+// TestExtractScheduledStartTime above): liveBroadcastDetails sits directly
+// at the top level, not nested under microformat.playerMicroformatRenderer.
+func playerWith(lbd map[string]any, uploadDate string) map[string]any {
+	m := map[string]any{}
+	if lbd != nil {
+		m["liveBroadcastDetails"] = lbd
+	}
+	if uploadDate != "" {
+		m["uploadDate"] = uploadDate
+	}
+	return m
+}

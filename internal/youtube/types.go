@@ -48,6 +48,17 @@ type VideoInfo struct {
 	HlsManifestURL     string           `json:"hlsManifestUrl,omitempty"`
 	PlayabilityError   PlayabilityError `json:"playabilityError,omitempty"`
 	PlayabilityReason  string           `json:"playabilityReason,omitempty"`
+
+	// PublishedAt is the probe's authoritative publish date (RFC3339 for a
+	// real broadcast start, YYYY-MM-DD for a microformat upload/publish
+	// date), status-aware per spec §12 — see extractPublishedAt. Empty when
+	// the status can't yield one (upcoming/live) or no source was present.
+	PublishedAt string `json:"publishedAt,omitempty"`
+	// PublishedPrecision describes what PublishedAt represents: "started"
+	// (a real liveBroadcastDetails.startTimestamp, vod/post_live only) or
+	// "day" (microformat uploadDate/publishDate fallback). Empty when
+	// PublishedAt is empty.
+	PublishedPrecision string `json:"publishedPrecision,omitempty"`
 }
 
 // Format contains video/audio format information from YouTube API.

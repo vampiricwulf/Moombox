@@ -74,6 +74,10 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 	// Scheduled start time
 	scheduledStartTime := extractScheduledStartTime(microformat, playabilityStatus)
 
+	// Published date (spec §12) — status-aware, deliberately independent of
+	// extractScheduledStartTime above (see extractPublishedAt doc comment).
+	publishedAt, publishedPrecision := extractPublishedAt(string(streamStatus), microformat)
+
 	// Length
 	var lengthSeconds *int
 	if ls := getStr(videoDetails, "lengthSeconds"); ls != "" {
@@ -107,6 +111,8 @@ func (p *PlayerAPI) parsePlayerResponse(ctx context.Context, data map[string]any
 		HlsManifestURL:     getStr(streamingData, "hlsManifestUrl"),
 		PlayabilityError:   playErr,
 		PlayabilityReason:  playReason,
+		PublishedAt:        publishedAt,
+		PublishedPrecision: publishedPrecision,
 	}, nil
 }
 
@@ -135,6 +141,46 @@ func extractScheduledStartTime(microformat, playabilityStatus map[string]any) st
 	}
 
 	return ""
+}
+
+// extractPublishedAt returns the probe's authoritative publish date for the
+// feed-history ladder (spec §12). Status-aware: liveBroadcastDetails.
+// startTimestamp is a REAL broadcast start only for past streams
+// (vod/post_live) — for upcoming it is the FUTURE schedule and must never
+// feed the result, so upcoming/live are deliberately absent from the switch
+// below. The microformat uploadDate/publishDate fallback (precision "day")
+// covers the normal plain-vod case, since an ended stream WITH an
+// endTimestamp classifies post_live instead of vod. The liveStreamability
+// epoch that extractScheduledStartTime falls back to is never consulted
+// here — deliberately NOT reusing extractScheduledStartTime, which
+// conflates a future scheduled start with a publish date.
+func extractPublishedAt(status string, microformat map[string]any) (ts, precision string) {
+	switch status {
+	case "vod", "post_live":
+		if lbd, ok := getNestedMap(microformat, "liveBroadcastDetails"); ok {
+			if v := getStr(lbd, "startTimestamp"); v != "" {
+				return v, "started"
+			}
+		}
+		if v := microformatDate(microformat); v != "" {
+			return v, "day"
+		}
+	case "not_a_stream":
+		if v := microformatDate(microformat); v != "" {
+			return v, "day"
+		}
+	}
+	return "", ""
+}
+
+// microformatDate returns the microformat upload/publish date, preferring
+// uploadDate. microformat is already the unwrapped playerMicroformatRenderer
+// map (same shape classifyStream and extractScheduledStartTime consume).
+func microformatDate(microformat map[string]any) string {
+	if v := getStr(microformat, "uploadDate"); v != "" {
+		return v
+	}
+	return getStr(microformat, "publishDate")
 }
 
 // parseFormats extracts format metadata + raw stream URLs from a
