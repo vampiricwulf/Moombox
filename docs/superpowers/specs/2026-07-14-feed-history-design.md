@@ -87,7 +87,10 @@ longer re-arm out-of-scope content.
 - Replacing RSS as the steady-state discovery source (see Decisions).
 - Unifying the `history` table into the new store (see Decisions).
 - Changing the probe-failure/cooldown machinery (`MetadataTracker`, `ProbeCooldown`).
-- Any Twitch-side change. The Twitch monitor is live-only and has no cap.
+- Any Twitch-side **monitor** change. The Twitch monitor is live-only and has no cap.
+  But Twitch is **not** untouched, and an earlier draft's flat non-goal was false: the
+  download pool is shared, so exempting live from `num_parallel_downloads` changes
+  Twitch too. See "Twitch is touched, and that is correct".
 - Any DECAPI-side change **beyond one date comparison**. DECAPI keeps its
   `HasActiveJob`/`HasProcessed`/probe path and still does **not** write to
   `feed_items` — which is why `decapi` is absent from the `source` enum. See "DECAPI
@@ -519,10 +522,14 @@ CREATE INDEX IF NOT EXISTS idx_feed_items_status
     ON feed_items(channel_id, status);
 
 CREATE TABLE IF NOT EXISTS channel_state (
-    channel_id     TEXT PRIMARY KEY,
-    backfilled_at  TEXT,   -- NULL until a full 3-tab scan completes
-    backfill_state TEXT,   -- JSON: per-tab continuation cursor
-    last_rss_ok_at TEXT    -- the "established" gate for archival
+    channel_id             TEXT PRIMARY KEY,
+    backfilled_at          TEXT,    -- NULL until a scan completes
+    backfilled_window_days INTEGER, -- the window the scan ran AT. Without this,
+                                    -- "the operator widened the window" is
+                                    -- undetectable: it is a comparison, and the
+                                    -- old value is gone across a restart
+    backfill_state         TEXT,    -- JSON: per-tab continuation cursor
+    last_rss_ok_at         TEXT     -- the "established" gate for archival
 );
 ```
 
@@ -1020,7 +1027,11 @@ per row, in this order:
     unknown  → probe (nothing can be missed)
     upcoming → probe (goal 3)
     live     → probe (goal 3)
-    vod / not_a_stream → NOT probed for discovery
+    vod / not_a_stream → NOT probed for discovery, EXCEPT the restart walk:
+        probe if  status = 'vod'
+              AND date_precision = 'started'   -- a probe saw a real broadcast
+              AND NOT HasProcessed             -- no job row exists
+        (see "The restart walk")
   probe choice: source='membership' ⇒ authenticated, else anonymous
   ESCALATION: see "A refusal escalates, and sets `source` itself" for the rule.
     Do NOT restate it here — the copy this line used to carry narrowed the relabel
@@ -1051,7 +1062,14 @@ lastDate   = {}                          -- per source, for the ordering check
 for row in candidates:                   -- SERIAL. Not concurrent: parallel probes
                                          -- are already in flight past the boundary
                                          -- before it is known.
-    if row.source in exhausted:  skip    -- proven older than a verified boundary
+    if row.source in exhausted AND row.status NOT IN (upcoming, live):  skip
+        -- proven older than a verified boundary.
+        -- The status exemption is NOT optional: Q2 puts upcoming/live rows in this
+        -- list unconditionally, and their `published` is an insert instant or an
+        -- RSS announcement — NOT a listing position — so "everything behind it is
+        -- older" says nothing about them. Without this, one vod probe retires a
+        -- source and throws away the live stream behind it. Goal 3, on the default
+        -- window.
     apply "Probe rules" IN FULL — every gate AND the status filter.
       Do not restate a subset here: `vod`/`not_a_stream` are NOT discovery-probed,
       and a copy of the rule that omits that probes the whole window.
@@ -1067,8 +1085,16 @@ for row in candidates:                   -- SERIAL. Not concurrent: parallel pro
             -- the ordering assumption is FALSE for this source
             disable early-exit for row.source this cycle; log a warning
         lastDate[row.source] = date
-        if date is OUTSIDE the window AND row.source is date-ordered:
+        if date is OUTSIDE the window
+           AND row.source is date-ordered
+           AND row's STORED date came from a listing (date_precision = 'coarse'):
             exhausted += row.source       -- everything behind it is older
+            -- The 'coarse' condition is load-bearing. Exhaustion is an inference
+            -- from LISTING ORDER, so it may only be drawn from a row whose stored
+            -- position came from a listing. An 'assumed' row carries published=now
+            -- — a claim of ignorance, not a coordinate — so it proves nothing about
+            -- what sits behind it. Under the relativeAgeRe break EVERY row is
+            -- 'assumed', so this is the common case, not an edge.
     -- errored / denied / cooldown / probed-with-no-date: DO NOT exhaust.
     -- The boundary was not learned. Retiring on these truncates the source on a
     -- transient fault — "unreachable" is not "we stopped looking".
@@ -1111,6 +1137,51 @@ requests, and uses dates the pass already has. It cannot repair a mis-ordered so
 it turns a silent completeness loss into a logged, self-detecting degradation that
 falls back to probing the full bucket. That is the same trade as `denied`: distrust the
 inference exactly when the evidence says it was a guess.
+
+### The restart walk
+
+A stream can restart on the same video ID — `feed.go:702-703` says so explicitly
+("not if merely finished — a stream may restart on the same URL"). Store-driven
+passes lose that, and the loss is narrow but real.
+
+**Where it does NOT bite, because `AddJob` already stops it.** `AddJob` is
+`INSERT OR IGNORE` on the video ID (`database_jobs.go:13-33`) and
+`monitor_callbacks.go:252-258` returns early on `added == false`. So a stream whose
+job already exists — Finished or otherwise — cannot be re-jobbed on a restart
+**today either**. There is no regression there, and an earlier draft of this section
+claimed one.
+
+**Where it does bite: `include_non_live_content = false`, which is the default.** A
+stream that ended before we ever saw it live enters as `unknown`, is discovery-probed
+once, and becomes `vod` + `started`. It is never jobbed (VODs are off), so **no job
+row exists**. Today it stays in RSS's 15-item window and is re-probed every cycle, so
+a restart returns `live`, `AddJob` succeeds, and it is archived. Under the new design
+`vod` is terminal, nothing re-probes it, and the restart is lost.
+
+So the discovery pass probes one extra class:
+
+```
+status = 'vod' AND date_precision = 'started' AND NOT HasProcessed
+```
+
+Each conjunct earns its place:
+
+| Conjunct | Why |
+|---|---|
+| `date_precision = 'started'` | that rung means a probe read a real `liveBroadcastDetails.startTimestamp` — i.e. this **was a broadcast**. A plain upload (`day`/`exact`) cannot restart, and excluding it is what keeps the walk cheap |
+| `NOT HasProcessed` | `HasProcessed` now means exactly "we created a job" (see "What `history` comes to mean"), and a row with a job row **cannot be re-jobbed** — `AddJob` dedups it. Probing those would be pure waste |
+| in-window | the window bounds it, like everything else |
+
+**Cost:** ~3 probes/channel/cycle at the 3-day default for a daily streamer, and
+**~0** at `include_non_live_content = true` — those rows are jobbed, so `HasProcessed`
+excludes them. The walk costs most exactly where it is needed and nothing where it is
+not.
+
+**Accepted residual:** a stream we never observed live and never probed while it was
+`unknown` stays `coarse`, never reaches `started`, and its restart is not caught. That
+requires the stream to end, be listed only by a coarse source, and restart — rare, and
+not worth widening the walk to `coarse` rows, which would probe every past upload on
+the channel.
 
 ### The probe outcome must surface to the caller, not be hooked inside
 
@@ -1585,6 +1656,25 @@ window and simply go un-probed for a cycle. Goal 2 holds at no cost, and goal 3 
 unaffected — the stream is jobbed on the first cycle cookies return, which is also the
 first cycle it could have been downloaded at all.
 
+**The write side needs no equivalent, and a review round raised this as a goal-2
+breach — recorded here so it is not re-raised.** The objection: `membershipActive()`
+gates the *fetch*, so during a lapse no members rows are written at all; a lapse longer
+than the window therefore loses that content permanently, which looks like scope moving
+on a fetch failure. Traced:
+
+| Published | On cookie return | Outcome |
+|---|---|---|
+| during the lapse, still inside the window | the tab re-lists it; upsert dates it `coarse`; Q1 admits it | **archived** — no gap |
+| during the lapse, already aged out | outside the window, as any content that old is | not archived — **and correctly so** |
+
+The second row is not a loss the design causes. Without cookies that content was
+**undownloadable anyway** — the archive we "lost" was never achievable. Scope never
+moved: the window is still N days and still a function of the operator's config. We
+simply could not observe, which is a different failure from scope shifting under us,
+and the one goal 2 does not speak to. No rescan on cookie return is needed either: the
+steady-state membership fetch already covers the window, which is all the backfill
+would scan.
+
 The rows stay stored when the toggle goes off (turning it back on must not lose them)
 and stop being visible.
 
@@ -1641,6 +1731,24 @@ only when a slot is actually free. Three problems dissolve at once:
 | `AcquireDownloadSlot` (`queue.go:149-180`) has no FIFO and no priority — waiters wake in Go runtime order, so "most recent first" does not exist | admission ordering lives in the scheduler, where it is an `ORDER BY`. The semaphore stops being the arbiter and becomes a safety net |
 | a new `JobStatus` strands on crash, as `worker.go:306-312` already shows for interrupted `Muxing` | `Queued` is a **resting** state, not a transient one. It survives restart because it was never in memory — the scheduler simply re-reads it. No recovery special-case |
 
+**`Queued` means *un-admitted*, and nothing else.** This is the whole reason the
+structure works, and an earlier draft broke it by also using `Queued` for a job that
+had been admitted and was blocked on the download pool. Those are different states
+with different owners — the scheduler owns the first, `JobQueue` owns the second —
+and one label for both leaves the M count undefined. Both readings fail: counting
+`Queued` rows deadlocks at 300 backlog VODs (300 ≥ M on the first evaluation, and
+the count never drops because nothing is ever admitted); counting admitted rows lets
+all 300 into `JobQueue`, reinstating `maxLifecycle` and the silent pending drop this
+table claims to dissolve.
+
+**So the scheduler gates the pool too, not just M.** It admits a job only when the
+channel is under M **and** `num_parallel_downloads` has a free slot. That makes
+`AcquireDownloadSlot` a safety net rather than the arbiter, and shrinks pool-blocking
+from a *state* to a millisecond race (two admissions can still collide on the last
+slot; the loser blocks briefly and reports `Downloading`, as today). One new status,
+and the waiting-VOD-reports-`Downloading` lie is gone from every case an operator
+can observe.
+
 **Admission rules:**
 
 ```
@@ -1662,26 +1770,55 @@ VOD from a backlog one, and `calculatePriority` (`queue.go:19-30`) switches on
 would silently evaporate on every restart.
 
 So the job carries a durable `queue_priority` (new = 0, backlog = 1), written at
-creation by the pass that knows. The scheduler orders `ORDER BY queue_priority ASC,
-published DESC` and counts M over `queue_priority = 1` rows only. Deriving it instead
-from `feed_items.first_seen` vs the job's `created_at` was considered and rejected: it
-makes a durable ordering rule depend on a timestamp comparison whose tolerance is the
-cycle interval, which is a config value.
+creation by the pass that knows. Deriving it instead from `feed_items.first_seen` vs
+the job's `created_at` was considered and rejected: it makes a durable ordering rule
+depend on a timestamp comparison whose tolerance is the cycle interval, which is a
+config value.
+
+**The `jobs` table cannot express any of this today, so v16 adds two columns.**
+`jobs` has **no `channel_id`** — only `channel_name`, a display string sourced from
+`ChannelConfig.Name` which is `omitempty` and routinely blank — and **no `published`**.
+So "M per channel, ordered by `published`" names two things that do not exist:
+
+```
+ADD jobs.channel_id      -- the real key. channel_name is a label, not an identifier
+ADD jobs.queue_priority  -- 0 = new, 1 = backlog. Durable; see above
+
+published comes from a JOIN on feed_items(channel_id, video_id) — that is the PK,
+so it is indexed, and the date stays in exactly ONE place. Denormalising it onto
+the job was rejected: the precision ladder exists precisely because which date wins
+is subtle, and a second copy would drift from it.
+
+admission order:  ORDER BY queue_priority ASC, published DESC
+M counts:         backlog jobs for this channel that are ADMITTED and non-terminal
+                  (i.e. NOT Queued, NOT Finished/Error/Cancelled). Queued rows are
+                  the waiting list — counting them against M is the deadlock above.
+```
+
+**The scheduler is a goroutine and needs the project's panic discipline.** It owns
+the only path out of `Queued`, so if it dies the entire backlog strands silently with
+no error anywhere. Model it on `pollForJobs` (`worker.go:322-360`), which already
+wraps its ticker loop in a restart-on-panic pattern. Woken on job completion and on
+new discovery; a slow heartbeat as a backstop. It is **YouTube-only** — Twitch never
+produces `Queued` rows (see Non-Goals).
 
 **Note the ordering rule is not redundant with `published DESC`.** New content is
 usually also the newest, so the two mostly agree — but not always: a members VOD first
 listed months after it aired is new-to-us and old-by-date. The M bypass is what needs
 the distinction, and it needs it exactly in the case where the two disagree.
 
-**Every VOD waiting on the pool shows as `Queued` — new or backlog.** "Skip the queue"
-is **priority, not exemption**: a new VOD jumps the entire back-catalogue and starts
-the instant a slot frees, but `num_parallel_downloads` is a hard resource limit and
-nothing bypasses it. This also kills an existing lie rather than working around it:
-today `stream_processor.go:220`/`:238` write `Downloading` *before*
-`AcquireDownloadSlot` blocks at `worker.go:446`, so a job waiting on the pool is
-persisted as downloading while it does nothing — byte-identical to one actively pulling
-segments. Only `download_started_at` (`orchestrator.go:123-124`) separates them, and no
-UI reads it. One waiting state, one truthful status, everywhere.
+**"Skip the queue" is priority, not exemption.** A new VOD jumps the entire
+back-catalogue and is admitted the instant a slot frees, but `num_parallel_downloads`
+is a hard resource limit and nothing bypasses it — the scheduler simply will not admit
+past it.
+
+This also kills an existing lie rather than working around it: today
+`stream_processor.go:220`/`:238` write `Downloading` *before* `AcquireDownloadSlot`
+blocks at `worker.go:446`, so a job waiting on the pool is persisted as downloading
+while it does nothing — byte-identical to one actively pulling segments. Only
+`download_started_at` (`orchestrator.go:123-124`) separates them, and no UI reads it.
+With the scheduler gating the pool, a job waits as `Queued` (truthful) instead of
+blocking as `Downloading` (false).
 
 ### `num_parallel_downloads` becomes VOD-only, default 2 → 10
 
@@ -1732,6 +1869,27 @@ window and M then govern only the `was_live → live` safety walk — a pass tha
 no jobs, so M has nothing to gate. No special case is needed: M gates job creation, and
 there are none. The window still decides how far back we look for a restarted stream,
 which is the right knob for it.
+
+**Ranges, scope, and one validator.** The spec deletes `max_feed_items` partly
+*because* its range disagreed across six sites; the replacements must not repeat it.
+
+```
+archive_window_days   1 – 3650   default 3
+archive_slots         1 – 100    default 3
+
+ONE validator, in config.go, alongside the existing checks. Every UI defers to it
+and enforces no range of its own — that is the whole lesson of Included Fix #1.
+Out-of-range follows the established contract at config.go:490-493: warn and reset
+to the default, do not fail the load.
+```
+
+**Both are two-level, exactly as `max_feed_items` is today.** A global
+`Monitors.<X>` plus a per-channel `ChannelConfig.<X> *int` override, resolved
+override → global → constant, mirroring `fm.maxFeedItems(ch)`
+(`feed.go:553-560`). Making them global-only would silently drop a capability
+operators have now — and the window makes per-channel matter *more*, not less: a
+channel that streams daily and one that posts monthly want different depths, which
+is precisely what a single global window cannot express.
 
 **`max_feed_items` is dropped, not migrated.** It bounded depth; M bounds concurrency;
 the window has no old counterpart. Carrying the number forward preserves a shape rather
@@ -1923,11 +2081,42 @@ A date-based stop needs no such gate. *"This item is older than the window"* mea
 same thing on a cold store and a warm one, so first scans and re-runs run the identical
 rule. The gate, the ambiguity, and the trap all go.
 
-**Widening `archive_window_days` must clear `backfilled_at`.** The scan's depth is a
-function of the window, so a wider window is a deeper scan — the same rule as turning
-`membership_discovery` on, and for the same reason: the eligible set changed. Narrowing
-it need not rescan; the surplus rows are merely outside the window, which is the state
-every un-scanned row is in anyway.
+**Widening `archive_window_days` must rescan deeper — and nothing detects that for
+free.** "Widening" is a comparison, and the old value is gone across a restart. Worse,
+there is no hook: `kickMonitors` fires on channel mutations only
+(`config_routes.go:743-744` gates on `updates["channels"]`), so a settings PUT that
+changes only the window fires nothing, and a hand-edited `config.toml` fires nothing
+ever. An operator would set 3 → 30, watch the window query immediately admit stored
+rows, and conclude it worked — while the catalogue behind RSS's ~15 items was never
+scanned. Silently, forever.
+
+So the scan records the depth it ran at, and the sweep re-derives the condition
+rather than being told:
+
+```
+channel_state.backfilled_window_days = archive_window_days   -- written WITH
+                                                                backfilled_at
+
+sweep condition:
+    backfilled_at IS NULL
+ OR backfilled_window_days < archive_window_days
+
+evaluated ON EVERY MONITOR CYCLE, not only at startup/kickMonitors. It is one
+comparison per channel against a value already in memory, and it needs NO
+config-change event — so it catches a settings PUT, a hand-edited TOML, and a
+restart identically.
+```
+
+**A widen mid-scan cancels the scan and restarts it deeper.** The in-flight set
+(channel → cancel func) already exists for cancel-before-prune; this reuses it.
+Without the cancel, a scan running at depth 3 would finish, write
+`backfilled_window_days = 3`, and only *then* would the next cycle notice 3 < 30 and
+start over — a wasted scan and a delay the operator cannot explain.
+
+**Narrowing never rescans and never cancels.** A running deeper scan records the
+deeper depth, which satisfies the condition for every narrower window it will ever be
+asked for. The surplus rows are merely outside the window — the state every
+un-scanned row is in anyway.
 
 **The `assumed` hazard the stop condition must survive.** An item `itemAge` cannot parse
 returns `0` ⇒ `published = now` ⇒ *inside* the window. So a tab of unparseable items
@@ -2017,7 +2206,18 @@ states it exists so the map "can't grow unbounded on a 24/7 process", implemente
 `feed.go:151-158` and called from `services.go:571-573`.
 
 So the same `kickMonitors` sweep deletes `feed_items`/`channel_state` rows for channels
-no longer in the active set. This also fixes a real bug: a removed-then-re-added channel
+no longer in the active set — **and their `Queued` jobs.**
+
+**`Queued` rows must go with them.** They never started, the scheduler would keep
+admitting them, and Moombox would visibly download the back-catalogue of a channel the
+operator deleted. It also closes a second hole: once `feed_items` is pruned, an
+orphaned `Queued` job loses the join that supplies its `published`, so it could not
+even be ordered.
+
+**In-flight jobs are left alone** (`Live`/`Downloading`/`Muxing`). Killing a download
+mid-write to honour a config edit is worse than finishing it, and removing a channel is
+sometimes a rename-and-re-add — which would otherwise destroy an archive in progress.
+The operator can cancel from either UI. This also fixes a real bug: a removed-then-re-added channel
 would otherwise inherit a stale `backfilled_at` and silently skip its backfill.
 
 **Caveat:** this is the **first channel-keyed DB cleanup in the codebase**. Nothing in
@@ -2094,6 +2294,32 @@ Both front doors share one service func, exactly as `kickMonitors` does today.
 
 Note: `buildMenuItems()`/`dispatchAction()` live in `internal/tui/app_actions.go:430`/`:18`,
 **not** `app.go` as CLAUDE.md claims — see Included Fixes.
+
+## Twitch is touched, and that is correct
+
+`num_parallel_downloads` becoming live-exempt is a **worker** change, and Twitch jobs
+go through the same `JobQueue` and the same `worker.go:446`. So Twitch live downloads
+go from **hard-capped at 2** to unbounded.
+
+**That is the intended outcome, not collateral.** A Twitch broadcast is exactly as
+unthrottleable as a YouTube one — it is happening now, and a cap that blocks it loses
+it. Capping Twitch live at 2 is the same stock-config stream-miss bug this design
+fixes for YouTube; leaving it would mean two rules for one queue and one platform
+still losing streams. The non-goal was written against the monitor and carried across
+without noticing the pool is shared.
+
+Two things this pins down that the spec otherwise leaves to an implementer:
+
+- **The pool's exemption predicate is `result.IsVod`, not the job status.** They
+  disagree: `stream_processor.go:229-245` writes `Downloading` + `IsVod: true` for
+  `not_a_stream` + `AllowNonStream`, and `stream_processor_twitch.go:85` sets
+  `IsVod: true` on the recovery path. The pool now means "how many VOD downloads at
+  once", so it must gate on what a VOD download *is*.
+- **The scheduler is YouTube-only.** Twitch never produces `Queued` rows and never
+  gets a `queue_priority`. Left unsaid, Twitch jobs would default to
+  `queue_priority = 0` ("new") and sort ahead of every YouTube backlog item —
+  harmless today, but accidental, and accidents in a priority rule do not stay
+  harmless.
 
 ## Error Handling
 
@@ -2369,8 +2595,20 @@ block, `CREATE TABLE/INDEX IF NOT EXISTS`, tables also added to `createSchema`.
    - Also touches `calculatePriority` (`queue.go:19-30`), the `JobStats` aggregate
      (`database_jobs.go:622-645`, which today counts pool-waiters as active), and both
      UIs' colour maps and filter buckets.
-6. Add `jobs.queue_priority` (or equivalent) — the durable new-vs-backlog
-   discriminator the scheduler orders on. See "The scheduler".
+6. Add **two** `jobs` columns — the scheduler cannot be written without them (see
+   "The scheduler"):
+   - `jobs.channel_id TEXT` — the real key. `channel_name` is a display string
+     (`omitempty`, routinely blank) and cannot group an M count.
+   - `jobs.queue_priority INTEGER` — 0 = new, 1 = backlog. Durable, because `Queued`
+     outlives the cycle that classified it.
+
+   Use the established `isDuplicateColumnErr(err)` guard for `ALTER TABLE … ADD
+   COLUMN` (`migrations.go:234-238`, `:289-293`, `:534-538`) — migrations run outside
+   a transaction and `user_version` is written last, so a crash mid-block re-runs the
+   whole block on next boot. Existing rows get `channel_id` NULL; that is correct,
+   they are not backlog and the scheduler never reads them.
+7. Add `channel_state.backfilled_window_days INTEGER` — the widen detector (see "The
+   stop condition is the window").
 
 **Config migration** (`migrateOldFormat()`, not the DB migration):
 
@@ -2456,6 +2694,15 @@ or the TUI settings screen and rejected by four other front doors. Recorded beca
 replacement settings must not repeat it: `archive_window_days` and `archive_slots` need
 **one** validator, in `config.go`, with every UI deferring to it.
 `web/public/modules/setup.js:682` feeds `setup-max-feed-items` and goes too.
+
+**The list above is the *global* setting only, and the deletion is wider.** Also
+remove: `ChannelConfig.MaxFeedItems` (`internal/config/types.go:265`) — the
+**per-channel override**, which the six-site table never mentions;
+`fm.maxFeedItems()` (`feed.go:548-560`), the three-level resolver; and the
+`migrateOldFormat` parse at `config.go:303`. The replacements re-create that
+two-level structure under new names (see "The two settings"), so this is a rename of
+the mechanism, not a removal of it — but every old site must go or the two shapes
+coexist.
 
 **2. `.claude/skills/moombox-database-migrations/SKILL.md` is stale.** It documents v6
 (line 8), a `schema_version` table with `UPDATE schema_version SET version = 7` (line
