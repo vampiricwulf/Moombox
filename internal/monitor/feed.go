@@ -637,22 +637,30 @@ type atomMediaGroup struct {
 	Description string `xml:"http://search.yahoo.com/mrss/ description"`
 }
 
-// archiveWindowDays is the per-channel resolver for how many days back to
-// archive: the channel's own ArchiveWindowDays override, else the global
+// resolveArchiveWindowDays is THE per-channel resolver for how many days back
+// to archive — stated once, shared by both monitors' archiveWindowDays
+// methods so feed and DECAPI can never disagree about the window: the
+// channel's own ArchiveWindowDays override, else the global
 // monitors.archive_window_days, else defaultArchiveWindowDays. Upcoming/live
-// content is always covered regardless of this window. Read by checkChannel
-// to compute the cycle's cutoff, which both the walk's early exit and the
-// ARCHIVE step's window re-check (archive.go) test against.
-func (fm *FeedMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
+// content is always covered regardless of this window.
+func resolveArchiveWindowDays(store *config.Store, ch *config.ChannelConfig) int {
 	if ch.ArchiveWindowDays != nil && *ch.ArchiveWindowDays > 0 {
 		return *ch.ArchiveWindowDays
 	}
 	var g int
-	fm.configStore.Read(func(c *config.MoomboxConfig) { g = c.Monitors.ArchiveWindowDays })
+	store.Read(func(c *config.MoomboxConfig) { g = c.Monitors.ArchiveWindowDays })
 	if g > 0 {
 		return g
 	}
 	return defaultArchiveWindowDays
+}
+
+// archiveWindowDays resolves the channel's archive window
+// (resolveArchiveWindowDays). Read by checkChannel to compute the cycle's
+// cutoff, which both the walk's early exit and the ARCHIVE step's window
+// re-check (archive.go) test against.
+func (fm *FeedMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
+	return resolveArchiveWindowDays(fm.configStore, ch)
 }
 
 // membershipDiscoveryEnabled reports the operator's membership_discovery

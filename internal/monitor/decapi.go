@@ -596,6 +596,25 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 		IsReprobe:    reprobe,
 		Logger:       dm.logger,
 	})
+	// Window check (§13): "the newest video on the channel" is not the same
+	// as "recent" — on a dormant channel it can be a year old, and jobbing it
+	// is the headline bug through a second door. Vod-family results job only
+	// inside the archive window; live/upcoming are NEVER window-blocked (this
+	// IS the RSS redundancy, and a date must never block it — their probes
+	// supply no date at all, §12). `post_live` reaches here un-normalized
+	// (the store normalization lives in the feed path's applyProbe), hence
+	// the three-status list. A dateless past result cannot verify the window
+	// ⇒ treated as outside; unlike the feed path there is no self-healing
+	// 'unknown' store row (DECAPI writes none, §13), so log at Info to keep
+	// the final skip visible.
+	if result.ShouldProcess && (result.StreamStatus == "vod" || result.StreamStatus == "post_live" || result.StreamStatus == "not_a_stream") {
+		cutoff := time.Now().UTC().Add(-time.Duration(dm.archiveWindowDays(ch)) * 24 * time.Hour).Format(time.RFC3339)
+		if result.PublishedAt == "" || result.PublishedAt < cutoff {
+			dm.logger.Info("decapi: newest video is outside the archive window; skipping",
+				"videoID", videoID, "published", result.PublishedAt)
+			return nil
+		}
+	}
 	if !result.ShouldProcess {
 		return nil
 	}
@@ -613,6 +632,14 @@ func (dm *DecapiMonitor) processResponse(ctx context.Context, body string, ch *c
 	}
 
 	return nil
+}
+
+// archiveWindowDays resolves the channel's archive window — the same rule
+// the feed monitor applies (resolveArchiveWindowDays, feed.go), so the two
+// monitors can never disagree about the window. Read by processResponse's
+// §13 window check on vod-family probe results.
+func (dm *DecapiMonitor) archiveWindowDays(ch *config.ChannelConfig) int {
+	return resolveArchiveWindowDays(dm.configStore, ch)
 }
 
 // getYouTubeChannels returns a copy of the YouTube channel list under

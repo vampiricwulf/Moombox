@@ -224,6 +224,11 @@ type ProcessYouTubeVideoResult struct {
 	// passthrough) or the probe did not complete. DECAPI reads it to pick a
 	// JobDisposition (spec §10's creator table).
 	StreamStatus string
+	// PublishedAt is the probe's authoritative publish date (RFC3339); empty
+	// whenever StreamStatus is — and for broadcast probes, which supply no
+	// date at all (§12). DECAPI reads it for the archive-window check on
+	// vod-family results (§13).
+	PublishedAt string
 }
 
 // nonLiveSkipReason decides whether a non-live classification (a VOD, post-live
@@ -492,6 +497,7 @@ func ProcessYouTubeVideo(p ProcessYouTubeVideoParams) ProcessYouTubeVideoResult 
 		Title:         title,
 		ChannelName:   channelName,
 		StreamStatus:  cr.StreamStatus,
+		PublishedAt:   cr.PublishedAt,
 	}
 }
 
