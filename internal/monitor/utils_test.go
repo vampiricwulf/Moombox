@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -330,6 +331,81 @@ func TestProcessYouTubeVideo_UnknownTitleNotOverwrite(t *testing.T) {
 
 	if result.Title != "Good Feed Title" {
 		t.Errorf("title should not be overwritten by 'Unknown Title': got %q", result.Title)
+	}
+}
+
+func TestIsDenied_CanonicalTable(t *testing.T) {
+	// Spec §9 table — all seven rows (plus one extra not_a_stream row). Both
+	// conjuncts load-bearing.
+	cases := []struct {
+		status, playability string
+		want                bool
+	}{
+		{"upcoming", "members_only", true},
+		{"upcoming", "login_required", true},
+		{"upcoming", "ok", false},             // genuine upcoming — goal 3
+		{"upcoming", "age_restricted", false}, // premieres reach upcoming with non-ok playability
+		{"upcoming", "unknown", false},        // unknown is not a refusal
+		{"vod", "age_restricted", false},      // formats came back — grounded
+		{"vod", "members_only", false},        // same — the status conjunct allows this
+		{"not_a_stream", "login_required", false},
+	}
+	for _, c := range cases {
+		if got := isDenied(c.status, c.playability); got != c.want {
+			t.Errorf("isDenied(%q,%q) = %v, want %v", c.status, c.playability, got, c.want)
+		}
+	}
+}
+
+func TestProbeAndClassify_Outcomes(t *testing.T) {
+	ch := &config.ChannelConfig{Name: "c"}
+	mk := func(probe func(context.Context, string) (*VideoProbeResult, error)) ProbeClassifyParams {
+		return ProbeClassifyParams{Ctx: context.Background(), VideoID: "v", Channel: ch,
+			ProbeVideo: probe, Tracker: NewMetadataFailureTracker(), Logger: silentLogger{}}
+		// Cooldown nil => no suppression (ProbeCooldown methods tolerate a nil receiver).
+	}
+	// probed
+	r := probeAndClassify(mk(func(ctx context.Context, id string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "vod", Title: "T", PublishedAt: "2026-07-14T20:00:00Z", PublishedPrecision: "started", PlayabilityError: "ok"}, nil
+	}))
+	if r.Outcome != OutcomeProbed || r.StreamStatus != "vod" || r.PublishedPrecision != "started" {
+		t.Fatalf("probed: %+v", r)
+	}
+	// denied — upcoming + members_only
+	r = probeAndClassify(mk(func(ctx context.Context, id string) (*VideoProbeResult, error) {
+		return &VideoProbeResult{StreamStatus: "upcoming", PlayabilityError: "members_only"}, nil
+	}))
+	if r.Outcome != OutcomeDenied || r.PlayabilityError != "members_only" {
+		t.Fatalf("denied: %+v (PlayabilityError must be carried — the escalation reads it)", r)
+	}
+	// errored
+	r = probeAndClassify(mk(func(ctx context.Context, id string) (*VideoProbeResult, error) {
+		return nil, errors.New("boom")
+	}))
+	if r.Outcome != OutcomeErrored {
+		t.Fatalf("errored: %+v", r)
+	}
+}
+
+func TestProbeAndClassify_NoHistoryWrites(t *testing.T) {
+	// The split exists because ProcessYouTubeVideo has AddToHistory side effects.
+	// probeAndClassify has NO AddToHistory parameter, which the compiler
+	// enforces — this test pins the DECAPI side instead: ProcessYouTubeVideo
+	// (composed) still writes history on a skipped vod.
+	var histCalls int
+	res := ProcessYouTubeVideo(ProcessYouTubeVideoParams{
+		Ctx: context.Background(), VideoID: "v", Channel: &config.ChannelConfig{Name: "c"},
+		ProbeVideo: func(ctx context.Context, id string) (*VideoProbeResult, error) {
+			return &VideoProbeResult{StreamStatus: "vod", Title: "T", PlayabilityError: "ok"}, nil
+		},
+		AddToHistory: func(id string) error { histCalls++; return nil },
+		Tracker:      NewMetadataFailureTracker(), Logger: silentLogger{},
+	})
+	if res.ShouldProcess {
+		t.Fatal("skipped vod (IncludeNonLiveContent false) must not process")
+	}
+	if histCalls != 1 {
+		t.Fatalf("DECAPI path must keep its history write, got %d calls", histCalls)
 	}
 }
 
